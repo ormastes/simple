@@ -1,0 +1,74 @@
+# slang pure backend — KV cache specs on a tiny synthetic Llama (dim 8,
+# 2 heads, 2 layers, vocab 16) with deterministic weights, so cached vs
+# uncached generation and the positions-evaluated counters run in seconds.
+
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{LlamaConfig, LlamaLayer, LlamaModel}
+use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_session_new, kv_generate_greedy, kv_generate_greedy_nocache}
+
+fn _vals(n: i64, seed: i64) -> [f64]:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        out.push((((i * 7 + seed * 13 + 3) % 11) - 5) as f64 / 10.0)
+        i = i + 1
+    out
+
+fn _mat(rows: i64, cols: i64, seed: i64) -> PureTensor:
+    tensor_from_values(_vals(rows * cols, seed), [rows, cols])
+
+fn _ones(n: i64) -> PureTensor:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(1.0)
+        i = i + 1
+    tensor_from_values(out, [n])
+
+fn _layer(seed: i64) -> LlamaLayer:
+    LlamaLayer(
+        attn_norm: _ones(8), wq: _mat(8, 8, seed + 1), wk: _mat(8, 8, seed + 2), wv: _mat(8, 8, seed + 3), wo: _mat(8, 8, seed + 4),
+        ffn_norm: _ones(8), w_gate: _mat(16, 8, seed + 5), w_up: _mat(16, 8, seed + 6), w_down: _mat(8, 16, seed + 7)
+    )
+
+fn _model() -> LlamaModel:
+    val cfg = LlamaConfig(dim: 8, n_layers: 2, n_heads: 2, head_dim: 4, hidden_dim: 16, vocab_size: 16, max_pos: 32, eps: 0.00001, rope_theta: 10000.0, bos_id: 1, eos_id: 99)
+    val emb = _mat(16, 8, 20)
+    LlamaModel(config: cfg, embed: emb, layers: [_layer(0), _layer(30)], final_norm: _ones(8), lm_head: emb)
+
+describe "pure KV cache":
+    it "generates the same tokens as the uncached path":
+        val m = _model()
+        val prompt = [1, 5, 9, 3]
+        val off = kv_generate_greedy_nocache(m, prompt, 6)
+        val on = kv_generate_greedy(m, kv_session_new(m), prompt, 6)
+        expect(on.generated.len()).to_equal(6)
+        expect(on.generated).to_equal(off.0)
+
+    it "evaluates one position per new token":
+        val m = _model()
+        val on = kv_generate_greedy(m, kv_session_new(m), [1, 5, 9, 3], 6)
+        # 4 prompt positions + 5 generated tokens that feed the next step.
+        expect(on.session.positions_evaluated).to_equal(9)
+        val off = kv_generate_greedy_nocache(m, [1, 5, 9, 3], 6)
+        # 4+5+6+7+8+9
+        expect(off.1).to_equal(39)
+
+    it "reuses a shared prefix on a second request":
+        val m = _model()
+        val first = kv_generate_greedy(m, kv_session_new(m), [1, 5, 9, 3], 6)
+        val before = first.session.positions_evaluated
+        val prompt2 = [1, 5, 9, 3, first.generated[0], first.generated[1]]
+        val second = kv_generate_greedy(m, first.session, prompt2, 4)
+        val fresh = kv_generate_greedy(m, kv_session_new(m), prompt2, 4)
+        expect(second.generated).to_equal(fresh.generated)
+        expect(second.reused_positions).to_equal(5)
+        expect(second.session.positions_evaluated - before).to_equal(fresh.session.positions_evaluated - 5)
+        expect(fresh.session.positions_evaluated).to_equal(9)
+
+    it "re-evaluates the last token when the prompt is fully cached":
+        val m = _model()
+        val first = kv_generate_greedy(m, kv_session_new(m), [1, 5, 9, 3], 3)
+        val again = kv_generate_greedy(m, first.session, [1, 5, 9, 3], 3)
+        expect(again.generated).to_equal(first.generated)
+        expect(again.reused_positions).to_equal(3)

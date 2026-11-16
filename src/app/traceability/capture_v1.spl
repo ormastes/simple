@@ -12,7 +12,7 @@ use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use app.traceability.cli_options_v1.{TraceCliOptionsV1, trace_cli_options_validate_v1}
-use app.traceability.core.{VirtualFile, TraceabilityConfig, is_traceable_file_path,
+use app.traceability.core.{VirtualFile, TraceabilityConfig, TraceablePathV1, is_traceable_file_path,
     traceability_config_from_captured_text_v1, traceability_config_validate_captured_v1, default_traceability_config}
 
 pub struct TraceCaptureLimitsV1:
@@ -76,15 +76,20 @@ fn capture_ancestors_v1(path: text) -> bool:
         index = index + 1
     true
 
-pub fn trace_capture_enumeration_v1(stdout: text, stderr: text, code: i64,
-    max_bytes: i64, max_entries: i64) -> Result<[text], text>:
+pub struct TraceCaptureExitCodeV1:
+    value: i64
+
+pub fn trace_capture_enumeration_v1(stdout: text, stderr: text, code: TraceCaptureExitCodeV1,
+    limits: TraceCaptureLimitsV1) -> Result<[text], text>:
     """Validate a bounded native capture before interpreting any path record.
 
     This provider inserts truncation bytes beyond its retained byte cap.
     Incomplete-stream markers end without NUL. Both cases reject even at exit0;
     legitimate filenames are not rejected for resembling marker text.
     """
-    if max_bytes < 0 or max_entries < 0 or code != 0 or stderr != "" or stdout.len() < 0 or stdout.len() > max_bytes:
+    val max_bytes = limits.max_walk_bytes
+    val max_entries = limits.max_files
+    if max_bytes < 0 or max_entries < 0 or code.value != 0 or stderr != "" or stdout.len() < 0 or stdout.len() > max_bytes:
         return Err("directory enumeration failed or capture exceeded its byte budget")
     val valid = validated_utf8_bytes_to_text_linear(stdout.bytes())?
     if valid == "":
@@ -121,7 +126,7 @@ fn capture_walk_v1(root: text, extra: [text], started: i64,
         return Err("input capture time budget exceeded")
     val (out, err, code) = process_run_bounded("find",
         ["-P", if root == ".": "." else: "./" + root] + extra + ["-print0"], remaining, limits.max_walk_bytes)
-    trace_capture_enumeration_v1(out, err, code, limits.max_walk_bytes, limits.max_files)
+    trace_capture_enumeration_v1(out, err, TraceCaptureExitCodeV1(value: code), limits)
 
 fn capture_attempt_id_v1(options: TraceCliOptionsV1, root: text) -> text:
     var selectors: [SdnValue] = []
@@ -193,7 +198,7 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
             entries = match capture_walk_v1(path, [], started, limits):
                 case Ok(values): values
                 case Err(_): return Err(capture_issue_v1("TRC-ENUMERATION", path, "Cannot enumerate complete input paths within budget", attempt))
-        elif is_traceable_file_path(path) and file_is_regular_no_follow(path):
+        elif is_traceable_file_path(path) == TraceablePathV1.Traceable and file_is_regular_no_follow(path):
             entries = [path]
         else:
             return Err(capture_issue_v1("TRC-INPUT", path, "Input is missing, inaccessible, symbolic or unsupported", attempt))
@@ -209,7 +214,7 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
                 continue
             if not file_is_regular_no_follow(entry):
                 return Err(capture_issue_v1("TRC-INPUT", entry, "Input must be an observed regular file", attempt))
-            if is_traceable_file_path(entry) and not selected.contains_key(entry):
+            if is_traceable_file_path(entry) == TraceablePathV1.Traceable and not selected.contains_key(entry):
                 if selected.len() >= limits.max_files:
                     return Err(capture_issue_v1("TRC-CAPTURE-LIMIT", entry, "Captured file count budget exceeded", attempt))
                 selected[entry] = true
@@ -261,6 +266,3 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
         return Err(capture_issue_v1("TRC-CAPTURE-HASH", "", "Cannot finalize captured input identity", attempt))
     Ok(TraceCapturedInputsV1(snapshot_id: "worktree-input:" + hash,
         root: root, files: files, config: config, total_bytes: total))
-
-export TraceCaptureLimitsV1, TraceCaptureIssueV1, TraceCapturedInputsV1
-export trace_capture_normalize_selector_v1, trace_capture_enumeration_v1, trace_capture_worktree_v1

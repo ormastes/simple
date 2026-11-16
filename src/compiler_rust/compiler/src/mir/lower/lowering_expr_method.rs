@@ -64,6 +64,95 @@ impl<'a> MirLowerer<'a> {
             || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Dict { .. })))
     }
 
+    /// `d.name(args)` on a dict, where `name` is no built-in method, calls the
+    /// function stored under key "name" -- what the interpreter does, and what
+    /// `d["name"](args)` already lowers to. It used to lower to the static
+    /// symbol `Dict.name` and abort with "Function 'Dict.name' not found".
+    /// `expr_ty` is the type the consumer of the method-call expression
+    /// expects: when it differs from the call's own result type (an untyped
+    /// method call is `ANY`) the raw result is boxed.
+    pub(super) fn try_lower_dict_stored_fn_call(
+        &mut self,
+        receiver: &HirExpr,
+        method: &str,
+        args: &[HirExpr],
+        expr_ty: TypeId,
+    ) -> MirLowerResult<Option<VReg>> {
+        let receiver_local_ty = self.recover_receiver_type(receiver);
+        let Some((value_ty, ret_ty)) = self.dict_value_call_types(receiver, receiver_local_ty) else {
+            return Ok(None);
+        };
+        // Any name a backend may resolve as a built-in keeps its existing
+        // route: every registered built-in method of any type (compiled code
+        // resolves built-ins by NAME), plus dict spellings outside the registry.
+        const DICT_EXTRA: &[&str] = &[
+            "contains_key",
+            "has",
+            "insert",
+            "length",
+            "delete",
+            "extend",
+            "entries",
+            "map_values",
+            "each",
+            "for_each",
+            "to_array",
+            "update",
+            "pop",
+            "copy",
+            "filter",
+            "map",
+        ];
+        let is_builtin_name = DICT_EXTRA.contains(&method)
+            || crate::method_registry::BUILTIN_METHODS
+                .iter()
+                .any(|(_, methods)| methods.iter().any(|m| m.name == method));
+        if is_builtin_name {
+            return Ok(None);
+        }
+        let key = HirExpr {
+            kind: HirExprKind::String(method.to_string()),
+            ty: TypeId::STRING,
+        };
+        let callee = HirExpr {
+            kind: HirExprKind::Index {
+                receiver: Box::new(receiver.clone()),
+                index: Box::new(key),
+            },
+            ty: value_ty,
+        };
+        let call = HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(callee),
+                args: args.to_vec(),
+            },
+            ty: ret_ty,
+        };
+        let raw = self.lower_expr(&call)?;
+        if expr_ty == ret_ty {
+            return Ok(Some(raw));
+        }
+        Ok(Some(self.box_arg_for_any_param(raw, &call)?))
+    }
+
+    /// `(value type, call result type)` when the receiver is a `Dict`. A dict
+    /// whose values share one function type gives that type's return type; a
+    /// dict of several or mixed functions has an `ANY` value type and an
+    /// `ANY` call result, exactly as `d["name"](args)` lowers.
+    fn dict_value_call_types(&self, receiver: &HirExpr, recovered_ty: Option<TypeId>) -> Option<(TypeId, TypeId)> {
+        let registry = self.type_registry?;
+        let dict_value = |ty: TypeId| match registry.get(ty) {
+            Some(HirType::Dict { value, .. }) => Some(*value),
+            _ => None,
+        };
+        let value = dict_value(receiver.ty).or_else(|| recovered_ty.and_then(dict_value))?;
+        match registry.get(value) {
+            Some(HirType::Function { ret, .. }) => Some((value, *ret)),
+            _ if value == TypeId::ANY => Some((value, TypeId::ANY)),
+            _ => None,
+        }
+    }
+
     /// Return the element type for a statically valid tuple index.
     ///
     /// Keep this deliberately narrower than general index inference: the MIR
@@ -351,8 +440,22 @@ impl<'a> MirLowerer<'a> {
                         || self.enum_has_variant_for_method_receiver(effective_ty, variant_name)
                         || self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty))
                     {
+                        // #6953: a user enum declaring `Ok`/`Err` answers its
+                        // own index; the builtin Result its fixed ABI value.
+                        let owned = self.type_registry.and_then(|registry| {
+                            registry
+                                .owned_variant_discriminant(receiver.ty, None, variant_name)
+                                .or_else(|| registry.owned_variant_discriminant(effective_ty, None, variant_name))
+                        });
+                        let disc = owned.unwrap_or_else(|| {
+                            if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
+                                Self::enum_variant_discriminant(variant_name)
+                            } else {
+                                crate::hir::name_only_variant_discriminant("mir is_ok/is_err", variant_name)
+                            }
+                        });
                         let expected = HirExpr {
-                            kind: crate::hir::HirExprKind::Integer(Self::enum_variant_discriminant(variant_name)),
+                            kind: crate::hir::HirExprKind::Integer(disc),
                             ty: TypeId::I64,
                         };
                         let expected_enum_id = HirExpr {

@@ -51,6 +51,22 @@ pub fn handle_unit_methods(
         // Without this arm the `other if other.starts_with("to_")` catchall
         // below would treat `text` as a target unit and fail.
         "to_text" => return Ok(Some(Value::text(value.to_display_string()))),
+        // Numeric extraction of the wrapped primitive (`b.to_f64()`), matching
+        // the pure-Simple record's `.value` field read.
+        "to_f64" | "to_float" => match value.as_ref() {
+            Value::Int(i) => return Ok(Some(Value::Float(*i as f64))),
+            Value::UInt { value: u, .. } => return Ok(Some(Value::Float(*u as f64))),
+            Value::Float(f) => return Ok(Some(Value::Float(*f))),
+            Value::Float32(f) => return Ok(Some(Value::Float(*f as f64))),
+            _ => {}
+        },
+        "to_i64" | "to_int" => match value.as_ref() {
+            Value::Int(i) => return Ok(Some(Value::Int(*i))),
+            Value::UInt { value: u, .. } => return Ok(Some(Value::Int(*u as i64))),
+            Value::Float(f) => return Ok(Some(Value::Int(*f as i64))),
+            Value::Float32(f) => return Ok(Some(Value::Int(*f as i64))),
+            _ => {}
+        },
         // For dynamic to_X() conversion methods, check if method starts with "to_"
         other if other.starts_with("to_") => {
             let target_suffix = &other[3..]; // Remove "to_" prefix

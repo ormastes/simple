@@ -12,8 +12,26 @@ use common.ui.draw_ir.{
     draw_ir_rect_bounds,
     draw_ir_style_prop
 }
-use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
+use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
+use std.common.encoding.sfnt.{
+    OtFont, OtTable, parse_offset_table, read_u16_be, read_i16_be,
+    sfnt_face_blob, font_face_spec_path, font_face_spec_index,
+    font_unmanaged_identity_face_spec
+}
+use std.common.encoding.sfnt_cmap.{
+    CmapFormat4, CmapFormat12, parse_cmap_format4, parse_cmap_format12,
+    cmap_lookup, cmap12_lookup
+}
+use std.common.encoding.sfnt_glyf.{
+    SFNT_GLYF_MOVE, SFNT_GLYF_LINE, SFNT_GLYF_QUAD, SFNT_GLYF_CLOSE,
+    SfntGlyfCommand, SfntGlyfOutline, parse_sfnt_glyf_outline
+}
+use std.common.encoding.font_registry.{selected_font_asset_local_path_for_identity}
+use std.common.encoding.utf8.{text_codepoints}
+use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_bytes}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 
 fn web_glyph_scale(fs: i32) -> i32:
     var s = fs / 8
@@ -761,92 +779,81 @@ fn fb_soft_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: 
 # layers hug the box while the wide soft layer spreads, so spill above the box
 # stays light while the drop below is deep.
 fn paint_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, clip: ClipRect) -> [u32]:
+    if st.box_shadow_raw != "":
+        var out = fb
+        val layers = split_top_level_commas(st.box_shadow_raw)
+        var li = layers.len() - 1
+        while li >= 0:
+            val layer = layers[li]
+            li = li - 1
+            if layer.contains("inset"):
+                continue
+            val layer_lower = layer.trim().lower()
+            if layer_lower == "none" or layer_lower.contains("transparent"):
+                continue
+            val col_raw = parse_color_any(layer)
+            val col = if col_raw != 0u32: col_raw elif st.box_shadow_color != 0u32: st.box_shadow_color elif st.fg != 0u32: st.fg else: web_argb(0, 0, 0)
+            val alpha = shadow_layer_alpha(layer)
+            if alpha <= 0:
+                continue
+            val prefix = shadow_length_prefix(layer)
+            val ox = parse_signed_nth_int(prefix, 0)
+            val oy = parse_signed_nth_int(prefix, 1)
+            if ox == -1000000 or oy == -1000000:
+                continue
+            var blur = parse_signed_nth_int(prefix, 2)
+            if blur == -1000000 or blur < 0:
+                blur = 0
+            var spread = parse_signed_nth_int(prefix, 3)
+            if spread == -1000000:
+                spread = 0
+            val sx = x + ox - spread
+            val sy = y + oy - spread
+            val sw = w + 2 * spread
+            val sh = h + 2 * spread
+            if sw <= 0 or sh <= 0:
+                continue
+            if blur > 0:
+                out = fb_soft_box_shadow(out, fbw, fbh, sx, sy, sw, sh, col, blur, alpha, clip)
+            else:
+                val op_pct = if alpha >= 255: 100 else: (alpha * 100 + 127) / 255
+                if op_pct > 0:
+                    val rtl = if st.border_radius_tl_px > 0: (if st.border_radius_tl_px + spread > 0: st.border_radius_tl_px + spread else: 0) else: 0
+                    val rtr = if st.border_radius_tr_px > 0: (if st.border_radius_tr_px + spread > 0: st.border_radius_tr_px + spread else: 0) else: 0
+                    val rbr = if st.border_radius_br_px > 0: (if st.border_radius_br_px + spread > 0: st.border_radius_br_px + spread else: 0) else: 0
+                    val rbl = if st.border_radius_bl_px > 0: (if st.border_radius_bl_px + spread > 0: st.border_radius_bl_px + spread else: 0) else: 0
+                    out = fb_rounded_rect_corners_opacity_clip(out, fbw, fbh, sx, sy, sw, sh, rtl, rtr, rbr, rbl, col, op_pct, clip)
+        return out
     if st.box_shadow_blur_px > 0:
-        if st.box_shadow_raw != "":
-            var out = fb
-            val layers = split_top_level_commas(st.box_shadow_raw)
-            var li = layers.len() - 1
-            while li >= 0:
-                val layer = layers[li]
-                li = li - 1
-                if layer.contains("inset"):
-                    continue
-                val col = parse_color_any(layer)
-                val lr = (((col >> 16) & 255u32) as i32)
-                val lg = (((col >> 8) & 255u32) as i32)
-                val lb = ((col & 255u32) as i32)
-                val alpha = shadow_layer_alpha(layer)
-                if lr + lg + lb > 360 or alpha < 30:
-                    continue
-                val prefix = shadow_length_prefix(layer)
-                val ox = parse_signed_nth_int(prefix, 0)
-                val oy = parse_signed_nth_int(prefix, 1)
-                if ox == -1000000 or oy == -1000000:
-                    continue
-                var blur = parse_signed_nth_int(prefix, 2)
-                if blur == -1000000 or blur < 0:
-                    blur = 0
-                if blur <= 0:
-                    blur = 1
-                out = fb_soft_box_shadow(out, fbw, fbh, x + ox, y + oy, w, h, col, blur, alpha, clip)
-            return out
         return fb_soft_box_shadow(fb, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st.box_shadow_color, st.box_shadow_blur_px, st.box_shadow_alpha, clip)
     fb_style_rounded_rect_opacity_clip(fb, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
 
+# Skia's 8x8 ordered-dither level M (0..63) at DEVICE pixel (px, py), as
+# Chrome's raster pipeline computes it: X = px, Y = py ^ px, and M interleaves
+# the low 3 bits of each. The stored channel is floor(v + (2M+1)/128) for an
+# exact value v in 0..255 (dither in (-63/128, 63/128), then round-to-nearest).
+# Replayed against 42 Chrome 159 gradient pixels, 42/42 exact.
 fn gradient_dither_threshold(px: i32, py: i32) -> i32:
-    val mx = px % 4
-    val my = py % 4
-    if my == 0:
-        if mx == 0: return 7
-        if mx == 1: return 10
-        if mx == 2: return 4
-        return 7
-    if my == 1:
-        if mx == 0: return 12
-        if mx == 1: return 2
-        if mx == 2: return 14
-        return 2
-    if my == 2:
-        if mx == 0:
-            if px % 8 == 4:
-                return 3
-            return 7
-        if mx == 1: return 11
-        if mx == 2: return 7
-        return 9
-    if mx == 0: return 15
-    if mx == 1: return 2
-    if mx == 2: return 12
-    5
+    val x = px & 7
+    val y = (py ^ px) & 7
+    ((y & 1) << 5) | ((x & 1) << 4) | ((y & 2) << 2) | ((x & 2) << 1) | ((y & 4) >> 1) | ((x & 4) >> 2)
 
-# Endpoint-exact vertical gradient ramp with ordered dither on the remainder.
-# Chromium/Skia hit the stop colors exactly at both ends of a linear-gradient
-# tile (t = pos / (span - 1)), and the ordered Bayer threshold only resolves
-# the fractional pixel between the two nearest integers; all channels (R, G,
-# B, A) share the same matrix and rounding rule. The previous centered
-# variant (b_weight = 2*pos + 1 over 2*span) never reached the end stop and
-# biased every channel fraction, which is what made the B channel look like
-# it followed a different rule.
+# Pixel-centre vertical gradient ramp with Chrome's ordered dither.
+# Chrome 159 samples each row at its centre, t = (2*pos + 1) / (2*span), so
+# no row is an exact stop: a 4px #000 -> #fff ramp paints 1F/60/9F/DF and a
+# 2px one 3F/BF. 92b33870986 had switched this to endpoint-exact
+# t = pos / (span - 1) to satisfy spec pins that Chrome never painted.
+# (px, py) are device pixel coordinates; see gradient_dither_threshold.
 fn mix_channel_gradient_centered(a: i32, b: i32, pos: i32, span: i32, px: i32, py: i32) -> i32:
     if span <= 0:
         return a
-    if span == 1:
-        # 1-px tile: the ramp degenerates to the dithered midpoint of the two
-        # stops (pinned by paint_primitives coverage byte oracles).
-        val weighted = a + b
-        var base = weighted / 2
-        val rem = weighted - base * 2
-        if rem > 0 and rem * 16 > gradient_dither_threshold(px, py) * 2:
-            base = base + 1
-        return base
-    val denom = span - 1
-    val b_weight = pos
+    val denom = span * 2
+    val b_weight = pos * 2 + 1
     val weighted = a * (denom - b_weight) + b * b_weight
-    var base = weighted / denom
-    val rem = weighted - base * denom
-    if rem > 0 and rem * 16 > gradient_dither_threshold(px, py) * denom:
-        base = base + 1
-    base
+    val out = (weighted * 128 + (gradient_dither_threshold(px, py) * 2 + 1) * denom) / (denom * 128)
+    if out > 255:
+        return 255
+    out
 
 fn mix_color_vertical_centered(a: u32, b: u32, pos: i32, span: i32, px: i32, py: i32) -> u32:
     if span <= 0:
@@ -930,23 +937,195 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
     val image_base_x = if fixed_no_repeat: image_x else: image_origin_x + image_x
     val image_base_y = if fixed_no_repeat: image_y else: image_origin_y + image_y
     val image_clip = if fixed_no_repeat: clip_intersect(clip, bg_x, bg_y, bg_x + bg_w, bg_y + bg_h) else: clip
+    if linear_gradient_needs_general_raster(st):
+        return fb_linear_gradient_general_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, tile_w, tile_h, max_x, max_y, image_base_x, image_base_y, image_clip)
     var py = 0
-    val small_no_repeat_gradient_tile = st.background_repeat == "no-repeat" and tile_w <= 64 and tile_h <= 64
     while py < max_y:
         val tile_py = py % tile_h
-        if small_no_repeat_gradient_tile:
-            var px = 0
-            while px < max_x:
-                val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, px, tile_py)
+        val dev_y = image_base_y + py
+        # Chrome dithers every device pixel. Within one row the dither level
+        # depends only on x & 7, so the row has at most 8 colours; equal
+        # neighbours are merged into one span.
+        var phase: [u32] = []
+        var k = 0
+        while k < 8:
+            phase.push(mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, image_base_x + k, dev_y))
+            k = k + 1
+        var run_x = 0
+        var px = 1
+        while px <= max_x:
+            if px == max_x or phase[px & 7] != phase[run_x & 7]:
+                val color = phase[run_x & 7]
                 val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
                 if opacity > 0:
-                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + px, 1, color | 0xFF000000u32, opacity, image_clip)
-                px = px + 1
-        else:
-            val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, 0, tile_py)
-            val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
-            if opacity > 0:
-                out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x, max_x, color | 0xFF000000u32, opacity, image_clip)
+                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, dev_y, image_base_x + run_x, px - run_x, color | 0xFF000000u32, opacity, image_clip)
+                run_x = px
+            px = px + 1
+        py = py + 1
+    out
+
+# True when a typed linear gradient is more than the two-stop top-to-bottom
+# ramp the row painter above handles: an angle other than 180deg, a third
+# stop, or a stop position other than 0% / 100%.
+fn linear_gradient_needs_general_raster(st: Style) -> bool:
+    if st.background_gradient_is_radial:
+        return false
+    val n = st.background_gradient_stop_colors.len()
+    if n < 2 or st.background_gradient_stop_positions.len() != n:
+        return false
+    if n > 2 or st.background_gradient_angle_deg % 360 != 180:
+        return true
+    st.background_gradient_stop_positions[0] != 0 or st.background_gradient_stop_positions[1] != 1000
+
+# sin and cos of a whole-degree angle, scaled by 65536 (Q16). A short Taylor
+# series on [0, 90] degrees plus quadrant symmetry: the gradient direction is
+# computed once per box, so per-pixel work stays integer.
+fn gradient_angle_sin_cos_q16(deg: i32) -> [i64]:
+    var d = deg % 360
+    if d < 0:
+        d = d + 360
+    val quadrant = d / 90
+    val r = (d % 90) as f64
+    val x = r * 3.141592653589793 / 180.0
+    val x2 = x * x
+    val sin_r = x * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0))))
+    val cos_r = 1.0 - x2 / 2.0 * (1.0 - x2 / 12.0 * (1.0 - x2 / 30.0 * (1.0 - x2 / 56.0 * (1.0 - x2 / 90.0))))
+    val s = (sin_r * 65536.0 + 0.5) as i64
+    val c = (cos_r * 65536.0 + 0.5) as i64
+    if quadrant == 0:
+        return [s, c]
+    if quadrant == 1:
+        return [c, 0 - s]
+    if quadrant == 2:
+        return [0 - s, 0 - c]
+    [0 - c, s]
+
+# One colour channel mixed in PREMULTIPLIED space (CSS Images 4 §3.4.1):
+# weights are each stop's alpha times its share, so a transparent stop
+# contributes no colour (blue -> transparent stays blue while it fades).
+# With equal alphas this is the plain straight-alpha mix, bit for bit.
+fn _gradient_mix_channel(a: u32, b: u32, shift: u32, wa: i64, wb: i64) -> u32:
+    val ca = ((a >> shift) & 255u32) as i64
+    val cb = ((b >> shift) & 255u32) as i64
+    val ws = wa + wb
+    if ws <= 0:
+        return 0u32
+    val v = (ca * wa + cb * wb + ws / 2) / ws
+    (v as u32) << shift
+
+# Color of the gradient line at `t16` (0..65536 from start to end) through
+# the stop list (positions in permille; `parse_gradient_stops` clamps each
+# one up to the largest before it, so they never decrease).
+fn linear_gradient_color_at(colors: [u32], positions: [i32], t16: i64) -> u32:
+    val n = colors.len()
+    val first = (positions[0] as i64) * 65536 / 1000
+    if t16 <= first:
+        return colors[0]
+    var i = 0
+    while i + 1 < n:
+        val p0 = (positions[i] as i64) * 65536 / 1000
+        val p1 = (positions[i + 1] as i64) * 65536 / 1000
+        if t16 <= p1:
+            if p1 <= p0:
+                return colors[i + 1]
+            val f16 = (t16 - p0) * 65536 / (p1 - p0)
+            val a = colors[i]
+            val b = colors[i + 1]
+            val wa = ((a >> 24) & 255u32) as i64 * (65536 - f16)
+            val wb = ((b >> 24) & 255u32) as i64 * f16
+            val alpha = ((wa + wb + 32768) / 65536) as u32
+            return (alpha << 24) | _gradient_mix_channel(a, b, 16u32, wa, wb) | _gradient_mix_channel(a, b, 8u32, wa, wb) | _gradient_mix_channel(a, b, 0u32, wa, wb)
+        i = i + 1
+    colors[n - 1]
+
+# CSS Images 3 §3.1 linear gradient over each `tile_w` x `tile_h` tile: the
+# gradient line passes through the tile centre at `angle` (0deg = to top,
+# clockwise) and is |w sin| + |h cos| long, so the corners hit the end
+# stops. Each row is painted as spans of equal color.
+fn fb_linear_gradient_general_clip(fb: [u32], fbw: i32, fbh: i32, bg_x: i32, bg_y: i32, bg_w: i32, bg_h: i32, st: Style, tile_w: i32, tile_h: i32, max_x: i32, max_y: i32, image_base_x: i32, image_base_y: i32, image_clip: ClipRect) -> [u32]:
+    var out = fb
+    if tile_w <= 0 or tile_h <= 0:
+        return out
+    val sc = if st.background_gradient_angle_deg >= 1000:
+        gradient_corner_dir_q16(st.background_gradient_angle_deg, tile_w, tile_h)
+    else:
+        gradient_angle_sin_cos_q16(st.background_gradient_angle_deg)
+    val s = sc[0]
+    val c = sc[1]
+    val sw = if s < 0: 0 - s else: s
+    val cw = if c < 0: 0 - c else: c
+    var len_q16 = (tile_w as i64) * sw + (tile_h as i64) * cw
+    if len_q16 < 1:
+        len_q16 = 1
+    # The ramp is sampled once per box into 1025 entries (t16 >> 6): the
+    # per-pixel work is then one multiply-add and a lookup. A per-pixel stop
+    # walk made the catalog `html` page render 55% slower.
+    val colors = st.background_gradient_stop_colors
+    val positions = st.background_gradient_stop_positions
+    var lut: [u32] = []
+    var li = 0
+    while li <= 1024:
+        lut.push(linear_gradient_color_at(colors, positions, (li as i64) * 64))
+        li = li + 1
+    var py = 0
+    val square = st.border_radius_tl_px <= 0 and st.border_radius_tr_px <= 0 and st.border_radius_br_px <= 0 and st.border_radius_bl_px <= 0
+    while py < max_y:
+        val dy2 = (2 * (py % tile_h) + 1 - tile_h) as i64
+        if square:
+            # Square corners: write the clipped row pixel by pixel. A span
+            # call per color change (every few pixels on a diagonal ramp)
+            # made the catalog `html` page render 55% slower.
+            val fy = image_base_y + py
+            if fy >= 0 and fy < fbh and fy >= image_clip.y0 and fy < image_clip.y1:
+                var x0 = image_base_x
+                var x1 = image_base_x + max_x
+                if x0 < 0:
+                    x0 = 0
+                if x1 > fbw:
+                    x1 = fbw
+                if x0 < image_clip.x0:
+                    x0 = image_clip.x0
+                if x1 > image_clip.x1:
+                    x1 = image_clip.x1
+                val row = fy * fbw
+                var fx = x0
+                while fx < x1:
+                    val gx = fx - image_base_x
+                    val dx2 = (2 * (gx % tile_w) + 1 - tile_w) as i64
+                    var t16 = 32768 + (dx2 * s - dy2 * c) * 32768 / len_q16
+                    if t16 < 0:
+                        t16 = 0
+                    if t16 > 65536:
+                        t16 = 65536
+                    val color = lut[(t16 / 64) as i32]
+                    val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
+                    if opacity >= 100:
+                        out[row + fx] = color | 0xFF000000u32
+                    elif opacity > 0:
+                        out[row + fx] = blend_opacity(color | 0xFF000000u32, out[row + fx], opacity)
+                    fx = fx + 1
+            py = py + 1
+            continue
+        var span_start = 0
+        var span_color = 0u32
+        var px = 0
+        while px <= max_x:
+            var color = 0u32
+            if px < max_x:
+                val dx2 = (2 * (px % tile_w) + 1 - tile_w) as i64
+                var t16 = 32768 + (dx2 * s - dy2 * c) * 32768 / len_q16
+                if t16 < 0:
+                    t16 = 0
+                if t16 > 65536:
+                    t16 = 65536
+                color = lut[(t16 / 64) as i32]
+            if px == max_x or (px > span_start and color != span_color):
+                val opacity = background_gradient_pixel_opacity(span_color, st.opacity_pct)
+                if opacity > 0 and px > span_start:
+                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + span_start, px - span_start, span_color | 0xFF000000u32, opacity, image_clip)
+                span_start = px
+            span_color = color
+            px = px + 1
         py = py + 1
     out
 
@@ -1129,15 +1308,218 @@ fn fb_background_radial_stack_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32
 
 fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
     var out = fb
+    if _fb_border_mitred(bl, bt, br, bb, cl, ct, cr, cb):
+        return _fb_border_sides_mitred(fb, fbw, fbh, x, y, w, h, bl, bt, br, bb, cl, ct, cr, cb, clip)
     if bt > 0 and ct != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y, w, bt, ct, clip)
     if bb > 0 and cb != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y + h - bb, w, bb, cb, clip)
+    # A translucent left/right side skips the rows a painted top/bottom side
+    # already covered, so a corner is blended once, not twice -- and keeps
+    # the rows of an unpainted side, so the corner is not left empty.
+    val top_rows = if ct != 0u32: bt else: 0
+    val bottom_rows = if cb != 0u32: bb else: 0
     if bl > 0 and cl != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
+        if _fb_border_translucent(cl):
+            out = _fb_border_side_clip(out, fbw, fbh, x, y + top_rows, bl, h - top_rows - bottom_rows, cl, clip)
+        else:
+            out = _fb_border_side_clip(out, fbw, fbh, x, y, bl, h, cl, clip)
     if br > 0 and cr != 0u32:
-        out = fb_rect_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
+        if _fb_border_translucent(cr):
+            out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y + top_rows, br, h - top_rows - bottom_rows, cr, clip)
+        else:
+            out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
     out
+
+fn _fb_border_translucent(color: u32) -> bool:
+    val alpha = ((color >> 24) & 255u32) as i32
+    alpha > 0 and alpha < 255
+
+# A translucent border colour (`hsl(0 100% 50% / .5)`) blends over what is
+# under it, as Chrome does; it used to be stored raw, alpha byte and all. An
+# alpha byte of 0 is a colour packed without one and stays opaque.
+fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip: ClipRect) -> [u32]:
+    if not _fb_border_translucent(color):
+        return fb_rect_clip(fb, fbw, fbh, x, y, w, h, color, clip)
+    val alpha = ((color >> 24) & 255u32) as i32
+    fb_rect_opacity_clip(fb, fbw, fbh, x, y, w, h, color | 0xFF000000u32, (alpha * 100 + 127) / 255, clip)
+
+fn _border_style_disabled(style: text) -> bool:
+    style == "none" or style == "hidden"
+
+fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, is_horiz: bool, style: text, color: u32, clip: ClipRect) -> [u32]:
+    if w <= 0 or h <= 0 or color == 0u32 or _border_style_disabled(style):
+        return fb
+    var out = fb
+    val t = if is_horiz: h else: w
+    if style == "double" and t >= 3:
+        val line_t = (t + 2) / 3
+        if is_horiz:
+            out = _fb_border_side_clip(out, fbw, fbh, x, y, w, line_t, color, clip)
+            return _fb_border_side_clip(out, fbw, fbh, x, y + h - line_t, w, line_t, color, clip)
+        out = _fb_border_side_clip(out, fbw, fbh, x, y, line_t, h, color, clip)
+        return _fb_border_side_clip(out, fbw, fbh, x + w - line_t, y, line_t, h, color, clip)
+    if style == "dashed" or style == "dotted":
+        val stroke_t = if t > 0: t else: 1
+        val dash_len = if style == "dotted": stroke_t else: stroke_t * 3
+        val gap_len = if style == "dotted": stroke_t else: stroke_t * 2
+        val total_len = if is_horiz: w else: h
+        var p = 0
+        while p < total_len:
+            val seg = if p + dash_len > total_len: total_len - p else: dash_len
+            if is_horiz:
+                out = _fb_border_side_clip(out, fbw, fbh, x + p, y, seg, h, color, clip)
+            else:
+                out = _fb_border_side_clip(out, fbw, fbh, x, y + p, w, seg, color, clip)
+            p = p + dash_len + gap_len
+        return out
+    _fb_border_side_clip(out, fbw, fbh, x, y, w, h, color, clip)
+
+fn _fb_border_corner_arc_clip(fb: [u32], fbw: i32, fbh: i32, bx: i32, by: i32, bw: i32, bh: i32, corner_kind: i32, rad: i32, w_h: i32, w_v: i32, c_h: u32, c_v: u32, s_h: text, s_v: text, clip: ClipRect) -> [u32]:
+    if rad <= 0:
+        return fb
+    val h_active = w_h > 0 and c_h != 0u32 and not _border_style_disabled(s_h)
+    val v_active = w_v > 0 and c_v != 0u32 and not _border_style_disabled(s_v)
+    if not h_active and not v_active:
+        return fb
+    var qx0 = bx
+    var qy0 = by
+    if corner_kind == 1 or corner_kind == 2:
+        qx0 = bx + bw - rad
+    if corner_kind == 2 or corner_kind == 3:
+        qy0 = by + bh - rad
+    var qx1 = qx0 + rad
+    var qy1 = qy0 + rad
+    if qx0 < 0: qx0 = 0
+    if qy0 < 0: qy0 = 0
+    if qx1 > fbw: qx1 = fbw
+    if qy1 > fbh: qy1 = fbh
+    if qx0 < clip.x0: qx0 = clip.x0
+    if qy0 < clip.y0: qy0 = clip.y0
+    if qx1 > clip.x1: qx1 = clip.x1
+    if qy1 > clip.y1: qy1 = clip.y1
+    if qx1 <= qx0 or qy1 <= qy0:
+        return fb
+    var out = fb
+    var py = qy0
+    while py < qy1:
+        val row = py * fbw
+        val dy = if corner_kind == 0 or corner_kind == 1: (by + rad - 1) - py else: py - (by + bh - rad)
+        var px = qx0
+        while px < qx1:
+            val dx = if corner_kind == 0 or corner_kind == 3: (bx + rad - 1) - px else: px - (bx + bw - rad)
+            val outer_cov = _corner_coverage256(dx, dy, rad)
+            if outer_cov > 0:
+                val use_h = if h_active and v_active: dy >= dx else: h_active
+                val side_w = if use_h: w_h else: w_v
+                val side_col = if use_h: c_h else: c_v
+                val side_style = if use_h: s_h else: s_v
+                var paint_px = true
+                if not (h_active and v_active):
+                    if use_h and dy < rad - side_w:
+                        paint_px = false
+                    elif not use_h and dx < rad - side_w:
+                        paint_px = false
+                if paint_px and (side_style == "dashed" or side_style == "dotted"):
+                    val stroke_t = if side_w > 0: side_w else: 1
+                    val dash_len = if side_style == "dotted": stroke_t else: stroke_t * 3
+                    val gap_len = if side_style == "dotted": stroke_t else: stroke_t * 2
+                    val arc_step = dx + (rad - dy)
+                    if (arc_step % (dash_len + gap_len)) >= dash_len:
+                        paint_px = false
+                if paint_px:
+                    var ring_cov = outer_cov
+                    if h_active and v_active:
+                        val r_in = if rad > side_w: rad - side_w else: 0
+                        if side_style == "double" and side_w >= 3:
+                            val line_w = (side_w + 2) / 3
+                            val r_mid_out = if rad > line_w: rad - line_w else: 0
+                            val r_mid_in = if r_in + line_w < r_mid_out: r_in + line_w else: r_mid_out
+                            val outer_ring = if r_mid_out > 0: outer_cov - _corner_coverage256(dx, dy, r_mid_out) else: outer_cov
+                            val inner_ring = if r_mid_in > r_in: _corner_coverage256(dx, dy, r_mid_in) - (if r_in > 0: _corner_coverage256(dx, dy, r_in) else: 0) else: 0
+                            ring_cov = outer_ring + inner_ring
+                        elif r_in > 0:
+                            ring_cov = outer_cov - _corner_coverage256(dx, dy, r_in)
+                    if ring_cov > 256:
+                        ring_cov = 256
+                    if ring_cov > 0:
+                        val opaque_col = side_col | 0xFF000000u32
+                        var cov = ring_cov
+                        if _fb_border_translucent(side_col):
+                            val col_a = ((side_col >> 24) & 255u32) as i32
+                            cov = (cov * col_a) / 255
+                        if cov >= 256:
+                            out[row + px] = opaque_col
+                        elif cov > 0:
+                            out[row + px] = _blend_alpha256(opaque_col, out[row + px], cov)
+            px = px + 1
+        py = py + 1
+    out
+
+fn fb_border_sides_styled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, sl: text, st_top: text, sr: text, sb: text, rtl: i32, rtr: i32, rbr: i32, rbl: i32, clip: ClipRect) -> [u32]:
+    val tl = clamp_corner_radius(rtl, w, h)
+    val tr = clamp_corner_radius(rtr, w, h)
+    val br_rad = clamp_corner_radius(rbr, w, h)
+    val bl_rad = clamp_corner_radius(rbl, w, h)
+    var out = fb
+    if bt > 0 and ct != 0u32 and not _border_style_disabled(st_top):
+        out = _fb_border_span_clip(out, fbw, fbh, x + tl, y, w - tl - tr, bt, true, st_top, ct, clip)
+    if bb > 0 and cb != 0u32 and not _border_style_disabled(sb):
+        out = _fb_border_span_clip(out, fbw, fbh, x + bl_rad, y + h - bb, w - bl_rad - br_rad, bb, true, sb, cb, clip)
+    val top_active = bt > 0 and ct != 0u32 and not _border_style_disabled(st_top)
+    val bot_active = bb > 0 and cb != 0u32 and not _border_style_disabled(sb)
+    val top_rows = if top_active: bt else: 0
+    val bottom_rows = if bot_active: bb else: 0
+    if bl > 0 and cl != 0u32 and not _border_style_disabled(sl):
+        if tl == 0 and bl_rad == 0:
+            if _fb_border_translucent(cl):
+                out = _fb_border_span_clip(out, fbw, fbh, x, y + top_rows, bl, h - top_rows - bottom_rows, false, sl, cl, clip)
+            else:
+                out = _fb_border_span_clip(out, fbw, fbh, x, y, bl, h, false, sl, cl, clip)
+        else:
+            out = _fb_border_span_clip(out, fbw, fbh, x, y + tl, bl, h - tl - bl_rad, false, sl, cl, clip)
+    if br > 0 and cr != 0u32 and not _border_style_disabled(sr):
+        if tr == 0 and br_rad == 0:
+            if _fb_border_translucent(cr):
+                out = _fb_border_span_clip(out, fbw, fbh, x + w - br, y + top_rows, br, h - top_rows - bottom_rows, false, sr, cr, clip)
+            else:
+                out = _fb_border_span_clip(out, fbw, fbh, x + w - br, y, br, h, false, sr, cr, clip)
+        else:
+            out = _fb_border_span_clip(out, fbw, fbh, x + w - br, y + tr, br, h - tr - br_rad, false, sr, cr, clip)
+    if tl > 0:
+        out = _fb_border_corner_arc_clip(out, fbw, fbh, x, y, w, h, 0, tl, bt, bl, ct, cl, st_top, sl, clip)
+    if tr > 0:
+        out = _fb_border_corner_arc_clip(out, fbw, fbh, x, y, w, h, 1, tr, bt, br, ct, cr, st_top, sr, clip)
+    if br_rad > 0:
+        out = _fb_border_corner_arc_clip(out, fbw, fbh, x, y, w, h, 2, br_rad, bb, br, cb, cr, sb, sr, clip)
+    if bl_rad > 0:
+        out = _fb_border_corner_arc_clip(out, fbw, fbh, x, y, w, h, 3, bl_rad, bb, bl, cb, cl, sb, sl, clip)
+    out
+
+fn fb_select_chevron_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, pad_r: i32, border_r: i32, border_t: i32, border_b: i32, arrow_zone_w: i32, color: u32, clip: ClipRect) -> [u32]:
+    if w < 10 or h < 8 or arrow_zone_w <= 0:
+        return fb
+    var ax1 = x + w - border_r - pad_r
+    if ax1 > x + w - border_r:
+        ax1 = x + w - border_r
+    var ax0 = ax1 - arrow_zone_w
+    if ax0 < x + 2:
+        ax0 = x + 2
+    if ax1 - ax0 < 6:
+        ax1 = x + w - border_r
+        ax0 = ax1 - arrow_zone_w
+        if ax0 < x + 2:
+            ax0 = x + 2
+    if ax1 - ax0 < 5:
+        return fb
+    val cx = (ax0 + ax1) / 2
+    val cy = (y + border_t + y + h - border_b) / 2
+    val chevron_col = if color != 0u32: color else: web_argb(55, 65, 81)
+    var out = fb
+    out = fb_rect_clip(out, fbw, fbh, cx - 3, cy - 2, 7, 1, chevron_col, clip)
+    out = fb_rect_clip(out, fbw, fbh, cx - 2, cy - 1, 5, 1, chevron_col, clip)
+    out = fb_rect_clip(out, fbw, fbh, cx - 1, cy, 3, 1, chevron_col, clip)
+    fb_rect_clip(out, fbw, fbh, cx, cy + 1, 1, 1, chevron_col, clip)
 
 fn fb_outline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, outline_w: i32, outline_offset: i32, color: u32, clip: ClipRect) -> [u32]:
     if outline_w <= 0 or color == 0u32:
@@ -1215,7 +1597,7 @@ fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: 
                         while dx < block_w:
                             val xx = bx0 + dx
                             if xx >= 0 and xx < fbw and xx >= clip.x0 and xx < clip.x1:
-                                out[row + xx] = color
+                                out[row + xx] = _fb_text_px(color, out[row + xx])
                             dx = dx + 1
                     dy = dy + 1
             rx = rx + 1
@@ -1299,6 +1681,760 @@ fn fb_text_thin_scaled_clip_range_adv(fb: [u32], fbw: i32, fbh: i32, x: i32, y: 
         i = i + 1
     out
 
+# --- Cached SFNT TrueType 4x4 AA baseline-aligned glyph rasterizer ----------
+
+class _TtfFaceEntry:
+    spec: text
+    font: OtFont
+    units_per_em: i32
+    ascender: i32
+    descender: i32
+    long_metrics: i32
+    hmtx_off: i64
+    hmtx_len: i64
+    has_cmap12: bool
+    cmap12: CmapFormat12
+    has_cmap4: bool
+    cmap4: CmapFormat4
+    native_bold: bool
+    native_italic: bool
+
+class _TtfGlyphBitmap:
+    x0_px: i32
+    y0_px: i32
+    w_px: i32
+    h_px: i32
+    adv_px: i32
+    coverage: [u8]
+
+class _TtfEdge:
+    ey0: f64
+    y_lo: f64
+    y_hi: f64
+    ex0: f64
+    dx_dy: f64
+    dir: i32
+
+val _TTF_BLOB_CACHE_LIMIT: i32 = 16
+var _ttf_blob_paths: [text] = []
+var _ttf_blob_bytes: [[u8]] = []
+
+val _TTF_FACE_CACHE_LIMIT: i32 = 24
+var _ttf_face_specs: [text] = []
+var _ttf_faces: [_TtfFaceEntry] = []
+
+val _TTF_RESOLVE_CACHE_LIMIT: i32 = 64
+var _ttf_resolve_keys: [text] = []
+var _ttf_resolve_slots: [i32] = []
+
+val _TTF_GLYPH_DM_SIZE: i32 = 512
+var _ttf_dm_keys: [text] = []
+var _ttf_dm_vals: [_TtfGlyphBitmap] = []
+
+fn _ttf_empty_cmap12() -> CmapFormat12:
+    CmapFormat12(group_count: 0u32, start_codes: [], end_codes: [], start_glyph_ids: [])
+
+fn _ttf_empty_cmap4() -> CmapFormat4:
+    CmapFormat4(seg_count: 0u32, end_codes: [], start_codes: [], id_deltas: [], id_range_offsets: [], glyph_ids: [])
+
+fn _ttf_empty_glyph_bitmap(adv_px: i32) -> _TtfGlyphBitmap:
+    _TtfGlyphBitmap(x0_px: 0, y0_px: 0, w_px: 0, h_px: 0, adv_px: adv_px, coverage: [])
+
+fn _ttf_floor_i32(v: f64) -> i32:
+    val i = v as i32
+    if (i as f64) > v: i - 1 else: i
+
+fn _ttf_ceil_i32(v: f64) -> i32:
+    val i = v as i32
+    if (i as f64) < v: i + 1 else: i
+
+fn _ttf_read_file_bytes_cached(path: text) -> [u8]:
+    if path == "":
+        return []
+    var i: i32 = 0
+    val n = _ttf_blob_paths.len() as i32
+    while i < n:
+        if _ttf_blob_paths[i] == path:
+            return _ttf_blob_bytes[i]
+        i = i + 1
+    var loaded: [u8] = []
+    match browser_file_read_bytes(path):
+        Some(raw):
+            loaded = raw
+        None:
+            loaded = []
+    if loaded.len() > 0:
+        if _ttf_blob_paths.len() >= (_TTF_BLOB_CACHE_LIMIT as i64):
+            _ttf_blob_paths = []
+            _ttf_blob_bytes = []
+        _ttf_blob_paths.push(path)
+        _ttf_blob_bytes.push(loaded)
+    loaded
+
+fn _ttf_spec_has_bold(spec: text) -> bool:
+    val lower = spec.to_lower()
+    (
+        lower.contains("-bold") or lower.contains("_bold") or
+        lower.contains("bold.") or lower.ends_with(".ttc#1") or
+        lower.ends_with(".ttc#3")
+    )
+
+fn _ttf_spec_has_italic(spec: text) -> bool:
+    val lower = spec.to_lower()
+    lower.contains("italic") or lower.contains("oblique") or lower.ends_with(".ttc#2") or lower.ends_with(".ttc#3")
+
+fn _ttf_load_face_spec(spec: text) -> i32:
+    if spec == "":
+        return -1
+    var i: i32 = 0
+    val n = _ttf_face_specs.len() as i32
+    while i < n:
+        if _ttf_face_specs[i] == spec:
+            return i
+        i = i + 1
+    val path = font_face_spec_path(spec)
+    val face_idx = font_face_spec_index(spec)
+    if path == "" or face_idx < 0:
+        return -1
+    val raw = _ttf_read_file_bytes_cached(path)
+    if raw.len() == 0:
+        return -1
+    val is_ttc = raw.len() >= 12 and raw[0] == 116u8 and raw[1] == 116u8 and raw[2] == 99u8 and raw[3] == 102u8
+    val face_blob = if is_ttc: sfnt_face_blob(raw, face_idx) else: raw
+    if face_blob.len() == 0:
+        return -1
+    var font_ok = false
+    var font = OtFont(blob: [], tables: [])
+    match parse_offset_table(face_blob):
+        Some(f):
+            font = f
+            font_ok = true
+        None:
+            font_ok = false
+    if not font_ok:
+        return -1
+    var has_head = false
+    var head_off: i64 = 0
+    var head_len: i64 = 0
+    var has_hhea = false
+    var hhea_off: i64 = 0
+    var hhea_len: i64 = 0
+    var has_hmtx = false
+    var hmtx_off: i64 = 0
+    var hmtx_len: i64 = 0
+    var has_loca = false
+    var has_glyf = false
+    var ti: i64 = 0
+    val tbls = font.tables
+    val tbl_n = tbls.len()
+    while ti < tbl_n:
+        val tbl = tbls[ti]
+        val t = tbl.tag
+        if t == 1751474532u32:
+            has_head = true
+            head_off = tbl.offset as i64
+            head_len = tbl.length as i64
+        elif t == 1751672161u32:
+            has_hhea = true
+            hhea_off = tbl.offset as i64
+            hhea_len = tbl.length as i64
+        elif t == 1752003704u32:
+            has_hmtx = true
+            hmtx_off = tbl.offset as i64
+            hmtx_len = tbl.length as i64
+        elif t == 1819239265u32:
+            has_loca = true
+        elif t == 1735162214u32:
+            has_glyf = true
+        ti = ti + 1
+    if not has_head or not has_hhea or not has_hmtx or not has_loca or not has_glyf:
+        return -1
+    val blob_len = font.blob.len()
+    if head_off < 0 or head_len < 54 or head_off + head_len > blob_len:
+        return -1
+    if hhea_off < 0 or hhea_len < 36 or hhea_off + hhea_len > blob_len:
+        return -1
+    if hmtx_off < 0 or hmtx_len < 4 or hmtx_off + hmtx_len > blob_len:
+        return -1
+    val upem = read_u16_be(font.blob, head_off + 18) as i32
+    val asc = read_i16_be(font.blob, hhea_off + 4)
+    val desc = read_i16_be(font.blob, hhea_off + 6)
+    val lmet = read_u16_be(font.blob, hhea_off + 34) as i32
+    if upem <= 0 or lmet <= 0:
+        return -1
+    var has_cmap12 = false
+    var cmap12 = _ttf_empty_cmap12()
+    match parse_cmap_format12(font):
+        Some(c12):
+            has_cmap12 = true
+            cmap12 = c12
+        None:
+            has_cmap12 = false
+    var has_cmap4 = false
+    var cmap4 = _ttf_empty_cmap4()
+    match parse_cmap_format4(font):
+        Some(c4):
+            has_cmap4 = true
+            cmap4 = c4
+        None:
+            has_cmap4 = false
+    if not has_cmap12 and not has_cmap4:
+        return -1
+    val entry = _TtfFaceEntry(
+        spec: spec,
+        font: font,
+        units_per_em: upem,
+        ascender: asc,
+        descender: desc,
+        long_metrics: lmet,
+        hmtx_off: hmtx_off,
+        hmtx_len: hmtx_len,
+        has_cmap12: has_cmap12,
+        cmap12: cmap12,
+        has_cmap4: has_cmap4,
+        cmap4: cmap4,
+        native_bold: _ttf_spec_has_bold(spec),
+        native_italic: _ttf_spec_has_italic(spec)
+    )
+    if _ttf_face_specs.len() >= (_TTF_FACE_CACHE_LIMIT as i64):
+        _ttf_face_specs = []
+        _ttf_faces = []
+        _ttf_resolve_keys = []
+        _ttf_resolve_slots = []
+        _ttf_dm_keys = []
+        _ttf_dm_vals = []
+    val slot = _ttf_faces.len() as i32
+    _ttf_face_specs.push(spec)
+    _ttf_faces.push(entry)
+    slot
+
+fn _ttf_resolve_face(identity: text, font_family: text, bold: bool, italic: bool) -> i32:
+    val b_tag = if bold: "1" else: "0"
+    val it_tag = if italic: "1" else: "0"
+    val key = identity + "|" + font_family + "|" + b_tag + "|" + it_tag
+    var ri: i32 = 0
+    val rn = _ttf_resolve_keys.len() as i32
+    while ri < rn:
+        if _ttf_resolve_keys[ri] == key:
+            return _ttf_resolve_slots[ri]
+        ri = ri + 1
+    var candidates: [text] = []
+    if identity != "":
+        if identity.starts_with("unmanaged="):
+            val u_spec = font_unmanaged_identity_face_spec(identity)
+            if u_spec != "":
+                candidates.push(u_spec)
+        elif identity.starts_with("sha256="):
+            val m_path = selected_font_asset_local_path_for_identity(identity)
+            if m_path != "":
+                candidates.push(m_path)
+        elif identity.ends_with(".ttf") or identity.ends_with(".ttc") or identity.contains("#"):
+            candidates.push(identity)
+    val family_cands = web_font_face_candidates(font_family, bold, italic)
+    var fi: i64 = 0
+    while fi < family_cands.len():
+        candidates.push(family_cands[fi])
+        fi = fi + 1
+    candidates.push("assets/fonts/NotoSans-Regular.ttf")
+    candidates.push("doc/06_spec/03_system/app/simple_web/evidence/fonts/DejaVuSans.ttf")
+    if bold:
+        candidates.push("/System/Library/Fonts/Helvetica.ttc#1")
+        candidates.push("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf")
+        candidates.push("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    candidates.push("/System/Library/Fonts/Helvetica.ttc#0")
+    candidates.push("/System/Library/Fonts/Supplemental/Arial.ttf")
+    candidates.push("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
+    candidates.push("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    candidates.push("assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf")
+    candidates.push("assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf")
+    var chosen: i32 = -1
+    var ci: i64 = 0
+    while ci < candidates.len() and chosen < 0:
+        chosen = _ttf_load_face_spec(candidates[ci])
+        ci = ci + 1
+    if _ttf_resolve_keys.len() >= (_TTF_RESOLVE_CACHE_LIMIT as i64):
+        _ttf_resolve_keys = []
+        _ttf_resolve_slots = []
+    _ttf_resolve_keys.push(key)
+    _ttf_resolve_slots.push(chosen)
+    chosen
+
+fn _ttf_cmap_glyph(face: _TtfFaceEntry, cp: i64) -> u32:
+    if cp < 0 or cp > 1114111:
+        return 0u32
+    val cp_u = cp as u32
+    var gid: u32 = 0u32
+    if face.has_cmap12:
+        gid = cmap12_lookup(face.cmap12, cp_u)
+    if gid == 0u32 and face.has_cmap4:
+        gid = cmap_lookup(face.cmap4, cp_u)
+    gid
+
+fn _ttf_hmtx_advance_px(face: _TtfFaceEntry, gid: u32, font_size: i32) -> i32:
+    if face.units_per_em <= 0 or face.long_metrics <= 0:
+        return 0
+    val g = gid as i32
+    val idx = if g < face.long_metrics: g else: face.long_metrics - 1
+    val pos = face.hmtx_off + (idx as i64) * 4
+    if pos < face.hmtx_off or pos + 2 > face.hmtx_off + face.hmtx_len:
+        return 0
+    val adv_fu = read_u16_be(face.font.blob, pos) as i32
+    val scale = (font_size as f64) / (face.units_per_em as f64)
+    ((adv_fu as f64) * scale + 0.5) as i32
+
+fn _ttf_rasterize_glyph(face: _TtfFaceEntry, gid: u32, font_size: i32, synth_bold: bool, synth_italic: bool) -> _TtfGlyphBitmap:
+    val adv_px = _ttf_hmtx_advance_px(face, gid, font_size)
+    if gid == 0u32 or font_size <= 0 or font_size > 512:
+        return _ttf_empty_glyph_bitmap(adv_px)
+    var cmds: [SfntGlyfCommand] = []
+    var has_outline = false
+    match parse_sfnt_glyf_outline(face.font, gid):
+        Some(outline):
+            cmds = outline.commands
+            has_outline = true
+        None:
+            has_outline = false
+    if not has_outline or cmds.len() == 0:
+        return _ttf_empty_glyph_bitmap(adv_px)
+    val scale = (font_size as f64) / (face.units_per_em as f64)
+    val skew = if synth_italic: 0.21 else: 0.0
+    val quad_steps: i32 = if font_size <= 24: 6 elif font_size <= 64: 10 else: 14
+    var seg_ax: [f64] = []
+    var seg_ay: [f64] = []
+    var seg_bx: [f64] = []
+    var seg_by: [f64] = []
+    var has_bounds = false
+    var min_x: f64 = 0.0
+    var min_y: f64 = 0.0
+    var max_x: f64 = 0.0
+    var max_y: f64 = 0.0
+    var cur_fx: f64 = 0.0
+    var cur_fy: f64 = 0.0
+    var start_fx: f64 = 0.0
+    var start_fy: f64 = 0.0
+    var cur_px: f64 = 0.0
+    var cur_py: f64 = 0.0
+    var start_px: f64 = 0.0
+    var start_py: f64 = 0.0
+    var contour_open = false
+    var ci: i64 = 0
+    val cmd_n = cmds.len()
+    while ci < cmd_n:
+        val cmd = cmds[ci]
+        val v = cmd.verb
+        if v == SFNT_GLYF_MOVE:
+            if contour_open and cur_py != start_py:
+                seg_ax.push(cur_px)
+                seg_ay.push(cur_py)
+                seg_bx.push(start_px)
+                seg_by.push(start_py)
+            cur_fx = cmd.x1
+            cur_fy = cmd.y1
+            start_fx = cur_fx
+            start_fy = cur_fy
+            cur_px = (cur_fx + cur_fy * skew) * scale
+            cur_py = (0.0 - cur_fy) * scale
+            start_px = cur_px
+            start_py = cur_py
+            contour_open = true
+            if not has_bounds:
+                min_x = cur_px
+                max_x = cur_px
+                min_y = cur_py
+                max_y = cur_py
+                has_bounds = true
+            else:
+                if cur_px < min_x: min_x = cur_px
+                if cur_px > max_x: max_x = cur_px
+                if cur_py < min_y: min_y = cur_py
+                if cur_py > max_y: max_y = cur_py
+        elif v == SFNT_GLYF_LINE:
+            val nx_f = cmd.x1
+            val ny_f = cmd.y1
+            val nx_p = (nx_f + ny_f * skew) * scale
+            val ny_p = (0.0 - ny_f) * scale
+            if ny_p != cur_py:
+                seg_ax.push(cur_px)
+                seg_ay.push(cur_py)
+                seg_bx.push(nx_p)
+                seg_by.push(ny_p)
+            if not has_bounds:
+                min_x = nx_p
+                max_x = nx_p
+                min_y = ny_p
+                max_y = ny_p
+                has_bounds = true
+            else:
+                if nx_p < min_x: min_x = nx_p
+                if nx_p > max_x: max_x = nx_p
+                if ny_p < min_y: min_y = ny_p
+                if ny_p > max_y: max_y = ny_p
+            cur_fx = nx_f
+            cur_fy = ny_f
+            cur_px = nx_p
+            cur_py = ny_p
+        elif v == SFNT_GLYF_QUAD:
+            val ctrl_x = cmd.x1
+            val ctrl_y = cmd.y1
+            val end_x = cmd.x2
+            val end_y = cmd.y2
+            var prev_p_x = cur_px
+            var prev_p_y = cur_py
+            var si: i32 = 1
+            while si <= quad_steps:
+                val t = (si as f64) / (quad_steps as f64)
+                val mt = 1.0 - t
+                val qfx = mt * mt * cur_fx + 2.0 * mt * t * ctrl_x + t * t * end_x
+                val qfy = mt * mt * cur_fy + 2.0 * mt * t * ctrl_y + t * t * end_y
+                val qpx = (qfx + qfy * skew) * scale
+                val qpy = (0.0 - qfy) * scale
+                if qpy != prev_p_y:
+                    seg_ax.push(prev_p_x)
+                    seg_ay.push(prev_p_y)
+                    seg_bx.push(qpx)
+                    seg_by.push(qpy)
+                if not has_bounds:
+                    min_x = qpx
+                    max_x = qpx
+                    min_y = qpy
+                    max_y = qpy
+                    has_bounds = true
+                else:
+                    if qpx < min_x: min_x = qpx
+                    if qpx > max_x: max_x = qpx
+                    if qpy < min_y: min_y = qpy
+                    if qpy > max_y: max_y = qpy
+                prev_p_x = qpx
+                prev_p_y = qpy
+                si = si + 1
+            cur_fx = end_x
+            cur_fy = end_y
+            cur_px = prev_p_x
+            cur_py = prev_p_y
+        elif v == SFNT_GLYF_CLOSE:
+            if contour_open and cur_py != start_py:
+                seg_ax.push(cur_px)
+                seg_ay.push(cur_py)
+                seg_bx.push(start_px)
+                seg_by.push(start_py)
+            cur_fx = start_fx
+            cur_fy = start_fy
+            cur_px = start_px
+            cur_py = start_py
+            contour_open = false
+        ci = ci + 1
+    if contour_open and cur_py != start_py:
+        seg_ax.push(cur_px)
+        seg_ay.push(cur_py)
+        seg_bx.push(start_px)
+        seg_by.push(start_py)
+    if not has_bounds or seg_ax.len() == 0:
+        return _ttf_empty_glyph_bitmap(adv_px)
+    val bold_extra = if synth_bold: (if font_size >= 36: 2 else: 1) else: 0
+    val x0_px = _ttf_floor_i32(min_x)
+    val y0_px = _ttf_floor_i32(min_y)
+    val x1_px = _ttf_ceil_i32(max_x) + bold_extra
+    val y1_px = _ttf_ceil_i32(max_y)
+    val w_px = if x1_px - x0_px > 0: x1_px - x0_px else: 1
+    val h_px = if y1_px - y0_px > 0: y1_px - y0_px else: 1
+    if w_px > 1024 or h_px > 1024:
+        return _ttf_empty_glyph_bitmap(adv_px)
+    val ox = x0_px as f64
+    val oy = y0_px as f64
+    var edges: [_TtfEdge] = []
+    var ei: i64 = 0
+    val seg_n = seg_ax.len()
+    while ei < seg_n:
+        val ay = seg_ay[ei] - oy
+        val by = seg_by[ei] - oy
+        if ay != by:
+            val ax = seg_ax[ei] - ox
+            val bx = seg_bx[ei] - ox
+            val dx_dy = (bx - ax) / (by - ay)
+            if ay < by:
+                edges.push(_TtfEdge(ey0: ay, y_lo: ay, y_hi: by, ex0: ax, dx_dy: dx_dy, dir: 1))
+            else:
+                edges.push(_TtfEdge(ey0: by, y_lo: by, y_hi: ay, ex0: bx, dx_dy: dx_dy, dir: -1))
+        ei = ei + 1
+    val edge_n = edges.len()
+    if edge_n == 0:
+        return _ttf_empty_glyph_bitmap(adv_px)
+    val total_px = w_px * h_px
+    var hits: [i32] = []
+    var hi: i32 = 0
+    while hi < total_px:
+        hits.push(0)
+        hi = hi + 1
+    var py: i32 = 0
+    while py < h_px:
+        val row_off = py * w_px
+        var sub_y: i32 = 0
+        while sub_y < 4:
+            val sy = (py as f64) + ((sub_y as f64) + 0.5) * 0.25
+            var act_x: [f64] = []
+            var act_dir: [i32] = []
+            var k: i64 = 0
+            while k < edge_n:
+                val e = edges[k]
+                if e.y_lo <= sy and sy < e.y_hi:
+                    val ix = e.ex0 + (sy - e.ey0) * e.dx_dy
+                    act_x.push(ix)
+                    act_dir.push(e.dir)
+                k = k + 1
+            val n_act = act_x.len() as i32
+            if n_act > 0:
+                var si: i32 = 1
+                while si < n_act:
+                    val kx = act_x[si]
+                    val kd = act_dir[si]
+                    var sj = si - 1
+                    while sj >= 0 and act_x[sj] > kx:
+                        act_x[sj + 1] = act_x[sj]
+                        act_dir[sj + 1] = act_dir[sj]
+                        sj = sj - 1
+                    act_x[sj + 1] = kx
+                    act_dir[sj + 1] = kd
+                    si = si + 1
+                var start_px = _ttf_floor_i32(act_x[0])
+                if start_px < 0:
+                    start_px = 0
+                var ai: i32 = 0
+                var winding: i32 = 0
+                val start_xf = start_px as f64
+                while ai < n_act and act_x[ai] < start_xf:
+                    winding = winding + act_dir[ai]
+                    ai = ai + 1
+                var px = start_px
+                while px < w_px:
+                    if winding == 0 and ai >= n_act:
+                        break
+                    val pxf = px as f64
+                    var col_hits: i32 = 0
+                    var sub_x: i32 = 0
+                    while sub_x < 4:
+                        val sx = pxf + ((sub_x as f64) + 0.5) * 0.25
+                        while ai < n_act and act_x[ai] < sx:
+                            winding = winding + act_dir[ai]
+                            ai = ai + 1
+                        if winding != 0:
+                            col_hits = col_hits + 1
+                        sub_x = sub_x + 1
+                    if col_hits > 0:
+                        hits[row_off + px] = hits[row_off + px] + col_hits
+                    px = px + 1
+            sub_y = sub_y + 1
+        py = py + 1
+    var cov: [u8] = []
+    var pi: i32 = 0
+    while pi < total_px:
+        val h = hits[pi]
+        if h > 0:
+            val c = (h * 255) / 16
+            cov.push((if c > 255: 255 else: c) as u8)
+        else:
+            cov.push(0u8)
+        pi = pi + 1
+    if bold_extra > 0:
+        var by_row: i32 = 0
+        while by_row < h_px:
+            val r_base = by_row * w_px
+            var bx = w_px - 1
+            while bx >= 1:
+                var best = cov[r_base + bx]
+                val prev1 = cov[r_base + bx - 1]
+                if prev1 > best:
+                    best = prev1
+                if bold_extra >= 2 and bx >= 2:
+                    val prev2 = cov[r_base + bx - 2]
+                    if prev2 > best:
+                        best = prev2
+                cov[r_base + bx] = best
+                bx = bx - 1
+            by_row = by_row + 1
+    _TtfGlyphBitmap(
+        x0_px: x0_px,
+        y0_px: y0_px,
+        w_px: w_px,
+        h_px: h_px,
+        adv_px: adv_px,
+        coverage: cov
+    )
+
+fn _ttf_glyph_cached(face_slot: i32, font_size: i32, synth_bold: bool, synth_italic: bool, gid: u32) -> _TtfGlyphBitmap:
+    if _ttf_dm_keys.len() == 0:
+        var init_i: i32 = 0
+        while init_i < _TTF_GLYPH_DM_SIZE:
+            _ttf_dm_keys.push("")
+            _ttf_dm_vals.push(_ttf_empty_glyph_bitmap(0))
+            init_i = init_i + 1
+    val sb_i = if synth_bold: 1 else: 0
+    val si_i = if synth_italic: 1 else: 0
+    val key = "{face_slot}:{font_size}:{sb_i}:{si_i}:{gid}"
+    val h_raw: i64 = (face_slot as i64) * 73856093 + (font_size as i64) * 19349663 + (sb_i as i64) * 83492791 + (si_i as i64) * 297121507 + (gid as i64)
+    var slot = (h_raw % (_TTF_GLYPH_DM_SIZE as i64)) as i32
+    if slot < 0:
+        slot = slot + _TTF_GLYPH_DM_SIZE
+    if _ttf_dm_keys[slot] == key:
+        return _ttf_dm_vals[slot]
+    val bmp = _ttf_rasterize_glyph(_ttf_faces[face_slot], gid, font_size, synth_bold, synth_italic)
+    _ttf_dm_keys[slot] = key
+    _ttf_dm_vals[slot] = bmp
+    bmp
+
+# reason: TTF availability query over boolean bold/italic flags
+# @allow(primitive_api)
+pub fn fb_text_ttf_available(resolved_font_identity: text, font_family: text, bold: bool, italic: bool) -> bool:
+    _ttf_resolve_face(resolved_font_identity, font_family, bold, italic) >= 0
+
+# reason: TTF ascent pixel calculator takes integer font_size and boolean bold/italic flags
+# @allow(primitive_api)
+pub fn fb_text_ttf_ascent_px(font_size: i32, resolved_font_identity: text, font_family: text, bold: bool, italic: bool) -> i32:
+    if font_size <= 0:
+        return 0
+    val face_slot = _ttf_resolve_face(resolved_font_identity, font_family, bold, italic)
+    if face_slot < 0:
+        return (font_size * 905 + 500) / 1000
+    val face = _ttf_faces[face_slot]
+    val upem = face.units_per_em
+    if face.ascender > 0 and upem > 0:
+        return (face.ascender * font_size + upem / 2) / upem
+    (font_size * 905 + 500) / 1000
+
+# reason: TTF baseline pixel calculator takes i32 pixel coordinates/size and bold/italic flags
+# @allow(primitive_api)
+pub fn fb_text_ttf_line_baseline_y(line_top: i32, line_h_px: i32, font_size: i32, resolved_font_identity: text, font_family: text, bold: bool, italic: bool) -> i32:
+    val face_slot = _ttf_resolve_face(resolved_font_identity, font_family, bold, italic)
+    var asc_px = (font_size * 905 + 500) / 1000
+    var desc_px = (font_size * 212 + 500) / 1000
+    if face_slot >= 0:
+        val face = _ttf_faces[face_slot]
+        val upem = face.units_per_em
+        if upem > 0:
+            if face.ascender > 0:
+                asc_px = (face.ascender * font_size + upem / 2) / upem
+            val desc_fu = if face.descender < 0: 0 - face.descender else: 0
+            if desc_fu > 0:
+                desc_px = (desc_fu * font_size + upem / 2) / upem
+    if line_h_px <= 0:
+        return line_top + asc_px
+    val text_top = (2 * line_top + line_h_px - asc_px - desc_px) / 2
+    text_top + asc_px
+
+# reason: low-level framebuffer TTF glyph range painter over raw [u32] pixels and i32 coords
+# @allow(primitive_api)
+pub fn fb_text_ttf_aa_clip_range_adv(
+    fb: [u32], fbw: i32, fbh: i32, x: i32, baseline_y: i32,
+    s: text, start: i32, endv: i32, color: u32, font_size: i32,
+    resolved_font_identity: text, font_family: text,
+    italic: bool, bold: bool, clip: ClipRect, by: [i32]
+) -> [u32]:
+    if font_size <= 0 or start >= endv:
+        return fb
+    val fg_alpha = ((color >> 24) & 255u32) as i32
+    if fg_alpha <= 0:
+        return fb
+    val face_slot = _ttf_resolve_face(resolved_font_identity, font_family, bold, italic)
+    if face_slot < 0:
+        val fallback_scale = web_glyph_scale(font_size)
+        val fallback_adv = 6 * fallback_scale
+        val fallback_space = 3 * fallback_scale
+        return fb_text_thin_scaled_clip_range_adv(
+            fb, fbw, fbh, x, baseline_y - 7 * fallback_scale, s, start, endv,
+            color, fallback_scale, fallback_adv, fallback_space, italic, bold, clip, by
+        )
+    val face = _ttf_faces[face_slot]
+    val synth_bold = bold and not face.native_bold
+    val synth_italic = italic and not face.native_italic
+    var cx0 = if clip.x0 > 0: clip.x0 else: 0
+    var cy0 = if clip.y0 > 0: clip.y0 else: 0
+    var cx1 = if clip.x1 < fbw: clip.x1 else: fbw
+    var cy1 = if clip.y1 < fbh: clip.y1 else: fbh
+    if cx0 >= cx1 or cy0 >= cy1:
+        return fb
+    val s_blen = s.byte_len()
+    val use_by = by.len() == s_blen
+    val clamped_end = if endv < s_blen: endv else: s_blen
+    val sb = s.bytes()
+    val cps = text_codepoints(s)
+    var ci: i64 = 0
+    var k: i32 = 0
+    while k < start and k < s_blen:
+        if sb[k] < 128 or sb[k] >= 192:
+            ci = ci + 1
+        k = k + 1
+    var out = fb
+    var pen_x = x
+    var i = start
+    while i < clamped_end:
+        if pen_x - font_size >= cx1:
+            return out
+        val b = sb[i]
+        var step_x: i32 = 0
+        if b < 128 or b >= 192:
+            val cp = if ci < cps.len(): cps[ci] else: 0
+            ci = ci + 1
+            val is_ws = cp == 32 or cp == 9 or cp == 10 or cp == 13
+            val gid = _ttf_cmap_glyph(face, cp)
+            if is_ws:
+                if not use_by:
+                    step_x = _ttf_hmtx_advance_px(face, gid, font_size)
+            elif gid == 0u32:
+                val gi = glyph_index_for_char_code(cp)
+                val fb_scale = web_glyph_scale(font_size)
+                if gi >= 0 and gi != 36:
+                    out = fb_glyph_thin_scaled_clip(
+                        out, fbw, fbh, pen_x, baseline_y - 7 * fb_scale,
+                        gi, color, fb_scale, italic, bold, clip
+                    )
+                if not use_by:
+                    step_x = 6 * fb_scale
+            else:
+                val bmp = _ttf_glyph_cached(face_slot, font_size, synth_bold, synth_italic, gid)
+                if not use_by:
+                    step_x = bmp.adv_px
+                if bmp.w_px > 0 and bmp.h_px > 0 and bmp.coverage.len() > 0:
+                    val gx0 = pen_x + bmp.x0_px
+                    val gy0 = baseline_y + bmp.y0_px
+                    val gx1 = gx0 + bmp.w_px
+                    val gy1 = gy0 + bmp.h_px
+                    val dx0 = if gx0 > cx0: gx0 else: cx0
+                    val dy0 = if gy0 > cy0: gy0 else: cy0
+                    val dx1 = if gx1 < cx1: gx1 else: cx1
+                    val dy1 = if gy1 < cy1: gy1 else: cy1
+                    if dx0 < dx1 and dy0 < dy1:
+                        var dy = dy0
+                        while dy < dy1:
+                            val src_row = (dy - gy0) * bmp.w_px
+                            val dst_row = dy * fbw
+                            var dx = dx0
+                            while dx < dx1:
+                                val cov = bmp.coverage[src_row + (dx - gx0)] as i32
+                                if cov > 0:
+                                    val eff_alpha = if fg_alpha == 255: cov else: (cov * fg_alpha + 127) / 255
+                                    if eff_alpha > 0:
+                                        val dst_idx = dst_row + dx
+                                        out[dst_idx] = composite_over_base(color, eff_alpha, out[dst_idx])
+                                dx = dx + 1
+                            dy = dy + 1
+        if use_by:
+            step_x = by[i]
+        pen_x = pen_x + step_x
+        i = i + 1
+    out
+
+# reason: low-level framebuffer TTF range painter over raw [u32] pixels and i32 coords
+# @allow(primitive_api)
+pub fn fb_text_ttf_aa_clip_range(
+    fb: [u32], fbw: i32, fbh: i32, x: i32, baseline_y: i32,
+    s: text, start: i32, endv: i32, color: u32, font_size: i32,
+    resolved_font_identity: text, font_family: text,
+    italic: bool, bold: bool, clip: ClipRect
+) -> [u32]:
+    fb_text_ttf_aa_clip_range_adv(
+        fb, fbw, fbh, x, baseline_y, s, start, endv, color, font_size,
+        resolved_font_identity, font_family, italic, bold, clip, []
+    )
+
 fn apply_text_transform_for_paint(value: text, transform: text) -> text:
     if transform == "uppercase":
         return value.upper()
@@ -1335,6 +2471,103 @@ pub fn reverse_text_for_paint(value: text) -> text:
         i = j
     out
 
+# Strong right-to-left codepoints (UAX #9 bidi class R / AL): Hebrew, Arabic,
+# Syriac, Thaana, NKo, Samaritan, Mandaic, their presentation forms, and the
+# supplementary RTL blocks.
+fn _bidi_cp_is_rtl(cp: i64) -> bool:
+    (cp >= 0x0590 and cp <= 0x08FF) or (cp >= 0xFB1D and cp <= 0xFDFF) or
+        (cp >= 0xFE70 and cp <= 0xFEFF) or (cp >= 0x10800 and cp <= 0x10FFF) or
+        (cp >= 0x1E800 and cp <= 0x1EFFF)
+
+# No strong direction: ASCII spaces and punctuation, Latin-1 punctuation and
+# signs, General Punctuation (incl. U+2022). Letters and digits are strong.
+fn _bidi_cp_is_neutral(cp: i64) -> bool:
+    if cp < 0x80:
+        val alnum = (cp >= 48 and cp <= 57) or (cp >= 65 and cp <= 90) or (cp >= 97 and cp <= 122)
+        return not alnum
+    (cp >= 0xA0 and cp <= 0xBF) or cp == 0xD7 or cp == 0xF7 or (cp >= 0x2000 and cp <= 0x206F)
+
+# reason: plain text in, bool out — a predicate over arbitrary UTF-8 text, no domain unit
+# @allow(primitive_api)
+pub fn text_has_rtl_strong(value: text) -> bool:
+    for cp in text_codepoints(value):
+        if _bidi_cp_is_rtl(cp):
+            return true
+    false
+
+# Visual order of `value` in a `direction:rtl` paragraph — a reduced UAX #9:
+# one embedding level, no explicit controls, no mirroring. A left-to-right
+# run (letters and digits, plus the neutrals BETWEEN two of them) keeps its
+# logical order. Runs, right-to-left characters and neutrals at a run edge
+# are laid out right to left. Chrome 159: `ABC` under direction:rtl paints
+# A, B, C left to right (the same ink as `ABC`, end-aligned), not `CBA`.
+# reason: text in, text out — a visual reordering of arbitrary UTF-8 text, no domain unit
+# @allow(primitive_api)
+pub fn bidi_visual_text_for_rtl(value: text) -> text:
+    val cps = text_codepoints(value)
+    val n = cps.len()
+    if n == 0:
+        return value
+    if not text_has_rtl_strong(value) and not _bidi_cp_is_neutral(cps[0]) and
+            not _bidi_cp_is_neutral(cps[n - 1]):
+        return value
+    # Byte span of each codepoint, as in reverse_text_for_paint.
+    val vb = value.bytes()
+    val nb = value.byte_len()
+    var starts: [i64] = []
+    var ends: [i64] = []
+    var span_count: i64 = 0
+    var i: i64 = 0
+    while i < nb:
+        var j = i + 1
+        while j < nb and vb[j] >= 128 and vb[j] < 192:
+            j = j + 1
+        starts.push(i)
+        ends.push(j)
+        span_count = span_count + 1
+        i = j
+    if span_count != n:
+        return reverse_text_for_paint(value)
+    # prev_l[k] / next_l[k]: the nearest strong class before / after k is L.
+    var prev_l: [bool] = []
+    var last_strong_l = false
+    var k: i64 = 0
+    while k < n:
+        prev_l.push(last_strong_l)
+        if not _bidi_cp_is_neutral(cps[k]):
+            last_strong_l = not _bidi_cp_is_rtl(cps[k])
+        k = k + 1
+    var next_l: [bool] = [false; n]
+    var following_l = false
+    k = n - 1
+    while k >= 0:
+        next_l[k] = following_l
+        if not _bidi_cp_is_neutral(cps[k]):
+            following_l = not _bidi_cp_is_rtl(cps[k])
+        k = k - 1
+    var ltr: [bool] = []
+    k = 0
+    while k < n:
+        val cp = cps[k]
+        if _bidi_cp_is_neutral(cp):
+            ltr.push(prev_l[k] and next_l[k])
+        else:
+            ltr.push(not _bidi_cp_is_rtl(cp))
+        k = k + 1
+    var out = ""
+    k = n - 1
+    while k >= 0:
+        if ltr[k]:
+            var s = k
+            while s > 0 and ltr[s - 1]:
+                s = s - 1
+            out = out + value.substring(starts[s], ends[k])
+            k = s - 1
+        else:
+            out = out + value.substring(starts[k], ends[k])
+            k = k - 1
+    out
+
 fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, italic: bool) -> [u32]:
     var out = fb
     var ry = 0
@@ -1348,7 +2581,7 @@ fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color
                 val xx = x + italic_shift + rx
                 val yy = y + ry
                 if xx >= 0 and xx < fbw and yy >= 0 and yy < fbh:
-                    out[yy * fbw + xx] = color
+                    out[yy * fbw + xx] = _fb_text_px(color, out[yy * fbw + xx])
             rx = rx + 1
         ry = ry + 1
     out
@@ -1389,10 +2622,40 @@ fn fb_px(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, color: u32) -> [u32]:
         out[y * fbw + x] = color
     out
 
+# Legacy widget chrome text: one fixed pixel table, painted last over the whole
+# frame. ONE source for both paint paths -- the CPU raster `paint` writes it
+# with fb_px (fb_generated_widget_chrome_text below) and the Draw IR producer
+# lowers each point to a 1x1 rect (_html_draw_ir_widget_chrome_text_commands in
+# paint_layout.spl), so the pixel API (Draw IR -> Engine2D) and the raster agree.
+class WidgetChromeTextPixels:
+    xs: [i32]
+    ys: [i32]
+    colors: [u32]
+
+# The table spans x 7..37 and y 7..61, so a smaller frame paints none of it.
+fn widget_chrome_text_fits(fbw: i32, fbh: i32) -> bool:
+    fbw >= 38 and fbh >= 62
+
+# Gate shared by both paint paths: legacy widget mode, a frame the table fits
+# in, and non-empty text under a widget ancestor. When it holds, the generated
+# table replaces every #text node's own glyphs.
+fn widget_chrome_text_active(nodes: [HNode], widget_mode: bool, fbw: i32, fbh: i32) -> bool:
+    val need_text = widget_mode and widget_chrome_text_fits(fbw, fbh)
+    need_text and compute_widget_paint_flags(nodes, widget_mode, need_text).has_nonempty_widget_text
+
 fn fb_generated_widget_chrome_text(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
-    if fbw < 38 or fbh < 62:
+    if not widget_chrome_text_fits(fbw, fbh):
         return fb
     var out = fb
+    val pixels = generated_widget_chrome_text_pixels()
+    var i = 0
+    val point_count = pixels.xs.len()
+    while i < point_count:
+        out = fb_px(out, fbw, fbh, pixels.xs[i], pixels.ys[i], pixels.colors[i])
+        i = i + 1
+    out
+
+fn generated_widget_chrome_text_pixels() -> WidgetChromeTextPixels:
     val xs = [
         9, 10, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 27, 28, 29, 30,
         8, 9, 10, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 27, 28, 29,
@@ -1444,12 +2707,7 @@ fn fb_generated_widget_chrome_text(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
         0xff576070u32, 0xff666f7fu32, 0xffa8b2bfu32, 0xffc4cedbu32, 0xff363e50u32, 0xff0f172au32, 0xffc9d3dfu32, 0xff949dabu32, 0xff7b8493u32, 0xff949dabu32, 0xff5a6373u32, 0xffa0aab7u32, 0xff3a4354u32, 0xff586171u32, 0xff3a4354u32, 0xffabb5c2u32,
         0xff666f7fu32, 0xffa8b2bfu32, 0xffaeb8c5u32, 0xff0f172au32, 0xffc9d3dfu32, 0xffcad4e0u32, 0xffbec8d4u32
     ]
-    var i = 0
-    val point_count = xs.len()
-    while i < point_count:
-        out = fb_px(out, fbw, fbh, xs[i], ys[i], colors[i])
-        i = i + 1
-    out
+    WidgetChromeTextPixels(xs: xs, ys: ys, colors: colors)
 
 class WidgetPaintFlags:
     has_widget_panel: bool
@@ -1673,3 +2931,118 @@ fn fb_text_flow_chrome_overlay(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
             out[idx] = text_flow_correction_colors[i]
         i = i + 1
     out
+
+# Two adjacent sides of different colours (`transparent` counts) meet on the
+# diagonal from the outer to the inner corner, as Chrome paints them: a CSS
+# triangle (`border:20px solid transparent; border-top-color:red`) is a
+# triangle, not a red rectangle. Same-coloured neighbours keep the plain
+# rectangles of fb_border_sides_clip, so a uniform border is unchanged.
+fn _fb_border_mitred(bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32) -> bool:
+    val tl = bt > 0 and bl > 0 and ct != cl
+    val tr = bt > 0 and br > 0 and ct != cr
+    val bl_corner = bb > 0 and bl > 0 and cb != cl
+    val br_corner = bb > 0 and br > 0 and cb != cr
+    tl or tr or bl_corner or br_corner
+
+# Row `r` (0 at the outer edge) of a side `side_w` thick, against a neighbour
+# `cross_w` thick: the first column (from the outer corner) the side owns
+# whole, times 2, plus 1 when the column before it is cut in half by the
+# diagonal. A pixel belongs to the side when its centre lies past the
+# diagonal, (2c+1) * side_w > (2r+1) * cross_w.
+fn _fb_mitre_cut(r: i32, side_w: i32, cross_w: i32) -> i32:
+    val num = (2 * r + 1) * cross_w
+    var c = 0
+    while (2 * c + 1) * side_w <= num:
+        c = c + 1
+    if c > 0 and (2 * c - 1) * side_w == num:
+        return c * 2 + 1
+    c * 2
+
+# The half-covered diagonal pixel: half of each side, painted ONCE as the
+# 50/50 mix (two sequential half blends weighted the first side 25%). A
+# transparent side (0) contributes nothing.
+fn _fb_mitre_pixel(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, ca: u32, cb: u32, clip: ClipRect) -> [u32]:
+    if ca == 0u32 and cb == 0u32:
+        return fb
+    val mix = mitre_mix_color(ca, cb)
+    val a = ((mix >> 24) & 255u32) as i32
+    fb_rect_opacity_clip(fb, fbw, fbh, x, y, 1, 1, mix | 0xFF000000u32, (a * 100 + 127) / 255, clip)
+
+# 50/50 mix of two side colours as one colour with its own alpha (the alpha
+# byte 0 of a non-zero colour means opaque here). Premultiplied average.
+fn mitre_mix_color(ca: u32, cb: u32) -> u32:
+    var r = 0
+    var g = 0
+    var b = 0
+    var a_sum = 0
+    for c in [ca, cb]:
+        if c != 0u32:
+            val a0 = ((c >> 24) & 255u32) as i32
+            val ea = if a0 == 0: 255 else: a0
+            r = r + (((c >> 16) & 255u32) as i32) * ea
+            g = g + (((c >> 8) & 255u32) as i32) * ea
+            b = b + ((c & 255u32) as i32) * ea
+            a_sum = a_sum + ea
+    if a_sum == 0:
+        return 0u32
+    val a = a_sum / 2
+    ((a as u32) << 24) | (((r / a_sum) as u32) << 16) | (((g / a_sum) as u32) << 8) | ((b / a_sum) as u32)
+
+fn _fb_border_sides_mitred(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
+    var out = fb
+    # Horizontal sides, one row at a time: row r of the top side and row r
+    # (counted up from the bottom edge) of the bottom side.
+    for side in [0, 1]:
+        val thick = if side == 0: bt else: bb
+        val c = if side == 0: ct else: cb
+        var r = 0
+        while r < thick:
+            val py = if side == 0: y + r else: y + h - 1 - r
+            var l_full = 0
+            var r_full = 0
+            if bl > 0 and cl != c:
+                val cut = _fb_mitre_cut(r, thick, bl)
+                l_full = cut / 2
+                if cut % 2 == 1:
+                    out = _fb_mitre_pixel(out, fbw, fbh, x + l_full - 1, py, c, cl, clip)
+            if br > 0 and cr != c:
+                val cut = _fb_mitre_cut(r, thick, br)
+                r_full = cut / 2
+                if cut % 2 == 1:
+                    out = _fb_mitre_pixel(out, fbw, fbh, x + w - r_full, py, c, cr, clip)
+            if c != 0u32 and w - l_full - r_full > 0:
+                out = _fb_border_side_clip(out, fbw, fbh, x + l_full, py, w - l_full - r_full, 1, c, clip)
+            r = r + 1
+    # Vertical sides: the rows between the horizontal sides whole, and inside
+    # a mitred corner only the columns before the diagonal. A same-coloured
+    # corner was already painted by the horizontal side.
+    for side in [0, 1]:
+        val thick = if side == 0: bl else: br
+        val c = if side == 0: cl else: cr
+        if thick > 0 and c != 0u32:
+            val px0 = if side == 0: x else: x + w - thick
+            if h - bt - bb > 0:
+                out = _fb_border_side_clip(out, fbw, fbh, px0, y + bt, thick, h - bt - bb, c, clip)
+            for end in [0, 1]:
+                val cross = if end == 0: bt else: bb
+                val cc = if end == 0: ct else: cb
+                if cross > 0 and cc != c:
+                    var r = 0
+                    while r < cross:
+                        val cut = _fb_mitre_cut(r, cross, thick)
+                        val own = cut / 2 - cut % 2
+                        if own > 0:
+                            val py = if end == 0: y + r else: y + h - 1 - r
+                            val ox = if side == 0: x else: x + w - own
+                            out = _fb_border_side_clip(out, fbw, fbh, ox, py, own, 1, c, clip)
+                        r = r + 1
+    out
+
+# A glyph pixel: `color: rgba(0,0,0,.5)` blends over what is under it, as
+# Chrome does (the 5x7 lane wrote it opaque). An alpha byte of 0 is a colour
+# packed without one and stays opaque.
+fn _fb_text_px(color: u32, dst: u32) -> u32:
+    val a = ((color >> 24) & 255u32) as i32
+    if a > 0 and a < 255:
+        return composite_over_base(color | 0xFF000000u32, a, dst)
+    color

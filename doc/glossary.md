@@ -257,6 +257,17 @@ Decision:
 - Best tradeoff is **shared core + Loader/JIT policy wrappers**.
 - One mapper with only config flags is workable but tends to grow mode conditionals and weak ownership rules.
 
+## Region (init capability)
+
+For `E_INIT_CAPABILITY_ESCAPE` (immutable async init): the async producer of a
+late-initialised immutable field (`async_init(...)`) is outside the constructing
+scope's mutation region, so it may only receive IMMUTABLE input. A `var`
+binding, `mut T`/`&mut` parameter, `me`-method `self`, borrow/view-typed binding or
+closure capturing mutable state, anywhere in the argument, is rejected; `val`
+bindings, immutable parameters and literals are accepted. Assignment to an
+immutable binding (`val x = counter`) is the gate. Owner decision 2026-11-15,
+`doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md` section 4.
+
 ## Remote interpreter
 Remote interpreter executes same frontend/lowering contract but targets remote memory.
 
@@ -1191,3 +1202,75 @@ diagnostic harness driven by `scripts/check/check-windows-native-mdi-evidence.{s
 and needs a message pump, window lifecycle and pixel readback that `CompositorBackend`
 does not expose. It is not duplication debt; do not "fix" it by routing it through the
 backend, which would destroy what it measures.
+
+## XRay (shared wrapper, backends, spy, profile)
+
+Simple's dynamic function-entry/exit tracing. **Wrapper interface**
+`XrayBackendV1` (`src/lib/nogc_sync_mut/trace/xray_spy_v1.spl`) is one
+pure-Simple interface built by composition: the control-plane leaf
+`XrayLlvmLeafV1` (install / enable site / disable site / close) plus the edge
+source `XrayEdgeSourceV1` (drain edges / site names). **Backends:** Linux =
+compiler-rt or native sled leaf, whose handler writes the channel directly;
+Windows = `XrayWinFlagLeafV1`, which uses flag-guard slots and an in-DLL ring
+drained into the channel. **Spy** is log mode: `XraySpyV1.log_lines()` prints
+one `enter|exit <name>` line per edge. **Profile** is `XraySpyV1.profile()`,
+which folds the same drained events with `trace_profile_fold_v1`. Both share
+one implementation and run unchanged on either OS; the spy's adapter takes the
+backend leaf's sled kind (`Llvm` or native `Simple`).
+
+## Node attribute
+
+A named, typed field of a tree node (AST `extra`, `s_val`, `op`) whose storage
+is chosen apart from the node record and read through `AttributeStoreV1<T>`.
+Default off (`direct`). Switches: `SIMPLE_NODE_ATTR`, `SIMPLE_NODE_ATTR_SDN`,
+`SIMPLE_NODE_ATTR_COUNT`. Spec: `doc/07_guide/language/attributes/node_attribute_layouts.md`.
+
+## Node attribute backing layout
+
+How a node attribute value is stored. The token is resolved once at construction:
+- **embedded** (`direct`): on the main node.
+- **column**: a side array indexed by node id.
+- **array index** (`array_index`): the node holds a slot index into a compact side array.
+- **hashmap** (`sparse_hash`): a keyed side table.
+- **array-index pointer** (`array_ptr`) and **hash pointer** (`hash_ptr`): the node
+  holds a pointer to an array slot or a hash entry. Both fail fast: there is no safe
+  reference that survives growth or rehash.
+
+## AoS / SoA (node attribute data layout)
+
+The `AttrLayoutV1` layout of a multi-field side array (`AttrGroupStoreV1`):
+- **AoS** (array of structs): one interleaved array.
+- **SoA** (struct of arrays): one array per field. This is the default.
+
+Applies to `column` and `array_index` only. Selected by `layout=aos|soa` in `SIMPLE_NODE_ATTR`.
+**Aspect containers** (`src/lib/nogc_sync_mut/trace/xray_container_v1.spl`):
+- **Profile container**: collects raw edges and folds them into per-function
+  calls and inclusive/exclusive ns.
+- **Logging container**: writes paired `enter|exit <name>` lines. An exit
+  that does not close the innermost logged entry is counted in
+  `unpaired_exits` and is not logged.
+- **Static mode**: the instrumentation is compiled in and calls
+  `hook_enter`/`hook_exit`; no sled is patched.
+- **Dynamic mode** (XRay-based): `apply()` enables the spy (the leaf patches
+  the sleds or flag guards) when a container goes active, and unpatches on Off.
+  `pump()` delivers the drained events.
+- **Container switch**: `XrayContainerSwitchV1.switch_to` / `apply` enables a
+  container, disables (Off), or swaps containers at run time. Off records
+  nothing: in static mode a hook returns at its first compare, and in dynamic
+  mode no sled is patched.
+
+## Three-Tier Hybrid Node Storage (Embedded + Arena CSR + Host Hash Index)
+
+The hybrid storage architecture used across Simple's browser DOM and layout trees (`BeDomNode`, `HNode`, and `DomArena`) to avoid allocating a per-node hash map while keeping attribute access and GPU offload $O(1)$ or bounded-linear:
+
+- **Tier 1 (Embedded Inline Hot Slots & Presence/Bloom Bitmasks)** — Fixed `u32` bitmasks (`attr_mask`, `css_declared_mask`) and promoted inline fields (`id_attr`, `class_attr`, `style_attr`, `src_attr`, `role_attr`, `type_attr`) stored directly on nodes or SoA columns. Provides zero-indirection $O(1)$ reads for common attributes/styles and single-instruction bitwise `&` rejection; `#text` and `#document` nodes carry zero attribute containers (`attr_mask == 0`).
+- **Tier 2 (Array-Indexed LCRS Tree & CSR Attribute Arena)** — 0-based `u32` array indices (`parents`, `first_children`, `next_siblings`, sentinel `DOM_NO_ID = 0xffffffffu32`) paired with Compressed Sparse Row `(attr_starts: [u32], attr_counts: [u32])` spans indexing into `DomAttributeArena` (`name_ids: [u32]`, `value_ids: [u32]`, `ns_ids: [u32]` interned via `DomStringTable`), or bounded parallel inline arrays (`attr_keys: [text]`, `attr_vals: [text]` up to `DOM_INLINE_ATTR_CAP = 8` cold attributes on CPU `BeDomNode`). This flat Pod/SoA layout is the canonical CUDA/Vulkan GPU-offload node representation alongside `DrawIrV3Command` (52-byte stride), `CudaLayoutExecutionPort` (`WEB_CUDA_LAYOUT_INPUT_WORDS = 13`, 52-byte `u32` PTX records over `.param .u64 input, .param .u64 tracks, .param .u64 output, .param .u32 count`), and `GpuWebBackendStrideProfile` (64-byte node stride / 256-byte Vulkan alignment).
+- **Tier 3 (Host-Only HashMap (`Dict`) Sidecar Index)** — Used strictly on CPU host for document-wide $O(1)$ `id -> node_idx` lookup (`DomIdentityIndex`, `DomHostIdSidecar`), temporary string interning during `DomBuilder` construction (dropped at `dom_builder_finish` / `.finish()`), and rare cold-overflow attributes (`> 8` uncommon attributes on CPU `BeDomNode`). `HashMap`/`Dict` is excluded from GPU-offloaded structs (`DomArena`, `DomAttributeArena`, `DrawIrV3Command`, `CudaLayoutExecutionPort`) because hash maps depend on host heap pointers, dynamic bucket rehashing, and pointer-chasing bucket chains that break flat Pod DMA layout and cause warp divergence across CUDA/Vulkan threads.
+
+## Tree Node Attribute Selection (Bitmask-Filtered CSS / QueryIR Attribute Matching)
+
+Structural predicate selection over DOM and layout tree nodes by attribute presence and CSS Selectors Level 4 / `QueryIR` (`QueryDialect.Dom`, `QueryDialect.CssSelector`) attribute match operators (`[attr]`, `=`, `~=`, `|=`, `^=`, `$=`, `*=`, plus case-sensitivity modifiers `i` and `s`). Evaluated in three stages to avoid per-node hash lookups and repeated raw HTML attribute re-tokenization:
+
+1. **Stage 1 (Presence & Bloom Bitmask Filter)** — A `u32` bitmask combining hot-attribute presence bits (lower 16 bits, e.g., `id`, `class`, `style`, `hidden`, `disabled`, `checked`, `selected`, `open`, `role`, `type`, `name`, `href`, `src`, `aria-*`, `data-*`, plus an overflow bit) and a 16-bit attribute-name Bloom filter (upper 16 bits) rejects non-matching nodes in a single bitwise `&` (`(node.attr_mask & bloom_or_presence) == 0`). On GPU (`DomAttrBitmaskColumn`), a flat `[u32]` column pre-filters `DomArena` nodes before span iteration.
+2. **Stage 2 (Embedded Hot-Slot Fast Path)** — Common attributes (`id`, `class`, `style`, `src`, `role`, `type`) resolve directly from Tier 1 inline fields in $O(1)$ without scanning attribute arrays or raw HTML text.
+3. **Stage 3 (Bounded CSR Span or Compact Array/Overflow Scan)** — Only nodes passing Stage 1 and not satisfied by Stage 2 fall through to scan a bounded CSR slice (`(attr_start, attr_count)` in `DomAttributeArena` using `u32` `StringId` equality on GPU via `dom_arena_select_attr`), or Tier 2 `attr_keys`/`attr_vals` + optional Tier 3 `Dict` overflow on CPU `BeDomNode` / raw attribute slices on `HNode`.

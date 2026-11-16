@@ -15,6 +15,7 @@
 #include <ws2tcpip.h>
 #endif
 #include "runtime_alloc_observer.h"
+#include "xray/xray_startup_owned_threads_v1.h"
 #if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
 const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #endif
@@ -2174,25 +2175,134 @@ static RtCoreClosurePin* spl_closure_pin_find_locked(const void* closure) {
  * slots, so they are counted against the load factor and reclaimed on grow. */
 #define RT_CORE_IMMORTAL_TOMBSTONE ((uintptr_t)1)
 
-static uintptr_t* rt_core_immortal_registry = NULL; /* open-addressing table, 0 = empty */
-static size_t rt_core_immortal_registry_cap = 0;    /* power of two, or 0 */
-static size_t rt_core_immortal_registry_len = 0;
-static size_t rt_core_immortal_registry_tombs = 0;
-static atomic_flag rt_core_immortal_registry_lock = ATOMIC_FLAG_INIT;
 
-static void rt_core_immortal_registry_acquire(void) {
-    while (atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock, memory_order_acquire)) {}
-}
-static void rt_core_immortal_registry_release(void) {
-    atomic_flag_clear_explicit(&rt_core_immortal_registry_lock, memory_order_release);
-}
+/* Sharded, lock-free-read registry. Every validated heap access
+ * (rt_array_get/push, rt_enum_check_variant, text decode, ...) asks this
+ * registry and every allocation registers here, so the former single
+ * process-wide spinlock serialized every isolated-thread worker on one cache
+ * line: the internal ELF linker ran 3x slower at 16 jobs than at 1 and burned
+ * ~46 cores spinning at 116 jobs. Bug:
+ * doc/08_tracking/bug/immortal_registry_global_spinlock_serializes_threads_2026-11-16.md
+ *
+ * - An address lives in exactly one of 64 shards, chosen by the top hash bits
+ *   (twin of the 64 HeapRegistryShard in src/compiler_rust/runtime/src/value/heap.rs).
+ *   Each shard has its own writer lock, table and fork-child overlay, on its
+ *   own cache lines.
+ * - Membership READS take no lock. A shard's live table is one block
+ *   {cap, slots[cap]} published as `slots` through one atomic pointer, so a
+ *   reader always sees a cap matching its slots; slot loads/stores are atomic.
+ *   A reader probing a superseded table still answers correctly: a pointer it
+ *   holds was registered before it reached the reader, hence before the
+ *   reader's load of the published table, and every later table is a rehash
+ *   that keeps it.
+ * - A resize retires the old block instead of freeing it. Retired blocks are
+ *   freed by a later writer of that shard only when no reader is inside a
+ *   probe (striped per-thread reader counters; publish-store then
+ *   counter-load vs counter-increment then publish-load, all seq_cst, so
+ *   either the reader sees the new table or the writer sees the reader). */
+#define RT_CORE_IMMORTAL_SHARD_BITS 6
+#define RT_CORE_IMMORTAL_SHARDS (1u << RT_CORE_IMMORTAL_SHARD_BITS)
 
-static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
+typedef struct RtCoreImmortalShard {
+    _Alignas(128) atomic_flag lock;
+    uintptr_t* _Atomic published; /* == registry, for lock-free readers */
+    uintptr_t* registry;          /* open-addressing table, 0 = empty; slots[-1] = cap */
+    size_t cap;                   /* power of two, or 0 */
+    size_t len;
+    size_t tombs;
+    uintptr_t** retired;          /* superseded blocks awaiting a reader-free moment */
+    size_t retired_len;
+    size_t retired_cap;
+    /* Fork-child overlay, see spl_immortal_registry_freeze_for_fork_child_v1. */
+    uintptr_t* _Atomic frozen;
+    size_t frozen_cap;
+    uintptr_t* erased;
+    size_t erased_cap;
+    size_t erased_len;
+    size_t erased_tombs;
+} RtCoreImmortalShard;
+
+static RtCoreImmortalShard rt_core_immortal_shards[RT_CORE_IMMORTAL_SHARDS];
+/* Set once any shard publishes a table or is frozen: cheap "registry empty" reject. */
+static atomic_int rt_core_immortal_nonempty = 0;
+/* Shard 0's writer lock. Kept under the old name for the try-lock gate of the
+ * dict scope-read view and for the fork selfchecks that hold it. */
+#define rt_core_immortal_registry_lock (rt_core_immortal_shards[0].lock)
+
+static inline uint64_t rt_core_immortal_hash64(uintptr_t p) {
     uint64_t x = (uint64_t)p;
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
     x ^= x >> 33;
-    return (size_t)x;
+    return x;
+}
+
+static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
+    return (size_t)rt_core_immortal_hash64(p);
+}
+
+static inline RtCoreImmortalShard* core_immortal_shard(uintptr_t p) {
+    return &rt_core_immortal_shards[rt_core_immortal_hash64(p) >> (64 - RT_CORE_IMMORTAL_SHARD_BITS)];
+}
+
+static void core_immortal_shard_acquire(RtCoreImmortalShard* s) {
+    while (atomic_flag_test_and_set_explicit(&s->lock, memory_order_acquire)) {}
+}
+static void core_immortal_shard_release(RtCoreImmortalShard* s) {
+    atomic_flag_clear_explicit(&s->lock, memory_order_release);
+}
+
+#define RT_CORE_IMMORTAL_READER_STRIPES 64
+typedef struct {
+    _Alignas(128) atomic_long active;
+} RtCoreImmortalReaderStripe;
+static RtCoreImmortalReaderStripe rt_core_immortal_readers[RT_CORE_IMMORTAL_READER_STRIPES];
+static atomic_uint rt_core_immortal_reader_next = 0;
+static _Thread_local int rt_core_immortal_reader_slot = -1;
+
+static inline RtCoreImmortalReaderStripe* core_immortal_reader_stripe(void) {
+    if (rt_core_immortal_reader_slot < 0) {
+        rt_core_immortal_reader_slot = (int)(atomic_fetch_add_explicit(
+            &rt_core_immortal_reader_next, 1, memory_order_relaxed) % RT_CORE_IMMORTAL_READER_STRIPES);
+    }
+    return &rt_core_immortal_readers[rt_core_immortal_reader_slot];
+}
+
+/* caller holds s->lock */
+static void core_immortal_reclaim_retired_locked(RtCoreImmortalShard* s) {
+    if (s->retired_len == 0) return;
+    for (size_t i = 0; i < RT_CORE_IMMORTAL_READER_STRIPES; i++) {
+        if (atomic_load_explicit(&rt_core_immortal_readers[i].active, memory_order_seq_cst) != 0) return;
+    }
+    for (size_t i = 0; i < s->retired_len; i++) free(s->retired[i]);
+    s->retired_len = 0;
+}
+
+/* caller holds s->lock; `slots` is no longer published */
+static void core_immortal_retire_locked(RtCoreImmortalShard* s, uintptr_t* slots) {
+    if (!slots) return;
+    if (s->retired_len == s->retired_cap) {
+        size_t cap = s->retired_cap ? s->retired_cap * 2 : 8;
+        uintptr_t** grown = (uintptr_t**)realloc(s->retired, cap * sizeof(uintptr_t*));
+        if (!grown) return; /* a reader may still probe it: leak, never free */
+        s->retired = grown;
+        s->retired_cap = cap;
+    }
+    s->retired[s->retired_len++] = slots - 1;
+    core_immortal_reclaim_retired_locked(s);
+}
+
+/* Upper bound of any shard's live capacity (lock-free; dict scope-read fuel). */
+static size_t core_immortal_max_cap(void) {
+    size_t cap = 0;
+    RtCoreImmortalReaderStripe* stripe = core_immortal_reader_stripe();
+    atomic_fetch_add_explicit(&stripe->active, 1, memory_order_seq_cst);
+    for (size_t i = 0; i < RT_CORE_IMMORTAL_SHARDS; i++) {
+        uintptr_t* slots = atomic_load_explicit(&rt_core_immortal_shards[i].published, memory_order_seq_cst);
+        if (slots && (size_t)slots[-1] > cap) cap = (size_t)slots[-1];
+    }
+    atomic_fetch_sub_explicit(&stripe->active, 1, memory_order_release);
+    return cap;
 }
 
 #define RT_CORE_TRANSIENT_RAW_TOMBSTONE ((uintptr_t)1)
@@ -2372,23 +2482,23 @@ static void rt_core_reclaim_transient_raw(void) {
     rt_core_transient_raw_clear();
 }
 
-/* caller holds the lock; table has a free slot */
-static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
-    size_t mask = rt_core_immortal_registry_cap - 1;
+/* caller holds s->lock; table has a free slot */
+static int rt_core_immortal_registry_insert_raw(RtCoreImmortalShard* s, uintptr_t p) {
+    size_t mask = s->cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
     size_t first_tomb = SIZE_MAX;
     for (;;) {
-        uintptr_t e = rt_core_immortal_registry[i];
+        uintptr_t e = s->registry[i];
         if (e == 0) {
             /* Reuse the earliest tombstone seen, but only after proving p is
              * not already present further along the probe chain. */
             if (first_tomb != SIZE_MAX) {
-                rt_core_immortal_registry[first_tomb] = p;
-                rt_core_immortal_registry_tombs--;
+                __atomic_store_n(&s->registry[first_tomb], p, __ATOMIC_RELAXED);
+                s->tombs--;
             } else {
-                rt_core_immortal_registry[i] = p;
+                __atomic_store_n(&s->registry[i], p, __ATOMIC_RELAXED);
             }
-            rt_core_immortal_registry_len++;
+            s->len++;
             return 1;
         }
         if (e == RT_CORE_IMMORTAL_TOMBSTONE) {
@@ -2406,15 +2516,9 @@ static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
  * its first growth allocates a fresh 2x table per child. After
  * spl_immortal_registry_freeze_for_fork_child_v1() the inherited table is
  * read-only: the child's objects use the (now empty) live table and an erase
- * of an inherited pointer is recorded in the erased set. Bug:
+ * of an inherited pointer is recorded in the erased set. Per shard, under the
+ * shard lock. Bug:
  * doc/08_tracking/bug/mir_fork_child_heap_registry_cow_resize_2026-10-25.md */
-static uintptr_t* rt_core_immortal_frozen = NULL;
-static size_t rt_core_immortal_frozen_cap = 0;
-static uintptr_t* rt_core_immortal_erased = NULL;
-static size_t rt_core_immortal_erased_cap = 0;
-static size_t rt_core_immortal_erased_len = 0;
-static size_t rt_core_immortal_erased_tombs = 0;
-
 static int core_ptr_table_has(const uintptr_t* table, size_t cap, uintptr_t p) {
     if (cap == 0) return 0;
     size_t mask = cap - 1;
@@ -2427,56 +2531,54 @@ static int core_ptr_table_has(const uintptr_t* table, size_t cap, uintptr_t p) {
     }
 }
 
-/* caller holds the lock: p is an inherited pointer that is currently live */
-static int core_immortal_frozen_live(uintptr_t p) {
-    return core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap, p) &&
-        (rt_core_immortal_erased_len == 0 ||
-         !core_ptr_table_has(rt_core_immortal_erased, rt_core_immortal_erased_cap, p));
+/* caller holds s->lock: p is an inherited pointer that is currently live */
+static int core_immortal_frozen_live(RtCoreImmortalShard* s, uintptr_t p) {
+    return core_ptr_table_has(s->frozen, s->frozen_cap, p) &&
+        (s->erased_len == 0 || !core_ptr_table_has(s->erased, s->erased_cap, p));
 }
 
-/* caller holds the lock; p is not in the erased set */
-static int core_immortal_erased_add(uintptr_t p) {
-    if ((rt_core_immortal_erased_len + rt_core_immortal_erased_tombs + 1) * 10
-            >= rt_core_immortal_erased_cap * 7) {
-        size_t new_cap = rt_core_immortal_erased_cap == 0 ? 64 : rt_core_immortal_erased_cap * 2;
+/* caller holds s->lock; p is not in the erased set */
+static int core_immortal_erased_add(RtCoreImmortalShard* s, uintptr_t p) {
+    if ((s->erased_len + s->erased_tombs + 1) * 10 >= s->erased_cap * 7) {
+        size_t new_cap = s->erased_cap == 0 ? 64 : s->erased_cap * 2;
         if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
         uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
         if (!fresh) return 0;
-        for (size_t k = 0; k < rt_core_immortal_erased_cap; k++) {
-            uintptr_t e = rt_core_immortal_erased[k];
+        for (size_t k = 0; k < s->erased_cap; k++) {
+            uintptr_t e = s->erased[k];
             if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
             size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
             while (fresh[j] != 0) j = (j + 1) & (new_cap - 1);
             fresh[j] = e;
         }
-        free(rt_core_immortal_erased);
-        rt_core_immortal_erased = fresh;
-        rt_core_immortal_erased_cap = new_cap;
-        rt_core_immortal_erased_tombs = 0;
+        free(s->erased);
+        s->erased = fresh;
+        s->erased_cap = new_cap;
+        s->erased_tombs = 0;
     }
-    size_t mask = rt_core_immortal_erased_cap - 1;
+    size_t mask = s->erased_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
-    while (rt_core_immortal_erased[i] != 0 && rt_core_immortal_erased[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
+    while (s->erased[i] != 0 && s->erased[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
         i = (i + 1) & mask;
     }
-    if (rt_core_immortal_erased[i] == RT_CORE_IMMORTAL_TOMBSTONE) rt_core_immortal_erased_tombs--;
-    rt_core_immortal_erased[i] = p;
-    rt_core_immortal_erased_len++;
+    if (s->erased[i] == RT_CORE_IMMORTAL_TOMBSTONE) s->erased_tombs--;
+    s->erased[i] = p;
+    s->erased_len++;
     return 1;
 }
 
-/* caller holds the lock; returns 1 if p was in the erased set */
-static int core_immortal_erased_drop(uintptr_t p) {
-    if (rt_core_immortal_erased_cap == 0) return 0;
-    size_t mask = rt_core_immortal_erased_cap - 1;
+/* caller holds s->lock; returns 1 if p was in the erased set */
+static int core_immortal_erased_drop(RtCoreImmortalShard* s, uintptr_t p) {
+    if (s->erased_cap == 0) return 0;
+    size_t mask = s->erased_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
     for (;;) {
-        uintptr_t e = rt_core_immortal_erased[i];
+        uintptr_t e = s->erased[i];
         if (e == 0) return 0;
         if (e == p) {
-            rt_core_immortal_erased[i] = RT_CORE_IMMORTAL_TOMBSTONE;
-            rt_core_immortal_erased_len--;
-            rt_core_immortal_erased_tombs++;
+            s->erased[i] = RT_CORE_IMMORTAL_TOMBSTONE;
+            s->erased_len--;
+            s->erased_tombs++;
             return 1;
         }
         i = (i + 1) & mask;
@@ -2486,132 +2588,155 @@ static int core_immortal_erased_drop(uintptr_t p) {
 /* Called in the child right after fork() (single-threaded there). A nested
  * fork keeps the first frozen layer and inherits the small live table. */
 void spl_immortal_registry_freeze_for_fork_child_v1(void) {
-    rt_core_immortal_registry_acquire();
-    if (!rt_core_immortal_frozen) {
-        rt_core_immortal_frozen = rt_core_immortal_registry;
-        rt_core_immortal_frozen_cap = rt_core_immortal_registry_cap;
-        rt_core_immortal_registry = NULL;
-        rt_core_immortal_registry_cap = 0;
-        rt_core_immortal_registry_len = 0;
-        rt_core_immortal_registry_tombs = 0;
+    /* Only this thread survives fork(): a parent thread caught inside a probe
+     * would otherwise pin its reader stripe and block reclaim forever. */
+    for (size_t i = 0; i < RT_CORE_IMMORTAL_READER_STRIPES; i++) {
+        atomic_store_explicit(&rt_core_immortal_readers[i].active, 0, memory_order_relaxed);
     }
-    rt_core_immortal_registry_release();
+    for (size_t k = 0; k < RT_CORE_IMMORTAL_SHARDS; k++) {
+        RtCoreImmortalShard* s = &rt_core_immortal_shards[k];
+        core_immortal_shard_acquire(s);
+        if (!atomic_load_explicit(&s->frozen, memory_order_relaxed)) {
+            s->frozen_cap = s->cap;
+            atomic_store_explicit(&s->frozen, s->registry, memory_order_release);
+            atomic_store_explicit(&s->published, NULL, memory_order_seq_cst);
+            if (s->registry) atomic_store_explicit(&rt_core_immortal_nonempty, 1, memory_order_release);
+            s->registry = NULL;
+            s->cap = 0;
+            s->len = 0;
+            s->tombs = 0;
+        }
+        core_immortal_shard_release(s);
+    }
 }
 
-static int core_immortal_live_erase_raw(uintptr_t p);
-
-/* caller holds the lock; returns 1 if an entry was erased */
-static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
-    if (core_immortal_live_erase_raw(p)) return 1;
-    if (!rt_core_immortal_frozen || !core_immortal_frozen_live(p)) return 0;
-    /* Out of memory for the erased set: refuse the erase (the object stays
-     * allocated) rather than report a pointer both live and freed. */
-    return core_immortal_erased_add(p);
-}
-
-static int core_immortal_live_erase_raw(uintptr_t p) {
-    if (rt_core_immortal_registry_cap == 0) return 0;
-    size_t mask = rt_core_immortal_registry_cap - 1;
+/* caller holds s->lock */
+static int core_immortal_live_erase_raw(RtCoreImmortalShard* s, uintptr_t p) {
+    if (s->cap == 0) return 0;
+    size_t mask = s->cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
     for (;;) {
-        uintptr_t e = rt_core_immortal_registry[i];
+        uintptr_t e = s->registry[i];
         if (e == 0) return 0;
         if (e == p) {
-            rt_core_immortal_registry[i] = RT_CORE_IMMORTAL_TOMBSTONE;
-            rt_core_immortal_registry_len--;
-            rt_core_immortal_registry_tombs++;
+            __atomic_store_n(&s->registry[i], RT_CORE_IMMORTAL_TOMBSTONE, __ATOMIC_RELAXED);
+            s->len--;
+            s->tombs++;
             return 1;
         }
         i = (i + 1) & mask;
     }
 }
 
-/* caller holds the lock */
-static int rt_core_immortal_registry_resize(size_t new_cap) {
-    if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
-    uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
-    if (!fresh) return 0;
-    uintptr_t* old = rt_core_immortal_registry;
-    size_t old_cap = rt_core_immortal_registry_cap;
-    rt_core_immortal_registry = fresh;
-    rt_core_immortal_registry_cap = new_cap;
-    rt_core_immortal_registry_len = 0;
-    rt_core_immortal_registry_tombs = 0; /* rehash drops tombstones */
+/* Erase p from its shard; returns 1 if an entry was erased. */
+static int rt_core_immortal_registry_erase(uintptr_t p) {
+    RtCoreImmortalShard* s = core_immortal_shard(p);
+    core_immortal_shard_acquire(s);
+    int erased = core_immortal_live_erase_raw(s, p);
+    /* Out of memory for the erased set: refuse the erase (the object stays
+     * allocated) rather than report a pointer both live and freed. */
+    if (!erased && atomic_load_explicit(&s->frozen, memory_order_relaxed) && core_immortal_frozen_live(s, p)) {
+        erased = core_immortal_erased_add(s, p);
+    }
+    core_immortal_shard_release(s);
+    return erased;
+}
+
+/* caller holds s->lock */
+static int rt_core_immortal_registry_resize(RtCoreImmortalShard* s, size_t new_cap) {
+    if (new_cap > SIZE_MAX / sizeof(uintptr_t) - 1) return 0;
+    /* block = {cap, slots[cap]}: lock-free readers get cap from slots[-1] */
+    uintptr_t* block = (uintptr_t*)rt_observed_calloc_v1(new_cap + 1, sizeof(uintptr_t));
+    if (!block) return 0;
+    block[0] = (uintptr_t)new_cap;
+    uintptr_t* fresh = block + 1;
+    uintptr_t* old = s->registry;
+    size_t old_cap = s->cap;
+    s->registry = fresh;
+    s->cap = new_cap;
+    s->len = 0;
+    s->tombs = 0; /* rehash drops tombstones */
     for (size_t i = 0; i < old_cap; i++) {
         if (old[i] != 0 && old[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
-            rt_core_immortal_registry_insert_raw(old[i]);
+            rt_core_immortal_registry_insert_raw(s, old[i]);
         }
     }
-    free(old);
+    atomic_store_explicit(&s->published, fresh, memory_order_seq_cst);
+    atomic_store_explicit(&rt_core_immortal_nonempty, 1, memory_order_release);
+    core_immortal_retire_locked(s, old);
     return 1;
 }
 
 static int rt_core_register_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
-    rt_core_immortal_registry_acquire();
-    if (rt_core_immortal_frozen &&
-            core_ptr_table_has(rt_core_immortal_frozen, rt_core_immortal_frozen_cap,
-                (uintptr_t)ptr)) {
+    RtCoreImmortalShard* s = core_immortal_shard((uintptr_t)ptr);
+    core_immortal_shard_acquire(s);
+    uintptr_t* frozen = atomic_load_explicit(&s->frozen, memory_order_relaxed);
+    if (frozen && core_ptr_table_has(frozen, s->frozen_cap, (uintptr_t)ptr)) {
         /* Inherited address: present, or re-registered after its erase. */
-        if (core_immortal_erased_drop((uintptr_t)ptr)) {
+        if (core_immortal_erased_drop(s, (uintptr_t)ptr)) {
             atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
             atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
         }
-        rt_core_immortal_registry_release();
+        core_immortal_shard_release(s);
         return 1;
     }
     /* grow at 70% load; tombstones count as occupancy since they lengthen
      * probe chains exactly as live entries do */
-    if ((rt_core_immortal_registry_len + rt_core_immortal_registry_tombs + 1) * 10
-            >= rt_core_immortal_registry_cap * 7) {
-        size_t new_cap = rt_core_immortal_registry_cap == 0 ? 256 : rt_core_immortal_registry_cap * 2;
+    if ((s->len + s->tombs + 1) * 10 >= s->cap * 7) {
+        size_t new_cap = s->cap == 0 ? 256 : s->cap * 2;
         /* A transient teardown can leave millions of tombstones while very
          * few live objects remain. Rehash those at the same capacity instead
          * of doubling the table once per source file. */
-        if (rt_core_immortal_registry_cap != 0 &&
-            rt_core_immortal_registry_tombs > rt_core_immortal_registry_len &&
-            (rt_core_immortal_registry_len + 1) * 10 < rt_core_immortal_registry_cap * 5) {
-            new_cap = rt_core_immortal_registry_cap;
+        if (s->cap != 0 && s->tombs > s->len && (s->len + 1) * 10 < s->cap * 5) {
+            new_cap = s->cap;
         }
-        if (!rt_core_immortal_registry_resize(new_cap)) {
-            rt_core_immortal_registry_release();
+        if (!rt_core_immortal_registry_resize(s, new_cap)) {
+            core_immortal_shard_release(s);
             return 0;
         }
     }
-    int inserted = rt_core_immortal_registry_insert_raw((uintptr_t)ptr);
+    int inserted = rt_core_immortal_registry_insert_raw(s, (uintptr_t)ptr);
     if (inserted) {
         atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
         atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
     }
-    rt_core_immortal_registry_release();
+    core_immortal_shard_release(s);
     return 1;
 }
 
 static int rt_core_is_registered_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
+    uintptr_t p = (uintptr_t)ptr;
+    RtCoreImmortalShard* s = core_immortal_shard(p);
     int found = 0;
-    rt_core_immortal_registry_acquire();
-    if (rt_core_immortal_registry_cap != 0) {
-        size_t mask = rt_core_immortal_registry_cap - 1;
-        size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
+    RtCoreImmortalReaderStripe* stripe = core_immortal_reader_stripe();
+    atomic_fetch_add_explicit(&stripe->active, 1, memory_order_seq_cst);
+    uintptr_t* slots = atomic_load_explicit(&s->published, memory_order_seq_cst);
+    if (slots) {
+        size_t mask = (size_t)slots[-1] - 1;
+        size_t i = rt_core_immortal_hash_ptr(p) & mask;
         for (;;) {
-            uintptr_t e = rt_core_immortal_registry[i];
+            uintptr_t e = __atomic_load_n(&slots[i], __ATOMIC_RELAXED);
             if (e == 0) break;
-            if (e == (uintptr_t)ptr) { found = 1; break; }
+            if (e == p) { found = 1; break; }
             i = (i + 1) & mask;
         }
     }
-    if (!found && rt_core_immortal_frozen) found = core_immortal_frozen_live((uintptr_t)ptr);
-    rt_core_immortal_registry_release();
+    atomic_fetch_sub_explicit(&stripe->active, 1, memory_order_release);
+    /* Fork-child overlay only: frozen + erased sets mutate under the lock. */
+    if (!found && atomic_load_explicit(&s->frozen, memory_order_acquire)) {
+        core_immortal_shard_acquire(s);
+        found = core_immortal_frozen_live(s, p);
+        core_immortal_shard_release(s);
+    }
     return found;
 }
 
 static int rt_core_unregister_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
     rt_core_heap_lifecycle_acquire();
-    rt_core_immortal_registry_acquire();
-    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
-    rt_core_immortal_registry_release();
+    int erased = rt_core_immortal_registry_erase((uintptr_t)ptr);
     if (erased) {
         atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
         core_transient_share_forget((uintptr_t)ptr);
@@ -2667,9 +2792,7 @@ static void core_reclaim_tracked_object_locked(void* ptr, uint32_t scope_id, int
             return;
         }
     }
-    rt_core_immortal_registry_acquire();
-    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
-    rt_core_immortal_registry_release();
+    int erased = rt_core_immortal_registry_erase((uintptr_t)ptr);
     if (!erased) return;
     atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
     switch (rt_core_registered_object_kind(ptr)) {
@@ -3211,7 +3334,7 @@ static int rt_core_transient_text_data_pointer(int64_t value, RtCoreTransientNod
     const uint64_t data_off = offsetof(RtCoreString, data);
     uint64_t w = (uint64_t)value;
     if ((w & (sizeof(uint64_t) - 1)) != 0 || w <= 0x10000 + data_off) return -1;
-    if (rt_core_immortal_registry_len == 0 && !rt_core_immortal_frozen) return -1;
+    if (!atomic_load_explicit(&rt_core_immortal_nonempty, memory_order_acquire)) return -1;
     RtCoreString* text = (RtCoreString*)(uintptr_t)(w - data_off);
     if (!rt_core_is_registered_immortal_ptr(text) ||
             rt_core_registered_object_kind(text) != RT_VALUE_HEAP_STRING) {
@@ -4523,7 +4646,7 @@ static RtCoreString* rt_core_string_from_data_pointer(int64_t value) {
     const uint64_t data_off = offsetof(RtCoreString, data);
     uint64_t w = (uint64_t)value;
     if ((w & (sizeof(uint64_t) - 1)) != 0 || w <= 0x10000 + data_off) return NULL;
-    if (rt_core_immortal_registry_len == 0 && !rt_core_immortal_frozen) return NULL;
+    if (!atomic_load_explicit(&rt_core_immortal_nonempty, memory_order_acquire)) return NULL;
     RtCoreString* s = (RtCoreString*)(uintptr_t)(w - data_off);
     if (!rt_core_is_registered_immortal_ptr(s) ||
             rt_core_registered_object_kind(s) != RT_VALUE_HEAP_STRING) {
@@ -6626,6 +6749,13 @@ int64_t rt_unwrap_or_self(int64_t value) {
 #define RT_DISC_NONE 2371748697u
 #define RT_RESULT_ENUM_ID 0u
 #define RT_OPTION_ENUM_ID 1u
+/* Result is id 0 from compiled code and id 2 from rt_result_ok/err, with
+ * positional Ok=0/Err=1 (legacy hashed tags still accepted). A user enum's
+ * declared index is 0/1 for its first variants (#6953), so Ok/Err may only be
+ * read under these ids. */
+static inline int rt_is_result_enum_id(uint32_t id) { return id == 0u || id == 2u; }
+static inline int rt_result_disc_is_ok(uint32_t d) { return d == 0u || d == RT_DISC_OK; }
+static inline int rt_result_disc_is_err(uint32_t d) { return d == 1u || d == RT_DISC_ERR; }
 
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
@@ -6637,9 +6767,9 @@ int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
         return value;
     }
 
-    if (e->enum_id == RT_RESULT_ENUM_ID) {
-        if (e->discriminant == RT_DISC_OK) return e->payload;
-        if (e->discriminant == RT_DISC_ERR) return default_val;
+    if (rt_is_result_enum_id(e->enum_id)) {
+        if (rt_result_disc_is_ok(e->discriminant)) return e->payload;
+        if (rt_result_disc_is_err(e->discriminant)) return default_val;
     }
 
     /* Arbitrary user enum: preserve the pre-existing "return self" fallback. */
@@ -6674,6 +6804,9 @@ int8_t rt_is_some(int64_t value) {
  * doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md */
 int8_t rt_is_present(int64_t value) {
     if (rt_is_none(value)) return 0;
+    /* `Err(e).?` is absent, as in the Rust twin and the interpreter. */
+    RtCoreEnum* result = rt_core_as_enum(value);
+    if (result && rt_is_result_enum_id(result->enum_id) && rt_result_disc_is_err(result->discriminant)) return 0;
     int64_t payload = rt_unwrap_or_self(value);
     if (payload == rt_core_nil()) return 0;
     RtCoreString* s = rt_core_as_string(payload);
@@ -8903,10 +9036,9 @@ void rt_memory_barrier(void) {
  * round-trip cannot be elided or constant-folded, so it is a genuine
  * barrier here. MinGW is deliberately NOT routed here -- it has the GNU
  * asm and takes the branch below, exactly like Linux/macOS/FreeBSD. */
-static volatile int64_t rt_black_box_sink;
 int64_t rt_black_box(int64_t value) {
-    rt_black_box_sink = value;
-    return rt_black_box_sink;
+    volatile int64_t sink = value;
+    return sink;
 }
 #elif defined(__GNUC__) || defined(__clang__)
 SPL_WEAK int64_t rt_black_box(int64_t value) {
@@ -8914,10 +9046,9 @@ SPL_WEAK int64_t rt_black_box(int64_t value) {
     return value;
 }
 #else
-static volatile int64_t rt_black_box_sink;
 int64_t rt_black_box(int64_t value) {
-    rt_black_box_sink = value;
-    return rt_black_box_sink;
+    volatile int64_t sink = value;
+    return sink;
 }
 #endif
 
@@ -10204,9 +10335,7 @@ static void core_rc_free_node(RtCoreRcNode n) {
         RtCoreClosurePin* pin = spl_closure_pin_find_locked(n.ptr);
         if (pin) { pin->orphaned = 1; return; } /* last rt_closure_release frees it */
     }
-    rt_core_immortal_registry_acquire();
-    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)n.ptr);
-    rt_core_immortal_registry_release();
+    int erased = rt_core_immortal_registry_erase((uintptr_t)n.ptr);
     if (!erased) return;
     atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
     core_transient_share_forget((uintptr_t)n.ptr);
@@ -11688,6 +11817,76 @@ int64_t spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
     return SPL_WFFI_OK;
 }
 
+/* Copies an all-int Simple array into raw[*count..]; 0 on a non-int array. */
+static int spl_wffi_append_int_args(int64_t value, int64_t* raw, int64_t* count) {
+    RtCoreArray* array = rt_core_as_array(value);
+    if (!array || (array->flags & RT_CORE_ARRAY_FLAG_BYTES)) return 0;
+    if (array->len > 0 && !array->data) return 0;
+    for (int64_t i = 0; i < array->len; i++) {
+        int64_t item = ((int64_t*)array->data)[i];
+        if (!rt_core_is_int(item)) return 0;
+        if (*count >= 8) { (*count)++; continue; }
+        raw[(*count)++] = rt_core_as_int(item);
+    }
+    return 1;
+}
+
+/* Byte-descriptor dispatch, twin of the Rust runtime's
+ * spl_wffi_call_i64_with_bytes_checked: the callee receives
+ * prefix..., ptr, len, suffix... (at most 8 foreign args); ptr is NULL when
+ * len == 0 and is valid only for the duration of the call. */
+int64_t spl_wffi_call_i64_with_bytes_checked(int64_t fptr, int64_t prefix_args,
+                                             int64_t bytes, int64_t offset,
+                                             int64_t length, int64_t suffix_args) {
+    if (fptr == 0) return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
+    RtCoreArray* owner = rt_core_as_array(bytes);
+    if (!owner || !(owner->flags & RT_CORE_ARRAY_FLAG_BYTES) || offset < 0 || length < 0 ||
+        offset > INT64_MAX - length || offset + length > owner->len ||
+        (length > 0 && !owner->data)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    int64_t raw[10] = {0};
+    int64_t count = 0;
+    if (!spl_wffi_append_int_args(prefix_args, raw, &count)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    int64_t prefix_count = count;
+    int64_t suffix_raw[8] = {0};
+    int64_t suffix_count = 0;
+    if (!spl_wffi_append_int_args(suffix_args, suffix_raw, &suffix_count)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    if (prefix_count + 2 + suffix_count > 8) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
+    }
+    raw[count++] = length == 0 ? 0 : (int64_t)(uintptr_t)((uint8_t*)owner->data + offset);
+    raw[count++] = length;
+    for (int64_t i = 0; i < suffix_count; i++) raw[count++] = suffix_raw[i];
+    SplArray* packed = rt_array_new(count);
+    if (!packed) return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    for (int64_t i = 0; i < count; i++) {
+        if (!rt_array_push(packed, rt_value_int(raw[i]))) {
+            rt_array_free(packed);
+            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+        }
+    }
+    int64_t value = spl_wffi_call_i64(fptr, (int64_t)(uintptr_t)packed, count);
+    rt_array_free(packed);
+    return spl_wffi_i64_checked_result(SPL_WFFI_OK, value);
+}
+
+int64_t spl_wffi_call_i64_with_bytes(int64_t fptr, int64_t prefix_args, int64_t bytes,
+                                     int64_t offset, int64_t length, int64_t suffix_args) {
+    int64_t checked = spl_wffi_call_i64_with_bytes_checked(fptr, prefix_args, bytes,
+                                                           offset, length, suffix_args);
+    RtCoreArray* pair = rt_core_as_array(checked);
+    if (!pair || pair->len != 2 || !pair->data) return 0;
+    int64_t status = rt_core_as_int(((int64_t*)pair->data)[0]);
+    int64_t value = rt_core_as_int(((int64_t*)pair->data)[1]);
+    rt_array_free((SplArray*)(uintptr_t)checked);
+    return status == SPL_WFFI_OK ? value : 0;
+}
+
 int64_t rt_array_header_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array : 0;
@@ -12232,7 +12431,10 @@ int8_t rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_dis
     int64_t discriminant = (int64_t)e->discriminant;
     if ((int64_t)e->enum_id == RT_OPTION_ENUM_ID && (discriminant == 1 || discriminant == RT_DISC_NONE)) return 1;
     if (discriminant != err_discriminant) return 0;
-    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+    /* Erased `?` (expected id 0): only a builtin Result's Err is absent; a
+     * user enum's declared index 1 must not return early (#6953). */
+    if (expected_enum_id == 0) return rt_is_result_enum_id(e->enum_id);
+    return e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
 }
 
 int64_t rt_enum_payload(int64_t value) {
@@ -12419,9 +12621,7 @@ int64_t rt_closure_release(int64_t closure_value) {
         *pin = rt_core_closure_pins[--rt_core_closure_pin_len];
     }
     if (free_now) {
-        rt_core_immortal_registry_acquire();
-        int erased = rt_core_immortal_registry_erase_raw((uintptr_t)closure);
-        rt_core_immortal_registry_release();
+        int erased = rt_core_immortal_registry_erase((uintptr_t)closure);
         if (erased) {
             atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
             free(closure);
@@ -12752,16 +12952,16 @@ int64_t rt_option_map(int64_t value, int64_t closure_value) {
     if (rt_is_none(value)) return value;
     RtCoreEnum* e = rt_core_as_enum(value);
     int result_ok = 0;
-    if (e && e->enum_id == RT_RESULT_ENUM_ID) {
-        if (e->discriminant == RT_DISC_ERR) return value;
-        result_ok = e->discriminant == RT_DISC_OK;
+    if (e && rt_is_result_enum_id(e->enum_id)) {
+        if (rt_result_disc_is_err(e->discriminant)) return value;
+        result_ok = rt_result_disc_is_ok(e->discriminant);
     }
     int64_t payload = rt_enum_payload(value);
     int64_t func_ptr = rt_closure_func_ptr(closure_value);
     if (!func_ptr) return rt_core_nil();
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     int64_t mapped = func(closure_value, payload);
-    if (result_ok) return rt_enum_new(RT_RESULT_ENUM_ID, RT_DISC_OK, mapped);
+    if (result_ok) return rt_enum_new((int32_t)e->enum_id, (int32_t)e->discriminant, mapped);
     return rt_enum_new(1, 0, mapped);
 }
 
@@ -12967,6 +13167,47 @@ static int64_t splc_utf8_array_to_bytes(int64_t value, uint8_t** out) {
     }
     *out = buf;
     return len;
+}
+
+/* C twins of the Rust spl_fonts_call_* transports (wsffi_native.rs): pass a
+ * Simple [u8] to a dlsym'd font provider as (ptr, len). Same contract: a null
+ * function or an unreadable byte array returns 0 without calling. */
+int64_t spl_fonts_call_init_blob(int64_t fptr, int64_t blob_value, int64_t digest_value) {
+    typedef int64_t (*Fn4)(int64_t, int64_t, int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* blob = NULL;
+    uint8_t* digest = NULL;
+    int64_t blob_len = splc_utf8_array_to_bytes(blob_value, &blob);
+    if (blob_len < 0) return 0;
+    int64_t digest_len = splc_utf8_array_to_bytes(digest_value, &digest);
+    if (digest_len < 0) { free(blob); return 0; }
+    int64_t rc = ((Fn4)(uintptr_t)fptr)((int64_t)(uintptr_t)blob, blob_len,
+                                         (int64_t)(uintptr_t)digest, digest_len);
+    free(blob);
+    free(digest);
+    return rc;
+}
+
+int64_t spl_fonts_call_init_path(int64_t fptr, int64_t path_value) {
+    typedef int64_t (*Fn2)(int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* path = NULL;
+    int64_t path_len = splc_utf8_array_to_bytes(path_value, &path);
+    if (path_len < 0) return 0;
+    int64_t rc = ((Fn2)(uintptr_t)fptr)((int64_t)(uintptr_t)path, path_len);
+    free(path);
+    return rc;
+}
+
+int64_t spl_fonts_call_layout_text(int64_t fptr, int64_t text_value, int64_t size_px, int64_t max_width) {
+    typedef int64_t (*Fn4)(int64_t, int64_t, int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* bytes = NULL;
+    int64_t len = splc_utf8_array_to_bytes(text_value, &bytes);
+    if (len < 0) return 0;
+    int64_t rc = ((Fn4)(uintptr_t)fptr)((int64_t)(uintptr_t)bytes, len, size_px, max_width);
+    free(bytes);
+    return rc;
 }
 
 /* Twin of what `std::str::from_utf8` runs (core's run_utf8_validation), which
@@ -13432,16 +13673,85 @@ static int64_t rt_core_dict_canon_key(int64_t k) {
     return rt_value_int(rt_core_numeric_arg(k));
 }
 
-static uint64_t rt_core_dict_hash(int64_t k) {
-    RtCoreString* s = rt_core_as_string(k);
-    if (s) {
-        uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
-        for (uint64_t i = 0; i < s->len; i++) {
-            h ^= (uint8_t)s->data[i];
-            h *= 1099511628211ULL;
-        }
-        return h;
+static uint64_t rt_core_dict_mix(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return x;
+}
+
+static uint64_t rt_core_dict_text_hash(RtCoreString* s) {
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+    for (uint64_t i = 0; i < s->len; i++) {
+        h ^= (uint8_t)s->data[i];
+        h *= 1099511628211ULL;
     }
+    return h;
+}
+
+/* Structural hash of a registered array/tuple, agreeing with rt_core_array_eq
+ * (and the rt_core_value_eq_inner it recurses into) for every pair those call
+ * equal: same length, element-wise equal. The TUPLE flag is not compared there,
+ * so it is not hashed either: [1, 2] and (1, 2) are one dict key. Integers hash
+ * by numeric value whatever their storage (tagged immediate, wide/u64 box, or
+ * a raw u64/byte-packed element) because rt_core_generic_int_eq and
+ * spl_core_heap_int_eq compare values; floats by their folded bits (IEEE `==`
+ * makes -0.0 == +0.0; NaN never compares equal, so its bucket is irrelevant);
+ * text by content; enums by id and discriminant (payload equality only
+ * narrows equal pairs further). Anything else compares by identity, so its
+ * word is hashed. Beyond the depth cap only the length is hashed, which equal
+ * arrays share, so the cap can only add collisions. */
+#define RT_CORE_DICT_HASH_MAX_DEPTH 8
+
+static uint64_t rt_core_dict_array_hash(RtCoreArray* a, int depth);
+
+static uint64_t rt_core_dict_int_hash(uint64_t value) {
+    return rt_core_dict_mix(value ^ UINT64_C(0x55494e545f553634));
+}
+
+static uint64_t rt_core_dict_element_hash(int64_t v, int depth) {
+    if (rt_core_is_float(v)) return rt_core_dict_mix(rt_core_dict_float_bits(v));
+    uint32_t int_kind = spl_core_heap_int_kind(v);
+    uint64_t bits = 0;
+    int is_u64 = 0;
+    if (int_kind && spl_core_int_operand(v, int_kind, &bits, &is_u64)) return rt_core_dict_int_hash(bits);
+    if (rt_core_is_special(v)) return rt_core_dict_mix((uint64_t)v);
+    RtCoreString* s = rt_core_as_string(v);
+    if (s) return rt_core_dict_text_hash(s);
+    RtCoreArray* a = rt_core_as_registered_array(v);
+    if (a) return rt_core_dict_array_hash(a, depth + 1);
+    RtCoreEnum* e = rt_core_as_registered_enum(v);
+    if (e) return rt_core_dict_mix(((uint64_t)e->enum_id << 32) ^ e->discriminant ^ UINT64_C(0x454e554d));
+    /* A tagged immediate integer, or a word compared by identity. */
+    if (rt_core_is_int(v)) return rt_core_dict_int_hash((uint64_t)rt_core_as_int(v));
+    return rt_core_dict_mix((uint64_t)v);
+}
+
+static uint64_t rt_core_dict_array_hash(RtCoreArray* a, int depth) {
+    uint64_t h = rt_core_dict_mix((uint64_t)a->len ^ UINT64_C(0x5455504c45));
+    if (depth > RT_CORE_DICT_HASH_MAX_DEPTH) return h;
+    int bytes = (a->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int u64 = (a->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    for (int64_t i = 0; i < a->len; i++) {
+        uint64_t element = bytes ? rt_core_dict_int_hash((uint64_t)((uint8_t*)a->data)[i])
+            : u64 ? rt_core_dict_int_hash(((uint64_t*)a->data)[i])
+            : rt_core_dict_element_hash(((int64_t*)a->data)[i], depth);
+        h = (h * 1099511628211ULL) ^ element;
+    }
+    return h;
+}
+
+/* Set on a dict the first time an array/tuple key is inserted. Telling an
+ * array from an immediate integer takes a registry probe, so lookups in a dict
+ * that never held one skip it: an array probe key cannot equal any key there,
+ * so hashing it by address cannot hide a hit. Only an insert can add an array
+ * key, and every insert (resize included) goes through core_dict_put_seq, so
+ * the flag is never missing when needed; a spuriously set flag costs a probe. */
+#define RT_CORE_DICT_FLAG_ARRAY_KEYS 0x01U
+
+static uint64_t rt_core_dict_hash(RtCoreDict* d, int64_t k, int inserting) {
+    RtCoreString* s = rt_core_as_string(k);
+    if (s) return rt_core_dict_text_hash(s);
     /* Float keys hash by VALUE, so two independent boxes of the same double --
      * and the legacy inline form of that same double -- share a bucket. */
     /* Integer boxes hash by VALUE too, and a wide box hashes like the u64 box
@@ -13450,13 +13760,20 @@ static uint64_t rt_core_dict_hash(int64_t k) {
     uint32_t int_kind = spl_core_heap_int_kind(k);
     uint64_t bits = 0;
     int is_u64 = 0;
-    uint64_t x = (int_kind && spl_core_int_operand(k, int_kind, &bits, &is_u64))
-        ? (bits ^ UINT64_C(0x55494e545f553634))
-        : (rt_core_is_float(k) ? rt_core_dict_float_bits(k) : (uint64_t)k);
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    return x;
+    if (int_kind && spl_core_int_operand(k, int_kind, &bits, &is_u64)) {
+        return rt_core_dict_mix(bits ^ UINT64_C(0x55494e545f553634));
+    }
+    if (rt_core_is_float(k)) return rt_core_dict_mix(rt_core_dict_float_bits(k));
+    /* Registered arrays and runtime tuples hash by VALUE, matching the
+     * structural equality rt_core_dict_key_eq already applies to them. */
+    if (inserting || (d->flags & RT_CORE_DICT_FLAG_ARRAY_KEYS)) {
+        RtCoreArray* a = rt_core_as_registered_array(k);
+        if (a) {
+            d->flags |= RT_CORE_DICT_FLAG_ARRAY_KEYS;
+            return rt_core_dict_array_hash(a, 0);
+        }
+    }
+    return rt_core_dict_mix((uint64_t)k);
 }
 
 /* Key equality for the slot scan. rt_native_eq everywhere EXCEPT float keys,
@@ -13537,7 +13854,7 @@ static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t 
         rt_core_dict_resize(d, next_cap);
     }
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 1);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     int64_t first_tomb = -1;
@@ -13577,7 +13894,7 @@ static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t 
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
     if (!d || !d->entries || d->len == 0) return rt_core_nil();
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 0);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     for (;;) {
@@ -13591,7 +13908,7 @@ static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
 static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
     if (!d || !d->entries || d->len == 0) return 0;
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 0);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     for (;;) {
@@ -13605,7 +13922,7 @@ static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
     if (!d || !d->entries || d->len == 0) return 0;
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 0);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     for (;;) {
@@ -13716,8 +14033,8 @@ int8_t rt_dict_clear(int64_t dict) {
 #define RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 64
 int64_t rt_dict_scope_read_bound_v1(void) {
     if (atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock, memory_order_acquire)) return -1;
-    size_t cap = rt_core_immortal_registry_cap;
-    rt_core_immortal_registry_release();
+    size_t cap = core_immortal_max_cap();
+    core_immortal_shard_release(&rt_core_immortal_shards[0]);
     size_t probes = cap < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 ? cap : RT_DICT_SCOPE_READ_PROBE_LIMIT_V1;
     return (int64_t)probes * 3 + 1;
 }
@@ -13726,20 +14043,29 @@ static void* core_dict_scope_read_heap_v1(int64_t value, uint32_t kind, int64_t*
     uintptr_t raw = (uintptr_t)value;
     if (raw < 4096 || (raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
     uintptr_t ptr = raw & ~RT_VALUE_TAG_MASK;
-    if (atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock, memory_order_acquire)) return NULL;
-    size_t cap = rt_core_immortal_registry_cap;
+    /* Shard 0 stays the single scope-read gate: a held gate fails closed
+     * for every dict, then the dict's own shard is try-locked too. */
+    RtCoreImmortalShard* gate = &rt_core_immortal_shards[0];
+    RtCoreImmortalShard* shard = core_immortal_shard(ptr);
+    if (atomic_flag_test_and_set_explicit(&gate->lock, memory_order_acquire)) return NULL;
+    if (shard != gate && atomic_flag_test_and_set_explicit(&shard->lock, memory_order_acquire)) {
+        core_immortal_shard_release(gate);
+        return NULL;
+    }
+    size_t cap = shard->cap;
     int found = 0;
     if (cap) {
         size_t index = rt_core_immortal_hash_ptr(ptr) & (cap - 1);
         for (size_t probes = 0; probes < cap && probes < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 && *fuel > 0; probes++) {
             --*fuel;
-            uintptr_t entry = rt_core_immortal_registry[index];
+            uintptr_t entry = shard->registry[index];
             if (!entry) break;
             if (entry == ptr) { found = 1; break; }
             index = (index + 1) & (cap - 1);
         }
     }
-    rt_core_immortal_registry_release();
+    if (shard != gate) core_immortal_shard_release(shard);
+    core_immortal_shard_release(gate);
     if (!found) return NULL;
     /* Dict kind is byte-sized; numeric and text kinds are 32-bit. */
     if (kind == RT_VALUE_HEAP_DICT)
@@ -13798,8 +14124,9 @@ int64_t rt_dict_scope_read_slot_v1(int64_t dict, int64_t owner,
     if (entry->occupied != 1) return -1;
     /* The checked owner may spend up to one registry-cap of the original
      * allowance. Reserve that worst case before key/value validation. */
-    size_t owner_probes = rt_core_immortal_registry_cap < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1
-        ? rt_core_immortal_registry_cap : RT_DICT_SCOPE_READ_PROBE_LIMIT_V1;
+    size_t registry_cap = core_immortal_max_cap();
+    size_t owner_probes = registry_cap < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1
+        ? registry_cap : RT_DICT_SCOPE_READ_PROBE_LIMIT_V1;
     if ((uint64_t)fuel <= owner_probes) return -1;
     fuel -= (int64_t)owner_probes;
     RtCoreString* key = core_dict_scope_read_heap_v1(entry->key, RT_VALUE_HEAP_STRING, &fuel);
@@ -15990,7 +16317,7 @@ static int rt_http_resolve(const char* host, const char* port, const struct addr
         return EAI_SYSTEM;
     }
     pthread_t thread;
-    int create_result = pthread_create(&thread, &thread_attr, rt_http_resolve_worker, job);
+    int create_result = SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&thread, &thread_attr, rt_http_resolve_worker, job);
     pthread_attr_destroy(&thread_attr);
     if (create_result != 0) {
         close(notify[0]); close(notify[1]); free(job->host); free(job->port); free(job);
@@ -18353,11 +18680,32 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
         command = joined;
     }
 
-    char* redirected = spl_str_concat(command, " 2>/tmp/simple_core_process_run_stderr");
+    /* stderr goes to a per-call mkstemp file that is read back after pclose.
+     * It used to go to the fixed shared path /tmp/simple_core_process_run_stderr
+     * and was never read, so every native process_run/shell returned an EMPTY
+     * stderr where the seed returns the child's text (and concurrent processes
+     * raced on the one file). If mkstemp fails, stderr is discarded rather than
+     * falling back to a shared path. */
+    char err_path[] = "/tmp/simple_process_run_stderr_XXXXXX";
+    int err_fd = mkstemp(err_path);
+    char* redirected = NULL;
+    if (err_fd >= 0) {
+        close(err_fd);
+        char* quoted_err = rt_core_shell_quote(err_path);
+        char* redirect = spl_str_concat(" 2>", quoted_err ? quoted_err : err_path);
+        if (quoted_err) free(quoted_err);
+        if (redirect) {
+            redirected = spl_str_concat(command, redirect);
+            free(redirect);
+        }
+    } else {
+        redirected = spl_str_concat(command, " 2>/dev/null");
+    }
     FILE* pipe = popen(redirected ? redirected : command, "r");
     free(command);
     if (redirected) free(redirected);
     if (!pipe) {
+        if (err_fd >= 0) unlink(err_path);
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
         rt_array_push(result, rt_string_new((const uint8_t*)"process spawn failed", 20));
         rt_array_push(result, rt_value_int(-1));
@@ -18384,9 +18732,33 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
     int status = pclose(pipe);
     int exit_code = status == -1 ? -1 : (status >> 8);
 
+    char* stderr_buf = NULL;
+    size_t stderr_len = 0;
+    if (err_fd >= 0) {
+        FILE* err_file = fopen(err_path, "rb");
+        if (err_file) {
+            size_t err_cap = 4096;
+            stderr_buf = (char*)rt_observed_malloc_v1(err_cap);
+            while (stderr_buf) {
+                size_t got = fread(stderr_buf + stderr_len, 1, err_cap - stderr_len, err_file);
+                if (got == 0) break;
+                stderr_len += got;
+                if (stderr_len == err_cap) {
+                    char* grown = (char*)rt_observed_realloc_v1(stderr_buf, err_cap * 2);
+                    if (!grown) break;
+                    stderr_buf = grown;
+                    err_cap *= 2;
+                }
+            }
+            fclose(err_file);
+        }
+        unlink(err_path);
+    }
+
     const char* stdout_text = stdout_buf ? stdout_buf : "";
     rt_array_push(result, rt_string_new((const uint8_t*)stdout_text, (uint64_t)strlen(stdout_text)));
-    rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+    rt_array_push(result, rt_string_new((const uint8_t*)(stderr_buf ? stderr_buf : ""), (uint64_t)(stderr_buf ? stderr_len : 0)));
+    if (stderr_buf) free(stderr_buf);
     rt_array_push(result, rt_value_int(exit_code));
     if (stdout_buf) free(stdout_buf);
     return result;
@@ -20930,6 +21302,141 @@ int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     return tuple;
 }
 
+/* browser_net_runtime.spl: rt_dns_lookup(hostname: text) -> text. Not in
+ * text_arg_indices, so the hostname is one tagged text value and the result a
+ * tagged text: the de-duplicated numeric addresses joined by ',' in resolver
+ * order, empty on any failure (Rust twin: value/net_tcp.rs rt_dns_lookup).
+ *
+ * Like the Rust twin (value/net.rs run_bounded_net_lookup) the resolve runs on
+ * a worker thread and the caller waits at most RT_DNS_LOOKUP_TIMEOUT_MS; at
+ * most RT_DNS_MAX_IN_FLIGHT lookups are outstanding (a stuck resolver cannot
+ * accumulate unbounded threads); a lookup that misses its deadline is
+ * abandoned, not cancelled. Lockless: the job is handed off through an atomic
+ * done flag and freed by whichever side drops the last atomic reference. */
+#define RT_DNS_LOOKUP_TIMEOUT_MS 5000
+#define RT_DNS_MAX_IN_FLIGHT 8
+
+typedef struct {
+    atomic_int refs;
+    atomic_int done;
+    char host[1024];
+    char joined[4096];
+    size_t used;
+} RtDnsJob;
+
+static atomic_int rt_dns_in_flight = 0;
+
+static void rt_dns_job_release(RtDnsJob* job) {
+    if (atomic_fetch_sub(&job->refs, 1) == 1) free(job);
+}
+
+static void rt_dns_job_resolve(RtDnsJob* job) {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* results = NULL;
+    if (getaddrinfo(job->host, NULL, &hints, &results) == 0 && results) {
+        char* joined = job->joined;
+        size_t used = 0;
+        joined[0] = '\0';
+        for (struct addrinfo* it = results; it; it = it->ai_next) {
+            char ip[INET6_ADDRSTRLEN];
+            const void* addr = NULL;
+            if (it->ai_family == AF_INET) addr = &((const struct sockaddr_in*)it->ai_addr)->sin_addr;
+            else if (it->ai_family == AF_INET6) addr = &((const struct sockaddr_in6*)it->ai_addr)->sin6_addr;
+            if (!addr || !inet_ntop(it->ai_family, addr, ip, sizeof(ip))) continue;
+            size_t ip_len = strlen(ip);
+            int seen = 0;
+            for (const char* p = joined; *p && !seen;) {
+                const char* end = strchr(p, ',');
+                size_t len = end ? (size_t)(end - p) : strlen(p);
+                if (len == ip_len && memcmp(p, ip, ip_len) == 0) seen = 1;
+                p = end ? end + 1 : p + len;
+            }
+            if (seen || used + ip_len + 2 > sizeof(job->joined)) continue;
+            if (used) joined[used++] = ',';
+            memcpy(joined + used, ip, ip_len + 1);
+            used += ip_len;
+        }
+        job->used = used;
+    }
+    if (results) freeaddrinfo(results);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
+}
+
+#if defined(_WIN32)
+static DWORD WINAPI rt_dns_job_thread(LPVOID arg) {
+#else
+static void* rt_dns_job_thread(void* arg) {
+#endif
+    RtDnsJob* job = (RtDnsJob*)arg;
+    rt_dns_job_resolve(job);
+    atomic_fetch_sub(&rt_dns_in_flight, 1);
+    rt_dns_job_release(job);
+    return 0;
+}
+
+int64_t rt_dns_lookup_timeout_ms(int64_t hostname_value, int64_t timeout_ms) {
+    uint64_t host_len = 0;
+    const uint8_t* host_bytes = rt_core_string_bytes(hostname_value, &host_len);
+    if (timeout_ms <= 0 || !host_bytes || host_len == 0 || host_len >= 1024) return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    if (!InitOnceExecuteOnce(&ws_compat_init_once, ws_compat_init_cb, NULL, NULL)) return rt_string_new(NULL, 0);
+#endif
+    if (atomic_fetch_add(&rt_dns_in_flight, 1) >= RT_DNS_MAX_IN_FLIGHT) {
+        atomic_fetch_sub(&rt_dns_in_flight, 1);
+        return rt_string_new(NULL, 0);
+    }
+    RtDnsJob* job = (RtDnsJob*)calloc(1, sizeof(RtDnsJob));
+    if (!job) {
+        atomic_fetch_sub(&rt_dns_in_flight, 1);
+        return rt_string_new(NULL, 0);
+    }
+    memcpy(job->host, host_bytes, (size_t)host_len);
+    atomic_init(&job->refs, 2);
+    atomic_init(&job->done, 0);
+#if defined(_WIN32)
+    HANDLE thread = CreateThread(NULL, 0, rt_dns_job_thread, job, 0, NULL);
+    if (!thread) {
+        atomic_fetch_sub(&rt_dns_in_flight, 1);
+        free(job);
+        return rt_string_new(NULL, 0);
+    }
+    DWORD wait_ms = timeout_ms > 0x7fffffffLL ? 0x7fffffffu : (DWORD)timeout_ms;
+    WaitForSingleObject(thread, wait_ms);
+    CloseHandle(thread);
+#else
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int created = pthread_create(&thread, &attr, rt_dns_job_thread, job);
+    pthread_attr_destroy(&attr);
+    if (created != 0) {
+        atomic_fetch_sub(&rt_dns_in_flight, 1);
+        free(job);
+        return rt_string_new(NULL, 0);
+    }
+    struct timespec step = {0, 1000000};
+    for (int64_t waited = 0; waited < timeout_ms && !atomic_load_explicit(&job->done, memory_order_acquire); waited++) {
+        nanosleep(&step, NULL);
+    }
+#endif
+    int64_t out;
+    if (atomic_load_explicit(&job->done, memory_order_acquire)) {
+        out = rt_string_new((const uint8_t*)job->joined, (uint64_t)job->used);
+    } else {
+        out = rt_string_new(NULL, 0);
+    }
+    rt_dns_job_release(job);
+    return out;
+}
+
+int64_t rt_dns_lookup(int64_t hostname_value) {
+    return rt_dns_lookup_timeout_ms(hostname_value, RT_DNS_LOOKUP_TIMEOUT_MS);
+}
+
 #if defined(_WIN32)
 #undef F_GETFL
 #undef F_SETFL
@@ -22211,3 +22718,22 @@ int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
 
 /* Single hosted owner for read-back workspace storage capabilities. */
 #include "runtime_workspace_storage_v1.c"
+
+/* Kernel object identity for the Windows service-logon namespace owner.
+ * CompareObjectHandles lives only in kernelbase.dll (not in llvm-mingw's
+ * kernel32/advapi32/ntdll import libraries), so a direct Simple extern leaves
+ * it unresolved at link. Resolve it at run time; report "not identical" (0)
+ * when the entry point is unavailable so callers fail closed. */
+int32_t rt_win_compare_object_handles(int64_t first, int64_t second) {
+#if defined(_WIN32)
+    typedef BOOL (WINAPI *compare_fn)(HANDLE, HANDLE);
+    HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+    compare_fn fn = kb ? (compare_fn)(void *)GetProcAddress(kb, "CompareObjectHandles") : NULL;
+    if (!fn) return 0;
+    return fn((HANDLE)(intptr_t)first, (HANDLE)(intptr_t)second) ? 1 : 0;
+#else
+    (void)first;
+    (void)second;
+    return 0;
+#endif
+}

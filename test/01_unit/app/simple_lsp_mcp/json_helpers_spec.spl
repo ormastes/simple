@@ -7,7 +7,7 @@
 use std.spec.step
 
 use std.spec
-use app.simple_lsp_mcp.json_helpers.{extract_field, extract_id, make_tool_result, make_tool_error}
+use app.simple_lsp_mcp.json_helpers.{extract_field, extract_id, make_tool_result, make_tool_error, content_length_header}
 
 describe "Simple LSP MCP native JSON extraction":
     # @manual scenario evidence
@@ -48,3 +48,25 @@ describe "Simple LSP MCP tool result escaping":
         val out = make_tool_error("\"4\"", "Missing required argument: \"file\"")
         expect(out).to_contain("\"text\":\"Missing required argument: \\\"file\\\"\"")
         expect(out.contains("\\\\\\\"file\\\\\\\"")).to_equal(false)
+
+describe "Simple LSP MCP stdio framing":
+    """
+    Regression for the 2026-11-16 tools/list desync: Content-Length used the
+    char count of a multibyte UTF-8 body, so the framing header under-counted
+    and standard MCP clients received a truncated body (and then desynced on
+    the remaining bytes).
+    """
+    # @manual scenario evidence
+    it "frames Content-Length as the UTF-8 byte count, not the char count":
+        # @req REQ-SSPEC-UNIT
+        step("frames Content-Length as the UTF-8 byte count, not the char count")
+        val body = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"text\":\"⋯ mid — dash\"}}"
+        val h = content_length_header(body)
+        expect(h).to_equal("Content-Length: " + str(body.byte_len()) + "\r\n\r\n")
+        expect(h.contains("Content-Length: " + str(body.len()) + "\r")).to_equal(false)
+
+    it "frames an ASCII body identically under byte and char counts":
+        # @req REQ-SSPEC-UNIT
+        step("frames an ASCII body identically under byte and char counts")
+        val body = "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{}}"
+        expect(content_length_header(body)).to_equal("Content-Length: " + str(body.len()) + "\r\n\r\n")

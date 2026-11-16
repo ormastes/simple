@@ -41,6 +41,11 @@ fn _driver_mount(driver: DriverInstance, opts: MountOptions) -> Result<DriverIns
             Ok(DriverInstance.RamFs(mutable_d))
         case DriverInstance.DbFs(d):      Ok(driver)
 
+fn _drop_count(result: Result<i64, FsError>) -> Result<(), FsError>:
+    match result:
+        case Err(e): Err(e)
+        case Ok(_): Ok(())
+
 fn _bytes_to_text_prefix(buf: [u8], count: i64) -> text:
     var out = ""
     var i: i64 = 0
@@ -173,88 +178,180 @@ fn _driver_execute_observation_current_v1(
                 current.content_generation == observation.content_generation and
                 current.size == observation.size
 
-fn _driver_open_path(driver: DriverInstance, path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
-    match driver:
-        case DriverInstance.Fat32(d):     d.open_path(path, flags)
-        case DriverInstance.Nvfs(d):      d.open_path(path, flags)
-        case DriverInstance.NvfsPosix(d): d.open_path(path, flags)
-        # RamFS implements the canonical FsDriver open operation.  Its
-        # historical open_path compatibility surface is intentionally not the
-        # mounted-object authority and must not manufacture a stub handle.
-        case DriverInstance.RamFs(d):     d.open(path, flags)
-        case DriverInstance.DbFs(d):      d.open_path(path, flags)
-
-fn _driver_opendir_path(driver: DriverInstance, path: Path) -> Result<DirHandle, FsError>:
-    match driver:
-        case DriverInstance.Fat32(d):     d.opendir_path(path)
-        case DriverInstance.Nvfs(d):      d.opendir_path(path)
-        case DriverInstance.NvfsPosix(d): d.opendir_path(path)
-        case DriverInstance.RamFs(d):     d.opendir_path(path)
-        case DriverInstance.DbFs(d):      d.opendir_path(path)
-
-fn _driver_readdir_handle(driver: DriverInstance, handle: DirHandle) -> Result<[DirEntry], FsError>:
-    match driver:
-        case DriverInstance.Fat32(d):     d.readdir_handle(handle)
-        case DriverInstance.Nvfs(d):      d.readdir_handle(handle)
-        case DriverInstance.NvfsPosix(d): d.readdir_handle(handle)
-        case DriverInstance.RamFs(d):     d.readdir_handle(handle)
-        case DriverInstance.DbFs(d):      d.readdir_handle(handle)
-
-fn _driver_read_handle(driver: DriverInstance, handle: FileHandle, length: i64) -> Result<text, FsError>:
-    match driver:
-        case DriverInstance.Fat32(d):     d.read_handle(handle, length)
-        case DriverInstance.Nvfs(d):      d.read_handle(handle, length)
-        case DriverInstance.NvfsPosix(d): d.read_handle(handle, length)
-        case DriverInstance.RamFs(d):     d.read_handle(handle, length)
-        case DriverInstance.DbFs(d):      d.read_handle(handle, length)
-
-fn _driver_mkdir_path(driver: DriverInstance, path: text, mode: u32) -> Result<(), FsError>:
-    match driver:
-        case DriverInstance.Fat32(d):     d.mkdir_path(path, mode)
-        case DriverInstance.Nvfs(d):      d.mkdir_path(path, mode)
-        case DriverInstance.NvfsPosix(d): d.mkdir_path(path, mode)
-        case DriverInstance.RamFs(d):     d.mkdir_path(path, mode)
-        case DriverInstance.DbFs(d):      d.mkdir_path(path, mode)
-
-fn _driver_write_text_handle(driver: DriverInstance, handle: FileHandle, content: text) -> Result<(), FsError>:
+fn _driver_open_path(driver: DriverInstance, path: Path, flags: OpenFlags) -> (DriverInstance, Result<FileHandle, FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
         case DriverInstance.Fat32(d):
-            val bytes = text_to_bytes_pure(content)
-            match d.write(handle, 0, bytes):
-                case Err(e): Err(e)
-                case Ok(_): Ok(())
+            var m = d
+            val r = m.open_path(path, flags)
+            (DriverInstance.Fat32(m), r)
         case DriverInstance.Nvfs(d):
-            val bytes = text_to_bytes_pure(content)
-            match d.write(handle, 0, bytes):
-                case Err(e): Err(e)
-                case Ok(_): Ok(())
+            var m = d
+            val r = m.open_path(path, flags)
+            (DriverInstance.Nvfs(m), r)
         case DriverInstance.NvfsPosix(d):
-            val bytes = text_to_bytes_pure(content)
-            match d.write(handle, 0, bytes):
-                case Err(e): Err(e)
-                case Ok(_): Ok(())
-        case DriverInstance.DbFs(d): d.write_handle(handle, content)
-        case _:                      Err(FsError.Unsupported)
+            var m = d
+            val r = m.open_path(path, flags)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.open(path, flags)
+            (DriverInstance.RamFs(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.open_path(path, flags)
+            (DriverInstance.DbFs(m), r)
 
-fn _driver_pwrite_text_handle(driver: DriverInstance, handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
+fn _driver_opendir_path(driver: DriverInstance, path: Path) -> (DriverInstance, Result<DirHandle, FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
         case DriverInstance.Fat32(d):
-            val bytes = text_to_bytes_pure(patch)
-            match d.pwrite(handle, offset, bytes):
-                case Err(e): Err(e)
-                case Ok(_): Ok(())
+            var m = d
+            val r = m.opendir_path(path)
+            (DriverInstance.Fat32(m), r)
         case DriverInstance.Nvfs(d):
-            val bytes = text_to_bytes_pure(patch)
-            match d.pwrite(handle, offset, bytes):
-                case Err(e): Err(e)
-                case Ok(_): Ok(())
+            var m = d
+            val r = m.opendir_path(path)
+            (DriverInstance.Nvfs(m), r)
         case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.opendir_path(path)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.opendir_path(path)
+            (DriverInstance.RamFs(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.opendir_path(path)
+            (DriverInstance.DbFs(m), r)
+
+fn _driver_readdir_handle(driver: DriverInstance, handle: DirHandle) -> (DriverInstance, Result<[DirEntry], FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
+    match driver:
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.readdir_handle(handle)
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.readdir_handle(handle)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.readdir_handle(handle)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.readdir_handle(handle)
+            (DriverInstance.RamFs(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.readdir_handle(handle)
+            (DriverInstance.DbFs(m), r)
+
+fn _driver_read_handle(driver: DriverInstance, handle: FileHandle, length: i64) -> (DriverInstance, Result<text, FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
+    match driver:
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.read_handle(handle, length)
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.read_handle(handle, length)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.read_handle(handle, length)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.read_handle(handle, length)
+            (DriverInstance.RamFs(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.read_handle(handle, length)
+            (DriverInstance.DbFs(m), r)
+
+fn _driver_mkdir_path(driver: DriverInstance, path: text, mode: u32) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
+    match driver:
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.mkdir_path(path, mode)
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.mkdir_path(path, mode)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.mkdir_path(path, mode)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.mkdir_path(path, mode)
+            (DriverInstance.RamFs(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.mkdir_path(path, mode)
+            (DriverInstance.DbFs(m), r)
+
+fn _driver_write_text_handle(driver: DriverInstance, handle: FileHandle, content: text) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
+    match driver:
+        case DriverInstance.Fat32(d):
+            var m = d
+            val bytes = text_to_bytes_pure(content)
+            val r = _drop_count(m.write(handle, 0, bytes))
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val bytes = text_to_bytes_pure(content)
+            val r = _drop_count(m.write(handle, 0, bytes))
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val bytes = text_to_bytes_pure(content)
+            val r = _drop_count(m.write(handle, 0, bytes))
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.write_handle(handle, content)
+            (DriverInstance.DbFs(m), r)
+        case _: (driver, Err(FsError.Unsupported))
+
+fn _driver_pwrite_text_handle(driver: DriverInstance, handle: FileHandle, patch: text, offset: i64) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
+    match driver:
+        case DriverInstance.Fat32(d):
+            var m = d
             val bytes = text_to_bytes_pure(patch)
-            match d.pwrite(handle, offset, bytes):
-                case Err(e): Err(e)
-                case Ok(_): Ok(())
-        case DriverInstance.DbFs(d): d.pwrite_handle(handle, patch, offset)
-        case _:                      Err(FsError.Unsupported)
+            val r = _drop_count(m.pwrite(handle, offset, bytes))
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val bytes = text_to_bytes_pure(patch)
+            val r = _drop_count(m.pwrite(handle, offset, bytes))
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val bytes = text_to_bytes_pure(patch)
+            val r = _drop_count(m.pwrite(handle, offset, bytes))
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.pwrite_handle(handle, patch, offset)
+            (DriverInstance.DbFs(m), r)
+        case _: (driver, Err(FsError.Unsupported))
 
 fn _driver_pread_text_handle(driver: DriverInstance, handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
     match driver:
@@ -276,57 +373,150 @@ fn _driver_pread_text_handle(driver: DriverInstance, handle: FileHandle, offset:
         case DriverInstance.DbFs(d): d.pread_handle(handle, offset, length)
         case _:                      Err(FsError.Unsupported)
 
-fn _driver_close_handle(driver: DriverInstance, handle: FileHandle) -> Result<(), FsError>:
+fn _driver_close_handle(driver: DriverInstance, handle: FileHandle) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
-        case DriverInstance.Fat32(d):      d.close(handle)
-        case DriverInstance.Nvfs(d):       d.close_handle(handle)
-        case DriverInstance.NvfsPosix(d):  d.close_handle(handle)
-        case DriverInstance.DbFs(d):       d.close_handle(handle)
-        case DriverInstance.RamFs(d):      d.close(handle)
-        case _:                            Err(FsError.Unsupported)
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.close(handle)
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.close_handle(handle)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.close_handle(handle)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.close(handle)
+            (DriverInstance.RamFs(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.close_handle(handle)
+            (DriverInstance.DbFs(m), r)
+        case _: (driver, Err(FsError.Unsupported))
 
-fn _driver_fsync(driver: DriverInstance, handle: FileHandle) -> Result<(), FsError>:
+fn _driver_fsync(driver: DriverInstance, handle: FileHandle) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
-        case DriverInstance.Fat32(d):      d.fsync(handle)
-        case DriverInstance.Nvfs(d):       d.fsync(handle)
-        case DriverInstance.NvfsPosix(d):  d.fsync(handle)
-        case DriverInstance.RamFs(d):      d.fsync(handle)
-        case DriverInstance.DbFs(d):       d.fsync(handle)
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.fsync(handle)
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.fsync(handle)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.fsync(handle)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.fsync(handle)
+            (DriverInstance.RamFs(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.fsync(handle)
+            (DriverInstance.DbFs(m), r)
 
-fn _driver_fdatasync(driver: DriverInstance, handle: FileHandle) -> Result<(), FsError>:
+fn _driver_fdatasync(driver: DriverInstance, handle: FileHandle) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
-        case DriverInstance.Fat32(d):      d.fdatasync(handle)
-        case DriverInstance.Nvfs(d):       d.fdatasync(handle)
-        case DriverInstance.NvfsPosix(d):  d.fdatasync(handle)
-        case DriverInstance.RamFs(d):      d.fdatasync(handle)
-        case DriverInstance.DbFs(d):       d.fdatasync(handle)
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.fdatasync(handle)
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.fdatasync(handle)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.fdatasync(handle)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.fdatasync(handle)
+            (DriverInstance.RamFs(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.fdatasync(handle)
+            (DriverInstance.DbFs(m), r)
 
 fn _file_stat_is_directory(stat: FileStat) -> bool:
     (stat.mode & 0o170000) == 0o040000
 
-fn _driver_unlink_path_text(driver: DriverInstance, path: text) -> Result<(), FsError>:
+fn _driver_unlink_path_text(driver: DriverInstance, path: text) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
-        case DriverInstance.Fat32(d):     d.unlink(Path(raw: path))
-        case DriverInstance.Nvfs(d):      d.unlink_path(path)
-        case DriverInstance.NvfsPosix(d): d.unlink_path(path)
-        case DriverInstance.DbFs(d):      d.unlink_path(path)
-        case _:                           Err(FsError.Unsupported)
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.unlink(Path(raw: path))
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.unlink_path(path)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.unlink_path(path)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.unlink_path(path)
+            (DriverInstance.DbFs(m), r)
+        case _: (driver, Err(FsError.Unsupported))
 
-fn _driver_rename_path_text(driver: DriverInstance, old_path: text, new_path: text) -> Result<(), FsError>:
+fn _driver_rename_path_text(driver: DriverInstance, old_path: text, new_path: text) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
-        case DriverInstance.Fat32(d):     d.rename(Path(raw: old_path), Path(raw: new_path))
-        case DriverInstance.Nvfs(d):      d.rename_path(old_path, new_path)
-        case DriverInstance.NvfsPosix(d): d.rename_path(old_path, new_path)
-        case DriverInstance.DbFs(d):      d.rename_path(old_path, new_path)
-        case _:                           Err(FsError.Unsupported)
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.rename(Path(raw: old_path), Path(raw: new_path))
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.rename_path(old_path, new_path)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.rename_path(old_path, new_path)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.rename_path(old_path, new_path)
+            (DriverInstance.DbFs(m), r)
+        case _: (driver, Err(FsError.Unsupported))
 
-fn _driver_ftruncate_handle(driver: DriverInstance, handle: FileHandle, new_size: i64) -> Result<(), FsError>:
+fn _driver_ftruncate_handle(driver: DriverInstance, handle: FileHandle, new_size: i64) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
-        case DriverInstance.Fat32(d):     d.ftruncate(handle, new_size)
-        case DriverInstance.Nvfs(d):      d.ftruncate_handle(handle, new_size)
-        case DriverInstance.NvfsPosix(d): d.ftruncate_handle(handle, new_size)
-        case DriverInstance.DbFs(d):      d.ftruncate_handle(handle, new_size)
-        case _:                           Err(FsError.Unsupported)
+        case DriverInstance.Fat32(d):
+            var m = d
+            val r = m.ftruncate(handle, new_size)
+            (DriverInstance.Fat32(m), r)
+        case DriverInstance.Nvfs(d):
+            var m = d
+            val r = m.ftruncate_handle(handle, new_size)
+            (DriverInstance.Nvfs(m), r)
+        case DriverInstance.NvfsPosix(d):
+            var m = d
+            val r = m.ftruncate_handle(handle, new_size)
+            (DriverInstance.NvfsPosix(m), r)
+        case DriverInstance.DbFs(d):
+            var m = d
+            val r = m.ftruncate_handle(handle, new_size)
+            (DriverInstance.DbFs(m), r)
+        case _: (driver, Err(FsError.Unsupported))
 
 fn _driver_mmap_shared_writable_handle(driver: DriverInstance, handle: FileHandle, offset: i64, length: i64) -> Result<(), FsError>:
     val _ = driver
@@ -335,10 +525,15 @@ fn _driver_mmap_shared_writable_handle(driver: DriverInstance, handle: FileHandl
     val _ = length
     Err(FsError.Unsupported)
 
-fn _driver_link_path_text(driver: DriverInstance, target: text, link_path: text) -> Result<(), FsError>:
+fn _driver_link_path_text(driver: DriverInstance, target: text, link_path: text) -> (DriverInstance, Result<(), FsError>):
+    # Drivers are value structs: mutate a local copy and hand it back so the
+    # mount table stores it (scalar state such as fd counters is otherwise lost).
     match driver:
-        case DriverInstance.RamFs(d): d.link(Path(raw: target), Path(raw: link_path))
-        case _:                       Err(FsError.Unsupported)
+        case DriverInstance.RamFs(d):
+            var m = d
+            val r = m.link(Path(raw: target), Path(raw: link_path))
+            (DriverInstance.RamFs(m), r)
+        case _: (driver, Err(FsError.Unsupported))
 
 export _driver_name, _driver_kind_name, _driver_capabilities, _driver_stat_path, _driver_fstat
 export _driver_file_generation_v1

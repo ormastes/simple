@@ -1,0 +1,223 @@
+# Context index postings — pure inverted index + BM25 scorers.
+#
+# `simple_ctx_search` used to test every normalized chunk body against every
+# query term (`contains` + `split` per chunk per term). The postings built here
+# map a term to the chunks that contain it, with the exact whole-word term
+# frequency, so a query scores only those chunks. They are built once per
+# cache generation (see `ctx_index_cache.spl`) from the SAME normalized bodies
+# the scan path uses (`ctx_normalize` frames every token with spaces), so the
+# frequency of a term is `split(" ")` token count == the scan path's
+# `split(" term ").len() - 1`.
+#
+# Both scorers live here and apply identical floating-point operations in
+# identical term/chunk order, which is what makes their results bit-equal and
+# the ranked output (ids and order) identical. The scan scorer is kept as the
+# parity oracle and as the path one-shot callers use (building postings for a
+# single query would cost more than scanning once).
+#
+# No I/O: unit-testable without the MCP server or a store on disk.
+
+use std.common.math.special.{ln_f64}
+
+# One query/index term, already lowercased by `ctx_normalize`.
+struct CtxTerm:
+    word: text
+
+# Position of a chunk inside the prepared index (not the stored chunk id).
+struct CtxDocSlot:
+    index: i64
+
+# Whole-word occurrences of a term inside one chunk.
+struct CtxTermFreq:
+    count: i64
+
+struct CtxPosting:
+    slot: CtxDocSlot
+    freq: CtxTermFreq
+
+# Normalized chunk bodies, one per slot.
+struct CtxNormBodies:
+    bodies: [text]
+
+# Raw body byte length per slot (BM25 document length).
+struct CtxBodyLengths:
+    bytes: [i64]
+
+# Average raw body length of the prepared index (>= 1.0).
+struct CtxAvgLength:
+    bytes: f64
+
+struct CtxPostings:
+    by_term: Dict<text, [CtxPosting]>
+    doc_count: i64
+
+# Maximum number of hits returned by a query.
+struct CtxResultLimit:
+    count: i64
+
+# Per-slot BM25 score and number of distinct query terms that matched.
+struct CtxScoreBoard:
+    scores: [f64]
+    matched: [i64]
+
+const _CTX_K1: f64 = 1.2
+const _CTX_B: f64 = 0.75
+const _CTX_MIN_TERM_LEN: i64 = 2
+
+pub fn ctx_postings_doc_count(p: CtxPostings) -> CtxTermFreq:
+    CtxTermFreq(count: p.doc_count)
+
+# Number of chunks containing `term` (document frequency).
+pub fn ctx_postings_df(p: CtxPostings, term: CtxTerm) -> CtxTermFreq:
+    if p.by_term.contains_key(term.word):
+        return CtxTermFreq(count: p.by_term[term.word].len())
+    CtxTermFreq(count: 0)
+
+pub fn ctx_postings_for(p: CtxPostings, term: CtxTerm) -> [CtxPosting]:
+    if p.by_term.contains_key(term.word):
+        return p.by_term[term.word]
+    []
+
+# Build the inverted index from normalized bodies. Tokens shorter than
+# `ctx_tokenize`'s minimum are not indexed (queries never contain them).
+pub fn ctx_postings_build(norm: CtxNormBodies) -> CtxPostings:
+    _ctx_postings_extend({}, 0, norm)
+
+# Incremental update on append: the appended chunks' normalized bodies take the
+# slots after the existing ones. Identical to `ctx_postings_build` over the
+# concatenated bodies (the spec compares both), without re-reading old bodies.
+pub fn ctx_postings_append(p: CtxPostings, added: CtxNormBodies) -> CtxPostings:
+    _ctx_postings_extend(p.by_term, p.doc_count, added)
+
+fn _ctx_postings_extend(start: Dict<text, [CtxPosting]>, first_slot: i64, norm: CtxNormBodies) -> CtxPostings:
+    var by_term = start
+    var slot = first_slot
+    for body in norm.bodies:
+        var counts: Dict<text, i64> = {}
+        var order: [text] = []
+        for tok in body.split(" "):
+            if tok.len() >= _CTX_MIN_TERM_LEN:
+                if counts.contains_key(tok):
+                    counts[tok] = counts[tok] + 1
+                else:
+                    counts[tok] = 1
+                    order.push(tok)
+        for tok in order:
+            val posting = CtxPosting(slot: CtxDocSlot(index: slot), freq: CtxTermFreq(count: counts[tok]))
+            if by_term.contains_key(tok):
+                var lst = by_term[tok]
+                lst.push(posting)
+                by_term[tok] = lst
+            else:
+                by_term[tok] = [posting]
+        slot = slot + 1
+    CtxPostings(by_term: by_term, doc_count: slot)
+
+fn _ctx_empty_board(n_docs: i64) -> CtxScoreBoard:
+    var scores: [f64] = []
+    var matched: [i64] = []
+    var i = 0
+    while i < n_docs:
+        scores.push(0.0)
+        matched.push(0)
+        i = i + 1
+    CtxScoreBoard(scores: scores, matched: matched)
+
+fn _ctx_idf(n_docs: i64, df: i64) -> f64:
+    ln_f64(1.0 + (n_docs.to_float() - df.to_float() + 0.5) / (df.to_float() + 0.5))
+
+fn _ctx_term_score(idf: f64, f_count: i64, doc_len: i64, avg: CtxAvgLength) -> f64:
+    val f = f_count.to_float()
+    val dl = doc_len.to_float()
+    val denom = f + _CTX_K1 * (1.0 - _CTX_B + _CTX_B * dl / avg.bytes)
+    idf * (f * (_CTX_K1 + 1.0)) / denom
+
+# Reference scorer: tests every normalized body for every term.
+pub fn ctx_scores_by_scan(norm: CtxNormBodies, lengths: CtxBodyLengths, terms: [CtxTerm], avg: CtxAvgLength) -> CtxScoreBoard:
+    val n_docs = norm.bodies.len()
+    var board = _ctx_empty_board(n_docs)
+    var scores = board.scores
+    var matched = board.matched
+    for qt in terms:
+        val needle = " " + qt.word + " "
+        var counts: [i64] = []
+        var df: i64 = 0
+        var i = 0
+        while i < n_docs:
+            var f: i64 = 0
+            if norm.bodies[i].contains(needle):
+                f = norm.bodies[i].split(needle).len() - 1
+            if f > 0:
+                df = df + 1
+            counts.push(f)
+            i = i + 1
+        if df == 0:
+            continue
+        val idf = _ctx_idf(n_docs, df)
+        i = 0
+        while i < n_docs:
+            if counts[i] > 0:
+                scores[i] = scores[i] + _ctx_term_score(idf, counts[i], lengths.bytes[i], avg)
+                matched[i] = matched[i] + 1
+            i = i + 1
+    CtxScoreBoard(scores: scores, matched: matched)
+
+# Postings scorer: only chunks that contain a term are touched.
+pub fn ctx_scores_by_postings(postings: CtxPostings, lengths: CtxBodyLengths, terms: [CtxTerm], avg: CtxAvgLength) -> CtxScoreBoard:
+    val n_docs = postings.doc_count
+    var board = _ctx_empty_board(n_docs)
+    var scores = board.scores
+    var matched = board.matched
+    for qt in terms:
+        val plist = ctx_postings_for(postings, qt)
+        if plist.len() == 0:
+            continue
+        val idf = _ctx_idf(n_docs, plist.len())
+        for p in plist:
+            val i = p.slot.index
+            scores[i] = scores[i] + _ctx_term_score(idf, p.freq.count, lengths.bytes[i], avg)
+            matched[i] = matched[i] + 1
+    CtxScoreBoard(scores: scores, matched: matched)
+
+# ---------------------------------------------------------------------------
+# When to build postings
+# ---------------------------------------------------------------------------
+# Measured 2026-11-15 (3,700 chunks, 3.2 MB, interpreted): building postings
+# costs ~2,500 ms once; a query then costs ~8 ms instead of ~18-35 ms. Every
+# append to the store changes the generation key and discards the index, so a
+# generation that serves only a few queries must never pay that build. The
+# build is therefore deferred until the generation has proved long-lived by
+# serving this many cache hits (~2.5 s of accumulated per-query saving).
+
+# Cache hits served by the current generation.
+struct CtxGenerationHits:
+    count: i64
+
+# Postings builds performed by this process (spec / perf probe).
+struct CtxPostingsBuildCount:
+    count: i64
+
+enum CtxPostingsDecision:
+    UseScan
+    BuildPostings
+
+const _CTX_POSTINGS_MIN_HITS: i64 = 128
+
+pub fn ctx_generation_hits_zero() -> CtxGenerationHits:
+    CtxGenerationHits(count: 0)
+
+pub fn ctx_generation_hits_next(prev: CtxGenerationHits) -> CtxGenerationHits:
+    CtxGenerationHits(count: prev.count + 1)
+
+pub fn ctx_postings_build_count_next(prev: CtxPostingsBuildCount) -> CtxPostingsBuildCount:
+    CtxPostingsBuildCount(count: prev.count + 1)
+
+pub fn ctx_postings_decide(hits: CtxGenerationHits) -> CtxPostingsDecision:
+    if hits.count >= _CTX_POSTINGS_MIN_HITS:
+        return CtxPostingsDecision.BuildPostings
+    CtxPostingsDecision.UseScan
+
+pub fn ctx_postings_decision_label(decision: CtxPostingsDecision) -> text:
+    match decision:
+        case CtxPostingsDecision.UseScan: "use_scan"
+        case CtxPostingsDecision.BuildPostings: "build_postings"

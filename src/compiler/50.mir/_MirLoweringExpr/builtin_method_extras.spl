@@ -311,6 +311,57 @@ impl MirLowering:
         self.mark_runtime_value_local(entries.id)
         self.builtin_runtime_tuples_to_native(entries, field_types)
 
+    me extern_runtime_tuple_array_to_native(result: LocalId, symbol: SymbolId) -> LocalId:
+        """An extern declared `-> [(A, B, ..)]` or `-> [(A, B, ..)]?` returns
+        rt_tuple_new pairs (rt_env_vars), which `GetField` misreads exactly
+        like dict entries. Rebuild them once here, at the call result, so the
+        value is native wherever it flows (`??`, Ok/Some payloads, returns).
+        A nil snapshot stays nil. Simple-defined callees are never touched.
+        The gate is the call-origin registry (an actual extern declaration),
+        not extern_fn_symbols: in the SIMPLE_BOOTSTRAP=1 seed-run lowering of
+        extern_runtime_tuple_array_native_spec that set did not hold the
+        extern while its call still lowered as Foreign."""
+        if self.provider_callable_call_origin_v1(symbol) != MirCallOrigin.Foreign:
+            return result
+        val declared = self.resolved_call_hir_return_type(symbol) ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+        var array_type = declared
+        var nilable = false
+        match declared.kind:
+            case HirTypeKind.Optional(optional_inner):
+                array_type = optional_inner
+                nilable = true
+            case _: ()
+        var members: [HirType] = []
+        match array_type.kind:
+            case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                match element.kind:
+                    case HirTypeKind.Tuple(tuple_members): members = tuple_members
+                    case _: return result
+            case _: return result
+        var field_types: [MirType] = []
+        for member in members:
+            field_types = field_types.push(self.builtin_dict_entry_field_type(Some(member), MirType.i64()))
+        if not nilable:
+            return self.builtin_runtime_tuples_to_native(result, field_types)
+        var b = self.builder
+        val merged = b.new_local(None, self.local_mir_type_of(result) ?? MirType.i64(), LocalKind.Var)
+        b.emit_copy(merged, result)
+        val is_some = b.emit_call_value(
+            builtin_extra_rt_operand("rt_is_some", [MirType.i64()], MirType.bool()),
+            [mir_operand_copy(result)], MirType.bool())
+        val some_block = b.new_block(Some("extern_rt_tuples_some"))
+        val merge_block = b.new_block(Some("extern_rt_tuples_merge"))
+        b.terminate_if(mir_operand_copy(is_some), some_block, merge_block)
+        b.switch_to_block(some_block)
+        self.builder = b
+        val native = self.builtin_runtime_tuples_to_native(result, field_types)
+        var b_done = self.builder
+        b_done.emit_copy(merged, native)
+        b_done.terminate_goto(merge_block)
+        b_done.switch_to_block(merge_block)
+        self.builder = b_done
+        merged
+
     me builtin_dict_items(receiver: HirExpr, dict_local: LocalId) -> LocalId:
         # A handle alone does not establish either field's representation.
         # Never decode an unknown record/text slot using a guessed i64 type.

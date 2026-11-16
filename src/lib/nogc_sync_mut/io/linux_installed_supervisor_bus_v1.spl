@@ -1,0 +1,630 @@
+# Direct authenticated system manager client. AUTHORED_NOT_RUN.
+# AddMatch is sent to the broker directly; no foreign callback can consume a
+# JobRemoved signal before the matching StopUnit reply has been decoded.
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_sync_mut.io.linux_installed_supervisor_profile_v1.LinuxInstalledSupervisorProfileV1
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+
+pub struct LinuxSupervisorUnitChangeV1:
+    kind: text
+    path: text
+    destination: text
+
+pub class LinuxSupervisorBusV1:
+    slot: i64
+    generation: i64
+    pub fn manager_v1() -> Result<text, text>: supervisor_bus_manager_v1(self.slot, self.generation)
+    pub fn unit_path_v1(unit: text) -> Result<text, text>:
+        supervisor_bus_query_text_v1(self.slot, self.generation, "GetUnit", unit, 111u8)
+    pub fn unit_file_state_v1(unit: text) -> Result<text, text>:
+        supervisor_bus_query_text_v1(self.slot, self.generation, "GetUnitFileState", unit, 115u8)
+    pub fn unit_by_pid_v1(pid: i64) -> Result<text, text>: supervisor_bus_pid_v1(self.slot, self.generation, pid)
+    # @allow(primitive_api): D-Bus object path, interface, and property names are wire strings and scalar codes
+    pub fn string_property_v1(path: text, iface: text, name: text) -> Result<text, text>:
+        supervisor_bus_string_property_v1(self.slot, self.generation, path, iface, name)
+    # @allow(primitive_api): D-Bus object path, interface, and property names are wire strings and scalar codes
+    pub fn number_property_v1(path: text, iface: text, name: text) -> Result<i64, text>:
+        supervisor_bus_number_property_v1(self.slot, self.generation, path, iface, name)
+    # @allow(primitive_api): D-Bus object path, interface, and property names are wire strings and scalar codes
+    pub fn boolean_property_v1(path: text, iface: text, name: text) -> Result<bool, text>:
+        val observed = supervisor_bus_scalar_property_v1(self.slot, self.generation, path, iface, name, 98u8)?
+        Ok(observed == 1)
+    # @allow(primitive_api): D-Bus object path, interface, and property names are wire strings and scalar codes
+    pub fn unsigned_property_v1(path: text, iface: text, name: text) -> Result<i64, text>:
+        supervisor_bus_scalar_property_v1(self.slot, self.generation, path, iface, name, 116u8)
+    # @allow(primitive_api): D-Bus object path, interface, and property names are wire strings and scalar codes
+    pub fn string_array_property_v1(path: text, iface: text, name: text) -> Result<[text], text>:
+        supervisor_bus_string_array_property_v1(self.slot, self.generation, path, iface, name)
+    pub fn empty_exec_commands_v1(path: text, name: text) -> Result<bool, text>:
+        supervisor_bus_empty_exec_commands_v1(self.slot, self.generation, path, name)
+    pub fn unit_job_v1(path: text) -> Result<i64, text>: supervisor_bus_job_v1(self.slot, self.generation, path)
+    pub fn ref_unit_v1(unit: text) -> Result<(), text>:
+        supervisor_bus_void_v1(self.slot, self.generation, "RefUnit", unit)
+    pub fn reload_v1() -> Result<(), text>:
+        supervisor_bus_void_v1(self.slot, self.generation, "Reload", "")
+    pub fn mask_v1(unit: text) -> Result<[LinuxSupervisorUnitChangeV1], text>:
+        supervisor_bus_mask_v1(self.slot, self.generation, unit)
+    pub fn stop_v1(unit: text) -> Result<text, text>:
+        supervisor_bus_stop_v1(self.slot, self.generation, unit)
+    pub fn await_stop_v1(unit: text, job: text) -> Result<(), text>:
+        supervisor_bus_await_v1(self.slot, self.generation, unit, job)
+    pub fn close_v1() -> text: supervisor_bus_close_v1(self.slot, self.generation)
+    pub fn close_diagnostic_v1() -> text: supervisor_bus_close_diagnostic_v1(self.slot, self.generation)
+
+pub enum LinuxSupervisorBusOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxSupervisorBusV1, reason: text)
+    Ready(owner: LinuxSupervisorBusV1)
+
+pub fn linux_supervisor_bus_open_v1(profile: LinuxInstalledSupervisorProfileV1) -> LinuxSupervisorBusOpenV1:
+    @when(os="linux"):
+    supervisor_bus_open_v1(profile)
+    @else:
+    LinuxSupervisorBusOpenV1.Rejected("supervisor-system-bus-linux-required")
+    @end
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_installed_supervisor_abi_v1.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u32, volatile_read_u64,
+    volatile_write_u8, volatile_write_u32, volatile_write_u64}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+struct SupervisorBusStateV1:
+    generation: i64
+    arena: i64
+    profile: LinuxInstalledSupervisorProfileV1
+    bus: i64 = 0
+    request: i64 = 0
+    reply: i64 = 0
+    credentials: i64 = 0
+    manager: text = ""
+    completed: [(text, text, text)] = []
+    ancestry: [i64] = []
+    socket_identity: text = ""
+    closed: bool = false
+    close_diagnostic: text = ""
+
+var supervisor_bus_slots_v1: [SupervisorBusStateV1] = []
+
+@unsafe(reason: "main-thread/process guard precedes mutable capsule access", capabilities: [ffi])
+fn supervisor_bus_entry_v1() -> Result<(), text>:
+    linux_machine_process_origin_check_v1()
+
+fn supervisor_bus_state_v1(slot: i64, generation: i64) -> Result<SupervisorBusStateV1, text>:
+    supervisor_bus_entry_v1()?
+    if slot < 0 or slot >= supervisor_bus_slots_v1.len(): return Err("supervisor-system-bus-stale")
+    val state = supervisor_bus_slots_v1[slot]
+    if state.closed or state.generation != generation: return Err("supervisor-system-bus-stale")
+    Ok(state)
+
+@unsafe(reason: "bounded NUL terminated scratch strings; arguments occupy distinct regions", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_z_v1(slot: i64, region: i64, value: text) -> i64:
+    if region < 0 or region > 7 or value.byte_len() > 4095 or value.contains("\0"): return 0
+    val pointer = supervisor_bus_slots_v1[slot].arena + 4096 + region * 4096
+    for at in 0..value.byte_len(): volatile_write_u8(pointer + at, value.byte_at(at) as i64)
+    volatile_write_u8(pointer + value.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "copy a bounded borrowed libsystemd string before dropping its owner", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_text_v1(pointer: i64) -> Result<text, text>:
+    if pointer <= 0: return Err("supervisor-system-bus-null-string")
+    var bytes: [u8] = []
+    for at in 0..4096:
+        val byte = volatile_read_u8(pointer + at) as u8
+        if byte == 0:
+            if not utf8_bytes_valid(bytes): return Err("supervisor-system-bus-string-utf8")
+            return Ok(bytes_to_text(bytes))
+        bytes.push(byte)
+    Err("supervisor-system-bus-string-bound")
+
+@unsafe(reason: "consume each message/credential reference before releasing it", capabilities: [ffi])
+fn supervisor_bus_reset_v1(slot: i64):
+    var state = supervisor_bus_slots_v1[slot]
+    val request = state.request
+    val reply = state.reply
+    val credentials = state.credentials
+    state.request = 0
+    state.reply = 0
+    state.credentials = 0
+    supervisor_bus_slots_v1[slot] = state
+    if request != 0:
+        val dropped_request = sd_bus_message_unref(request)
+    if reply != 0:
+        val dropped_reply = sd_bus_message_unref(reply)
+    if credentials != 0:
+        val dropped_credentials = sd_bus_creds_unref(credentials)
+
+@unsafe(reason: "native message output published into owner before validation", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_begin_v1(slot: i64, destination: text, path: text, iface: text, member: text) -> Result<(), text>:
+    supervisor_bus_reset_v1(slot)
+    val state = supervisor_bus_slots_v1[slot]
+    volatile_write_u64(state.arena, 0)
+    val code = sd_bus_message_new_method_call(state.bus, state.arena,
+        supervisor_bus_z_v1(slot, 0, destination), supervisor_bus_z_v1(slot, 1, path),
+        supervisor_bus_z_v1(slot, 2, iface), supervisor_bus_z_v1(slot, 3, member))
+    supervisor_bus_slots_v1[slot].request = volatile_read_u64(state.arena)
+    if code < 0 or supervisor_bus_slots_v1[slot].request == 0: return Err("supervisor-system-bus-message")
+    Ok(())
+
+@unsafe(reason: "append copied, nonvariadic string argument", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_append_v1(slot: i64, value: text) -> Result<(), text>:
+    val pointer = supervisor_bus_z_v1(slot, 4, value)
+    if pointer == 0 or sd_bus_message_append_basic(supervisor_bus_slots_v1[slot].request, 115u8, pointer) < 0:
+        return Err("supervisor-system-bus-append")
+    Ok(())
+
+@unsafe(reason: "one bounded exact-destination call retains reply even on failed status", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_call_v1(slot: i64, expected_sender: text) -> Result<(), text>:
+    val state = supervisor_bus_slots_v1[slot]
+    volatile_write_u64(state.arena + 8, 0)
+    val code = sd_bus_call(state.bus, state.request, 1000000u64, 0, state.arena + 8)
+    supervisor_bus_slots_v1[slot].reply = volatile_read_u64(state.arena + 8)
+    if code < 0 or supervisor_bus_slots_v1[slot].reply == 0:
+        return Err("supervisor-system-bus-call-failed-or-uncertain:" + str(code))
+    if supervisor_bus_text_v1(sd_bus_message_get_sender(supervisor_bus_slots_v1[slot].reply))? != expected_sender:
+        return Err("supervisor-system-bus-reply-owner-changed")
+    Ok(())
+
+@unsafe(reason: "exact response basic field", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_read_text_v1(slot: i64, kind: u8) -> Result<text, text>:
+    val state = supervisor_bus_slots_v1[slot]
+    volatile_write_u64(state.arena + 16, 0)
+    if sd_bus_message_read_basic(state.reply, kind, state.arena + 16) <= 0:
+        return Err("supervisor-system-bus-response-type")
+    supervisor_bus_text_v1(volatile_read_u64(state.arena + 16))
+
+@unsafe(reason: "validate exact complete response shape", capabilities: [ffi])
+fn supervisor_bus_end_v1(slot: i64) -> Result<(), text>:
+    if sd_bus_message_at_end(supervisor_bus_slots_v1[slot].reply, 1) <= 0:
+        return Err("supervisor-system-bus-response-tail")
+    Ok(())
+
+@unsafe(reason: "authenticate broker root credentials and actual PID1 manager unique name", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_auth_v1(slot: i64, initial: bool) -> Result<text, text>:
+    supervisor_bus_socket_v1(slot, initial and supervisor_bus_slots_v1[slot].ancestry.len() == 0)?
+    supervisor_bus_reset_v1(slot)
+    var state = supervisor_bus_slots_v1[slot]
+    volatile_write_u64(state.arena + 24, 0)
+    val peer_code = sd_bus_get_owner_creds(state.bus, 16u64, state.arena + 24)
+    supervisor_bus_slots_v1[slot].credentials = volatile_read_u64(state.arena + 24)
+    if peer_code < 0 or supervisor_bus_slots_v1[slot].credentials == 0:
+        return Err("supervisor-system-bus-peer-credentials")
+    volatile_write_u32(state.arena + 32, 4294967295)
+    if sd_bus_creds_get_euid(supervisor_bus_slots_v1[slot].credentials, state.arena + 32) < 0 or
+            volatile_read_u32(state.arena + 32) != 0:
+        return Err("supervisor-system-bus-root-peer-required")
+    supervisor_bus_begin_v1(slot, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner")?
+    supervisor_bus_append_v1(slot, "org.freedesktop.systemd1")?
+    supervisor_bus_call_v1(slot, "org.freedesktop.DBus")?
+    val unique = supervisor_bus_read_text_v1(slot, 115u8)?
+    supervisor_bus_end_v1(slot)?
+    if not unique.starts_with(":") or unique.byte_len() > 255: return Err("supervisor-system-bus-unique-owner")
+    if not initial and unique != supervisor_bus_slots_v1[slot].manager:
+        return Err("supervisor-system-manager-owner-changed")
+    supervisor_bus_reset_v1(slot)
+    state = supervisor_bus_slots_v1[slot]
+    volatile_write_u64(state.arena + 24, 0)
+    val code = sd_bus_get_name_creds(state.bus, supervisor_bus_z_v1(slot, 0, unique), 17u64, state.arena + 24)
+    supervisor_bus_slots_v1[slot].credentials = volatile_read_u64(state.arena + 24)
+    if code < 0 or supervisor_bus_slots_v1[slot].credentials == 0: return Err("supervisor-system-manager-credentials")
+    volatile_write_u32(state.arena + 32, 4294967295)
+    volatile_write_u32(state.arena + 36, 0)
+    if sd_bus_creds_get_euid(supervisor_bus_slots_v1[slot].credentials, state.arena + 32) < 0 or
+            sd_bus_creds_get_pid(supervisor_bus_slots_v1[slot].credentials, state.arena + 36) < 0 or
+            volatile_read_u32(state.arena + 32) != 0 or volatile_read_u32(state.arena + 36) != 1:
+        return Err("supervisor-system-manager-root-pid1-required")
+    Ok(unique)
+
+@unsafe(reason: "root-owned nofollow system-socket ancestry and unchanged socket inode/mount identity", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_socket_v1(slot: i64, initial: bool) -> Result<(), text>:
+    val state = supervisor_bus_slots_v1[slot]
+    var flags: i32 = 0
+    @when(arch="x86_64"):
+    flags = 720896
+    @elif(arch="aarch64"):
+    flags = 573440
+    @end
+    if flags == 0: return Err("supervisor-system-bus-abi-unsupported")
+    if initial:
+        var parent = -100i64
+        for name in ["/", "run", "dbus"]:
+            val fd = openat(parent as i32, supervisor_bus_z_v1(slot, 0, name), flags, 0u32) as i64
+            if fd < 0: return Err("supervisor-system-bus-protected-socket-parent")
+            supervisor_bus_slots_v1[slot].ancestry.push(fd)
+            parent = fd
+    val ancestry = supervisor_bus_slots_v1[slot].ancestry
+    if ancestry.len() != 3: return Err("supervisor-system-bus-protected-socket-parent")
+    for fd in ancestry:
+        for at in 128..384: volatile_write_u8(state.arena + at, 0)
+        if statx(fd as i32, supervisor_bus_z_v1(slot, 0, ""), 4096, 6143u32, state.arena + 128) != 0 or
+                (volatile_read_u32(state.arena + 128) & 6143) != 6143 or
+                volatile_read_u32(state.arena + 148) != 0 or
+                (volatile_read_u32(state.arena + 156) & 61458) != 16384:
+            return Err("supervisor-system-bus-root-protected-ancestry-required")
+    for at in 128..384: volatile_write_u8(state.arena + at, 0)
+    if statx(ancestry[2] as i32, supervisor_bus_z_v1(slot, 0, "system_bus_socket"), 256, 6143u32, state.arena + 128) != 0 or
+            (volatile_read_u32(state.arena + 128) & 6143) != 6143 or volatile_read_u32(state.arena + 148) != 0 or
+            (volatile_read_u32(state.arena + 156) & 61440) != 49152:
+        return Err("supervisor-system-bus-root-socket-required")
+    val identity = str(volatile_read_u32(state.arena + 264)) + ":" + str(volatile_read_u32(state.arena + 268)) + ":" +
+        str(volatile_read_u64(state.arena + 160)) + ":" + str(volatile_read_u64(state.arena + 272))
+    if not initial and identity != state.socket_identity: return Err("supervisor-system-bus-socket-replaced")
+    supervisor_bus_slots_v1[slot].socket_identity = identity
+    Ok(())
+
+fn supervisor_bus_manager_v1(slot: i64, generation: i64) -> Result<text, text>:
+    val state = supervisor_bus_state_v1(slot, generation)?
+    supervisor_bus_auth_v1(slot, false)
+
+fn supervisor_bus_manager_begin_v1(slot: i64, generation: i64, method: text) -> Result<text, text>:
+    val manager = supervisor_bus_manager_v1(slot, generation)?
+    supervisor_bus_begin_v1(slot, manager, "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", method)?
+    Ok(manager)
+
+fn supervisor_bus_query_text_v1(slot: i64, generation: i64, method: text, argument: text, kind: u8) -> Result<text, text>:
+    val manager = supervisor_bus_manager_begin_v1(slot, generation, method)?
+    supervisor_bus_append_v1(slot, argument)?
+    supervisor_bus_call_v1(slot, manager)?
+    val value = supervisor_bus_read_text_v1(slot, kind)?
+    supervisor_bus_end_v1(slot)?
+    Ok(value)
+
+fn supervisor_bus_void_v1(slot: i64, generation: i64, method: text, argument: text) -> Result<(), text>:
+    val state = supervisor_bus_state_v1(slot, generation)?
+    val profile = state.profile.current_v1()?
+    if method == "RefUnit" and not profile.activation_units.contains(argument):
+        return Err("supervisor-system-bus-unit-outside-installed-activation-closure")
+    val manager = supervisor_bus_manager_begin_v1(slot, generation, method)?
+    if argument != "": supervisor_bus_append_v1(slot, argument)?
+    supervisor_bus_call_v1(slot, manager)?
+    supervisor_bus_end_v1(slot)
+
+@unsafe(reason: "actual numeric process lookup through authenticated system manager", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_pid_v1(slot: i64, generation: i64, pid: i64) -> Result<text, text>:
+    if pid <= 0 or pid > 2147483647: return Err("supervisor-system-bus-pid-bound")
+    val manager = supervisor_bus_manager_begin_v1(slot, generation, "GetUnitByPID")?
+    val state = supervisor_bus_slots_v1[slot]
+    volatile_write_u32(state.arena + 40, pid)
+    if sd_bus_message_append_basic(state.request, 117u8, state.arena + 40) < 0: return Err("supervisor-system-bus-pid-argument")
+    supervisor_bus_call_v1(slot, manager)?
+    val path = supervisor_bus_read_text_v1(slot, 111u8)?
+    supervisor_bus_end_v1(slot)?
+    Ok(path)
+
+fn supervisor_bus_property_v1(slot: i64, generation: i64, path: text, iface: text, name: text) -> Result<(), text>:
+    val manager = supervisor_bus_manager_v1(slot, generation)?
+    supervisor_bus_begin_v1(slot, manager, path, "org.freedesktop.DBus.Properties", "Get")?
+    supervisor_bus_append_v1(slot, iface)?
+    supervisor_bus_append_v1(slot, name)?
+    supervisor_bus_call_v1(slot, manager)
+
+@unsafe(reason: "decode exact variant signature then copied string", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_string_property_v1(slot: i64, generation: i64, path: text, iface: text, name: text) -> Result<text, text>:
+    supervisor_bus_property_v1(slot, generation, path, iface, name)?
+    val reply = supervisor_bus_slots_v1[slot].reply
+    if sd_bus_message_enter_container(reply, 118u8, supervisor_bus_z_v1(slot, 0, "s")) <= 0:
+        return Err("supervisor-system-bus-property-signature")
+    val value = supervisor_bus_read_text_v1(slot, 115u8)?
+    if sd_bus_message_exit_container(reply) < 0: return Err("supervisor-system-bus-property-tail")
+    supervisor_bus_end_v1(slot)?
+    Ok(value)
+
+@unsafe(reason: "decode exact unsigned property variant", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_number_property_v1(slot: i64, generation: i64, path: text, iface: text, name: text) -> Result<i64, text>:
+    supervisor_bus_property_v1(slot, generation, path, iface, name)?
+    val state = supervisor_bus_slots_v1[slot]
+    if sd_bus_message_enter_container(state.reply, 118u8, supervisor_bus_z_v1(slot, 0, "u")) <= 0:
+        return Err("supervisor-system-bus-property-signature")
+    volatile_write_u32(state.arena + 40, 0)
+    if sd_bus_message_read_basic(state.reply, 117u8, state.arena + 40) <= 0:
+        return Err("supervisor-system-bus-property-number")
+    val value = volatile_read_u32(state.arena + 40)
+    if sd_bus_message_exit_container(state.reply) < 0: return Err("supervisor-system-bus-property-tail")
+    supervisor_bus_end_v1(slot)?
+    Ok(value)
+
+@unsafe(reason: "exact boolean or bounded unsigned64 variant; no caller assertion substitutes for the live property", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_scalar_property_v1(slot: i64, generation: i64, path: text, iface: text,
+        name: text, kind: u8) -> Result<i64, text>:
+    if kind != 98u8 and kind != 116u8: return Err("supervisor-system-bus-scalar-kind")
+    supervisor_bus_property_v1(slot, generation, path, iface, name)?
+    val state = supervisor_bus_slots_v1[slot]
+    val signature = if kind == 98u8: "b" else: "t"
+    if sd_bus_message_enter_container(state.reply, 118u8, supervisor_bus_z_v1(slot, 0, signature)) <= 0:
+        return Err("supervisor-system-bus-property-signature")
+    volatile_write_u64(state.arena + 40, 0)
+    if sd_bus_message_read_basic(state.reply, kind, state.arena + 40) <= 0:
+        return Err("supervisor-system-bus-property-scalar")
+    val value = if kind == 98u8: volatile_read_u32(state.arena + 40) else: volatile_read_u64(state.arena + 40)
+    # These admission readers intentionally support the signed-positive subset
+    # of uint64. An infinite timeout/overflow is unsupported, never truncated.
+    if value < 0 or (kind == 98u8 and value > 1): return Err("supervisor-system-bus-property-scalar-bound")
+    if sd_bus_message_exit_container(state.reply) < 0: return Err("supervisor-system-bus-property-tail")
+    supervisor_bus_end_v1(slot)?
+    Ok(value)
+
+@unsafe(reason: "bounded exact string-array variant from authenticated manager", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_string_array_property_v1(slot: i64, generation: i64, path: text,
+        iface: text, name: text) -> Result<[text], text>:
+    supervisor_bus_property_v1(slot, generation, path, iface, name)?
+    val reply = supervisor_bus_slots_v1[slot].reply
+    if (sd_bus_message_enter_container(reply, 118u8, supervisor_bus_z_v1(slot, 0, "as")) <= 0 or
+            sd_bus_message_enter_container(reply, 97u8, supervisor_bus_z_v1(slot, 1, "s")) <= 0):
+        return Err("supervisor-system-bus-property-array-signature")
+    var values: [text] = []
+    var total_bytes = 0
+    for index in 0..129:
+        val at_end = sd_bus_message_at_end(reply, 0)
+        if at_end < 0: return Err("supervisor-system-bus-property-array-shape")
+        if at_end > 0:
+            if sd_bus_message_exit_container(reply) < 0 or sd_bus_message_exit_container(reply) < 0:
+                return Err("supervisor-system-bus-property-array-tail")
+            supervisor_bus_end_v1(slot)?
+            return Ok(values)
+        if index >= 128: return Err("supervisor-system-bus-property-array-bound")
+        val value = supervisor_bus_read_text_v1(slot, 115u8)?
+        total_bytes = total_bytes + value.byte_len()
+        if total_bytes > 65536: return Err("supervisor-system-bus-property-array-byte-bound")
+        values.push(value)
+    Err("supervisor-system-bus-property-array-bound")
+
+@unsafe(reason: "actual exact service command-array type and empty body, never a parsed textual command list", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_empty_exec_commands_v1(slot: i64, generation: i64, path: text,
+        name: text) -> Result<bool, text>:
+    if name != "ExecStop" and name != "ExecStopPost": return Err("supervisor-system-bus-stop-command-property")
+    supervisor_bus_property_v1(slot, generation, path, "org.freedesktop.systemd1.Service", name)?
+    val reply = supervisor_bus_slots_v1[slot].reply
+    if (sd_bus_message_enter_container(reply, 118u8, supervisor_bus_z_v1(slot, 0, "a(sasbttttuii)")) <= 0 or
+            sd_bus_message_enter_container(reply, 97u8, supervisor_bus_z_v1(slot, 1, "(sasbttttuii)")) <= 0):
+        return Err("supervisor-system-bus-stop-command-signature")
+    val empty = sd_bus_message_at_end(reply, 0)
+    if empty < 0: return Err("supervisor-system-bus-stop-command-shape")
+    # A nonempty command list refuses immediately; its native message remains
+    # retained until normal reset/cleanup, without interpreting any command.
+    if empty == 0: return Ok(false)
+    if sd_bus_message_exit_container(reply) < 0 or sd_bus_message_exit_container(reply) < 0:
+        return Err("supervisor-system-bus-stop-command-tail")
+    supervisor_bus_end_v1(slot)?
+    Ok(true)
+
+@unsafe(reason: "decode exact current unit job tuple", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_job_v1(slot: i64, generation: i64, path: text) -> Result<i64, text>:
+    supervisor_bus_property_v1(slot, generation, path, "org.freedesktop.systemd1.Unit", "Job")?
+    val state = supervisor_bus_slots_v1[slot]
+    if sd_bus_message_enter_container(state.reply, 118u8, supervisor_bus_z_v1(slot, 0, "(uo)")) <= 0 or
+            sd_bus_message_enter_container(state.reply, 114u8, supervisor_bus_z_v1(slot, 1, "uo")) <= 0:
+        return Err("supervisor-system-bus-job-signature")
+    volatile_write_u32(state.arena + 40, 0)
+    if sd_bus_message_read_basic(state.reply, 117u8, state.arena + 40) <= 0: return Err("supervisor-system-bus-job-id")
+    val job = volatile_read_u32(state.arena + 40)
+    val object = supervisor_bus_read_text_v1(slot, 111u8)?
+    if job == 0 and object != "/": return Err("supervisor-system-bus-empty-job-shape")
+    if sd_bus_message_exit_container(state.reply) < 0 or sd_bus_message_exit_container(state.reply) < 0:
+        return Err("supervisor-system-bus-job-tail")
+    supervisor_bus_end_v1(slot)?
+    Ok(job)
+
+@unsafe(reason: "force=false runtime mask; decode exact changes without inventing rollback ownership", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_mask_v1(slot: i64, generation: i64, unit: text) -> Result<[LinuxSupervisorUnitChangeV1], text>:
+    supervisor_bus_installed_unit_v1(slot, generation, unit)?
+    val manager = supervisor_bus_manager_begin_v1(slot, generation, "MaskUnitFiles")?
+    val state = supervisor_bus_slots_v1[slot]
+    if sd_bus_message_open_container(state.request, 97u8, supervisor_bus_z_v1(slot, 0, "s")) < 0:
+        return Err("supervisor-system-bus-mask-array")
+    supervisor_bus_append_v1(slot, unit)?
+    if sd_bus_message_close_container(state.request) < 0: return Err("supervisor-system-bus-mask-array")
+    volatile_write_u32(state.arena + 40, 1)
+    volatile_write_u32(state.arena + 44, 0)
+    if sd_bus_message_append_basic(state.request, 98u8, state.arena + 40) < 0 or
+            sd_bus_message_append_basic(state.request, 98u8, state.arena + 44) < 0:
+        return Err("supervisor-system-bus-mask-options")
+    supervisor_bus_call_v1(slot, manager)?
+    val reply = supervisor_bus_slots_v1[slot].reply
+    if sd_bus_message_enter_container(reply, 97u8, supervisor_bus_z_v1(slot, 0, "(sss)")) <= 0:
+        return Err("supervisor-system-bus-mask-response")
+    var changes: [LinuxSupervisorUnitChangeV1] = []
+    for index in 0..256:
+        val next = sd_bus_message_enter_container(reply, 114u8, supervisor_bus_z_v1(slot, 0, "sss"))
+        if next < 0: return Err("supervisor-system-bus-mask-change")
+        if next == 0:
+            if sd_bus_message_exit_container(reply) < 0: return Err("supervisor-system-bus-mask-tail")
+            supervisor_bus_end_v1(slot)?
+            return Ok(changes)
+        val kind = supervisor_bus_read_text_v1(slot, 115u8)?
+        val path = supervisor_bus_read_text_v1(slot, 115u8)?
+        val destination = supervisor_bus_read_text_v1(slot, 115u8)?
+        changes.push(LinuxSupervisorUnitChangeV1(kind, path, destination))
+        if sd_bus_message_exit_container(reply) < 0: return Err("supervisor-system-bus-mask-change-tail")
+    Err("supervisor-system-bus-mask-change-bound")
+
+@unsafe(reason: "manual send(cookie) and bounded pump preserves JobRemoved even before StopUnit reply", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_stop_v1(slot: i64, generation: i64, unit: text) -> Result<text, text>:
+    supervisor_bus_installed_unit_v1(slot, generation, unit)?
+    val manager = supervisor_bus_manager_begin_v1(slot, generation, "StopUnit")?
+    supervisor_bus_append_v1(slot, unit)?
+    supervisor_bus_append_v1(slot, "fail")?
+    val state = supervisor_bus_slots_v1[slot]
+    volatile_write_u64(state.arena + 48, 0)
+    if sd_bus_send(state.bus, state.request, state.arena + 48) < 0:
+        return Err("supervisor-system-bus-stop-send-uncertain")
+    val cookie = volatile_read_u64(state.arena + 48)
+    if cookie <= 0: return Err("supervisor-system-bus-stop-cookie-unavailable")
+    val began = time_sample_monotonic_nanos_or_failure()
+    if began <= 0 or began > 9223372031854775807: return Err("supervisor-system-bus-clock")
+    val deadline = began + 5000000000
+    for turn in 0..8192:
+        supervisor_bus_pump_v1(slot, began, deadline)?
+        val reply = supervisor_bus_slots_v1[slot].reply
+        if reply != 0:
+            supervisor_bus_capture_job_v1(slot)?
+            volatile_write_u64(state.arena + 56, 0)
+            if sd_bus_message_get_reply_cookie(reply, state.arena + 56) >= 0 and
+                    volatile_read_u64(state.arena + 56) == cookie:
+                if supervisor_bus_text_v1(sd_bus_message_get_sender(reply))? != manager or
+                        sd_bus_message_is_method_error(reply, 0) != 0:
+                    return Err("supervisor-system-bus-stop-method-error-or-owner-changed")
+                val job = supervisor_bus_read_text_v1(slot, 111u8)?
+                supervisor_bus_end_v1(slot)?
+                if not job.starts_with("/org/freedesktop/systemd1/job/"):
+                    return Err("supervisor-system-bus-stop-job-path")
+                return Ok(job)
+    Err("supervisor-system-bus-stop-reply-message-bound")
+
+fn supervisor_bus_installed_unit_v1(slot: i64, generation: i64, unit: text) -> Result<(), text>:
+    val state = supervisor_bus_state_v1(slot, generation)?
+    val profile = state.profile.current_v1()?
+    if unit == profile.supervisor_unit or unit == profile.provider_unit or not profile.activation_units.contains(unit):
+        return Err("supervisor-system-bus-unit-outside-installed-activation-closure")
+    Ok(())
+
+@unsafe(reason: "retain each unhandled message in canonical state until next pump", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_pump_v1(slot: i64, began: i64, deadline: i64) -> Result<(), text>:
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now < began or now >= deadline: return Err("supervisor-system-bus-stop-job-timeout")
+    val state = supervisor_bus_slots_v1[slot]
+    val old_reply = state.reply
+    supervisor_bus_slots_v1[slot].reply = 0
+    if old_reply != 0:
+        val dropped = sd_bus_message_unref(old_reply)
+    volatile_write_u64(state.arena + 8, 0)
+    val code = sd_bus_process(state.bus, state.arena + 8)
+    supervisor_bus_slots_v1[slot].reply = volatile_read_u64(state.arena + 8)
+    if code < 0: return Err("supervisor-system-bus-stop-job-disconnected")
+    if code == 0:
+        val remaining = (deadline - now) / 1000
+        if sd_bus_wait(state.bus, (if remaining < 10000: remaining else: 10000) as u64) < 0:
+            return Err("supervisor-system-bus-stop-job-wait")
+    Ok(())
+
+@unsafe(reason: "validate and retain actual authenticated completion before matching returned job", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_capture_job_v1(slot: i64) -> Result<(), text>:
+    val state = supervisor_bus_slots_v1[slot]
+    val reply = state.reply
+    if sd_bus_message_is_signal(reply, supervisor_bus_z_v1(slot, 0, "org.freedesktop.systemd1.Manager"),
+            supervisor_bus_z_v1(slot, 1, "JobRemoved")) <= 0: return Ok(())
+    if supervisor_bus_text_v1(sd_bus_message_get_sender(reply))? != state.manager or
+            supervisor_bus_text_v1(sd_bus_message_get_path(reply))? != "/org/freedesktop/systemd1":
+        return Err("supervisor-system-bus-job-sender-mismatch")
+    volatile_write_u32(state.arena + 40, 0)
+    if sd_bus_message_read_basic(reply, 117u8, state.arena + 40) <= 0:
+        return Err("supervisor-system-bus-job-signal-shape")
+    val actual_job = supervisor_bus_read_text_v1(slot, 111u8)?
+    val actual_unit = supervisor_bus_read_text_v1(slot, 115u8)?
+    val result = supervisor_bus_read_text_v1(slot, 115u8)?
+    supervisor_bus_end_v1(slot)?
+    if state.completed.len() >= 256: return Err("supervisor-system-bus-completion-bound")
+    for completed in state.completed:
+        if completed.0 == actual_job: return Err("supervisor-system-bus-completion-duplicate")
+    supervisor_bus_slots_v1[slot].completed.push((actual_job, actual_unit, result))
+    Ok(())
+
+@unsafe(reason: "exact pre-subscribed JobRemoved sender/path/unit/result, bounded without callback races", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_await_v1(slot: i64, generation: i64, unit: text, job: text) -> Result<(), text>:
+    val state = supervisor_bus_state_v1(slot, generation)?
+    val began = time_sample_monotonic_nanos_or_failure()
+    if began <= 0 or began > 9223372031854775807: return Err("supervisor-system-bus-clock")
+    val deadline = began + 5000000000
+    for turn in 0..8192:
+        for completed in supervisor_bus_slots_v1[slot].completed:
+            if completed.0 == job:
+                if completed.1 != unit or completed.2 != "done":
+                    return Err("supervisor-system-bus-stop-job-not-done:" + completed.2)
+                val same_manager = supervisor_bus_manager_v1(slot, generation)?
+                return Ok(())
+        supervisor_bus_pump_v1(slot, began, deadline)?
+        if supervisor_bus_slots_v1[slot].reply != 0: supervisor_bus_capture_job_v1(slot)?
+    Err("supervisor-system-bus-stop-job-message-bound")
+
+@unsafe(reason: "open explicit system-bus endpoint; retain every output before fallible validation", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_open_v1(profile: LinuxInstalledSupervisorProfileV1) -> LinuxSupervisorBusOpenV1:
+    val entered = supervisor_bus_entry_v1()
+    if entered.is_err(): return LinuxSupervisorBusOpenV1.Rejected(entered.unwrap_err())
+    if supervisor_bus_slots_v1.len() >= 256: return LinuxSupervisorBusOpenV1.Rejected("supervisor-system-bus-owner-bound")
+    val arena = malloc(40960u64)
+    if arena == 0: return LinuxSupervisorBusOpenV1.Rejected("supervisor-system-bus-memory")
+    val slot = supervisor_bus_slots_v1.len()
+    supervisor_bus_slots_v1.push(SupervisorBusStateV1(generation: slot + 1, arena: arena, profile: profile))
+    val owner = LinuxSupervisorBusV1(slot: slot, generation: slot + 1)
+    val opened = supervisor_bus_initialize_v1(slot)
+    if opened.is_err(): return LinuxSupervisorBusOpenV1.CleanupRequired(owner, opened.unwrap_err())
+    LinuxSupervisorBusOpenV1.Ready(owner)
+
+@unsafe(reason: "actual root peer and unique manager authentication precede signal subscription", capabilities: [ffi, raw_ptr])
+fn supervisor_bus_initialize_v1(slot: i64) -> Result<(), text>:
+    val actual_profile = supervisor_bus_slots_v1[slot].profile.current_v1()?
+    supervisor_bus_socket_v1(slot, true)?
+    val arena = supervisor_bus_slots_v1[slot].arena
+    volatile_write_u64(arena, 0)
+    val created = sd_bus_new(arena)
+    supervisor_bus_slots_v1[slot].bus = volatile_read_u64(arena)
+    val bus = supervisor_bus_slots_v1[slot].bus
+    if created < 0 or bus == 0: return Err("supervisor-system-bus-create")
+    if sd_bus_set_address(bus, supervisor_bus_z_v1(slot, 0, "unix:path=/run/dbus/system_bus_socket")) < 0 or
+            sd_bus_set_bus_client(bus, 1) < 0 or sd_bus_set_allow_interactive_authorization(bus, 0) < 0 or
+            sd_bus_set_method_call_timeout(bus, 1000000u64) < 0 or sd_bus_start(bus) < 0:
+        return Err("supervisor-system-bus-authentication")
+    val manager = supervisor_bus_auth_v1(slot, true)?
+    supervisor_bus_slots_v1[slot].manager = manager
+    supervisor_bus_begin_v1(slot, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "AddMatch")?
+    supervisor_bus_append_v1(slot, "type='signal',sender='" + manager + "',path='/org/freedesktop/systemd1',interface='org.freedesktop.systemd1.Manager',member='JobRemoved'")?
+    supervisor_bus_call_v1(slot, "org.freedesktop.DBus")?
+    supervisor_bus_end_v1(slot)?
+    val actual_manager = supervisor_bus_manager_begin_v1(slot, slot + 1, "Subscribe")?
+    supervisor_bus_call_v1(slot, actual_manager)?
+    supervisor_bus_end_v1(slot)?
+    val current_path = supervisor_bus_pid_v1(slot, slot + 1, actual_profile.process.process_id)?
+    if supervisor_bus_query_text_v1(slot, slot + 1, "GetUnit", actual_profile.supervisor_unit, 111u8)? != current_path or
+            supervisor_bus_string_property_v1(slot, slot + 1, current_path, "org.freedesktop.systemd1.Unit", "Id")? != actual_profile.supervisor_unit or
+            supervisor_bus_number_property_v1(slot, slot + 1, current_path, "org.freedesktop.systemd1.Service", "MainPID")? != actual_profile.process.process_id:
+        return Err("supervisor-system-bus-current-installed-supervisor-process-required")
+    Ok(())
+
+@unsafe(reason: "canonical invalidation then exact native reference cleanup; never restores unit state", capabilities: [ffi])
+fn supervisor_bus_close_v1(slot: i64, generation: i64) -> text:
+    val entered = supervisor_bus_entry_v1()
+    if entered.is_err(): return entered.unwrap_err()
+    if slot < 0 or slot >= supervisor_bus_slots_v1.len(): return "stale"
+    val prior = supervisor_bus_slots_v1[slot]
+    if prior.generation != generation: return "stale"
+    if prior.closed:
+        return if prior.close_diagnostic == "": "released" else: "consumed-error"
+    supervisor_bus_reset_v1(slot)
+    val state = supervisor_bus_slots_v1[slot]
+    supervisor_bus_slots_v1[slot].closed = true
+    supervisor_bus_slots_v1[slot].bus = 0
+    supervisor_bus_slots_v1[slot].arena = 0
+    if state.bus != 0:
+        sd_bus_close(state.bus)
+        val dropped = sd_bus_unref(state.bus)
+    for index in 0..state.ancestry.len():
+        val fd = supervisor_bus_slots_v1[slot].ancestry[index]
+        supervisor_bus_slots_v1[slot].ancestry[index] = -1
+        if fd >= 0 and close(fd as i32) != 0 and supervisor_bus_slots_v1[slot].close_diagnostic == "":
+            supervisor_bus_slots_v1[slot].close_diagnostic = "supervisor-system-bus-directory-close-consumed-error"
+    free(state.arena)
+    if supervisor_bus_slots_v1[slot].close_diagnostic == "": "released" else: "consumed-error"
+
+fn supervisor_bus_close_diagnostic_v1(slot: i64, generation: i64) -> text:
+    val entered = supervisor_bus_entry_v1()
+    if entered.is_err(): return entered.unwrap_err()
+    if slot < 0 or slot >= supervisor_bus_slots_v1.len(): return "stale"
+    val state = supervisor_bus_slots_v1[slot]
+    if state.generation != generation: return "stale"
+    state.close_diagnostic
+@else:
+fn supervisor_bus_manager_v1(slot: i64, generation: i64) -> Result<text, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_query_text_v1(slot: i64, generation: i64, method: text, argument: text, kind: u8) -> Result<text, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_pid_v1(slot: i64, generation: i64, pid: i64) -> Result<text, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_string_property_v1(slot: i64, generation: i64, path: text, iface: text, name: text) -> Result<text, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_number_property_v1(slot: i64, generation: i64, path: text, iface: text, name: text) -> Result<i64, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_scalar_property_v1(slot: i64, generation: i64, path: text, iface: text, name: text, kind: u8) -> Result<i64, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_string_array_property_v1(slot: i64, generation: i64, path: text, iface: text, name: text) -> Result<[text], text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_empty_exec_commands_v1(slot: i64, generation: i64, path: text, name: text) -> Result<bool, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_job_v1(slot: i64, generation: i64, path: text) -> Result<i64, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_void_v1(slot: i64, generation: i64, method: text, argument: text) -> Result<(), text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_mask_v1(slot: i64, generation: i64, unit: text) -> Result<[LinuxSupervisorUnitChangeV1], text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_stop_v1(slot: i64, generation: i64, unit: text) -> Result<text, text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_await_v1(slot: i64, generation: i64, unit: text, job: text) -> Result<(), text>: Err("supervisor-system-bus-linux-required")
+fn supervisor_bus_close_v1(slot: i64, generation: i64) -> text: "stale"
+fn supervisor_bus_close_diagnostic_v1(slot: i64, generation: i64) -> text: "stale"
+@end

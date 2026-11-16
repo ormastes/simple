@@ -4,6 +4,43 @@
 
 use std.skia.entity.enums.{SkTextEncoding}
 use std.nogc_sync_mut.io.font_sffi.{font_face_current_generation}
+use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.sfnt_glyf.{sfnt_glyf_measure_codepoint_advances}
+use std.io_runtime.{file_exists, file_read_bytes_result}
+
+var _sk_cached_font_paths: [text] = ["", "", "", ""]
+var _sk_cached_font_blobs: [[u8]] = [[], [], [], []]
+var _sk_cached_font_cursor: i64 = 0
+
+pub fn sk_default_vector_font_path() -> text:
+    if file_exists("assets/fonts/NotoSans-Regular.ttf"):
+        return "assets/fonts/NotoSans-Regular.ttf"
+    if file_exists("doc/06_spec/03_system/app/simple_web/evidence/fonts/DejaVuSans.ttf"):
+        return "doc/06_spec/03_system/app/simple_web/evidence/fonts/DejaVuSans.ttf"
+    if file_exists("assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"):
+        return "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+    ""
+
+pub fn sk_load_cached_font_bytes(path: text) -> [u8]:
+    if path == "":
+        return []
+    var slot: i64 = 0
+    while slot < 4:
+        if _sk_cached_font_paths[slot] == path and _sk_cached_font_blobs[slot].len() > 0:
+            return _sk_cached_font_blobs[slot]
+        slot = slot + 1
+    if not file_exists(path):
+        return []
+    match file_read_bytes_result(path):
+        case Ok(bytes):
+            if bytes.len() > 0:
+                val dst = _sk_cached_font_cursor % 4
+                _sk_cached_font_paths[dst] = path
+                _sk_cached_font_blobs[dst] = bytes
+                _sk_cached_font_cursor = (_sk_cached_font_cursor + 1) % 4
+            bytes
+        case Err(_):
+            []
 
 # ============================================================================
 # SkFontStyle
@@ -118,8 +155,11 @@ class SkFont:
     hinting: SkFontHinting
     edging: bool   # true = anti-alias edge
     subpixel: bool
+    font_path: text = ""
 
-fn sk_font_new(typeface: SkTypeface, size: f64) -> SkFont:
+# reason: Skia constructor matches upstream SkFont.MakeFromTypeface(typeface, size)
+# @allow(primitive_api)
+pub fn sk_font_new(typeface: SkTypeface, size: f64) -> SkFont:
     SkFont(
         typeface: typeface,
         size: size,
@@ -127,11 +167,59 @@ fn sk_font_new(typeface: SkTypeface, size: f64) -> SkFont:
         skew_x: 0.0,
         hinting: SkFontHinting.Normal,
         edging: true,
-        subpixel: false
+        subpixel: false,
+        font_path: typeface.font_path
     )
 
-fn sk_font_default() -> SkFont:
-    sk_font_new(sk_typeface_default(), 12.0)
+# reason: Skia constructor takes f64 font size matching sk_font_new
+# @allow(primitive_api)
+pub fn sk_font_default(size: f64 = 12.0) -> SkFont:
+    sk_font_new(sk_typeface_default(), size)
+
+# reason: Skia TTF constructor takes f64 pixel size matching sk_font_new
+# @allow(primitive_api)
+pub fn sk_font_with_ttf(path: text, size: f64) -> SkFont:
+    val tf = SkTypeface(
+        family_name: "ttf",
+        style: sk_font_style_normal(),
+        font_path: path,
+        font_handle: 0,
+        font_generation: 0
+    )
+    SkFont(
+        typeface: tf,
+        size: size,
+        scale_x: 1.0,
+        skew_x: 0.0,
+        hinting: SkFontHinting.Normal,
+        edging: true,
+        subpixel: false,
+        font_path: path
+    )
+
+# reason: internal Skia shaping boundary over codepoint indices and default-fallback bool
+# @allow(primitive_api)
+pub fn sk_font_measure_codepoints_advances(font: SkFont, cps: [i64], allow_default_fallback: bool) -> [f64]:
+    val count = cps.len()
+    if count == 0:
+        return []
+    val sz = if font.size > 0.0: font.size else: 12.0
+    val sx = if font.scale_x > 0.0: font.scale_x else: 1.0
+    val fallback_adv = sz * sx * 0.6
+    var path = font.effective_font_path()
+    if path == "" and allow_default_fallback:
+        path = sk_default_vector_font_path()
+    val blob = sk_load_cached_font_bytes(path)
+    if blob.len() > 0:
+        val measured = sfnt_glyf_measure_codepoint_advances(blob, cps, sz * sx)
+        if measured.len() == count:
+            return measured
+    var advs: [f64] = []
+    var i: i64 = 0
+    while i < count:
+        advs = advs.push(fallback_adv)
+        i = i + 1
+    advs
 
 impl SkFont:
     fn with_size(size: f64) -> SkFont:
@@ -142,20 +230,46 @@ impl SkFont:
             skew_x: self.skew_x,
             hinting: self.hinting,
             edging: self.edging,
-            subpixel: self.subpixel
+            subpixel: self.subpixel,
+            font_path: self.font_path
         )
 
-    fn measure_text(text: text) -> f64:
+    fn with_font_path(path: text) -> SkFont:
+        val tf = SkTypeface(
+            family_name: self.typeface.family_name,
+            style: self.typeface.style,
+            font_path: path,
+            font_handle: self.typeface.font_handle,
+            font_generation: self.typeface.font_generation
+        )
+        SkFont(
+            typeface: tf,
+            size: self.size,
+            scale_x: self.scale_x,
+            skew_x: self.skew_x,
+            hinting: self.hinting,
+            edging: self.edging,
+            subpixel: self.subpixel,
+            font_path: path
+        )
+
+    fn effective_font_path() -> text:
+        if self.font_path != "":
+            return self.font_path
+        self.typeface.font_path
+
+    fn measure_text(content: text) -> f64:
+        val cps = text_codepoints(content)
+        val advs = sk_font_measure_codepoints_advances(self, cps, false)
         var total = 0.0
-        for _ch in text:
-            total = total + (self.size * self.scale_x * 0.6)
+        var i: i64 = 0
+        while i < advs.len():
+            total = total + advs[i]
+            i = i + 1
         total
 
-    fn count_glyphs(text: text) -> i64:
-        var count: i64 = 0
-        for _ch in text:
-            count = count + 1
-        count
+    fn count_glyphs(content: text) -> i64:
+        text_codepoints(content).len()
 
     fn to_string() -> text:
         "SkFont({self.typeface.family_name} {self.size}pt)"

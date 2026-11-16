@@ -6037,6 +6037,22 @@ STAGE3_NATIVE
 
 # Three-argument v2 entry; its caller supplies the wrapper environment default.
 # Private temporary directory, no stdout and no destination change on refusal.
+# Host-scaled stage3 git-state budget in ms: 300s x (1 + load1/ncpu), capped at
+# 4x. Where /proc/loadavg is absent (Windows Git Bash) load is unknown, so the
+# 4x cap applies rather than the bare 300s that fails a full-checkout walk.
+bootstrap_stage3_git_budget_ms() {
+    stage3_loadavg=${STAGE3_LOADAVG_FILE:-/proc/loadavg}
+    stage3_ncpu=${STAGE3_NCPU:-$(nproc 2>/dev/null || echo 1)}
+    if [ -r "$stage3_loadavg" ]; then
+        stage3_load=$(cut -d' ' -f1 "$stage3_loadavg" 2>/dev/null | cut -d. -f1)
+        stage3_scale=$(( 1 + ${stage3_load:-0} / (stage3_ncpu > 0 ? stage3_ncpu : 1) ))
+    else
+        stage3_scale=4
+    fi
+    [ "$stage3_scale" -le 4 ] || stage3_scale=4
+    echo $((300000 * stage3_scale))
+}
+
 bootstrap_stage3_materialized_git_state() (
     [ "$#" -eq 3 ] || exit 1
     case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 1 ;; esac
@@ -6054,23 +6070,29 @@ bootstrap_stage3_materialized_git_state() (
     STAGE3_GIT=$(cygpath -aw "$(command -v git)") || exit 1
     STAGE3_SH=$(cygpath -aw /usr/bin/sh.exe) || exit 1
     export STAGE3_ROOT STAGE3_ROOT_B64 STAGE3_RECEIPT STAGE3_RESULT STAGE3_OUTPUT STAGE3_GIT STAGE3_SH
-    # The C# watchdog budget (MaxMillis, default 300s after the 2026-09-16
-    # full-checkout measurement) must win the race against this outer kill:
-    # a too-tight timeout here reports a healthy, still-walking consumer as a
-    # generic bind failure. The budget is host-scaled (WA-PREFLIGHT-RETRY: a
-    # fixed 330s kill fired under load): unset -> 300s x (1 + load1/ncpu),
-    # capped at 4x; the outer kill always derives from the same budget + 30s.
+    # The C# watchdog budget (MaxMillis) must win the race against this outer
+    # kill: a too-tight timeout here reports a healthy, still-walking consumer
+    # as a generic bind failure. Unset -> the native ceiling (1200s). The old
+    # 300s x (1 + load1/ncpu) default stayed at 300s on an 80-thread host and
+    # killed a valid receipt whose walk measured 489s (2026-11-15). The outer
+    # kill adds 120s for PowerShell startup + Add-Type compile, which run
+    # before the C# clock starts.
     if [ -z "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" ]; then
-        stage3_ncpu=$(nproc 2>/dev/null || echo 1)
-        stage3_load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null | cut -d. -f1)
-        stage3_scale=$(( 1 + ${stage3_load:-0} / (stage3_ncpu > 0 ? stage3_ncpu : 1) ))
-        [ "$stage3_scale" -le 4 ] || stage3_scale=4
-        BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=$((300000 * stage3_scale))
+        BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=1200000
         export BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
     fi
     case "$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" in ''|*[!0-9]*) exit 1 ;; esac
-    stage3_outer_s=$((BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS / 1000 + 30))
-    /usr/bin/timeout -k 2s "${stage3_outer_s}s" powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
+    stage3_outer_s=$((BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS / 1000 + 120))
+    /usr/bin/timeout -k 2s "${stage3_outer_s}s" powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null
+    stage3_rc=$?
+    case "$stage3_rc" in
+        0) ;;
+        # 124 = timeout(1) fired, 137 = -k SIGKILL: the receipt was NOT judged.
+        124|137)
+            echo "stage3-materialized-consumer: timed out after ${stage3_outer_s}s (budget ${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS}ms); receipt not judged; raise BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS (ceiling 1200000)" >&2
+            exit 3 ;;
+        *) exit 1 ;;
+    esac
 )
 
 bootstrap_stage3_git_state() {

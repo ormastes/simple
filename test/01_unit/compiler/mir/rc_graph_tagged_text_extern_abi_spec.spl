@@ -1,0 +1,99 @@
+# Runtime RC graph externs consume tagged RuntimeValue handles. This exercises
+# production HIR -> MIR -> LLVM lowering, including same-name Source controls.
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.text_extern_abi.{tagged_text_value_arg_indices, text_arg_indices}
+
+fn lower_to_llvm(source: text, name: text) -> text:
+    val ast = parse_full_frontend(source, name, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in hir_lowering.errors:
+        errors = errors + err.message + "\n"
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "":
+        return "LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm.rc_graph_text_abi", CodegenTarget.X86_64, nil).translate_module(mir)
+
+fn call_line(output: text, marker: text) -> text:
+    for line in output.split("\n"):
+        if line.contains("call ") and line.contains(marker):
+            return line
+    ""
+
+fn top_level_arg_count(line: text, marker: text) -> i64:
+    val start_idx = line.find(marker)
+    if start_idx < 0:
+        return -1
+    val body = line.substring(start_idx + marker.len())
+    var depth = 1
+    var commas = 0
+    var saw = false
+    var i = 0
+    while i < body.len():
+        val ch = body[i]
+        if ch == "(":
+            depth = depth + 1
+            saw = true
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                if not saw: return 0
+                return commas + 1
+        elif ch == "," and depth == 1:
+            commas = commas + 1
+        elif ch != " ":
+            saw = true
+        i = i + 1
+    -1
+
+describe "runtime RC graph tagged-text extern ABI":
+    it "registers only the four exact tagged RuntimeValue owners":
+        expect(tagged_text_value_arg_indices("rt_rc_share").unwrap()).to_equal([0])
+        expect(tagged_text_value_arg_indices("rt_rc_retain").unwrap()).to_equal([0])
+        expect(tagged_text_value_arg_indices("rt_rc_release").unwrap()).to_equal([0])
+        expect(tagged_text_value_arg_indices("rt_rc_count").unwrap()).to_equal([0])
+        expect(tagged_text_value_arg_indices("other.rt_rc_count")).to_be_nil()
+        expect(tagged_text_value_arg_indices("rt_rc_count_extra")).to_be_nil()
+        expect(text_arg_indices("rt_rc_count")).to_be_nil()
+
+    it "passes an actual extern text operand as one tagged word":
+        val source = "extern fn rt_rc_count<T>(value: T) -> i64\n\n" +
+            "fn probe(value: text) -> i64:\n    rt_rc_count(value)\n"
+        val output = lower_to_llvm(source, "rc_graph_extern_text_abi.spl")
+        assert_true(not output.starts_with("LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
+        val line = call_line(output, "@rt_rc_count(")
+        assert_true(line != "", "expected the actual extern call")
+        assert_equal(1, top_level_arg_count(line, "@rt_rc_count("), "runtime takes one tagged handle: " + line)
+        assert_equal(0, output.split("rt_interp_cstr(").len() - 1, "tagged RC text must not be unboxed")
+
+    it "does not apply the runtime extern ABI to a same-name Source function":
+        val source = "fn rt_rc_count(value: text) -> i64:\n    value.len() as i64\n\n" +
+            "fn probe(value: text) -> i64:\n    rt_rc_count(value)\n"
+        val output = lower_to_llvm(source, "rc_graph_source_lookalike.spl")
+        assert_true(not output.starts_with("LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
+        assert_true(call_line(output, "rt_rc_count(") != "", "expected the source function call")
+        assert_equal(0, output.split("rt_interp_cstr(").len() - 1, "Source call must retain its own text ABI")
+
+    it "keeps non-text generic extern operands on their declared machine-word ABI":
+        val source = "extern fn rt_rc_count<T>(value: T) -> i64\n\n" +
+            "fn probe(value: i64) -> i64:\n    rt_rc_count(value)\n"
+        val output = lower_to_llvm(source, "rc_graph_extern_i64_abi.spl")
+        assert_true(not output.starts_with("LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
+        val line = call_line(output, "@rt_rc_count(")
+        assert_true(line != "", "expected the declared i64 extern call")
+        assert_equal(1, top_level_arg_count(line, "@rt_rc_count("), "i64 remains one machine word: " + line)
+        assert_true(line.contains("i64 "), "non-text arg keeps its declared i64 ABI: " + line)

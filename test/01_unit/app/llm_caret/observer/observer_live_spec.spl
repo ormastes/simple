@@ -1,0 +1,61 @@
+# Purpose and audience: live observer wiring evidence (hook receive -> TUI/GUI status), for the caret team.
+# @req CU-008 CU-009 CU-010
+
+use std.spec.*
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredHookCorrelation}
+use app.llm_caret.messaging.adapter.agent.hook_bridge.{drain_hook_events}
+use app.llm_caret.observer.observer_log.{observer_reset, observer_events, observer_inbox, OBSERVER_RING_CAP, observer_record_hook}
+use app.llm_caret.observer.attention_inbox.{attention_unread}
+use app.llm_caret.workbench.session_contract.{SessionId, SessionView, InputMode, new_session_view, new_draft}
+use app.llm_caret.workbench.tui_layout.{compute_layout, CompactView}
+use app.llm_caret.workbench.tui_view.{new_render_input, render_workbench}
+use app.llm_caret.workbench.gui_page.{render_workbench_page}
+use app.llm_caret.workbench.gui_layout.{WorkbenchMode}
+
+fn _view() -> SessionView:
+    new_session_view(SessionId(value: "builder", generation: 1), "builder", "claude")
+
+fn _enqueue(store: PureSqlMessagingStore, id: text, name: text, at: i64):
+    store.enqueue_hook_event(id, "claude", name, "{}", at)
+    store.put_hook_correlation(StoredHookCorrelation(event_id: id, task_id: "t", room_id: "r", agent_id: "builder"))
+
+fn _tui_text() -> text:
+    val v = _view()
+    val layout = compute_layout(120, 40, CompactView.Session, 1)
+    val input = new_render_input([v], v.id, new_draft(v.id, InputMode.Message), "roster")
+    render_workbench(layout, input).join("\n")
+
+describe "live observer":
+    it "no events renders unknown, never working":
+        # @req CU-010
+        step("no events")
+        observer_reset()
+        val t = _tui_text()
+        expect(t).to_contain("unknown")
+        expect(t.contains("working")).to_equal(false)
+
+    it "hook stream through drain_hook_events shows in TUI and GUI":
+        # @req CU-008 CU-009
+        step("approval hook drained")
+        observer_reset()
+        var store = PureSqlMessagingStore.open_memory().unwrap()
+        _enqueue(store, "h1", "PermissionRequest", 5)
+        drain_hook_events(store, 10)
+        expect(_tui_text()).to_contain("needs you -- structured approval request (structured)")
+        val html = render_workbench_page([_view()], _view().id, [], WorkbenchMode.Full)
+        expect(html).to_contain("needs you")
+        expect(html).to_contain("attention")
+        step("replay does not duplicate")
+        observer_record_hook("claude", "builder", 1, "h1", 5, "PermissionRequest")
+        expect(attention_unread(observer_inbox()).len()).to_equal(1)
+        expect(observer_events().len()).to_equal(1)
+
+    it "ring is bounded per session":
+        # @req CU-008
+        step("flood")
+        observer_reset()
+        var i = 0
+        while i < OBSERVER_RING_CAP + 10:
+            observer_record_hook("claude", "builder", 1, "e" + i.to_text(), i, "PreToolUse")
+            i = i + 1
+        expect(observer_events().len()).to_equal(OBSERVER_RING_CAP)

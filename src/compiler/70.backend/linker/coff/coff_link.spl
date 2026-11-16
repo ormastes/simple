@@ -143,11 +143,23 @@ fn _coff_patch(section: [u8], offset: i64, width: i64, value: i64) -> Result<[u8
     Ok(result)
 
 fn _coff_output_section_name(name: text) -> Result<text, text>:
+    # GNU-style priority constructor tables (`.ctors.00101`) fold into `.ctors`.
+    if name.starts_with(".ctors."): return Ok(".ctors")
+    if name.starts_with(".dtors."): return Ok(".dtors")
     val groups = name.split("$")
     if groups.len() > 1 and groups[0].len() > 0 and groups[0].len() <= 8:
         return Ok(groups[0])
     if name.len() > 0 and name.len() <= 8: return Ok(name)
     Err("COFF section name '{name}' cannot be represented in a PE section header")
+
+fn _coff_subsection_sort_key(name: text) -> text:
+    """Order within an output group. MSVC `$` groups sort by full name; the
+    mingw `.ctors`/`.dtors` tables place the synthetic `$A` head sentinel,
+    then bare and `.N` priority input, then the `$z` terminator (lld mingw)."""
+    for table in [".ctors", ".dtors"]:
+        if name == table: return "{table}$M"
+        if name.starts_with("{table}."): return "{table}$N{name}"
+    name
 
 fn _coff_section_alignment(section: CoffSection) -> Result<i64, text>:
     val encoded = (section.characteristics >> 20) & 0xf
@@ -163,7 +175,9 @@ fn _coff_section_is_image_input(section: CoffSection) -> bool:
     # CodeView type/symbol streams are linker inputs used to construct a PDB;
     # they are not PE image sections. `debug=true` remains rejected until the
     # internal linker owns PDB/debug-directory production.
-    not section.name.starts_with(".debug$")
+    # DWARF `.debug_*` sections (mingw/clang objects) are likewise not loaded;
+    # they are dropped as with `-s` until the linker emits long-name debug sections.
+    not section.name.starts_with(".debug$") and not section.name.starts_with(".debug_")
 
 fn _coff_gc_target(objects: [CoffObject], accepted: [[bool]],
         source_object: i64, symbol: CoffSymbol,
@@ -458,7 +472,8 @@ fn _coff_section_rvas(objects: [CoffObject],
         while a < subsection_names.len():
             var b = a + 1
             while b < subsection_names.len():
-                if subsection_names[b] < subsection_names[a]:
+                if _coff_subsection_sort_key(subsection_names[b]) <
+                        _coff_subsection_sort_key(subsection_names[a]):
                     val temporary = subsection_names[a]
                     subsection_names[a] = subsection_names[b]
                     subsection_names[b] = temporary
@@ -503,6 +518,12 @@ fn _coff_section_rvas(objects: [CoffObject],
                 oi = oi + 1
         next_rva = next_rva + pe_align_up(group_offset, section_alignment)
     Ok(result)
+
+fn _coff_symbol_section_removed(object_index: i64, symbol: CoffSymbol,
+        rvas: [[i64]]) -> bool:
+    val section_index = symbol.section_number - 1
+    section_index >= 0 and section_index < rvas[object_index].len() and
+        rvas[object_index][section_index] == 0
 
 fn _coff_local_symbol_rva(object_index: i64, symbol: CoffSymbol,
         rvas: [[i64]]) -> Result<i64, text>:
@@ -602,6 +623,10 @@ fn _coff_merge_object_sections(contributions: [PeImageSection]) -> [PeImageSecti
                 val offset = contribution.virtual_address - base
                 val count = contribution.data.len()
                 if count > 0: data.write_span(contribution.data, offset, 0, count)
+        # An empty output section (e.g. clang's zero-length `.data`/`.bss`)
+        # would share its RVA with the next section; the Windows loader rejects
+        # such an image ("not a valid Win32 application"), so lld omits it.
+        if virtual_end - base == 0 and raw_end == 0: continue
         result = result.push(PeImageSection(name: name, virtual_address: base,
             virtual_size: virtual_end - base, data: data,
             characteristics: characteristics))
@@ -954,7 +979,10 @@ fn _coff_relocation_symbol_address(objects: [CoffObject], rvas: [[i64]], object_
         image_base: i64) -> Result<CoffResolvedAddress, text>:
     if symbol.is_absolute():
         return Ok(CoffResolvedAddress(address: symbol.value, absolute: true))
-    if symbol.is_defined():
+    # An external symbol whose own COMDAT copy lost selection resolves to the
+    # winning definition elsewhere (e.g. mingw `.refptr.*` in every object).
+    if symbol.is_defined() and not (symbol.is_external() and
+            _coff_symbol_section_removed(object_index, symbol, rvas)):
         val local = _coff_local_symbol_rva(object_index, symbol, rvas)
         if local.is_err(): return Err(local.unwrap_err())
         return Ok(CoffResolvedAddress(
@@ -986,7 +1014,8 @@ fn _coff_relocation_symbol_address(objects: [CoffObject], rvas: [[i64]], object_
 
 fn _coff_symbol_location(objects: [CoffObject], rvas: [[i64]], object_index: i64,
         symbol: CoffSymbol, aliases: {text: text}) -> Result<CoffSymbolLocation, text>:
-    if symbol.is_defined():
+    if symbol.is_defined() and not (symbol.is_external() and
+            _coff_symbol_section_removed(object_index, symbol, rvas)):
         val section_index = symbol.section_number - 1
         if section_index < 0 or section_index >= rvas[object_index].len() or
                 rvas[object_index][section_index] == 0:
@@ -1445,6 +1474,56 @@ fn _coff_synthetic_absolutes(objects: [CoffObject], machine: i64) -> CoffObject:
     CoffObject(machine: machine, timestamp: 0, characteristics: 0, sections: [],
         symbols: symbols, symbol_table_offset: 0, symbol_table_count: table_index)
 
+fn _coff_symbol_referenced_undefined(objects: [CoffObject], name: text) -> bool:
+    var referenced = false
+    for object in objects:
+        for symbol in object.symbols:
+            if symbol.name == name and symbol.is_external():
+                if symbol.is_defined() or symbol.is_absolute(): return false
+                referenced = true
+    referenced
+
+fn _coff_synthetic_section(name: text, data: [u8], characteristics: i64) -> CoffSection:
+    CoffSection(name: name, virtual_size: 0, raw_size: data.len(), raw_pointer: 0,
+        relocation_pointer: 0, relocation_count: 0, characteristics: characteristics,
+        comdat_selection: 0, associative_section: 0, comdat_checksum: 0,
+        comdat_key: "", data: data, relocations: [])
+
+fn _coff_synthetic_mingw_lists(objects: [CoffObject], machine: i64) -> CoffObject:
+    """Symbols the GNU/mingw linker defines (lld `MinGW` driver rows):
+    `__CTOR_LIST__`/`__DTOR_LIST__` head a `-1 ... 0` pointer table built
+    from `.ctors`/`.dtors` input, and `__RUNTIME_PSEUDO_RELOC_LIST__`/`_END__`
+    bracket the (empty — no auto-import) pseudo-relocation list."""
+    var sections: [CoffSection] = []
+    var symbols: [CoffSymbol] = []
+    # IMAGE_SCN_CNT_INITIALIZED_DATA | MEM_READ | MEM_WRITE | ALIGN_8BYTES.
+    val table_flags = 0xc0400040
+    for table in [".ctors", ".dtors"]:
+        val list_name = if table == ".ctors": "__CTOR_LIST__" else: "__DTOR_LIST__"
+        if not _coff_symbol_referenced_undefined(objects, list_name): continue
+        var head: [u8] = []
+        for _ in 0..8: head = head.push(0xff)
+        sections = sections.push(_coff_synthetic_section("{table}$A", head, table_flags))
+        symbols = symbols.push(CoffSymbol(name: list_name, value: 0,
+            section_number: sections.len(), symbol_type: 0,
+            storage_class: COFF_STORAGE_CLASS_EXTERNAL, auxiliary_count: 0,
+            table_index: symbols.len(), weak_default_index: -1, weak_characteristics: 0))
+        sections = sections.push(_coff_synthetic_section("{table}$z", elf_u8_zeros(8), table_flags))
+    var pseudo_needed = false
+    for name in ["__RUNTIME_PSEUDO_RELOC_LIST__", "__RUNTIME_PSEUDO_RELOC_LIST_END__"]:
+        if _coff_symbol_referenced_undefined(objects, name): pseudo_needed = true
+    if pseudo_needed:
+        # IMAGE_SCN_CNT_INITIALIZED_DATA | MEM_READ | ALIGN_4BYTES, one 4-byte
+        # anchor so the empty list has a real RVA inside `.rdata`.
+        sections = sections.push(_coff_synthetic_section(".rdata$zzpr", elf_u8_zeros(4), 0x40300040))
+        for name in ["__RUNTIME_PSEUDO_RELOC_LIST__", "__RUNTIME_PSEUDO_RELOC_LIST_END__"]:
+            symbols = symbols.push(CoffSymbol(name: name, value: 0,
+                section_number: sections.len(), symbol_type: 0,
+                storage_class: COFF_STORAGE_CLASS_EXTERNAL, auxiliary_count: 0,
+                table_index: symbols.len(), weak_default_index: -1, weak_characteristics: 0))
+    CoffObject(machine: machine, timestamp: 0, characteristics: 0, sections: sections,
+        symbols: symbols, symbol_table_offset: 0, symbol_table_count: symbols.len())
+
 fn _coff_link_retained(request: CoffLinkRequest,
         retained_symbols: [text], machine: i64,
         policy: PeImagePolicy, image_base: i64,
@@ -1468,6 +1547,8 @@ fn _coff_link_retained(request: CoffLinkRequest,
         prepared.objects
     var objects = input_objects
     objects.push(_coff_synthetic_absolutes(input_objects, machine))
+    val mingw_lists = _coff_synthetic_mingw_lists(input_objects, machine)
+    if mingw_lists.sections.len() > 0: objects.push(mingw_lists)
     val selected = prepared.selected
     val closure_roots = prepared.closure_roots
     val aliases = prepared.aliases

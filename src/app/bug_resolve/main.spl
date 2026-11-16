@@ -3,9 +3,15 @@
 
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
-use nogc_sync_mut.database.bug.{load_bug_database}
+use nogc_sync_mut.database.bug.{load_bug_database, BugTokenReading, BugTokenCount, BugTokenUsage,
+    BugTokenProvider, BugTokenSource, BugKnowledgeLink, bug_token_total, bug_token_reading_text,
+    bug_token_category_to_string}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.log.{error}
+use app.bug_resolve.closure_cli.{BugDbPathV1, BugClosureRequestV1, bug_closure_state_of_v1, bug_closure_cli_evaluate, bug_closure_argument_problem_v1, bug_closure_render_v1}
+use app.bug.closure_gate.{BugIdV1, SnapshotDigestV1, TestCaseIdV1, ClosureRationaleV1, BugClosureDispositionV1, BugClosureKindV1, BugClosureVerdictV1, bug_closure_disposition_parse_v1, bug_closure_disposition_text_v1, bug_closure_disposition_kind_v1}
+use app.bug.workaround_autoretire.{AutoRetireVerdictV1}
+use app.bug.workaround_autoretire_cli.{workaround_auto_retire_print_v1}
 
 val BUG_DB_PATH = "doc/08_tracking/bug/bug_db.sdn"
 
@@ -24,6 +30,12 @@ fn print_help():
     print "  --token-source=<source>               Provider/session usage source"
     print "  --token-provider=<provider>           Provider identity (required and separate from source)"
     print "  --knowledge=<path|none>               Required knowledge link above 2x average"
+    print "  --reproducer=<spec>                   Existing reproducer _spec.spl (required to close)"
+    print "  --prevention=<spec>                   Existing prevention/generalization _spec.spl (required, distinct)"
+    print "  --disposition=<d>                     fixed (default), closed, triage, duplicate, invalid, wontfix, deferred; non-fix needs --rationale and is not a verified fix"
+    print "  --rationale=<text>                    Required for a non-fix disposition"
+    print "  --source-head=<rev>                   Source snapshot the closure is pinned to (default: git HEAD)"
+    print "  --auto-retire                         After resolving, list live workaround sites (path:line); exits 1 while any remain (default off, edits nothing)"
     print "  --json         Output as JSON"
     for line in log_options_help():
         print "  {line}"
@@ -43,15 +55,28 @@ fn parse_flag(args: [text], prefix: text) -> text:
             return arg[prefix.len():]
     ""
 
-fn _token_value(raw: text) -> i64:
+# None means the field is malformed (negative or not a decimal integer).
+fn _token_reading(raw: text) -> BugTokenReading?:
     if raw == "unavailable" or raw == "-1":
-        return -1
-    match raw.parse_i64():
-        case Some(value): if value >= 0: value else: -2
-        case None: -2
+        return Some(BugTokenReading.Unavailable)
+    # Not `match raw.parse_i64()`: on the seed, a tail-position match arm that
+    # builds BugTokenCount from its binding yields one shared count for every call.
+    val parsed = raw.parse_i64()
+    if not parsed.?:
+        return None
+    val count = parsed ?? 0
+    if count < 0:
+        return None
+    Some(BugTokenReading.Count(BugTokenCount(value: count)))
 
-fn _token_field_valid(raw: text) -> bool:
-    _token_value(raw) != -2
+fn _exceeds_twice_average(total: BugTokenReading, average: BugTokenReading) -> bool:
+    match total:
+        case BugTokenReading.Unavailable: false
+        case BugTokenReading.Count(total_count):
+            match average:
+                case BugTokenReading.Unavailable: false
+                case BugTokenReading.Count(average_count):
+                    average_count.value <= 4611686018427387903 and total_count.value > average_count.value * 2
 
 fn _knowledge_path_allowed(path: text) -> bool:
     path != "" and not path.starts_with("/") and not path.contains("..") and
@@ -115,32 +140,28 @@ fn main() -> i64:
         print_help()
         return 1
 
-    if not _token_field_valid(input_tokens) or not _token_field_valid(output_tokens) or not _token_field_valid(cache_read_tokens) or not _token_field_valid(cache_create_tokens):
-        print "Error: token fields must be nonnegative decimal integers or literal 'unavailable'"
-        return 1
-
-    val input_value = _token_value(input_tokens)
-    val output_value = _token_value(output_tokens)
-    val cache_read_value = _token_value(cache_read_tokens)
-    val cache_create_value = _token_value(cache_create_tokens)
-    val numeric_usage = input_value >= 0 and output_value >= 0 and cache_read_value >= 0 and cache_create_value >= 0
-    var total_tokens: i64 = -1
-    if numeric_usage:
-        if input_value > 9223372036854775807 - output_value:
+    var readings: [BugTokenReading] = []
+    for raw in [input_tokens, output_tokens, cache_read_tokens, cache_create_tokens]:
+        match _token_reading(raw):
+            case Some(reading): readings.push(reading)
+            case None:
+                print "Error: token fields must be nonnegative decimal integers or literal 'unavailable'"
+                return 1
+    val total = match bug_token_total(readings):
+        case Ok(value): value
+        case Err(_reason):
             print "Error: token total overflow"
             return 1
-        val first_total = input_value + output_value
-        if first_total > 9223372036854775807 - cache_read_value:
-            print "Error: token total overflow"
-            return 1
-        val second_total = first_total + cache_read_value
-        if second_total > 9223372036854775807 - cache_create_value:
-            print "Error: token total overflow"
-            return 1
-        total_tokens = second_total + cache_create_value
 
     val timestamp = date_str
-    val token_provider = token_provider_raw
+    val disposition_raw = parse_flag(args, "--disposition=")
+    var disposition = BugClosureDispositionV1.Fixed
+    if disposition_raw != "":
+        match bug_closure_disposition_parse_v1(disposition_raw):
+            case Some(value): disposition = value
+            case None:
+                print "Error: --disposition must be one of fixed, closed, triage, duplicate, invalid, wontfix, deferred"
+                return 1
 
     val db_opt = load_bug_database(BUG_DB_PATH)
     var db = match db_opt:
@@ -149,30 +170,84 @@ fn main() -> i64:
             print "Error: could not load bug database at {BUG_DB_PATH}"
             return 1
 
-    val token_category = db.token_category_for_bug(id)
-    val average_value = db.comparable_token_average(token_category, id)
-    if average_value == -2:
-        print "Error: comparable token cohort is invalid or overflows"
-        return 1
-    val above_twice_average = total_tokens >= 0 and average_value >= 0 and average_value <= 4611686018427387903 and total_tokens > average_value * 2
-    if above_twice_average:
+    val bug_state = match db.get_bug(id):
+        case Some(found): bug_closure_state_of_v1(found)
+        case None:
+            print "Error: bug '{id}' not found in database"
+            return 1
+    val token_category = match db.token_category_for_bug(id):
+        case Some(value): value
+        case None:
+            print "Error: bug '{id}' not found in database"
+            return 1
+    val average = match db.comparable_token_average(token_category, id):
+        case Ok(value): value
+        case Err(reason):
+            print "Error: comparable token cohort is invalid or overflows ({reason})"
+            return 1
+    if _exceeds_twice_average(total, average):
         if knowledge == "none" or not _knowledge_path_allowed(knowledge) or not file_exists(knowledge):
             print "Error: token usage exceeds 2x derived average; --knowledge must name an existing repository knowledge artifact"
             return 1
-    val any_unavailable = input_value < 0 or output_value < 0 or cache_read_value < 0 or cache_create_value < 0
-    val all_unavailable = input_value < 0 and output_value < 0 and cache_read_value < 0 and cache_create_value < 0
-    if any_unavailable and not all_unavailable:
+    var unavailable_count = 0
+    for reading in readings:
+        match reading:
+            case BugTokenReading.Unavailable: unavailable_count = unavailable_count + 1
+            case BugTokenReading.Count(_): pass
+    if unavailable_count > 0 and unavailable_count < readings.len():
         if knowledge == "none" or not _knowledge_path_allowed(knowledge) or not file_exists(knowledge):
             print "Error: partial token usage cannot be compared; --knowledge must name an existing repository knowledge artifact"
             return 1
 
-    val total_text = if total_tokens >= 0: "{total_tokens}" else: "unavailable"
-    val average_text = if average_value >= 0: "{average_value}" else: "unavailable"
-    val token_receipt = "token_usage category={token_category} provider={token_provider} input={input_tokens} output={output_tokens} cache_read={cache_read_tokens} cache_create={cache_create_tokens} total={total_text} source={token_source} comparable_average={average_text} knowledge={knowledge}"
+    val reproducer = parse_flag(args, "--reproducer=")
+    val prevention = parse_flag(args, "--prevention=")
+    val rationale = parse_flag(args, "--rationale=")
+    val verified_fix = bug_closure_disposition_kind_v1(disposition) == BugClosureKindV1.VerifiedFix
+    val source_head_raw = parse_flag(args, "--source-head=")
+    val source_head: SnapshotDigestV1? = if source_head_raw == "": None else: Some(SnapshotDigestV1(value: source_head_raw))
+    val reproducer_case: TestCaseIdV1? = if reproducer == "": None else: Some(TestCaseIdV1(value: reproducer))
+    val prevention_case: TestCaseIdV1? = if prevention == "": None else: Some(TestCaseIdV1(value: prevention))
+    val request = BugClosureRequestV1(bug: BugIdV1(value: id), disposition: disposition,
+        reproducer: reproducer_case, prevention: prevention_case,
+        rationale: ClosureRationaleV1(value: rationale), source_head: source_head, bug_state: bug_state)
+    val argument_problem = bug_closure_argument_problem_v1(request)
+    if argument_problem != "":
+        print "Error: close rejected: {argument_problem}"
+        return 1
+    # The evaluator is the single source of the verdict; nothing is written before it is Allowed.
+    val evaluation = match bug_closure_cli_evaluate(request, BugDbPathV1(value: BUG_DB_PATH)):
+        case Ok(value): value
+        case Err(reason):
+            print "Error: close rejected: {reason}"
+            return 1
+    if evaluation.receipt.verdict != BugClosureVerdictV1.Allowed:
+        print "Error: close rejected by the closure gate"
+        for line in bug_closure_render_v1(evaluation):
+            print line
+        return 1
+    if verified_fix:
+        db.add_investigation_log(id, "close_evidence reproducer={reproducer} prevention={prevention} run_evidence=not_observed head={evaluation.receipt.head.value}")
+    else:
+        db.add_investigation_log(id, "close_disposition disposition={bug_closure_disposition_text_v1(disposition)} kind=non_fix_disposition not_a_verified_fix rationale={rationale}")
+
+    val category_text = bug_token_category_to_string(token_category)
+    val token_receipt = "token_usage category={category_text} provider={token_provider_raw} input={input_tokens} output={output_tokens} cache_read={cache_read_tokens} cache_create={cache_create_tokens} total={bug_token_reading_text(total)} source={token_source} comparable_average={bug_token_reading_text(average)} knowledge={knowledge}"
     if not db.add_investigation_log(id, token_receipt):
         print "Error: bug '{id}' not found in database"
         return 1
-    if not db.add_token_usage(id, token_category, token_provider, input_value, output_value, cache_read_value, cache_create_value, total_tokens, token_source, knowledge, timestamp):
+    val knowledge_link: BugKnowledgeLink? = if knowledge == "none": None else: Some(BugKnowledgeLink(path: knowledge))
+    val usage = BugTokenUsage(
+        category: token_category,
+        provider: BugTokenProvider(value: token_provider_raw),
+        input: readings[0],
+        output: readings[1],
+        cache_read: readings[2],
+        cache_create: readings[3],
+        source: BugTokenSource(value: token_source),
+        knowledge: knowledge_link,
+        recorded_at: timestamp
+    )
+    if not db.add_token_usage(id, usage):
         print "Error: failed to store structured bug token usage"
         return 1
 
@@ -191,4 +266,6 @@ fn main() -> i64:
         print "{\"command\":\"bug-resolve\",\"status\":\"ok\",\"id\":\"" + id + "\",\"updated_at\":\"" + timestamp + "\"}"
     else:
         print "Resolved bug {id} (status: Closed, updated_at: {timestamp})"
+    if args.contains("--auto-retire") and workaround_auto_retire_print_v1(BugIdV1(value: id)) != AutoRetireVerdictV1.NothingToRetire:
+        return 1
     0

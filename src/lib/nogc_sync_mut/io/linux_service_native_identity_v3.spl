@@ -1,0 +1,66 @@
+# Genuine observation borrow only. No enrollment/service scope/incarnation,
+# launch/admission grant, registry, resource allocation, writer or owning close.
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.{LinuxMachinePolicyOwnerV1, LinuxMachineProcessContextV1}
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochObservationV1
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshHostContextV2
+
+pub struct LinuxServiceNativeIdentitySnapshotV3:
+    native_machine_id: text
+    native_boot_id: text
+    architecture: text
+    owner_generation: i64
+    process_identity_digest: text
+    process_generation: i64
+    authority_namespace_id: text
+
+pub class LinuxServiceNativeIdentityBorrowV3:
+    reader: LinuxMachinePolicyOwnerV1
+    successor: LinuxFreshEpochSuccessorCustodyV1
+    expected: LinuxServiceNativeIdentitySnapshotV3
+
+    pub fn current_v3() -> Result<LinuxServiceNativeIdentitySnapshotV3, text>:
+        val actual = service_identity_observe_v3(self.reader, self.successor)?
+        if actual != self.expected: return Err("linux-service-native-identity-original-pair-changed")
+        Ok(actual)
+
+fn service_identity_match_v3(process: LinuxMachineProcessContextV1, epoch: LinuxFreshEpochObservationV1,
+        host: LinuxFreshHostContextV2, boot: text) -> Result<(), text>:
+    if (process.generation < 1 or epoch.owner_generation < 1 or process.real_uid <= 0 or
+            process.real_uid != process.effective_uid or process.effective_uid != epoch.service_uid):
+        return Err("linux-service-native-identity-process-owner-mismatch")
+    if process.identity_digest != epoch.process_identity_digest:
+        return Err("linux-service-native-identity-profile-process-mismatch")
+    if host.owner_generation != epoch.owner_generation:
+        return Err("linux-service-native-identity-provider-generation-mismatch")
+    if boot == "" or boot != host.native_boot_id: return Err("linux-service-native-identity-boot-mismatch")
+    if (host.native_machine_id == "" or process.authority_namespace_id == "" or
+            not ["x86_64", "aarch64"].contains(host.architecture)):
+        return Err("linux-service-native-identity-context-unsupported")
+    Ok(())
+
+fn service_identity_observe_v3(reader: LinuxMachinePolicyOwnerV1,
+        successor: LinuxFreshEpochSuccessorCustodyV1) -> Result<LinuxServiceNativeIdentitySnapshotV3, text>:
+    val process = reader.actual_process_context_v1()?
+    val boot = reader.actual_boot_id_v2()?
+    val epoch = successor.current_v1()?
+    val host = successor.current_host_context_v2()?
+    service_identity_match_v3(process, epoch, host, boot)?
+    val final_epoch = successor.current_v1()?
+    val final_host = successor.current_host_context_v2()?
+    val final_boot = reader.actual_boot_id_v2()?
+    val final_process = reader.actual_process_context_v1()?
+    service_identity_match_v3(final_process, final_epoch, final_host, final_boot)?
+    if process != final_process or boot != final_boot or epoch != final_epoch or host != final_host:
+        return Err("linux-service-native-identity-observation-changed")
+    Ok(LinuxServiceNativeIdentitySnapshotV3(native_machine_id: final_host.native_machine_id,
+        native_boot_id: final_host.native_boot_id, architecture: final_host.architecture,
+        owner_generation: final_host.owner_generation, process_identity_digest: final_process.identity_digest,
+        process_generation: final_process.generation, authority_namespace_id: final_process.authority_namespace_id))
+
+pub fn linux_service_native_identity_borrow_v3(reader: LinuxMachinePolicyOwnerV1,
+        successor: LinuxFreshEpochSuccessorCustodyV1) -> Result<LinuxServiceNativeIdentityBorrowV3, text>:
+    # No caller observation, root, identity string or generation can mint this
+    # borrow. Actual upper retains both original capabilities on every result.
+    val observed = service_identity_observe_v3(reader, successor)?
+    Ok(LinuxServiceNativeIdentityBorrowV3(reader: reader, successor: successor, expected: observed))

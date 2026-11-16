@@ -4363,10 +4363,9 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
 
 /* C lane of rt_pty_is_running.
  *
- * HONEST SCOPE, stated rather than implied. The rest of the rt_pty_* family
- * (open/spawn/read/write/close) is Rust-only and frozen as such in
- * scripts/check/rt_dual_implementation_baseline.txt, so this is NOT a mirror
- * of an existing C pty implementation -- there is none to mirror. It is a
+ * HONEST SCOPE, stated rather than implied. On POSIX the rest of the rt_pty_*
+ * family (open/spawn/read/write/close) has no C lane (only Windows has one,
+ * below), so the POSIX branch is NOT a mirror of a C pty implementation. It is a
  * state-free liveness probe, and being state-free is exactly what lets it be
  * correct without the child table the Rust lane keeps.
  *
@@ -4385,19 +4384,307 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
  * poll() on a pty master is a known soft spot outside Linux and was NOT
  * exercised on macOS or FreeBSD here.
  *
- * Windows: the Rust lane resolves `handle` through its own SESSIONS map to a
- * process HANDLE and calls WaitForSingleObject. The C lane owns no such map,
- * cannot resolve the handle, and therefore cannot answer. It reports false --
- * the same value pty.rs itself uses as this family's "not supported here"
- * answer in its #[cfg(not(any(unix, windows)))] arms -- rather than inventing
- * a liveness claim it has no basis for. A bool cannot carry "unknown", so the
- * distinction lives in this comment and in the ConPTY follow-up, not in a
- * fabricated sentinel that would assert a specific failure instead.
+ * Windows: this lane owns a ConPTY session table (below), so open/spawn/read/
+ * write/close exist here too and `handle` resolves to the spawned process
+ * HANDLE, probed with WaitForSingleObject exactly like the Rust lane.
  */
 #ifdef _WIN32
+/* Windows C lane of the core rt_pty_* family over ConPTY. It mirrors the Rust
+ * lane's `#[cfg(windows)] mod pty_process` (src/compiler_rust/runtime/src/value/pty.rs):
+ * the same pipe pairing, CreatePseudoConsole flags, CreateProcessW launch of a
+ * command LINE, PeekNamedPipe-polled read with a held-back UTF-8 tail, and the
+ * same terminate -> ClosePseudoConsole -> close-pipes teardown. Native builds
+ * link this lane, so without it rt_pty_open/spawn/read/write/close were link
+ * stubs that aborted at the first call.
+ *
+ * Divergences, stated: invalid UTF-8 is passed through byte-for-byte instead
+ * of being replaced with U+FFFD, and a second concurrent reader of the SAME
+ * handle gets "" instead of queueing behind the first (one PTY has one
+ * reader). Concurrency is lockless: slots are claimed by CAS, every operation
+ * holds a use count, and close waits for that count to drain before releasing
+ * any OS handle, so a racing read never touches a closed pipe.
+ *
+ * The ConPTY entry points are resolved from kernel32 at first use: the
+ * toolchain headers in use declare them only for _WIN32_WINNT >= 0x0A00, and
+ * a host without ConPTY (pre-1809) must answer -1, not fail to load. */
+#ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+#define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
+#endif
+#define WIN_PTY_SLOTS 64
+#define WIN_PTY_READ_MAX 4096
+typedef HRESULT (WINAPI *WinPtyCreateFn)(COORD, HANDLE, HANDLE, DWORD, void**);
+typedef HRESULT (WINAPI *WinPtyResizeFn)(void*, COORD);
+typedef void (WINAPI *WinPtyCloseFn)(void*);
+struct WinPtySlot {
+    volatile LONG state;   /* 0 free, 1 claimed, 2 open, 3 closing */
+    volatile LONG users;
+    volatile LONG id;
+    volatile LONG spawned;
+    volatile LONG reading;
+    HANDLE input_write;
+    HANDLE output_read;
+    void* pseudo_console;
+    HANDLE process;
+    unsigned char pending[4];
+    int pending_len;
+};
+static struct WinPtySlot win_pty_slots[WIN_PTY_SLOTS];
+static volatile LONG win_pty_generation;
+static volatile LONG win_pty_api_state; /* 0 unresolved, 1 ready, 2 unavailable */
+static WinPtyCreateFn win_pty_create_fn;
+static WinPtyResizeFn win_pty_resize_fn;
+static WinPtyCloseFn win_pty_close_fn;
+static _Thread_local char win_pty_read_buf[WIN_PTY_READ_MAX + 8];
+
+static int win_pty_api(void) {
+    LONG state = win_pty_api_state;
+    if (state == 0) {
+        HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+        WinPtyCreateFn create = kernel ? (WinPtyCreateFn)(void*)GetProcAddress(kernel, "CreatePseudoConsole") : NULL;
+        WinPtyResizeFn resize = kernel ? (WinPtyResizeFn)(void*)GetProcAddress(kernel, "ResizePseudoConsole") : NULL;
+        WinPtyCloseFn close_fn = kernel ? (WinPtyCloseFn)(void*)GetProcAddress(kernel, "ClosePseudoConsole") : NULL;
+        if (create && resize && close_fn) {
+            win_pty_create_fn = create;
+            win_pty_resize_fn = resize;
+            win_pty_close_fn = close_fn;
+            MemoryBarrier();
+            InterlockedExchange(&win_pty_api_state, 1);
+        } else {
+            InterlockedExchange(&win_pty_api_state, 2);
+        }
+        state = win_pty_api_state;
+    }
+    return state == 1;
+}
+
+/* Pins the open slot named by `handle`; NULL for an unknown or closing one.
+ * Every non-NULL result must be released with win_pty_release. */
+static struct WinPtySlot* win_pty_acquire(int64_t handle) {
+    if (handle <= 0 || handle > INT32_MAX) return NULL;
+    struct WinPtySlot* slot = &win_pty_slots[handle % WIN_PTY_SLOTS];
+    InterlockedIncrement(&slot->users);
+    if (slot->state == 2 && slot->id == (LONG)handle) return slot;
+    InterlockedDecrement(&slot->users);
+    return NULL;
+}
+
+static void win_pty_release(struct WinPtySlot* slot) {
+    InterlockedDecrement(&slot->users);
+}
+
+static int32_t win_pty_open(int32_t rows, int32_t cols) {
+    if (!win_pty_api()) return -1;
+    struct WinPtySlot* slot = NULL;
+    int index = 0;
+    for (; index < WIN_PTY_SLOTS; index++) {
+        if (InterlockedCompareExchange(&win_pty_slots[index].state, 1, 0) == 0) {
+            slot = &win_pty_slots[index];
+            break;
+        }
+    }
+    if (!slot) return -1;
+    HANDLE input_read = NULL, input_write = NULL, output_read = NULL, output_write = NULL;
+    void* console = NULL;
+    COORD size;
+    size.X = (SHORT)(cols < 1 ? 1 : (cols > 32767 ? 32767 : cols));
+    size.Y = (SHORT)(rows < 1 ? 1 : (rows > 32767 ? 32767 : rows));
+    if (!CreatePipe(&input_read, &input_write, NULL, 0)) goto fail;
+    if (!CreatePipe(&output_read, &output_write, NULL, 0)) goto fail;
+    if (FAILED(win_pty_create_fn(size, input_read, output_write, 0x2 | 0x4, &console)) || !console) goto fail;
+    CloseHandle(input_read);
+    CloseHandle(output_write);
+    slot->input_write = input_write;
+    slot->output_read = output_read;
+    slot->pseudo_console = console;
+    slot->process = NULL;
+    slot->pending_len = 0;
+    slot->spawned = 0;
+    slot->reading = 0;
+    /* A generation keeps a reused slot from answering a stale handle. */
+    LONG generation = (InterlockedIncrement(&win_pty_generation) & 0x00FFFFFF) + 1;
+    LONG id = generation * WIN_PTY_SLOTS + index;
+    slot->id = id;
+    MemoryBarrier();
+    InterlockedExchange(&slot->state, 2);
+    return (int32_t)id;
+fail:
+    if (input_read) CloseHandle(input_read);
+    if (input_write) CloseHandle(input_write);
+    if (output_read) CloseHandle(output_read);
+    if (output_write) CloseHandle(output_write);
+    InterlockedExchange(&slot->state, 0);
+    return -1;
+}
+
+static int64_t win_pty_spawn(int32_t handle, const char* command) {
+    if (!command || !command[0]) return -1;
+    struct WinPtySlot* slot = win_pty_acquire(handle);
+    if (!slot) return -1;
+    int64_t result = -1;
+    if (InterlockedCompareExchange(&slot->spawned, 1, 0) != 0) {
+        win_pty_release(slot);
+        return -1;
+    }
+    wchar_t* line = win_capture_command_wide(command);
+    SIZE_T attribute_bytes = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_bytes);
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes =
+        attribute_bytes ? (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attribute_bytes) : NULL;
+    if (line && attributes && InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_bytes)) {
+        if (UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                                      slot->pseudo_console, sizeof(void*), NULL, NULL)) {
+            STARTUPINFOEXW startup;
+            PROCESS_INFORMATION info;
+            ZeroMemory(&startup, sizeof(startup));
+            ZeroMemory(&info, sizeof(info));
+            startup.StartupInfo.cb = sizeof(STARTUPINFOEXW);
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startup.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
+            startup.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
+            startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
+            startup.lpAttributeList = attributes;
+            if (CreateProcessW(NULL, line, NULL, NULL, FALSE,
+                               EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                               NULL, NULL, &startup.StartupInfo, &info)) {
+                CloseHandle(info.hThread);
+                slot->process = info.hProcess;
+                result = (int64_t)info.dwProcessId;
+            }
+        }
+        DeleteProcThreadAttributeList(attributes);
+    }
+    free(attributes);
+    free(line);
+    if (result < 0) InterlockedExchange(&slot->spawned, 0);
+    win_pty_release(slot);
+    return result;
+}
+
+static bool win_pty_write(int64_t handle, const char* data, size_t length) {
+    struct WinPtySlot* slot = win_pty_acquire(handle);
+    if (!slot) return false;
+    bool ok = true;
+    while (ok && length > 0) {
+        DWORD chunk = length > 0x40000000u ? 0x40000000u : (DWORD)length;
+        DWORD written = 0;
+        ok = WriteFile(slot->input_write, data, chunk, &written, NULL) && written > 0;
+        data += written;
+        length -= written;
+    }
+    win_pty_release(slot);
+    return ok;
+}
+
+/* Length of an incomplete UTF-8 sequence at the end of bytes[0..n) (0..3). */
+static int win_pty_utf8_incomplete_tail(const unsigned char* bytes, int n) {
+    for (int back = 1; back <= 3 && back <= n; back++) {
+        unsigned char b = bytes[n - back];
+        if ((b & 0xC0) != 0x80) {
+            int need = (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 1;
+            return need > back ? back : 0;
+        }
+    }
+    return 0;
+}
+
+static const char* win_pty_read(int64_t handle, int64_t timeout_ms) {
+    win_pty_read_buf[0] = 0;
+    struct WinPtySlot* slot = win_pty_acquire(handle);
+    if (!slot) return win_pty_read_buf;
+    if (InterlockedCompareExchange(&slot->reading, 1, 0) != 0) {
+        win_pty_release(slot);
+        return win_pty_read_buf;
+    }
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)(timeout_ms < 0 ? 0 : timeout_ms);
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(slot->output_read, NULL, 0, NULL, &available, NULL)) break;
+        if (available > 0) {
+            int held = slot->pending_len;
+            memcpy(win_pty_read_buf, slot->pending, (size_t)held);
+            DWORD want = available > WIN_PTY_READ_MAX ? WIN_PTY_READ_MAX : available;
+            DWORD got = 0;
+            if (!ReadFile(slot->output_read, win_pty_read_buf + held, want, &got, NULL)) {
+                win_pty_read_buf[0] = 0;
+                break;
+            }
+            int total = held + (int)got;
+            int cut = win_pty_utf8_incomplete_tail((const unsigned char*)win_pty_read_buf, total);
+            memcpy(slot->pending, win_pty_read_buf + total - cut, (size_t)cut);
+            slot->pending_len = cut;
+            win_pty_read_buf[total - cut] = 0;
+            break;
+        }
+        if (GetTickCount64() >= deadline) break;
+        Sleep(10);
+    }
+    InterlockedExchange(&slot->reading, 0);
+    win_pty_release(slot);
+    return win_pty_read_buf;
+}
+
+static bool win_pty_close(int64_t handle) {
+    if (handle <= 0 || handle > INT32_MAX) return true;
+    struct WinPtySlot* slot = &win_pty_slots[handle % WIN_PTY_SLOTS];
+    if (slot->id != (LONG)handle || InterlockedCompareExchange(&slot->state, 3, 2) != 2) {
+        /* Unknown handle = already closed: idempotent success, as in the Rust lane. */
+        return true;
+    }
+    while (slot->users != 0) Sleep(1);
+    bool ok = true;
+    if (slot->process) {
+        bool exited = WaitForSingleObject(slot->process, 0) == WAIT_OBJECT_0;
+        bool terminated = exited ||
+            (TerminateProcess(slot->process, 1) && WaitForSingleObject(slot->process, 2000) == WAIT_OBJECT_0);
+        ok = terminated && CloseHandle(slot->process);
+        slot->process = NULL;
+    }
+    win_pty_close_fn(slot->pseudo_console);
+    CloseHandle(slot->input_write);
+    CloseHandle(slot->output_read);
+    slot->pseudo_console = NULL;
+    slot->input_write = NULL;
+    slot->output_read = NULL;
+    slot->id = 0;
+    MemoryBarrier();
+    InterlockedExchange(&slot->state, 0);
+    return ok;
+}
+
+int32_t rt_pty_open(int32_t rows, int32_t cols) { return win_pty_open(rows, cols); }
+/* `text` crosses this ABI as a RuntimeValue string (as in the Rust lane's
+ * RuntimeValue parameters), not a C string: read it with rt_string_data/len and
+ * build the read result with rt_string_new. */
+int64_t rt_pty_spawn(int32_t handle, int64_t program) {
+    int64_t length = rt_string_len(program);
+    const uint8_t* bytes = rt_string_data(program);
+    if (length <= 0 || !bytes) return -1;
+    char* command = (char*)malloc((size_t)length + 1);
+    if (!command) return -1;
+    memcpy(command, bytes, (size_t)length);
+    command[length] = 0;
+    int64_t pid = strlen(command) == (size_t)length ? win_pty_spawn(handle, command) : -1;
+    free(command);
+    return pid;
+}
+bool rt_pty_write(int64_t handle, int64_t data) {
+    int64_t length = rt_string_len(data);
+    const uint8_t* bytes = rt_string_data(data);
+    if (length < 0 || (length > 0 && !bytes)) return false;
+    return win_pty_write(handle, (const char*)bytes, (size_t)length);
+}
+int64_t rt_pty_read(int64_t handle, int64_t timeout_ms) {
+    const char* text = win_pty_read(handle, timeout_ms);
+    return rt_string_new((const uint8_t*)text, (uint64_t)strlen(text));
+}
+bool rt_pty_close(int64_t handle) { return win_pty_close(handle); }
+
 bool rt_pty_is_running(int64_t handle) {
-    (void)handle;
-    return false;
+    struct WinPtySlot* slot = win_pty_acquire(handle);
+    if (!slot) return false;
+    bool running = slot->process && WaitForSingleObject(slot->process, 0) == WAIT_TIMEOUT;
+    win_pty_release(slot);
+    return running;
 }
 #else
 bool rt_pty_is_running(int64_t handle) {
@@ -4421,15 +4708,18 @@ bool rt_pty_is_running(int64_t handle) {
  * the Rust lane this cannot also signal the spawned child directly, because it
  * has no child table. NOT exercised on any POSIX host at the time of writing.
  *
- * Windows: the ConPTY handle lives in the Rust lane's SESSIONS map, so this
- * lane cannot resolve `handle` and reports false, which std.sys.pty's
- * capability probe reads as "this provider cannot resize". */
+ * Windows: ResizePseudoConsole on this lane's own ConPTY session. */
 #ifdef _WIN32
 bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
-    (void)handle;
-    (void)rows;
-    (void)cols;
-    return false;
+    if (rows < 1 || rows > 32767 || cols < 1 || cols > 32767) return false;
+    struct WinPtySlot* slot = win_pty_acquire(handle);
+    if (!slot) return false;
+    COORD size;
+    size.X = (SHORT)cols;
+    size.Y = (SHORT)rows;
+    bool ok = SUCCEEDED(win_pty_resize_fn(slot->pseudo_console, size));
+    win_pty_release(slot);
+    return ok;
 }
 #else
 bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {

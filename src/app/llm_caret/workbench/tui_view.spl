@@ -21,6 +21,11 @@ use app.llm_caret.workbench.tui_layout.{Rect, WorkbenchLayout, CompactView}
 use app.llm_caret.workbench.session_contract.{
     SessionId, SessionView, ComposerDraft, InputMode, ProcessLifecycle,
     AgentTurn, Transport, CapabilityEvidence, same_session}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, resolve_pane_binding,
+    pane_binding_label}
+use app.llm_caret.observer.session_status.{session_status_text, session_status_label, session_needs_attention, session_loaded_skills_text, session_skill_hint_text}
+use app.llm_caret.observer.observer_log.{observer_loaded_skills}
+use app.llm_caret.workbench.fleet_transport.{fleet_host_panel_rows}
 
 # ============================================================================
 # Grid primitives
@@ -189,22 +194,35 @@ struct WorkbenchRenderInput:
     # identities are still distinct (see workbench/pane_source.spl).
     active_pane_id: text
     active_output: [text]
+    # Explicit pane bindings + the pane's observed generation. The terminal
+    # label comes from `pane_binding_label(resolve_pane_binding(..))`: a pane
+    # with no matching binding is "unbound terminal", never the selected agent's.
+    bindings: [PaneBinding]
+    pane_generation: i64
 
 pub fn new_render_input(sessions: [SessionView], selected: SessionId, draft: ComposerDraft, focus_label: text) -> WorkbenchRenderInput:
     var no_output: [text] = []
+    var no_bindings: [PaneBinding] = []
     WorkbenchRenderInput(sessions: sessions, selected: selected, draft: draft,
-        focus_label: focus_label, active_pane_id: "", active_output: no_output)
+        focus_label: focus_label, active_pane_id: "", active_output: no_output,
+        bindings: no_bindings, pane_generation: 0)
 
 pub fn new_render_input_with_output(sessions: [SessionView], selected: SessionId, draft: ComposerDraft, focus_label: text, active_pane_id: text, active_output: [text]) -> WorkbenchRenderInput:
+    var no_bindings: [PaneBinding] = []
+    new_render_input_with_binding(sessions, selected, draft, focus_label,
+        active_pane_id, active_output, no_bindings, 0)
+
+pub fn new_render_input_with_binding(sessions: [SessionView], selected: SessionId, draft: ComposerDraft, focus_label: text, active_pane_id: text, active_output: [text], bindings: [PaneBinding], pane_generation: i64) -> WorkbenchRenderInput:
     WorkbenchRenderInput(sessions: sessions, selected: selected, draft: draft,
         focus_label: focus_label, active_pane_id: active_pane_id,
-        active_output: active_output)
+        active_output: active_output, bindings: bindings,
+        pane_generation: pane_generation)
 
 fn _pending_count(sessions: [SessionView]) -> i64:
     var n = 0
     var i = 0
     while i < sessions.len():
-        if sessions[i].needs_attention:
+        if session_needs_attention(sessions[i]):
             n = n + 1
         i = i + 1
     n
@@ -218,15 +236,22 @@ fn _render_roster(grid: Grid, r: Rect, input: WorkbenchRenderInput):
     _put_str(grid, r.x + 1, r.y + 1, r.w - 2, "Agents")
     var row = r.y + 2
     var i = 0
-    while i < input.sessions.len() and row < r.y + r.h - 1:
+    # Fleet hosts (id, transport kind, state -- never command args) take the
+    # last interior row so the roster never hides a disconnected host.
+    val host_rows = fleet_host_panel_rows()
+    var limit = r.y + r.h - 1
+    if host_rows.len() > 0 and r.h >= 5:
+        limit = limit - 1
+        _put_str(grid, r.x + 1, limit, r.w - 2, "Hosts: " + host_rows.join(", "))
+    while i < input.sessions.len() and row < limit:
         val s = input.sessions[i]
         var prefix = "  "
         if same_session(s.id, input.selected):
             prefix = "> "
         var attn = ""
-        if s.needs_attention:
+        if session_needs_attention(s):
             attn = " !"
-        _put_str(grid, r.x + 1, row, r.w - 2, prefix + s.label + " " + s.provider + " " + turn_text(s.turn) + attn)
+        _put_str(grid, r.x + 1, row, r.w - 2, prefix + s.label + " " + s.provider + " " + turn_text(s.turn) + " [" + session_status_label(s) + "]" + attn)
         row = row + 1
         i = i + 1
 
@@ -268,7 +293,8 @@ fn _render_active(grid: Grid, r: Rect, input: WorkbenchRenderInput):
     if input.active_pane_id == "":
         _put_str(grid, r.x + 1, r.y + 4, r.w - 2, "Pane: none attached")
         return
-    _put_str(grid, r.x + 1, r.y + 4, r.w - 2, "Pane " + input.active_pane_id)
+    _put_str(grid, r.x + 1, r.y + 4, r.w - 2,
+        pane_binding_label(resolve_pane_binding(input.bindings, s.id, input.pane_generation)))
     var row = r.y + 5
     var i = 0
     while i < input.active_output.len() and row < r.y + r.h - 1:
@@ -289,10 +315,23 @@ fn _render_previews(grid: Grid, previews: [Rect], input: WorkbenchRenderInput):
             shown = shown + 1
         i = i + 1
 
+fn _selected_status(input: WorkbenchRenderInput) -> text:
+    val idx = _find_index(input.sessions, input.selected)
+    if idx < 0:
+        return ""
+    val view = input.sessions[idx]
+    val status = "   Status: " + session_status_text(view)
+    if observer_loaded_skills(view.id.value).len() == 0:
+        return status
+    val hint = session_skill_hint_text(view)
+    if hint == "":
+        return status + "   " + session_loaded_skills_text(view)
+    status + "   " + session_loaded_skills_text(view) + "   " + hint
+
 fn _render_status(grid: Grid, r: Rect, input: WorkbenchRenderInput):
     val line = "Focus: " + input.focus_label + " -> " + _label_for(input.sessions, input.draft.target) +
         "   Mode: " + input_mode_text(input.draft.mode) +
-        "   Pending: " + _pending_count(input.sessions).to_text()
+        "   Pending: " + _pending_count(input.sessions).to_text() + _selected_status(input)
     _put_str(grid, r.x, r.y, r.w, line)
 
 # ============================================================================

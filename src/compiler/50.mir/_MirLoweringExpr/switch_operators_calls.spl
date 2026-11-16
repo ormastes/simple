@@ -34,6 +34,7 @@ use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 use compiler.mir._MirLowering.global_initializer_guard.*
+use compiler.mir._MirLowering.named_call_arguments_v1.*
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -117,6 +118,17 @@ fn int_list_contains(xs: [i64], v: i64) -> bool:
 pub fn hir_type_is_plain_scalar(type_: HirType) -> bool:
     match type_.kind:
         case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
+        case _: false
+
+# Type predicate shared with function_lowering/expr_dispatch; bool is its result.
+#[allow(primitive_api)]
+pub fn hir_type_is_plain_payload_sink_v1(type_: HirType) -> bool:
+    """A declared non-optional slot whose payload decode is total: a record,
+    text or collection. Scalars keep option_payload_for_int_sink; Int is also
+    what SIMPLE_BOOTSTRAP=1 erases `T?` to, so it never proves "not optional".
+    Optional/Any/TypeParam/Unit stay with their existing paths."""
+    match type_.kind:
+        case HirTypeKind.Named(_, _) | HirTypeKind.Str | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Dict(_, _) | HirTypeKind.Tuple(_): true
         case _: false
 
 fn hir_block_is_static_scalar(block: HirBlock, depth: i64) -> bool:
@@ -633,9 +645,14 @@ impl MirLowering:
         # unreliable under native codegen (doc/07_guide/language/dict_native_pitfalls.md).
         if self.enum_runtime_id_index_q.has(enum_name):
             return self.enum_runtime_id_index_q[enum_name]
-        val found = self.enum_runtime_id_index.get(enum_name)
-        if found != None:
-            return found
+        # The bare key used `.get()` + `return found` (i64? from -> i64). The
+        # integ2 Stage 2 compiled that return as rt_value_unbox_int(Option
+        # handle), so a bare-named construction (`val e: Box<text> =
+        # Box.Empty` -> lower_enum_construct_named("Box")) got a garbage
+        # enum id and every match on it fell through (defect C of
+        # doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md).
+        if self.enum_runtime_id_index.has(enum_name):
+            return self.enum_runtime_id_index[enum_name]
         self.ensure_declaration_enum_runtime_v1(enum_name)
         if self.enum_runtime_id_index_q.has(enum_name): return self.enum_runtime_id_index_q[enum_name]
         if self.enum_runtime_id_index.has(enum_name): return self.enum_runtime_id_index[enum_name]
@@ -950,6 +967,59 @@ impl MirLowering:
             self.remember_local_hir_type(payload_local.id, payload_type, 0, 0)
             self.static_scalar_locals[payload_local.id] = true
         payload_local
+
+    me is_plain_payload_return_v1(declared: HirType) -> bool:
+        """The one gate for narrowing a `T?` into a declared `-> T`, shared by
+        the implicit tail and `lower_return_expr`: a plain sink that is not a
+        native trait (a `-> Trait` return is coerced to a (data, table) object)."""
+        hir_type_is_plain_payload_sink_v1(declared) and self.native_trait_owner_for_type(declared) == ""
+
+    me is_plain_tuple_payload_slot_v1(declared: HirType) -> bool:
+        """A declared plain tuple `-> (A, B)`: the one sink whose `T?` arms
+        must be narrowed per arm, before the join. A native tuple is a
+        headerless N-word allocation, so the join cannot normalise a raw
+        tuple arm into `T?` at runtime (rt_enum_id would read element 0)."""
+        match declared.kind:
+            case HirTypeKind.Tuple(_): self.is_plain_payload_return_v1(declared)
+            case _: false
+
+    me is_plain_tuple_conditional_return_v1(declared: HirType, value: HirExpr) -> bool:
+        """The one gate, shared by the implicit tail and lower_return_expr,
+        for lowering a conditional value against a declared plain tuple
+        return, so each `(A, B)?` arm is narrowed (lower_block_expected)."""
+        if not self.is_plain_tuple_payload_slot_v1(declared):
+            return false
+        match value.kind:
+            case HirExprKind.If(_, _, else_): else_ != None
+            case HirExprKind.IfChain(_, else_): else_ != None
+            case HirExprKind.MatchCase(_, _): true
+            case _: false
+
+    me option_payload_for_plain_sink(local: LocalId, value_type: HirType) -> LocalId?:
+        """A `T?` value flowing into a declared plain `T` slot (a function tail
+        whose conditional joined to `T?`): unwrap with rt_unwrap_or_trap so
+        None aborts instead of escaping as the handle, then decode the payload
+        word as `T`. None when value_type is not Optional of a decodable T.
+        doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md"""
+        match value_type.kind:
+            case HirTypeKind.Optional(inner):
+                if not hir_type_is_plain_payload_sink_v1(inner):
+                    return None
+                var b = self.builder
+                val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_unwrap_or_trap"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ), call_origin: MirCallOrigin.Runtime)
+                val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
+                self.builder = b
+                val word = unwrapped ?? local
+                # A tuple payload is a tuple pointer word: recover it the way
+                # `.unwrap()` does, never decode it as an i64.
+                match inner.kind:
+                    case HirTypeKind.Tuple(_): return Some(self.recover_optional_tuple_payload(word, inner))
+                    case _: ()
+                Some(self.decode_declared_enum_payload_slot(word, inner))
+            case _: None
 
     me option_payload_for_int_sink(local: LocalId, sink_type: HirType) -> LocalId:
         """Payload-typed USE of an Optional local in a declared INTEGER sink
@@ -2068,9 +2138,10 @@ impl MirLowering:
                     return sym_id
         if base_local == None:
             return -1
-        val tracked = self.bitfield_value_syms.get(base_local.id)
-        if tracked != None:
-            return tracked
+        # has()+index, not `.get()` + `return tracked` (i64? from -> i64): the
+        # same shape the integ2 Stage 2 miscompiled in enum_runtime_id.
+        if self.bitfield_value_syms.has(base_local.id):
+            return self.bitfield_value_syms[base_local.id]
         -1
 
     me try_lower_bitfield_get(base: HirExpr, base_local: LocalId, field_name: text) -> LocalId?:
@@ -2858,6 +2929,44 @@ impl MirLowering:
             case _: ()
         None
 
+    me enum_match_declared_owner_key(scrutinee: HirExpr, owner_keys: [text]) -> text:
+        """Owner key, among `owner_keys`, of the builtin Result/Option that a
+        method-call subject's callee declares as its return
+        (`stores[0].get(i)` with `fn get(..) -> Result<T, E>` on a generic
+        class). Attribution only: no type is recorded for the subject, its
+        payload or the call result, so value conventions are untouched
+        (bug native_generic_class_result_payload_times_8_2026-11-15). Empty
+        when the declaration is unknown or names another type."""
+        var wanted = ""
+        match scrutinee.kind:
+            case MethodCall(receiver, method, _, _):
+                var receiver_type = self.receiver_declared_type(receiver)
+                if receiver_type == None:
+                    match receiver.kind:
+                        case HirExprKind.Index(_, _): receiver_type = self.declared_container_read_type(receiver)
+                        case _: ()
+                if val found_receiver = receiver_type:
+                    match found_receiver.kind:
+                        case HirTypeKind.Named(owner_symbol, _):
+                            if val method_id = self.symbols.lookup_method_in_type(owner_symbol, method):
+                                if val declared = self.resolved_call_hir_return_type(method_id):
+                                    match declared.kind:
+                                        case HirTypeKind.Result(_, _): wanted = "Result"
+                                        case HirTypeKind.Optional(_): wanted = "Option"
+                                        case _: ()
+                        case _: ()
+            case _: ()
+        if wanted == "":
+            return ""
+        var found = ""
+        for raw_key in owner_keys:
+            val key: text = raw_key
+            if self.enum_bare_of(key) == wanted:
+                if found != "":
+                    return ""
+                found = key
+        found
+
     me enum_match_unwrapped_type(receiver: HirExpr) -> HirType?:
         """Payload type of a builtin Option/Result unwrap on `receiver`."""
         if val source_type = self.enum_match_expr_type(receiver):
@@ -3130,6 +3239,13 @@ impl MirLowering:
                             if declared != None:
                                 val expression_key = result_err_field_type_key(declared, self.symbols)
                                 if expression_key == "" or expression_key != retained_key:
+                                    # A free generic call whose T payload was
+                                    # decoded and rebuilt at the call site
+                                    # (decode_erased_scalar_call_payload)
+                                    # retains the concrete instance of the
+                                    # expression's generic declaration.
+                                    if hir_type_instantiates_to(declared, retained):
+                                        return Some(retained)
                                     # Keep the rejecting guard. Bounded semantic
                                     # keys distinguish an erased call signature
                                     # from a genuinely conflicting declaration;
@@ -4452,8 +4568,17 @@ impl MirLowering:
                         # truthful, so that case reaches the loud ambiguity
                         # error below instead.
                         val owner_keys = self.variant_owner_keys(variant)
-                        val owner_count = owner_keys.len()
+                        var owner_count = owner_keys.len()
                         var owner = if owner_count > 0: owner_keys[0] else: ""
+                        if owner_count > 1:
+                            # A method-call subject whose callee DECLARES a
+                            # Result/Option return owns the bare arm. Only the
+                            # owner is taken; the subject stays untyped, so the
+                            # payload bind is exactly the unambiguous path's.
+                            val declared_owner = self.enum_match_declared_owner_key(scrutinee, owner_keys)
+                            if declared_owner != "":
+                                owner = declared_owner
+                                owner_count = 1
                         if owner_count == 1:
                             d = self.enum_variant_discriminant(owner, variant)
                             if enum_name == "":
@@ -4992,7 +5117,7 @@ impl MirLowering:
                     if effective_payload_type == None:
                         if val option_inner = self.option_inner_hir_type_for_local(scrutinee, scrut_local):
                             effective_payload_type = Some(option_inner)
-                    val bound_payload = if exact_optional_record:
+                    var bound_payload = if exact_optional_record:
                         match optional_record_type.kind:
                             case HirTypeKind.Error: pl
                             case _: self.materialize_optional_record_payload(pl, scrutinee_payload_struct, optional_record_type)
@@ -5033,18 +5158,10 @@ impl MirLowering:
                             # stage2_poll_payload_typeparam_match_2026-11-01).
                             # Metadata only: decoding above keeps the declared
                             # slot type.
-                            val payload_arm: HirMatchArm = arms[enum_arm_srcidx[ci]]
-                            var payload_instance: HirType? = scrutinee_enum_type
-                            match payload_arm.pattern.kind:
-                                case Enum(payload_arm_type, _, _):
-                                    match payload_arm_type.kind:
-                                        case HirTypeKind.Named(_, payload_arm_args):
-                                            if payload_arm_args.len() > 0:
-                                                payload_instance = Some(payload_arm_type)
-                                        case _: ()
-                                case _: ()
+                            val payload_instance = self.enum_arm_payload_instance_v1(arms[enum_arm_srcidx[ci]], scrutinee_enum_type)
                             val instantiated_payload_type = self.substitute_enum_payload_type_params_v1(payload_owner_key, enum_name, bound_payload_type, payload_instance)
                             self.remember_local_hir_type(bound_payload.id, instantiated_payload_type, 0, 0)
+                            bound_payload = self.decode_instantiated_enum_payload_slot_v1(bound_payload, bound_payload_type, instantiated_payload_type)
                     if enum_name == "Result" and enum_variants[ci] == "Err" and (mir_lower_env_get("SIMPLE_ENUM_PAYLOAD_PATH_TRACE") ?? "") == "1":
                         # Scalar diagnostic evidence only: do not interpolate
                         # optional type payloads through value-position unwraps.
@@ -5234,6 +5351,18 @@ impl MirLowering:
                                     # resolves the receiver instead of lowering a const-0
                                     # placeholder (bug mir_unresolved_method_on_enum_payload_binding).
                                     self.remember_local_hir_type(bound_slot.id, slot_types[slot_index], 0, 0)
+                        elif self.enum_variant_payload_types.has(tuple_payload_key):
+                            # Generic owner: the declared-slot decode above is
+                            # withheld, so a `Two<P, i64>` binder `a` stayed an
+                            # untyped `A` and `a.id` read field 0 into a Unit
+                            # dest. Tag an instantiated record slot, exactly as
+                            # the single-binder path does.
+                            val generic_slots: [HirType] = self.enum_variant_payload_types[tuple_payload_key]
+                            if slot_index >= 0 and slot_index < generic_slots.len():
+                                val generic_slot: HirType = generic_slots[slot_index]
+                                val slot_instance = self.enum_arm_payload_instance_v1(arms[enum_arm_srcidx[ci]], scrutinee_enum_type)
+                                val instantiated_slot = self.substitute_enum_payload_type_params_v1(tuple_owner_key, enum_name, generic_slot, slot_instance)
+                                bound_slot = self.decode_instantiated_enum_payload_slot_v1(gl, generic_slot, instantiated_slot)
                         # Text retag: mirror the single-field path — if this
                         # slot was observed TEXT at the construction site,
                         # rt_interp_cstr(gl) produces a genuinely
@@ -5972,7 +6101,13 @@ impl MirLowering:
         self.builder = b_ok
         if val pl = pr:
             if val static_base = self.enum_match_expr_type(base):
-                val base_type: HirType = static_base
+                var base_type: HirType = static_base
+                # decode_erased_scalar_call_payload already decoded a free
+                # generic call's `T` payload and retained the concrete
+                # instance; the declared `Result<T, E>` would decode it again.
+                if val lowered_base = self.find_local_hir_type(res_local.id):
+                    if hir_type_instantiates_to(base_type, lowered_base) and not hir_types_equal(base_type, lowered_base):
+                        base_type = lowered_base
                 match base_type.kind:
                     case HirTypeKind.Result(ok_type, _):
                         match ok_type.kind:
@@ -8278,6 +8413,234 @@ impl MirLowering:
         if record != "" and not self.struct_value_syms.contains(result.id):
             self.struct_value_syms[result.id] = record
 
+    me decode_erased_scalar_call_payload(result: LocalId, callee: SymbolId, args: [HirCallArg], call_param_types: [HirType], source_locals: Dict<i64, i64>) -> LocalId:
+        """Decode the `T` payload of a free generic call's `T?` /
+        `Result<T, E>` result into the caller's raw scalar layout.
+
+        Convention (generics = one erased body, 2026-10-31): a free generic
+        callee receives `T` as a TAGGED word (lower_call boxes every value
+        passed into a `T` / `[T]` slot) and its own `Some(x)` / `Ok(x)` store
+        that word unchanged. A bare `-> T` result is decoded at its consumer
+        (local_needs_erased_decode). A `T` nested in `T?` / `Result<T, E>`
+        had no decode: the caller matched it as the concrete `i64?` /
+        `Result<i64, E>` its instantiation names, whose payload is RAW, so
+        `wrap(7)` read 56 and an f64 payload read the heap-box pointer
+        (native_generic_payload_encoding_2026-11-15, mechanism M1).
+
+        The caller owns the decode: when the instantiation binds `T` to an
+        integer or float (proved only from an argument passed into a bare
+        `T` or `[T]` parameter -- exactly the slots this call boxed), the
+        Some/Ok payload is decoded and the enum is REBUILT (never mutated:
+        the callee may return a stored box). A bool binding also decodes
+        (`first([true]) ?? false` read the tagged word 11); None/Err and
+        every other payload (text, records, arrays) keep their word. Methods of
+        generic classes keep plain values in and out and never reach this
+        free-call path."""
+        val declared_return: HirType? = self.resolved_call_hir_return_type(callee)
+        if declared_return == None: return result
+        val return_hir: HirType = declared_return.unwrap()
+        var enum_name = ""
+        var payload_param = ""
+        var err_param = ""
+        match return_hir.kind:
+            case HirTypeKind.Optional(inner):
+                match inner.kind:
+                    case HirTypeKind.TypeParam(name, _):
+                        enum_name = "Option"
+                        payload_param = name
+                    case _: ()
+            case HirTypeKind.Result(ok_type, err_type):
+                match ok_type.kind:
+                    case HirTypeKind.TypeParam(name, _):
+                        enum_name = "Result"
+                        payload_param = name
+                    case _: ()
+                # `mk<T, E>(..) -> Result<T, E>`: E must be bound too; the
+                # rebuilt instance never carries an unbound parameter (r07).
+                match err_type.kind:
+                    case HirTypeKind.TypeParam(name, _): err_param = name
+                    case _:
+                        if self.hir_type_mentions_type_param(err_type, self.symbols): return result
+            case _: ()
+        if enum_name == "": return result
+        var wanted: [text] = [payload_param]
+        if err_param != "" and err_param != payload_param:
+            wanted.push(err_param)
+        var bound: Dict<text, HirType> = {}
+        var payload_through_dict = false
+        var index = 0
+        while index < args.len() and index < call_param_types.len():
+            val call_arg: HirCallArg = args[index]
+            val declared_param: HirType = call_param_types[index]
+            # Only the slots whose word reaches the body ENCODED: a bare `T`
+            # (boxed by this call), `[T]` elements and `Dict<K, T>` values
+            # (encoded by the container; a free body keeps them encoded).
+            var slot_param = ""
+            match declared_param.kind:
+                case HirTypeKind.TypeParam(param_name, _): slot_param = param_name
+                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element) | HirTypeKind.Dict(_, element):
+                    match element.kind:
+                        case HirTypeKind.TypeParam(param_name, _): slot_param = param_name
+                        case _: ()
+                case _: ()
+            match declared_param.kind:
+                case HirTypeKind.Dict(_, dict_value):
+                    match dict_value.kind:
+                        case HirTypeKind.TypeParam(dict_param, _):
+                            if dict_param == payload_param: payload_through_dict = true
+                        case _: ()
+                case _: ()
+            if slot_param != "" and wanted.contains(slot_param) and not call_arg.has_name and source_locals.contains(index):
+                val arg_local = LocalId(id: source_locals[index])
+                var actual = self.construct_field_source_hir_type(call_arg.value, arg_local, call_arg.value.span)
+                match actual.kind:
+                    case HirTypeKind.Error | HirTypeKind.Infer(_, _):
+                        actual = self.arithmetic_result_hir_type(call_arg.value, arg_local) ?? actual
+                    case _: ()
+                val bindings: Dict<text, HirType> = self.bind_struct_type_params(declared_param, actual, [slot_param], {})
+                if bindings.has(slot_param):
+                    val candidate: HirType = bindings[slot_param]
+                    if self.hir_type_mentions_type_param(candidate, self.symbols): return result
+                    if bound.has(slot_param):
+                        if not hir_types_equal(bound[slot_param], candidate): return result
+                    bound[slot_param] = candidate
+            index = index + 1
+        # `T` unbound but the payload can come from a `Dict<K, T>` argument
+        # (an unannotated or inline dict carries no element type in MIR):
+        # apply the erased i64 decode the free body applied to that read
+        # before this branch, and keep the declared typing, so the call
+        # behaves exactly as before (b05u, f04, f05).
+        val compat_dict_decode = payload_through_dict and not bound.has(payload_param)
+        if not compat_dict_decode:
+            # Any other unbound parameter keeps the pre-fix behaviour (no
+            # decode): the payload encoding is not provable, and records
+            # / text pass through.
+            for wanted_name in wanted:
+                if not bound.has(wanted_name): return result
+        var decode_type = MirType.i64()
+        var is_float = false
+        var is_bool = false
+        if not compat_dict_decode:
+            val bound_kind_type: HirType = bound[payload_param]
+            match bound_kind_type.kind:
+                case HirTypeKind.Int(_, _): decode_type = self.lower_type(bound_kind_type)
+                case HirTypeKind.Float(_):
+                    decode_type = MirType.f64()
+                    is_float = true
+                case HirTypeKind.Bool:
+                    decode_type = MirType.bool()
+                    is_bool = true
+                case _: return result
+        val enum_id = self.enum_runtime_id(enum_name)
+        if enum_id < 0: return result
+        val check_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_check_variant"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val payload_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_payload"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val ctor_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        var b = self.builder
+        # The Option/Result value is one handle word (as rt_enum_new returns
+        # it); the merge slot holds that word, not the aggregate MIR shape.
+        val result_type = MirType.i64()
+        val slot = b.emit_alloc(result_type)
+        b.emit_store(mir_operand_copy(slot), mir_operand_copy(result))
+        val id_local = b.emit_const_int(enum_id)
+        val zero_local = b.emit_const_int(0)
+        val is_payload_variant = b.emit_call(check_fn, [mir_operand_copy(result), mir_operand_copy(id_local), mir_operand_copy(zero_local)], MirType.bool())
+        if is_payload_variant == None:
+            self.builder = b
+            return result
+        val decode_block = b.new_block(Some("erased_payload_decode"))
+        val merge_block = b.new_block(Some("erased_payload_merge"))
+        b.terminate_if(mir_operand_copy(is_payload_variant.unwrap()), decode_block, merge_block)
+        b.switch_to_block(decode_block)
+        val tagged_payload = b.emit_call(payload_fn, [mir_operand_copy(result)], MirType.i64())
+        self.builder = b
+        if tagged_payload == None:
+            return result
+        # Bool reads BOTH true words (tagged 11, raw 1), as the Option/Result
+        # payload extraction does, so it cannot turn a raw true into false.
+        var decoded = if is_bool: self.enum_payload_value(tagged_payload.unwrap(), decode_type) else: self.decode_runtime_value(tagged_payload.unwrap(), decode_type)
+        var d = self.builder
+        if is_float:
+            # Same bit-preserving payload word as a concrete `Some(2.25)`
+            # (bitcast_float_enum_payload / emit_option_handle_with_disc).
+            decoded = d.emit_bitcast(mir_operand_copy(decoded), MirType.i64())
+        elif decode_type.kind != MirTypeKind.I64:
+            decoded = d.emit_cast(mir_operand_copy(decoded), MirType.i64())
+        val enum_id_i32 = d.new_temp(MirType(kind: MirTypeKind.I32))
+        d.emit_const(enum_id_i32, MirConstValue.Int(enum_id), MirType(kind: MirTypeKind.I32))
+        val disc_i32 = d.new_temp(MirType(kind: MirTypeKind.I32))
+        d.emit_const(disc_i32, MirConstValue.Int(0), MirType(kind: MirTypeKind.I32))
+        val rebuilt = d.emit_call(ctor_fn, [mir_operand_copy(enum_id_i32), mir_operand_copy(disc_i32), mir_operand_copy(decoded)], MirType.i64())
+        if val rebuilt_local = rebuilt:
+            d.emit_store(mir_operand_copy(slot), mir_operand_copy(rebuilt_local))
+        d.terminate_goto(merge_block)
+        d.switch_to_block(merge_block)
+        val merged = d.emit_load(mir_operand_copy(slot), result_type)
+        self.builder = d
+        if compat_dict_decode:
+            # Same typing and marks as the undecoded call result: every
+            # consumer reads it exactly as it read the pre-fix body's value.
+            if val result_hir = self.find_local_hir_type(result.id):
+                self.remember_local_hir_type(merged.id, result_hir, 0, 0)
+            self.remember_result_err_record_owner(merged.id, callee)
+            if self.option_value_locals.contains(result.id):
+                self.option_value_locals[merged.id] = true
+            if self.is_runtime_value_local(result.id):
+                self.mark_runtime_value_local(merged.id)
+            return merged
+        val bound_type: HirType = bound[payload_param]
+        # The merged word is the instantiated, RAW-payload enum: type it as
+        # the caller's concrete instance so every consumer (match, `?`,
+        # `.ok`, `unwrap_or`, a concrete `i64?` parameter) reads it as such.
+        val instance = match return_hir.kind:
+            case HirTypeKind.Result(_, err_type):
+                val err_instance: HirType = if err_param != "": bound[err_param] else: err_type
+                HirType(kind: HirTypeKind.Result(bound_type, err_instance), span: return_hir.span)
+            case _: HirType(kind: HirTypeKind.Optional(bound_type), span: return_hir.span)
+        self.remember_local_hir_type(merged.id, instance, 0, 0)
+        self.remember_result_err_record_owner(merged.id, callee)
+        if enum_name == "Option":
+            self.option_value_locals[merged.id] = true
+        self.mark_runtime_value_local(merged.id)
+        merged
+
+    me arithmetic_result_hir_type(source: HirExpr, local: LocalId) -> HirType?:
+        """`a + 1` passed into a `T` slot: arithmetic lowering decodes erased
+        operands, so an untagged I64/F64 result is a raw scalar of that type."""
+        if self.is_runtime_value_local(local.id): return None
+        var arithmetic = false
+        match source.kind:
+            case HirExprKind.Binary(op, _, _):
+                match op:
+                    case HirBinOp.Add | HirBinOp.Sub | HirBinOp.Mul | HirBinOp.Div | HirBinOp.Mod: arithmetic = true
+                    case _: ()
+            case _: ()
+        if not arithmetic: return None
+        if val mir_type = self.local_mir_type_of(local):
+            match mir_type.kind:
+                case MirTypeKind.I64: return Some(HirType(kind: HirTypeKind.Int(64, true), span: source.span))
+                case MirTypeKind.F64: return Some(HirType(kind: HirTypeKind.Float(64), span: source.span))
+                case _: ()
+        None
+
+    me static_optional_payload_is_type_param(base: HirExpr) -> bool:
+        """`base` is statically a `T?` with a bare erased `T` (a free generic
+        call's declared return, before decode_erased_scalar_call_payload)."""
+        if val static_type = self.enum_match_expr_type(base):
+            match static_type.kind:
+                case HirTypeKind.Optional(inner): return self.hir_type_is_bare_type_param(inner)
+                case _: ()
+        false
+
     me substitute_record_binders(ty: HirType, bindings: Dict<text, text>) -> HirType?:
         """`ty` with every bound RECORD binder replaced by its `Named`
         symbol; nil when nothing in `ty` changed. A binder bound to a
@@ -8579,7 +8942,6 @@ impl MirLowering:
                 lw.canonical_type_symbols = self.canonical_type_symbols
                 lw.canonical_type_symbol_names = self.canonical_type_symbol_names
                 lw.canonical_type_reverse_scan_rows = self.canonical_type_reverse_scan_rows
-                lw.next_canonical_type_symbol = self.next_canonical_type_symbol
                 lw.global_symbol_ids = self.global_symbol_ids
                 lw.global_statics_by_id = self.global_statics_by_id
                 lw.global_constants_by_id = self.global_constants_by_id
@@ -8767,7 +9129,6 @@ impl MirLowering:
                 self.symbol_write_ledger = mir_symbol_write_ledger_adopt(self.symbol_write_ledger, lw.symbol_write_ledger)
                 self.canonical_type_symbol_names = lw.canonical_type_symbol_names
                 self.canonical_type_reverse_scan_rows = lw.canonical_type_reverse_scan_rows
-                self.next_canonical_type_symbol = lw.next_canonical_type_symbol
                 # A successful nested lift contributes its actual dispatches
                 # in both lanes; failed lifts have already returned above.
                 self.devirtualized_calls = lw.devirtualized_calls
@@ -9268,6 +9629,40 @@ impl MirLowering:
                         self.error_fatal("dynamic callable requires proven arity before indirect emission", Some(callee.span))
                         return self.builder.emit_const_int(0)
                     case _: ()
+        # Plan before effects; source order and declared slots are distinct.
+        var named_slots: [i64] = []
+        var named_binding_name = ""
+        var has_named_arguments = false
+        for argument in args:
+            if argument.has_name:
+                has_named_arguments = true
+                break
+        if is_direct and has_named_arguments:
+            named_binding_name = self.provider_callable_symbol_name(direct_symbol, direct_name)
+            match self.named_call_slots_v1(named_binding_name, args):
+                case Ok(slots): named_slots = slots
+                case Err(reason):
+                    self.error_fatal(reason, Some(callee.span))
+                    return self.builder.emit_const_int(0)
+        var source_call_args = args
+        var source_call_types = call_param_types
+        if named_slots.len() > 0:
+            if named_slots.len() < call_param_types.len() and self.provider_callable_call_origin_v1(direct_symbol) != MirCallOrigin.Source:
+                self.error_fatal("named omitted defaults require a source callable owner", Some(callee.span))
+                return self.builder.emit_const_int(0)
+            source_call_args = []
+            source_call_types = []
+            var source_index = 0
+            while source_index < args.len():
+                val slot = named_slots[source_index]
+                if slot >= call_param_types.len():
+                    self.error_fatal("named call lacks declared parameter types", Some(callee.span))
+                    return self.builder.emit_const_int(0)
+                val original = args[source_index]
+                source_call_args.push(HirCallArg(has_name: false, name: "", value: original.value, span: original.span))
+                source_call_types.push(call_param_types[slot])
+                source_index = source_index + 1
+        val supplied_semantic_arity = if named_slots.len() > 0: call_param_types.len() else: args.len()
         var direct_runtime_value_abi: i64 = 0
         if is_direct and self.runtime_value_extern_abis.has(direct_symbol.id):
             direct_runtime_value_abi = self.runtime_value_extern_abis[direct_symbol.id]
@@ -9282,16 +9677,20 @@ impl MirLowering:
             direct_boxed_text_indices = boxed_text_arg_indices(text_boundary_name) ?? []
             # Tagged-value consumers take the text handle as-is; skipping
             # the pointer bridge is the whole adaptation.
-            for tagged_index in tagged_text_value_arg_indices(text_boundary_name) ?? []:
-                direct_boxed_text_indices = direct_boxed_text_indices.push(tagged_index)
+            # Tagged-value rows are valid only for an extern whose declaration
+            # provenance is recorded in the provider registry. Unknown or
+            # source-defined same-name symbols must keep their own ABI.
+            if self.provider_callable_call_origin_v1(direct_symbol) == MirCallOrigin.Foreign:
+                for tagged_index in tagged_text_value_arg_indices(text_boundary_name) ?? []:
+                    direct_boxed_text_indices = direct_boxed_text_indices.push(tagged_index)
             # Match the pair expander's applicability guards, including raw
             # machine-word overloads with a different semantic arity.
             if val pair_arity = text_extern_semantic_arity(text_boundary_name):
-                if args.len() != pair_arity:
+                if supplied_semantic_arity != pair_arity:
                     direct_pair_text_indices = []
             var in_range_pair_indices: [i64] = []
             for pair_index in direct_pair_text_indices:
-                if pair_index < args.len(): in_range_pair_indices = in_range_pair_indices.push(pair_index)
+                if pair_index < supplied_semantic_arity: in_range_pair_indices = in_range_pair_indices.push(pair_index)
             direct_pair_text_indices = in_range_pair_indices
             direct_text_pointer_bridge = true
         var direct_arg_index = 0
@@ -9304,7 +9703,7 @@ impl MirLowering:
         # alone read f64 == f64 afterwards).
         var int_literal_coerced_arg_indices: [i64] = []
         for arg in args:
-            val current_arg_index = direct_arg_index
+            val current_arg_index = if named_slots.len() > 0: named_slots[direct_arg_index] else: direct_arg_index
             direct_arg_index = direct_arg_index + 1
             val arg_value: HirExpr = arg.value
             val arg_kind: HirExprKind = arg_value.kind
@@ -9333,7 +9732,7 @@ impl MirLowering:
             # materialize a raw lifted fnptr or a closure handle.
             val lambda_disc = _sffi_enum_discriminant(HirExprKind.Lambda([], arg_value, []))
             if _sffi_enum_discriminant(arg_kind) == lambda_disc:
-                val expected_lambda_type: HirType? = if current_arg_index < call_param_types.len() and not arg.has_name:
+                val expected_lambda_type: HirType? = if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0):
                     Some(call_param_types[current_arg_index])
                 else: None
                 # `callback_compare(a, z, \l, r: l.value - r.value)`: the
@@ -9342,7 +9741,7 @@ impl MirLowering:
                 # binder's record identity for the lift so the lambda's field
                 # reads resolve against the real layout instead of index 0.
                 val saved_callback_bindings = self.erased_callback_record_bindings
-                self.erased_callback_record_bindings = self.erased_callback_record_bindings_for_call(args, call_param_types, arg_operands)
+                self.erased_callback_record_bindings = self.erased_callback_record_bindings_for_call(source_call_args, source_call_types, arg_operands)
                 val lambda_operand = self.lower_lambda_value_for_type(arg_value, expected_lambda_type)
                 self.erased_callback_record_bindings = saved_callback_bindings
                 if lambda_operand != None:
@@ -9350,7 +9749,7 @@ impl MirLowering:
                     continue
             # `x: mut <primitive>` param: pass the caller local's address
             # (bug mut_param_annotation_no_reference_propagation_2026-07-20).
-            if current_arg_index < call_param_types.len() and not arg.has_name:
+            if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0):
                 var mut_ref_operand: MirOperand? = None
                 match call_param_types[current_arg_index].kind:
                     case HirTypeKind.Ref(ref_inner, true):
@@ -9371,7 +9770,7 @@ impl MirLowering:
                 if val ref_operand = mut_ref_operand:
                     arg_operands = arg_operands.push(ref_operand)
                     continue
-            var arg_local = if current_arg_index < call_param_types.len() and not arg.has_name:
+            var arg_local = if current_arg_index < call_param_types.len() and (not arg.has_name or named_slots.len() > 0):
                 self.lower_expr_for_slot(arg_value, call_param_types[current_arg_index])
             elif current_arg_index < call_param_types.len():
                 # Named free-call args are passed in SOURCE order (HIR
@@ -9461,7 +9860,19 @@ impl MirLowering:
                         # one erased body, 2026-10-31): i64 outside the
                         # 61-bit range goes through the wide heap box, f64
                         # through rt_value_float, a record pointer passes.
-                        arg_local = self.box_runtime_value(arg_local)
+                        #
+                        # A text argument keeps its IDENTITY (bug
+                        # s2-transient-promote-dangle, 2026-11-16): plain
+                        # box_runtime_value copies any text local without a
+                        # static tagged note (every call result) through
+                        # rt_string_new, so `transient_promote<text>(digest)`
+                        # / `rt_transient_heap_promote<T>(digest)` retained a
+                        # persistent COPY while the caller returned the
+                        # original, freed at scope end. The dictionary-key
+                        # boxer asks rt_string_data at run time and copies
+                        # only a borrowed char*; non-text locals fall through
+                        # to box_runtime_value unchanged.
+                        arg_local = self.box_runtime_dictionary_key_v1(arg_local)
                     case HirTypeKind.Isolated(_):
                         boundary_transfer_mode = MirTransferMode.OwnedMove
                         boundary_transfer_payload = MirTransferPayload.OwnedRegion
@@ -9551,6 +9962,10 @@ impl MirLowering:
             else:
                 arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
+        val source_arg_operands = arg_operands
+        if named_slots.len() > 0:
+            arg_operands = self.complete_named_call_operands_v1(named_binding_name, arg_operands, named_slots)
+
         if is_direct:
             # A bare, unimported interpreter builtin (`env_get` without a `use`)
             # reaches here as HIR's module-less fallback symbol: it has no
@@ -9617,6 +10032,18 @@ impl MirLowering:
                 direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false,
                     declared_params: declared_param_mir, declared_params_known: true,
                     int_literal_coerced_params: coerced_param_marks)
+            elif arg_operands.len() > 0 and resolved_name != "":
+                # No declared types reached this call: the callee has no `->`
+                # (nil surface type) and a nominal param keeps its plain param
+                # record rejected. Its ABI param record still states every
+                # register class, so the import is declared from it instead of
+                # staying unknown (which refuses any float argument). The
+                # arguments above were lowered without declared slots; a class
+                # mismatch is reported by the backend, never coerced.
+                val abi_declared = self.callable_abi_declared_params_v1(resolved_name)
+                if abi_declared.len() > 0:
+                    direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false,
+                        declared_params: abi_declared, declared_params_known: true)
             if val declared_signature = self.exact_extern_signatures.get(mir_expr_symbol_id_value(direct_symbol)):
                 if declared_signature.params.len() != arg_operands.len():
                     self.error_fatal("fixed extern call argument count differs from its declaration", None)
@@ -9641,8 +10068,9 @@ impl MirLowering:
                 val zero_result = abi_builder.emit_const_int(0)
                 result = abi_builder.emit_binop(MirBinOp.Ne, mir_operand_copy(wide_result), mir_operand_copy(zero_result), MirType.bool())
                 self.builder = abi_builder
+            result = self.extern_runtime_tuple_array_to_native(result, direct_symbol)
             self.remember_call_hir_return(result, direct_symbol)
-            self.infer_erased_call_result_records(result, direct_symbol, args, call_param_types, arg_operands, arg_source_locals)
+            self.infer_erased_call_result_records(result, direct_symbol, source_call_args, source_call_types, source_arg_operands, arg_source_locals)
             if stamped_struct_name != "" and not self.struct_value_syms.contains(result.id):
                 self.struct_value_syms[result.id] = stamped_struct_name
             if stamped_return != None:
@@ -9659,7 +10087,7 @@ impl MirLowering:
                         self.mark_runtime_value_local(result.id)
                     case _:
                         ()
-            return result
+            return self.decode_erased_scalar_call_payload(result, direct_symbol, args, call_param_types, arg_source_locals)
 
         # Field-method fallback can supply the projected callable so its
         # receiver is not evaluated a second time. Argument lowering above

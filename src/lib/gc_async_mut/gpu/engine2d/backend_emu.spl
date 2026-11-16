@@ -1090,66 +1090,188 @@ fn _emu_gradient_color_at(colors: [u32], positions_permille: [i32], pos_permille
             val t = pos_permille - p0
             val c0 = colors[i - 1]
             val c1 = colors[i]
+            val a0 = color_a(c0)
+            val a1 = color_a(c1)
+            val a = a0 + (a1 - a0) * t / span
+            if a0 != a1:
+                # CSS Images 4 §3.4.1: interpolate in premultiplied colour.
+                val wa = a0 * (span - t)
+                val wb = a1 * t
+                val ws = _emu_max(wa + wb, 1)
+                val pr = (color_r(c0) * wa + color_r(c1) * wb + ws / 2) / ws
+                val pg = (color_g(c0) * wa + color_g(c1) * wb + ws / 2) / ws
+                val pb = (color_b(c0) * wa + color_b(c1) * wb + ws / 2) / ws
+                return rgba(pr, pg, pb, a)
             val r = color_r(c0) + (color_r(c1) - color_r(c0)) * t / span
             val g = color_g(c0) + (color_g(c1) - color_g(c0)) * t / span
             val b = color_b(c0) + (color_b(c1) - color_b(c0)) * t / span
-            val a = color_a(c0) + (color_a(c1) - color_a(c0)) * t / span
             return rgba(r, g, b, a)
         i = i + 1
     colors[n - 1]
 
+# A `to <corner>` linear gradient's angle depends on the box (CSS Images 3
+# §3.1.1: the other two corners lie on the 50% line). The parser stores it
+# as 1000 + its square-box angle (1045 top right, 1135 bottom right, 1225
+# bottom left, 1315 top left); this returns [sin, cos] of the real angle in
+# Q16 for a w x h box.
+fn gradient_corner_dir_q16(code: i32, w: i32, h: i32) -> [i64]:
+    val ww: i64 = if w > 0: w as i64 else: 1
+    val hh: i64 = if h > 0: h as i64 else: 1
+    val len_q16 = _emu_isqrt_i64((ww * ww + hh * hh) * 4294967296)
+    val s = hh * 4294967296 / len_q16
+    val c = ww * 4294967296 / len_q16
+    if code == 1045:
+        return [s, c]
+    if code == 1135:
+        return [s, 0 - c]
+    if code == 1225:
+        return [0 - s, 0 - c]
+    [0 - s, c]
+
+# sin and cos of a whole-degree CSS angle in Q16, integer only (this file is
+# also the baremetal / virtio-gpu raster). Twin of the browser-engine fb
+# raster's `gradient_angle_sin_cos_q16`
+# (`simple_web_html_layout_renderer_paint_primitives.spl`): the tables are that
+# function's Taylor series evaluated at 0..89 degrees, so the Draw IR lane and
+# the CPU raster map a pixel to the same gradient position bit for bit.
+fn _emu_gradient_sin_q16_table() -> [i64]:
+    [
+        0, 1144, 2287, 3430, 4572, 5712, 6850, 7987, 9121, 10252,
+        11380, 12505, 13626, 14742, 15855, 16962, 18064, 19161, 20252, 21336,
+        22415, 23486, 24550, 25607, 26656, 27697, 28729, 29753, 30767, 31772,
+        32768, 33754, 34729, 35693, 36647, 37590, 38521, 39441, 40348, 41243,
+        42126, 42995, 43852, 44695, 45525, 46341, 47143, 47930, 48703, 49461,
+        50203, 50931, 51643, 52339, 53020, 53684, 54332, 54963, 55578, 56175,
+        56756, 57319, 57865, 58393, 58903, 59396, 59870, 60326, 60764, 61183,
+        61584, 61966, 62328, 62672, 62997, 63303, 63589, 63856, 64104, 64332,
+        64540, 64729, 64898, 65048, 65177, 65287, 65376, 65446, 65496, 65526
+    ]
+
+fn _emu_gradient_cos_q16_table() -> [i64]:
+    [
+        65536, 65526, 65496, 65446, 65376, 65287, 65177, 65048, 64898, 64729,
+        64540, 64332, 64104, 63856, 63589, 63303, 62997, 62672, 62328, 61966,
+        61584, 61183, 60764, 60326, 59870, 59396, 58903, 58393, 57865, 57319,
+        56756, 56175, 55578, 54963, 54332, 53684, 53020, 52339, 51643, 50931,
+        50203, 49461, 48703, 47930, 47143, 46341, 45525, 44695, 43852, 42995,
+        42126, 41243, 40348, 39441, 38521, 37590, 36647, 35693, 34729, 33754,
+        32768, 31772, 30767, 29753, 28729, 27697, 26656, 25607, 24550, 23486,
+        22415, 21336, 20252, 19161, 18064, 16962, 15855, 14742, 13626, 12505,
+        11380, 10252, 9121, 7987, 6850, 5712, 4572, 3430, 2287, 1144
+    ]
+
+fn _emu_gradient_sin_cos_q16(deg: i32) -> [i64]:
+    var d = deg % 360
+    if d < 0:
+        d = d + 360
+    val quadrant = d / 90
+    val s = _emu_gradient_sin_q16_table()[d % 90]
+    val c = _emu_gradient_cos_q16_table()[d % 90]
+    if quadrant == 0:
+        return [s, c]
+    if quadrant == 1:
+        return [c, 0 - s]
+    if quadrant == 2:
+        return [0 - s, 0 - c]
+    [0 - c, s]
+
+fn _emu_gradient_mix_channel_q16(a: u32, b: u32, shift: u32, wa: i64, wb: i64) -> u32:
+    val ca = ((a >> shift) & 255u32) as i64
+    val cb = ((b >> shift) & 255u32) as i64
+    val ws = wa + wb
+    if ws <= 0:
+        return 0u32
+    val v = (ca * wa + cb * wb + ws / 2) / ws
+    (v as u32) << shift
+
+# Colour at `t16` (0..65536) along the gradient line, interpolated in
+# premultiplied colour with ROUNDED alpha (CSS Images 4 §3.4.1). Twin of the
+# fb raster's `linear_gradient_color_at`.
+fn _emu_gradient_color_at_q16(colors: [u32], positions_permille: [i32], t16: i64) -> u32:
+    val n = colors.len()
+    val first = (positions_permille[0] as i64) * 65536 / 1000
+    if t16 <= first:
+        return colors[0]
+    var i = 0
+    # cpu-lane-loop-ok: stop-pair search; bound is the gradient stop count (once per LUT entry, or per pixel only for boxes under 1025 px)
+    while i + 1 < n:
+        val p0 = (positions_permille[i] as i64) * 65536 / 1000
+        val p1 = (positions_permille[i + 1] as i64) * 65536 / 1000
+        if t16 <= p1:
+            if p1 <= p0:
+                return colors[i + 1]
+            val f16 = (t16 - p0) * 65536 / (p1 - p0)
+            val a = colors[i]
+            val b = colors[i + 1]
+            val wa = (color_a(a) as i64) * (65536 - f16)
+            val wb = (color_a(b) as i64) * f16
+            val alpha = ((wa + wb + 32768) / 65536) as u32
+            return (alpha << 24) | _emu_gradient_mix_channel_q16(a, b, 16u32, wa, wb) | _emu_gradient_mix_channel_q16(a, b, 8u32, wa, wb) | _emu_gradient_mix_channel_q16(a, b, 0u32, wa, wb)
+        i = i + 1
+    colors[n - 1]
+
+# CSS Images 3 §3.1: the gradient line passes through the box centre at the
+# angle (0deg = to top, clockwise) and is |w sin a| + |h cos a| long, so it
+# ends on the box EDGES at the two far corners -- the corner pixel centres sit
+# half a pixel inside the end stops (13 levels on a 10x10 box). Same mapping,
+# LUT and rounding as the browser-engine fb raster
+# (`fb_linear_gradient_general_clip`), so the Draw IR lane and the CPU raster
+# agree pixel for pixel.
 fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, colors: [u32], positions_permille: [i32], angle_deg: i32):
     if w <= 0 or h <= 0 or colors.len() == 0:
         return
-    if colors.len() == 1:
+    if colors.len() == 1 or positions_permille.len() != colors.len():
         core.draw_rect_filled(x, y, w, h, colors[0])
         return
-    val dx1000 = _emu_sin_approx(angle_deg)
-    val dy1000 = 0 - _emu_cos_approx(angle_deg)
-    val hw = w - 1
-    val hh = h - 1
-    val t00 = (0 - hw) * dx1000 + (0 - hh) * dy1000
-    val t10 = hw * dx1000 + (0 - hh) * dy1000
-    val t01 = (0 - hw) * dx1000 + hh * dy1000
-    val t11 = hw * dx1000 + hh * dy1000
-    var t_min = t00
-    if t10 < t_min: t_min = t10
-    if t01 < t_min: t_min = t01
-    if t11 < t_min: t_min = t11
-    var t_max = t00
-    if t10 > t_max: t_max = t10
-    if t01 > t_max: t_max = t01
-    if t11 > t_max: t_max = t11
-    val t_span = _emu_max(t_max - t_min, 1)
+    val sc = if angle_deg >= 1000: gradient_corner_dir_q16(angle_deg, w, h) else: _emu_gradient_sin_cos_q16(angle_deg)
+    val s = sc[0]
+    val c = sc[1]
+    val sw = if s < 0: 0 - s else: s
+    val cw = if c < 0: 0 - c else: c
+    var len_q16 = (w as i64) * sw + (h as i64) * cw
+    if len_q16 < 1:
+        len_q16 = 1
+    # The ramp is sampled once into 1025 entries (t16 >> 6); per pixel is one
+    # multiply-add and a lookup. A box with fewer pixels than the table
+    # evaluates the same quantised position per pixel instead (identical
+    # colours): building the table cost 6000 12x6 boxes +87 MB RSS.
+    val use_lut = (w as i64) * (h as i64) > 1025
+    var lut: [u32] = []
+    if use_lut:
+        var li = 0
+        # cpu-lane-loop-ok: one-time 1025-entry gradient LUT build per box, not per pixel
+        while li <= 1024:
+            lut.push(_emu_gradient_color_at_q16(colors, positions_permille, (li as i64) * 64))
+            li = li + 1
+    # One `draw_image` per row: a diagonal ramp changes colour every pixel or
+    # two, and one `draw_rect_filled` per colour run made the catalog `html`
+    # page render 212 s -> 334 s (its 120deg header alone).
+    var any_alpha = false
+    for sc_color in colors:
+        if color_a(sc_color) < 255:
+            any_alpha = true
     var py: i32 = 0
     # cpu-lane-loop-ok: N-stop linear gradient scanline walk: one iteration per row of the rect
     while py < h:
+        val dy2 = (2 * py + 1 - h) as i64
+        val row_t = 0 - dy2 * c
+        # A fresh row each time: a batching backend may keep the array.
+        var row: [u32] = [0u32; w]
         var px: i32 = 0
-        var run_start: i32 = 0
-        var run_len: i32 = 0
-        var run_color: u32 = 0u32
-        # cpu-lane-loop-ok: N-stop linear gradient per-pixel column walk; the gradient is still EVALUATED per pixel, but emission is run-merged (consecutive identical packed colors become ONE draw_rect_filled) so the Vulkan backend does not issue one compute dispatch per pixel
+        # cpu-lane-loop-ok: N-stop linear gradient per-pixel column walk; the row is emitted as ONE image blit
         while px < w:
-            val nx = 2 * px - hw
-            val ny = 2 * py - hh
-            val t = nx * dx1000 + ny * dy1000
-            var pos_permille = (t - t_min) * 1000 / t_span
-            if pos_permille < 0:
-                pos_permille = 0
-            if pos_permille > 1000:
-                pos_permille = 1000
-            val c = _emu_gradient_color_at(colors, positions_permille, pos_permille)
-            if run_len > 0 and c == run_color:
-                run_len = run_len + 1
-            else:
-                if run_len > 0:
-                    core.draw_rect_filled(x + run_start, y + py, run_len, 1, run_color)
-                run_start = px
-                run_color = c
-                run_len = 1
+            val dx2 = (2 * px + 1 - w) as i64
+            var t16 = 32768 + (dx2 * s + row_t) * 32768 / len_q16
+            if t16 < 0:
+                t16 = 0
+            if t16 > 65536:
+                t16 = 65536
+            row[px] = if use_lut: lut[(t16 / 64) as i32] else: _emu_gradient_color_at_q16(colors, positions_permille, (t16 / 64) * 64)
             px = px + 1
-        if run_len > 0:
-            core.draw_rect_filled(x + run_start, y + py, run_len, 1, run_color)
+        if any_alpha:
+            core.draw_image_blend(x, y + py, w, 1, row)
+        else:
+            core.draw_image(x, y + py, w, 1, row)
         py = py + 1
 
 fn emu_draw_radial_gradient_stops(mut core: RenderBackend, cx: i32, cy: i32, r: i32, colors: [u32], positions_permille: [i32]):

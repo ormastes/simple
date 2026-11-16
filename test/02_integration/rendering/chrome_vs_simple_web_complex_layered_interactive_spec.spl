@@ -1,0 +1,532 @@
+# Chrome vs Simple Web parity & interactive events spec for complex layered HTML/CSS.
+# Exercises flexbox, explicit-px CSS grid, rgba/opacity translucency, dynamic z-index
+# layering, button clicks, drag-and-drop, internal window controls, custom dropdown,
+# custom contextmenu with preventDefault/coordinates, and editable text field input.
+#
+# @cover src/lib/gc_async_mut/web/browser_session_runtime.spl 80%
+# @cover src/os/hosted/hosted_web_content_session.spl 80%
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{
+    cwd, dir_create_all, dir_remove_all, env_get, file_delete, file_exists,
+    file_read, file_read_bytes_result, file_write, getpid, host_os, process_run
+}
+use std.common.image.png_decode.{PngImage, decode_png_to_argb}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_path_to_id, be_dom_get_attr
+}
+use std.gc_async_mut.gpu.browser_engine.dom.BeDomNode
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_readback
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_element_geometry_lines,
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_resolved_engine2d_backend_name_with_reason
+}
+use std.nogc_sync_mut.ui.compare_view_host.{
+    compare_view_find_browser, compare_view_inspect
+}
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+
+val VIEW_W: i32 = 800
+val VIEW_H: i32 = 600
+val EXPECTED_PIXEL_COUNT: i32 = 480000
+val COMPLEX_HTML_REL: text = "examples/06_io/ui/complex_layered_desktop_web.html"
+
+struct FrameStats:
+    distinct_count: i32
+    non_bg_count: i32
+    mean_luma: i32
+
+struct GeomBox:
+    key: text
+    tag: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+fn _abs_i32(v: i32) -> i32:
+    if v < 0: -v else: v
+
+fn _abs_path(rel_or_abs: text) -> text:
+    if rel_or_abs.starts_with("/"):
+        return rel_or_abs
+    cwd() + "/" + rel_or_abs
+
+fn _find_geom(lines: [text], key: text) -> GeomBox:
+    val prefix = "GEOM|" + key + "|"
+    var i: i32 = 0
+    while i < (lines.len() as i32):
+        val line = lines[i]
+        if line.starts_with(prefix):
+            val parts = line.split("|")
+            if parts.len() >= 7:
+                return GeomBox(
+                    key: parts[1],
+                    tag: parts[2],
+                    x: parts[3].trim().to_i32(),
+                    y: parts[4].trim().to_i32(),
+                    w: parts[5].trim().to_i32(),
+                    h: parts[6].trim().to_i32()
+                )
+        i = i + 1
+    GeomBox(key: key, tag: "", x: -1, y: -1, w: 0, h: 0)
+
+fn _geom_center(b: GeomBox) -> (i32, i32):
+    (b.x + b.w / 2, b.y + b.h / 2)
+
+fn _boxes_overlap(a: GeomBox, b: GeomBox) -> bool:
+    if a.w <= 0 or a.h <= 0 or b.w <= 0 or b.h <= 0:
+        return false
+    a.x < b.x + b.w and a.x + a.w > b.x and a.y < b.y + b.h and a.y + a.h > b.y
+
+fn _rgb_r(c: u32) -> i32:
+    ((c >> 16) & 255u32) as i32
+
+fn _rgb_g(c: u32) -> i32:
+    ((c >> 8) & 255u32) as i32
+
+fn _rgb_b(c: u32) -> i32:
+    (c & 255u32) as i32
+
+fn _pixel_luma(c: u32) -> i32:
+    (_rgb_r(c) * 77 + _rgb_g(c) * 150 + _rgb_b(c) * 29) >> 8
+
+fn _max_channel_diff(a: u32, b: u32) -> i32:
+    val dr = _abs_i32(_rgb_r(a) - _rgb_r(b))
+    val dg = _abs_i32(_rgb_g(a) - _rgb_g(b))
+    val db = _abs_i32(_rgb_b(a) - _rgb_b(b))
+    var m = dr
+    if dg > m:
+        m = dg
+    if db > m:
+        m = db
+    m
+
+fn _compute_stats(pixels: [u32], w: i32, h: i32) -> FrameStats:
+    if (pixels.len() as i32) < w * h:
+        return FrameStats(distinct_count: 0, non_bg_count: 0, mean_luma: 0)
+    val bg = pixels[w * h - 1]
+    var seen: [u32] = []
+    var non_bg: i32 = 0
+    var luma_sum: i64 = 0
+    var sample_count: i64 = 0
+    var y: i32 = 0
+    while y < h:
+        var x: i32 = 0
+        val row_off = y * w
+        while x < w:
+            val px = pixels[row_off + x]
+            luma_sum = luma_sum + _pixel_luma(px).to_i64()
+            sample_count = sample_count + 1
+            if _max_channel_diff(px, bg) > 6:
+                non_bg = non_bg + 1
+            if (seen.len() as i32) < 64:
+                var found = false
+                var si: i32 = 0
+                while si < (seen.len() as i32):
+                    if seen[si] == px:
+                        found = true
+                        break
+                    si = si + 1
+                if not found:
+                    seen.push(px)
+            x = x + 4
+        y = y + 4
+    val mean = if sample_count > 0: (luma_sum / sample_count).to_i32() else: 0
+    FrameStats(distinct_count: seen.len() as i32, non_bg_count: non_bg, mean_luma: mean)
+
+fn _active_block_grid(pixels: [u32], w: i32, h: i32, cols: i32, rows: i32) -> [bool]:
+    var grid: [bool] = [false; cols * rows]
+    val bg = pixels[w * h - 1]
+    val bw = w / cols
+    val bh = h / rows
+    var gy: i32 = 0
+    while gy < rows:
+        var gx: i32 = 0
+        while gx < cols:
+            val sx = gx * bw
+            val sy = gy * bh
+            var active = false
+            var dy: i32 = 1
+            while dy < bh and not active:
+                val row_off = (sy + dy) * w
+                var dx: i32 = 1
+                while dx < bw:
+                    if _max_channel_diff(pixels[row_off + sx + dx], bg) > 10:
+                        active = true
+                        break
+                    dx = dx + 4
+                dy = dy + 4
+            grid[gy * cols + gx] = active
+            gx = gx + 1
+        gy = gy + 1
+    grid
+
+fn _region_diff_pixels(lhs: [u32], rhs: [u32], w: i32, h: i32, x0: i32, y0: i32, rw: i32, rh: i32) -> i32:
+    if (lhs.len() as i32) < w * h or (rhs.len() as i32) < w * h:
+        return 0
+    val rx0 = if x0 < 0: 0 else: x0
+    val ry0 = if y0 < 0: 0 else: y0
+    val rx1 = if x0 + rw > w: w else: x0 + rw
+    val ry1 = if y0 + rh > h: h else: y0 + rh
+    var diff: i32 = 0
+    var y: i32 = ry0
+    while y < ry1:
+        val row = y * w
+        var x: i32 = rx0
+        while x < rx1:
+            if _max_channel_diff(lhs[row + x], rhs[row + x]) > 8:
+                diff = diff + 1
+            x = x + 1
+        y = y + 1
+    diff
+
+fn _compute_parity_metrics(lhs: [u32], rhs: [u32]) -> (i32, i32, i32):
+    # Returns (pixel_match_tenths_pct, block_match_tenths_pct, active_overlap_count)
+    var matched_px: i64 = 0
+    var i: i32 = 0
+    while i < EXPECTED_PIXEL_COUNT:
+        if _max_channel_diff(lhs[i], rhs[i]) <= 36:
+            matched_px = matched_px + 1
+        i = i + 1
+    val px_tenths = ((matched_px * 1000) / EXPECTED_PIXEL_COUNT.to_i64()).to_i32()
+    val l_blocks = _active_block_grid(lhs, VIEW_W, VIEW_H, 16, 12)
+    val r_blocks = _active_block_grid(rhs, VIEW_W, VIEW_H, 16, 12)
+    var block_match: i32 = 0
+    var active_overlap: i32 = 0
+    var bi: i32 = 0
+    while bi < 192:
+        if l_blocks[bi] == r_blocks[bi]:
+            block_match = block_match + 1
+        if l_blocks[bi] and r_blocks[bi]:
+            active_overlap = active_overlap + 1
+        bi = bi + 1
+    val blk_tenths = (block_match * 1000) / 192
+    (px_tenths, blk_tenths, active_overlap)
+
+fn _crop_chrome_800x600(img: PngImage) -> [u32]:
+    if img.width == VIEW_W and img.height == VIEW_H and (img.pixels.len() as i32) >= EXPECTED_PIXEL_COUNT:
+        return img.pixels
+    if img.width == VIEW_W and img.height > VIEW_H and (img.pixels.len() as i32) >= VIEW_W * VIEW_H:
+        var cropped: [u32] = [0u32; EXPECTED_PIXEL_COUNT]
+        var idx: i32 = 0
+        while idx < EXPECTED_PIXEL_COUNT:
+            cropped[idx] = img.pixels[idx]
+            idx = idx + 1
+        return cropped
+    if img.width == VIEW_W * 2 and img.height >= VIEW_H * 2 and (img.pixels.len() as i32) >= VIEW_W * 2 * VIEW_H * 2:
+        var scaled: [u32] = [0u32; EXPECTED_PIXEL_COUNT]
+        var y: i32 = 0
+        while y < VIEW_H:
+            val sy = y * 2 * img.width
+            val dy = y * VIEW_W
+            var x: i32 = 0
+            while x < VIEW_W:
+                scaled[dy + x] = img.pixels[sy + x * 2]
+                x = x + 1
+            y = y + 1
+        return scaled
+    []
+
+fn _chrome_gpu_flags() -> [text]:
+    val disable_gpu = (env_get("CHROME_CAPTURE_DISABLE_GPU") ?? "false").trim().lower() == "true"
+    if disable_gpu:
+        return ["--disable-gpu"]
+    val os_name = host_os().trim().lower()
+    if os_name == "macos" or os_name == "darwin":
+        return [
+            "--use-angle=metal",
+            "--enable-gpu-rasterization",
+            "--ignore-gpu-blocklist"
+        ]
+    [
+        "--no-sandbox",
+        "--disable-gpu-sandbox",
+        "--disable-dev-shm-usage",
+        "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE",
+        "--use-angle=vulkan",
+        "--enable-gpu-rasterization",
+        "--ignore-gpu-blocklist"
+    ]
+
+fn _capture_chrome_screenshot(browser_bin: text, page_name: text, html: text, source_file_path: text) -> [u32]:
+    val pid = getpid()
+    val tmp_dir = "/tmp/simple_chrome_complex_{pid}_{page_name}"
+    val tmp_png = tmp_dir + "/shot.png"
+    val tmp_profile = tmp_dir + "/profile"
+    dir_create_all(tmp_profile)
+    var target_html_path = ""
+    var wrote_temp_html = false
+    if source_file_path != "":
+        target_html_path = _abs_path(source_file_path)
+    else:
+        target_html_path = tmp_dir + "/page.html"
+        file_write(target_html_path, html)
+        wrote_temp_html = true
+    val url = "file://" + target_html_path
+    var args: [text] = ["--headless=new"]
+    for flag in _chrome_gpu_flags():
+        args.push(flag)
+    args.push("--hide-scrollbars")
+    args.push("--force-device-scale-factor=1")
+    args.push("--force-color-profile=srgb")
+    args.push("--no-first-run")
+    args.push("--no-default-browser-check")
+    args.push("--user-data-dir=" + tmp_profile)
+    args.push("--window-size=800,687")
+    args.push("--screenshot=" + tmp_png)
+    args.push(url)
+    val (out, err, code) = process_run(browser_bin, args)
+    var result: [u32] = []
+    if code == 0 and file_exists(tmp_png):
+        match file_read_bytes_result(tmp_png):
+            Ok(bytes):
+                match decode_png_to_argb(bytes):
+                    Ok(img):
+                        result = _crop_chrome_800x600(img)
+                    Err(msg):
+                        print "chrome decode failed ({page_name}): {msg}"
+            Err(msg):
+                print "chrome read failed ({page_name}): {msg}"
+    elif code != 0:
+        print "chrome screenshot failed ({page_name}, code={code}): {err}"
+    if file_exists(tmp_png):
+        file_delete(tmp_png)
+    if wrote_temp_html and file_exists(target_html_path):
+        file_delete(target_html_path)
+    dir_remove_all(tmp_dir)
+    result
+
+fn _dom_attr_by_id(root: BeDomNode, id: text, attr: text) -> text:
+    val path = be_dom_find_path_to_id(root, id)
+    if path.len() == 0:
+        return ""
+    be_dom_get_attr(path[path.len() - 1], attr)
+
+describe "Chrome vs Simple Web complex layered HTML/CSS & interactive events":
+    it "matches Chrome layout, rgba transparency, and z-index layering on desktop workspace":
+        val html_path = _abs_path(COMPLEX_HTML_REL)
+        val html = file_read(html_path)
+        expect(html.len()).to_be_greater_than(1000)
+
+        # Verify anti-overlap static geometry and intentional layered z-index overlaps.
+        val geom_lines = simple_web_layout_element_geometry_lines(html, VIEW_W, VIEW_H)
+        val topbar = _find_geom(geom_lines, "path:0")
+        val sidebar = _find_geom(geom_lines, "path:1/0")
+        val main_pane = _find_geom(geom_lines, "path:1/1")
+        val kpi_grid = _find_geom(geom_lines, "path:1/1/0")
+        val kpi0 = _find_geom(geom_lines, "path:1/1/0/0")
+        val kpi1 = _find_geom(geom_lines, "path:1/1/0/1")
+        val kpi2 = _find_geom(geom_lines, "path:1/1/0/2")
+        val stage = _find_geom(geom_lines, "path:1/1/1")
+        val backdrop_card = _find_geom(geom_lines, "path:1/1/1/1")
+        val internal_win = _find_geom(geom_lines, "path:1/1/1/2")
+
+        expect(topbar.w).to_equal(800)
+        expect(topbar.h).to_equal(48)
+        expect(_boxes_overlap(topbar, sidebar)).to_equal(false)
+        expect(_boxes_overlap(topbar, main_pane)).to_equal(false)
+        expect(_boxes_overlap(sidebar, main_pane)).to_equal(false)
+        expect(_boxes_overlap(kpi0, kpi1)).to_equal(false)
+        expect(_boxes_overlap(kpi1, kpi2)).to_equal(false)
+        expect(_boxes_overlap(kpi_grid, stage)).to_equal(false)
+        expect(_boxes_overlap(backdrop_card, internal_win)).to_equal(true)
+
+        # Render via Vulkan readback and CpuBackend software renderer.
+        val (resolved, reason) = simple_web_resolved_engine2d_backend_name_with_reason(VIEW_W, VIEW_H, "vulkan")
+        val readback = simple_web_layout_render_html_readback(html, VIEW_W, VIEW_H, "vulkan")
+        val simple_pixels = readback.pixels
+        val sw_pixels = simple_web_layout_render_html_software_pixels(html, VIEW_W, VIEW_H)
+        expect(simple_pixels.len() as i32).to_equal(EXPECTED_PIXEL_COUNT)
+        expect(sw_pixels.len() as i32).to_equal(EXPECTED_PIXEL_COUNT)
+        val gpu_used = readback.source == "device_readback" and readback.backend_handle > 0 and readback.device_identity > 0
+        if resolved == "vulkan":
+            expect(readback.source).to_equal("device_readback")
+            expect(gpu_used).to_equal(true)
+
+        # Initial overlap sample: #backdrop-card (z=25) sits above #internal-win (z=20).
+        # Sample inside their intersection rectangle at (stage.x + 280, stage.y + 185).
+        val ov_x = stage.x + 280
+        val ov_y = stage.y + 185
+        val ov_px = simple_pixels[ov_y * VIEW_W + ov_x]
+        expect(_rgb_b(ov_px)).to_be_greater_than(_rgb_g(ov_px) + 20)
+        expect(_rgb_r(ov_px)).to_be_greater_than(40)
+
+        val s_stats = _compute_stats(simple_pixels, VIEW_W, VIEW_H)
+        expect(s_stats.distinct_count).to_be_greater_than(6)
+        expect(s_stats.non_bg_count).to_be_greater_than(1500)
+
+        val browser_bin = compare_view_find_browser("")
+        expect(browser_bin != "").to_equal(true)
+        if browser_bin != "":
+            val chrome_pixels = _capture_chrome_screenshot(browser_bin, "complex_layered_initial", "", COMPLEX_HTML_REL)
+            expect(chrome_pixels.len() as i32).to_equal(EXPECTED_PIXEL_COUNT)
+            if (chrome_pixels.len() as i32) == EXPECTED_PIXEL_COUNT:
+                val cv_status = compare_view_inspect(
+                    "chrome_vs_simple_web_complex_layered_initial",
+                    "simple_web_" + resolved,
+                    simple_pixels,
+                    VIEW_W,
+                    VIEW_H,
+                    "chrome_skia_gpu",
+                    chrome_pixels,
+                    VIEW_W,
+                    VIEW_H
+                )
+                if (env_get("SIMPLE_COMPARE_VIEW") ?? "").trim().lower() == "html":
+                    expect(cv_status.starts_with("written:")).to_equal(true)
+                val (px_tenths, blk_tenths, overlap_cnt) = _compute_parity_metrics(simple_pixels, chrome_pixels)
+                val (sw_px_tenths, sw_blk_tenths, _) = _compute_parity_metrics(sw_pixels, chrome_pixels)
+                val c_stats = _compute_stats(chrome_pixels, VIEW_W, VIEW_H)
+                print "[parity-complex-initial] resolved={resolved} gpu_used={gpu_used} pixel_parity_pct={px_tenths / 10}.{px_tenths % 10}% block_parity_pct={blk_tenths / 10}.{blk_tenths % 10}% sw_pixel_parity_pct={sw_px_tenths / 10}.{sw_px_tenths % 10}% active_overlap={overlap_cnt}/192"
+                expect(_abs_i32(s_stats.mean_luma - c_stats.mean_luma)).to_be_less_than(45)
+                expect(px_tenths).to_be_greater_than(700)
+                expect(blk_tenths).to_be_greater_than(800)
+                expect(sw_blk_tenths).to_be_greater_than(800)
+
+                # Chrome overlap pixel should also reflect translucent purple card on top of window.
+                val chrome_ov_px = chrome_pixels[ov_y * VIEW_W + ov_x]
+                expect(_rgb_b(chrome_ov_px)).to_be_greater_than(_rgb_g(chrome_ov_px) + 15)
+
+    it "handles button, drag, internal window, dropdown, contextmenu, and text input with DOM & pixel mutations":
+        val html_path = _abs_path(COMPLEX_HTML_REL)
+        val html = file_read(html_path)
+        var session = HostedWebContentSession.create_document(
+            1, "file://" + html_path, html, VIEW_W, VIEW_H
+        )
+        expect(session.failure_reason).to_equal("")
+
+        val initial_pixels = session.render_to_pixels()
+        expect(initial_pixels.len() as i32).to_equal(EXPECTED_PIXEL_COUNT)
+
+        val g0 = simple_web_layout_element_geometry_lines(html, VIEW_W, VIEW_H)
+        val btn_box = _find_geom(g0, "path:0/1/1")
+        val meter_box = _find_geom(g0, "path:0/1/0")
+        val dd_trigger_box = _find_geom(g0, "path:1/0/1/0")
+        val cmd_input_box = _find_geom(g0, "path:1/0/6")
+        val mirror_box = _find_geom(g0, "path:1/0/7")
+        val stage_box = _find_geom(g0, "path:1/1/1")
+        val ctx_zone_box = _find_geom(g0, "path:1/1/1/0")
+        val backdrop_box = _find_geom(g0, "path:1/1/1/1")
+        val win_box = _find_geom(g0, "path:1/1/1/2")
+        val win_title_box = _find_geom(g0, "path:1/1/1/2/0")
+        val win_close_box = _find_geom(g0, "path:1/1/1/2/0/1")
+        val drag_box = _find_geom(g0, "path:1/1/1/3")
+
+        # 1. Button click
+        val (bx, by) = _geom_center(btn_box)
+        val _b_dn = session.dispatch_pointer_at(1, bx, by, true)
+        val _b_up = session.dispatch_pointer_at(2, bx, by, false)
+        expect(session.browser.current_title).to_equal("action:1")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "action-count", "value")).to_equal("1")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "status-readout", "value")).to_equal("ACTIVE-1")
+        val after_btn_pixels = session.render_to_pixels()
+        expect(_region_diff_pixels(initial_pixels, after_btn_pixels, VIEW_W, VIEW_H, btn_box.x, btn_box.y, btn_box.w, btn_box.h)).to_be_greater_than(50)
+        expect(_region_diff_pixels(initial_pixels, after_btn_pixels, VIEW_W, VIEW_H, meter_box.x, meter_box.y, meter_box.w, meter_box.h)).to_be_greater_than(20)
+
+        # 2. Draggable floating widget (mousedown -> pointermove -> pointermove -> mouseup)
+        val (wx, wy) = _geom_center(drag_box)
+        val _w_dn = session.dispatch_pointer_at(3, wx, wy, true)
+        val _w_mv1 = session.dispatch_pointer_move_at(wx + 35, wy + 25, 1)
+        val _w_mv2 = session.dispatch_pointer_move_at(wx + 70, wy + 55, 1)
+        val _w_up = session.dispatch_pointer_at(4, wx + 70, wy + 55, false)
+        expect(session.browser.current_title).to_equal("drag:330,71")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "drag-pos", "value")).to_equal("330,71")
+        val after_drag_pixels = session.render_to_pixels()
+        expect(_region_diff_pixels(after_btn_pixels, after_drag_pixels, VIEW_W, VIEW_H, drag_box.x, drag_box.y, drag_box.w, drag_box.h)).to_be_greater_than(200)
+        expect(_region_diff_pixels(after_btn_pixels, after_drag_pixels, VIEW_W, VIEW_H, drag_box.x + 70, drag_box.y + 55, drag_box.w, drag_box.h)).to_be_greater_than(200)
+
+        # 3. Internal window raise z-index (over backdrop z=25 -> z=40), drag, then close
+        val wtx = win_title_box.x + 60
+        val wty = win_title_box.y + win_title_box.h / 2
+        val _win_dn = session.dispatch_pointer_at(5, wtx, wty, true)
+        expect(_dom_attr_by_id(session.browser.dom_root(), "win-state", "value").starts_with("Z40:")).to_equal(true)
+        val _win_mv = session.dispatch_pointer_move_at(wtx - 20, wty - 25, 1)
+        val _win_up = session.dispatch_pointer_at(6, wtx - 20, wty - 25, false)
+        expect(session.browser.current_title).to_equal("win:240,105")
+        val after_win_raise_pixels = session.render_to_pixels()
+        # Overlap area between backdrop (z=25) and raised internal window (z=40) must mutate.
+        expect(_region_diff_pixels(after_drag_pixels, after_win_raise_pixels, VIEW_W, VIEW_H, backdrop_box.x + 90, backdrop_box.y, 120, 140)).to_be_greater_than(100)
+
+        # Close internal window via moved #win-close button
+        val close_x = win_close_box.x + win_close_box.w / 2 - 20
+        val close_y = win_close_box.y + win_close_box.h / 2 - 25
+        val _cl_dn = session.dispatch_pointer_at(7, close_x, close_y, true)
+        val _cl_up = session.dispatch_pointer_at(8, close_x, close_y, false)
+        expect(session.browser.current_title).to_equal("window:closed")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "status-readout", "value")).to_equal("WIN-CLOSED")
+        val after_win_close_pixels = session.render_to_pixels()
+        expect(_region_diff_pixels(after_win_raise_pixels, after_win_close_pixels, VIEW_W, VIEW_H, win_box.x - 20, win_box.y - 25, win_box.w, win_box.h)).to_be_greater_than(500)
+
+        # 4. Custom dropdown open & select option Beta
+        val (ddx, ddy) = _geom_center(dd_trigger_box)
+        val _dd_dn = session.dispatch_pointer_at(9, ddx, ddy, true)
+        val _dd_up = session.dispatch_pointer_at(10, ddx, ddy, false)
+        expect(session.browser.current_title).to_equal("dropdown:open")
+        val dd_open_pixels = session.render_to_pixels()
+        expect(_region_diff_pixels(after_win_close_pixels, dd_open_pixels, VIEW_W, VIEW_H, dd_trigger_box.x, dd_trigger_box.y + 36, 168, 98)).to_be_greater_than(200)
+
+        val g_dd = simple_web_layout_element_geometry_lines(session.browser.render_html_document(), VIEW_W, VIEW_H)
+        val opt_beta_box = _find_geom(g_dd, "path:1/0/1/1/1")
+        val (obx, oby) = _geom_center(opt_beta_box)
+        val _ob_dn = session.dispatch_pointer_at(11, obx, oby, true)
+        val _ob_up = session.dispatch_pointer_at(12, obx, oby, false)
+        expect(session.browser.current_title).to_equal("dropdown:Beta")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "dropdown-value", "value")).to_equal("Beta")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "status-readout", "value")).to_equal("MODE-Beta")
+        val after_dd_pixels = session.render_to_pixels()
+        expect(_region_diff_pixels(dd_open_pixels, after_dd_pixels, VIEW_W, VIEW_H, dd_trigger_box.x, dd_trigger_box.y + 36, 168, 98)).to_be_greater_than(200)
+
+        # 5. Custom contextmenu (preventDefault + exact clientX/clientY/offsetX/offsetY + item click)
+        val ctx_x = ctx_zone_box.x + 84
+        val ctx_y = ctx_zone_box.y + 76
+        val _ctx_res = session.dispatch_context_menu_at(ctx_x, ctx_y)
+        expect(session.last_context_menu_default_prevented).to_equal(true)
+        expect(session.browser.current_title).to_equal("ctx:{ctx_x},{ctx_y}")
+        val expected_offset_x = ctx_x - ctx_zone_box.x
+        val expected_offset_y = ctx_y - ctx_zone_box.y
+        expect(_dom_attr_by_id(session.browser.dom_root(), "event-coords", "value")).to_equal("{ctx_x},{ctx_y}@{expected_offset_x},{expected_offset_y}")
+        val ctx_open_pixels = session.render_to_pixels()
+        expect(_region_diff_pixels(after_dd_pixels, ctx_open_pixels, VIEW_W, VIEW_H, stage_box.x, stage_box.y, 260, 220)).to_be_greater_than(150)
+
+        val g_ctx = simple_web_layout_element_geometry_lines(session.browser.render_html_document(), VIEW_W, VIEW_H)
+        val ctx_pin_box = _find_geom(g_ctx, "path:1/1/1/4/0")
+        val (cpx, cpy) = _geom_center(ctx_pin_box)
+        val _cp_dn = session.dispatch_pointer_at(13, cpx, cpy, true)
+        val _cp_up = session.dispatch_pointer_at(14, cpx, cpy, false)
+        expect(session.browser.current_title).to_equal("ctx:pinned")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "status-readout", "value")).to_equal("CTX-PINNED")
+        val after_ctx_pixels = session.render_to_pixels()
+        expect(_region_diff_pixels(ctx_open_pixels, after_ctx_pixels, VIEW_W, VIEW_H, ctx_pin_box.x - 10, ctx_pin_box.y - 10, 170, 90)).to_be_greater_than(150)
+
+        # 6. Editable text field (click to focus -> dispatch_text -> input event + value + mirror + pixel change)
+        val (inx, iny) = _geom_center(cmd_input_box)
+        val _in_dn = session.dispatch_pointer_at(15, inx, iny, true)
+        val _in_up = session.dispatch_pointer_at(16, inx, iny, false)
+        val _in_txt = session.dispatch_text(17, "-go")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "command-input", "value")).to_equal("init-go")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "text-mirror", "value")).to_equal("init-go")
+        expect(_dom_attr_by_id(session.browser.dom_root(), "status-readout", "value")).to_equal("TYPED")
+        expect(session.browser.current_title).to_equal("text:init-go")
+        val after_text_pixels = session.render_to_pixels()
+        expect(_region_diff_pixels(after_ctx_pixels, after_text_pixels, VIEW_W, VIEW_H, cmd_input_box.x, cmd_input_box.y, cmd_input_box.w, cmd_input_box.h)).to_be_greater_than(10)
+        expect(_region_diff_pixels(after_ctx_pixels, after_text_pixels, VIEW_W, VIEW_H, mirror_box.x, mirror_box.y, mirror_box.w, mirror_box.h)).to_be_greater_than(10)
+
+        # Verify post-interaction Chrome visual parity on the mutated DOM state.
+        val browser_bin = compare_view_find_browser("")
+        if browser_bin != "":
+            val mutated_html = session.browser.render_html_document()
+            val chrome_mutated = _capture_chrome_screenshot(browser_bin, "complex_layered_mutated", mutated_html, "")
+            expect(chrome_mutated.len() as i32).to_equal(EXPECTED_PIXEL_COUNT)
+            if (chrome_mutated.len() as i32) == EXPECTED_PIXEL_COUNT:
+                val (m_px, m_blk, m_ov) = _compute_parity_metrics(after_text_pixels, chrome_mutated)
+                print "[parity-complex-post-events] pixel_parity_pct={m_px / 10}.{m_px % 10}% block_parity_pct={m_blk / 10}.{m_blk % 10}% active_overlap={m_ov}/192"
+                expect(m_px).to_be_greater_than(700)
+                expect(m_blk).to_be_greater_than(800)
+
+        session.close()

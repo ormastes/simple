@@ -463,6 +463,52 @@ impl Lowerer {
         Ok(type_id)
     }
 
+    /// Erase a one-field record unit (`unit Name: T`) to its scalar `T` for
+    /// native/JIT lowering. The name becomes an alias of `T`, so operators and
+    /// parameter passing run on the scalar; see `lower_record_unit_ctor` and the
+    /// `.value` identity in field access. Non-scalar bases are left to the
+    /// existing (interpreter) path.
+    pub(crate) fn register_record_unit_scalar(&mut self, u: &ast::UnitDef) {
+        if u.base_types.len() != 1 {
+            return;
+        }
+        let Ok(base) = self.resolve_type(&u.base_types[0]) else {
+            return;
+        };
+        if !Self::is_scalar_type(self.module.types.get(base)) {
+            return;
+        }
+        self.module.types.register_alias(u.name.clone(), base);
+        self.record_unit_scalars.insert(u.name.clone(), base);
+    }
+
+    pub(crate) fn is_scalar_type(ty: Option<&HirType>) -> bool {
+        matches!(
+            ty,
+            Some(HirType::Bool | HirType::Char | HirType::Int { .. } | HirType::Float { .. } | HirType::String)
+        )
+    }
+
+    /// `Name(v)` / `Name(value: v)` for an erased record unit lowers to `v`.
+    pub(crate) fn lower_record_unit_ctor(
+        &mut self,
+        name: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        let Some(&base) = self.record_unit_scalars.get(name) else {
+            return Ok(None);
+        };
+        if args.len() != 1 || args[0].name.as_deref().is_some_and(|n| n != "value") {
+            return Ok(None);
+        }
+        let mut inner = self.lower_expr(&args[0].value, ctx)?;
+        if inner.ty == TypeId::ANY {
+            inner.ty = base;
+        }
+        Ok(Some(inner))
+    }
+
     /// Register a type alias, with optional refinement predicate (CTR-020)
     pub(crate) fn register_type_alias(&mut self, ta: &ast::TypeAliasDef) -> LowerResult<TypeId> {
         let base_type = self.resolve_type(&ta.ty)?;

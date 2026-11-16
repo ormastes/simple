@@ -3,20 +3,20 @@
 # Unit tests of the production decoder; live snapshot/provider tests remain separate.
 use std.spec
 use std.common.text_bytes.{text_to_utf8_bytes}
-use app.traceability.snapshot.git_batch.{decode_trace_git_batch}
+use app.traceability.snapshot.git_batch.{decode_trace_git_batch, TraceGitByteLimitV1, TraceGitBytesV1}
 
 val blob_a = "1111111111111111111111111111111111111111"
 val blob_b = "2222222222222222222222222222222222222222"
 
 fn batch_error(wire: text, ids: [text], limit: i64) -> text:
-    match decode_trace_git_batch(text_to_utf8_bytes(wire), ids, limit, 4096):
+    match decode_trace_git_batch(TraceGitBytesV1(bytes: text_to_utf8_bytes(wire)), ids, TraceGitByteLimitV1(value: limit), TraceGitByteLimitV1(value: 4096)):
         case Ok(_): "unexpected success"
         case Err(reason): reason
 
 describe "Git textual object batch framing":
     it "preserves embedded newlines and the next object's identity":
         val wire = "{blob_a} blob 4\na\nb\n\n{blob_b} blob 0\n\n"
-        match decode_trace_git_batch(text_to_utf8_bytes(wire), [blob_a, blob_b], 128, 4096):
+        match decode_trace_git_batch(TraceGitBytesV1(bytes: text_to_utf8_bytes(wire)), [blob_a, blob_b], TraceGitByteLimitV1(value: 128), TraceGitByteLimitV1(value: 4096)):
             case Ok(blobs):
                 expect(blobs.len()).to_equal(2)
                 expect(blobs[0].content).to_equal("a\nb\n")
@@ -27,7 +27,7 @@ describe "Git textual object batch framing":
 
     it "counts UTF-8 bytes without slicing a multibyte codepoint":
         val wire = "{blob_a} blob 3\n한\n"
-        match decode_trace_git_batch(text_to_utf8_bytes(wire), [blob_a], 128, 4096):
+        match decode_trace_git_batch(TraceGitBytesV1(bytes: text_to_utf8_bytes(wire)), [blob_a], TraceGitByteLimitV1(value: 128), TraceGitByteLimitV1(value: 4096)):
             case Ok(blobs):
                 expect(blobs[0].content).to_equal("한")
                 expect(blobs[0].byte_size).to_equal(3)
@@ -53,6 +53,6 @@ describe "Git textual object batch framing":
         var data = text_to_utf8_bytes("{blob_a} blob 1\n")
         data.push(255 as u8)
         data.push(10 as u8)
-        match decode_trace_git_batch(data, [blob_a], 128, 4096):
+        match decode_trace_git_batch(TraceGitBytesV1(bytes: data), [blob_a], TraceGitByteLimitV1(value: 128), TraceGitByteLimitV1(value: 4096)):
             case Ok(_): fail("invalid UTF-8 was accepted")
             case Err(reason): expect(reason.len()).to_be_greater_than(0)

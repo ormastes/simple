@@ -1296,6 +1296,9 @@ pub(super) fn eval_call_expr(
                         }
                     }
                 },
+                // `u.value` on a unit value: the record field form of `u.value()`
+                // (pure-Simple lowers a unit to a one-field `value` struct).
+                Value::Unit { ref value, .. } if field == "value" => Ok((**value).clone()),
                 // Enum property access (Option/Result properties)
                 // Also supports no-paren method calls
                 Value::Enum {

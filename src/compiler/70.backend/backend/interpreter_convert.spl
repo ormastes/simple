@@ -1,0 +1,83 @@
+# Interpreter Backend - `T(x)` conversion calls, comprehensions and
+# open-ended `for` ranges.
+#
+# doc/08_tracking/bug/native_cli_test_cannot_run_std_spec_2026-11-15.md
+
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.backend_types.*
+use compiler.backend.env.{EvalContext}
+use compiler.backend.interpreter.{InterpreterBackendImpl, resolve_sym_name}
+
+impl InterpreterBackendImpl:
+    fn eval_convert_call(inner: HirExpr, target: HirType, ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        """`i64(x)` / `float(x)`: a numeric cast, or a value parse for text."""
+        val v = self.eval_expr(inner, ctx)?
+        match target.kind:
+            case HirTypeKind.Int(_, _):
+                match v:
+                    case Value.String(s):
+                        match s.parse_int():
+                            case Some(n): Ok(backend_value_int_v1(n))
+                            case None: Err(BackendError.runtime_error("cannot convert text to an integer", Some(span)))
+                    case _: self.eval_cast(inner, target, ctx, span)
+            case HirTypeKind.Float(_):
+                match v:
+                    case Value.String(s): Ok(backend_value_float_v1(s.to_float()))
+                    case _: self.eval_cast(inner, target, ctx, span)
+            case _: Ok(v)
+
+    fn eval_comprehension(expr: HirExpr, clauses: [HirCompClause], ctx: EvalContext) -> Result<Value, BackendError>:
+        """`[e for x in xs if c]`: nested clauses, the result is an array."""
+        val out = self.comprehension_collect(expr, clauses, 0, ctx, [])?
+        Ok(backend_value_array_v1(out))
+
+    fn comprehension_collect(expr: HirExpr, clauses: [HirCompClause], at: i64, ctx: EvalContext, acc: [Value]) -> Result<[Value], BackendError>:
+        if at >= clauses.len():
+            val item = self.eval_expr(expr, ctx)?
+            return Ok(acc.push(item))
+        val clause: HirCompClause = clauses[at]
+        match clause.kind:
+            case HirCompClauseKind.If(cond):
+                val cv = self.eval_expr(cond, ctx)?
+                if not cv.is_truthy():
+                    return Ok(acc)
+                self.comprehension_collect(expr, clauses, at + 1, ctx, acc)
+            case HirCompClauseKind.For(var_, iter):
+                val name = resolve_sym_name(var_, ctx)
+                val source = self.eval_expr(iter, ctx)?
+                match source:
+                    case Value.Array(elements):
+                        var out: [Value] = acc
+                        for element in elements:
+                            val element_t: Value = element
+                            ctx.env.push_scope()
+                            ctx.env.define(name, element_t)
+                            val next = self.comprehension_collect(expr, clauses, at + 1, ctx, out)
+                            ctx.env.pop_scope()
+                            out = next?
+                        Ok(out)
+                    case _:
+                        Err(BackendError.type_error("comprehension over a non-array value", Some(iter.span)))
+
+    fn eval_for_open(var_: SymbolId, start: HirExpr, step: HirExpr?, body: HirBlock, ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        """`for i in a..:` counts up from `a` until the body breaks."""
+        val name = resolve_sym_name(var_, ctx)
+        var by: i64 = 1
+        if step.?:
+            match self.eval_expr(step.unwrap(), ctx)?:
+                case Value.Int(n): by = n
+                case _: return Err(BackendError.type_error("range step must be an integer", Some(span)))
+        var i: i64 = 0
+        match self.eval_expr(start, ctx)?:
+            case Value.Int(a): i = a
+            case _: return Err(BackendError.type_error("range bounds must be integers", Some(span)))
+        while true:
+            ctx.env.push_scope()
+            ctx.env.define(name, backend_value_int_v1(i))
+            val keep = self.run_loop_body(body, ctx)
+            ctx.env.pop_scope()
+            if not keep?:
+                break
+            i = i + by
+        Ok(Value.Nil)

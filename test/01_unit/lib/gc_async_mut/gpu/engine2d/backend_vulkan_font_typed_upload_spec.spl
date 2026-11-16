@@ -25,6 +25,11 @@ lanes, and a deliberate byte-order swap inside the typed upload moved it to
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     vulkan_font_upload_u32_requested, vulkan_font_upload_last_mode,
     vulkan_font_upload_last_reason, vulkan_font_upload_note}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_init, vulkan_sffi_select_device, vulkan_sffi_alloc_buffer,
+    vulkan_sffi_copy_to_buffer_u32, vulkan_sffi_copy_to_buffer_u32_admitted}
+use std.io_runtime.{file_exists}
+
+val LVP_ICD: text = "/usr/share/vulkan/icd.d/lvp_icd.json"
 
 describe "typed font atlas upload opt-in":
     it "defaults to the byte payload when the env var is unset":
@@ -51,3 +56,21 @@ describe "typed font atlas upload opt-in":
         vulkan_font_upload_note("u32", "typed-requested")
         expect(vulkan_font_upload_last_mode()).to_equal("u32")  # oracle: REQ-VK-FONT-U32-007
         expect(vulkan_font_upload_last_reason()).to_equal("typed-requested")  # oracle: REQ-VK-FONT-U32-008
+
+    it "admits the typed lane only where the word upload really succeeds":
+        # The font lane PARKS the atlas words and copies them at the next
+        # submit, so by the time `rt_vulkan_copy_to_buffer_u32` can decline
+        # the glyph dispatches are already recorded. Under the compiled array
+        # ABI it always declines (`_vulkan_copy_to_buffer_u32_abi`), which made
+        # every run on the u32 lane draw no text at all (forms-media 900x760:
+        # 26,956 pixels off the byte lane). The admission check must therefore
+        # answer the same question the copy will, before anything is parked.
+        if not file_exists(LVP_ICD):
+            print("[skip] typed-upload-admission: no llvmpipe ICD at {LVP_ICD}; the live copy was not exercised")
+            return
+        expect(vulkan_sffi_init()).to_equal(true)
+        expect(vulkan_sffi_select_device(0)).to_equal(true)
+        val buf = vulkan_sffi_alloc_buffer(16, 3)
+        expect(buf > 0).to_equal(true)
+        val words: [u32] = [1u32, 0xff000000u32, 0x00ffffffu32]
+        expect(vulkan_sffi_copy_to_buffer_u32(buf, words, 0)).to_equal(vulkan_sffi_copy_to_buffer_u32_admitted())

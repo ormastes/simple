@@ -48,13 +48,15 @@ use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_sel
     worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1,
     worker_admitted_edges_v1, worker_admitted_edges_selected_v1, worker_admitted_closure_v1, worker_admitted_order_v1,
     worker_admitted_error_v1, WorkerAdmittedGraphV1}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_bind_row_identity}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1, unit_tldr_imports_enabled_v1}
 use compiler.driver.driver_unit_tldr_imports_v1.{UnitTldrPlanV1, unit_tldr_plan_v1, unit_tldr_empty_plan_v1,
-    unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1, unit_tldr_log_line_v1}
+    unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1, unit_tldr_surface_for_row_v1, unit_tldr_log_line_v1}
 use compiler.driver.driver_tldr_import_route_v1.{TldrFrozenRoutePlanV1, tldr_route_frozen_inputs_v1}
 use compiler.driver.driver_tldr_frozen_surface_route_v1.{tldr_frozen_surface_lane_error_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_closure_incomplete_publish_v1,
-    native_file_worker_unit_active_v1, native_file_worker_batch_v1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1}
+    native_file_worker_unit_active_v1, native_file_worker_batch_v1, NATIVE_FILE_WORKER_ONLY_PATHS_ENV_V1,
+    native_file_unit_tldr_root_v1, native_file_unit_tldr_route_error_v1, NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_promote_transient_owner_v1}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1}
 use compiler.driver.cache.phase_compatibility_admission.{
@@ -116,6 +118,10 @@ use compiler.driver.driver_source_parse_support.{
     driver_parse_shard_claimed, _driver_parse_shard_owns, _driver_publish_frontend_cache_scope,
     _STREAM_PARSE_ERROR_PREFIX, driver_frontend_offload_decision
 }
+
+use compiler.driver.driver_unit_order_index_v1.{unit_admitted_graph_v1, unit_order_index_enabled_v1,
+    UNIT_ORDER_INDEX_ENV_V1, UNIT_ORDER_SKIP_FRESH_ENV_V1, unit_order_skip_fresh_enabled_v1,
+    unit_order_fresh_flags_v1, unit_order_skip_fresh_order_v1}
 
 var _worker_readiness_edges_reported_v1: bool = false
 
@@ -185,7 +191,16 @@ impl CompilerDriver:
             return false
         var admitted_graph = WorkerAdmittedGraphV1(edges: [], errors: [])
         if worker_unit:
-            val edge_result = worker_admitted_edges_v1(source_paths, source_contents, source_module_names,
+            # Skip-fresh reads the PREVIOUS index, so it runs before the
+            # graph step below republishes it.
+            val unit_fresh = unit_order_fresh_flags_v1(
+                unit_order_skip_fresh_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_SKIP_FRESH_ENV_V1) ?? "",
+                    driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "", source_paths, source_contents)
+            val edge_result = unit_admitted_graph_v1(
+                unit_order_index_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
+                source_paths, source_contents, source_module_names,
                 self.ctx.source_resolution_roots_owner, self.ctx.options.library_mode)
             if edge_result.is_err():
                 self.ctx.add_error(edge_result.unwrap_err())
@@ -193,7 +208,7 @@ impl CompilerDriver:
             admitted_graph = edge_result.unwrap()
             val pick_result = worker_unit_pick_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
                 driver_parse_env_get_v1("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
-                worker_admitted_order_v1(admitted_graph.edges),
+                unit_order_skip_fresh_order_v1(worker_admitted_order_v1(admitted_graph.edges), unit_fresh),
                 native_file_worker_batch_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? ""))
             if pick_result.is_err():
                 self.ctx.add_error("file-worker unit pick failed: {pick_result.unwrap_err()}")
@@ -219,7 +234,17 @@ impl CompilerDriver:
             worker_surface_closure_selected_v1(worker_spec, worker_flag))
         # PM3: a unit child parses only its picked files; imports resolve
         # through TLDR summary surfaces (driver_unit_tldr_imports_v1.spl).
-        val unit_tldr_root = (driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "")
+        # No --cache-dir: the parent hands the unit the shared HIR queue's
+        # frontend root (NativeFileUnitProcessInvokerV1.run_unit). An empty
+        # root used to fall back to body-parsing the whole import closure.
+        val unit_tldr_root = native_file_unit_tldr_root_v1(
+            driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "",
+            driver_parse_env_get_v1(NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1) ?? "")
+        val unit_root_error = native_file_unit_tldr_route_error_v1(worker_unit and worker_closure,
+            worker_unit and unit_tldr_imports_enabled_v1(true), unit_tldr_root)
+        if unit_root_error != "":
+            self.ctx.add_error(unit_root_error)
+            return false
         val unit_tldr_on = worker_unit and worker_closure and unit_tldr_root != "" and
             unit_tldr_imports_enabled_v1(true)
         var unit_tldr_plan: UnitTldrPlanV1 = unit_tldr_empty_plan_v1()
@@ -312,12 +337,17 @@ impl CompilerDriver:
                         "Module surface extraction error: {alias_result.unwrap_err()} source='{source_paths[source_index]}' module='{source_module_names[source_index]}' index={source_index}")
                     return false
             elif unit_tldr_on and not worker_needed[source_index] and
-                    unit_tldr_surface_for_v1(unit_tldr_plan, source_module_names[source_index]) != nil:
+                    unit_tldr_surface_for_row_v1(unit_tldr_plan, source_module_names[source_index], canonical_path) != nil:
                 # PM3: an import not parsed here gets its summary-built surface.
-                var tldr_surface: ModuleSurface = unit_tldr_surface_for_v1(unit_tldr_plan, source_module_names[source_index]).unwrap()
-                # Bind the summary surface to this admitted row: HIR deps records
-                # resolve import edges through surface.source_index (layer 2).
-                tldr_surface.source_index = source_index
+                var tldr_surface: ModuleSurface = unit_tldr_surface_for_row_v1(unit_tldr_plan, source_module_names[source_index], canonical_path).unwrap()
+                # Bind the summary surface to this admitted row, exactly like a
+                # placeholder: HIR deps records resolve import edges through
+                # surface.source_index (layer 2), the lib.X/std.X alias lane
+                # compares content length/hash with this row's bytes, and the
+                # HIR closure digest folds the names, so a worker with summaries
+                # must digest the row like one that parsed it.
+                tldr_surface = module_surface_bind_row_identity(tldr_surface, source_paths[source_index],
+                    canonical_path, source_module_names[source_index], source_index, source_contents[source_index])
                 val tldr_added = builder.add_surface_canonical_identity(tldr_surface,
                     source_module_names[source_index], canonical_path)
                 if tldr_added.is_err():

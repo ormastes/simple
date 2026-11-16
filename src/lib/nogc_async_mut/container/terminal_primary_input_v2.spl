@@ -1,0 +1,90 @@
+# Actual native input-gate observations over the canonical adopted owner.
+# No input writes, fabricated receipts, process reconstruction or new grants.
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlLeaseV1,
+    SessionRuntimeControlTargetV1}
+use std.common.process.input_control_v1.ProcessInputWriteDispositionV1
+use std.common.process.windows_engine_control_v2.{WindowsEnginePipeControlStateV2,
+    WindowsEnginePipeWriteStatusV2}
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
+    container_primary_input_state_v1, container_primary_input_install_v1,
+    container_primary_input_revoke_v1}
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_async_mut.container.terminal_primary_v2.container_primary_terminal_view_v2
+use std.nogc_async_mut.container.providers.windows.primary_connection_v2.{
+    windows_primary_connection_input_state_v2, windows_primary_connection_input_install_v2,
+    windows_primary_connection_input_revoke_v2}
+
+pub struct ContainerPrimaryInputGateV2:
+    controlled: bool
+    active: bool
+    target_digest: text
+    nonce_digest: text
+    revision: i64
+    expires_monotonic_ns: i64
+    pending: bool
+    unknown: bool
+
+fn require_adoption_v2(session: ContainerOwnedTerminalSessionV2) -> Result<(), text>:
+    val view = container_primary_terminal_view_v2(session)?
+    if view.adoption == nil: return Err("primary-input-not-adopted")
+    Ok(())
+
+fn windows_gate_v2(state: WindowsEnginePipeControlStateV2) -> Result<ContainerPrimaryInputGateV2, text>:
+    var pending = state.pending
+    var unknown = false
+    if val last = state.last:
+        unknown = last.status == WindowsEnginePipeWriteStatusV2.Unknown
+        if last.status == WindowsEnginePipeWriteStatusV2.Queued: pending = true
+    if val binding = state.binding:
+        if binding.kind != "input": return Err("primary-input-native-binding-kind")
+    if val current = state.current:
+        if not state.binding.? or current.kind != "input": return Err("primary-input-native-control-binding")
+        return Ok(ContainerPrimaryInputGateV2(controlled: state.binding.?, active: state.active,
+            target_digest: current.target_digest, nonce_digest: current.nonce_digest,
+            revision: current.revision, expires_monotonic_ns: current.expires_monotonic_ns,
+            pending: pending, unknown: unknown))
+    if state.active: return Err("primary-input-native-active-without-control")
+    # No installed native control is represented by empty identity and zero
+    # revision/deadline, never by manufacturing a lease from adopted metadata.
+    Ok(ContainerPrimaryInputGateV2(controlled: state.binding.?, active: state.active,
+        target_digest: "", nonce_digest: "", revision: 0, expires_monotonic_ns: 0,
+        pending: pending, unknown: unknown))
+
+pub fn container_primary_input_gate_v2(session: ContainerOwnedTerminalSessionV2) -> Result<ContainerPrimaryInputGateV2, text>:
+    require_adoption_v2(session)?
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            val state = container_primary_input_state_v1(primary)?
+            # The V1 process API is synchronous and has no queued disposition.
+            # Its current sequence is history, not a pending-IO indicator.
+            Ok(ContainerPrimaryInputGateV2(controlled: state.controlled, active: state.active,
+                target_digest: state.target_digest, nonce_digest: state.nonce_digest,
+                revision: state.revision, expires_monotonic_ns: state.expires_monotonic_ns,
+                pending: false, unknown: state.last_disposition == ProcessInputWriteDispositionV1.Unknown))
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            windows_gate_v2(windows_primary_connection_input_state_v2(connection)?)
+        case _: Err("container-primary-terminal-required")
+
+pub fn container_primary_input_install_v2(session: ContainerOwnedTerminalSessionV2,
+        lease: SessionRuntimeControlLeaseV1, target: SessionRuntimeControlTargetV1,
+        principal: text, nonce: text) -> Result<ContainerPrimaryInputGateV2, text>:
+    require_adoption_v2(session)?
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            container_primary_input_install_v1(primary, lease, target, principal, nonce)?
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val installed = windows_primary_connection_input_install_v2(connection, lease, target, principal, nonce)?
+            # Consume and check the actual install receipt before a separate
+            # native observation. Concurrent revocation remains visible below.
+            val installed_gate = windows_gate_v2(installed)?
+        case _: return Err("container-primary-terminal-required")
+    container_primary_input_gate_v2(session)
+
+pub fn container_primary_input_revoke_v2(session: ContainerOwnedTerminalSessionV2) -> Result<(), text>:
+    require_adoption_v2(session)?
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            container_primary_input_revoke_v1(primary)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            windows_primary_connection_input_revoke_v2(connection)
+        case _: Err("container-primary-terminal-required")

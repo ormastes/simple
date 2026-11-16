@@ -89,3 +89,43 @@ vacuous, not a leak) and the self-mocking-spec hazard class, live in
 [engine2d_font_offload](../engine2d_font_offload/skill.md) § 2026-09-06.
 
 - 2026-11-04: `metal-on-vulkan` (alias `metal_on_vulkan`) is an explicit, probe-disclosed VulkanBackend lane like `directx-on-vulkan`; strict `metal` stays macOS-only. Spec: test/02_integration/rendering/metal_on_vulkan_backend_spec.spl.
+
+## Text in render checks must be pixel-sharp (owner rule, 2026-11-15)
+
+Render checks and perf rows draw text at 1:1 or sharper: the 7 px bitmap face
+at **scale 1** (one font pixel = one device pixel; `font_size` 7..13, since
+`text_metrics` uses `scale = font_size / 7`), or the vector face at a >= 300
+dpi target (device scale >= 3.125). A bitmap face at scale 2x/3x is the
+forbidden case, never to pass a test or flatter a perf number, and both sides
+of a comparison use the same font at the same size.
+
+- Routing trap: `Engine2D.draw_text`/`draw_text_bg` use the vector face only
+  after `load_font` (`has_sffi_ttf()`); otherwise they use the bitmap face at
+  `font_size / 7`. A spec that "draws at 16" without `load_font` is a scale-2
+  bitmap. `draw_text_with_advances` always uses the vector face.
+- At scale 1 `draw_text_bg` is exact: `'A'` reads back `.###.` / `#...#` x2 /
+  `#####` / `#...#` x3, identical on `cpu` and `software`, with no in-between
+  values. The old "per-pixel AA" row asserted the bilinear blur that only
+  scale 2 produces.
+- AA coverage lives in the vector-face high-dpi row: Liberation Sans, "Ab" at
+  50 px (16 CSS px x 3.125) on a 96x64 surface, fg white / bg black -> 333
+  intermediate-red pixels, cpu == software == vulkan (llvmpipe) byte for byte
+  (`draw_text_bg_spec`, 2026-11-15).
+- Scale-1 atlas numbers: `"Vulkan Text 42"` is 70x7, 145 ink pixels (atlas
+  composite == CPU raster); atlas 475x7 (95 cells x 5 px); identity
+  `engine2d-bitmap-5x7-scale1`; `'A'` at `atlas_x` 165.
+- Moved to scale 1 (2026-11-15): the perf spec + bitmap probe bitmap rows (size 7;
+  probe p50 3,143,803 ns, checksum 772523490; pass both as
+  `SIMPLE_2D_BITMAP_BASELINE_NS`/`_CHECKSUM`) and the `feature_showcase` text
+  tier (parity gate PASS, 38 primitives, cpu == vulkan). The gate hardcodes the
+  seed at `src/compiler_rust/target/vulkan/release/simple` and reads
+  `VK_ICD_FILENAMES` (default MoltenVK); on Linux, symlink the seed and pass lvp.
+- Perf-spec trap: `load_font_bytes` is the registry (provenance) lane and
+  rejects any non-registry blob with identity "", so a fixture must be written to
+  disk and loaded with `load_font` (unmanaged lane). Since 11-09 that rejection
+  had zeroed every row of the perf spec.
+- Product defaults that scale the
+  bitmap face up: `src/os/compositor/compositor_engine2d.spl:1179`
+  (`draw_text_bg(..., 16)`), Draw IR text with no advances at CSS sizes >= 14
+  when no TTF is loaded. Vector-face rows at 1x (Draw IR, clip parity) are
+  neither 300 dpi nor scale-1 bitmap; that reading needs an owner call.

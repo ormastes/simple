@@ -16,6 +16,7 @@ use compiler.common.driver_compile_options.{driver_core_compile_options_default}
 use compiler.driver.driver_types.{compute_options_hash}
 use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
 use compiler.driver.driver_xray_policy.{xray_trace_instrumentation_enabled, xray_sdn_trace_instrumentation}
+use compiler.backend.llvm_xray_semantic_rows.{llvm_xray_semantic_attachment_v1}
 
 fn xray_attr_fn(id: i64, name: text, mode: i64) -> MirFunction:
     var builder = MirBuilder.new()
@@ -38,6 +39,12 @@ fn xray_attr_translator(target_os: text) -> MirToLlvm:
         "", false, "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
         false, "hosted")
 
+fn xray_env_translator(target_os: text, target_env: text) -> MirToLlvm:
+    MirToLlvm.create_explicit_target_with_hardening(
+        "probe.attrs", CodegenTarget.X86_64, "x86_64", "pc", target_os,
+        target_env, true, "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+        false, "hosted")
+
 fn xray_attr_ir(module: MirModule) -> text:
     xray_attr_translator("linux").translate_module(module)
 
@@ -49,6 +56,19 @@ fn xray_define_line(ir: text, name: text) -> text:
     ""
 
 describe "XRay LLVM function attributes":
+    it "attaches semantic rows to actual emitted instrumented definitions only":
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_tail", 2), xray_attr_fn(2, "xr_never", 0)]))
+        expect(xray_define_line(ir, "xr_tail")).to_contain(" !pcsections !{")
+        expect(xray_define_line(ir, "xr_tail")).to_contain("simple_xray_semantic_v1")
+        expect(xray_define_line(ir, "xr_never").contains("pcsections")).to_equal(false)
+        expect(ir.contains("@llvm.used")).to_equal(false)
+        expect(ir.contains("@llvm.compiler.used")).to_equal(false)
+
+    it "uses the final main symbol as semantic identity":
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "main", 2)]))
+        val expected = llvm_xray_semantic_attachment_v1("__simple_main", "probe.attrs").unwrap()
+        expect(xray_define_line(ir, "__simple_main")).to_contain(expected)
+
     it "marks entry+exit+tail functions xray-always":
         step("Translate a module with an xray_mode=2 function")
         val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_tail", 2), xray_attr_fn(2, "xr_never", 0)]))
@@ -69,14 +89,51 @@ describe "XRay LLVM function attributes":
         val ir = xray_attr_translator("darwin").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
         expect(ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
 
+    # @req REQ-XRAY-V1-API-01
+    it "admits windows-msvc with an explicit /EXPORT list for every xray symbol":
+        """MSVC link has no auto-export: the object carries `/EXPORT:<sym>,DATA`
+        in .drectve for each flag-guard data symbol, and no dllexport."""
+        val module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        val msvc = xray_env_translator("windows", "msvc").translate_module(module)
+        step("No fail-fast")
+        expect(msvc.contains("XRAY-E-")).to_equal(false)
+        expect(msvc).to_contain("@__simple_xray_slot_xr_tail")
+        expect(msvc.contains("dllexport")).to_equal(false)
+        step("The export list names every exported xray symbol as DATA")
+        expect(msvc).to_contain("module asm \".section .drectve,\\22yn\\22\"")
+        for sym in ["__simple_xray_descriptor_v1", "__simple_xray_names_v1", "__simple_xray_hook_v1", "__simple_xray_ring_v2"]:
+            expect(msvc).to_contain("module asm \".ascii \\22 /EXPORT:{sym},DATA\\22\"")
+        expect(msvc.contains("__simple_xray_ring_wrap_v2")).to_equal(false)
+
+    # @req REQ-XRAY-V1-API-01
+    it "adds the wrap marker to the msvc export list in wrap mode":
+        var module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        module.xray_ring_wrap = true
+        val msvc = xray_env_translator("windows", "msvc").translate_module(module)
+        expect(msvc).to_contain("module asm \".ascii \\22 /EXPORT:__simple_xray_ring_wrap_v2,DATA\\22\"")
+
+    # @req REQ-XRAY-V1-API-01
+    it "keeps windows-gnu free of any export list (mingw auto-export)":
+        step("Generalisation: gnu output has no .drectve/EXPORT and equals the env-less windows output")
+        val module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        val gnu = xray_env_translator("windows", "gnu").translate_module(module)
+        expect(gnu.contains("XRAY-E-")).to_equal(false)
+        expect(gnu).to_contain("@__simple_xray_slot_xr_tail")
+        expect(gnu.contains("/EXPORT")).to_equal(false)
+        expect(gnu.contains("drectve")).to_equal(false)
+        expect(gnu.contains("module asm")).to_equal(false)
+        var wrap = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        wrap.xray_ring_wrap = true
+        expect(xray_env_translator("windows", "gnu").translate_module(wrap).contains("/EXPORT")).to_equal(false)
+
     it "admits the host-default Linux translator used by the driver":
         step("MirToLlvm.create derives target_os from the triple parser, not a literal")
         val ir = MirToLlvm.create("probe.attrs", CodegenTarget.X86_64, nil).translate_module(
             xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
         if host_os() == "windows":
-            step("Windows host: host-default triple is windows, LLVM XRay sleds are Linux-only (A.5) -> explicit refusal naming the os")
-            expect(ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
-            expect(ir).to_contain("windows")
+            step("Windows host: host-default triple is windows -> flag-guard sleds, no compiler-rt attribute")
+            expect(ir.contains("XRAY-E-")).to_equal(false)
+            expect(ir).to_contain("@__simple_xray_slot_xr_tail")
         else:
             expect(ir.contains("XRAY-E-")).to_equal(false)
             expect(xray_define_line(ir, "xr_tail")).to_contain("\"function-instrument\"=\"xray-always\"")
@@ -114,6 +171,23 @@ describe "XRay LLVM function attributes":
         expect(xray_define_line(ir, "xr_a")).to_contain(" alwaysinline")
         expect(ir.contains("xray")).to_equal(false)
         expect(ir.contains("function-instrument")).to_equal(false)
+
+describe "XRay LLVM semantic row payload":
+    it "spells the agreed bounded uncompressed row and zero padding":
+        val attachment = llvm_xray_semantic_attachment_v1("probe.f1", "probe").unwrap()
+        expect(attachment).to_start_with(" !pcsections !{!\"simple_xray_semantic_v1\", !{")
+        expect(attachment).to_contain("i64 3552587323878299731, i32 1, i32 56, i32 8, i32 5, i64 0")
+        expect(attachment).to_end_with("i8 112, i8 114, i8 111, i8 98, i8 101, i8 0, i8 0, i8 0}}")
+
+    it "rejects empty identities instead of emitting unbindable rows":
+        expect(llvm_xray_semantic_attachment_v1("", "probe").is_err()).to_equal(true)
+        expect(llvm_xray_semantic_attachment_v1("probe.f1", "").is_err()).to_equal(true)
+
+    it "rejects over-limit identities instead of truncating":
+        var identity = ""
+        while identity.byte_len() < 4097: identity = identity + "x"
+        expect(llvm_xray_semantic_attachment_v1(identity, "probe").is_err()).to_equal(true)
+        expect(llvm_xray_semantic_attachment_v1("probe.f1", identity).is_err()).to_equal(true)
 
 describe "XRay compile options hash token":
     it "omits the XRay token within the current target-profile schema":
@@ -159,3 +233,134 @@ describe "XRay trace.instrumentation SDN key":
     it "returns empty when the manifest has no trace block":
         val manifest = "package:\n  name: demo\nexecution:\n  instrumentation: dynamic\n"
         expect(xray_sdn_trace_instrumentation(manifest)).to_equal("")
+
+# Windows flag-guard route (xray_v1_integration_status "Replacement route"):
+# no code patching; each sled function loads a per-function activation slot at
+# entry and before every return and calls __simple_xray_edge_v1(site, kind)
+# when it is set. One exported descriptor lists the slots.
+fn xray_count_of(ir: text, needle: text) -> i64:
+    ir.split(needle).len() - 1
+
+describe "XRay LLVM flag-guard sleds (Windows)":
+    it "admits a windows target and emits no Linux function-instrument attribute":
+        step("Translate an xray_mode=2 function for windows")
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(ir.contains("XRAY-E-")).to_equal(false)
+        expect(ir.contains("function-instrument")).to_equal(false)
+
+    it "emits an activation slot, an entry guard and an exit guard":
+        step("One slot per sled function; guard = load slot, icmp, br, call edge")
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(ir).to_contain("@__simple_xray_slot_xr_tail = internal global i8 0")
+        step("The edge hook is DLL-local and calls through an exported pointer, so a Windows DLL links with no undefined host symbol")
+        expect(ir).to_contain("@__simple_xray_hook_v1 = global ptr null")
+        expect(ir).to_contain("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind)")
+        expect(ir.contains("declare void @__simple_xray_edge_v1")).to_equal(false)
+        expect(ir).to_contain("call void @__simple_xray_edge_v1(i64 0, i32 0)")
+        expect(ir).to_contain("call void @__simple_xray_edge_v1(i64 0, i32 1)")
+        expect(xray_count_of(ir, "load volatile i8, ptr @__simple_xray_slot_xr_tail")).to_equal(2)
+        step("A guarded function performs a call, so it must not stay readonly")
+        expect(xray_define_line(ir, "xr_tail").contains("readonly")).to_equal(false)
+
+    it "exports exactly one descriptor symbol listing every slot":
+        step("Two sled functions, one never-listed function")
+        val ir = xray_attr_translator("windows").translate_module(
+            xray_attr_module([xray_attr_fn(1, "xr_a", 2), xray_attr_fn(2, "xr_b", 2), xray_attr_fn(3, "xr_never", 0)]))
+        expect(xray_count_of(ir, "@__simple_xray_descriptor_v1 =")).to_equal(1)
+        expect(ir).to_contain("@__simple_xray_descriptor_v1 = constant { i64, [2 x ptr] }")
+        expect(ir.contains("@__simple_xray_slot_xr_never")).to_equal(false)
+
+    # @req REQ-XRAY-V1-API-01
+    it "exports a names table parallel to the descriptor, in site order":
+        """Site id -> Simple function name for the profile: `__simple_xray_names_v1`
+        has the descriptor's shape, and entry i names the function of slot i."""
+        step("Two sled functions and one never-listed function")
+        val ir = xray_attr_translator("windows").translate_module(
+            xray_attr_module([xray_attr_fn(1, "xr_a", 2), xray_attr_fn(2, "xr_b", 2), xray_attr_fn(3, "xr_never", 0)]))
+        expect(xray_count_of(ir, "@__simple_xray_names_v1 =")).to_equal(1)
+        expect(ir).to_contain("@__simple_xray_names_v1 = constant { i64, [2 x ptr] } { i64 2, [2 x ptr] [ptr @__simple_xray_name_0, ptr @__simple_xray_name_1] }")
+        step("Each entry is a private NUL-terminated C string holding the Simple name")
+        expect(ir).to_contain("@__simple_xray_name_0 = private unnamed_addr constant [5 x i8] c\"xr_a\\00\"")
+        expect(ir).to_contain("@__simple_xray_name_1 = private unnamed_addr constant [5 x i8] c\"xr_b\\00\"")
+        expect(ir.contains("xr_never\\00")).to_equal(false)
+
+    it "escapes quote and backslash bytes in a names-table entry":
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "a\"b\\c", 2)]))
+        expect(ir).to_contain("@__simple_xray_name_0 = private unnamed_addr constant [6 x i8] c\"a\\22b\\5Cc\\00\"")
+
+    # @req REQ-XRAY-V1-API-01
+    it "exports a fixed-size in-DLL ring the edge appends to when no hook is set":
+        """Ring mode (PROVISIONAL): with a null hook, `__simple_xray_edge_v1` claims
+        a record index by `atomicrmw add` on the write index (lockless), drops and
+        counts when full, and publishes the record by a release store of seq."""
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        step("Header {capacity, write index, dropped} then capacity x {site, kind, pad, seq, ts} (ABI v2)")
+        expect(xray_count_of(ir, "@__simple_xray_ring_v2 =")).to_equal(1)
+        expect(xray_count_of(ir, "@__simple_xray_ring_v1")).to_equal(0)
+        expect(ir).to_contain("@__simple_xray_ring_v2 = global { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] } { i64 65536, i64 0, i64 0, [65536 x { i64, i32, i32, i64, i64 }] zeroinitializer }")
+        step("The edge stamps ts from llvm.readcyclecounter before the release seq store")
+        expect(xray_count_of(ir, "declare i64 @llvm.readcyclecounter()")).to_equal(1)
+        expect(ir).to_contain("%xe_ts = call i64 @llvm.readcyclecounter()\n  %xe_rts = getelementptr inbounds { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] }, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4\n  store i64 %xe_ts, ptr %xe_rts, align 8\n  %xe_seq = add i64 %xe_i, 1")
+        step("The null-hook branch appends to the ring; the hook branch is unchanged")
+        expect(ir).to_contain("br i1 %set, label %xe_call, label %xe_ring")
+        expect(ir).to_contain("call void %h(i64 %site, i32 %kind)")
+        expect(ir).to_contain("atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        expect(ir).to_contain("atomicrmw add ptr %xe_dropped, i64 1 monotonic")
+        expect(ir).to_contain("store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+
+    # @req REQ-XRAY-V1-API-01
+    it "emits a wrap-mode ring edge when the module selects xray_ring_wrap":
+        """Wrap keeps the most recent N edges: claim by atomicrmw add, slot =
+        claim mod capacity, seq invalidated first and release-stored last."""
+        var module = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        module.xray_ring_wrap = true
+        val ir = xray_attr_translator("windows").translate_module(module)
+        step("A marker symbol tells the reader the ring wraps")
+        expect(ir).to_contain("@__simple_xray_ring_wrap_v2 = constant i64 1")
+        step("Same ring layout; claim never drops")
+        expect(ir).to_contain("@__simple_xray_ring_v2 = global { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] }")
+        expect(ir).to_contain("%xe_c = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        expect(ir).to_contain("%xe_i = urem i64 %xe_c, 65536")
+        expect(ir.contains("%xe_dropped")).to_equal(false)
+        step("seq := 0, fence release, payload, seq := claim + 1 release")
+        expect(ir).to_contain("store atomic i64 0, ptr %xe_rseq monotonic, align 8")
+        expect(ir).to_contain("fence release")
+        expect(ir).to_contain("%xe_rts = getelementptr inbounds { i64, i64, i64, [65536 x { i64, i32, i32, i64, i64 }] }, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4")
+        expect(xray_count_of(ir, "declare i64 @llvm.readcyclecounter()")).to_equal(1)
+        expect(ir).to_contain("%xe_seq = add i64 %xe_c, 1")
+        expect(ir).to_contain("store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+
+    it "keeps drop mode byte-identical when xray_ring_wrap is off":
+        step("Off identity: explicit false equals the default module")
+        val base = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        var off = xray_attr_module([xray_attr_fn(1, "xr_tail", 2)])
+        off.xray_ring_wrap = false
+        val ir = xray_attr_translator("windows").translate_module(off)
+        expect(ir).to_equal(base)
+        step("Drop-mode edge text is the pre-wrap text")
+        expect(ir.contains("__simple_xray_ring_wrap_v2")).to_equal(false)
+        expect(ir).to_contain("  %xe_i = atomicrmw add ptr %xe_widx, i64 1 monotonic\n  %xe_full = icmp uge i64 %xe_i, 65536\n  br i1 %xe_full, label %xe_drop, label %xe_store")
+        expect(ir).to_contain("  %xe_seq = add i64 %xe_i, 1\n")
+
+    # Bug xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15:
+    # one explicit dllexport turns MinGW lld auto-export off, so the --xray DLL
+    # lost every function export. The xray symbols use the same auto-export.
+    it "emits no dllexport in a windows xray module (repro)":
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(ir.contains("dllexport")).to_equal(false)
+
+    it "emits no dllexport with several sled and never-listed functions":
+        val ir = xray_attr_translator("windows").translate_module(
+            xray_attr_module([xray_attr_fn(1, "xr_a", 2), xray_attr_fn(2, "xr_b", 2), xray_attr_fn(3, "xr_never", 0)]))
+        expect(ir.contains("dllexport")).to_equal(false)
+        expect(ir).to_contain("@__simple_xray_descriptor_v1 = constant")
+
+    it "still rejects entry+exit-only mode 1 on windows":
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_exit", 1)]))
+        expect(ir).to_contain("XRAY-E-UNSUPPORTED-MODE")
+
+    it "leaves a windows module with xray off free of any xray text":
+        step("Off identity: all xray_mode=0 emits no slot, descriptor or edge call")
+        val ir = xray_attr_translator("windows").translate_module(xray_attr_module([xray_attr_fn(1, "xr_a", 0)]))
+        expect(ir.contains("xray")).to_equal(false)
+        expect(ir.contains("__simple_xray")).to_equal(false)

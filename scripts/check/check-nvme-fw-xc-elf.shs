@@ -1,0 +1,132 @@
+#!/bin/sh
+# Pin the six bare-metal NVMe FW (fw_xc) targets and their linked ELF headers.
+#
+# Reads <dir>/nvme_fw_xc_<arch>.elf (from fw_xc/build.shs) and checks each with
+# `llvm-readelf -h`: Class, Machine, e_flags (ABI / float), Type EXEC, and that
+# the entry symbol `_start` plus `__simple_main` are defined. A missing image is
+# a FAIL, never a skip. Toolchain is clang + ld.lld only (no GCC anywhere).
+#
+# Usage: sh scripts/check/check-nvme-fw-xc-elf.shs [--dir DIR] [--selftest]
+#   --dir  default build/nvme_fw_xc
+#   --selftest  only run the fixture self-test (assembles fixtures with clang)
+# Verdict (last line): PASS -- <n> image(s) checked / FAIL -- ... / ERROR -- nothing was checked
+set -u
+
+dir=build/nvme_fw_xc
+only_self=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir) dir="$2"; shift 2 ;;
+        --selftest) only_self=1; shift ;;
+        -h|--help) sed -n "2,14p" "$0"; exit 0 ;;
+        *) echo "ERROR -- nothing was checked (bad argument: $1)"; exit 2 ;;
+    esac
+done
+READELF=${READELF:-llvm-readelf}
+NM=${NM:-llvm-nm}
+CLANG=${CLANG:-clang}
+for t in "$READELF" "$NM"; do
+    command -v "$t" >/dev/null 2>&1 || { echo "ERROR -- nothing was checked (missing $t)"; exit 2; }
+done
+
+# arch|class|machine|flags  (the pinned target list; keep in sync with fw_xc/build.shs)
+TARGETS='i686|ELF32|Intel 80386|0x0
+x86_64|ELF64|Advanced Micro Devices X86-64|0x0
+thumbv7em|ELF32|ARM|0x5000400
+aarch64|ELF64|AArch64|0x0
+riscv32|ELF32|RISC-V|0x1
+riscv64|ELF64|RISC-V|0x5'
+
+# check_one <elf> <class> <machine> <flags> -> prints reason, returns 0 ok / 1 bad
+check_one() {
+    f=$1
+    [ -s "$f" ] || { echo "missing image"; return 1; }
+    h=$("$READELF" -h "$f" 2>&1)
+    rc=$?
+    [ $rc -eq 0 ] || { echo "readelf failed"; return 1; }
+    cls=$(printf '%s\n' "$h" | sed -n 's/^ *Class: *//p')
+    mach=$(printf '%s\n' "$h" | sed -n 's/^ *Machine: *//p')
+    flg=$(printf '%s\n' "$h" | sed -n 's/^ *Flags: *\(0x[0-9a-fA-F]*\).*/\1/p')
+    typ=$(printf '%s\n' "$h" | sed -n 's/^ *Type: *\([A-Z]*\).*/\1/p')
+    [ "$cls" = "$2" ] || { echo "class $cls != $2"; return 1; }
+    [ "$mach" = "$3" ] || { echo "machine $mach != $3"; return 1; }
+    [ "$flg" = "$4" ] || { echo "flags $flg != $4"; return 1; }
+    [ "${5:-EXEC}" = any ] || [ "$typ" = EXEC ] || { echo "type $typ != EXEC"; return 1; }
+    if [ "${5:-EXEC}" != any ]; then
+        syms=$("$NM" --defined-only "$f" 2>/dev/null)
+        for s in _start __simple_main; do
+            printf '%s\n' "$syms" | grep -q " $s\$" || { echo "symbol $s undefined"; return 1; }
+        done
+        # Cortex-M: e_flags cannot tell A-profile/ARM-state code apart, so also
+        # require __simple_main to be a Thumb symbol (odd st_value).
+        if [ "$4" = 0x5000400 ]; then
+            v=$("$READELF" -s "$f" | awk '$8 == "__simple_main" {print $2; exit}')
+            case "$v" in
+                *[13579bdfBDF]) ;;
+                *) echo "__simple_main is not Thumb (value $v)"; return 1 ;;
+            esac
+        fi
+    fi
+    echo ok
+    return 0
+}
+
+selftest() {
+    command -v "$CLANG" >/dev/null 2>&1 || { echo "selftest: missing $CLANG"; return 2; }
+    st=$(mktemp -d "${TMPDIR:-/tmp}/nvxc-elf-st.XXXXXX")
+    # float code so ARM objects carry the Tag_ABI_VFP_args hard-float marker
+    printf 'float f(float x) { return x * 2.0f; }\n' > "$st/a.c"
+    fails=0
+    # good fixtures: header fields only (objects are REL, so type/symbols skipped)
+    while IFS='|' read -r a cls mach flg; do
+        case $a in
+            i686) tr=i686-unknown-none-elf; extra= ;;
+            x86_64) tr=x86_64-unknown-none-elf; extra= ;;
+            thumbv7em) tr=thumbv7em-none-eabihf; extra="-mfloat-abi=hard" ;;
+            aarch64) tr=aarch64-unknown-none-elf; extra= ;;
+            riscv32) tr=riscv32-unknown-elf; extra="-march=rv32imac -mabi=ilp32" ;;
+            riscv64) tr=riscv64-unknown-elf; extra="-march=rv64gc -mabi=lp64d" ;;
+        esac
+        # shellcheck disable=SC2086
+        "$CLANG" --target=$tr $extra -ffreestanding -c "$st/a.c" -o "$st/$a.o" 2>"$st/$a.err" || { echo "selftest: $a fixture build failed"; fails=$((fails+1)); continue; }
+        # ARM: EF_ARM_ABI_FLOAT_HARD (0x400) is set by the linker, never in a REL object
+        [ "$a" = thumbv7em ] && flg=0x5000000
+        r=$(check_one "$st/$a.o" "$cls" "$mach" "$flg" any)
+        [ "$r" = ok ] || { echo "selftest: good $a rejected: $r"; fails=$((fails+1)); }
+    done <<EOF
+$TARGETS
+EOF
+    # bad fixtures: soft-float rv64 must be rejected (the float-ABI defect class),
+    # wrong-machine must be rejected, a missing image must be rejected.
+    "$CLANG" --target=riscv64-unknown-elf -march=rv64gc -mabi=lp64 -ffreestanding -c "$st/a.c" -o "$st/rv64soft.o" 2>/dev/null
+    [ -s "$st/rv64soft.o" ] || { echo "selftest: rv64 lp64 fixture build failed"; fails=$((fails+1)); }
+    [ -s "$st/x86_64.o" ] && [ -s "$st/aarch64.o" ] || { echo "selftest: negative fixtures missing"; fails=$((fails+1)); }
+    r=$(check_one "$st/rv64soft.o" ELF64 RISC-V 0x5 any); [ "$r" != ok ] || { echo "selftest: lp64 soft-float accepted as lp64d"; fails=$((fails+1)); }
+    r=$(check_one "$st/x86_64.o" ELF64 AArch64 0x0 any); [ "$r" != ok ] || { echo "selftest: wrong machine accepted"; fails=$((fails+1)); }
+    r=$(check_one "$st/none.elf" ELF64 AArch64 0x0); [ "$r" != ok ] || { echo "selftest: missing image accepted"; fails=$((fails+1)); }
+    r=$(check_one "$st/aarch64.o" ELF64 AArch64 0x0); [ "$r" != ok ] || { echo "selftest: REL object accepted as linked image"; fails=$((fails+1)); }
+    rm -rf "$st"
+    [ $fails -eq 0 ] || return 1
+    echo "selftest: ok (6 good, 4 bad fixtures)"
+    return 0
+}
+
+selftest; src=$?
+if [ $src -ne 0 ]; then
+    echo "ERROR -- nothing was checked (selftest failed rc=$src)"; exit 2
+fi
+[ $only_self -eq 1 ] && { echo "PASS -- selftest only"; exit 0; }
+
+checked=0; bad=""
+while IFS='|' read -r a cls mach flg; do
+    r=$(check_one "$dir/nvme_fw_xc_$a.elf" "$cls" "$mach" "$flg")
+    checked=$((checked + 1))
+    echo "[$a] $r"
+    [ "$r" = ok ] || bad="$bad $a($r)"
+done <<EOF
+$TARGETS
+EOF
+[ $checked -gt 0 ] || { echo "ERROR -- nothing was checked"; exit 2; }
+if [ -n "$bad" ]; then echo "FAIL -- $checked image(s) checked; failed:$bad"; exit 1; fi
+echo "PASS -- $checked image(s) checked, ELF headers match the pinned target list"
+exit 0

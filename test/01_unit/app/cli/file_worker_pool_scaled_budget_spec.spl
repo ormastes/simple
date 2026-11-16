@@ -3,7 +3,7 @@ use app.io.env_ops.{env_set, env_unset}
 use app.io.cli_ops.{cli_kernel_executable_path}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1,
     FILE_WORKER_POOL_SCALED_FLOOR_KB_V1, file_worker_pool_usable_kb_v1,
-    file_worker_pool_budget_explicit_v1, file_worker_pool_scaled_budget_kb_v1,
+    file_worker_pool_price_explicit_v1, file_worker_pool_scaled_budget_kb_v1,
     file_worker_pool_phase_budget_kb_v1, file_worker_pool_hir_budget_kb_v1,
     file_worker_pool_mir_budget_kb_v1, file_worker_pool_mir_price_kb_v1,
     file_worker_pool_pointer_bits_from_elf_header_v1,
@@ -16,7 +16,6 @@ use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
     shard_threads_cap_for, shard_worker_budget_kb, shard_tree_budget_kb_for, shard_cgroup_memory_max_kb,
     shard_threads_parent_cap_for, shard_effective_tree_budget_kb_v1, shard_pool_workers_v1,
     shard_pool_effective_budget_for_v1, shard_pool_cap_kb_for_v1, shard_tree_headroom_kib_v1}
-use std.nogc_sync_mut.host_limits.{host_limit_value}
 
 # "Scale to host" default per-worker budget (user decision 2026-11-13): hosts
 # that fit 2 workers at 9 GB keep every budget unchanged; smaller hosts lower
@@ -38,11 +37,12 @@ describe "file worker pool: scale-to-host per-worker budget":
         expect(file_worker_pool_usable_kb_v1(-1, -1)).to_equal(0)
         expect(file_worker_pool_usable_kb_v1(9223372036854775807, 0)).to_equal(5534023222112865484)
 
-    it "an env phase value or the host worker_mem_mib key is an explicit override":
-        expect(file_worker_pool_budget_explicit_v1("", "")).to_be_false()
-        expect(file_worker_pool_budget_explicit_v1("8000000", "")).to_be_true()
-        expect(file_worker_pool_budget_explicit_v1("", "4096")).to_be_true()
-        expect(file_worker_pool_budget_explicit_v1("junk", "0")).to_be_false()
+    it "an env phase value is explicit; the host worker_mem_mib key only in shard mode":
+        expect(file_worker_pool_price_explicit_v1("", "", true)).to_be_false()
+        expect(file_worker_pool_price_explicit_v1("8000000", "", false)).to_be_true()
+        expect(file_worker_pool_price_explicit_v1("", "4096", true)).to_be_true()
+        expect(file_worker_pool_price_explicit_v1("", "4096", false)).to_be_false()
+        expect(file_worker_pool_price_explicit_v1("junk", "0", true)).to_be_false()
 
     it "big host: 2 workers fit at 9 GB, so every budget is unchanged":
         expect(file_worker_pool_scaled_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, 31200000, false)).to_equal(9000000)
@@ -212,9 +212,8 @@ describe "file worker pool: scale-to-host pricing uses the admission's effective
         val _ub = env_unset("SIMPLE_BUILD_MEMORY_RESERVE_BYTES")
         expect(headroom).to_equal(1048576)
         expect(live).to_equal(file_worker_pool_admission_usable_kb_v1(0, 20000000, shard_cgroup_memory_max_kb(), 16000000, 1048576))
-        val explicit = file_worker_pool_budget_explicit_v1("", host_limit_value("worker_mem_mib"))
-        if not explicit:
-            expect(got).to_equal(file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, live, file_worker_pool_host_pointer_bits_v1()))
+        step("the host worker_mem_mib key is a shard figure: the per-file HIR price ignores it")
+        expect(got).to_equal(file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, live, file_worker_pool_host_pointer_bits_v1()))
 
 # The width must be the running binary's own, never the cross-build target:
 # under source/interpreted execution `@when(arch=...)` follows

@@ -1,7 +1,7 @@
 # Seed JIT array reclamation — design options
 
 - **Date:** 2026-11-14
-- **Status:** proposal, awaiting owner decisions (section 6). No product code changed.
+- **Status:** proposal, awaiting owner decisions (section 6). Slice S1 is implemented on branch `work/jit-array-free-s1-20261114` (2026-11-14) with float and u64 element arrays excluded (boxed elements); landing is gated on the unified plan's S1 conditions, see its "Verdict on slice S1" status line.
 - **Scope:** the Rust seed's cranelift JIT lane (`src/compiler_rust/`). Other lanes are covered only as constraints.
 - **Bug:** `doc/08_tracking/bug/core_interp_per_iteration_array_leak_2026-11-14.md` ("Remaining", item 1).
 - **Earlier records:** `seed_jit_array_copy_never_freed_2026-10-19.md`,

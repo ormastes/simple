@@ -1,0 +1,140 @@
+"""
+## Purpose and audience
+Purpose: Pin Chrome 159's UA `box-sizing: border-box` for `<input>`: an
+authored `width`/`height` is the border box, unless the author says
+`box-sizing: content-box`. The engine laid every input out content-box, so
+`width:40px;height:16px;padding:2px` with the UA 2px border came out 48x24.
+Audience: browser-engine form-control layout maintainers.
+
+Chrome oracle (Chrome 159, `--headless --dump-dom`, 900x2000, 2026-11-16).
+`display:block;width:40px;height:16px;padding:2px;font:8px Arial`, UA border:
+
+| input                                    | computed box-sizing | rect (w x h) |
+|------------------------------------------|---------------------|--------------|
+| text, password, email, search            | border-box          | 40 x 16      |
+| button, submit, reset                    | border-box          | 40 x 16      |
+| checkbox, radio, range, color, file, date| border-box          | 40 x 16      |
+| text / button + author `content-box`     | content-box         | 48 x 24      |
+| image                                    | content-box         | 44 x 20      |
+| auto-sized text / password (no width)    | border-box          | 185 x 21     |
+
+`box-sizing` only reinterprets an authored size: the auto-sized input is
+185x21 either way, so the change must not shrink it.
+
+Still open (bug record): checkbox/radio ignore an authored size (13x13,
+Chrome 40x16); `type=image` carries the 2px UA border (engine 48x24, Chrome
+44x20); `<textarea>`/`<select>` are border-box in Chrome too (engine 46x22).
+
+Filed in doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(`input_ua_box_sizing`).
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — <input> UA box-sizing is border-box.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels,
+    simple_web_render_html_to_readback_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name
+}
+
+val PAGE: text = "<html><head><style>html,body{{margin:0;padding:0;background:#fff}}" +
+    " .w input{{display:block;width:40px;height:16px;padding:2px;font:8px Arial}}" +
+    " #c_text,#c_button{{box-sizing:content-box}} .u input{{display:block}}</style></head><body>" +
+    "<div class=w><input id=w_text><input id=w_password type=password><input id=w_email type=email>" +
+    "<input id=w_search type=search><input id=w_button type=button value=B><input id=w_submit type=submit>" +
+    "<input id=w_reset type=reset><input id=c_text><input id=c_button type=button value=B>" +
+    "<input id=w_image type=image><input id=w_checkbox type=checkbox></div>" +
+    "<div class=u><input id=d_text><input id=d_password type=password></div></body></html>"
+
+# One bordered 40x16 input at the origin: its border box is columns 0..39
+# and rows 0..15 in Chrome.
+val PIX_W: i32 = 64
+val PIX_H: i32 = 32
+val PIX: text = "<html><head><style>html,body{{margin:0;padding:0;background:#fff}}" +
+    " input{{display:block;width:40px;height:16px;padding:2px;border:1px solid #111827;" +
+    "background:#fff;outline:none}}</style></head><body><input id=b></body></html>"
+
+fn _size(id: text) -> text:
+    val composition = simple_web_layout_render_html_draw_ir(PAGE, 300, 400)
+    for c in composition.batches[0].commands:
+        if c.kind == "rect" and c.component_id == id:
+            return c.width.to_text() + "x" + c.height.to_text()
+    "missing " + id
+
+fn _dark(p: u32) -> bool:
+    ((p >> 8) & 0xFFu32) < 0x80u32
+
+fn _check_pixels(pixels: [u32]):
+    step("Chrome 159: border box columns 0..39, rows 0..15")
+    expect(_dark(pixels[8 * PIX_W + 39])).to_equal(true)
+    expect(_dark(pixels[8 * PIX_W + 40])).to_equal(false)
+    expect(_dark(pixels[15 * PIX_W + 8])).to_equal(true)
+    expect(_dark(pixels[16 * PIX_W + 8])).to_equal(false)
+    expect(_dark(pixels[8 * PIX_W + 45])).to_equal(false)
+    expect(_dark(pixels[21 * PIX_W + 8])).to_equal(false)
+
+describe "<input> UA box-sizing is border-box (Chrome 159)":
+    it "AC-1: text-like inputs use the authored size as the border box":
+        step("Chrome 159: text, password, email, search 40x16")
+        expect(_size("w_text")).to_equal("40x16")
+        expect(_size("w_password")).to_equal("40x16")
+        expect(_size("w_email")).to_equal("40x16")
+        expect(_size("w_search")).to_equal("40x16")
+
+    it "AC-2: button-like inputs use the authored size as the border box":
+        step("Chrome 159: button, submit, reset 40x16")
+        expect(_size("w_button")).to_equal("40x16")
+        expect(_size("w_submit")).to_equal("40x16")
+        expect(_size("w_reset")).to_equal("40x16")
+
+    it "AC-3: an author box-sizing:content-box wins over the UA rule":
+        step("Chrome 159: 40 + 2*2 padding + 2*2 border = 48x24")
+        expect(_size("c_text")).to_equal("48x24")
+        expect(_size("c_button")).to_equal("48x24")
+
+    it "AC-4: an auto-sized input keeps its intrinsic border box":
+        step("Chrome 159: 185x21 with or without border-box")
+        expect(_size("d_text")).to_equal("185x21")
+        expect(_size("d_password")).to_equal("185x21")
+
+    it "AC-5: type=image stays content-box":
+        step("Chrome 159: image computes content-box (44x20), wider than the 40px authored width")
+        # Engine 2026-11-16: 48x24 (content-box 40+2*2 padding, plus the UA
+        # 2px border Chrome drops for an image input: open, bug record).
+        # Chrome 159: 44x20.
+        expect(_size("w_image")).to_equal("48x24")
+
+    it "AC-6: the software raster and the Engine2D path paint a 40x16 border box":
+        _check_pixels(simple_web_layout_render_html_software_pixels(PIX, PIX_W, PIX_H))
+        _check_pixels(simple_web_render_html_to_pixels(PIX, PIX_W, PIX_H))
+
+    it "AC-8: an authored checkbox size is not honoured yet (open, see bug record)":
+        # Chrome 159: checkbox computes border-box and lays out 40x16 for
+        # `width:40px;height:16px`. The engine keeps its fixed 13x13 glyph box
+        # (open: checkbox/radio authored size). Exact engine pin so a change in
+        # either direction is seen.
+        step("Chrome 159: 40x16; engine 13x13")
+        expect(_size("w_checkbox")).to_equal("13x13")
+
+describe "<input> UA box-sizing on a real Vulkan device":
+    it "AC-7: a Vulkan device readback paints the 40x16 border box":
+        # Runs where a Vulkan ICD is installed (llvmpipe:
+        # VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json). Where none
+        # is, the row has nothing to drive and says so: it is NOT exercised.
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-7: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        step("the request really resolved to Vulkan (no silent software fallback)")
+        expect(simple_web_resolved_engine2d_backend_name(PIX_W, PIX_H, "vulkan")).to_equal("vulkan")
+        val rb = simple_web_render_html_to_readback_with_engine2d_backend(PIX, PIX_W, PIX_H, "vulkan")
+        expect(rb.source).to_equal("device_readback")
+        _check_pixels(rb.pixels)
+        expect(rb.pixels).to_equal(simple_web_render_html_to_pixels(PIX, PIX_W, PIX_H))

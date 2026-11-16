@@ -117,3 +117,43 @@ for this doc.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **FIXED (confirmed)** — ne15: 8/9 on the fresh seed (was 0/9); all file.* namespace calls through use patterns resolve. Residual 1/9 is a separate dir.create/dir.exist Windows fs-layer issue (lead for a new stdlib-fs row; not chased in this doc).
+
+## Addendum 2026-11-15 — residual still red on Linux; one repro recorded
+
+`test/01_unit/lib/std/shell/file_system_spec.spl` is still 8/9 on a
+release/1.0.0 seed on Linux aarch64 ("should create and remove directory"),
+so the residual is not Windows-specific. The row stays open.
+
+Separate observation, not yet shown to be the cause of that failure: calling a
+function stored in a module-level dict by dot syntax fails on the default lane.
+
+```simple
+# lib_a.spl
+pub fn exist_pub(p: text) -> bool:
+    true
+# main.spl
+use lib_a.{exist_pub}
+val ns = {"q": exist_pub}
+fn main():
+    print "q={ns.q("x")}"   # Runtime error: Function 'q' not found
+```
+
+Observed on seeds built from release/1.0.0 on 2026-11-14 and 2026-11-15; the
+direct call `exist_pub("x")` works.
+
+## Addendum 2026-11-15 (second) — residual root-caused and fixed
+
+The last failing case was not a filesystem problem. `dir.remove(path)` on the
+`std.shell.dir` module ran the built-in dict mutator `remove` (returning the
+module itself) instead of the module's own `remove` function: the interpreter's
+in-place dict mutation fast paths pre-empted the member-function lookup that
+the ordinary method path already does. Those fast paths now step aside when
+the dict stores a function under the called name.
+
+- `test/01_unit/lib/std/shell/file_system_spec.spl`: 8/9 -> 9/9.
+- `test/01_unit/bugs/dict_member_fn_over_builtin_mutator_spec.spl`: 1/3 -> 3/3
+  (module member call, dict-stored function, and a plain dict still removing).
+- 56-spec sweep, before vs after: only those two change.
+
+The `Function 'q' not found` repro in the previous addendum is a different
+defect (dot-call on a module-level dict on the JIT lane) and is still open.

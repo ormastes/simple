@@ -1,0 +1,227 @@
+friend lib.nogc_sync_mut.orchestration
+internal_export linux_protected_root_broker_acquire_v1
+internal_export linux_protected_root_broker_release_v1
+internal_export linux_protected_root_broker_cancel_begin_v1
+internal_export linux_protected_root_broker_cancel_step_v1
+internal_export linux_protected_root_broker_reap_publish_v1
+# Read-only protected Host input custody. Reuses the existing journal health
+# slots/oracle; this reader never opens a writer or manufactures Host authority.
+use std.common.task_runner.distributed_operation_owner_health_v2.*
+use std.common.crypto.sha256.sha256_text
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_broker_borrow_v3}
+use std.nogc_sync_mut.io.linux_protected_broker_state_v1.LinuxProtectedBrokerStorageTurnV1
+use std.common.build_manager.group_process_protocol.GroupProcessPollV1
+
+pub class LinuxProtectedRootReaderV1:
+    held: OperationJournalLinuxStorageOwnerV1
+    binding: text
+    opening: Option<OperationJournalHealthTurnV2> = nil
+    broker_claim: Option<OperationJournalBrokerClaimV1> = nil
+
+pub struct LinuxProtectedRootReaderOpenV1:
+    owner: Option<LinuxProtectedRootReaderV1>
+    ready: bool
+    error: text
+
+pub struct LinuxProtectedRootReaderCloseV1:
+    owner: Option<LinuxProtectedRootReaderV1>
+    completed: bool
+    error: text
+
+pub fn linux_protected_root_reader_open_v1(root: text) -> LinuxProtectedRootReaderOpenV1:
+    val binding = sha256_text("LINUX-PROTECTED-ROOT-READER-V1\n" + root)
+    val actual = operation_health_linux_open_v1(root, binding, false, false)
+    if actual.owner.is_none(): return LinuxProtectedRootReaderOpenV1(nil, false, actual.error)
+    val owner = LinuxProtectedRootReaderV1(actual.owner.unwrap(), binding, actual.turn)
+    if actual.error != "": return LinuxProtectedRootReaderOpenV1(Some(owner), false, actual.error)
+    val bound = operation_health_linux_bind_v1(owner.held, owner.opening.unwrap())
+    if bound.is_err(): return LinuxProtectedRootReaderOpenV1(Some(owner), false, bound.unwrap_err())
+    val ended = operation_health_end_v2(owner.opening.unwrap())
+    if ended.is_err(): return LinuxProtectedRootReaderOpenV1(Some(owner), false, ended.unwrap_err())
+    LinuxProtectedRootReaderOpenV1(Some(LinuxProtectedRootReaderV1(owner.held, binding)), true, "")
+
+fn protected_root_read_held_v1(owner: LinuxProtectedRootReaderV1,
+        turn: OperationJournalHealthTurnV2, relative: text, maximum: i64) -> Result<Option<text>, text>:
+    val store = operation_health_linux_borrow_v1(owner.held, turn)?
+    store.read(relative, maximum, true)
+
+pub fn linux_protected_root_reader_read_v1(owner: LinuxProtectedRootReaderV1,
+        relative: text, maximum: i64) -> Result<Option<text>, text>:
+    if owner.opening.is_some(): return Err("protected-root-reader-not-ready")
+    val turn = operation_health_linux_begin_v1(owner.held, owner.binding)?
+    val result = protected_root_read_held_v1(owner, turn, relative, maximum)
+    val ended = operation_health_end_v2(turn)
+    if ended.is_err(): return Err(ended.unwrap_err())
+    result
+
+pub fn linux_protected_root_reader_current_v1(owner: LinuxProtectedRootReaderV1) -> Result<(), text>:
+    if owner.opening.is_some(): return Err("protected-root-reader-not-ready")
+    val turn = operation_health_linux_begin_v1(owner.held, owner.binding)?
+    val result = operation_health_linux_borrow_v1(owner.held, turn)
+    val ended = operation_health_end_v2(turn)
+    if ended.is_err(): return Err(ended.unwrap_err())
+    if result.is_err(): return Err(result.unwrap_err())
+    Ok(())
+
+pub fn linux_protected_root_reader_close_v1(owner: LinuxProtectedRootReaderV1) -> LinuxProtectedRootReaderCloseV1:
+    val acquired = if owner.opening.is_some(): Ok(owner.opening.unwrap()) else:
+        operation_health_linux_begin_v1(owner.held, owner.binding, true)
+    if acquired.is_err():
+        return LinuxProtectedRootReaderCloseV1(if acquired.unwrap_err() == "OPERATION_JOURNAL_HEALTH_UNKNOWN": nil else: Some(owner), false, acquired.unwrap_err())
+    val turn = acquired.unwrap()
+    val closed = operation_health_linux_close_step_v1(owner.held, turn)
+    if closed.is_err(): return LinuxProtectedRootReaderCloseV1(if closed.unwrap_err() == "OPERATION_JOURNAL_HEALTH_UNKNOWN": nil else:
+        Some(LinuxProtectedRootReaderV1(owner.held, owner.binding, Some(turn))), false, closed.unwrap_err())
+    val result = closed.unwrap()
+    LinuxProtectedRootReaderCloseV1(if result.closed: nil else:
+        Some(LinuxProtectedRootReaderV1(owner.held, owner.binding, Some(turn))), result.closed and result.error == "", result.error)
+
+# Restrictive proof predicate, not a getter or installed-root authorization.
+# Current rechecks the actual canonical resource before immutable binding data
+# can match the launch owner's expected original canonical root spelling.
+pub fn linux_protected_root_reader_require_root_v1(owner: LinuxProtectedRootReaderV1,
+        expected_root: text) -> Result<(), text>:
+    linux_protected_root_reader_current_v1(owner)?
+    if owner.binding != sha256_text("LINUX-PROTECTED-ROOT-READER-V1\n" + expected_root):
+        return Err("protected-root-reader-root-mismatch")
+    Ok(())
+
+pub class LinuxProtectedBrokerControlLoanV1:
+    parent: LinuxProtectedRootReaderV1
+    generation: i64
+    request_digest: text
+
+pub struct LinuxProtectedBrokerControlTurnV1:
+    parent: LinuxProtectedRootReaderV1
+    loan: Option<LinuxProtectedBrokerControlLoanV1> = nil
+    facts_known: bool = false
+    publication: text = "NotAttempted"
+    pending: bool = false
+    observation: Option<GroupProcessPollV1> = nil
+    consumed: bool = false
+    durable_required: bool = false
+    error: text = ""
+
+pub struct LinuxProtectedBrokerReapTurnV1:
+    parent: LinuxProtectedRootReaderV1
+    facts_known: bool = false
+    publication: text = "NotAttempted"
+    verified: bool = false
+    error: text = ""
+
+pub struct LinuxProtectedBrokerAcquireTurnV1:
+    journal: DistributedOperationJournalV2
+    installed: LinuxProtectedRootReaderV1
+    reader: Option<LinuxProtectedRootReaderV1> = nil
+    ready: bool = false
+    origin_ms: i64 = 0
+    deadline_ms: i64 = 0
+    rejected_offered: Option<LinuxProtectedRootReaderV1> = nil
+    facts_known: bool = false
+    completed: bool = false
+    error: text = ""
+
+fn protected_broker_acquire_result_v1(journal: DistributedOperationJournalV2,
+        installed: LinuxProtectedRootReaderV1, binding: text,
+        offered: Option<LinuxProtectedRootReaderV1>, actual: OperationJournalBrokerAcquireV1) -> LinuxProtectedBrokerAcquireTurnV1:
+    var result = LinuxProtectedBrokerAcquireTurnV1(journal, installed, ready: actual.ready,
+        origin_ms: actual.origin_ms, deadline_ms: actual.deadline_ms, completed: actual.completed,
+        facts_known: actual.claim.is_some() or actual.deadline_ms > 0, error: actual.error)
+    if val child = actual.child:
+        result.reader = Some(LinuxProtectedRootReaderV1(child, binding, actual.opening, actual.claim))
+    if not actual.adopted_offered: result.rejected_offered = offered
+    result
+
+pub(friend) fn linux_protected_root_broker_acquire_v1(journal: DistributedOperationJournalV2,
+        installed: LinuxProtectedRootReaderV1, operation_key: text, claim_digest: text,
+        selected_root: text, origin_ms: i64, deadline_ms: i64,
+        offered: Option<LinuxProtectedRootReaderV1> = nil) -> LinuxProtectedBrokerAcquireTurnV1:
+    var result = LinuxProtectedBrokerAcquireTurnV1(journal, installed, rejected_offered: offered)
+    val current = linux_protected_root_reader_current_v1(installed)
+    if current.is_err():
+        result.error = current.unwrap_err()
+        return result
+    var offered_held: Option<OperationJournalLinuxStorageOwnerV1> = nil
+    if val supplied = offered:
+        # Existing canonical entry is reconciled before offered currentness.
+        # A stale extra alias must not hide the already-retained obligation.
+        if supplied.opening.is_some() or supplied.binding != sha256_text("LINUX-PROTECTED-ROOT-READER-V1\n" + selected_root):
+            result.error = "protected-broker-offered-root-mismatch"
+            return result
+        offered_held = Some(supplied.held)
+    val writer = distributed_operation_journal_broker_borrow_v3(journal)
+    if writer.is_err():
+        result.error = writer.unwrap_err()
+        return result
+    val binding = sha256_text("LINUX-PROTECTED-ROOT-READER-V1\n" + selected_root)
+    val actual = writer.unwrap().broker_acquire_v1(installed.held, installed.binding,
+        operation_key, claim_digest, selected_root, binding, origin_ms, deadline_ms, offered_held)
+    result = protected_broker_acquire_result_v1(journal, installed, actual.binding, offered, actual)
+    val ended = writer.unwrap().broker_finish_v1()
+    if ended.is_err():
+        result.ready = false
+        result.error = ended.unwrap_err()
+    result
+
+pub(friend) fn linux_protected_root_broker_release_v1(journal: DistributedOperationJournalV2,
+        installed: LinuxProtectedRootReaderV1, operation_key: text, claim_digest: text) -> LinuxProtectedBrokerAcquireTurnV1:
+    var result = LinuxProtectedBrokerAcquireTurnV1(journal, installed)
+    val current = linux_protected_root_reader_current_v1(installed)
+    if current.is_err():
+        result.error = current.unwrap_err()
+        return result
+    val writer = distributed_operation_journal_broker_borrow_v3(journal)
+    if writer.is_err():
+        result.error = writer.unwrap_err()
+        return result
+    val actual = writer.unwrap().broker_release_v1(installed.held, installed.binding, operation_key, claim_digest)
+    result = protected_broker_acquire_result_v1(journal, installed, actual.binding, nil, actual)
+    val ended = writer.unwrap().broker_finish_v1()
+    if ended.is_err(): result.error = ended.unwrap_err()
+    result
+
+fn protected_broker_effect_v1(parent: LinuxProtectedRootReaderV1, action: text,
+        identity: text, deadline: i64, generation: i64, request_digest: text,
+        payload: text) -> LinuxProtectedBrokerStorageTurnV1:
+    if parent.broker_claim.is_none(): return LinuxProtectedBrokerStorageTurnV1(error: "protected-broker-journal-adoption-required")
+    if parent.opening.is_some(): return LinuxProtectedBrokerStorageTurnV1(error: "protected-broker-parent-not-ready")
+    val acquired = operation_health_linux_begin_v1(parent.held, parent.binding)
+    if acquired.is_err(): return LinuxProtectedBrokerStorageTurnV1(error: acquired.unwrap_err())
+    val turn = acquired.unwrap()
+    val borrowed = operation_health_linux_borrow_v1(parent.held, turn)
+    var result = if borrowed.is_err(): LinuxProtectedBrokerStorageTurnV1(error: borrowed.unwrap_err()) else:
+        borrowed.unwrap().broker_control_v1(parent.broker_claim.unwrap(), action, identity, deadline, generation, request_digest, payload)
+    val ended = operation_health_end_v2(turn)
+    if ended.is_err(): result.error = ended.unwrap_err()
+    result
+
+fn protected_broker_control_result_v1(parent: LinuxProtectedRootReaderV1,
+        actual: LinuxProtectedBrokerStorageTurnV1) -> LinuxProtectedBrokerControlTurnV1:
+    var result = LinuxProtectedBrokerControlTurnV1(parent, facts_known: actual.facts_known,
+        publication: actual.publication, pending: actual.pending, observation: actual.observation,
+        consumed: actual.consumed, durable_required: actual.durable_required, error: actual.error)
+    if actual.generation > 0 and actual.request_digest != "":
+        result.loan = Some(LinuxProtectedBrokerControlLoanV1(parent, actual.generation, actual.request_digest))
+    result
+
+pub(friend) fn linux_protected_root_broker_cancel_begin_v1(parent: LinuxProtectedRootReaderV1,
+        expected_root: text, identity: text, original_deadline_ms: i64) -> LinuxProtectedBrokerControlTurnV1:
+    val current = linux_protected_root_reader_require_root_v1(parent, expected_root)
+    if current.is_err(): return LinuxProtectedBrokerControlTurnV1(parent, error: current.unwrap_err())
+    protected_broker_control_result_v1(parent,
+        protected_broker_effect_v1(parent, "begin", identity, original_deadline_ms, 0, "", ""))
+
+pub(friend) fn linux_protected_root_broker_cancel_step_v1(loan: LinuxProtectedBrokerControlLoanV1) -> LinuxProtectedBrokerControlTurnV1:
+    var result = protected_broker_control_result_v1(loan.parent,
+        protected_broker_effect_v1(loan.parent, "step", "", 0, loan.generation, loan.request_digest, ""))
+    # Unknown-origin/recheck errors cannot silently discard the original loan.
+    if result.loan.is_none(): result.loan = Some(loan)
+    result
+
+pub(friend) fn linux_protected_root_broker_reap_publish_v1(parent: LinuxProtectedRootReaderV1,
+        expected_root: text, identity: text, canonical_reap_bytes: text,
+        original_deadline_ms: i64) -> LinuxProtectedBrokerReapTurnV1:
+    val current = linux_protected_root_reader_require_root_v1(parent, expected_root)
+    if current.is_err(): return LinuxProtectedBrokerReapTurnV1(parent, error: current.unwrap_err())
+    val actual = protected_broker_effect_v1(parent, "reap", identity, original_deadline_ms, 0, "", canonical_reap_bytes)
+    LinuxProtectedBrokerReapTurnV1(parent, actual.facts_known, actual.publication, actual.verified, actual.error)

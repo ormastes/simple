@@ -1,0 +1,176 @@
+# Regression guard for compiler-built tuples destructured natively (for-loop
+# element, header pattern, xs[i], call result, literal, local, struct field,
+# dict value, `_` holes, 3-tuples, enumerate, dict iteration, positional
+# .0/.1, whole-tuple interpolation and passing). All rows are right on the
+# current Stage 2 (cranelift and llvm); the stage2 "for-loop tuple destructure"
+# failure is runtime-produced tuples only, see
+# test/fixtures/native_extern_runtime_tuple_array/main.spl.
+# Build with SIMPLE_BOOTSTRAP=1: `native-build main.spl --backend=cranelift
+# --entry-closure` (and --backend=llvm) from a directory outside test/
+# (boot-fable-lane-scripts/check_fx.sh). Expected stdout = seed interpreter
+# (SIMPLE_EXECUTION_MODE=interpret), exactly:
+#   A1 name=[ka] value_len=3 name_len=2
+#   A1s a=[ka] b=[va1]
+#   A1 name=[kb] value_len=4 name_len=2
+#   A1s a=[kb] b=[vb22]
+#   A2 p0=[ka] p1=[va1] eq=true
+#   A5 whole=(ka, va1) first=ka
+#   A2 p0=[kb] p1=[vb22] eq=false
+#   A5 whole=(kb, vb22) first=kb
+#   A3 k=[ka] v=[va1] vlen=3
+#   A3 k=[kb] v=[vb22] vlen=4
+#   A4 k=[ka] v=[va1]
+#   A4 k=[kb] v=[vb22]
+#   B1 p=1 q=2 sum=3
+#   B1 p=30 q=40 sum=70
+#   B2 s=[t] n=5 slen=1
+#   B2 s=[uu] n=6 slen=2
+#   B3 f=1.5 b=true
+#   B3 f=2.25 b=false
+#   B4 x=1 y=2 lbl=[p1]
+#   B4 x=3 y=4 lbl=[p2]
+#   B5 v=9 ol=[s]
+#   B5 v=-1 ol=[n]
+#   C1 fn a=[fn] b=7
+#   C2 lit a=[lit] b=[eral]
+#   C3 local a=[loc] b=[al]
+#   C4 field a=[fld] b=[x]
+#   C5 dict a=[dv] b=3
+#   D1 a=[x] c=[y]
+#   D1 a=[z] c=[w]
+#   D2 only=[va1]
+#   D2 only=[vb22]
+#   E1 k=[one] v=1
+#   E1 k=[two] v=2
+#   E2 k=[one] v=1
+#   E2 k=[two] v=2
+#   F1 i=0 x=[a]
+#   F1 i=1 x=[bb]
+#   F2 i=0 x=[a]
+#   F2 i=1 x=[bb]
+#   F3 a=1 b=2 t=[n]
+#   G1 2:ka|3:va1;2:kb|4:vb22;
+#   G2 name=[ra] value_len=1
+#   G2 name=[rb] value_len=2
+
+struct Pt:
+    x: i64
+    y: i64
+
+fn show(tag: text, a: text, b: text):
+    print "{tag} a=[{a}] b=[{b}]"
+
+fn first_text(p: (text, text)) -> text:
+    p.0
+
+fn pair_fn() -> (text, i64):
+    ("fn", 7)
+
+struct Holder:
+    p: (text, text)
+
+fn param_rows(snapshot: [(text, text)]) -> text:
+    var observed: {text: text} = {}
+    var out = ""
+    for pair in snapshot:
+        val (name, value) = pair
+        if observed.contains_key(name):
+            return "dup:{name}"
+        observed[name] = value
+        out = out + "{name.len()}:{name}|{value.len()}:{value};"
+    out
+
+fn result_rows() -> Result<[(text, text)], text>:
+    Ok([("ra", "1"), ("rb", "22")])
+
+fn main():
+    val tt: [(text, text)] = [("ka", "va1"), ("kb", "vb22")]
+    # A1 for element, val pattern, (text, text): read, len, pass, interp
+    for pair in tt:
+        val (name, value) = pair
+        print "A1 name=[{name}] value_len={value.len()} name_len={name.len()}"
+        show("A1s", name, value)
+    # A2 positional access on the loop variable
+    for pair in tt:
+        print "A2 p0=[{pair.0}] p1=[{pair.1}] eq={pair.0 == \"ka\"}"
+        print "A5 whole={pair} first={first_text(pair)}"
+    # A3 pattern in the loop header
+    for (k, v) in tt:
+        print "A3 k=[{k}] v=[{v}] vlen={v.len()}"
+    # A4 index source xs[i]
+    var i = 0
+    while i < tt.len():
+        val (ik, iv) = tt[i]
+        print "A4 k=[{ik}] v=[{iv}]"
+        i = i + 1
+    # B element types through the for-loop element
+    val ii: [(i64, i64)] = [(1, 2), (30, 40)]
+    for e in ii:
+        val (p, q) = e
+        print "B1 p={p} q={q} sum={p + q}"
+    val ti: [(text, i64)] = [("t", 5), ("uu", 6)]
+    for e in ti:
+        val (s, n) = e
+        print "B2 s=[{s}] n={n} slen={s.len()}"
+    val fb: [(f64, bool)] = [(1.5, true), (2.25, false)]
+    for e in fb:
+        val (f, b) = e
+        print "B3 f={f} b={b}"
+    val st: [(Pt, text)] = [(Pt(x: 1, y: 2), "p1"), (Pt(x: 3, y: 4), "p2")]
+    for e in st:
+        val (pt, lbl) = e
+        print "B4 x={pt.x} y={pt.y} lbl=[{lbl}]"
+    val ot: [(i64?, text)] = [(Some(9), "s"), (None, "n")]
+    for e in ot:
+        val (o, ol) = e
+        print "B5 v={o ?? -1} ol=[{ol}]"
+    # C other destructure sources
+    val (fa, fb2) = pair_fn()
+    print "C1 fn a=[{fa}] b={fb2}"
+    val (la, lb) = ("lit", "eral")
+    print "C2 lit a=[{la}] b=[{lb}]"
+    val loc: (text, text) = ("loc", "al")
+    val (lc, ld) = loc
+    print "C3 local a=[{lc}] b=[{ld}]"
+    val h = Holder(p: ("fld", "x"))
+    val (ha, hb) = h.p
+    print "C4 field a=[{ha}] b=[{hb}]"
+    val d: {text: (text, i64)} = {"k": ("dv", 3)}
+    val (da, db) = d["k"]
+    print "C5 dict a=[{da}] b={db}"
+    # D placeholders and arity
+    val t3: [(text, i64, text)] = [("x", 1, "y"), ("z", 2, "w")]
+    for e in t3:
+        val (a3, _, c3) = e
+        print "D1 a=[{a3}] c=[{c3}]"
+    for e in tt:
+        val (_, only) = e
+        print "D2 only=[{only}]"
+    # E dict iteration
+    val dd: {text: i64} = {"one": 1, "two": 2}
+    for (dk, dv) in dd:
+        print "E1 k=[{dk}] v={dv}"
+    for kv in dd.items():
+        val (ik2, iv2) = kv
+        print "E2 k=[{ik2}] v={iv2}"
+    # F enumerate and nesting
+    val xs: [text] = ["a", "bb"]
+    for (ei, ex) in xs.enumerate():
+        print "F1 i={ei} x=[{ex}]"
+    for pr in xs.enumerate():
+        val (pi, px) = pr
+        print "F2 i={pi} x=[{px}]"
+    val nn: [((i64, i64), text)] = [((1, 2), "n")]
+    for e in nn:
+        val (inner, nt) = e
+        val (na, nb) = inner
+        print "F3 a={na} b={nb} t=[{nt}]"
+    # G the compiler-site shape (param) and the repro shape (Result payload)
+    print "G1 {param_rows(tt)}"
+    match result_rows():
+        case Ok(snap):
+            for pair in snap:
+                val (rn, rv) = pair
+                print "G2 name=[{rn}] value_len={rv.len()}"
+        case Err(e):
+            print "G2 err {e}"

@@ -1,0 +1,128 @@
+"""
+## Purpose and audience
+Purpose: Pin LCD subpixel text antialiasing on the Engine2D CPU text path
+against Chrome 159's headless screenshot. Chrome draws text whose DEVICE size
+is <= 48 px with Skia's LCD16 mask: a 3x horizontal coverage raster, RGB
+subpixel order left to right, a 5-tap FIR measured from Chrome's pixels
+`[0.090, 0.225, 0.370, 0.225, 0.090]`, 5 bits per channel, blended per channel. Above
+48 device px Chrome falls back to grayscale (measured: 48 px LCD, 49 px gray).
+Owner decision 2026-11-16: implement LCD text in Simple, do not disable it in
+Chrome.
+Audience: web renderer / Engine2D font maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new
+--disable-gpu --force-device-scale-factor=1`, Liberation Sans 16 px,
+`color:#000` on white, `<p style="margin:0;position:absolute;left:1px;top:0">l</p>` (a `<p>` routes the page onto the Draw IR text lane; Chrome paints the same pixels for a `<div>`),
+stem row y=6, columns x=1..4:
+
+| x | 1        | 2        | 3        | 4        |
+|---|----------|----------|----------|----------|
+|   | `ffe7b7` | `5f1f07` | `2f77cf` | `f7ffff` |
+
+Phase is part of the oracle: Chrome positions glyphs at quarter pixels
+(left:1.25px gives `ffffdf a74f17 0f3f97 d7f7ff`), so only an integer pen is
+comparable with this engine's integer-advance layout.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-LCD-001 — Draw IR text at <= 48 device px paints Chrome's LCD subpixel coverage on CPU backends.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 64
+val H: i32 = 64
+# One 5-bit LCD16 step is 8/255; allow two steps for outline/raster rounding.
+val TOL: i32 = 16
+
+val PAGE_L16: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:16px;line-height:1;color:#000\">l</p></body></html>"
+val PAGE_L50: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:50px;line-height:1;color:#000\">l</p></body></html>"
+val PAGE_LLL: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:16px;line-height:1;color:#000\">lll</p></body></html>"
+val PAGE_WB: text = "<!doctype html><html><body style=\"margin:0;background:#000;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:16px;line-height:1;color:#fff\">l</p></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+# Largest per-channel |ours - chrome| over x=1..chrome.len() on row y.
+fn _worst_delta(px: [u32], y: i32, chrome: [u32]) -> i32:
+    var worst = 0
+    var i = 0
+    while i < chrome.len().to_i32():
+        val ours = px[y * W + 1 + i]
+        for sh in [16u32, 8u32, 0u32]:
+            val d = _abs(_chan(ours, sh) - _chan(chrome[i], sh))
+            if d > worst:
+                worst = d
+        i = i + 1
+    worst
+
+# Pixels in rows 0..H where the colour channels differ (an LCD fringe).
+fn _fringe_count(px: [u32]) -> i32:
+    var n = 0
+    for p in px:
+        val r = _chan(p, 16u32)
+        val g = _chan(p, 8u32)
+        val b = _chan(p, 0u32)
+        if r != g or g != b:
+            n = n + 1
+    n
+
+describe "LCD subpixel text against Chrome 159":
+    it "AC-1: a 16 px black l paints Chrome's per-channel stem within two LCD16 steps":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_L16, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome row 6, x=1..4: ffe7b7 5f1f07 2f77cf f7ffff")
+        val chrome: [u32] = [0xffe7b7u32, 0x5f1f07u32, 0x2f77cfu32, 0xf7ffffu32]
+        expect(_worst_delta(px, 6, chrome) <= TOL).to_be(true)
+
+    it "AC-2: the stem has RGB-order colour fringes (red light on the left edge, blue light on the right)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_L16, W, H, "cpu_simd")
+        val left = px[6 * W + 1]
+        val right = px[6 * W + 3]
+        step("left edge pixel: R lighter than B; right edge pixel: B lighter than R")
+        expect(_chan(left, 16u32) > _chan(left, 0u32)).to_be(true)
+        expect(_chan(right, 0u32) > _chan(right, 16u32)).to_be(true)
+
+    it "AC-3: text above 48 device px stays grayscale, like Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_L50, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome 49..63 px: every ink pixel has r == g == b")
+        expect(_fringe_count(px)).to_equal(0)
+
+    it "AC-4: glyphs take Chrome's quarter-pixel phases along a run":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_LLL, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome `lll` at left:1px, row 6: pens 1, 4.56 -> 4.50, 8.11 -> 8.00, i.e. phases 0, 1/2, 0")
+        val chrome: [u32] = [0xffe7b7u32, 0x5f1f07u32, 0x2f77cfu32, 0xf7fff7u32, 0xd78f3fu32, 0x0f174fu32,
+            0xa7e7ffu32, 0xffe7b7u32, 0x5f1f07u32, 0x2f77cfu32, 0xf7ffffu32]
+        expect(_worst_delta(px, 6, chrome) <= TOL).to_be(true)
+
+    it "AC-5: light text gets Chrome's per-channel coverage boost (Skia mask gamma preblend)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_WB, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome white-on-black l, row 6, x=1..4: 071f57 afe7f7 d7973f 0f0000 (an unboosted mask gives ~001040 a0e0f0 d07830)")
+        val chrome: [u32] = [0x071f57u32, 0xafe7f7u32, 0xd7973fu32, 0x0f0000u32]
+        expect(_worst_delta(px, 6, chrome) <= TOL).to_be(true)

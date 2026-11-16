@@ -1,0 +1,77 @@
+#![allow(primitive_api)]
+# primitive_api: reviewed Linux fd/syscall-level retained-directory and process-replace mechanism keeps raw fds, byte bounds, seals, deadlines and flags as i64/bool (milestone_0012 groupB review); no raw descriptor crosses Host/workspace public APIs.
+# NEW anchored mutation mechanisms only. Actual installed authority stays in source owner.
+# SOURCE_AUTHORED_NOT_RUN. No raw descriptor crosses Host/workspace public APIs.
+@when(os="linux"):
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.*
+use std.nogc_sync_mut.io.anchored_io_linux_v1.*
+use std.nogc_sync_mut.io.volatile_ops.volatile_write_u8
+
+pub fn retained_stage_leaf_v1(name: text) -> bool:
+    if name.byte_len() < 1 or name.byte_len() > 128 or name == "." or name == "..": return false
+    for byte in name.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+                (byte >= 97 and byte <= 122) or byte == 45 or byte == 95 or byte == 46): return false
+    true
+
+# Creates only a new child. EEXIST is never adoption; caller retains partial tree.
+@unsafe(reason: "exclusive anchored private directory operation beneath retained source-owned handle", capabilities: [ffi, raw_ptr])
+pub fn retained_stage_directory_fd_v1(parent: i64, name: text, create: bool) -> Result<i64, text>:
+    if not retained_stage_leaf_v1(name) or anchored_linux_directory_flags_v1() == 0: return Err("stage-directory-name")
+    val path = anchored_linux_name_v1(name)
+    if path == 0: return Err("stage-memory")
+    if create and mkdirat(parent as i32, path, 448u32) != 0:
+        free(path)
+        return Err("stage-directory-exclusive-create")
+    val fd = openat(parent as i32, path, anchored_linux_directory_flags_v1(), 0u32) as i64
+    free(path)
+    if fd < 0: return Err("stage-directory-open")
+    val held = anchored_linux_metadata_v1(fd, "", true)
+    val named = anchored_linux_metadata_v1(parent, name, false)
+    if held.is_err() or named.is_err():
+        val consumed = close(fd as i32)
+        return Err("stage-directory-metadata")
+    val meta = held.unwrap()
+    if (meta.identity != named.unwrap().identity or meta.uid != geteuid() or
+            (meta.mode & 61440u32) != 16384u32 or (meta.mode & 63u32) != 0u32):
+        val consumed = close(fd as i32)
+        return Err("stage-directory-private-identity")
+    if create and fsync(parent as i32) != 0:
+        val consumed = close(fd as i32)
+        return Err("stage-directory-namespace-sync")
+    Ok(fd)
+
+@unsafe(reason: "exclusive bounded regular-file write on original retained parent; leaves partial content retained on refusal", capabilities: [ffi, raw_ptr])
+pub fn retained_stage_file_bytes_v1(parent: i64, name: text, bytes: [u8]) -> Result<[u8], text>:
+    if not retained_stage_leaf_v1(name) or bytes.len() > 1048576 or anchored_linux_file_flags_v1() == 0: return Err("stage-file-bound")
+    val path = anchored_linux_name_v1(name)
+    if path == 0: return Err("stage-memory")
+    val fd = openat(parent as i32, path, anchored_linux_file_flags_v1() + 193, 384u32) as i64
+    free(path)
+    if fd < 0: return Err("stage-file-exclusive-create")
+    val memory = malloc((bytes.len() + 1) as u64)
+    var failure = ""
+    if memory == 0: failure = "stage-memory"
+    if failure == "" and fchmod(fd as i32, 384u32) != 0: failure = "stage-file-private-mode"
+    if failure == "":
+        for index in 0..bytes.len(): volatile_write_u8(memory + index, bytes[index] as i64)
+        var offset = 0
+        while offset < bytes.len() and failure == "":
+            val count = write(fd as i32, memory + offset, (bytes.len() - offset) as u64)
+            if count <= 0 or count > bytes.len() - offset: failure = "stage-file-write"
+            else: offset = offset + count
+    if memory != 0: free(memory)
+    if failure == "" and fsync(fd as i32) != 0: failure = "stage-file-sync"
+    val held = anchored_linux_metadata_v1(fd, "", true)
+    val named = anchored_linux_metadata_v1(parent, name, false)
+    if held.is_err() or named.is_err(): failure = "stage-file-metadata"
+    else:
+        val meta = held.unwrap()
+        if (meta.identity != named.unwrap().identity or meta.uid != geteuid() or meta.mode != 33152u32 or
+                meta.links != 1 or meta.size != bytes.len()): failure = "stage-file-private-identity"
+    # Linux close consumes fd even when returning error. Never retry raw fd.
+    if close(fd as i32) != 0: failure = "stage-file-close-consumed-error"
+    if failure == "" and fsync(parent as i32) != 0: failure = "stage-file-namespace-sync"
+    if failure != "": return Err(failure)
+    Ok(held.unwrap().identity)
+@end

@@ -1,0 +1,126 @@
+"""
+## Purpose and audience
+Purpose: Prove the SFFI generator emits a validating, fallible facade
+(`Result<Unit, ConstraintError>`) for an extern that returns a unit carrying a
+range, and a direct projection for an unconstrained unit.
+Audience: compiler and tooling engineers maintaining SFFI boundary generation.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Generator input model only (ConstrainedUnitReturn); the language grammar has no
+unit range syntax yet. Integer ranges only; anything else yields SPL-SFFI-RANGE-001.
+"""
+# @req: RB-SFFI-02
+
+use std.spec.*
+use std.spec.step
+use compiler.tools.sffi_gen.constrained_unit_gen.{ConstrainedUnitReturn, generate_unit_return_facade}
+
+# @manual_section: constrained_unit_return
+describe "SFFI constrained unit return":
+    """A range-carrying unit is checked at the boundary before it is trusted."""
+
+    it "emits a validating wrapper with range check and Err path":
+        # @req: RB-SFFI-02
+        step("Generate a facade for a unit with min 1 and max 65535")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_net_port", params: "fd: i32", arg_names: "fd", unit_name: "Port", abi_type: "i32", range_min: "1", range_max: "65535")
+        val r = generate_unit_return_facade(spec)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn __raw_rt_net_port(fd: i32) -> i32")
+        expect(r.source).to_contain("fn rt_net_port(fd: i32) -> Result<Port, ConstraintError>:")
+        expect(r.source).to_contain("val raw = __raw_rt_net_port(fd)")
+        expect(r.source).to_contain("if raw < 1 or raw > 65535:")
+        expect(r.source).to_contain("return Err(ConstraintError.out_of_range(\"Port\", raw, \"1\", \"65535\"))")
+        expect(r.source).to_contain("Ok(raw as Port)")
+
+    it "checks only the lower bound when the range is half open":
+        # @req: RB-SFFI-02
+        step("Generate a facade with a minimum but no maximum")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_count", params: "", arg_names: "", unit_name: "Count", abi_type: "i64", range_min: "0", range_max: "")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_contain("if raw < 0:")
+        expect(r.source.contains("raw >")).to_equal(false)
+        expect(r.source).to_contain("Ok(raw as Count)")
+
+    it "keeps an unconstrained unit as a direct projection":
+        # @req: RB-SFFI-02
+        step("Generate a facade for a unit with no range")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_clock_ms", params: "", arg_names: "", unit_name: "Millis", abi_type: "i64", range_min: "", range_max: "")
+        val r = generate_unit_return_facade(spec)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn rt_clock_ms() -> Millis")
+        expect(r.source.contains("Result<")).to_equal(false)
+        expect(r.source.contains("ConstraintError")).to_equal(false)
+
+    it "reports SPL-SFFI-RANGE-001 for a range on a non-integer representation":
+        # @req: RB-SFFI-02
+        step("Generate a facade with a range over an f64 unit")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_temp", params: "", arg_names: "", unit_name: "Celsius", abi_type: "f64", range_min: "0", range_max: "100")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_equal("")
+        expect(r.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+        expect(r.diagnostic).to_contain("Celsius")
+
+    it "reports SPL-SFFI-RANGE-001 for a bound that is not an integer literal":
+        # @req: RB-SFFI-02
+        step("Generate a facade whose maximum is an expression")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_n", params: "", arg_names: "", unit_name: "Level", abi_type: "i32", range_min: "0", range_max: "MAX_LEVEL")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_equal("")
+        expect(r.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+
+    it "checks only the upper bound for a max-only range":
+        # @req: RB-SFFI-02
+        step("Generate a facade with a maximum but no minimum")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_lvl", params: "", arg_names: "", unit_name: "Level", abi_type: "u8", range_min: "", range_max: "200")
+        val r = generate_unit_return_facade(spec)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("if raw > 200:")
+        expect(r.source.contains("raw <")).to_equal(false)
+
+    it "accepts negative bounds on a signed representation":
+        # @req: RB-SFFI-02
+        step("Generate a facade over i32 with range -40..125")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_t", params: "", arg_names: "", unit_name: "TempC", abi_type: "i32", range_min: "-40", range_max: "125")
+        val r = generate_unit_return_facade(spec)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("if raw < -40 or raw > 125:")
+
+    it "emits a public facade fn":
+        # @req: RB-SFFI-02
+        step("Generate a constrained facade and look for pub fn")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_p", params: "", arg_names: "", unit_name: "P", abi_type: "i32", range_min: "1", range_max: "2")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_contain("pub fn rt_p() -> Result<P, ConstraintError>:")
+        expect(r.source).to_contain("extern fn __raw_rt_p() -> i32")
+
+    it "reports SPL-SFFI-RANGE-001 when min is greater than max":
+        # @req: RB-SFFI-02
+        step("Generate a facade with an empty range")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_e", params: "", arg_names: "", unit_name: "E", abi_type: "i32", range_min: "10", range_max: "5")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_equal("")
+        expect(r.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+        expect(r.diagnostic).to_contain("greater than")
+
+    it "reports SPL-SFFI-RANGE-001 for bounds outside the ABI type":
+        # @req: RB-SFFI-02
+        step("Generate facades whose bounds do not fit the representation")
+        val neg_u32 = ConstrainedUnitReturn(extern_name: "rt_a", params: "", arg_names: "", unit_name: "A", abi_type: "u32", range_min: "-1", range_max: "")
+        val r1 = generate_unit_return_facade(neg_u32)
+        expect(r1.source).to_equal("")
+        expect(r1.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+        val big_u8 = ConstrainedUnitReturn(extern_name: "rt_b", params: "", arg_names: "", unit_name: "B", abi_type: "u8", range_min: "", range_max: "300")
+        val r2 = generate_unit_return_facade(big_u8)
+        expect(r2.source).to_equal("")
+        expect(r2.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+        val edge = ConstrainedUnitReturn(extern_name: "rt_c", params: "", arg_names: "", unit_name: "C", abi_type: "u8", range_min: "0", range_max: "255")
+        expect(generate_unit_return_facade(edge).diagnostic).to_equal("")
+
+    it "builds the unit with the default `raw as Unit` cast, not the constructor":
+        # @req: RB-SFFI-02
+        step("Generate a facade and check the unit is established by cast")
+        val spec = ConstrainedUnitReturn(extern_name: "rt_port", params: "", arg_names: "", unit_name: "Port", abi_type: "i32", range_min: "1", range_max: "9")
+        val r = generate_unit_return_facade(spec)
+        expect(r.source).to_contain("Ok(raw as Port)")
+        expect(r.source.contains("Port(raw)")).to_equal(false)

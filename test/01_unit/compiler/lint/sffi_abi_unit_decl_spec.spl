@@ -1,0 +1,89 @@
+"""
+## Purpose and audience
+Purpose: Prove SPL-SFFI-ABI-001 reads the C ABI type from the unit declaration
+itself (`@c_abi("int32_t") unit Fd: i32 as fd`, owner decision 3B 2026-11-16)
+wherever that unit crosses an extern boundary, and that the old separate
+`@c_abi(Unit: "ctype")` form still works as a deprecated alias with a note.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+The alias form is kept for one release; `sffi_abi_deprecation_notes` reports it.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.sffi_abi_mismatch.{check_sffi_abi_mismatch, sffi_abi_deprecation_notes}
+
+val LINUX = "x86_64-unknown-linux-gnu"
+val WIN = "x86_64-pc-windows-gnu"
+
+# @manual_section: sffi_abi_unit_decl
+describe "SPL-SFFI-ABI-001: @c_abi on the unit declaration":
+    """The C ABI type lives on the unit decl and is checked at each extern use."""
+
+    it "accepts a matching int32_t unit used by an extern fn":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint @c_abi(int32_t) unit Fd: i32 used in an extern signature")
+        val src = "@c_abi(\"int32_t\") unit Fd: i32 as fd\nextern fn c_open() -> Fd\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(0)
+
+    it "reports a width mismatch at the extern line that uses the unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint @c_abi(int64_t) on an i32 unit passed to an extern fn")
+        val src = "@c_abi(\"int64_t\") unit Fd: i32 as fd\nextern fn c_close(fd: Fd) -> i32\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", LINUX)
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-SFFI-ABI-001")
+        expect(fs[0].line_num).to_equal(2)
+        expect(fs[0].message).to_contain("width mismatch")
+
+    it "accepts the decorator on its own line above the unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a two-line @c_abi + unit declaration")
+        val src = "@c_abi(\"unsigned int\")\nunit Flags: i32 as fl\nextern fn c_flags() -> Flags\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", LINUX)
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(3)
+        expect(fs[0].message).to_contain("signedness mismatch")
+
+    it "resolves C long per target: LP64 ok, LLP64 Windows mismatch":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint @c_abi(long) on an i64 unit for linux and windows triples")
+        val src = "@c_abi(\"long\") unit Off: i64 as off\nextern fn c_seek(o: Off) -> Off\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(0)
+        val w = check_sffi_abi_mismatch(src, "app/x.spl", WIN)
+        expect(w.len()).to_equal(1)
+        expect(w[0].message).to_contain("width mismatch")
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", "x86_64-pc-windows-msvc").len()).to_equal(1)
+
+    it "does not check a unit that never crosses an extern boundary":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a mismatched @c_abi unit with no extern use")
+        val src = "@c_abi(\"int64_t\") unit Fd: i32 as fd\nfn local(f: Fd) -> Fd:\n    f\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(0)
+
+    it "rejects an unknown target at the extern use":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a unit-decl @c_abi against an unknown triple")
+        val src = "@c_abi(\"int32_t\") pub unit Fd: i32 as fd\npub extern fn c_open() -> Fd\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", "mystery-os")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].message).to_contain("unknown target")
+
+    it "keeps the alias form working and reports a deprecation note":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint the old @c_abi(Unit: ctype) form")
+        val src = "unit Ticks: i32 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(1)
+        val notes = sffi_abi_deprecation_notes(src)
+        expect(notes.len()).to_equal(1)
+        expect(notes[0].line_num).to_equal(2)
+        expect(notes[0].message).to_contain("deprecated")
+
+    it "emits no deprecation note for the unit-decl form":
+        # @req: REQ-DIAG-POLICY-001
+        step("Check notes for both decorator placements")
+        val src = "@c_abi(\"int32_t\") unit Fd: i32 as fd\n@c_abi(\"long\")\nunit Off: i64 as off\nextern fn c(f: Fd, o: Off)\n"
+        expect(sffi_abi_deprecation_notes(src).len()).to_equal(0)

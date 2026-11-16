@@ -1,0 +1,100 @@
+# cmd_messenger_human_output_spec
+"""As a person running `devhub messenger doctor` or `send` without `--json`,
+I want a readable `error: ...` line and exit 2 when my messenger config is
+missing, and a readable doctor summary (followed by the machine `result`
+record) when the target is configured, so I can diagnose setup without
+parsing JSON."""
+
+use std.spec
+use std.io_runtime.{env_get_opt, file_write}
+use std.io.dir_ops.{dir_create_all}
+use std.env.{env_set, env_unset}
+use app.devhub.cmd_messenger.{messenger_doctor_human_record, messenger_send_record}
+
+fn _restore(name: text, previous: text?) -> bool:
+    if val value = previous:
+        return env_set(name, value)
+    env_unset(name)
+
+fn _with_home(home_dir: text, verb: text, args: [text]) -> (i64, [text]):
+    val home = env_get_opt("HOME")
+    val profile = env_get_opt("USERPROFILE")
+    if not env_set("HOME", home_dir):
+        return (-1, [])
+    if not env_set("USERPROFILE", home_dir):
+        return (-1, [])
+    val record = if verb == "doctor":
+        messenger_doctor_human_record(args)
+    else:
+        val sent = messenger_send_record(args)
+        (sent.0, [sent.2])
+    val _h = _restore("HOME", home)
+    val _p = _restore("USERPROFILE", profile)
+    record
+
+fn _configured_home() -> text:
+    val root = "build/tmp/devhub_messenger_human_home_20261115"
+    val config = """
+messenger:
+    schema_version: 1
+    default_target: team_chat
+
+messenger.team_chat:
+    read_provider: api
+    send_provider: api
+    send_enabled: false
+    cache_mode: none
+    sync_policy: on_demand
+
+messenger.team_chat.api:
+    adapter: mattermost
+    endpoint: https://chat.example.org
+    credential_ref: secret://messenger/team_chat/api_token
+"""
+    if not dir_create_all(root + "/.config/devhub"):
+        return ""
+    if not file_write(root + "/.config/devhub/messenger.sdn", config):
+        return ""
+    root
+
+val MISSING_HOME = "build/tmp/devhub_no_messenger_home_human_20261115"
+
+describe "devhub messenger human output with no messenger.sdn":
+
+    it "doctor prints a single error line and exits 2":
+        step("run doctor in human mode against a home with no config")
+        val record = _with_home(MISSING_HOME, "doctor", ["doctor", "--target", "dense"])
+        step("observe the exit code and the printed line")
+        expect(record.0).to_equal(2)
+        expect(record.1.len()).to_equal(1)
+        expect(record.1[0]).to_start_with("error: ")
+        expect(record.1[0]).to_contain("messenger config not found")
+
+    it "send prints an error line and exits 2 before any transport":
+        step("run send in human mode with --confirm against a home with no config")
+        val record = _with_home(MISSING_HOME, "send", ["send", "--target", "dense", "--room", "r1", "--text", "hi", "--confirm"])
+        step("observe that the config error, not a transport status, is reported")
+        expect(record.0).to_equal(2)
+        expect(record.1[0]).to_start_with("error: ")
+        expect(record.1[0]).to_contain("messenger config not found")
+        expect(record.1[0]).not_to_contain("send: ")
+
+describe "devhub messenger doctor human output for a configured target":
+
+    it "prints a readable summary followed by the machine result record":
+        step("write a messenger.sdn declaring team_chat into a temp home")
+        val home = _configured_home()
+        expect(home.len() > 0).to_be(true)
+        step("run doctor in human mode for team_chat")
+        val record = _with_home(home, "doctor", ["doctor", "--target", "team_chat"])
+        step("observe the summary lines and trailing result record")
+        expect(record.0).to_equal(0)
+        expect(record.1[0]).to_equal("doctor: target 'team_chat' (resolved from --target flag)")
+        expect(record.1[1]).to_equal("  read_provider: api")
+        expect(record.1[2]).to_equal("  read_only: false")
+        val last = record.1[record.1.len() - 1]
+        expect(last).to_start_with("result {{")
+        expect(last).to_contain("\"target\":\"team_chat\"")
+        expect(last).to_contain("\"action\":\"doctor\"")
+        expect(last).not_to_contain("chat.example.org")
+        expect(last).not_to_contain("secret://")

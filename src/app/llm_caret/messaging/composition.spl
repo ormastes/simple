@@ -34,21 +34,38 @@ class MessagingRuntime:
     binding_sessions: [text]
     agent_control: AgentControlService
 
-    static fn open(path: text) -> MessagingRuntime:
-        val store = PureSqlMessagingStore.open(path)
-        var runtime = MessagingRuntime(store: store, memberships: store.memberships(), profiles: store.profiles(),
-            tasks: store.tasks(), bindings: store.agent_bindings(), binding_sessions: [],
+    static fn open(path: text) -> Result<MessagingRuntime, text>:
+        val store = match PureSqlMessagingStore.open(path):
+            case Ok(opened): opened
+            case Err(reason): return Err(reason)
+        val loaded_memberships = match store.memberships():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val loaded_profiles = match store.profiles():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val loaded_tasks = match store.tasks():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val loaded_bindings = match store.agent_bindings():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        var runtime = MessagingRuntime(store: store, memberships: loaded_memberships, profiles: loaded_profiles,
+            tasks: loaded_tasks, bindings: loaded_bindings, binding_sessions: [],
             agent_control: AgentControlService.new(true))
         for binding in runtime.bindings:
             val profile = runtime.who(binding.agent_id.value)
             val attached = if profile.found: runtime.agent_control.attach(profile.profile.provider, binding) else:
                 AgentControlResult(ok: false, provider: "", session_id: "", evidence: "", error: "agent_not_found")
             runtime.binding_sessions.push(if attached.ok: attached.session_id else: "")
-        runtime
+        Ok(runtime)
 
-    static fn memory() -> MessagingRuntime:
-        MessagingRuntime(store: PureSqlMessagingStore.open_memory(), memberships: [], profiles: [], tasks: [], bindings: [], binding_sessions: [],
-            agent_control: AgentControlService.new(true))
+    static fn memory() -> Result<MessagingRuntime, text>:
+        val store = match PureSqlMessagingStore.open_memory():
+            case Ok(opened): opened
+            case Err(reason): return Err(reason)
+        Ok(MessagingRuntime(store: store, memberships: [], profiles: [], tasks: [], bindings: [], binding_sessions: [],
+            agent_control: AgentControlService.new(true)))
 
     fn ready() -> bool: self.store.ready()
     me close() -> bool: self.store.close()
@@ -108,7 +125,9 @@ class MessagingRuntime:
         RoomMutation(accepted: true, error: "", room: mutation.room, memberships: self.memberships)
 
     me join_room(room_id: text, identity_id: text, role: text, at: i64) -> RuntimeMutation:
-        val room = self.store.room(room_id)
+        val room = match self.store.room(room_id):
+            case Ok(found): found
+            case Err(reason): return RuntimeMutation(accepted: false, error: reason)
         if room.room_id.value == "": return RuntimeMutation(accepted: false, error: "room_not_found")
         val mutation = add_room_member(room, self.memberships, identity_id, role, at)
         if not mutation.accepted: return RuntimeMutation(accepted: false, error: mutation.error)
@@ -119,7 +138,9 @@ class MessagingRuntime:
         RuntimeMutation(accepted: true, error: "")
 
     me leave_room(room_id: text, identity_id: text) -> RuntimeMutation:
-        val room = self.store.room(room_id)
+        val room = match self.store.room(room_id):
+            case Ok(found): found
+            case Err(reason): return RuntimeMutation(accepted: false, error: reason)
         if room.room_id.value == "": return RuntimeMutation(accepted: false, error: "room_not_found")
         val mutation = remove_room_member(room, self.memberships, identity_id)
         if not mutation.accepted: return RuntimeMutation(accepted: false, error: mutation.error)
@@ -131,32 +152,42 @@ class MessagingRuntime:
             sender_agent: text, origin: MessageOrigin, body: text, reply_to_id: text,
             correlation_id: text, causation_id: text, hop_count: i64, at: i64,
             idempotency_key: text) -> AppendMessageResult:
-        val room = self.store.room(room_id)
+        val room = match self.store.room(room_id):
+            case Ok(found): found
+            case Err(reason): return AppendMessageResult(ok: false, message_id: message_id, room_seq: 0, duplicate: false, error: reason)
         if room.room_id.value == "":
             return AppendMessageResult(ok: false, message_id: message_id, room_seq: 0, duplicate: false, error: "room_not_found")
         if not identity_can_read(room, self.memberships, sender_identity):
             return AppendMessageResult(ok: false, message_id: message_id, room_seq: 0, duplicate: false, error: "room_access_denied")
-        val prepared = prepare_message(message_id, workspace_id, room_id, self.store.message_count() + 1,
+        val sequence_hint = match self.store.message_count():
+            case Ok(found): found
+            case Err(reason): return AppendMessageResult(ok: false, message_id: message_id, room_seq: 0, duplicate: false, error: reason)
+        val prepared = prepare_message(message_id, workspace_id, room_id, sequence_hint + 1,
             sender_identity, sender_agent, origin, body, "", reply_to_id, correlation_id,
             causation_id, hop_count, at)
         if not prepared.accepted:
             return AppendMessageResult(ok: false, message_id: message_id, room_seq: 0, duplicate: false, error: prepared.error)
         self.store.append_message(prepared.message, idempotency_key)
 
-    fn read_messages(room_id: text, identity_id: text, after_seq: i64, limit: i64) -> [RoomMessage]:
-        val room = self.store.room(room_id)
-        if room.room_id.value == "" or not identity_can_read(room, self.memberships, identity_id): return []
+    fn read_messages(room_id: text, identity_id: text, after_seq: i64, limit: i64) -> Result<[RoomMessage], text>:
+        val room = self.store.room(room_id)?
+        if room.room_id.value == "" or not identity_can_read(room, self.memberships, identity_id): return Ok([])
         self.store.message_history(room_id, after_seq, limit)
 
     me mark_read(room_id: text, identity_id: text, seq: i64, at: i64) -> StoreWriteResult:
-        val room = self.store.room(room_id)
+        val room = match self.store.room(room_id):
+            case Ok(found): found
+            case Err(reason): return StoreWriteResult(ok: false, error: reason)
         if room.room_id.value == "" or not identity_can_read(room, self.memberships, identity_id):
             return StoreWriteResult(ok: false, error: "room_access_denied")
         self.store.advance_cursor(room_id, identity_id, seq, at)
 
     me bind_transport(binding_id: text, canonical_room_id: text, transport: text,
             external_room_id: text, mirror_policy: text, capabilities_version: text) -> RuntimeMutation:
-        if self.store.room(canonical_room_id).room_id.value == "":
+        val target_room = match self.store.room(canonical_room_id):
+            case Ok(found): found
+            case Err(reason): return RuntimeMutation(accepted: false, error: reason)
+        if target_room.room_id.value == "":
             return RuntimeMutation(accepted: false, error: "room_not_found")
         if mirror_policy != "full" and mirror_policy != "metadata_only" and mirror_policy != "off":
             return RuntimeMutation(accepted: false, error: "invalid_mirror_policy")
@@ -169,7 +200,9 @@ class MessagingRuntime:
 
     me advance_transport_cursors(binding_id: text, inbound_cursor: text,
             outbound_cursor: text) -> RuntimeMutation:
-        val binding = self.store.transport_binding(binding_id)
+        val binding = match self.store.transport_binding(binding_id):
+            case Ok(found): found
+            case Err(reason): return RuntimeMutation(accepted: false, error: reason)
         if binding.binding_id == "": return RuntimeMutation(accepted: false, error: "binding_not_found")
         val write = self.store.put_transport_binding(StoredTransportBinding(binding_id: binding.binding_id,
             canonical_room_id: binding.canonical_room_id, transport: binding.transport,
@@ -180,9 +213,15 @@ class MessagingRuntime:
 
     me map_external_message(ref_id: text, binding_id: text, canonical_message_id: text,
             external_message_id: text, external_thread_id: text, at: i64) -> RuntimeMutation:
-        if self.store.transport_binding(binding_id).binding_id == "":
+        val binding = match self.store.transport_binding(binding_id):
+            case Ok(found): found
+            case Err(reason): return RuntimeMutation(accepted: false, error: reason)
+        if binding.binding_id == "":
             return RuntimeMutation(accepted: false, error: "binding_not_found")
-        if not self.store.message_exists(canonical_message_id):
+        val message_known = match self.store.message_exists(canonical_message_id):
+            case Ok(found): found
+            case Err(reason): return RuntimeMutation(accepted: false, error: reason)
+        if not message_known:
             return RuntimeMutation(accepted: false, error: "message_not_found")
         val write = self.store.put_external_ref(StoredExternalRef(ref_id: ref_id,
             binding_id: binding_id, canonical_message_id: canonical_message_id,
@@ -190,17 +229,23 @@ class MessagingRuntime:
             created_at: at))
         RuntimeMutation(accepted: write.ok, error: write.error)
 
-    fn transport_binding(binding_id: text) -> StoredTransportBinding:
+    fn transport_binding(binding_id: text) -> Result<StoredTransportBinding, text>:
         self.store.transport_binding(binding_id)
 
-    fn external_message_ref(binding_id: text, canonical_message_id: text) -> StoredExternalRef:
+    fn external_message_ref(binding_id: text, canonical_message_id: text) -> Result<StoredExternalRef, text>:
         self.store.external_ref(binding_id, canonical_message_id)
 
     me queue_transport_template(delivery_id: text, message_id: text, binding_id: text,
             request_template: CredentialHttpRequestTemplate, at: i64) -> RuntimeMutation:
-        if self.store.transport_binding(binding_id).binding_id == "":
+        val binding = match self.store.transport_binding(binding_id):
+            case Ok(found): found
+            case Err(reason): return RuntimeMutation(accepted: false, error: reason)
+        if binding.binding_id == "":
             return RuntimeMutation(accepted: false, error: "binding_not_found")
-        if not self.store.message_exists(message_id):
+        val message_known = match self.store.message_exists(message_id):
+            case Ok(found): found
+            case Err(reason): return RuntimeMutation(accepted: false, error: reason)
+        if not message_known:
             return RuntimeMutation(accepted: false, error: "message_not_found")
         if not request_template.accepted:
             return RuntimeMutation(accepted: false, error: request_template.error)
@@ -220,7 +265,9 @@ class MessagingRuntime:
         self.profiles = self.profiles + [profile]
         self.store.put_profile(profile)
         if profile.room_ids.len() > 0:
-            val room = self.store.room(profile.room_ids[0])
+            val room = match self.store.room(profile.room_ids[0]):
+                case Ok(found): found
+                case Err(reason): return RuntimeMutation(accepted: false, error: reason)
             if room.room_id.value != "":
                 val identity_write = self.store.put_identity(Identity(
                     identity_id: messaging_id("identity", profile.agent_id.value),
@@ -271,7 +318,9 @@ class MessagingRuntime:
         self.agent_control.attach(provider, binding)
 
     me register_agent_binding(provider: text, binding: AgentBinding) -> AgentControlResult:
-        val room = self.store.room(binding.room_id.value)
+        val room = match self.store.room(binding.room_id.value):
+            case Ok(found): found
+            case Err(reason): return AgentControlResult(ok: false, provider: provider, session_id: "", evidence: "", error: reason)
         if room.room_id.value == "":
             return AgentControlResult(ok: false, provider: provider, session_id: "", evidence: "", error: "room_not_found")
         val profile = self.who(binding.agent_id.value)
@@ -305,15 +354,21 @@ class MessagingRuntime:
         attached
 
     me route_human_message(message_id: text, main_agent_id: text, at: i64) -> RoutedTaskResult:
-        val message = self.store.message(message_id)
+        val message = match self.store.message(message_id):
+            case Ok(found): found
+            case Err(reason): return RoutedTaskResult(routed: false, task_id: "", agent_id: "", session_id: "", context_bundle_id: "", error: reason)
         if message.message_id.value == "":
             return RoutedTaskResult(routed: false, task_id: "", agent_id: "", session_id: "",
                 context_bundle_id: "", error: "message_not_found")
         if message.origin != MessageOrigin.Human:
             return RoutedTaskResult(routed: false, task_id: "", agent_id: "", session_id: "",
                 context_bundle_id: "", error: "origin_does_not_trigger")
-        val room = self.store.room(message.room_id.value)
-        val history = self.store.message_history(message.room_id.value, 0, 1000)
+        val room = match self.store.room(message.room_id.value):
+            case Ok(found): found
+            case Err(reason): return RoutedTaskResult(routed: false, task_id: "", agent_id: "", session_id: "", context_bundle_id: "", error: reason)
+        val history = match self.store.message_history(message.room_id.value, 0, 1000):
+            case Ok(found): found
+            case Err(reason): return RoutedTaskResult(routed: false, task_id: "", agent_id: "", session_id: "", context_bundle_id: "", error: reason)
         val decision = route_message(message, history, self.bindings, self.profiles, "", main_agent_id)
         val trigger_allowed = room.mode == "room" or decision.reason == "explicit_mention" or
             decision.reason == "explicit_command_target" or decision.reason == "reply_target"

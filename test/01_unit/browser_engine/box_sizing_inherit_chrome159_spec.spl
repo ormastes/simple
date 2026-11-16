@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+Purpose: Pin `box-sizing:inherit` (CSS Cascade 4 §7.3.3): the child takes the
+PARENT's computed box-sizing, while box-sizing itself is not inherited.
+Audience: browser-engine cascade maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `body{margin:0}`,
+getBoundingClientRect, 2026-11-16), each child `width:50px;padding:5px;height:20px`:
+
+| parent             | child                 | x,y,w,h     |
+|--------------------|-----------------------|-------------|
+| `border-box`       | `box-sizing:inherit`  | 0,0,50,20   |
+| (content-box)      | `box-sizing:inherit`  | 0,20,60,30  |
+| `border-box`       | (no box-sizing)       | 0,50,60,30  |
+
+Filed as `casc_box_sizing_inherit` in
+doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-BOX-SIZING-INHERIT-001 — box-sizing:inherit takes the parent's value.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} section{{box-sizing:border-box}}" +
+    " #a{{box-sizing:inherit;width:50px;padding:5px}} #b{{box-sizing:inherit;width:50px;padding:5px}}" +
+    " #c{{box-sizing:border-box}} #d{{width:50px;padding:5px}}</style></head><body>" +
+    "<section><div id=a style=\"height:20px\"></div></section>" +
+    "<div><div id=b style=\"height:20px\"></div></div>" +
+    "<div id=c><div id=d style=\"height:20px\"></div></div>" +
+    "</body></html>"
+
+fn _box(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "x") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "y") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "w") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "h")
+
+describe "box-sizing:inherit":
+    it "AC-1: inherits border-box from the parent":
+        step("Chrome 159: border-box 50x20 includes the 2x5 padding")
+        expect(_box("a")).to_equal("0,0,50,20")
+
+    it "AC-2: inherits content-box from the parent":
+        step("Chrome 159: content-box 50 + 2x5 = 60, 20 + 10 = 30")
+        expect(_box("b")).to_equal("0,20,60,30")
+
+    it "AC-3: box-sizing is not inherited without the keyword":
+        step("Chrome 159: border-box parent, plain child stays content-box -> 60x30")
+        expect(_box("d")).to_equal("0,50,60,30")

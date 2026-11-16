@@ -39,6 +39,14 @@ impl MirLowering:
                     match value.kind:
                         case HirExprKind.NilLit: return self.ensure_option_handle(local, expected)
                         case _: ()
+                    # `None` lowers through the Option enum (rt_enum_new, disc
+                    # 1), not NilLit. It names no concrete type: searching an
+                    # implementation for it used an EMPTY concrete owner.
+                    # option_none_locals marks only the fresh construct local
+                    # (never propagated through assignments), so a variable
+                    # that may hold a concrete value never skips conversion.
+                    if self.option_none_locals.contains(local.id):
+                        return self.ensure_option_handle(local, expected)
                     # `Some(<concrete>)`: `local` is the already-built Option
                     # handle (typed `Concrete?`, or untyped), which names no
                     # implementation itself -- the impl search failed with an
@@ -131,6 +139,15 @@ impl MirLowering:
             return local
         val implementation = self.native_trait_implementations[selected]
         val layout = self.native_trait_layouts[layout_index]
+        # One layout serves every instantiation of a generic trait, so the
+        # owner match above cannot tell `Owner<text>` from `Owner<i64>`. When
+        # both sides spell concrete arguments they must agree; an erased or
+        # parameter argument (`Owner<T>` in a generic body) has no key ("").
+        if layout.generic:
+            val expected_key = self.native_trait_signature_type_key(expected)
+            if expected_key.contains("[") and implementation.trait_type_key != "" and expected_key != implementation.trait_type_key:
+                self.error_fatal("native trait object type arguments differ: {owner} for {concrete_owner}: expected={expected_key} implementation={implementation.trait_type_key}", Some(value.span))
+                return local
         val rejection = self.native_trait_implementation_rejection(layout, implementation)
         if rejection != "":
             self.error_fatal("incompatible native trait object signature: {owner} for {concrete_owner}: {rejection}", Some(value.span))
@@ -410,7 +427,7 @@ impl MirLowering:
             val layout_index = self.native_trait_layout_index(implementation.trait_owner)
             if layout_index < 0: continue
             val layout = self.native_trait_layouts[layout_index]
-            if not layout.object_safe: continue
+            if not layout.object_safe or layout.generic: continue
             if self.native_trait_implementation_rejection(layout, implementation) != "": continue
             val id = native_trait_cast_id(implementation.trait_owner)
             if val prior = seen_ids.get(id):
@@ -472,6 +489,9 @@ impl MirLowering:
             return local
         if not self.native_trait_layouts[target_index].object_safe:
             self.error_fatal("native trait cast target is not object-safe: {target_owner}", Some(span))
+            return local
+        if self.native_trait_layouts[target_index].generic:
+            self.error_fatal("native trait cast target is generic (the cast id cannot carry its type arguments): {target_owner}", Some(span))
             return local
         # A thunk only checks ids among its own type's traits; refuse a
         # target whose id another visible trait shares, or the thunk could

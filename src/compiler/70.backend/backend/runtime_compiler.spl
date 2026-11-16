@@ -14,6 +14,7 @@ use compiler.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.backend.runtime_object_cache_windows.{runtime_windows_cache_toolchain_v1, runtime_windows_cached_compile_v1, runtime_windows_cache_publish_batch_v1}
 use compiler.backend.runtime_xray_context_policy_v1.{runtime_xray_context_validate_v1, runtime_xray_context_cache_suffix_v1, runtime_xray_context_flags_v1}
+use common.types.{Enabled}
 use compiler.backend.runtime_tagged_callback_owner_v1.{runtime_tagged_callback_owner_v1}
 use compiler.backend.runtime_object_cache_posix.{runtime_posix_cache_fingerprint_command_v1}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
@@ -233,6 +234,19 @@ fn hosted_c_target_os_matches(target: text, host_os_name: text) -> bool:
 fn hosted_c_target_is_mingw(target: text) -> bool:
     target.ends_with("-pc-windows-gnu") or target.ends_with("-w64-mingw32") or target.ends_with("-w64-windows-gnu")
 
+pub fn hosted_mingw_clang_target(target: text) -> text:
+    """llvm-mingw clang driver triple for a Windows GNU compile or link.
+
+    The target's own architecture; x86_64 for an empty, host or unknown one.
+    A hardcoded x86_64 triple sent an aarch64-pc-windows-gnu cross link to the
+    x86_64 sysroot."""
+    val lower = target.trim().lower()
+    if lower.starts_with("aarch64-") or lower.starts_with("arm64-"):
+        return "aarch64-w64-windows-gnu"
+    if lower.starts_with("i686-"):
+        return "i686-w64-windows-gnu"
+    "x86_64-w64-windows-gnu"
+
 pub fn hosted_c_compiler_plan(target: text, host_os_name: text, host_arch_name: text) -> HostedCCompilerPlan:
     """Classify hosted C compilation without enabling unsupported cross targets."""
     if target == "" or target == "host" or target == "native":
@@ -284,6 +298,11 @@ pub fn c_compiler_override(windows_gnu: bool, requires_cross: bool, target: text
         val gnu_cc = env_get_nullable("CC")
         if gnu_cc != "" and gnu_cc != nil:
             simple_cc = gnu_cc
+    elif windows_gnu and hosted_c_target_is_mingw(target) and (simple_cc == "" or simple_cc == nil):
+        # llvm-mingw clang is multi-target: reuse CC for a mingw cross arch.
+        val cross_cc = env_get_nullable("CC")
+        if cross_cc != "" and cross_cc != nil:
+            simple_cc = cross_cc
     if simple_cc != "" and simple_cc != nil:
         if ((windows_gnu and not requires_cross) or hosted_c_target_is_mingw(target)) and not simple_cc.lower().contains("clang"):
             return ""
@@ -766,7 +785,7 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
         source_sig = source_sig + ";" + name
     val timestamp_owner = runtime_profile == "core-c-bootstrap" or alloc_observer
     val base_flag_sig = "v8;alloc_observer_v1={alloc_observer};profile={runtime_profile};sources={source_sig};timestamp_owner={timestamp_owner};legacy_owner={legacy_owner};cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()};abi_policy={abi_policy};runtime_owner={runtime_owner};{runtime_vector_provider_pin_cache_sig_v1(vector_pin)}"
-    val flag_sig = base_flag_sig + runtime_xray_context_cache_suffix_v1(xray_thread_context_v1)
+    val flag_sig = base_flag_sig + runtime_xray_context_cache_suffix_v1(Enabled(value: xray_thread_context_v1))
     val cmd = runtime_posix_cache_fingerprint_command_v1(rt_dir, cc, flag_sig, host_os())
     val (out, err, code) = backend_shell_tuple(cmd)
     if code != 0:
@@ -856,17 +875,36 @@ pub fn runtime_core_c_sources_v1() -> [text]:
     """
     ["runtime_native", "runtime_alloc_observer", "runtime_core_intrinsics", "runtime_file_view", "runtime_disk_headroom", "runtime_memory_headroom", "runtime_cache_host_authority_v1", "runtime_framebuffer", "runtime_directx_core", "runtime_legacy_core", "runtime_core_io_exports", "runtime_core_host_services", "runtime_fork", "runtime_memtrack", "runtime_process", "runtime_process_tree", "runtime_memory", "runtime_process_owned", "runtime_coverage_core", "runtime_contracts", "runtime_font", "runtime_thread", "runtime_simd_utf8", "runtime_simd_case", "runtime_simd_search", "runtime_simd_dispatch", "runtime_packed_span", "runtime_terminal", "runtime_prof_sample", "runtime_core_exports", "runtime_backend_plugin", "runtime_rocm", "runtime_renderdoc", "runtime_timestamp", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime", "runtime_cranelift_bridge_stub"]
 
-pub fn runtime_core_c_platform_sources_v1(windows_target: bool) -> [text]:
+pub fn runtime_core_c_target_os_v1(target: text, host_windows: bool, host_os_name: text) -> text:
+    """Which core-C platform owner set a native target takes: windows, linux or other.
+
+    Android triples (`*-linux-android`) stay `other`: its async backend has
+    not been compiled or linked through this list.
+    """
+    if target.contains("-windows") or (target == "host" and host_windows):
+        return "windows"
+    if target.contains("-linux-gnu") or target.contains("-linux-musl") or (target == "host" and host_os_name == "linux"):
+        return "linux"
+    "other"
+
+pub fn runtime_core_c_platform_sources_v1(target_os: text) -> [text]:
     """Per-OS async driver owners for the core-C composition.
 
-    platform/async_driver.c owns the 14 rt_driver_* exports and dispatches to
+    platform/async_driver.c owns the rt_driver_* exports and dispatches to
     one OS backend; on Windows that is platform/async_windows.c
     (spl_driver_create_iocp). The phase-3 stage3 link needed both and the
     baked list omitted them (bug stage2_runtime_missing_rt_heap_aux_live_bytes
-    _2026-11-02 sibling). Other OS backends are not yet admitted here.
+    _2026-11-02 sibling). On Linux the dispatch probes io_uring and falls back
+    to epoll, so both owners are linked; without SPL_HAS_IO_URING (never set
+    here, no liburing) async_linux_uring.c is its stub that returns NULL. The
+    aarch64 Stage 3 core-C link (2026-11-15) failed on 10 rt_driver_* symbols
+    without them. FreeBSD/macOS kqueue owners are not yet admitted: they have
+    not been compiled or linked through this list.
     """
-    if windows_target:
+    if target_os == "windows":
         return ["platform/async_driver", "platform/async_windows"]
+    if target_os == "linux":
+        return ["platform/async_driver", "platform/async_linux_epoll", "platform/async_linux_uring"]
     []
 
 pub fn runtime_object_basename_v1(name: text) -> text:
@@ -1056,8 +1094,8 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
     val compile_pid = getpid()
     val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
     if core_c_profile:
-        val windows_target = target.contains("-windows") or (target == "host" and _is_windows())
-        for platform_source in runtime_core_c_platform_sources_v1(windows_target):
+        val target_os = runtime_core_c_target_os_v1(target, _is_windows(), host_os())
+        for platform_source in runtime_core_c_platform_sources_v1(target_os):
             sources = sources.push(platform_source)
     val context_policy = runtime_xray_context_validate_v1(xray_thread_context_v1, target, host_os(),
         runtime_owner, core_c_profile, include_stage4_legacy_compat)
@@ -1097,7 +1135,9 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
     var windows_toolchain = ""
     var windows_compiler_digest = ""
     var windows_pending_keys: [text] = []
-    if _is_windows() and use_msvc and not native_tool_strict_requested_v1() and (env_get_nullable("SIMPLE_RT_OBJ_CACHE") ?? "") != "0":
+    # Both Windows drivers (clang-cl and llvm-mingw clang.exe) use the content
+    # cache; the toolchain identity is "" (uncached) for any other compiler.
+    if _is_windows() and not native_tool_strict_requested_v1() and (env_get_nullable("SIMPLE_RT_OBJ_CACHE") ?? "") != "0":
         windows_cache_root = env_get_nullable("SIMPLE_RT_OBJ_CACHE_DIR") ?? ""
         if windows_cache_root == "":
             val local_data = env_get_nullable("LOCALAPPDATA") ?? ""
@@ -1170,7 +1210,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             # section so the linker's --gc-sections can strip unreferenced code.
             comp_args = ["-c"]
             if target.ends_with("-pc-windows-gnu"):
-                comp_args.push("--target=x86_64-w64-windows-gnu")
+                comp_args.push("--target=" + hosted_mingw_clang_target(target))
             for target_arg in hosted_cross_c_target_args(target, host_os(), host_arch()):
                 comp_args.push(target_arg)
             for abi_define in abi_defines:
@@ -1219,7 +1259,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             comp_args.push(obj_path)
             comp_args.push(src_path)
 
-        for context_define in runtime_xray_context_flags_v1(xray_thread_context_v1, name):
+        for context_define in runtime_xray_context_flags_v1(Enabled(value: xray_thread_context_v1), name):
             comp_args.push(context_define)
         for pin_define in runtime_vector_provider_pin_defines_v1(name, vector_pin, use_msvc):
             comp_args.push(pin_define)

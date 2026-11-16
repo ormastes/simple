@@ -30,8 +30,9 @@ observation_budget_ms=${13}
 # identity and cross-module import resolution do not serve the per-module
 # lane. "whole-program" restores SIMPLE_BOOTSTRAP=1 plus
 # SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
-# A per-file lane may carry ":fw=0|1" and ":gte=0|1" items, forwarded in that
-# order as SIMPLE_FILE_WORKERS and SIMPLE_NATIVE_GO_TO_END (systemd does not
+# A per-file lane may carry ":fw=0|1", ":gte=0|1" and ":msc=<1..128>" items,
+# forwarded in that order as SIMPLE_FILE_WORKERS, SIMPLE_NATIVE_GO_TO_END and
+# SIMPLE_MIR_SHARD_COUNT (systemd does not
 # inherit, and the compiler runs under env -i).
 bootstrap_flag=1 whole_program_env= per_file_env=
 if [ "$worker_arg_count" -ge 34 ]; then
@@ -44,6 +45,8 @@ if [ "$worker_arg_count" -ge 34 ]; then
         case "$lane_item" in
           fw=0|fw=1) per_file_env="$per_file_env SIMPLE_FILE_WORKERS=${lane_item#fw=}" ;;
           gte=0|gte=1) per_file_env="$per_file_env SIMPLE_NATIVE_GO_TO_END=${lane_item#gte=}" ;;
+          msc=[1-9]|msc=[1-9][0-9]|msc=1[01][0-9]|msc=12[0-8])
+            per_file_env="$per_file_env SIMPLE_MIR_SHARD_COUNT=${lane_item#msc=}" ;;
           *) echo "stage3 worker: invalid lowering lane" >&2; exit 64 ;;
         esac
       done ;;
@@ -202,11 +205,28 @@ case "$platform" in
 esac
 timeout_args=
 [ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"
+stage3_streaming_surfaces=0
+mir_interface_hir_env=
+mir_shard_count_env=
+if [ "${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" = 1 ]; then
+  stage3_streaming_surfaces=1
+  mir_interface_hir_env="SIMPLE_MIR_SHARD_INTERFACE_HIR=1"
+  # Per-file lanes already carry one shard-count row. Duplicate names make
+  # the transcript writer fail closed before the compiler can start.
+  if [ -n "$whole_program_env" ]; then
+    mir_shard_count_env="SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-8}"
+  fi
+fi
+file_worker_batch_env=
+if [ -n "${SIMPLE_FILE_WORKER_BATCH:-}" ]; then
+  file_worker_batch_env="SIMPLE_FILE_WORKER_BATCH=${SIMPLE_FILE_WORKER_BATCH}"
+fi
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \
   SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP="${bootstrap_flag}" ${whole_program_env} ${per_file_env} \
   SIMPLE_ABI_POLICY="$abi_policy" SIMPLE_ABI_ADMISSION_RECEIPT="$abi_receipt" \
-  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=0 \
+  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES="$stage3_streaming_surfaces" \
+  ${mir_interface_hir_env} ${mir_shard_count_env} ${file_worker_batch_env} \
   SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route" \
   SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$fallback_route" \
   SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \

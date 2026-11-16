@@ -541,6 +541,18 @@ impl<'a> Parser<'a> {
                         return Ok(node);
                     }
                     TokenKind::Mixin => return self.parse_mixin_with_attrs(attributes),
+                    TokenKind::Unit => {
+                        // `@c_abi("int32_t") unit Fd: i32 as fd` (owner decision
+                        // 3B, 2026-11-16): the C ABI type is source metadata read
+                        // by the SPL-SFFI-ABI-001 lint; the unit node itself
+                        // carries no attributes, so they are dropped here.
+                        let _ = attributes;
+                        let mut node = self.parse_unit()?;
+                        if let Node::Unit(ref mut u) = node {
+                            u.visibility = visibility;
+                        }
+                        return Ok(node);
+                    }
                     TokenKind::Trait => {
                         // Without this arm a decorator-shaped attribute
                         // (`@doc("...")`) before a trait fell through to the

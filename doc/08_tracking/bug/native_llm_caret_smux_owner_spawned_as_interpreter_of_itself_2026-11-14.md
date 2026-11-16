@@ -1,6 +1,6 @@
 # Native `llm_caret workspace attach` cannot start the smux owner: it runs ITSELF as `<exe> run smux_client.spl`
 
-Status: fix landed, verification-pending (native rebuild required)
+Status: verification-pending (native re-verified 2026-11-15)
 Severity: P2 (native-only; workspace panes unusable from a standalone native caret on the smux backend)
 Found: 2026-11-14, lane `work/caret-native-defects-20261114`
 Seed: built from this branch (import_loader alias fix on `4118fda1a3e`)
@@ -138,3 +138,137 @@ the system specs could run): native and interpreted
 `workspace_cli_system_spec.spl`, native `caret_cli_help_system_spec`. The
 unblock condition above is therefore still open. A native caret still needs
 `SIMPLE_BINARY` pointing at a simple interpreter.
+
+## Verification run 2026-11-15 (run-only, no rebuild)
+
+Worktree at `9bffbf8ef3a` (PR #9238 fix). Seed `src/compiler_rust/target/bootstrap/simple.exe`
+built from that commit; `build/nb/llm_caret.exe` native-built from it. `SIMPLE_BINARY=$SEED`,
+`claude` removed from PATH (`command -v claude` empty).
+
+- native `workspace_cli_system_spec.spl` (`LLM_CARET_NATIVE_BIN=build/nb/llm_caret.exe`):
+  `Results: 4 total, 3 passed, 1 failed` (exit 1)
+- interpreted `workspace_cli_system_spec.spl` on `$SEED` (seed copied over `bin/simple.exe`):
+  `Results: 0 total, 0 passed, 0 failed` (exit 5; `SPEC FILE VERDICT: ... timeout=1 reason=child-timeout budget_ms=900000`)
+- native `caret_cli_help_system_spec.spl`:
+  `Results: 4 total, 4 passed, 0 failed` (exit 0)
+
+Next defect: in native mode, step `attaches three agents, isolates their worktrees,
+broadcasts, and tears down` still fails for agent-1/2/3 with
+`expected error new_session_failed smux owner did not start to contain window cli-team:agent-N`;
+then `session cli-team alive=false`. The native owner still does not come up via
+`process_spawn_async`. The interpreted run exceeds the 900 s child budget.
+Status stays verification-pending.
+
+## Root cause analysis 2026-11-15
+
+Status stays verification-pending. Run-only lane (no build, host disk ~4 GB free),
+worktree branch `work/native-owner-start-20261115` at `8eaed4c6d1b`, binaries reused:
+`build/nb/llm_caret.exe` (2026-11-14T22:52:30, 14244864 B) and seed
+`src/compiler_rust/target/bootstrap/simple.exe` (2026-11-14T22:42:11). `claude` off PATH.
+
+### Static trace (native caret)
+
+`_smux_owner_up` (`agent_workspace.spl:336`): fast path `list-sessions`; else writes
+`<session> <token>` to `%LOCALAPPDATA%/simple/caret_smux/<session>-<hash(repo)>.owner`,
+`smux_owner_argv(exe, env SIMPLE_BINARY, <root>/src/app/hosted_apps/smux_client.spl, <file>)`
+-> `[SIMPLE_BINARY, run, <client>, --serve-owner-file, <file>]` (native exe base is
+`llm_caret.exe`, so `SIMPLE_BINARY` empty => immediate `false`, same error text, no wait).
+`SIMPLE_BINARY` is cleared for the spawn and restored after. `start_outliving_process(root, argv)`
+runs `process_spawn_async("powershell", ["-NoProfile","-NonInteractive","-Command",
+"Start-Process -WindowStyle Hidden -WorkingDirectory '<root>' -FilePath '<SIMPLE_BINARY>'
+-ArgumentList '\"run\"','\"<client>\"','\"--serve-owner-file\"','\"<file>\"'"])`
+(C `win_process_spawn_async_owned_environment_v1`: no job, NUL std handles,
+`CREATE_NO_WINDOW`, inherited env, cwd = caller's) and requires `process_wait(hop, 30000) == 0`.
+Readiness: `_smux_req(ws, "list-sessions") != nil` every 500 ms for 240000 ms; the owner
+rewrites the file to `<id> <addr> <token> <pid>` once bound.
+
+### Measured
+
+- Standalone `llm_caret.exe workspace rca1 attach agent-1 --repo <fresh repo>`
+  (`SIMPLE_BINARY=$SEED`), 04:58:25 -> 04:58:59, rc=0:
+  `window rca1:agent-1` / `ok smux: created window id6`. Owner process seen:
+  `"...\bootstrap\simple.exe" "run" "C:/dev/wt/sqlcov-20261114/src/app/hosted_apps/smux_client.spl" "--serve-owner-file" "C:/Users/user/AppData/Local/simple/caret_smux/rca1-941330179.owner"`;
+  owner file in four-field form `rca1 127.0.0.1:65189 <tok> 22160` within ~34 s. `workspace rca1 kill` -> `ok`, owner gone.
+- Native `workspace_cli_system_spec.spl` (`LLM_CARET_NATIVE_BIN=build/nb/llm_caret.exe`,
+  `SIMPLE_BINARY=$SEED`, run by `$SEED test`), twice:
+  `SPEC FILE VERDICT: ... outcome=OK declared>=4 executed=4 passed=4 failed=0` /
+  `Results: 4 total, 4 passed, 0 failed` (first run 05:02:34 -> 05:03:36). During the team
+  scenario the owner for `cli-team-947543512.owner` was the seed interpreter, parent chain
+  outside any kill-on-close job, and it bound and served all three attaches.
+
+### Conclusion
+
+The spawn path (#9211 argv + #9238 `process_spawn_async` hop) is correct with these
+binaries: the owner starts, outlives the hop, binds, and the readiness probe sees it.
+The 2026-11-15 `3/4` failure is NOT reproduced with the same binaries. Likely causes of
+that run, neither proven: (a) `SIMPLE_BINARY` not reaching the caret (gives the same
+`smux owner did not start` text instantly), or (b) owner interpreter start exceeding the
+240 s budget under host load (one owner start = full interpreter boot of `smux_client.spl`;
+~34 s idle here). Stale owner files from other runs (`cli-team-899123459.owner`,
+`cli-team-979861953.owner`, different repo hashes) were present and did not interfere.
+
+### Minimal fix proposal
+
+No code fix is justified by evidence. Proposed diagnostic-only follow-up (not done here):
+make `_smux_owner_up` distinguish its three failure exits in the error text
+(`SIMPLE_BINARY unset`, `Start-Process hop failed rc=<n>`, `owner not ready after 240 s`)
+so the next failing run names its cause.
+
+### Still needed
+
+Native rebuild not required for this conclusion. Close-out needs the unblock condition's
+`workspace_recovery` native run, and a re-run of the 3/4 environment if it recurs.
+
+## Owner-start error causes + native recovery run (2026-11-15, lane `work/owner-start-error-causes-20261115`)
+
+Status stays verification-pending. `_smux_owner_up` is now `smux_owner_start(ws, exe) -> text`
+and each failure names its cause after the unchanged `smux owner did not start` prefix:
+`SIMPLE_BINARY not set (native <exe> needs a simple interpreter)`, `launcher failed`,
+`not ready after 240 s`, `owner file setup failed`.
+Spec `test/01_unit/app/llm_caret/smux_owner_start_error_spec.spl` (interpreted, seed):
+red `function smux_owner_start not found` -> green `Results: 1 total, 1 passed, 0 failed`.
+
+- native `workspace_recovery_system_spec.spl` (`LLM_CARET_NATIVE_BIN=build/nb/llm_caret.exe`,
+  existing exe from 2026-11-14 22:52, no rebuild, `SIMPLE_BINARY`=seed):
+  `Results: 12 total, 12 passed, 0 failed` (exit 0)
+
+## Native re-verification 2026-11-15 (release/1.0.0 @ cd0630ec257, incl. #9298)
+
+`build/nb/llm_caret.exe` rebuilt with seed `native-build` (`compiled=712 reused=0`
+— the incremental cache was NOT reused this run; full rebuild). Run with
+`LLM_CARET_NATIVE_BIN` and `SIMPLE_BINARY=<seed>`:
+
+- workspace_cli_system_spec: `Results: 4 total, 4 passed, 0 failed`
+- workspace_recovery_system_spec: `Results: 12 total, 12 passed, 0 failed`
+- caret_cli_help_system_spec: `Results: 4 total, 4 passed, 0 failed`
+
+Manual, `SIMPLE_BINARY` unset, `llm_caret.exe workspace x attach agent-1` (rc=1):
+`error new_session_failed smux owner did not start: SIMPLE_BINARY not set (native llm_caret.exe needs a simple interpreter)`
+
+## Phase-1 seed at tip re-verification (2026-11-15)
+
+- Seed: Rust seed rebuilt cold at `release/1.0.0` tip `5dd7e582c2b`
+  (`cargo build --profile bootstrap --bin simple`, clang-cl, LLVM 23.1.1 activation,
+  6m03s, no errors). `--version`: `Simple Language v1.0.0-rc.1`.
+- Native builds with that seed (llvm-mingw UCRT, `SIMPLE_NATIVE_INCREMENTAL=1`, shared `build/nb/cache`):
+  - devhub: `[native-incremental] 0 reused / 300 rebuilt`, 12.3s compile + 19.1s link, 5775 KB
+  - llm_caret: `[native-incremental] 0 reused / 712 rebuilt`, 38.9s compile + 18.0s link, 13992 KB
+- Specs (sequential, `Anthropic.ClaudeCode` stripped from PATH, `command -v claude` empty):
+  - messenger_read_verbs_history_edges: `Results: 8 total, 8 passed, 0 failed`
+  - messenger_read_verbs_damaged_store: `Results: 7 total, 7 passed, 0 failed`
+  - native_binary_sqlcipher_read: `Results: 2 total, 2 passed, 0 failed`
+  - native_binary_sqlcipher_open: `Results: 4 total, 4 passed, 0 failed`
+  - workspace_cli_system: `Results: 4 total, 4 passed, 0 failed`
+  - workspace_recovery_system: `Results: 12 total, 12 passed, 0 failed`
+  - caret_cli_help_system: `Results: 4 total, 4 passed, 0 failed`
+- Status unchanged (verification-pending); this is seed-at-tip evidence, not a status move.
+
+## Flake hunt 2026-11-15 (3 sequential native runs)
+
+`LLM_CARET_NATIVE_BIN=/c/dev/wt/sqlcov-20261114/build/nb/llm_caret.exe SIMPLE_BINARY=<seed-tip.exe> seed-tip.exe test test/03_system/app/llm_caret/workspace_cli_system_spec.spl`, base origin/release/1.0.0, Windows host:
+
+- run 1: rc=0, `Results: 4 total, 4 passed, 0 failed`
+- run 2: rc=0, `Results: 4 total, 4 passed, 0 failed`
+- run 3: rc=0, `Results: 4 total, 4 passed, 0 failed`
+
+The earlier 3/4 "smux owner did not start" did not reproduce in 3 runs, so no #9298 step-named cause text was captured. Status remains verification-pending; the flake stays unexplained (intermittent, or load-dependent).

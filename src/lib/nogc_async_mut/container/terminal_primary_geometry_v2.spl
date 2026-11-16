@@ -1,0 +1,132 @@
+# Geometry owns a separate bounded control exchange, never the terminal reader.
+# The caller retains the sole session and supplies its current issuer lease.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2}
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1, container_primary_attach_plan_v1}
+use std.nogc_async_mut.container.terminal_primary_v2.container_primary_terminal_view_v2
+use std.nogc_async_mut.container.primary_geometry_v1.*
+use std.nogc_async_mut.container.providers.windows.primary_geometry_owner_v2.{WindowsPrimaryGeometryOwnerV2, WindowsPrimaryGeometryTurnV2}
+use std.nogc_async_mut.container.providers.windows.primary_connection_v2.windows_primary_connection_plan_v2
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.windows_engine_container_resize_v3
+use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.windows_docker_engine_exchange_serialize_v3
+use std.nogc_async_mut.container.providers.linux.primary_geometry_http_v1.linux_primary_geometry_http_request_v1
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, container_host_scope_bytes_v2}
+use std.common.contracts.container.primary_geometry_v1.{ContainerPrimaryGeometryRequestV1, container_primary_geometry_request_same_v1}
+use std.common.crypto.sha256.sha256_u8_hex
+
+pub enum ContainerPrimaryGeometryNativeV2:
+    Legacy(ContainerPrimaryGeometryOwnerV1)
+    Connection(WindowsPrimaryGeometryOwnerV2)
+
+pub class ContainerPrimaryGeometryOwnerV2:
+    native: ContainerPrimaryGeometryNativeV2
+    execution: ContainerExecutionRequestV2
+    policy_bytes: text
+    request: ContainerPrimaryGeometryRequestV1
+    session_identity: text
+
+pub struct ContainerPrimaryGeometryTurnV2:
+    owner: ContainerPrimaryGeometryOwnerV2?
+    phase: text
+    disposition: text
+    cleanup_pending: bool
+    error: text
+
+pub fn container_primary_geometry_wire_digest_v2(session: ContainerOwnedTerminalSessionV2,
+        columns: i64, rows: i64) -> Result<text, text>:
+    if columns < 1 or columns > 512 or rows < 1 or rows > 256 or columns * rows > 60000:
+        return Err("primary-geometry-dimensions")
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            val plan = container_primary_attach_plan_v1(primary)
+            Ok(sha256_u8_hex(linux_primary_geometry_http_request_v1("resize", plan.runtime.native_id, columns, rows)?))
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val plan = windows_primary_connection_plan_v2(connection)
+            if plan.terminal_mode != "tty": return Err("primary-geometry-tty-required")
+            Ok(sha256_u8_hex(windows_docker_engine_exchange_serialize_v3(
+                windows_engine_container_resize_v3("1.48", plan.runtime.native_id, rows, columns, true)?)?))
+        case _: Err("primary-geometry-primary-required")
+
+fn geometry_reject(reason: text) -> ContainerPrimaryGeometryTurnV2:
+    ContainerPrimaryGeometryTurnV2(nil, "done", "rejected", false, reason)
+
+fn legacy_turn(owner: ContainerPrimaryGeometryOwnerV2, turn: ContainerPrimaryGeometryTurnV1) -> ContainerPrimaryGeometryTurnV2:
+    var retained = owner
+    if val native = turn.owner:
+        retained.native = ContainerPrimaryGeometryNativeV2.Legacy(native)
+        return ContainerPrimaryGeometryTurnV2(Some(retained), turn.phase, turn.disposition, turn.cleanup_pending, turn.error)
+    ContainerPrimaryGeometryTurnV2(nil, turn.phase, turn.disposition, turn.cleanup_pending, turn.error)
+
+fn connection_turn(owner: ContainerPrimaryGeometryOwnerV2, turn: WindowsPrimaryGeometryTurnV2) -> ContainerPrimaryGeometryTurnV2:
+    var retained = owner
+    if val native = turn.owner:
+        retained.native = ContainerPrimaryGeometryNativeV2.Connection(native)
+        return ContainerPrimaryGeometryTurnV2(Some(retained), turn.phase, turn.disposition, turn.cleanup_pending, turn.error)
+    ContainerPrimaryGeometryTurnV2(nil, turn.phase, turn.disposition, turn.cleanup_pending, turn.error)
+
+pub fn container_primary_geometry_begin_v2(container: SimpleContainerOwnerV2,
+        session: ContainerOwnedTerminalSessionV2, execution: ContainerExecutionRequestV2,
+        policy_bytes: text, request: ContainerPrimaryGeometryRequestV1) -> ContainerPrimaryGeometryTurnV2:
+    val view = container_primary_terminal_view_v2(session)
+    if view.is_err(): return geometry_reject(view.unwrap_err())
+    val actual = container_host_scope_bytes_v2(simple_container_scope_v2(container))
+    val target = container_host_scope_bytes_v2(request.target.scope)
+    if actual.is_err() or target.is_err() or actual.unwrap() != target.unwrap():
+        return geometry_reject("primary-geometry-host-scope-changed")
+    val digest = container_primary_geometry_wire_digest_v2(session, request.columns, request.rows)
+    if digest.is_err(): return geometry_reject(digest.unwrap_err())
+    if digest.unwrap() != request.request_digest: return geometry_reject("primary-geometry-wire-changed")
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            val turn = simple_container_primary_geometry_begin_v1(container, primary, policy_bytes, request)
+            if turn.owner == nil: return geometry_reject(turn.error)
+            val owner = ContainerPrimaryGeometryOwnerV2(ContainerPrimaryGeometryNativeV2.Legacy(turn.owner.unwrap()),
+                execution, policy_bytes, request, view.unwrap().fingerprint)
+            legacy_turn(owner, turn)
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            match container:
+                case SimpleContainerOwnerV2.Windows(_, adapter):
+                    val context = adapter.primary_geometry_context_v2(execution, view.unwrap().runtime, policy_bytes)
+                    if context.is_err(): return geometry_reject(context.unwrap_err())
+                    val created = WindowsPrimaryGeometryOwnerV2.new(execution, connection, context.unwrap().0,
+                        context.unwrap().1, request)
+                    if created.is_err(): return geometry_reject(created.unwrap_err())
+                    val owner = ContainerPrimaryGeometryOwnerV2(ContainerPrimaryGeometryNativeV2.Connection(created.unwrap()),
+                        execution, policy_bytes, request, view.unwrap().fingerprint)
+                    ContainerPrimaryGeometryTurnV2(Some(owner), "probe", "pending", false, "")
+                case _: geometry_reject("primary-geometry-provider-domain")
+        case _: geometry_reject("primary-geometry-primary-required")
+
+pub fn container_primary_geometry_cancel_v2(owner: ContainerPrimaryGeometryOwnerV2,
+        reason: text) -> ContainerPrimaryGeometryTurnV2:
+    match owner.native:
+        case ContainerPrimaryGeometryNativeV2.Legacy(native):
+            legacy_turn(owner, simple_container_primary_geometry_cancel_v1(native, reason))
+        case ContainerPrimaryGeometryNativeV2.Connection(original):
+            var native = original
+            connection_turn(owner, native.cancel(reason))
+
+pub fn container_primary_geometry_step_v2(owner: ContainerPrimaryGeometryOwnerV2,
+        container: SimpleContainerOwnerV2, session: ContainerOwnedTerminalSessionV2,
+        request: ContainerPrimaryGeometryRequestV1) -> ContainerPrimaryGeometryTurnV2:
+    val view = container_primary_terminal_view_v2(session)
+    val same = container_primary_geometry_request_same_v1(owner.request, request)
+    if (view.is_err() or same.is_err() or not same.unwrap() or view.unwrap().fingerprint != owner.session_identity):
+        return container_primary_geometry_cancel_v2(owner, "primary-geometry-current-session-or-request-changed")
+    match owner.native:
+        case ContainerPrimaryGeometryNativeV2.Legacy(native):
+            match session:
+                case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+                    legacy_turn(owner, simple_container_primary_geometry_step_v1(container, primary, native, request, 1))
+                case _: container_primary_geometry_cancel_v2(owner, "primary-geometry-session-domain")
+        case ContainerPrimaryGeometryNativeV2.Connection(original):
+            match container:
+                case SimpleContainerOwnerV2.Windows(_, adapter):
+                    val context = adapter.primary_geometry_context_v2(owner.execution, view.unwrap().runtime, owner.policy_bytes)
+                    if context.is_err(): return container_primary_geometry_cancel_v2(owner, context.unwrap_err())
+                case _: return container_primary_geometry_cancel_v2(owner, "primary-geometry-provider-domain")
+            match session:
+                case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+                    var native = original
+                    connection_turn(owner, native.step(connection, request))
+                case _: container_primary_geometry_cancel_v2(owner, "primary-geometry-session-domain")

@@ -4,7 +4,8 @@
 
 use std.spec.step
 use std.spec.{describe, it, expect}
-use std.nogc_sync_mut.net.stun.{stun_parse_header, stun_decode_attributes, stun_decode_xor_mapped_address, stun_binding_request, StunHeaderResult}
+use std.common.types.{Offset, Length, PortNumber}
+use std.nogc_sync_mut.net.stun.{stun_parse_header, stun_decode_attributes, stun_decode_xor_mapped_address, stun_binding_request, stun_binding_success_response, stun_parse_message, StunMessageResult, StunHeaderResult}
 
 fn txn() -> [u8]:
     [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8]
@@ -14,7 +15,7 @@ describe "STUN wraparound and truncation bounds":
         # @req REQ-SSPEC-LIB
         step("parse header at offset 0x7FFFFFFFFFFFFFF0")
         val msg = stun_binding_request(txn())
-        val r = stun_parse_header(msg, 0x7FFFFFFFFFFFFFF0)
+        val r = stun_parse_header(msg, Offset(value: 0x7FFFFFFFFFFFFFF0))
         var refused = false
         match r:
             case Err(_): refused = true
@@ -25,7 +26,7 @@ describe "STUN wraparound and truncation bounds":
         # @req REQ-SSPEC-LIB
         step("decode attributes with offset 20 and length 0x7FFFFFFFFFFFFFF0")
         val msg = stun_binding_request(txn())
-        val attrs = stun_decode_attributes(msg, 20, 0x7FFFFFFFFFFFFFF0)
+        val attrs = stun_decode_attributes(msg, Offset(value: 20), Length(value: 0x7FFFFFFFFFFFFFF0))
         expect(attrs.len()).to_equal(0)
 
     it "a truncated IPv4 XOR-MAPPED-ADDRESS value yields an empty address":
@@ -61,3 +62,27 @@ describe "STUN wraparound and truncation bounds":
         val v: [u8] = []
         val a = stun_decode_xor_mapped_address(v, txn())
         expect(a.ip_bytes.len()).to_equal(0)
+
+    it "a typed PortNumber round-trips through XOR-MAPPED-ADDRESS":
+        # @req REQ-SSPEC-LIB
+        step("build a success response for port 3478 and decode it")
+        val msg = stun_binding_success_response(txn(), PortNumber(value: 3478), 192, 168, 1, 100)
+        var port = -1
+        var len = -1
+        match stun_parse_message(msg):
+            case Ok(m):
+                val a = stun_decode_xor_mapped_address(m.attributes[0].value, txn())
+                port = a.port.value
+                len = a.ip_bytes.len()
+            case Err(_): port = -2
+        expect(port).to_equal(3478)
+        expect(len).to_equal(4)
+
+    it "a decoded header carries a typed Length":
+        # @req REQ-SSPEC-LIB
+        step("parse a binding request header at Offset 0")
+        var n = -1
+        match stun_parse_header(stun_binding_request(txn()), Offset(value: 0)):
+            case Ok(h): n = h.msg_length.value
+            case Err(_): n = -2
+        expect(n).to_equal(0)

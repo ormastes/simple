@@ -4,7 +4,7 @@
 # authority, which the legacy database cannot supply). No writes, ever.
 # @req REQ-TRC-015 REQ-TRC-021
 use std.common.traceability.model.*
-use std.common.traceability.schema.{trace_id_valid, trace_path_valid}
+use std.common.traceability.schema.{trace_entity_id_parse_v1, trace_path_parse_v1}
 
 pub struct LegacyBugRowV1:
     id: text
@@ -93,7 +93,7 @@ pub fn parse_legacy_bug_db_v1(content: text, path: text, content_sha256: text) -
                 continue
             val db_id = fields[0]
             val id = "bug:" + db_id
-            if db_id == "" or not trace_id_valid(id):
+            if db_id == "" or trace_entity_id_parse_v1(id).is_none():
                 diagnostics.push(legacy_diagnostic(path, table, "row id is not a canonical identity"))
                 continue
             if seen.contains_key(id):
@@ -102,11 +102,11 @@ pub fn parse_legacy_bug_db_v1(content: text, path: text, content_sha256: text) -
                 continue
             seen[id] = true
             var file = fields[4]
-            if file != "" and not trace_path_valid(file):
+            if file != "" and trace_path_parse_v1(file).is_none():
                 diagnostics.push(legacy_diagnostic(path, id, "file column is not a safe repository path; link dropped"))
                 file = ""
             var reproducible = fields[6]
-            if reproducible != "" and not trace_path_valid(reproducible): reproducible = ""
+            if reproducible != "" and trace_path_parse_v1(reproducible).is_none(): reproducible = ""
             rows.push(LegacyBugRowV1(id: id, db_id: db_id, table: table, severity: fields[1], status: fields[2],
                 title: fields[3], file: file, line: legacy_line_number_v1(fields[5]), reproducible_by: reproducible,
                 created_at: fields[7], updated_at: fields[8], valid: fields[9] == "true"))
@@ -118,8 +118,12 @@ pub fn legacy_bug_nodes_v1(source: LegacyBugSourceV1) -> [TraceNode]:
         nodes.push(TraceNode(id: row.id, kind: TraceNodeKind.Bug, title: row.title))
     nodes
 
-pub fn legacy_bug_row_matches_v1(row: LegacyBugRowV1, status: text, severity: text, file_prefix: text) -> bool:
-    if status != "" and row.status != status: return false
-    if severity != "" and row.severity != severity: return false
-    if file_prefix != "" and not row.file.starts_with(file_prefix): return false
-    true
+pub enum LegacyBugFilterV1:
+    Matches
+    Excluded
+
+pub fn legacy_bug_row_matches_v1(row: LegacyBugRowV1, status: text, severity: text, file_prefix: text) -> LegacyBugFilterV1:
+    if status != "" and row.status != status: return LegacyBugFilterV1.Excluded
+    if severity != "" and row.severity != severity: return LegacyBugFilterV1.Excluded
+    if file_prefix != "" and not row.file.starts_with(file_prefix): return LegacyBugFilterV1.Excluded
+    LegacyBugFilterV1.Matches

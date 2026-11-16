@@ -1,0 +1,59 @@
+# Prepare BEFORE reservation/signing. The public snapshot is an ordinary
+# explicit workload environment field in the provider's immutable request.
+# This never modifies a signed plan, opens a route or provisions credentials.
+# Source-only NOT_RUN; Windows V1 has no workload env and is refused explicitly.
+use std.common.config_core.server_context_types_v1.{ServerConfigV1, ResolvedServerV1}
+use std.common.config_core.server_container_projection_v1.server_container_snapshot_v1
+use std.common.contracts.container.execution_options_v1.{OciEnvironmentEntryV1, oci_execution_options_v1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2,
+    ContainerExecutionRequestV2, container_execution_request_encode_v2}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2,
+    simple_container_backend_v2, simple_container_project_v2}
+use std.nogc_async_mut.container.server_discovery_v1.simple_container_server_v1
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+
+pub fn container_server_environment_v1(existing: [OciEnvironmentEntryV1],
+        selection: ResolvedServerV1) -> Result<[OciEnvironmentEntryV1], text>:
+    for entry in existing:
+        if (["simple_servers_sdn", "simple_server_client_scope", "simple_servers_config"].contains(entry.name.lower())):
+            return Err("container-server-environment-already-selected")
+    var environment = existing
+    environment.push(OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_SDN",
+        value: server_container_snapshot_v1(selection)?))
+    environment.push(OciEnvironmentEntryV1(name: "SIMPLE_SERVER_CLIENT_SCOPE", value: "container"))
+    environment.push(OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_CONFIG", value: ""))
+    val options = oci_execution_options_v1(environment, "")?
+    Ok(environment)
+
+# Backend-owned Linux values enter here before an execution plan exists.
+# Both opaque retained bytes AND plan digest derive from the same final value.
+pub fn container_server_linux_request_v1(scope: ContainerHostScopeV2,
+        unsigned_request: LinuxOciRequestV1, selection: ResolvedServerV1) -> Result<ContainerExecutionRequestV2, text>:
+    if unsigned_request.network_policy != "bridge":
+        return Err("container-server-network-unavailable")
+    var native = unsigned_request
+    native.environment = container_server_environment_v1(native.environment, selection)?
+    val digest = linux_oci_request_digest_v1(native)?
+    val retained = linux_oci_retained_request_encode_v1(native)?
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: digest,
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode,
+        continuity_id: scope.continuity_id)
+    val request = ContainerExecutionRequestV2(plan: plan, request_bytes: retained)
+    val bounded = container_execution_request_encode_v2(request)?
+    Ok(request)
+
+pub fn simple_container_server_prepare_v1(owner: SimpleContainerOwnerV2,
+        unsigned_request: LinuxOciRequestV1, config: ServerConfigV1, consumer: text,
+        explicit_server: text, explicit_context: text) -> Result<ContainerExecutionRequestV2, text>:
+    if simple_container_backend_v2(owner) != "linux-podman":
+        return Err("container-server-workload-environment-unsupported")
+    val discovery = simple_container_server_v1(owner, config, consumer, explicit_server, explicit_context)?
+    val request = container_server_linux_request_v1(simple_container_scope_v2(owner), unsigned_request, discovery.selection)?
+    val projected = simple_container_project_v2(owner, request)?
+    Ok(request)
+
+export container_server_environment_v1, container_server_linux_request_v1, simple_container_server_prepare_v1

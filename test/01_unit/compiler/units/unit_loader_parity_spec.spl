@@ -1,0 +1,112 @@
+# @req RB-PARITY-01 RB-UNIT-01
+# @cover src/compiler/30.types/units/unit_ops.spl 60%
+"""
+## Purpose and audience
+Plan slice E (compiler/interpreter/loader parity), first increment. A unit
+operator verdict must be identical whether the unit declarations come from the
+compiler's live pool (parse in this process) or from the loader path, where the
+pool is restored from the flat-pool blob the frontend cache / SMF load uses
+(flat_type_pools_dump / flat_type_pools_restore). It also pins that the
+interpreter value path (unit_value_binop) is derived from the same verdict.
+## Operator workflow
+bin/simple test test/01_unit/compiler/units/unit_loader_parity_spec.spl
+## Compatibility and limitations
+Covers the unit declaration pools only (nominal, point/delta, index, alias,
+legacy newtype). Capability/ABI digest validation in the loader is not covered.
+## Verification guidance and troubleshooting
+A mismatch after restore means a unit_decl_* pool is missing from the flat-pool
+dump/restore pair or restored out of order.
+"""
+
+use std.spec
+use compiler.core.types.{
+    reset_all_pools, unit_decl_register, unit_decl_register_origin, TYPE_I64,
+    flat_type_pools_dump, flat_type_pools_restore
+}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.types.units.unit_ops.{UnitOpVerdict, unit_op_verdict, UnitValueResult, unit_value_binop}
+
+fn declare_world():
+    reset_all_pools()
+    unit_decl_register("Distance", "nominal", "km", TYPE_I64, "")
+    unit_decl_register("Mass", "nominal", "kg", TYPE_I64, "")
+    unit_decl_register("Timestamp", "point", "ts", TYPE_I64, "Duration")
+    unit_decl_register("Duration", "nominal", "dur", TYPE_I64, "")
+    unit_decl_register("Slot", "index", "slot", TYPE_I64, "")
+    unit_decl_register("Km", "alias", "kmx", TYPE_I64, "Distance")
+    unit_decl_register_origin("Meters", "nominal", "m", TYPE_I64, "", "newtype")
+
+fn verdict_text(v: UnitOpVerdict) -> text:
+    match v:
+        case NotUnit: "notunit"
+        case Allow(r): "allow:" + r
+        case Deny(m):
+            if m.starts_with("SPL-UNIT-002"): "deny"
+            else: "deny-without-code"
+
+fn value_text(r: UnitValueResult) -> text:
+    match r:
+        case Value(t, v): "value:" + t + ":" + v.to_string()
+        case Truth(b): "truth:" + b.to_string()
+        case Error(_): "error"
+        case Fallthrough: "fallthrough"
+
+fn verdict_matrix() -> text:
+    val names = ["Distance", "Mass", "Timestamp", "Duration", "Slot", "Km", "Meters", "int", "float"]
+    val ops = ["add", "sub", "mul", "div", "mod", "cmp", "bit"]
+    var out = ""
+    for l in names:
+        for r in names:
+            for op in ops:
+                out = out + l + " " + op + " " + r + " => " + verdict_text(unit_op_verdict(op, l, r)) + "\n"
+    out
+
+fn value_matrix() -> text:
+    var out = ""
+    out = out + value_text(unit_value_binop("add", "", "Distance", 2, "Distance", 3)) + "\n"
+    out = out + value_text(unit_value_binop("add", "", "Distance", 2, "Mass", 3)) + "\n"
+    out = out + value_text(unit_value_binop("sub", "", "Timestamp", 9, "Timestamp", 4)) + "\n"
+    out = out + value_text(unit_value_binop("add", "", "Timestamp", 9, "Duration", 4)) + "\n"
+    out = out + value_text(unit_value_binop("add", "", "Timestamp", 9, "Timestamp", 4)) + "\n"
+    out = out + value_text(unit_value_binop("cmp", "lt", "Slot", 1, "Slot", 2)) + "\n"
+    out = out + value_text(unit_value_binop("add", "", "Meters", 1, "Meters", 2)) + "\n"
+    out = out + value_text(unit_value_binop("mul", "", "Km", 3, "int", 2)) + "\n"
+    out
+
+describe "unit verdict parity across the loader pool path (RB-PARITY-01)":
+    it "verdict matrix is identical after a flat-pool dump and restore":
+        declare_world()
+        step("record the compiler-side verdict matrix and the dump")
+        val before = verdict_matrix()
+        val blob = flat_type_pools_dump()
+        step("clearing the pools removes every unit, so the matrix must change")
+        reset_all_pools()
+        expect(verdict_matrix() == before).to_equal(false)
+        step("restore from the blob, as the loader / cache hit does")
+        val ok = flat_type_pools_restore(FlatPoolReader.new(blob))
+        expect(ok).to_equal(true)
+        step("the restored matrix is byte-identical")
+        expect(verdict_matrix() == before).to_equal(true)
+
+    it "interpreter value results are identical after restore":
+        declare_world()
+        val before = value_matrix()
+        val blob = flat_type_pools_dump()
+        reset_all_pools()
+        step("restore and re-evaluate the same operations")
+        val ok = flat_type_pools_restore(FlatPoolReader.new(blob))
+        expect(ok).to_equal(true)
+        expect(value_matrix() == before).to_equal(true)
+
+    it "rejection survives restore: km + kg and point + point stay denied":
+        declare_world()
+        val blob = flat_type_pools_dump()
+        reset_all_pools()
+        val ok = flat_type_pools_restore(FlatPoolReader.new(blob))
+        expect(ok).to_equal(true)
+        step("denied operations keep the stable SPL-UNIT-002 code")
+        expect(verdict_text(unit_op_verdict("add", "Distance", "Mass"))).to_equal("deny")
+        expect(verdict_text(unit_op_verdict("add", "Timestamp", "Timestamp"))).to_equal("deny")
+        step("legacy newtype compat arithmetic is preserved, not silently dropped")
+        expect(verdict_text(unit_op_verdict("mod", "Meters", "Meters"))).to_equal("deny")
+        expect(verdict_text(unit_op_verdict("mul", "Meters", "Meters"))).to_equal("allow:Meters")

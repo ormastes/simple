@@ -630,6 +630,11 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
         let is_resource_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "resource")
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        // `sandbox Name:` / `ui_policy Name:` declarations; any other use of
+        // those identifiers is an ordinary expression/assignment.
+        let is_named_policy_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "sandbox" || name == "ui_policy")
+            && matches!(self.peek_next().kind, TokenKind::Identifier { .. })
+            && matches!(self.peek_nth(2).kind, TokenKind::Colon);
         match &self.current.kind {
             // Route @ and legacy #[...] to attributed_item.
             TokenKind::At | TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
@@ -898,21 +903,60 @@ impl<'a> Parser<'a> {
             TokenKind::On if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::On => self.parse_aop_advice().map(Node::AopAdvice),
             TokenKind::Identifier { .. } if is_inject_graph_decl => self.parse_inject_graph().map(Node::InjectGraph),
+            // `security` is contextual: a declaration only for `security:`,
+            // `security <name>:` or `security gate ...`; anything else
+            // (`security.x = v`, `security = s`, `security(...)`) is an
+            // ordinary expression/assignment.
+            // `friend <pkg.path>`, `internal_export <name>` and `layer <name> [uses ..]`
+            // are module directives handled by the
+            // pure-Simple frontend; the seed has no visibility graph, so it is
+            // consumed as a no-op (same node as bare `export`). The word stays
+            // an ordinary identifier unless an identifier follows on the line.
+            TokenKind::Identifier { name, .. } if matches!(name.as_str(), "friend" | "internal_export" | "layer") => {
+                if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) {
+                    let start_span = self.current.span;
+                    while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                        self.advance();
+                    }
+                    Ok(Node::ExportUseStmt(ExportUseStmt {
+                        span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+                        path: ModulePath::new(Vec::new()),
+                        target: ImportTarget::Glob,
+                    }))
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::Identifier { name, .. } if name == "security" => {
                 let next = self.peek_next();
-                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "gate") {
-                    self.parse_top_level_security_gate().map(Node::SecurityGate)
-                } else {
-                    self.parse_security_policy().map(Node::SecurityPolicy)
+                match &next.kind {
+                    TokenKind::Identifier { name, .. } if name == "gate" => {
+                        self.parse_top_level_security_gate().map(Node::SecurityGate)
+                    }
+                    TokenKind::Colon => self.parse_security_policy().map(Node::SecurityPolicy),
+                    TokenKind::Identifier { .. }
+                        if matches!(self.peek_nth(2).kind, TokenKind::Colon) =>
+                    {
+                        self.parse_security_policy().map(Node::SecurityPolicy)
+                    }
+                    _ => self.parse_expression_or_assignment(),
                 }
             }
             // `resource Name` (soft keyword): bare form is rejected inside
             // parse_resource_decl because `@sffi(prefix: ...)` is required.
             TokenKind::Identifier { .. } if is_resource_decl => self.parse_resource_decl(Vec::new(), Visibility::Private),
-            TokenKind::Identifier { name, .. } if name == "sandbox" => {
+            // `sandbox` / `ui_policy` are contextual too: declaration only for
+            // `<kw> <Name>:`.
+            TokenKind::Identifier { name, .. }
+                if name == "sandbox" && is_named_policy_decl =>
+            {
                 self.parse_sandbox_policy().map(Node::SandboxPolicy)
             }
-            TokenKind::Identifier { name, .. } if name == "ui_policy" => self.parse_ui_policy().map(Node::UiPolicy),
+            TokenKind::Identifier { name, .. }
+                if name == "ui_policy" && is_named_policy_decl =>
+            {
+                self.parse_ui_policy().map(Node::UiPolicy)
+            }
             TokenKind::Identifier { .. } if is_capability_policy_decl => {
                 self.parse_capability_policy().map(Node::CapabilityPolicy)
             }

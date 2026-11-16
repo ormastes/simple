@@ -1,0 +1,46 @@
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.common.contracts.orchestration.agent_task_command_v1.agent_task_command_decode_v1
+use std.nogc_sync_mut.orchestration.controller_agent_task_command_v1.controller_agent_task_command_v1
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn task_command_error_v1(reason: text, code: i64, effect: bool, cleanup: bool) -> OrchestratorValidationReplyV1:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("controller-agent-task-result"), "status": SdnValue.String("rejected"),
+        "code": SdnValue.String(reason), "effectAttempted": SdnValue.Bool(effect),
+        "reconciliationRequired": SdnValue.Bool(effect or cleanup),
+        "executionAuthorized": SdnValue.Bool(false), "contentDisclosed": SdnValue.Bool(false)}
+    OrchestratorValidationReplyV1(exit_code: code, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn orchestrator_agent_task_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    orchestrator_agent_task_input_command_v1(args, nil)
+
+# Transport integrations must supply root/controller/config pin from their own
+# installed service policy. This input port does not authorize caller paths.
+pub fn orchestrator_agent_task_input_command_v1(args: [text], supplied: Option<text>) -> OrchestratorValidationReplyV1:
+    if args.len() != 5 or not ["task-retain", "task-use"].contains(args[0]):
+        return task_command_error_v1("usage: task-retain|task-use <root> <controller> <config-digest> <packet-file>", 2, false, false)
+    var source = ""
+    if supplied.is_some():
+        source = supplied.unwrap()
+    else:
+        if not host_path_is_absolute(args[4]): return task_command_error_v1("task-packet-absolute-path-required", 2, false, false)
+        val read = file_read_regular_no_follow_bounded(args[4], 262144)
+        if read.is_err(): return task_command_error_v1("task-packet-unavailable", 1, false, false)
+        source = read.unwrap()
+    val decoded = agent_task_command_decode_v1(source)
+    if decoded.is_err(): return task_command_error_v1(decoded.unwrap_err(), 2, false, false)
+    val packet = decoded.unwrap()
+    val expected = if args[0] == "task-retain": "retain" else: "use"
+    if packet.action != expected: return task_command_error_v1("task-packet-action-mismatch", 2, false, false)
+    val turn = controller_agent_task_command_v1(args[1], args[2], args[3], packet)
+    if turn.error == "" and turn.closed and turn.journal_cleanup.is_none() and turn.windows_cleanup.is_none():
+        # The process-local task value is deliberately not serialized.
+        return OrchestratorValidationReplyV1(exit_code: 0, output: turn.output)
+    var reply = task_command_error_v1(turn.error, 1, turn.effect_attempted, not turn.closed)
+    reply.journal_cleanup = turn.journal_cleanup
+    reply.cleanup_state = turn.cleanup_state
+    reply.controller_root_cleanup = turn.windows_cleanup
+    reply

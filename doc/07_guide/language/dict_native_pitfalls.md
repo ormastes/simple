@@ -180,6 +180,8 @@ exposure — always also search for `: {`-style dict declarations.
 | `d.keys()` | correct | yes |
 | `d[k]` indexed read — hit | correct | yes |
 | `Some(d[k])` manual wrap | correct — round-trips through `.unwrap()` and `Option`-typed params | yes |
+| `K` = tuple `(a, b)` | **silent miss** — tuples are headerless `rt_alloc` blocks, compared by address (measured `t1 -1`, `t2 false` on Rust and C runtimes; Stage 2 core-c-bootstrap: every row of `test/fixtures/native_tuple_keyed_dict/main.spl` misses) | **NO** |
+| `K` = array `[T]` | C runtime: value-keyed since `work/native-tuple-keyed-dict-20261115` (`rt_core_dict_hash` hashes registered arrays/runtime tuples structurally, matching the structural equality it already used; was a silent miss, overwrite added a second entry). `[1, 2]` and a runtime tuple `(1, 2)` are ONE key. **Mutating an array after using it as a key strands the entry** (still counted by `len()`, found by neither the mutated array nor a fresh equal one) — same as the Rust runtime's value hash | yes, never mutate a key |
 
 > **CHANGED 2026-07-28 — the MISS row was previously WRONG.** This table used to say
 > `d.get(k)` on a miss was "correct, `nil`". It is not: a miss returns the **zero value**

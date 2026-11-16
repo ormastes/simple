@@ -6,8 +6,9 @@ use std.nogc_sync_mut.http_server.{SimpleHttpServer, SecureServerPolicy,
 use app.io.mod.{current_time_ms}
 use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal, bearer_token}
 use app.llm_caret.messaging.adapter.server.primitive_dispatch.{PrimitiveRequest, PrimitiveMessagingApplication}
+use app.llm_caret.messaging.adapter.server.api.{ApiResponse}
 
-var PRIMITIVE_HTTP_APP: PrimitiveMessagingApplication = PrimitiveMessagingApplication.memory()
+var PRIMITIVE_HTTP_APP: PrimitiveMessagingApplication? = None
 var PRIMITIVE_HTTP_TOKEN = ""
 var PRIMITIVE_HTTP_IDENTITY = ""
 var PRIMITIVE_HTTP_WORKSPACE = ""
@@ -37,24 +38,36 @@ fn primitive_http_principal(req: HttpRequest, now: i64) -> AuthPrincipal:
 
 fn primitive_http_handle(req: HttpRequest) -> HttpResponse:
     val now = current_time_ms()
-    val result = PRIMITIVE_HTTP_APP.handle(PrimitiveRequest(
-        method: http_method_to_text(req.method), path: req.path, body: req.body,
-        idempotency_key: req.header("Idempotency-Key"),
-        principal: primitive_http_principal(req, now), occurred_at: now))
+    val result = match PRIMITIVE_HTTP_APP:
+        case Some(app):
+            var live = app
+            live.handle(PrimitiveRequest(
+                method: http_method_to_text(req.method), path: req.path, body: req.body,
+                idempotency_key: req.header("Idempotency-Key"),
+                principal: primitive_http_principal(req, now), occurred_at: now))
+        case None:
+            ApiResponse(status: 503, content_type: "text/plain", body: "messaging_not_configured")
     HttpResponse(status: primitive_http_status(result.status),
         headers: [("Content-Type", result.content_type), ("Cache-Control", "no-store"),
             ("X-Content-Type-Options", "nosniff")], body: result.body)
 
 fn configure_primitive_http_server(database_path: text, token: text, identity_id: text,
-        workspace_id: text, scopes: [text], expires_at: i64):
-    PRIMITIVE_HTTP_APP.close()
-    PRIMITIVE_HTTP_APP = PrimitiveMessagingApplication.open(database_path)
-    PRIMITIVE_HTTP_APP.configure_enrollment_secret(token)
+        workspace_id: text, scopes: [text], expires_at: i64) -> Result<(), text>:
+    val opened = match PrimitiveMessagingApplication.open(database_path):
+        case Ok(app): app
+        case Err(reason): return Err(reason)
+    match PRIMITIVE_HTTP_APP:
+        case Some(previous): previous.close()
+        case None: pass
+    var configured = opened
+    configured.configure_enrollment_secret(token)
+    PRIMITIVE_HTTP_APP = Some(configured)
     PRIMITIVE_HTTP_TOKEN = token
     PRIMITIVE_HTTP_IDENTITY = identity_id
     PRIMITIVE_HTTP_WORKSPACE = workspace_id
     PRIMITIVE_HTTP_SCOPES = scopes
     PRIMITIVE_HTTP_EXPIRES_AT = expires_at
+    Ok(())
 
 fn run_primitive_http_server(host: text, port: i64) -> Result<(), text>:
     var router = Router.new()

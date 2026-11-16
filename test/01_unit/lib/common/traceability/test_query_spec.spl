@@ -1,0 +1,266 @@
+# Purpose and audience: read-only TestDB query contract for CLI/MCP facade authors and evidence reviewers.
+# @req TESTDB-001 TESTDB-002 TESTDB-003 TESTDB-004
+use std.spec.*
+use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.test_query.{
+    TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseId,
+    TestPlannedCaseIdentity, TestAttemptIdentity, TestQueryStatus, TestQualification,
+    TestEvidenceProvenance, TestQueryLimit, TestQueryCursor, TestQuery, TestQueryRow,
+    TestQueryTruncation, TestQueryCoverage, TestQueryErrorKind,
+    parse_test_query_status, qualify_test_query_status, project_run_case_rows,
+    paginate_test_query_rows
+}
+
+"""
+# Read-only TestDB query: typed rows, qualification and pagination
+
+Purpose: an agent or reviewer asking "did this exact case pass in this run?"
+gets typed rows whose identities, status and truncation are explicit, so an
+absent identity, an unknown status string or a skipped case can never be read
+as a PASS. Audience: authors of the future `simple test query` CLI/MCP facade
+and reviewers of TestDB-backed qualification evidence.
+
+Plan section 3.5 / 9.1 names TESTDB-001..010 without defining each one; this
+spec maps them as: TESTDB-001 exact case query, TESTDB-002 every status variant
+(including Unknown), TESTDB-003 provenance and explicit missing identity,
+TESTDB-004 bounded pagination with typed truncation, partial coverage and
+rejected queries. TESTDB-005..010 are recorded as not covered in
+doc/08_tracking/bug/testdb_query_cli_mcp_not_implemented_2026-11-14.md.
+"""
+
+fn _key(path: text, name: text) -> TestCaseKey:
+    TestCaseKey(path: TestCasePath(value: path), name: TestCaseName(value: name))
+
+fn _started(name: text) -> TraceCaseEvent:
+    TraceCaseEvent(case_name: name, phase: "started", outcome: "not_finished")
+
+fn _finished(name: text, outcome: text) -> TraceCaseEvent:
+    TraceCaseEvent(case_name: name, phase: "finished", outcome: outcome)
+
+fn _no_plan() -> TestPlannedCaseIdentity:
+    TestPlannedCaseIdentity.Missing
+
+fn _query(limit: i64, cursor: TestQueryCursor?) -> TestQuery:
+    TestQuery(case_key: _key("test/a_spec.spl", "adds"), run_id: None,
+        limit: TestQueryLimit(value: limit), cursor: cursor)
+
+fn _rows(count: i64) -> [TestQueryRow]:
+    var events: [TraceCaseEvent] = []
+    for i in 0..count:
+        events.push(_started("adds"))
+        events.push(_finished("adds", "passed"))
+    project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), events)
+
+fn _status_name(status: TestQueryStatus) -> text:
+    match status:
+        case TestQueryStatus.Passed: "passed"
+        case TestQueryStatus.Failed: "failed"
+        case TestQueryStatus.Skipped: "skipped"
+        case TestQueryStatus.Ignored: "ignored"
+        case TestQueryStatus.QualifiedIgnore: "qualifiedignore"
+        case TestQueryStatus.Pending: "pending"
+        case TestQueryStatus.InDevelopment: "in_development"
+        case TestQueryStatus.FeatureGated: "feature_gated"
+        case TestQueryStatus.Blocked: "blocked"
+        case TestQueryStatus.NotFinished: "not_finished"
+        case TestQueryStatus.Cached: "cached"
+        case TestQueryStatus.Unknown(raw): "unknown:" + raw
+
+fn _qualifies(status: TestQueryStatus) -> text:
+    match qualify_test_query_status(status):
+        case TestQualification.Pass: "pass"
+        case TestQualification.NotPass: "not-pass"
+
+fn _attempt_text(attempt: TestAttemptIdentity) -> text:
+    match attempt:
+        case TestAttemptIdentity.StreamOrder(ordinal): "stream:{ordinal.value}"
+        case TestAttemptIdentity.Missing: "missing"
+
+describe "TestDB query rows for one exact case":
+    it "returns only the queried case and keeps its run and planned identity":
+        # @req TESTDB-001
+        step("Project one run's events that mix the queried case with a neighbour")
+        val events = [_started("adds"), _started("subtracts"), _finished("subtracts", "failed"), _finished("adds", "passed")]
+        val planned = TestPlannedCaseIdentity.Recorded(TestPlannedCaseId(value: "case-adds"))
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-7"), planned, events)
+        step("Only the queried case appears, with its run id and planned case id")
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].run_id.value).to_equal("run-7")
+        expect(rows[0].case_key.name.value).to_equal("adds")
+        expect(_status_name(rows[0].status)).to_equal("passed")
+        match rows[0].planned_case:
+            case TestPlannedCaseIdentity.Recorded(id): expect(id.value).to_equal("case-adds")
+            case TestPlannedCaseIdentity.Missing: fail("planned case id was dropped")
+
+    it "keeps two attempts of the same case in one run as separate rows":
+        # @req TESTDB-001
+        step("Project a stream where the case started, failed, then started and passed")
+        val events = [_started("adds"), _finished("adds", "failed"), _started("adds"), _finished("adds", "passed")]
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), events)
+        step("Each attempt is its own row in stream order; the failure is not overwritten")
+        expect(rows.len()).to_equal(2)
+        expect(_attempt_text(rows[0].attempt)).to_equal("stream:0")
+        expect(_status_name(rows[0].status)).to_equal("failed")
+        expect(_attempt_text(rows[1].attempt)).to_equal("stream:1")
+        expect(_status_name(rows[1].status)).to_equal("passed")
+
+describe "TestDB query status variants":
+    it "maps every recorded status string to its own variant":
+        # @req TESTDB-002
+        step("Parse each status spelling the runner and the event store write")
+        val spellings = ["passed", "failed", "skipped", "ignored", "qualifiedignore", "pending",
+                         "in_development", "feature_gated", "blocked", "not_finished", "cached"]
+        for spelling in spellings:
+            expect(_status_name(parse_test_query_status(spelling))).to_equal(spelling)
+        step("The hyphenated in-development spelling maps to the same variant")
+        expect(_status_name(parse_test_query_status("in-development"))).to_equal("in_development")
+
+    it "reports an unrecognised status string as Unknown instead of Skipped":
+        # @req TESTDB-002
+        step("Parse a status no writer produces")
+        val status = parse_test_query_status("fabricated_pass")
+        step("It is Unknown and keeps the raw text for diagnosis")
+        expect(_status_name(status)).to_equal("unknown:fabricated_pass")
+        expect(_status_name(parse_test_query_status(""))).to_equal("unknown:")
+
+describe "TestDB query qualification":
+    it "qualifies only a Passed status as PASS":
+        # @req TESTDB-002
+        step("Qualify the Passed status")
+        expect(_qualifies(TestQueryStatus.Passed)).to_equal("pass")
+        step("Every other status, including skipped, gated, blocked, cached and unknown, is not PASS")
+        val others = [TestQueryStatus.Failed, TestQueryStatus.Skipped, TestQueryStatus.Ignored,
+                      TestQueryStatus.QualifiedIgnore, TestQueryStatus.Pending, TestQueryStatus.InDevelopment,
+                      TestQueryStatus.FeatureGated, TestQueryStatus.Blocked, TestQueryStatus.NotFinished,
+                      TestQueryStatus.Cached, TestQueryStatus.Unknown(raw: "passed ")]
+        for status in others:
+            expect(_qualifies(status)).to_equal("not-pass")
+
+    it "never qualifies a skipped row even when its case also passed elsewhere":
+        # @req TESTDB-002
+        step("Project a pending (skipped-in-run) outcome")
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(),
+            [_started("adds"), _finished("adds", "pending")])
+        step("The row carries a NotPass qualification")
+        expect(rows.len()).to_equal(1)
+        match rows[0].qualification:
+            case TestQualification.Pass: fail("a pending row qualified as PASS")
+            case TestQualification.NotPass: expect(_status_name(rows[0].status)).to_equal("pending")
+
+describe "TestDB query provenance and missing identity":
+    it "marks a run without a frozen plan and an orphan terminal event as Missing":
+        # @req TESTDB-003
+        step("Project a terminal event that has no start in the stream, for a run with no plan")
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-2"), _no_plan(),
+            [_finished("adds", "passed")])
+        step("Planned id and attempt identity are explicitly Missing, never empty text")
+        expect(rows.len()).to_equal(1)
+        expect(_attempt_text(rows[0].attempt)).to_equal("missing")
+        match rows[0].planned_case:
+            case TestPlannedCaseIdentity.Recorded(_): fail("a missing plan produced a planned id")
+            case TestPlannedCaseIdentity.Missing: pass
+        step("Provenance is the unverified framework observation the store actually holds")
+        match rows[0].provenance:
+            case TestEvidenceProvenance.UnverifiedFrameworkObservation: pass
+
+    it "reports a started case with no terminal event as NotFinished, not as its last outcome":
+        # @req TESTDB-003
+        step("Project a retry that started but never finished")
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-3"), _no_plan(),
+            [_started("adds"), _finished("adds", "passed"), _started("adds")])
+        step("The interrupted attempt stays a separate NotFinished row")
+        expect(rows.len()).to_equal(2)
+        expect(_status_name(rows[1].status)).to_equal("not_finished")
+        expect(_qualifies(rows[1].status)).to_equal("not-pass")
+
+fn _first_cursor(rows: [TestQueryRow], query: TestQuery) -> TestQueryCursor:
+    match paginate_test_query_rows(rows, query):
+        case Err(error): fail("first page failed: {error.detail}")
+        case Ok(page):
+            match page.truncation:
+                case TestQueryTruncation.Truncated(next): next
+                case TestQueryTruncation.Complete: fail("fixture did not truncate")
+
+fn _cursor_rejected(rows: [TestQueryRow], query: TestQuery) -> bool:
+    match paginate_test_query_rows(rows, query):
+        case Err(error):
+            match error.kind:
+                case TestQueryErrorKind.InvalidQuery: true
+                case _: false
+        case Ok(_): false
+
+describe "TestDB query pagination":
+    it "returns a bounded page with a typed truncation and next cursor":
+        # @req TESTDB-004
+        step("Paginate five rows with a limit of two")
+        match paginate_test_query_rows(_rows(5), _query(2, None)):
+            case Err(error): fail("valid page failed: {error.detail}")
+            case Ok(page):
+                expect(page.rows.len()).to_equal(2)
+                match page.truncation:
+                    case TestQueryTruncation.Complete: fail("a truncated page reported Complete")
+                    case TestQueryTruncation.Truncated(next):
+                        expect(next.token.starts_with("tq1:")).to_equal(true)
+                        step("Follow the opaque cursor twice to the last page")
+                        match paginate_test_query_rows(_rows(5), _query(2, Some(next))):
+                            case Err(error): fail("second page failed: {error.detail}")
+                            case Ok(second):
+                                expect(second.rows.len()).to_equal(2)
+                                match second.truncation:
+                                    case TestQueryTruncation.Complete: fail("the middle page claimed to be complete")
+                                    case TestQueryTruncation.Truncated(next2):
+                                        match paginate_test_query_rows(_rows(5), _query(2, Some(next2))):
+                                            case Err(error): fail("last page failed: {error.detail}")
+                                            case Ok(last):
+                                                expect(last.rows.len()).to_equal(1)
+                                                match last.truncation:
+                                                    case TestQueryTruncation.Complete: pass
+                                                    case TestQueryTruncation.Truncated(_): fail("the last page claimed more rows")
+
+    it "marks a page that contains an unfinished attempt as partial coverage":
+        # @req TESTDB-004
+        step("Paginate rows where one attempt never finished")
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-3"), _no_plan(),
+            [_started("adds"), _finished("adds", "passed"), _started("adds")])
+        match paginate_test_query_rows(rows, _query(10, None)):
+            case Err(error): fail("valid page failed: {error.detail}")
+            case Ok(page):
+                match page.coverage:
+                    case TestQueryCoverage.Full: fail("an interrupted attempt was reported as full coverage")
+                    case TestQueryCoverage.Partial: expect(page.rows.len()).to_equal(2)
+
+    it "rejects a zero limit and an oversized limit":
+        # @req TESTDB-004
+        step("A zero limit is an invalid query, not an empty success")
+        match paginate_test_query_rows(_rows(3), _query(0, None)):
+            case Ok(_): fail("limit 0 returned a page")
+            case Err(error):
+                match error.kind:
+                    case TestQueryErrorKind.InvalidQuery: pass
+                    case _: fail("wrong error kind for limit 0")
+        step("A limit above the bound is rejected")
+        expect(paginate_test_query_rows(_rows(3), _query(1001, None)).is_err()).to_equal(true)
+
+    it "rejects a plain integer cursor, a tampered token and a token from another query or snapshot":
+        # @req TESTDB-004
+        step("Take a genuine cursor from page one of five rows, limit two")
+        val genuine = _first_cursor(_rows(5), _query(2, None))
+        step("A plain row offset is not a cursor")
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: "2"))))).to_equal(true)
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: ""))))).to_equal(true)
+        step("Altering the offset digits or the digest of a real token is rejected")
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: genuine.token + "0"))))).to_equal(true)
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: "tq1:00:2"))))).to_equal(true)
+        expect(_cursor_rejected(_rows(5), _query(2, Some(TestQueryCursor(token: genuine.token.replace("tq1:", "tq1:f")))))).to_equal(true)
+        step("The same token under a different limit, case or run is rejected")
+        expect(_cursor_rejected(_rows(5), _query(3, Some(genuine)))).to_equal(true)
+        val other_case = TestQuery(case_key: _key("test/a_spec.spl", "subtracts"), run_id: None,
+            limit: TestQueryLimit(value: 2), cursor: Some(genuine))
+        expect(_cursor_rejected(_rows(5), other_case)).to_equal(true)
+        val other_run = TestQuery(case_key: _key("test/a_spec.spl", "adds"), run_id: Some(TestRunId(value: "run-9")),
+            limit: TestQueryLimit(value: 2), cursor: Some(genuine))
+        expect(_cursor_rejected(_rows(5), other_run)).to_equal(true)
+        step("The same token against a changed row set (new attempt recorded) is rejected")
+        expect(_cursor_rejected(_rows(6), _query(2, Some(genuine)))).to_equal(true)
+        step("The genuine token still works on the unchanged query")
+        expect(_cursor_rejected(_rows(5), _query(2, Some(genuine)))).to_equal(false)

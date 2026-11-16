@@ -212,7 +212,12 @@ impl<'a> MirLowerer<'a> {
                 method,
                 args,
                 dispatch,
-            } => self.lower_method_call_expr(receiver, method, args, dispatch),
+            } => {
+                if let Some(reg) = self.try_lower_dict_stored_fn_call(receiver, method, args, expr_ty)? {
+                    return Ok(reg);
+                }
+                self.lower_method_call_expr(receiver, method, args, dispatch)
+            }
 
             HirExprKind::Lambda {
                 params,

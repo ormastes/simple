@@ -1,0 +1,171 @@
+# A server connection borrows the retained ready reader. Only the canonical
+# listener thread can advance its one-use challenge; no wire value is authority.
+use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@end
+use std.common.contracts.orchestration.host_service_auth_v6.HostServiceAuthContextV6
+use std.common.contracts.orchestration.host_service_auth_frame_v6.*
+use std.common.contracts.orchestration.host_service_operation_v6.*
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.sosix.time.sosix_time_now_monotonic_ms
+
+pub class HostServiceAuthConnectionV6:
+    identity: i64
+
+pub class HostServiceAuthenticatedRequestV6:
+    identity: i64
+
+pub struct HostServiceAuthConnectionOpenV6:
+    owner: HostServiceAuthConnectionV6
+    challenge: text
+
+struct AuthConnectionStateV6:
+    identity: i64
+    reader: Option<HostServiceReadyReaderV1>
+    context: HostServiceAuthContextV6
+    deadline: i64
+    phase: text
+    request: Option<HostServiceOperationRequestV6> = nil
+
+var _auth_connections_v6: [AuthConnectionStateV6] = []
+var _auth_connection_next_v6: i64 = 1
+
+# No callback, yield, await or thread transfer occurs between guard and state
+# mutation. Native canonical-thread admission precedes every registry access.
+# On Linux that admission is the pinned procfs origin of the original process
+# main thread, the same guard the Linux ready reader and publisher use. It is
+# process origin only; inherited/quarantined state is refused before any slot.
+fn auth_connection_enter_v6() -> Result<bool, text>:
+    @when(os="windows"):
+    windows_command_thread_check_v2()?
+    Ok(true)
+    @elif(os="linux"):
+    val origin = unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    if origin.is_err(): return Err(origin.unwrap_err())
+    Ok(true)
+    @else:
+    Err("host-service-auth-native-reader-unavailable")
+    @end
+
+fn auth_connection_index_v6(identity: i64) -> Result<int, text>:
+    for index in 0.._auth_connections_v6.len():
+        if _auth_connections_v6[index].identity == identity: return Ok(index)
+    Err("host-service-auth-connection-stale")
+
+fn auth_connection_current_v6(state: AuthConnectionStateV6) -> Result<bool, text>:
+    val now = sosix_time_now_monotonic_ms()
+    if now < 0 or now >= state.deadline: return Err("host-service-auth-deadline")
+    if state.reader.is_none(): return Err("host-service-auth-reader-released")
+    val current = host_service_ready_reader_current_v1(state.reader.unwrap())?
+    if host_service_ready_reader_incarnation_v1(state.reader.unwrap())? != state.context.service_incarnation:
+        return Err("host-service-auth-incarnation-changed")
+    Ok(true)
+
+pub fn host_service_auth_connection_begin_v6(reader: HostServiceReadyReaderV1,
+        hello: HostServiceAuthFrameV6, deadline: i64) -> Result<HostServiceAuthConnectionOpenV6, text>:
+    val admitted = auth_connection_enter_v6()?
+    val valid = host_service_auth_frame_validate_v6(hello)?
+    if hello.role != "hello": return Err("host-service-auth-hello-required")
+    val now = sosix_time_now_monotonic_ms()
+    if now < 0 or deadline <= now or deadline - now > 2000: return Err("host-service-auth-deadline")
+    val current = host_service_ready_reader_current_v1(reader)?
+    if host_service_ready_reader_incarnation_v1(reader)? != hello.service_incarnation:
+        return Err("host-service-auth-incarnation-mismatch")
+    var index = -1
+    for candidate in 0.._auth_connections_v6.len():
+        if _auth_connections_v6[candidate].phase == "closed" and index < 0: index = candidate
+    if index < 0 and _auth_connections_v6.len() >= 16: return Err("host-service-auth-connection-capacity")
+    if _auth_connection_next_v6 >= 9223372036854775807: return Err("host-service-auth-generation-exhausted")
+    val nonce = sosix_random_hex(32)
+    if nonce.is_none(): return Err("host-service-auth-entropy-unavailable")
+    val context = HostServiceAuthContextV6(hello.service_incarnation, hello.client_nonce,
+        nonce.unwrap(), hello.command_digest)
+    val tag = host_service_ready_reader_server_tag_v1(reader, context, "challenge", "")?
+    val challenge = host_service_auth_frame_encode_v6(HostServiceAuthFrameV6(
+        "challenge", context.service_incarnation, context.client_nonce,
+        context.server_nonce, context.command_digest, "", tag))?
+    val state = AuthConnectionStateV6(_auth_connection_next_v6, Some(reader), context, deadline, "challenge")
+    val live = auth_connection_current_v6(state)?
+    _auth_connection_next_v6 = _auth_connection_next_v6 + 1
+    if index < 0: _auth_connections_v6.push(state)
+    else: _auth_connections_v6[index] = state
+    Ok(HostServiceAuthConnectionOpenV6(HostServiceAuthConnectionV6(state.identity), challenge))
+
+pub fn host_service_auth_connection_accept_v6(owner: HostServiceAuthConnectionV6,
+        frame: HostServiceAuthFrameV6) -> Result<HostServiceAuthenticatedRequestV6, text>:
+    val admitted = auth_connection_enter_v6()?
+    val index = auth_connection_index_v6(owner.identity)?
+    var state = _auth_connections_v6[index]
+    if state.phase != "challenge": return Err("host-service-auth-challenge-consumed")
+    # Consume BEFORE any fallible validation. Neither a copied owner nor a bad
+    # first request can obtain a second submission against this challenge.
+    state.phase = "rejected"
+    _auth_connections_v6[index] = state
+    val live = auth_connection_current_v6(state)?
+    val valid = host_service_auth_frame_validate_v6(frame)?
+    if (frame.role != "request" or frame.service_incarnation != state.context.service_incarnation or
+            frame.client_nonce != state.context.client_nonce or frame.server_nonce != state.context.server_nonce or
+            frame.command_digest != state.context.command_digest): return Err("host-service-auth-request-context")
+    if not host_service_ready_reader_verify_request_v1(state.reader.unwrap(), state.context, frame.payload, frame.tag)?:
+        return Err("host-service-auth-request-tag")
+    val request = host_service_operation_decode_v6(frame.payload)?
+    val still_live = auth_connection_current_v6(state)?
+    state.request = Some(request)
+    state.phase = "verified"
+    _auth_connections_v6[index] = state
+    Ok(HostServiceAuthenticatedRequestV6(state.identity))
+
+# The listener invokes this immediately before the canonical Host dispatch.
+# The returned request is data; the one-use permission remains consumed here.
+pub fn host_service_auth_connection_take_v6(owner: HostServiceAuthConnectionV6,
+        verified: HostServiceAuthenticatedRequestV6) -> Result<HostServiceOperationRequestV6, text>:
+    val admitted = auth_connection_enter_v6()?
+    if owner.identity != verified.identity: return Err("host-service-auth-request-owner")
+    val index = auth_connection_index_v6(owner.identity)?
+    var state = _auth_connections_v6[index]
+    if state.phase != "verified" or state.request.is_none(): return Err("host-service-auth-request-consumed")
+    state.phase = "dispatched"
+    _auth_connections_v6[index] = state
+    val live = auth_connection_current_v6(state)?
+    Ok(state.request.unwrap())
+
+pub fn host_service_auth_connection_reply_v6(owner: HostServiceAuthConnectionV6,
+        payload: text) -> Result<text, text>:
+    val admitted = auth_connection_enter_v6()?
+    val index = auth_connection_index_v6(owner.identity)?
+    var state = _auth_connections_v6[index]
+    if state.phase != "dispatched": return Err("host-service-auth-reply-consumed")
+    state.phase = "reply-sealed"
+    _auth_connections_v6[index] = state
+    val live = auth_connection_current_v6(state)?
+    val tag = host_service_ready_reader_server_tag_v1(state.reader.unwrap(), state.context, "reply", payload)?
+    host_service_auth_frame_encode_v6(HostServiceAuthFrameV6("reply", state.context.service_incarnation,
+        state.context.client_nonce, state.context.server_nonce, state.context.command_digest, payload, tag))
+
+# Only the already-taken exact stop request may ask the listener to retire.
+# Other live challenges must finish or time out before their reader is closed.
+pub fn host_service_auth_connection_stop_guard_v6(owner: HostServiceAuthConnectionV6) -> Result<bool, text>:
+    val admitted = auth_connection_enter_v6()?
+    val index = auth_connection_index_v6(owner.identity)?
+    val state = _auth_connections_v6[index]
+    if state.phase != "dispatched" or state.request.is_none(): return Err("host-service-auth-stop-request")
+    if state.request.unwrap().action != "service-stop": return Err("host-service-auth-stop-request")
+    val live = auth_connection_current_v6(state)?
+    for other in _auth_connections_v6:
+        if other.identity != state.identity and other.phase != "closed":
+            return Err("host-service-auth-other-connection-pending")
+    Ok(true)
+
+pub fn host_service_auth_connection_close_v6(owner: HostServiceAuthConnectionV6) -> Result<bool, text>:
+    val admitted = auth_connection_enter_v6()?
+    val index = auth_connection_index_v6(owner.identity)?
+    var state = _auth_connections_v6[index]
+    state.phase = "closed"
+    state.request = nil
+    state.reader = nil
+    _auth_connections_v6[index] = state
+    # This retires only a logical connection borrow. The server retains the
+    # actual reader and socket until their separate native cleanup completes.
+    Ok(true)

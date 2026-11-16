@@ -82,6 +82,11 @@ impl MirLowering:
         if implementation.methods.len() != layout.methods.len(): return "implementation method count mismatch"
         if implementation.signatures.len() != layout.methods.len(): return "implementation signature count mismatch"
         if self.mir_hir_type_is_resource_direct(implementation.concrete_type): return "concrete resource requires a drop slot"
+        # A generic trait's `T?` slot binds T to the concrete Option payload on
+        # first use; every later `T?` slot must agree (object_safe admitted T
+        # only as a whole Option payload, so the slot ABI is one word).
+        var bound_names: [text] = []
+        var bound_keys: [text] = []
         var index = 0
         while index < layout.methods.len():
             val slot = layout.methods[index]
@@ -101,17 +106,35 @@ impl MirLowering:
             val concrete_receiver = self.native_trait_signature_type_key(concrete.params[0])
             val expected_receiver = self.native_trait_signature_type_key(implementation.concrete_type)
             if concrete_receiver != expected_receiver: return "method {method}: concrete receiver expected={expected_receiver} actual={concrete_receiver}"
-            val result_key = self.native_trait_signature_type_key(slot.result)
             val concrete_result = self.native_trait_signature_type_key(concrete.result)
-            if result_key == "": return "method {method}: unsupported declaration return type"
-            if result_key != concrete_result: return "method {method}: return type expected={result_key} actual={concrete_result}"
+            # Bind from the DECLARED results: bootstrap HIR erases `-> X?` to
+            # i64 on both sides, which would admit any T unchecked. An
+            # implementation result that cannot be recovered fails closed.
+            val result_param = self.native_trait_optional_param_payload(slot.declared_result)
+            if result_param != "":
+                val bound_result = self.native_trait_bind_optional_param(result_param, concrete.declared_result, bound_names, bound_keys)
+                if bound_result != "": return "method {method}: return type {bound_result}"
+                bound_names.push(result_param)
+                bound_keys.push(self.native_trait_signature_type_key(concrete.declared_result))
+            else:
+                val result_key = self.native_trait_signature_type_key(slot.result)
+                if result_key == "": return "method {method}: unsupported declaration return type"
+                if result_key != concrete_result: return "method {method}: return type expected={result_key} actual={concrete_result}"
             var argument = 1
             while argument < slot.params.len():
                 if self.mir_hir_type_is_resource_direct(slot.params[argument]): return "method {method} parameter {argument}: declaration resource requires a drop slot"
                 if self.mir_hir_type_is_resource_direct(concrete.params[argument]): return "method {method} parameter {argument}: implementation resource requires a drop slot"
                 if slot.parameter_mutability[argument] != concrete.parameter_mutability[argument]: return "method {method} parameter {argument}: mutability mismatch"
-                val key = self.native_trait_signature_type_key(slot.params[argument])
                 val concrete_key = self.native_trait_signature_type_key(concrete.params[argument])
+                val argument_param = self.native_trait_optional_param_payload(slot.params[argument])
+                if argument_param != "":
+                    val bound_argument = self.native_trait_bind_optional_param(argument_param, concrete.params[argument], bound_names, bound_keys)
+                    if bound_argument != "": return "method {method} parameter {argument}: type {bound_argument}"
+                    bound_names.push(argument_param)
+                    bound_keys.push(concrete_key)
+                    argument = argument + 1
+                    continue
+                val key = self.native_trait_signature_type_key(slot.params[argument])
                 if key == "": return "method {method} parameter {argument}: unsupported declaration type"
                 if key != concrete_key: return "method {method} parameter {argument}: type expected={key} actual={concrete_key}"
                 argument = argument + 1
@@ -126,7 +149,7 @@ impl MirLowering:
         -1
 
     fn native_trait_layout_matches(left: NativeTraitLayout, right: NativeTraitLayout) -> bool:
-        if left.owner != right.owner or left.object_safe != right.object_safe or left.methods.len() != right.methods.len(): return false
+        if left.owner != right.owner or left.object_safe != right.object_safe or left.generic != right.generic or left.methods.len() != right.methods.len(): return false
         var index = 0
         while index < left.methods.len():
             val a = left.methods[index]
@@ -257,7 +280,7 @@ impl MirLowering:
             # Diagnose at conversion, not for an unused generic declaration.
             if owner == "": continue
             var slots: [NativeTraitMethodSlot] = []
-            var safe = declaration.type_params.len() == 0 and declaration.assoc_types.len() == 0 and declaration.supertraits.len() == 0
+            var safe = declaration.assoc_types.len() == 0 and declaration.supertraits.len() == 0
             val method_names = native_trait_sorted_method_names(declaration)
             if method_names.len() != declaration.methods.len() + declaration.defaults.len(): safe = false
             for method_name in method_names:
@@ -280,14 +303,124 @@ impl MirLowering:
                         parameter_names: parameter_names,
                         parameter_mutability: parameter_mutability,
                         result: self.relocate_provider_type(method.return_type, module.symbols),
-                        mutable_receiver: method.is_mutable))
-            val layout = NativeTraitLayout(owner: owner, methods: slots, object_safe: safe)
+                        mutable_receiver: method.is_mutable,
+                        declared_result: self.relocate_provider_type(self.native_trait_declared_optional_result(method.symbol, method.return_type, module.symbols), module.symbols)))
+            var type_param_names: [text] = []
+            for type_param in declaration.type_params:
+                type_param_names.push(type_param.name)
+            if declaration.type_params.len() > 0:
+                if not self.native_trait_generic_slots_word_only(type_param_names, slots, declaration.defaults.len()):
+                    safe = false
+            val layout = NativeTraitLayout(owner: owner, methods: slots, object_safe: safe, generic: declaration.type_params.len() > 0, type_params: type_param_names)
             val existing = self.native_trait_layout_index(owner)
             if existing >= 0:
                 if not self.native_trait_layout_matches(self.native_trait_layouts[existing], layout):
                     self.error_fatal("conflicting native trait declaration ABI: {owner}", Some(declaration.span))
             else:
                 self.native_trait_layouts.push(layout)
+
+    fn native_trait_generic_slots_word_only(type_param_names: [text],
+            slots: [NativeTraitMethodSlot], default_count: i64) -> bool:
+        """A trait with its own type parameters (`trait Owner<T>`) has one
+        native object layout for every instantiation, so it is object-safe
+        only when no slot's machine signature depends on T. Every mention of a
+        trait parameter must be the whole payload of an Optional (`T?`): an
+        Option is the i64 enum handle at runtime and lowers to a pointer-class
+        word in every backend, whatever T is. A bare `T` (f64 is a float
+        register, text a two-word string) or `T` nested in any other type
+        (`[T]`, `Box<T>`, `T??`) keeps the trait non-object-safe.
+        Default methods are refused too: their bodies would be shared by all
+        instantiations. Slot 0 (the receiver) is the trait itself."""
+        if default_count > 0: return false
+        for slot in slots:
+            var index = 1
+            while index < slot.params.len():
+                if not self.native_trait_type_word_only(slot.params[index], type_param_names): return false
+                index = index + 1
+            if not self.native_trait_type_word_only(slot.result, type_param_names): return false
+        true
+
+    fn native_trait_type_word_only(type_: HirType, type_param_names: [text]) -> bool:
+        match type_.kind:
+            case HirTypeKind.Optional(inner):
+                if self.native_trait_type_param_name(inner) != "": return true
+            case _: ()
+        for mention in self.native_bound_mentions_into(type_, []):
+            if mention == "*" or self.text_list_has(type_param_names, mention): return false
+        true
+
+    fn native_trait_type_param_name(type_: HirType) -> text:
+        """Name of a bare type-parameter type (either HIR spelling), else ""."""
+        match type_.kind:
+            case HirTypeKind.TypeParam(name, _): name
+            case HirTypeKind.Named(symbol, args):
+                if args.len() != 0: return ""
+                if val present = self.symbols.get_symbol_raw(symbol.id):
+                    if present.kind == SymbolKind.TypeParam: return present.name
+                ""
+            case _: ""
+
+    fn native_trait_declared_optional_result(symbol: SymbolId, erased: HirType, provider: SymbolTable) -> HirType:
+        """The method symbol's declared `X?` result when bootstrap HIR erased
+        the method's return_type to the i64 default; `erased` otherwise. Only
+        an Int erasure is replaced, so no other declared shape changes."""
+        match erased.kind:
+            case HirTypeKind.Int(_, _): ()
+            case _: return erased
+        if val present = provider.get_symbol_raw(symbol.id):
+            if val symbol_type = present.type_:
+                match symbol_type.kind:
+                    case HirTypeKind.Function(_, declared, _):
+                        match declared.kind:
+                            case HirTypeKind.Optional(_): return declared
+                            case _: ()
+                    case _: ()
+        erased
+
+    fn native_trait_bind_optional_param(name: text, concrete: HirType,
+            bound_names: [text], bound_keys: [text]) -> text:
+        """"" when the concrete type is an Option agreeing with any earlier
+        binding of `name`; otherwise the mismatch, for the rejection text.
+        The call site substitutes the receiver's argument into `T?` when the
+        receiver type names it (native_trait_receiver_type_arg), else keeps
+        `T?` and a consumer decodes the payload by its runtime word. Only
+        i64, text and f64 payloads are admitted on either path. Any other
+        argument (`[i64]`, `bool`, a struct) is refused here, before a trait
+        object can exist."""
+        val concrete_key = self.native_trait_signature_type_key(concrete)
+        match concrete.kind:
+            case HirTypeKind.Optional(_): ()
+            case _: return "expected={name}? actual={self.native_trait_type_label(concrete)}"
+        if concrete_key != "optional[int:64:true]" and concrete_key != "optional[text]" and concrete_key != "optional[float:64]":
+            return "argument {name}={self.native_trait_type_label(concrete)} is not supported through a generic trait slot natively (only i64, text, f64)"
+        var index = 0
+        while index < bound_names.len():
+            if bound_names[index] == name and bound_keys[index] != concrete_key:
+                return "expected={bound_keys[index]} (bound {name}) actual={concrete_key}"
+            index = index + 1
+        ""
+
+    fn native_trait_type_label(type_: HirType) -> text:
+        """Diagnostic spelling: the signature key, else a best-effort name."""
+        val key = self.native_trait_signature_type_key(type_)
+        if key != "": return key
+        match type_.kind:
+            case HirTypeKind.Optional(inner): return "optional[" + self.native_trait_type_label(inner) + "]"
+            case HirTypeKind.Named(symbol, _):
+                if val present = self.symbols.get_symbol_raw(symbol.id):
+                    return "named:" + present.name
+                return "<unresolved symbol {symbol.id}>"
+            case HirTypeKind.Infer(_, _): return "<inferred type>"
+            case HirTypeKind.Error: return "<error type>"
+            case HirTypeKind.TypeParam(name, _): return "<type parameter {name}>"
+            case _: ()
+        "<unkeyed type>"
+
+    fn native_trait_optional_param_payload(type_: HirType) -> text:
+        """`T` for a slot type `T?` whose payload is a type parameter, else ""."""
+        match type_.kind:
+            case HirTypeKind.Optional(inner): self.native_trait_type_param_name(inner)
+            case _: ""
 
     me register_native_trait_implementations(module: HirModule):
         # Preserve the no-op path for modules with only inherent impls.
@@ -350,7 +483,8 @@ impl MirLowering:
                                 parameter_names: parameter_names,
                                 parameter_mutability: parameter_mutability,
                                 result: self.relocate_provider_type(declaration.return_type, module.symbols),
-                                mutable_receiver: declaration.is_mutable))
+                                mutable_receiver: declaration.is_mutable,
+                                declared_result: self.relocate_provider_type(self.native_trait_declared_optional_result(declaration.symbol, declaration.return_type, module.symbols), module.symbols)))
                         else:
                             methods.push("")
                     else:
@@ -359,4 +493,4 @@ impl MirLowering:
                     trait_owner: owner, concrete_owner: concrete_owner, methods: methods,
                     concrete_type: self.relocate_provider_type(implementation.type_, module.symbols),
                     concrete_name: concrete.name, reference_semantics: concrete.kind == SymbolKind.Class,
-                    signatures: signatures))
+                    signatures: signatures, trait_type_key: self.native_trait_signature_type_key(relocated_trait)))

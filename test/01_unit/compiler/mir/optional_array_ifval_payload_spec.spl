@@ -18,6 +18,8 @@ use compiler.hir.hir_lowering._Expressions.expression_core.*
 use compiler.hir.hir_lowering._Expressions.expression_support.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.MirLowering
+use compiler.mir.mir_json.{serialize_mir_function}
+use std.io_runtime.{env_set}
 
 fn optional_array_mir_errors(source: text) -> [text]:
     val parsed = parse_full_frontend(source, "optional_array.spl", "optional_array", Logger(level: 0))
@@ -134,3 +136,80 @@ describe "optional array existence-check payload metadata":
         val inner = HirType(kind: HirTypeKind.Optional(array), span: Span.empty())
         expect(optional_array_binding_shape(inner, false, true)).to_equal("wrong-binding-type")
         expect(optional_array_binding_shape(inner, true, false)).to_equal("absent:optional")
+
+# The rows above pin `[T]?` (an optional ARRAY) with ordinary HIR. They never
+# lowered an element of `[T?]`, and never in bootstrap mode (how native-build
+# runs), so this stayed 8/8 while natively `if val x = xs[k]` on a local
+# `val xs: [i64?] = [...]` bound the Option HANDLE: `rt_array_get` marks the
+# element a runtime value and ExistsCheck decoded that handle with
+# `rt_value_as_int_wide` instead of reading its raw payload (`index 1: some
+# 195219007798705` for Some(0)). f64/bool elements read garbage the same way.
+# doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+fn optional_element_bootstrap_mir(source: text, target: text) -> text:
+    val parsed = parse_full_frontend(source, "optional_element.spl", "optional_element", Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("optional_element.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    val hir = hir_owner.lower_module(parsed)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    var mir_owner = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = mir_owner.lower_module(hir)
+    for function in mir.functions.values():
+        if function.name == target or function.name.ends_with("." + target):
+            return serialize_mir_function(function)
+    ""
+
+fn optional_element_call_dest(mir: text, callee: text) -> text:
+    val at = mir.index_of("\"value\":\"" + callee + "\"")
+    if at < 0:
+        return ""
+    val head = mir.substring(0, at)
+    val dest_at = head.rfind("\"dest\":")
+    if dest_at < 0:
+        return ""
+    optional_element_digits(head, dest_at + 7)
+
+fn optional_element_first_arg(mir: text, callee: text) -> text:
+    val at = mir.index_of("\"value\":\"" + callee + "\"")
+    if at < 0:
+        return ""
+    val tail = mir.substring(at, mir.len())
+    val args_at = tail.index_of("\"args\":[")
+    if args_at < 0:
+        return ""
+    val after = tail.substring(args_at, tail.len())
+    val copy_at = after.index_of("\"Copy\":")
+    if copy_at < 0:
+        return ""
+    optional_element_digits(after, copy_at + 7)
+
+fn optional_element_digits(s: text, start: i64) -> text:
+    var i = start
+    var out = ""
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if not "0123456789".contains(ch):
+            return out
+        out = out + ch
+        i = i + 1
+    out
+
+fn optional_element_payload_problem(element: text, some_values: text) -> text:
+    """Empty when the if-val payload of `xs[k]` on a local `[T?]` is read from
+    the Option box (`rt_enum_check_variant` on the element word)."""
+    val src = "fn f(k: i64) -> i64:\n    val xs: [" + element + "?] = [None, " + some_values + "]\n    if val x = xs[k]:\n        return 1\n    0\n"
+    val mir = optional_element_bootstrap_mir(src, "f")
+    if mir == "":
+        return "{element}: no MIR"
+    val element_word = optional_element_call_dest(mir, "rt_array_get")
+    if element_word == "":
+        return "{element}: no rt_array_get"
+    val checked = optional_element_first_arg(mir, "rt_enum_check_variant")
+    if checked != element_word:
+        return "{element}: element %{element_word} payload not read from its Option box (rt_enum_check_variant arg: '{checked}')"
+    ""
+
+describe "if val on an element of a local [T?] binds the Option payload (bootstrap HIR)":
+    it "reads the i64, f64 and bool payload from the element's Option box":
+        expect(optional_element_payload_problem("i64", "Some(0), Some(3)")).to_equal("")
+        expect(optional_element_payload_problem("f64", "Some(0.0), Some(-2.5)")).to_equal("")
+        expect(optional_element_payload_problem("bool", "Some(false), Some(true)")).to_equal("")

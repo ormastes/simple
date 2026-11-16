@@ -269,6 +269,47 @@ pub(crate) fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(
     crate::interpreter::interpreter_module::check_private_call_visibility(name, &owner, &cur)
 }
 
+/// A module namespace handed out whole (`values`, `entries`, iteration, a
+/// copy made to mutate or merge it) names every private fn it stores under
+/// that fn's own name, exactly as `m["f"]` names one. A dict program code
+/// built is not a namespace and is not judged.
+pub(crate) fn gate_module_namespace_handout(map: &DictMap) -> Result<(), CompileError> {
+    if !crate::interpreter::is_module_namespace_dict(map) {
+        return Ok(());
+    }
+    gate_namespace_private_entries(map)
+}
+
+/// `module_dict_make_mut` for a program's `d[k] = v`: the write copies a
+/// module namespace into a plain dict, so the namespace is judged first.
+pub(crate) fn namespace_make_mut_for_write(dict: &mut Arc<DictMap>) -> Result<&mut DictMap, CompileError> {
+    gate_module_namespace_handout(dict)?;
+    Ok(crate::interpreter::module_dict_make_mut(dict))
+}
+
+/// The judging half of `gate_module_namespace_handout`, for a caller that
+/// already knows the entries come from a namespace (its flat surface).
+/// Judged in name order, so the refusal names the same fn on every lane
+/// (namespace insertion order differs between the JIT and interpreter loaders).
+pub(crate) fn gate_namespace_private_entries(entries: &DictMap) -> Result<(), CompileError> {
+    let mut private_fns: Vec<&Arc<FunctionDef>> = entries
+        .iter()
+        .filter_map(|(key, stored)| match stored {
+            Value::Function { def, .. }
+                if matches!(def.visibility, simple_parser::ast::Visibility::Private) && def.name == *key =>
+            {
+                Some(def)
+            }
+            _ => None,
+        })
+        .collect();
+    private_fns.sort_by(|a, b| a.name.cmp(&b.name));
+    for def in private_fns {
+        gate_private_call(&def.name, def)?;
+    }
+    Ok(())
+}
+
 /// Identity-keyed lookup into `FUNCTION_MODULE_OWNER` (see its doc comment):
 /// `None` when this candidate's owning module was never recorded (e.g. a
 /// struct's mangled static-method overload registration doesn't tag one).

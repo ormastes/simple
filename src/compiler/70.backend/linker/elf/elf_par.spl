@@ -1,0 +1,87 @@
+# Lockless fan-out for the internal ELF linker (mold-style per-object work).
+#
+# Contract (doc/08_tracking/bug/internal_elf_linker_elf32_i386_armv7_2026-11-16.md):
+#   - the owner publishes an IMMUTABLE input snapshot in a module global of the
+#     worker's own module, then spawns workers; the snapshot is never written
+#     while workers run (spawn is the happens-before edge, join the other);
+#   - each worker gets a disjoint index range [lo, hi) and returns its result
+#     as a flat `[i64]` message through `join` — no shared mutable state;
+#   - the owner merges the messages in range order, so the output is identical
+#     to the serial path regardless of scheduling.
+# The only synchronisation is one CAS gate that admits a single owner of the
+# snapshot globals; a link that loses the CAS simply runs serially.
+#
+# Workaround: doc/08_tracking/bug/isolated_thread_args_drop_arrays_structs_2026-11-16.md
+# The isolated-thread primitive cannot carry arrays/structs as worker
+# arguments (worker returns None) nor return structs (invalid heap ref), so
+# inputs travel through the immutable global snapshot and results as [i64].
+# `ThreadHandle.join()` is typed `i64?`, so a native build cannot read an
+# array result through it; the join below is declared with the real result
+# type instead (same bug doc).
+
+use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use std.io_runtime.{env_get}
+
+extern fn rt_thread_join(handle: i64) -> [i64]?
+extern fn rt_thread_free(handle: i64)
+
+fn elf_par_join(handle: i64) -> [i64]?:
+    val result = unsafe(capabilities: [ffi]):
+        rt_thread_join(handle)
+    unsafe(capabilities: [ffi]):
+        rt_thread_free(handle)
+    result
+
+var _elf_par_gate: AtomicI64 = atomic_i64_new(0)
+var _elf_par_completed: AtomicI64 = atomic_i64_new(0)
+
+fn elf_par_completed() -> i64:
+    """Count of fan-outs whose every worker delivered a message (observability
+    for specs: proves the parallel path ran rather than the serial fallback)."""
+    _elf_par_completed.load(MemoryOrdering.SeqCst)
+
+fn elf_par_acquire() -> bool:
+    """Become the single owner of the snapshot globals; false = run serially."""
+    _elf_par_gate.compare_exchange(0, 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst)
+
+fn elf_par_release():
+    _elf_par_gate.store(0, MemoryOrdering.SeqCst)
+
+fn elf_par_jobs(requested: i64, items: i64) -> i64:
+    """Worker count: explicit request, else SIMPLE_LINK_JOBS, else 1
+    (auto stays serial, see below)."""
+    var jobs = requested
+    if jobs <= 0:
+        val env = env_get("SIMPLE_LINK_JOBS")
+        if env != "": jobs = env.to_int() ?? 0
+    # Auto mode stays serial: measured 2026-11-16 the fan-out is a net loss
+    # (200 objs: jobs=16 42.0 s vs jobs=1 30.3 s). Opt in with jobs / env.
+    if jobs <= 0: return 1
+    if jobs > items: jobs = items
+    if jobs < 1: jobs = 1
+    jobs
+
+fn elf_par_run(items: i64, jobs: i64, worker: fn(i64, i64) -> [i64]) -> Result<[[i64]], text>:
+    """Run worker over `jobs` contiguous ranges of [0, items); messages in range order.
+    Err when a worker produced no message (the caller then runs serially)."""
+    var handles = []
+    var k: i64 = 0
+    while k < jobs:
+        val lo = items * k / jobs
+        val hi = items * (k + 1) / jobs
+        handles.push(thread_spawn_with_args(lo, hi, worker))
+        k = k + 1
+    var out: [[i64]] = []
+    var failed = false
+    for h in handles:
+        val r = elf_par_join(h.handle)
+        if r.?:
+            out.push(r.unwrap())
+        else:
+            failed = true
+    if failed: return Err("elf_par: a worker returned no message")
+    _elf_par_completed.fetch_add(1, MemoryOrdering.SeqCst)
+    Ok(out)
+
+export elf_par_acquire, elf_par_release, elf_par_jobs, elf_par_run, elf_par_completed

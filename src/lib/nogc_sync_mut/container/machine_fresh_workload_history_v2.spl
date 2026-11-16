@@ -1,0 +1,59 @@
+# Same-writer exact replay of held V2 transactions. Does not open a writer,
+# synthesize an epoch, recover a process or construct an admission owner.
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.database.wal.{WalEntry}
+use std.nogc_sync_mut.database.wal_segmented.DatabaseWalRevisionV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_history_v1.machine_fresh_epoch_read_initial_v1
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.machine_fresh_workload_rows_equal_v2
+
+pub struct MachineFreshWorkloadSegmentV2:
+    revision: DatabaseWalRevisionV1
+    entries: [WalEntry]
+
+pub struct MachineFreshWorkloadHistoryV2:
+    epoch: MachineFreshEpochRecordV1
+    initial_commit: text
+    segments: [MachineFreshWorkloadSegmentV2]
+    # milestone_0021 3.2a: a successor lifecycle on the same transfer is ANCHORED after its closed, settled
+    # predecessor's last verified segment. "" keeps the unlinked replay from initial_commit byte-for-byte.
+    link_parent: text = ""
+    link_sequence: i64 = 0
+
+pub fn machine_fresh_workload_head_v2(history: MachineFreshWorkloadHistoryV2) -> text:
+    if history.segments.len() == 0:
+        if history.link_parent != "": return history.link_parent
+        return history.initial_commit
+    history.segments[history.segments.len() - 1].revision.digest
+
+pub fn machine_fresh_workload_history_verify_v2(storage: MachineStorageOwnerV1,
+        history: MachineFreshWorkloadHistoryV2) -> Result<(), text>:
+    if history.segments.len() > 64: return Err("machine-fresh-workload-history-bound")
+    val head = machine_fresh_workload_head_v2(history)
+    if storage.wal_head_v1()? != head: return Err("machine-fresh-workload-unknown-history")
+    val original = machine_fresh_epoch_read_initial_v1(storage, history.initial_commit)?
+    if machine_fresh_epoch_record_bytes_v1(original)? != machine_fresh_epoch_record_bytes_v1(history.epoch)?:
+        return Err("machine-fresh-workload-initial-binding")
+    var parent = history.initial_commit
+    var sequence = 5
+    if history.link_parent != "":
+        # Linked branch: the anchor must be a real store revision whose next sequence is exactly link_sequence.
+        val anchor = storage.wal_revision_v1(history.link_parent)?
+        if anchor.last_sequence + 1 != history.link_sequence: return Err("machine-fresh-workload-link-binding")
+        parent = history.link_parent
+        sequence = history.link_sequence
+    for segment in history.segments:
+        val revision = storage.wal_revision_v1(segment.revision.digest)?
+        if (revision != segment.revision or revision.parent != parent or segment.entries.len() < 1 or
+                segment.entries.len() > 8 or revision.first_sequence != sequence or
+                revision.last_sequence != sequence + segment.entries.len() - 1):
+            return Err("machine-fresh-workload-revision-binding")
+        val actual = storage.wal_segment_v1(revision)?
+        if not machine_fresh_workload_rows_equal_v2(actual, segment.entries):
+            return Err("machine-fresh-workload-exact-replay")
+        for index in 0..actual.len():
+            if actual[index].sequence != sequence + index: return Err("machine-fresh-workload-sequence-gap")
+        sequence = revision.last_sequence + 1
+        parent = revision.digest
+    if storage.wal_head_v1()? != head: return Err("machine-fresh-workload-head-changed")
+    Ok(())

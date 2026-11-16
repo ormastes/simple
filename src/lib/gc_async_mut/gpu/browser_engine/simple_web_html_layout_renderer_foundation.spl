@@ -704,6 +704,149 @@ fn _web_budget_expired_in(name: text) -> bool:
 # Flat node arena
 # ---------------------------------------------------------------------------
 
+# Tier 1 HNode attribute presence bits (lower 16 bits of HNode.attr_mask).
+pub val HNODE_ATTR_ID_BIT: u32 = 1u32
+pub val HNODE_ATTR_CLASS_BIT: u32 = 2u32
+pub val HNODE_ATTR_STYLE_BIT: u32 = 4u32
+pub val HNODE_ATTR_HIDDEN_BIT: u32 = 8u32
+pub val HNODE_ATTR_DISABLED_BIT: u32 = 16u32
+pub val HNODE_ATTR_CHECKED_BIT: u32 = 32u32
+pub val HNODE_ATTR_SELECTED_BIT: u32 = 64u32
+pub val HNODE_ATTR_OPEN_BIT: u32 = 128u32
+pub val HNODE_ATTR_ROLE_BIT: u32 = 256u32
+pub val HNODE_ATTR_TYPE_BIT: u32 = 512u32
+pub val HNODE_ATTR_NAME_BIT: u32 = 1024u32
+pub val HNODE_ATTR_HREF_BIT: u32 = 2048u32
+pub val HNODE_ATTR_SRC_BIT: u32 = 4096u32
+pub val HNODE_ATTR_LANG_BIT: u32 = 8192u32
+pub val HNODE_ATTR_ARIA_BIT: u32 = 16384u32
+pub val HNODE_ATTR_DATA_BIT: u32 = 32768u32
+
+# reason: 32-bit Bloom filter mask for HNode attribute presence prefilter
+# @allow(primitive_api)
+pub fn hnode_attr_bloom_bit(attr_lower: text) -> u32:
+    var h: u32 = 5381u32
+    var i = 0
+    val n = attr_lower.byte_len()
+    while i < n:
+        var ch = attr_lower.byte_at(i)
+        if ch >= 65 and ch <= 90:
+            ch = ch + 32
+        h = ((h << 5) + h + ch.to_u32()) & 65535u32
+        i = i + 1
+    val slot = (h ^ (h >> 4)) & 15u32
+    1u32 << (16u32 + slot)
+
+# reason: HNode lower-16 presence bitmask aligned with HNODE_ATTR_* constants
+# @allow(primitive_api)
+pub fn hnode_hot_bit_for_name(attr_lower: text) -> u32:
+    if attr_lower == "id": return HNODE_ATTR_ID_BIT
+    if attr_lower == "class": return HNODE_ATTR_CLASS_BIT
+    if attr_lower == "style": return HNODE_ATTR_STYLE_BIT
+    if attr_lower == "hidden": return HNODE_ATTR_HIDDEN_BIT
+    if attr_lower == "disabled": return HNODE_ATTR_DISABLED_BIT
+    if attr_lower == "checked": return HNODE_ATTR_CHECKED_BIT
+    if attr_lower == "selected": return HNODE_ATTR_SELECTED_BIT
+    if attr_lower == "open": return HNODE_ATTR_OPEN_BIT
+    if attr_lower == "role": return HNODE_ATTR_ROLE_BIT
+    if attr_lower == "type": return HNODE_ATTR_TYPE_BIT
+    if attr_lower == "name": return HNODE_ATTR_NAME_BIT
+    if attr_lower == "href": return HNODE_ATTR_HREF_BIT
+    if attr_lower == "src": return HNODE_ATTR_SRC_BIT
+    if attr_lower == "lang": return HNODE_ATTR_LANG_BIT
+    if attr_lower.starts_with("aria-"): return HNODE_ATTR_ARIA_BIT
+    if attr_lower.starts_with("data-"): return HNODE_ATTR_DATA_BIT
+    0u32
+
+class _HNodeAttrScan:
+    attr_mask: u32
+    role_attr: text
+    type_attr: text
+
+fn _hnode_is_ws_byte(b: i64) -> bool:
+    b == 32 or b == 9 or b == 10 or b == 13
+
+fn _hnode_scan_attrs(inner: text, start_at: i32) -> _HNodeAttrScan:
+    val n = inner.byte_len() as i32
+    var mask: u32 = 0u32
+    var role_val = ""
+    var has_role = false
+    var type_val = ""
+    var has_type = false
+    var i: i32 = start_at
+    while i < n:  # cpu-lane-loop-ok: single linear scan of ONE element's raw attribute span in mk_element_node
+        val b = inner.byte_at(i)
+        if _hnode_is_ws_byte(b) or b == 47 or b == 62:
+            i = i + 1
+            continue
+        val name_start = i
+        var h: u32 = 5381u32
+        while i < n:
+            val nb = inner.byte_at(i)
+            if _hnode_is_ws_byte(nb) or nb == 61 or nb == 47 or nb == 62:
+                break
+            var lb = nb
+            if lb >= 65 and lb <= 90:
+                lb = lb + 32
+            h = ((h << 5) + h + lb.to_u32()) & 65535u32
+            i = i + 1
+        val name_len = i - name_start
+        if name_len > 0:
+            val slot = (h ^ (h >> 4)) & 15u32
+            mask = mask | (1u32 << (16u32 + slot))
+            val name_lower = inner.substring(name_start, i).lower()
+            mask = mask | hnode_hot_bit_for_name(name_lower)
+            while i < n and _hnode_is_ws_byte(inner.byte_at(i)):
+                i = i + 1
+            if i < n and inner.byte_at(i) == 61:
+                i = i + 1
+                while i < n and _hnode_is_ws_byte(inner.byte_at(i)):
+                    i = i + 1
+                var val_start = i
+                var val_end = i
+                if i < n and (inner.byte_at(i) == 34 or inner.byte_at(i) == 39):
+                    val q = inner.byte_at(i)
+                    i = i + 1
+                    val_start = i
+                    while i < n and inner.byte_at(i) != q:
+                        i = i + 1
+                    val_end = i
+                    if i < n and inner.byte_at(i) == q:
+                        i = i + 1
+                else:
+                    val_start = i
+                    while i < n and not _hnode_is_ws_byte(inner.byte_at(i)) and inner.byte_at(i) != 62:
+                        i = i + 1
+                    val_end = i
+                if not has_role and name_lower == "role":
+                    role_val = inner.substring(val_start, val_end)
+                    has_role = true
+                elif not has_type and name_lower == "type":
+                    type_val = inner.substring(val_start, val_end)
+                    has_type = true
+        else:
+            i = i + 1
+    _HNodeAttrScan(attr_mask: mask, role_attr: role_val, type_attr: type_val)
+
+# reason: builds u32 attr presence/Bloom bitmask for HNode
+# @allow(primitive_api)
+pub fn hnode_compute_attr_mask(
+    attrs_raw: text, id_attr: text, class_attr: text, style_attr: text,
+    role_attr: text, type_attr: text
+) -> u32:
+    var mask = _hnode_scan_attrs(attrs_raw, 0).attr_mask
+    if id_attr != "":
+        mask = mask | HNODE_ATTR_ID_BIT | hnode_attr_bloom_bit("id")
+    if class_attr != "":
+        mask = mask | HNODE_ATTR_CLASS_BIT | hnode_attr_bloom_bit("class")
+    if style_attr != "":
+        mask = mask | HNODE_ATTR_STYLE_BIT | hnode_attr_bloom_bit("style")
+    if role_attr != "":
+        mask = mask | HNODE_ATTR_ROLE_BIT | hnode_attr_bloom_bit("role")
+    if type_attr != "":
+        mask = mask | HNODE_ATTR_TYPE_BIT | hnode_attr_bloom_bit("type")
+    mask
+
 class HNode:
     tag: text          # lowercased tag, "#text", or "#root"
     text_data: text    # text for #text nodes
@@ -718,9 +861,16 @@ class HNode:
     has_widget_image_class: bool
     has_focused_class: bool
     id_attr: text
+    role_attr: text = ""
+    type_attr: text = ""
+    attr_mask: u32 = 0u32
     attrs_raw: text    # raw tag inner text for attribute selectors
     parent: i64        # index of parent in the arena (-1 for root)
     is_details_summary: bool # first direct summary owned by details
+    # Raw source of whitespace-only text after an element ("" otherwise).
+    # Where the computed white-space keeps newlines each "\n" in it is a
+    # forced break (`html_kept_newlines`); `text_data` keeps its spaces.
+    ws_raw: text = ""
 
 class HtmlChildIndex:
     first_child: [i32]
@@ -752,7 +902,7 @@ class ClassFlags:
     has_focused_class: bool
 
 fn mk_node(tag: text, parent: i64) -> HNode:
-    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent, is_details_summary: false)
+    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", role_attr: "", type_attr: "", attr_mask: 0u32, attrs_raw: "", parent: parent, is_details_summary: false)
 
 fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
     val node_count = nodes.len()
@@ -1171,11 +1321,31 @@ fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
     val class_attr: text = attr_value_by_key(inner, "class=")
     val class_words: [text] = if class_attr.len() > 0: split_class_words_trimmed(class_attr) else: []
     val flags: ClassFlags = class_flags_from_attr(class_attr)
+    val id_attr: text = attr_value_by_key(inner, "id=")
+    val style_attr: text = attr_value_by_key(inner, "style=")
+    val tag_len = tag.byte_len() as i32
+    val inner_len = inner.byte_len() as i32
+    var scan_start: i32 = 0
+    if tag_len > 0 and inner_len >= tag_len:
+        if inner == tag:
+            scan_start = tag_len
+        elif inner_len > tag_len and inner.substring(0, tag_len).lower() == tag.lower():
+            val next_b = inner.byte_at(tag_len)
+            if _hnode_is_ws_byte(next_b) or next_b == 47 or next_b == 62:
+                scan_start = tag_len
+    val scanned = _hnode_scan_attrs(inner, scan_start)
+    var attr_mask = scanned.attr_mask
+    if id_attr != "":
+        attr_mask = attr_mask | HNODE_ATTR_ID_BIT | hnode_attr_bloom_bit("id")
+    if class_attr != "":
+        attr_mask = attr_mask | HNODE_ATTR_CLASS_BIT | hnode_attr_bloom_bit("class")
+    if style_attr != "":
+        attr_mask = attr_mask | HNODE_ATTR_STYLE_BIT | hnode_attr_bloom_bit("style")
     HNode(
         tag: tag,
         text_data: "",
         text_trimmed: "",
-        style_attr: attr_value_by_key(inner, "style="),
+        style_attr: style_attr,
         class_attr: class_attr,
         class_words: class_words,
         has_widget_class: flags.has_widget_class,
@@ -1184,7 +1354,10 @@ fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
         has_widget_button_class: flags.has_widget_button_class,
         has_widget_image_class: flags.has_widget_image_class,
         has_focused_class: flags.has_focused_class,
-        id_attr: attr_value_by_key(inner, "id="),
+        id_attr: id_attr,
+        role_attr: scanned.role_attr,
+        type_attr: scanned.type_attr,
+        attr_mask: attr_mask,
         attrs_raw: inner,
         parent: parent,
         is_details_summary: false
@@ -1313,6 +1486,38 @@ fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]
         html, requested_node_limit, SIMPLE_WEB_MAX_HTML_BYTES
     )
 
+# True when `parent` is or sits inside an element the UA stylesheet makes
+# preformatted (`pre`, `textarea`, `listing`, `plaintext`).
+fn _html_in_preformatted(nodes: [HNode], parent: i32) -> bool:
+    var p = parent
+    while p >= 0:
+        val tag = nodes[p].tag
+        if tag == "pre" or tag == "textarea" or tag == "listing" or tag == "plaintext":
+            return true
+        p = nodes[p].parent
+    false
+
+# The spaces of whitespace-only text after an element: one per space or tab
+# in the source, at least one (a newline alone is one space).
+fn _html_ws_spaces(raw: text) -> text:
+    var out = ""
+    for ch in raw.chars():
+        if ch == " " or ch == "\t":
+            out = out + " "
+    if out == "": " " else: out
+
+# Forced breaks a whitespace-only text node makes: its newline count where
+# the computed white-space keeps newlines (`Style.white_space_newline`),
+# else 0.
+fn html_kept_newlines(node: HNode, keeps_newlines: bool) -> i32:
+    if not keeps_newlines or node.ws_raw == "" or node.text_trimmed != "":
+        return 0
+    var n = 0
+    for ch in node.ws_raw.chars():
+        if ch == "\n":
+            n = n + 1
+    n
+
 fn _parse_html_with_limits(
     html: text, requested_node_limit: i32, requested_byte_limit: i64
 ) -> [HNode]:
@@ -1336,6 +1541,9 @@ fn _parse_html_with_limits(
     var flat_to_hnode: [i32] = [-1; projected.nodes.len()]
     var skip_subtree: [bool] = [false; projected.nodes.len()]
     var details_has_summary: [bool] = [false; node_limit]
+    # Tag of the latest child of each flat parent, so whitespace after an
+    # element is kept for the cascade to judge.
+    var prev_child_tag: [text] = [""; projected.nodes.len()]
     var nodes: [HNode] = []
     var i = 0
     while i < projected.nodes.len() and nodes.len() < node_limit:
@@ -1356,21 +1564,39 @@ fn _parse_html_with_limits(
             -1
         else:
             flat_to_hnode[flat.parent]
+        val prev_child_tag_before = if flat.parent >= 0: prev_child_tag[flat.parent] else: ""
+        if flat.parent >= 0:
+            prev_child_tag[flat.parent] = flat.tag
         if flat.tag == "#text":
             val trimmed = flat.text_data.trim()
-            if trimmed.len() > 0 or flat.text_data == " ":
+            # Whitespace after an element is kept as one collapsible space:
+            # between inline-level boxes it is one (`<canvas></canvas>\n<svg>`
+            # puts 4.45px between them in Chrome). Whether it renders at all
+            # depends on computed display, so compute_styles hides it beside
+            # block-level boxes and inside flex/grid/table containers. A
+            # newline in it is remembered (`ws_raw`): where the computed
+            # white-space keeps newlines the layout breaks the line there.
+            # Only a lone " " survived here before.
+            val after_element = trimmed.len() == 0 and prev_child_tag_before != "" and prev_child_tag_before != "#text"
+            # Inside a preformatted element the spaces keep their count
+            # (`<pre><b>a</b>  <b>b</b>` is a two-space gap); elsewhere the
+            # layout would not collapse them, so one space is stored.
+            val text_data = if not after_element: flat.text_data elif _html_in_preformatted(nodes, parent): _html_ws_spaces(flat.text_data) else: " "
+            if trimmed.len() > 0 or after_element or text_data == " ":
                 if (nodes.len() > 0 and nodes[nodes.len() - 1].tag == "#text" and
                     nodes[nodes.len() - 1].parent == parent):
                     val previous_index = nodes.len() - 1
                     var previous = nodes[previous_index]
-                    previous.text_data = previous.text_data + flat.text_data
+                    previous.text_data = previous.text_data + text_data
                     previous.text_trimmed = previous.text_data.trim()
                     nodes[previous_index] = previous
                     flat_to_hnode[i] = previous_index
                 else:
                     var text_node = mk_node("#text", parent)
-                    text_node.text_data = flat.text_data
+                    text_node.text_data = text_data
                     text_node.text_trimmed = trimmed
+                    if after_element:
+                        text_node.ws_raw = flat.text_data
                     flat_to_hnode[i] = nodes.len() as i32
                     nodes.push(text_node)
         else:
@@ -1518,7 +1744,6 @@ fn parse_color(raw: text) -> u32:
         return 0u32
     if s == "white": return web_argb(255, 255, 255)
     if s == "black": return web_argb(0, 0, 0)
-    if s == "red": return web_argb(220, 50, 50)
     # CSS Color 5 `light-dark(<light>, <dark>)`: this renderer paints the
     # light color scheme, so the first top-level argument wins. Without this
     # example.com's `background: light-dark(#eee,#222)` decoded as garbage.
@@ -1543,6 +1768,10 @@ fn parse_color(raw: text) -> u32:
             val g = hex_val(s.substring(3, 4)) * 16 + hex_val(s.substring(4, 5))
             val b = hex_val(s.substring(5, 6)) * 16 + hex_val(s.substring(6, 7))
             val a = hex_val(s.substring(7, 8)) * 16 + hex_val(s.substring(8, 9))
+            if a == 0:
+                # Fully transparent (`#0000`, `#ff000000`): 0, the value every
+                # painter skips. Packed as-is its alpha byte of 0 read as opaque.
+                return 0u32
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len >= 6:
             val r = hex_val(s.substring(1, 2)) * 16 + hex_val(s.substring(2, 3))
@@ -1554,6 +1783,8 @@ fn parse_color(raw: text) -> u32:
             val g = hex_val(s.substring(2, 3)) * 17
             val b = hex_val(s.substring(3, 4)) * 17
             val a = hex_val(s.substring(4, 5)) * 17
+            if a == 0:
+                return 0u32
             return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len == 3:
             val r = hex_val(s.substring(1, 2)) * 17
@@ -1561,14 +1792,9 @@ fn parse_color(raw: text) -> u32:
             val b = hex_val(s.substring(3, 4)) * 17
             return web_argb(r, g, b)
         return 0u32
-    if s.byte_len() >= 3 and text_matches_at(s, "rgb", 0):
-        val lp = text_index_of(s, "(")
-        val rp = text_index_of(s, ")")
-        if lp >= 0 and rp > lp:
-            val c1 = find_from(s, ",", lp + 1)
-            val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
-            if c1 >= 0 and c2 >= 0 and c2 < rp:
-                return web_argb(parse_int_range(s, lp + 1, c1), parse_int_range(s, c1 + 1, c2), parse_int_range(s, c2 + 1, rp))
+    # rgb()/rgba()/hsl()/hsla() in every syntax keep their alpha through the
+    # delegate (legacy comma rgba() was forced opaque here until 2026-11-15);
+    # invalid input is 0 -- not a colour -- never black.
     _parse_color_delegated(s)
 
 fn _parse_color_delegated(lowered: text) -> u32:
@@ -1599,8 +1825,17 @@ fn parse_color_any(raw: text) -> u32:
     val direct = parse_color(raw)
     if direct != 0u32:
         return direct
+    # The colour token of a shorthand (`4px solid blue`): a named colour was
+    # never found here, so `border:1px solid black` painted no border.
+    val tok = _shorthand_color_token(raw)
+    if tok != 0u32:
+        return tok
     val lower = raw.lower()
-    val rgb = text_index_of(lower, "rgb")
+    # The first colour function inside a shorthand (`4px solid hsl(...)`):
+    # rgb()/rgba() and hsl()/hsla() alike.
+    val rgb_at = text_index_of(lower, "rgb")
+    val hsl_at = text_index_of(lower, "hsl")
+    val rgb = if rgb_at < 0 or (hsl_at >= 0 and hsl_at < rgb_at): hsl_at else: rgb_at
     if rgb >= 0:
         val rp = find_from(raw, ")", rgb)
         if rp >= 0:
@@ -1611,6 +1846,56 @@ fn parse_color_any(raw: text) -> u32:
     if hash >= 0:
         return parse_color(raw.substring(hash, raw.byte_len()))
     0u32
+
+# First top-level token of a shorthand that parses as a colour; a length
+# (`4px`, `0`) is skipped, since the delegate would read its digits as one.
+fn _shorthand_color_token(raw: text) -> u32:
+    for tok in _decl_top_level_tokens(raw):
+        if not "0123456789.-+".contains(tok.substring(0, 1)):
+            val c = parse_color(tok)
+            if c != 0u32:
+                return c
+    0u32
+
+pub fn _color_alpha_zero(raw: text) -> bool:
+    if val rgba = parse_color_value_checked(raw.trim().lower()):
+        return (rgba & 0xFFu32) == 0u32
+    false
+
+pub fn _decl_transparent_color(raw: text) -> bool:
+    """True when a colour value, or the colour token of a border/outline
+    shorthand, is fully transparent (`transparent`, `rgba(0,0,0,0)`,
+    `#0000`). The colour parsers answer 0 for it -- the same 0 as "no colour
+    in this value" -- so an applier asks this to tell "set to transparent"
+    from "unset" and override the earlier colour, as Chrome does."""
+    for tok in _decl_top_level_tokens(raw):
+        # A length (`20px`, `0`) is never a colour; the delegate would read
+        # its digits as one.
+        if not "0123456789.-+".contains(tok.substring(0, 1)) and _color_alpha_zero(tok):
+            return true
+    false
+
+# Whitespace-separated tokens of a value, a function (`rgb(0 0 0 / 0)`)
+# kept whole.
+pub fn _decl_top_level_tokens(raw: text) -> [text]:
+    var out: [text] = []
+    val s = raw.trim()
+    val n = s.byte_len()
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i <= n:
+        val ch = if i < n: s.substring(i, i + 1) else: " "
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif depth == 0 and (ch == " " or ch == "\t" or ch == "\n"):
+            if i > start:
+                out.push(s.substring(start, i))
+            start = i + 1
+        i = i + 1
+    out
 
 # "0.09", ".5", "1" -> 0..255 alpha
 fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
@@ -1644,6 +1929,10 @@ fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
 # (rgba() keeps its alpha; every other form is opaque like parse_color_any).
 fn parse_color_alpha(raw: text) -> u32:
     val s = raw.trim().lower()
+    if text_matches_at(s, "rgb", 0) or text_matches_at(s, "hsl", 0):
+        # dom_color's CSS Color 4 parser: comma or space syntax, `/ alpha`,
+        # percentages, hue units; 0 when invalid or fully transparent.
+        return _parse_color_delegated(s)
     val rgba_at = text_index_of(s, "rgba")
     if rgba_at >= 0:
         val lp = find_from(s, "(", rgba_at)
@@ -1748,7 +2037,8 @@ fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
             # IS the sheen (e.g. rgba(255,255,255,0.08)); parse_color_any made
             # every stop opaque (0xFFFFFFFF), erasing the translucency the CPU
             # material admission keys on.
-            return parse_color_alpha(part)
+            # A positioned stop (`#0f0 60%`) is still that colour.
+            return parse_color_alpha(gradient_stop_color_text(part))
         item_index = item_index + 1
     0u32
 
@@ -1915,6 +2205,48 @@ fn parse_signed_leading_int(s: text) -> i32:
     else:
         v
 
+# A `<angle>` token (`deg`, `grad`, `rad`, `turn`, decimals allowed) in
+# whole degrees, rounded and reduced to 0..359.
+fn gradient_angle_token_deg(s: text) -> i32:
+    val n = s.byte_len()
+    var i = 0
+    var neg = false
+    if n > 0 and s.substring(0, 1) == "-":
+        neg = true
+        i = 1
+    elif n > 0 and s.substring(0, 1) == "+":
+        i = 1
+    var v = 0.0
+    var scale = 0.0
+    while i < n:
+        val c = s.substring(i, i + 1)
+        val d = dec_val(c)
+        if d < 10:
+            if scale > 0.0:
+                v = v + (d as f64) * scale
+                scale = scale / 10.0
+            else:
+                v = v * 10.0 + (d as f64)
+            i = i + 1
+        elif c == "." and scale == 0.0:
+            scale = 0.1
+            i = i + 1
+        else:
+            break
+    val unit = s.substring(i, n)
+    var deg = v
+    if unit == "grad":
+        deg = v * 0.9
+    elif unit == "rad":
+        deg = v * 180.0 / 3.141592653589793
+    elif unit == "turn":
+        deg = v * 360.0
+    val r = (deg + 0.5) as i32
+    # Reduced to 0..359: values >= 1000 are the `to <corner>` codes, so
+    # `3turn` or `1080deg` must never reach the painter unreduced.
+    val m = (if neg: 0 - r else: r) % 360
+    if m < 0: m + 360 else: m
+
 # Linear-gradient angle in CSS degrees (0 = to top, 90 = to right, 180 (the
 # CSS default) = to bottom, 270 = to left). Radial gradients have no angle.
 fn parse_gradient_angle_deg(raw: text) -> i32:
@@ -1926,7 +2258,17 @@ fn parse_gradient_angle_deg(raw: text) -> i32:
         return 180
     val first = parts[0].trim()
     if is_gradient_angle_token(first):
-        return parse_signed_leading_int(first)
+        return gradient_angle_token_deg(first)
+    # `to <corner>`: the angle depends on the box, resolved at paint time
+    # (`gradient_corner_dir_q16`); 1000 + the square-box angle.
+    if first == "to top right" or first == "to right top":
+        return 1045
+    if first == "to bottom right" or first == "to right bottom":
+        return 1135
+    if first == "to bottom left" or first == "to left bottom":
+        return 1225
+    if first == "to top left" or first == "to left top":
+        return 1315
     if first == "to top":
         return 0
     if first == "to right":
@@ -1974,6 +2316,16 @@ fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
         raw_pos[0] = 0
     if raw_pos[n - 1] < 0:
         raw_pos[n - 1] = 1000
+    # CSS Images 3 §3.4.3: a positioned stop below the largest position
+    # before it is raised to that position (a hard edge).
+    var run_max = raw_pos[0]
+    var q = 1
+    while q < n:
+        if raw_pos[q] >= 0:
+            if raw_pos[q] < run_max:
+                raw_pos[q] = run_max
+            run_max = raw_pos[q]
+        q = q + 1
     var k = 1
     while k < n - 1:
         if raw_pos[k] < 0:
@@ -2915,7 +3267,14 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         val empty: [text] = []
         return empty
     # Preallocated + indexed store: `.push` in a loop clones the array (O(N^2)).
-    var tbl: [text] = [""; n * 2]
+    # A border/outline shorthand also stores up to 12 longhands (below); the
+    # table is cut to the used length at the end, so the lookups that scan it
+    # whole never see the spare slots.
+    val per_decl = if text_index_of(decls, "border") >= 0 or text_index_of(decls, "outline") >= 0: 26 else: 2
+    # `outline` is dispatch-handled alone; its longhands (not dispatch props)
+    # are only needed when an outline longhand can be overridden.
+    val expand_outline = text_index_of(decls, "outline-") >= 0
+    var tbl: [text] = [""; n * per_decl]
     var pos = 0
     var idx = 0
     val decls_len = decls.byte_len()
@@ -2924,13 +3283,255 @@ fn _decl_table_build_inner(decls: text) -> [text]:
         val end = if semi >= 0: semi else: decls_len
         val colon = find_from(decls, ":", pos)
         if colon >= 0 and colon < end:
-            tbl[idx] = decls.substring(pos, colon).trim().lower()
-            tbl[idx + 1] = decls.substring(colon + 1, end).trim()
-            idx = idx + 2
+            val prop = decls.substring(pos, colon).trim().lower()
+            val value = decls.substring(colon + 1, end).trim()
+            var longhands: [text] = []
+            if prop != "outline" or expand_outline:
+                longhands = _border_shorthand_longhands(prop, value)
+            if not _decl_invalid_color_function(prop, value) and not (longhands.len() == 1 and longhands[0] == "!"):
+                # A logical property that expanded is stored as its physical
+                # longhands only, so its fixed-order applier cannot re-apply
+                # it over a later physical declaration.
+                if longhands.len() == 0 or not _border_logical_prop(prop):
+                    tbl[idx] = prop
+                    tbl[idx + 1] = value
+                    idx = idx + 2
+                # The shorthand's longhands at its own source position, so the
+                # last-wins lookup of a longhand sees a shorthand authored
+                # after it (`border-top-color:red;border-color:blue` -> blue).
+                for item in longhands:
+                    tbl[idx] = item
+                    idx = idx + 1
         if semi < 0:
             break
         pos = semi + 1
-    tbl
+    if idx == tbl.len():
+        return tbl
+    var used: [text] = [""; idx]
+    var k = 0
+    while k < idx:
+        used[k] = tbl[k]
+        k = k + 1
+    used
+
+fn _border_logical_prop(prop: text) -> bool:
+    prop.starts_with("border-block") or prop.starts_with("border-inline")
+
+# Physical sides of a logical border property name (horizontal-tb, ltr --
+# the mapping the logical appliers use), or [] when it is not one.
+fn _border_logical_sides(name: text) -> [text]:
+    if name == "border-block": return ["top", "bottom"]
+    if name == "border-block-start": return ["top"]
+    if name == "border-block-end": return ["bottom"]
+    if name == "border-inline": return ["left", "right"]
+    if name == "border-inline-start": return ["left"]
+    if name == "border-inline-end": return ["right"]
+    []
+
+fn _border_kind_ok(kind: text, tok: text) -> bool:
+    if kind == "color": return _border_color_token(tok)
+    if kind == "width": return _border_width_token(tok)
+    css_border_style_token(tok) != ""
+
+# `thin`/`medium`/`thick` as the px the width appliers parse (Chrome 159:
+# 1, 3, 5).
+fn _border_width_px(tok: text) -> text:
+    val t = tok.lower()
+    if t == "thin": return "1px"
+    if t == "medium": return "3px"
+    if t == "thick": return "5px"
+    tok
+
+# The physical side longhands a border (or outline) property sets, as flat
+# (property, value) pairs. ["!"] marks a declaration CSS drops whole: a
+# `border-color` with a token that is not a colour or more than four values,
+# so the earlier value stays. A shorthand also resets the parts it omits
+# (width medium, style none, color currentcolor). A value with `var()`, or
+# a width/style list the appliers must judge, is left to the appliers.
+fn _border_shorthand_longhands(prop: text, value: text) -> [text]:
+    var out: [text] = []
+    if text_index_of(value, "var(") >= 0:
+        return out
+    val toks = _decl_top_level_tokens(value)
+    if prop == "outline":
+        return _border_parts_longhands(toks, ["outline"])
+    if not prop.starts_with("border"):
+        return out
+    val sides = ["top", "right", "bottom", "left"]
+    if prop == "border-color" or prop == "border-width" or prop == "border-style":
+        val n = toks.len()
+        val kind = prop.substring(7, prop.byte_len())
+        if n < 1 or n > 4:
+            if kind == "color" and n > 4:
+                return ["!"]
+            return out
+        var k = 0
+        while k < n:
+            if not _border_kind_ok(kind, toks[k]):
+                if kind == "color":
+                    return ["!"]
+                return out
+            k = k + 1
+        val r_tok = if n >= 2: toks[1] else: toks[0]
+        val b_tok = if n >= 3: toks[2] else: toks[0]
+        val l_tok = if n >= 4: toks[3] else: r_tok
+        val per_side = [toks[0], r_tok, b_tok, l_tok]
+        var s = 0
+        while s < 4:
+            val v = if kind == "width": _border_width_px(per_side[s]) else: per_side[s]
+            out.push("border-" + sides[s] + "-" + kind)
+            out.push(v)
+            s = s + 1
+        return out
+    # Logical longhands: `border-inline-start-color` -> `border-left-color`;
+    # `border-block-width: 1px 2px` -> top 1px, bottom 2px.
+    for kind in ["width", "style", "color"]:
+        val suffix = "-" + kind
+        if prop.ends_with(suffix) and _border_logical_prop(prop):
+            val lsides = _border_logical_sides(prop.substring(0, prop.byte_len() - suffix.byte_len()))
+            if lsides.len() == 0 or toks.len() < 1 or toks.len() > lsides.len():
+                return out
+            for tok in toks:
+                if not _border_kind_ok(kind, tok):
+                    if kind == "color":
+                        return ["!"]
+                    return out
+            var si = 0
+            while si < lsides.len():
+                val tok = if si < toks.len(): toks[si] else: toks[0]
+                val v = if kind == "width": _border_width_px(tok) else: tok
+                out.push("border-" + lsides[si] + "-" + kind)
+                out.push(v)
+                si = si + 1
+            return out
+    var targets: [text] = []
+    if prop == "border":
+        targets = sides
+    elif prop == "border-top" or prop == "border-right" or prop == "border-bottom" or prop == "border-left":
+        targets = [prop.substring(7, prop.byte_len())]
+    else:
+        targets = _border_logical_sides(prop)
+    if targets.len() == 0:
+        return out
+    var names: [text] = []
+    for side in targets:
+        names.push("border-" + side)
+    _border_parts_longhands(toks, names)
+
+# Longhands `<name>-width/-style/-color` for every name in `names` from a
+# width/style/color shorthand value; a part it omits is reset to its
+# initial value. A token of no kind, a kind given twice or a CSS-wide
+# keyword leaves it unexpanded, so the appliers keep their old reading.
+fn _border_parts_longhands(toks: [text], names: [text]) -> [text]:
+    var out: [text] = []
+    for tok in toks:
+        val t = tok.lower()
+        if t == "inherit" or t == "initial" or t == "unset" or t == "revert":
+            return out
+    var width = ""
+    var style = ""
+    var color = ""
+    for tok in toks:
+        if _border_width_token(tok) and width == "":
+            width = _border_width_px(tok)
+        elif (css_border_style_token(tok) != "" or (tok.lower() == "auto" and names[0] == "outline")) and style == "":
+            style = tok
+        elif _border_color_token(tok) and color == "":
+            color = tok
+        else:
+            return out
+    if width == "":
+        width = "3px"
+    if style == "":
+        style = "none"
+    if color == "":
+        color = "currentcolor"
+    for name in names:
+        out.push(name + "-width")
+        out.push(width)
+        out.push(name + "-style")
+        out.push(style)
+        out.push(name + "-color")
+        out.push(color)
+    out
+
+# Painted width of an `outline` shorthand (Chrome 159): an omitted width is
+# medium (3px); an omitted, `none` or `hidden` style paints nothing; `auto`
+# paints the focus ring, modelled as its 1px outer column.
+fn outline_shorthand_paint_width_px(raw: text) -> i32:
+    var width = -1
+    var styled = false
+    var auto_style = false
+    for tok in _decl_top_level_tokens(raw.trim().lower()):
+        if tok == "auto":
+            auto_style = true
+        elif css_border_style_token(tok) != "":
+            if border_style_disables_paint(tok):
+                return 0
+            styled = true
+        elif width < 0 and _border_width_token(tok):
+            width = parse_int(_border_width_px(tok))
+    if width == 0 or (not styled and not auto_style):
+        return 0
+    if auto_style and not styled:
+        return 1
+    if width < 0: 3 else: width
+
+fn _border_width_token(tok: text) -> bool:
+    val t = tok.lower()
+    t == "thin" or t == "medium" or t == "thick" or "0123456789.".contains(tok.substring(0, 1))
+
+fn _border_color_token(tok: text) -> bool:
+    val t = tok.lower()
+    if t == "currentcolor" or t == "inherit" or t == "initial" or t == "unset" or t == "revert":
+        return true
+    not _border_width_token(tok) and (parse_color(tok) != 0u32 or _decl_transparent_color(tok))
+
+# A colour property whose value holds a malformed rgb()/rgba()/hsl()/hsla()
+# is an invalid declaration: CSS drops it whole, so the earlier (or
+# inherited) value stays. Leaving it in the table let the last-wins lookup
+# read it as "no colour" and lose the earlier one -- for a longhand
+# (`background-color: hsl(foo, bar, baz)`) and for a shorthand
+# (`background: rgb(1,2)`, `border: 3px solid hsl(foo,1%,2%)`), which also
+# resets its other longhands (css_color_parse_chrome159_spec.spl AC-9, AC-10).
+fn _decl_invalid_color_function(prop: text, value: text) -> bool:
+    if not (
+        prop == "color" or prop == "background-color" or
+        prop == "background" or prop == "border" or
+        prop == "border-color" or prop == "border-top" or
+        prop == "border-right" or prop == "border-bottom" or
+        prop == "border-left" or prop == "border-top-color" or
+        prop == "border-right-color" or prop == "border-bottom-color" or
+        prop == "border-left-color" or prop == "outline" or
+        prop == "outline-color" or prop == "text-decoration-color" or
+        prop == "caret-color"
+    ):
+        return false
+    val v = value.lower()
+    # Nothing a later stage substitutes is judged here.
+    if text_index_of(v, "var(") >= 0 or text_index_of(v, "calc(") >= 0 or text_index_of(v, "env(") >= 0 or text_index_of(v, "attr(") >= 0:
+        return false
+    var i = 0
+    val n = v.byte_len()
+    while i < n:
+        val lp = find_from(v, "(", i)
+        if lp < 0:
+            return false
+        var start = lp
+        while start > 0 and _decl_ident_char(v.substring(start - 1, start)):
+            start = start - 1
+        val name = v.substring(start, lp)
+        val rp = find_from(v, ")", lp)
+        if rp < 0:
+            return false
+        if name == "rgb" or name == "rgba" or name == "hsl" or name == "hsla":
+            if parse_color_value_checked(v.substring(start, rp + 1)) == nil:
+                return true
+        i = rp + 1
+    false
+
+fn _decl_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or ch == "-"
 
 # ---------------------------------------------------------------------------
 # Presence set over a declaration table.
@@ -3033,26 +3634,6 @@ fn decl_tbl_last_index(tbl: [text], prop: text) -> i32:
             return i / 2
         i = i - 2
     -1
-
-# `transition` (and its longhands) can appear more than once with a blank or
-# otherwise unusable value from an earlier reset rule; unlike `decl_tbl_get`,
-# these skip blank entries so the cascade lands on the last entry that
-# actually carries a value.
-fn decl_tbl_last_valid_transition_index(tbl: [text], prop: text) -> i32:
-    var i = (tbl.len() as i32) - 2
-    while i >= 0:
-        if tbl[i] == prop and tbl[i + 1].trim().len() > 0:
-            return i / 2
-        i = i - 2
-    -1
-
-fn decl_tbl_get_last_valid_transition(tbl: [text], prop: text) -> text:
-    var i = (tbl.len() as i32) - 2
-    while i >= 0:
-        if tbl[i] == prop and tbl[i + 1].trim().len() > 0:
-            return tbl[i + 1]
-        i = i - 2
-    ""
 
 fn parse_nth_box_int(raw: text, index: i32) -> i32:
     val normalized = raw.trim().lower()

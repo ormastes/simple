@@ -1,0 +1,62 @@
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/kv_cache.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/llama_forward.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/tokenizer.spl 80%
+# Purpose and audience: executable evidence that the pure-Simple Llama runner
+# (no llama.cpp) really generates text from stories15M, and that the KV cache
+# and prefix reuse change cost, not output.
+# Gate: runs only when the stories15M model directory exists
+# (SLANG_PURE_MODEL, default C:/dev/model/llama2c-stories15M). Slow on the seed
+# interpreter (minutes): the perf-diff table is printed to the log.
+
+use std.spec.{describe, it, expect, skip}
+use std.io_runtime.{env_get, is_dir, file_append_text, dir_create_all}
+use test.fixtures.slang_pure.stories15m_generate.{stories15m_run, stories15m_table}
+
+# The runner does not keep stdout of passing examples and counts skip() as a
+# pass, so evidence (and every skip reason) is also appended to a file.
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/pure_evidence.txt", line + "\n")
+
+fn _skip(name: text, why: text):
+    _record("SKIPPED: " + name + " -- " + why)
+    skip(name, why)
+
+# llama.cpp greedy continuation of "Once upon a time" for this model; the
+# pure runner generates 18 tokens, which end inside "sunshine".
+val REFERENCE = ", there was a little girl named Lily. She loved to play outside in the sun"
+
+# env_get returns "" (not None) when unset, so `??` never applied the default.
+fn _pure_model_env() -> text:
+    val e = env_get("SLANG_PURE_MODEL")
+    if e != "":
+        return e
+    "C:/dev/model/llama2c-stories15M"
+
+fn _model_dir() -> text:
+    val d = _pure_model_env()
+    if is_dir(d):
+        return d
+    ""
+
+describe "slang pure runner on stories15M":
+    it "generates the llama.cpp continuation and the cache changes only cost":
+        val dir = _model_dir()
+        if dir == "":
+            _skip("generates the llama.cpp continuation and the cache changes only cost", "stories15M model directory not present")
+        else:
+            val r = stories15m_run(dir, 18, 6).unwrap()
+            _record("generated=[{r.full_text}]")
+            _record(stories15m_table(r))
+            expect(r.prompt_ids).to_equal([1, 9038, 2501, 263, 931])
+            expect(r.full_text).to_equal(REFERENCE)
+            # cache off == cache on, token for token
+            expect(r.on_ids).to_equal(r.off_ids)
+            expect(r.off_ids).to_equal(r.full_ids.slice(0, 6))
+            # the cache evaluates fewer positions than a full re-run per token
+            expect(r.on_positions < r.off_positions).to_equal(true)
+            # prefix reuse: same tokens, fewer positions than a fresh session
+            expect(r.req2_reuse_ids).to_equal(r.req2_fresh_ids)
+            expect(r.req2_reuse_ids).to_equal(r.full_ids.slice(3, 6))
+            expect(r.req2_reuse_positions < r.req2_fresh_positions).to_equal(true)

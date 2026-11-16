@@ -1,0 +1,38 @@
+"""
+## Purpose and audience
+Purpose: Pin that a lone `background-image:url(...)` longhand lowers to a
+typed Draw IR image command, while its authored text stays in
+`background-layers-raw` as the css-cascade rejection witness
+(13f95dfa511 kept that witness; Draw IR then refused every layer with raw
+text, so longhand images dropped to a plain rect).
+Audience: browser-engine background and Draw IR maintainers.
+
+Root cause of the simple_web_renderer_spec rows "lowers one exact CSS
+background image with typed tile geometry and border order", "retains the
+unclipped rounded CSS background shape" and "subtracts content clip insets
+from each CSS background radius axis".
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — single url() background-image longhand lowers to Draw IR.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir_with_images}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_image_resource}
+
+fn _kinds(style: text) -> text:
+    val html = "<html style='margin:0'><body style='margin:0'><div id='t' style='width:8px;height:8px;" + style + "'></div></body></html>"
+    val image = simpleos_host_gpu_image_resource("image://tile", 2, 2, [0xFFFF0000u32; 4])
+    var out = ""
+    for c in simple_web_layout_render_html_draw_ir_with_images(html, 20, 20, [image]).batches[0].commands:
+        if c.component_id.starts_with("t"):
+            out = out + c.component_id + ":" + c.kind + " "
+    out.trim()
+
+describe "background-image longhand Draw IR":
+    it "AC-1: a lone url() longhand lowers to an image command":
+        expect(_kinds("background-image:url(image://tile)")).to_contain("t_background_image:image")
+
+    it "AC-2: an unsupported layer still fails closed":
+        expect(_kinds("background-image:url(image://tile), radial-gradient(red, blue)")).to_not_contain("t_background_image")

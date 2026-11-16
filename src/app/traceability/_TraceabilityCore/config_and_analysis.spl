@@ -65,7 +65,7 @@ fn load_traceability_config() -> TraceabilityConfig:
         return default_traceability_config()
     traceability_config_from_captured_text_v1(content)
 
-pub fn traceability_config_validate_captured_v1(config: TraceabilityConfig) -> Result<bool, text>:
+pub fn traceability_config_validate_captured_v1(config: TraceabilityConfig) -> Result<TraceabilityConfig, text>:
     if config.warn_source_roots.len() > 4096:
         return Err("structural configuration member budget exceeded")
     var bytes = 0
@@ -75,7 +75,7 @@ pub fn traceability_config_validate_captured_v1(config: TraceabilityConfig) -> R
         if path.len() > 65536 - bytes:
             return Err("structural configuration byte budget exceeded")
         bytes = bytes + path.len()
-    Ok(true)
+    Ok(config)
 
 pub fn traceability_config_from_captured_text_v1(content: text) -> TraceabilityConfig:
     """Parse supplied configuration without reading the mutable filesystem."""
@@ -153,8 +153,16 @@ fn analyze_parsed_traceability_v1(parsed: [ParsedTraceFile], existing_paths: [te
 
     warnings
 
+# Upper bound on diagnostics one structural evaluation may materialize.
+pub struct TraceDiagnosticLimitV1:
+    value: i64
+
+pub enum TraceSourceRootsV1:
+    Enforced
+    Skipped
+
 pub fn analyze_virtual_files_bounded_v1(files: [VirtualFile], scope: text,
-    config: TraceabilityConfig, enforce_source_roots: bool, max_diagnostics: i64) -> Result<[TraceabilityWarning], text>:
+    config: TraceabilityConfig, source_roots: TraceSourceRootsV1, diagnostic_limit: TraceDiagnosticLimitV1) -> Result<[TraceabilityWarning], text>:
     """Bound warning construction before invoking the existing structural rules.
 
     B = 6F + 2L + I + T, including duplicates. F counts files; L counts the
@@ -163,6 +171,8 @@ pub fn analyze_virtual_files_bounded_v1(files: [VirtualFile], scope: text,
     emit no more than this reviewed upper bound. Budget refusal is incomplete
     evaluation, never a completed violation. This does not bound analysis time.
     """
+    val enforce_source_roots = source_roots == TraceSourceRootsV1.Enforced
+    val max_diagnostics = diagnostic_limit.value
     if max_diagnostics < 0 or max_diagnostics > 100000:
         return Err("invalid structural diagnostic budget")
     traceability_config_validate_captured_v1(config)?
@@ -270,14 +280,14 @@ fn collect_virtual_files(paths: [text]) -> [VirtualFile]:
     for root in roots:
         if not file_exists(root) and not is_dir(root):
             continue
-        if is_traceable_file_path(root):
+        if is_traceable_file_path(root) == TraceablePathV1.Traceable:
             if path_list_contains(seen, root) == false:
                 seen.push(root)
                 files.push(VirtualFile(path: root, content: file_read(root)))
             continue
         val walked = dir_walk(root)
         for path in walked:
-            if not is_traceable_file_path(path):
+            if is_traceable_file_path(path) != TraceablePathV1.Traceable:
                 continue
             if path_list_contains(seen, path):
                 continue
@@ -285,17 +295,21 @@ fn collect_virtual_files(paths: [text]) -> [VirtualFile]:
             files.push(VirtualFile(path: path, content: file_read(path)))
     files
 
-pub fn is_traceable_file_path(path: text) -> bool:
+pub enum TraceablePathV1:
+    Traceable
+    NotTraceable
+
+pub fn is_traceable_file_path(path: text) -> TraceablePathV1:
     if has_prefix(s: path, prefix: "src/"):
         if has_suffix(s: path, suffix: ".spl"):
-            return true
+            return TraceablePathV1.Traceable
     if has_prefix(s: path, prefix: "test/"):
         if has_suffix(s: path, suffix: ".spl"):
-            return true
+            return TraceablePathV1.Traceable
     if has_prefix(s: path, prefix: "doc/"):
         if has_suffix(s: path, suffix: ".md"):
-            return true
-    false
+            return TraceablePathV1.Traceable
+    TraceablePathV1.NotTraceable
 
 fn parse_trace_file(file: VirtualFile) -> ParsedTraceFile:
     val kind = classify_trace_path(file.path)

@@ -1221,6 +1221,31 @@ bin/simple test test/03_system/gui/ui/shared_ui_contract_spec.spl --tag slow
 
 ---
 
+
+### Pixel-compare resolution rule (owner, 2026-11-15)
+
+- **Never lower resolution to meet a perf budget or to make a compare pass.**
+  Low resolution itself is the problem, on BOTH sides: the Simple render AND
+  the reference capture (Chrome, Skia). A low-res reference is as invalid as a
+  low-res Simple render. Downscaling, a smaller viewport, a lower DPI, blur or
+  widened tolerance that
+  hides a real difference is a defect, not a fix. Fix the renderer or the perf.
+- **Text compares:** a rasterized vector (outline) font must be rendered at
+  **300 DPI or more** (CSS device scale >= 3.125, i.e. 16px text >= 50 device px)
+  so glyph shape, not hinting noise, is compared. Otherwise use a
+  **pixel-based (bitmap) font** at its native size, where every pixel is exact
+  and tolerance can be 0.
+- A text compare must assert a pass bar (differing pixels / max channel delta).
+  A diagnostic that only checks "it ran" is not a compare.
+- Inspect pairs with `SIMPLE_COMPARE_VIEW=stay|auto` (A / B / DIFF panes).
+
+Current gap (checked 2026-11-15):
+`test/03_system/gui/pixel_compare/chromium_vs_simple_text_spec.spl` renders a
+vector font (Liberation Mono 16px, smoothing off) at 1x / 96 DPI into 320x240
+and only asserts `diff >= 0` — it violates both rules. Its Chrome capture
+`build/pixel_compare/electron_simple_text.json` is also absent on Windows, so it
+cannot run here. Fix: capture at device scale >= 3.125 (or switch the fixture
+to a bitmap font) and assert a real threshold.
 ## Markdown Doctests on Path Runs
 
 `config/sdoctest.sdn` controls whether a path-scoped `bin/simple test <path>`
@@ -1386,3 +1411,54 @@ The exact candidate runs `test/03_system/check/post_bootstrap_stage4_acceptance_
 with absolute `STAGE4_POST_BOOTSTRAP_BINARY` and adjacent
 `STAGE4_POST_BOOTSTRAP_PROVENANCE`. Use interpreter, no daemon/database/cache,
 `--assert-ran`, and `--fail-fast`. Retained smoke is hash-verified, not rerun.
+
+
+---
+
+## TestDB Read-Only Query: `test query` / `test explain`
+
+Purpose: look at recorded attempt rows for exactly one case without touching
+the test database (no cold-start create, no save, no migration).
+
+```bash
+bin/simple test query   <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
+bin/simple test explain <path>::<case> [--run <id>]
+# direct form: bin/simple run src/app/test_runner_new/main.spl query ...
+```
+
+`--cursor` takes only the opaque token printed as `next cursor: <token>` of a
+previous page. The token is bound to the case, `--run`, `--limit` and the result
+rows it was issued over; a plain integer, an edited token, a token from another
+query, or one issued before a new attempt was recorded is rejected with exit 2
+(`invalid query`). Restart without `--cursor` to re-page.
+
+Defaults: table format, `--limit 50` (explain 1000). The database path is fixed
+at `doc/08_tracking/test/test_db.sdn`.
+
+Exit codes: 0 rows found, 1 no rows, 2 usage error, unknown run, or missing /
+corrupt / unsealed database.
+
+Verified output (seed `bin/simple.exe`, release tip `75d3cba7d16`; both the
+`test query` and direct forms behave the same):
+
+```text
+$ bin/simple test query test/01_unit/app/traceability/trace_matrix_spec.spl::x
+no rows: no recorded attempts for test/01_unit/app/traceability/trace_matrix_spec.spl::x
+(exit 1)
+
+$ bin/simple test query nocolon
+usage: simple test query <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
+       simple test explain <path>::<case> [--run <id>]
+exit codes: 0 rows found, 1 no rows, 2 usage error or unreadable/corrupt test database
+(exit 2)
+```
+
+The committed `test_db.sdn` holds no trace-case event tables, so a rows-found
+example could not be produced from the repo DB. When rows exist, the source
+(`src/app/test_runner_new/test_query_cli.spl`) renders one
+`attempt <n> of <case> in run <id>: status=<s>` line per attempt, then
+`partial: truncated, more rows exist` and `next cursor: <token>` when paged, or
+`partial: some attempts are unfinished or have missing identity`. `explain`
+adds a reason per status (skipped, cached, blocked and unknown never qualify as
+a pass) and an `identity missing:` line. Rows are unverified framework
+observations, not admitted evidence. MCP twin: `simple_test_query`.

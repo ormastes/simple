@@ -22,6 +22,7 @@ use compiler.tools.sffi_gen.main.*
 #   --clean           Clean build/rust/ and re-setup from scratch
 #   --gen-all         Generate entire build/rust/ from all full specs
 #   --gen-module      Generate a single module from a full spec file
+#   --gen-units       Generate checked constrained-unit facades from unit decls
 #   --verify          Verify generated code compiles (cargo check)
 #   --help            Show this help message
 
@@ -30,6 +31,7 @@ use compiler.tools.sffi_gen.parser*
 use compiler.tools.sffi_gen.rust_codegen*
 use compiler.tools.sffi_gen.cargo_gen*
 use compiler.tools.sffi_gen.builder*
+use compiler.tools.sffi_gen.constrained_unit_scan.{generate_constrained_unit_facades}
 use std.log.{error}
 use std.nogc_sync_mut.io_runtime.{env_get}
 
@@ -39,6 +41,7 @@ extern fn sys_get_args() -> [text]
 extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -46,8 +49,7 @@ fn sffi_file_read(path: text) -> text?:
     rt_file_read_text(path)
 
 fn sffi_file_write(path: text, content: text) -> bool:
-    val (stdout, stderr, exit_code) = rt_process_run("/bin/sh", ["-c", "cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF"])
-    exit_code == 0
+    rt_file_write_text(path, content)
 
 fn sffi_file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -190,6 +192,7 @@ class CliOptions:
     gen_all: bool
     gen_module: bool
     gen_workspace: bool
+    gen_units: bool
     verify: bool
     show_help: bool
 
@@ -205,6 +208,7 @@ class CliOptions:
             gen_all: false,
             gen_module: false,
             gen_workspace: false,
+            gen_units: false,
             verify: false,
             show_help: false
         )
@@ -236,6 +240,7 @@ fn print_help():
     print "  --gen-all         Generate entire build/rust/ from all full specs"
     print "  --gen-module      Generate a single module from a full spec file"
     print "  --gen-workspace   Generate multi-crate workspace (16 SFFI crates)"
+    print "  --gen-units       Generate checked constrained-unit facades (<name>_units.spl)"
     print "  --verify          Verify generated code compiles (cargo check)"
     print "  --clean           Clean build/rust/ and re-setup from scratch"
     print "  -h, --help        Show this help"
@@ -293,6 +298,8 @@ fn parse_args(args: [text]) -> CliOptions:
             opts.gen_all = true
         elif arg == "--gen-module":
             opts.gen_module = true
+        elif arg == "--gen-units":
+            opts.gen_units = true
         elif arg == "--gen-workspace":
             opts.gen_workspace = true
         elif arg == "--verify":
@@ -637,3 +644,34 @@ fn generate_full_module(spec_path: text, opts: CliOptions) -> i64:
 # ============================================================================
 
 # Generate the entire build/rust/sffi_gen/ directory from all full specs.
+
+# ============================================================================
+# Constrained-unit facades (--gen-units)
+# ============================================================================
+
+
+pub fn sffi_units_output_path(input_file: text, output_dir: text) -> text:
+    val parts = input_file.replace("\\", "/").split("/")
+    val base = parts[parts.len() - 1].replace(".spl", "")
+    "{output_dir}/{base}_units.spl"
+
+# Scan input_file for unit decls + extern fns returning units; write facades.
+pub fn sffi_gen_units(input_file: text, output_dir: text, dry_run: bool) -> i64:
+    val source = sffi_file_read(input_file) ?? ""
+    if source == "":
+        sffi_print_error("Cannot read input file: {input_file}")
+        return 1
+    val r = generate_constrained_unit_facades(source)
+    if r.diagnostic != "":
+        sffi_print_error(r.diagnostic)
+        return 1
+    if dry_run:
+        print r.source
+        return 0
+    val out_path = sffi_units_output_path(input_file, output_dir)
+    rt_dir_create(output_dir, true)
+    if not rt_file_write_text(out_path, r.source):
+        sffi_print_error("Cannot write {out_path}")
+        return 1
+    sffi_log_step("Wrote {out_path}")
+    0

@@ -5,6 +5,7 @@
 
 use std.database.bug.{create_bug_database, load_bug_database, BugDatabase, Bug, BugSeverity, BugStatus, parse_severity, parse_status}
 use std.cli.cli_util (parse_csv_fields)
+use std.database.bug_close_gate.{bug_close_gate}
 use std.nogc_async_mut.mcp.resource_utils.{
     escape_json,
     extract_json_string, extract_json_int, extract_json_array,
@@ -329,10 +330,20 @@ fn update_bug_from_json(db_path: text, bug_id: text, json: String) -> String:
     val line = extract_json_int(json, "line")
     val reproducible_by = extract_json_string(json, "reproducible_by")
 
+    val new_status = if status_str != "": parse_status(status_str) else: existing.status
+    val closing = (new_status == BugStatus.Fixed or new_status == BugStatus.Closed) and new_status != existing.status
+    if closing:
+        val reproducer = extract_json_string(json, "reproducer")
+        val prevention = extract_json_string(json, "prevention")
+        val gate_error = bug_close_gate(reproducer, prevention,
+            reproducer != "" and file_exists(reproducer), prevention != "" and file_exists(prevention))
+        if gate_error != "":
+            return error_json("close rejected: {gate_error}")
+
     val updated_bug = Bug(
         id: bug_id,
         severity: if severity_str != "": parse_severity(severity_str) else: existing.severity,
-        status: if status_str != "": parse_status(status_str) else: existing.status,
+        status: new_status,
         title: if title != "": title else: existing.title,
         description: existing.description,
         file: if file != "": file else: existing.file,

@@ -1,0 +1,50 @@
+"""CU-013: reverse impact over a small feature->requirement->design->spec->code->bug corpus
+yields exactly the expected edges, no extra and none missing."""
+# @req REQ-CARET-TRC-002
+use std.spec.*
+use std.common.traceability.model.*
+use app.traceability.ide_view_render.{impact_edges, TraceImpactLimitV1}
+
+fn node(id: text, kind: TraceNodeKind) -> TraceNode:
+    TraceNode(id: id, kind: kind, title: id)
+
+fn edge(id: text, from: text, rel: TraceRelation, to: text) -> TraceEdge:
+    TraceEdge(id: id, from_id: from, relation: rel, to_id: to)
+
+fn corpus() -> TraceGraph:
+    val subject = SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:c", kind: "git_tree", revision_id: "commit:c", tree_id: "tree:c", object_format: "sha256")
+    val nodes = [node("feature:f", TraceNodeKind.Feature), node("req:R-1", TraceNodeKind.Requirement),
+        node("design:d", TraceNodeKind.Design), node("suite:s", TraceNodeKind.TestSuite),
+        node("file:code", TraceNodeKind.SourceFile), node("bug:b", TraceNodeKind.Bug),
+        node("req:R-2", TraceNodeKind.Requirement), node("file:other", TraceNodeKind.SourceFile)]
+    val edges = [edge("edge:1", "feature:f", TraceRelation.Specifies, "req:R-1"),
+        edge("edge:2", "req:R-1", TraceRelation.DescribedBy, "design:d"),
+        edge("edge:3", "req:R-1", TraceRelation.VerifiedBy, "suite:s"),
+        edge("edge:4", "req:R-1", TraceRelation.ImplementedBy, "file:code"),
+        edge("edge:5", "bug:b", TraceRelation.ObservedIn, "file:code"),
+        edge("edge:6", "req:R-2", TraceRelation.ImplementedBy, "file:other")]
+    TraceGraph(subject: subject, input_manifest_id: "inputs:c", nodes: nodes, test_definitions: [], claims: [],
+        edges: edges, edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation:c", complete: false)
+
+fn ids(edges: [TraceEdge]) -> [text]:
+    var out: [text] = []
+    for e in edges: out.push(e.id)
+    trace_sorted_ids(out)
+
+describe "reverse impact over a corpus (CU-013)":
+    it "code file: incoming edges are exactly its requirement and bug":
+        step("incoming impact of file:code")
+        val edges = impact_edges(corpus(), "file:code", "incoming", TraceImpactLimitV1(value: 10)).unwrap()
+        expect(ids(edges)).to_equal(["edge:4", "edge:5"])
+
+    it "requirement: incoming is the feature only, outgoing is design/spec/code":
+        step("req:R-1 both directions")
+        expect(ids(impact_edges(corpus(), "req:R-1", "incoming", TraceImpactLimitV1(value: 10)).unwrap())).to_equal(["edge:1"])
+        expect(ids(impact_edges(corpus(), "req:R-1", "outgoing", TraceImpactLimitV1(value: 10)).unwrap())).to_equal(["edge:2", "edge:3", "edge:4"])
+
+    it "a leaf with no incoming impact yields none; unrelated corpus nodes never leak":
+        step("feature:f incoming, design incoming")
+        expect(impact_edges(corpus(), "feature:f", "incoming", TraceImpactLimitV1(value: 10)).unwrap().len()).to_equal(0)
+        expect(ids(impact_edges(corpus(), "design:d", "incoming", TraceImpactLimitV1(value: 10)).unwrap())).to_equal(["edge:2"])
+        for e in impact_edges(corpus(), "file:code", "incoming", TraceImpactLimitV1(value: 10)).unwrap():
+            expect(e.to_id).to_equal("file:code")

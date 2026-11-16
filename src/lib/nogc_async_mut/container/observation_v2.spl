@@ -1,0 +1,50 @@
+# Read-only Simple Container API. Kept independent of connection/effect owners
+# so protected deployment authority can verify provider identity without cycles.
+use std.common.contracts.container.execution_v2.ContainerHostObservationV2
+use std.common.contracts.container.backend_identity_v1.*
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.string_core.str_len
+use std.nogc_async_mut.container.providers.linux.host_observation_v2.linux_container_host_observe_v2
+use std.nogc_async_mut.container.providers.windows.host_observation_v2.windows_container_host_observe_v2
+
+fn observation_text_v2(value: text) -> bool:
+    str_len(value) > 0 and str_len(value) <= 4096 and not value.contains("\0") and
+        not value.contains("\n") and not value.contains("\r") and not value.contains("\t")
+
+fn observation_backend_v2(backend: text) -> Result<ContainerBackendIdentityV1, text>:
+    match container_backend_admit_effects_v1(backend):
+        case Ok(identity): Ok(identity)
+        case Err(reason): Err("container-api-" + reason)
+
+pub fn container_observation_validate_v2(backend: text, value: ContainerHostObservationV2) -> Result<ContainerHostObservationV2, text>:
+    if value.backend != backend or not observation_text_v2(value.native_machine_id) or
+            not builder_digest_valid_v1(value.provider_identity_digest) or
+            not builder_identifier_valid_v1(value.architecture):
+        return Err("container-api-host-observation-invalid")
+    val identity = observation_backend_v2(backend)?
+    if value.execution_os != container_backend_execution_os_v1(identity):
+        return Err("container-api-host-os-mismatch")
+    if value.continuity_assurance == "native-boot-incarnation-v1":
+        if not observation_text_v2(value.native_boot_id): return Err("container-api-native-boot-required")
+        if value.boot_observation != "" and not observation_text_v2(value.boot_observation):
+            return Err("container-api-boot-observation-invalid")
+    elif value.continuity_assurance == "machine-boot-counter-v1":
+        if value.native_boot_id != "" or not observation_text_v2(value.boot_observation):
+            return Err("container-api-weak-boot-observation-invalid")
+    else:
+        return Err("container-api-continuity-assurance-unsupported")
+    Ok(value)
+
+
+pub fn simple_container_observe_v2(backend: text, policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
+    val identity = observation_backend_v2(backend)?
+    if str_len(policy_bytes) == 0 or str_len(policy_bytes) > 1048576: return Err("container-api-policy-size")
+    match identity:
+        case ContainerBackendIdentityV1.LinuxPodman:
+            val observed = linux_container_host_observe_v2(policy_bytes)?
+            container_observation_validate_v2(backend, observed)
+        case ContainerBackendIdentityV1.WindowsDockerProcess:
+            val observed = windows_container_host_observe_v2(policy_bytes)?
+            container_observation_validate_v2(backend, observed)
+        case ContainerBackendIdentityV1.MacOsSeatbeltProcess:
+            Err("container-api-" + CONTAINER_BACKEND_UNQUALIFIED_SEATBELT_V1)

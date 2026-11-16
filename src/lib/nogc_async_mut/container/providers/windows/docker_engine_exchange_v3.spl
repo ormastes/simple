@@ -1,6 +1,7 @@
-# Private nonblocking READ-ONLY Engine HTTP exchange. Public acquisition admits
-# only exact info/container-inspect GETs. Mutation codecs below are pure data;
-# no create/start/attach/resize entry opens a pipe until a real effect owner exists.
+# Private nonblocking Engine HTTP exchange. Public metadata-only acquisition
+# admits exact info/container-inspect GETs. Primary attach additionally requires
+# the actual protected journal's one-use receipt after trusted Host verification.
+# Create/start/resize codecs remain pure data with no mutation acquisition.
 # Context is deadline metadata only, never an execution grant.
 # SOURCE-ONLY NOT_RUN. No reconnect/replay; timeout never proves exec absence.
 # Sole broker-owner discipline is required: class/lease values are not copy-safe
@@ -11,6 +12,13 @@ use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
 use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid, text_bytes_concat_checked}
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get}
 use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
+use std.common.contracts.container.primary_connection_consumption_v2.{ContainerPrimaryConnectionConsumptionV2,
+    container_primary_connection_consumption_bytes_v2}
+use std.common.contracts.container.primary_connection_attempt_v3.{ContainerPrimaryConnectionAttemptEvidenceV3,
+    container_primary_connection_attempt_encode_v3}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.windows_primary_connection_admission_v2.{WindowsPrimaryConnectionVerifiedV2,
+    windows_primary_connection_claim_v2}
 
 pub const WINDOWS_DOCKER_ENGINE_EXCHANGE_TIMEOUT_MAX_V3: i64 = 300000
 pub const WINDOWS_DOCKER_ENGINE_EXCHANGE_RESPONSE_MAX_V3: i64 = WINDOWS_ENGINE_HEADER_MAX_V3 + WINDOWS_ENGINE_CONTROL_MAX_V3 + WINDOWS_ENGINE_FRAME_MAX_V3
@@ -31,11 +39,32 @@ pub enum WindowsDockerEngineExchangeOutcomeV3:
     CleanupRequired(owner: WindowsDockerEngineExchangeV3, reason: text)
     Rejected(reason: text)
 
+# Constructed only by this exchange after its positive one-use claim. A caller
+# cannot turn a generic rejection or decoded record into a terminal capability.
+pub class WindowsPrimaryConnectionAttemptTerminalV3:
+    record: ContainerPrimaryConnectionConsumptionV2
+    closed_lease: WindowsEnginePipeLeaseV1?
+
+    pub fn bytes_v3(expected: ContainerPrimaryConnectionConsumptionV2) -> Result<text, text>:
+        val actual = container_primary_connection_consumption_bytes_v2(self.record)?
+        if actual != container_primary_connection_consumption_bytes_v2(expected)?:
+            return Err("primary-connection-attempt-record-mismatch")
+        if val lease = self.closed_lease:
+            val state = windows_engine_pipe_poll_v1(lease)?
+            if not state.closed or state.read_pending or state.write_pending:
+                return Err("primary-connection-attempt-cleanup-pending")
+            return container_primary_connection_attempt_encode_v3(ContainerPrimaryConnectionAttemptEvidenceV3(
+                expected.plan.request_digest, sha256_text(actual), "pipe-closed", Some(lease.slot as i64), Some(lease.generation)))
+        container_primary_connection_attempt_encode_v3(ContainerPrimaryConnectionAttemptEvidenceV3(
+            expected.plan.request_digest, sha256_text(actual), "not-opened", nil, nil))
+
 pub struct WindowsDockerEngineHijackV3:
     lease: WindowsEnginePipeLeaseV1
     response: WindowsEngineHttpResponseV3
     operation: text
     tty: bool
+    request: WindowsEngineHttpRequestV3
+    primary_plan_digest: text
 
 pub enum WindowsDockerEngineTransferOutcomeV3:
     Transferred(source: WindowsDockerEngineExchangeV3, stream: WindowsDockerEngineHijackV3)
@@ -207,6 +236,10 @@ pub class WindowsDockerEngineExchangeV3:
     cleanup_error: text
     last_pipe: WindowsEnginePipePollV1?
     admitted_observation: WindowsEnginePipeObservationV1?
+    primary_plan_digest: text = ""
+    primary_record: ContainerPrimaryConnectionConsumptionV2? = nil
+    closed_primary_lease: WindowsEnginePipeLeaseV1? = nil
+    primary_not_opened: bool = false
 
 impl WindowsDockerEngineExchangeV3:
     # Compatibility spelling remains fail-closed. A data-only write context
@@ -232,8 +265,45 @@ impl WindowsDockerEngineExchangeV3:
         var owner = WindowsDockerEngineExchangeV3(lease: None, request: request, wire: wire, write_offset: 0,
             response_bytes: [], response: None, context: None, phase: WindowsDockerEngineExchangePhaseV3.Writing,
             started_nanos: started, deadline_nanos: started + timeout_ms * 1000000, first_error: "", cleanup_error: "", last_pipe: None, admitted_observation: None)
+        WindowsDockerEngineExchangeV3._connect_v3(owner)
+
+    # Only the trusted Host owns this receipt. Exact canonical reconstruction
+    # prevents relabelling a retained publication with another plan or deadline.
+    # Claim happens before connect; any later failure keeps the helper charged.
+    pub static fn begin_primary_v2(admission: WindowsPrimaryConnectionVerifiedV2) -> WindowsDockerEngineExchangeOutcomeV3:
+        val record = admission.record_v2()
+        val validated = container_primary_connection_consumption_bytes_v2(record)
+        if validated.is_err(): return WindowsDockerEngineExchangeOutcomeV3.Rejected(validated.unwrap_err())
+        val planned = windows_engine_attach_v3("1.48", record.plan.runtime.native_id, record.plan.terminal_mode == "tty", true)
+        if planned.is_err(): return WindowsDockerEngineExchangeOutcomeV3.Rejected(planned.unwrap_err())
+        val request = planned.unwrap()
+        val encoded = windows_docker_engine_exchange_serialize_v3(request)
+        if encoded.is_err(): return WindowsDockerEngineExchangeOutcomeV3.Rejected(encoded.unwrap_err())
+        val claimed = windows_primary_connection_claim_v2(admission)
+        if claimed.is_err(): return WindowsDockerEngineExchangeOutcomeV3.Rejected(claimed.unwrap_err())
+        val window = claimed.unwrap()
+        var owner = WindowsDockerEngineExchangeV3(lease: None, request: request, wire: encoded.unwrap(), write_offset: 0,
+            response_bytes: [], response: None, context: None, phase: WindowsDockerEngineExchangePhaseV3.Writing,
+            started_nanos: window.started_v3(), deadline_nanos: window.deadline_v3(), first_error: "", cleanup_error: "",
+            last_pipe: None, admitted_observation: None, primary_plan_digest: record.plan.request_digest, primary_record: Some(record))
+        val now = time_sample_monotonic_nanos_or_failure()
+        if now < window.started_v3() or now >= window.deadline_v3():
+            owner.primary_not_opened = true
+            owner.phase = WindowsDockerEngineExchangePhaseV3.Closed
+            owner.first_error = "primary-connection-consumed-expired"
+            return WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(owner, owner.first_error)
+        WindowsDockerEngineExchangeV3._connect_v3(owner)
+
+    static fn _connect_v3(initial: WindowsDockerEngineExchangeV3) -> WindowsDockerEngineExchangeOutcomeV3:
+        var owner = initial
         match windows_engine_pipe_connect_v1():
-            case WindowsEnginePipeAdmissionV1.Rejected(error): return WindowsDockerEngineExchangeOutcomeV3.Rejected(error)
+            case WindowsEnginePipeAdmissionV1.Rejected(error):
+                if owner.primary_record != nil:
+                    owner.primary_not_opened = true
+                    owner.phase = WindowsDockerEngineExchangePhaseV3.Closed
+                    owner.first_error = error
+                    return WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(owner, error)
+                return WindowsDockerEngineExchangeOutcomeV3.Rejected(error)
             case WindowsEnginePipeAdmissionV1.CleanupRequired(lease, error):
                 owner.lease = Some(lease)
                 return owner._failure(error)
@@ -245,6 +315,15 @@ impl WindowsDockerEngineExchangeV3:
                     case Ok(value): owner.admitted_observation = Some(value)
                     case Err(error): return owner._failure(error)
         owner._window_result()
+
+    pub fn primary_attempt_terminal_v3() -> Result<WindowsPrimaryConnectionAttemptTerminalV3, text>:
+        if self.primary_record == nil or self.lease != nil or self.phase != WindowsDockerEngineExchangePhaseV3.Closed:
+            return Err("primary-connection-attempt-terminal-unavailable")
+        if not self.primary_not_opened and self.closed_primary_lease == nil:
+            return Err("primary-connection-attempt-native-evidence-required")
+        val proof = WindowsPrimaryConnectionAttemptTerminalV3(self.primary_record.unwrap(), self.closed_primary_lease)
+        val checked = proof.bytes_v3(self.primary_record.unwrap())?
+        Ok(proof)
 
     pub fn phase_v3() -> WindowsDockerEngineExchangePhaseV3: self.phase
     pub fn response_v3() -> WindowsEngineHttpResponseV3?: self.response
@@ -273,6 +352,7 @@ impl WindowsDockerEngineExchangeV3:
                 case Ok(state):
                     self.last_pipe = Some(state)
                     if state.closed:
+                        if self.primary_record != nil: self.closed_primary_lease = self.lease
                         self.lease = None
                         self.phase = WindowsDockerEngineExchangePhaseV3.Closed
 
@@ -300,6 +380,7 @@ impl WindowsDockerEngineExchangeV3:
         self.last_pipe = Some(state)
         if state.closed:
             val incomplete = self.phase == WindowsDockerEngineExchangePhaseV3.Writing or self.phase == WindowsDockerEngineExchangePhaseV3.Reading
+            if self.primary_record != nil: self.closed_primary_lease = self.lease
             self.lease = None
             self.phase = WindowsDockerEngineExchangePhaseV3.Closed
             if incomplete:
@@ -320,9 +401,12 @@ impl WindowsDockerEngineExchangeV3:
             val remaining = self.wire.len() - self.write_offset
             val count = if remaining > WINDOWS_ENGINE_PIPE_MAX_BYTES_V1: WINDOWS_ENGINE_PIPE_MAX_BYTES_V1 else: remaining
             val bytes = [for index in self.write_offset..(self.write_offset + count): self.wire[index]]
-            val accepted = match self.context:
-                case Some(value): windows_engine_pipe_write_some_admitted_v1(lease, bytes, value)
-                case None: windows_engine_pipe_write_some_v1(lease, bytes)
+            val accepted = if self.primary_plan_digest != "":
+                windows_engine_pipe_write_some_until_v2(lease, bytes, self.deadline_nanos)
+            else:
+                match self.context:
+                    case Some(value): windows_engine_pipe_write_some_admitted_v1(lease, bytes, value)
+                    case None: windows_engine_pipe_write_some_v1(lease, bytes)
             match accepted:
                 case Err(reason): return self._failure(reason)
                 case Ok(written):
@@ -360,6 +444,7 @@ impl WindowsDockerEngineExchangeV3:
             case Ok(state):
                 self.last_pipe = Some(state)
                 if state.closed:
+                    if self.primary_record != nil: self.closed_primary_lease = self.lease
                     self.lease = None
                     self.phase = WindowsDockerEngineExchangePhaseV3.Closed
                 WindowsDockerEngineExchangeOutcomeV3.Ready(self)
@@ -374,6 +459,7 @@ impl WindowsDockerEngineExchangeV3:
             case Ok(state):
                 self.last_pipe = Some(state)
                 if not state.closed: return WindowsDockerEngineExchangeOutcomeV3.CleanupRequired(self, "engine-exchange-native-collection-incomplete")
+                if self.primary_record != nil: self.closed_primary_lease = self.lease
                 self.lease = None
                 self.phase = WindowsDockerEngineExchangePhaseV3.Closed
                 WindowsDockerEngineExchangeOutcomeV3.Ready(self)
@@ -394,7 +480,9 @@ impl WindowsDockerEngineExchangeV3:
         self.last_pipe = Some(state)
         if state.closing or state.closed or state.read_pending or state.write_pending:
             return WindowsDockerEngineTransferOutcomeV3.Retained(self, "engine-exchange-hijack-pipe-not-transferable")
-        val stream = WindowsDockerEngineHijackV3(lease: lease, response: self.response.unwrap(), operation: self.request.operation, tty: self.request.tty)
+        val stream = WindowsDockerEngineHijackV3(lease: lease, response: self.response.unwrap(),
+            operation: self.request.operation, tty: self.request.tty, request: self.request,
+            primary_plan_digest: self.primary_plan_digest)
         self.lease = None
         self.context = None
         self.phase = WindowsDockerEngineExchangePhaseV3.Transferred

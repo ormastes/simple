@@ -1,0 +1,175 @@
+# Closed DATA projection. No value here is admission, custody or a launch grant.
+use std.common.contracts.container.execution_v2.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub enum LinuxFreshWorkloadActionV2:
+    PullImage
+    Create
+    Start
+    Inspect
+    Stop
+    Remove
+    Absence
+    ConfigurationBefore
+    ConfigurationImage
+    ConfigurationAfter
+    InputConfigurationBefore
+    InputConfigurationImage
+    InputConfigurationAfter
+
+pub struct LinuxFreshWorkloadCommandV2:
+    request: ContainerExecutionRequestV2
+    scope: ContainerHostScopeV2
+    action: LinuxFreshWorkloadActionV2
+    native_id: text
+    image: text
+    entrypoint: [text]
+    args: [text]
+    cpu_millis: i64
+    memory_bytes: i64
+    pid_limit: i64
+    timeout_ms: i64
+    helper_cpu_millis: i64
+    helper_memory_bytes: i64
+    observed_image_id: text = ""
+
+pub struct LinuxFreshHostContextV2:
+    native_machine_id: text
+    native_boot_id: text
+    architecture: text
+    owner_generation: i64
+
+pub enum LinuxFreshWorkloadClosureStateV2:
+    EmptyOriginalContainer
+    RemovedOriginalContainer
+
+# Diagnostic DATA from the genuine held subject. Never a collect/reap receipt
+# or a release grant; the upper owner must separately correlate its own call.
+pub struct LinuxFreshWorkloadClosureV2:
+    state: LinuxFreshWorkloadClosureStateV2
+    native_id: text
+    request_binding_digest: text
+    native_binding_digest: text
+    cgroup_device: i64
+    cgroup_inode: i64
+    cgroup_mount_id: i64
+    process_id: i64
+    process_start_ticks: i64
+    partition_identity_digest: text
+    owner_generation: i64
+
+fn workload_texts_v2(values: [text]) -> SdnValue:
+    var result: [SdnValue] = []
+    for value in values: result.push(SdnValue.String(value))
+    SdnValue.Array(result)
+
+pub fn linux_fresh_workload_action_name_v2(action: LinuxFreshWorkloadActionV2) -> text:
+    match action:
+        case LinuxFreshWorkloadActionV2.PullImage: "pull-image"
+        case LinuxFreshWorkloadActionV2.Create: "create"
+        case LinuxFreshWorkloadActionV2.Start: "start"
+        case LinuxFreshWorkloadActionV2.Inspect: "inspect"
+        case LinuxFreshWorkloadActionV2.Stop: "stop"
+        case LinuxFreshWorkloadActionV2.Remove: "remove"
+        case LinuxFreshWorkloadActionV2.Absence: "absence"
+        case LinuxFreshWorkloadActionV2.ConfigurationBefore: "configuration-before"
+        case LinuxFreshWorkloadActionV2.ConfigurationImage: "configuration-image"
+        case LinuxFreshWorkloadActionV2.ConfigurationAfter: "configuration-after"
+        case LinuxFreshWorkloadActionV2.InputConfigurationBefore: "input-configuration-before"
+        case LinuxFreshWorkloadActionV2.InputConfigurationImage: "input-configuration-image"
+        case LinuxFreshWorkloadActionV2.InputConfigurationAfter: "input-configuration-after"
+
+pub fn linux_fresh_workload_command_validate_v2(command: LinuxFreshWorkloadCommandV2) -> Result<(), text>:
+    val encoded = container_execution_request_encode_v2(command.request)?
+    val p = command.request.plan
+    val supplied = ContainerHostScopeV2(physical_host_id: p.physical_host_id, service_scope_id: p.service_scope_id,
+        boot_id: p.boot_id, provider_generation: p.provider_generation, native_machine_id: p.native_machine_id,
+        continuity_mode: p.continuity_mode, continuity_id: p.continuity_id)
+    if p.backend != "linux-podman" or container_host_scope_bytes_v2(supplied)? != container_host_scope_bytes_v2(command.scope)?:
+        return Err("fresh-workload-command-scope")
+    if command.action == LinuxFreshWorkloadActionV2.Create or command.action == LinuxFreshWorkloadActionV2.PullImage:
+        if command.native_id != "": return Err("fresh-workload-create-native-id-must-be-empty")
+    elif not builder_digest_valid_v1(command.native_id): return Err("fresh-workload-full-native-id-required")
+    val image_read = command.action == LinuxFreshWorkloadActionV2.ConfigurationImage or command.action == LinuxFreshWorkloadActionV2.InputConfigurationImage
+    if image_read:
+        val id = if command.observed_image_id.starts_with("sha256:"): command.observed_image_id.substring(7, command.observed_image_id.byte_len()) else: command.observed_image_id
+        if not builder_digest_valid_v1(id): return Err("fresh-workload-observed-image-id-required")
+    elif command.observed_image_id != "": return Err("fresh-workload-image-id-only-for-image-read")
+    if (command.cpu_millis < 1 or command.cpu_millis > 64000 or command.memory_bytes < 1 or
+            command.memory_bytes > 1125899906842624 or command.pid_limit < 1 or command.pid_limit > 4096 or
+            command.timeout_ms < 1 or command.timeout_ms > 30000 or command.helper_cpu_millis < 1 or
+            command.helper_cpu_millis > 64000 or command.helper_memory_bytes < 1 or command.helper_memory_bytes > 1125899906842624):
+        return Err("fresh-workload-command-budget")
+    linux_fresh_workload_registry_image_v2(command.image)?
+    if command.entrypoint.len() < 1 or command.entrypoint.len() > 32 or command.args.len() > 32:
+        return Err("fresh-workload-explicit-entrypoint-required")
+    for value in [command.image] + command.entrypoint + command.args:
+        if value.byte_len() > 4096 or value.contains("\0"): return Err("fresh-workload-command-argument")
+    # Restrictive comparison against exact canonical retained provider bytes.
+    # Full provider digest decoding remains the upper private admission's job.
+    val parsed = match sdn_parse_strict_v1(command.request.request_bytes, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 4, max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value.value
+        case Err(_): return Err("fresh-workload-command-request-syntax")
+    val fields = match parsed:
+        case SdnValue.Dict(value): value
+        case _: return Err("fresh-workload-command-request-shape")
+    val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("linux-oci-retained-request"),
+        "podUid": SdnValue.String(p.workload_uid), "attempt": SdnValue.Int(p.attempt), "operationId": SdnValue.String(p.operation_id),
+        "requestDigest": SdnValue.String(p.request_digest), "image": SdnValue.String(command.image), "bundlePath": SdnValue.String(""),
+        "command": workload_texts_v2(command.entrypoint), "args": workload_texts_v2(command.args),
+        "timeoutMs": SdnValue.Int(command.timeout_ms), "cpuLimitMillis": SdnValue.Int(command.cpu_millis),
+        "memoryLimitBytes": SdnValue.Int(command.memory_bytes), "pidLimit": SdnValue.Int(command.pid_limit),
+        "networkPolicy": SdnValue.String("none"), "filesystemPolicy": SdnValue.String("read-only"),
+        "buildInputRoot": SdnValue.String(""), "buildOutputRoot": SdnValue.String(""), "replaceEntrypoint": SdnValue.Bool(true),
+        "environment": SdnValue.Array([]), "workingDirectory": SdnValue.String("")}
+    # Optional V4 containment selector is immutable metadata only, not a runtime
+    # or kernel enforcement grant. User/terminal/mount modes remain unsupported.
+    if fields.contains_key("containmentProfileDigest"):
+        val digest = match fields["containmentProfileDigest"]:
+            case SdnValue.String(value): value
+            case _: return Err("fresh-workload-containment-selector")
+        if not builder_digest_valid_v1(digest): return Err("fresh-workload-containment-selector")
+        expected["version"] = SdnValue.Int(4)
+        expected["terminalMode"] = SdnValue.String("none")
+        expected["userUid"] = SdnValue.Int(-1)
+        expected["userGid"] = SdnValue.Int(-1)
+        expected["userNamespaceMode"] = SdnValue.String("")
+        expected["containmentProfileDigest"] = SdnValue.String(digest)
+    if (sdn_encode_canonical(SdnValue.Dict(expected)) + "\n" != command.request.request_bytes or
+            sdn_encode_canonical(parsed) + "\n" != command.request.request_bytes):
+        return Err("fresh-workload-command-request-fields-differ")
+    Ok(())
+
+# Registry-only platform-manifest pin. Local transports and short names cannot
+# select Host files or administrative registry search defaults.
+pub fn linux_fresh_workload_registry_image_v2(image: text) -> Result<(), text>:
+    val pin_parts: [text] = image.split("@sha256:")
+    if pin_parts.len() != 2 or not builder_digest_valid_v1(pin_parts[1]):
+        return Err("fresh-workload-registry-manifest-pin-required")
+    if image.byte_len() > 4096:
+        return Err("fresh-workload-registry-manifest-pin-required")
+    val parts = pin_parts[0].split("/")
+    if parts.len() < 2 or parts.len() > 32: return Err("fresh-workload-qualified-registry-required")
+    val host = parts[0].split(":")
+    if host.len() < 1 or host.len() > 2 or not host[0].contains("."):
+        return Err("fresh-workload-registry-host-required")
+    for label in host[0].split("."):
+        if label == "" or label.starts_with("-") or label.ends_with("-"): return Err("fresh-workload-registry-host-shape")
+        for byte in label.bytes():
+            if not ((byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 45):
+                return Err("fresh-workload-registry-host-shape")
+    if host.len() == 2:
+        val port = host[1].to_int() ?? -1
+        if port < 1 or port > 65535 or str(port) != host[1]: return Err("fresh-workload-registry-port")
+    for at in 1..parts.len():
+        val part = parts[at]
+        if part == "" or part == "." or part == "..": return Err("fresh-workload-registry-repository")
+        for byte in part.bytes():
+            if not ((byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or [45, 46, 95].contains(byte as i64)):
+                return Err("fresh-workload-registry-repository")
+    Ok(())

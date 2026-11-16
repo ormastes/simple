@@ -1,0 +1,151 @@
+use app.io.mod.{env_get, home, file_read_regular_no_follow_bounded}
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
+use app.orchestrator.server_config_load_v1.server_config_load_v1
+use app.orchestrator.controller_gateway_v1.{controller_gateway_config_load_v1,
+    controller_gateway_dispatch_v1, controller_gateway_header_v1, controller_gateway_response_v1,
+    ControllerGatewayRequestV1, controller_gateway_request_encode_v1}
+use app.orchestrator.host_identity_exchange_v1.host_identity_exchange_client_v1
+use app.orchestrator.server_ssh_profile_v1.server_ssh_profile_load_v1
+use app.orchestrator.server_ssh_transport_v1.{server_ssh_start_v1, server_ssh_poll_v1, server_ssh_cancel_v1}
+use app.orchestrator.server_ssh_relay_v1.{server_gateway_stdio_read_v1, server_gateway_stdio_write_v1}
+use std.common.config_core.server_context_resolve_v1.resolve_server_context_v1
+use std.common.config_core.server_context_types_v1.ResolvedServerV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.LocalGatewayHeaderV1
+
+fn server_error_v1(reason: text, uncertain: bool) -> OrchestratorValidationReplyV1:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("server-command-error"), "code": SdnValue.String(reason),
+        "reconciliationRequired": SdnValue.Bool(uncertain)}
+    OrchestratorValidationReplyV1(exit_code: if uncertain: 2 else: 1,
+        output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn server_optional_v1(value: text) -> text:
+    if value == "-": "" else: value
+
+pub fn server_selection_v1(args: [text]) -> Result<ResolvedServerV1, text>:
+    if args.len() < 6 or not ["host", "container"].contains(args[5]): return Err("server-selection-arguments")
+    val config = server_config_load_v1(server_optional_v1(args[1]))?
+    val injected_scope = env_get("SIMPLE_SERVER_CLIENT_SCOPE")
+    if injected_scope != "" and injected_scope != "container": return Err("server-client-scope-invalid")
+    resolve_server_context_v1(config, args[2], server_optional_v1(args[4]),
+        server_optional_v1(args[3]), args[5] == "container" or injected_scope == "container")
+
+pub fn orchestrator_server_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() == 0: return server_error_v1("server-command-required", false)
+    val resolve_only = args[0] == "server-resolve"
+    if (resolve_only and args.len() != 6) or (not resolve_only and (args[0] != "server-request" or args.len() != 8)):
+        return server_error_v1("usage: server-resolve <config|-> <consumer> <context|-> <server|-> <host|container>; server-request adds <profile> <request>", false)
+    val selected = server_selection_v1(args)
+    if selected.is_err(): return server_error_v1(selected.unwrap_err(), false)
+    val selection = selected.unwrap()
+    if resolve_only:
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("server-selection"),
+            "consumer": SdnValue.String(selection.consumer), "context": SdnValue.String(selection.context),
+            "server": SdnValue.String(selection.record.name), "selectionSource": SdnValue.String(selection.source),
+            "transport": SdnValue.String(selection.record.transport), "host": SdnValue.String(selection.record.host),
+            "port": SdnValue.Int(selection.record.port), "connected": SdnValue.Bool(false)}
+        return OrchestratorValidationReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    val source = file_read_regular_no_follow_bounded(args[7], 2097152)
+    if source.is_err(): return server_error_v1("server-request-unavailable", false)
+    orchestrator_server_source_v1(selection, args[6], source.unwrap())
+
+pub fn orchestrator_server_source_v1(selection: ResolvedServerV1, profile_path: text, source: text) -> OrchestratorValidationReplyV1:
+    val header = controller_gateway_header_v1(source)
+    if header.is_err(): return server_error_v1(header.unwrap_err(), false)
+    if selection.record.transport == "local":
+        val config = controller_gateway_config_load_v1(profile_path)
+        if config.is_err(): return server_error_v1(config.unwrap_err(), false)
+        val dispatched = controller_gateway_dispatch_v1(config.unwrap(), header.unwrap(), source)
+        if dispatched.is_err(): return server_error_v1(dispatched.unwrap_err(), false)
+        return dispatched.unwrap()
+    if selection.record.transport != "ssh": return server_error_v1("server-consumer-transport-unsupported", false)
+    val profile = server_ssh_profile_load_v1(profile_path)
+    if profile.error != "" or profile.cleanup.is_some() or profile.profile.is_none():
+        val reason = if profile.error != "": profile.error else: "server-profile-cleanup-unconfirmed"
+        var rejected = server_error_v1(reason, profile.cleanup.is_some())
+        rejected.transport_store_cleanup = profile.cleanup
+        return rejected
+    val started = server_ssh_start_v1(selection.record, profile.profile.unwrap(), header.unwrap(), source)
+    if started.is_err(): return server_error_v1(started.unwrap_err(), false)
+    var turn = started.unwrap()
+    var polls = 0
+    # Each poll is bounded by 10 ms; owner deadline matches the action budget.
+    val maximum_polls = if ["dispatch", "resume-execution"].contains(header.unwrap().action): 12200 else: 3200
+    while not turn.complete and turn.error == "" and polls < maximum_polls:
+        turn = server_ssh_poll_v1(turn)
+        polls = polls + 1
+    if not turn.complete:
+        turn = server_ssh_cancel_v1(turn)
+        var cleanup_polls = 0
+        while not turn.complete and cleanup_polls < 100:
+            turn = server_ssh_poll_v1(turn)
+            cleanup_polls = cleanup_polls + 1
+    if turn.error != "" or not turn.complete or turn.response_header.is_none():
+        var reply = server_error_v1(if turn.error != "": turn.error else: "server-transport-collection-unconfirmed", true)
+        reply.transport_cleanup = turn.lease
+        reply.transport_store_cleanup = turn.store_cleanup
+        return reply
+    if turn.response_header.unwrap().exit_code != 0:
+        return OrchestratorValidationReplyV1(exit_code: turn.response_header.unwrap().exit_code, output: turn.response_payload)
+    val validated = controller_gateway_response_v1(source, turn.response_payload)
+    if validated.is_err(): return server_error_v1(validated.unwrap_err(), true)
+    OrchestratorValidationReplyV1(exit_code: 0, output: validated.unwrap())
+
+fn server_identity_option_v1(args: [text], key: text) -> text:
+    var value = ""
+    var index = 1
+    while index + 1 < args.len():
+        if args[index] == key:
+            if value != "": return ""
+            value = args[index + 1]
+        index = index + 2
+    value
+
+pub fn orchestrator_identity_exchange_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() < 8 or not ["key-sendserver", "key-takeserver"].contains(args[0]):
+        return server_error_v1("identity-exchange-usage", false)
+    val selected = server_selection_v1(args)
+    if selected.is_err(): return server_error_v1(selected.unwrap_err(), false)
+    val selection = selected.unwrap()
+    if selection.record.transport != "ssh": return server_error_v1("identity-exchange-authenticated-ssh-required", false)
+    val key_args = [args[0]] + args.slice(7, args.len())
+    val server_name = server_identity_option_v1(key_args, "--server")
+    if server_name != selection.record.name: return server_error_v1("identity-exchange-selected-server-mismatch", false)
+    val controller = server_identity_option_v1(key_args, "--controller-id")
+    val uid = server_identity_option_v1(key_args, "--request-uid")
+    val action = if args[0] == "key-sendserver": "identity-register" else: "identity-server"
+    val profile_path = args[6]
+    host_identity_exchange_client_v1(key_args, \public_source:
+        val request = ControllerGatewayRequestV1(action: action, controller_id: controller,
+            request_uid: uid, source: public_source, ns: "", name: server_name, source_digest: "")
+        val encoded = controller_gateway_request_encode_v1(request)
+        if encoded.is_err(): return server_error_v1(encoded.unwrap_err(), false)
+        orchestrator_server_source_v1(selection, profile_path, encoded.unwrap())
+    )
+
+# Fixed SSH command. The request cannot select or override this local profile.
+# SSH account access and private installed file are prerequisites; allowlisted
+# signed execution still passes through the original domain authorization.
+pub fn orchestrator_gateway_stdio_v1() -> OrchestratorValidationReplyV1:
+    val explicit = env_get("SIMPLE_ORCHESTRATOR_GATEWAY_CONFIG")
+    val path = if explicit != "": explicit else: home() + "/.config/simple/orchestrator-gateway.sdn"
+    val config = controller_gateway_config_load_v1(path)
+    if config.is_err(): return server_error_v1(config.unwrap_err(), false)
+    val incoming = server_gateway_stdio_read_v1()
+    if incoming.is_err(): return server_error_v1(incoming.unwrap_err(), false)
+    val request = incoming.unwrap()
+    val dispatched = controller_gateway_dispatch_v1(config.unwrap(), request.header, request.payload)
+    var reply = if dispatched.is_err(): server_error_v1(dispatched.unwrap_err(), false) else: dispatched.unwrap()
+    reply = orchestrator_reply_cleanup_v2(reply)
+    val response = LocalGatewayHeaderV1(response: true, request_id: request.header.request_id,
+        action: "", operation_id: "", exit_code: reply.exit_code,
+        payload_bytes: reply.output.bytes().len(), handoff_metadata: "")
+    val written = server_gateway_stdio_write_v1(response, reply.output)
+    # Main must retain cleanup authority until process exit, and must not append
+    # human text to this binary frame. SSH status 0 means frame delivery only.
+    reply.output = ""
+    reply.exit_code = if written.is_ok(): 0 else: 2
+    reply

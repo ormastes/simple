@@ -90,11 +90,17 @@ pub fn rt_dict_get_fn(args: &[Value]) -> Result<Value, CompileError> {
     })?;
 
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
-        return Ok(key_value
-            .as_text_str()
-            .and_then(|key| map.get(key))
-            .map(Value::dict_entry_value_for_iteration)
-            .unwrap_or(Value::Nil));
+        let stored = key_value.as_text_str().and_then(|key| map.get(key));
+        // Names `f` like `m.get("f")` on a module namespace.
+        if let Some(Value::Function { def, .. }) = stored {
+            if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                && key_value.as_text_str() == Some(def.name.as_str())
+                && crate::interpreter::is_module_namespace_dict(map)
+            {
+                crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+            }
+        }
+        return Ok(stored.map(Value::dict_entry_value_for_iteration).unwrap_or(Value::Nil));
     }
 
     let dict = RuntimeValue::from_raw(dict_value.as_int()? as u64);
@@ -194,6 +200,7 @@ pub fn rt_dict_values_fn(args: &[Value]) -> Result<Value, CompileError> {
         )
     })?;
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
+        crate::interpreter::interpreter_call::gate_module_namespace_handout(map)?;
         return Ok(Value::array(
             crate::value::dict_entries_ordered(map).into_iter().map(|(_, value)| Value::dict_entry_value_for_iteration(value)).collect::<Vec<Value>>(),
         ));

@@ -1778,6 +1778,8 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
             // Helper to call setrlimit
             #[cfg(target_os = "linux")]
             fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
+                // 32-bit targets have a 32-bit rlim_t: saturate to RLIM_INFINITY rather than truncate.
+                let value = libc::rlim_t::try_from(value).unwrap_or(libc::RLIM_INFINITY);
                 let rlim = libc::rlimit {
                     rlim_cur: value,
                     rlim_max: value,
@@ -2043,6 +2045,21 @@ pub unsafe extern "C" fn rt_process_run_bounded_tuple(
     max_output_bytes: i64,
 ) -> *mut i64 {
     process_result_block(rt_process_run_bounded(cmd_ptr, cmd_len, args, timeout_ms, max_output_bytes))
+}
+
+/// Raw 3-word block (stdout, stderr, untagged status) for
+/// `rt_process_run_timeout` (C twin: `rt_process_run_timeout_tuple`).
+///
+/// # Safety
+/// Same contract as [`rt_process_run_timeout`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run_timeout_tuple(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+    timeout_ms: i64,
+) -> *mut i64 {
+    process_result_block(rt_process_run_timeout(cmd_ptr, cmd_len, args, timeout_ms))
 }
 
 /// Repack a (stdout, stderr, status) result tuple: slots 0/1 keep their
