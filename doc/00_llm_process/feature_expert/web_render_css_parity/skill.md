@@ -2211,3 +2211,11 @@ Gates and remaining gaps:
 - css-paint 5.68% = 38,905 px: ~75% glyph residual (LCD, vertical hinting, pen phase; excluded), 16.7% vertical drift (everything below the h3 sits 1 row low), ~7% the 18.72px h3 (integer font-size, 5 px wide), ~0.4% box edges. Table and fix sketch: `doc/08_tracking/bug/web_render_css_paint_residual_2026-11-17.md`.
 - **Trap — a 1-row text offset on a plain `<p>` is not a baseline bug.** A probe page of `<p>` blocks matches Chrome ink rows exactly at 12/16/20/24 px; the drift comes from em margins (0.83em, 1em) and line-height 28.08 rounded box by box in i32 layout (Chrome 331.33 vs Simple 332). Do not touch the glyph baseline; carry a fractional margin remainder through the block cursor instead (all block-flow paths together).
 - **Trap — `--dump-dom` without `--hide-scrollbars` lays out 15 px narrower.** Use only the y column of such a run.
+
+## 2026-11-17 — flex-row main axis keeps fractions; edges are snapped
+
+- **Trap — a row of `<button>` flex items drifted right one pixel per item.** `form_control_label_width_px` (layout_foundation) rounds each label UP, so tab-bar buttons were 74/55/90/80/109/78 wide against Chrome's 73.55/54.30/89.13/79.5/108.36/77.28, and by the 7th the left edge was 582 vs Chrome 578.
+- Fix: `form_control_label_width_milli_px` measures the label unrounded (1/36 px oversample, floored to LayoutUnit 1/64), `form_control_button_frac_delta_milli_px` is the gap to the whole-px width, and the row loop in `layout_engine` (`frac_adj_milli`) snaps EDGES: `left = round(x)`, `right = round(x + w)`, `width = right - left`. The whole-px chain `cx` is unchanged, so only flex-row main-axis drawing positions move; block axis, wrap rows, reversed rows and the font renderer are untouched.
+- Chrome 159 tab-bar (900 wide) snapped x,w: 48,74 130,54 192,89 289,79 376,109 493,77 578,73. Pinned in `flex_row_fractional_positions_chrome159_spec`.
+- **Trap — the snapped width is NOT `round(w)`.** `289 + 79.5` is 368.47, so the 4th button is 79 wide, not 80. Always `round(right) - round(left)`.
+- **Trap — oversample resolution matters.** At 1/30 px the four-label error (+0.03 px) pushed button 5's left from 376.47 over the .5 boundary to 377; 1/36 px plus a floor to 1/64 keeps it at 376.
