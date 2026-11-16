@@ -1324,13 +1324,15 @@ describe "SimpleWebRenderer":
         # @capture(gui_image): retained evidence for scenario "preserves cascaded font families in text Draw IR computed style"
         step("Verify: preserves cascaded font families in text Draw IR computed style")
         val html = "<html><head><style>.parent{font-family:\"Noto Sans Mono\",monospace}.override{font-family:Pixelify Sans,sans-serif}.short{font:italic 700 11.5px   /   20px   \"Roboto Slab\",serif}</style></head><body><div class='parent'><span>Inherited</span><span class='override'>Override</span><span class='short'>Shorthand</span></div></body></html>"
-        val composition = simple_web_layout_render_html_draw_ir(html, 160, 64)
+        # 320 wide: the spans have no break opportunity, so "Shorthand" starts
+        # past x=160 (engine 163, Chrome 155.8) and a 160 surface culls it.
+        val composition = simple_web_layout_render_html_draw_ir(html, 320, 64)
         val commands = composition.batches[0].commands
         val inherited = _draw_ir_text_command(commands, "Inherited")
         val overridden = _draw_ir_text_command(commands, "Override")
         val shorthand = _draw_ir_text_command(commands, "Shorthand")
 
-        expect(composition.schema).to_equal("simple-draw-ir-v2")
+        expect(composition.schema).to_equal("simple-draw-ir-v3")
         expect(_draw_ir_style_value(inherited, "font-family")).to_equal("\"Noto Sans Mono\",monospace")
         expect(_draw_ir_style_value(overridden, "font-family")).to_equal("Pixelify Sans,sans-serif")
         expect(_draw_ir_style_value(shorthand, "font-family")).to_equal("\"Roboto Slab\",serif")
@@ -1339,9 +1341,11 @@ describe "SimpleWebRenderer":
         expect(_draw_ir_style_value(shorthand, "font-style")).to_equal("italic")
         expect(_draw_ir_style_value(shorthand, "font-weight")).to_equal("bold")
         val identity = _draw_ir_style_value(inherited, "font-identity")
-        val advances = _draw_ir_style_value(inherited, "font-advance-widths")
         if identity != "":
-            expect(advances).to_contain(",")
+            # Advances travel in the typed `advance_widths` field (Engine2D
+            # reads it first); the `font-advance-widths` style prop is no
+            # longer emitted. Same bar as the old `,` check: two or more.
+            expect(inherited.advance_widths.len()).to_be_greater_than(1)
         else:
             # Font runtime absence keeps the established bitmap metrics path.
             expect(inherited.advance_widths.len()).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
