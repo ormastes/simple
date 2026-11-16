@@ -159,9 +159,13 @@ fn _vulkan_font_quad_has_lcd_cell(batch: FontRenderBatch, q: FontRenderQuad) -> 
         row = row + 1
     false
 
+# reason: stable identity string of a trimmed quad's destination and atlas rect
+# @allow(primitive_api)
 fn vulkan_font_quad_key(q: FontRenderQuad) -> text:
     "{q.dst_x},{q.dst_y},{q.width},{q.height},{q.atlas_x},{q.atlas_y}"
 
+# reason: pixel coordinates and clip/surface extents of a quad batch, same units as the sibling clip helpers
+# @allow(primitive_api)
 fn vulkan_font_lcd_veto_keys(quads: [FontRenderQuad], kept: [FontRenderQuad], origin_x: i32,
                              origin_y: i32, clip_x: i32, clip_y: i32, clip_w: i32,
                              clip_h: i32, surface_w: i32, surface_h: i32) -> [text]:
@@ -198,9 +202,13 @@ fn vulkan_font_lcd_veto_keys(quads: [FontRenderQuad], kept: [FontRenderQuad], or
         ki = ki + 1
     keys
 
+# reason: reads header word 7 bit 31 of the packed params bytes
+# @allow(primitive_api)
 fn vulkan_font_packed_has_lcd_trailer(packed: [u8]) -> bool:
     packed.len() >= 32 and (packed[31].to_i64() & 128) != 0
 
+# reason: pixel origin and surface extents plus the packed params bytes, same units as vulkan_font_packed_params
+# @allow(primitive_api)
 fn vulkan_font_packed_params_lcd(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
                                  dst_width: i32, dst_height: i32, lcd: bool,
                                  veto_keys: [text]) -> [u8]:
@@ -1846,7 +1854,11 @@ impl VulkanBackend:
                 vulkan_font_overlap_note(batch.quads.len().to_i64(),
                     vulkan_font_count_overlapping_quads(batch.quads))
             val _t_packed = vulkan_timing_now_us()
-            val packed = vulkan_font_packed_params_lcd(batch, origin_x, origin_y, width, height, true, self.font_lcd_veto_keys)
+            # Only the pinned SPIR-V kernel knows the LCD trailer and the X = 1 grid.
+            # The `runtime-glsl` kernel is the common gray source (one 64-wide
+            # group per glyph, no stride loop): it would draw 64 pixels per glyph.
+            val lcd_kernel = pipeline.artifact_mode == "precompiled-spirv"
+            val packed = vulkan_font_packed_params_lcd(batch, origin_x, origin_y, width, height, lcd_kernel, self.font_lcd_veto_keys)
             vulkan_timing_add(VK_T_FONT_PACKED_PARAMS, _t_packed)
             val pool_index = self.pending_font_params.len()
             val use_packed_pool = self.frame_batching_enabled and not self.font_oracle_mode

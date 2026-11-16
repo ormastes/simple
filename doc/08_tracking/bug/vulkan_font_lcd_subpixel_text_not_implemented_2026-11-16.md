@@ -133,11 +133,33 @@ Left open:
 2. The shipped kernel is now a superset of the frozen common GLSL
    (`font_atlas_composite_vulkan_glsl_source`, sha256 `8a5c5422...`, which
    `check-portable-compute-toolchains.shs` still compiles to `4b5f44e2...`). The
-   `runtime-glsl` fallback (no pinned SPIR-V) and the OpenCL/CUDA/Metal twins
-   still paint an LCD atlas cell as gray; they are not admitted by
-   `_lcd_text_active()`.
+   `runtime-glsl` fallback (no pinned SPIR-V) keeps the legacy params layout and
+   one-group-per-64-pixels grid (the packer is told `lcd = false` unless
+   `artifact_mode == "precompiled-spirv"`; with the trailer and X = 1 it would
+   have drawn only 64 pixels per glyph) and paints an LCD atlas cell as gray
+   alpha, as do the OpenCL/CUDA/Metal twins, which `_lcd_text_active()` does not
+   admit. Not exercised by a test (needs a no-SPIR-V install).
 3. LCD on a trimmed quad gates on the visible pixels' opacity, the CPU on the
    whole untrimmed quad's; equal on an opaque frame, different on a translucent
    one (not exercised).
 4. More than 32 distinct LCD text colours in one batch is refused and falls to
    the per-quad-readback CPU suffix (correct, slow).
+5. Cost (lavapipe, 900x760, seed `cargo-target-webrender-vk`, three text pages,
+   first / second render in one process, seconds). Base 16.2/6.8, 12.0/5.4, 6.7/5.4;
+   head with `SIMPLE_WEB_LCD_TEXT=0` 16.5/7.1, 12.1/5.6, 6.9/5.5 (gray unchanged
+   within ~5 %); head LCD on 61.6/10.8, 23.1/7.5, 13.4/7.5. LCD text is about 60 %
+   slower steady and several times slower cold, the same order as the documented
+   CPU LCD cost (+45-51 %); the share between LCD glyph raster, the host quad
+   scan and the kernel was not profiled. The pooled params buffers grow from
+   114,720 to 229,408 bytes per batch slot for every page, gray ones included.
+6. Unexplained, flagged for review: peak RSS of `web_device_scale_spec` (and the
+   probe above) is 1.1 GB on base and with `SIMPLE_WEB_LCD_TEXT=0`, but 246 MB on
+   head with LCD on, with identical pixels (the specs pin exact bytes and ink
+   counts). `simple_web_renderer_spec` shows the same 1.4 GB -> 246 MB with equal
+   wall time. A 300k-call micro of `engine2d_lcd_s32_tables` moves 432 MB -> 297 MB
+   when called from the new helper module instead of `engine.spl`, so the table
+   cache living in the giant module is a suspect, not a proven cause.
+7. The two "clip box" and "bottom edge" 64x64 probe pages report
+   `vector_font_device_executed=false` with LCD on AND off, so that fallback to the
+   CPU suffix is not caused by this change; at 900x760 the same constructs ran on
+   the device on base and head.
