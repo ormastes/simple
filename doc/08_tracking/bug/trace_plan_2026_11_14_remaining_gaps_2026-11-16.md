@@ -28,8 +28,6 @@ flagged, but they break the "no primitive in public API" requirement:
   unwrap at use sites, keep the SDN wire format byte-identical (codec specs).
 
 ## 3. MCP / ctx
-
-- `src/app/mcp/main_lazy_ctx_tools.spl` keeps 12 `primitive_api` findings and
   23 lint errors (unchanged by waves 1–3).
 - `simple_ctx_purge` takes no lock; an append racing an applied purge can be
   lost (documented in `doc/07_guide/app/mcp/mcp.md`).
