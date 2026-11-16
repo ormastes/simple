@@ -6,6 +6,10 @@ use std.nogc_sync_mut.database.wal_segmented.DatabaseWalRevisionV1
 use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
 use std.nogc_sync_mut.container.machine_fresh_epoch_history_v1.machine_fresh_epoch_read_initial_v1
 use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.machine_fresh_workload_rows_equal_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 
 pub struct MachineFreshWorkloadSegmentV2:
     revision: DatabaseWalRevisionV1
@@ -56,4 +60,39 @@ pub fn machine_fresh_workload_history_verify_v2(storage: MachineStorageOwnerV1,
         sequence = revision.last_sequence + 1
         parent = revision.digest
     if storage.wal_head_v1()? != head: return Err("machine-fresh-workload-head-changed")
+    Ok(())
+
+# milestone_0021 PR3 (D19 / P2R1-F7): the evidence digest of a settled lifecycle's released machine-charge row
+# (rec2:170-172 workload, wsr:212-213 workspace) as COMMITTED in its history, bound to the committing revision.
+# The latest segment that carries a workload/workspace charge row decides; that row must be a released charge.
+# Callers replay the history against the store first (machine_fresh_workload_history_verify_v2).
+pub fn machine_fresh_workload_released_charge_digest_v3(segments: [MachineFreshWorkloadSegmentV2]) -> Result<text, text>:
+    var index = segments.len()
+    while index > 0:
+        index = index - 1
+        for entry in segments[index].entries:
+            if entry.table_name == "machine-container-reservations-v1" and
+                    (entry.row_key.starts_with("workload-") or entry.row_key.starts_with("workspace-")):
+                machine_fresh_released_charge_check_v3(entry.data)?
+                return Ok(sha256_text("machine-fresh-released-charge-v3\n" + segments[index].revision.digest + "\n" +
+                    entry.row_key + "\n" + entry.data))
+    Err("machine-fresh-workload-charge-row-missing")
+
+fn machine_fresh_released_charge_check_v3(data: text) -> Result<(), text>:
+    val parsed = match sdn_parse_strict_v1(data, SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 3,
+            max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(issue): return Err("machine-fresh-workload-charge-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("machine-fresh-workload-charge-not-released")
+    if not fields.contains_key("kind") or not fields.contains_key("state"): return Err("machine-fresh-workload-charge-not-released")
+    val kind = match fields["kind"]:
+        case SdnValue.String(value): value
+        case _: ""
+    val state = match fields["state"]:
+        case SdnValue.String(value): value
+        case _: ""
+    if (kind != "machine-fresh-workload-charge" and kind != "machine-fresh-workspace-charge") or state != "released":
+        return Err("machine-fresh-workload-charge-not-released")
     Ok(())

@@ -22,8 +22,8 @@ use std.container.{simple_container_open_lent_v4, simple_container_take_workspac
     simple_container_adopt_lent_workspace_reader_v3, simple_container_advance_workload_v3,
     simple_container_set_lifecycle_root_v3, simple_container_epoch_current_v3, simple_container_helper_dirs_v3,
     simple_container_validate_helper_template_v3, simple_container_settle_workspace_v3,
-    simple_container_return_settled_workspace_source_v3, simple_container_close_workload_v3,
-    simple_container_close_epoch_v3}
+    simple_container_released_charge_digest_v3, simple_container_return_settled_workspace_source_v3,
+    simple_container_close_workload_v3, simple_container_close_epoch_v3}
 use std.container.{LinuxFreshWorkloadOwnerV2, LinuxWorkspaceRootBorrowV3, LinuxOciRequestV1,
     linux_oci_request_digest_v1, linux_oci_retained_request_encode_v1, linux_oci_retained_request_decode_v1}
 use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
@@ -40,7 +40,14 @@ use std.common.contracts.orchestration.host_execute_associated_v3.{HostExecuteAs
 use std.common.contracts.orchestration.host_execution_association_v3.host_execution_association_encode_v3
 use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
 use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
-use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2,
+    distributed_grant_digest_v2}
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_decode_signed_grant_v2,
+    distributed_encode_signed_approval_v2, distributed_decode_signed_approval_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_verify_grant_approval_from_snapshot_v2}
 use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
 use std.common.contracts.provider_cli.adapter_v1.{decode_provider_cli_provider_v1, provider_cli_probe_count_v1,
     provider_cli_probe_argv_v1}
@@ -77,6 +84,7 @@ use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 # 30 s: the collector deadline (provider_cli_container_probe_v1.spl:302-303) and the per-probe timeout cap.
 const HOST_AGENT_PROBE_TIMEOUT_MS_V4: i64 = 30000
 const HOST_AGENT_INVOKE_MAX_BYTES_V4: i64 = 2097152
+const HOST_AGENT_CANCEL_MAX_BYTES_V4: i64 = 65536
 
 # The agent owner (DESIGN section 2). Transfer holder: exactly one of `container`, `fresh`, `collector` is Some
 # while the transfer is held. Fields after `error` are the bounded-step cursors (deviation D17).
@@ -107,6 +115,8 @@ pub struct HostLinuxServiceAgentV4:
     intent: Option<ProviderCliInteractiveIntentDataV1> = None
     created: Option<RuntimeIdentityV1> = None
     probe_settles: [text] = []
+    # milestone_0021 PR3 (D19): the agent lifecycle's released machine-charge row digest, read at stage `settle`.
+    machine_settle: text = ""
     outcome: text = ""
     exit_digest: text = ""
     destroy_digest: text = ""
@@ -114,6 +124,8 @@ pub struct HostLinuxServiceAgentV4:
     # A probe record was reserved by Select and is not yet settled; the current lifecycle is closed (probe-close
     # done, advance not yet).
     probe_record: bool = false
+    # P3R1-F4: the probe Settle committed and its released-charge read is still outstanding (resumable).
+    probe_settle_read: bool = false
     lifecycle_closed: bool = false
 
 # Canonical invoke payload: {operation_id, manifest bytes}. The manifest is untrusted transport; only the
@@ -189,6 +201,115 @@ pub fn host_agent_invoke_request_decode_v4(source: text) -> Result<HostAgentInvo
     # Canonical bytes only (version and kind included).
     if host_agent_invoke_request_encode_v4(value)? != source: return Err("linux-host-agent-invoke-noncanonical")
     Ok(value)
+
+# ---- controller-signed cancel (milestone_0021 PR3a, review P3R1-F1) ----
+
+# Canonical cancel payload: the run's operation id and association digest, plus the controller-signed
+# operation/grant/approval triple. Never the invoke bytes: those carry no signature and anyone who saw an
+# invoke could replay them as a cancel. The operation is DERIVED from the archived signed execute's envelope
+# (host_agent_cancel_operation_v4), so a cancel can only stop the run that execute admitted.
+pub struct HostAgentCancelRequestV4:
+    operation_id: text
+    association_digest: text
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+fn host_agent_cancel_payload_digest_v4(operation_id: text, association_digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-cancel"),
+        "operationId": SdnValue.String(operation_id), "associationDigest": SdnValue.String(association_digest)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# The cancel's own operation kind (precedent: controller_desired_cancel_operation_v1): same principal, project,
+# host, environment and budget as the archived execute, a distinct id and kind, a payload digest bound to the
+# operation id and the association digest, and the LIVE policy revision, revocation epoch and session generation
+# so a controller can still cancel after a session rollover while an old-session packet cannot be replayed.
+pub fn host_agent_cancel_operation_v4(execute: OperationEnvelopeV2, association_digest: text,
+        context: HostReservationAuthorizationContextV1) -> Result<OperationEnvelopeV2, text>:
+    if not builder_digest_valid_v1(association_digest): return Err("linux-host-agent-cancel-association")
+    var operation = execute
+    operation.id = "cancel-" + execute.id
+    operation.operation = "host_agent_cancel_v4"
+    operation.payload_digest = host_agent_cancel_payload_digest_v4(execute.id, association_digest)
+    operation.policy_revision = context.policy_revision
+    operation.revocation_epoch = context.revocation_epoch
+    operation.session_generation = context.session_generation
+    val valid = distributed_encode_operation_v2(operation)?
+    Ok(operation)
+
+pub fn host_agent_cancel_request_encode_v4(value: HostAgentCancelRequestV4) -> Result<text, text>:
+    if not builder_identifier_valid_v1(value.operation_id): return Err("linux-host-agent-cancel-operation")
+    if not builder_digest_valid_v1(value.association_digest): return Err("linux-host-agent-cancel-association")
+    if (value.operation.operation != "host_agent_cancel_v4" or value.operation.id != "cancel-" + value.operation_id or
+            value.operation.payload_digest != host_agent_cancel_payload_digest_v4(value.operation_id, value.association_digest)):
+        return Err("linux-host-agent-cancel-operation-mismatch")
+    if (not value.signed.grant.operations.contains("host_agent_cancel_v4") or
+            value.approval.request_digest != sha256_text(distributed_encode_operation_v2(value.operation)?) or
+            value.approval.grant_digest != distributed_grant_digest_v2(value.signed.grant)?):
+        return Err("linux-host-agent-cancel-proof-binding")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-cancel"),
+        "operationId": SdnValue.String(value.operation_id), "associationDigest": SdnValue.String(value.association_digest),
+        "operation": SdnValue.String(distributed_encode_operation_v2(value.operation)?),
+        "signed": SdnValue.String(distributed_encode_signed_grant_v2(value.signed)?),
+        "approval": SdnValue.String(distributed_encode_signed_approval_v2(value.approval)?)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > HOST_AGENT_CANCEL_MAX_BYTES_V4: return Err("linux-host-agent-cancel-size")
+    Ok(bytes)
+
+fn host_agent_cancel_text_v4(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("linux-host-agent-cancel-field:" + name)
+
+pub fn host_agent_cancel_request_decode_v4(source: text) -> Result<HostAgentCancelRequestV4, text>:
+    if source.byte_len() == 0 or source.byte_len() > HOST_AGENT_CANCEL_MAX_BYTES_V4: return Err("linux-host-agent-cancel-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: HOST_AGENT_CANCEL_MAX_BYTES_V4,
+            max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(issue): return Err("linux-host-agent-cancel-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("linux-host-agent-cancel-object")
+    if fields.len() != 7: return Err("linux-host-agent-cancel-fields")
+    for name in ["version", "kind", "operationId", "associationDigest", "operation", "signed", "approval"]:
+        if not fields.contains_key(name): return Err("linux-host-agent-cancel-fields")
+    val value = HostAgentCancelRequestV4(operation_id: host_agent_cancel_text_v4(fields, "operationId")?,
+        association_digest: host_agent_cancel_text_v4(fields, "associationDigest")?,
+        operation: distributed_decode_operation_v2(host_agent_cancel_text_v4(fields, "operation")?)?,
+        signed: distributed_decode_signed_grant_v2(host_agent_cancel_text_v4(fields, "signed")?)?,
+        approval: distributed_decode_signed_approval_v2(host_agent_cancel_text_v4(fields, "approval")?)?)
+    # Canonical bytes only (version and kind included).
+    if host_agent_cancel_request_encode_v4(value)? != source: return Err("linux-host-agent-cancel-noncanonical")
+    Ok(value)
+
+# Gate order of the cancel authorization (mirrors the associated execute): the request names the held run; the
+# archived execute's association digest equals the request's and the held agent's; the operation is exactly the
+# one derived from the archived execute under the live context; the issuer is the configured controller; and
+# issuer and approver signatures verify under the installed authority snapshot. Pure: the owner glue supplies
+# the archived execute, the held ids and the live context, and archives the packet only after this returns Ok.
+pub fn host_linux_service_agent_cancel_authorize_v4(snapshot: DistributedAuthoritySnapshotV2, controller_ref: text,
+        request: HostAgentCancelRequestV4, execute_operation: OperationEnvelopeV2, execute_association_digest: text,
+        held_operation_id: text, held_association_digest: text,
+        context: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    if request.operation_id != held_operation_id or execute_operation.id != held_operation_id:
+        return Err("linux-host-agent-incarnation-consumed")
+    if (request.association_digest != execute_association_digest or
+            execute_association_digest != held_association_digest):
+        return Err("linux-host-agent-cancel-association")
+    val expected = host_agent_cancel_operation_v4(execute_operation, execute_association_digest, context)?
+    if distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(expected)?:
+        return Err("linux-host-agent-cancel-operation-mismatch")
+    if request.signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    distributed_verify_grant_approval_from_snapshot_v2(snapshot, request.signed, request.approval, request.operation,
+        context.grant_clock, snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)
+
+# No-replace archive of the signed cancel: Ok(true) is an exact-bytes retry (idempotent, answered without a
+# second verification); a different packet for an archived cancel is a conflict.
+pub fn host_agent_cancel_archive_check_v4(archived: Option<text>, source: text) -> Result<bool, text>:
+    if archived.is_none(): return Ok(false)
+    if archived.unwrap() != source: return Err("linux-host-agent-cancel-packet-conflict")
+    Ok(true)
 
 # ---- stored-bytes gates (section 2 gates 2-5; gate 1 and the archive/association reads are the service owner's) ----
 
@@ -385,16 +506,6 @@ fn host_agent_progress_v4(reply: MachineFreshProbeReplyV3) -> Result<bool, text>
         case MachineFreshProbeReplyV3.Progress(actual): actual
         case _: Err("linux-host-agent-probe-turn-mismatch")
 
-# Settle digest of one probe: there is no transfer accessor for the released machine-charge row
-# (rec2:170-172), so the evidence binds the probe's own identity and its receipt (deviation D19).
-fn host_agent_probe_settle_digest_v4(request: ContainerExecutionRequestV2, receipt: ProviderCliContainedProbeReceiptV2,
-        index: i64) -> Result<text, text>:
-    val snapshot = receipt.snapshot_v2()?
-    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-agent-probe-settled"),
-        "probeIndex": SdnValue.Int(index), "requestDigest": SdnValue.String(request.plan.request_digest),
-        "transcriptDigest": SdnValue.String(snapshot.base.transcript_digest), "charge": SdnValue.String("released")}
-    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
-
 fn host_agent_probe_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
         input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
     var state = agent
@@ -477,13 +588,19 @@ fn host_agent_probe_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapaci
             state.cleanup_action = "absence"
         return host_agent_pending_v4(state, capacity)
     if state.stage == "probe-settle":
-        val moved = host_agent_probe_call_v4(state, request, MachineFreshProbeCallV3.Settle)
-        state = moved.0
-        val settled = host_agent_completion_v4(moved.1)
-        if settled.is_err(): return host_agent_wedged_v4(state, capacity, settled.unwrap_err())
-        state.probe_record = false
-        val digest = host_agent_probe_settle_digest_v4(request, state.receipts[index], index)
-        if digest.is_err(): return host_agent_failed_v4(state, capacity, digest.unwrap_err())
+        if not state.probe_settle_read:
+            val moved = host_agent_probe_call_v4(state, request, MachineFreshProbeCallV3.Settle)
+            state = moved.0
+            val settled = host_agent_completion_v4(moved.1)
+            if settled.is_err(): return host_agent_wedged_v4(state, capacity, settled.unwrap_err())
+            state.probe_record = false
+            state.probe_settle_read = true
+        # D19 (PR3): the probe lifecycle's released machine-charge row, replayed from the store by the transfer.
+        # P3R1-F4: Settle is committed once `probe_settle_read` is set, so a refused read keeps the stage and
+        # retries ONLY the read on the next call (never a second Settle), like stage `settle` below.
+        val digest = simple_container_released_charge_digest_v3(state.container.unwrap())
+        if digest.is_err(): return host_agent_turn_v4(state, capacity, "", digest.unwrap_err(), true)
+        state.probe_settle_read = false
         state.probe_settles.push(digest.unwrap())
         state.stage = "probe-close"
         return host_agent_pending_v4(state, capacity)
@@ -783,6 +900,11 @@ fn host_agent_release_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapa
         # A refusal here precedes any write (T-01 gates): the stage resumes on the next call.
         val settled = simple_container_settle_workspace_v3(state.container.unwrap())
         if settled.is_err(): return host_agent_turn_v4(state, capacity, "", settled.unwrap_err(), true)
+        # D19 (PR3): the released workspace charge row. The settle above is idempotent (settled -> Ok), so a
+        # refused read resumes this stage on the next call.
+        val charge = simple_container_released_charge_digest_v3(state.container.unwrap())
+        if charge.is_err(): return host_agent_turn_v4(state, capacity, "", charge.unwrap_err(), true)
+        state.machine_settle = charge.unwrap()
         state.stage = "source-return"
         return host_agent_pending_v4(state, capacity)
     if state.stage == "source-return":
@@ -793,21 +915,12 @@ fn host_agent_release_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapa
     if state.stage == "host-settle": return host_agent_host_settle_v4(state, capacity, input)
     host_agent_wedged_v4(state, capacity, "linux-host-agent-stage-invalid")
 
-# The machine settle digest: no transfer accessor exposes the wsr:212-213 settle row, so the evidence binds the
-# settled workload's own identity (deviation D19, same as the probe settles).
-fn host_agent_machine_settle_digest_v4(input: HostAgentStepInputV4) -> text:
-    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-agent-workspace-settled"),
-        "operationId": SdnValue.String(input.execute.prepare.prepare.operation.id),
-        "requestDigest": SdnValue.String(input.execute.association.execution.plan.request_digest),
-        "charge": SdnValue.String("released")}
-    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
-
 pub fn host_linux_service_agent_outcome_v4(agent: HostLinuxServiceAgentV4, input: HostAgentStepInputV4) -> HostAgentOutcomeRecordV4:
     HostAgentOutcomeRecordV4(operation_id: input.execute.prepare.prepare.operation.id, fence: input.fence,
         association_digest: agent.association_digest, payload_digest: agent.payload_digest, outcome: agent.outcome,
         exit_observation_digest: agent.exit_digest, probe_settle_digests: agent.probe_settles,
         selection_binding_digest: input.manifest.base.selection_binding_digest, destroy_digest: agent.destroy_digest,
-        absence_result: "absent", machine_settle_digest: host_agent_machine_settle_digest_v4(input), source_return: "returned")
+        absence_result: "absent", machine_settle_digest: agent.machine_settle, source_return: "returned")
 
 fn host_agent_host_settle_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
         input: HostAgentStepInputV4) -> HostLinuxServiceAgentTurnV4:
@@ -858,6 +971,48 @@ pub fn host_linux_service_agent_step_v4(agent: HostLinuxServiceAgentV4, capacity
     if (stage == "stopping" or stage == "settle" or stage == "source-return" or stage == "host-settle"):
         return host_agent_release_step_v4(agent, capacity, input)
     host_agent_native_step_v4(agent, capacity, input)
+
+# ---- cancel (milestone_0021 PR3: the re-pointed V7 cancel handler, D21) ----
+
+pub struct HostLinuxServiceAgentCancelV4:
+    agent: HostLinuxServiceAgentV4
+    response: text
+    error: text
+    effect_attempted: bool
+
+# P3R1-F5: the exit marker is bound to the digest of the controller-signed cancel packet that caused it, so the
+# outcome record carries signed evidence of why the run failed (still not an observed runtime exit).
+fn host_agent_cancel_digest_v4(agent: HostLinuxServiceAgentV4, cancel_digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-agent-cancelled"),
+        "operationId": SdnValue.String(agent.operation_id), "associationDigest": SdnValue.String(agent.association_digest),
+        "cancelDigest": SdnValue.String(cancel_digest)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# Cancel is a state transition only (no container, journal or clock): a running, idle agent takes the same exit the
+# signed window's end takes (stage `stopping`, outcome `failed`), and the step driver then runs Destroy and the 3.6
+# settle on later invoke calls. From `stopping` on it is a no-op. A pending running step and every earlier stage
+# are refused unchanged: their machine records settle through their own stages, bounded by the signed window.
+pub fn host_linux_service_agent_request_cancel_v4(agent: HostLinuxServiceAgentV4, cancel_digest: text) -> HostLinuxServiceAgentCancelV4:
+    var state = agent
+    if not builder_digest_valid_v1(cancel_digest):
+        return HostLinuxServiceAgentCancelV4(agent: state, response: "", error: "linux-host-agent-cancel-digest", effect_attempted: false)
+    if state.stage == "wedged" or state.stage == "failed":
+        return HostLinuxServiceAgentCancelV4(agent: state, response: "",
+            error: if state.error != "": state.error else: "linux-host-agent-" + state.stage, effect_attempted: true)
+    if ["stopping", "settle", "source-return", "host-settle", "settled"].contains(state.stage):
+        return HostLinuxServiceAgentCancelV4(agent: state, response: host_linux_service_agent_reply_v4(state), error: "",
+            effect_attempted: false)
+    if state.stage != "running":
+        return HostLinuxServiceAgentCancelV4(agent: state, response: "", error: "linux-host-agent-cancel-stage:" + state.stage,
+            effect_attempted: false)
+    if state.pending:
+        return HostLinuxServiceAgentCancelV4(agent: state, response: "", error: "linux-host-agent-cancel-pending",
+            effect_attempted: false)
+    state.outcome = "failed"
+    state.exit_digest = host_agent_cancel_digest_v4(state, cancel_digest)
+    state.stage = "stopping"
+    HostLinuxServiceAgentCancelV4(agent: state, response: host_linux_service_agent_reply_v4(state), error: "",
+        effect_attempted: false)
 
 # ---- staged close (3.7), agent half ----
 
@@ -984,3 +1139,6 @@ export host_linux_service_agent_budget_v4, host_linux_service_agent_probe_reques
 export host_linux_service_agent_reply_v4, host_linux_service_agent_open_v4
 export host_linux_service_agent_outcome_v4, host_linux_service_agent_step_v4
 export host_linux_service_agent_close_v4, host_linux_service_agent_release_v4
+export HostLinuxServiceAgentCancelV4, host_linux_service_agent_request_cancel_v4
+export HostAgentCancelRequestV4, host_agent_cancel_operation_v4, host_agent_cancel_request_encode_v4
+export host_agent_cancel_request_decode_v4, host_linux_service_agent_cancel_authorize_v4, host_agent_cancel_archive_check_v4
