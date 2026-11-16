@@ -1,0 +1,104 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# AssocTypeResolver declares `traits: Dict<text, SolverTraitDef>` and
+# `impls: Dict<text, [ImplBlock]>`, but add_trait/add_impl used to index them
+# with the HirSymbol itself (an 8-field struct). The readers
+# (resolve_projection, find_impl_for_type) iterate `traits.keys()` as text, so
+# writers and readers disagreed on the key type. Native MIR refuses the struct
+# key outright (E-MIR-STRUCT-DICT-KEY), which broke Stage 3.
+# Bug record: doc/08_tracking/bug/type_checker_accepts_struct_key_on_text_dict_2026-11-16.md
+
+use std.spec.step
+
+use compiler.traits.associated_types.{AssocTypeProjection, AssocTypeResolver}
+use compiler.traits.trait_def.{SolverTraitDef, AssocTypeDef}
+use compiler.traits.trait_impl.{ImplBlock}
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn i64_ty() -> HirType: ty(HirTypeKind.Int(bits: 64, signed: true))
+
+fn range_ty() -> HirType: ty(HirTypeKind.Named(symbol: SymbolId(id: 77), args: []))
+
+fn trait_symbol(id: i64, name: text) -> HirSymbol:
+    HirSymbol(
+        id: SymbolId(id: id),
+        name: name,
+        kind: SymbolKind.Trait,
+        type_: nil,
+        scope: ScopeId(id: 0),
+        span: Span.empty(),
+        visibility: Visibility.Public,
+        is_public: true,
+        is_mutable: false,
+        defining_module: nil,
+        builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0
+    )
+
+fn iterator_resolver() -> AssocTypeResolver:
+    val sym = trait_symbol(5, "Iterator")
+    var trait_def = SolverTraitDef.create(sym, Span.empty())
+    trait_def.add_assoc_type(AssocTypeDef.create("Item"))
+    var impl_block = ImplBlock.create(sym, range_ty(), Span.empty())
+    impl_block.add_assoc_type_impl("Item", i64_ty())
+    var resolver = AssocTypeResolver.create()
+    resolver.add_trait(trait_def)
+    resolver.add_impl(impl_block)
+    resolver
+
+describe "AssocTypeResolver keys its registries by trait name text":
+    it "keys the trait registry by the trait's name text":
+        # @req REQ-SSPEC-UNIT
+        step("keys the trait registry by the trait's name text")
+        val resolver = iterator_resolver()
+        val keys = resolver.traits.keys()
+        expect(keys.len()).to_equal(1)
+        val key: text = keys[0]
+        expect(key).to_equal("Iterator")
+        expect(resolver.traits.has("Iterator")).to_be_true()
+
+    it "keys the impl registry by the same text the trait registry uses":
+        # @req REQ-SSPEC-UNIT
+        step("keys the impl registry by the same text the trait registry uses")
+        val resolver = iterator_resolver()
+        expect(resolver.impls.has("Iterator")).to_be_true()
+        expect(resolver.impls["Iterator"].len()).to_equal(1)
+
+    it "resolves Range.Item to i64 through the trait impl":
+        # @req REQ-SSPEC-UNIT
+        step("resolves Range.Item to i64 through the trait impl")
+        val resolver = iterator_resolver()
+        val projection = AssocTypeProjection.create(range_ty(), "Item")
+        val resolved = resolver.resolve_projection(projection)
+        match resolved.kind:
+            case Int(bits, signed):
+                expect(bits).to_equal(64)
+                expect(signed).to_be_true()
+            case _:
+                fail("Range.Item did not resolve to i64")
+
+    it "finds the impl that provides the projection":
+        # @req REQ-SSPEC-UNIT
+        step("finds the impl that provides the projection")
+        val resolver = iterator_resolver()
+        val projection = AssocTypeProjection.create(range_ty(), "Item")
+        val found = resolver.find_impl_for_projection(projection)
+        expect(found.?).to_be_true()
+
+    it "normalizes a Projection type to the impl's concrete type":
+        # @req REQ-SSPEC-UNIT
+        step("normalizes a Projection type to the impl's concrete type")
+        val resolver = iterator_resolver()
+        val projected = ty(HirTypeKind.Projection(base: range_ty(), assoc_name: "Item"))
+        val normalized = resolver.normalize(projected)
+        match normalized.kind:
+            case Int(bits, _):
+                expect(bits).to_equal(64)
+            case _:
+                fail("Range.Item did not normalize to i64")
