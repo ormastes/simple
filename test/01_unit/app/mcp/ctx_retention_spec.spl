@@ -29,7 +29,8 @@ is passed, and neither indexing nor searching ever purges.
 use std.spec
 use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_read, time_now_unix_micros}
 use app.mcp.ctx_retention.{CtxChunkId, CtxSourceLabel, CtxUnixSecs, CtxAgeLimit, CtxByteCount, CtxRetentionRow, CtxRetentionPolicy, ctx_retention_row, ctx_retention_policy, ctx_retention_check, ctx_retention_decide, ctx_policy_check_label}
-use app.mcp.main_lazy_ctx_tools.{ctx_index_text, ctx_store_dir, handle_simple_ctx_purge, handle_simple_ctx_search}
+use app.mcp.main_lazy_ctx_tools.{ctx_index_text, ctx_store_dir, handle_simple_ctx_purge, handle_simple_ctx_search, ctx_purge_snapshot, ctx_purge_commit, ctx_purge_store, CtxPurgeCommit}
+use app.mcp.ctx_retention.{CtxPurgeMode}
 
 fn _row(id: i64, source: text, ts: i64, size: i64) -> CtxRetentionRow:
     ctx_retention_row(CtxChunkId(value: id), CtxSourceLabel(value: source), CtxUnixSecs(secs: ts), CtxByteCount(bytes: size))
@@ -59,6 +60,13 @@ fn _fresh_store() -> text:
 
 fn _store_text() -> text:
     file_read(ctx_store_dir() + "/chunks.sdn")
+
+fn _commit_label(c: CtxPurgeCommit) -> text:
+    match c:
+        case CtxPurgeCommit.Committed: "committed"
+        case CtxPurgeCommit.NothingToDrop: "nothing"
+        case CtxPurgeCommit.StoreMoved: "moved"
+        case CtxPurgeCommit.WriteFailed: "write_failed"
 
 describe "ctx retention decision (pure)":
     it "drops only the named source":
@@ -160,3 +168,34 @@ describe "simple_ctx_purge tool":
         step("all four chunks still searchable")
         assert_contains(handle_simple_ctx_search("2", "{\"query\":\"delta\"}"), "source=cmd:z")
         assert_contains(handle_simple_ctx_search("3", "{\"query\":\"epsilon\"}"), "source=cmd:z")
+
+describe "simple_ctx_purge against a concurrent append":
+    it "adverse: an append between the purge read and its commit is not lost":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("alpha linker notes", "cmd:old").count, 1)
+        assert_equal(ctx_index_text("beta parser notes", "doc:keep").count, 1)
+        val policy = ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), None, None)
+        step("purge reads its snapshot and decides to drop cmd:old")
+        val snap = ctx_purge_snapshot(policy)
+        assert_equal(snap.plan.drop.len(), 1)
+        step("an append completes after the read, before the commit")
+        assert_equal(ctx_index_text("gamma digest notes", "doc:late").count, 1)
+        val before = _store_text()
+        step("the stale snapshot refuses to commit and writes nothing")
+        assert_equal(_commit_label(ctx_purge_commit(snap)), "moved")
+        assert_equal(_store_text(), before)
+        step("a fresh purge re-snapshots, commits, and keeps the late append")
+        val report = ctx_purge_store(policy, CtxPurgeMode.Apply)
+        assert_equal(report.rewritten, true)
+        assert_contains(handle_simple_ctx_search("1", "{\"query\":\"digest\"}"), "source=doc:late")
+        assert_contains(handle_simple_ctx_search("2", "{\"query\":\"parser\"}"), "source=doc:keep")
+        assert_false(handle_simple_ctx_search("3", "{\"query\":\"linker\"}").contains("source=cmd:old"))
+
+    it "commits a snapshot whose store did not move":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("alpha linker notes", "cmd:old").count, 1)
+        val policy = ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), None, None)
+        val snap = ctx_purge_snapshot(policy)
+        assert_equal(_commit_label(ctx_purge_commit(snap)), "committed")

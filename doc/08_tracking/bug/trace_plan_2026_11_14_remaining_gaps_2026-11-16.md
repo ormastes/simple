@@ -22,10 +22,6 @@ flagged, but they break the "no primitive in public API" requirement:
 
 ## 3. MCP / ctx
   23 lint errors (unchanged by waves 1–3).
-- `simple_ctx_purge` takes no lock; an append racing an applied purge can be
-  lost (documented in `doc/07_guide/app/mcp/mcp.md`).
-- Postings are rebuilt per store generation and only after 128 cache hits;
-  there is no incremental update on append.
 - `simple_trace` validates `profile` but does not change enforcement by it, and
   exposes only `operation: missing`.
 - `simple_test_query`: the TestDB-absent (no cold start) path has no spec.
