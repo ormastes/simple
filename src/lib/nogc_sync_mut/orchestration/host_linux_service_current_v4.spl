@@ -3,8 +3,9 @@
 # prepare/execute dispatch on the sole Host capacity journal.
 # SOURCE_AUTHORED / NOT_RUN. Reconcile (host_linux_service_reconcile_v4) runs
 # at startup over the offline fresh-epoch store inventory lent by the same
-# admission (milestone_0019 M1-M3); the native launch after admission is NOT
-# composed; see
+# admission (milestone_0019 M1-M3); after a PROVED reconcile the opener hands
+# that inventory back (milestone_0021 PR1); the native launch after admission
+# is NOT composed; see
 # .spipe/simple_orchestrator/continuation_20261116/milestone_0016_service40/DESIGN.md and milestone_0017_service40_reconcile/DESIGN.md.
 use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{HostLinuxServiceEnrollmentBindingV3,
     host_linux_service_enrollment_digest_v3, host_linux_service_allocatable_v3, host_linux_service_enrollment_decode_v3}
@@ -70,8 +71,11 @@ pub class HostLinuxServiceCurrentV4:
     proof: Option<LinuxServiceVerifiedEnrollmentV1> = None
     native: Option<LinuxServiceNativeIdentityBorrowV3> = None
     # Offline store-inventory borrow lent by the same admission; handed back
-    # before the native loan ends.
+    # after a proved startup reconcile, else before the native loan ends.
     inventory: Option<LinuxFreshEpochStoreInventoryBorrowV1> = None
+    # Set only by linux_service_inventory_return_v4 after the exact borrow was
+    # handed back; current_v4 then requires the in-memory continuity proof.
+    inventory_returned: bool = false
     native_snapshot: Option<LinuxServiceNativeIdentitySnapshotV3> = None
     records: Option<HostLinuxServiceRecordsV4> = None
     capacity: Option<HostCapacityOwnerV1> = None
@@ -105,8 +109,14 @@ pub class HostLinuxServiceCurrentV4:
             if admission.owner.is_none(): return Err("linux-host-service-admission-missing")
             val lender = admission.owner.unwrap()
             if not lender.service_loaned: return Err("linux-host-service-loan-inactive")
-            if not lender.store_inventory_loaned or self.inventory.is_none():
-                return Err("linux-host-service-inventory-loan-inactive")
+            # The store loan is either still out (held here, not returned) or
+            # was returned by the post-reconcile handoff, which needs the proof.
+            if lender.store_inventory_loaned:
+                if self.inventory.is_none() or self.inventory_returned:
+                    return Err("linux-host-service-inventory-loan-inactive")
+            elif (not self.inventory_returned or self.inventory.is_some() or
+                    not self.capacity.unwrap().ledger.continuity_proven):
+                return Err("linux-host-service-inventory-return-unproven")
             val epoch = lender.current_v1()?
             if sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?) != self.initial_epoch:
                 return Err("linux-host-service-epoch-changed")
@@ -405,7 +415,40 @@ pub fn host_linux_service_open_installed_v4(anchor: text) -> HostLinuxServiceSta
         lent.native.unwrap(), lent.epoch_digest, stored.inventory.unwrap())
     var owner = started.owner
     owner.admission = shell.admission
-    HostLinuxServiceStartTurnV4(owner: owner, error: started.error)
+    if started.error != "": return HostLinuxServiceStartTurnV4(owner: owner, error: started.error)
+    # A quarantined start keeps the inventory lent (status_v4 keeps refusing).
+    if owner.reconcile_error != "" or owner.capacity.is_none() or not owner.capacity.unwrap().ledger.continuity_proven:
+        return HostLinuxServiceStartTurnV4(owner: owner, error: "")
+    linux_service_inventory_handoff_v4(owner)
+
+# Post-reconcile handoff (milestone_0021 PR1). The store-inventory loan exists
+# for the startup reconcile only. Once that reconcile PROVED continuity on this
+# owner's published journal, the exact lent borrow goes back to the lender.
+# Returning it grants nothing: start_provider_v1 and transfer_workload_v2 still
+# refuse a once-lent epoch (retained service reader).
+fn linux_service_inventory_handoff_v4(owner: HostLinuxServiceCurrentV4) -> HostLinuxServiceStartTurnV4:
+    if (not owner.published or owner.reconcile_error != "" or owner.capacity.is_none() or
+            not owner.capacity.unwrap().ledger.continuity_proven):
+        return linux_service_start_error_v4(owner, "linux-host-service-inventory-handoff-unproven")
+    linux_service_inventory_return_v4(owner)
+
+# The exact-borrow return behind the proof gate above. The lender verifies the
+# borrow aliases its own reader and custody; a refusal keeps the borrow here
+# and the loan active, so close still hands it back first.
+fn linux_service_inventory_return_v4(original: HostLinuxServiceCurrentV4) -> HostLinuxServiceStartTurnV4:
+    var owner = original
+    if owner.inventory_returned: return linux_service_start_error_v4(owner, "linux-host-service-inventory-returned")
+    if owner.inventory.is_none(): return linux_service_start_error_v4(owner, "linux-host-service-inventory-borrow-missing")
+    if owner.admission.is_none() or owner.admission.unwrap().owner.is_none():
+        return linux_service_start_error_v4(owner, "linux-host-service-admission-missing")
+    var admission = owner.admission.unwrap()
+    val returned = admission.owner.unwrap().end_store_inventory_loan_v1(owner.inventory.unwrap())
+    admission.owner = Some(returned.owner)
+    owner.admission = Some(admission)
+    if returned.error != "": return linux_service_start_error_v4(owner, returned.error)
+    owner.inventory = None
+    owner.inventory_returned = true
+    linux_service_start_error_v4(owner, "")
 
 # Signed associated prepare authorization: transport bounds, exact live scope,
 # configured controller and fresh issuer + approver signatures under the
@@ -649,7 +692,8 @@ fn linux_service_close_reason_v4(error: text, fallback: text) -> text:
 # readers are replaced by whatever the landed close retained. A failed release
 # is sticky in `close_error`, so a retry never reports a clean completion over
 # an earlier failure. The native identity borrow is released with its upper
-# parent: the retained lending admission, closed after the loan ends.
+# parent: the retained lending admission, closed after the loan ends. An
+# inventory already returned after the proof is skipped (store loan inactive).
 pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostLinuxServiceCloseV4:
     var owner = original
     owner.closed = true
