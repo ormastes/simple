@@ -14,8 +14,79 @@ use compiler.core.interpreter.value.*
 use compiler.core.interpreter.eval.{eval_set_error}
 use std.common.units.engine.unit_expr.{parse_unit_expression}
 use std.common.units.model.world_units.{UnitExpression}
+use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at}
+use std.io_runtime.{dir_list_or_empty, file_exists}
 
 val UNIT_VALUE_TYPE: text = "__unit__"
+val UNIT_LIBRARY_ROOT: text = "src/unit/simple-lang"
+
+# Suffix scope: a suffix backed by a library unit module
+# (src/unit/simple-lang/<family>/<sfx>.spl) is usable only after
+# `use unit.<family>[.{sfx}|.*|.<sfx>]` or a same-file `unit X: T as sfx`.
+# Reset per core_interpret run via eval_init.
+var unit_scope_names: [text] = []
+var unit_scope_families: [text] = []
+var unit_family_cache_sfx: [text] = []
+var unit_family_cache_fam: [text] = []
+# The unit-decl registry is not reset between core_interpret runs; only decls
+# registered after this run's reset count as declared in scope.
+var unit_scope_decl_base: i64 = 0
+
+pub fn unit_scope_reset():
+    unit_scope_names = []
+    unit_scope_families = []
+    unit_scope_decl_base = unit_decl_count()
+
+pub fn unit_scope_record_use(module_path: text, imported_names: [text]):
+    """Record a `use unit.<...>` import. `{a, b}` scopes those suffixes;
+    a bare path or `.*` scopes its last segment as a family and as a suffix."""
+    if not module_path.starts_with("unit."): return
+    var path = module_path
+    if path.ends_with(".*"): path = path.substring(0, path.last_index_of("."))
+    val last = path.substring(path.last_index_of(".") + 1)
+    if imported_names.len() == 0 or imported_names.contains("*"):
+        unit_scope_families.push(last)
+        unit_scope_names.push(last)
+        return
+    for name in imported_names:
+        unit_scope_names.push(name)
+
+fn unit_library_families(suffix: text) -> text:
+    """Comma-joined sorted family dirs whose library unit module defines
+    `suffix` (a suffix may live in several, e.g. velocity and composite), or ""."""
+    var i = 0
+    while i < unit_family_cache_sfx.len():
+        if unit_family_cache_sfx[i] == suffix: return unit_family_cache_fam[i]
+        i = i + 1
+    var found: [text] = []
+    for fam in dir_list_or_empty(UNIT_LIBRARY_ROOT):
+        if file_exists(UNIT_LIBRARY_ROOT + "/" + fam + "/" + suffix + ".spl"):
+            found.push(fam)
+    val joined = found.sort().join(",")
+    unit_family_cache_sfx.push(suffix)
+    unit_family_cache_fam.push(joined)
+    joined
+
+fn unit_suffix_declared(suffix: text) -> bool:
+    var i = unit_scope_decl_base
+    while i < unit_decl_count():
+        if unit_decl_short_symbol_at(i) == suffix: return true
+        i = i + 1
+    false
+
+fn unit_suffix_scope_error(suffix: text) -> text:
+    """"" when `suffix` is in scope, else the diagnostic text."""
+    if unit_scope_names.contains(suffix): return ""
+    val joined = unit_library_families(suffix)
+    if joined == "": return ""
+    val families = joined.split(",")
+    for fam in families:
+        if unit_scope_families.contains(fam): return ""
+    if unit_suffix_declared(suffix): return ""
+    var hints: [text] = []
+    for fam in families:
+        hints.push("`use unit." + fam + ".{" + suffix + "}`")
+    "unit suffix '" + suffix + "' is not in scope; add " + hints.join(" or ") + " (or declare `unit X: T as " + suffix + "`)"
 
 fn unit_make(value: i64, suffix: text) -> i64:
     var names: [text] = []
@@ -31,6 +102,10 @@ pub fn eval_suffixed_lit(eid: i64, float_value: f64) -> i64:
     val node = expr_get(eid)
     if node.extra == 2:
         eval_set_error("string unit literals are not supported: _" + node.f_val)
+        return -1
+    val scope_err = unit_suffix_scope_error(node.s_val)
+    if scope_err != "":
+        eval_set_error(scope_err)
         return -1
     if node.extra == 1:
         return unit_make(val_make_bool(node.i_val != 0), node.s_val)
