@@ -25,7 +25,13 @@ fn form_control_ua_box_decls(node: HNode) -> text:
     if node.tag == "button":
         return "border:2px solid #767676"
     if node.tag == "select":
-        return "border:1px solid #767676"
+        # A listbox (`multiple`, or `size` > 1) is a white `Field`. A menulist
+        # gets `background-color: ButtonFace` (Chrome 159 getComputedStyle
+        # rgb(239, 239, 239)), but an unstyled one paints its native white
+        # field instead; see _select_author_styled.
+        if attr_present(node.attrs_raw, "multiple") or parse_int(attr_value(node.attrs_raw, "size").trim()) > 1:
+            return "border:1px solid #767676;background-color:#fff"
+        return "border:1px solid #767676;background-color:#efefef"
     if node.tag == "textarea":
         return "border:1px solid #767676;padding:2px"
     ""
@@ -340,6 +346,32 @@ fn _display_or_inline_flex_in_decls(decls: text) -> text:
 
 # True when the winning `display` declaration is `inline-flex`. The box is
 # still laid out with the display the cascade fell back to.
+fn _decls_style_control_box(decls: text) -> bool:
+    for part in decls.split(";"):
+        val colon = part.index_of(":")
+        if colon > 0:
+            val name = part[0:colon].trim().lower()
+            if name.starts_with("background") or name == "box-shadow":
+                return true
+            if name.starts_with("border") and name != "border-collapse" and name != "border-spacing":
+                return true
+            if name == "appearance" or name == "-webkit-appearance":
+                val value = part[colon + 1:].trim().lower()
+                if value != "" and value != "auto":
+                    return true
+    false
+
+# Chrome 159 keeps a select's native (`appearance: auto`) menulist look --
+# a white field -- until the author declares a border (radius included),
+# background, box-shadow or a non-auto appearance; then it paints CSS, i.e.
+# the UA ButtonFace fill. Padding, color and font-size do not count. Pinned
+# in select_ua_background_chrome159_spec.
+fn _select_author_styled(
+    normal: text, inline_normal: text, important: text, inline_important: text
+) -> bool:
+    _decls_style_control_box(normal) or _decls_style_control_box(inline_normal) or
+        _decls_style_control_box(important) or _decls_style_control_box(inline_important)
+
 fn _inline_flex_display_authored(
     normal: text, inline_normal: text, important: text, inline_important: text
 ) -> bool:
@@ -1043,6 +1075,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # the cascade memo above is keyed by tag, not by this attribute.
         if nd.tag == "audio" and not attr_present(nd.attrs_raw, "controls"):
             st.display = "none"
+        if nd.tag == "select" and not _select_author_styled(
+            combined_decls, inline_normal, combined_important_decls, inline_important
+        ):
+            st = apply_decls(st, "background-color:#fff", em_base)
         if _wsc_tail_sub_armed():
             _wsc_add_sub2(11, _wsc_now_us() - _sb_t8)
             _sb_t8 = _wsc_now_us()
