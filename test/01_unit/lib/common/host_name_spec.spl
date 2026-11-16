@@ -1,4 +1,4 @@
-use std.common.net.host_name.{HostName, host_name_parse, host_name_is_ip_literal}
+use std.common.net.host_name.{HostName, HostIdentity, host_name_parse, host_identity_parse}
 
 describe "host_name_parse":
     it "accepts and lowercases a DNS name":
@@ -31,6 +31,30 @@ describe "host_name_parse":
         expect(host_name_parse(long_label + ".com").is_err()).to_equal(true)
         expect(host_name_parse(long_label[0:63] + ".com").is_err()).to_equal(false)
 
-    it "detects IP literals":
-        expect(host_name_is_ip_literal("10.0.0.1")).to_equal(true)
-        expect(host_name_is_ip_literal("localhost")).to_equal(false)
+    it "rejects non-ASCII with the IDNA message":
+        match host_name_parse("bücher.de"):
+            Ok(_): fail("non-ASCII accepted")
+            Err(e): expect(e.contains("ASCII")).to_equal(true)
+
+describe "host_identity_parse":
+    it "classifies DNS names, IPv4 and IPv6":
+        match host_identity_parse("Example.com"):
+            Ok(HostIdentity.Name(n)): expect(n.value).to_equal("example.com")
+            _: fail("name not classified")
+        match host_identity_parse("10.0.0.1"):
+            Ok(HostIdentity.Ip(_)): expect(true).to_equal(true)
+            _: fail("ipv4 not classified")
+        match host_identity_parse("2001:db8::1"):
+            Ok(HostIdentity.Ip(_)): expect(true).to_equal(true)
+            _: fail("ipv6 not classified")
+        match host_identity_parse("::1"):
+            Ok(HostIdentity.Ip(_)): expect(true).to_equal(true)
+            _: fail("loopback not classified")
+
+    it "rejects malformed literals and names":
+        expect(host_identity_parse("1.2.3").is_err()).to_equal(true)
+        expect(host_identity_parse("300.1.1.1").is_err()).to_equal(true)
+        expect(host_identity_parse("1:2:3").is_err()).to_equal(true)
+        expect(host_identity_parse("::zz").is_err()).to_equal(true)
+        expect(host_identity_parse("1::2::3").is_err()).to_equal(true)
+        expect(host_identity_parse("").is_err()).to_equal(true)
