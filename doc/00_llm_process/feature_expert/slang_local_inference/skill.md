@@ -369,8 +369,8 @@ Tokens/s below is meaningless for 1-2 token answers.
 One module owns every per-OS decision: `src/lib/gc_async_mut/slang/host/slang_host.spl`.
 Decisions are pure functions of an `os` text (`ggml_lib_default`, `rocm_bin_default_for`,
 `hip_lib_names`, `hiprtc_lib_names`, `host_libc_name`, `host_join`, and the parsers
-`parse_meminfo_bytes`, `parse_vm_stat_used_pages`, `parse_int_text`,
-`darwin_available_bytes`), so the Linux/macOS branches are unit-tested on any host
+`parse_meminfo_bytes`, `parse_vm_stat_page_size`, `parse_vm_stat_available_pages`,
+`parse_int_text`, `darwin_available_bytes`), so the Linux/macOS branches are unit-tested on any host
 (`test/01_unit/lib/gc_async_mut/slang/host/slang_host_spec.spl`). The `host_*` wrappers
 route env, file exists/read, directory list and process capture through SOSIX
 (`std.nogc_async_mut.sosix.host_facade`; `sosix_host_os()` is the three-way OS accessor).
@@ -383,9 +383,14 @@ route env, file exists/read, directory list and process capture through SOSIX
   `std.io_runtime` / `std.nogc_sync_mut.sffi.dynamic`.
 - Library names: shim `slang_ggml.dll` / `libslang_ggml.so` / `libslang_ggml.dylib`;
   ROCm `amdhip64_7.dll`+`hiprtc0702.dll` (bin dir) vs `/opt/rocm/lib/libamdhip64.so[.7]`+`libhiprtc.so[.7]`;
-  macOS has no ROCm (returns Err). CUDA is not loaded anywhere in slang.
-- Free memory: Linux `/proc/meminfo` MemAvailable; macOS `sysctl` + `vm_stat` (no pipe/awk,
-  parsed in Simple; this also removed the W-STR-BRACE-001 warning); Windows
+  macOS has no ROCm (returns Err). CUDA is not loaded anywhere in slang. Windows path
+  literals must escape every backslash: `"...\ROCm\7.2\bin"` unescaped turns `\7` into a
+  control char and ROCm silently reads as absent (caught 2026-11-17 by the live ROCm spec).
+- Free memory: Linux `/proc/meminfo` MemAvailable; macOS = vm_stat free + inactive +
+  speculative pages (purgeable excluded: it overlaps active/inactive) times the page size from
+  vm_stat's OWN header (`hw.pagesize` only as fallback; Rosetta sees 4 KiB vs native 16 KiB),
+  capped at `sysctl hw.memsize` (no pipe/awk, parsed in Simple; this also removed the
+  W-STR-BRACE-001 warning); Windows
   `Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory`. Probes run with NO timeout
   (the CIM probe has measured 54-135 s under load).
 - Shim build (`scripts/check/build-slang-ggml-shim.shs`): Linux = clang (refuses a non-clang

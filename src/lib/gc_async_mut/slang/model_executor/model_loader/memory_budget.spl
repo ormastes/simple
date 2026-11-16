@@ -15,7 +15,7 @@
 # reports the arithmetic it used. A refusal a caller can read is worth more than
 # a verdict it has to trust.
 
-use std.gc_async_mut.slang.host.slang_host.{host_os_name, host_file_read, host_run_int, host_run_text, parse_meminfo_bytes, parse_vm_stat_used_pages, darwin_available_bytes}
+use std.gc_async_mut.slang.host.slang_host.{host_os_name, host_file_read, host_run_int, host_run_text, parse_meminfo_bytes, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes}
 
 # Bytes to leave for the OS, the page cache and whatever else shares this
 # machine. Deliberately generous: the cost of being wrong upward is a refused
@@ -106,18 +106,23 @@ fn mem_available_bytes() -> i64:
 # headroom rule above exists for, so the check matters more here, not less.
 #
 # `vm_stat` reports pages, not bytes, and there is no MemAvailable analogue, so
-# availability is derived as total minus resident: active + wired + compressed.
-# That is CONSERVATIVE by construction — inactive and purgeable pages are
-# reclaimable and are counted as unavailable anyway — which errs toward refusing
-# a load that would have fitted, the safe direction for this gate.
+# availability is the pages vm_stat itself calls reclaimable: free + inactive +
+# speculative, capped at hw.memsize. Purgeable pages are left out (they overlap
+# active/inactive), and memory vm_stat does not account for at all (GPU and
+# firmware carve-outs on Apple silicon) is never counted as available — the
+# old "total minus active+wired+compressed" did count it. The page size comes
+# from vm_stat's own header, so the counts and their unit share one source;
+# hw.pagesize is only the fallback.
 fn _mem_available_darwin() -> i64:
     val total = host_run_int("sysctl", ["-n", "hw.memsize"])
-    val page_size = host_run_int("sysctl", ["-n", "hw.pagesize"])
-    if total <= 0 or page_size <= 0:
+    if total <= 0:
         return -1
     # No shell pipe: vm_stat runs directly and slang_host parses its text.
-    val used_pages = parse_vm_stat_used_pages(host_run_text("vm_stat", []))
-    darwin_available_bytes(total, page_size, used_pages)
+    val stat = host_run_text("vm_stat", [])
+    var page_size = parse_vm_stat_page_size(stat)
+    if page_size <= 0:
+        page_size = host_run_int("sysctl", ["-n", "hw.pagesize"])
+    darwin_available_bytes(total, page_size, parse_vm_stat_available_pages(stat))
 
 fn _gib(bytes: i64) -> text:
     (bytes / (1024 * 1024 * 1024)).to_text() + " GiB"
