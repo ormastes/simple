@@ -907,6 +907,25 @@ impl<'a> Parser<'a> {
             // `security <name>:` or `security gate ...`; anything else
             // (`security.x = v`, `security = s`, `security(...)`) is an
             // ordinary expression/assignment.
+            // `friend <pkg.path>` is a module access directive handled by the
+            // pure-Simple frontend; the seed has no visibility graph, so it is
+            // consumed as a no-op (same node as bare `export`). `friend` stays
+            // an ordinary identifier unless an identifier follows on the line.
+            TokenKind::Identifier { name, .. } if name == "friend" => {
+                if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) {
+                    let start_span = self.current.span;
+                    while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                        self.advance();
+                    }
+                    Ok(Node::ExportUseStmt(ExportUseStmt {
+                        span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+                        path: ModulePath::new(Vec::new()),
+                        target: ImportTarget::Glob,
+                    }))
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::Identifier { name, .. } if name == "security" => {
                 let next = self.peek_next();
                 match &next.kind {
