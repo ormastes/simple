@@ -583,6 +583,7 @@ impl CompilerDriver:
         for held_name in self.ctx.mir_modules.keys():
             batch_names = batch_names.push(held_name)
         self.native_staged_codegen.record_batch_lowering_v1(lowering_failed)
+        val flushed_before_batch = self.native_staged_codegen.modules_flushed
         val batch_index = self.native_staged_codegen.batches_flushed + 1
         log_phase("aot:staged_codegen:batch:start index={batch_index} modules={batch_names.len()}")
         val go_to_end = go_to_end_enabled_v1()
@@ -648,6 +649,14 @@ impl CompilerDriver:
             self.native_staged_codegen.failed_batches = self.native_staged_codegen.failed_batches.push(
                 "batch-{batch_index}: {failed_units}")
             print "[staged-codegen] batch {batch_index} failed; continuing codegen for later batches (build will fail at end)"
+        val withheld_before_batch = self.native_staged_codegen.modules_withheld
+        self.native_staged_codegen.record_batch_withheld_v1(batch_names.len(),
+            self.native_staged_codegen.modules_flushed - flushed_before_batch)
+        val withheld_in_batch = self.native_staged_codegen.modules_withheld - withheld_before_batch
+        if withheld_in_batch > 0 and not batch_failed:
+            # A lowering/verify gate withheld the whole batch: say so, the
+            # progress line alone used to report it as failed=0.
+            print "[staged-codegen] batch {batch_index} withheld {withheld_in_batch} module(s) (lowering_failed={self.native_staged_codegen.lowering_failed} verify_failed={self.native_staged_codegen.verify_failed}); build will fail at end"
         self.ctx.evict_mir_modules(batch_names)
         if go_to_end:
             # The verify verdict is per batch under go-to-end (the batch was
@@ -657,7 +666,7 @@ impl CompilerDriver:
         log_build_progress("native_staged", "modules",
             self.native_staged_codegen.modules_flushed,
             self.native_staged_codegen.scheduled_names.len(),
-            "batch-{batch_index}", 5, 6, 0,
+            "batch-{batch_index}", 5, 6, self.native_staged_codegen.modules_withheld,
             self.native_staged_codegen.cache_hit_count, "running")
         log_phase("aot:staged_codegen:batch:done index={batch_index} released={batch_names.len()}")
         true
