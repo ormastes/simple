@@ -1,0 +1,125 @@
+# AUTHORED_NOT_RUN. Actual production DATA validators/projector, no fake cap,
+# Subject, process PID or successful absence observation is constructed.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.linux_fresh_workload_probe_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_probe_cohort_data_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.nogc_sync_mut.io.linux_fresh_workload_launch_v2.linux_fresh_workload_argv_v2
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.sdn.value.SdnValue
+
+fn probe_command_data_v3() -> LinuxFreshWorkloadProbeCommandV3:
+    val native = LinuxOciRequestV1(pod_uid: "probe_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/true"],
+        args: [], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 67108864,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    val scope = ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "a".repeat(64),
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "linux-machine-id-v1:1234",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id, boot_id: scope.boot_id,
+        provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    LinuxFreshWorkloadProbeCommandV3(workload: LinuxFreshWorkloadCommandV2(
+        request: ContainerExecutionRequestV2(plan, linux_oci_retained_request_encode_v1(native).unwrap()), scope: scope,
+        action: LinuxFreshWorkloadActionV2.Inspect, native_id: "3".repeat(64), image: native.image,
+        entrypoint: native.command, args: native.args, cpu_millis: native.cpu_limit_millis, memory_bytes: native.memory_limit_bytes,
+        pid_limit: native.pid_limit, timeout_ms: native.timeout_ms, helper_cpu_millis: 500, helper_memory_bytes: 33554432),
+        action: LinuxFreshWorkloadProbeActionV3.Wait)
+
+fn probe_bound_inspect_data_v3(command: LinuxFreshWorkloadProbeCommandV3) -> GroupProcessStreamLaunchV2:
+    # DATA-only projection fixture; no actual installed/custody owner supplied.
+    val profile = LinuxFreshEpochProfileV1(fields: {"graphRoot": SdnValue.String("/srv/provider/graph"),
+        "runRoot": SdnValue.String("/srv/provider/run"), "delegatedCgroup": SdnValue.String("/simple/epoch/containers")})
+    val args = linux_fresh_workload_argv_v2(profile, command.workload).unwrap()
+    val request = GroupProcessStreamRequestV2(program: "/usr/bin/podman", producer_digest: "b".repeat(64), args: args,
+        environment: [], directory: "/", inputs: [], timeout_ms: 30000, broker_program: "/opt/simple/broker",
+        broker_digest: "c".repeat(64), child_argv_digest: group_process_child_argv_digest_v2("/usr/bin/podman", args),
+        launch_deadline_unix_ms: 1)
+    val resources = GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(500, 50000, 100000),
+        broker: GroupProcessBrokerBudgetV3("/sys/fs/cgroup/service/broker", 11, 22, 7, "d".repeat(64),
+            250000, 1000000, 250, 67108864, 134217728), child_image_mode: "trusted-local-admin-image-fd-v1")
+    GroupProcessStreamLaunchV2(root: "/srv/broker/probe", worker_id: "operation_1", generation: 7,
+        snapshot_digest: "e".repeat(64), cache_identity: "f".repeat(64), memory_limit_bytes: command.workload.helper_memory_bytes,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/service", transport_generation: 0, profile_v3: Some(resources))
+
+describe "Closed CPU Wait and Logs probe projection":
+    it "replaces only the verified inspect tail and preserves every other pinned field":
+        step("Compare the complete resulting launch, not only a command substring")
+        val command = probe_command_data_v3()
+        val base = probe_bound_inspect_data_v3(command)
+        for action in [LinuxFreshWorkloadProbeActionV3.Wait, LinuxFreshWorkloadProbeActionV3.Logs]:
+            var selected = command
+            selected.action = action
+            val verb = if action == LinuxFreshWorkloadProbeActionV3.Wait: "wait" else: "logs"
+            var expected = base
+            var request = expected.request
+            request.args = ["--remote=false", "--log-level=error", "--cgroup-manager=cgroupfs", "--root", "/srv/provider/graph",
+                "--runroot", "/srv/provider/run", "--storage-driver", "vfs", "--tmpdir", "/srv/provider/run/tmp", verb, "--", "3".repeat(64)]
+            request.child_argv_digest = group_process_child_argv_digest_v2(request.program, request.args)
+            expected.request = request
+            expect(linux_fresh_workload_probe_project_v3(base, selected).unwrap()).to_equal(expected)
+
+    it "rejects weakened or injected prefix tail and helper budgets":
+        step("A caller DATA launch cannot smuggle argv through the closed projector")
+        val command = probe_command_data_v3()
+        val base = probe_bound_inspect_data_v3(command)
+        var changed = probe_bound_inspect_data_v3(command)
+        changed.request.args[0] = "--remote=true"
+        expect(linux_fresh_workload_probe_project_v3(changed, command).is_err()).to_equal(true)
+        changed = probe_bound_inspect_data_v3(command)
+        changed.request.args[16] = "4".repeat(64)
+        expect(linux_fresh_workload_probe_project_v3(changed, command).is_err()).to_equal(true)
+        changed = probe_bound_inspect_data_v3(command)
+        changed.request.args.push("--follow")
+        expect(linux_fresh_workload_probe_project_v3(changed, command).is_err()).to_equal(true)
+        changed = probe_bound_inspect_data_v3(command)
+        changed.memory_limit_bytes = changed.memory_limit_bytes + 1
+        expect(linux_fresh_workload_probe_project_v3(changed, command).is_err()).to_equal(true)
+        changed = probe_bound_inspect_data_v3(command)
+        changed.profile_v3 = nil
+        expect(linux_fresh_workload_probe_project_v3(changed, command).is_err()).to_equal(true)
+
+    it "keeps the CPU canonical request and exact native identity closed":
+        step("Probe enum never widens the old generic workload action")
+        val original = probe_command_data_v3()
+        expect(linux_fresh_workload_probe_command_validate_v3(original).is_ok()).to_equal(true)
+        var changed = probe_command_data_v3()
+        changed.workload.action = LinuxFreshWorkloadActionV2.Start
+        expect(linux_fresh_workload_probe_command_validate_v3(changed).is_err()).to_equal(true)
+        changed = probe_command_data_v3()
+        changed.workload.native_id = "short"
+        expect(linux_fresh_workload_probe_command_validate_v3(changed).is_err()).to_equal(true)
+        changed = probe_command_data_v3()
+        changed.workload.timeout_ms = 30001
+        expect(linux_fresh_workload_probe_command_validate_v3(changed).is_err()).to_equal(true)
+        changed = probe_command_data_v3()
+        changed.workload.scope.provider_generation = 8
+        expect(linux_fresh_workload_probe_command_validate_v3(changed).is_err()).to_equal(true)
+
+    it "binds request scope native ID and actual retained helper allowance":
+        val original = probe_command_data_v3()
+        val digest = linux_fresh_workload_probe_binding_v3(original).unwrap()
+        var changed = probe_command_data_v3()
+        changed.workload.native_id = "4".repeat(64)
+        expect(linux_fresh_workload_probe_binding_v3(changed).unwrap() == digest).to_equal(false)
+        changed = probe_command_data_v3()
+        changed.workload.helper_cpu_millis = 501
+        expect(linux_fresh_workload_probe_binding_v3(changed).unwrap() == digest).to_equal(false)
+
+    it "preserves extracted native UID range and security validator boundaries":
+        step("Pure proc text is not an actual census or absence proof")
+        for id in [20001, 100000, 165535]:
+            expect(linux_fresh_probe_status_related_v3("Uid:\t" + str(id) + "\t" + str(id) + "\t" + str(id) + "\t" + str(id) + "\n", 20001, 100000, 65536).unwrap()).to_equal(true)
+        expect(linux_fresh_probe_status_related_v3("Uid:\t165536\t165536\t165536\t165536\n", 20001, 100000, 65536).unwrap()).to_equal(false)
+        expect(linux_fresh_probe_status_related_v3("Uid:\t20001\t20001\n", 20001, 100000, 65536).is_err()).to_equal(true)
+        expect(linux_fresh_probe_native_number_v3("001").is_err()).to_equal(true)
+        expect(linux_fresh_probe_native_number_v3("12", 11).is_err()).to_equal(true)
+        expect(linux_fresh_probe_native_security_v3(("id", 20001, 16832, 0), "private-dir", 20001).is_ok()).to_equal(true)
+        expect(linux_fresh_probe_native_security_v3(("id", 0, 16832, 0), "private-dir", 20001).is_err()).to_equal(true)
