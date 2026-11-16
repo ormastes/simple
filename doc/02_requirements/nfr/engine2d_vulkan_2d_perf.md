@@ -185,3 +185,14 @@ intermittent SIGBUS under memory pressure
 (`doc/08_tracking/bug/vulkan_engine2d_sequential_frames_flaky_moltenvk_2026-09-02.md`).
 The gate compares same-machine, same-device, same-workload runs, so relative
 ratio is the metric, never absolute fps.
+
+**Linux C leg (2026-11-16).** The gate was macOS-only: Homebrew headers and `-lvulkan`, `-std=c99` without `_POSIX_C_SOURCE` (glibc then hides `clock_gettime`/`nanosleep`), and an RSS reading only from BSD `time -l`, which the live contract requires. It now takes `VK2D_VULKAN_INCLUDE_DIR` and `VK2D_VULKAN_LINK` (Homebrew defaults kept) and reads RSS from GNU `time -v`. Measured on aarch64 NVIDIA GB10:
+
+```sh
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+VK2D_VULKAN_INCLUDE_DIR=<Khronos Vulkan-Headers include dir> \
+VK2D_VULKAN_LINK=/usr/lib/aarch64-linux-gnu/libvulkan.so.1 \
+sh scripts/check/check-vulkan-2d-c-compare.shs
+```
+
+The C leg is `admitted`: `c_p95_ns=137360`, `c_checksum=10460147`. The Simple leg needs a self-hosted binary (`bootstrap-seed-forbidden` with the Rust seed); none is deployed on this host yet, so the ratio is still unmeasured here.

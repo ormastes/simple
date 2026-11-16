@@ -2,8 +2,11 @@
 #
 # SkTextBlob — immutable container of shaped glyphs + positions.
 
-use std.skia.entity.font.{SkFont}
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
+use std.skia.entity.enums.{SkAlphaType, SkColorType}
+use std.skia.entity.font.{SkFont, sk_font_default, sk_font_measure_codepoints_advances}
 use std.skia.entity.geometry.{SkPoint, SkRect}
+use std.skia.entity.image.{SkImage, SkImageInfo}
 
 # ============================================================================
 # SkGlyphRun — one run of glyphs with a single font
@@ -11,8 +14,9 @@ use std.skia.entity.geometry.{SkPoint, SkRect}
 
 class SkGlyphRun:
     font: SkFont
-    glyphs: [i64]      # glyph IDs
+    glyphs: [i64]      # Unicode codepoints (from make_from_text) or glyph IDs (from shaper)
     positions: [SkPoint]
+    text_value: text = ""
 
 # ============================================================================
 # SkTextBlob
@@ -21,29 +25,88 @@ class SkGlyphRun:
 class SkTextBlob:
     runs: [SkGlyphRun]
 
-fn sk_text_blob_make_from_text(text: text, font: SkFont) -> SkTextBlob:
-    # Simple stub: create a single run with one glyph per character
-    val n = text.len()
+val SK_TEXT_BLOB_IMAGE_MAGIC: i64 = 1413830740
+var _sk_picture_text_blobs: [SkTextBlob] = []
+
+pub fn sk_text_blob_make_from_text(content: text, font: SkFont) -> SkTextBlob:
+    val cps = text_codepoints(content)
+    val advs = sk_font_measure_codepoints_advances(font, cps, true)
     var glyphs: [i64] = []
     var positions: [SkPoint] = []
-    var i = 0
-    while i < n:
-        glyphs.push(i)
-        positions.push(SkPoint(x: font.size * i.to_f64() * 0.6, y: 0.0))
+    var pen_x = 0.0
+    var i: i64 = 0
+    while i < cps.len():
+        glyphs = glyphs.push(cps[i] as i64)
+        positions = positions.push(SkPoint(x: pen_x, y: 0.0))
+        pen_x = pen_x + advs[i]
         i = i + 1
-    val run = SkGlyphRun(font: font, glyphs: glyphs, positions: positions)
+    val run = SkGlyphRun(font: font, glyphs: glyphs, positions: positions, text_value: content)
     SkTextBlob(runs: [run])
 
-fn sk_text_blob_make_from_pos_text(text: text, positions: [SkPoint], font: SkFont) -> SkTextBlob:
-    val n = text.len()
+fn sk_text_blob_make_from_pos_text(content: text, positions: [SkPoint], font: SkFont) -> SkTextBlob:
+    val cps = text_codepoints(content)
+    val n = cps.len()
     var glyphs: [i64] = []
-    var i = 0
+    var i: i64 = 0
     while i < n:
-        glyphs.push(i)
+        glyphs = glyphs.push(cps[i] as i64)
         i = i + 1
     val actual_positions = if positions.len() >= n: positions[:n] else: positions
-    val run = SkGlyphRun(font: font, glyphs: glyphs, positions: actual_positions)
+    val run = SkGlyphRun(font: font, glyphs: glyphs, positions: actual_positions, text_value: content)
     SkTextBlob(runs: [run])
+
+pub fn sk_pack_text_blob_op_image(blob: SkTextBlob) -> SkImage:
+    val slot = _sk_picture_text_blobs.len()
+    _sk_picture_text_blobs = _sk_picture_text_blobs.push(blob)
+    var fallback_cps: [i64] = []
+    if blob.runs.len() > 0:
+        val run0 = blob.runs[0]
+        if run0.text_value != "":
+            val cps = text_codepoints(run0.text_value)
+            var ci: i64 = 0
+            while ci < cps.len():
+                fallback_cps = fallback_cps.push(cps[ci] as i64)
+                ci = ci + 1
+        else:
+            fallback_cps = run0.glyphs
+    SkImage(
+        info: SkImageInfo(
+            width: slot + 1,
+            height: SK_TEXT_BLOB_IMAGE_MAGIC,
+            color_type: SkColorType.Unknown,
+            alpha_type: SkAlphaType.Unknown
+        ),
+        pixels: fallback_cps
+    )
+
+fn _sk_codepoints_to_text(cps: [i64]) -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < cps.len():
+        out = out + char_from_codepoint(cps[i])
+        i = i + 1
+    out
+
+pub fn sk_unpack_text_blob_from_image(img_opt: Option<SkImage>) -> Option<SkTextBlob>:
+    match img_opt:
+        case Some(img):
+            if img.info.height == SK_TEXT_BLOB_IMAGE_MAGIC and img.info.width > 0:
+                val idx = img.info.width - 1
+                if idx >= 0 and idx < _sk_picture_text_blobs.len():
+                    return Some(_sk_picture_text_blobs[idx])
+                if img.pixels.len() > 0:
+                    val recovered = _sk_codepoints_to_text(img.pixels)
+                    return Some(sk_text_blob_make_from_text(recovered, sk_font_default()))
+            None
+        case None:
+            None
+
+pub fn sk_text_blob_run_text(run: SkGlyphRun) -> text:
+    if run.text_value != "":
+        return run.text_value
+    if run.glyphs.len() == 0:
+        return ""
+    _sk_codepoints_to_text(run.glyphs)
 
 impl SkTextBlob:
     fn is_empty() -> bool:

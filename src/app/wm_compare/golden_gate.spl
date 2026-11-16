@@ -23,6 +23,7 @@ use app.wm_compare_host.dir_ops.{dir_create_all}
 use app.wm_compare_host.env_ops.{env_get}
 use app.wm_compare_host.file_ops.{file_exists}
 use app.wm_compare_host.sffi_io.{file_read_bytes, file_write_bytes}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect}
 
 # ----------------------------------------------------------------------------
 # Public result type
@@ -71,11 +72,16 @@ fn encode_ppm_p6(width: u32, height: u32, pixels: [u32]) -> [u8]:
     alpha channel.
     """
     var out: [u8] = [80u8, 54u8, 10u8]              # "P6\n"
-    out = out + _u32_to_decimal(width)
-    out = out + [32u8]                              # ' '
-    out = out + _u32_to_decimal(height)
-    out = out + [10u8]                              # '\n'
-    out = out + [50u8, 53u8, 53u8, 10u8]            # "255\n"
+    for b in _u32_to_decimal(width):
+        out.push(b)
+    out.push(32u8)                                  # ' '
+    for b in _u32_to_decimal(height):
+        out.push(b)
+    out.push(10u8)                                  # '\n'
+    out.push(50u8)                                  # '2'
+    out.push(53u8)                                  # '5'
+    out.push(53u8)                                  # '5'
+    out.push(10u8)                                  # '\n'
     val total = width * height
     var i: u32 = 0
     while i < total:
@@ -83,7 +89,9 @@ fn encode_ppm_p6(width: u32, height: u32, pixels: [u32]) -> [u8]:
         val r = ((px >> 16) & 0xFF).to_i32().to_u8()
         val g = ((px >> 8) & 0xFF).to_i32().to_u8()
         val b = (px & 0xFF).to_i32().to_u8()
-        out = out + [r, g, b]
+        out.push(r)
+        out.push(g)
+        out.push(b)
         i = i + 1
     out
 
@@ -126,13 +134,13 @@ fn decode_ppm_p6(data: [u8]) -> [u32]:
     val mv_pair = _decimal_to_u32(data, pos)
     pos = mv_pair.next + 1u32                 # skip '\n' after maxval
     val total = w * h
-    var out: [u32] = []
+    var out: [u32] = [0u32; total.to_i64()]
     var i: u32 = 0
     while i < total:
         val r = data[pos].to_u32()
         val g = data[pos + 1u32].to_u32()
         val b = data[pos + 2u32].to_u32()
-        out = out + [0xFF000000u32 | (r << 16) | (g << 8) | b]
+        out[i] = 0xFF000000u32 | (r << 16) | (g << 8) | b
         pos = pos + 3u32
         i = i + 1
     out
@@ -196,6 +204,10 @@ fn check_golden(scene: ParityScene) -> GoldenGateResult:
             regenerated: false, loaded_ok: false,
             diff: placeholder, pass_gate: false
         )
+    val _inspect = compare_view_inspect(
+        "golden_gate_" + scene.name,
+        "fresh", fresh, scene.width.to_i32(), scene.height.to_i32(),
+        "golden", golden, scene.width.to_i32(), scene.height.to_i32())
     val d = diff_buffers(scene.name, scene.width, scene.height, golden, fresh)
     val gate_ok = d.pass_exact
     GoldenGateResult(

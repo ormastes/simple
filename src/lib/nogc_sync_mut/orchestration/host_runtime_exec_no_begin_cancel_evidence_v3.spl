@@ -1,7 +1,8 @@
 # Cycle-free historical proof. No root/capacity owner, native effect, lease,
 # current authorization clock or parent release is reconstructed from data.
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
-    DistributedOperationJournalHistoryBatchV2, distributed_operation_journal_lookup_v2}
+    DistributedOperationJournalHistoryBatchV2, distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_read_v3, distributed_operation_journal_read_required_v3}
 use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
 use std.common.contracts.orchestration.host_runtime_exec_no_begin_cancel_v3.*
 use std.common.contracts.orchestration.host_runtime_exec_v3.host_runtime_exec_request_encode_v3
@@ -19,6 +20,11 @@ use std.common.crypto.sha256.sha256_text
 # Stable protected-parent model, identical to the landed BEGIN interlock.
 # Unknown/symlink/inaccessible directory state is never an absence result.
 fn no_begin_entry_present_v3(journal: DistributedOperationJournalV2, kind: text, id: text) -> Result<bool, text>:
+    if journal.linux_storage.is_some():
+        # Only a positive protected None proves absence. Unsafe/inaccessible or
+        # oversized entries propagate Err; they cannot discharge a child barrier.
+        return host_runtime_exec_no_begin_presence_data_v3(distributed_operation_journal_read_v3(
+            journal, kind + "/" + sha256_text(id) + ".sdn", 8388608))
     val directory = journal.root + "/" + kind
     if not path_entry_present(directory)?: return Ok(false)
     var parent = retained_directory_open_trusted_v1(directory)?
@@ -31,8 +37,10 @@ pub fn host_runtime_exec_no_begin_cancel_load_v3(journal: DistributedOperationJo
         child_operation: OperationEnvelopeV2) -> Result<HostRuntimeExecNoBeginCancelReceiptV3, text>:
     val current = distributed_operation_journal_lookup_v2(journal, child_operation.id)?
     if current.envelope != distributed_encode_operation_v2(child_operation)?: return Err("host-exec-no-begin-child-envelope")
-    val source = host_cleanup_private_read_v1(journal.root + "/host-runtime-exec-no-begin-cancellations",
-        sha256_text(child_operation.id) + ".sdn", 4194304)?
+    val source = if journal.linux_storage.is_some():
+        distributed_operation_journal_read_required_v3(journal, "host-runtime-exec-no-begin-cancellations/" + sha256_text(child_operation.id) + ".sdn", 4194304)?
+        else: host_cleanup_private_read_v1(journal.root + "/host-runtime-exec-no-begin-cancellations",
+            sha256_text(child_operation.id) + ".sdn", 4194304)?
     val receipt = host_runtime_exec_no_begin_cancel_receipt_decode_v3(source)?
     if distributed_encode_operation_v2(receipt.child_operation)? != current.envelope: return Err("host-exec-no-begin-receipt-child")
     Ok(receipt)
@@ -94,3 +102,9 @@ pub fn host_runtime_exec_no_begin_cancel_validate_v3(journal: DistributedOperati
             history.revision_endpoints[edge.last_commit_digest] < edge.last_sequence):
         return Err("host-exec-no-begin-prefix-not-ancestor")
     Ok(true)
+
+# Pure result interpretation only, not authority. The only actual presence
+# caller above supplies the genuine current protected journal read result.
+pub fn host_runtime_exec_no_begin_presence_data_v3(value: Result<Option<text>, text>) -> Result<bool, text>:
+    val entry = value?
+    Ok(entry.is_some())

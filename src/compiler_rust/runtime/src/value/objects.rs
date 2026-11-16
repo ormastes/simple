@@ -433,6 +433,25 @@ mod positional_registry {
     }
 }
 
+/// Owner-correct discriminant (#6953): `variant`'s index in ITS OWN enum's
+/// declared variant list, or `None` when that enum does not declare it.
+///
+/// This is a pure function of one declaration, so every compile site, worker
+/// process and cached object agrees on it regardless of which other enums
+/// declare the same variant name or in what order they were registered. Every
+/// compiler site that can resolve the owning enum must use this rather than
+/// the name-only `hash_variant_discriminant`. Builtins agree with the fixed
+/// ABI: `Option` declares `[Some, None]` and `Result` `[Ok, Err]`.
+pub fn declared_variant_discriminant<'a>(
+    declared_variants: impl IntoIterator<Item = &'a str>,
+    variant: &str,
+) -> Option<u32> {
+    declared_variants
+        .into_iter()
+        .position(|name| name == variant)
+        .map(|index| index as u32)
+}
+
 /// Register an enum declaration's variants in declaration order so that
 /// `hash_variant_discriminant` yields the positional (pure-Simple) index.
 pub fn register_enum_variants<'a>(variants: impl IntoIterator<Item = &'a str>) {
@@ -462,6 +481,13 @@ pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
 
 pub(crate) const RESULT_ENUM_ID: u32 = 0;
 pub(crate) const OPTION_ENUM_ID: u32 = 1;
+
+/// Result's runtime enum id: 0 from compiled code, 2 from the C runtime's
+/// `rt_result_ok`/`rt_result_err`. A user enum's declared index is 0/1 for its
+/// first two variants (#6953), so Ok/Err may only be read under these ids.
+fn is_result_enum_id(enum_id: u32) -> bool {
+    enum_id == RESULT_ENUM_ID || enum_id == 2
+}
 
 pub(crate) fn rt_option_none() -> RuntimeValue {
     rt_enum_new(OPTION_ENUM_ID, hash_variant_discriminant("None"), RuntimeValue::NIL)
@@ -647,12 +673,14 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
         return value;
     }
 
-    if discriminant == hash_variant_discriminant("Ok") {
-        return payload;
-    }
-    if discriminant == hash_variant_discriminant("Err") {
-        eprintln!("error: called unwrap on Err");
-        std::process::abort();
+    if is_result_enum_id(enum_id) {
+        if discriminant == hash_variant_discriminant("Ok") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("Err") {
+            eprintln!("error: called unwrap on Err");
+            std::process::abort();
+        }
     }
 
     // Arbitrary user enum: preserve the pre-existing "return self" fallback.
@@ -698,7 +726,7 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
         return value;
     }
 
-    if enum_id == RESULT_ENUM_ID {
+    if is_result_enum_id(enum_id) {
         if discriminant == hash_variant_discriminant("Ok") {
             return payload;
         }
@@ -756,11 +784,13 @@ pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> R
         return value;
     }
 
-    if discriminant == hash_variant_discriminant("Ok") {
-        return payload;
-    }
-    if discriminant == hash_variant_discriminant("Err") {
-        trap();
+    if is_result_enum_id(enum_id) {
+        if discriminant == hash_variant_discriminant("Ok") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("Err") {
+            trap();
+        }
     }
 
     // Arbitrary user enum: preserve the pre-existing "return self" fallback.
@@ -784,8 +814,14 @@ pub extern "C" fn rt_try_is_absent(value: RuntimeValue, expected_enum_id: i64, e
         {
             return true;
         }
+        // An erased `?` (expected id 0) is a builtin Result's Err only: a user
+        // enum's declared index 1 (#6953) must not return early.
         discriminant as i64 == err_discriminant
-            && (expected_enum_id == 0 || enum_id == 0 || enum_id as i64 == expected_enum_id)
+            && if expected_enum_id == 0 {
+                is_result_enum_id(enum_id)
+            } else {
+                enum_id == 0 || enum_id as i64 == expected_enum_id
+            }
     })
 }
 
@@ -867,7 +903,7 @@ pub extern "C" fn rt_is_present(value: RuntimeValue) -> bool {
     // decides (seed_jit_dotq_coalesce_parity_2026-11-06).
     if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
         let (enum_id, discriminant) = unsafe { ((*p).enum_id, (*p).discriminant) };
-        if enum_id == RESULT_ENUM_ID && discriminant == hash_variant_discriminant("Err") {
+        if is_result_enum_id(enum_id) && discriminant == hash_variant_discriminant("Err") {
             return false;
         }
     }
@@ -892,15 +928,15 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
         return value;
     }
 
-    let mut result_ok_discriminant = None;
+    let mut result_ok = None;
     if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
         let (enum_id, discriminant) = unsafe { ((*p).enum_id, (*p).discriminant) };
-        if enum_id == RESULT_ENUM_ID {
+        if is_result_enum_id(enum_id) {
             if discriminant == hash_variant_discriminant("Err") {
                 return value;
             }
             if discriminant == hash_variant_discriminant("Ok") {
-                result_ok_discriminant = Some(discriminant);
+                result_ok = Some((enum_id, discriminant));
             }
         }
     }
@@ -919,8 +955,8 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
     let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
     let result = func(closure, payload);
 
-    match result_ok_discriminant {
-        Some(discriminant) => rt_enum_new(RESULT_ENUM_ID, discriminant, result),
+    match result_ok {
+        Some((enum_id, discriminant)) => rt_enum_new(enum_id, discriminant, result),
         None => rt_option_some(result),
     }
 }
