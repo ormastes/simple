@@ -1,14 +1,19 @@
-# Node attribute store over three placements (data plan W3b, plan P4).
+# Node attribute store over the node attribute placements (data plan W3b, plan P4).
 #
 # One typed read/write/presence/retire API for a node attribute whose value lives
-# either embedded on the main node (an owner delegate), in a dense column indexed
-# by node id, or in a sparse hash keyed by node id. The placement is a storage
-# token (`direct` | `column` | `sparse_hash`) resolved ONCE at construction by the
-# W1 rule resolver (`data_attr_storage_resolve_v1`); an access switches on the
-# `AttrPlacementV1` enum tag only, never on a string. Default OFF: nothing in the
-# compiler builds a store unless a rule or tag selects it, and the owner arrays
-# are untouched. Concurrency model: a store is owned by one writer per
-# (phase, module); readers share frozen snapshots (see phase_cell_*_v1).
+# embedded on the main node (an owner delegate), in a dense column indexed
+# implicitly by node id, in a compact side array whose slot index the node holds
+# (array_index), or in a sparse hash keyed by node id. The placement is a storage
+# token (`direct` | `column` | `array_index` | `sparse_hash`) resolved ONCE at
+# construction by the W1 rule resolver (`data_attr_storage_resolve_v1`); an access
+# switches on the `AttrPlacementV1` enum tag only, never on a string.
+# `array_ptr` / `hash_ptr` (node holds a pointer to an array slot / hash entry)
+# resolve as tokens but fail fast at construction: safe Simple has no element
+# reference that stays valid across side-array growth or hash rehash.
+# Default OFF: nothing in the compiler builds a store unless a rule or tag
+# selects it, and the owner arrays are untouched. Concurrency model: a store is
+# owned by one writer per (phase, module); readers share frozen snapshots (see
+# phase_cell_*_v1).
 
 use compiler.common.data.data_schema_contracts.*
 use compiler.common.data.data_schema_resolver.*
@@ -17,11 +22,39 @@ enum AttrPlacementV1:
     Embedded
     Column
     SparseHash
+    ArrayIndex
+    ArrayPointer
+    HashPointer
+
+# Data layout of a multi-field side array: one interleaved array (AoS) or one
+# array per field (SoA). Applies to column and array_index only.
+enum AttrLayoutV1:
+    Aos
+    Soa
 
 # The node's own field(s): the store delegates to the owner and keeps no copy.
 trait AttrOwnerV1<T>:
     fn owner_read(node: i64) -> T?
     me owner_write(node: i64, value: T?)
+
+# Node-held slot index for a detached array_index store (stands in for the
+# node's index field when the caller supplies none).
+class AttrIndexCellsV1:
+    cells: [i64?]
+
+impl AttrIndexCellsV1:
+    static fn create() -> AttrIndexCellsV1:
+        AttrIndexCellsV1(cells: [])
+
+impl AttrOwnerV1<i64> for AttrIndexCellsV1:
+    fn owner_read(node: i64) -> i64?:
+        if node < 0 or node >= self.cells.len():
+            return None
+        self.cells[node]
+    me owner_write(node: i64, value: i64?):
+        while self.cells.len() <= node:
+            self.cells = self.cells.push(None)
+        self.cells[node] = value
 
 class AttributeStoreV1<T>:
     attr: text
@@ -30,6 +63,8 @@ class AttributeStoreV1<T>:
     slots: [T?]
     present: i64
     hash: Dict<i64, T>
+    index_owner: AttrOwnerV1<i64>?
+    free: [i64]
 
 pub fn attr_placement_from_token_v1(token: text) -> Result<AttrPlacementV1, text>:
     if token == "direct":
@@ -38,14 +73,58 @@ pub fn attr_placement_from_token_v1(token: text) -> Result<AttrPlacementV1, text
         return Ok(AttrPlacementV1.Column)
     if token == "sparse_hash":
         return Ok(AttrPlacementV1.SparseHash)
-    Err("unknown attribute storage token '{token}' (expected direct, column or sparse_hash)")
+    if token == "array_index":
+        return Ok(AttrPlacementV1.ArrayIndex)
+    if token == "array_ptr":
+        return Ok(AttrPlacementV1.ArrayPointer)
+    if token == "hash_ptr":
+        return Ok(AttrPlacementV1.HashPointer)
+    Err("unknown attribute storage token '{token}' (expected direct, column, array_index, sparse_hash, array_ptr or hash_ptr)")
+
+pub fn attr_placement_token_v1(placement: AttrPlacementV1) -> text:
+    match placement:
+        case Embedded: "direct"
+        case Column: "column"
+        case SparseHash: "sparse_hash"
+        case ArrayIndex: "array_index"
+        case ArrayPointer: "array_ptr"
+        case HashPointer: "hash_ptr"
+
+# Empty token = SoA, the layout every single-field column already has.
+pub fn attr_layout_from_token_v1(token: text) -> Result<AttrLayoutV1, text>:
+    if token == "soa" or token == "":
+        return Ok(AttrLayoutV1.Soa)
+    if token == "aos":
+        return Ok(AttrLayoutV1.Aos)
+    Err("unknown attribute data layout '{token}' (expected aos or soa)")
+
+pub fn attr_layout_token_v1(layout: AttrLayoutV1) -> text:
+    match layout:
+        case Aos: "aos"
+        case Soa: "soa"
+
+# TODO(node-attr-pointer-layouts): back array_ptr / hash_ptr once safe Simple has a
+# stable element reference across side-array growth and hash rehash.
+fn attr_pointer_unsupported_v1(attr: text, placement: AttrPlacementV1) -> text:
+    "attribute {attr}: {attr_placement_token_v1(placement)} is unsupported: no safe element reference survives side-array growth or hash rehash (use array_index or sparse_hash)"
 
 impl AttributeStoreV1<T>:
     fn placement_token() -> text:
-        match self.placement:
-            case Embedded: "direct"
-            case Column: "column"
-            case SparseHash: "sparse_hash"
+        attr_placement_token_v1(self.placement)
+
+    # Slot held by the node for array_index; -1 when the node holds none.
+    fn slot_of(node: i64) -> i64:
+        match self.index_owner:
+            case Some(ix):
+                match ix.owner_read(node):
+                    case Some(s): return s
+                    case None: pass
+            case None: pass
+        -1
+
+    # Side-array length for array_index (live + free slots).
+    fn side_slots() -> i64:
+        self.slots.len()
 
     fn has(node: i64) -> bool:
         match self.placement:
@@ -61,6 +140,10 @@ impl AttributeStoreV1<T>:
                 return false
             case SparseHash:
                 return self.hash.contains_key(node)
+            case ArrayIndex:
+                return self.slot_of(node) >= 0
+            case _:
+                return false
 
     fn get(node: i64) -> Result<T, text>:
         match self.placement:
@@ -79,6 +162,13 @@ impl AttributeStoreV1<T>:
             case SparseHash:
                 if self.hash.contains_key(node):
                     return Ok(self.hash[node])
+            case ArrayIndex:
+                val s = self.slot_of(node)
+                if s >= 0:
+                    match self.slots[s]:
+                        case Some(v): return Ok(v)
+                        case None: pass
+            case _: pass
         Err("absent: no {self.attr} entry for node {node}")
 
     me set(node: i64, value: T) -> Result<bool, text>:
@@ -101,6 +191,23 @@ impl AttributeStoreV1<T>:
                 self.slots[node] = Some(value)
             case SparseHash:
                 self.hash[node] = value
+            case ArrayIndex:
+                val held = self.slot_of(node)
+                if held >= 0:
+                    self.slots[held] = Some(value)
+                    return Ok(true)
+                var s = self.slots.len()
+                if self.free.len() > 0:
+                    s = self.free[self.free.len() - 1]
+                    val _f = self.free.pop()
+                    self.slots[s] = Some(value)
+                else:
+                    self.slots = self.slots.push(Some(value))
+                match self.index_owner:
+                    case Some(ix): ix.owner_write(node, Some(s))
+                    case None: return Err("attribute {self.attr}: array_index placement has no index owner")
+                self.present = self.present + 1
+            case _: return Err(attr_pointer_unsupported_v1(self.attr, self.placement))
         Ok(true)
 
     # Retire an entry (node freed or attribute cleared). True when it was present.
@@ -118,6 +225,15 @@ impl AttributeStoreV1<T>:
                 self.present = self.present - 1
             case SparseHash:
                 self.hash.remove(node)
+            case ArrayIndex:
+                val s = self.slot_of(node)
+                self.slots[s] = None
+                self.free = self.free.push(s)
+                match self.index_owner:
+                    case Some(ix): ix.owner_write(node, None)
+                    case None: pass
+                self.present = self.present - 1
+            case _: return false
         true
 
     fn len() -> i64:
@@ -125,11 +241,26 @@ impl AttributeStoreV1<T>:
             case SparseHash: self.hash.len()
             case _: self.present
 
-pub fn attr_store_for_token_v1<T>(attr: text, token: text, owner: AttrOwnerV1<T>) -> Result<AttributeStoreV1<T>, text>:
-    val placement = attr_placement_from_token_v1(token)?
+fn attr_store_new_v1<T>(attr: text, placement: AttrPlacementV1, owner: AttrOwnerV1<T>?,
+                        index_owner: AttrOwnerV1<i64>?) -> AttributeStoreV1<T>:
     val h: Dict<i64, T> = {}
     val s: [T?] = []
-    Ok(AttributeStoreV1(attr: attr, placement: placement, owner: Some(owner), slots: s, present: 0, hash: h))
+    val f: [i64] = []
+    AttributeStoreV1(attr: attr, placement: placement, owner: owner, slots: s, present: 0, hash: h,
+                     index_owner: index_owner, free: f)
+
+pub fn attr_store_for_token_v1<T>(attr: text, token: text, owner: AttrOwnerV1<T>) -> Result<AttributeStoreV1<T>, text>:
+    val placement = attr_placement_from_token_v1(token)?
+    match placement:
+        case ArrayPointer: return Err(attr_pointer_unsupported_v1(attr, placement))
+        case HashPointer: return Err(attr_pointer_unsupported_v1(attr, placement))
+        case ArrayIndex: return Ok(attr_store_new_v1<T>(attr, placement, None, Some(AttrIndexCellsV1.create())))
+        case _: pass
+    Ok(attr_store_new_v1<T>(attr, placement, Some(owner), None))
+
+# array_index store whose slot index lives on the node through `index_owner`.
+pub fn attr_store_indexed_v1<T>(attr: text, index_owner: AttrOwnerV1<i64>) -> AttributeStoreV1<T>:
+    attr_store_new_v1<T>(attr, AttrPlacementV1.ArrayIndex, None, Some(index_owner))
 
 # Resolve the placement once from SPL hints/pins and SDN rules (plan 8.4), then
 # build the store. Built-in default is `direct` (today's owner behaviour).
@@ -139,12 +270,150 @@ pub fn attr_store_resolve_v1<T>(tree: text, view: text, attr: text, rules: [Data
         case Ok(choice): attr_store_for_token_v1(attr, choice.choice, owner)
         case Err(diag): Err(diag.message)
 
-# Store for a column or sparse-hash placement: the store owns its values, so no
-# owner delegate exists. `direct` has no detached form (the owner is the store).
+# Store for a column, array_index or sparse-hash placement: the store owns its
+# values, so no owner delegate exists. `direct` has no detached form (the owner
+# is the store); the pointer placements fail fast.
 pub fn attr_store_detached_v1<T>(attr: text, placement: AttrPlacementV1) -> Result<AttributeStoreV1<T>, text>:
     match placement:
         case Embedded: return Err("attribute {attr}: embedded placement needs an owner")
+        case ArrayPointer: return Err(attr_pointer_unsupported_v1(attr, placement))
+        case HashPointer: return Err(attr_pointer_unsupported_v1(attr, placement))
+        case ArrayIndex: return Ok(attr_store_new_v1<T>(attr, placement, None, Some(AttrIndexCellsV1.create())))
         case _: pass
-    val h: Dict<i64, T> = {}
-    val s: [T?] = []
-    Ok(AttributeStoreV1(attr: attr, placement: placement, owner: None, slots: s, present: 0, hash: h))
+    Ok(attr_store_new_v1<T>(attr, placement, None, None))
+
+# ---------------------------------------------------------------------------
+# Multi-field side array (`nfields` attributes of one type per row) in AoS or
+# SoA layout. Row = node id (column) or the node-held slot (array_index).
+# ---------------------------------------------------------------------------
+class AttrGroupStoreV1<T>:
+    attr: text
+    placement: AttrPlacementV1
+    layout: AttrLayoutV1
+    nfields: i64
+    aos: [T?]
+    soa: [[T?]]
+    live: [bool]
+    rows_n: i64
+    index: AttrIndexCellsV1
+    free: [i64]
+
+pub fn attr_group_store_v1<T>(attr: text, placement: AttrPlacementV1, nfields: i64,
+                              layout: AttrLayoutV1) -> Result<AttrGroupStoreV1<T>, text>:
+    match placement:
+        case Column: pass
+        case ArrayIndex: pass
+        case _: return Err("attribute group {attr}: {attr_placement_token_v1(placement)} has no side array, so AoS/SoA does not apply")
+    if nfields < 1:
+        return Err("attribute group {attr}: needs at least one field")
+    var soa: [[T?]] = []
+    var i = 0
+    while i < nfields:
+        val col: [T?] = []
+        soa.push(col)
+        i = i + 1
+    val a: [T?] = []
+    val l: [bool] = []
+    val f: [i64] = []
+    Ok(AttrGroupStoreV1(attr: attr, placement: placement, layout: layout, nfields: nfields, aos: a, soa: soa,
+                        live: l, rows_n: 0, index: AttrIndexCellsV1.create(), free: f))
+
+impl AttrGroupStoreV1<T>:
+    fn layout_token() -> text:
+        attr_layout_token_v1(self.layout)
+
+    fn row_of(node: i64) -> i64:
+        match self.placement:
+            case Column:
+                if node >= 0 and node < self.live.len() and self.live[node]:
+                    return node
+                return -1
+            case _:
+                match self.index.owner_read(node):
+                    case Some(r): return r
+                    case None: return -1
+
+    fn has(node: i64) -> bool:
+        self.row_of(node) >= 0
+
+    fn rows() -> i64:
+        self.rows_n
+
+    fn get(node: i64, field: i64) -> Result<T, text>:
+        if field < 0 or field >= self.nfields:
+            return Err("attribute group {self.attr}: field {field} out of range")
+        val r = self.row_of(node)
+        if r >= 0:
+            match self.layout:
+                case Aos:
+                    match self.aos[r * self.nfields + field]:
+                        case Some(v): return Ok(v)
+                        case None: pass
+                case Soa:
+                    match self.soa[field][r]:
+                        case Some(v): return Ok(v)
+                        case None: pass
+        Err("absent: no {self.attr}[{field}] entry for node {node}")
+
+    # Grow the side array to hold row r (all fields absent).
+    me grow_to(r: i64):
+        while self.live.len() <= r:
+            self.live = self.live.push(false)
+            match self.layout:
+                case Aos:
+                    var i = 0
+                    while i < self.nfields:
+                        self.aos = self.aos.push(None)
+                        i = i + 1
+                case Soa:
+                    var i = 0
+                    while i < self.nfields:
+                        self.soa[i] = self.soa[i].push(None)
+                        i = i + 1
+
+    me clear_row(r: i64):
+        var i = 0
+        while i < self.nfields:
+            match self.layout:
+                case Aos: self.aos[r * self.nfields + i] = None
+                case Soa: self.soa[i][r] = None
+            i = i + 1
+
+    me set(node: i64, field: i64, value: T) -> Result<bool, text>:
+        if node < 0:
+            return Err("attribute group {self.attr}: negative node id {node}")
+        if field < 0 or field >= self.nfields:
+            return Err("attribute group {self.attr}: field {field} out of range")
+        var r = self.row_of(node)
+        if r < 0:
+            match self.placement:
+                case Column: r = node
+                case _:
+                    if self.free.len() > 0:
+                        r = self.free[self.free.len() - 1]
+                        val _f = self.free.pop()
+                    else:
+                        r = self.live.len()
+                    self.index.owner_write(node, Some(r))
+            self.grow_to(r)
+            self.clear_row(r)
+            self.live[r] = true
+            self.rows_n = self.rows_n + 1
+        match self.layout:
+            case Aos: self.aos[r * self.nfields + field] = Some(value)
+            case Soa: self.soa[field][r] = Some(value)
+        Ok(true)
+
+    me retire(node: i64) -> bool:
+        val r = self.row_of(node)
+        if r < 0:
+            return false
+        self.clear_row(r)
+        self.live[r] = false
+        match self.placement:
+            case Column: pass
+            case _:
+                self.index.owner_write(node, None)
+                self.free = self.free.push(r)
+        self.rows_n = self.rows_n - 1
+        true
