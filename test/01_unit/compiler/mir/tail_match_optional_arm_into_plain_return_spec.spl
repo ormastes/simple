@@ -69,6 +69,64 @@ val METHOD_SOURCE: text = "struct Lid:\n    id: i64\n\n" +
 # A tuple `T?` payload is a tuple pointer word, not an i64 to decode.
 val TUPLE_SOURCE: text = "fn pick_pair(n: i64) -> (i64, text)?:\n    if n < 0:\n        return None\n    Some((n, \"x\"))\n\n" +
     "fn tup_ret(n: i64) -> (i64, text):\n    return pick_pair(n)\n"
+# An `if` joining a tuple `T?` arm with a raw tuple arm into `-> T`, as the
+# tail and as an explicit return.
+val TUPLE_JOIN_SOURCE: text = "fn pick_ok(n: i64) -> (i64, bool)?:\n    if n < 0:\n        return None\n    Some((n, true))\n\n" +
+    "fn tok_tail(n: i64, k: i64) -> (i64, bool):\n    if k > 0:\n        pick_ok(n)\n    else:\n        (0, false)\n\n" +
+    "fn tok_ret(n: i64, k: i64) -> (i64, bool):\n    return if k > 0: pick_ok(n) else: (0, false)\n"
+# A tuple payload with no native slot proof (f32) must fail closed.
+val TUPLE_F32_SOURCE: text = "fn pick_f(n: i64) -> (f32, i64)?:\n    if n < 0:\n        return None\n    Some((1.5, n))\n\n" +
+    "fn tf(n: i64) -> (f32, i64):\n    return pick_f(n)\n"
+
+fn lower_module_errors(src: text) -> [text]:
+    val module = parse_full_frontend(src, "tail_arm.spl", "tail_arm.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("tail_arm.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+    var out: [text] = []
+    for e in mir_lowering.errors:
+        if e.fatal:
+            out = out.push(e.message)
+    out
+
+fn local_def_after(mir: text, op: text, dest: text) -> text:
+    """The text of the first `op` instruction defining `dest`, up to the next
+    instruction's `"dest":`, or ""."""
+    val at = mir.index_of("""{""" + "\"" + op + "\":" + """{"dest":""" + dest + ",")
+    if at < 0:
+        return ""
+    # Skip `{"<op>":{"dest":` so the search below finds the NEXT dest.
+    val rest = mir.substring(at + op.len() + 12, mir.len())
+    val next = rest.index_of("\"dest\":")
+    if next < 0:
+        return rest
+    rest.substring(0, next)
+
+fn returned_local_id(mir: text) -> text:
+    val ret_at = mir.index_of("\"Return\":")
+    if ret_at < 0:
+        return ""
+    val ret_tail = mir.substring(ret_at, mir.len())
+    val operand = ret_tail.substring(ret_tail.index_of("\"Copy\":") + 7, ret_tail.len())
+    operand.substring(0, operand.index_of("}"))
+
+fn returns_tuple_from_ptr_cast(mir: text) -> bool:
+    """`return <(A, B)?>` must return the payload recovered by a pointer cast
+    of the unwrapped word: Return <- Copy <- Cast to Ptr(Tuple)."""
+    val copy_def = local_def_after(mir, "Copy", returned_local_id(mir))
+    if copy_def == "":
+        return false
+    val src_tail = copy_def.substring(copy_def.index_of("\"src\":") + 6, copy_def.len())
+    val src = src_tail.substring(0, src_tail.index_of("}"))
+    val cast_def = local_def_after(mir, "Cast", src)
+    cast_def.contains("""Ptr":{"pointee":{"Tuple":""")
+
+fn is_option_envelope_type(ty: text) -> bool:
+    """MIR spells `(A, B)?` as the envelope Tuple(Bool, Tuple(A, B))."""
+    ty.starts_with("""{"Tuple":["Bool",{""")
+
+val PTR_TUPLE_I64_BOOL: text = """target":{"Ptr":{"pointee":{"Tuple":["I64","Bool"]}"""
 
 fn returned_local_type(mir: text) -> text:
     val ret_at = mir.index_of("\"Return\":")
@@ -110,5 +168,28 @@ describe "tail match with an optional arm into a plain declared return":
         val mir = lower_module_json(TUPLE_SOURCE)["tup_ret"] ?? ""
         expect(mir).to_contain("rt_unwrap_or_trap")
         val ret_type = returned_local_type(mir)
-        expect(ret_type != "").to_equal(true)
-        expect(ret_type == "\"I64\"").to_equal(false)
+        expect(ret_type.starts_with("""{"Tuple":["I64",""")).to_equal(true)
+        expect(is_option_envelope_type(ret_type)).to_equal(false)
+        expect(returns_tuple_from_ptr_cast(mir)).to_equal(true)
+
+    it "narrows an if tail joining a tuple T? arm with a raw tuple arm":
+        val mir = lower_module_json(TUPLE_JOIN_SOURCE)["tok_tail"] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir).to_contain("rt_unwrap_or_trap")
+        expect(mir).to_contain(PTR_TUPLE_I64_BOOL)
+        expect(is_option_envelope_type(returned_local_type(mir))).to_equal(false)
+
+    it "narrows an explicit return of that tuple join the same way":
+        val mir = lower_module_json(TUPLE_JOIN_SOURCE)["tok_ret"] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir).to_contain("rt_unwrap_or_trap")
+        expect(mir).to_contain(PTR_TUPLE_I64_BOOL)
+        expect(is_option_envelope_type(returned_local_type(mir))).to_equal(false)
+
+    it "fails closed on a tuple T? payload with an unsupported element":
+        val errors = lower_module_errors(TUPLE_F32_SOURCE)
+        var saw = false
+        for message in errors:
+            if message.contains("unsupported optional tuple payload element type"):
+                saw = true
+        expect(saw).to_equal(true)
