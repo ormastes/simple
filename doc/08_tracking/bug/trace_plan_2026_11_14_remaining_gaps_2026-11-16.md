@@ -32,9 +32,11 @@ flagged, but they break the "no primitive in public API" requirement:
 
 ## 4. Test query and harness
 
-- `simple test query` spec rows use `@req TESTDB-011..016`, ids chosen by the
-  implementer; reconcile with the plan's TESTDB table.
-- `--cursor` is a plain row offset, not an opaque token.
+- The plan (sections 3.5, 9.1) lists `TESTDB-001`..`TESTDB-010` as one range and
+  defines no per-id rows. Specs now use the mapping in
+  `test_query_spec.spl` (001 exact query, 002 result variants, 003 provenance and
+  missing identity, 004 pagination/rejected/failed queries); 005..010 and an id
+  for read-only/no-write isolation remain undefined by the plan.
 
 ## Already recorded elsewhere
 
