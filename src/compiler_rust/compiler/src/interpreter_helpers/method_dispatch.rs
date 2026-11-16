@@ -1049,6 +1049,35 @@ pub(crate) fn call_method_on_value(
             "family" => return Ok(family.clone().map_or(Value::Nil, Value::text_owned)),
             "to_string" => return Ok(Value::text(format!("{}_{}", value.to_display_string(), suffix))),
             "to_text" => return Ok(Value::text(value.to_display_string())),
+            // Unit-to-unit `to_<suffix>` (e.g. `opt.unwrap().to_mps()`): reuse the
+            // direct-receiver conversion path. It returns None for builtin numeric
+            // targets (`to_i64`, `to_f64`, ...), which fall through to the inner value.
+            other if other.starts_with("to_") && _args.is_empty() => {
+                if let Some(converted) = crate::interpreter::interpreter_method::special::handle_unit_methods(
+                    value,
+                    suffix,
+                    family,
+                    other,
+                    &[],
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                )? {
+                    return Ok(converted);
+                }
+                return call_method_on_value(
+                    (**value).clone(),
+                    method,
+                    _args,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                );
+            }
             _ => {
                 return call_method_on_value(
                     (**value).clone(),

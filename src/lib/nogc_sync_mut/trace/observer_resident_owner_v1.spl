@@ -1,0 +1,364 @@
+# Process singleton control owner with public candidate discovery factories.
+# Factories may register the live image; public prepare/start refuse activation
+# through the shared closed admission owner before entering native state.
+# Admitted cold operations serialize before reading mutable module state.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_resident_admission_v1.*
+use std.common.trace.observer_config_v1.{trace_config_validate_v1}
+use std.common.trace.observer_event_codec_v1.{trace_event_decode_v1}
+use std.common.trace.xray_llvm_semantic_map_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_image_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_resident_leaf_v1.*
+use std.nogc_sync_mut.trace.observer_resident_storage_v1.*
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.ptr.raw.{rt_ptr_read_i64}
+use std.nogc_sync_mut.atomic.{rt_par_atomic_load_i64}
+
+extern fn simple_xray_resident_control_enter_v1() -> i64
+extern fn simple_xray_resident_control_leave_v1()
+extern fn simple_xray_resident_runtime_is_ready_v1() -> i64
+extern fn simple_xray_resident_in_hook_v1() -> i64
+extern fn simple_xray_startup_current_owner_v1() -> i64
+extern fn simple_xray_llvm_resident_drained_v1() -> i64
+extern fn simple_xray_llvm_resident_loss_inexact_v1() -> i64
+extern fn simple_xray_thread_task_root_v1() -> i64
+extern fn rt_time_monotonic_ns() -> i64
+
+struct TraceResidentOwnerV1:
+    images: [XrayLlvmRegisteredImageV1]
+    retained: [TraceResidentStorageV1]
+    charged: i64
+    registration_attempted: bool
+    adapter: XrayLlvmAdapterV1
+    live: bool
+    prepared: bool
+    state: TraceSessionStateV1
+    cursor: i64
+    high_water: u64
+    errors: u64
+
+var _trace_resident_owner_v1: [TraceResidentOwnerV1] = []
+
+impl TraceResidentOwnerV1:
+    static fn create() -> TraceResidentOwnerV1:
+        TraceResidentOwnerV1(images: [], retained: [], charged: 0,
+            registration_attempted: false, adapter: XrayLlvmAdapterV1.create(1),
+            live: false, prepared: false, state: TraceSessionStateV1.Drained,
+            cursor: 0, high_water: 0, errors: 0)
+
+    me register() -> Result<bool, TraceFailureV1>:
+        if self.images.len() > 0: return Ok(true)
+        if self.registration_attempted: return Err(TraceFailureV1.InvalidMap)
+        # Snapshot attempts may retain native storage even on failure. Reserve
+        # the entire allowed attempt once, never retry it with a fresh budget.
+        self.registration_attempted = true
+        self.charged = 33554432
+        val image = xray_llvm_register_main_image_v1(33554432, 1, 1)?
+        self.images.push(image)
+        Ok(true)
+
+    fn valid(session: TraceSessionV1) -> bool:
+        self.live and session.slot == 1 and session.incarnation == self.adapter.incarnation and session.generation == self.adapter.incarnation
+
+    fn leaf() -> XrayLlvmResidentLeafV1:
+        val storage = self.retained[self.retained.len() - 1]
+        XrayLlvmResidentLeafV1(manifest: self.images[0].manifest,
+            descriptor: storage.base, generation: self.adapter.incarnation)
+
+    me prepare(config: TraceConfigV1, selection: TraceSelectionV1
+            ) -> Result<TracePreparedV1, TraceFailureV1>:
+        if self.live or self.prepared: return Err(TraceFailureV1.Busy)
+        trace_config_validate_v1(config)?
+        if config.instrumentation != TraceInstrumentationV1.Dynamic:
+            return Err(TraceFailureV1.InstrumentationAbsent)
+        if config.consistency != TraceConsistencyV1.RawEdges or config.patch_mode != TracePatchModeV1.Quiescent or (config.event_mask & 256u64) != 0:
+            return Err(TraceFailureV1.UnsupportedConsistency)
+        if self.retained.len() >= 16 or self.retained.len() as u64 >= config.max_resident_generations:
+            return Err(TraceFailureV1.ResourceExhausted)
+        self.register()?
+        val manifest = self.images[0].manifest
+        if selection.manifest_incarnation != manifest.incarnation: return Err(TraceFailureV1.InvalidMap)
+        val bytes = trace_resident_storage_bytes_v1(config, manifest.bindings.len())?
+        if bytes > TRACE_RESIDENT_BYTES_LIMIT_V1 - self.charged: return Err(TraceFailureV1.ResourceExhausted)
+        # Validate selection before allocation or issuance. The temporary leaf
+        # cannot publish anything; adapter.prepare only queries its map bound.
+        var leaf = XrayLlvmResidentLeafV1(manifest: manifest, descriptor: 0, generation: 0)
+        var adapter = self.adapter
+        val prepared = adapter.prepare(leaf, config, selection)?
+        self.charged = self.charged + bytes
+        val storage = trace_resident_storage_allocate_v1(config, manifest, prepared.incarnation)?
+        self.retained.push(storage)
+        self.adapter = adapter
+        self.prepared = true
+        self.cursor = 0
+        self.high_water = 0
+        self.errors = 0
+        Ok(prepared)
+
+    me start(prepared: TracePreparedV1) -> Result<TraceSessionV1, TraceFailureV1>:
+        if self.live: return Err(TraceFailureV1.Busy)
+        if not self.prepared or prepared.slot != 1 or prepared.incarnation != self.adapter.incarnation:
+            return Err(TraceFailureV1.InvalidHandle)
+        var leaf = self.leaf()
+        var adapter = self.adapter
+        val result = adapter.start(leaf, prepared, leaf.descriptor)
+        self.adapter = adapter
+        self.prepared = false
+        match result:
+            case Ok(session):
+                self.live = true
+                self.state = TraceSessionStateV1.Active
+                # The calling root attaches outside the handler. New runtime
+                # workers attach at their own thread/task root wrappers.
+                if simple_xray_thread_task_root_v1() != 1:
+                    self.errors = self.errors + 1u64
+                    var rollback = self.adapter
+                    val stopped = rollback.request_stop(leaf, session)
+                    self.adapter = rollback
+                    # No success handle is returned. Keep failed generation
+                    # inaccessible and block all later preparations until a
+                    # separately qualified recovery operation is supplied.
+                    self.state = TraceSessionStateV1.Faulted
+                    return Err(TraceFailureV1.BackendFailure)
+                Ok(session)
+            case Err(failure): Err(failure)
+
+    me stop(session: TraceSessionV1) -> Result<TraceSessionStateV1, TraceFailureV1>:
+        if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
+        if self.state != TraceSessionStateV1.Active: return Ok(self.state)
+        var leaf = self.leaf()
+        var adapter = self.adapter
+        val stopped = adapter.request_recording_stop(leaf, session)
+        self.adapter = adapter
+        match stopped:
+            case Err(failure):
+                if failure == TraceFailureV1.Busy: return Err(failure)
+                self.state = TraceSessionStateV1.Faulted
+                self.errors = self.errors + 1u64
+                Err(failure)
+            case Ok(_):
+                self.state = TraceSessionStateV1.Draining
+                Ok(self.state)
+
+    fn stats(session: TraceSessionV1) -> Result<TraceStatsV1, TraceFailureV1>:
+        if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
+        val storage = self.retained[self.retained.len() - 1]
+        var recorded: u64 = 0
+        var transitions: u64 = 0
+        var lost: u64 = 0
+        var inexact = simple_xray_llvm_resident_loss_inexact_v1() != 0
+        unsafe(capabilities: [ffi]):
+            lost = rt_par_atomic_load_i64(storage.pool + 48) as u64
+            if lost == 18446744073709551615u64:
+                lost = 0
+                inexact = true
+            for arena in storage.arenas:
+                val count = rt_par_atomic_load_i64(arena + 40) as u64
+                # Each newly attached empty ring receives its mandatory first
+                # transition before data. Rings and slots are never reused.
+                if count > 0: transitions = transitions + 1u64
+                val dropped = trace_native_channel_lost_v1(arena)
+                if count > 18446744073709551615u64 - recorded:
+                    recorded = 18446744073709551615u64
+                    inexact = true
+                else: recorded = recorded + count
+                if dropped > 18446744073709551615u64 - lost:
+                    lost = 18446744073709551615u64
+                    inexact = true
+                else: lost = lost + dropped
+                if trace_native_channel_loss_inexact_v1(arena): inexact = true
+        # Existing wire stats have no exactness bit. A backend error explicitly
+        # marks an unknown/lower-bound loss count; UINT64_MAX is never a count.
+        val errors = self.errors + (if inexact: 1u64 else: 0u64)
+        Ok(TraceStatsV1(generation: session.generation, recorded: recorded, lost: lost,
+            transitions: transitions, unsupported_sites: 0, queue_high_water: self.high_water,
+            backend_errors: errors))
+
+    me poll(session: TraceSessionV1, max_records: u32) -> Result<TraceBatchV1, TraceFailureV1>:
+        if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
+        if max_records == 0 or max_records > 4096: return Err(TraceFailureV1.InvalidArgument)
+        val storage = self.retained[self.retained.len() - 1]
+        var events: [TraceEventV1] = []
+        var empty = 0
+        while events.len() < max_records as i64 and empty < storage.arenas.len():
+            val arena = storage.arenas[self.cursor]
+            self.cursor = (self.cursor + 1) % storage.arenas.len()
+            unsafe(capabilities: [ffi]):
+                val pending = rt_par_atomic_load_i64(arena + 40) - rt_par_atomic_load_i64(arena + 48)
+                if pending > 0 and pending as u64 > self.high_water: self.high_water = pending as u64
+                val status = trace_native_channel_poll_into_v1(arena, storage.scratch, 96)
+                if status == 1:
+                    var encoded: [u8] = []
+                    for word in 0..12:
+                        val bits = rt_ptr_read_i64(storage.scratch, word * 8) as u64
+                        for byte in 0..8: encoded.push(((bits >> (byte * 8)) & 255u64) as u8)
+                    val event = trace_event_decode_v1(encoded)?
+                    if event.generation != session.generation: return Err(TraceFailureV1.InvalidHandle)
+                    events.push(event)
+                    empty = 0
+                elif status == 0 or status == -2:
+                    empty = empty + 1
+                else: return Err(TraceFailureV1.BackendFailure)
+        Ok(TraceBatchV1(events: events, state: self.state))
+
+    me drain(session: TraceSessionV1, deadline_ns: u64) -> Result<TraceDrainV1, TraceFailureV1>:
+        if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
+        if self.state == TraceSessionStateV1.Active: return Err(TraceFailureV1.Busy)
+        if self.state == TraceSessionStateV1.Faulted: return Err(TraceFailureV1.BackendFailure)
+        var drained = simple_xray_llvm_resident_drained_v1() == 1
+        if drained:
+            val storage = self.retained[self.retained.len() - 1]
+            unsafe(capabilities: [ffi]):
+                for arena in storage.arenas:
+                    if trace_native_channel_close_v1(arena) != 1 or not trace_native_channel_drained_v1(arena):
+                        drained = false
+        if drained: self.state = TraceSessionStateV1.Drained
+        elif rt_time_monotonic_ns() as u64 >= deadline_ns: return Err(TraceFailureV1.TimedOut)
+        Ok(TraceDrainV1(state: self.state, stats: self.stats(session)?))
+
+    me flush(session: TraceSessionV1, deadline_ns: u64) -> Result<TraceStatsV1, TraceFailureV1>:
+        if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
+        if self.state == TraceSessionStateV1.Faulted: return Err(TraceFailureV1.BackendFailure)
+        val storage = self.retained[self.retained.len() - 1]
+        unsafe(capabilities: [ffi]):
+            for arena in storage.arenas:
+                if rt_par_atomic_load_i64(arena + 40) != rt_par_atomic_load_i64(arena + 48):
+                    if rt_time_monotonic_ns() as u64 >= deadline_ns: return Err(TraceFailureV1.TimedOut)
+                    return Err(TraceFailureV1.Busy)
+        self.stats(session)
+
+    me release(session: TraceSessionV1) -> Result<bool, TraceFailureV1>:
+        if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
+        if self.state != TraceSessionStateV1.Drained: return Err(TraceFailureV1.Busy)
+        self.live = false
+        # No descriptor, arena, map, image, or generation budget is reclaimed.
+        Ok(true)
+
+fn trace_resident_enter_v1() -> Result<bool, TraceFailureV1>:
+    if simple_xray_resident_runtime_is_ready_v1() != 1: return Err(TraceFailureV1.Busy)
+    if simple_xray_resident_in_hook_v1() != 0: return Err(TraceFailureV1.Busy)
+    # Retained state must never join a caller's session/transient lifetime.
+    # Cold operations contain no user callbacks or allocation-scope changes.
+    if not trace_resident_process_owner_v1(): return Err(TraceFailureV1.Busy)
+    if simple_xray_resident_control_enter_v1() != 1: return Err(TraceFailureV1.Busy)
+    if _trace_resident_owner_v1.len() == 0: _trace_resident_owner_v1.push(TraceResidentOwnerV1.create())
+    Ok(true)
+
+# Stateless façade copies are safe: every operation uses the same process
+# owner, never a per-instance capture table. Candidate construction registers
+# the actual live image; it does not accept caller-supplied manifest authority.
+pub class TraceResidentObserverV1:
+    pass
+
+pub fn trace_resident_observer_candidate_v1() -> Result<TraceResidentObserverV1, TraceFailureV1>:
+    trace_resident_enter_v1()?
+    var owner = _trace_resident_owner_v1[0]
+    val result = owner.register()
+    _trace_resident_owner_v1[0] = owner
+    simple_xray_resident_control_leave_v1()
+    result?
+    Ok(TraceResidentObserverV1())
+
+pub fn trace_resident_selection_candidate_v1(owner_name: text, keys: [text]
+        ) -> Result<TraceSelectionV1, TraceFailureV1>:
+    trace_resident_enter_v1()?
+    var owner = _trace_resident_owner_v1[0]
+    val result = owner.register()
+    _trace_resident_owner_v1[0] = owner
+    simple_xray_resident_control_leave_v1()
+    result?
+    if keys.len() == 0 or keys.len() > 4096: return Err(TraceFailureV1.InvalidMap)
+    # Fresh scalar IDs only: no internal binding, array, row or build-ID carrier
+    # is returned to a caller that could mutate the trusted manifest.
+    val manifest = owner.images[0].manifest
+    var sites: [TraceSiteV1] = []
+    for key in keys:
+        var found = false
+        for binding in manifest.bindings:
+            # An empty owner requests a globally unique emitted key (useful
+            # for exact C exports). Ambiguity never selects an arbitrary row.
+            if (owner_name == "" or binding.row.owner == owner_name) and binding.row.key == key:
+                if found: return Err(TraceFailureV1.InvalidMap)
+                for previous in sites:
+                    if previous.site_id == binding.site_id: return Err(TraceFailureV1.InvalidMap)
+                sites.push(TraceSiteV1(module_instance: manifest.module_instance, site_id: binding.site_id))
+                found = true
+        if not found: return Err(TraceFailureV1.InvalidMap)
+    Ok(TraceSelectionV1(manifest_incarnation: manifest.incarnation, sites: sites))
+
+impl TraceObserverV1 for TraceResidentObserverV1:
+    fn capabilities() -> TraceCapabilitiesV1:
+        trace_resident_capabilities_v1()
+
+    me prepare(config: TraceConfigV1, selection: TraceSelectionV1) -> Result<TracePreparedV1, TraceFailureV1>:
+        trace_resident_require_qualified_v1()?
+        trace_resident_enter_v1()?
+        var owner = _trace_resident_owner_v1[0]
+        # Native thread-owned window association is checked while control is
+        # held. It is necessary in addition to the qualification gate above;
+        # the ledger/current-owner fact alone never grants profile admission.
+        val result = if simple_xray_startup_current_owner_v1() == 1:
+            owner.prepare(config, selection)
+        else: Err(TraceFailureV1.UnsupportedConsistency)
+        _trace_resident_owner_v1[0] = owner
+        simple_xray_resident_control_leave_v1()
+        result
+
+    me start(prepared: TracePreparedV1) -> Result<TraceSessionV1, TraceFailureV1>:
+        trace_resident_require_qualified_v1()?
+        trace_resident_enter_v1()?
+        var owner = _trace_resident_owner_v1[0]
+        val result = if simple_xray_startup_current_owner_v1() == 1:
+            owner.start(prepared)
+        else: Err(TraceFailureV1.UnsupportedConsistency)
+        _trace_resident_owner_v1[0] = owner
+        simple_xray_resident_control_leave_v1()
+        result
+
+    me request_stop(session: TraceSessionV1) -> Result<TraceSessionStateV1, TraceFailureV1>:
+        trace_resident_enter_v1()?
+        var owner = _trace_resident_owner_v1[0]
+        val result = owner.stop(session)
+        _trace_resident_owner_v1[0] = owner
+        simple_xray_resident_control_leave_v1()
+        result
+
+    me drain(session: TraceSessionV1, deadline_ns: u64) -> Result<TraceDrainV1, TraceFailureV1>:
+        trace_resident_enter_v1()?
+        var owner = _trace_resident_owner_v1[0]
+        val result = owner.drain(session, deadline_ns)
+        _trace_resident_owner_v1[0] = owner
+        simple_xray_resident_control_leave_v1()
+        result
+
+    me poll(session: TraceSessionV1, max_records: u32) -> Result<TraceBatchV1, TraceFailureV1>:
+        trace_resident_enter_v1()?
+        var owner = _trace_resident_owner_v1[0]
+        val result = owner.poll(session, max_records)
+        _trace_resident_owner_v1[0] = owner
+        simple_xray_resident_control_leave_v1()
+        result
+
+    me flush(session: TraceSessionV1, deadline_ns: u64) -> Result<TraceStatsV1, TraceFailureV1>:
+        trace_resident_enter_v1()?
+        var owner = _trace_resident_owner_v1[0]
+        val result = owner.flush(session, deadline_ns)
+        _trace_resident_owner_v1[0] = owner
+        simple_xray_resident_control_leave_v1()
+        result
+
+    fn stats(session: TraceSessionV1) -> Result<TraceStatsV1, TraceFailureV1>:
+        trace_resident_enter_v1()?
+        val owner = _trace_resident_owner_v1[0]
+        val result = owner.stats(session)
+        simple_xray_resident_control_leave_v1()
+        result
+
+    me release(session: TraceSessionV1) -> Result<bool, TraceFailureV1>:
+        trace_resident_enter_v1()?
+        var owner = _trace_resident_owner_v1[0]
+        val result = owner.release(session)
+        _trace_resident_owner_v1[0] = owner
+        simple_xray_resident_control_leave_v1()
+        result

@@ -874,6 +874,29 @@ pub(super) fn eval_op_expr(
                         }
                     }
                 }
+                // Scaling needs a numeric scalar: `text * 1_sfx` (the `(expr)_sfx`
+                // desugar) used to repeat the text and wrap it as a numeric unit.
+                // Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+                (Value::Unit { suffix, .. }, other) | (other, Value::Unit { suffix, .. })
+                    if matches!(op, BinOp::Mul | BinOp::Div)
+                        && !matches!(
+                            other,
+                            Value::Int(_) | Value::UInt { .. } | Value::Float(_) | Value::Float32(_)
+                        ) =>
+                {
+                    let ctx = ErrorContext::new().with_code(codes::INVALID_OPERATION).with_help(format!(
+                        "for a text-based unit use the literal form \"...\"_{}",
+                        suffix
+                    ));
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "unit suffix `_{}` needs a numeric value (got {})",
+                            suffix,
+                            other.type_name()
+                        ),
+                        ctx,
+                    ));
+                }
                 // Mixed unit/non-unit operations: allow scaling (mul/div)
                 (Value::Unit { value, suffix, family }, other) | (other, Value::Unit { value, suffix, family })
                     if matches!(op, BinOp::Mul | BinOp::Div) =>

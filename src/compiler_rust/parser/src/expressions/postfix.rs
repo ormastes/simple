@@ -955,7 +955,36 @@ impl<'a> Parser<'a> {
             }
         }
 
+        self.reject_postfix_unit_suffix()?;
         Ok(expr)
+    }
+
+    /// `f(n)_sfx`, `x.m(n)_sfx`, `a[i]_sfx`, `(a, b)_sfx`: a unit suffix glued
+    /// to a call/index/tuple result. Only a parenthesized group takes a suffix
+    /// (`(expr)_sfx`, see collections.rs apply_paren_unit_suffix); otherwise
+    /// `_sfx` silently became a no-paren call argument. Fail with the fix.
+    /// Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+    fn reject_postfix_unit_suffix(&self) -> Result<(), ParseError> {
+        if !matches!(self.previous.kind, TokenKind::RParen | TokenKind::RBracket)
+            || self.current.span.start != self.previous.span.end
+        {
+            return Ok(());
+        }
+        if let TokenKind::Identifier { name, .. } = &self.current.kind {
+            if name.len() > 1
+                && name.starts_with('_')
+                && name[1..].chars().next().map_or(false, |c| c.is_ascii_alphabetic())
+            {
+                return Err(ParseError::syntax_error_with_span(
+                    format!(
+                        "unit suffix `{}` cannot follow a call, index or tuple result; wrap it in a group: `(...){}`",
+                        name, name
+                    ),
+                    self.current.span,
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// True when `e` is spelled like a TYPE in element position of an array

@@ -1,0 +1,121 @@
+"""Typed observation of the bytes mapped as this Linux process image.
+
+This owner reports only the kernel image digest. It does not identify the
+compiler source tree, linked providers, target triple, or a managed producer.
+The memo owns its successful digest as a process-lifetime RC root; memo status
+and failure code remain scalar so they cannot outlive a build-session string.
+Other hosts and unreadable images fail closed until they have an in-process
+kernel image owner. Temporary ownership/resource failures remain retryable and
+are not published as a permanent unavailable observation.
+"""
+
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.io_runtime.{platform_name}
+use std.nogc_sync_mut.concurrent.mutex.{
+    mutex_new_gate_handle, mutex_lock_gate_handle, mutex_unlock_gate_handle
+}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.nogc_sync_mut.sffi.rc_graph.{rt_rc_share, rt_rc_release}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+
+pub struct KernelImageDigestV1:
+    sha256: text
+
+# Runtime mutex handle is a scalar and outlives managed build-session heaps.
+var _kernel_image_digest_gate_v1: i64 = mutex_new_gate_handle(0)
+var _kernel_image_digest_status_v1: i64 = 0
+var _kernel_image_digest_error_v1: i64 = 0
+var _kernel_image_digest_value_v1: text = ""
+
+fn _kernel_image_digest_hash_v1() -> Result<text, i64>:
+    if platform_name() != "linux":
+        return Err(1)
+    val observed = file_hash_sha256("/proc/self/exe")
+    if observed == nil:
+        return Err(2)
+    val digest = observed.unwrap()
+    if not sha256_lower_hex_valid(digest):
+        return Err(3)
+    Ok(digest)
+
+fn _kernel_image_digest_release_v1(digest: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_rc_release(digest)
+
+fn _kernel_image_digest_capture_v1() -> Result<text, i64>:
+    # rt_rc_share can claim transient strings only while a module scope is
+    # active. Reuse an existing active scope, or create a small scope so the
+    # hash result can be transferred to the process RC owner. A paused scope
+    # cannot safely own the result, so fail closed.
+    val scope_state = transient_array_scope_state_v1()
+    if scope_state != 0 and scope_state != 1:
+        return Err(-5)
+    val owns_scope = scope_state == 0
+    if owns_scope and not transient_scope_begin():
+        return Err(-5)
+    var digest = ""
+    var error = 0
+    var retained = false
+    match _kernel_image_digest_hash_v1():
+        case Ok(observed_digest):
+            retained = unsafe(capabilities: [ffi]): rt_rc_share(observed_digest)
+            if retained:
+                digest = observed_digest
+            else:
+                error = -4
+        case Err(code): error = code
+    val scope_ended = not owns_scope or transient_scope_end()
+    if not scope_ended:
+        if retained and not _kernel_image_digest_release_v1(digest):
+            panic("kernel image digest failed to release after scope teardown refusal")
+        panic("kernel image digest transient scope failed to end")
+    if error != 0:
+        return Err(error)
+    Ok(digest)
+
+fn _kernel_image_digest_error_text_v1(code: i64) -> text:
+    if code == 1:
+        return "current kernel image digest is unavailable on this host"
+    if code == 2:
+        return "current kernel image digest is unreadable"
+    if code == 3:
+        return "current kernel image digest is not canonical lowercase SHA-256"
+    if code == 4:
+        return "current kernel image digest could not be retained for process lifetime"
+    if code == 5:
+        return "current kernel image digest ownership scope is unavailable"
+    "current kernel image digest is unavailable"
+
+pub fn kernel_image_digest_v1() -> Result<KernelImageDigestV1, text>:
+    # Keep capture and publication under one process-local gate: a concurrent
+    # caller cannot observe an initialized state before the result is stored.
+    val locked = mutex_lock_gate_handle(_kernel_image_digest_gate_v1)
+    if locked == nil:
+        return Err("current kernel image digest owner lock is unavailable")
+    var retry_error = 0
+    if _kernel_image_digest_status_v1 == 0:
+        match _kernel_image_digest_capture_v1():
+            case Ok(digest):
+                _kernel_image_digest_value_v1 = digest
+                _kernel_image_digest_status_v1 = 1
+            case Err(code):
+                if code < 0:
+                    retry_error = 0 - code
+                else:
+                    _kernel_image_digest_error_v1 = code
+                    _kernel_image_digest_status_v1 = 2
+    val status = _kernel_image_digest_status_v1
+    val digest = _kernel_image_digest_value_v1
+    val error = _kernel_image_digest_error_v1
+    val unlocked = mutex_unlock_gate_handle(_kernel_image_digest_gate_v1, 0)
+    if unlocked != 1:
+        return Err("current kernel image digest owner lock release failed")
+    if status == 1:
+        Ok(KernelImageDigestV1(sha256: digest))
+    else if status == 2:
+        Err(_kernel_image_digest_error_text_v1(error))
+    else:
+        Err(_kernel_image_digest_error_text_v1(retry_error))
+
+export KernelImageDigestV1, kernel_image_digest_v1
