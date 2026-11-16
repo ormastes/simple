@@ -570,10 +570,11 @@ pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i3
         text_value, 0, text_value.byte_len(), st, adv, space_adv
     )
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
-    val baseline_x = if (
+    val button_label = (
         input_type == "button" or input_type == "submit" or
         input_type == "reset"
-    ):
+    )
+    val baseline_x = if button_label and measured_width <= content_w:
         content_x + (content_w - measured_width) / 2
     elif measured_width > content_w and st.direction_rtl:
         # An overflowing value is start-aligned whatever text-align says
@@ -587,6 +588,20 @@ pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i3
         text_line_aligned_x(
             content_x, content_w, measured_width, st, 0, 1
         )
+    # A button label is clipped at the padding box, not the content box.
+    # Chrome 159, 30px submit (1px border, 2px padding, 8px Arial,
+    # `ABCDEFGHIJK`, 58px): ink columns 3..28 (start-aligned, into the right
+    # padding); under RTL 1..26 (end-anchored at the content right edge 27,
+    # into the left padding). A label that fits stays centred.
+    val clip = if button_label:
+        _input_text_content_clip(
+            ancestor_clip, x + st.border_l, y + st.border_t,
+            w - st.border_l - st.border_r, h - st.border_t - st.border_b
+        )
+    else:
+        _input_text_content_clip(
+            ancestor_clip, content_x, content_y, content_w, content_h
+        )
     val visual_map = input_text_visual_map(nd, st)
     var absolute_boundaries: [i32] = []
     # cpu-lane-loop-ok: maps one input's glyph-boundary x offsets to absolute x; bound is the boundary count of that input's own value, a single linear map with no nesting
@@ -599,9 +614,7 @@ pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i3
         baseline_x: baseline_x,
         baseline_y: baseline_y,
         measured_width: measured_width,
-        clip: _input_text_content_clip(
-            ancestor_clip, content_x, content_y, content_w, content_h
-        ),
+        clip: clip,
         color: st.fg,
         source_window_start_byte: 0,
         source_window_end_byte: if text_is_valid_utf8(
