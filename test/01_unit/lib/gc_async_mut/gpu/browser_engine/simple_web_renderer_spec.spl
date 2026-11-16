@@ -503,8 +503,20 @@ describe "SimpleWebRenderer":
         val pixels = simple_web_render_html_to_pixels(html, 64, 48)
 
         expect(query.kind).to_equal("text")
+        # RTL glyph reversal is NOT Chrome behaviour (Chrome 159 paints Latin
+        # "ABCDEFGHIJK" in logical order under direction:rtl); left as-is
+        # pending the owner's RTL/bidi decision.
         expect(query.text_value).to_equal("KJIHGFEDCBA")
-        expect(query.x).to_equal(1)  # oracle: 1 is the pinned authoritative contract value
+        # Chrome 159 (2026-11-16): the 11-glyph value is 56px wide in a 34px
+        # content box (scrollWidth 56 > clientWidth 34), so text-align:center
+        # is ignored and the RTL run is end-anchored at the content box's
+        # right edge: center, start and left paint identical ink columns.
+        # Chrome x = 37 - 56 = -19. The engine applies the same rule:
+        # content right 43 (content-box input 46 wide; Chrome's default
+        # <input> box-sizing is border-box, filed separately) minus the full
+        # 11 x 5px run = -12. The old 1 assumed 4px glyphs, a 9-glyph cap and
+        # centring of an overflowing run.
+        expect(query.x).to_equal(43 - 11 * 5)
         expect(query.y).to_equal(7)  # oracle: 7 is the pinned authoritative contract value
         expect(query.clip_rect.present).to_be(true)
         expect(query.clip_rect.x).to_equal(3)  # oracle: 3 is the pinned authoritative contract value
@@ -514,8 +526,17 @@ describe "SimpleWebRenderer":
         expect(query.color).to_equal(0xFF22C55Eu32)
         expect(hint.kind).to_equal("text")
         expect(hint.color).to_equal(0xFFEF4444u32)
-        expect(pixels[7 * 64 + 5]).to_equal(0xFF22C55Eu32)
+        # Chrome 159 screenshot of this page: text ink only in columns
+        # 4..21 (inside the 3..22 clip), and (5,7) itself is NOT ink there
+        # (#e3fdff), so the old single-pixel (5,7) pin was an artefact of
+        # the 4px-glyph x=1 run. Pin ink inside the clip in the exact text
+        # color, and no paint at all right of the clip across the whole
+        # input row (a superset of the old (25,7) white check).
+        expect(_count_non_color_rect(pixels, 64, 3, 3, 22, 16, 0xFF22C55Eu32)).to_be_less_than(19 * 13)
+        # Chrome 159: 101 non-white pixels in the 3..22 x 3..16 clip region.
+        expect(_ink_near_chrome(_count_non_color_rect(pixels, 64, 3, 3, 22, 16, 0xFFFFFFFFu32), 101)).to_equal(true)
         expect(pixels[7 * 64 + 25]).to_equal(0xFFFFFFFFu32)
+        expect(_count_non_color_rect(pixels, 64, 22, 0, 64, 16, 0xFFFFFFFFu32)).to_equal(0)  # oracle: Chrome 159 paints nothing right of the .clip box
 
     it "maps logical border block and inline properties to physical edges":
         # @req REQ-WEB-RENDER-001
@@ -1324,13 +1345,15 @@ describe "SimpleWebRenderer":
         # @capture(gui_image): retained evidence for scenario "preserves cascaded font families in text Draw IR computed style"
         step("Verify: preserves cascaded font families in text Draw IR computed style")
         val html = "<html><head><style>.parent{font-family:\"Noto Sans Mono\",monospace}.override{font-family:Pixelify Sans,sans-serif}.short{font:italic 700 11.5px   /   20px   \"Roboto Slab\",serif}</style></head><body><div class='parent'><span>Inherited</span><span class='override'>Override</span><span class='short'>Shorthand</span></div></body></html>"
-        val composition = simple_web_layout_render_html_draw_ir(html, 160, 64)
+        # 320 wide: the spans have no break opportunity, so "Shorthand" starts
+        # past x=160 (engine 163, Chrome 155.8) and a 160 surface culls it.
+        val composition = simple_web_layout_render_html_draw_ir(html, 320, 64)
         val commands = composition.batches[0].commands
         val inherited = _draw_ir_text_command(commands, "Inherited")
         val overridden = _draw_ir_text_command(commands, "Override")
         val shorthand = _draw_ir_text_command(commands, "Shorthand")
 
-        expect(composition.schema).to_equal("simple-draw-ir-v2")
+        expect(composition.schema).to_equal("simple-draw-ir-v3")
         expect(_draw_ir_style_value(inherited, "font-family")).to_equal("\"Noto Sans Mono\",monospace")
         expect(_draw_ir_style_value(overridden, "font-family")).to_equal("Pixelify Sans,sans-serif")
         expect(_draw_ir_style_value(shorthand, "font-family")).to_equal("\"Roboto Slab\",serif")
@@ -1339,9 +1362,11 @@ describe "SimpleWebRenderer":
         expect(_draw_ir_style_value(shorthand, "font-style")).to_equal("italic")
         expect(_draw_ir_style_value(shorthand, "font-weight")).to_equal("bold")
         val identity = _draw_ir_style_value(inherited, "font-identity")
-        val advances = _draw_ir_style_value(inherited, "font-advance-widths")
         if identity != "":
-            expect(advances).to_contain(",")
+            # Advances travel in the typed `advance_widths` field (Engine2D
+            # reads it first); the `font-advance-widths` style prop is no
+            # longer emitted. Same bar as the old `,` check: two or more.
+            expect(inherited.advance_widths.len()).to_be_greater_than(1)
         else:
             # Font runtime absence keeps the established bitmap metrics path.
             expect(inherited.advance_widths.len()).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
@@ -1906,7 +1931,17 @@ describe "SimpleWebRenderer":
             "<button id='invisible-button' style='opacity:0;width:16px;" +
             "height:16px'>click</button></body></html>",
             32, 32, 4, 4, 0)
-        expect(target).to_equal("id:invisible-button")
+        # Chrome 159 elementFromPoint(4,4) is the button: opacity:0 still hit-tests.
+        # Target keys are canonical body paths (see input_overlay "keeps
+        # duplicate author IDs distinct through canonical path keys"), so the
+        # button, body's first element child, is `path:0`, not `id:...`.
+        expect(target).to_equal("path:0")
+        val beside = simple_web_layout_hit_test_target_at_time(
+            "<html style='margin:0'><body style='margin:0'>" +
+            "<button id='invisible-button' style='opacity:0;width:16px;" +
+            "height:16px'>click</button></body></html>",
+            32, 32, 24, 4, 0)
+        expect(beside).to_not_equal("path:0")
 
     it "matches Chrome background shorthand fallback and declaration order":
         # @req REQ-WEB-RENDER-001
