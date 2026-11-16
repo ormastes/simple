@@ -1,0 +1,62 @@
+# Authored UNRUN. Execute in an isolated process from a committed Git checkout.
+# This calls the actual SCV acquisition and production native closure walker;
+# no source projection or substitute resolver is used.
+use app.io._CliCompile.native_build_closure.{_native_build_entry_closure,
+    native_build_closure_snapshot_root_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_clear_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+
+val POLICY_FIXTURE = "test/fixtures/visibility_manifest_policy_v1"
+
+fn closure_has_suffix(paths: [text], suffix: text) -> bool:
+    for path in paths:
+        if path.ends_with(suffix): return true
+    false
+
+fn main():
+    compiler_source_authority_clear_v1()
+    val leaf = POLICY_FIXTURE + "/open/02.child/leaf.spl"
+    val narrow = _native_build_entry_closure(leaf, [leaf])
+    assert(narrow.len() == 1)
+    assert(closure_has_suffix(narrow, "/" + leaf))
+    assert(not closure_has_suffix(narrow, "/open/unrelated.spl"))
+    assert(not closure_has_suffix(narrow, "/open/__init__.spl"))
+    val snapshot = native_build_closure_snapshot_root_v1()
+    assert(snapshot != "")
+    # Ancestor bytes above the narrow root are still frozen policy inputs.
+    val observed = file_read_regular_no_follow_bounded(
+        snapshot + "/" + POLICY_FIXTURE + "/open/__init__.spl", 1024 * 1024)
+    val original = file_read_regular_no_follow_bounded(
+        POLICY_FIXTURE + "/open/__init__.spl", 1024 * 1024)
+    assert(observed.is_ok())
+    assert(original.is_ok())
+    assert(sha256_text(observed.unwrap()) == sha256_text(original.unwrap()))
+
+    # A comments-only PRESENT ancestor remains frozen above a file root;
+    # its empty policy must never be confused with authenticated absence.
+    compiler_source_authority_clear_v1()
+    val closed_leaf = POLICY_FIXTURE + "/closed/child/body.spl"
+    val closed_narrow = _native_build_entry_closure(closed_leaf, [closed_leaf])
+    assert(closed_narrow.len() == 1)
+    assert(closure_has_suffix(closed_narrow, "/" + closed_leaf))
+    assert(not closure_has_suffix(closed_narrow, "/closed/__init__.spl"))
+    val closed_snapshot = native_build_closure_snapshot_root_v1()
+    val closed_policy = file_read_regular_no_follow_bounded(
+        closed_snapshot + "/" + POLICY_FIXTURE + "/closed/__init__.spl", 1024 * 1024)
+    val closed_original = file_read_regular_no_follow_bounded(
+        POLICY_FIXTURE + "/closed/__init__.spl", 1024 * 1024)
+    assert(closed_policy.is_ok())
+    assert(closed_original.is_ok())
+    assert(sha256_text(closed_policy.unwrap()) == sha256_text(closed_original.unwrap()))
+
+    # An explicitly selected facade follows its normal imports and alias
+    # bindings. Policy-only suppression must never suppress real imports.
+    compiler_source_authority_clear_v1()
+    val selected = _native_build_entry_closure(
+        POLICY_FIXTURE + "/alias_consumer.spl", [POLICY_FIXTURE])
+    assert(closure_has_suffix(selected, "/alias_consumer.spl"))
+    assert(closure_has_suffix(selected, "/alias/__init__.spl"))
+    assert(closure_has_suffix(selected, "/alias/impl.spl"))
+    assert(not closure_has_suffix(selected, "/open/unrelated.spl"))
+    print "visibility_manifest_policy_closure_v1: PASS"
