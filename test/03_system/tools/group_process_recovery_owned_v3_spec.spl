@@ -1,0 +1,202 @@
+# AUTHORED_NOT_RUN. Real administrator-provisioned completed broker fixture.
+# This checks retained filesystem mechanism only, not Host authorization or
+# actual original native completion qualification. Missing setup fails.
+# @req REQ-BROKER-RECOVERY-READ-001
+# @req REQ-BROKER-RECOVERY-READ-003
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
+use std.nogc_sync_mut.io.group_process_recovery_owner_v3.*
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.build_manager.grouped_execution_contract.GroupedActionLeaseV1
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.group_process_protocol.{group_process_observation_decode_v1, group_process_memory_receipt_v1}
+use std.common.build_manager.group_process_stream_profile_v3.group_process_stream_resource_receipt_v3
+
+var recovery_fixture_readers_v3: [LinuxProtectedRootReaderV1] = []
+
+fn recovery_fixture_open_v3(path: text) -> Option<LinuxProtectedRootReaderV1>:
+    val opened = linux_protected_root_reader_open_v1(path)
+    if opened.owner.is_some(): recovery_fixture_readers_v3.push(opened.owner.unwrap())
+    if not opened.ready:
+        fail("real protected broker fixture unavailable:" + opened.error)
+        return nil
+    opened.owner
+
+fn recovery_fixture_close_v3(original: LinuxProtectedRootReaderV1) -> bool:
+    var owner = original
+    for _ in 0..512:
+        val closed = linux_protected_root_reader_close_v1(owner)
+        if closed.owner.is_none(): return closed.completed
+        owner = closed.owner.unwrap()
+        recovery_fixture_readers_v3.push(owner)
+    fail("real reader cleanup remains retained after bounded turns")
+    false
+
+describe "Actual borrowed broker recovery root binding":
+    it "refuses byte-copied other-root archives and fences a copied view after real parent close":
+        step("Require two separately protected real roots; do not fabricate native owners")
+        val opened_a = recovery_fixture_open_v3("/var/lib/simple/test-fixtures/group-recovery-v3/root-a")
+        if opened_a.is_none(): return
+        val a = opened_a.unwrap()
+        val opened_b = recovery_fixture_open_v3("/var/lib/simple/test-fixtures/group-recovery-v3/root-b")
+        if opened_b.is_none():
+            val closed_a = recovery_fixture_close_v3(a)
+            return
+        val b = opened_b.unwrap()
+        val request = linux_protected_root_reader_read_v1(a, "broker.request.sdn", 16777216)
+        if request.is_err() or request.unwrap().is_none():
+            val closed_b = recovery_fixture_close_v3(b)
+            val closed_a = recovery_fixture_close_v3(a)
+            fail("real original immutable fixture request missing")
+            return
+        val source = request.unwrap().unwrap()
+        val parsed = group_process_stream_launch_decode_profiled_v3(source)
+        if parsed.is_err():
+            val closed_b = recovery_fixture_close_v3(b)
+            val closed_a = recovery_fixture_close_v3(a)
+            fail("real broker fixture request invalid:" + parsed.unwrap_err())
+            return
+        val launch = parsed.unwrap()
+        if launch.root != "/var/lib/simple/test-fixtures/group-recovery-v3/root-a":
+            val closed_b = recovery_fixture_close_v3(b)
+            val closed_a = recovery_fixture_close_v3(a)
+            fail("real fixture must be produced at root-a, never rewritten to fit")
+            return
+        val identity = sha256_text(source)
+        step("Require actual copied archive bytes so missing-root files cannot mask a broken binding guard")
+        val copied_request = linux_protected_root_reader_read_v1(b, "broker.request.sdn", 16777216)
+        val copied_claim = linux_protected_root_reader_read_v1(b, "broker.claim", 128)
+        if (copied_request.is_err() or copied_claim.is_err() or copied_request.unwrap().is_none() or
+                copied_claim.unwrap().is_none()):
+            val closed_b = recovery_fixture_close_v3(b)
+            val closed_a = recovery_fixture_close_v3(a)
+            fail("real byte-copied root-b fixture unavailable")
+            return
+        if copied_request.unwrap().unwrap() != source or copied_claim.unwrap().unwrap() != identity:
+            val closed_b = recovery_fixture_close_v3(b)
+            val closed_a = recovery_fixture_close_v3(a)
+            fail("root-b must contain exact original root-a request/claim bytes")
+            return
+        step("Compare actual reader roots, not copied claim/request digests")
+        val substituted = group_process_stream_recover_owned_v3(b, launch, identity)
+        expect(substituted.is_err()).to_equal(true)
+        val opened = group_process_stream_recover_owned_v3(a, launch, identity)
+        if opened.is_err():
+            val closed_b = recovery_fixture_close_v3(b)
+            val closed_a = recovery_fixture_close_v3(a)
+            fail("real original recovery unavailable:" + opened.unwrap_err())
+            return
+        val recovery = opened.unwrap()
+        val alias = recovery
+        val proof = recovery.cleanup_proof_v3()
+        val lease = GroupedActionLeaseV1(group_id: "recovery_fixture_group", action_id: "recovery_fixture_action",
+            worker_id: launch.worker_id, generation: launch.generation, lease_id: "recovery_fixture_lease",
+            snapshot_digest: launch.snapshot_digest, cache_identity: launch.cache_identity)
+        val reap = recovery.validate_reap_v3(lease)
+        expect(proof.is_ok()).to_equal(true)
+        expect(reap.is_ok()).to_equal(true)
+        val prospective = recovery.prospective_reap_bytes_v3(lease)
+        val retained = linux_protected_root_reader_read_v1(a, "tree-reaped.sdn", 16384)
+        if prospective.is_err() or retained.is_err() or retained.unwrap().is_none():
+            val closed_b = recovery_fixture_close_v3(b)
+            val closed_a = recovery_fixture_close_v3(a)
+            fail("real completed fixture prospective/retained proof unavailable")
+            return
+        expect(prospective.unwrap()).to_equal(retained.unwrap().unwrap())
+        var wrong_worker = lease
+        wrong_worker.worker_id = "unmatched_fixture_worker"
+        expect(recovery.prospective_reap_bytes_v3(wrong_worker).is_err()).to_equal(true)
+        var wrong_lease = lease
+        wrong_lease.lease_id = "recovery_fixture_other_lease"
+        expect(recovery.validate_reap_v3(wrong_lease).is_err()).to_equal(true)
+        step("Only the original reader owner closes; the borrowed view owns no close")
+        val closed_b = recovery_fixture_close_v3(b)
+        val closed_a = recovery_fixture_close_v3(a)
+        expect(closed_b).to_equal(true)
+        expect(closed_a).to_equal(true)
+        expect(alias.current_v3().is_err()).to_equal(true)
+        expect(alias.cleanup_proof_v3().is_err()).to_equal(true)
+        expect(alias.validate_reap_v3(lease).is_err()).to_equal(true)
+
+    it "refuses exactly absent final proof for a real otherwise-valid partial parent cleanup":
+        step("Require real partial-cleanup root-c, not arbitrary missing or corrupt evidence")
+        val opened = recovery_fixture_open_v3("/var/lib/simple/test-fixtures/group-recovery-v3/root-c")
+        if opened.is_none(): return
+        val parent = opened.unwrap()
+        val raw = linux_protected_root_reader_read_v1(parent, "broker.request.sdn", 16777216)
+        if raw.is_err() or raw.unwrap().is_none():
+            val closed = recovery_fixture_close_v3(parent)
+            fail("real partial root-c request unavailable")
+            return
+        val source = raw.unwrap().unwrap()
+        val parsed = group_process_stream_launch_decode_profiled_v3(source)
+        if parsed.is_err():
+            val closed = recovery_fixture_close_v3(parent)
+            fail("real root-c immutable request invalid")
+            return
+        val launch = parsed.unwrap()
+        if launch.root != "/var/lib/simple/test-fixtures/group-recovery-v3/root-c":
+            val closed = recovery_fixture_close_v3(parent)
+            fail("real partial fixture was not produced at root-c")
+            return
+        val identity = sha256_text(source)
+        val actual = group_process_stream_recover_owned_v3(parent, launch, identity)
+        if actual.is_err():
+            val closed = recovery_fixture_close_v3(parent)
+            fail("real root-c claim/request custody unavailable:" + actual.unwrap_err())
+            return
+        val nochild = linux_protected_root_reader_read_v1(parent, "broker.stream.unlaunched.sdn", 4096)
+        val terminal = linux_protected_root_reader_read_v1(parent, "broker.tree.sdn", 4096)
+        val retained = linux_protected_root_reader_read_v1(parent, "tree-reaped.sdn", 16384)
+        val pending = linux_protected_root_reader_read_v1(parent, "broker.tree.pending.sdn", 4096)
+        val memory = linux_protected_root_reader_read_v1(parent, "broker-memory.sdn", 4096)
+        if (nochild.is_err() or terminal.is_err() or retained.is_err() or pending.is_err() or memory.is_err()):
+            val closed = recovery_fixture_close_v3(parent)
+            fail("actual partial-cleanup artifact observation failed")
+            return
+        if (nochild.unwrap().is_some() or terminal.unwrap().is_some() or retained.unwrap().is_some() or
+                pending.unwrap().is_none() or memory.unwrap().is_none()):
+            val closed = recovery_fixture_close_v3(parent)
+            fail("root-c requires positive native absence of final/nochild/reap and actual pending+memory")
+            return
+        val observation = group_process_observation_decode_v1(identity, pending.unwrap().unwrap())
+        if observation.is_err():
+            val closed = recovery_fixture_close_v3(parent)
+            fail("actual pending cleanup observation is not canonical")
+            return
+        val value = observation.unwrap()
+        if not value.terminal or not value.leader_reaped or not value.tree_empty or value.active_processes != 0:
+            val closed = recovery_fixture_close_v3(parent)
+            fail("actual pending archive must describe collected child, not final parent cleanup")
+            return
+        val expected_memory = group_process_memory_receipt_v1(identity, launch.memory_policy,
+            launch.memory_limit_bytes, value.memory_peak_bytes, "linux")
+        if expected_memory.is_err() or memory.unwrap().unwrap() != expected_memory.unwrap():
+            val closed = recovery_fixture_close_v3(parent)
+            fail("actual partial fixture memory binding invalid")
+            return
+        if val profile = launch.profile_v3:
+            val resources = linux_protected_root_reader_read_v1(parent, "broker.resources.sdn", 4096)
+            val expected_resources = group_process_stream_resource_receipt_v3(identity, profile)
+            if (resources.is_err() or resources.unwrap().is_none() or expected_resources == "" or
+                    resources.unwrap().unwrap() != expected_resources):
+                val closed = recovery_fixture_close_v3(parent)
+                fail("actual partial fixture resource profile binding invalid")
+                return
+        val current = linux_protected_root_reader_current_v1(parent)
+        if current.is_err():
+            val closed = recovery_fixture_close_v3(parent)
+            fail("actual partial fixture current ancestry failed")
+            return
+        val lease = GroupedActionLeaseV1(group_id: "recovery_fixture_group", action_id: "recovery_fixture_action",
+            worker_id: launch.worker_id, generation: launch.generation, lease_id: "recovery_fixture_lease",
+            snapshot_digest: launch.snapshot_digest, cache_identity: launch.cache_identity)
+        val prospective = actual.unwrap().prospective_reap_bytes_v3(lease)
+        val validated = actual.unwrap().validate_reap_v3(lease)
+        expect(recovery_fixture_close_v3(parent)).to_equal(true)
+        match prospective:
+            case Err(reason): expect(reason).to_equal("stream recovery required artifact missing:broker.tree.sdn")
+            case Ok(_): fail("missing actual final cleanup proof became prospective bytes")
+        match validated:
+            case Err(reason): expect(reason).to_equal("stream recovery required artifact missing:tree-reaped.sdn")
+            case Ok(_): fail("missing actual canonical reap became validated evidence")

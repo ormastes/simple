@@ -1,0 +1,29 @@
+# Closed legacy broker cancel wire DATA. No file effects or authority grant.
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.build_manager.group_process_protocol.{GroupProcessPollV1, group_process_observation_decode_v1}
+
+pub fn group_process_stream_cancel_request_v3(identity: text, nonce: text) -> Result<text, text>:
+    if not builder_digest_valid_v1(identity) or not builder_identifier_valid_v1(nonce):
+        return Err("stream-cancel-identity-or-nonce-invalid")
+    val request = identity + "\n" + nonce + "\ncancel"
+    if request.byte_len() > 4096: return Err("stream-cancel-request-bound")
+    Ok(request)
+
+pub fn group_process_stream_cancel_request_validate_v3(request: text) -> Result<(text, text), text>:
+    if request.byte_len() < 1 or request.byte_len() > 4096: return Err("stream-cancel-request-bound")
+    val parts = request.split("\n")
+    if parts.len() != 3 or parts[2] != "cancel": return Err("stream-cancel-closed-command-required")
+    if group_process_stream_cancel_request_v3(parts[0], parts[1])? != request:
+        return Err("stream-cancel-request-noncanonical")
+    Ok((parts[0], parts[1]))
+
+pub fn group_process_stream_cancel_response_v3(request: text, response: text) -> Result<Option<GroupProcessPollV1>, text>:
+    val binding = group_process_stream_cancel_request_validate_v3(request)?
+    if response.byte_len() < 1 or response.byte_len() > 8192: return Err("stream-cancel-response-bound")
+    val prefix = request + "\n"
+    # Old/different nonce response is pending, never fresh broker authority.
+    if not response.starts_with(prefix): return Ok(nil)
+    val observed = group_process_observation_decode_v1(binding.0, response.substring(prefix.byte_len(), response.byte_len()))?
+    if observed.terminal: return Err("terminal group observation lacks durable collected receipt")
+    if not observed.cancelled: return Ok(nil)
+    Ok(Some(observed))

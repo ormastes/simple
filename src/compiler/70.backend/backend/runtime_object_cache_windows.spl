@@ -1,5 +1,6 @@
-# clang-cl cache adapter. Preprocessed bytes, not a guessed include list, are
-# the compilation input. Unsupported tool/configuration shapes remain uncached.
+# Windows runtime C object cache adapter (clang-cl and the llvm-mingw GNU clang
+# driver). Preprocessed bytes, not a guessed include list, are the compilation
+# input. Unsupported tool/configuration shapes remain uncached.
 use compiler.backend.runtime_object_cache.{runtime_object_cache_digest_valid_v1, runtime_object_cache_material_v1, runtime_object_cache_key_v1, runtime_object_cache_lookup_v1, runtime_object_cache_publish_v1}
 use std.io_runtime.{process_run, env_get_nullable, file_delete, file_hash_sha256_or_empty, dir_list_optional}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
@@ -11,20 +12,73 @@ pub struct RuntimeWindowsCacheCompileResultV1:
     exit_code: i64
     pending_key: text
 
+pub struct RuntimeWindowsCacheArgsV1:
+    preprocess: [text]
+    compile: [text]
+    options: [text]
+
 fn runtime_windows_uncached_compile_v1(compiler: text, arguments: [text]) -> RuntimeWindowsCacheCompileResultV1:
     val (stdout, stderr, code) = process_run(compiler, arguments)
     RuntimeWindowsCacheCompileResultV1(stdout: stdout, stderr: stderr, exit_code: code, pending_key: "")
 
+pub fn runtime_windows_cache_driver_kind_v1(compiler: text) -> text:
+    """Driver style of a cacheable Windows runtime C compiler.
+
+    "cl" for clang-cl.exe, "gnu" for the clang C driver (llvm-mingw clang.exe
+    or a <triple>-clang.exe wrapper), "" for anything else (uncached). An
+    unqualified spelling has no adjacent directory to identify, so it is "".
+    """
+    val spelling = compiler.replace("\\", "/").lower()
+    val separator = spelling.rfind("/")
+    if separator < 0: return ""
+    val name = spelling[separator + 1:]
+    if name == "clang-cl.exe": return "cl"
+    if name == "clang.exe" or name.ends_with("-clang.exe"): return "gnu"
+    ""
+
+pub fn runtime_windows_cache_split_args_v1(kind: text, arguments: [text], source: text, output: text, preprocessed: text) -> RuntimeWindowsCacheArgsV1:
+    """Split one runtime compile into: preprocess the TU into `preprocessed`,
+    compile that same `.i` to `output`, and the output-independent options
+    folded into the cache key."""
+    var preprocess: [text] = []
+    var compile: [text] = []
+    var options: [text] = []
+    var skip_next = false
+    for argument in arguments:
+        compile.push(if argument == source: preprocessed else: argument)
+        if kind == "gnu":
+            options.push(if argument == output: "<runtime-object>" else: argument)
+            if skip_next:
+                skip_next = false
+            elif argument == "-o":
+                skip_next = true
+            elif argument != "-c":
+                preprocess.push(argument)
+        else:
+            options.push(if argument == "/Fo" + output: "/Fo<runtime-object>" else: argument)
+            if argument != "/c" and not argument.starts_with("/Fo"):
+                preprocess.push(argument)
+    if kind == "gnu":
+        preprocess.push("-E")
+        preprocess.push("-o")
+        preprocess.push(preprocessed)
+    else:
+        preprocess.push("/P")
+        preprocess.push("/Fi" + preprocessed)
+    RuntimeWindowsCacheArgsV1(preprocess: preprocess, compile: compile, options: options)
+
 pub fn runtime_windows_cache_toolchain_v1(root: text, compiler: text) -> text:
-    """Content identity for the selected clang-cl executable and adjacent DLLs.
+    """Content identity for the selected clang-cl / clang executable and its
+    adjacent DLLs (plus, for the GNU driver, every adjacent clang*.exe: the
+    llvm-mingw clang.exe is a 14 KB wrapper that execs clang-<N>.exe).
 
     The caller rechecks this identity after the complete runtime build. System
     headers are covered by each actual preprocessed TU, including SDK headers.
     """
+    val kind = runtime_windows_cache_driver_kind_v1(compiler)
+    if kind == "": return ""
     val spelling = compiler.replace("\\", "/")
     val separator = spelling.rfind("/")
-    if separator < 0 or not spelling.lower().ends_with("/clang-cl.exe"):
-        return ""
     val compiler_digest = file_hash_sha256_or_empty(compiler)
     if not runtime_object_cache_digest_valid_v1(compiler_digest): return ""
     val directory = spelling[0:separator]
@@ -34,7 +88,8 @@ pub fn runtime_windows_cache_toolchain_v1(root: text, compiler: text) -> text:
     names.sort()
     var options: [text] = [spelling, compiler_digest]
     for name in names:
-        if name.lower().ends_with(".dll"):
+        val lower = name.lower()
+        if lower.ends_with(".dll") or (kind == "gnu" and lower.starts_with("clang") and lower.ends_with(".exe")):
             val digest = file_hash_sha256_or_empty(directory + "/" + name)
             if not runtime_object_cache_digest_valid_v1(digest): return ""
             options.push(name)
@@ -87,17 +142,12 @@ pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, compiler_di
     if staged.is_err(): return runtime_windows_uncached_compile_v1(compiler, arguments)
     val stage = staged.unwrap()
     val preprocessed = stage + "/input.i"
-    var preprocess_args: [text] = []
-    var compile_args: [text] = []
+    val split = runtime_windows_cache_split_args_v1(runtime_windows_cache_driver_kind_v1(compiler), arguments, source, output, preprocessed)
+    val preprocess_args = split.preprocess
+    val compile_args = split.compile
     var options: [text] = []
     for value in context: options.push(value)
-    for argument in arguments:
-        if argument != "/c" and not argument.starts_with("/Fo"):
-            preprocess_args.push(argument)
-        compile_args.push(if argument == source: preprocessed else: argument)
-        options.push(if argument == "/Fo" + output: "/Fo<runtime-object>" else: argument)
-    preprocess_args.push("/P")
-    preprocess_args.push("/Fi" + preprocessed)
+    for value in split.options: options.push(value)
     val (pre_out, pre_err, pre_code) = process_run(compiler, preprocess_args)
     val tu_digest = file_hash_sha256_or_empty(preprocessed)
     if pre_code != 0 or not runtime_object_cache_digest_valid_v1(tu_digest):

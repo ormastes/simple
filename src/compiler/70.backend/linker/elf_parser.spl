@@ -183,6 +183,25 @@ fn elf_sign_extend(value: i64, bits: i64) -> i64:
     val modulus = 1 << bits
     if value & sign != 0: value - modulus else: value
 
+fn elf_i386_rel_addend(bytes: [u8], target: ElfSectionHeader,
+    reloc: ElfRelocation) -> Result<i64, text>:
+    """Implicit SHT_REL addend of an i386 relocation: the signed field value."""
+    val rtype = elf_reloc_type(reloc)
+    if rtype == 0:
+        return Ok(0)
+    var width: i64 = 4
+    if rtype == 20 or rtype == 21: width = 2
+    elif rtype == 22 or rtype == 23: width = 1
+    val at = target.sh_addr + reloc.r_offset
+    if target.sh_type == SHT_NOBITS or reloc.r_offset < 0 or reloc.r_offset + width > target.sh_size or
+            at < 0 or at + width > bytes.len():
+        return Err("i386 REL relocation field extends beyond its target section")
+    if width == 1:
+        return Ok(elf_sign_extend(bytes[at] as i64, 8))
+    if width == 2:
+        return Ok(elf_sign_extend(elf_read_u16_le(bytes, at), 16))
+    Ok(elf_signed_u32(elf_read_u32_le(bytes, at)))
+
 fn elf_arm_rel_addend(bytes: [u8], target: ElfSectionHeader,
     reloc: ElfRelocation) -> Result<i64, text>:
     val at = target.sh_addr + reloc.r_offset
@@ -546,6 +565,17 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
                     if reloc.target_section_idx < 0 or reloc.target_section_idx >= sections.len():
                         return Err("ARM REL relocation names an invalid target section")
                     val addend = elf_arm_rel_addend(
+                        bytes, sections[reloc.target_section_idx], reloc)?
+                    reloc = ElfRelocation(
+                        r_offset: reloc.r_offset,
+                        r_info: reloc.r_info,
+                        r_addend: addend,
+                        section_idx: reloc.section_idx,
+                        target_section_idx: reloc.target_section_idx)
+                elif elf32 and header.e_machine == 3 and sections[sec_i].sh_type == SHT_REL:
+                    if reloc.target_section_idx < 0 or reloc.target_section_idx >= sections.len():
+                        return Err("i386 REL relocation names an invalid target section")
+                    val addend = elf_i386_rel_addend(
                         bytes, sections[reloc.target_section_idx], reloc)?
                     reloc = ElfRelocation(
                         r_offset: reloc.r_offset,

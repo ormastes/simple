@@ -269,15 +269,17 @@ class PureSqlMessagingStore:
     is_open: bool
     initialization_error: text
 
-    static fn open(path: text) -> PureSqlMessagingStore:
-        val store = PureSqlMessagingStore(db: PureDatabase.open_deferred(path).unwrap(), is_open: true,
-            initialization_error: "")
+    static fn open(path: text) -> Result<PureSqlMessagingStore, text>:
+        val db = match PureDatabase.open_deferred(path):
+            case Ok(opened): opened
+            case Err(reason): return Err(reason.message())
+        val store = PureSqlMessagingStore(db: db, is_open: true, initialization_error: "")
         if store.initialize():
             val checkpointed = store.db.checkpoint()
             if checkpointed.is_err():
                 store.initialization_error = checkpointed.unwrap_err().message()
             store.db.set_auto_checkpoint(true)
-        store
+        Ok(store)
 
     static fn open_memory() -> PureSqlMessagingStore:
         val store = PureSqlMessagingStore(db: PureDatabase.memory().unwrap(), is_open: true,
@@ -291,7 +293,11 @@ class PureSqlMessagingStore:
             if result.is_err():
                 self.initialization_error = result.unwrap_err().message()
                 return false
-        val rows = self.db.query("SELECT value FROM messaging_metadata WHERE id = 'schema_version'", []).unwrap()
+        val queried = self.db.query("SELECT value FROM messaging_metadata WHERE id = 'schema_version'", [])
+        if queried.is_err():
+            self.initialization_error = queried.unwrap_err().message()
+            return false
+        val rows = queried.unwrap()
         if rows.len() == 0:
             val inserted = self.db.exec_sql("INSERT INTO messaging_metadata (id,value) VALUES ('schema_version','1')")
             if inserted.is_err():

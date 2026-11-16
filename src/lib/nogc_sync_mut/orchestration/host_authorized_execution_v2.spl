@@ -1,7 +1,17 @@
+use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.LinuxWorkspaceSourceLoanV3
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v2.*
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.WorkspaceStorageLeaseV1
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_packet_v1.agent_workspace_invocation_packet_decode_v1
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.nogc_async_mut.container.providers.linux.workspace_mount_owner_v1.LinuxWorkspaceSourceOwnerV1
+use std.nogc_async_mut.llm.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1, ProviderCliContainedProbeReceiptV1}
 use std.nogc_sync_mut.io.windows_command_domain_v4.windows_command_origin_matches_v4
 use std.nogc_async_mut.container.execution_progress_v4.{ContainerExecutionProgressV4, simple_container_execution_begin_v4, simple_container_execution_step_v4, simple_container_execution_cancel_v4, simple_container_execution_thread_check_v4, simple_container_execution_scripted_v4}
-# Shared signed host executor. All native/container operations use Simple
-# Container API V2; no Linux/Windows provider or request codec imports.
+# Shared signed host executor. Generic native/container operations use Simple
+# Container API V2. The separate internal Linux workspace staging entry borrows
+# original source custody; workspace provider start remains a separate gate.
 # Selected journal profile: process-crash-v1, NOT power-loss durability.
 # Restart/unproven continuity requires managed-scope inventory and quarantine.
 # The shared API and envelope are integrated; platform qualification is separate.
@@ -11,7 +21,7 @@ use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
 use std.nogc_sync_mut.orchestration.host_execution_intent_v1.*
 use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
 use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2, simple_container_apply_v2, simple_container_read_v2, simple_container_intent_v2, simple_container_scope_v2, simple_container_observation_v2, simple_container_backend_v2, simple_container_configuration_observe_v1, simple_container_input_configuration_observe_v1}
-use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2, container_execution_request_encode_v2, container_execution_plan_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.execution_v2.{ContainerRequestProjectionV2, ContainerExecutionRequestV2, ContainerHostScopeV2, container_execution_request_encode_v2, container_execution_plan_bytes_v2, container_scope_fence_id_v2}
 use std.common.contracts.container.pre_start_input_constraint_v1.{ContainerPreStartInputConstraintV1,
     container_pre_start_input_constraint_copy_v1, container_pre_start_input_constraint_validate_v1,
     container_pre_start_input_constraint_check_v1}
@@ -19,7 +29,7 @@ use std.common.contracts.container.pre_start_constraint_v1.{ContainerPreStartCon
 use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1}
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1, RUNTIME_STATUS_OK}
 use std.common.contracts.orchestration.host_capacity_v1.HostLedgerFenceV1
-use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, distributed_grant_authorize_v2}
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2, distributed_grant_authorize_v2}
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
@@ -109,6 +119,14 @@ fn host_execution_fresh_authority_v2(prepared: HostExecutionPreparedV2, context:
 fn host_execution_prepare_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
         payload: text, policy: LocalAuthorityPolicyV1, expected_provider_digest: text,
         service_scope_id: text, context: HostReservationAuthorizationContextV1) -> Result<HostExecutionPreparedV2, text>:
+    host_execution_prepare_projected_v3(owner, container, payload, policy, expected_provider_digest, service_scope_id, context, None)
+
+# Private actual-owner alternative. Generic callers always supply nil and retain
+# the exact no-workspace allocation guard below. No public enum/bool selects it.
+fn host_execution_prepare_projected_v3(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        payload: text, policy: LocalAuthorityPolicyV1, expected_provider_digest: text,
+        service_scope_id: text, context: HostReservationAuthorizationContextV1,
+        workspace_projection: Option<ContainerRequestProjectionV2>) -> Result<HostExecutionPreparedV2, text>:
     val context_error = host_execution_context_error_v2(context, context, policy)
     if context_error != "": return Err(context_error)
     if str_len(expected_provider_digest) != 64 or not builder_digest_valid_v1(expected_provider_digest):
@@ -144,13 +162,17 @@ fn host_execution_prepare_v2(owner: HostCapacityOwnerV1, container: SimpleContai
         return Err("host-execution-container-fence-mismatch")
     if plan.service_scope_id != service_scope_id or plan.service_scope_id != envelope.intent.reservation.service_scope_id:
         return Err("host-execution-service-scope-mismatch")
-    val projection = simple_container_project_v2(container, envelope.execution)?
+    val projection = if workspace_projection.is_some(): workspace_projection.unwrap() else: simple_container_project_v2(container, envelope.execution)?
     if (projection.operation_id != envelope.operation.id or projection.operation_id != plan.operation_id or
             projection.workload_uid != plan.workload_uid or projection.attempt != plan.attempt or projection.request_digest != plan.request_digest):
         return Err("host-execution-request-identity-mismatch")
     if projection.cpu_millis != envelope.intent.reservation.cpu_millis or projection.memory_bytes != envelope.intent.reservation.memory_bytes:
         return Err("host-execution-allocation-mismatch")
-    if envelope.intent.reservation.exclusive_devices.len() != 0 or projection.has_devices or projection.has_workspace: return Err("host-execution-allocation-adapter-unavailable")
+    if workspace_projection.is_some():
+        if envelope.intent.reservation.exclusive_devices.len() != 0 or projection.has_devices or not projection.has_workspace:
+            return Err("host-execution-agent-workspace-allocation-invalid")
+    else:
+        if envelope.intent.reservation.exclusive_devices.len() != 0 or projection.has_devices or projection.has_workspace: return Err("host-execution-allocation-adapter-unavailable")
     if projection.timeout_ms <= 0 or projection.timeout_ms > envelope.operation.duration_ms: return Err("host-execution-timeout-mismatch")
     val expires = if grant.expires_at < envelope.approval.expires_at: grant.expires_at else: envelope.approval.expires_at
     val deadline = container_effect_deadline_v1(plan.request_digest, envelope.operation.id, ["create", "start"], expires)?
@@ -360,6 +382,10 @@ pub struct HostExecutionProgressTurnV4:
     error: text
 
 struct HostExecutionProgressStateV4:
+    agent_native: Option<HostAgentWorkspaceNativeStateV2> = None
+    agent_native_busy: bool = false
+    agent_native_turn: i64 = 0
+    agent_native_current: Option<HostAgentNativeCurrentPairV2> = None
     prepared: HostExecutionPreparedV2
     policy: LocalAuthorityPolicyV1
     provider_digest: text
@@ -435,6 +461,9 @@ fn host_execution_restricted_begin_v4(owner: HostCapacityOwnerV1, container: Sim
     if error != "": return HostExecutionProgressTurnV4(owner, container, nil, nil, false, error)
     val capacity = owner.ledger.capacity
     val fence = HostLedgerFenceV1(capacity.authority_id, capacity.boot_id, capacity.provider_generation, owner.ledger.revision)
+    # Read the scripted flag before begin commits: nothing fallible may follow the commit.
+    val scripted = simple_container_execution_scripted_v4(container)
+    if scripted.is_err(): return HostExecutionProgressTurnV4(owner, container, None, None, not host_execution_current_v2(owner), scripted.unwrap_err())
     val begun = host_capacity_owner_begin_v1(owner, prepared.envelope.intent, prepared.envelope.operation,
         prepared.envelope.receipt, fence, prepared.grant, latest)
     if begun.is_err(): return HostExecutionProgressTurnV4(owner, container, nil, nil, not host_execution_current_v2(owner), begun.unwrap_err())
@@ -445,13 +474,15 @@ fn host_execution_restricted_begin_v4(owner: HostCapacityOwnerV1, container: Sim
         journal_lease: executing.journal.lease_digest, journal_authority: executing.journal.authority_digest,
         journal_sequence: executing.journal.sequence, constraint: constraint, input_constraint: input_constraint)))
     HostExecutionProgressTurnV4(executing, container, Some(HostExecutionContinuationV4(slot,
-        simple_container_execution_scripted_v4(container).unwrap(), prepared.scope,
+        scripted.unwrap(), prepared.scope,
         executing.journal.root, executing.journal.lease_digest, executing.journal.authority_digest)), nil, false, "")
 
 fn host_execution_progress_finish_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
         continuation: HostExecutionContinuationV4, state: HostExecutionProgressStateV4,
         runtime: RuntimeIdentityV1, phase: text) -> HostExecutionProgressTurnV4:
     # Called only after active command cleanup has returned no native owner.
+    if state.agent_native.is_some():
+        return HostExecutionProgressTurnV4(owner, container, Some(continuation), None, true, "host-agent-native-versioned-route-required")
     val turn = host_execution_record_v2(owner, container, state.prepared, state.provider_digest,
         state.context, runtime, phase, state.create_status, state.start_status, state.inspect_status, state.error)
     host_execution_progress_slots_v4[continuation.slot] = nil
@@ -462,6 +493,8 @@ fn host_execution_progress_finish_v4(owner: HostCapacityOwnerV1, container: Simp
 fn host_execution_progress_quarantine_v4(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
         continuation: HostExecutionContinuationV4, original: HostExecutionProgressStateV4,
         error: text) -> HostExecutionProgressTurnV4:
+    if original.agent_native.is_some():
+        return HostExecutionProgressTurnV4(owner, container, Some(continuation), None, true, "host-agent-native-versioned-route-required")
     var state = original
     if state.error == "": state.error = error
     if state.active.is_some():
@@ -489,6 +522,8 @@ pub fn host_authorized_execution_step_v4(owner: HostCapacityOwnerV1, container: 
     var state = match host_execution_progress_slots_v4[continuation.slot]:
         case Some(value): value
         case nil: return HostExecutionProgressTurnV4(owner, container, nil, nil, true, "host-execution-continuation-retired")
+    if state.agent_native.is_some():
+        return HostExecutionProgressTurnV4(owner, container, Some(continuation), None, true, "host-agent-native-versioned-route-required")
     # Current writer validation is mandatory before advancing a native command.
     # Wrong supplied owners cannot replace the retained command cleanup carrier.
     if (owner.journal.root != state.journal_root or owner.journal.lease_digest != state.journal_lease or
@@ -576,3 +611,196 @@ pub fn host_authorized_execution_step_v4(owner: HostCapacityOwnerV1, container: 
         return host_execution_progress_finish_v4(owner, progress.owner, continuation, state, runtime, phase)
     host_execution_progress_slots_v4[continuation.slot] = Some(state)
     HostExecutionProgressTurnV4(owner, progress.owner, Some(continuation), nil, state.error != "", state.error)
+
+# Internal trusted same-Host entry. No generic mount/AgentSession guard changes.
+# Actual domain forwarding is a separate owned integration; this function is
+# never selected by a caller boolean, signature DTO alone or SSH authentication.
+# No end-user command/domain route invokes this partial staging dependency.
+pub fn host_authorized_agent_workspace_stage_v1(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        source: LinuxWorkspaceSourceOwnerV1, payload: text,
+        selection: ProviderCliContainedSelectionV1, version_receipt: ProviderCliContainedProbeReceiptV1,
+        policy: LocalAuthorityPolicyV1, expected_provider_identity_digest: text, service_scope_id: text,
+        context: HostReservationAuthorizationContextV1,
+        refresh_context: fn() -> HostReservationAuthorizationContextV1) -> HostAgentWorkspaceTurnV1:
+    if not host_execution_current_v2(owner):
+        return host_agent_workspace_turn_v1(owner, container, source, false, false, true, "host-execution-owner-stale")
+    val packet = match agent_workspace_invocation_packet_decode_v1(payload):
+        case Ok(value): value
+        case Err(reason): return host_agent_workspace_turn_v1(owner, container, source, false, false, false, reason)
+    val validated = match host_agent_workspace_validate_v1(owner, container, source, packet, selection, version_receipt,
+            policy, expected_provider_identity_digest, service_scope_id, context, "admitted"):
+        case Ok(value): value
+        case Err(reason): return host_agent_workspace_turn_v1(owner, container, source, false, false, true, reason)
+    val host_payload = match host_execute_request_encode_v2(packet.host):
+        case Ok(value): value
+        case Err(reason): return host_agent_workspace_turn_v1(owner, container, source, false, false, false, reason)
+    # Only this private branch receives an actual source-owner projection after
+    # independent full invocation verification. There is no exported projector
+    # parameter or portable preflight capability.
+    val prepared = match host_execution_prepare_projected_v3(owner, container, host_payload, policy,
+            expected_provider_identity_digest, service_scope_id, context, Some(validated.projection)):
+        case Ok(value): value
+        case Err(reason): return host_agent_workspace_turn_v1(owner, container, source, false, false, true, reason)
+    val host_saved = host_execution_retain_v2(owner, prepared, host_payload)
+    if host_saved.is_err(): return host_agent_workspace_turn_v1(owner, container, source, false, true, false, host_saved.unwrap_err())
+    val invocation_saved = host_agent_workspace_archive_v1(owner, packet)
+    if invocation_saved.is_err(): return host_agent_workspace_turn_v1(owner, container, source, false, true, false, invocation_saved.unwrap_err())
+    val commit_context = refresh_context()
+    val context_error = host_execution_context_error_v2(context, commit_context, policy)
+    if context_error != "": return host_agent_workspace_turn_v1(owner, container, source, false, true, false, context_error)
+    val refreshed = host_agent_workspace_validate_v1(owner, container, source, packet, selection, version_receipt,
+        policy, expected_provider_identity_digest, service_scope_id, commit_context, "admitted")
+    if refreshed.is_err(): return host_agent_workspace_turn_v1(owner, container, source, false, true, false, refreshed.unwrap_err())
+    val fresh_host = host_execution_fresh_authority_v2(prepared, commit_context)
+    if fresh_host != "": return host_agent_workspace_turn_v1(owner, container, source, false, true, false, fresh_host)
+    val capacity = owner.ledger.capacity
+    val fence = HostLedgerFenceV1(authority_id: capacity.authority_id, boot_id: capacity.boot_id,
+        provider_generation: capacity.provider_generation, revision: owner.ledger.revision)
+    val beginning = host_capacity_owner_begin_v1(owner, prepared.envelope.intent, prepared.envelope.operation,
+        prepared.envelope.receipt, fence, prepared.grant, commit_context)
+    # Result Err can follow an actual WAL begin. Never stage or retry effects;
+    # preserve latest known actual owner and require recovery, without inventing
+    # the missing advanced projection or losing original source/cleanup custody.
+    if beginning.is_err(): return host_agent_workspace_turn_v1(owner, container, source, false, true, true, beginning.unwrap_err())
+    val executing = beginning.unwrap()
+    # Adopt the actual success-returned capacity journal BEFORE fallible staging.
+    host_agent_workspace_stage_begun_v1(executing, container, source, packet, selection, version_receipt,
+        policy, expected_provider_identity_digest, service_scope_id, commit_context, refresh_context)
+# V2 uses the SAME existing canonical progress registry, with no reusable raw
+pub struct HostAgentWorkspaceProgressTurnV2:
+    owner: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    lease: Option<WorkspaceStorageLeaseV1>
+    source: Option<LinuxWorkspaceSourceLoanV3>
+    continuation: Option<HostExecutionContinuationV4>
+    observation: Option<HostExecutionObservationV2>
+    recovery_required: bool
+    error: text
+fn host_agent_native_reply_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, native: Option<HostAgentWorkspaceNativeStateV2>, handle: Option<HostExecutionContinuationV4>, observation: Option<HostExecutionObservationV2>, recovery: bool, error: text) -> HostAgentWorkspaceProgressTurnV2:
+    HostAgentWorkspaceProgressTurnV2(owner, container, if native.is_some(): native.unwrap().lease else: None,
+        if native.is_some(): Some(native.unwrap().source) else: None, handle, observation, recovery, error)
+pub fn host_authorized_agent_workspace_begin_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, lease: WorkspaceStorageLeaseV1, payload: text, selection: ProviderCliContainedSelectionV1, receipt: ProviderCliContainedProbeReceiptV1, policy: LocalAuthorityPolicyV1, provider: text, service: text, context: HostReservationAuthorizationContextV1, refresh: fn() -> HostReservationAuthorizationContextV1) -> HostAgentWorkspaceProgressTurnV2:
+    host_agent_native_begin_installed_v2(owner, container, Some(lease), payload, selection, receipt, policy, provider, service, context, refresh)
+pub fn host_authorized_agent_workspace_begin_installed_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, payload: text, selection: ProviderCliContainedSelectionV1, receipt: ProviderCliContainedProbeReceiptV1, policy: LocalAuthorityPolicyV1, provider: text, service: text, context: HostReservationAuthorizationContextV1, refresh: fn() -> HostReservationAuthorizationContextV1) -> HostAgentWorkspaceProgressTurnV2:
+    host_agent_native_begin_installed_v2(owner, container, None, payload, selection, receipt, policy, provider, service, context, refresh)
+fn host_agent_native_begin_installed_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, lease: Option<WorkspaceStorageLeaseV1>, payload: text, selection: ProviderCliContainedSelectionV1, receipt: ProviderCliContainedProbeReceiptV1, policy: LocalAuthorityPolicyV1, provider: text, service: text, context: HostReservationAuthorizationContextV1, refresh: fn() -> HostReservationAuthorizationContextV1) -> HostAgentWorkspaceProgressTurnV2:
+    val origin = host_agent_workspace_origin_v2()
+    if origin.is_err(): return HostAgentWorkspaceProgressTurnV2(owner, container, lease, None, None, None, true, origin.unwrap_err())
+    if lease.is_some(): return HostAgentWorkspaceProgressTurnV2(owner, container, lease, None, None, None, true, "agent-workspace-supplied-lease-port-unavailable")
+    if not host_execution_current_v2(owner) or host_execution_progress_slots_v4.len() >= 100000:
+        return HostAgentWorkspaceProgressTurnV2(owner, container, lease, None, None, None, true, "host-agent-native-owner-or-bound")
+    val acquired = host_agent_workspace_acquire_installed_v2(owner, container, payload, selection, receipt, policy, provider, service, context)
+    var current = acquired.container
+    if acquired.error != "" or acquired.state.is_none():
+        return HostAgentWorkspaceProgressTurnV2(owner, current, acquired.lease, acquired.source, None, None, true, acquired.error)
+    var native = acquired.state.unwrap()
+    # Encoding can fail after acquisition: return the acquired source/container custody, never panic.
+    val encoded = host_execute_request_encode_v2(native.packet.host)
+    if encoded.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, encoded.unwrap_err())
+    val host_payload = encoded.unwrap()
+    val prepared = host_execution_prepare_projected_v3(owner, current, host_payload, policy, provider, service, context, native.projection)
+    if prepared.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, prepared.unwrap_err())
+    val saved = host_execution_retain_v2(owner, prepared.unwrap(), host_payload)
+    if saved.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, saved.unwrap_err())
+    val archived = host_agent_workspace_archive_v2(owner, native.packet)
+    if archived.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, archived.unwrap_err())
+    val fresh = refresh()
+    val checked = host_agent_workspace_source_check_v2(owner, current, native, policy, fresh, "admitted")
+    if checked.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, checked.unwrap_err())
+    native.context = fresh
+    val capacity = owner.ledger.capacity
+    val fence = HostLedgerFenceV1(capacity.authority_id, capacity.boot_id, capacity.provider_generation, owner.ledger.revision)
+    val begun = host_capacity_owner_begin_v1(owner, prepared.unwrap().envelope.intent, prepared.unwrap().envelope.operation,
+        prepared.unwrap().envelope.receipt, fence, prepared.unwrap().grant, fresh)
+    if begun.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, begun.unwrap_err())
+    val executing = begun.unwrap()
+    val slot = host_execution_progress_slots_v4.len()
+    host_execution_progress_slots_v4.push(Some(HostExecutionProgressStateV4(agent_native: Some(native), agent_native_current: Some(HostAgentNativeCurrentPairV2(executing, current)),
+        prepared: prepared.unwrap(), policy: policy, provider_digest: provider, context: fresh,
+        journal_root: executing.journal.root, journal_lease: executing.journal.lease_digest,
+        journal_authority: executing.journal.authority_digest, journal_sequence: executing.journal.sequence)))
+    val handle = HostExecutionContinuationV4(slot, false, simple_container_scope_v2(current), executing.journal.root,
+        executing.journal.lease_digest, executing.journal.authority_digest)
+    host_agent_native_reply_v2(executing, current, Some(native), Some(handle), None, false, "")
+fn host_agent_native_slot_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, handle: HostExecutionContinuationV4) -> Result<HostExecutionProgressStateV4, text>:
+    val origin = host_agent_workspace_origin_v2()?
+    if handle.slot < 0 or handle.slot >= host_execution_progress_slots_v4.len(): return Err("host-agent-native-continuation-invalid")
+    val state = match host_execution_progress_slots_v4[handle.slot]:
+        case Some(value): value
+        case None: return Err("host-agent-native-continuation-retired")
+    if (state.agent_native.is_none() or handle.scripted or handle.scope != simple_container_scope_v2(container) or
+            handle.journal_root != owner.journal.root or handle.journal_lease != owner.journal.lease_digest or
+            handle.journal_authority != owner.journal.authority_digest or owner.journal.sequence < state.journal_sequence or
+            owner.journal.root != state.journal_root or owner.journal.lease_digest != state.journal_lease or
+            owner.journal.authority_digest != state.journal_authority or not host_execution_current_v2(owner)):
+        return Err("host-agent-native-continuation-owner-mismatch")
+    if state.agent_native_busy: return Err("host-agent-native-continuation-busy")
+    Ok(state)
+pub fn host_authorized_agent_workspace_step_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        handle: HostExecutionContinuationV4, policy: LocalAuthorityPolicyV1, context: HostReservationAuthorizationContextV1) -> HostAgentWorkspaceProgressTurnV2:
+    val loaded = host_agent_native_reserve_v2(owner, container, handle)
+    if loaded.is_err(): return host_agent_native_reject_v2(owner, container, handle, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    val pair = state.agent_native_current.unwrap()
+    val turn = host_agent_workspace_native_step_v2(pair.owner, pair.container, state.agent_native.unwrap(), policy, context)
+    host_agent_native_publish_v2(pair.owner, handle, state, turn)
+pub fn host_authorized_agent_workspace_cancel_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, handle: HostExecutionContinuationV4, policy: LocalAuthorityPolicyV1, context: HostReservationAuthorizationContextV1, signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2) -> HostAgentWorkspaceProgressTurnV2:
+    val loaded = host_agent_native_reserve_v2(owner, container, handle)
+    if loaded.is_err(): return host_agent_native_reject_v2(owner, container, handle, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    val pair = state.agent_native_current.unwrap()
+    val turn = host_agent_workspace_cancel_arm_v2(pair.owner, pair.container, state.agent_native.unwrap(), signed, approval, policy, context)
+    host_agent_native_publish_v2(pair.owner, handle, state, turn)
+fn host_agent_native_reject_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, handle: HostExecutionContinuationV4, error: text) -> HostAgentWorkspaceProgressTurnV2:
+    if error == "host-agent-native-continuation-busy":
+        val state = host_execution_progress_slots_v4[handle.slot].unwrap()
+        if state.agent_native_current.is_some():
+            val pair = state.agent_native_current.unwrap()
+            return host_agent_native_reply_v2(pair.owner, pair.container, state.agent_native, Some(handle), None, true, error)
+    host_agent_native_reply_v2(owner, container, None, Some(handle), None, true, error)
+fn host_agent_native_reserve_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, handle: HostExecutionContinuationV4) -> Result<HostExecutionProgressStateV4, text>:
+    var state = host_agent_native_slot_v2(owner, container, handle)?
+    if state.agent_native_turn == 9223372036854775807: return Err("host-agent-native-turn-exhausted")
+    state.agent_native_turn = state.agent_native_turn + 1
+    state.agent_native_busy = true
+    if state.agent_native_current.is_none() or state.agent_native_current.unwrap().owner.journal.sequence < owner.journal.sequence:
+        state.agent_native_current = Some(HostAgentNativeCurrentPairV2(owner, container))
+    host_execution_progress_slots_v4[handle.slot] = Some(state)
+    Ok(state)
+fn host_agent_native_publish_v2(owner: HostCapacityOwnerV1, handle: HostExecutionContinuationV4, original: HostExecutionProgressStateV4, turn: HostAgentWorkspaceAdvanceTurnV2) -> HostAgentWorkspaceProgressTurnV2:
+    val active = host_execution_progress_slots_v4[handle.slot]
+    if active.is_none() or not active.unwrap().agent_native_busy or active.unwrap().agent_native_turn != original.agent_native_turn:
+        return host_agent_native_reply_v2(owner, turn.container, Some(turn.state), Some(handle), turn.observation, true, "host-agent-native-turn-changed")
+    var state = original
+    state.agent_native = Some(turn.state)
+    state.context = turn.state.context
+    state.journal_sequence = owner.journal.sequence
+    state.agent_native_current = Some(HostAgentNativeCurrentPairV2(owner, turn.container))
+    host_execution_progress_slots_v4[handle.slot] = Some(state)
+    state.agent_native_busy = false
+    host_execution_progress_slots_v4[handle.slot] = Some(state)
+    host_agent_native_reply_v2(owner, turn.container, Some(turn.state), Some(handle), turn.observation, turn.recovery_required, turn.error)
+pub struct HostAgentTerminalContextTurnV2:
+    owner: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    continuation: HostExecutionContinuationV4
+    operation_template: Option<OperationEnvelopeV2>
+    principal: text
+    invocation_digest: text
+    manifest_digest: text
+    error: text
+pub fn host_authorized_agent_workspace_terminal_context_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, continuation: HostExecutionContinuationV4, policy: LocalAuthorityPolicyV1, context: HostReservationAuthorizationContextV1) -> HostAgentTerminalContextTurnV2:
+    val loaded = host_agent_native_reserve_v2(owner, container, continuation)
+    if loaded.is_err():
+        val held = host_agent_native_reject_v2(owner, container, continuation, loaded.unwrap_err())
+        return HostAgentTerminalContextTurnV2(held.owner, held.container, continuation, None, "", "", "", held.error)
+    val state = loaded.unwrap()
+    var native = state.agent_native.unwrap()
+    val pair = state.agent_native_current.unwrap()
+    val checked = host_agent_workspace_terminal_values_v2(pair.owner, pair.container, native, policy, context)
+    if checked.is_ok(): native.context = context
+    val error = if checked.is_err(): checked.unwrap_err() else: ""
+    val held = host_agent_native_publish_v2(pair.owner, continuation, state, HostAgentWorkspaceAdvanceTurnV2(pair.container, native, None, error != "", error))
+    if held.error != "": return HostAgentTerminalContextTurnV2(held.owner, held.container, continuation, None, "", "", "", held.error)
+    val values = checked.unwrap()
+    HostAgentTerminalContextTurnV2(held.owner, held.container, continuation, Some(values.operation_template), values.principal, values.invocation_digest, values.manifest_digest, "")

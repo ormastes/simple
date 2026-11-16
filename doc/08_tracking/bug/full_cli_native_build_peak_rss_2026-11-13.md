@@ -127,3 +127,18 @@ handles:
   omitted bool with false, so a value check alone cannot tell the two apart.
 - The fix takes effect only after a Phase 2 rebuild. The Rust seed does not
   reflect Phase 2 memory behavior.
+
+## Recurrence 2026-11-14, aarch64 (DGX Spark), Stage 2 compiler-test matrix
+
+`compiler_cli_build` aborted with `primary_status=rss-cap-exceeded`
+(`primary_exit_status=88`; the matrix reports `status=89`) in two independent
+`--full-bootstrap --stop-after-stage2 --backend=cranelift` runs:
+
+| run | source | process-tree cap | last progress line |
+|---|---|---|---|
+| `bootstrap-fable-32` | `origin/release/1.0.0` `2864bc90f8c` | 24,146,760 KiB | MIR, struct re-registration warnings |
+| `bootstrap-jitfree-s1` (PR #9147, under `SIMPLE_ARRAY_FREE_QUARANTINE=1`) | `33bc5c6d1d8` | 29,360,128 KiB | `[mir] 350/3146 rss_mib=26630` after about 100 min |
+
+In both runs Stage 2 build, sanity and the compiler hash check passed, and
+`compiler_version` passed. The full-CLI MIR phase now exceeds a 28 GiB cap
+on this host, above the ~20 GB MIR figure recorded above.

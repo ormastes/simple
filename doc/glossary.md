@@ -1217,3 +1217,35 @@ one `enter|exit <name>` line per edge. **Profile** is `XraySpyV1.profile()`,
 which folds the same drained events with `trace_profile_fold_v1`. Both share
 one implementation and run unchanged on either OS; the spy's adapter takes the
 backend leaf's sled kind (`Llvm` or native `Simple`).
+
+**Aspect containers** (`src/lib/nogc_sync_mut/trace/xray_container_v1.spl`):
+- **Profile container**: collects raw edges and folds them into per-function
+  calls and inclusive/exclusive ns.
+- **Logging container**: writes paired `enter|exit <name>` lines. An exit
+  that does not close the innermost logged entry is counted in
+  `unpaired_exits` and is not logged.
+- **Static mode**: the instrumentation is compiled in and calls
+  `hook_enter`/`hook_exit`; no sled is patched.
+- **Dynamic mode** (XRay-based): `apply()` enables the spy (the leaf patches
+  the sleds or flag guards) when a container goes active, and unpatches on Off.
+  `pump()` delivers the drained events.
+- **Container switch**: `XrayContainerSwitchV1.switch_to` / `apply` enables a
+  container, disables (Off), or swaps containers at run time. Off records
+  nothing: in static mode a hook returns at its first compare, and in dynamic
+  mode no sled is patched.
+
+## Three-Tier Hybrid Node Storage (Embedded + Arena CSR + Host Hash Index)
+
+The hybrid storage architecture used across Simple's browser DOM and layout trees (`BeDomNode`, `HNode`, and `DomArena`) to avoid allocating a per-node hash map while keeping attribute access and GPU offload $O(1)$ or bounded-linear:
+
+- **Tier 1 (Embedded Inline Hot Slots & Presence/Bloom Bitmasks)** — Fixed `u32` bitmasks (`attr_mask`, `css_declared_mask`) and promoted inline fields (`id_attr`, `class_attr`, `style_attr`, `src_attr`, `role_attr`, `type_attr`) stored directly on nodes or SoA columns. Provides zero-indirection $O(1)$ reads for common attributes/styles and single-instruction bitwise `&` rejection; `#text` and `#document` nodes carry zero attribute containers (`attr_mask == 0`).
+- **Tier 2 (Array-Indexed LCRS Tree & CSR Attribute Arena)** — 0-based `u32` array indices (`parents`, `first_children`, `next_siblings`, sentinel `DOM_NO_ID = 0xffffffffu32`) paired with Compressed Sparse Row `(attr_starts: [u32], attr_counts: [u32])` spans indexing into `DomAttributeArena` (`name_ids: [u32]`, `value_ids: [u32]`, `ns_ids: [u32]` interned via `DomStringTable`), or bounded parallel inline arrays (`attr_keys: [text]`, `attr_vals: [text]` up to `DOM_INLINE_ATTR_CAP = 8` cold attributes on CPU `BeDomNode`). This flat Pod/SoA layout is the canonical CUDA/Vulkan GPU-offload node representation alongside `DrawIrV3Command` (52-byte stride), `CudaLayoutExecutionPort` (`WEB_CUDA_LAYOUT_INPUT_WORDS = 13`, 52-byte `u32` PTX records over `.param .u64 input, .param .u64 tracks, .param .u64 output, .param .u32 count`), and `GpuWebBackendStrideProfile` (64-byte node stride / 256-byte Vulkan alignment).
+- **Tier 3 (Host-Only HashMap (`Dict`) Sidecar Index)** — Used strictly on CPU host for document-wide $O(1)$ `id -> node_idx` lookup (`DomIdentityIndex`, `DomHostIdSidecar`), temporary string interning during `DomBuilder` construction (dropped at `dom_builder_finish` / `.finish()`), and rare cold-overflow attributes (`> 8` uncommon attributes on CPU `BeDomNode`). `HashMap`/`Dict` is excluded from GPU-offloaded structs (`DomArena`, `DomAttributeArena`, `DrawIrV3Command`, `CudaLayoutExecutionPort`) because hash maps depend on host heap pointers, dynamic bucket rehashing, and pointer-chasing bucket chains that break flat Pod DMA layout and cause warp divergence across CUDA/Vulkan threads.
+
+## Tree Node Attribute Selection (Bitmask-Filtered CSS / QueryIR Attribute Matching)
+
+Structural predicate selection over DOM and layout tree nodes by attribute presence and CSS Selectors Level 4 / `QueryIR` (`QueryDialect.Dom`, `QueryDialect.CssSelector`) attribute match operators (`[attr]`, `=`, `~=`, `|=`, `^=`, `$=`, `*=`, plus case-sensitivity modifiers `i` and `s`). Evaluated in three stages to avoid per-node hash lookups and repeated raw HTML attribute re-tokenization:
+
+1. **Stage 1 (Presence & Bloom Bitmask Filter)** — A `u32` bitmask combining hot-attribute presence bits (lower 16 bits, e.g., `id`, `class`, `style`, `hidden`, `disabled`, `checked`, `selected`, `open`, `role`, `type`, `name`, `href`, `src`, `aria-*`, `data-*`, plus an overflow bit) and a 16-bit attribute-name Bloom filter (upper 16 bits) rejects non-matching nodes in a single bitwise `&` (`(node.attr_mask & bloom_or_presence) == 0`). On GPU (`DomAttrBitmaskColumn`), a flat `[u32]` column pre-filters `DomArena` nodes before span iteration.
+2. **Stage 2 (Embedded Hot-Slot Fast Path)** — Common attributes (`id`, `class`, `style`, `src`, `role`, `type`) resolve directly from Tier 1 inline fields in $O(1)$ without scanning attribute arrays or raw HTML text.
+3. **Stage 3 (Bounded CSR Span or Compact Array/Overflow Scan)** — Only nodes passing Stage 1 and not satisfied by Stage 2 fall through to scan a bounded CSR slice (`(attr_start, attr_count)` in `DomAttributeArena` using `u32` `StringId` equality on GPU via `dom_arena_select_attr`), or Tier 2 `attr_keys`/`attr_vals` + optional Tier 3 `Dict` overflow on CPU `BeDomNode` / raw attribute slices on `HNode`.
