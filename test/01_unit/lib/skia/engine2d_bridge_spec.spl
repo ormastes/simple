@@ -17,7 +17,9 @@ use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind, sk_picture
 use std.skia.entity.geometry.{SkRect, sk_rect_make_xywh, sk_rrect_make}
 use std.skia.entity.image.{sk_image_info_n32_premul, sk_image_make}
 use std.skia.entity.path.{sk_path_new}
-use std.skia.bridge.engine2d_bridge.{sk_image_to_u32_pixels, skia_render_picture_on_engine2d, skia_render_picture_on_engine2d_reported, skia_picture_to_vulkan_base}
+use std.skia.entity.canvas.{sk_canvas_make}
+use std.skia.entity.font.{sk_font_with_ttf}
+use std.skia.bridge.engine2d_bridge.{BridgeReport, BridgeRenderResult, SkEngine2DSession, SkVulkanEngine2DSession, sk_image_to_u32_pixels, skia_render_picture_on_engine2d, skia_render_picture_on_engine2d_reported, skia_picture_to_vulkan_base, skia_picture_to_engine2d_parity, skia_engine2d_session_create, skia_vulkan_session_create}
 
 
 # Record a real skia SkPicture via SkPictureRecorder: an opaque background rect
@@ -308,3 +310,74 @@ describe "SkiaEngine2DBridge":
             Ok(_): false
             Err(_): true
         expect(is_err).to_equal(true)
+
+    it "SkEngine2DSession renders persistent multi-frame software sessions deterministically":
+        # @req REQ-SSPEC-LIB
+        step("SkEngine2DSession rejects invalid dims and preserves frame-to-frame pixel parity")
+        val invalid = skia_engine2d_session_create(0, 48, "software")
+        expect(invalid.is_err()).to_equal(true)
+
+        val bounds = sk_rect_make_xywh(0.0, 0.0, 48.0, 48.0)
+        val bg_paint = sk_paint_fill(sk_color_argb(255, 16, 24, 40))
+        val path_paint = sk_paint_fill(sk_color_argb(220, 240, 110, 48))
+        val rrect_paint = sk_paint_fill(sk_color_argb(200, 64, 180, 240))
+        val tri = sk_path_new().move_to(6.0, 8.0).line_to(42.0, 12.0).line_to(16.0, 42.0).close()
+        val rrect = sk_rrect_make(sk_rect_make_xywh(20.0, 20.0, 22.0, 18.0), 4.0, 4.0)
+        val font = sk_font_with_ttf("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf", 12.0)
+        val text_paint = sk_paint_fill(sk_color_argb(255, 245, 248, 255))
+
+        var canvas = sk_canvas_make(48, 48).begin_recording(bounds)
+        canvas = canvas.draw_rect(bounds, bg_paint)
+        canvas = canvas.draw_path(tri, path_paint)
+        canvas = canvas.draw_rrect(rrect, rrect_paint)
+        canvas = canvas.draw_string("Hi", 6.0, 34.0, font, text_paint)
+        val pic = canvas.end_recording()
+
+        val sess_res = skia_engine2d_session_create(48, 48, "software")
+        expect(sess_res.is_ok()).to_equal(true)
+        var sess = sess_res.unwrap()
+        val rb1 = sess.render_picture_readback(pic)
+        expect(rb1.is_ok()).to_equal(true)
+        val frame2 = sess.render_picture_frame(pic)
+        expect(frame2.is_ok()).to_equal(true)
+        val rb3 = sess.render_picture_readback(pic)
+        expect(rb3.is_ok()).to_equal(true)
+        val px1 = rb1.unwrap().pixels
+        val px3 = rb3.unwrap().pixels
+        expect(px1.len()).to_equal(48 * 48)
+        expect(px3).to_equal(px1)
+        sess.shutdown()
+
+    it "SkVulkanEngine2DSession executes persistent device-retained frames and matches readback":
+        # @req REQ-SSPEC-LIB
+        step("SkVulkanEngine2DSession validates dimensions and tracks no-readback finalized frames")
+        val invalid = skia_vulkan_session_create(48, 0)
+        expect(invalid.is_err()).to_equal(true)
+
+        val bounds = sk_rect_make_xywh(0.0, 0.0, 48.0, 48.0)
+        val tri = sk_path_new().move_to(6.0, 8.0).line_to(40.0, 14.0).line_to(14.0, 40.0).close()
+        val font = sk_font_with_ttf("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf", 12.0)
+        var canvas = sk_canvas_make(48, 48).begin_recording(bounds)
+        canvas = canvas.draw_rect(bounds, sk_paint_fill(sk_color_argb(255, 18, 28, 46)))
+        canvas = canvas.draw_path(tri, sk_paint_fill(sk_color_argb(240, 230, 95, 50)))
+        canvas = canvas.draw_string("Vk", 8.0, 32.0, font, sk_paint_fill(sk_color_argb(255, 250, 250, 255)))
+        val pic = canvas.end_recording()
+
+        val vsess_res = skia_vulkan_session_create(48, 48)
+        if vsess_res.is_ok():
+            var vsess = vsess_res.unwrap()
+            val f1 = vsess.render_picture_frame(pic)
+            val f2 = vsess.render_picture_frame(pic)
+            expect(f1.is_ok()).to_equal(true)
+            expect(f2.is_ok()).to_equal(true)
+            expect(vsess.device_finalize_no_readback_count()).to_equal(2)
+            val rb = vsess.render_picture_readback(pic)
+            expect(rb.is_ok()).to_equal(true)
+            val rb_px = rb.unwrap().pixels
+            expect(rb_px.len()).to_equal(48 * 48)
+            val oneshot = skia_picture_to_vulkan_base(pic, 48, 48)
+            expect(oneshot.is_ok()).to_equal(true)
+            expect(rb_px).to_equal(oneshot.unwrap().pixels)
+            vsess.shutdown()
+        else:
+            expect(vsess_res.is_err()).to_equal(true)

@@ -15,6 +15,7 @@ use std.skia.entity.enums.{SkBlendMode, SkPaintStyle, SkPathDirection}
 use std.skia.entity.shader.{SkShaderKind}
 use std.skia.capability.{SkCapability, sk_capability_vulkan}
 use std.skia.backend.cpu.backend.{cpu_backend_new}
+use std.skia.bridge.engine2d_bridge.{skia_picture_to_vulkan_base}
 
 # ============================================================================
 # SkVulkanContext — opaque Vulkan device/queue context
@@ -152,13 +153,37 @@ impl SkVulkanSurface:
         val sr = vk.submit(cb)
         if not sr.ok:
             return self
-        val bm = cpu_backend_new().render_picture(picture, cull)
-        val total = bm.width * bm.height * 4
+        val total = w * h * 4
         var out: [i64] = [0i64; total]
-        var i = 0
-        while i < total:
-            out[i] = bm.pixels[i] as i64
-            i = i + 1
+        match skia_picture_to_vulkan_base(picture, w as i32, h as i32):
+            Ok(bridge_res):
+                val px_count = w * h
+                var pi = 0
+                while pi < px_count:
+                    val px = bridge_res.pixels[pi]
+                    val a = ((px >> 24) & 0xFFu32) as i64
+                    if a > 0:
+                        val r_s = ((px >> 16) & 0xFFu32) as i64
+                        val g_s = ((px >> 8) & 0xFFu32) as i64
+                        val b_s = (px & 0xFFu32) as i64
+                        val base = pi * 4
+                        if a >= 255:
+                            out[base] = r_s
+                            out[base + 1] = g_s
+                            out[base + 2] = b_s
+                            out[base + 3] = 255
+                        else:
+                            out[base] = (r_s * a + 127) / 255
+                            out[base + 1] = (g_s * a + 127) / 255
+                            out[base + 2] = (b_s * a + 127) / 255
+                            out[base + 3] = a
+                    pi = pi + 1
+            Err(_):
+                val bm = cpu_backend_new().render_picture(picture, cull)
+                var i = 0
+                while i < total:
+                    out[i] = bm.pixels[i] as i64
+                    i = i + 1
         val fresh_canvas = sk_canvas_make(w, h).begin_recording(cull)
         SkVulkanSurface(info: self.info, context: self.context, canvas: fresh_canvas, pixels: out)
 
