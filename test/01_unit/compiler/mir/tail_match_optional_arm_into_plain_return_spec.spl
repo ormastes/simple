@@ -1,0 +1,56 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+A `-> T` body whose tail match joins to `T?` must not return the Option handle.
+
+Bug: doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md
+
+`MirLowering.lower_expr_impl(expr) -> LocalId` ends in a match over
+HirExprKind. Two arms (CfgSelect, InlineAsmMatch) yield `LocalId?`, so HIR
+types the whole match `LocalId?`. The MatchCase arm of lower_expr_impl passes
+that HIR type as the expected type. Every arm value is then promoted through
+ensure_option_handle (rt_enum_id + rt_enum_new), and the function returns the
+Some handle where `LocalId` is declared. A Stage 3 built that way emitted every
+LLVM operand as `%l4` (the RtCoreEnum header word read as LocalId.id).
+Native oracle: test/fixtures/native_tail_match_optional_arm_plain_return/main.spl.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "tail_arm.spl", "tail_arm.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("tail_arm.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+val SOURCE: text = "struct Lid:\n    id: i64\n\n" +
+    "enum EK:\n    IntLit(v: i64)\n    Sel(n: i64)\n    Nothing\n\n" +
+    "fn make(n: i64) -> Lid:\n    Lid(id: n)\n\n" +
+    "fn pick(n: i64) -> Lid?:\n    if n < 0:\n        return None\n    Some(Lid(id: n))\n\n" +
+    "fn lower_impl(k: EK) -> Lid:\n    match k:\n        case IntLit(v):\n            make(v)\n        case Sel(n):\n            pick(n)\n        case _:\n            make(0)\n"
+
+describe "tail match with an optional arm into a plain declared return":
+    it "does not promote the plain arms to Option handles":
+        val fns = lower_module_json(SOURCE)
+        val mir = fns["lower_impl"] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir.contains("rt_enum_id")).to_equal(false)
+
+    it "narrows the optional arm to its payload, trapping on None":
+        val fns = lower_module_json(SOURCE)
+        val mir = fns["lower_impl"] ?? ""
+        expect(mir).to_contain("rt_unwrap_or_trap")
