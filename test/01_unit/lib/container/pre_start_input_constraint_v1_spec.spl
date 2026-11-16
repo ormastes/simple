@@ -1,0 +1,97 @@
+# AUTHORED_NOT_RUN. Synthetic DATA tests of the production pure checker only;
+# no configuration DTO, native birth or signed admission is treated as genuine.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.pre_start_input_constraint_v1.*
+use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartConstraintV1
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1,
+    ContainerExecutionMountObservationV1}
+use std.common.contracts.container.execution_input_configuration_v1.ContainerExecutionInputConfigurationObservationV1
+use std.common.crypto.sha256.sha256_text
+
+fn input_profile_scope_data_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "data-host", service_scope_id: "data-service", boot_id: "data-boot",
+        provider_generation: 3, native_machine_id: "data-machine", continuity_mode: "native-boot-incarnation-v1",
+        continuity_id: "data-boot")
+
+fn input_profile_request_data_v1(scope: ContainerHostScopeV2) -> ContainerExecutionRequestV2:
+    ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "data-workload",
+        attempt: 1, operation_id: "data-operation", request_digest: sha256_text("data-request"),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id, boot_id: scope.boot_id,
+        provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id), request_bytes: "data-only")
+
+fn input_profile_constraint_data_v1(scope: ContainerHostScopeV2,
+        request: ContainerExecutionRequestV2) -> ContainerPreStartInputConstraintV1:
+    val base = ContainerPreStartConstraintV1(request_digest: request.plan.request_digest,
+        scope_bytes: container_host_scope_bytes_v2(scope).unwrap(), provider_generation: scope.provider_generation,
+        requested_image_ref: "sha256:" + sha256_text("data-image"), requested_image_kind: "image-config-id",
+        image_config_id: sha256_text("data-image"), primary_argv: ["/opt/provider", "--help"],
+        working_directory: "/workspace", configured_user: "1000", environment_digest: sha256_text("data-env"),
+        mounts: [], require_readonly_rootfs: true)
+    ContainerPreStartInputConstraintV1(base: base, profile: ContainerPreStartInputProfileV1.ClosedStdinNonTty)
+
+fn input_profile_observation_data_v1(scope: ContainerHostScopeV2, request: ContainerExecutionRequestV2,
+        value: ContainerPreStartInputConstraintV1) -> ContainerExecutionInputConfigurationObservationV1:
+    val runtime = RuntimeIdentityV1(pod_uid: request.plan.workload_uid, attempt: request.plan.attempt,
+        provider_generation: scope.provider_generation, operation_id: request.plan.operation_id, engine: "podman",
+        native_id: sha256_text("data-native"), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val configuration = ContainerExecutionConfigurationObservationV1(scope: scope, runtime: runtime,
+        request_digest: value.base.request_digest, requested_image_ref: value.base.requested_image_ref,
+        requested_image_kind: value.base.requested_image_kind, runtime_image_id: "sha256:" + value.base.image_config_id,
+        image_config_id: value.base.image_config_id, image_repo_digests: [], primary_argv: ["/opt/provider", "--help"],
+        working_directory: "/workspace", configured_user: "1000", readonly_rootfs: true, mounts: [],
+        environment_digest: value.base.environment_digest, environment_names: [],
+        image_default_environment_digest: value.base.environment_digest, image_default_environment_names: [],
+        configuration_digest: sha256_text("data-config"))
+    ContainerExecutionInputConfigurationObservationV1(configuration: configuration, open_stdin: false,
+        tty: false, stdin_once: false, input_configuration_digest: sha256_text("data-outer"))
+
+describe "Restrictive input-profile DATA comparison":
+    it "requires closed stdin and non-TTY while preserving observational StdinOnce":
+        step("Run the real pure checker without constructing native configuration authority")
+        val scope = input_profile_scope_data_v1()
+        val request = input_profile_request_data_v1(scope)
+        val input = input_profile_constraint_data_v1(scope, request)
+        var observed = input_profile_observation_data_v1(scope, request, input)
+        val runtime = observed.configuration.runtime
+        expect(container_pre_start_input_constraint_check_v1(input, request, scope, runtime, observed).is_ok()).to_equal(true)
+        observed.stdin_once = true
+        expect(container_pre_start_input_constraint_check_v1(input, request, scope, runtime, observed).is_ok()).to_equal(true)
+        observed.open_stdin = true
+        expect(container_pre_start_input_constraint_check_v1(input, request, scope, runtime, observed).unwrap_err()).to_equal("pre-start-input-closed-stdin-nontty-required")
+        observed.open_stdin = false
+        observed.tty = true
+        expect(container_pre_start_input_constraint_check_v1(input, request, scope, runtime, observed).unwrap_err()).to_equal("pre-start-input-closed-stdin-nontty-required")
+
+    it "binds the input profile to the existing exact request and native identity checker":
+        step("Reject native identity, request digest and outer digest changes")
+        val scope = input_profile_scope_data_v1()
+        val request = input_profile_request_data_v1(scope)
+        val input = input_profile_constraint_data_v1(scope, request)
+        val original = input_profile_observation_data_v1(scope, request, input)
+        var changed = input_profile_observation_data_v1(scope, request, input)
+        changed.configuration.runtime.native_id = sha256_text("other-native")
+        expect(container_pre_start_input_constraint_check_v1(input, request, scope, original.configuration.runtime, changed).is_err()).to_equal(true)
+        changed = input_profile_observation_data_v1(scope, request, input)
+        changed.configuration.request_digest = sha256_text("other-request")
+        expect(container_pre_start_input_constraint_check_v1(input, request, scope, original.configuration.runtime, changed).is_err()).to_equal(true)
+        changed = input_profile_observation_data_v1(scope, request, input)
+        changed.input_configuration_digest = "invalid"
+        expect(container_pre_start_input_constraint_check_v1(input, request, scope, original.configuration.runtime, changed).unwrap_err()).to_equal("pre-start-input-configuration-digest-invalid")
+
+    it "defensively copies the sole input profile and its nested base restriction":
+        step("Mutate caller DATA after the production copy and preserve retained argv and mounts")
+        val scope = input_profile_scope_data_v1()
+        val request = input_profile_request_data_v1(scope)
+        var input = input_profile_constraint_data_v1(scope, request)
+        input.base.mounts = [ContainerExecutionMountObservationV1(kind: "bind", source: "/source", destination: "/data", read_only: true)]
+        val retained = container_pre_start_input_constraint_copy_v1(input)
+        input.base.primary_argv[0] = "/replacement"
+        input.base.mounts[0] = ContainerExecutionMountObservationV1(kind: "bind", source: "/replacement", destination: "/opt", read_only: false)
+        expect(retained.profile).to_equal(ContainerPreStartInputProfileV1.ClosedStdinNonTty)
+        expect(retained.base.primary_argv).to_equal(["/opt/provider", "--help"])
+        expect(retained.base.mounts[0].source).to_equal("/source")
+        expect(retained.base.mounts[0].destination).to_equal("/data")
+        expect(retained.base.mounts[0].read_only).to_equal(true)

@@ -1,0 +1,148 @@
+"""
+## Purpose and audience
+Extends the node-attribute switch of the real compiler AST pool to the `op`
+attribute (the `i_val` slot of BINARY / UNARY / COMPOUND_ASSIGN nodes), adds
+opt-in read/write access counters per attribute so placement can be chosen from
+measured data, and latches the switch once in the compiler driver (C.2).
+Readers are compiler authors and storage owners.
+Category: Infrastructure.
+## Operator workflow
+bin/simple test test/02_integration/compiler/data/ast_attr_op_counters_spec.spl
+## Compatibility and limitations
+Interpreter lane. Default off builds no store and counts nothing.
+## Verification guidance and troubleshooting
+A fingerprint mismatch between off and on means a store changed a parse result.
+"""
+# @req NODEATTR-OP-01 NODEATTR-OP-02 NODEATTR-OP-03 NODEATTR-CNT-01 NODEATTR-CNT-02 NODEATTR-DRV-01
+# @manual_section: Node attribute op, access counters and driver latch
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io_runtime.{env_set}
+use compiler.core.types.{reset_all_pools}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.ast.{expr_attr_op_placement, expr_attr_op_present, expr_attr_access_counts, expr_attr_access_summary, expr_attr_latch_clear, expr_count, expr_get_tag, expr_get_span, expr_get_int, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_str, expr_store_state_take, expr_store_state_install}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.driver_compile_options.{CompileOptions}
+
+val FIXED_INPUT = "src/compiler/00.common/data/data_schema_resolver.spl"
+# Same constant as ast_attr_apply_spec: the parse of FIXED_INPUT before any store.
+val BASELINE_FINGERPRINT = 93698475
+
+fn fingerprint() -> i64:
+    var h = 7
+    val n = expr_count()
+    var i = 0
+    while i < n:
+        h = (h * 31 + expr_get_tag(i)) % 1000000007
+        h = (h * 31 + expr_get_span(i)) % 1000000007
+        h = (h * 31 + expr_get_int(i)) % 1000000007
+        h = (h * 31 + expr_get_left(i)) % 1000000007
+        h = (h * 31 + expr_get_right(i)) % 1000000007
+        h = (h * 31 + expr_get_extra(i) + 2) % 1000000007
+        h = (h * 31 + expr_get_args(i).len()) % 1000000007
+        h = (h * 31 + expr_get_str(i).len()) % 1000000007
+        i = i + 1
+    h
+
+fn parse_with(config: text) -> i64:
+    env_set("SIMPLE_NODE_ATTR", config)
+    reset_all_pools()
+    parser_init_with_path(file_read(FIXED_INPUT), FIXED_INPUT)
+    parse_module_body()
+    fingerprint()
+
+fn ints() -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < expr_count():
+        out.push(expr_get_int(i))
+        i = i + 1
+    out
+
+fn op_nodes() -> i64:
+    var n = 0
+    var i = 0
+    while i < expr_count():
+        val t = expr_get_tag(i)
+        if t == 7 or t == 8 or t == 24:
+            n = n + 1
+        i = i + 1
+    n
+
+describe "op applied to the real AST":
+    it "keeps the parse identical to the pre-change fingerprint when op is off":
+        # @req NODEATTR-OP-01
+        expect(parse_with("")).to_equal(BASELINE_FINGERPRINT)
+        expect(expr_attr_op_placement()).to_equal("direct")
+        expect(expr_attr_op_present()).to_equal(-1)
+        expect(parse_with("op=direct")).to_equal(BASELINE_FINGERPRINT)
+
+    it "answers identical op values and presence on the sparse hash and the column":
+        # @req NODEATTR-OP-02
+        val off_ints = ints()
+        val off_ops = op_nodes()
+        expect(off_ops > 0).to_equal(true)
+        for cfg in ["op=sparse_hash", "op=column", "op=direct", "op=sparse_hash"]:
+            step("Parse with {cfg}")
+            expect(parse_with(cfg)).to_equal(BASELINE_FINGERPRINT)
+            expect(ints()).to_equal(off_ints)
+            if cfg != "op=direct":
+                expect(expr_attr_op_present()).to_equal(off_ops)
+        expect(expr_attr_op_placement()).to_equal("sparse_hash")
+
+    it "keeps op values across a store state take and install while op is on":
+        # @req NODEATTR-OP-03
+        val fp = parse_with("op=sparse_hash,extra=sparse_hash,s_val=column")
+        expect(fp).to_equal(BASELINE_FINGERPRINT)
+        val before = ints()
+        val s = expr_store_state_take()
+        expr_store_state_install(s)
+        expect(ints()).to_equal(before)
+        expect(fingerprint()).to_equal(BASELINE_FINGERPRINT)
+        parse_with("")
+
+describe "node attribute access counters":
+    it "counts nothing and reports an empty summary when counting is off":
+        # @req NODEATTR-CNT-01
+        env_set("SIMPLE_NODE_ATTR_COUNT", "")
+        parse_with("")
+        expect(expr_attr_access_counts("op")).to_equal([-1, -1])
+        expect(expr_attr_access_summary()).to_equal("")
+
+    it "counts reads and writes per attribute without changing the parse":
+        # @req NODEATTR-CNT-02
+        env_set("SIMPLE_NODE_ATTR_COUNT", "1")
+        expect(parse_with("")).to_equal(BASELINE_FINGERPRINT)
+        val op_before = expr_attr_access_counts("op")
+        val ex_before = expr_attr_access_counts("extra")
+        expect(op_before[1] >= op_nodes()).to_equal(true)
+        expect(ex_before[1] > 0).to_equal(true)
+        expect(expr_attr_access_counts("s_val")[1] > 0).to_equal(true)
+        fingerprint()
+        val op_after = expr_attr_access_counts("op")
+        expect(op_after[0] - op_before[0]).to_equal(op_nodes())
+        expect(expr_attr_access_counts("extra")[0] - ex_before[0]).to_equal(expr_count())
+        expect(expr_attr_access_summary().contains("op reads=")).to_equal(true)
+        env_set("SIMPLE_NODE_ATTR_COUNT", "")
+        parse_with("")
+        expect(expr_attr_access_counts("op")).to_equal([-1, -1])
+
+describe "driver adoption of the node attribute switch":
+    it "latches SIMPLE_NODE_ATTR once when the driver is created":
+        # @req NODEATTR-DRV-01
+        env_set("SIMPLE_NODE_ATTR", "op=sparse_hash")
+        val d = CompilerDriver.create(CompileOptions.default())
+        expect(d.identity_id > 0).to_equal(true)
+        env_set("SIMPLE_NODE_ATTR", "op=column")
+        CompilerDriver.create(CompileOptions.default())
+        env_set("SIMPLE_NODE_ATTR", "")
+        reset_all_pools()
+        parser_init_with_path(file_read(FIXED_INPUT), FIXED_INPUT)
+        parse_module_body()
+        expect(expr_attr_op_placement()).to_equal("sparse_hash")
+        expect(fingerprint()).to_equal(BASELINE_FINGERPRINT)
+        expr_attr_latch_clear()
+        parse_with("")
+        expect(expr_attr_op_placement()).to_equal("direct")

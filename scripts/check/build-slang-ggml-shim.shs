@@ -28,6 +28,12 @@
 # (libc++.dll, libunwind.dll, libwinpthread-1.dll) are copied next to the shim.
 # Note the DLL naming trap: mingw builds produce libllama.dll, MSVC llama.dll.
 #
+# SLANG_SHIM_MTMD=1 adds the multimodal group (image/audio, `mtmd group` block
+# at the end of the shim): compiles with -DSLANG_WITH_MTMD, links libmtmd and
+# copies libmtmd.dll next to the shim. LLAMA_BUILD_DIR must be a llama.cpp
+# build that has libmtmd (e.g. /c/dev/tools/llama.cpp/build-mingw-mm). Off by
+# default; the text-only shim is unchanged. Not available on the MSVC lane.
+#
 # Optional MSVC lane (SLANG_SHIM_MSVC=1): clang-cl + lld-link. Needs the MSVC/SDK env
 # (`. scripts/setup/windows-msvc-bootstrap-env.shs`) and a llama.cpp built
 # with BUILD_SHARED_LIBS=ON, i.e. build/bin/llama.dll plus the import library
@@ -61,6 +67,9 @@ else
 fi
 LLAMA_BUILD_DIR=${LLAMA_BUILD_DIR:-$LLAMA_ROOT/build}
 
+if [ "$WIN_MSVC" -eq 1 ] && [ "${SLANG_SHIM_MTMD:-0}" = 1 ]; then
+    echo "ERROR -- nothing was built (SLANG_SHIM_MTMD=1 is supported on the llvm-mingw and Linux lanes only)"; exit 2
+fi
 if [ "$WIN_MSVC" -eq 1 ]; then
     OUT=$OUT_DIR/slang_ggml.dll
     LLAMA_LIB=$LLAMA_BUILD_DIR/bin/llama.dll
@@ -121,11 +130,19 @@ if [ "$IS_WINDOWS" -eq 1 ] && [ "$WIN_MSVC" -eq 0 ]; then
     # mingw ld auto-exports every non-static function when none is marked
     # dllexport, so functions behind a disabled #if never reach the exports.
     cc_rc=0
-    "$CC" -O2 -shared -o "$(winpath "$OUT")" "$(winpath "$SRC")" \
+    MM_FLAGS=""; MM_LIBS=""; MTMD_DLL=""
+    if [ "${SLANG_SHIM_MTMD:-0}" = 1 ]; then
+        MTMD_IMPLIB=${MTMD_IMPLIB:-$LLAMA_BUILD_DIR/tools/mtmd/libmtmd.dll.a}
+        [ -f "$MTMD_IMPLIB" ] || { echo "ERROR -- nothing was built (SLANG_SHIM_MTMD=1 but no import library $MTMD_IMPLIB; build llama.cpp with libmtmd)"; exit 2; }
+        MM_FLAGS="-DSLANG_WITH_MTMD -I$(winpath "$LLAMA_ROOT/tools/mtmd")"
+        MM_LIBS=$(winpath "$MTMD_IMPLIB")
+        MTMD_DLL=libmtmd.dll
+    fi
+    "$CC" -O2 -shared -o "$(winpath "$OUT")" "$(winpath "$SRC")" $MM_FLAGS \
         -I"$(winpath "$LLAMA_ROOT/include")" -I"$(winpath "$LLAMA_ROOT/ggml/include")" \
-        "$(winpath "$LLAMA_IMPLIB")" >"$OUT_DIR/build.log" 2>&1 || cc_rc=$?
+        "$(winpath "$LLAMA_IMPLIB")" $MM_LIBS >"$OUT_DIR/build.log" 2>&1 || cc_rc=$?
     if [ "$cc_rc" -eq 0 ]; then
-        for dep in ggml-base.dll ggml-cpu.dll ggml.dll libllama.dll; do
+        for dep in ggml-base.dll ggml-cpu.dll ggml-vulkan.dll ggml.dll libllama.dll $MTMD_DLL; do
             if [ -f "$LLAMA_BUILD_DIR/bin/$dep" ]; then
                 cp -f "$LLAMA_BUILD_DIR/bin/$dep" "$OUT_DIR/$dep"
             fi
@@ -171,9 +188,14 @@ else
     # pipeline's $? is the last stage's) and never bare under `set -e`
     # (which would exit before the verdict line is printed).
     cc_rc=0
-    "$CC" -O2 -fPIC -shared -o "$OUT" "$SRC" \
+    MM_FLAGS=""; MM_LIBS=""
+    if [ "${SLANG_SHIM_MTMD:-0}" = 1 ]; then
+        MM_FLAGS="-DSLANG_WITH_MTMD -I$LLAMA_ROOT/tools/mtmd"
+        MM_LIBS="-lmtmd"
+    fi
+    "$CC" -O2 -fPIC -shared -o "$OUT" "$SRC" $MM_FLAGS \
         -I"$LLAMA_ROOT/include" -I"$LLAMA_ROOT/ggml/include" \
-        -L"$LLAMA_BUILD_DIR/bin" -lllama \
+        -L"$LLAMA_BUILD_DIR/bin" -lllama $MM_LIBS \
         -Wl,-rpath,"$LLAMA_BUILD_DIR/bin" 2>"$OUT_DIR/build.log" || cc_rc=$?
 fi
 if [ "$cc_rc" -ne 0 ]; then
@@ -207,6 +229,19 @@ do
         exit 1
     }
 done
+
+if [ "${SLANG_SHIM_MTMD:-0}" = 1 ]; then
+    for required in \
+        slang_ggml_mm_load slang_ggml_mm_caps slang_ggml_mm_free \
+        slang_ggml_request_mm_reset slang_ggml_request_mm_add_encoded \
+        slang_ggml_request_mm_tokenize slang_ggml_request_mm_eval_prompt
+    do
+        grep -q " T $required\$" "$symbols" || {
+            echo "FAIL -- built $OUT with SLANG_SHIM_MTMD=1 but mtmd symbol $required is absent"
+            exit 1
+        }
+    done
+fi
 
 if [ -f "$LLAMA_ROOT/include/llama-slang-paged.h" ]; then
     native_symbols=$OUT_DIR/llama_slang_paged_symbols.txt

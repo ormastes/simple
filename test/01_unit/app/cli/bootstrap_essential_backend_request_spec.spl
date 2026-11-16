@@ -1,0 +1,41 @@
+"""Essential-backend composition request policy: only K1 backends are linked."""
+use std.spec.{describe, it, expect, step}
+use app.cli.bootstrap_essential_backend_request.{
+    bootstrap_essential_backend_choices_v1,
+    bootstrap_essential_backend_request_error_v1}
+
+describe "essential backend composition request policy":
+    it "lists only the K1 backends of the selected policy":
+        step("Choices follow the paired kernel root")
+        expect(bootstrap_essential_backend_choices_v1("llvm")).to_equal("llvm")
+        expect(bootstrap_essential_backend_choices_v1("llvm-cranelift")).to_equal("llvm|cranelift")
+
+    it "accepts llvm and the automatic default under either policy":
+        step("Host-essential LLVM is always linked")
+        for policy in ["llvm", "llvm-cranelift"]:
+            for backend in ["", "auto", "llvm"]:
+                expect(bootstrap_essential_backend_request_error_v1(policy, backend, "")).to_equal("")
+
+    it "accepts cranelift only when the policy links it":
+        step("Cranelift is K1 only under llvm-cranelift")
+        expect(bootstrap_essential_backend_request_error_v1("llvm-cranelift", "cranelift", "")).to_equal("")
+        expect(bootstrap_essential_backend_request_error_v1("llvm", "cranelift", "")).to_contain("PLUG-E-NOTFOUND")
+
+    it "fails closed for every non-essential backend":
+        step("P-static backends are not linked")
+        for backend in ["native", "c", "wasm", "cuda", "hip", "opencl", "vulkan", "vhdl", "lean"]:
+            val err = bootstrap_essential_backend_request_error_v1("llvm-cranelift", backend, "")
+            expect(err).to_contain("PLUG-E-NOTFOUND")
+            expect(err).to_contain(backend)
+
+    it "refuses plugin paths that no provider can load yet":
+        step("simple_backend_plugin_v1 has no exporter")
+        val err = bootstrap_essential_backend_request_error_v1("llvm", "llvm", "x.dll")
+        expect(err).to_contain("PLUG-E-UNSUPPORTED")
+        expect(err).to_contain("x.dll")
+
+    it "adds no restriction once the full static table is installed":
+        step("Phase 4 full-CLI builds also pass the kernel root; the installed full table wins")
+        for backend in ["c", "vhdl", "cuda", "wasm", "native"]:
+            expect(bootstrap_essential_backend_request_error_v1("llvm-cranelift", backend, "", true)).to_equal("")
+        expect(bootstrap_essential_backend_request_error_v1("llvm", "llvm", "x.dll", true)).to_equal("")

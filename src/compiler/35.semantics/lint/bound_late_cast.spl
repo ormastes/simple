@@ -1,0 +1,615 @@
+# SPL-BOUND-002: late primitive-to-unit cast of a foreign-origin value
+# (`Unit(x)` and `x as Unit`).
+# SPL-BOUND-001: a raw extern result (bare call or plain copy) returned
+# unconverted (`return raw` / final bare `raw`) from a non-boundary function
+# with a declared non-Nil return type.
+#
+# A foreign value acquires unit semantics at its SFFI/HAL boundary adapter
+# (a function carrying @unsafe(... capabilities: [ffi])), never in an
+# arbitrary later function. Slice B1 of
+# doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md:
+# function-local origin only (raw extern result and plain `val x = y` copies).
+# Slice B2 step 1 adds same-file cross-function summaries (fixpoint over
+# non-boundary functions returning a raw foreign value). Cross-file and typed-HIR
+# summaries remain a gap. B2 step 2: exported per-module raw-return summaries
+# (BoundModuleSummary) seed importers via check_bound_late_casts_cross.
+
+use compiler.semantics.lint.lint_text.{code_line_snapshot, CodeLine}
+
+pub struct BoundLateCastFinding:
+    code: text
+    message: text
+    note: text
+    line_num: i64
+
+fn _blc_indent(raw: text) -> i64:
+    var i = 0
+    while i < raw.byte_len() and raw.substring(i, i + 1) == " ":
+        i = i + 1
+    i
+
+fn _blc_fn_header(line: text) -> bool:
+    var rest = line
+    for prefix in ["pub ", "static ", "async ", "unsafe "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len())
+    rest.starts_with("fn ") or rest.starts_with("me ")
+
+fn _blc_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+        (c >= "0" and c <= "9") or c == "_"
+
+fn _blc_leading_ident(s: text) -> text:
+    var i = 0
+    while i < s.byte_len() and _blc_ident_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn _blc_extern_name(line: text) -> text:
+    var rest = line
+    if rest.starts_with("pub "):
+        rest = rest.substring(4, rest.byte_len())
+    if rest.starts_with("unsafe "):
+        rest = rest.substring(7, rest.byte_len())
+    if not rest.starts_with("extern fn "):
+        return ""
+    _blc_leading_ident(rest.substring(10, rest.byte_len()))
+
+fn _blc_unit_decl_name(line: text) -> text:
+    var rest = line
+    if rest.starts_with("pub "):
+        rest = rest.substring(4, rest.byte_len())
+    if not rest.starts_with("unit "):
+        return ""
+    val name = _blc_leading_ident(rest.substring(5, rest.byte_len()))
+    if rest.substring(5 + name.byte_len(), rest.byte_len()).starts_with(":"):
+        return name
+    ""
+
+fn _blc_unit_imports(line: text, existing: [text]) -> [text]:
+    var units = existing
+    if not line.starts_with("use unit."):
+        return units
+    val open = line.find("{{")
+    val close = line.find("}")
+    if open < 0 or close <= open:
+        return units
+    for part in line.substring(open + 1, close).split(","):
+        # `{Meter as M}` binds the local name M.
+        var name = part.trim()
+        val alias_at = name.find(" as ")
+        if alias_at >= 0:
+            name = name.substring(alias_at + 4, name.byte_len()).trim()
+        if name != "" and not units.contains(name):
+            units.push(name)
+    units
+
+fn _blc_has_ffi_capability(line: text) -> bool:
+    val key = line.find("capabilities")
+    if key < 0:
+        return false
+    val rest = line.substring(key, line.byte_len())
+    val open = rest.find("[")
+    val close = rest.find("]")
+    if open < 0 or close <= open:
+        return false
+    for value in rest.substring(open + 1, close).split(","):
+        if value.trim() == "ffi":
+            return true
+    false
+
+fn _blc_boundary(lines: [CodeLine], header_index: i64) -> bool:
+    # Contiguous annotation block directly above the header. An annotation may
+    # span lines (`@unsafe(reason: "...",` / `capabilities: [ffi])`), so join
+    # the lines from its `@unsafe(` start down to the header. Only `@...` lines
+    # and annotation continuations (ending in `,` or `)`, not a declaration)
+    # belong to the block; anything else (an `extern fn`, a body line) ends it,
+    # so a preceding declaration's @unsafe is never inherited. Bounded.
+    var i = header_index - 1
+    var remaining = 32
+    var joined = ""
+    while i >= 0 and remaining > 0:
+        val prev = lines[i].trimmed
+        remaining = remaining - 1
+        if prev == "":
+            i = i - 1
+            continue
+        if not prev.starts_with("@"):
+            val continuation = (prev.ends_with(",") or prev.ends_with(")")) and
+                not prev.contains("fn ") and not prev.ends_with(":")
+            if not continuation:
+                return false
+        joined = prev + " " + joined
+        if prev.starts_with("@unsafe("):
+            return _blc_has_ffi_capability(joined)
+        i = i - 1
+    false
+
+fn _blc_calls(expr: text, name: text) -> bool:
+    val needle = name + "("
+    if expr.starts_with(needle):
+        return true
+    for lead in [" ", "(", "[", ",", "=", ":"]:
+        if expr.contains(lead + needle):
+            return true
+    false
+
+fn _blc_mentions(expr: text, name: text) -> bool:
+    # Whole-identifier occurrence of `name` inside `expr`.
+    var from = 0
+    while from < expr.byte_len():
+        val rest = expr.substring(from, expr.byte_len())
+        val at = rest.find(name)
+        if at < 0:
+            return false
+        val start = from + at
+        val end = start + name.byte_len()
+        # A preceding `.` means a field/method of another value, not this name.
+        val before_ok = start == 0 or
+            (not _blc_ident_char(expr.substring(start - 1, start)) and
+                expr.substring(start - 1, start) != ".")
+        val after_ok = end >= expr.byte_len() or not _blc_ident_char(expr.substring(end, end + 1))
+        if before_ok and after_ok:
+            return true
+        from = start + 1
+    false
+
+fn _blc_binding(line: text) -> text:
+    var rest = ""
+    if line.starts_with("val "):
+        rest = line.substring(4, line.byte_len())
+    elif line.starts_with("var "):
+        rest = line.substring(4, line.byte_len())
+    else:
+        # Plain reassignment `x = expr` (not `==`, not a compound/field target).
+        val name = _blc_leading_ident(line)
+        val after = line.substring(name.byte_len(), line.byte_len())
+        if name != "" and after.starts_with(" = "):
+            return name
+        if name != "" and _blc_compound_op(after):
+            return name
+        return ""
+    _blc_leading_ident(rest)
+
+fn _blc_compound_op(after: text) -> bool:
+    # ` += `, ` -= `, ` *= `, ` /= ` after a target name.
+    for op in [" += ", " -= ", " *= ", " /= "]:
+        if after.starts_with(op):
+            return true
+    false
+
+fn _blc_is_compound(line: text) -> bool:
+    if line.starts_with("val ") or line.starts_with("var "):
+        return false
+    val name = _blc_leading_ident(line)
+    name != "" and _blc_compound_op(line.substring(name.byte_len(), line.byte_len()))
+
+fn _blc_paren_depth(s: text) -> i64:
+    var depth = 0
+    var i = 0
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        i = i + 1
+    depth
+
+fn _blc_strip_parens(expr: text) -> text:
+    # `(x)` -> `x`, only when the first `(` closes at the very end.
+    var e = expr.trim()
+    while e.starts_with("(") and e.ends_with(")"):
+        var depth = 0
+        var closed_at = -1
+        var i = 0
+        while i < e.byte_len():
+            val c = e.substring(i, i + 1)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                depth = depth - 1
+                if depth == 0:
+                    closed_at = i
+                    break
+            i = i + 1
+        if closed_at != e.byte_len() - 1:
+            break
+        e = e.substring(1, e.byte_len() - 1).trim()
+    e
+
+fn _blc_header_end(lines: [CodeLine], start: i64) -> i64:
+    # Index of the line that closes a (possibly multi-line) fn header: the
+    # first line at or after `start` where the parens balance.
+    var depth = 0
+    var k = start
+    while k < lines.len() and k < start + 24:
+        depth = depth + _blc_paren_depth(lines[k].trimmed)
+        if depth <= 0:
+            return k
+        k = k + 1
+    start
+
+fn _blc_join(lines: [CodeLine], first: i64, last: i64) -> text:
+    var joined = ""
+    var k = first
+    while k <= last:
+        joined = joined + " " + lines[k].trimmed
+        k = k + 1
+    joined.trim()
+
+fn _blc_branch_tails(lines: [CodeLine], last_line: i64, body_indent: i64) -> [i64]:
+    # Branch-final lines of a final top-level `if`/`match` statement: the last
+    # non-blank line of every deeper block that is not itself a block header.
+    var tails: [i64] = []
+    var s = last_line
+    while s >= 0:
+        val t = lines[s].trimmed
+        val continues = _blc_indent(lines[s].raw) > body_indent or t == "" or t.starts_with("elif ") or t.starts_with("else:")
+        if not continues:
+            break
+        s = s - 1
+    if s < 0 or s == last_line:
+        return tails
+    val head = lines[s].trimmed
+    if not head.starts_with("if ") and not head.starts_with("match "):
+        return tails
+    var k = s + 1
+    while k <= last_line:
+        if lines[k].trimmed != "" and not lines[k].trimmed.ends_with(":"):
+            var n = k + 1
+            while n <= last_line and lines[n].trimmed == "":
+                n = n + 1
+            if n > last_line or _blc_indent(lines[n].raw) < _blc_indent(lines[k].raw):
+                tails.push(k)
+        k = k + 1
+    tails
+
+fn _blc_rhs(line: text) -> text:
+    val eq = line.find("=")
+    if eq < 0:
+        return ""
+    line.substring(eq + 1, line.byte_len()).trim()
+
+fn _blc_cast_args(expr: text, unit_name: text) -> [text]:
+    # Every `Unit(...)` argument on the line (whole-identifier `Unit` only).
+    var args: [text] = []
+    val needle = unit_name + "("
+    var from = 0
+    while from < expr.byte_len():
+        val k = expr.substring(from, expr.byte_len()).find(needle)
+        if k < 0:
+            return args
+        val at = from + k
+        from = at + needle.byte_len()
+        if at > 0:
+            val before = expr.substring(at - 1, at)
+            if _blc_ident_char(before) or before == ".":
+                continue
+        var depth = 0
+        var i = from
+        while i < expr.byte_len():
+            val c = expr.substring(i, i + 1)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                if depth == 0:
+                    args.push(expr.substring(from, i))
+                    break
+                depth = depth - 1
+            i = i + 1
+    args
+
+fn _blc_as_operands(expr: text, unit_name: text) -> [text]:
+    # Operand of every `<operand> as Unit` cast on the line (whole-identifier
+    # `Unit` after `as`). The operand is the trailing atom before ` as `:
+    # an optional balanced `(...)` preceded by an identifier/field path.
+    var ops: [text] = []
+    val needle = " as " + unit_name
+    var from = 0
+    while from < expr.byte_len():
+        val k = expr.substring(from, expr.byte_len()).find(needle)
+        if k < 0:
+            return ops
+        val at = from + k
+        from = at + needle.byte_len()
+        if from < expr.byte_len() and _blc_ident_char(expr.substring(from, from + 1)):
+            continue
+        var start = at
+        if start > 0 and expr.substring(start - 1, start) == ")":
+            var depth = 0
+            while start > 0:
+                val c = expr.substring(start - 1, start)
+                if c == ")":
+                    depth = depth + 1
+                elif c == "(":
+                    depth = depth - 1
+                start = start - 1
+                if depth == 0:
+                    break
+        while start > 0:
+            val c = expr.substring(start - 1, start)
+            if _blc_ident_char(c) or c == ".":
+                start = start - 1
+            else:
+                break
+        ops.push(expr.substring(start, at))
+    ops
+
+fn _blc_bare_extern_call(expr: text, externs: [text]) -> bool:
+    # The whole expression is exactly one `extern_name(...)` call.
+    for name in externs:
+        val needle = name + "("
+        if not expr.starts_with(needle) or not expr.ends_with(")"):
+            continue
+        var depth = 0
+        var i = name.byte_len()
+        var closed_at = -1
+        while i < expr.byte_len():
+            val c = expr.substring(i, i + 1)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                depth = depth - 1
+                if depth == 0:
+                    closed_at = i
+                    break
+            i = i + 1
+        if closed_at == expr.byte_len() - 1:
+            return true
+    false
+
+fn _blc_raw_value(expr: text, externs: [text], raw: [text]) -> bool:
+    # The expression IS an unconverted raw extern result: a bare extern call or
+    # a plain copy of one (no cast, no call, no arithmetic).
+    val e = _blc_strip_parens(expr)
+    raw.contains(e) or _blc_bare_extern_call(e, externs)
+
+fn _blc_return_primitive(header: text, units: [text]) -> bool:
+    # A declared primitive return: not `-> Nil` / `-> ()` / none, and not a unit
+    # type (a unit-typed return is already converted).
+    val arrow = header.find(" -> ")
+    if arrow < 0:
+        return false
+    var rt = header.substring(arrow + 4, header.byte_len()).trim()
+    if rt.ends_with(":"):
+        rt = rt.substring(0, rt.byte_len() - 1).trim()
+    rt != "" and rt != "Nil" and rt != "()" and rt != "nil" and not units.contains(rt)
+
+fn _blc_foreign(expr: text, externs: [text], tainted: [text]) -> bool:
+    for name in externs:
+        if _blc_calls(expr, name):
+            return true
+    for name in tainted:
+        if _blc_mentions(expr, name):
+            return true
+    false
+
+fn _blc_escape_finding(line_num: i64) -> BoundLateCastFinding:
+    BoundLateCastFinding(
+        code: "SPL-BOUND-001",
+        message: "raw extern result escapes unconverted from a non-boundary function",
+        note: "convert the foreign value at an @unsafe(reason: ..., capabilities: [ffi]) boundary adapter (typed unit, enum, or Result<T, ConstraintError>) and return that instead of the raw primitive",
+        line_num: line_num
+    )
+
+struct BlcPass:
+    findings: [BoundLateCastFinding]
+    foreign_fns: [text]
+
+fn _blc_fn_name(line: text) -> text:
+    var rest = line
+    for prefix in ["pub ", "static ", "async ", "unsafe "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len())
+    if rest.starts_with("fn "):
+        return _blc_leading_ident(rest.substring(3, rest.byte_len()))
+    if rest.starts_with("me "):
+        return _blc_leading_ident(rest.substring(3, rest.byte_len()))
+    ""
+
+fn _blc_return_type(header: text) -> text:
+    val arrow = header.find(" -> ")
+    if arrow < 0:
+        return ""
+    var rt = header.substring(arrow + 4, header.byte_len()).trim()
+    if rt.ends_with(":"):
+        rt = rt.substring(0, rt.byte_len() - 1).trim()
+    rt
+
+# Cross-file summary: the `pub fn` names of one module that return a raw
+# foreign value unconverted (`raw_fns`), keyed by the module path that
+# importers name in `use <module>.{...}`.
+pub struct BoundModuleSummary:
+    module: text
+    raw_fns: [text]
+
+fn _blc_imported_raw(lines: [CodeLine], deps: [BoundModuleSummary]) -> [text]:
+    # Local names bound by `use <module>.{a, b as c}` whose target is in the
+    # module's raw-return summary.
+    var seeds: [text] = []
+    for line in lines:
+        val t = line.trimmed
+        if not t.starts_with("use "):
+            continue
+        val open = t.find(".{{")
+        val close = t.find("}")
+        if open < 0 or close <= open:
+            continue
+        val module = t.substring(4, open).trim()
+        for dep in deps:
+            if dep.module != module:
+                continue
+            for part in t.substring(open + 2, close).split(","):
+                var name = part.trim()
+                var local = name
+                val alias_at = name.find(" as ")
+                if alias_at >= 0:
+                    local = name.substring(alias_at + 4, name.byte_len()).trim()
+                    name = name.substring(0, alias_at).trim()
+                if dep.raw_fns.contains(name) and local != "" and not seeds.contains(local):
+                    seeds.push(local)
+    seeds
+
+fn _blc_pub_fn_names(lines: [CodeLine]) -> [text]:
+    var names: [text] = []
+    for line in lines:
+        if line.trimmed.starts_with("pub ") and _blc_fn_header(line.trimmed):
+            val n = _blc_fn_name(line.trimmed)
+            if n != "" and not names.contains(n):
+                names.push(n)
+    names
+
+pub fn check_bound_late_casts(source: text, file_path: text) -> [BoundLateCastFinding]:
+    check_bound_late_casts_cross(source, file_path, [])
+
+pub fn check_bound_late_casts_cross(source: text, file_path: text, deps: [BoundModuleSummary]) -> [BoundLateCastFinding]:
+    _blc_run(source, file_path, deps).findings
+
+pub fn bound_raw_return_summary(source: text, file_path: text) -> [text]:
+    bound_raw_return_summary_cross(source, file_path, [])
+
+pub fn bound_raw_return_summary_cross(source: text, file_path: text, deps: [BoundModuleSummary]) -> [text]:
+    # Exported raw-boundary-return summary of this module for its importers.
+    val pubs = _blc_pub_fn_names(code_line_snapshot(source).lines)
+    [n for n in _blc_run(source, file_path, deps).foreign_fns if pubs.contains(n)]
+
+fn _blc_run(source: text, file_path: text, deps: [BoundModuleSummary]) -> BlcPass:
+    var findings: [BoundLateCastFinding] = []
+    if file_path.contains("/vendor/") or file_path.contains("sffi_gen"):
+        return BlcPass(findings: findings, foreign_fns: [])
+    val lines = code_line_snapshot(source).lines
+    var externs: [text] = []
+    var units: [text] = []
+    for line in lines:
+        val e = _blc_extern_name(line.trimmed)
+        if e != "" and not externs.contains(e):
+            externs.push(e)
+        val u = _blc_unit_decl_name(line.trimmed)
+        if u != "" and not units.contains(u):
+            units.push(u)
+        units = _blc_unit_imports(line.trimmed, units)
+    val imported = _blc_imported_raw(lines, deps)
+    if externs.len() == 0 and imported.len() == 0:
+        return BlcPass(findings: findings, foreign_fns: [])
+    # Same-file cross-function origin summaries: a non-boundary function that
+    # returns a raw foreign value makes calls to it foreign. Iterate to a
+    # fixpoint; the callee set only grows and is bounded by the function count,
+    # so recursion and mutual recursion terminate. Imported raw-return fns
+    # (cross-file summaries) seed the callee set; SPL-BOUND-001 stays keyed on
+    # this file's own externs (the exporter already reports its raw return).
+    var callees = [x for x in externs]
+    for x in imported:
+        if not callees.contains(x):
+            callees.push(x)
+    var pass_result = _blc_pass(lines, externs, callees, units)
+    var rounds = 0
+    while rounds <= lines.len():
+        var grown = false
+        for name in pass_result.foreign_fns:
+            if not callees.contains(name):
+                callees.push(name)
+                grown = true
+        if not grown:
+            break
+        pass_result = _blc_pass(lines, externs, callees, units)
+        rounds = rounds + 1
+    pass_result
+
+fn _blc_pass(lines: [CodeLine], externs: [text], callees: [text], units: [text]) -> BlcPass:
+    var findings: [BoundLateCastFinding] = []
+    var foreign_fns: [text] = []
+    var i = 0
+    while i < lines.len():
+        val header = lines[i]
+        if not _blc_fn_header(header.trimmed):
+            i = i + 1
+            continue
+        val boundary = _blc_boundary(lines, i)
+        val header_indent = _blc_indent(header.raw)
+        val header_end = _blc_header_end(lines, i)
+        val header_text = _blc_join(lines, i, header_end)
+        val returns_value = _blc_return_primitive(header_text, units)
+        var tainted: [text] = []
+        var raw_vals: [text] = []
+        var fvals: [text] = []
+        var returns_foreign = false
+        var body_indent = -1
+        var last_line = -1
+        var j = header_end + 1
+        while j < lines.len():
+            val body = lines[j]
+            if body.trimmed == "":
+                j = j + 1
+                continue
+            if _blc_indent(body.raw) <= header_indent:
+                break
+            if body_indent < 0:
+                body_indent = _blc_indent(body.raw)
+            last_line = j
+            if not boundary:
+                val bound = _blc_binding(body.trimmed)
+                if returns_value and body.trimmed.starts_with("return "):
+                    var value = body.trimmed.substring(7, body.trimmed.byte_len())
+                    # A return wrapped across lines: `return (` ... `)`.
+                    var w = j + 1
+                    while _blc_paren_depth(value) > 0 and w < lines.len() and w < j + 8:
+                        value = value + " " + lines[w].trimmed
+                        w = w + 1
+                    if _blc_raw_value(value, externs, raw_vals):
+                        findings.push(_blc_escape_finding(body.line_num))
+                if body.trimmed.starts_with("return ") and _blc_raw_value(body.trimmed.substring(7, body.trimmed.byte_len()), callees, fvals):
+                    returns_foreign = true
+                var reported = false
+                for unit_name in units:
+                    if reported:
+                        break
+                    var operands = _blc_cast_args(body.trimmed, unit_name)
+                    for op in _blc_as_operands(body.trimmed, unit_name):
+                        operands.push(op)
+                    for arg in operands:
+                        if _blc_foreign(arg, callees, tainted):
+                            findings.push(BoundLateCastFinding(
+                                code: "SPL-BOUND-002",
+                                message: "late cast of a foreign-origin value to unit `{unit_name}`",
+                                note: "establish `{unit_name}` at the SFFI/HAL boundary: return it from an @unsafe(reason: ..., capabilities: [ffi]) adapter (or a Result<{unit_name}, ConstraintError> when the unit is constrained) and call that adapter here",
+                                line_num: body.line_num
+                            ))
+                            reported = true
+                            break
+                if bound != "":
+                    # A rebinding/shadowing replaces the origin of `bound`.
+                    # A compound assignment (`x += e`) keeps the target's origin.
+                    val compound = _blc_is_compound(body.trimmed)
+                    val foreign_rhs = _blc_foreign(_blc_rhs(body.trimmed), callees, tainted) or (compound and tainted.contains(bound))
+                    if foreign_rhs and not tainted.contains(bound):
+                        tainted.push(bound)
+                    elif not foreign_rhs and tainted.contains(bound):
+                        tainted = [t for t in tainted if t != bound]
+                    # SPL-BOUND-001 origin: only bare extern results / plain copies.
+                    val raw_rhs = not compound and _blc_raw_value(_blc_rhs(body.trimmed), externs, raw_vals)
+                    if raw_rhs and not raw_vals.contains(bound):
+                        raw_vals.push(bound)
+                    elif not raw_rhs and raw_vals.contains(bound):
+                        raw_vals = [t for t in raw_vals if t != bound]
+                    # Summary origin: bare call of a foreign callee / plain copy.
+                    val fvals_rhs = not compound and _blc_raw_value(_blc_rhs(body.trimmed), callees, fvals)
+                    if fvals_rhs and not fvals.contains(bound):
+                        fvals.push(bound)
+                    elif not fvals_rhs and fvals.contains(bound):
+                        fvals = [t for t in fvals if t != bound]
+            j = j + 1
+        if not boundary and returns_value and last_line >= 0:
+            val tail = lines[last_line]
+            if _blc_indent(tail.raw) == body_indent and not tail.trimmed.starts_with("return ") and _blc_binding(tail.trimmed) == "" and _blc_raw_value(tail.trimmed, externs, raw_vals):
+                findings.push(_blc_escape_finding(tail.line_num))
+            if _blc_indent(tail.raw) == body_indent and not tail.trimmed.starts_with("return ") and _blc_binding(tail.trimmed) == "" and _blc_raw_value(tail.trimmed, callees, fvals):
+                returns_foreign = true
+            for k in _blc_branch_tails(lines, last_line, body_indent):
+                if _blc_binding(lines[k].trimmed) == "" and not lines[k].trimmed.starts_with("return ") and _blc_raw_value(lines[k].trimmed, externs, raw_vals):
+                    findings.push(_blc_escape_finding(lines[k].line_num))
+        val fn_name = _blc_fn_name(header.trimmed)
+        if not boundary and returns_foreign and fn_name != "" and not units.contains(_blc_return_type(header.trimmed)) and not foreign_fns.contains(fn_name):
+            foreign_fns.push(fn_name)
+        i = j
+    BlcPass(findings: findings, foreign_fns: foreign_fns)

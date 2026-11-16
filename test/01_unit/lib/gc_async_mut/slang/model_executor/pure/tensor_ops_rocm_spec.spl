@@ -1,0 +1,105 @@
+# slang pure backend — ROCm ops provider vs the CPU provider (tensor_ops.spl)
+#
+# Gated on the ROCm DLLs: without them every case prints a SKIP reason and
+# returns. Tolerance: |gpu - cpu| <= 1e-4 * max(1, max|cpu|) per element (f32
+# device math vs f64 CPU math).
+
+use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_attention}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_rmsnorm, rocm_tensor_add, rocm_tensor_mul, rocm_tensor_silu, rocm_tensor_attention}
+
+fn rocm_present() -> bool:
+    if rocm_available_at(rocm_bin_default()):
+        return true
+    print "SKIP: ROCm DLLs (amdhip64_7.dll, hiprtc0702.dll) not found in {rocm_bin_default()}"
+    false
+
+fn rand_values(n: i64, seed: i64) -> [f64]:
+    var out: [f64] = []
+    var s = seed
+    var i: i64 = 0
+    while i < n:
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.push(((s % 20001) as f64) / 10000.0 - 1.0)
+        i = i + 1
+    out
+
+fn rand_tensor(shape: [i64], seed: i64) -> PureTensor:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    tensor_from_values(rand_values(n, seed), shape)
+
+# Max |gpu - cpu| relative to max(1, max|cpu|).
+fn rel_err(gpu: PureTensor, cpu: PureTensor) -> f64:
+    var scale = 1.0
+    var i: i64 = 0
+    while i < cpu.data.len():
+        val a = if cpu.data[i] < 0.0: -cpu.data[i] else: cpu.data[i]
+        if a > scale:
+            scale = a
+        i = i + 1
+    var worst = 0.0
+    i = 0
+    while i < cpu.data.len():
+        val d0 = gpu.data[i] - cpu.data[i]
+        val d = if d0 < 0.0: -d0 else: d0
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst / scale
+
+describe "pure ROCm ops provider":
+    it "opens a Radeon device":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            print "ROCM device: {rocm_ops_device_name(ops)}"
+            expect(rocm_ops_device_name(ops)).to_contain("Radeon")
+
+    it "matvec matches the CPU op":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val w = rand_tensor([300, 288], 1)
+            val x = rand_tensor([288], 2)
+            val dw = rocm_tensor_upload(ops, w).unwrap()
+            val dx = rocm_tensor_upload(ops, x).unwrap()
+            val y = rocm_tensor_download(ops, rocm_tensor_matvec(ops, dw, dx).unwrap()).unwrap()
+            expect(y.data.len()).to_equal(300)
+            expect(rel_err(y, tensor_matvec(w, x)) < 0.0001).to_equal(true)
+
+    it "rmsnorm matches the CPU op":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val x = rand_tensor([288], 3)
+            val w = rand_tensor([288], 4)
+            val y = rocm_tensor_download(ops, rocm_tensor_rmsnorm(ops, rocm_tensor_upload(ops, x).unwrap(), rocm_tensor_upload(ops, w).unwrap(), 0.00001).unwrap()).unwrap()
+            expect(rel_err(y, tensor_rmsnorm(x, w, 0.00001)) < 0.0001).to_equal(true)
+
+    it "add, mul and silu match the CPU ops":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val a = rand_tensor([768], 5)
+            val b = rand_tensor([768], 6)
+            val da = rocm_tensor_upload(ops, a).unwrap()
+            val db = rocm_tensor_upload(ops, b).unwrap()
+            val s = rocm_tensor_download(ops, rocm_tensor_add(ops, da, db).unwrap()).unwrap()
+            val m = rocm_tensor_download(ops, rocm_tensor_mul(ops, da, db).unwrap()).unwrap()
+            val u = rocm_tensor_download(ops, rocm_tensor_silu(ops, da).unwrap()).unwrap()
+            expect(rel_err(s, tensor_add(a, b)) < 0.0001).to_equal(true)
+            expect(rel_err(m, tensor_mul(a, b)) < 0.0001).to_equal(true)
+            expect(rel_err(u, tensor_silu(a)) < 0.0001).to_equal(true)
+
+    it "attention matches the CPU op":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val q = rand_tensor([288], 7)
+            val kb = rand_tensor([32, 288], 8)
+            val vb = rand_tensor([32, 288], 9)
+            val y = rocm_tensor_download(ops, rocm_tensor_attention(ops, rocm_tensor_upload(ops, q).unwrap(), rocm_tensor_upload(ops, kb).unwrap(), rocm_tensor_upload(ops, vb).unwrap(), 20, 6, 48).unwrap()).unwrap()
+            expect(rel_err(y, tensor_attention(q, kb, vb, 20, 6, 48)) < 0.0001).to_equal(true)
+
+    it "reports a HIP error as Err, not a crash":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val bad = rocm_tensor_attention(ops, rocm_tensor_upload(ops, rand_tensor([288], 1)).unwrap(), rocm_tensor_upload(ops, rand_tensor([288], 1)).unwrap(), rocm_tensor_upload(ops, rand_tensor([288], 1)).unwrap(), 2000, 6, 48)
+            expect(bad.is_err()).to_equal(true)

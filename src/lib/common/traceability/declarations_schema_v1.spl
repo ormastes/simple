@@ -1,16 +1,18 @@
 """Validate authored data without resolving claims or granting exceptions."""
 use std.common.sdn.strict_v1.{sdn_strict_limits_valid_v1}
-use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, trace_codec_issue_v1}
+use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, TraceCodecValidityV1, trace_codec_issue_v1}
 use std.common.traceability.declarations_types_v1.*
 use std.common.traceability.declarations_wire_v1.{trace_declarations_output_size_v1}
 use std.common.traceability.codec_fields_v1.*
 use std.common.traceability.codec_text_budget_v1.{TraceCodecTextBudgetV1}
 
-pub fn trace_declarations_limits_valid_v1(limits: TraceDeclarationsCodecLimitsV1) -> bool:
-    (sdn_strict_limits_valid_v1(limits.sdn) and limits.max_records >= 0 and limits.max_records <= 1000000 and
+pub fn trace_declarations_limits_check_v1(limits: TraceDeclarationsCodecLimitsV1) -> Result<(), TraceCodecIssueV1>:
+    if (sdn_strict_limits_valid_v1(limits.sdn) and limits.max_records >= 0 and limits.max_records <= 1000000 and
         limits.max_text_bytes >= 0 and limits.max_text_bytes <= 16777216 and
         limits.max_field_bytes >= 0 and limits.max_field_bytes <= 1048576 and
-        limits.max_output_bytes >= 0 and limits.max_output_bytes <= 16777216)
+        limits.max_output_bytes >= 0 and limits.max_output_bytes <= 16777216):
+        return Ok(())
+    Err(trace_codec_issue_v1("invalid_limits", "", "Codec limits outside hard bounds"))
 
 fn trace_declarations_utc_valid_v1(item: text) -> bool:
     if item.byte_len() != 20: return false
@@ -40,8 +42,8 @@ fn trace_declarations_utc_valid_v1(item: text) -> bool:
     if month == 2 and year % 4 == 0 and (year % 100 != 0 or year % 400 == 0): maximum = 29
     day <= maximum
 
-pub fn trace_declarations_validate_v1(document: TraceDeclarationsV1, limits: TraceDeclarationsCodecLimitsV1, for_encoding: bool = false) -> Result<bool, TraceCodecIssueV1>:
-    if not trace_declarations_limits_valid_v1(limits): return Err(trace_codec_issue_v1("invalid_limits", "", "Codec limits outside hard bounds"))
+pub fn trace_declarations_validate_v1(document: TraceDeclarationsV1, limits: TraceDeclarationsCodecLimitsV1, purpose: TraceDeclarationsPurposeV1 = TraceDeclarationsPurposeV1.Decode) -> Result<(), TraceCodecIssueV1>:
+    trace_declarations_limits_check_v1(limits)?
     val counts = [document.claims.len(), document.aliases.len(), document.exceptions.len(), document.origins.len()]
     val widths = [5, 4, 10, 7]
     var rows = 0
@@ -66,7 +68,7 @@ pub fn trace_declarations_validate_v1(document: TraceDeclarationsV1, limits: Tra
         budget.charge([item.id, item.scope_kind, item.subject_id, item.rule_id, item.reason, item.owner, item.review_state, item.expires_at, item.origin_id], "exceptions")?
     for item in document.origins: budget.charge([item.id, item.origin_kind, item.path, item.extractor_version], "origins")?
     val output_cap = if limits.max_output_bytes < limits.sdn.max_source_bytes: limits.max_output_bytes else: limits.sdn.max_source_bytes
-    if for_encoding and trace_declarations_output_size_v1(document) > output_cap:
+    if purpose == TraceDeclarationsPurposeV1.Encode and trace_declarations_output_size_v1(document).value > output_cap:
         return Err(trace_codec_issue_v1("output_limit", "", "Exact declaration output exceeds budget before indexes or rows"))
     trace_codec_id_check_v1(document.id, "id")?
     trace_codec_id_check_v1(document.namespace, "namespace")?
@@ -79,7 +81,7 @@ pub fn trace_declarations_validate_v1(document: TraceDeclarationsV1, limits: Tra
         origins[item.id] = true
         trace_codec_enum_check_v1(item.origin_kind, ["explicit", "annotation"], path + ".origin_kind")?
         trace_codec_id_check_v1(item.extractor_version, path + ".extractor_version")?
-        if not trace_codec_path_valid_v1(item.path): return Err(trace_codec_issue_v1("invalid_path", path + ".path", "Repository-relative origin path required"))
+        if trace_codec_path_valid_v1(item.path) == TraceCodecValidityV1.Invalid: return Err(trace_codec_issue_v1("invalid_path", path + ".path", "Repository-relative origin path required"))
         if (item.span_available and (item.line < 1 or item.column < 1)) or (not item.span_available and (item.line != 0 or item.column != 0)):
             return Err(trace_codec_issue_v1("invalid_location", path, "Origin span contradicts availability"))
         index = index + 1
@@ -116,7 +118,7 @@ pub fn trace_declarations_validate_v1(document: TraceDeclarationsV1, limits: Tra
         exceptions[item.id] = true
         trace_codec_enum_check_v1(item.scope_kind, ["entity", "feature", "requirement", "criterion", "input_path"], path + ".scope_kind")?
         if item.scope_kind == "input_path":
-            if not trace_codec_path_valid_v1(item.subject_id): return Err(trace_codec_issue_v1("invalid_path", path + ".subject_id", "Exception input path is invalid"))
+            if trace_codec_path_valid_v1(item.subject_id) == TraceCodecValidityV1.Invalid: return Err(trace_codec_issue_v1("invalid_path", path + ".subject_id", "Exception input path is invalid"))
         else: trace_codec_id_check_v1(item.subject_id, path + ".subject_id")?
         trace_codec_id_check_v1(item.rule_id, path + ".rule_id")?
         trace_codec_id_check_v1(item.owner, path + ".owner")?
@@ -126,6 +128,6 @@ pub fn trace_declarations_validate_v1(document: TraceDeclarationsV1, limits: Tra
             return Err(trace_codec_issue_v1("invalid_expiry", path + ".expires_at", "Expiry availability/UTC calendar value is invalid"))
         if not origins.contains_key(item.origin_id): return Err(trace_codec_issue_v1("missing_reference", path + ".origin_id", "Exception origin is absent"))
         index = index + 1
-    Ok(true)
+    Ok(())
 
-export trace_declarations_limits_valid_v1, trace_declarations_validate_v1
+export trace_declarations_limits_check_v1, trace_declarations_validate_v1

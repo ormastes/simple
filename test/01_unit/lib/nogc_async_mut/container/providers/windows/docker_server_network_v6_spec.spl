@@ -1,0 +1,404 @@
+# AUTHORED_NOT_RUN. Real contract/reducer assertions with scripted engine facts;
+# no Windows, HNS, DNS, endpoint, firewall or server connection qualification.
+use std.spec.*
+use std.common.contracts.container.execution_options_v1.OciEnvironmentEntryV1
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeIntentV1}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.config_core.server_context_types_v1.{ServerRecordV1, ResolvedServerV1}
+use std.common.config_core.server_container_projection_v1.server_container_snapshot_v1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_server_environment_v5.*
+use std.nogc_async_mut.container.providers.windows.docker_server_environment_inspect_v5.*
+use std.nogc_async_mut.container.providers.windows.docker_cleanup_observation_v6.*
+use std.nogc_async_mut.container.providers.windows.docker_network_v6.*
+use std.nogc_async_mut.container.providers.windows.docker_observation_codec_v2.*
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.windows_docker_scope_values_v2
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.windows_adapter_scope_fixture_v2
+
+fn server_policy_v6() -> WindowsDockerPolicyV1:
+    WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe", endpoint: "npipe:////./pipe/docker_engine",
+        engine_id: "engine-a", node_boot_id: "boot-a", provider_generation: 4,
+        expected_kernel_version: "10.0 20348 (20348.2402.amd64fre)", image_os_version: "10.0.20348.2402",
+        expected_image_id: "sha256:" + "a".repeat(64), timeout_ms: 5000, max_output_bytes: 8192,
+        system_root: "C:\\Windows", temp_directory: "C:\\Temp", network_id: "f".repeat(64), network_name: "simple-nat")
+
+fn server_environment_v5(host: text = "server.example") -> [OciEnvironmentEntryV1]:
+    val record = ServerRecordV1(name: "shared", transport: "ssh", host: host, port: 22,
+        container_host: host, auth_ref: "secret://container-job/read-only", tls_ref: "trust://company/server", remote_executable: "/opt/simple/bin/simple")
+    val selected = ResolvedServerV1(record: record, consumer: "simple", context: "ci", source: "context_shared")
+    [OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_SDN", value: server_container_snapshot_v1(selected).unwrap()),
+        OciEnvironmentEntryV1(name: "SIMPLE_SERVER_CLIENT_SCOPE", value: "container"),
+        OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_CONFIG", value: "")]
+
+fn server_request_v6() -> WindowsDockerRequestV1:
+    WindowsDockerRequestV1(pod_uid: "job", attempt: 1, operation_id: "launch",
+        image: "mcr.microsoft.com/windows/servercore@sha256:" + "b".repeat(64),
+        command: ["C:\\work tree\\simple.exe", "servers"], args: ["two words", "", "$(not-a-shell)"],
+        cpu_count: 2, memory_limit_bytes: 536870912, network: "f".repeat(64), environment: server_environment_v5())
+
+fn scripted_reply_v6(command: RuntimeCommandV1, output: text) -> WindowsDockerScriptedResultV1:
+    WindowsDockerScriptedResultV1(operation: command.operation, program: command.program,
+        args: command.args, stdout: output, stderr: "", exit_code: 0)
+
+fn engine_reply_v6() -> WindowsDockerScriptedResultV1:
+    val p = server_policy_v6()
+    scripted_reply_v6(windows_docker_command_v1(p, "engine-info", ["info", "--format", WINDOWS_DOCKER_INFO_FORMAT_V1]),
+        "windows|" + p.engine_id + "|" + p.expected_kernel_version)
+
+fn network_reply_v6(id: text = "") -> WindowsDockerScriptedResultV1:
+    val p = server_policy_v6()
+    val actual = if id == "": p.network_id else: id
+    scripted_reply_v6(windows_docker_network_inspect_command_v6(p).unwrap(), actual + "|simple-nat|nat|local|false")
+
+fn image_reply_v6() -> WindowsDockerScriptedResultV1:
+    val p = server_policy_v6()
+    val r = server_request_v6()
+    scripted_reply_v6(windows_docker_command_v1(p, "image-inspect", ["image", "inspect", "--format", WINDOWS_DOCKER_IMAGE_FORMAT_V1, r.image]),
+        "windows|" + p.expected_image_id + "|" + p.image_os_version + "\n" + r.image + "\n")
+
+fn attached_observation_v6(id: text = "") -> text:
+    val p = server_policy_v6()
+    val r = server_request_v6()
+    val selected = if id == "": p.network_id else: id
+    "c".repeat(64) + "|" + p.expected_image_id + "|" + r.image + "|process|ContainerUser|" + p.network_id +
+        "|2|536870912|windows-docker-process-v1|job|1|launch|boot-a|4|" +
+        windows_docker_request_digest_v1(p, r).unwrap() + "|created|0|1|" + selected
+
+fn effective_environment_json_v5() -> text:
+    var entries: [JsonValue] = []
+    for entry in server_request_v6().environment: entries.push(JsonValue.Str(entry.name + "=" + entry.value))
+    entries.push(JsonValue.Null)
+    json_value_serialize(json_value_object_from([("id", JsonValue.Str("c".repeat(64))), ("environment", JsonValue.Array(entries))]))
+
+fn server_script_v6(post_network: text = "", observed_environment: text = "") -> [WindowsDockerScriptedResultV1]:
+    val p = server_policy_v6()
+    val r = server_request_v6()
+    val inspect = windows_docker_command_v1(p, "inspect", ["container", "inspect", "--format", windows_docker_inspect_format_v2(r, nil), "c".repeat(64)])
+    val env_query = windows_docker_server_environment_inspect_command_v5(p, "c".repeat(64)).unwrap()
+    val env_raw = if observed_environment == "": effective_environment_json_v5() else: observed_environment
+    [engine_reply_v6(), network_reply_v6(), image_reply_v6(),
+        engine_reply_v6(), network_reply_v6(), image_reply_v6(),
+        scripted_reply_v6(windows_docker_create_command_v1(p, r).unwrap(), "c".repeat(64)),
+        engine_reply_v6(), network_reply_v6(post_network), scripted_reply_v6(env_query, env_raw), scripted_reply_v6(inspect, attached_observation_v6())]
+
+fn server_provider_v6(script: [WindowsDockerScriptedResultV1]) -> WindowsDockerRuntimeProviderV1:
+    val p = server_policy_v6()
+    val r = server_request_v6()
+    var provider = WindowsDockerRuntimeProviderV1.scripted(p, script)
+    val digest = windows_docker_request_digest_v1(p, r).unwrap()
+    val installed = provider.set_launch_deadline_v1(container_effect_deadline_v1(digest, "launch", ["create", "start"], 2000).unwrap())
+    expect(installed.unwrap()).to_equal(true)
+    val clock = provider.set_scripted_admission_clock_v1(1000)
+    expect(clock.unwrap()).to_equal(true)
+    provider
+
+fn cleanup_script_v6(observation: text, include_removal: bool) -> [WindowsDockerScriptedResultV1]:
+    val p = server_policy_v6()
+    val r = server_request_v6()
+    val bad = effective_environment_json_v5().replace("SIMPLE_SERVERS_CONFIG=", "simple_servers_config=")
+    val failed = server_script_v6("", bad)
+    var script: [WindowsDockerScriptedResultV1] = []
+    # Env failure stops before the final readiness inspection.
+    for index in 0..failed.len() - 1: script.push(failed[index])
+    script.push(engine_reply_v6())
+    script.push(scripted_reply_v6(windows_docker_cleanup_inspect_command_v6(p, nil, "c".repeat(64)).unwrap(), observation))
+    if include_removal:
+        script.push(scripted_reply_v6(windows_docker_command_v1(p, "destroy", ["rm", "c".repeat(64)]), "c".repeat(64)))
+        script.push(engine_reply_v6())
+        script.push(scripted_reply_v6(windows_docker_command_v1(p, "verify-absence",
+            ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + "c".repeat(64), "--format", "{{{{.ID}}}}"]), ""))
+    script
+
+fn cleanup_identity_observation_v6() -> text:
+    val fields = attached_observation_v6().split("|")
+    var identity: [text] = []
+    for index in 0..17: identity.push(fields[index])
+    identity.join("|")
+
+fn data_recovery_intent_v6() -> RuntimeIntentV1:
+    RuntimeIntentV1(pod_uid: "job", attempt: 1, provider_generation: 4, operation_id: "launch",
+        engine: "docker", native_id: "c".repeat(64), node_boot_id: "boot-a", phase: "created")
+
+fn readiness_inspect_reply_v6() -> WindowsDockerScriptedResultV1:
+    val p = server_policy_v6()
+    val r = server_request_v6()
+    scripted_reply_v6(windows_docker_command_v1(p, "inspect", ["container", "inspect", "--format",
+        windows_docker_inspect_format_v2(r, nil), "c".repeat(64)]), attached_observation_v6())
+
+fn effective_env_reply_v5(raw: text) -> WindowsDockerScriptedResultV1:
+    scripted_reply_v6(windows_docker_server_environment_inspect_command_v5(server_policy_v6(), "c".repeat(64)).unwrap(), raw)
+
+fn recovery_script_v6() -> [WindowsDockerScriptedResultV1]:
+    [engine_reply_v6(), image_reply_v6(), network_reply_v6(), readiness_inspect_reply_v6(), effective_env_reply_v5(effective_environment_json_v5())]
+
+describe "versioned Windows public discovery and installed NAT network":
+    it "keeps legacy none-network request and policy records free of new fields":
+        var p = server_policy_v6()
+        p.network_id = ""
+        p.network_name = ""
+        var r = server_request_v6()
+        r.environment = []
+        r.network = "none"
+        val policy_bytes = windows_docker_policy_encode_v1(p).unwrap()
+        val bytes = windows_docker_request_encode_v1(p, r).unwrap()
+        expect(policy_bytes.contains("version: 1")).to_equal(true)
+        expect(policy_bytes.contains("networkId:")).to_equal(false)
+        expect(bytes.contains("version: 1")).to_equal(true)
+        expect(bytes.contains("environment:")).to_equal(false)
+        val command = windows_docker_create_command_v1(p, r).unwrap()
+        val tail = ["--entrypoint", r.command[0], r.image, r.command[1]] + r.args
+        var actual: [text] = []
+        for index in command.args.len() - tail.len()..command.args.len(): actual.push(command.args[index])
+        expect(actual).to_equal(tail)
+
+    it "roundtrips explicit V3 policy and V6 request with bound discovery triple":
+        val p = server_policy_v6()
+        val r = server_request_v6()
+        val policy_bytes = windows_docker_policy_encode_v1(p).unwrap()
+        expect(policy_bytes.contains("version: 3")).to_equal(true)
+        expect(windows_docker_policy_decode_v1(policy_bytes).unwrap().network_id).to_equal(p.network_id)
+        val bytes = windows_docker_request_encode_v1(p, r).unwrap()
+        expect(bytes.contains("version: 6")).to_equal(true)
+        val decoded = windows_docker_request_decode_v1(p, bytes).unwrap()
+        expect(decoded.environment[0].value).to_equal(r.environment[0].value)
+        expect(decoded.environment[2].value).to_equal("")
+        expect(decoded.network).to_equal(p.network_id)
+        expect(windows_docker_request_encode_v1(p, decoded).unwrap()).to_equal(bytes)
+        expect(windows_docker_request_decode_v1(p, bytes.replace("version: 6", "version: 5")).unwrap_err()).to_equal("docker-request-record-invalid:version:network")
+
+    it "retains the existing V2 directory, V3 workspace and V4 terminal records":
+        var p = server_policy_v6()
+        p.network_id = ""
+        p.network_name = ""
+        p.workspace_root = "C:\\owned"
+        var r = server_request_v6()
+        r.environment = []
+        r.network = "none"
+        r.working_directory = "C:\\work"
+        val directory = windows_docker_request_encode_v1(p, r).unwrap()
+        expect(directory.contains("version: 2")).to_equal(true)
+        expect(directory.contains("environment:")).to_equal(false)
+        r.mounts = [WindowsDockerMountV1(host_root: "C:\\owned\\job", guest_root: "C:\\work", read_only: false)]
+        val workspace = windows_docker_request_encode_v1(p, r).unwrap()
+        expect(workspace.contains("version: 3")).to_equal(true)
+        r.terminal_tty = true
+        val terminal = windows_docker_request_encode_v1(p, r).unwrap()
+        expect(terminal.contains("version: 4")).to_equal(true)
+        val decoded = windows_docker_request_decode_v1(p, terminal).unwrap()
+        expect(decoded.environment.len()).to_equal(0)
+        expect(decoded.terminal_tty).to_equal(true)
+
+    it "preserves explicit V5 discovery without silently enabling networking":
+        val p = server_policy_v6()
+        var r = server_request_v6()
+        r.network = "none"
+        # Valid V4 terminal fields isolate the environment-version gate when
+        # downgrading; missing terminal fields would correctly reject earlier.
+        r.terminal_tty = true
+        val bytes = windows_docker_request_encode_v1(p, r).unwrap()
+        expect(bytes.contains("version: 5")).to_equal(true)
+        expect(windows_docker_request_decode_v1(p, bytes).unwrap().network).to_equal("none")
+        expect(windows_docker_request_decode_v1(p, bytes.replace("version: 5", "version: 4")).unwrap_err()).to_equal("docker-request-record-invalid:version:environment")
+
+    it "emits one typed argument per public env value and exact command bytes":
+        val p = server_policy_v6()
+        val r = server_request_v6()
+        val command = windows_docker_create_command_v1(p, r).unwrap()
+        val expected_tail = ["--env", "SIMPLE_SERVERS_SDN=" + r.environment[0].value,
+            "--env", "SIMPLE_SERVER_CLIENT_SCOPE=container", "--env", "SIMPLE_SERVERS_CONFIG=",
+            "--entrypoint", "", r.image] + r.command + r.args
+        var tail: [text] = []
+        for index in command.args.len() - expected_tail.len()..command.args.len(): tail.push(command.args[index])
+        expect(tail).to_equal(expected_tail)
+        expect(command.args[6]).to_equal("--network")
+        expect(command.args[7]).to_equal(p.network_id)
+
+    it "rejects case aliases, missing clear, NUL, oversized and secret environment":
+        val original = server_environment_v5()
+        var env = original
+        env[1] = OciEnvironmentEntryV1(name: "simple_servers_sdn", value: original[0].value)
+        expect(windows_docker_server_environment_options_v5(env).unwrap_err()).to_equal("docker-server-environment-name-duplicate")
+        expect(windows_docker_server_environment_options_v5([original[0], original[1]]).unwrap_err()).to_equal("docker-server-environment-triple-required")
+        for value in ["bad\u{0}value", "x".repeat(4097)]:
+            env = server_environment_v5()
+            env[0] = OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_SDN", value: value)
+            expect(windows_docker_server_environment_options_v5(env).unwrap_err()).to_equal("docker-server-environment-value-invalid")
+        env = server_environment_v5()
+        env[0] = OciEnvironmentEntryV1(name: "AWS_SECRET_ACCESS_KEY", value: "private")
+        expect(windows_docker_server_environment_options_v5(env).unwrap_err()).to_equal("docker-server-environment-name-restricted")
+
+    it "keeps a one-word or JSON-looking executable outside ENTRYPOINT parsing":
+        val p = server_policy_v6()
+        var r = server_request_v6()
+        r.command = ["C:\\one word\\simple.exe"]
+        r.args = []
+        var command = windows_docker_create_command_v1(p, r).unwrap()
+        expect(command.args[command.args.len() - 1]).to_equal("C:\\one word\\simple.exe")
+        expect(command.args[command.args.len() - 2]).to_equal(r.image)
+        r.command = ["[not-json-entrypoint]"]
+        command = windows_docker_create_command_v1(p, r).unwrap()
+        expect(command.args[command.args.len() - 1]).to_equal("[not-json-entrypoint]")
+
+    it "binds snapshot and network changes and refuses unapproved network identity":
+        val p = server_policy_v6()
+        var r = server_request_v6()
+        val old = windows_docker_request_digest_v1(p, r).unwrap()
+        r.environment = server_environment_v5("other.example")
+        expect(windows_docker_request_digest_v1(p, r).unwrap() == old).to_equal(false)
+        r.network = "simple-nat"
+        expect(windows_docker_request_digest_v1(p, r).unwrap_err()).to_equal("docker-network-not-authorized")
+        r.network = "host"
+        expect(windows_docker_request_digest_v1(p, r).unwrap_err()).to_equal("docker-network-not-authorized")
+
+    it "verifies the actual reserved environment instead of trusting image merge semantics":
+        val r = server_request_v6()
+        val raw = effective_environment_json_v5()
+        expect(windows_docker_server_environment_observation_v5(r, "c".repeat(64), raw).unwrap()).to_equal(true)
+        expect(windows_docker_server_environment_observation_v5(r, "c".repeat(64), raw.replace("SIMPLE_SERVERS_CONFIG=", "simple_servers_config=")).unwrap_err()).to_equal("docker-server-environment-observed-name-invalid")
+        expect(windows_docker_server_environment_observation_v5(r, "c".repeat(64), raw.replace("SIMPLE_SERVERS_CONFIG=", "SIMPLE_SERVERS_CONFIG=unexpected.sdn")).unwrap_err()).to_equal("docker-server-environment-observed-value-mismatch")
+        expect(windows_docker_server_environment_observation_v5(r, "c".repeat(64), raw.replace("null]", "\"SIMPLE_SERVERS_CONFIG=\",null]")).unwrap_err()).to_equal("docker-server-environment-observed-count")
+    it "rejects foreign, internal or wrong-driver actual network observations":
+        val p = server_policy_v6()
+        val raw = p.network_id + "|simple-nat|nat|local|false"
+        expect(windows_docker_network_observation_v6(p, raw).unwrap()).to_equal(true)
+        for changed in [raw.replace(p.network_id, "e".repeat(64)), raw.replace("|nat|", "|transparent|"),
+                raw.replace("local", "swarm"), raw.replace("false", "true")]:
+            expect(windows_docker_network_observation_v6(p, changed).unwrap_err()).to_equal("docker-network-observation-mismatch")
+
+    it "rejects absent, additional and foreign attached endpoints":
+        val p = server_policy_v6()
+        val r = server_request_v6()
+        expect(windows_docker_inspect_decode_v2(p, r, nil, "c".repeat(64), attached_observation_v6()).unwrap().phase).to_equal("created")
+        for raw in [attached_observation_v6("e".repeat(64)), attached_observation_v6().replace("|0|1|", "|0|2|"),
+                attached_observation_v6().replace("|0|1|", "|0|0|")]:
+            expect(windows_docker_inspect_decode_v2(p, r, nil, "c".repeat(64), raw).unwrap_err()).to_equal("docker-inspect-attached-network-mismatch")
+
+    it "consumes actual finite provider stages before reporting a created container":
+        var provider = server_provider_v6(server_script_v6())
+        val r = server_request_v6()
+        expect(provider.prepare_pod(r).status).to_equal("ok")
+        expect(provider.create(r).status).to_equal("ok")
+        val intent = provider.intent(r)
+        expect(intent.unwrap().native_id).to_equal("c".repeat(64))
+
+    it "uses the same network stages in bounded cooperative progress":
+        var provider = server_provider_v6(server_script_v6())
+        val r = server_request_v6()
+        expect(provider.prepare_pod(r).status).to_equal("ok")
+        var progress = provider.progress_begin_v2("create", r)
+        for index in 0..16:
+            if not progress.completed_v2(): progress = provider.progress_poll_v2(progress, false)
+        expect(progress.completed_v2()).to_equal(true)
+        val operation = progress.operation_v2()
+        expect(operation.unwrap().status).to_equal("ok")
+
+    it "retains the exact created ID when the post-create network becomes unproven":
+        var provider = server_provider_v6(server_script_v6("e".repeat(64)))
+        val r = server_request_v6()
+        expect(provider.prepare_pod(r).status).to_equal("ok")
+        val result = provider.create(r)
+        expect(result.status).to_equal("blocked")
+        expect(result.reason).to_equal("docker-network-observation-mismatch")
+        val retained = provider.intent(r).unwrap()
+        expect(retained.native_id).to_equal("c".repeat(64))
+        expect(retained.phase).to_equal("unknown")
+
+    it "refuses mismatched network inspection before reserving or creating a workload":
+        var provider = server_provider_v6([engine_reply_v6(), network_reply_v6("e".repeat(64))])
+        val result = provider.prepare_pod(server_request_v6())
+        expect(result.status).to_equal("blocked")
+        expect(result.reason).to_equal("docker-network-observation-mismatch")
+        expect(provider.intent(server_request_v6()).is_err()).to_equal(true)
+
+    it "retains the created ID when an image supplies a case-aliased effective config path":
+        val sabotaged = effective_environment_json_v5().replace("SIMPLE_SERVERS_CONFIG=", "simple_servers_config=")
+        var provider = server_provider_v6(server_script_v6("", sabotaged))
+        val r = server_request_v6()
+        expect(provider.prepare_pod(r).status).to_equal("ok")
+        val denied = provider.create(r)
+        expect(denied.status).to_equal("blocked")
+        expect(denied.reason).to_equal("docker-server-environment-observed-name-invalid")
+        val retained = provider.intent(r)
+        expect(retained.unwrap().native_id).to_equal("c".repeat(64))
+
+    it "cleans only the retained created ID despite unready environment and proves absence":
+        var provider = server_provider_v6(cleanup_script_v6(cleanup_identity_observation_v6(), true))
+        val r = server_request_v6()
+        expect(provider.prepare_pod(r).status).to_equal("ok")
+        expect(provider.create(r).status).to_equal("blocked")
+        val cleaned = provider.destroy(r)
+        expect(cleaned.status).to_equal("ok")
+        expect(cleaned.state.phase).to_equal("destroyed")
+        expect(cleaned.state.identity.native_id).to_equal("c".repeat(64))
+
+    it "refuses cleanup for an unrelated native ID or mismatched operation proof":
+        val raw = cleanup_identity_observation_v6()
+        for changed in [raw.replace("c".repeat(64), "e".repeat(64)), raw.replace("|launch|", "|different-operation|")]:
+            var provider = server_provider_v6(cleanup_script_v6(changed, false))
+            val r = server_request_v6()
+            expect(provider.prepare_pod(r).status).to_equal("ok")
+            expect(provider.create(r).status).to_equal("blocked")
+            expect(provider.destroy(r).reason).to_equal("docker-cleanup-owned-identity-mismatch")
+            val retained = provider.intent(r)
+            expect(retained.unwrap().native_id).to_equal("c".repeat(64))
+
+    it "does not derive cleanup authority from a prepared request without a retained birth":
+        var provider = server_provider_v6([engine_reply_v6(), network_reply_v6(), image_reply_v6(), engine_reply_v6()])
+        val r = server_request_v6()
+        expect(provider.prepare_pod(r).status).to_equal("ok")
+        expect(provider.destroy(r).reason).to_equal("docker-exact-native-id-required")
+
+    it "checks the complete existing managed-scope proof for cleanup-only observations":
+        var p = server_policy_v6()
+        val r = server_request_v6()
+        val scope = windows_adapter_scope_fixture_v2()
+        val values = windows_docker_scope_values_v2(scope).unwrap()
+        p.node_boot_id = values[5]
+        var fields = cleanup_identity_observation_v6().split("|")
+        fields[12] = scope.boot_id
+        fields[14] = windows_docker_request_digest_v1(p, r).unwrap()
+        val observed = fields.join("|") + "|" + values.join("|")
+        expect(windows_docker_cleanup_observation_v6(p, r, Some(scope), "c".repeat(64), observed).unwrap().phase).to_equal("created")
+        expect(windows_docker_cleanup_observation_v6(p, r, Some(scope), "c".repeat(64), observed.replace("|host-a|", "|different-host|")).unwrap_err()).to_equal("docker-cleanup-scope-mismatch")
+
+    it "requires actual approved network properties on direct recovery before adopting a matching attached ID":
+        val p = server_policy_v6()
+        val query = windows_docker_network_inspect_command_v6(p).unwrap()
+        val actual = p.network_id + "|simple-nat|nat|local|false"
+        for poisoned in [actual.replace(p.network_id, "e".repeat(64)), actual.replace("|nat|", "|transparent|"),
+                actual.replace("simple-nat", "foreign-name"), actual.replace("local", "swarm"), actual.replace("false", "true")]:
+            var provider = server_provider_v6([engine_reply_v6(), image_reply_v6(), scripted_reply_v6(query, poisoned), readiness_inspect_reply_v6()])
+            val result = provider.recover(server_request_v6(), data_recovery_intent_v6())
+            expect(result.status).to_equal("blocked")
+            expect(result.reason).to_equal("docker-network-observation-mismatch")
+            expect(result.state.phase == "created").to_equal(false)
+
+    it "keeps a recovered ready container on the strict cleanup path":
+        val p = server_policy_v6()
+        var script = recovery_script_v6()
+        script = script + [engine_reply_v6(), network_reply_v6(), readiness_inspect_reply_v6(), effective_env_reply_v5(effective_environment_json_v5()),
+            scripted_reply_v6(windows_docker_command_v1(p, "destroy", ["rm", "c".repeat(64)]), "c".repeat(64)), engine_reply_v6(),
+            scripted_reply_v6(windows_docker_command_v1(p, "verify-absence",
+                ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + "c".repeat(64), "--format", "{{{{.ID}}}}"]), "")]
+        var provider = server_provider_v6(script)
+        val r = server_request_v6()
+        expect(provider.recover(r, data_recovery_intent_v6()).status).to_equal("ok")
+        val cleaned = provider.destroy(r)
+        expect(cleaned.status).to_equal("ok")
+        expect(cleaned.state.phase).to_equal("destroyed")
+
+    it "does not turn caller recovery metadata into a relaxed cleanup birth grant":
+        val poisoned = effective_environment_json_v5().replace("SIMPLE_SERVERS_CONFIG=", "simple_servers_config=")
+        val script = recovery_script_v6() + [engine_reply_v6(), network_reply_v6(), readiness_inspect_reply_v6(), effective_env_reply_v5(poisoned)]
+        var provider = server_provider_v6(script)
+        val r = server_request_v6()
+        # Synthetic recovery metadata may reconstruct state, but cannot produce
+        # the private flag set by the actual create completion owner.
+        expect(provider.recover(r, data_recovery_intent_v6()).status).to_equal("ok")
+        expect(provider.destroy(r).reason).to_equal("docker-server-environment-observed-name-invalid")
+        val retained = provider.intent(r)
+        expect(retained.unwrap().native_id).to_equal("c".repeat(64))

@@ -27,7 +27,7 @@ use std.spec.step
 use std.spec.{describe, it, expect}
 
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{detect_format, model_format_text, describe_model, scan_model_root, has_gguf_magic, has_safetensors_header, gguf_entry_shard, dir_byte_size}
-use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, mem_available_bytes, default_headroom_bytes}
+use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, check_fit_with_available, mem_available_bytes, default_headroom_bytes, estimate_runtime_overhead_bytes}
 use std.io_runtime.{dir_create_all, file_write, dir_remove_all}
 
 fn valid_manifest(model_id: text) -> text:
@@ -136,5 +136,36 @@ describe "a load that will not fit is refused before it is attempted":
         step("Verify: headroom is load-bearing - the same model flips verdict on it alone")
         val available = mem_available_bytes()
         val snug = available - (1024 * 1024)
-        expect(check_fit(snug, 0, 0).fits).to_equal(true)
-        expect(check_fit(snug, 0, default_headroom_bytes()).fits).to_equal(false)
+        expect(check_fit_with_available(snug, 0, 0, available).fits).to_equal(true)
+        expect(check_fit_with_available(snug, 0, default_headroom_bytes(), available).fits).to_equal(false)
+
+describe "runtime overhead scales with context and model, not a flat 6 GiB":
+    it "needs about 0.6 GiB for a 1 GiB Q4 model at 4096 context":
+        step("Verify: 128 MiB KV (32 KiB/token * 4096) + 512 MiB compute slack")
+        val gib = 1024 * 1024 * 1024
+        expect(estimate_runtime_overhead_bytes(gib, 4096)).to_equal(640 * 1024 * 1024)
+
+    it "grows with the context size":
+        step("Verify: doubling n_ctx adds exactly the KV cost of the extra tokens")
+        val gib = 1024 * 1024 * 1024
+        val small = estimate_runtime_overhead_bytes(gib, 4096)
+        val big = estimate_runtime_overhead_bytes(gib, 8192)
+        expect(big - small).to_equal(4096 * 32768)
+
+    it "clamps the per-token cost for tiny and huge models":
+        step("Verify: floor 16 KiB/token and cap 512 KiB/token, plus 512 MiB slack")
+        val slack = 512 * 1024 * 1024
+        expect(estimate_runtime_overhead_bytes(0, 1000)).to_equal(1000 * 16384 + slack)
+        expect(estimate_runtime_overhead_bytes(80 * 1024 * 1024 * 1024, 1000)).to_equal(1000 * 524288 + slack)
+
+    it "never goes below the compute slack for a non-positive context":
+        step("Verify: a negative n_ctx cannot produce a negative overhead")
+        expect(estimate_runtime_overhead_bytes(1024, -5)).to_equal(512 * 1024 * 1024)
+
+    it "lets a 1 GiB Q4 model pass a 4 GiB budget that the old flat 6 GiB refused":
+        step("Verify: weights + estimated overhead + 1 GiB headroom fit in 4 GiB available")
+        val gib = 1024 * 1024 * 1024
+        val overhead = estimate_runtime_overhead_bytes(gib, 4096)
+        expect(check_fit_with_available(gib, overhead, gib, 4 * gib).fits).to_equal(true)
+        expect(check_fit_with_available(gib, overhead, gib, 2 * gib).fits).to_equal(false)
+        expect(check_fit_with_available(gib, 6 * gib, gib, 4 * gib).fits).to_equal(false)

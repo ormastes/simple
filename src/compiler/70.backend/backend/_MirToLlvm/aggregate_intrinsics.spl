@@ -150,7 +150,7 @@ impl MirToLlvm:
                     # Cycle-154: verbatim element word (no value_types re-tag;
                     # the tainted value_as_type reinterpreted the single-stmt
                     # body's Stmt element, the 0xfd569c fault's exact value).
-                    val elem_value = self.store_field_bits_verbatim(raw_elem, self.get_operand_type_at(operands, i), "i64", self.get_operand_unsigned_at(operands, i))
+                    val elem_value = self.store_field_bits_verbatim(raw_elem, self.fresh_operand_type(operands[i]), "i64", self.get_operand_unsigned_at(operands, i))
                     self.builder.emit("  call i8 @rt_array_push(ptr {dest_name}, i64 {elem_value})")
                 return
             case Struct(_):
@@ -183,7 +183,7 @@ impl MirToLlvm:
                 for i in 0..n:
                     val raw = self.translate_operand_at(operands, i)
                     # Cycle-151: verbatim word store (no value_types re-tag).
-                    val v = self.store_field_bits_verbatim(raw, self.get_operand_type_at(operands, i), nit, self.get_operand_unsigned_at(operands, i))
+                    val v = self.store_field_bits_verbatim(raw, self.fresh_operand_type(operands[i]), nit, self.get_operand_unsigned_at(operands, i))
                     val fp = self.builder.fresh_local()
                     self.builder.emit("  {fp} = getelementptr inbounds {nit}, ptr {agg}, i32 {i}")
                     self.builder.emit_store(nit, v, fp)
@@ -227,7 +227,7 @@ impl MirToLlvm:
                 self.builder.emit("  {tup_agg} = call ptr @rt_alloc(i64 {tup_n * tup_word_bytes})")
                 for i in 0..tup_n:
                     val tup_raw = self.translate_operand_at(operands, i)
-                    val tup_v = self.store_field_bits_verbatim(tup_raw, self.get_operand_type_at(operands, i), tup_nit, self.get_operand_unsigned_at(operands, i))
+                    val tup_v = self.store_field_bits_verbatim(tup_raw, self.fresh_operand_type(operands[i]), tup_nit, self.get_operand_unsigned_at(operands, i))
                     val tup_fp = self.builder.fresh_local()
                     self.builder.emit("  {tup_fp} = getelementptr inbounds {tup_nit}, ptr {tup_agg}, i32 {i}")
                     self.builder.emit_store(tup_nit, tup_v, tup_fp)
@@ -341,7 +341,7 @@ impl MirToLlvm:
         # class as the Struct arm -- a bool/small word written through a
         # ptr-marked value_types entry gets reinterpreted and corrupts the
         # field or its neighbor).
-        val value_val = self.store_field_bits_verbatim(raw_value_val, self.get_operand_type(value), nit, self.get_operand_unsigned(value))
+        val value_val = self.store_field_bits_verbatim(raw_value_val, self.fresh_operand_type(value), nit, self.get_operand_unsigned(value))
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
         self.builder.emit_store(nit, value_val, field_ptr)
@@ -384,6 +384,25 @@ impl MirToLlvm:
         if ty == "float":
             return "i32"
         ty
+
+    me fresh_operand_type(operand: MirOperand) -> text:
+        """Operand LLVM type preferring the local's freshest recorded
+        `local_types` entry over the sticky ptr_locals/bool_locals priming
+        flags (same rule as translate_copy_move, bug #149). translate_call
+        overrides local_types[dest] to the callee's real return (e.g. a
+        struct-returning fn emitted as `call i64`) without clearing a stale
+        ptr_locals[dest]; trusting the flag here emitted `ptrtoint ptr %lN`
+        on an i64-defined %lN (llc: "defined with type 'i64' but expected
+        'ptr'")."""
+        match operand.kind:
+            case Copy(local) | Move(local):
+                val id = self.local_id_value(local)
+                # contains_key + index read, never `.get()`.
+                if self.local_types.contains_key(id) and self.local_types[id] != "nil" and self.local_types[id] != "":
+                    return self.local_types[id]
+                self.get_local_type(id)
+            case _:
+                self.get_operand_type(operand)
 
     me store_field_bits_verbatim(raw_val: text, operand_ty: text, nit: text, source_unsigned: bool = false) -> text:
         """Cycle-151 VERBATIM word store for aggregate materialization.
@@ -449,7 +468,7 @@ impl MirToLlvm:
         self.remember_gep_pointer_type(dest_id, target)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
-        val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
+        val src_ty = self.valid_llvm_type(self.fresh_operand_type(operand))
         val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
         self.local_types[dest_id] = target_ty
         self.value_types[dest_name] = target_ty
@@ -487,7 +506,7 @@ impl MirToLlvm:
         self.remember_gep_pointer_type(dest_id, target)
         val dest_name = self.get_local(dest_id)
         val operand_val = self.translate_operand(operand)
-        val src_ty = self.valid_llvm_type(self.get_operand_type(operand))
+        val src_ty = self.valid_llvm_type(self.fresh_operand_type(operand))
         val target_ty = self.valid_llvm_type(self.llvm_type_text(target))
         self.local_types[dest_id] = target_ty
         self.value_types[dest_name] = target_ty

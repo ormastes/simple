@@ -1,0 +1,68 @@
+# AUTHORED_NOT_RUN. Actual preinstalled Windows fixtures; no setup or skips.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.env_ops.{host_os, env_get}
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+
+var global_root_fixture_owners_v1: [WindowsPrivateRootV1] = []
+
+fn global_root_fixture_path_v1(name: text) -> text:
+    expect(host_os()).to_equal("windows")
+    val path = env_get(name)
+    expect(path == "").to_equal(false)
+    expect(path.byte_len()).to_be_greater_than(3)
+    expect(path.substring(1, 3)).to_equal(":\\")
+    path
+
+fn global_root_fixture_open_v1(path: text) -> Result<WindowsPrivateRootV1, text>:
+    match windows_private_root_open_v1(path):
+        case Ok(owner):
+            global_root_fixture_owners_v1.push(owner)
+            Ok(owner)
+        case Err(error):
+            if error.cleanup_root != nil:
+                var owner = error.cleanup_root.unwrap()
+                global_root_fixture_owners_v1.push(owner)
+                val released = owner.close()
+            Err(error.message)
+
+fn global_root_fixture_probe_v1(path: text) -> Result<bool, text>:
+    val opened = global_root_fixture_open_v1(path)
+    if opened.is_err(): return Err(opened.unwrap_err())
+    var owner = opened.unwrap()
+    val ready = owner.security_current()
+    val closed = owner.close()
+    if not closed: return Err("actual-global-root-fixture-cleanup-retained")
+    Ok(ready)
+
+describe "Existing private root explicit global namespace compatibility":
+    it "opens ordinary and explicit global paths to the actual protected fixture":
+        step("Select an independently installed protected Windows fixture")
+        val path = global_root_fixture_path_v1("SIMPLE_WINDOWS_PRIVATE_GLOBAL_ROOT_FIXTURE")
+        step("Close each actual root before asserting ordinary and global admission")
+        val ordinary = global_root_fixture_probe_v1(path)
+        val global = global_root_fixture_probe_v1("\\GLOBAL??\\" + path)
+        expect(ordinary.is_ok()).to_equal(true)
+        expect(global.is_ok()).to_equal(true)
+        expect(ordinary.unwrap()).to_equal(true)
+        expect(global.unwrap()).to_equal(true)
+
+    it "retains Unicode child names in explicit global paths":
+        step("Use a real protected Unicode fixture instead of ASCII substitution")
+        val path = global_root_fixture_path_v1("SIMPLE_WINDOWS_PRIVATE_GLOBAL_UNICODE_FIXTURE")
+        expect(path.contains("機器")).to_equal(true)
+        val opened = global_root_fixture_probe_v1("\\GLOBAL??\\" + path)
+        expect(opened.is_ok()).to_equal(true)
+        expect(opened.unwrap()).to_equal(true)
+
+    it "refuses noncanonical global roots and traversal without creating directories":
+        step("Require the actual Windows factory and reject malformed spellings")
+        expect(host_os()).to_equal("windows")
+        for path in ["\\GLOBAL??\\", "\\GLOBAL??\\C:\\", "\\global??\\C:\\state",
+                "\\GLOBAL??\\C:state", "\\GLOBAL??\\C:\\..\\state", "\\GLOBAL??\\C:\\state:stream",
+                "\\GLOBAL??\\C:\\state\\", "\\GLOBAL??\\C:\\\\state", "\\??\\C:\\state",
+                "\\GLOBAL??\\UNC\\server\\share"]:
+            val opened = global_root_fixture_open_v1(path)
+            if opened.is_ok():
+                var unexpected = opened.unwrap()
+                val closed = unexpected.close()
+            expect(opened.is_err()).to_equal(true)

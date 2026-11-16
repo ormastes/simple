@@ -1597,9 +1597,13 @@ pub fn load_module_with_imports_for_target(
 ) -> Result<Module, CompileError> {
     let mut module = load_module_with_imports_internal(path, visited, None, true, target_arch)?;
     append_root_import_binding_markers(&mut module, path);
-    warn_duplicate_private_signatures(&module);
-    warn_method_arity_collisions(&module);
-    warn_cross_impl_method_collisions(&module);
+    // Advisory collision reports describe the loaded closure. For `lint|fix|fmt`
+    // that closure is the linter itself, not the linted file: stay quiet.
+    if !simple_common::tool_closure_quiet::tool_closure_quiet() {
+        warn_duplicate_private_signatures(&module);
+        warn_method_arity_collisions(&module);
+        warn_cross_impl_method_collisions(&module);
+    }
     Ok(module)
 }
 

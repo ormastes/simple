@@ -109,3 +109,18 @@ resolves the T_SHA_ABC value mismatch, or whether they are independent.
 ## Affected specs
 
 - `test/unit/lib/crypto/ed25519_ct_property_spec.spl`
+
+## 2026-11-15 — regressed again by a stale merge, restored
+
+The constant-time fix `815f360747b` (2026-08-17) was silently reverted ten days
+later by the stale-snapshot merge `e274cd33719` (2026-08-27): on release/1.0.0
+`src/os/crypto/ed25519_ops.spl` was byte-identical to the parent of the fix, so
+`ed_scalar_mul`, `_ed_scalar_mul_basepoint_cached` and
+`ed_scalar_mul_basepoint_simple` all branched on secret scalar bits again while
+this row read `closed`.
+
+Restored the file from `815f360747b` unchanged. Evidence (seed built from
+release/1.0.0): `ed25519_secret_branch_detection_spec` 3/5 -> 5/5,
+`ed25519_ct_property_spec` 7/8 -> 8/8 (its positive check now names the real
+select helper `_ed_point_select_16`), `ed25519_rfc8032_spec` 15/15 before and
+after, wall time unchanged (15.9s -> 16.2s).

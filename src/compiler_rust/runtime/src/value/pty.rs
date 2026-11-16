@@ -256,6 +256,33 @@ fn record_pty_exit_status(pid: libc::pid_t, status: i32) {
     }
 }
 
+#[cfg(unix)]
+lazy_static::lazy_static! {
+    /// Raw fds this runtime opened as PTY ends and has not yet closed. Close
+    /// consults it: an fd number not in it is already closed (or never ours),
+    /// so `close` must not touch it — the number may have been reused by an
+    /// unrelated file.
+    static ref PTY_OWNED_FDS: std::sync::Mutex<std::collections::HashSet<i32>> =
+        std::sync::Mutex::new(std::collections::HashSet::new());
+}
+
+/// Records `fd` as a PTY end owned by this runtime (every open path calls it).
+#[cfg(unix)]
+pub fn note_pty_owned(fd: i32) {
+    if fd >= 0 {
+        if let Ok(mut set) = PTY_OWNED_FDS.lock() {
+            set.insert(fd);
+        }
+    }
+}
+
+/// Removes `fd` from the owned set; true only when it was owned, i.e. the
+/// caller is the one allowed to `libc::close` it.
+#[cfg(unix)]
+pub fn take_pty_owned(fd: i32) -> bool {
+    PTY_OWNED_FDS.lock().map(|mut set| set.remove(&fd)).unwrap_or(false)
+}
+
 /// Remembers the child spawned on `master_fd` for `pty_exit_code`.
 #[cfg(unix)]
 pub fn note_pty_spawn(master_fd: i32, pid: libc::pid_t) {
@@ -594,6 +621,7 @@ mod pty_process {
         if let Ok(mut table) = SLAVE_TABLE.lock() {
             table.insert(master_fd, slave_fd);
         }
+        super::note_pty_owned(master_fd);
 
         master_fd
     }
@@ -1055,7 +1083,8 @@ mod pty_process {
             .ok()
             .and_then(|mut sessions| sessions.remove(&(handle as i32)))
         else {
-            return false;
+            // Unknown handle = already closed: idempotent success, same as Unix.
+            return true;
         };
         session.terminate_child()
     }
@@ -1169,6 +1198,9 @@ pub extern "C" fn native_pty_openpty() -> RuntimeValue {
                 // Leak the OwnedFds so they aren't closed (caller will manage them)
                 std::mem::forget(result.master);
                 std::mem::forget(result.slave);
+                // Both ends are handed out; either may come back to close.
+                note_pty_owned(master_fd);
+                note_pty_owned(slave_fd);
 
                 // Return tuple of [master, slave]
                 let tuple = super::collections::rt_tuple_new(2);
@@ -1332,6 +1364,12 @@ pub extern "C" fn native_pty_close(fd: i64) -> RuntimeValue {
     #[cfg(unix)]
     {
         let fd = fd as RawFd;
+        // Idempotent and fd-reuse safe: only an fd we still own is closed. An
+        // unknown number is already closed (or was never ours) — success, and
+        // it is left untouched since it may now name an unrelated file.
+        if !take_pty_owned(fd) {
+            return RuntimeValue::from_bool(true);
+        }
         let child = pty_process::forget(fd as i64);
         forget_pty_utf8(fd as i64);
         let closed = unsafe { libc::close(fd) == 0 };
@@ -1513,6 +1551,25 @@ mod tests {
     /// child stayed a zombie and `kill(pid, 0)` kept reporting it alive.
     #[test]
     #[cfg(unix)]
+    fn rt_pty_close_is_idempotent() {
+        let handle = pty_process::open(24, 80);
+        assert!(handle >= 0);
+        assert_eq!(rt_pty_close(handle as i64), RuntimeValue::TRUE);
+        assert_eq!(rt_pty_close(handle as i64), RuntimeValue::TRUE);
+    }
+
+    #[test]
+    fn rt_pty_close_leaves_unowned_fd_open() {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        for fd in fds {
+            assert_eq!(rt_pty_close(fd as i64), RuntimeValue::TRUE);
+            assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0, "fd {} was closed", fd);
+            unsafe { libc::close(fd) };
+        }
+    }
+
+    #[test]
     fn rt_pty_close_reaps_the_child() {
         let handle = pty_process::open(24, 80);
         assert!(handle >= 0);
@@ -1785,7 +1842,8 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(pty_process::close(handle as i64));
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
-        assert!(!pty_process::close(handle as i64));
+        // Second close of a gone handle is idempotent success.
+        assert!(pty_process::close(handle as i64));
     }
 
     #[test]

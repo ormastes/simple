@@ -1,5 +1,5 @@
 """Normalized data closure. This validator does not authenticate evidence."""
-use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, trace_codec_issue_v1}
+use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, TraceCodecValidityV1, TraceGraphValidationModeV1, trace_codec_issue_v1}
 use std.common.traceability.graph_types_v1.*
 use std.common.traceability.graph_fields_v1.*
 use std.common.traceability.graph_budget_v1.{trace_graph_preflight_v1}
@@ -29,7 +29,7 @@ fn trace_graph_relation_valid_v1(relation: text, source: text, target: text, tar
         case "supersedes": source == target
         case _: false
 
-fn trace_graph_acyclic_v1(edges: [TraceGraphEdgeV1], relation: text) -> Result<bool, TraceCodecIssueV1>:
+fn trace_graph_acyclic_v1(edges: [TraceGraphEdgeV1], relation: text) -> Result<(), TraceCodecIssueV1>:
     var indegree: Dict<text, i64> = {}
     var adjacency: Dict<text, [text]> = {}
     for edge in edges:
@@ -54,10 +54,10 @@ fn trace_graph_acyclic_v1(edges: [TraceGraphEdgeV1], relation: text) -> Result<b
         cursor = cursor + 1
     if cursor != indegree.keys().len():
         return Err(trace_codec_issue_v1("cyclic_relation", "edges", "Cycle in acyclic relation " + relation))
-    Ok(true)
+    Ok(())
 
-pub fn trace_graph_validate_v1(document: TraceGraphV1, limits: TraceGraphCodecLimitsV1, for_encoding: bool = false) -> Result<bool, TraceCodecIssueV1>:
-    trace_graph_preflight_v1(document, limits, for_encoding)?
+pub fn trace_graph_validate_v1(document: TraceGraphV1, limits: TraceGraphCodecLimitsV1, mode: TraceGraphValidationModeV1 = TraceGraphValidationModeV1.Decoding) -> Result<(), TraceCodecIssueV1>:
+    trace_graph_preflight_v1(document, limits, mode)?
     trace_graph_id_check_v1(document.snapshot.id, "snapshot.id")?
     trace_graph_enum_check_v1(document.snapshot.kind, ["worktree", "index", "git", "sj"], "snapshot.kind")?
     trace_graph_id_check_v1(document.manifest.input_set_id, "manifest.input_set_id")?
@@ -70,10 +70,10 @@ pub fn trace_graph_validate_v1(document: TraceGraphV1, limits: TraceGraphCodecLi
     var index = 0
     for item in document.inputs:
         val path = "inputs." + index.to_text()
-        if not trace_graph_path_valid_v1(item.path): return Err(trace_codec_issue_v1("invalid_path", path + ".path", "Repository-relative path required"))
+        if trace_graph_path_valid_v1(item.path) == TraceCodecValidityV1.Invalid: return Err(trace_codec_issue_v1("invalid_path", path + ".path", "Repository-relative path required"))
         if inputs.contains_key(item.path): return Err(trace_codec_issue_v1("duplicate_identifier", path + ".path", "Duplicate manifest path"))
         inputs[item.path] = true
-        if not trace_graph_digest_valid_v1(item.sha256): return Err(trace_codec_issue_v1("invalid_digest", path + ".sha256", "Lowercase SHA256 required"))
+        if trace_graph_digest_valid_v1(item.sha256) == TraceCodecValidityV1.Invalid: return Err(trace_codec_issue_v1("invalid_digest", path + ".sha256", "Lowercase SHA256 required"))
         if item.bytes < 0: return Err(trace_codec_issue_v1("invalid_counter", path + ".bytes", "Negative byte count"))
         trace_graph_enum_check_v1(item.role, ["source", "test", "document", "policy", "declaration", "evidence"], path + ".role")?
         index = index + 1
@@ -105,7 +105,7 @@ pub fn trace_graph_validate_v1(document: TraceGraphV1, limits: TraceGraphCodecLi
                 return Err(trace_codec_issue_v1("invalid_definition", path, "Ordinary definition identity/digest contradicts its entity"))
         else:
             if not nodes.contains_key(item.definition_id): return Err(trace_codec_issue_v1("missing_reference", path + ".definition_id", "Parameterized base is absent"))
-            if nodes[item.definition_id] != "test_case" or not item.parameter_digest_available or not trace_graph_digest_valid_v1(item.parameter_digest):
+            if nodes[item.definition_id] != "test_case" or not item.parameter_digest_available or trace_graph_digest_valid_v1(item.parameter_digest) == TraceCodecValidityV1.Invalid:
                 return Err(trace_codec_issue_v1("invalid_definition", path, "Parameterized case requires ordinary base and digest"))
             val key = trace_graph_tuple_key_v1([item.definition_id, item.parameter_digest])
             if parameters.contains_key(key): return Err(trace_codec_issue_v1("duplicate_parameter", path, "Duplicate parameter identity for base definition"))
@@ -180,7 +180,7 @@ pub fn trace_graph_validate_v1(document: TraceGraphV1, limits: TraceGraphCodecLi
         trace_graph_enum_check_v1(item.locator_kind, ["file", "symbol", "scenario", "section", "cas"], path + ".locator_kind")?
         if item.path_available != (item.path != ""): return Err(trace_codec_issue_v1("invalid_location", path + ".path", "Path availability contradicts text"))
         if item.locator_kind == "cas":
-            if item.path_available or not item.locator.starts_with("sha256:") or not trace_graph_digest_valid_v1(item.locator[7:item.locator.len()]):
+            if item.path_available or not item.locator.starts_with("sha256:") or trace_graph_digest_valid_v1(item.locator[7:item.locator.len()]) == TraceCodecValidityV1.Invalid:
                 return Err(trace_codec_issue_v1("invalid_location", path, "CAS requires exact SHA256 reference and unavailable path"))
         else:
             if not item.path_available: return Err(trace_codec_issue_v1("invalid_location", path + ".path", "Source locator requires available path"))
@@ -193,6 +193,6 @@ pub fn trace_graph_validate_v1(document: TraceGraphV1, limits: TraceGraphCodecLi
         index = index + 1
     trace_graph_acyclic_v1(document.edges, "belongs_to")?
     trace_graph_acyclic_v1(document.edges, "aliases")?
-    Ok(true)
+    Ok(())
 
 export trace_graph_validate_v1

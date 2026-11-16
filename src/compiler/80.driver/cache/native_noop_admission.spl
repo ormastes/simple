@@ -99,6 +99,18 @@ fn native_noop_fingerprint_v1(path: text) -> text:
         return ""
     "{fingerprint!.size}:{fingerprint!.content_hash}"
 
+# A Windows GNU link given `-o <path>` with no extension writes `<path>.exe`
+# (the PE linker driver appends the suffix), while the request keeps naming the
+# bare delivery path. Fingerprinting only the bare spelling refused every such
+# successful build with "output-missing" (Stage 2 compiler-test matrix row
+# test_runner_build, pin 18a1f28937c2). Resolve to the spelling that exists; an
+# existing bare path always wins, and nothing is invented when neither exists.
+fn native_noop_built_output_v1(path: text) -> text:
+    if path == "" or path.ends_with(".exe") or rt_file_exists(path):
+        return path
+    val exe_path = "{path}.exe"
+    if rt_file_exists(exe_path): exe_path else: path
+
 fn native_noop_request_v1(
     cache_root: text, output_path: text, backend: text, target: text,
     opt_level: i64, release: bool, debug_info: bool, gc_off: bool,
@@ -227,7 +239,7 @@ fn native_noop_admit_v1(request: NativeNoopRequestV1) -> NativeNoopAdmissionV1:
     val output_prefix = "output-fingerprint="
     val input_count_prefix = "inputs="
     if not lines[6].starts_with(output_prefix) or
-            native_noop_fingerprint_v1(request.output_path) != lines[6].substring(output_prefix.len()) or
+            native_noop_fingerprint_v1(native_noop_built_output_v1(request.output_path)) != lines[6].substring(output_prefix.len()) or
             not lines[7].starts_with(input_count_prefix):
         return NativeNoopAdmissionV1(false, "output-changed", current!, 0)
     val expected_count = lines[7].substring(input_count_prefix.len()).to_i64()
@@ -311,7 +323,8 @@ fn native_noop_publish_fault_built_v1(
     # directory creation and past the publication lock.
     if request.root == "" or request.identity == "" or request.output_path == "":
         return "request-invalid"
-    val output_fingerprint = native_noop_fingerprint_v1(built_output_path)
+    val output_fingerprint = native_noop_fingerprint_v1(
+        native_noop_built_output_v1(built_output_path))
     if output_fingerprint == "":
         return "output-missing"
     val root = "{request.root}/{request.identity}"

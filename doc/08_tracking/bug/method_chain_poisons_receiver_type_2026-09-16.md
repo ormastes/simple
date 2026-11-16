@@ -1,7 +1,7 @@
 # Method chain poisons the receiver variable's inferred type
 
 Date: 2026-09-16
-Status: OPEN (re-verified LIVE 2026-11-11, lane ne15 — see addendum)
+Status: FIXED 2026-11-14 (lane p3-batch-c) — root cause was the seed `expect` handler re-evaluating ordered comparisons; see the 2026-11-14 addendum
 
 ## Observed
 
@@ -111,3 +111,53 @@ bound to a `val` first) passes on the same binary in the same session. The
 receiver-poison mechanism is unchanged. Fix path remains the record's: seed /
 self-hosted type-inference (chain-result type leaking into the receiver slot)
 plus seed rebuild; not attempted in this lane.
+
+## Addendum 2026-11-14 (lane p3-batch-c) — FIXED; the receiver was never poisoned
+
+Seeds: Rust seed built from `release/1.0.0` @ `c541817df822` (base) and the
+same tree plus this fix, Linux aarch64.
+
+**Real cause.** The receiver's type was not the problem. The seed's BDD
+`expect` handler (`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`,
+`"expect"` arm) evaluated both operands of an ORDERED comparison (`<`, `<=`,
+`>`, `>=`) for its failure message, then evaluated the whole comparison
+**again** for its value. Any side-effecting operand ran twice and the assertion
+saw the second run. In the ReplyStore repro, `expect(replies.allocate_id() >
+reply_id)` allocated id 1 (true), then allocated again on a full store (-1,
+false). Probes on the base seed:
+
+- `expect(bump() > 0).to_equal(true)`: global counter ends at **2** (now 1);
+- `val b = replies.allocate_id() > reply_id`: true, and `simple run` agrees;
+- `expect(replies.allocate_id()).to_equal(-1)` followed by plain calls on the
+  same `var`: correct. This is the "V1 passes, V3 fails" split that contradicts
+  the receiver-poison diagnosis.
+
+`==`/`!=` were already single-evaluation.
+
+**Fix.** Each operand is evaluated once. The ordered arm runs the standard
+binary evaluator on those values, bound to NUL-prefixed temporaries (the same
+pattern as the compound field-setter path in `interpreter/node_exec.rs`), so
+ordering semantics (unsigned, float, text, `__lt__`) are unchanged. The dead
+`eval_assertion_operand` wrapper is replaced by
+`collapse_assertion_operand`, which works on an already-evaluated value.
+
+**Evidence.** `test/01_unit/bugs/expect_ordered_compare_single_eval_spec.spl`:
+base seed 5/10, with every single-evaluation and ReplyStore example red; fixed
+seed 10/10. Negative examples that are green on both seeds: `==`/`!=` run
+once, `expect(5 < 3).to_equal(false)`, u64 high-bit, int/float and text
+ordering. A bare `expect 1 > 2` still fails with `expected 1 > 2 to hold` on
+both seeds. Timing for 100k `expect(i >= 0).to_equal(true)`: base 2.43/2.29 s,
+fixed 2.36/1.74 s, RSS 228–281 MB on both (noise).
+
+**Workarounds removed.** All four specs were re-run with the chained form on
+both seeds, at their real paths:
+
+| spec | base | fixed |
+|---|---|---|
+| `actor_reply_store_capacity_spec` | red | green |
+| `static_compression_cache_spec` | green | green |
+| `worker_wire_shutdown_spec` | green | green |
+| `ndarray_empty_public_reductions_spec` | green | green |
+
+So only the ReplyStore shape was this bug. The other three had already
+stopped reproducing. All four now use the chained form.

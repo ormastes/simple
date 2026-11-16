@@ -81,6 +81,105 @@ struct BugStats:
     health: text  # "good" | "attention" | "critical"
 
 # ============================================================================
+# Completion token receipts (bug_token_usage table)
+# ============================================================================
+# One row per resolve receipt. The comparable average of a category is the
+# mean total over rows of OTHER, Closed bugs in the same category; bug-resolve
+# demands a knowledge link when a new total exceeds twice that average.
+
+# Cohort a bug's tokens are compared within; derived from the bug's file path.
+enum BugTokenCategory:
+    Compiler
+    Runtime
+    Library
+    Application
+    Os
+    Test
+    Other
+
+struct BugTokenCount:
+    value: i64
+
+# A provider-reported token count, or an explicit "unavailable".
+enum BugTokenReading:
+    Unavailable
+    Count(BugTokenCount)
+
+struct BugTokenProvider:
+    value: text
+
+struct BugTokenSource:
+    value: text
+
+# Repository knowledge artifact linked to a receipt (relative .md path).
+struct BugKnowledgeLink:
+    path: text
+
+struct BugTokenUsage:
+    category: BugTokenCategory
+    provider: BugTokenProvider
+    input: BugTokenReading
+    output: BugTokenReading
+    cache_read: BugTokenReading
+    cache_create: BugTokenReading
+    source: BugTokenSource
+    knowledge: BugKnowledgeLink?
+    recorded_at: text
+
+fn bug_token_usage_columns() -> [text]:
+    ["bug_id", "category", "provider", "input_tokens", "output_tokens",
+     "cache_read_tokens", "cache_create_tokens", "total_tokens",
+     "source", "knowledge", "recorded_at"]
+
+fn bug_token_category_to_string(category: BugTokenCategory) -> text:
+    match category:
+        BugTokenCategory.Compiler: "compiler"
+        BugTokenCategory.Runtime: "runtime"
+        BugTokenCategory.Library: "library"
+        BugTokenCategory.Application: "application"
+        BugTokenCategory.Os: "os"
+        BugTokenCategory.Test: "test"
+        BugTokenCategory.Other: "other"
+
+fn bug_token_category_for_path(path: text) -> BugTokenCategory:
+    if path.starts_with("src/compiler"):
+        return BugTokenCategory.Compiler
+    if path.starts_with("src/runtime"):
+        return BugTokenCategory.Runtime
+    if path.starts_with("src/lib"):
+        return BugTokenCategory.Library
+    if path.starts_with("src/app"):
+        return BugTokenCategory.Application
+    if path.starts_with("src/os"):
+        return BugTokenCategory.Os
+    if path.starts_with("test/"):
+        return BugTokenCategory.Test
+    BugTokenCategory.Other
+
+fn bug_token_reading_text(reading: BugTokenReading) -> text:
+    match reading:
+        case BugTokenReading.Unavailable: "unavailable"
+        case BugTokenReading.Count(count): "{count.value}"
+
+# Sum of the readings; Unavailable if any reading is, Err on i64 overflow.
+fn bug_token_total(readings: [BugTokenReading]) -> Result<BugTokenReading, text>:
+    var total: i64 = 0
+    for reading in readings:
+        match reading:
+            case BugTokenReading.Unavailable:
+                return Ok(BugTokenReading.Unavailable)
+            case BugTokenReading.Count(count):
+                if total > 9223372036854775807 - count.value:
+                    return Err("token total overflow")
+                total = total + count.value
+    Ok(BugTokenReading.Count(BugTokenCount(value: total)))
+
+fn _bug_token_reading_known(reading: BugTokenReading) -> bool:
+    match reading:
+        case BugTokenReading.Unavailable: false
+        case BugTokenReading.Count(_): true
+
+# ============================================================================
 # BugDatabase
 # ============================================================================
 
@@ -121,7 +220,8 @@ fn bug_database_from_sdn(db: SdnDatabase) -> BugDatabase:
 
 fn bug_shard_tables() -> [text]:
     ["bugs_active", "bugs", "bug_descriptions", "bug_investigation_logs",
-     "bug_fix_strategies", "bug_difficulty", "bug_fix_claims", "bug_scope"]
+     "bug_fix_strategies", "bug_difficulty", "bug_fix_claims", "bug_scope",
+     "bug_token_usage"]
 
 fn bug_shard_dir(path: text) -> text:
     val parts = path.replace("\\", "/").split("/")
@@ -279,6 +379,8 @@ fn create_bug_database(path: text) -> BugDatabase:
         "content"
     ])
     db.set_table("bug_investigation_logs", log_table)
+
+    db.set_table("bug_token_usage", SdnTable.new("bug_token_usage", bug_token_usage_columns()))
 
     bug_database_from_sdn(db)
 
@@ -443,6 +545,109 @@ class BugDatabase:
         row.set("bug_id", id)
         row.set("line_num", "{next_line}")
         row.set("content", content)
+        if not table.add_row(row):
+            return false
+        self.db.set_table(table_name, table)
+        true
+
+    # True when a still-valid row of `id` is Closed. update_bug leaves the
+    # superseded row behind as valid=false, and get_bug can return that stale
+    # row, so closedness is read from the valid rows only.
+    fn has_valid_closed_row(id: text) -> bool:
+        for table_name in self.available_bug_tables():
+            val table = match self.db.get_table(table_name):
+                case Some(value): value
+                case None: continue
+            for row in table.rows:
+                if (row.get("id") ?? "") != id or (row.get("valid") ?? "true").lower() == "false":
+                    continue
+                if parse_status(row.get("status") ?? "Open") == BugStatus.Closed:
+                    return true
+        false
+
+    # Cohort of an existing bug; None when the id is unknown.
+    fn token_category_for_bug(id: text) -> BugTokenCategory?:
+        match self.get_bug(id):
+            case Some(bug): Some(bug_token_category_for_path(bug.file))
+            case None: None
+
+    # Mean total_tokens over receipts of OTHER Closed bugs in `category`.
+    # Ok(Unavailable) when there is no such receipt; Err when a stored total
+    # is malformed or the sum overflows i64.
+    fn comparable_token_average(category: BugTokenCategory, exclude_id: text) -> Result<BugTokenReading, text>:
+        val table = match self.db.get_table("bug_token_usage"):
+            case Some(value): value
+            case None: return Ok(BugTokenReading.Unavailable)
+        val category_text = bug_token_category_to_string(category)
+        var sum: i64 = 0
+        var count: i64 = 0
+        for row in table.rows:
+            val bug_id = row.get("bug_id") ?? ""
+            if (row.get("category") ?? "") != category_text or bug_id == exclude_id:
+                continue
+            val raw = row.get("total_tokens") ?? ""
+            if raw == "unavailable":
+                continue
+            val value: i64 = match raw.parse_i64():
+                case Some(parsed): parsed
+                case None: return Err("bug_token_usage row of {bug_id}: malformed total_tokens '{raw}'")
+            if value < 0:
+                return Err("bug_token_usage row of {bug_id}: negative total_tokens '{raw}'")
+            if not self.has_valid_closed_row(bug_id):
+                continue
+            if sum > 9223372036854775807 - value:
+                return Err("bug_token_usage cohort {category_text}: total overflows")
+            sum = sum + value
+            count = count + 1
+        if count == 0:
+            return Ok(BugTokenReading.Unavailable)
+        Ok(BugTokenReading.Count(BugTokenCount(value: sum / count)))
+
+    # Append one structured completion receipt for an existing bug. Readings
+    # must be all known or all unavailable; a partial receipt needs a
+    # knowledge link. Text fields follow the single-line field contract.
+    # Call save() explicitly after a successful append.
+    me add_token_usage(id: text, usage: BugTokenUsage) -> bool:
+        if self.find_bug_table_name(id) == "":
+            return false
+        val knowledge_text = match usage.knowledge:
+            case Some(link): link.path
+            case None: "none"
+        if usage.knowledge.? and knowledge_text == "none":
+            return false
+        for field in [usage.provider.value, usage.source.value, knowledge_text, usage.recorded_at]:
+            if field == "" or not _bug_append_field_safe(field):
+                return false
+        val readings = [usage.input, usage.output, usage.cache_read, usage.cache_create]
+        var known = 0
+        for reading in readings:
+            if _bug_token_reading_known(reading):
+                known = known + 1
+        if known != 0 and known != readings.len() and not usage.knowledge.?:
+            return false
+        val total = match bug_token_total(readings):
+            case Ok(value): value
+            case Err(_reason): return false
+
+        val table_name = "bug_token_usage"
+        var table: SdnTable = SdnTable.new(table_name, bug_token_usage_columns())
+        match self.db.get_table(table_name):
+            case Some(existing): table = existing
+            case None: pass
+        if table.columns != bug_token_usage_columns():
+            return false
+        val row = SdnRow.empty()
+        row.set("bug_id", id)
+        row.set("category", bug_token_category_to_string(usage.category))
+        row.set("provider", usage.provider.value)
+        row.set("input_tokens", bug_token_reading_text(usage.input))
+        row.set("output_tokens", bug_token_reading_text(usage.output))
+        row.set("cache_read_tokens", bug_token_reading_text(usage.cache_read))
+        row.set("cache_create_tokens", bug_token_reading_text(usage.cache_create))
+        row.set("total_tokens", bug_token_reading_text(total))
+        row.set("source", usage.source.value)
+        row.set("knowledge", knowledge_text)
+        row.set("recorded_at", usage.recorded_at)
         if not table.add_row(row):
             return false
         self.db.set_table(table_name, table)

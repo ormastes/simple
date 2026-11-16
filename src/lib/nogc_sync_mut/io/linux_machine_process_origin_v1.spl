@@ -1,0 +1,105 @@
+# Process-lifetime guard, not machine or principal authority. One procfs fd and
+# 1024 bytes remain owned here until process exit, including after the last
+# policy capsule closes. Never close/reuse that origin descriptor in a child.
+# AUTHORED_NOT_RUN: fork/PID namespace and bind-mount faults are unqualified.
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64, volatile_write_u8}
+use std.common.string_core.char_from_code
+
+var linux_origin_phase_v1: text = "virgin"
+var linux_origin_fd_v1: i64 = -1
+var linux_origin_arena_v1: i64 = 0
+var linux_origin_pid_v1: i64 = 0
+var linux_origin_identity_v1: text = ""
+var linux_origin_mount_v1: i64 = 0
+var linux_origin_device_v1: text = ""
+
+@unsafe(reason: "bounded constant origin path/link name in process-owned scratch", capabilities: [ffi, raw_ptr])
+fn linux_origin_name_v1(value: text) -> i64:
+    val pointer = linux_origin_arena_v1 + 512
+    for at in 0..value.byte_len(): volatile_write_u8(pointer + at, value.byte_at(at) as i64)
+    volatile_write_u8(pointer + value.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "requires returned mount and security fields from genuine procfs descriptor or magic link", capabilities: [ffi, raw_ptr])
+fn linux_origin_metadata_v1(name: text) -> Result<(text, i64, text, i64), text>:
+    val buffer = linux_origin_arena_v1
+    for at in 0..256: volatile_write_u8(buffer + at, 0)
+    val pointer = linux_origin_name_v1(name)
+    val flags = if name == "": 4096 else: 256 # AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW
+    if statx(linux_origin_fd_v1 as i32, pointer, flags, 6143u32, buffer) != 0 or
+            (volatile_read_u32(buffer) & 6143) != 6143:
+        return Err("linux-machine-origin-statx-unavailable")
+    val mount_id = volatile_read_u64(buffer + 144)
+    val device = str(volatile_read_u32(buffer + 136)) + ":" + str(volatile_read_u32(buffer + 140))
+    val mode = volatile_read_u16(buffer + 28)
+    if mount_id <= 0: return Err("linux-machine-origin-mount-id-unavailable")
+    Ok((device + ":" + str(volatile_read_u64(buffer + 32)) + ":" + str(mount_id), mount_id, device, mode))
+
+@unsafe(reason: "correlates actual caller with pinned genuine procfs across fork and PID namespace collisions", capabilities: [ffi, raw_ptr])
+fn linux_origin_verify_v1(pid: i64, tid: i64) -> Result<(), text>:
+    val buffer = linux_origin_arena_v1 + 256
+    for at in 0..128: volatile_write_u8(buffer + at, 0)
+    if fstatfs(linux_origin_fd_v1 as i32, buffer) != 0 or volatile_read_u64(buffer) != 40864:
+        return Err("linux-machine-origin-procfs-unavailable")
+    val root = linux_origin_metadata_v1("")?
+    if (root.3 & 61440) != 16384: return Err("linux-machine-origin-procfs-directory-required")
+    if linux_origin_identity_v1 == "":
+        linux_origin_identity_v1 = root.0
+        linux_origin_mount_v1 = root.1
+        linux_origin_device_v1 = root.2
+    if root.0 != linux_origin_identity_v1: return Err("linux-machine-origin-procfs-identity-changed")
+    for link in ["self", "thread-self"]:
+        val meta = linux_origin_metadata_v1(link)?
+        if meta.1 != linux_origin_mount_v1 or meta.2 != linux_origin_device_v1 or (meta.3 & 61440) != 40960:
+            return Err("linux-machine-origin-procfs-magic-link-substituted")
+        val name = linux_origin_name_v1(link)
+        val output = linux_origin_arena_v1 + 768
+        val count = readlinkat(linux_origin_fd_v1 as i32, name, output, 128u64)
+        if count <= 0 or count >= 128: return Err("linux-machine-origin-current-task-unavailable")
+        var value = ""
+        for at in 0..count: value = value + char_from_code(volatile_read_u8(output + at) as u32)
+        val expected = if link == "self": str(pid) else: str(pid) + "/task/" + str(tid)
+        if value != expected: return Err("linux-machine-origin-foreign-process-or-pid-namespace")
+    Ok(())
+
+@unsafe(reason: "owns one permanent genuine procfs origin before registry creation; never resets inherited/quarantined state", capabilities: [ffi, raw_ptr])
+pub fn linux_machine_process_origin_check_v1() -> Result<(), text>:
+    val pid = getpid() as i64
+    val tid = gettid() as i64
+    if pid <= 0 or tid != pid: return Err("linux-machine-policy-main-thread-required")
+    if linux_origin_phase_v1 == "opening" or linux_origin_phase_v1 == "quarantined":
+        return Err("linux-machine-origin-quarantined")
+    if linux_origin_phase_v1 == "virgin":
+        var flags: i32 = 0
+        @when(arch="x86_64"):
+        flags = 720896
+        @elif(arch="aarch64"):
+        flags = 573440
+        @end
+        if flags == 0: return Err("linux-machine-policy-abi-unsupported")
+        linux_origin_phase_v1 = "opening"
+        linux_origin_arena_v1 = malloc(1024u64)
+        if linux_origin_arena_v1 == 0:
+            linux_origin_phase_v1 = "quarantined"
+            return Err("linux-machine-origin-memory-unavailable")
+        val name = linux_origin_name_v1("/proc")
+        # Publish descriptor ownership before any subsequent fallible check.
+        linux_origin_fd_v1 = openat(-100, name, flags, 0u32) as i64
+        if linux_origin_fd_v1 < 0:
+            linux_origin_phase_v1 = "quarantined"
+            return Err("linux-machine-origin-procfs-open-failed")
+        linux_origin_pid_v1 = pid
+    if pid != linux_origin_pid_v1:
+        linux_origin_phase_v1 = "quarantined"
+        return Err("linux-machine-policy-foreign-process")
+    val verified = linux_origin_verify_v1(pid, tid)
+    if verified.is_err():
+        linux_origin_phase_v1 = "quarantined"
+        return verified
+    linux_origin_phase_v1 = "ready"
+    Ok(())
+@else:
+pub fn linux_machine_process_origin_check_v1() -> Result<(), text>: Err("linux-machine-policy-host-unsupported")
+@end

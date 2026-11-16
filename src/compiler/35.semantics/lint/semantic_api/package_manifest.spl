@@ -1,0 +1,124 @@
+# semantic_api package manifest — what a package's `__init__.spl` exports
+# (REQ-TYPE-001 `__init__`, REQ-TYPE-004 memoized / no global scan).
+#
+# The effective visibility of an item is the intersection of its own `pub`
+# and its directory's `__init__.spl` (doc/07_guide/language/module_system.md
+# § Visibility Rules). The only file consulted is the `__init__.spl` in the
+# linted file's own directory: one known path, read at most once per
+# directory per process. Nothing walks the tree.
+#
+# Only `mod` / `pub mod` / `export use` lines are read (the constructs a
+# manifest may contain); the checker's decl arena is never touched because it
+# is global and belongs to the file being linted.
+
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+
+class SemanticApiManifest:
+    pub_mods: Dict<text, bool>             # `pub mod X`
+    private_mods: Dict<text, bool>         # `mod X`
+    exported: Dict<text, Dict<text, bool>> # module -> names named by `export use`
+    glob_mods: Dict<text, bool>            # module re-exported with `.*`
+
+var _MANIFEST_BY_DIR: Dict<text, text> = {}
+
+fn semantic_api_manifest_cache_size() -> i64:
+    _MANIFEST_BY_DIR.len()
+
+fn _dir_of(path: text) -> text:
+    val norm = path.replace("\\", "/")
+    val at = norm.last_index_of("/")
+    if at < 0:
+        return "."
+    norm.slice(0, at)
+
+fn semantic_api_manifest_text_for(path: text) -> text:
+    """Text of the `__init__.spl` beside `path`, or "" when absent. Memoized per directory."""
+    val dir = _dir_of(path)
+    if _MANIFEST_BY_DIR.contains_key(dir):
+        return _MANIFEST_BY_DIR[dir]
+    val init_path = "{dir}/__init__.spl"
+    val body = if file_exists(init_path): file_read(init_path) else: ""
+    _MANIFEST_BY_DIR[dir] = body
+    body
+
+fn semantic_api_module_stem(path: text) -> text:
+    val norm = path.replace("\\", "/")
+    val at = norm.last_index_of("/")
+    val file = if at >= 0: norm.slice(at + 1, norm.len()) else: norm
+    if file.ends_with(".spl"):
+        return file.slice(0, file.len() - 4)
+    file
+
+fn _last_segment(dotted: text) -> text:
+    val at = dotted.last_index_of(".")
+    if at < 0:
+        return dotted
+    dotted.slice(at + 1, dotted.len())
+
+fn _strip_alias(name: text) -> text:
+    val i = name.index_of(":")
+    if i >= 0:
+        return name.slice(0, i).trim()
+    name.trim()
+
+fn _note_export(m: SemanticApiManifest, rest: text):
+    # rest is the text after `export use ` / `export `: `mod.name`,
+    # `mod.{a, b:alias}` or `mod.*`.
+    val brace = rest.index_of(".{")
+    if brace >= 0:
+        val mod_name = _last_segment(rest.slice(0, brace).trim())
+        val close = rest.index_of("}")
+        val inner = if close > brace: rest.slice(brace + 2, close) else: rest.slice(brace + 2, rest.len())
+        var names: Dict<text, bool> = if m.exported.contains_key(mod_name): m.exported[mod_name] else: {}
+        for part in inner.split(","):
+            val n = _strip_alias(part)
+            if n == "*":
+                m.glob_mods[mod_name] = true
+            elif n != "":
+                names[n] = true
+        m.exported[mod_name] = names
+        return
+    val at = rest.last_index_of(".")
+    if at <= 0:
+        return
+    val name = _strip_alias(rest.slice(at + 1, rest.len()))
+    val mod_name = _last_segment(rest.slice(0, at).trim())
+    if name == "*":
+        m.glob_mods[mod_name] = true
+        return
+    var names: Dict<text, bool> = if m.exported.contains_key(mod_name): m.exported[mod_name] else: {}
+    names[name] = true
+    m.exported[mod_name] = names
+
+fn semantic_api_manifest_parse(text_in: text) -> SemanticApiManifest:
+    var m = SemanticApiManifest(pub_mods: {}, private_mods: {}, exported: {}, glob_mods: {})
+    for raw in text_in.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("#"):
+            continue
+        if line.starts_with("pub mod "):
+            m.pub_mods[line.slice(8, line.len()).trim()] = true
+        elif line.starts_with("mod "):
+            m.private_mods[line.slice(4, line.len()).trim()] = true
+        elif line.starts_with("export use "):
+            _note_export(m, line.slice(11, line.len()))
+        elif line.starts_with("export ") and line.ends_with(".*"):
+            _note_export(m, line.slice(7, line.len()))
+    m
+
+fn semantic_api_manifest_governs(m: SemanticApiManifest, stem: text) -> bool:
+    """True when the manifest narrows what `stem` exports: it is named by
+    `export use` names or is a private `mod`, and is neither `pub mod` nor
+    glob re-exported. An unmentioned module keeps its pre-manifest behavior."""
+    if m.pub_mods.contains_key(stem) or m.glob_mods.contains_key(stem):
+        return false
+    m.exported.contains_key(stem) or m.private_mods.contains_key(stem)
+
+fn semantic_api_manifest_names(m: SemanticApiManifest, stem: text) -> Dict<text, bool>:
+    if m.exported.contains_key(stem):
+        return m.exported[stem]
+    {}
+
+export SemanticApiManifest
+export semantic_api_manifest_text_for, semantic_api_manifest_cache_size, semantic_api_module_stem
+export semantic_api_manifest_parse, semantic_api_manifest_governs, semantic_api_manifest_names

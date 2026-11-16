@@ -1,0 +1,38 @@
+# SOURCE_AUTHORED_NOT_RUN. Codec-version contracts, never source/native ownership fixtures.
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v2.*
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.agent_executable_profile_v1.*
+
+fn source_profile_fixture_v2() -> LinuxAgentWorkspaceProfileV2:
+    val base = LinuxAgentWorkspaceProfileV1(machine_policy_digest: "1".repeat(64), workspace_profile_digest: "2".repeat(64),
+        assets_root: "/srv/agent-assets", repository_ref: "source", revision_oid: "a".repeat(40), object_format: "sha1",
+        source_manifest_digest: "3".repeat(64), bootstrap_digest: "4".repeat(64), git_digest: "5".repeat(64),
+        agent_digest: "6".repeat(64), bootstrap_program: "/opt/simple/bootstrap", image: "example@sha256:" + "7".repeat(64),
+        agent_program: "/usr/bin/codex", image_config_id: "sha256:" + "8".repeat(64))
+    val executable = AgentExecutableProfileV1(architecture: "linux-aarch64", image_size_bytes: 290069784,
+        max_image_bytes: 536870912, bootstrap_memory_bytes: 402653184, agent_memory_bytes: 268435456)
+    LinuxAgentWorkspaceProfileV2(base: base, executable_profile: executable, bootstrap_profile: "linux-agent-worktree-bootstrap-v1",
+        approved_layout: "reserved-workspace-immutable-assets-v1", approved_layout_digest: linux_agent_workspace_layout_digest_v2(base, executable).unwrap())
+
+describe "Explicit installed source staging version":
+    it "REQ-AGENT-SOURCE-V2-001 preserves strict old versus explicit new policy identity":
+        val approved = source_profile_fixture_v2()
+        val old_bytes = linux_agent_workspace_profile_encode_v1(approved.base).unwrap()
+        val new_bytes = linux_agent_workspace_profile_encode_v2(approved).unwrap()
+        expect(linux_agent_workspace_profile_decode_v1(old_bytes).is_ok()).to_equal(true)
+        expect(linux_agent_workspace_profile_decode_v1(new_bytes).is_err()).to_equal(true)
+        expect(linux_agent_workspace_profile_decode_v2(old_bytes).is_err()).to_equal(true)
+        val decoded = linux_agent_workspace_profile_decode_v2(new_bytes).unwrap()
+        expect(decoded.base.agent_program).to_equal(approved.base.agent_program)
+        expect(decoded.bootstrap_profile).to_equal("linux-agent-worktree-bootstrap-v1")
+        expect(sha256_text(new_bytes) == sha256_text(old_bytes)).to_equal(false)
+        expect(linux_agent_workspace_profile_encode_v2(decoded).unwrap()).to_equal(new_bytes)
+
+    it "REQ-AGENT-SOURCE-V2-002 rejects caller-edited layout or compiled selector":
+        val approved = source_profile_fixture_v2()
+        val bytes = linux_agent_workspace_profile_encode_v2(approved).unwrap()
+        expect(linux_agent_workspace_profile_decode_v2(bytes.replace("reserved-workspace-immutable-assets-v1", "claimed-qualified")).is_err()).to_equal(true)
+        expect(linux_agent_workspace_profile_decode_v2(bytes.replace("linux-agent-worktree-bootstrap-v1", "arbitrary-bootstrap")).is_err()).to_equal(true)
+        expect(linux_agent_workspace_profile_decode_v2(bytes.replace(approved.approved_layout_digest, "9".repeat(64))).is_err()).to_equal(true)

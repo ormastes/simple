@@ -1,0 +1,65 @@
+# Identity-store implementation protocol and ordinary Linux libc boundary.
+# SOURCE_AUTHORED_NOT_RUN. No new runtime exports or subprocesses.
+use std.common.text_bytes.utf8_bytes_valid
+pub enum HostIdentityStorePublicationV1:
+    NotAttempted
+    Published
+    Existing
+    Uncertain
+
+pub struct HostIdentityPlatformReadV1:
+    bytes: Option<[u8]> = None
+    absent: bool = false
+    cleanup_pending: bool = false
+    error: text = ""
+
+pub struct HostIdentityPlatformPublishV1:
+    publication: HostIdentityStorePublicationV1 = HostIdentityStorePublicationV1.NotAttempted
+    file_synced: bool = false
+    namespace_synced: bool = false
+    cleanup_pending: bool = false
+    error: text = ""
+
+pub struct HostIdentityPlatformCloseV1:
+    consumed: bool
+    completed: bool
+    error: text
+
+fn host_identity_leaf_valid_v1(leaf: text) -> bool:
+    if leaf.byte_len() != 68 and leaf.byte_len() != 70 and leaf.byte_len() != 72: return false
+    for index in 0..64:
+        val code = leaf.byte_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    val role = leaf.substring(64, leaf.byte_len())
+    role == ".key" or role == ".hosts" or role == ".profile"
+
+fn host_identity_bytes_equal_v1(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    for index in 0..left.len():
+        if left[index] != right[index]: return false
+    true
+
+fn host_identity_payload_valid_v1(bytes: [u8]) -> bool:
+    if bytes.len() < 1 or bytes.len() > 65536 or not utf8_bytes_valid(bytes): return false
+    for byte in bytes:
+        if byte == 0u8: return false
+    true
+
+export host_identity_leaf_valid_v1, host_identity_bytes_equal_v1, host_identity_payload_valid_v1
+
+@when(os="linux"):
+pub use std.nogc_sync_mut.io.retained_file_abi.{malloc, free, openat, pread, write, fsync, statx, geteuid, close}
+@unsafe(reason: "snapshots this thread's Linux errno immediately after the relevant failed libc call", capabilities: [ffi, raw_ptr])
+extern fn __errno_location() -> i64
+@unsafe(reason: "creates one private directory relative to a retained trusted parent", capabilities: [ffi, raw_ptr])
+extern fn mkdirat(parent: i32, name: i64, mode: u32) -> i32
+@unsafe(reason: "sets private mode on a newly exclusively created retained inode before bytes", capabilities: [ffi])
+extern fn fchmod(fd: i32, mode: u32) -> i32
+@unsafe(reason: "atomically publishes a retained directory stage name without replacing any target", capabilities: [ffi, raw_ptr])
+extern fn linkat(source_parent: i32, source: i64, target_parent: i32, target: i64, flags: i32) -> i32
+@unsafe(reason: "removes only a stage name whose current inode was compared with its retained descriptor", capabilities: [ffi, raw_ptr])
+extern fn unlinkat(parent: i32, name: i64, flags: i32) -> i32
+@unsafe(reason: "names exclusive temporary stages and refuses inherited registry use after fork", capabilities: [ffi])
+extern fn getpid() -> i32
+export mkdirat, fchmod, linkat, unlinkat, getpid, __errno_location
+@end

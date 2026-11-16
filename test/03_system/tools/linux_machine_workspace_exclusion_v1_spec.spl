@@ -1,0 +1,130 @@
+# AUTHORED_NOT_RUN. Disposable administrator-installed machine/workspace
+# profiles, dedicated nonroot service UID, actual XFS project quota fixture.
+# No installation, elevation, Podman, workspace deletion or quota release.
+# @req REQ-LINUX-WORKSPACE-EXCLUSION-001
+# @req REQ-LINUX-WORKSPACE-EXCLUSION-002
+# @req REQ-LINUX-WORKSPACE-EXCLUSION-003
+use std.spec.{describe, it, expect, step, fail}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.crypto.sha256.sha256_u8_hex
+use std.common.contracts.storage.workspace_storage_v1.workspace_storage_binding_v1
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.nogc_sync_mut.io.linux_machine_workspace_exclusion_v1.*
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.{WorkspaceStorageLeaseV1,
+    workspace_storage_admit_v1, workspace_storage_observe_v1}
+use std.nogc_async_mut.container.providers.linux.workspace_installed_profile_v1.{linux_workspace_installed_profile_decode_v1,
+    linux_workspace_storage_request_v1}
+
+var exclusion_fixture_readers_v1: [LinuxMachinePolicyOwnerV1] = []
+var exclusion_fixture_stores_v1: [LinuxMachineStorageV1] = []
+var exclusion_fixture_leases_v1: [WorkspaceStorageLeaseV1] = []
+var exclusion_fixture_owners_v1: [LinuxMachineWorkspaceExclusionV1] = []
+
+fn exclusion_fixture_reader_v1() -> Result<LinuxMachinePolicyOwnerV1, text>:
+    match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Ready(owner):
+            exclusion_fixture_readers_v1.push(owner)
+            Ok(owner)
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            exclusion_fixture_readers_v1.push(owner)
+            Err(reason + ":cleanup=" + owner.close_v1())
+        case LinuxMachinePolicyOpenV1.Rejected(reason): Err(reason)
+
+fn exclusion_fixture_storage_v1(reader: LinuxMachinePolicyOwnerV1) -> Result<LinuxMachineStorageV1, text>:
+    match reader.open_storage_v1():
+        case LinuxMachineStorageOpenV1.Ready(owner):
+            exclusion_fixture_stores_v1.push(owner)
+            Ok(owner)
+        case LinuxMachineStorageOpenV1.CleanupRequired(owner, reason):
+            exclusion_fixture_stores_v1.push(owner)
+            Err(reason + ":cleanup=" + owner.close_v1())
+        case LinuxMachineStorageOpenV1.Rejected(reason): Err(reason + ":reader-cleanup=" + reader.close_v1())
+
+fn exclusion_fixture_open_v1(storage: LinuxMachineStorageV1, lease: WorkspaceStorageLeaseV1) -> Result<LinuxMachineWorkspaceExclusionV1, text>:
+    match linux_machine_workspace_exclusion_open_v1(storage, lease):
+        case LinuxMachineWorkspaceExclusionOpenV1.Ready(owner):
+            exclusion_fixture_owners_v1.push(owner)
+            Ok(owner)
+        case LinuxMachineWorkspaceExclusionOpenV1.CleanupRequired(owner, reason):
+            exclusion_fixture_owners_v1.push(owner)
+            val closed = owner.close_v1()
+            Err(reason + ":closed=" + str(closed.closed) + ":" + closed.error)
+        case LinuxMachineWorkspaceExclusionOpenV1.Rejected(reason): Err(reason)
+
+fn exclusion_fixture_competitor_v1(storage: LinuxMachineStorageV1, lease: WorkspaceStorageLeaseV1) -> Result<bool, text>:
+    match linux_machine_workspace_exclusion_open_v1(storage, lease):
+        case LinuxMachineWorkspaceExclusionOpenV1.Ready(owner):
+            exclusion_fixture_owners_v1.push(owner)
+            val closed = owner.close_v1()
+            if not closed.closed or closed.error != "": return Err("unexpected competing owner cleanup failed:" + closed.error)
+            Ok(false)
+        case LinuxMachineWorkspaceExclusionOpenV1.CleanupRequired(owner, reason):
+            exclusion_fixture_owners_v1.push(owner)
+            val closed = owner.close_v1()
+            if not closed.closed or closed.error != "": return Err("competing cleanup pending:" + closed.error)
+            Ok(reason != "")
+        case LinuxMachineWorkspaceExclusionOpenV1.Rejected(reason): Ok(reason != "")
+
+describe "Borrowed actual Linux workspace exclusion v1":
+    it "contends on the native root and never closes borrowed storage or quota owners":
+        step("Read fixed administrator profiles and retain the actual XFS quota lease")
+        val reader = exclusion_fixture_reader_v1().unwrap()
+        val machine_read = reader.read_policy_v1()
+        val machine_bytes = machine_read.unwrap()
+        val profile_read = reader.read_workspace_profile_v1()
+        val profile_bytes = profile_read.unwrap()
+        expect(utf8_bytes_valid(profile_bytes)).to_equal(true)
+        val profile = linux_workspace_installed_profile_decode_v1(bytes_to_text(profile_bytes)).unwrap()
+        val machine_digest = sha256_u8_hex(machine_bytes)
+        if profile.machine_policy_digest != machine_digest:
+            val closed = reader.close_v1()
+            fail("installed workspace profile machine binding differs; reader-close=" + closed)
+            return
+        val request = linux_workspace_storage_request_v1(profile)
+        val lease = workspace_storage_admit_v1(request).unwrap()
+        # Preserve the native quota owner before another fallible operation.
+        exclusion_fixture_leases_v1.push(lease)
+        val storage = exclusion_fixture_storage_v1(reader).unwrap()
+
+        step("Acquire the actual state-relative exclusion and reject a competing alias")
+        val first = exclusion_fixture_open_v1(storage, lease).unwrap()
+        val first_current = first.current_v1()
+        val snapshot = first_current.unwrap()
+        expect(snapshot.machine_policy_digest).to_equal(machine_digest)
+        expect(snapshot.lease_binding_digest).to_equal(workspace_storage_binding_v1(request).unwrap())
+        expect(snapshot.workspace_identity_digest.byte_len()).to_equal(64)
+        expect(exclusion_fixture_competitor_v1(storage, lease).unwrap()).to_equal(true)
+        val after_competitor = first.current_v1()
+        val retained_snapshot = after_competitor.unwrap()
+        expect(retained_snapshot.workspace_identity_digest).to_equal(snapshot.workspace_identity_digest)
+
+        step("Close only this exclusion and keep both borrowed native owners current")
+        val closed = first.close_v1()
+        expect(closed.closed).to_equal(true)
+        expect(closed.owner.is_none()).to_equal(true)
+        expect(closed.error).to_equal("")
+        val closed_current = first.current_v1()
+        expect(closed_current.is_err()).to_equal(true)
+        val retained_machine = storage.policy_bytes_v1()
+        expect(sha256_u8_hex(retained_machine.unwrap())).to_equal(machine_digest)
+        val quota = workspace_storage_observe_v1(lease).unwrap()
+        expect(quota.state).to_equal("retained")
+        expect(quota.binding_digest).to_equal(snapshot.lease_binding_digest)
+
+        step("A closed alias cannot release a later canonical exclusion generation")
+        val next = exclusion_fixture_open_v1(storage, lease).unwrap()
+        val repeated = first.close_v1()
+        expect(repeated.closed).to_equal(true)
+        expect(repeated.owner.is_none()).to_equal(true)
+        expect(repeated.error).to_equal("")
+        val next_current = next.current_v1()
+        val next_snapshot = next_current.unwrap()
+        expect(next_snapshot.workspace_identity_digest).to_equal(snapshot.workspace_identity_digest)
+        expect(exclusion_fixture_competitor_v1(storage, lease).unwrap()).to_equal(true)
+        val next_closed = next.close_v1()
+        expect(next_closed.closed).to_equal(true)
+        expect(next_closed.owner.is_none()).to_equal(true)
+        expect(next_closed.error).to_equal("")
+        # The caller closes only its own machine storage; quota remains retained
+        # for reconciliation. No absence or native quota release is fabricated.
+        expect(storage.close_v1()).to_equal("released")

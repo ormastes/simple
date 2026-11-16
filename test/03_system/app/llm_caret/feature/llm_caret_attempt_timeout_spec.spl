@@ -1,28 +1,78 @@
-# Run with scripts/check/check-caret-http-attempt-timeout.py and a qualified
-# POSIX self-hosted runtime. This spec requires its live server; never skip it.
-# Execution status: AUTHORED_UNRUN. Bug llm_caret_http_attempt_timeout stays OPEN.
+# Starts its own loopback stall/echo server (fixtures/caret_timeout_server.spl,
+# run by $SIMPLE_BINARY) unless CARET_TIMEOUT_TEST_URL names an external one.
+# This spec requires its live server; never skip it.
 use std.spec
 use std.spec.{pending}
-use app.io.mod.{env_get, current_time_ms}
+use app.io.mod.{env_get, current_time_ms, file_exists, file_read_text, dir_create_all, getpid, process_spawn_async, sleep_ms}
 use app.llm_caret.claude_api.{ClaudeApiRequest, claude_api_retry_transport}
 use app.llm_caret.openai_api.{OpenAIApiRequest, openai_retry_transport}
 use app.llm_caret.openai_compat.{CompatRequest, compat_transport}
 use std.nogc_sync_mut.io.http_client_core.{http_request_raw_timeout}
 
-val TIMEOUT_SERVER_BLOCKED = "BLOCKED: CARET_TIMEOUT_TEST_URL is unset; the stall/echo server is started only by scripts/check/check-caret-http-attempt-timeout.py"
+val TIMEOUT_SERVER_FIXTURE = "test/03_system/app/llm_caret/feature/fixtures/caret_timeout_server.spl"
+
+fn timeout_state_dir() -> text:
+    "build/tmp/caret_timeout_server_{getpid()}"
+
+fn timeout_external_url() -> text:
+    env_get("CARET_TIMEOUT_TEST_URL") ?? ""
+
+# Returns the base URL of a live stall/echo server, starting the in-repo
+# fixture once per spec process; "" when no server could be brought up.
+fn timeout_server_base() -> text:
+    val external = timeout_external_url()
+    if external.len() > 0:
+        return external
+    val port_file = timeout_state_dir() + "/port"
+    if not file_exists(port_file):
+        val runtime = env_get("SIMPLE_BINARY") ?? ""
+        if runtime.len() == 0 or not file_exists(timeout_state_dir()) and not dir_create_all(timeout_state_dir()):
+            return ""
+        if process_spawn_async(runtime, ["run", TIMEOUT_SERVER_FIXTURE, timeout_state_dir()]) <= 0:
+            return ""
+        var waited = 0
+        while not file_exists(port_file) and waited < 60000:
+            sleep_ms(100)
+            waited = waited + 100
+        if not file_exists(port_file):
+            return ""
+        sleep_ms(100)
+    val port = file_read_text(port_file).trim()
+    if port.len() == 0:
+        return ""
+    "http://127.0.0.1:" + port
+
+fn timeout_server_blocked_reason() -> text:
+    if (env_get("SIMPLE_BINARY") ?? "").len() == 0:
+        return "BLOCKED: CARET_TIMEOUT_TEST_URL and SIMPLE_BINARY are unset; no runtime to start the loopback stall/echo fixture " + TIMEOUT_SERVER_FIXTURE
+    "BLOCKED: loopback stall/echo fixture " + TIMEOUT_SERVER_FIXTURE + " did not publish a port within 60 s"
 
 fn timeout_server_missing() -> bool:
-    (env_get("CARET_TIMEOUT_TEST_URL") ?? "").len() == 0
+    timeout_server_base().len() == 0
 
 fn timeout_test_url(path: text) -> text:
-    val base = env_get("CARET_TIMEOUT_TEST_URL") ?? ""
+    val base = timeout_server_base()
     expect(base.len()).to_be_greater_than(0)
     base + path
+
+# Server-side request ledger written by the fixture after each request.
+fn timeout_ledger_after(expected: text) -> text:
+    val ledger_file = timeout_state_dir() + "/ledger"
+    var waited = 0
+    var ledger = ""
+    while waited < 5000:
+        if file_exists(ledger_file):
+            ledger = file_read_text(ledger_file)
+            if ledger == expected:
+                return ledger
+        sleep_ms(100)
+        waited = waited + 100
+    ledger
 
 describe "Caret actual HTTP adapters enforce attempt deadlines":
     it "interrupts a stalled Claude response":
         if timeout_server_missing():
-            pending(TIMEOUT_SERVER_BLOCKED)
+            pending(timeout_server_blocked_reason())
             return
         val request = ClaudeApiRequest(method: "POST", url: timeout_test_url("/slow"), headers: "Content-Type: application/json", body: "{}")
         val started = current_time_ms()
@@ -33,7 +83,7 @@ describe "Caret actual HTTP adapters enforce attempt deadlines":
 
     it "interrupts a stalled OpenAI response":
         if timeout_server_missing():
-            pending(TIMEOUT_SERVER_BLOCKED)
+            pending(timeout_server_blocked_reason())
             return
         val request = OpenAIApiRequest(method: "POST", url: timeout_test_url("/slow"), headers: "Content-Type: application/json", body: "{}")
         val started = current_time_ms()
@@ -44,7 +94,7 @@ describe "Caret actual HTTP adapters enforce attempt deadlines":
 
     it "interrupts a stalled compatible endpoint without retrying":
         if timeout_server_missing():
-            pending(TIMEOUT_SERVER_BLOCKED)
+            pending(timeout_server_blocked_reason())
             return
         val request = CompatRequest(method: "POST", url: timeout_test_url("/slow"), headers: "Content-Type: application/json", body: "{}")
         val started = current_time_ms()
@@ -55,12 +105,21 @@ describe "Caret actual HTTP adapters enforce attempt deadlines":
 
     it "preserves UTF8 bytes and permits explicit unbounded zero":
         if timeout_server_missing():
-            pending(TIMEOUT_SERVER_BLOCKED)
+            pending(timeout_server_blocked_reason())
             return
         val response = http_request_raw_timeout("POST", timeout_test_url("/echo"), "Content-Type: text/plain", "hello 서울", 0)
         expect(response.0).to_equal(200)
         expect(response.1).to_equal("hello 서울")
         expect(response.2).to_equal("")
+
+    it "sends exactly one request per bounded adapter and one echo":
+        if timeout_external_url().len() > 0:
+            pending("BLOCKED: CARET_TIMEOUT_TEST_URL names an external server; its request ledger is not observable here")
+            return
+        if timeout_server_missing():
+            pending(timeout_server_blocked_reason())
+            return
+        expect(timeout_ledger_after("slow=3\necho=1\n")).to_equal("slow=3\necho=1\n")
 
     it "rejects a negative transport timeout before issuing a request":
         val response = http_request_raw_timeout("POST", "http://127.0.0.1:9/negative", "", "", -1)
