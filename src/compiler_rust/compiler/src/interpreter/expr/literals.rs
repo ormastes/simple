@@ -298,13 +298,29 @@ pub(super) fn eval_literal_expr(
             // Imported globals can change during a nested call, so refresh only
             // bindings with exact owner provenance at the point of each read.
             if let Some(val) = env.get(name) {
-                // An imported fn referenced by its own name is a use of it by
-                // this caller (a callback parameter is local and named apart).
+                // An imported fn referenced by its own name, or by the alias
+                // its import gave it (`use m.{secret as s}`), is a use of it
+                // by this caller. A callback parameter is local, and a module
+                // global holding a fn value is bound under the global's name,
+                // not the fn's: neither is judged.
                 if let Value::Function { def, .. } = val {
                     if matches!(def.visibility, simple_parser::ast::Visibility::Private)
-                        && def.name == *name
                         && !env.is_local(name)
+                        && (def.name == *name
+                            || env.global_binding(name).is_some_and(|(_, source)| source == def.name))
                     {
+                        // The flattened top-level env binds a bare fn name to
+                        // whichever module registered it last; the calling
+                        // module's own same-named helper is the one it names.
+                        if def.name == *name {
+                            if let Some(own) = crate::interpreter::interpreter_call::caller_own_function(name, def) {
+                                return Ok(Some(Value::Function {
+                                    name: name.clone(),
+                                    def: own,
+                                    captured_env: Arc::new(Env::new()),
+                                }));
+                            }
+                        }
                         crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
                     }
                 }
@@ -350,7 +366,7 @@ pub(super) fn eval_literal_expr(
             }
             // Then check functions for top-level function definitions
             // Return as Value::Function for first-class function usage
-            if let Some(func) = functions.get(name).cloned() {
+            if let Some(func) = crate::interpreter::interpreter_call::caller_bound_function(name, functions) {
                 crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
                 return Ok(Some(Value::Function {
                     name: name.clone(),

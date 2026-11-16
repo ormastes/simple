@@ -2,6 +2,68 @@ use compiler.common.driver_core_modes.{CompileMode, OutputFormat}
 use common.plugin.aspect_params.{AspectParamsV1}
 use compiler.common.assurance.representation_context_v1.{RepresentationSourceContextV1}
 
+enum TargetBuildProfileV1:
+    Development
+    Release
+
+enum TargetDebugRequestV1:
+    Default
+    Disabled
+    Enabled
+
+# Capability is supplied by the admission owner, never inferred from policy.
+enum TargetTraceCapabilityV1:
+    Unavailable(reason: text)
+    Available
+
+enum TargetTraceResolutionV1:
+    Disabled
+    Unavailable(reason: text)
+    Available
+
+struct NormalizedTargetProfileV1:
+    profile: TargetBuildProfileV1
+    debug_request: TargetDebugRequestV1
+    # Available means admitted instrumentation, never active recording.
+    trace_resolution: TargetTraceResolutionV1
+
+pub fn target_profile_normalize_v1(profile: TargetBuildProfileV1,
+        request: TargetDebugRequestV1, automatic_development_debug: bool,
+        capability: TargetTraceCapabilityV1) -> Result<NormalizedTargetProfileV1, text>:
+    if profile == TargetBuildProfileV1.Release:
+        if request == TargetDebugRequestV1.Enabled:
+            return Err("TARGET-PROFILE-E-CONFLICT: release forbids debug tracing")
+        return Ok(NormalizedTargetProfileV1(profile, request, TargetTraceResolutionV1.Disabled))
+    if request == TargetDebugRequestV1.Disabled or
+            (request == TargetDebugRequestV1.Default and not automatic_development_debug):
+        return Ok(NormalizedTargetProfileV1(profile, request, TargetTraceResolutionV1.Disabled))
+    match capability:
+        case Unavailable(reason):
+            if reason == "":
+                return Err("TARGET-PROFILE-E-CAPABILITY: missing unavailability reason")
+            if request == TargetDebugRequestV1.Enabled:
+                return Err("TARGET-PROFILE-E-UNAVAILABLE: " + reason)
+            Ok(NormalizedTargetProfileV1(profile, request, TargetTraceResolutionV1.Unavailable(reason)))
+        case Available:
+            Ok(NormalizedTargetProfileV1(profile, request, TargetTraceResolutionV1.Available))
+
+pub fn target_profile_identity_fields_v1(profile: NormalizedTargetProfileV1) -> [text]:
+    val mode = if profile.profile == TargetBuildProfileV1.Release: "release" else: "development"
+    val request = match profile.debug_request:
+        case Default: "default"
+        case Disabled: "disabled"
+        case Enabled: "enabled"
+    val resolution = match profile.trace_resolution:
+        case Disabled: "disabled"
+        case Unavailable(_): "unavailable"
+        case Available: "available"
+    val reason = match profile.trace_resolution:
+        case Unavailable(value): value
+        case _: ""
+    ["target_profile_schema=1", "target_profile=" + mode,
+        "target_debug_request=" + request, "target_trace_resolution=" + resolution,
+        "target_trace_reason=" + reason]
+
 struct CompileOptions:
     mode: CompileMode
     input_files: [text]
@@ -49,6 +111,11 @@ struct CompileOptions:
     # XRay static switch (`--xray`). false = no sleds, no metadata, byte-identical
     # output; resolved once by 80.driver/driver_xray_policy.spl.
     xray_enabled: bool = false
+    # Target policy selector, not producer identity or admission authority.
+    # Empty preserves ordinary CLI defaults; only managed phase3 enables the
+    # automatic development debug request.
+    managed_build_phase: text = ""
+    target_debug_request: TargetDebugRequestV1 = TargetDebugRequestV1.Default
     # MC/DC transport is scalar/text so standalone native CLI aggregate copies
     # do not depend on enum representation. Empty/zero means "use environment
     # or the compiler default"; explicit static-off is represented by
@@ -144,7 +211,7 @@ pub fn driver_core_compile_options_default() -> CompileOptions:
 pub fn compileoptions_effective_mir_opt_level(opts: CompileOptions) -> i64:
     if opts.opt_level.?:
         return opts.opt_level ?? 0
-    if opts.release or opts.optimize:
+    if opts.release or opts.profile == "prod" or opts.build_mode == "release" or opts.optimize:
         return 2
     0
 
@@ -168,7 +235,10 @@ pub fn compileoptions_normalize_mir_optimization(opts: CompileOptions) -> Compil
     var normalized = opts
     normalized.optimize = effective > 0
     normalized.opt_level = effective
-    normalized.release = opts.release or effective > 0
+    # Optimization is independent of development/release semantics.
+    normalized.release = opts.release or opts.profile == "prod" or opts.build_mode == "release"
+    normalized.profile = if normalized.release: "prod" else: opts.profile
+    normalized.build_mode = if normalized.release: "release" else: "debug"
     normalized.mcdc_mode_text = mcdc_mode_text
     normalized.mcdc_owner_bytes = mcdc_owner_bytes
     normalized.mcdc_global_bytes = mcdc_global_bytes
@@ -181,4 +251,29 @@ pub fn compileoptions_normalize_mir_optimization(opts: CompileOptions) -> Compil
     normalized.collection_memory_budget_bytes = collection_memory_budget_bytes
     normalized.xray_enabled = xray_enabled
     normalized.nogc_require_strict = nogc_require_strict
+    normalized.managed_build_phase = opts.managed_build_phase
+    normalized.target_debug_request = opts.target_debug_request
     normalized
+
+pub fn compileoptions_target_profile_v1(raw_options: CompileOptions,
+        capability: TargetTraceCapabilityV1) -> Result<NormalizedTargetProfileV1, text>:
+    val options = compileoptions_normalize_mir_optimization(raw_options)
+    val phase = options.managed_build_phase
+    if phase != "" and phase != "phase3" and phase != "phase4":
+        return Err("TARGET-PROFILE-E-PHASE: unknown managed build phase")
+    if (phase == "phase3" and (options.release or options.profile != "dev")) or
+            (phase == "phase4" and (not options.release or options.profile != "prod")):
+        return Err("TARGET-PROFILE-E-CONFLICT: managed phase and target profile differ")
+    if options.release and options.xray_enabled:
+        return Err("TARGET-PROFILE-E-CONFLICT: release forbids XRay instrumentation")
+    val profile = if options.release: TargetBuildProfileV1.Release else: TargetBuildProfileV1.Development
+    target_profile_normalize_v1(profile, options.target_debug_request, phase == "phase3", capability)
+
+export TargetBuildProfileV1, TargetDebugRequestV1, TargetTraceCapabilityV1
+export TargetTraceResolutionV1, NormalizedTargetProfileV1
+
+pub fn target_profile_identity_text_v1(profile: NormalizedTargetProfileV1) -> text:
+    var identity = ""
+    for field in target_profile_identity_fields_v1(profile):
+        identity = identity + field.len().to_text() + ":" + field
+    identity

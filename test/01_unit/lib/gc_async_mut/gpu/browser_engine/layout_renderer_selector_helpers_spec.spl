@@ -1,0 +1,113 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl 1%
+# @tag: unit, browser_engine, css, selectors, stacking
+#
+# Selector helpers of the layout renderer, called directly on raw attribute
+# text: the attribute-selector operators of Selectors 4 section 6 (`=`, `~=`,
+# `|=`, `^=`, `$=`, `*=`, the `i` and `s` flags, and bare presence), operand
+# unquoting, attribute-name presence with token boundaries, and the stable
+# z-index sort of positive stacking children (CSS 2.2 Appendix E: children
+# paint in z-index order, ties in document order).
+#
+# The empty-operand `^=`/`$=`/`*=` rows are kept out of this spec; see
+# doc/08_tracking/bug/web_selector_attr_colon_empty_operand_universal_compound_2026-11-15.md.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_selectors.{
+    attr_selector_matches, unquote_css_attr_value, attr_name_present,
+    _sort_positive_z_indices, _z_index_sort_before
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{renderer_default_style, Style}
+
+val ATTRS: text = " data-v=\"Alpha Beta\" lang=\"en-US\" data-flag data-empty=\"\""
+
+fn _styles(z: [i32]) -> [Style]:
+    var out: [Style] = []
+    for v in z:
+        var st = renderer_default_style()
+        st.z_index = v
+        out.push(st)
+    out
+
+describe "Attribute operators":
+
+    context "value operators":
+
+        it "matches an exact value, case-sensitive by default":
+            expect(attr_selector_matches(ATTRS, "data-v=\"Alpha Beta\"")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v=\"alpha beta\"")).to_equal(false)
+            expect(attr_selector_matches(ATTRS, "data-v=\"alpha beta\" i")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v=\"alpha beta\" s")).to_equal(false)
+
+        it "matches a whitespace-separated token":
+            expect(attr_selector_matches(ATTRS, "data-v~=Beta")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v~=beta")).to_equal(false)
+            expect(attr_selector_matches(ATTRS, "data-v~=beta I")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v~=\"\"")).to_equal(false)
+
+        it "matches a dash-separated prefix":
+            expect(attr_selector_matches(ATTRS, "lang|=en")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "lang|=en-US")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "lang|=e")).to_equal(false)
+            expect(attr_selector_matches(ATTRS, "lang|=EN i")).to_equal(true)
+
+        it "matches prefix, suffix and substring":
+            expect(attr_selector_matches(ATTRS, "data-v^='Alp'")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v^=alp")).to_equal(false)
+            expect(attr_selector_matches(ATTRS, "data-v^=alp i")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v$=Beta")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v$=BETA i")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v*=\"a B\"")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v*=\"A b\" i")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-v*=zz")).to_equal(false)
+
+        it "never matches prefix/suffix/substring on an absent attribute":
+            expect(attr_selector_matches(ATTRS, "title^=a")).to_equal(false)
+            expect(attr_selector_matches(ATTRS, "title$=a")).to_equal(false)
+            expect(attr_selector_matches(ATTRS, "title*=a")).to_equal(false)
+
+    context "presence":
+
+        it "matches a valueless and an empty-valued attribute":
+            expect(attr_selector_matches(ATTRS, "data-flag")).to_equal(true)
+            expect(attr_selector_matches(ATTRS, "data-empty")).to_equal(true)
+
+        it "does not match a name that only appears inside another name or value":
+            expect(attr_selector_matches(ATTRS, "data")).to_equal(false)
+            expect(attr_selector_matches(ATTRS, "Beta")).to_equal(false)
+            expect(attr_selector_matches(ATTRS, "  ")).to_equal(false)
+
+describe "Attribute helpers":
+
+    it "strips one pair of matching quotes":
+        expect(unquote_css_attr_value(" \"a b\" ")).to_equal("a b")
+        expect(unquote_css_attr_value("'x'")).to_equal("x")
+        expect(unquote_css_attr_value("\"x'")).to_equal("\"x'")
+        expect(unquote_css_attr_value("x")).to_equal("x")
+
+    it "finds an attribute name only at token boundaries":
+        expect(attr_name_present(" a b=1", "b")).to_equal(true)
+        expect(attr_name_present("a/", "a")).to_equal(true)
+        expect(attr_name_present(" ab=1", "b")).to_equal(false)
+        expect(attr_name_present(" bc", "b")).to_equal(false)
+        expect(attr_name_present(" b", "")).to_equal(false)
+
+describe "Positive z-index stacking order":
+
+    it "orders by z-index and keeps document order for ties":
+        val styles = _styles([5, 1, 3, 1, 2])
+        val out = _sort_positive_z_indices([0, 1, 2, 3, 4], 5, styles)
+        expect(out).to_equal([1, 3, 4, 2, 0])
+
+    it "sorts a single child and an empty list":
+        expect(_sort_positive_z_indices([2], 1, _styles([0, 0, 7]))).to_equal([2])
+        expect(_sort_positive_z_indices([], 0, _styles([1])).len()).to_equal(0)
+
+    it "compares by z-index then by index":
+        val styles = _styles([2, 1])
+        expect(_z_index_sort_before(1, 0, styles)).to_equal(true)
+        expect(_z_index_sort_before(0, 1, styles)).to_equal(false)
+        val tie = _styles([1, 1])
+        expect(_z_index_sort_before(0, 1, tie)).to_equal(true)
+        expect(_z_index_sort_before(1, 0, tie)).to_equal(false)

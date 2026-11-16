@@ -41,7 +41,7 @@
 #   the platform variance; a guarded C file (`#if __linux__`) or a
 #   `#[cfg(unix)]` Rust export is invisible on the host it excludes.
 # Exit: 0 = complete, 1 = missing symbols (listed as `MISSING <sym>` /
-#       `MISSING-CLOSURE <sym>`), 2 = usage / toolchain / compile failure.
+#       `MISSING-CLOSURE <sym>` / `MISSING-INTERNAL <sym>`), 2 = usage / toolchain / compile failure.
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -157,7 +157,11 @@ else
         SOURCES="$SOURCES
 $PLATFORM"
     elif [ "$(uname -s)" = Linux ]; then
+        PLATFORM=$(awk '/^pub fn runtime_core_c_platform_sources_v1/{f=1} f&&/target_os == "linux"/{getline; print; exit}' "$RC" |
+            grep -oE '"[^"]+"' | tr -d '"')
+        [ -n "$PLATFORM" ] || die "could not read the Linux runtime_core_c_platform_sources_v1 list from $RC"
         SOURCES="$SOURCES
+$PLATFORM
 hosted_cocoa
 hosted_win32"
     fi
@@ -187,6 +191,27 @@ hosted_win32"
     done | sed -E 's/^_//' >"$WORK_DIR/defined.txt"
 fi
 LC_ALL=C sort -u "$WORK_DIR/defined.txt" -o "$WORK_DIR/defined.txt"
+
+# --- bundle-internal: the Linux core-C objects resolve their own rt_*/spl_* ---
+# A listed object that references a runtime symbol only an UNLISTED source
+# defines links today only while --gc-sections drops the referencing function;
+# the go-to-end trial link (--no-gc-sections) and any new caller expose it.
+# Measured 2026-11-15: async_linux_epoll.c's rt_epoll_wait called
+# spl_array_new_i64, defined only by the excluded runtime.c. Linux only: the
+# other hosts' bundles have not been measured.
+IMISS=-1
+if [ -z "$RUNTIME_LIB" ] && [ "$HOST_OS" = linux ]; then
+    : >"$WORK_DIR/bundle_undef.txt"; : >"$WORK_DIR/bundle_def.txt"
+    for obj in "$WORK_DIR"/obj/*.o; do
+        case "$(basename "$obj" .o)" in hosted_cocoa|hosted_win32) continue ;; esac
+        "$NM" -u "$obj" 2>/dev/null | awk '{print $NF}' >>"$WORK_DIR/bundle_undef.txt"
+        "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}' >>"$WORK_DIR/bundle_def.txt"
+    done
+    grep -E '^(rt|spl)_' "$WORK_DIR/bundle_undef.txt" | LC_ALL=C sort -u >"$WORK_DIR/bundle_undef_rt.txt" || true
+    LC_ALL=C sort -u "$WORK_DIR/bundle_def.txt" -o "$WORK_DIR/bundle_def.txt"
+    LC_ALL=C comm -23 "$WORK_DIR/bundle_undef_rt.txt" "$WORK_DIR/bundle_def.txt" >"$WORK_DIR/missing_internal.txt"
+    IMISS=$(wc -l <"$WORK_DIR/missing_internal.txt" | tr -d ' ')
+fi
 
 # --- closure-strict: what THIS platform's real link can define ----------------
 if [ "$CLOSURE_STRICT" = 1 ]; then
@@ -284,7 +309,11 @@ if [ "$CLOSURE_STRICT" = 1 ]; then
     printf 'runtime-link-completeness: closure-strict host=%s required=%s defined=%s missing=%s\n' "$HOST_OS" "$CREQ" "$CDEF" "$CMISS"
     sed 's/^/MISSING-CLOSURE /' "$WORK_DIR/missing_closure.txt"
 fi
-if [ "$MISS" -gt 0 ] || [ "$CMISS" -gt 0 ]; then
+if [ "$IMISS" -ge 0 ]; then
+    printf 'runtime-link-completeness: bundle-internal host=%s unresolved=%s\n' "$HOST_OS" "$IMISS"
+    sed 's/^/MISSING-INTERNAL /' "$WORK_DIR/missing_internal.txt"
+fi
+if [ "$MISS" -gt 0 ] || [ "$CMISS" -gt 0 ] || [ "$IMISS" -gt 0 ]; then
     sed 's/^/MISSING /' "$WORK_DIR/missing.txt"
     printf 'STATUS: FAIL\n'
     exit 1

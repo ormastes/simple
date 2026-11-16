@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Purpose: Pin that a growing flex item clamped by an explicit `min-width` is
+frozen and the remaining free space is re-shared among the other items
+(CSS Flexbox 1 §9.7, min violations).
+Audience: browser-engine flex layout maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `body{margin:0}`, rows
+`display:flex;width:100px;height:10px`, getBoundingClientRect x,width,
+2026-11-16):
+
+| row                                                     | items x,w                   |
+|---------------------------------------------------------|-----------------------------|
+| `flex:1;min-width:70px` + `flex:1`                      | 0,70 / 70,30                |
+| `flex:1;min-width:40px;padding:0 5px` + `flex:1` x2     | 0,50 / 50,25 / 75,25        |
+| `flex:1;min-width:30px` + `flex:1` (no violation)       | 0,50 / 50,50                |
+| `flex:1;min-width:60px;box-sizing:border-box;padding:0 10px` + `flex:1` | 0,60 / 60,40 |
+
+Filed as `flex_min_w` in
+doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLEX-MIN-WIDTH-FREEZE-001 — a min-width clamp freezes a flex item and re-shares the rest.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .r{{display:flex;width:100px;height:10px}} .r div{{height:10px}}</style></head><body>" +
+    "<div class=r><div id=a style=\"flex:1;min-width:70px\"></div><div id=b style=\"flex:1\"></div></div>" +
+    "<div class=r><div id=c style=\"flex:1;min-width:40px;padding:0 5px\"></div><div id=d style=\"flex:1\"></div><div id=e style=\"flex:1\"></div></div>" +
+    "<div class=r><div id=f style=\"flex:1;min-width:30px\"></div><div id=g style=\"flex:1\"></div></div>" +
+    "<div class=r><div id=h style=\"flex:1;min-width:60px;box-sizing:border-box;padding:0 10px\"></div><div id=i style=\"flex:1\"></div></div>" +
+    "</body></html>"
+
+fn _xw(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "x") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "w")
+
+describe "flex min-width freeze":
+    it "AC-1: the clamped item keeps its min-width":
+        expect(_xw("a")).to_equal("0,70")
+
+    it "AC-2: the sibling takes only what is left":
+        expect(_xw("b")).to_equal("70,30")
+
+    it "AC-3: content-box min-width plus padding is the frozen outer size":
+        expect(_xw("c")).to_equal("0,50")
+
+    it "AC-4: two siblings share the rest evenly":
+        expect(_xw("d") + " " + _xw("e")).to_equal("50,25 75,25")
+
+    it "AC-5: no violation leaves an even split":
+        expect(_xw("f") + " " + _xw("g")).to_equal("0,50 50,50")
+
+    it "AC-6: border-box min-width":
+        expect(_xw("h") + " " + _xw("i")).to_equal("0,60 60,40")

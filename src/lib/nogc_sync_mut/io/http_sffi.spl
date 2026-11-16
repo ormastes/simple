@@ -31,9 +31,6 @@ extern fn rt_http_patch(url: text, body: text, content_type: text) -> (i64, text
 @unsafe(reason: "raw URL text and runtime-owned response tuple ABI", capabilities: [ffi])
 extern fn rt_http_head(url: text) -> (i64, text, text)
 
-# Upload file
-@unsafe(reason: "raw URL/path/field text and runtime-owned response tuple ABI", capabilities: [ffi])
-extern fn rt_http_upload(url: text, file_path: text, field_name: text) -> (i64, text, text)
 
 # --- HTTP Client Configuration ---
 
@@ -41,8 +38,6 @@ extern fn rt_http_upload(url: text, file_path: text, field_name: text) -> (i64, 
 extern fn rt_http_client_create() -> i64
 @unsafe(reason: "raw client handle ABI with bounded timeout policy", capabilities: [ffi])
 extern fn rt_http_client_set_timeout(client: i64, timeout_ms: i64) -> bool
-@unsafe(reason: "raw client handle and header text ABI", capabilities: [ffi])
-extern fn rt_http_client_set_header(client: i64, key: text, value: text) -> bool
 @unsafe(reason: "raw client handle plus method/URL/header-array/body ABI and runtime-owned response tuple", capabilities: [ffi])
 extern fn rt_http_client_request(
     client: i64,
@@ -54,20 +49,9 @@ extern fn rt_http_client_request(
 @unsafe(reason: "invalidates a generation-encoded client handle", capabilities: [ffi])
 extern fn rt_http_client_destroy(client: i64)
 
-# --- HTTP Server ---
+# --- HTTP Server / upload / client headers: pure Simple (http_server_core) ---
 
-@unsafe(reason: "raw port ABI; zero is an invalid server handle", capabilities: [ffi])
-extern fn rt_http_server_create(port: i64) -> i64
-@unsafe(reason: "raw server handle and route/handler text ABI", capabilities: [ffi])
-extern fn rt_http_server_route(server: i64, method: text, path: text, handler: text) -> bool
-@unsafe(reason: "raw server handle and filesystem path text ABI", capabilities: [ffi])
-extern fn rt_http_server_static(server: i64, path: text, dir: text) -> bool
-@unsafe(reason: "raw server handle and process-network side effect ABI", capabilities: [ffi])
-extern fn rt_http_server_start(server: i64) -> bool
-@unsafe(reason: "raw server handle and process-network side effect ABI", capabilities: [ffi])
-extern fn rt_http_server_stop(server: i64) -> bool
-@unsafe(reason: "invalidates a raw server handle", capabilities: [ffi])
-extern fn rt_http_server_destroy(server: i64)
+export use std.nogc_sync_mut.io.http_server_core.{rt_http_upload, rt_http_client_set_header, http_client_default_headers, http_client_forget_headers, rt_http_server_create, rt_http_server_route, rt_http_server_static, rt_http_server_start, rt_http_server_stop, rt_http_server_destroy, HTTP_SERVER_ECHO_HANDLER}
 
 # --- Request/Response Handling ---
 
@@ -75,14 +59,8 @@ extern fn rt_http_server_destroy(server: i64)
 
 # --- WebSocket (Optional) ---
 
-@unsafe(reason: "raw URL text ABI; zero is an invalid WebSocket handle", capabilities: [ffi])
-extern fn rt_ws_connect(url: text) -> i64
-@unsafe(reason: "raw WebSocket handle and message text ABI", capabilities: [ffi])
-extern fn rt_ws_send(ws: i64, message: text) -> bool
-@unsafe(reason: "raw WebSocket handle and runtime-owned text ABI; empty text is ambiguous", capabilities: [ffi])
-extern fn rt_ws_receive(ws: i64) -> text
-@unsafe(reason: "consumes a raw WebSocket handle with boolean status", capabilities: [ffi])
-extern fn rt_ws_close(ws: i64) -> bool
+# Implemented in pure Simple over the sync TCP stream (RFC 6455 client).
+export use std.nogc_sync_mut.io.ws_client_core.{rt_ws_connect, rt_ws_send, rt_ws_receive, rt_ws_close}
 
 # --- Utilities ---
 
@@ -171,11 +149,12 @@ fn http_client_request(client: HttpClient, method: HttpMethod, url: text, header
     else:
         val method_str = method_to_string(method)
         unsafe(capabilities: [ffi]):
-            make_http_response(rt_http_client_request(client.handle, method_str, url, headers, body))
+            make_http_response(rt_http_client_request(client.handle, method_str, url, http_client_default_headers(client.handle) + headers, body))
 
 fn http_client_destroy(client: HttpClient):
     """Release HTTP client resources."""
     if client.is_valid:
+        http_client_forget_headers(client.handle)
         unsafe(capabilities: [ffi]):
             rt_http_client_destroy(client.handle)
 
@@ -198,7 +177,8 @@ fn http_server_new(port: i64) -> HttpServer:
 fn http_server_route(server: HttpServer, method: text, path: text, handler: text) -> bool:
     """
     Register route handler.
-    Handler is a function name that will be called with (request, response).
+    Handler is the literal response body; the reserved handler `@echo`
+    (HTTP_SERVER_ECHO_HANDLER) answers with the raw request head and body.
     """
     if not server.is_valid:
         false

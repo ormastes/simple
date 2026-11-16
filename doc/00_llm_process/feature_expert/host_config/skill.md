@@ -64,3 +64,26 @@ os, LLVM root/version, gpu) out of scripts and tracked files.
   fixture hooks (`*_MEMINFO_PATH`) need `*_TEST_FIXTURE=1` and monitor mode;
   the receipt records `host_total_source`, `cap_source`, `cap_bound`. Gate:
   `scripts/bootstrap/tests/tree-rss-cap-policy-test.shs`.
+
+## Shared orchestration server contexts (2026-11-15)
+
+The planned HOST CONFIG `server_config` reference selects a separate strict
+server/context SDN document. Keep machine build defaults, endpoint selection,
+and orchestration enrollment intent under their existing owners. See the
+[server-context guide](../../../07_guide/tooling/orchestration_server_contexts.md),
+[architecture](../../../04_architecture/server_contexts.md), and
+[test plan](../../../03_plan/sys_test/server_contexts.md).
+
+The pure contract is `src/lib/common/config_core/server_context_*_v1.spl`.
+Default-file absence preserves local operation; malformed or invalid explicit
+configuration must fail. The guide's CLI/discovery integration is under
+implementation. Its [manual](../../../06_spec/01_unit/lib/common/config_core/server_context_v1_spec.md)
+is manually authored and NOT_RUN; no deployed endpoint or performance evidence
+is admitted by this update.
+
+The new app loader's first slice reads user `host.sdn` (path override
+`SIMPLE_HOST_CONFIG`) and `SIMPLE_HOST_SERVER_CONFIG`, without loading machine
+or legacy per-hostname defaults. Explicit CLI config beats
+`SIMPLE_SERVERS_CONFIG`, then inline `SIMPLE_SERVERS_SDN`, then `server_config`, then implicit
+`~/.config/simple/servers.sdn`. Only absence of that implicit fallback yields
+local defaults. Selection does not mutate the environment.

@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+Purpose: Verify which leading elements the SPipe process harness CLI treats as
+entry noise (program name, script path, dispatch token) and that a known action
+is never dropped, so `simple run .../main.spl goal skills ...` reaches `goal`.
+Audience: SPipe/tooling engineers who maintain the harness CLI entry path.
+## Operator workflow
+Run with the test runner; a red scenario names the argument shape that regressed.
+## Compatibility and limitations
+Pure function only; the real entry paths are exercised by running the command.
+Troubleshooting: measured `run` shape is `[goal, skills, ...]` with no program name.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.spipe_process_harness.entry_args.{strip_entry_args}
+
+fn joined(raw: [text]) -> text:
+    strip_entry_args(raw).items.join("|")
+
+describe "harness entry argument normalisation":
+    it "keeps the first action when no program name is present (simple run shape)":
+        # @req SKILL-005
+        step("Strip args exactly as `bin/simple.exe run main.spl goal skills` delivers them")
+        expect(joined(["goal", "skills", "--task", "dev"])).to_equal("goal|skills|--task|dev")
+        step("Every known action survives in first position")
+        expect(joined(["state", "--feature", "x"])).to_equal("state|--feature|x")
+        expect(joined(["gate"])).to_equal("gate")
+
+    it "drops a leading program name":
+        # @req SKILL-005
+        step("Bare, relative and absolute program names")
+        expect(joined(["simple", "goal", "skills"])).to_equal("goal|skills")
+        expect(joined(["bin/simple", "hud"])).to_equal("hud")
+        expect(joined(["C:\\dev\\simple\\bin\\simple.exe", "deploy"])).to_equal("deploy")
+
+    it "drops everything up to and including the script path":
+        # @req SKILL-005
+        step("Script path in the middle")
+        expect(joined(["simple", "run", "src/app/spipe_process_harness/main.spl", "goal", "start"])).to_equal("goal|start")
+        expect(joined(["x", "/repo/src/app/spipe_process_harness/main.spl", "gate"])).to_equal("gate")
+
+    it "drops the dispatch token but never an action":
+        # @req SKILL-005
+        step("Dispatch token with and without a program name")
+        expect(joined(["spipe-process-harness", "goal", "status"])).to_equal("goal|status")
+        expect(joined(["bin/simple", "spipe-process-harness", "hook"])).to_equal("hook")
+        step("A flag in first position is not a program name")
+        expect(joined(["--help"])).to_equal("--help")
+
+    it "returns nothing for empty args":
+        # @req SKILL-005
+        step("Empty and entry-only inputs")
+        expect(strip_entry_args([]).items.len()).to_equal(0)
+        expect(strip_entry_args(["simple"]).items.len()).to_equal(0)

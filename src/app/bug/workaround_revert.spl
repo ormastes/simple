@@ -1,0 +1,37 @@
+# CU-016: expired workarounds (linked bug fixed/closed, or the marker's
+# `expires=YYYY-MM-DD` date has passed) become explicit revert-candidate rows.
+# Pure; never applies anything. `today` is injected as YYYY-MM-DD.
+use app.bug.workaround_index.{WorkaroundIndex}
+use std.database.bug.{BugDatabase, BugStatus}
+
+export RevertCandidate, workaround_revert_candidates, revert_candidate_message
+
+struct RevertCandidate:
+    bug_id: text
+    path: text
+    line: i64
+    recover: text
+    trigger: text
+    authorized: bool
+
+fn workaround_revert_candidates(index: WorkaroundIndex, db: BugDatabase, today: text) -> [RevertCandidate]:
+    var out: [RevertCandidate] = []
+    for link in index.links:
+        var trigger = ""
+        match db.get_bug(link.bug_id):
+            case Some(bug):
+                if bug.status == BugStatus.Fixed or bug.status == BugStatus.Closed:
+                    trigger = "fix_landed"
+            case None: pass
+        # ISO dates compare lexicographically; the expiry day itself is still valid.
+        if trigger == "" and link.expires != "" and today > link.expires:
+            trigger = "expired"
+        if trigger != "":
+            out.push(RevertCandidate(bug_id: link.bug_id, path: link.path, line: link.line,
+                recover: link.recover, trigger: trigger, authorized: false))
+    out
+
+fn revert_candidate_message(c: RevertCandidate) -> text:
+    var m = "{c.bug_id}: revert candidate {c.path}:{c.line} ({c.trigger}); not applied, needs explicit authorization"
+    if c.recover != "": m = m + "; original at {c.recover}"
+    m

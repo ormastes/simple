@@ -14,13 +14,17 @@ export routes and origins), so a body-only edit leaves every OTHER module's
 key unchanged; the edited module still misses through its own source digest
 in `hir_cache_key`. Any interface change still moves the digest. A surface
 without a cacheable semantic digest falls back to its content hash (counted).
-`SIMPLE_HIR_CACHE_CLOSURE_KEY=content` keeps the old rows for bisecting.
+Since 2026-11-15 interface rows are opt-in (`SIMPLE_HIR_CACHE_CLOSURE_KEY=interface`)
+and content rows are the default: HIR shard workers hold empty-text placeholder
+surfaces whose interface digest is an empty module's, so interface rows broke
+the shard inventory (hir_worker_placeholder_closure_digest_spec). These
+scenarios run with the opt-in set.
 Audience: compiler engineers maintaining the HIR cache.
 """
 
 # @tag: unit, compiler, driver, cache
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, before_each, after_each}
 use std.spec.step
 use std.io_runtime.{env_set, env_remove_process}
 use compiler.common.config.{Logger}
@@ -64,6 +68,12 @@ fn hik_registry(leaf_source: text, force_fallback: bool) -> ModuleSurfacesByName
     reg
 
 describe "HIR cache closure key follows interfaces, not bytes":
+    before_each:
+        val _set = env_set("SIMPLE_HIR_CACHE_CLOSURE_KEY", "interface")
+
+    after_each:
+        val _cleared = env_remove_process("SIMPLE_HIR_CACHE_CLOSURE_KEY")
+
     it "keeps the closure digest across a body-only edit":
         step("Edit only area's body in the leaf")
         val before = hik_digest(hik_base_leaf())
@@ -86,12 +96,11 @@ describe "HIR cache closure key follows interfaces, not bytes":
     it "moves the closure digest on a trait default body edit":
         expect(hik_digest(hik_leaf("i64", "p: Pt", "p.x * 2", "3", "9"))).to_not_equal(hik_digest(hik_base_leaf()))
 
-    it "keeps the legacy content rows selectable":
-        step("SIMPLE_HIR_CACHE_CLOSURE_KEY=content restores byte keying")
-        val _set = env_set("SIMPLE_HIR_CACHE_CLOSURE_KEY", "content")
+    it "keys by content when the opt-in is unset (the default)":
+        step("No SIMPLE_HIR_CACHE_CLOSURE_KEY: a body-only edit moves the digest")
+        val _cleared = env_remove_process("SIMPLE_HIR_CACHE_CLOSURE_KEY")
         val before = hik_digest(hik_base_leaf())
         val after = hik_digest(hik_leaf("i64", "p: Pt", "p.x * 3", "3", "4"))
-        val _cleared = env_remove_process("SIMPLE_HIR_CACHE_CLOSURE_KEY")
         expect(after).to_not_equal(before)
 
     it "a body edit in a fallback surface still moves the closure digest":

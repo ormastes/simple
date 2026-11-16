@@ -373,8 +373,14 @@ impl<'a> Parser<'a> {
                         // `parse_expression` stopped at `print`, leaking the
                         // argument (`"b"`) as a stray tail statement. See
                         // doc/08_tracking/bug/seed_run_main_tail_if_print_coerced_to_exit_code_2026-11-06.md.
-                        let else_expr = self.parse_expression()?;
-                        Some(Box::new(self.parse_with_no_paren_calls(else_expr)?))
+                        //
+                        // The else body may also be an ASSIGNMENT
+                        // (`if c: xs.push(v)` / `else: xs[i] = v`), exactly
+                        // as after an assignment then-body.
+                        match self.parse_expression_or_assignment()? {
+                            Node::Expression(else_expr) => Some(Box::new(else_expr)),
+                            stmt => Some(Box::new(Expr::DoBlock(vec![stmt]))),
+                        }
                     }
                 }
             } else {

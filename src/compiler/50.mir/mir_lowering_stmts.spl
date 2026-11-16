@@ -475,6 +475,35 @@ pub fn hir_unsuffixed_int_literal_value(value: HirExpr) -> i64?:
         case _: ()
     None
 
+pub fn hir_float_collection_literal(value: HirExpr, declared: HirType) -> HirExpr:
+    """`val fs: [f64] = [1, 2]`: unsuffixed int literals inside an array or
+    dict literal whose DECLARED element (dict value) type is f32/f64 become
+    float literals (int->f64 is allowed on all backends). Otherwise they were
+    boxed as tagged ints and read back as floats. Recurses through nested
+    literals; every other expression is returned unchanged."""
+    match declared.kind:
+        case HirTypeKind.Float(_):
+            if val int_value = hir_unsuffixed_int_literal_value(value):
+                return HirExpr(kind: HirExprKind.FloatLit(int_value.to_f64(), None), has_type_: true, type_: declared, span: value.span)
+        case HirTypeKind.Array(element, _):
+            match value.kind:
+                case HirExprKind.ArrayLit(elements, literal_type):
+                    var converted: [HirExpr] = []
+                    for element_value in elements:
+                        converted.push(hir_float_collection_literal(element_value, element))
+                    return HirExpr(kind: HirExprKind.ArrayLit(converted, literal_type), has_type_: value.has_type_, type_: value.type_, span: value.span)
+                case _: ()
+        case HirTypeKind.Dict(_, dict_value):
+            match value.kind:
+                case HirExprKind.DictLit(entries, key_type, value_type):
+                    var converted: [(HirExpr, HirExpr)] = []
+                    for entry in entries:
+                        converted.push((entry.0, hir_float_collection_literal(entry.1, dict_value)))
+                    return HirExpr(kind: HirExprKind.DictLit(converted, key_type, value_type), has_type_: value.has_type_, type_: value.type_, span: value.span)
+                case _: ()
+        case _: ()
+    value
+
 pub fn hir_type_is_declared_float_slot(declared: HirType) -> bool:
     """The declared-slot side of lower_int_literal_for_float_slot: a
     declared f32/f64, or an Optional wrapping one. Everything else (i64
@@ -1852,6 +1881,8 @@ impl MirLowering:
                                     self.static_scalar_locals[local.id] = true
                                 if self.exists_scalar_word_locals.contains(init_local.id):
                                     self.exists_scalar_word_locals[local.id] = true
+                                if self.presence_word_locals.contains(init_local.id) and not self.symbol_is_reassignable(symbol_value_id):
+                                    self.presence_word_locals[local.id] = self.presence_word_locals[init_local.id]
                                 self.copy_optional_record_owner(init_local.id, local.id)
                                 self.copy_result_err_record_owner(init_local.id, local.id)
                                 val found_init_hir_type = self.find_local_hir_type(init_local.id)
@@ -2936,7 +2967,7 @@ impl MirLowering:
         else:
             None
 
-    me lower_expr_for_slot(value: HirExpr, declared: HirType) -> LocalId:
+    me lower_expr_for_slot(source_value: HirExpr, declared: HirType) -> LocalId:
         """Lower `value` for a slot of DECLARED type `declared` (annotated
         binding, parameter, return type).
 
@@ -2950,6 +2981,9 @@ impl MirLowering:
         a scalar arm becomes Some, a nil arm None, an ambiguous arm is
         classified per arm. Everything else is plain lower_expr.
         doc/08_tracking/bug/optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md"""
+        var value = source_value
+        if source_value != None and declared != None:
+            value = hir_float_collection_literal(source_value, declared)
         if value != None and declared != None:
             if val float_literal = self.lower_int_literal_for_float_slot(value, declared):
                 return float_literal

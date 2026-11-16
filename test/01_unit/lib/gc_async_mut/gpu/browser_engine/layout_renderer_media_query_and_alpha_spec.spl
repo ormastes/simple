@@ -1,0 +1,88 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_css_rules.spl 1%
+# @tag: unit, browser_engine, css, media, color
+#
+# `@media` prelude evaluation against the viewport width (Media Queries 4):
+# comma groups OR together, every `(feature: value)` term of a group must
+# hold, `min-width`/`max-width` compare inclusively, and a feature the UA has
+# no preference for (`prefers-color-scheme: dark`, `hover: hover` in Chrome
+# 159 headless -- measured: a rule under it does not apply) fails its group.
+# A negative viewport is the legacy "apply every @media block" mode.
+#
+# And the alpha fraction of `rgba()`: 0..1 mapped to 0..255 rounding half up
+# (CSS Color 4 section 5.1; 0.5 -> 128 as in Chrome), with at most three
+# fraction digits and any value >= 1 opaque.
+#
+# A bare media type (`@media print`) is kept out of this spec; see
+# doc/08_tracking/bug/web_media_print_type_applies_on_screen_2026-11-15.md.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_css_rules.{_media_prelude_applies, _media_group_applies}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_alpha_fraction_range}
+
+fn _alpha(s: text) -> i32:
+    parse_alpha_fraction_range(s, 0, s.byte_len())
+
+describe "@media prelude":
+
+    context "width features":
+
+        it "compares max-width inclusively":
+            expect(_media_prelude_applies("@media (max-width: 599px)", 900)).to_equal(false)
+            expect(_media_prelude_applies("@media (max-width: 599px)", 599)).to_equal(true)
+            expect(_media_prelude_applies("@media (max-width: 599px)", 600)).to_equal(false)
+
+        it "compares min-width inclusively":
+            expect(_media_prelude_applies("@media (min-width: 600px)", 600)).to_equal(true)
+            expect(_media_prelude_applies("@media (min-width: 600px)", 599)).to_equal(false)
+
+        it "requires every term of a group":
+            val q = "@media screen and (min-width: 600px) and (max-width: 800px)"
+            expect(_media_prelude_applies(q, 700)).to_equal(true)
+            expect(_media_prelude_applies(q, 900)).to_equal(false)
+            expect(_media_prelude_applies("@media only screen and (max-width: 600px)", 900)).to_equal(false)
+
+        it "ORs comma groups":
+            val q = "@media (max-width: 400px), (min-width: 800px)"
+            expect(_media_prelude_applies(q, 900)).to_equal(true)
+            expect(_media_prelude_applies(q, 300)).to_equal(true)
+            expect(_media_prelude_applies(q, 600)).to_equal(false)
+
+    context "other features":
+
+        it "fails a group on a feature with no UA preference":
+            expect(_media_prelude_applies("@media (prefers-color-scheme: dark)", 900)).to_equal(false)
+            expect(_media_prelude_applies("@media (hover: hover)", 900)).to_equal(false)
+            expect(_media_prelude_applies("@media (hover: hover), (min-width: 10px)", 900)).to_equal(true)
+
+        it "fails a term without a value or an unclosed term":
+            expect(_media_group_applies("(color)", 900)).to_equal(false)
+            expect(_media_group_applies("(min-width: 10px", 900)).to_equal(false)
+
+    context "degenerate preludes":
+
+        it "applies an empty prelude and every block in legacy mode":
+            expect(_media_prelude_applies("@media", 900)).to_equal(true)
+            expect(_media_prelude_applies("@media (max-width: 1px)", -1)).to_equal(true)
+            expect(_media_prelude_applies("@media screen", 900)).to_equal(true)
+
+describe "rgba() alpha fraction":
+
+    it "maps a fraction to 0..255 rounding half up":
+        expect(_alpha("0.5")).to_equal(128)
+        expect(_alpha(".09")).to_equal(23)
+        expect(_alpha("0.25")).to_equal(64)
+        expect(_alpha("0")).to_equal(0)
+
+    it "keeps three fraction digits":
+        expect(_alpha("0.123456")).to_equal(31)
+
+    it "is opaque at 1 and above":
+        expect(_alpha("1")).to_equal(255)
+        expect(_alpha("1.0")).to_equal(255)
+        expect(_alpha("3")).to_equal(255)
+
+    it "reads only the leading number of a range":
+        val s = "rgba(0,0,0, 0.5 )"
+        expect(parse_alpha_fraction_range(s, 11, 17)).to_equal(128)

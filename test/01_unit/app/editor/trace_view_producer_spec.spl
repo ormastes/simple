@@ -1,0 +1,73 @@
+"""CU-014 producer: source_present / expected_generation come from the canonical
+snapshot (locator blobs on a real worktree fixture, graph generation), not defaults."""
+# @req REQ-CARET-TRC-001 REQ-CARET-TRC-003
+use std.spec.*
+use std.editor.extensions.host.{ExtensionHost, extension_host_with_builtin_handlers}
+use std.common.traceability.model.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use app.editor.trace_view_host.{TraceViewInput, view_host_render, view_host_input_from_graph}
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1}
+
+val ROOT = "build/test-artifacts/trace_view_producer"
+
+fn graph(generation: text) -> TraceGraph:
+    val subject = SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:r", kind: "worktree_preview", revision_id: "", tree_id: "t", object_format: "sha256")
+    val nodes = [TraceNode(id: "req:R-1", kind: TraceNodeKind.Requirement, title: "R one"),
+        TraceNode(id: "file:a", kind: TraceNodeKind.SourceFile, title: "a.txt")]
+    val loc = TraceLocator(entity_id: "file:a", path: "a.txt", locator_kind: "file", locator: "", blob_id: "sha256:" + sha256_text("alpha"))
+    TraceGraph(subject: subject, input_manifest_id: "i", nodes: nodes, test_definitions: [], claims: [], edges: [],
+        edge_origins: [], origins: [], locators: [loc], diagnostics: [], generation_id: generation, complete: false)
+
+fn caret_host() -> ExtensionHost:
+    val host = extension_host_with_builtin_handlers()
+    host.activate_event("onProfile:caret")
+    host
+
+fn render(i: TraceViewInput) -> [text]:
+    view_host_render(caret_host(), "trace.explorer", Some(i))
+
+fn q() -> TraceNodeQueryV1:
+    TraceNodeQueryV1(snapshot_id: "snapshot:r", operation: "list", kind: "requirements", limit: 10)
+
+fn fixture():
+    dir_create_all(ROOT)
+    file_write(ROOT + "/a.txt", "alpha")
+
+describe "trace view input producer (CU-014)":
+    it "intact worktree blob: present and rendered":
+        step("blob exists with pinned hash")
+        fixture()
+        val i = view_host_input_from_graph(graph("generation:1"), ROOT, "generation:1", q())
+        expect(i.source_present).to_equal(true)
+        expect(i.expected_generation).to_equal("generation:1")
+        expect(render(i).join(" ").contains("R one")).to_equal(true)
+
+    it "deleted blob: missing line, no content":
+        step("delete the referenced blob")
+        fixture()
+        file_remove(ROOT + "/a.txt")
+        val i = view_host_input_from_graph(graph("generation:1"), ROOT, "generation:1", q())
+        expect(i.source_present).to_equal(false)
+        val lines = render(i)
+        expect(lines.len()).to_equal(1)
+        expect(lines[0].contains("source blob is missing")).to_equal(true)
+
+    it "changed blob content is treated as missing, never as the pinned revision":
+        step("overwrite blob")
+        fixture()
+        file_write(ROOT + "/a.txt", "beta")
+        val i = view_host_input_from_graph(graph("generation:1"), ROOT, "generation:1", q())
+        expect(i.source_present).to_equal(false)
+        expect(render(i).join(" ").contains("R one")).to_equal(false)
+
+    it "graph bumped after the request: stale line, no content":
+        step("request issued at generation:1, graph now generation:2")
+        fixture()
+        val i = view_host_input_from_graph(graph("generation:2"), ROOT, "generation:1", q())
+        expect(i.expected_generation).to_equal("generation:1")
+        val lines = render(i)
+        expect(lines.len()).to_equal(1)
+        expect(lines[0].starts_with("stale:")).to_equal(true)
+        expect(lines.join(" ").contains("R one")).to_equal(false)

@@ -1,0 +1,225 @@
+"""
+## Purpose and audience
+Purpose: Pin `transparent` (and any alpha-0 colour) as a real CSS value that
+overrides an earlier colour. Every applier read a parsed colour of 0 as "no
+colour here, keep the earlier value", so `background-color:red;
+background:transparent` stayed red, `border-color:transparent` kept the
+earlier border colour, and a CSS triangle (`border:20px solid transparent;
+border-top-color:red`) painted a red rectangle instead of Chrome's mitred
+triangle.
+Audience: browser-engine style and paint maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, `--window-size=420,200`,
+screenshot pixels of TRANSPARENT_PAGE):
+- `#a` (y 0..9) `background:red;background:transparent` and `#b` (y 14..23)
+  `background-color:red;background:transparent` are white.
+- `#c` (y 28..67, 40x40) `width:0;height:0;border:20px solid transparent;
+  border-top-color:red`: row y = 28 + r (r 0..19) is #ff0000 for x in
+  r+1 .. 38-r, #ff7f7f (half coverage) at x = r and x = 39-r, white outside;
+  rows 48..67 are white.
+- `#d` (y 72..87) `color:red;color:transparent` paints no text.
+- `#e` (y 92..103) `border:4px solid blue;border-color:transparent` is white.
+- `#g` (y 108..119) `border:4px solid blue` then a later rule
+  `border-top-color:transparent`: x = 10 is white for y 108..115 and #0000ff
+  for y 116..119; x = 0 is #0000ff from y 109 (y 108 is the #7f7fff mitre).
+- `#g`'s `border:4px solid blue` is #0000ff: a named colour inside a
+  shorthand was never found, so that border painted nothing.
+- `getComputedStyle` of `#f000` / `#ff000000` is rgba(255, 0, 0, 0):
+  transparent, painted as nothing.
+- `#k` (y 124..133) `style="background:rgb(0,255,0"` (unclosed at the end of
+  the attribute) is #00ff00.
+- `#m` (y 138..177) `border-color:red transparent transparent transparent`
+  on a 0x0 box with 20px solid sides: the same triangle as `#c`, 110 px
+  lower.
+- `#n` (y 182..197) `color:rgba(0,0,0,0)` with no earlier colour paints no
+  text.
+Every painted row is checked in the 5x7 framebuffer lane and the Draw IR CPU
+lane: the Draw IR border painter drew rectangles, so its triangle was a red
+40x20 block.
+
+Text alpha page (TEXT_ALPHA_PAGE, `--window-size=420,200`, 40px bands):
+`color:rgba(0,0,0,.5)` at 12px and 32px never paints darker than #7f7f7f
+(127 per channel, 4 and 257 pixels at it); `color:rgba(255,0,0,.5)` at 32px
+is #ff7f7f at its darkest. Both the 5x7 framebuffer lane and the Draw IR
+CPU lane wrote the glyph colour opaque (black, #ff0000).
+
+Review page (REVIEW_PAGE, `--window-size=420,200`): `#o` a later
+`outline:3px solid transparent` rule leaves white around the box ((1, 8),
+(12, 2)); `#p` (y 26..41) `color:#f000` alone in its rule paints no text;
+`#q` (y 50..69) `width:0;white-space:nowrap;border:5px solid blue` stays 10px
+wide -- (7, 52) and (1, 60) blue, (12, 55) white; `#s` (y 78..89)
+`border:4px solid;border-color:red blue` meets on the diagonal at #7f0080,
+the 50/50 mix: (0, 78), (1, 79), (3, 81), (3, 86), (0, 89); (0, 82) blue,
+(5, 78) red.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CSS-COLOR-PARSE-002 — `transparent` and alpha-0 colours override an earlier colour, and differently coloured border sides meet on a mitre, as Chrome 159 paints them.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_color, parse_color_any}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{simple_web_render_html_to_pixels_with_cpu_draw_ir_backend}
+
+val TRANSPARENT_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{width:20px;height:10px;margin:0 0 4px 0}}#a{{background:red;background:transparent}}#b{{background-color:red;background:transparent}}#c{{width:0;height:0;border:20px solid transparent;border-top-color:red}}#d{{color:red;color:transparent;font:16px/16px sans-serif;height:16px}}#e{{border:4px solid blue;border-color:transparent;height:4px;width:12px}}#g{{border:4px solid blue;height:4px;width:12px}}#g{{border-top-color:transparent}}#k{{width:420px;height:10px}}#m{{width:0;height:0;border-style:solid;border-width:20px;border-color:red transparent transparent transparent}}#n{{color:rgba(0,0,0,0);font:16px/16px sans-serif;height:16px}}</style></head><body><div id=a></div><div id=b></div><div id=c></div><div id=d>MMMM</div><div id=e></div><div id=g></div><div id=k style=\"background:rgb(0,255,0\"></div><div id=m></div><div id=n>MMMM</div></body></html>"
+
+val TEXT_ALPHA_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{margin:0;height:40px}}#a{{color:rgba(0,0,0,.5);font:12px/40px sans-serif}}#b{{color:rgba(0,0,0,.5);font:32px/40px sans-serif}}#c{{color:rgba(255,0,0,.5);font:32px/40px sans-serif}}</style></head><body><div id=a>MMMM</div><div id=b>MMMM</div><div id=c>MMMM</div></body></html>"
+
+val REVIEW_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}div{{font:16px/16px sans-serif;height:16px;margin:0 0 8px 0}}#o{{outline:3px solid blue;width:20px;height:10px;margin:4px 4px 12px 4px}}#o{{outline:3px solid transparent}}#p{{color:#f000}}#s{{border:4px solid;border-color:red blue;width:12px;height:4px}}#q{{width:0;white-space:nowrap;height:10px;border:5px solid blue;color:#fff}}</style></head><body><div id=o></div><div id=p>MMMM</div><div id=q>MMMM</div><div id=s></div></body></html>"
+
+# Text pixels in the 40px band at `y0` and the darkest channel among them.
+fn band_text(px: [u32], y0: i32) -> (i32, i32):
+    var n = 0
+    var darkest = 255
+    var y = y0
+    while y < y0 + 40:
+        var x = 0
+        while x < 200:
+            val c = px[x + y * 420] & 0xFFFFFFu32
+            if c != 0xFFFFFFu32:
+                n = n + 1
+                for shift in [16u32, 8u32, 0u32]:
+                    val v = ((c >> shift) & 255u32) as i32
+                    if v < darkest:
+                        darkest = v
+            x = x + 1
+        y = y + 1
+    (n, darkest)
+
+# Largest channel difference between Simple's pixel and a Chrome colour.
+fn off(px: [u32], x: i32, y: i32, chrome: u32) -> i32:
+    val p = px[x + y * 420]
+    var m = 0
+    for shift in [16u32, 8u32, 0u32]:
+        val a = ((p >> shift) & 255u32) as i32
+        val b = ((chrome >> shift) & 255u32) as i32
+        val d = if a > b: a - b else: b - a
+        if d > m:
+            m = d
+    m
+
+fn render() -> [u32]:
+    simple_web_render_html_to_pixels_with_engine2d_backend(TRANSPARENT_PAGE, 420, 200, "cpu_simd")
+
+fn render_lane(lane: i32) -> [u32]:
+    if lane == 0:
+        return render()
+    simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(TRANSPARENT_PAGE, 420, 200, "cpu_simd")
+
+# Mismatching pixels of a 40x40 CSS triangle whose top edge is at `top`.
+fn triangle_bad(px: [u32], top: i32) -> i32:
+    var bad = 0
+    var r = 0
+    while r < 20:
+        var x = 0
+        while x < 42:
+            val want = if x > r and x < 39 - r: 0xff0000u32 elif x == r or x == 39 - r: 0xff7f7fu32 else: 0xffffffu32
+            if off(px, x, top + r, want) > 1:
+                bad = bad + 1
+            x = x + 1
+        r = r + 1
+    bad
+
+describe "CSS transparent as a value":
+    it "AC-1: `background:transparent` overrides an earlier background colour":
+        val px = render()
+        step("Chrome 159: #a (y 0..9) and #b (y 14..23) are white")
+        expect(off(px, 5, 5, 0xffffffu32)).to_equal(0)
+        expect(off(px, 5, 18, 0xffffffu32)).to_equal(0)
+
+    it "AC-2: a CSS triangle -- transparent sides and a mitred red top":
+        for lane in [0, 1]:
+            val px = render_lane(lane)
+            step("Chrome 159: row 28+r is red for x r+1..38-r, half red at x r and 39-r, white outside")
+            expect(triangle_bad(px, 28)).to_equal(0)
+            step("Chrome 159: rows 48..67 (the transparent bottom half) are white")
+            expect(off(px, 20, 50, 0xffffffu32)).to_equal(0)
+            expect(off(px, 2, 60, 0xffffffu32)).to_equal(0)
+            expect(off(px, 37, 60, 0xffffffu32)).to_equal(0)
+            step("Chrome 159: `border-color:red transparent transparent transparent` is the same triangle at y 138")
+            expect(triangle_bad(px, 138)).to_equal(0)
+            expect(off(px, 20, 165, 0xffffffu32)).to_equal(0)
+
+    it "AC-3: `color:transparent` paints no text":
+        val px = render()
+        step("Chrome 159: rows 72..87 (#d) and 182..197 (#n, rgba(0,0,0,0)) are white across the text")
+        var dark = 0
+        for y0 in [72, 182]:
+            var y = y0
+            while y < y0 + 16:
+                var x = 0
+                while x < 80:
+                    if off(px, x, y, 0xffffffu32) > 0:
+                        dark = dark + 1
+                    x = x + 1
+                y = y + 1
+        expect(dark).to_equal(0)
+
+    it "AC-4: `border-color:transparent` and a later `border-top-color:transparent` clear the earlier colour":
+        for lane in [0, 1]:
+            val px = render_lane(lane)
+            step("Chrome 159: #e (y 92..103) is white on every side")
+            expect(off(px, 1, 97, 0xffffffu32)).to_equal(0)
+            expect(off(px, 10, 93, 0xffffffu32)).to_equal(0)
+            expect(off(px, 18, 97, 0xffffffu32)).to_equal(0)
+            expect(off(px, 10, 102, 0xffffffu32)).to_equal(0)
+            step("Chrome 159: #g x = 10 is white for y 108..115 and blue for 116..119; x = 0 is blue from y 109")
+            expect(off(px, 10, 109, 0xffffffu32)).to_equal(0)
+            expect(off(px, 10, 117, 0x0000ffu32)).to_equal(0)
+            expect(off(px, 0, 112, 0x0000ffu32)).to_equal(0)
+
+    it "AC-5: an unclosed colour function at the end of an inline style still applies":
+        val px = render()
+        step("Chrome 159: #k (y 124..133) is #00ff00")
+        expect(off(px, 5, 128, 0x00ff00u32)).to_equal(0)
+        expect(off(px, 300, 128, 0x00ff00u32)).to_equal(0)
+
+    it "AC-6: alpha-0 hex is transparent and a named colour inside a shorthand is found":
+        step("Chrome 159: `#f000` and `#ff000000` compute to rgba(255, 0, 0, 0)")
+        expect(parse_color("#f000")).to_equal(0u32)
+        expect(parse_color("#ff000000")).to_equal(0u32)
+        step("Chrome 159: `border:4px solid blue` paints #0000ff")
+        expect(parse_color_any("4px solid blue")).to_equal(0xFF0000FFu32)
+        expect(parse_color_any("1px dashed rebeccapurple")).to_equal(0xFF663399u32)
+        expect(parse_color_any("4px solid")).to_equal(0u32)
+
+    it "AC-7: half-transparent text blends in the 5x7 lane and the Draw IR CPU lane":
+        for lane in [0, 1]:
+            val px = if lane == 0: simple_web_render_html_to_pixels_with_engine2d_backend(TEXT_ALPHA_PAGE, 420, 200, "cpu_simd") else: simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(TEXT_ALPHA_PAGE, 420, 200, "cpu_simd")
+            step("Chrome 159: rgba(0,0,0,.5) text is never darker than 127 per channel")
+            for y0 in [0, 40]:
+                val (n, darkest) = band_text(px, y0)
+                expect(n > 0).to_equal(true)
+                expect(darkest >= 126).to_equal(true)
+            step("Chrome 159: rgba(255,0,0,.5) text is #ff7f7f at its darkest")
+            val (rn, rdark) = band_text(px, 80)
+            expect(rn > 0).to_equal(true)
+            expect(rdark >= 126).to_equal(true)
+
+    it "AC-8: dispatch-path colours, `width:0` with nowrap, and the mitre pixel mix":
+        for lane in [0, 1]:
+            val px = if lane == 0: simple_web_render_html_to_pixels_with_engine2d_backend(REVIEW_PAGE, 420, 200, "cpu_simd") else: simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(REVIEW_PAGE, 420, 200, "cpu_simd")
+            step("Chrome 159: a later `outline:3px solid transparent` paints no outline")
+            expect(off(px, 1, 8, 0xffffffu32)).to_equal(0)
+            expect(off(px, 12, 2, 0xffffffu32)).to_equal(0)
+            step("Chrome 159: `color:#f000` paints no text (y 26..41)")
+            var dark = 0
+            var y = 26
+            while y < 42:
+                var x = 0
+                while x < 100:
+                    if off(px, x, y, 0xffffffu32) > 0:
+                        dark = dark + 1
+                    x = x + 1
+                y = y + 1
+            expect(dark).to_equal(0)
+            step("Chrome 159: `width:0;white-space:nowrap` keeps the box 10px wide")
+            expect(off(px, 7, 52, 0x0000ffu32)).to_equal(0)
+            expect(off(px, 1, 60, 0x0000ffu32)).to_equal(0)
+            expect(off(px, 12, 55, 0xffffffu32)).to_equal(0)
+            step("Chrome 159: red top/bottom meet blue sides at #7f0080")
+            for xy in [(0, 78), (1, 79), (3, 81), (3, 86), (0, 89)]:
+                expect(off(px, xy.0, xy.1, 0x7f0080u32) <= 1).to_equal(true)
+            expect(off(px, 0, 82, 0x0000ffu32)).to_equal(0)
+            expect(off(px, 5, 78, 0xff0000u32)).to_equal(0)

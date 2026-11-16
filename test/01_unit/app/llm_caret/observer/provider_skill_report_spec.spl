@@ -1,0 +1,74 @@
+# Purpose and audience: provider loaded-skill reporting evidence (Claude Skill tool hook -> session status -> checklist), for the caret team.
+# @req CU-020
+
+use std.spec.*
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredHookCorrelation}
+use app.llm_caret.messaging.adapter.agent.hook_bridge.{drain_hook_events}
+use app.llm_caret.observer.provider_adapters.{claude_loaded_skill}
+use app.llm_caret.observer.observer_log.{observer_reset, observer_loaded_skills}
+use app.llm_caret.observer.session_status.{session_loaded_skills_text}
+use app.llm_caret.workbench.session_contract.{SessionId, SessionView, InputMode, new_session_view, new_draft}
+use app.llm_caret.workbench.tui_layout.{compute_layout, CompactView}
+use app.llm_caret.workbench.tui_view.{new_render_input, render_workbench}
+use app.llm_caret.workbench.capability_checklist.{CapabilityStatus, CapabilityProbes, capability_row_for}
+
+fn _view() -> SessionView:
+    new_session_view(SessionId(value: "builder", generation: 1), "builder", "claude")
+
+fn _enqueue(store: PureSqlMessagingStore, id: text, name: text, payload: text, at: i64):
+    store.enqueue_hook_event(id, "claude", name, payload, at)
+    store.put_hook_correlation(StoredHookCorrelation(event_id: id, task_id: "t", room_id: "r", agent_id: "builder"))
+
+fn _skill_payload(name: text) -> text:
+    "{\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"" + name + "\"}}"
+
+fn _probes(skills: [text]) -> CapabilityProbes:
+    CapabilityProbes(live_panes: 1, observer_events: 1, ext_manifest_ok: true, ext_views: 5,
+        ext_leftover: 0, trace_view_declared: true, skill_count: 12, loaded_skills: skills, requested_skills: [])
+
+describe "provider loaded-skill reporting (CU-020)":
+    it "extracts a skill only from a Claude PreToolUse Skill call":
+        # @req CU-020
+        step("Skill tool call")
+        expect(claude_loaded_skill("PreToolUse", _skill_payload("spipe"))).to_equal("spipe")
+        step("other tool, other hook, empty payload")
+        expect(claude_loaded_skill("PreToolUse", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}")).to_equal("")
+        expect(claude_loaded_skill("PostToolUse", _skill_payload("spipe"))).to_equal("")
+        expect(claude_loaded_skill("PreToolUse", "{}")).to_equal("")
+
+    it "records skills from drained hooks and shows them in session status":
+        # @req CU-020
+        step("no hooks yet")
+        observer_reset()
+        expect(session_loaded_skills_text(_view())).to_equal("skills: none reported")
+        step("two skill hooks and a replay")
+        var store = PureSqlMessagingStore.open_memory()
+        _enqueue(store, "s1", "PreToolUse", _skill_payload("spipe"), 5)
+        _enqueue(store, "s2", "PreToolUse", _skill_payload("verify"), 6)
+        _enqueue(store, "s3", "PreToolUse", _skill_payload("spipe"), 7)
+        _enqueue(store, "s4", "PreToolUse", "{\"tool_name\":\"Bash\"}", 8)
+        drain_hook_events(store, 10)
+        expect(observer_loaded_skills("builder")).to_equal(["spipe", "verify"])
+        expect(observer_loaded_skills("other")).to_equal([])
+        expect(session_loaded_skills_text(_view())).to_equal("skills: spipe, verify")
+
+    it "checklist skills row reflects provider-reported loaded skills":
+        # @req CU-020
+        step("none loaded stays partial")
+        expect(capability_row_for(_probes([]), "skills").status).to_equal(CapabilityStatus.Partial)
+        step("loaded skills make the row met and name them")
+        val r = capability_row_for(_probes(["spipe"]), "skills")
+        expect(r.status).to_equal(CapabilityStatus.Met)
+        expect(r.reason).to_contain("loaded: spipe")
+
+    it "shows reported skills on the workbench status line":
+        # @req CU-020
+        step("drain a skill hook then render")
+        observer_reset()
+        var store = PureSqlMessagingStore.open_memory()
+        _enqueue(store, "t1", "PreToolUse", _skill_payload("spipe"), 5)
+        drain_hook_events(store, 10)
+        val v = _view()
+        val layout = compute_layout(160, 40, CompactView.Session, 1)
+        val input = new_render_input([v], v.id, new_draft(v.id, InputMode.Message), "roster")
+        expect(render_workbench(layout, input).join("\n")).to_contain("skills: spipe")

@@ -1,0 +1,92 @@
+# Canonical terminal-attempt metadata only. This codec never establishes
+# native absence, successful receipt claim, cleanup or reservation authority.
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct ContainerPrimaryConnectionAttemptEvidenceV3:
+    request_digest: text
+    consumption_digest: text
+    disposition: text
+    pipe_slot: Option<i64>
+    pipe_generation: Option<i64>
+
+fn attempt_reason_v3(evidence: ContainerPrimaryConnectionAttemptEvidenceV3) -> text:
+    if not builder_digest_valid_v1(evidence.request_digest) or not builder_digest_valid_v1(evidence.consumption_digest):
+        return "primary-connection-attempt-digest"
+    if evidence.disposition == "not-opened":
+        if evidence.pipe_slot.is_some() or evidence.pipe_generation.is_some():
+            return "primary-connection-attempt-unopened-identity"
+    elif evidence.disposition == "pipe-closed":
+        if evidence.pipe_slot.is_none() or evidence.pipe_generation.is_none():
+            return "primary-connection-attempt-closed-identity"
+        if evidence.pipe_slot.unwrap() < 0 or evidence.pipe_slot.unwrap() > 2147483647:
+            return "primary-connection-attempt-slot"
+        if evidence.pipe_generation.unwrap() <= 0: return "primary-connection-attempt-generation"
+    else: return "primary-connection-attempt-disposition"
+    ""
+
+fn attempt_optional_value_v3(value: Option<i64>) -> SdnValue:
+    match value:
+        case Some(number): SdnValue.Int(number)
+        case None: SdnValue.Null
+
+pub fn container_primary_connection_attempt_encode_v3(evidence: ContainerPrimaryConnectionAttemptEvidenceV3) -> Result<text, text>:
+    val reason = attempt_reason_v3(evidence)
+    if reason != "": return Err(reason)
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String("container-primary-connection-attempt-terminal"),
+        "resourceDomain": SdnValue.String("engine-attach-attempt"),
+        "provider": SdnValue.String("windows-docker-process"),
+        "requestDigest": SdnValue.String(evidence.request_digest),
+        "consumptionDigest": SdnValue.String(evidence.consumption_digest),
+        "disposition": SdnValue.String(evidence.disposition),
+        "pipeSlot": attempt_optional_value_v3(evidence.pipe_slot),
+        "pipeGeneration": attempt_optional_value_v3(evidence.pipe_generation),
+        "readPending": SdnValue.Bool(false), "writePending": SdnValue.Bool(false)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn attempt_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("primary-connection-attempt-text:" + key)
+
+fn attempt_optional_integer_v3(fields: Dict<text, SdnValue>, key: text) -> Result<Option<i64>, text>:
+    match fields[key]:
+        case SdnValue.Null: Ok(None)
+        case SdnValue.Int(value): Ok(Some(value))
+        case _: Err("primary-connection-attempt-integer-or-null:" + key)
+
+pub fn container_primary_connection_attempt_decode_v3(source: text) -> Result<ContainerPrimaryConnectionAttemptEvidenceV3, text>:
+    if source.byte_len() == 0 or source.byte_len() > 4096: return Err("primary-connection-attempt-source-bound")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("primary-connection-attempt-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("primary-connection-attempt-object")
+    val keys = ["version", "kind", "resourceDomain", "provider", "requestDigest", "consumptionDigest",
+        "disposition", "pipeSlot", "pipeGeneration", "readPending", "writePending"]
+    for key in fields.keys():
+        if not keys.contains(key): return Err("primary-connection-attempt-unknown-field:" + key)
+    for key in keys:
+        if not fields.contains_key(key): return Err("primary-connection-attempt-missing-field:" + key)
+    if fields["version"] != SdnValue.Int(3) or attempt_text_v3(fields, "kind")? != "container-primary-connection-attempt-terminal":
+        return Err("primary-connection-attempt-version-or-kind")
+    if (attempt_text_v3(fields, "resourceDomain")? != "engine-attach-attempt" or
+            attempt_text_v3(fields, "provider")? != "windows-docker-process"):
+        return Err("primary-connection-attempt-domain-or-provider")
+    if fields["readPending"] != SdnValue.Bool(false) or fields["writePending"] != SdnValue.Bool(false):
+        return Err("primary-connection-attempt-pending-flags")
+    val evidence = ContainerPrimaryConnectionAttemptEvidenceV3(
+        request_digest: attempt_text_v3(fields, "requestDigest")?,
+        consumption_digest: attempt_text_v3(fields, "consumptionDigest")?,
+        disposition: attempt_text_v3(fields, "disposition")?,
+        pipe_slot: attempt_optional_integer_v3(fields, "pipeSlot")?,
+        pipe_generation: attempt_optional_integer_v3(fields, "pipeGeneration")?)
+    val canonical = container_primary_connection_attempt_encode_v3(evidence)?
+    if canonical != source: return Err("primary-connection-attempt-noncanonical")
+    Ok(evidence)

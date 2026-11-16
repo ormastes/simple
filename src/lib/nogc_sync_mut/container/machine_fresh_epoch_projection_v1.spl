@@ -1,0 +1,61 @@
+# Data correspondence used only after genuine native owners are revalidated.
+# This function returns accounting data, never an admission or custody owner.
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochObservationV1
+use std.common.contracts.container.machine_policy_v1.MachineContainerPolicyV1
+use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_decode_v1
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+
+fn fresh_epoch_native_machine_v1() -> Result<text, text>:
+    # This fixed OS identity read never invokes Podman or initializes storage.
+    # The actual epoch owner separately checks process/mount namespace origin.
+    val source = file_read_regular_no_follow_bounded("/etc/machine-id", 128)?
+    val machine = source.trim()
+    if machine.byte_len() != 32 or (source != machine and source != machine + "\n"):
+        return Err("machine-fresh-epoch-native-machine-id")
+    for ch in machine.chars():
+        if not "0123456789abcdef".contains(ch): return Err("machine-fresh-epoch-native-machine-id")
+    Ok(machine)
+
+pub fn machine_fresh_epoch_project_v1(actual: LinuxFreshEpochObservationV1, policy: MachineContainerPolicyV1,
+        principal: MachineLocalPrincipalSnapshotV1, physical: (i64, i64)) -> Result<MachineFreshEpochRecordV1, text>:
+    if (policy.mode != "standalone" or principal.platform != "linux" or principal.process_id <= 0 or
+            principal.thread_id <= 0 or principal.authority_namespace_id == "" or
+            principal.principal_id != "linux:uid:" + str(actual.service_uid) or
+            not policy.local_principals.contains(principal.principal_id)):
+        return Err("machine-fresh-epoch-local-principal-binding")
+    # Independent genuine owners may use different generation-bearing digest
+    # envelopes. The caller revalidates both actual current-process owners;
+    # this data projection does not authenticate either from a digest match.
+    if policy.native_machine_id != fresh_epoch_native_machine_v1()?:
+        return Err("machine-fresh-epoch-native-machine-binding")
+    var provider_policy = ""
+    var provider_identity = ""
+    var providers = 0
+    for provider in policy.providers:
+        if provider.backend == "linux-podman":
+            providers = providers + 1
+            provider_policy = provider.policy_bytes
+            provider_identity = provider.identity_digest
+    if providers != 1 or sha256_text(provider_policy) != actual.provider_policy_digest:
+        return Err("machine-fresh-epoch-provider-policy-binding")
+    val engine = linux_oci_engine_policy_decode_v1(provider_policy)?
+    if engine.expected_uid != actual.service_uid: return Err("machine-fresh-epoch-provider-uid-binding")
+    val cpu = if physical.0 < policy.cpu_millis: physical.0 else: policy.cpu_millis
+    val memory = if physical.1 < policy.memory_bytes: physical.1 else: policy.memory_bytes
+    val record = MachineFreshEpochRecordV1(authority_id: policy.authority_id, physical_host_id: policy.physical_host_id,
+        native_machine_id: policy.native_machine_id, epoch_id: actual.epoch_id, epoch_generation: actual.owner_generation,
+        profile_digest: actual.profile_digest, machine_policy_digest: actual.machine_policy_digest,
+        process_identity_digest: actual.process_identity_digest, principal_id: principal.principal_id,
+        service_uid: actual.service_uid, service_gid: actual.service_gid, manager_unique_name: actual.manager_unique_name,
+        partition_identity_digest: actual.partition_identity_digest, store_identity_digest: actual.store_identity_digest,
+        provider_policy_digest: actual.provider_policy_digest, provider_identity_digest: provider_identity,
+        capacity_cpu_millis: cpu, capacity_memory_bytes: memory,
+        observed_cpu_millis: actual.observed_cpu_millis, observed_memory_bytes: actual.observed_memory_bytes,
+        reserved_cpu_millis: actual.reserved_cpu_millis, reserved_memory_bytes: actual.reserved_memory_bytes,
+        outside_cpu_millis: actual.outside_cpu_millis, outside_memory_bytes: actual.outside_memory_bytes,
+        usable_cpu_millis: actual.usable_cpu_millis, usable_memory_bytes: actual.usable_memory_bytes)
+    val checked = machine_fresh_epoch_capacity_v1(record)?
+    Ok(record)

@@ -113,28 +113,66 @@ run_spec slang_pack_cli test/01_unit/app/slang_pack/main_spec.spl
 run_spec slang_pack_log_modes test/02_integration/app/slang_pack_log_modes_spec.spl
 
 SURFACE_MANIFEST="$BUILD_DIR/slang_local_readiness_surface_manifest.tsv"
-{
-    for path in \
-        test/01_unit/lib/gc_async_mut/slang/model_loader_manifest_spec.spl \
-        test/01_unit/lib/gc_async_mut/slang/model_loader_tensor_bytes_spec.spl \
-        test/01_unit/lib/gc_async_mut/slang/model_loader_stream_plan_spec.spl \
-        test/01_unit/lib/gc_async_mut/slang/model_loader_transport_spec.spl \
-        test/01_unit/lib/gc_async_mut/slang/nvfs_client/std_fs_spec.spl \
-        test/01_unit/lib/gc_async_mut/slang/model_loader_streaming_readiness_spec.spl \
-        test/01_unit/app/slang_pack/main_spec.spl \
-        test/02_integration/app/slang_pack_log_modes_spec.spl \
-        "$BUILD_DIR/manifest.log" \
-        "$BUILD_DIR/tensor_bytes.log" \
-        "$BUILD_DIR/stream_plan.log" \
-        "$BUILD_DIR/transport.log" \
-        "$BUILD_DIR/std_fs.log" \
-        "$BUILD_DIR/streaming_readiness.log" \
-        "$BUILD_DIR/slang_pack_cli.log" \
-        "$BUILD_DIR/slang_pack_log_modes.log"
-    do
-        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
-    done
-} >"$SURFACE_MANIFEST"
+SURFACE_PATHS="
+        test/01_unit/lib/gc_async_mut/slang/model_loader_manifest_spec.spl
+        test/01_unit/lib/gc_async_mut/slang/model_loader_tensor_bytes_spec.spl
+        test/01_unit/lib/gc_async_mut/slang/model_loader_stream_plan_spec.spl
+        test/01_unit/lib/gc_async_mut/slang/model_loader_transport_spec.spl
+        test/01_unit/lib/gc_async_mut/slang/nvfs_client/std_fs_spec.spl
+        test/01_unit/lib/gc_async_mut/slang/model_loader_streaming_readiness_spec.spl
+        test/01_unit/app/slang_pack/main_spec.spl
+        test/02_integration/app/slang_pack_log_modes_spec.spl
+        $BUILD_DIR/manifest.log
+        $BUILD_DIR/tensor_bytes.log
+        $BUILD_DIR/stream_plan.log
+        $BUILD_DIR/transport.log
+        $BUILD_DIR/std_fs.log
+        $BUILD_DIR/streaming_readiness.log
+        $BUILD_DIR/slang_pack_cli.log
+        $BUILD_DIR/slang_pack_log_modes.log"
+# One wc and one sha256sum for the whole set: process creation is the dominant
+# cost on Windows hosts (seconds per spawn), so per-file $(wc|tr) / $(sha256sum|awk)
+# subshell pipelines made this step minutes long.
+EXISTING_PATHS=""
+for path in $SURFACE_PATHS; do
+    if [ -f "$path" ]; then EXISTING_PATHS="$EXISTING_PATHS $path"; fi
+done
+SIZES_TMP="$BUILD_DIR/.surface_sizes.tmp"
+SHAS_TMP="$BUILD_DIR/.surface_shas.tmp"
+: >"$SIZES_TMP"
+: >"$SHAS_TMP"
+if [ -n "$EXISTING_PATHS" ]; then
+    # shellcheck disable=SC2086
+    wc -c $EXISTING_PATHS >"$SIZES_TMP"
+    if command -v sha256sum >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        sha256sum $EXISTING_PATHS >"$SHAS_TMP"
+    elif command -v shasum >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        shasum -a 256 $EXISTING_PATHS >"$SHAS_TMP"
+    fi
+fi
+# Sets MF_SIZE / MF_SHA for one surface path without forking.
+manifest_lookup() {
+    MF_SIZE="missing"
+    MF_SHA="missing"
+    [ -f "$1" ] || return 0
+    MF_SHA="unavailable"
+    while read -r a b; do
+        if [ "$b" = "$1" ]; then MF_SIZE="$a"; fi
+    done <"$SIZES_TMP"
+    while read -r a b; do
+        # sha256sum prefixes the name with * in binary mode (Windows default).
+        if [ "${b#\*}" = "$1" ]; then MF_SHA="$a"; fi
+    done <"$SHAS_TMP"
+}
+: >"$SURFACE_MANIFEST"
+for path in $SURFACE_PATHS; do
+    manifest_lookup "$path"
+    printf '%s\t%s\t%s\n' "$path" "$MF_SIZE" "$MF_SHA" >>"$SURFACE_MANIFEST"
+done
+# Kept until exit: the env/report blocks below look up the log entries too.
+trap 'rm -f "$SIZES_TMP" "$SHAS_TMP"' EXIT
 surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
 surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
 surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
@@ -247,8 +285,9 @@ fi
         eval "exit_code=\${${key}_exit}"
         printf '%s\n' "llm_runtime_slang_local_readiness_${key}_status=$value"
         printf '%s\n' "llm_runtime_slang_local_readiness_${key}_exit=$exit_code"
-        printf '%s\n' "llm_runtime_slang_local_readiness_${key}_log_size=$(artifact_size "$BUILD_DIR/$key.log")"
-        printf '%s\n' "llm_runtime_slang_local_readiness_${key}_log_sha256=$(artifact_sha256 "$BUILD_DIR/$key.log")"
+        manifest_lookup "$BUILD_DIR/$key.log"
+        printf '%s\n' "llm_runtime_slang_local_readiness_${key}_log_size=$MF_SIZE"
+        printf '%s\n' "llm_runtime_slang_local_readiness_${key}_log_sha256=$MF_SHA"
     done
 } >"$OUT_ENV"
 
@@ -276,8 +315,9 @@ fi
         eval "value=\${${key}_status}"
         eval "exit_code=\${${key}_exit}"
         printf '%s\n' "- ${key}: \`$value\` exit=\`$exit_code\` log=\`$BUILD_DIR/$key.log\`"
-        printf '%s\n' "- ${key}_log_size: \`$(artifact_size "$BUILD_DIR/$key.log")\`"
-        printf '%s\n' "- ${key}_log_sha256: \`$(artifact_sha256 "$BUILD_DIR/$key.log")\`"
+        manifest_lookup "$BUILD_DIR/$key.log"
+        printf '%s\n' "- ${key}_log_size: \`$MF_SIZE\`"
+        printf '%s\n' "- ${key}_log_sha256: \`$MF_SHA\`"
     done
     printf '%s\n' "- env: \`$OUT_ENV\`"
     printf '\n'

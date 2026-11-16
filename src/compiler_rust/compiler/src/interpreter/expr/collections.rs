@@ -663,7 +663,22 @@ pub(super) fn eval_collection_expr(
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
                     // Return nil for missing keys instead of erroring
-                    Ok(crate::interpreter::module_dict_get(&map, &key)
+                    let stored = crate::interpreter::module_dict_get(&map, &key);
+                    // `m["f"]` on a module namespace names `f` exactly like
+                    // `m.f` does: a non-local receiver name holding the fn under
+                    // its own name, or any receiver (a local alias included)
+                    // holding a registered module namespace. A dict program
+                    // code built and handed out is its owner's data.
+                    if let Some(Value::Function { def, .. }) = &stored {
+                        if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                            && def.name == key
+                            && (matches!(receiver.as_ref(), Expr::Identifier(ns) if !env.is_local(ns))
+                                || crate::interpreter::is_module_namespace_dict(&map))
+                        {
+                            crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                        }
+                    }
+                    Ok(stored
                         .map(|stored| Value::unwrap_dict_entry(&idx_val, stored))
                         .unwrap_or(Value::Nil))
                 }

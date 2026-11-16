@@ -1597,9 +1597,13 @@ pub fn load_module_with_imports_for_target(
 ) -> Result<Module, CompileError> {
     let mut module = load_module_with_imports_internal(path, visited, None, true, target_arch)?;
     append_root_import_binding_markers(&mut module, path);
-    warn_duplicate_private_signatures(&module);
-    warn_method_arity_collisions(&module);
-    warn_cross_impl_method_collisions(&module);
+    // Advisory collision reports describe the loaded closure. For `lint|fix|fmt`
+    // that closure is the linter itself, not the linted file: stay quiet.
+    if !simple_common::tool_closure_quiet::tool_closure_quiet() {
+        warn_duplicate_private_signatures(&module);
+        warn_method_arity_collisions(&module);
+        warn_cross_impl_method_collisions(&module);
+    }
     Ok(module)
 }
 
@@ -2575,6 +2579,10 @@ fn load_module_with_imports_internal(
         .parse()
         .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
+    // Private fn names must be known before any importer's flattened top-level
+    // initializer runs, and to the JIT lane, which never runs the interpreter
+    // loader at all.
+    crate::interpreter::interpreter_module::register_module_private_fns(&path, &module.items);
 
     // Closures capture enclosing locals by value and are read-only
     // (.claude/rules/language.md:22, owner ruling 2026-09-27): a nested fn or

@@ -1511,6 +1511,8 @@ struct PipedProcess {
     stdout_state: i64,
     stdout_tail: Vec<u8>,
     exit_status: Option<std::process::ExitStatus>,
+    /// Registry generation for `PipedProcessRefV1` (0 = legacy pid-only spawn).
+    generation: i64,
 }
 
 impl PipedProcess {
@@ -1586,6 +1588,7 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
                 stdout_state: 0,
                 stdout_tail: Vec::new(),
                 exit_status: None,
+                generation: 0,
             });
             Ok(Value::Int(pid))
         }
@@ -1845,6 +1848,126 @@ pub fn rt_process_close_piped(args: &[Value]) -> Result<Value, CompileError> {
         }
         None => Ok(Value::Bool(false)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// PipedProcessRefV1: generation-checked twin of the C registry
+// (`src/runtime/runtime_process.c` rt_process_*_ref_v1). Same sentinels:
+// -2 stale/unknown reference, -3 "POSIX unsupported" for liveness and close
+// (a generation is not kernel group authority, so nothing is signalled or
+// reaped through a reference), -1 failure.
+// ---------------------------------------------------------------------------
+
+const PIPED_REF_MAX_ARGS_V1: usize = 64;
+static NEXT_PIPED_GENERATION_V1: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+
+fn piped_ref_int(args: &[Value], index: usize) -> i64 {
+    match args.get(index) {
+        Some(Value::Int(n)) => *n,
+        _ => -1,
+    }
+}
+
+/// True when (pid, generation) names a live generation-checked entry.
+fn piped_ref_matches(map: &HashMap<i64, PipedProcess>, pid: i64, generation: i64) -> bool {
+    pid > 0 && pid <= i32::MAX as i64 && generation > 0 && map.get(&pid).is_some_and(|p| p.generation == generation)
+}
+
+/// `rt_process_spawn_piped_generation_v1(cmd: text, cmd_len: i64, args: [text]) -> i64`
+pub fn rt_process_spawn_piped_generation_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (Some(Value::Str(cmd)), Some(Value::Int(cmd_len)), Some(Value::Array(argv))) =
+        (args.first(), args.get(1), args.get(2))
+    else {
+        return Ok(Value::Int(-1));
+    };
+    if *cmd_len <= 0 || *cmd_len as usize != cmd.len() || cmd.contains('\0') || argv.len() > PIPED_REF_MAX_ARGS_V1 {
+        return Ok(Value::Int(-1));
+    }
+    if !argv.iter().all(|a| matches!(a, Value::Str(s) if !s.contains('\0'))) {
+        return Ok(Value::Int(-1));
+    }
+    let Value::Int(pid) = rt_process_spawn_piped(&[Value::Str(cmd.clone()), Value::Array(argv.clone())])? else {
+        return Ok(Value::Int(-1));
+    };
+    if pid <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let generation = NEXT_PIPED_GENERATION_V1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match PIPED_PROCESSES.lock().unwrap().get_mut(&pid) {
+        Some(process) => process.generation = generation,
+        None => return Ok(Value::Int(-1)),
+    }
+    Ok(Value::Int(generation))
+}
+
+/// `rt_process_piped_pid_for_generation_v1(generation: i64) -> i64` (-2 unknown).
+pub fn rt_process_piped_pid_for_generation_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let generation = piped_ref_int(args, 0);
+    if generation <= 0 {
+        return Ok(Value::Int(-2));
+    }
+    let map = PIPED_PROCESSES.lock().unwrap();
+    let pid = map
+        .iter()
+        .find(|(_, p)| p.generation == generation)
+        .map_or(-2, |(pid, _)| *pid);
+    Ok(Value::Int(pid))
+}
+
+/// `rt_process_read_stdout_ref_v1(pid, generation) -> text` ("" for a stale reference).
+pub fn rt_process_read_stdout_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    if !piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation) {
+        return Ok(Value::text(String::new()));
+    }
+    rt_process_read_stdout(&[Value::Int(pid)])
+}
+
+/// `rt_process_stdout_state_ref_v1(pid, generation) -> i64` (0 deferred, 1 EOF, -1 failure, -2 stale).
+pub fn rt_process_stdout_state_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    let map = PIPED_PROCESSES.lock().unwrap();
+    if !piped_ref_matches(&map, pid, generation) {
+        return Ok(Value::Int(-2));
+    }
+    Ok(Value::Int(map.get(&pid).map_or(-2, |p| p.stdout_state)))
+}
+
+/// `rt_process_validate_piped_ref_v1(pid, generation) -> i64` (0 valid, -2 stale).
+pub fn rt_process_validate_piped_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    let valid = piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation);
+    Ok(Value::Int(if valid { 0 } else { -2 }))
+}
+
+/// `rt_process_write_stdin_some_ref_v1(pid, generation, data, data_len, offset, max_bytes) -> i64`.
+pub fn rt_process_write_stdin_some_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    if args.len() < 6 {
+        return Ok(Value::Int(-1));
+    }
+    if !piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation) {
+        return Ok(Value::Int(-2));
+    }
+    let mut forwarded = vec![Value::Int(pid)];
+    forwarded.extend_from_slice(&args[2..6]);
+    rt_process_write_stdin_some(&forwarded)
+}
+
+/// `rt_process_is_piped_alive_ref_v1(pid, generation) -> i64`: -3 for a live
+/// reference (POSIX liveness through a generation is unsupported), -2 stale.
+pub fn rt_process_is_piped_alive_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    let valid = piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation);
+    Ok(Value::Int(if valid { -3 } else { -2 }))
+}
+
+/// `rt_process_close_piped_ref_v1(pid, generation) -> i64`: -3 for a live
+/// reference (close unsupported; descriptors and the slot are retained), -2 stale.
+pub fn rt_process_close_piped_ref_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (pid, generation) = (piped_ref_int(args, 0), piped_ref_int(args, 1));
+    let valid = piped_ref_matches(&PIPED_PROCESSES.lock().unwrap(), pid, generation);
+    Ok(Value::Int(if valid { -3 } else { -2 }))
 }
 
 /// Read the same owned stream state consumed by process_read_stdout_result.

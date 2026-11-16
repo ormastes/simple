@@ -411,7 +411,7 @@ extern fn rt_cranelift_load(ctx: i64, type_: i64, addr: i64, offset: i64) -> i64
 @unsafe(reason: "raw Cranelift ABI; zero/false sentinel or ignored operation means invalid input", capabilities: [ffi, raw_ptr])
 extern fn rt_cranelift_store(ctx: i64, value: i64, addr: i64, offset: i64)
 @unsafe(reason: "raw Cranelift ABI; zero/false sentinel or ignored operation means invalid input", capabilities: [ffi, raw_ptr])
-extern fn rt_cranelift_stack_slot(ctx: i64, size: i64, align: i64) -> i64
+extern fn rt_cranelift_stack_slot(ctx: i64, size: i64, align_shift: i64) -> i64
 @unsafe(reason: "raw Cranelift ABI; zero/false sentinel or ignored operation means invalid input", capabilities: [ffi, raw_ptr])
 extern fn rt_cranelift_stack_addr(ctx: i64, slot: i64, offset: i64) -> i64
 
@@ -424,8 +424,22 @@ fn cranelift_store(ctx: i64, value: i64, addr: i64, offset: i64):
     rt_cranelift_store(ctx, value, addr, offset)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
-fn cranelift_stack_slot(ctx: i64, size: i64, align: i64) -> i64:
-    rt_cranelift_stack_slot(ctx, size, align)
+fn cranelift_stack_slot(ctx: i64, size: i64, align_bytes: i64) -> i64:
+    # Callers give the alignment in BYTES; the provider forwards its third
+    # argument to cranelift-codegen `StackSlotData::new(kind, size,
+    # align_shift)`, a log2 exponent. Passing bytes straight through made every
+    # 8-byte request 2^8 = 256-byte aligned (multi-MB frames, Stage 3 stack
+    # overflow).
+    rt_cranelift_stack_slot(ctx, size, cranelift_align_shift_for_bytes(align_bytes))
+
+# log2 of a byte alignment, rounded up to the next power of two; <= 1 -> 0.
+# Capped at 16 (64 KiB): Cranelift requires align_shift < 32, and no stack
+# value needs more than a page.
+fn cranelift_align_shift_for_bytes(align_bytes: i64) -> i64:
+    var shift = 0
+    while shift < 16 and (1 << shift) < align_bytes:
+        shift = shift + 1
+    shift
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_stack_addr(ctx: i64, slot: i64, offset: i64) -> i64:

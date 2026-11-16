@@ -79,11 +79,11 @@ fn cli_print_shared_optimization_inventory(command: text):
     print "========================="
     print "Native executable default profile: aggressive"
     print "  Applied when building an executable without an explicit --opt-level."
-    print "Native profile mapping:"
-    print "  none       -> debug build mode, layout optimization disabled"
-    print "  basic      -> release build mode, layout optimization disabled"
-    print "  standard   -> release build mode, layout optimization disabled"
-    print "  aggressive -> release build mode, layout optimization enabled"
+    print "Native optimization levels (independent of target profile):"
+    print "  none       -> optimization disabled"
+    print "  basic      -> independent target profile, layout optimization disabled"
+    print "  standard   -> independent target profile, layout optimization disabled"
+    print "  aggressive -> independent target profile, layout optimization enabled"
     print ""
     print "Implemented optimization inventory:"
     print "  - [syntax] async desugar (basic, inventory-only)"
@@ -91,7 +91,7 @@ fn cli_print_shared_optimization_inventory(command: text):
     print "  - [syntax] collection pattern desugar (basic, inventory-only)"
     for line in mir_optimization_inventory_lines():
         print line
-    print "  - [native] release build mode (basic, native-default)"
+    print "  - [native] target profile selected independently from optimization"
     print "  - [native] 4KB layout optimization (aggressive, native-default)"
     if command == "compile":
         print ""
@@ -162,9 +162,8 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     options.verbose = verbose
     options.low_memory = low_memory
     options.profile = profile
-    if release or opt_level > 0:
-        options.release = release
-        options.opt_level = opt_level
+    options.release = release
+    options.opt_level = opt_level
     if backend != "" and backend != "auto":
         options.backend = backend
     if debug_trace_level != "":
@@ -347,6 +346,9 @@ pub fn cli_compile(args: [text]) -> i64:
     var opt_level: i64 = 0
     var optimization_requested: bool = false
     var profile: text = "dev"
+    var profile_explicit = false
+    var requested_profile = ""
+    var release_explicit = false
     var debug_trace_level: text = ""
     var coverage_enabled: bool = false
     var xray_enabled: bool = false
@@ -476,13 +478,15 @@ pub fn cli_compile(args: [text]) -> i64:
         elif arg == "--release":
             release = true
             profile = "prod"
-            if opt_level < 2:
+            release_explicit = true
+            if not optimization_requested:
                 opt_level = 2
             optimization_requested = true
         elif arg == "--release-optimized":
             release_optimized = true
             release = true
             profile = "prod"
+            release_explicit = true
             use_lto = true
             march_target = "x86-64-v3"
             opt_level = 3
@@ -501,8 +505,6 @@ pub fn cli_compile(args: [text]) -> i64:
                     _cli_eprint("Error: Unknown optimization level: {level}")
                     _cli_eprint("Valid levels: none, basic, standard, aggressive")
                     return 1
-            if opt_level > 0:
-                release = true
             optimization_requested = true
         elif arg == "--opt-level":
             i = i + 1
@@ -522,22 +524,34 @@ pub fn cli_compile(args: [text]) -> i64:
                     _cli_eprint("Error: Unknown optimization level: {level}")
                     _cli_eprint("Valid levels: none, basic, standard, aggressive")
                     return 1
-            if opt_level > 0:
-                release = true
             optimization_requested = true
         elif arg.starts_with("--profile="):
-            profile = arg.substring(10)
+            val selected_profile = arg.substring(10)
+            if requested_profile != "" and requested_profile != selected_profile:
+                _cli_eprint("TARGET-PROFILE-E-CONFLICT: conflicting explicit profiles")
+                return 1
+            requested_profile = selected_profile
+            profile = selected_profile
+            profile_explicit = true
+            release = profile == "prod"
             if profile == "prod":
                 release = true
-                if opt_level < 2:
+                if not optimization_requested:
                     opt_level = 2
         elif arg == "--profile":
             i = i + 1
             if i < args.len():
-                profile = args[i]
+                val selected_profile = args[i]
+                if requested_profile != "" and requested_profile != selected_profile:
+                    _cli_eprint("TARGET-PROFILE-E-CONFLICT: conflicting explicit profiles")
+                    return 1
+                requested_profile = selected_profile
+                profile = selected_profile
+                profile_explicit = true
+                release = profile == "prod"
                 if profile == "prod":
                     release = true
-                    if opt_level < 2:
+                    if not optimization_requested:
                         opt_level = 2
             else:
                 _cli_eprint("Error: --profile requires an argument")
@@ -643,6 +657,10 @@ pub fn cli_compile(args: [text]) -> i64:
 
         i = i + 1
 
+    if release_explicit and profile_explicit and requested_profile != "prod":
+        _cli_eprint("TARGET-PROFILE-E-CONFLICT: release and development both requested")
+        return 1
+
     if source_file == "":
         _cli_eprint("Error: No source file specified")
         _cli_eprint("Usage: simple compile [options] <source.spl>")
@@ -734,7 +752,9 @@ pub fn cli_compile(args: [text]) -> i64:
     if backend == "llvm" or backend == "llvm-lib" or backend == "llvmlib" or emit == "native":
         if not optimization_requested:
             opt_level = cli_native_default_opt_level()
-            release = true
+            if not profile_explicit:
+                release = true
+                profile = "prod"
         var out = output_file
         if out == "":
             out = source_file.replace(".spl", "")

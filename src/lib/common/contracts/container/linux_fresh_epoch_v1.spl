@@ -1,0 +1,166 @@
+# Pure strict installed metadata. No decoded value is epoch custody or a grant.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+
+pub struct LinuxFreshEpochProfileV1:
+    fields: Dict<text, SdnValue>
+    pub fn text_v1(key: text) -> Result<text, text>:
+        if not self.fields.contains_key(key): return Err("fresh-epoch-profile-missing:" + key)
+        match self.fields[key]:
+            case SdnValue.String(value): Ok(value)
+            case _: Err("fresh-epoch-profile-text:" + key)
+    pub fn number_v1(key: text) -> Result<i64, text>:
+        if not self.fields.contains_key(key): return Err("fresh-epoch-profile-missing:" + key)
+        match self.fields[key]:
+            case SdnValue.Int(value): Ok(value)
+            case _: Err("fresh-epoch-profile-integer:" + key)
+
+# Actual owner produces this diagnostic; constructing it creates no custody.
+pub struct LinuxFreshEpochObservationV1:
+    owner_generation: i64
+    epoch_id: text
+    profile_digest: text
+    machine_policy_digest: text
+    process_identity_digest: text
+    manager_unique_name: text
+    service_uid: i64
+    service_gid: i64
+    partition_identity_digest: text
+    store_identity_digest: text
+    provider_policy_digest: text
+    observed_cpu_millis: i64
+    observed_memory_bytes: i64
+    reserved_cpu_millis: i64
+    reserved_memory_bytes: i64
+    outside_cpu_millis: i64
+    outside_memory_bytes: i64
+    usable_cpu_millis: i64
+    usable_memory_bytes: i64
+
+fn epoch_profile_keys_v1() -> [text]:
+    ["kind", "version", "epochId", "machinePolicyDigest", "serviceName", "serviceUid", "serviceGid",
+        "subuidStart", "subuidCount", "subgidStart", "subgidCount", "hostUnit", "providerUnit", "providerSocketUnit",
+        "partitionCgroup", "delegatedCgroup", "supervisorCgroup", "partitionCpuMillis", "partitionMemoryBytes",
+        "reservedCpuMillis", "reservedMemoryBytes", "outsideCpuMillis", "outsideMemoryBytes", "providerExecutable",
+        "providerExecutableSha256", "providerPolicyDigest", "graphRoot", "runRoot", "staticRoot", "endpointPath",
+        "storageDriver", "cgroupManager", "brokerExecutable", "brokerExecutableSha256"]
+
+pub fn linux_fresh_epoch_path_v1(path: text) -> bool:
+    if path == "/" or not path.starts_with("/") or path.ends_with("/") or path.byte_len() > 2048 or path.contains("//"):
+        return false
+    for at in 0..path.byte_len():
+        val byte = path.byte_at(at) as i64
+        if byte < 33 or byte > 126 or byte == 92: return false
+    for part in path.split("/"):
+        if part == "." or part == "..": return false
+    true
+
+pub fn linux_fresh_epoch_overlap_v1(left: text, right: text) -> bool:
+    left == right or left.starts_with(right + "/") or right.starts_with(left + "/")
+
+# Restrictive comparison of canonical installed engine metadata only. The
+# async provider still owns its full decoder and actual engine observation.
+pub fn linux_fresh_epoch_provider_matches_v1(profile: LinuxFreshEpochProfileV1, source: text) -> Result<(), text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 3, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value.value
+        case Err(_): return Err("fresh-epoch-provider-policy-decode")
+    val fields = match parsed:
+        case SdnValue.Dict(value): value
+        case _: return Err("fresh-epoch-provider-policy-shape")
+    val view = LinuxFreshEpochProfileV1(fields: fields)
+    if (view.text_v1("kind")? != "linux-oci-engine-policy" or view.number_v1("version")? != 1 or
+            view.text_v1("mode")? != "trusted-local-admin-v1" or view.number_v1("expectedUid")? != profile.number_v1("serviceUid")? or
+            view.text_v1("executablePath")? != profile.text_v1("providerExecutable")? or
+            view.text_v1("expectedGraphRoot")? != profile.text_v1("graphRoot")? or
+            view.text_v1("expectedRunRoot")? != profile.text_v1("runRoot")? or
+            view.text_v1("expectedStorageDriver")? != "vfs" or view.number_v1("storageOptionCount")? != 0):
+        return Err("fresh-epoch-provider-profile-mismatch")
+    if not fields.contains_key("storageOptions"): return Err("fresh-epoch-provider-options-required")
+    match fields["storageOptions"]:
+        case SdnValue.Array(value):
+            if value.len() != 0: return Err("fresh-epoch-provider-options-unsupported")
+        case _: return Err("fresh-epoch-provider-options-shape")
+    if fields.len() != 10 or sdn_encode_canonical(parsed) + "\n" != source:
+        return Err("fresh-epoch-provider-policy-noncanonical")
+    Ok(())
+
+pub fn linux_fresh_epoch_profile_validate_v1(profile: LinuxFreshEpochProfileV1) -> Result<(), text>:
+    val keys = epoch_profile_keys_v1()
+    if profile.fields.len() != keys.len(): return Err("fresh-epoch-profile-fields")
+    for key in keys:
+        if not profile.fields.contains_key(key): return Err("fresh-epoch-profile-fields")
+    if profile.text_v1("kind")? != "linux-fresh-provider-epoch" or profile.number_v1("version")? != 1:
+        return Err("fresh-epoch-profile-kind-version")
+    if not builder_identifier_valid_v1(profile.text_v1("epochId")?): return Err("fresh-epoch-profile-id")
+    for key in ["machinePolicyDigest", "providerExecutableSha256", "providerPolicyDigest", "brokerExecutableSha256"]:
+        if not builder_digest_valid_v1(profile.text_v1(key)?): return Err("fresh-epoch-profile-digest")
+    val name = profile.text_v1("serviceName")?
+    if name.byte_len() == 0 or name.byte_len() > 32: return Err("fresh-epoch-profile-service-name")
+    for byte in name.bytes():
+        if not ((byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 45 or byte == 95):
+            return Err("fresh-epoch-profile-service-name")
+    for key in ["serviceUid", "serviceGid", "subuidStart", "subuidCount", "subgidStart", "subgidCount"]:
+        val value = profile.number_v1(key)?
+        if value <= 0 or value > 4294967294: return Err("fresh-epoch-profile-identity-range")
+    for pair in [("subuidStart", "subuidCount"), ("subgidStart", "subgidCount")]:
+        if profile.number_v1(pair.0)? > 4294967295 - profile.number_v1(pair.1)?:
+            return Err("fresh-epoch-profile-subid-overflow")
+    for key in ["hostUnit", "providerUnit", "providerSocketUnit"]:
+        val unit = profile.text_v1(key)?
+        if unit.byte_len() < 2 or unit.byte_len() > 128 or unit.contains("..") or unit.contains("/"):
+            return Err("fresh-epoch-profile-unit")
+        for byte in unit.bytes():
+            if (not ((byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or
+                    (byte >= 48 and byte <= 57) or byte == 45 or byte == 95 or byte == 46 or byte == 64)):
+                return Err("fresh-epoch-profile-unit")
+    val host_unit = profile.text_v1("hostUnit")?
+    val provider_unit = profile.text_v1("providerUnit")?
+    val socket_unit = profile.text_v1("providerSocketUnit")?
+    if (not host_unit.ends_with(".service") or not provider_unit.ends_with(".service") or
+            not socket_unit.ends_with(".socket") or host_unit == provider_unit):
+        return Err("fresh-epoch-profile-unit-role")
+    for key in ["partitionCgroup", "delegatedCgroup", "supervisorCgroup", "providerExecutable", "brokerExecutable", "graphRoot", "runRoot", "staticRoot", "endpointPath"]:
+        if not linux_fresh_epoch_path_v1(profile.text_v1(key)?): return Err("fresh-epoch-profile-path")
+    val parent = profile.text_v1("partitionCgroup")?
+    val delegated = profile.text_v1("delegatedCgroup")?
+    val supervisor = profile.text_v1("supervisorCgroup")?
+    if not delegated.starts_with(parent + "/") or supervisor != delegated + "/supervisor":
+        return Err("fresh-epoch-profile-cgroup-topology")
+    val graph = profile.text_v1("graphRoot")?
+    val run = profile.text_v1("runRoot")?
+    if (profile.text_v1("staticRoot")? != graph + "/libpod" or profile.text_v1("endpointPath")? != run + "/podman.sock" or
+            linux_fresh_epoch_overlap_v1(graph, run)): return Err("fresh-epoch-profile-store-topology")
+    for store in [graph, run]:
+        for protected in ["/etc", "/proc", "/sys", "/dev", "/var/lib/simple/container"]:
+            if linux_fresh_epoch_overlap_v1(store, protected): return Err("fresh-epoch-profile-protected-overlap")
+    if profile.text_v1("storageDriver")? != "vfs" or profile.text_v1("cgroupManager")? != "cgroupfs":
+        return Err("fresh-epoch-profile-backend-unsupported")
+    val cpu = profile.number_v1("partitionCpuMillis")?
+    val memory = profile.number_v1("partitionMemoryBytes")?
+    val reserved_cpu = profile.number_v1("reservedCpuMillis")?
+    val reserved_memory = profile.number_v1("reservedMemoryBytes")?
+    val outside_cpu = profile.number_v1("outsideCpuMillis")?
+    val outside_memory = profile.number_v1("outsideMemoryBytes")?
+    if (cpu <= 0 or cpu > 64000 or memory <= 0 or memory > 1125899906842624 or
+            reserved_cpu < 1 or reserved_cpu >= cpu or reserved_memory < 1 or reserved_memory >= memory or
+            outside_cpu < 1 or outside_cpu > 64000 or outside_memory < 1 or outside_memory > 1125899906842624):
+        return Err("fresh-epoch-profile-capacity")
+    Ok(())
+
+pub fn linux_fresh_epoch_profile_decode_v1(source: text) -> Result<LinuxFreshEpochProfileV1, text>:
+    val document = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 2, max_nodes: 96, max_rows: 0, max_cells: 0, max_columns: 40)):
+        case Ok(value): value
+        case Err(_): return Err("fresh-epoch-profile-syntax")
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("fresh-epoch-profile-object")
+    val profile = LinuxFreshEpochProfileV1(fields: fields)
+    linux_fresh_epoch_profile_validate_v1(profile)?
+    if sdn_encode_canonical(SdnValue.Dict(fields)) + "\n" != source:
+        return Err("fresh-epoch-profile-noncanonical")
+    Ok(profile)

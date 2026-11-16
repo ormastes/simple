@@ -54,7 +54,7 @@ GENERATOR="scripts/generate/generate-web-combo-matrix.shs"
 HARVESTER="scripts/check/check-chrome-layout-geometry-diff.shs"
 GEOM_APP="src/app/ui/chrome_showcase/layout_geometry_diff.spl"
 BUILD_DIR="${COMBO_BUILD_DIR:-build/web_combo_matrix}"
-PAGES="tag_tag tag_css css_css"
+PAGES="tag_tag tag_css css_css lh_normal"
 WIDTH=900
 HEIGHT=2000
 TOLERANCE=1
@@ -205,6 +205,34 @@ compare() {
     }' mism_file="${MISM_FILE:-}" "$3"
 }
 
+# full_chrome_in <home> -> newest Playwright FULL Chromium under <home>, or
+# nothing. The headless shell is never an answer: it resolves `monospace`
+# through fontconfig to a face whose line box is 1px shorter than full
+# Chrome's (`<code>` 18 vs 19 tall), which reported 28 false NEW ids at an
+# untouched base (2026-11-15). The geometry differ keeps its own preference
+# for the shell; this gate's oracle is the full browser.
+full_chrome_in() {
+    # Highest build NUMBER wins; glob name order puts chromium-999 last.
+    fc_pick=""
+    fc_best=-1
+    for fc_c in "$1"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
+        [ -x "$fc_c" ] || continue
+        fc_n=${fc_c#"$1"/.cache/ms-playwright/chromium-}
+        fc_n=${fc_n%%/*}
+        case "$fc_n" in ''|*[!0-9]*) continue ;; esac
+        if [ "$fc_n" -gt "$fc_best" ]; then
+            fc_best=$fc_n
+            fc_pick=$fc_c
+        fi
+    done
+    printf '%s' "$fc_pick"
+}
+
+is_headless_shell() {
+    case "$1" in *chrome-headless-shell) return 0 ;; esac
+    return 1
+}
+
 # ------------------------------------------------------------------ selftest
 selftest() {
     st="$(mktemp -d "${TMPDIR:-/tmp}/combo-selftest.XXXXXX")"
@@ -275,6 +303,31 @@ n-s
     : >"$st/rows.tsv"
     : >"$st/cells.tsv"
     expect "empty-compare-is-error" 2 "ERROR — nothing was checked (0 cell(s) compared)" ""
+    # Oracle picker: a home holding only the headless shell yields nothing
+    # (the run then fails closed); with full builds present the newest wins.
+    # pick <name> <want> <got>
+    pick() {
+        st_n=$((st_n + 1))
+        if [ "$2" = "$3" ]; then
+            echo "selftest $1: PASS"
+        else
+            echo "selftest $1: FAIL (want '$2', got '$3')"
+            st_fail=$((st_fail + 1))
+        fi
+    }
+    st_home="$st/home"
+    mkdir -p "$st_home/.cache/ms-playwright/chromium_headless_shell-1255/chrome-headless-shell-linux-arm64"
+    st_shell="$st_home/.cache/ms-playwright/chromium_headless_shell-1255/chrome-headless-shell-linux-arm64/chrome-headless-shell"
+    printf '#!/bin/sh\n' >"$st_shell"
+    chmod +x "$st_shell"
+    pick "shell-only-home-has-no-oracle" "" "$(full_chrome_in "$st_home")"
+    for st_b in 999 1255 1200; do
+        mkdir -p "$st_home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64"
+        printf '#!/bin/sh\n' >"$st_home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64/chrome"
+        chmod +x "$st_home/.cache/ms-playwright/chromium-$st_b/chrome-linux-arm64/chrome"
+    done
+    pick "newest-full-build-wins" "$st_home/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome" "$(full_chrome_in "$st_home")"
+    pick "explicit-shell-is-refused" "refused" "$(is_headless_shell "$st_shell" && echo refused)"
     if [ "$st_fail" -ne 0 ]; then
         echo "FAIL — $st_n selftest fixture(s) checked, $st_fail failed"
         return 1
@@ -291,7 +344,7 @@ set -e
 if [ "$MODE" = "--selftest" ]; then
     echo "$selftest_out"
     [ "$selftest_rc" -eq 0 ] || exit 1
-    echo "PASS — 11 fixture(s) checked, 0 failed"
+    echo "PASS — 14 fixture(s) checked, 0 failed"
     exit 0
 fi
 if [ "$selftest_rc" -ne 0 ]; then
@@ -326,11 +379,21 @@ if [ -z "${SIMPLE_BIN:-}" ]; then
 fi
 [ -x "${SIMPLE_BIN:-}" ] || err "no simple binary; set SIMPLE_BIN"
 
-set +e
-CHROME="$(sh "$HARVESTER" --print-chrome 2>/dev/null)"
-chrome_rc=$?
-set -e
-{ [ "$chrome_rc" -eq 0 ] && [ -x "$CHROME" ]; } || err "no Chrome found; set CHROME_BIN"
+CHROME=""
+if [ -n "${CHROME_BIN:-}" ]; then
+    [ -x "$CHROME_BIN" ] || err "CHROME_BIN=$CHROME_BIN is not executable"
+    CHROME="$CHROME_BIN"
+else
+    for c in /usr/bin/google-chrome /usr/bin/google-chrome-stable \
+             /usr/bin/chromium /usr/bin/chromium-browser; do
+        [ -x "$c" ] && { CHROME="$c"; break; }
+    done
+    [ -n "$CHROME" ] || CHROME="$(full_chrome_in "$HOME")"
+fi
+if is_headless_shell "$CHROME"; then
+    err "$CHROME is the headless shell, whose monospace face differs from full Chrome's; set CHROME_BIN to a full Chrome $MIN_CHROME_MAJOR+"
+fi
+[ -n "$CHROME" ] || err "no full Chrome found (the headless shell is not the oracle); set CHROME_BIN to a full Chrome $MIN_CHROME_MAJOR+"
 CHROME_VERSION="$("$CHROME" --version 2>/dev/null | sed -n 's/^[^0-9]*\([0-9][0-9.]*\).*$/\1/p' | head -n 1)"
 chrome_major="${CHROME_VERSION%%.*}"
 case "$chrome_major" in

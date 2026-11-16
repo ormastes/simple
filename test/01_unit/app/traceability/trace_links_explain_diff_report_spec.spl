@@ -1,0 +1,155 @@
+"""`trace links`, `trace explain`, `trace diff` and `trace report` query modules.
+
+Purpose: prove each command keeps a structural link (Linked) apart from passing
+evidence (Verified), names why a requirement is incomplete, flags dangling or
+mis-kinded links, reports status changes between two snapshots, and turns an
+incomplete graph into the incomplete verdict (exit 2).
+Audience: traceability maintainers and reviewers of the `simple trace` family.
+"""
+# @req REQ-TRC-021
+use std.spec.*
+use std.spec.step
+use std.common.traceability.model.*
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceRequirementIdV1, TraceRequirementCountV1, TraceGraphCompletenessV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1, TraceCommandVerdictV1}
+use std.common.traceability.query_links_v1.{TraceLinkIssueKindV1, trace_links_check_v1}
+use std.common.traceability.query_explain_v1.{TraceExplainReasonV1, trace_explain_requirement_v1}
+use std.common.traceability.query_diff_v1.{TraceDiffChangeV1, trace_diff_v1}
+use std.common.traceability.query_report_v1.{trace_report_v1}
+
+fn family_graph() -> TraceGraph:
+    TraceGraph(subject: SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
+        kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256"),
+        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: true,
+        nodes: [TraceNode(id: "req:ok", kind: TraceNodeKind.Requirement, title: "Linked both"),
+            TraceNode(id: "req:gap", kind: TraceNodeKind.Requirement, title: "Nothing linked"),
+            TraceNode(id: "src:a", kind: TraceNodeKind.SourceFile, title: "a.spl"),
+            TraceNode(id: "case:a", kind: TraceNodeKind.TestCase, title: "case a")],
+        test_definitions: [], claims: [], origins: [], edge_origins: [], locators: [], diagnostics: [],
+        edges: [TraceEdge(id: "e1", from_id: "req:ok", relation: TraceRelation.ImplementedBy, to_id: "src:a"),
+            TraceEdge(id: "e2", from_id: "req:ok", relation: TraceRelation.VerifiedBy, to_id: "case:a")])
+
+fn evidence_for(id: text) -> [TracePassingEvidenceV1]:
+    [TracePassingEvidenceV1(requirement_id: TraceRequirementIdV1(value: id))]
+
+describe "trace links":
+    it "reports a dangling endpoint and a mis-kinded link, sorted by edge id":
+        # @req REQ-TRC-021
+        step("Add an edge to a node that does not exist and a verified_by edge to a source file")
+        var graph = family_graph()
+        graph.edges.push(TraceEdge(id: "e9", from_id: "req:gap", relation: TraceRelation.ImplementedBy, to_id: "src:missing"))
+        graph.edges.push(TraceEdge(id: "e3", from_id: "req:gap", relation: TraceRelation.VerifiedBy, to_id: "src:a"))
+        val result = trace_links_check_v1(graph, [], [], TraceProfile.Worktree)
+        expect(result.issues.len()).to_equal(2)
+        expect(result.issues[0].edge_id.value).to_equal("e3")
+        expect(result.issues[0].kind).to_equal(TraceLinkIssueKindV1.InvalidEndpointKinds)
+        expect(result.issues[1].kind).to_equal(TraceLinkIssueKindV1.DanglingEndpoint)
+
+    it "counts a valid link as linked, never verified, until evidence arrives":
+        # @req REQ-TRC-021
+        step("No evidence: the fully linked requirement is linked")
+        val bare = trace_links_check_v1(family_graph(), [], [], TraceProfile.Worktree)
+        expect(bare.issues.len()).to_equal(0)
+        expect(bare.linked_requirements.value).to_equal(1)
+        expect(bare.verified_requirements.value).to_equal(0)
+        step("Passing evidence moves it to verified")
+        val proven = trace_links_check_v1(family_graph(), [], evidence_for("req:ok"), TraceProfile.Worktree)
+        expect(proven.verified_requirements.value).to_equal(1)
+        expect(proven.linked_requirements.value).to_equal(0)
+
+    it "returns the incomplete verdict on an incomplete graph":
+        # @req REQ-TRC-021
+        step("Mark the graph incomplete")
+        var graph = family_graph()
+        graph.complete = false
+        val result = trace_links_check_v1(graph, [], [], TraceProfile.Worktree)
+        expect(result.completeness).to_equal(TraceGraphCompletenessV1.Incomplete)
+        expect(result.verdict).to_equal(TraceCommandVerdictV1.Incomplete)
+
+describe "trace explain":
+    it "names the missing halves of an unlinked requirement":
+        # @req REQ-TRC-021
+        step("Explain the requirement with no links")
+        val result = trace_explain_requirement_v1(family_graph(), [], [], TraceRequirementIdV1(value: "req:gap"), TraceProfile.Worktree).unwrap()
+        expect(result.reasons.contains(TraceExplainReasonV1.NoImplementation)).to_be(true)
+        expect(result.reasons.contains(TraceExplainReasonV1.NoVerification)).to_be(true)
+        expect(result.verdict).to_equal(TraceCommandVerdictV1.Complete)
+
+    it "says a linked requirement still lacks passing evidence, and has no reasons once verified":
+        # @req REQ-TRC-021
+        step("Linked without evidence")
+        val linked = trace_explain_requirement_v1(family_graph(), [], [], TraceRequirementIdV1(value: "req:ok"), TraceProfile.Worktree).unwrap()
+        expect(linked.status.verification).to_equal(TraceLinkStatus.Linked)
+        expect(linked.reasons).to_equal([TraceExplainReasonV1.NoPassingEvidence])
+        step("Linked with passing evidence")
+        val proven = trace_explain_requirement_v1(family_graph(), [], evidence_for("req:ok"), TraceRequirementIdV1(value: "req:ok"), TraceProfile.Worktree).unwrap()
+        expect(proven.status.verification).to_equal(TraceLinkStatus.Verified)
+        expect(proven.reasons.len()).to_equal(0)
+
+    it "adds graph-incomplete and the incomplete verdict, and yields None for an unknown id":
+        # @req REQ-TRC-021
+        step("Incomplete graph")
+        var graph = family_graph()
+        graph.complete = false
+        val result = trace_explain_requirement_v1(graph, [], [], TraceRequirementIdV1(value: "req:gap"), TraceProfile.Worktree).unwrap()
+        expect(result.reasons.contains(TraceExplainReasonV1.GraphIncomplete)).to_be(true)
+        expect(result.verdict).to_equal(TraceCommandVerdictV1.Incomplete)
+        step("Unknown requirement id")
+        expect(trace_explain_requirement_v1(family_graph(), [], [], TraceRequirementIdV1(value: "req:none"), TraceProfile.Worktree).is_none()).to_be(true)
+
+describe "trace diff":
+    it "classifies added, removed, improved and regressed requirements":
+        # @req REQ-TRC-021
+        step("Head adds req:new, drops req:gap and gains evidence for req:ok")
+        var head = family_graph()
+        head.nodes = [TraceNode(id: "req:ok", kind: TraceNodeKind.Requirement, title: "Linked both"),
+            TraceNode(id: "req:new", kind: TraceNodeKind.Requirement, title: "New"),
+            TraceNode(id: "src:a", kind: TraceNodeKind.SourceFile, title: "a.spl"),
+            TraceNode(id: "case:a", kind: TraceNodeKind.TestCase, title: "case a")]
+        val result = trace_diff_v1(family_graph(), [], [], head, [], evidence_for("req:ok"), TraceProfile.Worktree)
+        var changes: Dict<text, TraceDiffChangeV1> = {}
+        for entry in result.entries: changes[entry.requirement_id.value] = entry.change
+        expect(changes["req:new"]).to_equal(TraceDiffChangeV1.Added)
+        expect(changes["req:gap"]).to_equal(TraceDiffChangeV1.Removed)
+        expect(changes["req:ok"]).to_equal(TraceDiffChangeV1.Improved)
+        step("Reverse the roles: losing evidence is a regression")
+        val back = trace_diff_v1(family_graph(), [], evidence_for("req:ok"), family_graph(), [], [], TraceProfile.Worktree)
+        expect(back.entries[0].change).to_equal(TraceDiffChangeV1.Regressed)
+        expect(back.entries[0].base).to_equal(TraceLinkStatus.Verified)
+        expect(back.entries[0].head).to_equal(TraceLinkStatus.Linked)
+
+    it "is incomplete when either side is incomplete":
+        # @req REQ-TRC-021
+        step("Incomplete base")
+        var base = family_graph()
+        base.complete = false
+        val result = trace_diff_v1(base, [], [], family_graph(), [], [], TraceProfile.Worktree)
+        expect(result.completeness).to_equal(TraceGraphCompletenessV1.Incomplete)
+        expect(result.verdict).to_equal(TraceCommandVerdictV1.Incomplete)
+
+describe "trace report":
+    it "summarises linked, verified and missing counts without merging linked into verified":
+        # @req REQ-TRC-021
+        step("No evidence")
+        val bare = trace_report_v1(family_graph(), [], [], TraceProfile.Worktree, TraceRequirementCountV1(value: 5))
+        expect(bare.total.value).to_equal(2)
+        expect(bare.linked.value).to_equal(1)
+        expect(bare.verified.value).to_equal(0)
+        expect(bare.missing.value).to_equal(1)
+        expect(bare.top_missing[0].value).to_equal("req:gap")
+        expect(bare.verdict).to_equal(TraceCommandVerdictV1.Complete)
+        step("With evidence")
+        val proven = trace_report_v1(family_graph(), [], evidence_for("req:ok"), TraceProfile.Worktree, TraceRequirementCountV1(value: 5))
+        expect(proven.verified.value).to_equal(1)
+        expect(proven.linked.value).to_equal(0)
+
+    it "counts unknown, not missing, on an incomplete graph and returns the incomplete verdict":
+        # @req REQ-TRC-021
+        step("Incomplete graph")
+        var graph = family_graph()
+        graph.complete = false
+        val result = trace_report_v1(graph, [], [], TraceProfile.Worktree, TraceRequirementCountV1(value: 5))
+        expect(result.missing.value).to_equal(0)
+        expect(result.unknown.value).to_equal(1)
+        expect(result.verdict).to_equal(TraceCommandVerdictV1.Incomplete)

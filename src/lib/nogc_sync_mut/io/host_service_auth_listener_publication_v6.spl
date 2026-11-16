@@ -1,0 +1,57 @@
+# Trusted startup bridge over the existing listener and protected publisher.
+# This owner borrows the listener; the canonical server remains its sole closer.
+use std.io.tcp.TcpListener
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.nogc_sync_mut.io.host_service_auth_setup_v1.{HostServiceAuthReadyPublishOwnerV1,
+    HostServiceAuthReadyPublishTurnV1, host_service_auth_ready_publish_open_v1,
+    host_service_auth_ready_publish_step_v1, host_service_auth_ready_publish_close_v1}
+
+pub class HostServiceAuthListenerPublicationV6:
+    publisher: HostServiceAuthReadyPublishOwnerV1
+    endpoint: text
+    error: text = ""
+
+pub struct HostServiceAuthListenerPublicationTurnV6:
+    journal: DistributedOperationJournalV2
+    owner: Option<HostServiceAuthListenerPublicationV6>
+    publication: text
+    ready_digest: text
+    host_lease_digest: text
+    host_authority_digest: text
+    completed: bool
+    cleanup_pending: bool
+    error: text
+
+fn listener_publication_result_v6(endpoint: text, prior_error: text,
+        turn: HostServiceAuthReadyPublishTurnV1) -> HostServiceAuthListenerPublicationTurnV6:
+    val error = if prior_error != "": prior_error else: turn.error
+    val owner = if turn.owner.is_some(): Some(HostServiceAuthListenerPublicationV6(turn.owner.unwrap(), endpoint, error)) else: nil
+    HostServiceAuthListenerPublicationTurnV6(turn.journal, owner, turn.ready_publication,
+        turn.ready_digest, turn.journal.lease_digest, turn.journal.authority_digest,
+        turn.completed and error == "", turn.cleanup_pending, error)
+
+pub fn host_service_auth_listener_publication_begin_v6(listener: TcpListener, journal: DistributedOperationJournalV2,
+        setup_path: text, setup_digest: text, incarnation: text) -> HostServiceAuthListenerPublicationTurnV6:
+    if not listener.is_open(): return HostServiceAuthListenerPublicationTurnV6(journal, nil, "not-attempted", "", journal.lease_digest, journal.authority_digest, false, false, "host-service-auth-listener-closed")
+    val endpoint = listener.local_addr()
+    if endpoint.is_err(): return HostServiceAuthListenerPublicationTurnV6(journal, nil, "not-attempted", "", journal.lease_digest, journal.authority_digest, false, false, "host-service-auth-listener-address")
+    if not endpoint.unwrap().starts_with("127.0.0.1:"):
+        return HostServiceAuthListenerPublicationTurnV6(journal, nil, "not-attempted", "", journal.lease_digest, journal.authority_digest, false, false, "host-service-auth-loopback-required")
+    listener_publication_result_v6(endpoint.unwrap(), "",
+        host_service_auth_ready_publish_open_v1(journal, setup_path, setup_digest, endpoint.unwrap(), incarnation))
+
+pub fn host_service_auth_listener_publication_step_v6(listener: TcpListener,
+        owner: HostServiceAuthListenerPublicationV6, journal: DistributedOperationJournalV2,
+        cancel: bool = false) -> HostServiceAuthListenerPublicationTurnV6:
+    val endpoint = listener.local_addr()
+    var reason = owner.error
+    if (not listener.is_open() or endpoint.is_err() or
+            (endpoint.is_ok() and endpoint.unwrap() != owner.endpoint)):
+        if reason == "": reason = "host-service-auth-listener-changed"
+    val turn = host_service_auth_ready_publish_step_v1(owner.publisher, journal, cancel or reason != "")
+    listener_publication_result_v6(owner.endpoint, reason, turn)
+
+pub fn host_service_auth_listener_publication_close_v6(owner: HostServiceAuthListenerPublicationV6,
+        journal: DistributedOperationJournalV2) -> HostServiceAuthListenerPublicationTurnV6:
+    listener_publication_result_v6(owner.endpoint, owner.error,
+        host_service_auth_ready_publish_close_v1(owner.publisher, journal))

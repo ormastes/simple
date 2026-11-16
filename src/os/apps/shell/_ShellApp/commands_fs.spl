@@ -23,6 +23,7 @@ use os.userlib.window.{WindowClient}
 use common.window_protocol.window_protocol.{WM_EVENT_CLOSE}
 
 use os.userlib.system.{uptime, hostname, mem_info, reboot}
+use os.apps.shell.shell_host.{shell_host_run, shell_host_chdir}
 use os.userlib.log.{read_recent}
 use os.kernel.types.syscall_types.{SignalKind}
 use os.apps.shell.shell_job.{JobTable, JobState, Job}
@@ -122,6 +123,18 @@ impl ShellApp:
 
     me _try_external(command: text, args: [text]):
         """Try to run an external command synchronously."""
+        if self.hosted:
+            # Host parity: launch the real host program via SOSIX process.
+            val (out, err, code) = shell_host_run(command, args)
+            if out != "": self._write_inline(out)
+            if err != "": self._write_inline(err)
+            if (code == 127 or code < 0) and out == "" and err == "":
+                # The SOSIX runner reports a spawn failure as -1.
+                self._write_error("shs: command not found: {command}")
+                self.last_exit_code = 127
+                return
+            self.last_exit_code = code as i32
+            return
         val toolchain_shim = tool_try_staged_toolchain(
             self.vfs, self.cwd, self._get_env("PATH"), command, args, self.terminal)
         if toolchain_shim != nil:
@@ -183,6 +196,13 @@ impl ShellApp:
                 self._write_error("cd: no such directory: {resolved}")
                 self.last_exit_code = 1
                 return
+            if self.hosted:
+                val node = result.unwrap()
+                if node.kind != FsNodeKind.Directory:
+                    self._write_error("cd: not a directory: {resolved}")
+                    self.last_exit_code = 1
+                    return
+                shell_host_chdir(resolved)
         self.cwd = resolved
         self.last_exit_code = 0
 

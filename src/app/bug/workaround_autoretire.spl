@@ -1,0 +1,93 @@
+# Pure auto-retire candidate listing and closure-bypass detection
+# (plan section 4 E-BUG-WR-004, section 5).
+#
+# Value in, value out: no file, database write, process or clock access.
+# Nothing here edits source. The retirement transaction in
+# workaround_retirement.spl needs a root-fix commit, exact hunks and admitted
+# test proofs that a workaround index row does not carry, so this module only
+# names the sites (path:line) that still need that transaction.
+use app.bug.workaround_index.{WorkaroundIndex}
+use app.bug.closure_gate.{BugIdV1, BugClosureBlockReasonV1, bug_closure_block_code_v1}
+use std.database.bug.{BugDatabase, BugStatus}
+
+struct WorkaroundSitePathV1:
+    value: text
+
+struct WorkaroundSiteLineV1:
+    value: i64
+
+struct WorkaroundSiteV1:
+    bug_id: BugIdV1
+    path: WorkaroundSitePathV1
+    line: WorkaroundSiteLineV1
+
+struct WorkaroundIssueCodeV1:
+    value: text
+
+# Closed-set outcome of an --auto-retire request.
+enum AutoRetireVerdictV1:
+    NothingToRetire
+    CandidatesRemain
+    IndexIncomplete
+
+struct AutoRetireReportV1:
+    bug_id: BugIdV1
+    verdict: AutoRetireVerdictV1
+    sites: [WorkaroundSiteV1]
+
+# One closed/fixed bug that still has a live workaround link.
+struct ClosureBypassFindingV1:
+    code: WorkaroundIssueCodeV1
+    site: WorkaroundSiteV1
+
+pub fn workaround_site_text_v1(site: WorkaroundSiteV1) -> text:
+    "{site.path.value}:{site.line.value}"
+
+fn _site_of(link_bug: text, path: text, line: i64) -> WorkaroundSiteV1:
+    WorkaroundSiteV1(bug_id: BugIdV1(value: link_bug),
+        path: WorkaroundSitePathV1(value: path), line: WorkaroundSiteLineV1(value: line))
+
+pub fn workaround_auto_retire_report_v1(index: WorkaroundIndex, bug_id: BugIdV1) -> AutoRetireReportV1:
+    """List the live workaround sites linked to bug_id. An incomplete index is never reported clean."""
+    var sites: [WorkaroundSiteV1] = []
+    for link in index.links:
+        if link.bug_id == bug_id.value:
+            sites.push(_site_of(link.bug_id, link.path, link.line))
+    var verdict = AutoRetireVerdictV1.NothingToRetire
+    if sites.len() > 0:
+        verdict = AutoRetireVerdictV1.CandidatesRemain
+    elif not index.complete:
+        verdict = AutoRetireVerdictV1.IndexIncomplete
+    AutoRetireReportV1(bug_id: bug_id, verdict: verdict, sites: sites)
+
+pub fn workaround_auto_retire_lines_v1(report: AutoRetireReportV1) -> [text]:
+    var out: [text] = []
+    match report.verdict:
+        case AutoRetireVerdictV1.NothingToRetire:
+            out.push("auto-retire: {report.bug_id.value}: no live workaround sites")
+        case AutoRetireVerdictV1.IndexIncomplete:
+            out.push("auto-retire: {report.bug_id.value}: workaround index incomplete; run simple check-dbs --fullscan bugs")
+        case AutoRetireVerdictV1.CandidatesRemain:
+            for site in report.sites:
+                out.push("auto-retire: {report.bug_id.value}: retirement candidate {workaround_site_text_v1(site)}; not applied")
+    out
+
+
+fn _status_resolved(db: BugDatabase, id: text) -> bool:
+    match db.get_bug(id):
+        case Some(bug): bug.status == BugStatus.Fixed or bug.status == BugStatus.Closed
+        case None: false
+
+pub fn workaround_closure_bypass_findings_v1(index: WorkaroundIndex, db: BugDatabase) -> [ClosureBypassFindingV1]:
+    """Fixed/closed bug with a live workaround link: the closure gate was bypassed (E-BUG-WR-004)."""
+    var out: [ClosureBypassFindingV1] = []
+    val code = bug_closure_block_code_v1(BugClosureBlockReasonV1.ActiveWorkaround)
+    for link in index.links:
+        if _status_resolved(db, link.bug_id):
+            out.push(ClosureBypassFindingV1(code: WorkaroundIssueCodeV1(value: code),
+                site: _site_of(link.bug_id, link.path, link.line)))
+    out
+
+pub fn workaround_closure_bypass_message_v1(finding: ClosureBypassFindingV1) -> text:
+    "{finding.code.value}: bug {finding.site.bug_id.value} is fixed/closed but workaround remains at {workaround_site_text_v1(finding.site)}; closure bypassed the gate"
+

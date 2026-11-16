@@ -146,6 +146,24 @@ sub admit_auxiliary {
         $memberships{$sha} = 1;
         $allowed->{$relative} = 1;
     }
+    # Dirty-tracked sidecar, one per inventory digest. It names tracked paths
+    # whose rows may differ from HEAD, so a listed path may be absent (deleted
+    # in the worktree); it never admits a file.
+    for my $name (names("$base/compile-events/dirty")) {
+        $name =~ /\A([0-9a-f]{64})\.paths\z/ or die "invalid SCV dirty sidecar filename\n";
+        my $sha = $1;
+        my $relative = "build/scv/compile-events/dirty/$name";
+        my @rows = split /\n/, bytes("$overlay/$relative"), -1;
+        (shift(@rows) // '') eq 'simple-compile-dirty-tracked-v1' &&
+            (shift(@rows) // '') eq "inventory=$sha" or die "SCV dirty sidecar binding differs\n";
+        (shift(@rows) // '') eq 'count=' . scalar(@rows) or die "SCV dirty sidecar count differs\n";
+        my %seen;
+        for my $path (@rows) {
+            source_path($path);
+            !$seen{$path}++ or die "duplicate SCV dirty sidecar path\n";
+        }
+        $allowed->{$relative} = 1;
+    }
     my $current = 'build/scv/source-inventory/CURRENT';
     if (-e "$overlay/$current" || -l "$overlay/$current") {
         my @rows = split /\n/, bytes("$overlay/$current"), -1;

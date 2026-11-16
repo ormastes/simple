@@ -1,0 +1,128 @@
+# Pure production association/codecs only. Existing Ed25519/wire fixtures are
+# DATA, not native Windows requests, actual roots/readers or live exchange proof.
+# All scenarios source-authored NOT_RUN; actual installed-native cases in manual.
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.*
+use std.common.contracts.orchestration.host_controller_status_v3.*
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_operation_request_digest_v6
+use std.common.contracts.orchestration.host_service_operation_reply_v6.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.crypto.sha256.sha256_text
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.*
+use test.fixtures.orchestrator_acceptance.controller_container_authority_v2.*
+
+fn dispatch_status_data_v3() -> HostControllerStatusV3:
+    val fixture = controller_container_authority_fixture_v2("windows-docker-process")
+    HostControllerStatusV3(scope: fixture.observation.scope, authority_id: fixture.context.config.host_authority_id,
+        enrollment_digest: "d".repeat(64), provider_identity_digest: fixture.context.config.provider_identity_digest,
+        revision: 7, cpu_millis: 8000, memory_bytes: 16000, available_cpu_millis: 6000,
+        available_memory_bytes: 12000, retained_reservations: 1, ready: true)
+
+describe "retained Controller dispatch V3 pure association refusals":
+    it "accepts the exact canonical V3 status association without native authority":
+        step("Use the production typed status codec and full immutable packet scope")
+        val fixture = controller_container_authority_fixture_v2("windows-docker-process")
+        val status = dispatch_status_data_v3()
+        val bytes = host_controller_status_encode_v3(status).unwrap()
+        val decoded = host_controller_status_decode_v3(bytes).unwrap()
+        expect(controller_dispatch_host_status_match_v3(fixture.context, fixture.packet, decoded).unwrap()).to_equal(true)
+
+    it "refuses restarted incarnation provider generation and service scope substitution":
+        step("An authenticated status from another actual scope cannot advance the packet")
+        val fixture = controller_container_authority_fixture_v2("windows-docker-process")
+        var changed = dispatch_status_data_v3()
+        changed.scope.continuity_id = "windows-service-incarnation-v1:cafe"
+        expect(controller_dispatch_host_status_match_v3(fixture.context, fixture.packet, changed).is_err()).to_equal(true)
+        changed = dispatch_status_data_v3()
+        changed.scope.provider_generation = changed.scope.provider_generation + 1
+        expect(controller_dispatch_host_status_match_v3(fixture.context, fixture.packet, changed).is_err()).to_equal(true)
+        changed = dispatch_status_data_v3()
+        changed.scope.service_scope_id = "another-service"
+        expect(controller_dispatch_host_status_match_v3(fixture.context, fixture.packet, changed).is_err()).to_equal(true)
+
+    it "refuses unready status and provider or enrollment authority substitution":
+        step("Readiness and installed provider enrollment are separate required bindings")
+        val fixture = controller_container_authority_fixture_v2("windows-docker-process")
+        var changed = dispatch_status_data_v3()
+        changed.ready = false
+        expect(controller_dispatch_host_status_match_v3(fixture.context, fixture.packet, changed).is_err()).to_equal(true)
+        changed = dispatch_status_data_v3()
+        changed.provider_identity_digest = "c".repeat(64)
+        expect(controller_dispatch_host_status_match_v3(fixture.context, fixture.packet, changed).is_err()).to_equal(true)
+        changed = dispatch_status_data_v3()
+        changed.enrollment_digest = "e".repeat(64)
+        changed.authority_id = "host-" + changed.enrollment_digest
+        expect(controller_dispatch_host_status_match_v3(fixture.context, fixture.packet, changed).is_err()).to_equal(true)
+
+    it "derives one assignment archive key independent of refreshed grant proof bytes":
+        step("Refreshing signatures cannot hide an already recorded original execute")
+        val fixture = controller_container_wire_fixture_v2("windows-docker-process")
+        val renewed = controller_container_renew_fixture_v2(fixture.dispatch)
+        val expected = "controller-dispatch-execute-v3/" + sha256_text(controller_assignment_bytes_v1(fixture.dispatch.binding).unwrap()) + ".sdn"
+        expect(controller_dispatch_execute_archive_key_v3(fixture.dispatch).unwrap()).to_equal(expected)
+        expect(controller_dispatch_execute_archive_key_v3(renewed).unwrap()).to_equal(expected)
+
+    it "uses original canonical execute digest instead of regenerating refreshed grant bytes":
+        step("The control request binds exact immutable signed execute source")
+        val fixture = controller_container_wire_fixture_v2("windows-docker-process")
+        val source = host_execute_request_encode_v2(fixture.host).unwrap()
+        val renewed = controller_container_renew_fixture_v2(fixture.dispatch)
+        expect(controller_dispatch_original_execute_match_v3(renewed, source).unwrap()).to_equal(
+            host_service_operation_request_digest_v6(fixture.host.operation.id, source).unwrap())
+        var changed = fixture.host
+        changed.signed = renewed.host_execution_signed
+        changed.approval = renewed.host_execution_approval
+        val other = host_execute_request_encode_v2(changed).unwrap()
+        expect(source == other).to_equal(false)
+        expect(controller_dispatch_original_execute_match_v3(renewed, source).unwrap() ==
+            controller_dispatch_original_execute_match_v3(renewed, other).unwrap()).to_equal(false)
+
+    it "refuses another immutable workload execution and malformed original archive":
+        step("Pure shape validation never permits arbitrary original digest claims")
+        val fixture = controller_container_wire_fixture_v2("windows-docker-process")
+        val source = host_execute_request_encode_v2(fixture.host).unwrap()
+        var packet = fixture.dispatch
+        packet.execution.request_bytes = "other-common-wire-DATA"
+        expect(controller_dispatch_original_execute_match_v3(packet, source).is_err()).to_equal(true)
+        expect(controller_dispatch_original_execute_match_v3(fixture.dispatch, source + "\n").is_err()).to_equal(true)
+        expect(controller_dispatch_original_execute_match_v3(fixture.dispatch, "untrusted").is_err()).to_equal(true)
+
+    it "preserves actual uncertain cancellation and completion facts as nonzero":
+        step("Project actual lower close outcome rather than infer success from local cancellation")
+        for prior in ["not-sent", "remote-pending", "unknown", "authenticated-reply"]:
+            val closed = controller_dispatch_close_disposition_v3(prior, "unknown", "host-service-auth-cancelled", true, false)
+            expect(closed.outcome).to_equal("unknown")
+            expect(closed.error).to_equal("host-service-auth-cancelled")
+
+    it "does not promote pending DATA or cancellation into cleanup success":
+        step("Use canonical pending reply DATA without constructing any handle or private custody state")
+        val pending = host_service_operation_reply_encode_v6(HostServiceOperationReplyV6(action: "progress",
+            service_incarnation: "a".repeat(32), operation_id: "host-operation", scope_digest: "b".repeat(64),
+            request_digest: "c".repeat(64), pending: true, exit_code: 0, payload: "", error: "")).unwrap()
+        expect(host_service_operation_reply_decode_v6(pending).unwrap().pending).to_equal(true)
+        val disposition = controller_dispatch_close_disposition_v3("remote-pending", "unknown",
+            "host-service-auth-cancelled", true, false)
+        expect(disposition.outcome).to_equal("unknown")
+        expect(disposition.error).to_equal("host-service-auth-cancelled")
+
+    it "refuses missing exchange carrier without confirmed completion and never clears uncertainty":
+        step("Consume actual completed and owner facts independently of absence and poll action")
+        val missing = controller_dispatch_close_disposition_v3("remote-pending", "unknown", "host-service-auth-cancelled", false, false)
+        expect(missing.error).to_equal("dispatch-exchange-close-unconfirmed")
+        expect(missing.outcome).to_equal("unknown")
+        val uncertain = controller_dispatch_close_disposition_v3("unknown", "authenticated-reply", "", true, false)
+        expect(uncertain.outcome).to_equal("unknown")
+        expect(controller_dispatch_close_disposition_v3("not-sent", "unknown", "", true, false).error).to_equal("dispatch-exchange-outcome-unknown")
+
+    it "consumes matching revisions and rejects copied older revisions as DATA decisions only":
+        step("Use the production checked revision rule without forging any registry handle")
+        expect(controller_dispatch_revision_advance_v3(7, 7, false).unwrap()).to_equal(8)
+        expect(controller_dispatch_revision_advance_v3(8, 7, false).unwrap_err()).to_equal("controller-dispatch-owner-stale")
+        expect(controller_dispatch_revision_advance_v3(8, 7, true).unwrap_err()).to_equal("controller-dispatch-owner-stale")
+        expect(controller_dispatch_revision_advance_v3(0, 0, true).is_err()).to_equal(true)
+
+    it "never wraps the ceiling revision and still permits canonical cleanup at that ceiling":
+        step("A ceiling decision grants no registry admission or native ownership")
+        expect(controller_dispatch_revision_advance_v3(9223372036854775806, 9223372036854775806, false).unwrap()).to_equal(9223372036854775807)
+        expect(controller_dispatch_revision_advance_v3(9223372036854775807, 9223372036854775807, false).unwrap_err()).to_equal("controller-dispatch-owner-revision-exhausted")
+        expect(controller_dispatch_revision_advance_v3(9223372036854775807, 9223372036854775807, true).unwrap()).to_equal(9223372036854775807)

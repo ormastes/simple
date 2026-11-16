@@ -1,0 +1,99 @@
+# Scope-free provider request DATA. Binding is pure derivation, never native
+# scope observation, provider validation, admission or permission to Create.
+use std.common.contracts.container.execution_v2.*
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub const CONTAINER_EXECUTION_DRAFT_BODY_MAX_V3: i64 = 1048576
+pub const CONTAINER_ASSOCIATED_WIRE_MAX_V3: i64 = 2097152
+pub const CONTAINER_ASSOCIATED_ROUTE_BODY_MAX_V3: i64 = 8192
+
+pub struct ContainerExecutionDraftV3:
+    backend: text
+    workload_uid: text
+    attempt: i64
+    operation_id: text
+    request_digest: text
+    request_bytes: text
+
+# Shared strict scalar-envelope helpers. Fixed callers supply safe field names;
+# no Host/domain/storage imports or native authority are introduced here.
+pub fn execution_associated_fields_v3(source: text, kind: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() == 0 or source.byte_len() > CONTAINER_ASSOCIATED_WIRE_MAX_V3: return Err("associated-source-size")
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: CONTAINER_ASSOCIATED_WIRE_MAX_V3,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16))
+    if parsed.is_err(): return Err("associated-source-syntax")
+    if sdn_encode_canonical(parsed.unwrap().value) + "\n" != source: return Err("associated-source-canonical")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("associated-source-object")
+    for name in fields.keys():
+        if not names.contains(name): return Err("associated-source-unknown-field")
+    for name in names:
+        if not fields.contains_key(name): return Err("associated-source-missing-field")
+    if execution_associated_int_v3(fields, "version")? != 3 or execution_associated_text_v3(fields, "kind")? != kind:
+        return Err("associated-source-version")
+    Ok(fields)
+
+pub fn execution_associated_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("associated-source-text")
+
+pub fn execution_associated_int_v3(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("associated-source-integer")
+
+pub fn execution_associated_encode_v3(fields: Dict<text, SdnValue>) -> Result<text, text>:
+    var size: i64 = 3 + 2 * fields.len() + 2 * (fields.len() - 1)
+    for name in fields.keys():
+        size = size + name.byte_len()
+        val scalar = match fields[name]:
+            case SdnValue.Int(value): value.to_text().byte_len()
+            case SdnValue.String(value): sdn_encoded_text_size_v1(value)
+            case _: return Err("associated-source-value")
+        size = size + scalar
+        if size > CONTAINER_ASSOCIATED_WIRE_MAX_V3: return Err("associated-source-size")
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn container_execution_draft_encode_v3(draft: ContainerExecutionDraftV3) -> Result<text, text>:
+    if draft.backend != "linux-podman": return Err("container-draft-backend-unsupported")
+    if (not builder_identifier_valid_v1(draft.workload_uid) or not builder_identifier_valid_v1(draft.operation_id) or
+            draft.attempt <= 0 or not builder_digest_valid_v1(draft.request_digest) or draft.request_bytes.byte_len() == 0 or
+            draft.request_bytes.byte_len() > CONTAINER_EXECUTION_DRAFT_BODY_MAX_V3 or draft.request_bytes.contains("\0")):
+        return Err("container-draft-fields")
+    execution_associated_encode_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("container-execution-draft"),
+        "backend": SdnValue.String(draft.backend), "workloadUid": SdnValue.String(draft.workload_uid), "attempt": SdnValue.Int(draft.attempt),
+        "operationId": SdnValue.String(draft.operation_id), "requestDigest": SdnValue.String(draft.request_digest),
+        "requestBytes": SdnValue.String(draft.request_bytes)})
+
+pub fn container_execution_draft_decode_v3(source: text) -> Result<ContainerExecutionDraftV3, text>:
+    val fields = execution_associated_fields_v3(source, "container-execution-draft", ["version", "kind", "backend",
+        "workloadUid", "attempt", "operationId", "requestDigest", "requestBytes"])?
+    val draft = ContainerExecutionDraftV3(execution_associated_text_v3(fields, "backend")?, execution_associated_text_v3(fields, "workloadUid")?,
+        execution_associated_int_v3(fields, "attempt")?, execution_associated_text_v3(fields, "operationId")?,
+        execution_associated_text_v3(fields, "requestDigest")?, execution_associated_text_v3(fields, "requestBytes")?)
+    if container_execution_draft_encode_v3(draft)? != source: return Err("container-draft-canonical")
+    Ok(draft)
+
+pub fn container_execution_draft_digest_v3(draft: ContainerExecutionDraftV3) -> Result<text, text>:
+    Ok(sha256_text(container_execution_draft_encode_v3(draft)?))
+
+pub fn container_execution_draft_bind_v3(draft: ContainerExecutionDraftV3, scope: ContainerHostScopeV2) -> Result<ContainerExecutionRequestV2, text>:
+    val valid = container_execution_draft_encode_v3(draft)?
+    val request = ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: draft.backend, workload_uid: draft.workload_uid,
+        attempt: draft.attempt, operation_id: draft.operation_id, request_digest: draft.request_digest,
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id, boot_id: scope.boot_id,
+        provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id), request_bytes: draft.request_bytes)
+    val encoded = container_execution_request_encode_v2(request)?
+    Ok(request)
+
+export ContainerExecutionDraftV3, CONTAINER_EXECUTION_DRAFT_BODY_MAX_V3, CONTAINER_ASSOCIATED_WIRE_MAX_V3, CONTAINER_ASSOCIATED_ROUTE_BODY_MAX_V3
+export container_execution_draft_encode_v3, container_execution_draft_decode_v3, container_execution_draft_digest_v3, container_execution_draft_bind_v3
+export execution_associated_fields_v3, execution_associated_text_v3, execution_associated_int_v3, execution_associated_encode_v3

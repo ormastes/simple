@@ -1,0 +1,76 @@
+# AUTHORED_NOT_RUN. Disposable administrator-installed actual supervisor fixture.
+# Initial supervisor acquisition invokes real LEGACY activation-unit controls;
+# this cutoff continuation itself sends no signal, request, mask or StopUnit.
+# Keep the actual provider main process running throughout this scenario.
+# @req REQ-LINUX-PROVIDER-MAIN-OBSERVATION-001
+# @req REQ-LINUX-PROVIDER-MAIN-OBSERVATION-002
+# @req REQ-LINUX-PROVIDER-MAIN-OBSERVATION-003
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.linux_installed_supervisor_owner_v1.*
+use std.nogc_sync_mut.io.linux_installed_provider_main_observation_v1.*
+
+var main_observation_fixture_supervisors_v1: [LinuxInstalledSupervisorOwnerV1] = []
+var main_observation_fixture_cutoffs_v1: [LinuxInstalledProviderCutoffOwnerV1] = []
+
+fn main_observation_fixture_supervisor_v1() -> Result<LinuxInstalledSupervisorOwnerV1, text>:
+    match linux_installed_supervisor_open_v1():
+        case LinuxInstalledSupervisorOpenV1.Ready(owner):
+            main_observation_fixture_supervisors_v1.push(owner)
+            Ok(owner)
+        case LinuxInstalledSupervisorOpenV1.CleanupRequired(owner, reason):
+            main_observation_fixture_supervisors_v1.push(owner)
+            val closed = owner.close_v1()
+            Err("actual installed supervisor fixture refused: " + reason + "; cleanup=" + closed)
+        case LinuxInstalledSupervisorOpenV1.Rejected(reason): Err(reason)
+
+describe "Actual installed original provider main-process observation":
+    it "retires active aliases and retains actual observation without authorizing a stop transaction":
+        step("Acquire the actual installed supervisor with its provider still running")
+        val owner = main_observation_fixture_supervisor_v1().unwrap()
+        val alias = owner
+        val before = owner.current_v1()
+        if before.is_err():
+            assert(false)
+            return
+        step("Arm the same canonical owner and pin the actual original main process and endpoint peer")
+        val cutoff = match owner.begin_provider_cutoff_v1():
+            case LinuxInstalledProviderCutoffBeginV1.Rejected(original, reason):
+                main_observation_fixture_supervisors_v1.push(original)
+                assert(false)
+                return
+            case LinuxInstalledProviderCutoffBeginV1.Retained(retained, phase, reason):
+                main_observation_fixture_cutoffs_v1.push(retained)
+                retained
+        val observed = cutoff.current_v1()
+        val old_current = alias.current_v1()
+        val old_installed = alias.installed_snapshot_v1()
+        step("Close only observation resources and keep original global inhibition retained")
+        val closed = cutoff.close_v1()
+        val diagnostic = cutoff.close_diagnostic_v1()
+        val after = cutoff.current_v1()
+        expect(observed.is_ok()).to_equal(true)
+        expect(old_current.is_err()).to_equal(true)
+        expect(old_installed.is_err()).to_equal(true)
+        val actual = observed.unwrap()
+        expect(actual.phase).to_equal(LinuxInstalledProviderCutoffPhaseV1.RetainedUnknown)
+        expect(actual.reason).to_equal("provider-stop-transaction-ownership-unavailable")
+        expect(actual.original_main.is_some()).to_equal(true)
+        val native = actual.original_main.unwrap()
+        val original = before.unwrap()
+        expect(native.provider_process_id).to_equal(original.provider_process_id)
+        expect(native.provider_incarnation).to_equal(original.provider_incarnation)
+        expect(native.profile_digest).to_equal(original.profile_digest)
+        expect(native.manager_unique_name).to_equal(original.manager_unique_name)
+        expect(native.socket_inode).to_be_greater_than(0)
+        expect(native.original_process_exited).to_equal(false)
+        expect(native.preflight.restart).to_equal("no")
+        expect(native.preflight.exec_stop_empty).to_equal(true)
+        expect(native.preflight.exec_stop_post_empty).to_equal(true)
+        expect(native.preflight.dynamic_user).to_equal(false)
+        expect(native.preflight.remove_ipc).to_equal(false)
+        expect(native.preflight.runtime_directories.len()).to_equal(0)
+        expect(closed).to_equal("retained-supervisor-inhibition-successor-handoff-required")
+        expect(diagnostic).to_equal("")
+        expect(after.is_ok()).to_equal(true)
+        expect(after.unwrap().phase).to_equal(LinuxInstalledProviderCutoffPhaseV1.RetainedUnknown)
+        expect(after.unwrap().original_main.is_none()).to_equal(true)
