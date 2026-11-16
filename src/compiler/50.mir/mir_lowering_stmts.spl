@@ -1812,10 +1812,14 @@ impl MirLowering:
                         val initializer_moves = self.ownership_assignment_requires_move(init_local, let_init.kind, span)
                         val struct_is_place_iso = struct_sym != None and initializer_moves
                         val initializer_is_short = self.ownership_assignment_is_short(init_local)
+                        # Not only a syntactic place read: any initializer whose
+                        # result IS an existing binding's local (e.g. a `do:` block
+                        # whose tail is `a`) must be copied, never aliased.
+                        val alias_reads_existing_record = struct_sym != None and (mir_expr_kind_is_place(let_init.kind) or self.local_is_symbol_bound(init_local))
                         val struct_copy = if struct_is_place_iso or initializer_is_short:
                             None
                         else:
-                            self.maybe_copy_struct_value(init_local, struct_sym, mir_expr_kind_is_place(let_init.kind))
+                            self.maybe_copy_struct_value(init_local, struct_sym, alias_reads_existing_record)
                         if val copy_local = struct_copy:
                             self.bind_local(symbol_value_id, copy_local)
                         elif struct_is_place_iso:
@@ -1836,7 +1840,15 @@ impl MirLowering:
                             if self.local_hir_type_resource_state(init_local.id) == 1:
                                 self.consumed_resource_locals[init_local.id] = true
                                 self.resource_owned_locals.push(smove_local)
-                        elif (bf_sym != None or struct_sym != None) and not initializer_is_short:
+                        elif (bf_sym != None or struct_sym != None) and not initializer_is_short and not alias_reads_existing_record:
+                            # Alias only a FRESH aggregate. A record local that is a
+                            # place read or already bound to a symbol (a class keeps
+                            # reference semantics, so no struct copy was made; a
+                            # `do:` block returns its tail's OWN local) needs its own
+                            # local: aliasing made `var t = a; t = b` overwrite `a`
+                            # (bug stage2_class_var_place_alias_clobbers_source_2026-11-16).
+                            # A bitfield-only word keeps the old alias: its copy
+                            # SIGSEGVs on the field write (recorded in that bug doc).
                             self.bind_local(symbol_value_id, init_local)
                         else:
                             # Bug #186: array-typed place-read local-alias fix
@@ -1857,10 +1869,19 @@ impl MirLowering:
                                 self.builder = b
                                 self.bind_local(symbol_value_id, local)
                                 self.copy_assignment_short_provenance(init_local, local)
-                                if initializer_is_short and struct_sym != None:
+                                # Short initializers and place reads of a class /
+                                # bitfield both land here with a known record or
+                                # bitfield owner; the fresh local keeps it.
+                                if struct_sym != None:
                                     self.struct_value_syms[local.id] = struct_sym ?? ""
-                                if initializer_is_short and bf_sym != None:
+                                if bf_sym != None:
                                     self.bitfield_value_syms[local.id] = bf_sym ?? -1
+                                # Generic instance owner (`Box<T>` field types), as
+                                # copy_struct_value_recursive carries it.
+                                if self.generic_instance_field_types.has(init_local.id):
+                                    self.generic_instance_field_types[local.id] = self.generic_instance_field_types[init_local.id]
+                                if self.generic_instance_field_struct_names.has(init_local.id):
+                                    self.generic_instance_field_struct_names[local.id] = self.generic_instance_field_struct_names[init_local.id]
                                 if self.runtime_array_locals.contains(init_local.id):
                                     self.runtime_array_locals[local.id] = true
                                 if self.runtime_dict_locals.contains(init_local.id):
@@ -2192,10 +2213,11 @@ impl MirLowering:
                         # Bug #177: same struct-value-copy guard as the disc==1
                         # early-Let path above -- kept in sync (this arm is dead
                         # today, see the comment above effective_type).
-                        val struct_copy2 = self.maybe_copy_struct_value(init_local, struct_sym, init_is_place)
+                        val alias2_reads_existing_record = struct_sym != None and (init_is_place or (has_init and self.local_is_symbol_bound(init_local)))
+                        val struct_copy2 = self.maybe_copy_struct_value(init_local, struct_sym, alias2_reads_existing_record)
                         if val copy_local2 = struct_copy2:
                             self.bind_local(symbol_id, copy_local2)
-                        elif bf_sym != None or struct_sym != None:
+                        elif (bf_sym != None or struct_sym != None) and not alias2_reads_existing_record:
                             self.bind_local(symbol_id, init_local)
                         else:
                             # Bug #186: same array-value-copy guard as the
@@ -2210,6 +2232,14 @@ impl MirLowering:
                                 val local = b.new_local(None, effective_type, LocalKind.Var)
                                 self.builder = b
                                 self.bind_local(symbol_id, local)
+                                if struct_sym != None:
+                                    self.struct_value_syms[local.id] = struct_sym ?? ""
+                                if bf_sym != None:
+                                    self.bitfield_value_syms[local.id] = bf_sym ?? -1
+                                if has_init and self.generic_instance_field_types.has(init_local.id):
+                                    self.generic_instance_field_types[local.id] = self.generic_instance_field_types[init_local.id]
+                                if has_init and self.generic_instance_field_struct_names.has(init_local.id):
+                                    self.generic_instance_field_struct_names[local.id] = self.generic_instance_field_struct_names[init_local.id]
                                 if has_init and self.runtime_array_locals.contains(init_local.id):
                                     self.runtime_array_locals[local.id] = true
                                 if has_init and self.runtime_dict_locals.contains(init_local.id):
