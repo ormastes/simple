@@ -529,3 +529,16 @@ A cross-dir product file glob-imports a facade that glob re-exports the definer,
 - `src/lib/nogc_sync_mut/tooling/easy_fix/accessor_rewrite.spl` (2): `acc_process_file`, `acc_unsafe_setter_names`
 - `src/lib/scv/structural_match_source.spl` (1): `scv_cst_store_file`
 - `src/os/port/_BootstrapCross/cross_bootstrap_pipeline.spl` (1): `cross_bootstrap_main`
+
+## Addendum 2026-11-15 — namespace handed out whole
+
+Closed: a module namespace handed out whole (`m.values()`, `m.entries()`,
+iteration, a comprehension, `get_or`, `map_values`, a mutated copy
+(`remove`, `ns[k] = v`) or `merge`) is now judged like `m["f"]`; `keys()`,
+test callers, same-directory callers and a dict a module hands out stay
+allowed. Matrix spec 60/62 on base -> 62/62; 247-spec sweep shows no
+pass-to-fail change versus base.
+
+Still open: a function with no recorded owner is not checked when called from
+another thread; native/AOT builds do not apply the check; the JIT lane does
+not apply the unused-import rule.

@@ -7,6 +7,28 @@ fn parse_items(source: &str) -> Vec<Node> {
 }
 
 #[test]
+fn security_contextual_identifier_statement() {
+    let items = parse_items(
+        r#"fn f():
+    var security = make()
+    security.policy_bound = true
+    security = make()
+security.level = 3
+"#,
+    );
+    assert!(!items.iter().any(|n| matches!(n, Node::SecurityPolicy(_))));
+    assert!(matches!(&items[0], Node::Function(_)));
+}
+
+#[test]
+fn sandbox_and_ui_policy_contextual_identifier_statement() {
+    let items = parse_items("sandbox.level = 2\nui_policy.level = 3\n");
+    assert!(!items
+        .iter()
+        .any(|n| matches!(n, Node::SandboxPolicy(_) | Node::UiPolicy(_))));
+}
+
+#[test]
 fn parses_security_policy_with_convention_defaults() {
     let items = parse_items(
         r#"security AppSecurity:

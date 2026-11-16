@@ -2,19 +2,20 @@
 # Pure protocol decoder coverage; this does not claim a live Git snapshot ran.
 use std.spec
 use std.common.text_bytes.{text_to_utf8_bytes}
-use app.traceability.snapshot.git_tree.{decode_trace_git_tree}
+use app.traceability.snapshot.git_tree.{decode_trace_git_tree, TraceGitEntryLimitV1}
+use app.traceability.snapshot.git_batch.{TraceGitByteLimitV1, TraceGitBytesV1}
 
 val oid_a = "1111111111111111111111111111111111111111"
 
 fn tree_error(wire: text, object_format: text, entries: i64, bytes: i64) -> text:
-    match decode_trace_git_tree(text_to_utf8_bytes(wire), object_format, entries, bytes):
+    match decode_trace_git_tree(TraceGitBytesV1(bytes: text_to_utf8_bytes(wire)), object_format, TraceGitEntryLimitV1(value: entries), TraceGitByteLimitV1(value: bytes)):
         case Ok(_): "unexpected success"
         case Err(reason): reason
 
 describe "Git tree inventory framing":
     it "preserves exact paths with spaces and Unicode":
         val wire = "100644 blob {oid_a}\t目录/ spaced name.txt\0"
-        match decode_trace_git_tree(text_to_utf8_bytes(wire), "sha1", 8, 4096):
+        match decode_trace_git_tree(TraceGitBytesV1(bytes: text_to_utf8_bytes(wire)), "sha1", TraceGitEntryLimitV1(value: 8), TraceGitByteLimitV1(value: 4096)):
             case Ok(entries):
                 expect(entries.len()).to_equal(1)
                 expect(entries[0].mode).to_equal("100644")
@@ -26,12 +27,12 @@ describe "Git tree inventory framing":
     it "preserves embedded line breaks and tabs in raw Git paths":
         val path = "line one\nline two\tname.txt"
         val wire = "100644 blob {oid_a}\t{path}\0"
-        match decode_trace_git_tree(text_to_utf8_bytes(wire), "sha1", 8, 4096):
+        match decode_trace_git_tree(TraceGitBytesV1(bytes: text_to_utf8_bytes(wire)), "sha1", TraceGitEntryLimitV1(value: 8), TraceGitByteLimitV1(value: 4096)):
             case Ok(entries): expect(entries[0].path).to_equal(path)
             case Err(reason): fail(reason)
 
     it "accepts an explicitly successful empty tree result":
-        match decode_trace_git_tree([], "sha256", 1, 4096):
+        match decode_trace_git_tree(TraceGitBytesV1(bytes: []), "sha256", TraceGitEntryLimitV1(value: 1), TraceGitByteLimitV1(value: 4096)):
             case Ok(entries): expect(entries.len()).to_equal(0)
             case Err(reason): fail(reason)
 
@@ -45,7 +46,7 @@ describe "Git tree inventory framing":
         expect(tree_error(duplicate, "sha1", 8, 4096)).to_contain("duplicate tree entry path")
         val first_distinct = "100644 blob {oid_a}\tA\0"
         val distinct = first_distinct + "100644 blob {oid_a}\ta\0"
-        match decode_trace_git_tree(text_to_utf8_bytes(distinct), "sha1", 8, 4096):
+        match decode_trace_git_tree(TraceGitBytesV1(bytes: text_to_utf8_bytes(distinct)), "sha1", TraceGitEntryLimitV1(value: 8), TraceGitByteLimitV1(value: 4096)):
             case Ok(entries): expect(entries.len()).to_equal(2)
             case Err(reason): fail(reason)
 
@@ -65,7 +66,7 @@ describe "Git tree inventory framing":
         var invalid = text_to_utf8_bytes("100644 blob {oid_a}\tfile")
         invalid.push(255 as u8)
         invalid.push(0 as u8)
-        match decode_trace_git_tree(invalid, "sha1", 8, 4096):
+        match decode_trace_git_tree(TraceGitBytesV1(bytes: invalid), "sha1", TraceGitEntryLimitV1(value: 8), TraceGitByteLimitV1(value: 4096)):
             case Ok(_): fail("invalid UTF-8 path was accepted")
             case Err(reason): expect(reason).to_contain("TRACE-SNAPSHOT-INCOMPLETE")
 

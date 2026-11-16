@@ -3,8 +3,9 @@
 # Cross-file identities and locators are resolved only after all partitions merge.
 # @req REQ-TRC-017
 use std.common.traceability.model.*
+use std.common.traceability.trace_ids_v1.{TraceOverridePermissionV1}
 use std.common.traceability.incremental.*
-use std.common.traceability.schema.{trace_path_valid}
+use std.common.traceability.schema.{trace_path_parse_v1}
 use std.common.traceability.sdn_codec.{decode_trace_declarations}
 use std.common.traceability.conventions.{convention_target_path}
 use std.common.sdn.value.{SdnValue}
@@ -40,6 +41,16 @@ pub struct TraceSnapshotPartitionUpdate:
     invalidation: TraceInvalidation
     reused_paths: [text]
 
+fn authority_review_wire(authority: TraceAuthority) -> text:
+    if authority.review_id.is_some():
+        return authority.review_id.unwrap().value
+    ""
+
+fn authority_expiry_wire(authority: TraceAuthority) -> text:
+    if authority.expires_snapshot_id.is_some():
+        return authority.expires_snapshot_id.unwrap().value
+    ""
+
 fn partition_digest(value: text) -> text:
     var bytes: [u8] = []
     for byte in value.bytes(): bytes.push(byte)
@@ -68,7 +79,7 @@ fn partition_fact_digest(facts: TraceFacts) -> text:
     var claims: [SdnValue] = []
     for item in facts.claims: claims.push(partition_sdn_strings(["id", "from_id", "relation", "to_id", "origin_id", "operation", "rule_id", "scope_id"], [item.id, item.from_id, relation_name(item.relation), item.to_id, item.origin_id, claim_operation_name(item.operation), item.rule_id, item.scope_id]))
     var origins: [SdnValue] = []
-    for item in facts.origins: origins.push(partition_sdn_strings(["id", "kind", "owner_path", "locator", "rule_version"], [item.id, origin_kind_name(item.kind), item.owner_path, item.locator, item.rule_version]))
+    for item in facts.origins: origins.push(partition_sdn_strings(["id", "kind", "owner_path", "locator", "rule_version"], [item.id.value, origin_kind_name(item.kind), item.owner_path.value, item.locator, item.rule_version.value]))
     var locators: [SdnValue] = []
     for item in facts.locators: locators.push(partition_sdn_strings(["entity_id", "path", "locator_kind", "locator", "blob_id"], [item.entity_id, item.path, item.locator_kind, item.locator, item.blob_id]))
     var diagnostics: [SdnValue] = []
@@ -110,13 +121,13 @@ pub fn trace_snapshot_policy_binding(policy: TracePolicy) -> text:
     var rules: [SdnValue] = []
     for rule in policy.conventions:
         rules.push(partition_record(["id", "source_root", "target_root", "source_suffix", "target_suffix", "relation", "version"],
-            [rule.id, rule.source_root, rule.target_root, rule.source_suffix, rule.target_suffix, relation_name(rule.relation), rule.version]))
+            [rule.id.value, rule.source_root.value, rule.target_root.value, rule.source_suffix.value, rule.target_suffix.value, relation_name(rule.relation), rule.version.value]))
     var authorities: [SdnValue] = []
     for authority in policy.authorities:
         var row: Dict<text, SdnValue> = {}
         row["declaration"] = partition_record(["origin_id", "relation", "scope_id", "owner_path", "review_id", "reason", "expires_snapshot_id"],
-            [authority.origin_id, relation_name(authority.relation), authority.scope_id, authority.owner_path, authority.review_id, authority.reason, authority.expires_snapshot_id])
-        row["allow_override"] = SdnValue.Bool(authority.allow_override)
+            [authority.origin_id.value, relation_name(authority.relation), authority.scope_id.value, authority.owner_path.value, authority_review_wire(authority), authority.reason, authority_expiry_wire(authority)])
+        row["allow_override"] = SdnValue.Bool(authority.override_permission == TraceOverridePermissionV1.Allowed)
         authorities.push(SdnValue.Dict(row))
     var fields: Dict<text, SdnValue> = {}
     fields["schema"] = SdnValue.String("simple.trace.policy-binding/v1")
@@ -180,7 +191,7 @@ fn rebind_partition(partition: TraceSnapshotPartition, subject: SnapshotSubject)
 fn declaration_path_valid(paths: [text]) -> bool:
     var seen: Dict<text, bool> = {}
     for path in paths:
-        if not trace_path_valid(path) or seen.contains_key(path): return false
+        if trace_path_parse_v1(path).is_none() or seen.contains_key(path): return false
         seen[path] = true
     true
 
@@ -316,7 +327,7 @@ fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifac
     # Same per-path diagnostic identity and order as extract_snapshot_trace_facts_cold.
     var registered: [text] = []
     for path in declarations:
-        if registered.contains(path) or not trace_path_valid(path):
+        if registered.contains(path) or trace_path_parse_v1(path).is_none():
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-AUTHORITY-CONFLICT", subject_id: subject.snapshot_id,
                 rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "invalid or repeated declaration registration", severity: "error"))
@@ -414,7 +425,7 @@ pub fn build_trace_snapshot_partition_set(snapshot: SnapshotInput, declaration_p
     var seen: Dict<text, bool> = {}
     var partitions: [TraceSnapshotPartition] = []
     for artifact in snapshot.artifacts:
-        if not trace_path_valid(artifact.path) or artifact.blob_id == "" or artifact.visibility == "" or seen.contains_key(artifact.path):
+        if trace_path_parse_v1(artifact.path).is_none() or artifact.blob_id == "" or artifact.visibility == "" or seen.contains_key(artifact.path):
             return Err("TRACE-PARTITIONS-INCOMPLETE: invalid or duplicate artifact identity")
         seen[artifact.path] = true
         partitions.push(make_partition(snapshot.subject, artifact, declaration_paths.contains(artifact.path)))
@@ -446,13 +457,16 @@ fn trace_partition_invalidation(base: TraceSnapshotPartitionSet, candidate: Trac
         plan.complete = false
     plan
 
+pub struct TraceAffectedLimitV1:
+    value: i64
+
 # Reuses only owner-local decoded partitions whose exact artifact and all
 # extractor/schema/policy/config bindings match. Cross-file resolution is rebuilt.
 pub fn update_trace_snapshot_partitions(base: TraceSnapshotPartitionSet, candidate: SnapshotInput,
     declaration_paths: [text], extractor_id: text, schema_id: text, policy: TracePolicy, policy_binding_id: text,
     configuration_id: text, manifest_id: text, generation_id: text,
     changed_identities: [text], changed_memberships: [text], changed_configurations: [text],
-    limit: i64) -> Result<TraceSnapshotPartitionUpdate, text>:
+    affected_limit: TraceAffectedLimitV1) -> Result<TraceSnapshotPartitionUpdate, text>:
     if not candidate.complete or candidate.subject.repository_id != base.subject.repository_id or candidate.subject.object_format != base.subject.object_format:
         return Err("TRACE-PARTITIONS-INCOMPLETE: candidate subject is incompatible with retained base")
     if not declaration_path_valid(declaration_paths) or candidate.artifacts.len() > 40000:
@@ -477,7 +491,7 @@ pub fn update_trace_snapshot_partitions(base: TraceSnapshotPartitionSet, candida
     var changed_paths: [text] = []
     var reused: [text] = []
     for artifact in candidate.artifacts:
-        if not trace_path_valid(artifact.path) or artifact.blob_id == "" or artifact.visibility == "" or seen.contains_key(artifact.path):
+        if trace_path_parse_v1(artifact.path).is_none() or artifact.blob_id == "" or artifact.visibility == "" or seen.contains_key(artifact.path):
             return Err("TRACE-PARTITIONS-INCOMPLETE: invalid or duplicate candidate artifact")
         seen[artifact.path] = true
         val registered = declaration_paths.contains(artifact.path)
@@ -508,7 +522,7 @@ pub fn update_trace_snapshot_partitions(base: TraceSnapshotPartitionSet, candida
     var membership_changes = changed_memberships + changed_paths + changed_membership_keys(base.facts, facts)
     val invalidation = trace_partition_invalidation(base, updated, changed_paths, identity_changes,
         membership_changes, changed_configurations + (if config_changed: [base.configuration_id] + [configuration_id] else: []),
-        complete_deps and facts.complete, policy_changed, extractor_changed, schema_changed, limit)
+        complete_deps and facts.complete, policy_changed, extractor_changed, schema_changed, affected_limit.value)
     val graph = resolve_trace_graph(facts, policy)
     Ok(TraceSnapshotPartitionUpdate(partition_set: updated, facts: facts,
         graph: graph, invalidation: invalidation, reused_paths: reused))

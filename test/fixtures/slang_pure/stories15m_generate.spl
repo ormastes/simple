@@ -1,0 +1,122 @@
+# Fixture: pure-Simple stories15M generation, cache off vs on.
+#
+# Runs "Once upon a time" through the pure-Simple Llama runner (no llama.cpp):
+#   full : cached greedy generation of n_full tokens (the text assertion)
+#   off  : no-cache generation of n_cmp tokens, every step re-runs the sequence
+#   on   : cached generation of the same n_cmp tokens from a fresh session
+#   req2 : a second request sharing a prefix with the first, on the warm
+#          session (prefix reuse) and on a fresh session (no reuse)
+# Standalone: `bin/simple run test/fixtures/slang_pure/stories15m_generate.spl`.
+
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{llama_load}
+use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_session_new, kv_generate_greedy, kv_generate_greedy_nocache}
+use std.gc_async_mut.slang.model_executor.pure.tokenizer.{pure_tokenizer_load, pure_tokenizer_encode, pure_tokenizer_decode}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+pub struct Stories15mReport:
+    prompt_ids: [i64]
+    full_ids: [i64]
+    full_text: text
+    full_ms: i64
+    full_positions: i64
+    off_ids: [i64]
+    off_ms: i64
+    off_positions: i64
+    on_ids: [i64]
+    on_ms: i64
+    on_positions: i64
+    req2_prompt_len: i64
+    req2_new: i64
+    req2_reuse_ids: [i64]
+    req2_reuse_ms: i64
+    req2_reuse_positions: i64
+    req2_reused: i64
+    req2_fresh_ids: [i64]
+    req2_fresh_ms: i64
+    req2_fresh_positions: i64
+
+fn _ms_since(t0: i64) -> i64:
+    (time_now_nanos() - t0) / 1000000
+
+fn _slice(xs: [i64], from: i64, to: i64) -> [i64]:
+    var out: [i64] = []
+    var i = from
+    while i < to:
+        out.push(xs[i])
+        i = i + 1
+    out
+
+pub fn stories15m_run(model_dir: text, n_full: i64, n_cmp: i64) -> Result<Stories15mReport, text>:
+    val m = llama_load(model_dir)?
+    val tok = pure_tokenizer_load(model_dir)?
+    val prompt = pure_tokenizer_encode(tok, "Once upon a time", true)
+
+    var t0 = time_now_nanos()
+    val full = kv_generate_greedy(m, kv_session_new(m), prompt, n_full)
+    val full_ms = _ms_since(t0)
+    val full_positions = full.session.positions_evaluated
+
+    t0 = time_now_nanos()
+    val off = kv_generate_greedy_nocache(m, prompt, n_cmp)
+    val off_ms = _ms_since(t0)
+
+    t0 = time_now_nanos()
+    val on = kv_generate_greedy(m, kv_session_new(m), prompt, n_cmp)
+    val on_ms = _ms_since(t0)
+
+    # Second request: the first request's prompt plus its first 3 generated
+    # tokens (a shared prefix), asking for 3 more tokens.
+    val req2_prompt = prompt + _slice(full.generated, 0, 3)
+    t0 = time_now_nanos()
+    val before = full.session.positions_evaluated
+    val r2 = kv_generate_greedy(m, full.session, req2_prompt, 3)
+    val req2_reuse_ms = _ms_since(t0)
+    val req2_reuse_positions = r2.session.positions_evaluated - before
+
+    t0 = time_now_nanos()
+    val r2f = kv_generate_greedy(m, kv_session_new(m), req2_prompt, 3)
+    val req2_fresh_ms = _ms_since(t0)
+
+    Ok(Stories15mReport(
+        prompt_ids: prompt,
+        full_ids: full.generated,
+        full_text: pure_tokenizer_decode(tok, full.generated),
+        full_ms: full_ms,
+        full_positions: full_positions,
+        off_ids: off.0,
+        off_ms: off_ms,
+        off_positions: off.1,
+        on_ids: on.generated,
+        on_ms: on_ms,
+        on_positions: on.session.positions_evaluated,
+        req2_prompt_len: req2_prompt.len(),
+        req2_new: 3,
+        req2_reuse_ids: r2.generated,
+        req2_reuse_ms: req2_reuse_ms,
+        req2_reuse_positions: req2_reuse_positions,
+        req2_reused: r2.reused_positions,
+        req2_fresh_ids: r2f.generated,
+        req2_fresh_ms: req2_fresh_ms,
+        req2_fresh_positions: r2f.session.positions_evaluated
+    ))
+
+pub fn stories15m_table(r: Stories15mReport) -> text:
+    var s = "| run | new tokens | positions evaluated | ms |\n"
+    s = s + "| cache off (full re-run per token) | {r.off_ids.len()} | {r.off_positions} | {r.off_ms} |\n"
+    s = s + "| cache on (fresh session) | {r.on_ids.len()} | {r.on_positions} | {r.on_ms} |\n"
+    s = s + "| request 2, prefix reuse ({r.req2_reused} cached) | {r.req2_reuse_ids.len()} | {r.req2_reuse_positions} | {r.req2_reuse_ms} |\n"
+    s = s + "| request 2, fresh session | {r.req2_fresh_ids.len()} | {r.req2_fresh_positions} | {r.req2_fresh_ms} |"
+    s
+
+fn main():
+    val res = stories15m_run("C:/dev/model/llama2c-stories15M", 18, 6)
+    if res.is_err():
+        print "stories15m error: {res.unwrap_err()}"
+        return
+    val r = res.unwrap()
+    print "prompt_ids={r.prompt_ids}"
+    print "generated_ids={r.full_ids}"
+    print "generated_text=[{r.full_text}]"
+    val tps = (r.full_ids.len() * 1000) as f64 / (r.full_ms as f64)
+    print "full_run: tokens={r.full_ids.len()} ms={r.full_ms} positions={r.full_positions} tokens_per_s={tps}"
+    print stories15m_table(r)

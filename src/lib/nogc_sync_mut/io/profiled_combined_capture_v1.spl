@@ -1,0 +1,235 @@
+# Actual owned profiled capture. Admission remains the caller's genuine owner
+# duty BEFORE this mechanism; a launch template is not a permission grant.
+# Native spawn is inside this module so no raw reference can escape or be read
+# through a copied caller alias. Separate-stream capture V1 is unchanged.
+use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, PipedProcessOwnedTransferV2,
+    PipedProcessOwnedSpawnV2, process_spawn_piped_owned_v2, process_validate_piped_owned_transfer_v2,
+    process_read_stdout_ref_v1, process_retire_piped_owned_v2, process_cleanup_piped_owned_v2,
+    process_capture_native_mode_check_v1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2,
+    group_process_stream_poll_v2, group_process_stream_terminal_v2, group_process_stream_cleanup_proof_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2,
+    group_process_stream_template_encode_v3}
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_sync_mut.io.thread.thread_native_current_id
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+pub class ProfiledCombinedCaptureOwnerV1:
+    slot: i64
+    generation: i64
+
+pub class ProfiledCombinedCaptureEvidenceV1:
+    slot: i64
+    generation: i64
+    transcript: [u8]
+    exit_code: i64
+    source_identity: text
+    source_launch_digest: text
+    complete: bool
+    native_retired: bool
+
+    # Read-only runtime validation of the actual complete/retired capture's
+    # canonical tombstone. No supplied Result/bytes can mint this evidence.
+    pub fn current_v1() -> Result<(), text>:
+        profiled_combined_capture_evidence_matches_v1(ProfiledCombinedCaptureOwnerV1(slot: self.slot,
+            generation: self.generation), self)
+
+    # allow(primitive_api): raw transcript bytes are the evidence payload itself
+    pub fn transcript_bytes_v1() -> [u8]:
+        var copied: [u8] = []
+        for byte in self.transcript: copied.push(byte)
+        copied
+    # allow(primitive_api): native process exit status
+    pub fn exit_code_v1() -> i64: self.exit_code
+    pub fn layout_v1() -> text: "combined-profiled-v1"
+    pub fn source_identity_v1() -> text: self.source_identity
+    pub fn source_launch_digest_v1() -> text: self.source_launch_digest
+    # Only the private terminal/EOF/positive-retirement path constructs this.
+    # No independent stderr bytes/EOF or owned-reaping claim is made.
+    # allow(primitive_api): read-only evidence predicate
+    pub fn complete_v1() -> bool: self.complete
+    # allow(primitive_api): read-only evidence predicate
+    pub fn native_retirement_confirmed_v1() -> bool: self.native_retired
+
+pub struct ProfiledCombinedCaptureTurnV1:
+    owner: Option<ProfiledCombinedCaptureOwnerV1>
+    evidence: Option<ProfiledCombinedCaptureEvidenceV1>
+    error: text
+
+struct CombinedCaptureStateV1:
+    generation: i64
+    native: Option<GroupProcessStreamOwnerV2> = nil
+    reference: Option<PipedProcessRefV1> = nil
+    transcript: [u8] = []
+    limit: i64
+    deadline_ns: i64
+    eof: bool = false
+    terminal: bool = false
+    exit_code: i64 = -1
+    cancelled: bool = false
+    retired: bool = false
+    error: text = ""
+    source_identity: text = ""
+    transcript_digest: text = ""
+    source_launch_digest: text
+
+var combined_capture_slots_v1: [CombinedCaptureStateV1] = []
+var combined_capture_active_v1: i64 = 0
+var combined_capture_thread_v1: i64 = 0
+
+fn combined_capture_entry_v1() -> Result<(), text>:
+    process_capture_native_mode_check_v1()?
+    val origin = linux_machine_process_origin_check_v1()?
+    val thread = thread_native_current_id()
+    if thread <= 0: return Err("profiled-capture-thread")
+    if combined_capture_thread_v1 == 0: combined_capture_thread_v1 = thread
+    if combined_capture_thread_v1 != thread: return Err("profiled-capture-foreign-thread")
+    Ok(())
+
+fn combined_capture_load_v1(owner: ProfiledCombinedCaptureOwnerV1) -> Result<CombinedCaptureStateV1, text>:
+    val current = combined_capture_entry_v1()?
+    if owner.slot < 0 or owner.slot >= combined_capture_slots_v1.len(): return Err("profiled-capture-owner-unknown")
+    val state = combined_capture_slots_v1[owner.slot]
+    if state.generation != owner.generation: return Err("profiled-capture-generation")
+    Ok(state)
+
+fn combined_capture_error_v1(slot: i64, reason: text):
+    if combined_capture_slots_v1[slot].error == "": combined_capture_slots_v1[slot].error = reason
+
+fn combined_capture_retired_v1(slot: i64):
+    # Called only after actual rejection without resources or successful native
+    # retirement. Tombstones retain identity/first error, never transcript bytes.
+    if not combined_capture_slots_v1[slot].retired:
+        combined_capture_slots_v1[slot].native = nil
+        combined_capture_slots_v1[slot].reference = nil
+        combined_capture_slots_v1[slot].transcript = []
+        combined_capture_slots_v1[slot].retired = true
+        combined_capture_active_v1 = combined_capture_active_v1 - 1
+
+fn combined_capture_pending_v1(owner: ProfiledCombinedCaptureOwnerV1) -> ProfiledCombinedCaptureTurnV1:
+    val state = combined_capture_slots_v1[owner.slot]
+    ProfiledCombinedCaptureTurnV1(if state.retired: nil else: Some(owner), nil, state.error)
+
+pub fn profiled_combined_capture_start_v1(launch: GroupProcessStreamLaunchV2,
+        combined_limit: i64) -> ProfiledCombinedCaptureTurnV1:
+    val entered = combined_capture_entry_v1()
+    if entered.is_err(): return ProfiledCombinedCaptureTurnV1(nil, nil, entered.unwrap_err())
+    if combined_limit < 1 or combined_limit > 1048576 or launch.request.timeout_ms < 1 or launch.request.timeout_ms > 30000:
+        return ProfiledCombinedCaptureTurnV1(nil, nil, "profiled-capture-bounds")
+    if combined_capture_active_v1 >= 32 or combined_capture_slots_v1.len() >= 100000:
+        return ProfiledCombinedCaptureTurnV1(nil, nil, "profiled-capture-owner-bound")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now > 9223372036854775807 - launch.request.timeout_ms * 1000000:
+        return ProfiledCombinedCaptureTurnV1(nil, nil, "profiled-capture-clock")
+    val wire = group_process_stream_template_encode_v3(launch)
+    if wire.is_err(): return ProfiledCombinedCaptureTurnV1(nil, nil, wire.unwrap_err())
+    val slot = combined_capture_slots_v1.len()
+    val owner = ProfiledCombinedCaptureOwnerV1(slot: slot, generation: slot + 1)
+    combined_capture_slots_v1.push(CombinedCaptureStateV1(generation: owner.generation,
+        limit: combined_limit, deadline_ns: now + launch.request.timeout_ms * 1000000,
+        source_launch_digest: sha256_text(wire.unwrap())))
+    combined_capture_active_v1 = combined_capture_active_v1 + 1
+    # Reserve canonical capture BEFORE spawning. Every native result is captured
+    # here; neither Ready nor CleanupRequired exposes a public raw-reference turn.
+    match process_spawn_piped_owned_v2(launch):
+        case PipedProcessOwnedSpawnV2.Rejected(reason):
+            combined_capture_error_v1(slot, reason)
+            combined_capture_retired_v1(slot)
+            return combined_capture_pending_v1(owner)
+        case PipedProcessOwnedSpawnV2.CleanupRequired(native, reference, reason):
+            combined_capture_slots_v1[slot].native = Some(native)
+            combined_capture_slots_v1[slot].reference = reference
+            if reason != "process_stream_already_terminal": combined_capture_error_v1(slot, reason)
+        case PipedProcessOwnedSpawnV2.Ready(native, reference):
+            combined_capture_slots_v1[slot].native = Some(native)
+            combined_capture_slots_v1[slot].reference = Some(reference)
+    val state = combined_capture_slots_v1[slot]
+    if state.native.is_some(): combined_capture_slots_v1[slot].source_identity = state.native.unwrap().identity_digest
+    if state.native.is_none() or state.reference.is_none():
+        combined_capture_error_v1(slot, "profiled-capture-native-transfer-incomplete")
+    else:
+        val checked = process_validate_piped_owned_transfer_v2(PipedProcessOwnedTransferV2(
+            owner: state.native.unwrap(), reference: state.reference.unwrap()))
+        if checked.is_err(): combined_capture_error_v1(slot, checked.unwrap_err())
+    combined_capture_pending_v1(owner)
+
+pub fn profiled_combined_capture_step_v1(owner: ProfiledCombinedCaptureOwnerV1,
+        cancel: bool = false) -> ProfiledCombinedCaptureTurnV1:
+    val loaded = combined_capture_load_v1(owner)
+    if loaded.is_err(): return ProfiledCombinedCaptureTurnV1(Some(owner), nil, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if state.retired: return ProfiledCombinedCaptureTurnV1(nil, nil, state.error)
+    if cancel:
+        combined_capture_slots_v1[owner.slot].cancelled = true
+        combined_capture_error_v1(owner.slot, "profiled-capture-cancelled")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now >= state.deadline_ns: combined_capture_error_v1(owner.slot, "profiled-capture-deadline")
+    state = combined_capture_slots_v1[owner.slot]
+    if state.error == "" and not state.eof and state.reference.is_some():
+        match process_read_stdout_ref_v1(state.reference.unwrap()):
+            case Ok(Some(chunk)):
+                # transcript is [u8]: its element count is already a byte count.
+                val held_bytes = state.transcript.len()
+                if chunk.byte_len() > state.limit - held_bytes:
+                    combined_capture_error_v1(owner.slot, "profiled-capture-output-limit")
+                else:
+                    for byte in chunk.bytes(): combined_capture_slots_v1[owner.slot].transcript.push(byte)
+            case Ok(None): pass
+            case Err(reason):
+                if reason == "process_stdout_eof": combined_capture_slots_v1[owner.slot].eof = true
+                else: combined_capture_error_v1(owner.slot, reason)
+    state = combined_capture_slots_v1[owner.slot]
+    if state.native.is_none():
+        combined_capture_error_v1(owner.slot, "profiled-capture-native-owner-missing")
+        return combined_capture_pending_v1(owner)
+    val native = state.native.unwrap()
+    if state.error == "":
+        val polled = group_process_stream_poll_v2(native)
+        if polled.is_err(): combined_capture_error_v1(owner.slot, polled.unwrap_err())
+        elif polled.unwrap().terminal:
+            val terminal = group_process_stream_terminal_v2(native)
+            if terminal.is_err(): combined_capture_error_v1(owner.slot, terminal.unwrap_err())
+            else:
+                val actual = terminal.unwrap().0
+                combined_capture_slots_v1[owner.slot].terminal = true
+                combined_capture_slots_v1[owner.slot].exit_code = actual.exit_code
+                if actual.timed_out or actual.cancelled: combined_capture_error_v1(owner.slot, "profiled-capture-native-limited")
+    state = combined_capture_slots_v1[owner.slot]
+    if state.error != "":
+        val closed = process_cleanup_piped_owned_v2(native, state.reference)
+        if closed.is_ok(): combined_capture_retired_v1(owner.slot)
+        return combined_capture_pending_v1(owner)
+    if not state.eof or not state.terminal: return combined_capture_pending_v1(owner)
+    val proof = group_process_stream_cleanup_proof_v2(native)
+    if proof.is_err(): return combined_capture_pending_v1(owner)
+    val closed = process_retire_piped_owned_v2(native, state.reference)
+    if closed.is_err():
+        combined_capture_error_v1(owner.slot, closed.unwrap_err())
+        return combined_capture_pending_v1(owner)
+    # Keep only the actual transcript digest in the canonical tombstone; a
+    # caller-constructed evidence value cannot substitute bytes or exit status.
+    combined_capture_slots_v1[owner.slot].transcript_digest = sha256_u8_hex(state.transcript)
+    val evidence = ProfiledCombinedCaptureEvidenceV1(slot: owner.slot, generation: owner.generation,
+        transcript: state.transcript, exit_code: state.exit_code, source_identity: state.source_identity,
+        source_launch_digest: state.source_launch_digest, complete: state.eof and state.terminal,
+        native_retired: closed.is_ok())
+    combined_capture_retired_v1(owner.slot)
+    ProfiledCombinedCaptureTurnV1(nil, Some(evidence), "")
+
+# allow(primitive_api): read-only retirement predicate over an owner the caller already holds
+pub fn profiled_combined_capture_retired_v1(owner: ProfiledCombinedCaptureOwnerV1) -> Result<bool, text>:
+    val state = combined_capture_load_v1(owner)?
+    Ok(state.retired)
+
+pub fn profiled_combined_capture_evidence_matches_v1(owner: ProfiledCombinedCaptureOwnerV1,
+        evidence: ProfiledCombinedCaptureEvidenceV1) -> Result<(), text>:
+    val state = combined_capture_load_v1(owner)?
+    if (not state.retired or state.error != "" or evidence.slot != owner.slot or
+            evidence.generation != owner.generation or evidence.source_identity != state.source_identity or
+            evidence.source_launch_digest != state.source_launch_digest or not evidence.complete or
+            not evidence.native_retired or not state.eof or not state.terminal or
+            evidence.exit_code != state.exit_code or state.transcript_digest == "" or
+            sha256_u8_hex(evidence.transcript) != state.transcript_digest):
+        return Err("profiled-capture-evidence-owner-mismatch")
+    Ok(())

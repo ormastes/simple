@@ -51,16 +51,35 @@ typedef uint32_t SDL_AudioDeviceID;
 
 typedef struct { int x, y, w, h; } SDL_Rect;
 
+/* Pointer-size-dependent SDL_Surface layout (2.30). Real layout:
+ *   flags, format*, w, h, pitch, pixels*, userdata*, locked, list_blitmap*,
+ *   clip_rect(16), map*, refcount
+ * LP64:  format 8, w 16, h 20, pitch 24, pixels 32, size 96.
+ * ILP32: format 4, w 8,  h 12, pitch 16, pixels 20, size 60. */
+#if __SIZEOF_POINTER__ == 4
+#define RT_SDL2_SURFACE_SIZE    60
+#define RT_SDL2_SURFACE_W       8
+#define RT_SDL2_SURFACE_PITCH   16
+#define RT_SDL2_SURFACE_PIXELS  20
+#define RT_SDL2_AUDIOSPEC_SIZE  24
+#else
+#define RT_SDL2_SURFACE_SIZE    96
+#define RT_SDL2_SURFACE_W       16
+#define RT_SDL2_SURFACE_PITCH   24
+#define RT_SDL2_SURFACE_PIXELS  32
+#define RT_SDL2_AUDIOSPEC_SIZE  32
+#endif
+
 typedef struct {
     Uint32 flags;          /* 0 */
-    void*  format;         /* 8 */
-    int    w, h;           /* 16, 20 */
-    int    pitch;          /* 24 */
-    void*  pixels;         /* 32 */
+    void*  format;         /* 4 / 8 */
+    int    w, h;
+    int    pitch;
+    void*  pixels;
     /* remainder of SDL_Surface (userdata, locked, list_blitmap, clip_rect,
-       map, refcount) is never touched here; pad to the real 96 bytes so a
+       map, refcount) is never touched here; pad to the real size so a
        stack/array of SDL_Surface would still be correctly sized. */
-    char   _tail[96 - 40];
+    char   _tail[RT_SDL2_SURFACE_SIZE - (RT_SDL2_SURFACE_PIXELS + sizeof(void*))];
 } SDL_Surface;
 
 typedef struct {
@@ -141,8 +160,8 @@ typedef struct {
 /* Compile-time re-verification of the probed layout. */
 #define RT_SDL2_ASSERT(cond, tag) typedef char rt_sdl2_static_##tag[(cond) ? 1 : -1]
 RT_SDL2_ASSERT(sizeof(SDL_Event) == 56, event_size);
-RT_SDL2_ASSERT(sizeof(SDL_Surface) == 96, surface_size);
-RT_SDL2_ASSERT(sizeof(SDL_AudioSpec) == 32, audiospec_size);
+RT_SDL2_ASSERT(sizeof(SDL_Surface) == RT_SDL2_SURFACE_SIZE, surface_size);
+RT_SDL2_ASSERT(sizeof(SDL_AudioSpec) == RT_SDL2_AUDIOSPEC_SIZE, audiospec_size);
 RT_SDL2_ASSERT(sizeof(SDL_Rect) == 16, rect_size);
 RT_SDL2_ASSERT(sizeof(SDL_Keysym) == 16, keysym_size);
 RT_SDL2_ASSERT(offsetof(SDL_Event, key.keysym) == 16, key_keysym);
@@ -153,9 +172,9 @@ RT_SDL2_ASSERT(offsetof(SDL_Event, button.x) == 20, button_x);
 RT_SDL2_ASSERT(offsetof(SDL_Event, wheel.x) == 16, wheel_x);
 RT_SDL2_ASSERT(offsetof(SDL_Event, window.event) == 12, window_event);
 RT_SDL2_ASSERT(offsetof(SDL_Event, window.data1) == 16, window_data1);
-RT_SDL2_ASSERT(offsetof(SDL_Surface, w) == 16, surface_w);
-RT_SDL2_ASSERT(offsetof(SDL_Surface, pitch) == 24, surface_pitch);
-RT_SDL2_ASSERT(offsetof(SDL_Surface, pixels) == 32, surface_pixels);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, w) == RT_SDL2_SURFACE_W, surface_w);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, pitch) == RT_SDL2_SURFACE_PITCH, surface_pitch);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, pixels) == RT_SDL2_SURFACE_PIXELS, surface_pixels);
 RT_SDL2_ASSERT(offsetof(SDL_AudioSpec, callback) == 16, audiospec_callback);
 
 /* ================================================================

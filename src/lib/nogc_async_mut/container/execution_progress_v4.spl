@@ -1,0 +1,105 @@
+use std.nogc_sync_mut.io.windows_command_domain_v4.{windows_command_origin_matches_v4, windows_command_registry_thread_v4}
+use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.windows_docker_progress_release_v4
+# Cooperative command execution through the common Container owner. This port
+# is Windows-only today; Linux retains its existing finite API. No blocking
+# legacy call is hidden inside a cooperative step.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2, simple_container_scope_v2}
+use std.nogc_async_mut.container.providers.windows.docker_progress_v2.WindowsDockerProgressV2
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2}
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.runtime_v1.RuntimeOperationV1
+
+pub class ContainerExecutionProgressV4:
+    request: ContainerExecutionRequestV2
+    scope: ContainerHostScopeV2
+    native: WindowsDockerProgressV2
+
+pub struct ContainerExecutionProgressTurnV4:
+    owner: SimpleContainerOwnerV2
+    progress: Option<ContainerExecutionProgressV4>
+    operation: Option<RuntimeOperationV1>
+    error: text
+
+# Process-local registries are thread-bound before they are read or mutated.
+# Explicit scripted fixtures carry no native authority and remain test-only.
+pub fn simple_container_execution_scripted_v4(owner: SimpleContainerOwnerV2) -> Result<bool, text>:
+    match owner:
+        case SimpleContainerOwnerV2.Windows(_, adapter): Ok(adapter.is_scripted_fixture_v2())
+        case SimpleContainerOwnerV2.Linux(_, _): Err("container-cooperative-execution-backend-unavailable")
+
+pub fn simple_container_execution_thread_check_v4(owner: SimpleContainerOwnerV2) -> Result<bool, text>:
+    val scripted = simple_container_execution_scripted_v4(owner)?
+    windows_command_registry_thread_v4(scripted)
+
+pub fn simple_container_execution_begin_v4(owner: SimpleContainerOwnerV2, action: text,
+        request: ContainerExecutionRequestV2, deadline: ContainerEffectDeadlineV1) -> ContainerExecutionProgressTurnV4:
+    execution_begin(owner, action, request, Some(deadline))
+
+# Read-only inspection has a capture timeout from installed policy; it does not
+# mint an attach/launch grant or reinterpret an effect action as observation.
+pub fn simple_container_inspection_begin_v4(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2) -> ContainerExecutionProgressTurnV4:
+    execution_begin(owner, "inspect", request, nil)
+
+fn execution_begin(owner: SimpleContainerOwnerV2, action: text,
+        request: ContainerExecutionRequestV2, deadline: Option<ContainerEffectDeadlineV1>) -> ContainerExecutionProgressTurnV4:
+    val thread = simple_container_execution_thread_check_v4(owner)
+    if thread.is_err(): return ContainerExecutionProgressTurnV4(owner, nil, nil, thread.unwrap_err())
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return ContainerExecutionProgressTurnV4(owner, nil, nil, projected.unwrap_err())
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, _):
+            ContainerExecutionProgressTurnV4(owner, nil, nil, "container-cooperative-execution-backend-unavailable")
+        case SimpleContainerOwnerV2.Windows(scope, original):
+            var adapter = original
+            val begun = adapter.execution_begin_v4(action, request, deadline)
+            val retained = SimpleContainerOwnerV2.Windows(scope, adapter)
+            if begun.is_err(): return ContainerExecutionProgressTurnV4(retained, nil, nil, begun.unwrap_err())
+            val progress = begun.unwrap()
+            if progress.completed_v2():
+                val released = windows_docker_progress_release_v4(progress)
+                if not released: return ContainerExecutionProgressTurnV4(retained,
+                    Some(ContainerExecutionProgressV4(request, scope, progress)), nil, "container-command-release-pending")
+                return ContainerExecutionProgressTurnV4(retained, nil, progress.operation_v2(), "")
+            ContainerExecutionProgressTurnV4(retained, Some(ContainerExecutionProgressV4(request, scope, progress)), nil, "")
+
+pub fn simple_container_execution_step_v4(owner: SimpleContainerOwnerV2,
+        progress: ContainerExecutionProgressV4, cancel: bool) -> ContainerExecutionProgressTurnV4:
+    val origin = simple_container_execution_scripted_v4(owner)
+    if origin.is_err() or not windows_command_origin_matches_v4(progress.native.scripted, origin.unwrap()):
+        return ContainerExecutionProgressTurnV4(owner, Some(progress), nil, "container-execution-origin-mismatch")
+    val thread = windows_command_registry_thread_v4(progress.native.scripted)
+    if thread.is_err(): return ContainerExecutionProgressTurnV4(owner, Some(progress), nil, thread.unwrap_err())
+    # A mismatched caller cannot substitute a different provider to clean a
+    # retained native child. Preserve both supplied carriers for correct retry.
+    if simple_container_scope_v2(owner) != progress.scope:
+        return ContainerExecutionProgressTurnV4(owner, Some(progress), nil, "container-execution-progress-scope-mismatch")
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, _):
+            ContainerExecutionProgressTurnV4(owner, Some(progress), nil, "container-execution-progress-owner-mismatch")
+        case SimpleContainerOwnerV2.Windows(scope, original):
+            var adapter = original
+            val next = adapter.execution_poll_v4(progress.request, progress.native, cancel)
+            val retained = SimpleContainerOwnerV2.Windows(scope, adapter)
+            if next.completed_v2():
+                val released = windows_docker_progress_release_v4(next)
+                if not released: return ContainerExecutionProgressTurnV4(retained,
+                    Some(ContainerExecutionProgressV4(progress.request, scope, next)), nil, "container-command-release-pending")
+                return ContainerExecutionProgressTurnV4(retained, nil, next.operation_v2(), "")
+            ContainerExecutionProgressTurnV4(retained,
+                Some(ContainerExecutionProgressV4(progress.request, scope, next)), nil, "")
+
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.windows_docker_progress_cancel_v4
+
+# Owner mismatch cannot justify losing native cleanup. This only cancels the
+# exact retained command helper, never launches or controls a container.
+pub fn simple_container_execution_cancel_v4(owner: SimpleContainerOwnerV2,
+        progress: ContainerExecutionProgressV4) -> ContainerExecutionProgressTurnV4:
+    val next = windows_docker_progress_cancel_v4(progress.native)
+    if next.completed_v2():
+        val released = windows_docker_progress_release_v4(next)
+        if not released: return ContainerExecutionProgressTurnV4(owner,
+            Some(ContainerExecutionProgressV4(progress.request, progress.scope, next)), nil, "container-command-release-pending")
+        return ContainerExecutionProgressTurnV4(owner, nil, next.operation_v2(), "")
+    ContainerExecutionProgressTurnV4(owner, Some(ContainerExecutionProgressV4(progress.request, progress.scope, next)), nil, "")

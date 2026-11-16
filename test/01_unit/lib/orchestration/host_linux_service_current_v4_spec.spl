@@ -1,0 +1,739 @@
+"""
+## Purpose and audience
+Pins the service 40 host-side composition in
+`src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl`:
+startup accepts only the sealed signed-enrollment proof re-verified against
+installed policy with a fresh clock, ready/status cannot exist before the
+immutable current record, associated prepare/execute need fresh real
+signatures over the exact live association, and a same-ID prepare retry keeps
+the original reservation deadline. Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
+Shutdown (S40-SHUTDOWN-01), the installed-credential pin and the associated
+execution commit gates (S40-COMMIT-01) are covered here;
+Linux reconciliation (host_linux_service_reconcile_v4_spec) runs at startup over
+the offline fresh-epoch store inventory lent by the same admission (S40-LOAN-03..05); a lent or once-lent epoch never
+starts its provider (S40-LOAN-06); the store inventory goes back to the lender only after the startup reconcile
+proved continuity, and the once-lent gates still refuse afterwards (S40-HANDOFF-01..03, milestone_0021 PR1).
+## Compatibility and limitations
+Real Ed25519 signatures from the verifier fixture seeds and a real temporary
+capacity journal. No protected root reader, native identity borrow or
+Linux-protected journal exists in a unit run, so the full startup turn and a
+positive ready/status are covered by the configured real fixture driver
+(NOT_AUTHORED). The native snapshot below is DATA, not a borrow.
+## Verification guidance and troubleshooting
+Each refusal names the exact error. `APPROVAL_EXPIRED` after a restart-equivalent
+wait is the owner decision of 2026-11-16, not a flake.
+"""
+use std.spec.{step, fail}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+# Tests reach the module's private pure gates directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_proof_held_v4,
+    linux_service_scope_v4, linux_service_status_bytes_v4, linux_service_prepare_authorize_v4, linux_service_association_v4,
+    linux_service_execute_authorize_core_v4, host_linux_service_close_v4, host_linux_service_anchor_parent_v4,
+    host_linux_service_open_installed_v4, linux_service_inventory_handoff_v4, linux_service_inventory_return_v4}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owned_fresh_error_v3
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.io.host_linux_service_records_v4.*
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
+use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io.thread.thread_sleep_ms
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_digest_v3
+use std.common.contracts.orchestration.host_prepare_associated_v3.HostPrepareAssociatedRequestV3
+use std.common.contracts.orchestration.host_prepare_request_v1.HostPrepareRequestV1
+use std.common.contracts.orchestration.host_execution_association_v3.*
+use std.common.contracts.orchestration.host_execute_associated_v3.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.container.machine_authority_v1.{MachineFreshEpochAdmissionOwnerV1, MachineFreshEpochAdmissionTurnV1}
+use std.nogc_sync_mut.container.machine_fresh_epoch_lifecycle_v1.MachineFreshEpochLifecycleV1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachinePolicyOwnerV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2,
+    GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
+use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
+
+val S40_OPERATIONS: [text] = ["host_enroll_v1", "host_reservation_v1", "host_execute_associated_v3"]
+val S40_FAR: i64 = 4102444800000
+
+fn s40_fixture() -> LinuxServiceVerifierFixtureV1:
+    linux_service_verifier_fixture_ops_v1(1, 65, S40_FAR, "/var/lib/simple/hosts", S40_OPERATIONS)
+
+fn s40_proof(fixture: LinuxServiceVerifierFixtureV1) -> LinuxServiceVerifiedEnrollmentV1:
+    linux_service_enrollment_verify_v1(fixture.policy, fixture.binding, fixture.credential,
+        fixture.configuration, fixture.engine_policy, fixture.broker_policy).unwrap()
+
+# Snapshot DATA standing in for what an actual borrow's current_v3 returns.
+fn s40_native(fixture: LinuxServiceVerifierFixtureV1) -> LinuxServiceNativeIdentitySnapshotV3:
+    LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: "native-boot",
+        architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
+        authority_namespace_id: "namespace_1")
+
+fn s40_scope(fixture: LinuxServiceVerifierFixtureV1) -> ContainerHostScopeV2:
+    linux_service_scope_v4(fixture.binding, s40_native(fixture), "ab".repeat(16)).unwrap()
+
+fn s40_draft(op: text = "operation_2") -> ContainerExecutionDraftV3:
+    ContainerExecutionDraftV3("linux-podman", "workload", 1, op, "a".repeat(64), "opaque-codec-DATA")
+
+fn s40_intent(scope: ContainerHostScopeV2, deadline_ms: i64, op: text = "operation_2", revision: i64 = 1) -> HostReservationIntentV1:
+    val bound = container_execution_draft_bind_v3(s40_draft(op), scope).unwrap()
+    host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "worker_1",
+        fence: HostLedgerFenceV1("host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, revision),
+        plan_digest: container_execution_plan_digest_v2(bound.plan).unwrap(),
+        reservation: HostReservationV1("reservation_" + op, op, "0".repeat(64), "service_1", 1, "nonce",
+            500, 4096, [], deadline_ms, HostReservationStateV1.Prepared))).unwrap()
+
+fn s40_operation(intent: HostReservationIntentV1) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(2, intent.reservation.operation_id, intent.reservation.payload_digest, "user_1", "project_1", "worker_1",
+        "host_reservation_v1", "a".repeat(64), 4, 2, 3, 4096, 100)
+
+fn s40_grant(operations: [text]) -> ExecutionGrantV2:
+    ExecutionGrantV2("grant_2", "user_1", "project_1", "worker_1", operations, "a".repeat(64), 4, 2, S40_FAR, 536870912, 1000)
+
+fn s40_prepare(scope: ContainerHostScopeV2, deadline_ms: i64, issuer: i64, approver: i64,
+        op: text = "operation_2", revision: i64 = 1) -> HostPrepareAssociatedRequestV3:
+    val intent = s40_intent(scope, deadline_ms, op, revision)
+    val operation = s40_operation(intent)
+    val proof = linux_service_verifier_sign_v1(operation, s40_grant(["host_reservation_v1"]), issuer, approver, S40_FAR)
+    HostPrepareAssociatedRequestV3(HostPrepareRequestV1(intent, operation, proof.0, proof.1), s40_draft(op), scope)
+
+fn s40_epoch() -> text:
+    "c".repeat(64)
+
+fn s40_execution(native: LinuxServiceNativeIdentitySnapshotV3, op: text = "operation_2") -> ContainerExecutionRequestV2:
+    val native_scope = ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "epoch-" + s40_epoch(),
+        boot_id: native.native_boot_id, provider_generation: native.owner_generation, native_machine_id: native.native_machine_id,
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: native.native_boot_id)
+    container_execution_draft_bind_v3(s40_draft(op), native_scope).unwrap()
+
+fn s40_association(fixture: LinuxServiceVerifierFixtureV1, prepare: HostPrepareAssociatedRequestV3,
+        native: LinuxServiceNativeIdentitySnapshotV3) -> Result<HostExecutionAssociationV3, text>:
+    # Integrity-only receipt; production obtains it through the capacity owner.
+    val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+    linux_service_association_v4(fixture.binding, s40_scope(fixture), s40_epoch(), native, prepare, receipt, s40_execution(native))
+
+fn s40_execute(prepare: HostPrepareAssociatedRequestV3, association: HostExecutionAssociationV3,
+        issuer: i64, approver: i64) -> HostExecuteAssociatedRequestV3:
+    val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+    val operation = host_execute_associated_operation_v3(prepare.prepare.operation, association).unwrap()
+    val proof = linux_service_verifier_sign_v1(operation, s40_grant(["host_execute_associated_v3"]), issuer, approver, S40_FAR)
+    HostExecuteAssociatedRequestV3(prepare, receipt, association, operation, proof.0, proof.1)
+
+fn s40_unsigned_prepare(prepare: HostPrepareAssociatedRequestV3) -> HostPrepareAssociatedRequestV3:
+    var changed = prepare
+    var zero: [u8] = []
+    for index in 0..64: zero.push(0u8)
+    changed.prepare.signed.signature = zero
+    changed.prepare.approval.signature = zero
+    changed
+
+fn s40_open(root: text, capacity: HostCapacityV1) -> HostCapacityOwnerV1:
+    var opened: [HostCapacityOwnerV1] = []
+    match host_capacity_owner_open_owned_v2(root, capacity, "9".repeat(64), 64, true):
+        case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+        case HostCapacityOpenV2.Rejected(reason): fail(reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            fail(reason)
+    opened[0]
+
+describe "Linux service V4 host composition (service 40)":
+    it "starts only from the sealed proof re-verified against installed policy with a fresh clock":
+        # @req S40-START-01
+        # @capture(statistics): refusal reason for each missing, foreign or expired proof input
+        step("the genuine proof of this installed association re-verifies against installed bytes")
+        val fixture = s40_fixture()
+        val proof = s40_proof(fixture)
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, Some(fixture.policy)).is_ok()).to_equal(true)
+        step("no installed policy read, or a policy holding other keys, is refused")
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, None).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        val other_policy = linux_service_verifier_policy_ops_v1(2, 66, S40_OPERATIONS)
+        expect(linux_service_proof_held_v4(proof, fixture.binding, fixture.credential, Some(other_policy)).unwrap_err()).to_equal("linux-service-enrollment-installed-policy-mismatch")
+        step("a proof of another association never starts this installed binding")
+        val foreign = s40_proof(linux_service_verifier_fixture_ops_v1(1, 65, S40_FAR, "/var/lib/simple/other", S40_OPERATIONS))
+        expect(linux_service_proof_held_v4(foreign, fixture.binding, fixture.credential, Some(fixture.policy)).unwrap_err()).to_equal("linux-host-service-proof-binding-mismatch")
+        step("a genuine proof over a credential other than the installed one is refused")
+        val resigned = linux_service_verifier_credential_v1(fixture.binding, 1, 65, S40_FAR - 1)
+        expect(linux_service_proof_held_v4(proof, fixture.binding, resigned, Some(fixture.policy)).unwrap_err()).to_equal("linux-host-service-proof-credential-mismatch")
+        step("an approval that expires while the service is down is refused at restart")
+        val installed = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val expires = host_local_context_v1(installed).grant_clock + 20000
+        val short = linux_service_verifier_fixture_ops_v1(1, 65, expires, "/var/lib/simple/hosts", S40_OPERATIONS)
+        val short_proof = s40_proof(short)
+        var polls = 0
+        while host_local_context_v1(installed).grant_clock <= expires and polls < 120:
+            thread_sleep_ms(500)
+            polls = polls + 1
+        expect(host_local_context_v1(installed).grant_clock > expires).to_equal(true)
+        expect(linux_service_proof_held_v4(short_proof, short.binding, short.credential, Some(short.policy)).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+
+    it "mints a stable service-incarnation scope from the actual native machine only":
+        # @req S40-START-02
+        # @capture(statistics): minted scope bytes and each refused native/entropy input
+        step("signed IDs, actual machine and provider generation, empty boot, fresh incarnation")
+        val fixture = s40_fixture()
+        val scope = s40_scope(fixture)
+        expect(scope.boot_id).to_equal("")
+        expect(scope.continuity_mode).to_equal("service-incarnation-v1")
+        expect(scope.provider_generation).to_equal(41)
+        expect(scope.service_scope_id).to_equal(fixture.binding.service_scope_id)
+        step("another machine, a missing generation or non-random incarnation is refused")
+        var other = s40_native(fixture)
+        other.native_machine_id = "linux-machine-id-v1:ffffffffffffffff"
+        expect(linux_service_scope_v4(fixture.binding, other, "ab".repeat(16)).unwrap_err()).to_equal("linux-host-service-native-machine-mismatch")
+        var ungenerated = s40_native(fixture)
+        ungenerated.owner_generation = 0
+        expect(linux_service_scope_v4(fixture.binding, ungenerated, "ab".repeat(16)).unwrap_err()).to_equal("linux-host-service-native-generation")
+        expect(linux_service_scope_v4(fixture.binding, s40_native(fixture), "").unwrap_err()).to_equal("linux-host-service-entropy-unavailable")
+
+    it "never produces ready or status before the current association record is read back":
+        # @req S40-READY-01
+        # @capture(statistics): status refusal for an unstarted owner and status bytes after publication
+        step("an owner with no published current record has no status")
+        val unstarted = HostLinuxServiceCurrentV4(root: "/var/lib/simple/hosts/host-root-x")
+        expect(unstarted.status_v4().unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        step("record bytes that were never read back do not count as published")
+        var unread = HostLinuxServiceCurrentV4(root: "/var/lib/simple/hosts/host-root-x")
+        unread.current_bytes = "version: 4\n"
+        unread.current_relative = "linux-service-current/x.sdn"
+        expect(unread.status_v4().unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        step("a published flag without the retained owners is incomplete acquisition, not ready")
+        unread.published = true
+        expect(unread.status_v4().unwrap_err()).to_equal("linux-host-service-acquisition-incomplete")
+        step("status DATA binds the enrollment, scope and the exact current record digest")
+        val fixture = s40_fixture()
+        expect(linux_service_status_bytes_v4(fixture.binding, s40_scope(fixture), "record\n", false).unwrap_err()).to_equal("linux-host-service-current-unpublished")
+        val status = linux_service_status_bytes_v4(fixture.binding, s40_scope(fixture), "record\n", true).unwrap()
+        expect(status.contains(sha256_text("record\n"))).to_equal(true)
+        expect(status.contains(host_linux_service_enrollment_digest_v3(fixture.binding).unwrap())).to_equal(true)
+
+    it "admits an associated prepare only with fresh real signatures over the live scope":
+        # @req S40-PREPARE-01
+        # @capture(statistics): verified grant id and refusal reason for each unsigned, foreign or mismatched prepare
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val scope = s40_scope(fixture)
+        val deadline = host_local_context_v1(policy).monotonic_ms + 600000
+        step("issuer and approver signatures by the installed keys verify")
+        val genuine = s40_prepare(scope, deadline, 1, 65)
+        expect(linux_service_prepare_authorize_v4(scope, policy, "issuer_1", genuine, host_local_context_v1(policy)).unwrap().id).to_equal("grant_2")
+        step("an unsigned prepare and one signed by foreign keys are refused")
+        expect(linux_service_prepare_authorize_v4(scope, policy, "issuer_1", s40_unsigned_prepare(genuine), host_local_context_v1(policy)).unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+        expect(linux_service_prepare_authorize_v4(scope, policy, "issuer_1", s40_prepare(scope, deadline, 2, 66), host_local_context_v1(policy)).unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+        step("another service incarnation or an unconfigured controller is refused before verification")
+        val other_scope = linux_service_scope_v4(fixture.binding, s40_native(fixture), "cd".repeat(16)).unwrap()
+        expect(linux_service_prepare_authorize_v4(other_scope, policy, "issuer_1", genuine, host_local_context_v1(policy)).unwrap_err()).to_equal("linux-host-service-prepare-scope-mismatch")
+        expect(linux_service_prepare_authorize_v4(scope, policy, "issuer_9", genuine, host_local_context_v1(policy)).unwrap_err()).to_equal("linux-host-service-controller-mismatch")
+
+    it "binds the association to the actual native boot, generation and startup epoch":
+        # @req S40-ASSOC-01
+        # @capture(statistics): association digest and refusal for each changed native projection
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val prepare = s40_prepare(s40_scope(fixture), host_local_context_v1(policy).monotonic_ms + 600000, 1, 65)
+        step("the projected plan from the actual native identity associates")
+        val native = s40_native(fixture)
+        val association = s40_association(fixture, prepare, native).unwrap()
+        expect(association.epoch_record_digest).to_equal(s40_epoch())
+        expect(association.service_process_identity_digest).to_equal(native.process_identity_digest)
+        step("a plan projected for another boot or provider generation is refused")
+        val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+        var other_boot = native
+        other_boot.native_boot_id = "other-boot"
+        expect(linux_service_association_v4(fixture.binding, s40_scope(fixture), s40_epoch(), native, prepare, receipt,
+            s40_execution(other_boot)).unwrap_err()).to_equal("linux-host-service-native-projection-mismatch")
+        var other_generation = native
+        other_generation.owner_generation = 42
+        expect(linux_service_association_v4(fixture.binding, s40_scope(fixture), s40_epoch(), native, prepare, receipt,
+            s40_execution(other_generation)).unwrap_err()).to_equal("linux-host-service-native-projection-mismatch")
+        step("a different startup epoch is refused")
+        expect(linux_service_association_v4(fixture.binding, s40_scope(fixture), "d".repeat(64), native, prepare, receipt,
+            s40_execution(native)).unwrap_err()).to_equal("linux-host-service-native-projection-mismatch")
+
+    it "authorizes associated execute only for the stored association with fresh signatures":
+        # @req S40-EXECUTE-01
+        # @capture(statistics): verified grant id and refusal reason for missing, foreign, unsigned and rebound requests
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val scope = s40_scope(fixture)
+        val prepare = s40_prepare(scope, host_local_context_v1(policy).monotonic_ms + 600000, 1, 65)
+        val association = s40_association(fixture, prepare, s40_native(fixture)).unwrap()
+        val stored = Some(host_execution_association_encode_v3(association).unwrap())
+        step("the exact stored association signed by the installed keys verifies")
+        val genuine = s40_execute(prepare, association, 1, 65)
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", genuine, stored, host_local_context_v1(policy)).unwrap().id).to_equal("grant_2")
+        step("no stored association, or a foreign one, is refused")
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", genuine, None, host_local_context_v1(policy)).unwrap_err()).to_equal("linux-host-service-association-missing")
+        var foreign_native = s40_native(fixture)
+        foreign_native.process_identity_digest = "f".repeat(64)
+        val foreign = s40_association(fixture, prepare, foreign_native).unwrap()
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", s40_execute(prepare, foreign, 1, 65), stored,
+            host_local_context_v1(policy)).unwrap_err()).to_equal("linux-host-service-association-foreign")
+        step("foreign-key signatures over the genuine association are refused")
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", s40_execute(prepare, association, 2, 66), stored,
+            host_local_context_v1(policy)).unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+        step("signatures over a foreign association do not authorize the stored one")
+        var rebound = s40_execute(prepare, foreign, 1, 65)
+        rebound.association = association
+        expect(linux_service_execute_authorize_core_v4(scope, policy, "issuer_1", rebound, stored, host_local_context_v1(policy)).unwrap_err()).to_equal("associated-execute-operation-mismatch")
+
+    it "keeps the original deadline on a same-ID prepare retry and refuses a renewal":
+        # @req S40-RETRY-01
+        # @capture(statistics): receipt digests of the first prepare and the retry, and the renewal refusal
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val scope = s40_scope(fixture)
+        val deadline = host_local_context_v1(policy).monotonic_ms + 600000
+        val prepare = s40_prepare(scope, deadline, 1, 65)
+        val grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", prepare, host_local_context_v1(policy)).unwrap()
+        val root = secure_temp_dir("/tmp", "s40-capacity").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+        val owner = s40_open(root + "/journal", capacity)
+        step("first prepare admits and its receipt carries the original intent")
+        val intent = prepare.prepare.intent
+        val operation = prepare.prepare.operation
+        val first = host_capacity_owner_prepare_v1(owner, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        val receipt = host_capacity_owner_prepared_receipt_v1(first, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        expect(receipt.intent_digest).to_equal(sha256_text(host_reservation_encode_intent_v1(intent).unwrap()))
+        step("the exact same-ID retry returns the same receipt, not a renewed one")
+        val again = host_capacity_owner_prepare_v1(first, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        val replay = host_capacity_owner_prepared_receipt_v1(again, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        expect(replay.receipt_digest).to_equal(receipt.receipt_digest)
+        expect(replay.prepared_revision).to_equal(receipt.prepared_revision)
+        step("the same ID with a later deadline is refused, and its association would differ")
+        val renewed = s40_prepare(scope, deadline + 600000, 1, 65)
+        val renewed_grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", renewed, host_local_context_v1(policy)).unwrap()
+        expect(host_capacity_owner_prepare_v1(again, renewed.prepare.intent, renewed.prepare.operation, renewed_grant,
+            host_local_context_v1(policy)).unwrap_err()).to_equal("reservation-payload-mismatch")
+        val original_bytes = host_execution_association_encode_v3(s40_association(fixture, prepare, s40_native(fixture)).unwrap()).unwrap()
+        val renewed_bytes = host_execution_association_encode_v3(s40_association(fixture, renewed, s40_native(fixture)).unwrap()).unwrap()
+        expect(renewed_bytes == original_bytes).to_equal(false)
+        step("a retry after the ORIGINAL deadline is refused: the deadline is never renewed")
+        val brief_deadline = host_local_context_v1(policy).monotonic_ms + 30000
+        val brief = s40_prepare(scope, brief_deadline, 1, 65, "operation_3", again.ledger.revision)
+        val brief_grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", brief, host_local_context_v1(policy)).unwrap()
+        val held = host_capacity_owner_prepare_v1(again, brief.prepare.intent, brief.prepare.operation, brief_grant,
+            host_local_context_v1(policy)).unwrap()
+        var waits = 0
+        while host_local_context_v1(policy).monotonic_ms < brief_deadline and waits < 120:
+            thread_sleep_ms(500)
+            waits = waits + 1
+        expect(host_local_context_v1(policy).monotonic_ms >= brief_deadline).to_equal(true)
+        val late = host_capacity_owner_prepare_v1(held, brief.prepare.intent, brief.prepare.operation, brief_grant,
+            host_local_context_v1(policy))
+        expect(late.unwrap_err()).to_equal("prepare-expired")
+        val closed = host_capacity_owner_close_owned_v2(held)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "commits associated execution only through the associated begin on a protected journal":
+        # @req S40-COMMIT-01
+        # @capture(statistics): refusal reason per gate and the journal row state after each refusal
+        val fixture = s40_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val scope = s40_scope(fixture)
+        val prepare = s40_prepare(scope, host_local_context_v1(policy).monotonic_ms + 600000, 1, 65)
+        val grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", prepare, host_local_context_v1(policy)).unwrap()
+        val root = secure_temp_dir("/tmp", "s40-commit").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+        val intent = prepare.prepare.intent
+        val operation = prepare.prepare.operation
+        val prepared = host_capacity_owner_prepare_v1(s40_open(root + "/journal", capacity), intent, operation, grant,
+            host_local_context_v1(policy)).unwrap()
+        val receipt = host_capacity_owner_prepared_receipt_v1(prepared, intent, operation, grant, host_local_context_v1(policy)).unwrap()
+        val association = s40_association(fixture, prepare, s40_native(fixture)).unwrap()
+        val execution = host_execute_associated_operation_v3(operation, association).unwrap()
+        val ledger = prepared.ledger
+        val fence = HostLedgerFenceV1(ledger.capacity.authority_id, ledger.capacity.boot_id, ledger.capacity.provider_generation, ledger.revision)
+        val associated = s40_grant(["host_execute_associated_v3"])
+        val refresh = fn() -> HostReservationAuthorizationContextV1: host_local_context_v1(policy)
+        step("the V1 begin refuses an associated-only grant")
+        expect(host_capacity_owner_begin_v1(prepared, intent, operation, receipt, fence, associated,
+            host_local_context_v1(policy)).unwrap_err()).to_equal("OPERATION_DENIED")
+        step("an envelope not bound to the association is refused before any effect")
+        val unbound = host_capacity_owner_begin_associated_v3(prepared, intent, operation, receipt, fence, association, operation, associated,
+            host_local_context_v1(policy), S40_FAR, refresh)
+        expect(unbound.error).to_equal("host-associated-execution-envelope-mismatch")
+        expect(unbound.effect_attempted).to_equal(false)
+        step("an envelope bound to a different association is refused: the payload is bound by the owner")
+        var foreign_native = s40_native(fixture)
+        foreign_native.process_identity_digest = "f".repeat(64)
+        val foreign = s40_association(fixture, prepare, foreign_native).unwrap()
+        val rebound = host_capacity_owner_begin_associated_v3(prepared, intent, operation, receipt, fence, association,
+            host_execute_associated_operation_v3(operation, foreign).unwrap(), associated, host_local_context_v1(policy), S40_FAR, refresh)
+        expect(rebound.error).to_equal("host-associated-execution-envelope-mismatch")
+        expect(rebound.effect_attempted).to_equal(false)
+        step("a prepare-only grant cannot commit the associated envelope")
+        val prepare_only = host_capacity_owner_begin_associated_v3(prepared, intent, operation, receipt, fence, association, execution,
+            s40_grant(["host_reservation_v1"]), host_local_context_v1(policy), S40_FAR, refresh)
+        expect(prepare_only.error).to_equal("OPERATION_DENIED")
+        step("a genuine associated grant still cannot commit on an unprotected journal")
+        val unprotected = host_capacity_owner_begin_associated_v3(prepared, intent, operation, receipt, fence, association, execution, associated,
+            host_local_context_v1(policy), S40_FAR, refresh)
+        expect(unprotected.error).to_equal("OPERATION_JOURNAL_LINUX_PROTECTED_REQUIRED")
+        expect(unprotected.effect_attempted).to_equal(false)
+        expect(daemon_operation_exact_v2(unprotected.owner.journal, operation).unwrap().state).to_equal("admitted")
+        step("the commit-time context must not regress, change or pass the signed deadline")
+        val now = host_local_context_v1(policy)
+        expect(host_capacity_owned_fresh_error_v3(now, now, S40_FAR)).to_equal("")
+        var regressed = now
+        regressed.grant_clock = now.grant_clock - 1
+        expect(host_capacity_owned_fresh_error_v3(now, regressed, S40_FAR)).to_equal("host-owned-authorization-clock-regressed")
+        var changed = now
+        changed.policy_revision = now.policy_revision + 1
+        expect(host_capacity_owned_fresh_error_v3(now, changed, S40_FAR)).to_equal("host-owned-authorization-context-changed")
+        expect(host_capacity_owned_fresh_error_v3(now, now, now.grant_clock)).to_equal("host-owned-authorization-expired")
+        val closed = host_capacity_owner_close_owned_v2(unprotected.owner)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "shuts down fail-closed and releases the retained journal":
+        # @req S40-SHUTDOWN-01
+        # @capture(statistics): close completion, retained carriers and post-close status refusal
+        step("a closed owner refuses status even if it was published")
+        var owner = HostLinuxServiceCurrentV4(root: "/var/lib/simple/hosts/host-root-x")
+        owner.published = true
+        owner.current_bytes = "record\n"
+        owner.current_relative = "linux-service-current/x.sdn"
+        val empty = host_linux_service_close_v4(owner)
+        expect(empty.completed).to_equal(true)
+        expect(empty.owner.status_v4().unwrap_err()).to_equal("linux-host-service-closed")
+        # Owned-lock journal branch; the Linux-protected close branch needs the real fixture driver.
+        step("a retained owned-lock capacity journal is closed through its owner and no longer retained")
+        val fixture = s40_fixture()
+        val root = secure_temp_dir("/tmp", "s40-close").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(s40_scope(fixture)).unwrap(), 41, 2000, 536870912, [])
+        var holding = HostLinuxServiceCurrentV4(root: root)
+        holding.capacity = Some(s40_open(root + "/journal", capacity))
+        val closed = host_linux_service_close_v4(holding)
+        expect(closed.completed).to_equal(true)
+        expect(closed.owner.capacity.is_none()).to_equal(true)
+        expect(closed.owner.journal_cleanup.is_none()).to_equal(true)
+        expect(closed.released_all).to_equal(true)
+        expect(closed.owner.status_v4().unwrap_err()).to_equal("linux-host-service-closed")
+        step("a repeated close of the released owner reports completion again, with nothing retained")
+        expect(host_linux_service_close_v4(closed.owner).completed).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+# Installed opener and fresh-epoch service loan (S40-OPEN-*, S40-LOAN-*).
+# AUTHORED, NOT_RUN. The loan checks run on a DATA lender whose slots are
+# never touched (every case returns before current_v1 or any close). The full
+# opener needs a genuine admitted epoch and installed roots, so its order is
+# the one structural pin kept (S40-OPEN-03).
+fn s40_source(path: text) -> text:
+    file_read_regular_no_follow_bounded(path, 1048576).unwrap()
+
+fn s40_before(source: text, first: text, second: text) -> bool:
+    val left = source.index_of(first)
+    val right = source.index_of(second)
+    left >= 0 and right >= 0 and left < right
+
+val S40_CURRENT: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl"
+val S40_ANCHOR: text = "/var/lib/simple/hosts/host-root-" + "a".repeat(64)
+
+fn s40_record() -> MachineFreshEpochRecordV1:
+    MachineFreshEpochRecordV1(authority_id: "machine_1", physical_host_id: "host_1",
+        native_machine_id: "linux-machine-id-v1:1234", epoch_id: "installed_epoch_1", epoch_generation: 7,
+        profile_digest: "a".repeat(64), machine_policy_digest: "b".repeat(64), process_identity_digest: "c".repeat(64),
+        principal_id: "linux:uid:20001", service_uid: 20001, service_gid: 20001, manager_unique_name: ":1.23",
+        partition_identity_digest: "d".repeat(64), store_identity_digest: "e".repeat(64),
+        provider_policy_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        capacity_cpu_millis: 8000, capacity_memory_bytes: 8192, observed_cpu_millis: 4000, observed_memory_bytes: 4096,
+        reserved_cpu_millis: 500, reserved_memory_bytes: 512, outside_cpu_millis: 4000, outside_memory_bytes: 4096,
+        usable_cpu_millis: 3500, usable_memory_bytes: 3584)
+
+fn s40_lender(loaned: bool, reader: Option<LinuxMachinePolicyOwnerV1>) -> MachineFreshEpochAdmissionOwnerV1:
+    MachineFreshEpochAdmissionOwnerV1(authority: None, custody: Some(LinuxFreshEpochSuccessorCustodyV1(slot: 4, generation: 1)),
+        record: s40_record(), initial_commit: "", custody_generation: 1,
+        lifecycle: MachineFreshEpochLifecycleV1(slot: -1, generation: 0), error: "",
+        service_reader: reader, service_loaned: loaned)
+
+fn s40_borrow(reader_generation: i64, custody_slot: i64) -> LinuxServiceNativeIdentityBorrowV3:
+    LinuxServiceNativeIdentityBorrowV3(reader: LinuxMachinePolicyOwnerV1(slot: 3, generation: reader_generation),
+        successor: LinuxFreshEpochSuccessorCustodyV1(slot: custody_slot, generation: 1),
+        expected: s40_native(s40_fixture()))
+
+fn s40_reader() -> Option<LinuxMachinePolicyOwnerV1>:
+    Some(LinuxMachinePolicyOwnerV1(slot: 3, generation: 1))
+
+fn s40_store_lender(store_loaned: bool) -> MachineFreshEpochAdmissionOwnerV1:
+    var lender = s40_lender(true, s40_reader())
+    lender.store_inventory_loaned = store_loaned
+    lender
+
+# Synthetic launch DATA: start_provider_v1 refuses a lent epoch before it binds,
+# encodes or validates the template, so no field is ever read.
+fn s40_template() -> GroupProcessStreamLaunchV2:
+    val digest = "a".repeat(64)
+    val request = GroupProcessStreamRequestV2(program: "/synthetic/program",
+        producer_digest: digest, args: [], environment: ["LANG=C"], directory: "/synthetic/work",
+        inputs: [], timeout_ms: 1000, broker_program: "/synthetic/broker", broker_digest: digest,
+        child_argv_digest: group_process_child_argv_digest_v2("/synthetic/program", []), launch_deadline_unix_ms: 1)
+    GroupProcessStreamLaunchV2(root: "/synthetic/group", worker_id: "worker-a",
+        generation: 1, snapshot_digest: digest, cache_identity: digest, memory_limit_bytes: 1048576,
+        request: request, delegated_cgroup_path: "/synthetic/cgroup", transport_generation: 1)
+
+fn s40_inventory(reader_generation: i64, custody_slot: i64) -> LinuxFreshEpochStoreInventoryBorrowV1:
+    LinuxFreshEpochStoreInventoryBorrowV1(reader: LinuxMachinePolicyOwnerV1(slot: 3, generation: reader_generation),
+        successor: LinuxFreshEpochSuccessorCustodyV1(slot: custody_slot, generation: 1), epoch_digest: "c".repeat(64))
+
+describe "Linux service installed opener and fresh-epoch service loan (service 40)":
+    it "derives the parent from the administrator anchor string only":
+        # @req S40-OPEN-01
+        expect(host_linux_service_anchor_parent_v4(S40_ANCHOR).unwrap()).to_equal("/var/lib/simple/hosts")
+        expect(host_linux_service_anchor_parent_v4("var/lib/host-root-" + "a".repeat(64)).unwrap_err()).to_equal("linux-host-service-anchor-invalid")
+        expect(host_linux_service_anchor_parent_v4("/host-root-" + "a".repeat(64)).unwrap_err()).to_equal("linux-host-service-anchor-invalid")
+        expect(host_linux_service_anchor_parent_v4("/var/../hosts/host-root-" + "a".repeat(64)).unwrap_err()).to_equal("linux-host-service-anchor-invalid")
+        expect(host_linux_service_anchor_parent_v4("/var/lib/simple/hosts/other").unwrap_err()).to_equal("linux-host-service-anchor-leaf")
+        expect(host_linux_service_anchor_parent_v4("/var/lib/simple/hosts/host-root-abc").unwrap_err()).to_equal("linux-host-service-anchor-leaf")
+        expect(host_linux_service_anchor_parent_v4(S40_ANCHOR + "/").unwrap_err()).to_equal("linux-host-service-anchor-invalid")
+
+    it "refuses an invalid anchor before opening any admission or reader":
+        # @req S40-OPEN-02
+        val turn = host_linux_service_open_installed_v4("relative/host-root-x")
+        expect(turn.error).to_equal("linux-host-service-anchor-invalid")
+        expect(turn.owner.admission.is_none()).to_equal(true)
+        expect(turn.owner.root_reader.is_none()).to_equal(true)
+        val closed = host_linux_service_close_v4(turn.owner)
+        expect(closed.completed).to_equal(true)
+        expect(closed.released_all).to_equal(true)
+
+    it "runs every read-only check before the durable admission, then lends, re-pins and starts":
+        # @req S40-OPEN-03 (the one structural pin: needs installed roots and an admitted epoch to run)
+        val source = s40_source(S40_CURRENT)
+        val order = ["val opened = linux_protected_root_reader_open_v1(anchor)",
+            "val opened_parent = linux_protected_root_reader_open_v1(parent.unwrap())",
+            "val proof = linux_service_installed_proof_v4(anchor, parent.unwrap()",
+            "var admission = machine_container_authority_open_fresh_epoch_v1()",
+            "val lent = admission.owner.unwrap().lend_service_identity_v1()",
+            "val stored = admission.owner.unwrap().lend_store_inventory_v1()",
+            "val repinned = linux_service_readers_pinned_v4(anchor, parent.unwrap()",
+            "val started = host_linux_service_start_v4(anchor,",
+            "lent.native.unwrap(), lent.epoch_digest, stored.inventory.unwrap())"]
+        var i = 0
+        while i + 1 < order.len():
+            expect(s40_before(source, order[i], order[i + 1])).to_equal(true)
+            i = i + 1
+
+    it "refuses a second lend while loaned or after a reader was retained":
+        # @req S40-LOAN-01
+        val active = s40_lender(true, s40_reader()).lend_service_identity_v1()
+        expect(active.error).to_equal("machine-fresh-epoch-service-loan-active")
+        expect(active.native.is_none()).to_equal(true)
+        expect(active.owner.service_loaned).to_equal(true)
+        val consumed = s40_lender(false, s40_reader()).lend_service_identity_v1()
+        expect(consumed.error).to_equal("machine-fresh-epoch-service-loan-consumed")
+        expect(consumed.owner.service_reader.is_some()).to_equal(true)
+
+    it "ends the loan only for the exact lent borrow":
+        # @req S40-LOAN-02
+        expect(s40_lender(false, s40_reader()).end_service_loan_v1(s40_borrow(1, 4)).error).to_equal("machine-fresh-epoch-service-loan-inactive")
+        expect(s40_lender(true, None).end_service_loan_v1(s40_borrow(1, 4)).error).to_equal("machine-fresh-epoch-service-loan-lender-consumed")
+        val stale_reader = s40_lender(true, s40_reader()).end_service_loan_v1(s40_borrow(2, 4))
+        expect(stale_reader.error).to_equal("machine-fresh-epoch-service-loan-foreign-borrow")
+        expect(stale_reader.owner.service_loaned).to_equal(true)
+        expect(s40_lender(true, s40_reader()).end_service_loan_v1(s40_borrow(1, 5)).error).to_equal("machine-fresh-epoch-service-loan-foreign-borrow")
+        val ended = s40_lender(true, s40_reader()).end_service_loan_v1(s40_borrow(1, 4))
+        expect(ended.error).to_equal("")
+        expect(ended.owner.service_loaned).to_equal(false)
+        expect(ended.owner.service_reader.is_some()).to_equal(true)
+        step("a lent or once-lent owner never transfers its workload")
+        expect(s40_lender(true, s40_reader()).transfer_workload_v2().error).to_equal("machine-fresh-epoch-service-loan-active")
+
+    it "keeps the loan and admission when close cannot hand the exact borrow back":
+        # @req S40-OPEN-04
+        val missing = host_linux_service_close_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_lender(true, s40_reader()))))))
+        expect(missing.error).to_equal("linux-host-service-loan-borrow-missing")
+        expect(missing.released_all).to_equal(false)
+        expect(missing.owner.admission.unwrap().owner.unwrap().service_loaned).to_equal(true)
+        val foreign = host_linux_service_close_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(2, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_lender(true, s40_reader()))))))
+        expect(foreign.error).to_equal("machine-fresh-epoch-service-loan-foreign-borrow")
+        expect(foreign.owner.native.is_some()).to_equal(true)
+        expect(foreign.owner.admission.is_some()).to_equal(true)
+        step("a repeated close reports the same sticky refusal and still retains everything")
+        val again = host_linux_service_close_v4(foreign.owner)
+        expect(again.completed).to_equal(false)
+        expect(again.owner.admission.is_some()).to_equal(true)
+
+    it "lends the offline store inventory only inside an active service loan":
+        # @req S40-LOAN-03 (M2; every case returns before current_v1, so no slot is touched)
+        val no_service = s40_lender(false, s40_reader()).lend_store_inventory_v1()
+        expect(no_service.error).to_equal("machine-fresh-epoch-store-inventory-service-loan-inactive")
+        expect(no_service.inventory.is_none()).to_equal(true)
+        val active = s40_store_lender(true).lend_store_inventory_v1()
+        expect(active.error).to_equal("machine-fresh-epoch-store-inventory-loan-active")
+        expect(active.owner.store_inventory_loaned).to_equal(true)
+        expect(s40_lender(true, None).lend_store_inventory_v1().error).to_equal("machine-fresh-epoch-service-loan-lender-consumed")
+
+    it "ends the store inventory loan only for the exact borrow and before the service loan":
+        # @req S40-LOAN-04
+        expect(s40_store_lender(false).end_store_inventory_loan_v1(s40_inventory(1, 4)).error).to_equal(
+            "machine-fresh-epoch-store-inventory-loan-inactive")
+        val stale_reader = s40_store_lender(true).end_store_inventory_loan_v1(s40_inventory(2, 4))
+        expect(stale_reader.error).to_equal("machine-fresh-epoch-store-inventory-loan-foreign-borrow")
+        expect(stale_reader.owner.store_inventory_loaned).to_equal(true)
+        expect(s40_store_lender(true).end_store_inventory_loan_v1(s40_inventory(1, 5)).error).to_equal(
+            "machine-fresh-epoch-store-inventory-loan-foreign-borrow")
+        step("the service loan cannot end, and the workload cannot transfer, while the store loan is active")
+        val held = s40_store_lender(true).end_service_loan_v1(s40_borrow(1, 4))
+        expect(held.error).to_equal("machine-fresh-epoch-store-inventory-loan-active")
+        expect(held.owner.service_loaned).to_equal(true)
+        expect(s40_store_lender(true).transfer_workload_v2().error).to_equal("machine-fresh-epoch-service-loan-active")
+        step("the exact borrow ends the store loan; the service loan then ends normally")
+        val ended = s40_store_lender(true).end_store_inventory_loan_v1(s40_inventory(1, 4))
+        expect(ended.error).to_equal("")
+        expect(ended.owner.store_inventory_loaned).to_equal(false)
+        expect(ended.owner.service_loaned).to_equal(true)
+        expect(ended.owner.end_service_loan_v1(s40_borrow(1, 4)).error).to_equal("")
+
+    it "never lets a store inventory loan outlive its owner":
+        # @req S40-LOAN-05
+        val refused = s40_store_lender(true).close_v1()
+        expect(refused.closed).to_equal(false)
+        expect(refused.error).to_equal("machine-fresh-epoch-store-inventory-loan-active")
+        expect(refused.owner.unwrap().store_inventory_loaned).to_equal(true)
+        step("service close without the lent inventory borrow keeps both loans and the admission")
+        val missing = host_linux_service_close_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(missing.error).to_equal("linux-host-service-inventory-borrow-missing")
+        expect(missing.released_all).to_equal(false)
+        expect(missing.owner.admission.unwrap().owner.unwrap().store_inventory_loaned).to_equal(true)
+        expect(missing.owner.native.is_some()).to_equal(true)
+        step("a foreign inventory borrow is refused and retained")
+        val foreign = host_linux_service_close_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 5)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(foreign.error).to_equal("machine-fresh-epoch-store-inventory-loan-foreign-borrow")
+        expect(foreign.owner.inventory.is_some()).to_equal(true)
+        expect(foreign.owner.admission.unwrap().owner.unwrap().store_inventory_loaned).to_equal(true)
+        step("the exact inventory ends first; a foreign native borrow then keeps the service loan and admission")
+        val ordered = host_linux_service_close_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(2, 4)), inventory: Some(s40_inventory(1, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(ordered.error).to_equal("machine-fresh-epoch-service-loan-foreign-borrow")
+        expect(ordered.owner.inventory.is_none()).to_equal(true)
+        val lender = ordered.owner.admission.unwrap().owner.unwrap()
+        expect(lender.store_inventory_loaned).to_equal(false)
+        expect(lender.service_loaned).to_equal(true)
+
+    it "never starts the provider of a lent or once-lent epoch":
+        # @req S40-LOAN-06 (R2-F4/R3-F3; every case returns before lifecycle, custody or template use)
+        step("an active service loan refuses the start and keeps the loan")
+        val lent = s40_lender(true, s40_reader()).start_provider_v1(s40_template())
+        expect(lent.error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
+        expect(lent.started).to_equal(false)
+        expect(lent.process.is_none()).to_equal(true)
+        expect(lent.reference.is_none()).to_equal(true)
+        expect(lent.owner.service_loaned).to_equal(true)
+        step("an active store inventory loan refuses the start and keeps both loans")
+        val stored = s40_store_lender(true).start_provider_v1(s40_template())
+        expect(stored.error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
+        expect(stored.started).to_equal(false)
+        expect(stored.owner.store_inventory_loaned).to_equal(true)
+        expect(stored.owner.service_loaned).to_equal(true)
+        step("an ended loan still refuses: the retained service reader marks the epoch once-lent")
+        val ended = s40_lender(false, s40_reader()).start_provider_v1(s40_template())
+        expect(ended.error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
+        expect(ended.started).to_equal(false)
+        expect(ended.owner.service_reader.is_some()).to_equal(true)
+
+    it "returns the store inventory only after the startup reconcile proved continuity":
+        # @req S40-HANDOFF-01 (milestone_0021 PR1; every case returns before any slot is touched)
+        step("no proven capacity (published owner): the handoff is refused and the inventory stays lent")
+        val unproven = linux_service_inventory_handoff_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4)), published: true,
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(unproven.error).to_equal("linux-host-service-inventory-handoff-unproven")
+        expect(unproven.owner.inventory.is_some()).to_equal(true)
+        expect(unproven.owner.inventory_returned).to_equal(false)
+        expect(unproven.owner.admission.unwrap().owner.unwrap().store_inventory_loaned).to_equal(true)
+        step("a recorded reconcile refusal (also without capacity) keeps the inventory lent")
+        val quarantined = linux_service_inventory_handoff_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4)), published: true,
+            reconcile_error: "linux-service-inventory-begun-present",
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(quarantined.error).to_equal("linux-host-service-inventory-handoff-unproven")
+        expect(quarantined.owner.inventory.is_some()).to_equal(true)
+        expect(quarantined.owner.admission.unwrap().owner.unwrap().store_inventory_loaned).to_equal(true)
+        step("an unpublished owner (also without capacity) keeps the inventory lent; the full gate is pinned in S40-HANDOFF-03")
+        val unpublished = linux_service_inventory_handoff_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(unpublished.error).to_equal("linux-host-service-inventory-handoff-unproven")
+        expect(unpublished.owner.inventory.is_some()).to_equal(true)
+
+    it "returns only the exact lent inventory and grants nothing by returning it":
+        # @req S40-HANDOFF-02 (the private return step after the proof gate; DATA lender, no slot is touched)
+        step("a foreign inventory borrow is refused and both loans stay")
+        val foreign = linux_service_inventory_return_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 5)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(foreign.error).to_equal("machine-fresh-epoch-store-inventory-loan-foreign-borrow")
+        expect(foreign.owner.inventory.is_some()).to_equal(true)
+        expect(foreign.owner.inventory_returned).to_equal(false)
+        expect(foreign.owner.admission.unwrap().owner.unwrap().store_inventory_loaned).to_equal(true)
+        step("a missing borrow or a missing lender is refused")
+        val missing = linux_service_inventory_return_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(missing.error).to_equal("linux-host-service-inventory-borrow-missing")
+        val lenderless = linux_service_inventory_return_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4))))
+        expect(lenderless.error).to_equal("linux-host-service-admission-missing")
+        expect(lenderless.owner.inventory.is_some()).to_equal(true)
+        step("the exact borrow ends the store loan only; the service loan stays")
+        val returned = linux_service_inventory_return_v4(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service",
+            native: Some(s40_borrow(1, 4)), inventory: Some(s40_inventory(1, 4)),
+            admission: Some(MachineFreshEpochAdmissionTurnV1(owner: Some(s40_store_lender(true))))))
+        expect(returned.error).to_equal("")
+        expect(returned.owner.inventory.is_none()).to_equal(true)
+        expect(returned.owner.inventory_returned).to_equal(true)
+        val lender = returned.owner.admission.unwrap().owner.unwrap()
+        expect(lender.store_inventory_loaned).to_equal(false)
+        expect(lender.service_loaned).to_equal(true)
+        step("a second return is refused")
+        expect(linux_service_inventory_return_v4(returned.owner).error).to_equal("linux-host-service-inventory-returned")
+        step("the returned epoch still never starts its provider and never transfers (once-lent)")
+        expect(lender.start_provider_v1(s40_template()).error).to_equal("machine-fresh-epoch-provider-start-after-service-loan")
+        expect(lender.transfer_workload_v2().error).to_equal("machine-fresh-epoch-service-loan-active")
+        step("close after the handoff skips the returned inventory and stops at the service loan")
+        var closing = returned.owner
+        closing.native = Some(s40_borrow(2, 4))
+        val closed = host_linux_service_close_v4(closing)
+        expect(closed.error).to_equal("machine-fresh-epoch-service-loan-foreign-borrow")
+        expect(closed.owner.admission.unwrap().owner.unwrap().service_loaned).to_equal(true)
+
+    it "hands the inventory back from the opener only after a proven start, and current_v4 accepts it only then":
+        # @req S40-HANDOFF-03 (structural pin: the positive path needs installed roots and an admitted epoch)
+        val source = s40_source(S40_CURRENT)
+        expect(s40_before(source, "val started = host_linux_service_start_v4(anchor,",
+            "linux_service_inventory_handoff_v4(owner)")).to_equal(true)
+        expect(source.contains("elif (not self.inventory_returned or self.inventory.is_some() or\n" +
+            "                    not self.capacity.unwrap().ledger.continuity_proven):")).to_equal(true)
+        expect(source.contains("if self.inventory.is_none() or self.inventory_returned:")).to_equal(true)
+        expect(source.contains("return Err(\"linux-host-service-inventory-return-unproven\")")).to_equal(true)
+        step("the opener skips the handoff on a quarantined start, and the handoff gate needs every proof fact")
+        expect(s40_before(source, "if started.error != \"\": return HostLinuxServiceStartTurnV4(owner: owner, error: started.error)",
+            "if owner.reconcile_error != \"\" or owner.capacity.is_none() or not owner.capacity.unwrap().ledger.continuity_proven:")).to_equal(true)
+        expect(s40_before(source, "not owner.capacity.unwrap().ledger.continuity_proven:\n        return HostLinuxServiceStartTurnV4(owner: owner, error: \"\")",
+            "    linux_service_inventory_handoff_v4(owner)")).to_equal(true)
+        expect(source.contains("    if (not owner.published or owner.reconcile_error != \"\" or owner.capacity.is_none() or\n" +
+            "            not owner.capacity.unwrap().ledger.continuity_proven):\n" +
+            "        return linux_service_start_error_v4(owner, \"linux-host-service-inventory-handoff-unproven\")")).to_equal(true)

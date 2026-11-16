@@ -303,6 +303,10 @@ pub struct Lowerer {
     /// early-return in `expr/access.rs::lower_field_access` falls through
     /// to the field-access fallback (W13-F class 1, fixed in W15-H).
     pub(super) global_enum_defs: Option<GlobalEnumDefs>,
+    /// Bare enum names declared by several modules; their `global_enum_defs`
+    /// row is a merged union, so a seeded registration from it is not one
+    /// owner's declaration and must not yield a discriminant (#6953).
+    pub(super) merged_global_enum_names: Option<std::sync::Arc<std::collections::HashSet<String>>>,
     /// Source file each struct/class bare name was DECLARED in, recorded by
     /// `register_struct`. A name that collides across modules maps to the file
     /// of whichever declaration registered last -- which is exactly the signal
@@ -327,10 +331,11 @@ pub struct Lowerer {
     /// a field with NO declared default keeps the `Nil` placeholder exactly as
     /// before.
     pub(super) struct_field_defaults: HashMap<String, HashMap<String, Expr>>,
-    /// Authored simple type name of each class/struct field, keyed by owner
-    /// then field. Lets `self.field.m()` recover a TRAIT field type, which
-    /// `resolve_type` erases to ANY.
-    pub(super) struct_field_type_names: HashMap<String, HashMap<String, String>>,
+    /// Authored field types and declaration provenance keyed by receiver TypeId.
+    /// A reused type id from conflicting owners is tombstoned, not guessed. Preserve
+    /// Optional and generic structure: only payload bindings may acquire the
+    /// inner trait identity; the Option carrier itself must never acquire it.
+    pub(super) struct_field_declared_types: HashMap<TypeId, Option<(String, HashMap<String, Type>)>>,
     /// Local bindings authored as untyped empty array literals (`var xs = []`).
     ///
     /// These start as `[Any]` placeholders in HIR so later builtin `append`
@@ -457,9 +462,10 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
-            struct_field_type_names: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
         }
     }
@@ -549,9 +555,10 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
-            struct_field_type_names: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
         }
     }
@@ -664,9 +671,10 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
-            struct_field_type_names: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
         }
     }
@@ -793,6 +801,29 @@ impl Lowerer {
         self.global_enum_defs = Some(defs);
     }
 
+    /// Names whose `global_enum_defs` row merges several declarations; see
+    /// `merged_global_enum_names`. Call before `register_global_enums`.
+    pub fn set_merged_global_enum_names(&mut self, names: std::sync::Arc<std::collections::HashSet<String>>) {
+        self.merged_global_enum_names = Some(names);
+    }
+
+    /// #6953: discriminant of `variant` in its OWNING enum (the enum
+    /// `owner_ty` is, else `enum_name`, else the index every enum visible to
+    /// this module agrees on). Only when none resolves does it fall back to
+    /// the reported name-only lookup.
+    pub(crate) fn owner_variant_discriminant(
+        &self,
+        owner_ty: crate::hir::TypeId,
+        enum_name: Option<&str>,
+        variant: &str,
+        site: &'static str,
+    ) -> i64 {
+        self.module
+            .types
+            .owned_or_unique_variant_discriminant(owner_ty, enum_name, variant)
+            .unwrap_or_else(|| crate::hir::name_only_variant_discriminant(site, variant))
+    }
+
     /// Eagerly register every enum from `global_enum_defs` into the local
     /// type registry as a real `HirType::Enum` and bind its name in
     /// `self.globals` to the freshly-allocated TypeId.
@@ -857,6 +888,13 @@ impl Lowerer {
                     type_bindings: std::collections::HashMap::new(),
                 },
             );
+            if self
+                .merged_global_enum_names
+                .as_ref()
+                .is_some_and(|names| names.contains(&enum_name))
+            {
+                self.module.types.mark_merged_enum(type_id);
+            }
             self.globals.insert(enum_name, type_id);
         }
     }

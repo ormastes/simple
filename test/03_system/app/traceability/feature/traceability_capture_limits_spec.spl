@@ -11,12 +11,13 @@ use std.spec.step
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use app.io.minimal_runtime_ops.{process_run_bounded}
 use app.traceability.cli_options_v1.{TraceCliOptionsV1, trace_cli_options_parse_v1}
-use app.traceability.capture_v1.{TraceCaptureLimitsV1, trace_capture_worktree_v1, trace_capture_enumeration_v1}
-use app.traceability.structural_report_v1.{trace_qualification_infrastructure_v1}
+use app.traceability.capture_v1.{TraceCaptureLimitsV1, trace_capture_worktree_v1, trace_capture_enumeration_v1, TraceCaptureExitCodeV1}
+use app.traceability.structural_report_v1.{trace_qualification_infrastructure_v1, TraceSnapshotCompletenessV1}
 use std.common.traceability.types_v1.{trace_qualification_codec_limits_v1}
 use std.common.traceability.qualification_v1.{trace_qualification_encode_v1}
 use app.traceability.core.{VirtualFile, TraceabilityConfig, default_traceability_config,
-    traceability_config_validate_captured_v1, analyze_virtual_files_bounded_v1}
+    traceability_config_validate_captured_v1, analyze_virtual_files_bounded_v1,
+    TraceSourceRootsV1, TraceDiagnosticLimitV1}
 
 fn trace_fixture_nul_v1() -> text:
     var accepted = false
@@ -37,7 +38,7 @@ fn options_rejected(args: [text]) -> bool:
         case Ok(_): false
 
 fn enumeration_rejected(out: text, err: text, code: i64, bytes: i64, entries: i64) -> bool:
-    match trace_capture_enumeration_v1(out, err, code, bytes, entries):
+    match trace_capture_enumeration_v1(out, err, TraceCaptureExitCodeV1(value: code), TraceCaptureLimitsV1(max_walk_bytes: bytes, max_files: entries)):
         case Err(_): true
         case Ok(_): false
 
@@ -58,7 +59,7 @@ describe "Bound structural capture before accepting a completed snapshot":
             case Ok(_): pass
         expect(rejected).to_equal(true)
         step("Encode unavailable identity as an incomplete report")
-        val report = trace_qualification_infrastructure_v1("worktree-attempt:unavailable", false,
+        val report = trace_qualification_infrastructure_v1("worktree-attempt:unavailable", TraceSnapshotCompletenessV1.Incomplete,
             TraceCliOptionsV1(), "TRC-CAPTURE-ROOT", "", "Working directory unavailable")
         var encoded = false
         match trace_qualification_encode_v1(report, trace_qualification_codec_limits_v1()):
@@ -92,7 +93,7 @@ describe "Bound structural capture before accepting a completed snapshot":
         step("Preserve Unicode and newline names without interpreting marker text")
         var accepted = false
         val name = "test/λ\n[output truncated: legitimate filename]"
-        match trace_capture_enumeration_v1("./" + name + nul, "", 0, 1000, 1):
+        match trace_capture_enumeration_v1("./" + name + nul, "", TraceCaptureExitCodeV1(value: 0), TraceCaptureLimitsV1(max_walk_bytes: 1000, max_files: 1)):
             case Ok(paths): accepted = paths.len() == 1 and paths[0] == name
             case Err(_): pass
         expect(accepted).to_equal(true)
@@ -125,12 +126,12 @@ describe "Bound structural capture before accepting a completed snapshot":
         # @ac: AC-TRC-015
         val files = [VirtualFile(path: "src/example.spl", content: "fn example():\n    pass\n")]
         var rejected = false
-        match analyze_virtual_files_bounded_v1(files, "all", default_traceability_config(), false, 5):
+        match analyze_virtual_files_bounded_v1(files, "all", default_traceability_config(), TraceSourceRootsV1.Skipped, TraceDiagnosticLimitV1(value: 5)):
             case Err(_): rejected = true
             case Ok(_): pass
         expect(rejected).to_equal(true)
         var accepted = false
-        match analyze_virtual_files_bounded_v1(files, "all", default_traceability_config(), false, 6):
+        match analyze_virtual_files_bounded_v1(files, "all", default_traceability_config(), TraceSourceRootsV1.Skipped, TraceDiagnosticLimitV1(value: 6)):
             case Ok(warnings): accepted = warnings.len() == 0
             case Err(_): pass
         expect(accepted).to_equal(true)

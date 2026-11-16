@@ -992,10 +992,10 @@ impl MirLowering:
         var b_wide = self.builder
         val widened = b_wide.emit_cast(mir_operand_copy(value_local), MirType.i64())
         self.builder = b_wide
-        var b_narrow = self.builder
-        val narrowed = b_narrow.emit_cast(mir_operand_copy(widened), MirType.bool())
-        self.builder = b_narrow
-        narrowed
+        # Not a trunc to i1: a receiver bound from a runtime-word producer
+        # (`val got: bool? = d.get(k)`) carries the tagged false word 19, whose
+        # low bit is 1. enum_payload_value accepts both true forms (1, 11).
+        self.enum_payload_value(widened, MirType.bool())
 
     me lower_result_unwrap(receiver: HirExpr, payload_type: HirType, default_expr: HirExpr?, unwrap_err: bool) -> LocalId:
         self.lower_result_unwrap_core(receiver, payload_type, default_expr, unwrap_err, 0, false)
@@ -1240,6 +1240,20 @@ impl MirLowering:
         b_merge.switch_to_block(merge_block)
         self.builder = b_merge
         self.remember_local_hir_type(result_local.id, payload_type, 0, 0)
+        # `.ok` / `.err` (nil fallback) yields a decoded payload-or-nil word
+        # typed by the payload; the variant tag is its presence. A scalar
+        # payload cannot answer presence by value (Ok(3) is the nil word).
+        # doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+        if val projection_default = default_expr:
+            match projection_default.kind:
+                case HirExprKind.NilLit:
+                    match payload_type.kind:
+                        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
+                            self.presence_word_locals[result_local.id] = has_payload.id
+                            if is_text:
+                                self.mark_decoded_text_option_local(result_local.id)
+                        case _: ()
+                case _: ()
         if result_is_optional:
             self.option_value_locals[result_local.id] = true
             self.mark_runtime_value_local(result_local.id)
@@ -2295,7 +2309,10 @@ impl MirLowering:
             end_local = b_end.emit_const_int(9223372036854775807)
             self.builder = b_end
         var b_slice = self.builder
-        val handle = b_slice.emit_cast(mir_operand_copy(tagged), MirType.i64())
+        # The receiver HANDLE word is a reinterpret (Bitcast): a text -> i64
+        # Cast is `int(text)` to Cranelift and fed rt_slice a parsed number
+        # (stage-2 class A, second instance). start/finish are real widenings.
+        val handle = b_slice.emit_bitcast(mir_operand_copy(tagged), MirType.i64())
         val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
         val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
         val step = b_slice.emit_const_int(1)
@@ -2330,7 +2347,7 @@ impl MirLowering:
             val len_callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_len"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))), call_origin: MirCallOrigin.Runtime)
             end_local = b_slice.emit_call_value(len_callee, [mir_operand_copy(receiver_local)], MirType.i64())
-        val handle = b_slice.emit_cast(mir_operand_copy(receiver_local), MirType.i64())
+        val handle = b_slice.emit_bitcast(mir_operand_copy(receiver_local), MirType.i64())
         val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
         val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
         val step = b_slice.emit_const_int(1)
@@ -2353,7 +2370,7 @@ impl MirLowering:
         # result metadata owner. rt_slice is O(k), allocates a new container,
         # and preserves BYTES/U64_PACKED storage flags.
         var b_slice = self.builder
-        val handle = b_slice.emit_cast(mir_operand_copy(receiver_local), MirType.i64())
+        val handle = b_slice.emit_bitcast(mir_operand_copy(receiver_local), MirType.i64())
         val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
         val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
         val step = b_slice.emit_const_int(1)
@@ -6507,7 +6524,11 @@ impl MirLowering:
         # hir_codec.spl `w.put_f64`). Only then -- never over a known type --
         # take the provider-prescanned receiver-tail params: the receiver is the
         # handle word, the return stays the i64 default (an f64 result still
-        # fails loudly in cl_call_abi_mismatch).
+        # fails loudly in cl_call_abi_mismatch). A callable with no receiver
+        # split (static method, UFCS free function) has its whole ABI param
+        # record instead. Both hold provider-resolved symbol-free stand-ins
+        # (module_lowering.spl mir_abi_param_stand_in_v1), so a nominal param
+        # no longer makes the signature unknown.
         if not sym_type_present:
             if val tail_params = bootstrap_method_receiver_tail_params_lookup_v1(name):
                 var receiver_params: [MirType] = [MirType.i64()]
@@ -6515,13 +6536,21 @@ impl MirLowering:
                     receiver_params = receiver_params.push(self.lower_type(tail_param))
                 signature = MirSignature(params: receiver_params, return_type: MirType.i64(), is_variadic: false,
                     declared_params: receiver_params, declared_params_known: true)
+            else:
+                val abi_declared = self.callable_abi_declared_params_v1(name)
+                if abi_declared.len() > 0:
+                    signature = MirSignature(params: abi_declared, return_type: MirType.i64(), is_variadic: false,
+                        declared_params: abi_declared, declared_params_known: true)
+        # Imported declarations without a return annotation retain exact
+        # importer-local parameter identities; they outrank the name-keyed
+        # prescan fallbacks above.
         if val declaration = optional_sym:
             val declared_symbol: HirSymbol = declaration
-            if declared_symbol.type_ == nil:
+            if not declared_symbol.type_.?:
                 if val params = declared_symbol.declared_param_types_v1:
                     var declared_params: [MirType] = []
                     for param in params:
-                        declared_params.push(self.lower_type(param))
+                        declared_params = declared_params.push(self.lower_type(param))
                     # Preserve unknown return inference; only parameters are
                     # proven here. No caller-operand ABI guessing is permitted.
                     signature = MirSignature(params: declared_params, return_type: signature.return_type,
@@ -6530,6 +6559,17 @@ impl MirLowering:
             MirConstValue.Str(name),
             MirType(kind: MirTypeKind.FuncPtr(signature))
         ), call_origin: call_origin)
+
+    me callable_abi_declared_params_v1(link_name: text) -> [MirType]:
+        """Declared param types of a receiver-less callable whose surface
+        symbol carries no callable type, from the provider's ABI param record.
+        [] when unregistered, rejected or ambiguous: the signature then stays
+        unknown and a float argument keeps failing loudly."""
+        var declared: [MirType] = []
+        if val abi_params = bootstrap_callable_abi_params_lookup_v1(link_name.replace("::", ".")):
+            for abi_param in abi_params:
+                declared = declared.push(self.lower_type(abi_param))
+        declared
 
     me named_function_operand(fallback_name: text) -> MirOperand?:
         var callable_name = fallback_name

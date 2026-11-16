@@ -14,7 +14,8 @@ use std.common.process.observation_v1.{
     ObservedProcessRequestV1, ObservedProcessPollV1, ObservedProcessResultV1,
     ObservedProcessStreamV1, ObservedProcessRusageV1, ObservedExecutablePinV1,
     observed_process_empty_stream_v1, observed_process_empty_rusage_v1,
-    observed_process_empty_pin_v1, observed_process_result_status_v1
+    observed_process_empty_pin_v1, observed_process_result_status_v1,
+    observed_process_collect_retired_v1
 }
 use std.common.process.observation_v4.{
     PROCESS_OBSERVATION_V4_VERSION, PROCESS_OBSERVATION_V4_WORDS,
@@ -415,6 +416,12 @@ pub class ProcessObservationOwnerV1:
     var kill_sent: bool
     var reaped: bool
     var output_complete: bool
+    var output_complete_observed: bool = false
+    var stream_counts_observed: bool = false
+    var terminal_observed: Option<bool> = nil
+    var identity_revalidated: Option<bool> = nil
+    var cancel_requested: Option<bool> = nil
+    var native_error: Option<i64> = nil
     var eintr_retries: i64
     var consumed: bool
 
@@ -674,34 +681,48 @@ fn _process_observation_poll_receipt_v1(
             lease.stderr_truncated))
 
 pub(package) fn process_observation_owner_poll_v1(
-    lease: ObservedProcessLeaseV1,
+    lease: ObservedProcessLeaseV1, wait_ms: i64,
+    stdout_capacity: i64, stderr_capacity: i64
+) -> ObservedProcessPollV1:
+    process_observation_owner_poll_turn_v1(lease, wait_ms, stdout_capacity, stderr_capacity).1
+
+fn process_observation_owner_poll_turn_v1(
+    initial: ObservedProcessLeaseV1,
     wait_ms: i64,
     stdout_capacity: i64,
     stderr_capacity: i64
-) -> ObservedProcessPollV1:
+) -> (ObservedProcessLeaseV1, ObservedProcessPollV1):
+    var lease = initial
     if lease.provider == ProcessObservationProviderV1.Unsupported:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.Unsupported,
-            ObservedProcessFailureReasonV1.None, [], [])
+            ObservedProcessFailureReasonV1.None, [], []))
     if lease.consumed or lease.handle <= 0:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.ReuseRejected,
-            ObservedProcessFailureReasonV1.None, [], [])
+            ObservedProcessFailureReasonV1.None, [], []))
     if wait_ms < 0 or wait_ms > PROCESS_OBSERVATION_MAX_POLL_MS_V1 or
        stdout_capacity < 0 or stdout_capacity > PROCESS_OBSERVATION_POLL_BYTES_V1 or
        stderr_capacity < 0 or stderr_capacity > PROCESS_OBSERVATION_POLL_BYTES_V1:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.Malformed,
-            ObservedProcessFailureReasonV1.InvalidRequest, [], [])
+            ObservedProcessFailureReasonV1.InvalidRequest, [], []))
     val (stdout_chunk, stderr_chunk, words) = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_poll_value(
             lease.handle, wait_ms, stdout_capacity, stderr_capacity)
     if words.len() != OWNED_PROCESS_V3_POLL_WORDS or words[0] != 1:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.Malformed,
-            ObservedProcessFailureReasonV1.MalformedReceipt, [], [])
-    _process_observation_append_v1(lease.stdout_bytes, stdout_chunk)
-    _process_observation_append_v1(lease.stderr_bytes, stderr_chunk)
+            ObservedProcessFailureReasonV1.MalformedReceipt, [], []))
+    for byte in stdout_chunk: lease.stdout_bytes.push(byte)
+    for byte in stderr_chunk: lease.stderr_bytes.push(byte)
+    lease.native_error = Some(words[16])
+    lease.stream_counts_observed = words[16] == 0
+    lease.terminal_observed = nil
+    lease.cancel_requested = nil
+    if words[16] == 0:
+        lease.terminal_observed = Some(words[2] != 0)
+        lease.cancel_requested = Some(words[3] != 0)
     lease.terminal = words[2] != 0
     lease.deadline_exceeded = words[4] != 0
     lease.term_sent = words[5] != 0
@@ -720,79 +741,107 @@ pub(package) fn process_observation_owner_poll_v1(
         lease.eintr_retries = metadata[13]
         lease.output_complete =
             (metadata[4] & PROCESS_OBSERVATION_OUTPUT_EOF_V1) != 0
+        lease.output_complete_observed = metadata[14] == 0 or metadata[14] == PROCESS_OBSERVATION_EAGAIN_V1
     if words[16] == PROCESS_OBSERVATION_ESTALE_V1:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.ReuseRejected,
-            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk))
     if words[16] == PROCESS_OBSERVATION_ENOTSUP_V1:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.Unsupported,
-            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk))
     if words[16] != 0:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.ProviderFailed,
-            ObservedProcessFailureReasonV1.WaitFailed, stdout_chunk, stderr_chunk)
-    _process_observation_poll_receipt_v1(
+            ObservedProcessFailureReasonV1.WaitFailed, stdout_chunk, stderr_chunk))
+    (lease, _process_observation_poll_receipt_v1(
         lease, ObservedProcessPollStatusV1.Polled,
-        ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+        ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk))
 
 pub(package) fn process_observation_owner_collect_v1(
     lease: ObservedProcessLeaseV1
 ) -> ObservedProcessResultV1:
+    process_observation_owner_capture_collect_v1(lease).1
+
+pub(package) fn process_observation_owner_capture_collect_v1(
+    initial: ObservedProcessLeaseV1
+) -> (ObservedProcessLeaseV1, ObservedProcessResultV1):
+    var lease = initial
     if lease.provider == ProcessObservationProviderV1.Unsupported:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.Unsupported,
-            ObservedProcessFailureReasonV1.None)
+            ObservedProcessFailureReasonV1.None))
     if lease.consumed or lease.handle <= 0:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.ReuseRejected,
-            ObservedProcessFailureReasonV1.None)
+            ObservedProcessFailureReasonV1.None))
     var turns = (lease.deadline_ms + lease.term_grace_ms +
         PROCESS_OBSERVATION_DRAIN_RESERVE_MS_V1) / 25 + 4
     var drained = false
     while turns > 0 and not drained:
-        val polled = process_observation_owner_poll_v1(
+        val advanced = process_observation_owner_poll_turn_v1(
             lease, 25, PROCESS_OBSERVATION_POLL_BYTES_V1,
             PROCESS_OBSERVATION_POLL_BYTES_V1)
+        lease = advanced.0
+        val polled = advanced.1
         if polled.status != ObservedProcessPollStatusV1.Polled:
-            return _process_observation_result_error_v1(
+            return (lease, _process_observation_result_error_v1(
                 lease, ObservedProcessResultStatusV1.ProviderFailed,
-                polled.failure_reason)
+                polled.failure_reason))
         drained = polled.terminal and
             lease.stdout_bytes.len() == lease.stdout_kept and
             lease.stderr_bytes.len() == lease.stderr_kept
         turns = turns - 1
     if not drained:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.CleanupPending,
-            ObservedProcessFailureReasonV1.CleanupIncomplete)
+            ObservedProcessFailureReasonV1.CleanupIncomplete))
     val metadata: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_observation_value(lease.handle)
     if metadata.len() != PROCESS_OBSERVATION_METADATA_WORDS_V1 or
        metadata[0] != PROCESS_OBSERVATION_ADAPTER_VERSION_V1 or
        metadata[14] != 0:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.ProviderFailed,
-            ObservedProcessFailureReasonV1.MalformedReceipt)
+            ObservedProcessFailureReasonV1.MalformedReceipt))
     val words: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_collect_value(lease.handle)
     if words.len() != OWNED_PROCESS_V3_RESULT_WORDS or words[0] != 1:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.Malformed,
-            ObservedProcessFailureReasonV1.MalformedReceipt)
+            ObservedProcessFailureReasonV1.MalformedReceipt))
+    lease.native_error = Some(words[14])
+    lease.identity_revalidated = Some(words[6] != 0)
+    lease.cancel_requested = Some(words[3] != 0)
+    lease.deadline_exceeded = words[2] != 0
+    lease.term_sent = words[4] != 0
+    lease.kill_sent = words[5] != 0
+    lease.reaped = words[7] != 0
+    lease.stdout_truncated = words[8] != 0
+    lease.stderr_truncated = words[9] != 0
+    lease.stdout_seen = words[10]
+    lease.stderr_seen = words[11]
+    lease.stdout_kept = words[12]
+    lease.stderr_kept = words[13]
+    # The existing V3 adapter retires exactly this terminal collect outcome,
+    # including a reaped terminal provider error (POSIX and Windows adapters).
+    # Preserve that actual consumption before returning an error receipt.
+    if observed_process_collect_retired_v1(words[7] != 0, words[14]):
+        lease.consumed = true
+    lease.stream_counts_observed = words[14] == 0 or lease.consumed
     if words[14] == PROCESS_OBSERVATION_EAGAIN_V1 or
        words[14] == PROCESS_OBSERVATION_EBUSY_V1:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.CleanupPending,
-            ObservedProcessFailureReasonV1.CleanupIncomplete)
+            ObservedProcessFailureReasonV1.CleanupIncomplete))
     if words[14] != 0:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.ProviderFailed,
-            ObservedProcessFailureReasonV1.WaitFailed)
+            ObservedProcessFailureReasonV1.WaitFailed))
     lease.consumed = true
     val rusage_available =
         (metadata[4] & PROCESS_OBSERVATION_DIRECT_RUSAGE_V1) != 0
-    ObservedProcessResultV1(
+    (lease, ObservedProcessResultV1(
         status: ObservedProcessResultStatusV1.Collected,
         pid: metadata[1],
         exit_code: if metadata[12] == 0: words[1] else: -1,
@@ -812,7 +861,11 @@ pub(package) fn process_observation_owner_collect_v1(
         executable_pin: ObservedExecutablePinV1(
             pinned: lease.pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
-        failure_reason: ObservedProcessFailureReasonV1.None)
+        failure_reason: ObservedProcessFailureReasonV1.None,
+        output_complete_observed: true, stream_counts_observed: true,
+        terminal_observed: lease.terminal_observed,
+        identity_revalidated: Some(words[6] != 0), cancel_requested: Some(words[3] != 0),
+        native_error: Some(words[14]), native_retired: lease.consumed))
 
 fn _process_observation_result_error_v1(
     lease: ObservedProcessLeaseV1,
@@ -835,7 +888,36 @@ fn _process_observation_result_error_v1(
         executable_pin: ObservedExecutablePinV1(
             pinned: lease.pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
-        failure_reason: reason)
+        failure_reason: reason, output_complete_observed: lease.output_complete_observed,
+        stream_counts_observed: lease.stream_counts_observed,
+        terminal_observed: lease.terminal_observed,
+        identity_revalidated: lease.identity_revalidated, cancel_requested: lease.cancel_requested,
+        native_error: lease.native_error, native_retired: lease.consumed)
+
+# Narrow same-owner cancellation for the receipt-preserving capture facade.
+# No new native export or executor; errors leave the actual owner retained.
+pub(package) fn process_observation_owner_capture_cancel_v1(initial: ProcessObservationOwnerV1
+) -> (ProcessObservationOwnerV1, Result<OwnedProcessCancelReceipt, text>):
+    var lease = initial
+    if lease.provider == ProcessObservationProviderV1.Unsupported: return (lease, Err("process capture observation provider unsupported"))
+    if lease.consumed or lease.handle <= 0: return (lease, Err("process capture observation owner retired"))
+    val raw: [i64] = unsafe(capabilities: [ffi]): rt_process_owned_v3_cancel_value(lease.handle)
+    val decoded = _owned_v3_words(raw, OWNED_PROCESS_V3_CANCEL_WORDS, "cancel")
+    if decoded.is_err(): return (lease, Err(decoded.unwrap_err()))
+    val words = decoded.unwrap()
+    lease.native_error = Some(words[3])
+    if words[1] != 0: lease.cancel_requested = Some(true)
+    if words[2] != 0: lease.term_sent = true
+    (lease, Ok(OwnedProcessCancelReceipt(version: words[0], accepted: words[1] != 0,
+        term_sent: words[2] != 0, runtime_error: words[3])))
+
+# Existing mode gates, no new runtime export. Called before facade registry
+# access, then the actual platform process/canonical-thread origin check runs.
+pub(package) fn process_capture_native_mode_check_v1() -> Result<(), text>:
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("process-capture-native-provider-required")
+    Ok(())
 use std.io_runtime.{env_get, env_get_nullable, read_file_text_result, file_size_signed, host_os}
 use std.io_runtime.{env_set_process, env_remove_process}
 use std.common.string_core.{str_len}
@@ -2427,8 +2509,13 @@ pub fn browser_renderer_sandbox_enter() -> bool:
 pub fn process_write_stdin(pid: i64, data: text) -> bool:
     _process_write_stdin_raw(pid, data)
 
+# Byte length of `data` for the text + byte-offset stdin ABI. The runtime
+# windows `[offset, data_len)`; a code-point count truncates multibyte input.
+pub fn process_stdin_data_len(data: text) -> i64:
+    str_len(data)
+
 pub fn process_write_stdin_some(pid: i64, data: text, offset: i64, max_bytes: i64) -> i64:
-    _process_write_stdin_some_raw(pid, data, data.len(), offset, max_bytes)
+    _process_write_stdin_some_raw(pid, data, process_stdin_data_len(data), offset, max_bytes)
 
 pub fn process_read_stdout(pid: i64) -> text:
     _process_read_stdout_raw(pid)

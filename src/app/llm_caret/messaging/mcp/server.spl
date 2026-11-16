@@ -64,19 +64,39 @@ class MessagingMcpServer:
     handled_evidence: [text]
 
     static fn memory() -> MessagingMcpServer:
-        MessagingMcpServer(store: PureSqlMessagingStore.open_memory(), rooms: [], memberships: [],
+        val store = match PureSqlMessagingStore.open_memory():
+            case Ok(opened): opened
+            case Err(reason): panic("MessagingMcpServer.memory: " + reason)
+        MessagingMcpServer(store: store, rooms: [], memberships: [],
             profiles: [], tasks: [], artifacts: [], handled_keys: [], handled_resources: [], handled_evidence: [])
 
-    static fn open(path: text) -> MessagingMcpServer:
-        val store = PureSqlMessagingStore.open(path)
+    static fn open(path: text) -> Result<MessagingMcpServer, text>:
+        val store = match PureSqlMessagingStore.open(path):
+            case Ok(opened): opened
+            case Err(reason): return Err(reason)
         var artifacts: [PublishedArtifact] = []
-        for item in store.artifacts():
+        val stored_artifacts = match store.artifacts():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val loaded_rooms = match store.rooms():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val loaded_memberships = match store.memberships():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val loaded_profiles = match store.profiles():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        val loaded_tasks = match store.tasks():
+            case Ok(found): found
+            case Err(reason): return Err(reason)
+        for item in stored_artifacts:
             artifacts.push(PublishedArtifact(artifact_id: item.artifact_id, task_id: item.task_id,
                 room_id: item.room_id, media_type: item.media_type, value: item.value,
                 published_by: item.published_by, created_at: item.created_at))
-        MessagingMcpServer(store: store, rooms: store.rooms(), memberships: store.memberships(),
-            profiles: store.profiles(), tasks: store.tasks(), artifacts: artifacts,
-            handled_keys: [], handled_resources: [], handled_evidence: [])
+        Ok(MessagingMcpServer(store: store, rooms: loaded_rooms, memberships: loaded_memberships,
+            profiles: loaded_profiles, tasks: loaded_tasks, artifacts: artifacts,
+            handled_keys: [], handled_resources: [], handled_evidence: []))
 
     me close() -> bool: self.store.close()
 
@@ -92,7 +112,7 @@ class MessagingMcpServer:
         self.store.put_profile(profile)
         self.profiles.push(profile)
 
-    fn room(room_id: text) -> Room: self.store.room(room_id)
+    fn room(room_id: text) -> Result<Room, text>: self.store.room(room_id)
 
     fn can_read(room: Room, identity_id: text) -> bool:
         identity_can_read(room, self.memberships, identity_id)
@@ -102,7 +122,9 @@ class MessagingMcpServer:
         if not auth.allowed: return empty_chat_result(auth.status, auth.error)
         if mutating(request.tool):
             if not key_valid(request.idempotency_key): return empty_chat_result(400, "stable_idempotency_key_required")
-            val persisted = self.store.mcp_idempotency(request.idempotency_key)
+            val persisted = match self.store.mcp_idempotency(request.idempotency_key):
+                case Ok(found): found
+                case Err(reason): return empty_chat_result(500, reason)
             if persisted.resource_id != "":
                 return ChatToolResult(ok: true, status: 200, error: "", duplicate: true,
                     resource_id: persisted.resource_id, evidence: persisted.evidence,
@@ -135,7 +157,9 @@ class MessagingMcpServer:
         result
 
     me chat_join(request: ChatToolRequest) -> ChatToolResult:
-        val room = self.room(request.room_id)
+        val room = match self.room(request.room_id):
+            case Ok(found): found
+            case Err(reason): return empty_chat_result(500, reason)
         if room.room_id.value == "": return empty_chat_result(404, "room_not_found")
         if request.identity_id != request.principal.identity_id and not has_scope(request.principal, "room:manage"):
             return empty_chat_result(403, "cannot_join_other_identity")
@@ -157,7 +181,9 @@ class MessagingMcpServer:
         success(request.room_id, "membership_left")
 
     me chat_send(request: ChatToolRequest) -> ChatToolResult:
-        val room = self.room(request.room_id)
+        val room = match self.room(request.room_id):
+            case Ok(found): found
+            case Err(reason): return empty_chat_result(500, reason)
         if room.room_id.value == "": return empty_chat_result(404, "room_not_found")
         if not self.can_read(room, request.principal.identity_id): return empty_chat_result(403, "room_access_denied")
         if request.body.len() > 65536: return empty_chat_result(413, "message_too_large")
@@ -172,14 +198,18 @@ class MessagingMcpServer:
             resource_id: result.resource_id, evidence: result.evidence, messages: [], profiles: [], tasks: [], artifacts: [])
 
     fn chat_read(request: ChatToolRequest, context_only: bool) -> ChatToolResult:
-        val room = self.room(request.room_id)
+        val room = match self.room(request.room_id):
+            case Ok(found): found
+            case Err(reason): return empty_chat_result(500, reason)
         if room.room_id.value == "": return empty_chat_result(404, "room_not_found")
         if not self.can_read(room, request.principal.identity_id): return empty_chat_result(403, "room_access_denied")
         var cap = request.limit
         if cap < 1: cap = if context_only: 8 else: 50
         if context_only and cap > 32: cap = 32
         if not context_only and cap > 200: cap = 200
-        val messages = self.store.message_history(request.room_id, request.after_seq, cap)
+        val messages = match self.store.message_history(request.room_id, request.after_seq, cap):
+            case Ok(found): found
+            case Err(reason): return empty_chat_result(500, reason)
         ChatToolResult(ok: true, status: 200, error: "", duplicate: false, resource_id: request.room_id,
             evidence: if context_only: "bounded_context" else: "canonical_history", messages: messages,
             profiles: [], tasks: [], artifacts: [])
@@ -205,7 +235,9 @@ class MessagingMcpServer:
             profiles: [], tasks: [], artifacts: [])
 
     me chat_mark_read(request: ChatToolRequest) -> ChatToolResult:
-        val room = self.room(request.room_id)
+        val room = match self.room(request.room_id):
+            case Ok(found): found
+            case Err(reason): return empty_chat_result(500, reason)
         if room.room_id.value == "" or not self.can_read(room, request.principal.identity_id):
             return empty_chat_result(403, "room_access_denied")
         val stored = self.store.advance_cursor(request.room_id, request.principal.identity_id, request.after_seq, request.occurred_at)

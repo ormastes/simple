@@ -8,11 +8,13 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarat
     _decl_tbl_resolve_writing_mode, parse_supported_nonnegative_px,
     sticky_top_inset_value, _background_shorthand_tokens, border_spacing_px,
     _resolve_authored_padding, decl_tbl_get_last_valid_nonnegative_px,
-    parse_supported_outline_shorthand_width_px
+    parse_supported_outline_shorthand_width_px, css_cascade_root_font_px
 }
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{BoxShadowAgg}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{BoxShadowAgg, shadow_layer_alpha, shadow_length_prefix}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec}
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{_color_alpha_zero, _decl_transparent_color, _decl_top_level_tokens}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille}
 
 fn _decl_is_current_color_token(raw: text) -> bool:
     """True when a background color declaration is the `currentColor` keyword,
@@ -106,7 +108,9 @@ fn _apply_decls_without_grid_inner(
     var flex_shrink_v = st.flex_shrink
     var flex_basis_px_v = st.flex_basis_px
     var flex_basis_zero_v = st.flex_basis_zero
+    var flex_basis_permille_v = st.flex_basis_permille
     var min_width_set_v = st.min_width_set
+    var width_zero_v = st.width_zero
     var order_v = st.order
     var flex_wrap_v = st.flex_wrap
     var justify_content_v = st.justify_content
@@ -129,6 +133,8 @@ fn _apply_decls_without_grid_inner(
     var border_color_b_v = st.border_color_b
     var border_style_l_v = st.border_style_l
     var border_style_r_v = st.border_style_r
+    var border_style_t_v = st.border_style_t
+    var border_style_b_v = st.border_style_b
     var outline_w_v = st.outline_w
     var outline_color_v = st.outline_color
     var outline_offset_px_v = st.outline_offset_px
@@ -319,9 +325,21 @@ fn _apply_decls_without_grid_inner(
             # inherit` and the system-font keywords are left alone.
             line_height_v = line_height_after_normal_keyword(line_height_v, browser_host_has_measured_linux_face_set())
             line_height_em_milli_v = 0
+    # `font: inherit` takes the parent's computed size, family, weight, style
+    # and line height (the values captured when this style inherited), which
+    # a tag default such as the form-control UA font may have replaced.
+    if font_decl.trim().lower() == "inherit":
+        if st.inherit_font_size > 0:
+            font_size_v = st.inherit_font_size
+        if st.inherit_font_family != "":
+            font_family_v = st.inherit_font_family
+        bold_v = st.inherit_bold
+        font_style_italic_v = st.inherit_italic
+        line_height_v = st.inherit_line_height_px
+        line_height_em_milli_v = 0
     val font_family_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-family").trim()
     if font_family_decl != "" and decl_tbl_last_index_p(decl_tbl, decl_present, "font-family") > font_pos:
-        font_family_v = font_family_decl
+        font_family_v = if font_family_decl.lower() == "inherit" and st.inherit_font_family != "": st.inherit_font_family else: font_family_decl
     val bg = decl_tbl_get_p(decl_tbl, decl_present, "background-color")
     val bgs = decl_tbl_get_p(decl_tbl, decl_present, "background")
     val bg_image = decl_tbl_get_p(decl_tbl, decl_present, "background-image")
@@ -417,6 +435,18 @@ fn _apply_decls_without_grid_inner(
                                 # projection; the stop list below carries it.
                                 background_gradient_from_v = 0u32
                                 background_gradient_to_v = 0u32
+                elif over_layers.len() == 1:
+                    # `background: linear-gradient(...)` alone is one typed
+                    # image layer over a transparent color. It fell through
+                    # to the raw branch, which painted the FIRST STOP as a
+                    # flat color (the catalog `html` header).
+                    over_image = over_layers[0].trim()
+                    val one_from = parse_linear_gradient_color(over_image, 0)
+                    val one_to = parse_linear_gradient_color(over_image, 1)
+                    if _background_is_exact_typed_linear_layer(over_image, one_from, one_to, false):
+                        over_typed = true
+                        background_gradient_from_v = one_from
+                        background_gradient_to_v = one_to
                 if over_typed:
                     bg_v = over_color
                     background_image_uri_v = ""
@@ -636,15 +666,19 @@ fn _apply_decls_without_grid_inner(
         val cv = parse_color(col)
         if cv != 0u32:
             fg_v = cv
-        elif col.trim().lower() == "transparent":
+        elif col.trim().lower() == "transparent" or _color_alpha_zero(col):
+            # `rgba(0,0,0,0)` paints no text, like `transparent`.
             fg_v = 0u32
     val fs = decl_tbl_get_p(decl_tbl, decl_present, "font-size")
     val fs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-size")
     if fs.len() > 0 and (font_pos < 0 or fs_pos > font_pos):
         val fsl = fs.trim().lower()
-        if fsl.ends_with("rem"):
-            # rem is relative to the root font-size (16px default).
-            val computed = (16 * parse_decimal_x10(fsl)) / 10
+        if fsl == "inherit":
+            if st.inherit_font_size > 0:
+                font_size_v = st.inherit_font_size
+        elif fsl.ends_with("rem"):
+            # rem is relative to the root (html) computed font-size.
+            val computed = (css_cascade_root_font_px() * parse_decimal_x10(fsl)) / 10
             if computed > 0:
                 font_size_v = computed
         elif fsl.ends_with("em"):
@@ -679,7 +713,10 @@ fn _apply_decls_without_grid_inner(
     val line_height = decl_tbl_get_p(decl_tbl, decl_present, "line-height")
     val line_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "line-height")
     if line_height.len() > 0 and (font_pos < 0 or line_height_pos > font_pos):
-        if line_height_value_is_normal(line_height):
+        if line_height.trim().lower() == "inherit":
+            line_height_v = st.inherit_line_height_px
+            line_height_em_milli_v = 0
+        elif line_height_value_is_normal(line_height):
             # `normal` is a value, not the absence of one: it must replace an
             # inherited factor or length. It used to parse to 0 and be dropped,
             # so `<div style="line-height:2"><p style="line-height:normal">`
@@ -723,6 +760,7 @@ fn _apply_decls_without_grid_inner(
             # `em`/`rem` are font-relative (see _decl_font_relative_length_px):
             # `width:10em` was read as 10 px.
             width_v = _decl_font_relative_length_px(width, font_size_v)
+        width_zero_v = width_v == 0 and "0123456789.".contains(width.substring(0, 1))
     val height = decl_tbl_get_p(decl_tbl, decl_present, "height")
     val height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "height")
     if height.len() > 0:
@@ -759,7 +797,9 @@ fn _apply_decls_without_grid_inner(
             elif height_v > 0 and width_v == 0:
                 width_v = (height_v * ar_num) / ar_den
     val box_sizing = decl_tbl_get_p(decl_tbl, decl_present, "box-sizing")
-    if box_sizing.len() > 0:
+    if box_sizing.trim().lower() == "inherit":
+        border_box_v = st.inherit_border_box
+    elif box_sizing.len() > 0:
         border_box_v = box_sizing == "border-box"
     val border_radius_shorthand: CssCornerRadii = parse_border_radius_shorthand(
         decl_tbl_get_p(decl_tbl, decl_present, "border-radius"))
@@ -776,19 +816,22 @@ fn _apply_decls_without_grid_inner(
     val min_width = decl_tbl_get_p(decl_tbl, decl_present, "min-width")
     val min_width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-width")
     if min_width.len() > 0:
-        min_width_v = _decl_font_relative_length_px(min_width, font_size_v)
+        min_width_v = _decl_percent_sentinel_or_length_px(min_width, font_size_v)
         min_width_set_v = min_width.trim() != "auto"
     val max_width = decl_tbl_get_p(decl_tbl, decl_present, "max-width")
     val max_width_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-width")
     if max_width.len() > 0:
-        max_width_v = _decl_font_relative_length_px(max_width, font_size_v)
+        # A percentage is stored as the negative sentinel `width` uses and
+        # resolved against the containing block at layout time
+        # (`style_with_resolved_percent_min_max`); it was read as that many px.
+        max_width_v = _decl_percent_sentinel_or_length_px(max_width, font_size_v)
     # min()/max()/clamp() on `width` desugar to the clamp slots (see
     # css_math_primary): they only fill a slot the author left unset.
     val width_implied_max = css_math_implied_max_px(width_raw)
     val width_implied_min = css_math_implied_min_px(width_raw)
-    if width_implied_max > 0 and max_width_v <= 0:
+    if width_implied_max > 0 and max_width_v == 0:
         max_width_v = width_implied_max
-    if width_implied_min > 0 and min_width_v <= 0:
+    if width_implied_min > 0 and min_width_v == 0:
         min_width_v = width_implied_min
     val min_height = decl_tbl_get_p(decl_tbl, decl_present, "min-height")
     val min_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-height")
@@ -797,11 +840,11 @@ fn _apply_decls_without_grid_inner(
             min_height_vh_v = true
         else:
             min_height_vh_v = false
-            min_height_v = parse_int(min_height)
+            min_height_v = _decl_percent_sentinel_or_px(min_height)
     val max_height = decl_tbl_get_p(decl_tbl, decl_present, "max-height")
     val max_height_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "max-height")
     if max_height.len() > 0:
-        max_height_v = parse_int(max_height)
+        max_height_v = _decl_percent_sentinel_or_px(max_height)
     val min_inline_size = decl_tbl_get_p(decl_tbl, decl_present, "min-inline-size")
     val min_inline_size_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "min-inline-size")
     if min_inline_size.len() > 0:
@@ -848,6 +891,7 @@ fn _apply_decls_without_grid_inner(
         flex_shrink_v = if flex == "none": 0 else: 1
         flex_basis_px_v = 0
         flex_basis_zero_v = false
+        flex_basis_permille_v = -1
     elif flex.len() > 0:
         var flex_numbers = 0
         var flex_basis_given = false
@@ -856,6 +900,7 @@ fn _apply_decls_without_grid_inner(
             if flex_token == "auto":
                 flex_basis_px_v = 0
                 flex_basis_zero_v = false
+                flex_basis_permille_v = -1
                 flex_basis_given = true
             elif flex_token.len() > 0:
                 val flex_token_px = if flex_token == "0%": 0 else: parse_supported_nonnegative_px(flex_token)
@@ -869,16 +914,21 @@ fn _apply_decls_without_grid_inner(
                 elif flex_token_px >= 0:
                     flex_basis_px_v = flex_token_px
                     flex_basis_zero_v = flex_token_px == 0
+                    flex_basis_permille_v = -1
                     flex_basis_given = true
                 else:
                     # A basis this parser cannot size (`50%`, `12rem`,
                     # `calc()`): leave it auto rather than call it zero.
                     flex_basis_px_v = 0
                     flex_basis_zero_v = false
+                    flex_basis_permille_v = -1
+                    if parse_percent_permille(flex_token) > 0:
+                        flex_basis_permille_v = parse_percent_permille(flex_token)
                     flex_basis_given = true
         if flex_numbers > 0 and not flex_basis_given:
             flex_basis_px_v = 0
             flex_basis_zero_v = true
+            flex_basis_permille_v = -1
     val flex_grow_decl = decl_tbl_get_p(decl_tbl, decl_present, "flex-grow")
     if flex_grow_decl.len() > 0:
         val grow_v = _decl_flex_factor(flex_grow_decl)
@@ -895,12 +945,19 @@ fn _apply_decls_without_grid_inner(
         if basis_v >= 0:
             flex_basis_px_v = basis_v
             flex_basis_zero_v = basis_v == 0
+            flex_basis_permille_v = -1
         elif flex_basis_decl.trim() == "0%":
             flex_basis_px_v = 0
             flex_basis_zero_v = true
+            flex_basis_permille_v = -1
         elif flex_basis_decl.trim() == "auto":
             flex_basis_px_v = 0
             flex_basis_zero_v = false
+            flex_basis_permille_v = -1
+        elif parse_percent_permille(flex_basis_decl.trim()) > 0:
+            flex_basis_px_v = 0
+            flex_basis_zero_v = false
+            flex_basis_permille_v = parse_percent_permille(flex_basis_decl.trim())
     val order_decl = decl_tbl_get_p(decl_tbl, decl_present, "order")
     if order_decl.len() > 0:
         order_v = _decl_signed_int_or_zero(order_decl)
@@ -1290,6 +1347,8 @@ fn _apply_decls_without_grid_inner(
     if flex_direction_decl.len() > 0:
         if flex_direction_decl == "column":
             flex_direction_v = "column"
+        elif flex_direction_decl == "column-reverse":
+            flex_direction_v = "column-reverse"
         elif flex_direction_decl == "row-reverse":
             flex_direction_v = "row-reverse"
         else:
@@ -1302,6 +1361,8 @@ fn _apply_decls_without_grid_inner(
     if flex_flow_decl.len() > 0:
         if css_word_contains(flex_flow_decl, "row-reverse"):
             flex_direction_v = "row-reverse"
+        elif css_word_contains(flex_flow_decl, "column-reverse"):
+            flex_direction_v = "column-reverse"
         elif css_word_contains(flex_flow_decl, "column"):
             flex_direction_v = "column"
         elif css_word_contains(flex_flow_decl, "row"):
@@ -1370,7 +1431,7 @@ fn _apply_decls_without_grid_inner(
     val font_style_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-style")
     if font_style_decl.len() > 0 and (font_pos < 0 or font_style_pos > font_pos):
         val font_style_norm = font_style_decl.trim().lower()
-        font_style_italic_v = font_style_norm == "italic" or font_style_norm == "oblique"
+        font_style_italic_v = if font_style_norm == "inherit": st.inherit_italic else: font_style_norm == "italic" or font_style_norm == "oblique"
     val font_kerning_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-kerning")
     if font_kerning_decl.len() > 0:
         val font_kerning_norm = font_kerning_decl.trim().lower()
@@ -1503,7 +1564,7 @@ fn _apply_decls_without_grid_inner(
             if shadow_x != -1000000 and shadow_y != -1000000:
                 text_shadow_x_px_v = shadow_x
                 text_shadow_y_px_v = shadow_y
-                text_shadow_color_v = if shadow_color != 0u32: shadow_color else: st.fg
+                text_shadow_color_v = if shadow_color != 0u32: shadow_color elif _decl_transparent_color(text_shadow_norm): 0u32 else: st.fg
     val text_decoration_decl = decl_tbl_get_p(decl_tbl, decl_present, "text-decoration")
     if text_decoration_decl.len() > 0:
         val text_decoration_norm = text_decoration_decl.trim().lower()
@@ -1863,7 +1924,9 @@ fn _apply_decls_without_grid_inner(
     val fw = decl_tbl_get_p(decl_tbl, decl_present, "font-weight")
     val fw_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-weight")
     if fw.len() > 0 and (font_pos < 0 or fw_pos > font_pos):
-        if fw == "normal" or fw == "400":
+        if fw.trim().lower() == "inherit":
+            bold_v = st.inherit_bold
+        elif fw == "normal" or fw == "400":
             bold_v = false
         elif fw == "bold" or fw == "700" or fw == "600" or fw == "800":
             bold_v = true
@@ -1903,7 +1966,9 @@ fn _apply_decls_without_grid_inner(
         val style = css_border_style_token(border)
         if style != "":
             border_style_l_v = style
+            border_style_t_v = style
             border_style_r_v = style
+            border_style_b_v = style
         val bw = parse_int(border)
         if bw > 0:
             border_w_v = bw
@@ -1912,13 +1977,13 @@ fn _apply_decls_without_grid_inner(
             border_r_v = bw
             border_b_v = bw
         val bc = parse_color_any(border)
-        if bc != 0u32:
+        if bc != 0u32 or _decl_transparent_color(border):
             border_color_v = bc
             border_color_l_v = bc
             border_color_t_v = bc
             border_color_r_v = bc
             border_color_b_v = bc
-        if border_shorthand_disables_paint(border):
+        if border_shorthand_disables_paint(border) or style == "none" or style == "hidden":
             border_w_v = 0
             border_l_v = 0
             border_t_v = 0
@@ -1945,13 +2010,29 @@ fn _apply_decls_without_grid_inner(
                 border_l_v = bw3
     val border_color = decl_tbl_get_p(decl_tbl, decl_present, "border-color")
     if border_color.len() > 0:
-        val bcv = parse_color_any(border_color)
-        if bcv != 0u32:
-            border_color_v = bcv
-            border_color_l_v = bcv
-            border_color_t_v = bcv
-            border_color_r_v = bcv
-            border_color_b_v = bcv
+        # 1-4 values: top, right, bottom, left (`red transparent transparent
+        # transparent` is the other CSS-triangle idiom).
+        val bc_toks = _decl_top_level_tokens(border_color)
+        if bc_toks.len() >= 1 and bc_toks.len() <= 4:
+            val n = bc_toks.len()
+            val t_tok = bc_toks[0]
+            val r_tok = if n >= 2: bc_toks[1] else: t_tok
+            val b_tok = if n >= 3: bc_toks[2] else: t_tok
+            val l_tok = if n >= 4: bc_toks[3] else: r_tok
+            val tc = parse_color_any(t_tok)
+            if tc != 0u32 or _decl_transparent_color(t_tok):
+                border_color_t_v = tc
+                if n == 1:
+                    border_color_v = tc
+            val rc = parse_color_any(r_tok)
+            if rc != 0u32 or _decl_transparent_color(r_tok):
+                border_color_r_v = rc
+            val bc2 = parse_color_any(b_tok)
+            if bc2 != 0u32 or _decl_transparent_color(b_tok):
+                border_color_b_v = bc2
+            val lc = parse_color_any(l_tok)
+            if lc != 0u32 or _decl_transparent_color(l_tok):
+                border_color_l_v = lc
     val border_left = decl_tbl_get_p(decl_tbl, decl_present, "border-left")
     if border_left.len() > 0:
         val style = css_border_style_token(border_left)
@@ -1961,16 +2042,23 @@ fn _apply_decls_without_grid_inner(
         if blw >= 0:
             border_l_v = blw
         val blc = parse_color_any(border_left)
-        if blc != 0u32:
+        if blc != 0u32 or _decl_transparent_color(border_left):
             border_color_l_v = blc
+        if border_shorthand_disables_paint(border_left) or border_style_disables_paint(border_left):
+            border_l_v = 0
     val border_top = decl_tbl_get_p(decl_tbl, decl_present, "border-top")
     if border_top.len() > 0:
+        val style = css_border_style_token(border_top)
+        if style != "":
+            border_style_t_v = style
         val btw = parse_int(border_top)
         if btw >= 0:
             border_t_v = btw
         val btc = parse_color_any(border_top)
-        if btc != 0u32:
+        if btc != 0u32 or _decl_transparent_color(border_top):
             border_color_t_v = btc
+        if border_shorthand_disables_paint(border_top) or border_style_disables_paint(border_top):
+            border_t_v = 0
     val border_right = decl_tbl_get_p(decl_tbl, decl_present, "border-right")
     if border_right.len() > 0:
         val style = css_border_style_token(border_right)
@@ -1980,48 +2068,65 @@ fn _apply_decls_without_grid_inner(
         if brw >= 0:
             border_r_v = brw
         val brc = parse_color_any(border_right)
-        if brc != 0u32:
+        if brc != 0u32 or _decl_transparent_color(border_right):
             border_color_r_v = brc
+        if border_shorthand_disables_paint(border_right) or border_style_disables_paint(border_right):
+            border_r_v = 0
     val border_bottom = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom")
     if border_bottom.len() > 0:
+        val style = css_border_style_token(border_bottom)
+        if style != "":
+            border_style_b_v = style
         val bbw = parse_int(border_bottom)
         if bbw >= 0:
             border_b_v = bbw
         val bbc = parse_color_any(border_bottom)
-        if bbc != 0u32:
+        if bbc != 0u32 or _decl_transparent_color(border_bottom):
             border_color_b_v = bbc
+        if border_shorthand_disables_paint(border_bottom) or border_style_disables_paint(border_bottom):
+            border_b_v = 0
     val border_block = decl_tbl_get_p(decl_tbl, decl_present, "border-block")
     if border_block.len() > 0:
+        val style = css_border_style_token(border_block)
+        if style != "":
+            border_style_t_v = style
+            border_style_b_v = style
         val bbw = parse_int(border_block)
         if bbw >= 0:
             border_t_v = bbw
             border_b_v = bbw
         val bbc = parse_color_any(border_block)
-        if bbc != 0u32:
+        if bbc != 0u32 or _decl_transparent_color(border_block):
             border_color_t_v = bbc
             border_color_b_v = bbc
-        if border_style_disables_paint(border_block):
+        if border_shorthand_disables_paint(border_block) or border_style_disables_paint(border_block):
             border_t_v = 0
             border_b_v = 0
     val border_block_start = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start")
     if border_block_start.len() > 0:
+        val style = css_border_style_token(border_block_start)
+        if style != "":
+            border_style_t_v = style
         val bbsw = parse_int(border_block_start)
         if bbsw >= 0:
             border_t_v = bbsw
         val bbsc = parse_color_any(border_block_start)
-        if bbsc != 0u32:
+        if bbsc != 0u32 or _decl_transparent_color(border_block_start):
             border_color_t_v = bbsc
-        if border_style_disables_paint(border_block_start):
+        if border_shorthand_disables_paint(border_block_start) or border_style_disables_paint(border_block_start):
             border_t_v = 0
     val border_block_end = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end")
     if border_block_end.len() > 0:
+        val style = css_border_style_token(border_block_end)
+        if style != "":
+            border_style_b_v = style
         val bbew = parse_int(border_block_end)
         if bbew >= 0:
             border_b_v = bbew
         val bbec = parse_color_any(border_block_end)
-        if bbec != 0u32:
+        if bbec != 0u32 or _decl_transparent_color(border_block_end):
             border_color_b_v = bbec
-        if border_style_disables_paint(border_block_end):
+        if border_shorthand_disables_paint(border_block_end) or border_style_disables_paint(border_block_end):
             border_b_v = 0
     val border_inline = decl_tbl_get_p(decl_tbl, decl_present, "border-inline")
     if border_inline.len() > 0:
@@ -2034,7 +2139,7 @@ fn _apply_decls_without_grid_inner(
             border_l_v = biw
             border_r_v = biw
         val bic = parse_color_any(border_inline)
-        if bic != 0u32:
+        if bic != 0u32 or _decl_transparent_color(border_inline):
             border_color_l_v = bic
             border_color_r_v = bic
         if border_style_disables_paint(border_inline):
@@ -2049,7 +2154,7 @@ fn _apply_decls_without_grid_inner(
         if bisw >= 0:
             border_l_v = bisw
         val bisc = parse_color_any(border_inline_start)
-        if bisc != 0u32:
+        if bisc != 0u32 or _decl_transparent_color(border_inline_start):
             border_color_l_v = bisc
         if border_style_disables_paint(border_inline_start):
             border_l_v = 0
@@ -2062,7 +2167,7 @@ fn _apply_decls_without_grid_inner(
         if biew >= 0:
             border_r_v = biew
         val biec = parse_color_any(border_inline_end)
-        if biec != 0u32:
+        if biec != 0u32 or _decl_transparent_color(border_inline_end):
             border_color_r_v = biec
         if border_style_disables_paint(border_inline_end):
             border_r_v = 0
@@ -2079,24 +2184,32 @@ fn _apply_decls_without_grid_inner(
     if border_bottom_width.len() > 0:
         border_b_v = parse_int(border_bottom_width)
     val border_left_color = decl_tbl_get_p(decl_tbl, decl_present, "border-left-color")
-    if border_left_color.len() > 0:
+    if border_left_color.trim().lower() == "currentcolor":
+        border_color_l_v = fg_v
+    elif border_left_color.len() > 0:
         val blcv = parse_color_any(border_left_color)
-        if blcv != 0u32:
+        if blcv != 0u32 or _decl_transparent_color(border_left_color):
             border_color_l_v = blcv
     val border_top_color = decl_tbl_get_p(decl_tbl, decl_present, "border-top-color")
-    if border_top_color.len() > 0:
+    if border_top_color.trim().lower() == "currentcolor":
+        border_color_t_v = fg_v
+    elif border_top_color.len() > 0:
         val btcv = parse_color_any(border_top_color)
-        if btcv != 0u32:
+        if btcv != 0u32 or _decl_transparent_color(border_top_color):
             border_color_t_v = btcv
     val border_right_color = decl_tbl_get_p(decl_tbl, decl_present, "border-right-color")
-    if border_right_color.len() > 0:
+    if border_right_color.trim().lower() == "currentcolor":
+        border_color_r_v = fg_v
+    elif border_right_color.len() > 0:
         val brcv = parse_color_any(border_right_color)
-        if brcv != 0u32:
+        if brcv != 0u32 or _decl_transparent_color(border_right_color):
             border_color_r_v = brcv
     val border_bottom_color = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom-color")
-    if border_bottom_color.len() > 0:
+    if border_bottom_color.trim().lower() == "currentcolor":
+        border_color_b_v = fg_v
+    elif border_bottom_color.len() > 0:
         val bbcv = parse_color_any(border_bottom_color)
-        if bbcv != 0u32:
+        if bbcv != 0u32 or _decl_transparent_color(border_bottom_color):
             border_color_b_v = bbcv
     val border_block_width = decl_tbl_get_p(decl_tbl, decl_present, "border-block-width")
     if border_block_width.len() > 0:
@@ -2125,79 +2238,111 @@ fn _apply_decls_without_grid_inner(
     val border_block_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-color")
     if border_block_color.len() > 0:
         val bbcv = parse_color_any(border_block_color)
-        if bbcv != 0u32:
+        if bbcv != 0u32 or _decl_transparent_color(border_block_color):
             border_color_t_v = bbcv
             border_color_b_v = bbcv
     val border_block_start_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start-color")
     if border_block_start_color.len() > 0:
         val bbscv = parse_color_any(border_block_start_color)
-        if bbscv != 0u32:
+        if bbscv != 0u32 or _decl_transparent_color(border_block_start_color):
             border_color_t_v = bbscv
     val border_block_end_color = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end-color")
     if border_block_end_color.len() > 0:
         val bbecv = parse_color_any(border_block_end_color)
-        if bbecv != 0u32:
+        if bbecv != 0u32 or _decl_transparent_color(border_block_end_color):
             border_color_b_v = bbecv
     val border_inline_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-color")
     if border_inline_color.len() > 0:
         val bicv = parse_color_any(border_inline_color)
-        if bicv != 0u32:
+        if bicv != 0u32 or _decl_transparent_color(border_inline_color):
             border_color_l_v = bicv
             border_color_r_v = bicv
     val border_inline_start_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-start-color")
     if border_inline_start_color.len() > 0:
         val biscv = parse_color_any(border_inline_start_color)
-        if biscv != 0u32:
+        if biscv != 0u32 or _decl_transparent_color(border_inline_start_color):
             border_color_l_v = biscv
     val border_inline_end_color = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-end-color")
     if border_inline_end_color.len() > 0:
         val biecv = parse_color_any(border_inline_end_color)
-        if biecv != 0u32:
+        if biecv != 0u32 or _decl_transparent_color(border_inline_end_color):
             border_color_r_v = biecv
     val border_style = decl_tbl_get_p(decl_tbl, decl_present, "border-style")
     if border_style.len() > 0:
-        val left_style = css_border_style_side(border_style, 3)
+        val top_style = css_border_style_side(border_style, 0)
         val right_style = css_border_style_side(border_style, 1)
-        if left_style != "":
-            border_style_l_v = left_style
+        val bottom_style = css_border_style_side(border_style, 2)
+        val left_style = css_border_style_side(border_style, 3)
+        if top_style != "":
+            border_style_t_v = top_style
         if right_style != "":
             border_style_r_v = right_style
+        if bottom_style != "":
+            border_style_b_v = bottom_style
+        if left_style != "":
+            border_style_l_v = left_style
+        # The side widths are zeroed by the per-side style longhands this
+        # shorthand stored at its own source position, so a later
+        # `border-top` can still give the top a border.
         if border_style_disables_paint(border_style):
             border_w_v = 0
-            border_l_v = 0
-            border_t_v = 0
-            border_r_v = 0
-            border_b_v = 0
     val border_left_style = decl_tbl_get_p(decl_tbl, decl_present, "border-left-style")
     if border_left_style.len() > 0:
         val style = css_border_style_token(border_left_style)
         if style != "":
             border_style_l_v = style
-        if border_style_disables_paint(border_left_style):
+        if border_style_disables_paint(border_left_style) or style == "none" or style == "hidden":
             border_l_v = 0
     val border_top_style = decl_tbl_get_p(decl_tbl, decl_present, "border-top-style")
-    if border_top_style.len() > 0 and border_style_disables_paint(border_top_style):
-        border_t_v = 0
+    if border_top_style.len() > 0:
+        val style = css_border_style_token(border_top_style)
+        if style != "":
+            border_style_t_v = style
+        if border_style_disables_paint(border_top_style) or style == "none" or style == "hidden":
+            border_t_v = 0
     val border_right_style = decl_tbl_get_p(decl_tbl, decl_present, "border-right-style")
     if border_right_style.len() > 0:
         val style = css_border_style_token(border_right_style)
         if style != "":
             border_style_r_v = style
-        if border_style_disables_paint(border_right_style):
+        if border_style_disables_paint(border_right_style) or style == "none" or style == "hidden":
             border_r_v = 0
     val border_bottom_style = decl_tbl_get_p(decl_tbl, decl_present, "border-bottom-style")
-    if border_bottom_style.len() > 0 and border_style_disables_paint(border_bottom_style):
-        border_b_v = 0
+    if border_bottom_style.len() > 0:
+        val style = css_border_style_token(border_bottom_style)
+        if style != "":
+            border_style_b_v = style
+        if border_style_disables_paint(border_bottom_style) or style == "none" or style == "hidden":
+            border_b_v = 0
     val border_block_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-style")
-    if border_block_style.len() > 0 and border_style_disables_paint(border_block_style):
-        border_t_v = 0
-        border_b_v = 0
+    if border_block_style.len() > 0:
+        val top_style = css_border_style_side(border_block_style, 0)
+        val bot_style = css_border_style_side(border_block_style, 1)
+        if top_style != "":
+            border_style_t_v = top_style
+            if top_style == "none" or top_style == "hidden":
+                border_t_v = 0
+        if bot_style != "":
+            border_style_b_v = bot_style
+            if bot_style == "none" or bot_style == "hidden":
+                border_b_v = 0
+        if border_style_disables_paint(border_block_style):
+            border_t_v = 0
+            border_b_v = 0
     val border_block_start_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-start-style")
-    if border_block_start_style.len() > 0 and border_style_disables_paint(border_block_start_style):
-        border_t_v = 0
+    if border_block_start_style.len() > 0:
+        val style = css_border_style_token(border_block_start_style)
+        if style != "":
+            border_style_t_v = style
+        if border_style_disables_paint(border_block_start_style) or style == "none" or style == "hidden":
+            border_t_v = 0
     val border_block_end_style = decl_tbl_get_p(decl_tbl, decl_present, "border-block-end-style")
-    if border_block_end_style.len() > 0 and border_style_disables_paint(border_block_end_style):
-        border_b_v = 0
+    if border_block_end_style.len() > 0:
+        val style = css_border_style_token(border_block_end_style)
+        if style != "":
+            border_style_b_v = style
+        if border_style_disables_paint(border_block_end_style) or style == "none" or style == "hidden":
+            border_b_v = 0
     val border_inline_style = decl_tbl_get_p(decl_tbl, decl_present, "border-inline-style")
     if border_inline_style.len() > 0:
         val left_style = css_border_style_side(border_inline_style, 3)
@@ -2229,31 +2374,38 @@ fn _apply_decls_without_grid_inner(
         border_r_v = 0
     val outline = decl_tbl_get_p(decl_tbl, decl_present, "outline")
     if outline.len() > 0:
-        val ow = parse_supported_outline_shorthand_width_px(outline)
-        if ow >= 0:
-            outline_w_v = ow
+        outline_w_v = outline_shorthand_paint_width_px(outline)
         val oc = parse_color_any(outline)
-        if oc != 0u32:
+        if oc != 0u32 or _decl_transparent_color(outline):
             outline_color_v = oc
-        if border_style_disables_paint(outline):
-            outline_w_v = 0
+        else:
+            # An omitted colour is currentColor.
+            outline_color_v = fg_v
     val outline_width = decl_tbl_get_p(decl_tbl, decl_present, "outline-width")
     if outline_width.len() > 0:
         outline_w_v = parse_int(outline_width)
     val outline_color = decl_tbl_get_p(decl_tbl, decl_present, "outline-color")
-    if outline_color.len() > 0:
+    if outline_color.trim().lower() == "currentcolor":
+        outline_color_v = fg_v
+    elif outline_color.len() > 0:
         val ocv = parse_color_any(outline_color)
-        if ocv != 0u32:
+        if ocv != 0u32 or _decl_transparent_color(outline_color):
             outline_color_v = ocv
     val outline_offset = decl_tbl_get_p(decl_tbl, decl_present, "outline-offset")
     if outline_offset.len() > 0:
         outline_offset_px_v = parse_int(outline_offset)
     val outline_style = decl_tbl_get_p(decl_tbl, decl_present, "outline-style")
     if outline_style.len() > 0:
+        # Chrome 159: `outline-style:solid` alone is medium (3px); `auto`
+        # paints the 1px ring whatever the width.
         if border_style_disables_paint(outline_style):
             outline_w_v = 0
-        elif outline_w_v == 0:
+        elif outline_style.trim().lower() == "auto":
             outline_w_v = 1
+        elif outline_w_v == 0 and decl_tbl_get_p(decl_tbl, decl_present, "outline-width").len() == 0:
+            outline_w_v = 3
+            if decl_tbl_get_p(decl_tbl, decl_present, "outline-color").len() == 0 and decl_tbl_get_p(decl_tbl, decl_present, "outline").len() == 0:
+                outline_color_v = fg_v
     val box_shadow_decl = decl_tbl_get_p(decl_tbl, decl_present, "box-shadow")
     if box_shadow_decl.len() > 0:
         val box_shadow_norm = box_shadow_decl.trim().lower()
@@ -2277,15 +2429,19 @@ fn _apply_decls_without_grid_inner(
                 box_shadow_alpha_v = agg.alpha
                 box_shadow_color_v = agg.color
             else:
-                val shadow_x = parse_signed_nth_int(box_shadow_norm, 0)
-                val shadow_y = parse_signed_nth_int(box_shadow_norm, 1)
+                val shadow_prefix = shadow_length_prefix(box_shadow_norm)
+                val shadow_x = parse_signed_nth_int(shadow_prefix, 0)
+                val shadow_y = parse_signed_nth_int(shadow_prefix, 1)
+                val shadow_blur_raw = parse_signed_nth_int(shadow_prefix, 2)
+                val shadow_blur = if shadow_blur_raw > 0: shadow_blur_raw else: 0
                 val shadow_color = parse_color_any(box_shadow_norm)
+                val shadow_alpha = shadow_layer_alpha(box_shadow_norm)
                 if shadow_x != -1000000 and shadow_y != -1000000:
                     box_shadow_x_px_v = shadow_x
                     box_shadow_y_px_v = shadow_y
-                    box_shadow_blur_px_v = 0
-                    box_shadow_alpha_v = 255
-                    box_shadow_color_v = if shadow_color != 0u32: shadow_color else: web_argb(0, 0, 0)
+                    box_shadow_blur_px_v = shadow_blur
+                    box_shadow_alpha_v = if shadow_alpha > 0: shadow_alpha else: 0
+                    box_shadow_color_v = if shadow_color != 0u32: shadow_color elif _decl_transparent_color(box_shadow_norm): 0u32 else: web_argb(0, 0, 0)
     val backdrop_filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "backdrop-filter")
     val webkit_backdrop_filter_decl = decl_tbl_get_p(decl_tbl, decl_present, "-webkit-backdrop-filter")
     if backdrop_filter_decl.len() > 0:
@@ -2345,7 +2501,7 @@ fn _apply_decls_without_grid_inner(
             margin_l_v = 0
             margin_l_auto_v = true
         else:
-            margin_l_v = if ml.ends_with("%"): 0 - parse_int(ml) else: parse_int(ml)
+            margin_l_v = if ml.ends_with("%"): 0 - parse_int(ml) else: _decl_font_relative_length_px(ml, font_size_v)
             margin_l_auto_v = false
     val margin_inline = decl_tbl_get_p(decl_tbl, decl_present, "margin-inline")
     val margin_inline_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-inline")
@@ -2461,7 +2617,7 @@ fn _apply_decls_without_grid_inner(
             margin_r_v = 0
             margin_r_auto_v = true
         else:
-            margin_r_v = if mr.ends_with("%"): 0 - parse_int(mr) else: parse_int(mr)
+            margin_r_v = if mr.ends_with("%"): 0 - parse_int(mr) else: _decl_font_relative_length_px(mr, font_size_v)
             margin_r_auto_v = false
     val mb = decl_tbl_get_p(decl_tbl, decl_present, "margin-bottom")
     val mb_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-bottom")
@@ -2494,6 +2650,8 @@ fn _apply_decls_without_grid_inner(
         border_b_v = 0
         border_style_l_v = "none"
         border_style_r_v = "none"
+        border_style_t_v = "none"
+        border_style_b_v = "none"
         border_color_v = 0u32
         border_color_l_v = 0u32
         border_color_t_v = 0u32
@@ -2514,7 +2672,7 @@ fn _apply_decls_without_grid_inner(
     if line_height_em_milli_v > 0:
         val own_font_line_height = (font_size_v * line_height_em_milli_v + 500) / 1000
         line_height_v = if own_font_line_height > 0: own_font_line_height else: 1
-    Style(bg: bg_v, transform_raw: transform_raw_v, translate_raw: translate_raw_v, scale_raw: scale_raw_v, rotate_raw: rotate_raw_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, background_gradient_stop_colors: background_gradient_stop_colors_v, background_gradient_stop_positions: background_gradient_stop_positions_v, background_gradient_angle_deg: background_gradient_angle_deg_v, background_gradient_is_radial: background_gradient_is_radial_v, background_repeat: background_repeat_v, background_size_w_px: background_size_w_px_v, background_size_h_px: background_size_h_px_v, background_position_x_px: background_position_x_px_v, background_position_y_px: background_position_y_px_v, background_clip: background_clip_v, background_origin: background_origin_v, background_attachment: background_attachment_v, background_image_uri: background_image_uri_v, fg: fg_v, font_size: font_size_v, font_family: font_family_v, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: line_height_v, line_height_em_milli: line_height_em_milli_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, flex_basis_zero: flex_basis_zero_v, min_width_set: min_width_set_v, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, border_style_l: border_style_l_v, border_style_r: border_style_r_v, outline_w: outline_w_v, outline_color: outline_color_v, outline_offset_px: outline_offset_px_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, box_shadow_blur_px: box_shadow_blur_px_v, box_shadow_alpha: box_shadow_alpha_v, box_shadow_raw: box_shadow_raw_v, bg_layers_raw: bg_layers_raw_v, backdrop_filter_raw: backdrop_filter_raw_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, overflow_scroll_y: overflow_scroll_y_v, scrollbar_thumb_color: scrollbar_thumb_color_v, scrollbar_track_color: scrollbar_track_color_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, content_visibility_hidden: content_visibility_hidden_v, contain_size: contain_size_v, contain_intrinsic_w_px: contain_intrinsic_w_v, contain_intrinsic_h_px: contain_intrinsic_h_v, will_change: will_change_v, color_adjust: color_adjust_v, forced_color_adjust: forced_color_adjust_v, print_color_adjust: print_color_adjust_v, orphans: orphans_v, widows: widows_v, position_relative: position_relative_v, position_absolute: position_absolute_v, position_sticky: position_sticky_v, position_fixed: position_fixed_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_align_set: text_align_set_v, text_align_last: text_align_last_v, text_justify: text_justify_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_size_adjust: font_size_adjust_v, font_palette: font_palette_v, font_feature_settings: font_feature_settings_v, font_language_override: font_language_override_v, font_variation_settings: font_variation_settings_v, font_variant: font_variant_v, font_variant_alternates: font_variant_alternates_v, font_variant_caps: font_variant_caps_v, font_variant_east_asian: font_variant_east_asian_v, font_variant_emoji: font_variant_emoji_v, font_variant_ligatures: font_variant_ligatures_v, font_variant_numeric: font_variant_numeric_v, font_variant_position: font_variant_position_v, font_style_italic: font_style_italic_v, font_kerning: font_kerning_v, font_optical_sizing: font_optical_sizing_v, font_stretch: font_stretch_v, font_width: font_width_v, font_synthesis: font_synthesis_v, font_synthesis_small_caps: font_synthesis_small_caps_v, font_synthesis_position: font_synthesis_position_v, font_synthesis_style: font_synthesis_style_v, font_synthesis_weight: font_synthesis_weight_v, direction_rtl: direction_rtl_v, writing_mode: writing_mode_v, text_orientation: text_orientation_v, text_combine_upright: text_combine_upright_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_color: text_decoration_color_v, text_decoration_underline: text_decoration_underline_v, text_decoration_overline: text_decoration_overline_v, text_decoration_line_through: text_decoration_line_through_v, text_decoration_style: text_decoration_style_v, text_decoration_thickness_px: text_decoration_thickness_px_v, text_underline_offset_px: text_underline_offset_px_v, text_underline_position: text_underline_position_v, white_space_nowrap: white_space_nowrap_v, white_space_pre: white_space_pre_v, overflow_wrap: overflow_wrap_v, line_break: line_break_v, hyphens: hyphens_v, word_break: word_break_v, cursor: cursor_v, resize: resize_v, table_layout: table_layout_v, border_collapse: border_collapse_v, border_spacing_x_px: border_spacing_x_px_v, border_spacing_y_px: border_spacing_y_px_v, caption_side: caption_side_v, vertical_align: vertical_align_v, caret_color: caret_color_v, accent_color: accent_color_v, tab_size: tab_size_v, unicode_bidi: unicode_bidi_v, transition_property: transition_property_v, transition_duration_ms: transition_duration_ms_v, transition_delay_ms: transition_delay_ms_v, transition_timing_function: transition_timing_function_v, animation_name: animation_name_v, animation_duration_ms: animation_duration_ms_v, animation_delay_ms: animation_delay_ms_v, animation_timing_function: animation_timing_function_v, animation_iteration_count: animation_iteration_count_v, animation_direction: animation_direction_v, animation_fill_mode: animation_fill_mode_v, animation_play_state: animation_play_state_v, transform_origin: transform_origin_v, transform_box: transform_box_v, transform_style: transform_style_v, image_rendering: image_rendering_v, object_fit: object_fit_v, object_position: object_position_v, bold: bold_v, float_mode: float_mode_v, clear_mode: clear_mode_v, list_style_none: list_style_none_v)
+    Style(bg: bg_v, transform_raw: transform_raw_v, translate_raw: translate_raw_v, scale_raw: scale_raw_v, rotate_raw: rotate_raw_v, border_style_t: border_style_t_v, border_style_b: border_style_b_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, background_gradient_stop_colors: background_gradient_stop_colors_v, background_gradient_stop_positions: background_gradient_stop_positions_v, background_gradient_angle_deg: background_gradient_angle_deg_v, background_gradient_is_radial: background_gradient_is_radial_v, background_repeat: background_repeat_v, background_size_w_px: background_size_w_px_v, background_size_h_px: background_size_h_px_v, background_position_x_px: background_position_x_px_v, background_position_y_px: background_position_y_px_v, background_clip: background_clip_v, background_origin: background_origin_v, background_attachment: background_attachment_v, background_image_uri: background_image_uri_v, fg: fg_v, font_size: font_size_v, font_family: font_family_v, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: line_height_v, line_height_em_milli: line_height_em_milli_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, flex_basis_zero: flex_basis_zero_v, flex_basis_permille: flex_basis_permille_v, min_width_set: min_width_set_v, width_zero: width_zero_v and width_v == 0, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, border_style_l: border_style_l_v, border_style_r: border_style_r_v, outline_w: outline_w_v, outline_color: outline_color_v, outline_offset_px: outline_offset_px_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, box_shadow_blur_px: box_shadow_blur_px_v, box_shadow_alpha: box_shadow_alpha_v, box_shadow_raw: box_shadow_raw_v, bg_layers_raw: bg_layers_raw_v, backdrop_filter_raw: backdrop_filter_raw_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, overflow_scroll_y: overflow_scroll_y_v, scrollbar_thumb_color: scrollbar_thumb_color_v, scrollbar_track_color: scrollbar_track_color_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, content_visibility_hidden: content_visibility_hidden_v, contain_size: contain_size_v, contain_intrinsic_w_px: contain_intrinsic_w_v, contain_intrinsic_h_px: contain_intrinsic_h_v, will_change: will_change_v, color_adjust: color_adjust_v, forced_color_adjust: forced_color_adjust_v, print_color_adjust: print_color_adjust_v, orphans: orphans_v, widows: widows_v, position_relative: position_relative_v, position_absolute: position_absolute_v, position_sticky: position_sticky_v, position_fixed: position_fixed_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_align_set: text_align_set_v, inherit_font_family: st.inherit_font_family, inherit_font_size: st.inherit_font_size, inherit_bold: st.inherit_bold, inherit_italic: st.inherit_italic, inherit_line_height_px: st.inherit_line_height_px, text_align_last: text_align_last_v, text_justify: text_justify_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_size_adjust: font_size_adjust_v, font_palette: font_palette_v, font_feature_settings: font_feature_settings_v, font_language_override: font_language_override_v, font_variation_settings: font_variation_settings_v, font_variant: font_variant_v, font_variant_alternates: font_variant_alternates_v, font_variant_caps: font_variant_caps_v, font_variant_east_asian: font_variant_east_asian_v, font_variant_emoji: font_variant_emoji_v, font_variant_ligatures: font_variant_ligatures_v, font_variant_numeric: font_variant_numeric_v, font_variant_position: font_variant_position_v, font_style_italic: font_style_italic_v, font_kerning: font_kerning_v, font_optical_sizing: font_optical_sizing_v, font_stretch: font_stretch_v, font_width: font_width_v, font_synthesis: font_synthesis_v, font_synthesis_small_caps: font_synthesis_small_caps_v, font_synthesis_position: font_synthesis_position_v, font_synthesis_style: font_synthesis_style_v, font_synthesis_weight: font_synthesis_weight_v, direction_rtl: direction_rtl_v, writing_mode: writing_mode_v, text_orientation: text_orientation_v, text_combine_upright: text_combine_upright_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_color: text_decoration_color_v, text_decoration_underline: text_decoration_underline_v, text_decoration_overline: text_decoration_overline_v, text_decoration_line_through: text_decoration_line_through_v, text_decoration_style: text_decoration_style_v, text_decoration_thickness_px: text_decoration_thickness_px_v, text_underline_offset_px: text_underline_offset_px_v, text_underline_position: text_underline_position_v, white_space_nowrap: white_space_nowrap_v, white_space_pre: white_space_pre_v, overflow_wrap: overflow_wrap_v, line_break: line_break_v, hyphens: hyphens_v, word_break: word_break_v, cursor: cursor_v, resize: resize_v, table_layout: table_layout_v, border_collapse: border_collapse_v, border_spacing_x_px: border_spacing_x_px_v, border_spacing_y_px: border_spacing_y_px_v, caption_side: caption_side_v, vertical_align: vertical_align_v, caret_color: caret_color_v, accent_color: accent_color_v, tab_size: tab_size_v, unicode_bidi: unicode_bidi_v, transition_property: transition_property_v, transition_duration_ms: transition_duration_ms_v, transition_delay_ms: transition_delay_ms_v, transition_timing_function: transition_timing_function_v, animation_name: animation_name_v, animation_duration_ms: animation_duration_ms_v, animation_delay_ms: animation_delay_ms_v, animation_timing_function: animation_timing_function_v, animation_iteration_count: animation_iteration_count_v, animation_direction: animation_direction_v, animation_fill_mode: animation_fill_mode_v, animation_play_state: animation_play_state_v, transform_origin: transform_origin_v, transform_box: transform_box_v, transform_style: transform_style_v, image_rendering: image_rendering_v, object_fit: object_fit_v, object_position: object_position_v, bold: bold_v, float_mode: float_mode_v, clear_mode: clear_mode_v, list_style_none: list_style_none_v)
 
 # min-width / max-width in font-relative units (gap C, 2026-10-05). These
 # used to go through parse_int, so `max-width: 26em` (example.com) became
@@ -2522,10 +2680,24 @@ fn _apply_decls_without_grid_inner(
 # computed font-size; rem uses the 16px root, matching the font-size rem rule
 # in _apply_decls_dispatch. Every other unit keeps the previous parse_int
 # reading unchanged.
+# A `min-` / `max-` size: a percentage as the negative sentinel (`-50` for
+# `50%`, resolved at layout time), anything else as a px length.
+fn _decl_percent_sentinel_or_length_px(raw: text, font_px: i32) -> i32:
+    if raw.trim().ends_with("%"):
+        val p = parse_int(raw)
+        return if p > 0: 0 - p else: 0
+    _decl_font_relative_length_px(raw, font_px)
+
+fn _decl_percent_sentinel_or_px(raw: text) -> i32:
+    if raw.trim().ends_with("%"):
+        val p = parse_int(raw)
+        return if p > 0: 0 - p else: 0
+    parse_int(raw)
+
 fn _decl_font_relative_length_px(raw: text, font_px: i32) -> i32:
     val v = raw.trim().lower()
     if v.ends_with("rem"):
-        return (16 * parse_decimal_x10(v)) / 10
+        return (css_cascade_root_font_px() * parse_decimal_x10(v)) / 10
     if v.ends_with("em"):
         return (font_px * parse_decimal_x10(v)) / 10
     parse_int(raw)
@@ -2597,3 +2769,4 @@ fn _decl_signed_int_or_zero(raw: text) -> i32:
     if v == -1000000:
         return 0
     v
+

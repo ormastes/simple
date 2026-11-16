@@ -50,3 +50,25 @@ multi-line `"""` string-constant body (review M1 fix in `native_interface_decls_
 and method default changes each change the unit interface digest while
 fn/method bodies and module docstrings do not. Unit archives require llvm-ar
 (`library_unit_archiver_v1`), never binutils `ar`.
+
+## Row 22 status (2026-11-15, lane detids)
+
+FIXED: `canonical_type_symbols` ids. `canonical_mir_type_symbol_for_key_v1`
+(`module_lowering.spl`) now calls `canonical_type_symbol_id_v1`
+(`src/compiler/50.mir/canonical_type_symbol_id_v1.spl`): the id is a digest
+(djb2) of the canonical type key in [1000000000, 1000000000 + 2^30), so
+visit/sibling order no longer changes it. Spec:
+`test/01_unit/compiler/mir/canonical_type_symbol_id_spec.spl` (shuffled
+insertion order, range/uniqueness, idempotence, collision re-hash).
+
+REMAINS:
+- Collisions: on a 30-bit slot clash the later key in visit order re-hashes
+  (attempt >= 1), so those rare keys are still order dependent. Closing it needs
+  a per-unit sorted pre-pass or a recorded id table in `receipt.sdn`.
+- `next_canonical_type_symbol` (dead field and nested-lowerer sync copies) was
+  removed 2026-11-15 (slice E cleanup).
+- MC/DC: `mcdc_runtime_decision_id_v1` is already a digest of (path, span
+  start), so it is order independent, but it is 31-bit with NO collision
+  handling, and `mcdc_next_runtime_id` is still an ordered counter for
+  synthetic decisions (`span.start < 0`). Not changed here.
+- Cross-process byte-identical objects verification not run.

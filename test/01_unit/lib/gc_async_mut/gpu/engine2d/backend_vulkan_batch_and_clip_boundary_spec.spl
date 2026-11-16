@@ -57,22 +57,24 @@ use std.gpu.engine2d.helpers_text.{text_metrics}
 val READY = "ready"
 val OPAQUE_BLUE: u32 = 0xFF3366CCu32
 val SAMPLE = "Simple"
+# Pixel-sharp: the 7 px bitmap face at scale 1 (owner rule 2026-11-15).
+val TEXT_SIZE: i32 = 7
 
 fn gate(clip_unbakeable: bool, mask_bytes: i64, color: u32, sample: text) -> text:
-    val metrics = text_metrics(sample, 16)
+    val metrics = text_metrics(sample, TEXT_SIZE)
     vulkan_bitmap_text_atlas_block_reason(
         true, clip_unbakeable, mask_bytes, READY, 7, 9, color, sample.len(),
         vulkan_bitmap_text_atlas_eligible(sample), metrics.scale,
         metrics.glyph_height_px)
 
 fn sample_quads(sample: text) -> [FontRenderQuad]:
-    val metrics = text_metrics(sample, 16)
+    val metrics = text_metrics(sample, TEXT_SIZE)
     vulkan_bitmap_text_quads(sample, OPAQUE_BLUE, metrics.scale, metrics.advance,
                              metrics.glyph_height_px)
 
 fn quad_alpha_at(q: FontRenderQuad, sample: text, u: i64, v: i64) -> u32:
     """The composited colour the SPIR-V kernel produces at one pixel of a quad."""
-    val metrics = text_metrics(sample, 16)
+    val metrics = text_metrics(sample, TEXT_SIZE)
     val atlas = vulkan_bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
     val pixels = font_atlas_subrect_pixels(
         atlas, vulkan_bitmap_font_atlas_width(metrics.scale),
@@ -121,7 +123,7 @@ describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on th
         # a 4K page. The memo keys on the same identity the device cache does.
         step("Request the host coverage atlas three times for the same glyph identity")
         val backend = VulkanBackend.create()
-        val metrics = text_metrics(SAMPLE, 16)
+        val metrics = text_metrics(SAMPLE, TEXT_SIZE)
         val first = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
         val second = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
         val third = backend._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px)
@@ -140,8 +142,8 @@ describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on th
         # the first size must raster a third time (single-slot memo, stated).
         step("Request the host atlas at two different glyph sizes, then back at the first size")
         val backend = VulkanBackend.create()
-        val small = text_metrics(SAMPLE, 16)
-        val large = text_metrics(SAMPLE, 48)
+        val small = text_metrics(SAMPLE, TEXT_SIZE)
+        val large = text_metrics(SAMPLE, 14)  # scale 2: a second atlas identity; no glyph pixels are asserted on it
         backend._bitmap_font_atlas_pixels(small.scale, small.glyph_height_px)
         backend._bitmap_font_atlas_pixels(large.scale, large.glyph_height_px)
         # @capture(statistics): CPU build count increments once per distinct glyph identity
@@ -178,6 +180,8 @@ describe "Engine2D Vulkan keeps one batch per frame and keeps clipped text on th
         val quads = sample_quads(SAMPLE)
         expect(quads.len() > 0).to_equal(true)
         val first = quads[0]
+        expect(first.width).to_equal(5i32)  # oracle: 5 px cell of the 5x7 face at scale 1
+        expect(first.height).to_equal(7i32)
         val clipped = vulkan_bitmap_text_clip_quads(
             quads, 0i32, 0i32, 2i32, 0i32, first.width - 2i32, 1000i32)
         # @capture(bit_table): clipped quad geometry and its composited pixel colours

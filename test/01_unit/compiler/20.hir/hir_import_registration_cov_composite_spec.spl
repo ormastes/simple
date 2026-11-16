@@ -37,7 +37,7 @@ use compiler.hir.hir_lowering.module_surface.{
 }
 
 val comp_a_src = "pub struct Point:\n    x: i64\n\npub enum Color:\n    Red\n    Green(i64)\n\npub struct Sealed:\n    pub shown: i64\n    hidden: i64\n\npub struct Open:\n    pub a: i64\n    pub b: i64\n\npub struct Generic<T>:\n    item: T\n    origin: Point\n\npub struct Bounded<T: Missing>:\n    v: i64\n\npub enum BoundedEnum<T: Missing>:\n    One\n\npub trait BoundedTrait<T: Missing>:\n    fn get() -> i64\n\npub fn make() -> i64:\n    1\n"
-val comp_c_src = "use lib.a.\{Point\}\n\npub struct Holder:\n    p: Point\n\npub struct QualifiedHolder:\n    q: lib.a.Point\n"
+val comp_c_src = "use lib.a.\{Point\}\n\npub struct Holder:\n    p: Point\n\npub struct QualifiedHolder:\n    q: lib.a.Point\n\npub struct Orphaned:\n    g: Ghost\n"
 
 fn composite_registry() -> ModuleSurfacesByName:
     val names = ["lib.a", "lib.c"]
@@ -163,6 +163,27 @@ describe "imported composite field dependencies":
         expect(lowering.symbols.lookup_qualified_type_raw("lib.a", "T")).to_equal(-1)
         expect(lowering.struct_type_param_names_by_name["lib.a.Generic"]).to_equal(["T"])
         expect(lowering.errors.len()).to_equal(0)
+
+    it "never reports a field dependency as an undeclared import":
+        # The importer wrote `use lib.c.{Orphaned}`; it never named `Ghost`.
+        val lowering = import_one(importer_at("app/main.spl", composite_registry()), "lib.c", "Orphaned", "Orphaned", true)
+        expect(bound(lowering, "Orphaned")).to_equal(true)
+        expect(errors_mentioning(lowering, "UNDECL-IMPORT-001")).to_equal(0)
+        # It is reported where the type is used, against the name that is missing.
+        expect(errors_mentioning(lowering, "unresolved type: Ghost")).to_equal(1)
+        expect(lowering.symbols.lookup_qualified_type_raw("lib.c", "Ghost")).to_equal(-1)
+
+    it "reports the unresolved field type once when a consumer module is lowered":
+        val consumer = "use lib.c.\{Orphaned\}\n\nfn keep(o: Orphaned) -> Orphaned:\n    o\n"
+        var lowering = hirlowering_for_module("app.main", composite_registry())
+        val _hir = lowering.lower_module(parse_full_frontend(consumer, "app/main.spl", "app.main", Logger(level: 0)))
+        expect(errors_mentioning(lowering, "UNDECL-IMPORT-001")).to_equal(0)
+        expect(errors_mentioning(lowering, "unresolved type: Ghost")).to_equal(1)
+        expect(lowering.errors.len()).to_equal(1)
+
+    it "still reports a name the importer itself asked for and nobody declares":
+        val lowering = import_one(importer_at("app/main.spl", composite_registry()), "lib.c", "Ghost", "Ghost", true)
+        expect(errors_mentioning(lowering, "[W-HIR-UNDECL-IMPORT-001] `Ghost` is named in `use lib.c.")).to_equal(1)
 
     it "ignores a direct dependency request for a qualified spelling":
         var lowering = importer_at("app/main.spl", composite_registry())

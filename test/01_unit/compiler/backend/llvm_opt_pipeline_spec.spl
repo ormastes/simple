@@ -9,6 +9,18 @@ use compiler.backend.llvm_ir_builder.{natural_alignment, is_integer_type, is_sig
 fn builder() -> LlvmIRBuilder:
     LlvmIRBuilder.create("test", LlvmTargetTriple.from_target(CodegenTarget.X86_64))
 
+fn duplicate_metadata_ids(ir: text) -> text:
+    """Space-joined `!N` ids defined more than once (llc: Metadata id is already used)."""
+    var seen: {text: bool} = {}
+    var dups = ""
+    for line in ir.split("\n"):
+        if line.starts_with("!") and line.contains(" = "):
+            val id = line.substring(0, line.index_of(" = "))
+            if seen.contains_key(id):
+                dups = dups + " " + id
+            seen[id] = true
+    dups
+
 describe "Llvm Opt Pipeline":
     it "maps Simple optimization levels to LLVM default pipelines":
         expect(llvm_default_pipeline_for_level(OptimizationLevel.None_)).to_equal("default<O0>")
@@ -106,3 +118,32 @@ describe "Llvm Opt Pipeline":
         expect(ir).to_contain("Simple TBAA")
         expect(ir).to_contain("!tbaa")
         expect(ir).to_contain("align 8")
+
+    it "keeps metadata ids unique across debug info, bare-metal attributes and TBAA (llc: Metadata id is already used)":
+        val b = builder()
+        b.emit_baremetal_attributes()
+        b.emit_module_header()
+        b.emit_debug_info_header("m.spl", "/src")
+        var n = 0
+        while n < 120:
+            b.emit_di_subprogram(b.next_debug_id(), "f{n}", 1)
+            n = n + 1
+        b.emit_tbaa_hierarchy()
+        val ir = b.build()
+        expect(ir).to_contain("no-builtins")
+        expect(ir).to_contain("Simple TBAA")
+        expect(duplicate_metadata_ids(ir)).to_equal("")
+
+    it "points tbaa_tag_for_type at the access tag the hierarchy emits":
+        val b = builder()
+        val tag = b.tbaa_tag_for_type("i64")
+        var n = 0
+        while n < 120:
+            b.next_debug_id()
+            n = n + 1
+        b.emit_tbaa_hierarchy()
+        val ir = b.build()
+        val lb = "{"
+        val rb = "}"
+        expect(ir).to_contain("!{tag} = !{lb}!{tag - 5}, !{tag - 5}, i64 0{rb}")
+        expect(ir).to_contain("!{tag - 5} = !{lb}!\"int\"")

@@ -51,6 +51,7 @@ struct NativeModel:
     entry_path: text
     runnable: bool
     reason: text
+    mmproj_path: text
 
 fn _join(root: text, name: text) -> text:
     if root.ends_with("/"):
@@ -84,24 +85,59 @@ fn has_gguf_magic(path: text) -> bool:
 fn has_safetensors_header(path: text) -> bool:
     (file_read_text_at_nullable(path, 8, 1) ?? "") == "{"
 
-# The lowest-numbered GGUF shard in `dir`, which is the one a GGUF reader is
-# given (it finds its siblings itself). Empty text when the directory holds no
-# file that actually carries the magic.
-fn gguf_entry_shard(dir: text) -> text:
-    var best = ""
+# True when `path` is a multimodal projector (CLIP-style encoder), not a text
+# model. The reliable test is GGUF metadata `general.architecture == "clip"`.
+# llama.cpp's writer emits that key FIRST, so it is read at fixed offsets: the
+# header is magic(4) version(4) tensor_count(8) kv_count(8), then the first KV
+# is key_len(8) "general.architecture"(20) type(4) value_len(8) value. Only the
+# ASCII runs are read as text. A file whose first key is something else cannot
+# be classified from metadata cheaply; for those, and only those, the `mmproj`
+# filename prefix is the fallback hint.
+fn gguf_is_projector(path: text) -> bool:
+    val first_key = file_read_text_at_nullable(path, 32, 20) ?? ""
+    if first_key == "general.architecture":
+        return (file_read_text_at_nullable(path, 64, 4) ?? "") == "clip"
+    _basename(path).starts_with("mmproj")
+
+# `.gguf` files in `dir` that carry the magic, split by role.
+fn _gguf_names(dir: text, projectors: bool) -> [text]:
+    var out: [text] = []
     match dir_list_optional(dir):
         case Some(names):
             for name in names:
                 if name.ends_with(".gguf"):
                     val p = _join(dir, name)
-                    if has_gguf_magic(p):
-                        if best == "" or name < best:
-                            best = name
+                    if has_gguf_magic(p) and gguf_is_projector(p) == projectors:
+                        out.push(name)
         case nil:
             pass
-    if best == "":
+    out
+
+# The lowest-numbered GGUF shard of the TEXT model in `dir`, which is the one a
+# GGUF reader is given (it finds its siblings itself). Projector files are never
+# the entry. Empty text when the directory holds no such file.
+fn gguf_entry_shard(dir: text) -> text:
+    val names = _gguf_names(dir, false)
+    if names.len() == 0:
         return ""
-    _join(dir, best)
+    _join(dir, _lowest(names))
+
+fn _lowest(names: [text]) -> text:
+    var best = names[0]
+    for name in names:
+        if name < best:
+            best = name
+    best
+
+# The multimodal projector path next to the text model, or empty when there is# none. More than one projector is ambiguous: see `gguf_projector_count`.
+fn gguf_mmproj_path(dir: text) -> text:
+    val names = _gguf_names(dir, true)
+    if names.len() != 1:
+        return ""
+    _join(dir, names[0])
+
+fn gguf_projector_count(dir: text) -> i64:
+    _gguf_names(dir, true).len()
 
 fn _first_safetensors(dir: text) -> text:
     var best = ""
@@ -132,6 +168,13 @@ fn detect_format(dir: text) -> ModelFormat:
         return ModelFormat.Safetensors
     ModelFormat.Unknown
 
+# Why a directory with no model is unknown. A directory holding only a
+# projector is a different mistake from an empty one, and says so.
+fn unknown_reason(dir: text) -> text:
+    if gguf_projector_count(dir) > 0:
+        return "only a multimodal projector (architecture clip) was found; it needs a text model GGUF beside it"
+    "no manifest.sdn, no file carrying GGUF magic, and no safetensors header"
+
 # Describes one directory. `ggml_available` is passed in rather than probed
 # because whether a backend library is present is the caller's knowledge, not
 # this module's — and a detector that silently reported "not runnable" on a host
@@ -145,24 +188,29 @@ fn describe_model(dir: text, ggml_available: bool) -> NativeModel:
         ModelFormat.SlangPack:
             NativeModel(id: name, root: dir, format: "slang-pack", bytes: bytes,
                 entry_path: _join(dir, "manifest.sdn"), runnable: false,
-                reason: "slang pack recognised; slang has no engine of its own yet (master plan A3/A4/A5)")
+                reason: "slang pack recognised; slang has no engine of its own yet (master plan A3/A4/A5)", mmproj_path: "")
         ModelFormat.Gguf:
             val shard = gguf_entry_shard(dir)
+            val mmproj = gguf_mmproj_path(dir)
+            if gguf_projector_count(dir) > 1:
+                return NativeModel(id: name, root: dir, format: "gguf", bytes: bytes,
+                    entry_path: shard, runnable: false,
+                    reason: "ambiguous multimodal projector: the directory holds " + gguf_projector_count(dir).to_text() + " projector (architecture clip) files, keep exactly one", mmproj_path: "")
             if ggml_available:
                 NativeModel(id: name, root: dir, format: "gguf", bytes: bytes,
-                    entry_path: shard, runnable: true, reason: "")
+                    entry_path: shard, runnable: true, reason: "", mmproj_path: mmproj)
             else:
                 NativeModel(id: name, root: dir, format: "gguf", bytes: bytes,
                     entry_path: shard, runnable: false,
-                    reason: "GGUF recognised but no ggml backend library is configured")
+                    reason: "GGUF recognised but no ggml backend library is configured", mmproj_path: mmproj)
         ModelFormat.Safetensors:
             NativeModel(id: name, root: dir, format: "safetensors", bytes: bytes,
                 entry_path: _first_safetensors(dir), runnable: false,
-                reason: "safetensors recognised; the ggml backend reads GGUF only, and slang has no native safetensors executor yet")
+                reason: "safetensors recognised; the ggml backend reads GGUF only, and slang has no native safetensors executor yet", mmproj_path: "")
         ModelFormat.Unknown:
             NativeModel(id: name, root: dir, format: "unknown", bytes: bytes,
                 entry_path: "", runnable: false,
-                reason: "no manifest.sdn, no file carrying GGUF magic, and no safetensors header")
+                reason: unknown_reason(dir), mmproj_path: "")
 
 fn _basename(path: text) -> text:
     var trimmed = path
@@ -193,4 +241,5 @@ fn scan_model_root(model_root: text, ggml_available: bool) -> [NativeModel]:
 
 export ModelFormat, model_format_text, NativeModel
 export dir_byte_size, has_gguf_magic, has_safetensors_header, gguf_entry_shard
+export gguf_is_projector, gguf_mmproj_path, gguf_projector_count
 export detect_format, describe_model, scan_model_root

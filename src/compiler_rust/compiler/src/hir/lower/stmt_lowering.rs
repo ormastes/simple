@@ -259,7 +259,10 @@ impl Lowerer {
     /// Preserve only an exact declared trait identity for a local receiver.
     /// This does not change the runtime value or DI/security type-name hints.
     pub(super) fn declared_trait_dispatch(&self, declared: &ast::Type) -> Option<HirTraitDispatch> {
-        let ast::Type::Simple(name) = declared else { return None; };
+        let name = match declared {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
+            _ => return None,
+        };
         self.trait_declaration_for_current_owner(name)
     }
 
@@ -274,14 +277,23 @@ impl Lowerer {
         }
     }
 
-    /// The if-let / match subject temp inherits the payload trait of the
-    /// `Option<Trait>` local it was read from.
+    /// The subject temp inherits only its Optional payload's exact trait
+    /// identity. A field uses its authored type, never a method-name guess.
     pub(super) fn carry_optional_trait_subject(&self, subject: &Expr, subject_idx: usize, ctx: &mut FunctionContext) {
-        let Expr::Identifier(name) = subject else { return; };
-        let Some(dispatch) = ctx.lookup(name).and_then(|index| ctx.optional_trait_payloads.get(&index)).cloned() else {
-            return;
+        let dispatch = match subject {
+            Expr::Identifier(name) => ctx.lookup(name)
+                .and_then(|index| ctx.optional_trait_payloads.get(&index)).cloned(),
+            Expr::FieldAccess { receiver, field } => {
+                match self.receiver_field_declared_type(receiver, field, ctx) {
+                    Some((owner, ast::Type::Optional(inner))) => self.declared_trait_dispatch_in_owner(inner, owner),
+                    _ => None,
+                }
+            }
+            _ => None,
         };
-        ctx.optional_trait_payloads.insert(subject_idx, dispatch);
+        if let Some(dispatch) = dispatch {
+            ctx.optional_trait_payloads.insert(subject_idx, dispatch);
+        }
     }
 
     /// Give the PAYLOAD binding of an `Option<Trait>` subject its declared
@@ -308,26 +320,26 @@ impl Lowerer {
         }
     }
 
+    pub(super) fn declared_trait_dispatch_in_owner(&self, declared: &ast::Type, owner: &str) -> Option<HirTraitDispatch> {
+        let name = match declared {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
+            _ => return None,
+        };
+        self.trait_declaration_for_owner(name, owner)
+    }
+
+    fn trait_declaration_for_owner(&self, authored_name: &str, owner: &str) -> Option<HirTraitDispatch> {
+        let declared_in = |owner: &str, name: &str| {
+            self.trait_declared_owners.get(std::path::Path::new(owner)).and_then(|traits| traits.get(name)).cloned()
+        };
+        if let Some(found) = declared_in(owner, authored_name) { return Some(found); }
+        let (source_owner, source_name) = self.flatten_owner_import_bindings.get(owner)?.get(authored_name)?;
+        declared_in(source_owner, source_name)
+    }
+
     pub(super) fn trait_declaration_for_current_owner(&self, authored_name: &str) -> Option<HirTraitDispatch> {
-        // In a flattened unit, a function from an imported module carries its
-        // flatten owner, and `register_trait` keys a flattened trait by that
-        // same owner string, not by `current_file` (the compile root). Look
-        // in the owner first, then in the owner's own `use` binding for the
-        // name; anything else keeps the file-keyed lookup.
         if let Some(owner) = self.current_function_owner.as_deref() {
-            let declared_in = |owner: &str, name: &str| {
-                self.trait_declared_owners.get(std::path::Path::new(owner)).and_then(|traits| traits.get(name)).cloned()
-            };
-            if let Some(found) = declared_in(owner, authored_name) {
-                return Some(found);
-            }
-            if let Some((source_owner, source_name)) =
-                self.flatten_owner_import_bindings.get(owner).and_then(|bindings| bindings.get(authored_name))
-            {
-                if let Some(found) = declared_in(source_owner, source_name) {
-                    return Some(found);
-                }
-            }
+            if let Some(found) = self.trait_declaration_for_owner(authored_name, owner) { return Some(found); }
         }
         self.trait_declaration_in_file(authored_name, self.current_file.as_deref())
     }
@@ -2871,6 +2883,7 @@ impl Lowerer {
                         ty: subject_ty,
                     };
                     let slot_expr = Self::payload_slot_expr(enum_variant, &subject_ref, i, payload_patterns.len());
+                    let slot_expr = self.or_pattern_payload_slot(slot_expr, enum_name, enum_variant, subject_ty, i, p);
                     self.bind_subpattern(&slot_expr, p, &binding_type_map, ctx, &mut binding_stmts);
                 }
             }
@@ -2903,8 +2916,37 @@ impl Lowerer {
         let arity = payload_patterns.len();
         for (j, sub) in payload_patterns.iter().enumerate() {
             let slot = Self::payload_slot_expr(variant, enum_expr, j, arity);
+            let slot = if enum_expr.ty == TypeId::ANY {
+                slot
+            } else {
+                self.or_pattern_payload_slot(slot, "_", variant, enum_expr.ty, j, sub)
+            };
             self.bind_subpattern(&slot, sub, binding_type_map, ctx, out);
         }
+    }
+
+    /// #6953: a payload slot expression is ANY-typed. An or-pattern sitting in
+    /// it types its per-alternative binding guards by `slot.ty`, so give the
+    /// slot the variant's DECLARED field type -- the type
+    /// `nested_payload_condition` tests the same slot with. Other sub-pattern
+    /// kinds keep the ANY slot they always had.
+    fn or_pattern_payload_slot(
+        &self,
+        slot: HirExpr,
+        enum_name: &str,
+        variant: &str,
+        owner_ty: TypeId,
+        index: usize,
+        sub: &Pattern,
+    ) -> HirExpr {
+        if !matches!(sub, Pattern::Or(_)) {
+            return slot;
+        }
+        let ty = self
+            .get_enum_variant_field_types_with_hint(enum_name, variant, owner_ty)
+            .and_then(|types| types.get(index).copied())
+            .unwrap_or(TypeId::ANY);
+        HirExpr { ty, ..slot }
     }
 
     /// Emit the `Let` bindings for ONE sub-pattern whose value sits at `slot`.
@@ -3032,7 +3074,9 @@ impl Lowerer {
             Pattern::Or(alternatives) => {
                 let mut arms: Vec<(Option<HirExpr>, Vec<HirStmt>)> = Vec::new();
                 for alt in alternatives {
-                    let cond = self.subpattern_condition(slot, alt, ctx);
+                    // Typed by the slot's own type, as the arm test is: an
+                    // erased type resolves `Copy(d)` by name only (#6953).
+                    let cond = self.subpattern_condition_typed(slot, slot.ty, alt, ctx);
                     let mut alt_out: Vec<HirStmt> = Vec::new();
                     self.bind_subpattern(slot, alt, binding_type_map, ctx, &mut alt_out);
                     let irrefutable = cond.is_none();
@@ -3375,9 +3419,8 @@ impl Lowerer {
             Pattern::Identifier(name) => {
                 if self.subject_enum_has_variant(subject_ty, name) {
                     // Treat as an identity-aware enum variant pattern.
-                    let expected_disc: i64 = {
-                        simple_runtime::value::hash_variant_discriminant(name) as i64
-                    };
+                    let expected_disc: i64 =
+                        self.owner_variant_discriminant(subject_ty, None, name, "hir match bare variant arm");
 
                     let expected_val = HirExpr {
                         kind: HirExprKind::Integer(expected_disc),
@@ -3580,7 +3623,7 @@ impl Lowerer {
                 let fields = fields.clone();
                 Ok(self.named_struct_pattern_condition(&subject_ref, &name, &fields, ctx))
             }
-            Pattern::Enum { name: _, variant, .. } => {
+            Pattern::Enum { name: pattern_enum, variant, .. } => {
                 // Warn-only, DEFAULT OFF. This is the statement-form half of the
                 // JIT's pattern decision -- proved by instrumentation to be the
                 // only site reached for `match x: case Some(v)` and for
@@ -3694,10 +3737,10 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Validate the stable enum identity and hashed variant tag.
-                let expected_disc: i64 = {
-                    simple_runtime::value::hash_variant_discriminant(variant) as i64
-                };
+                // Validate the stable enum identity and the OWNING enum's
+                // declared variant index (#6953).
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(subject_ty, Some(pattern_enum.as_str()), variant, "hir match statement arm");
 
                 let expected_val = HirExpr {
                     kind: HirExprKind::Integer(expected_disc),

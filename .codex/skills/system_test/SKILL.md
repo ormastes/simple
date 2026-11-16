@@ -86,6 +86,25 @@ generated/manual scenario documentation derived from those specs.
 - Feature-specific matcher replacements — use helper functions inside SSpec
   scenarios instead
 
+### Control flow in effectful fixtures
+
+Inside a running example, `std.spec.fail(...)` and failed `expect(...)` matchers
+record failures; they are not an early-return mechanism. Before opening another
+resource, sending a request, or closing a parent, propagate failed prerequisites
+through `Result` and explicitly return from the calling scenario/helper. A
+return from `before_each` alone does not establish that the example or
+`after_each` will stop: retain a readiness/error state that those paths check.
+
+For owner-bearing operation/cleanup turns, retain the actual returned owner
+before inspecting success or error flags, following that API's contract. Never
+replace a returned updated owner with a stale original handle. If child cleanup
+is unresolved, preserve its carrier and stop parent close, sweeping, and the
+next setup attempt. Do not retry a consumed raw descriptor to make cleanup pass.
+
+Exercise the failure path with the real fixture when available. A textual
+source-order check is not a native cleanup-fault test; label missing dynamic
+coverage and unexecuted cases explicitly.
+
 ### SSpec Template
 
 ```simple

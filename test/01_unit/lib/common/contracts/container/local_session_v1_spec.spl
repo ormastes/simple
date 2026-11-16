@@ -1,0 +1,279 @@
+# AUTHORED_NOT_RUN. Pure production contracts only; no native/backend effects.
+# @req REQ-CARET-LOCAL-REQUEST-001
+# @req REQ-CARET-LOCAL-REQUEST-002
+# @req REQ-CARET-LOCAL-REQUEST-003
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.local_session_v1.*
+use std.common.crypto.sha256.sha256_text
+
+fn local_request_fixture_v1() -> LocalContainerRequestV1:
+    LocalContainerRequestV1(image: "simple/dev:1", executable: "/usr/bin/simple",
+        argv: ["", "two words", "x=y", "quote\"slash\\", "line\nnext", "λ"],
+        working_directory: "/workspace", mounts: [LocalContainerMountV1(host_path: "/home/user/project",
+            guest_path: "/workspace", read_only: true)], environment: ["PATH=/usr/bin", "VALUE=a=b=c", "EMPTY="],
+        network: "private", cpu_millis: 1000, memory_bytes: 1048576, terminal_mode: "tty", cols: 80, rows: 24)
+
+fn local_request_text_fixture_v1(size: i64) -> text:
+    var value = ""
+    var remaining = size
+    var block = "x"
+    while remaining > 0:
+        if remaining % 2 == 1: value = value + block
+        remaining = remaining / 2
+        if remaining > 0: block = block + block
+    value
+
+describe "Local container request v1 pure metadata":
+    it "preserves all request fields in exact canonical bytes and their digest":
+        step("Encode a request with distinct empty, spaced, escaped and Unicode argv")
+        val request = local_request_fixture_v1()
+        val bytes = local_container_request_bytes_v1(request).unwrap()
+        expect(bytes).to_start_with("{argv: [\"\", \"two words\"")
+        expect(bytes).to_contain("kind: local-container-request")
+        expect(bytes).to_contain("version: 1")
+        expect(bytes).to_end_with("}\n")
+        expect(local_container_request_digest_v1(request).unwrap()).to_equal(sha256_text(bytes))
+        step("Decode canonical bytes and compare every original field")
+        val decoded = local_container_request_decode_v1(bytes).unwrap()
+        expect(decoded.image).to_equal(request.image)
+        expect(decoded.executable).to_equal(request.executable)
+        expect(decoded.argv).to_equal(request.argv)
+        expect(decoded.working_directory).to_equal(request.working_directory)
+        expect(decoded.environment).to_equal(request.environment)
+        expect(decoded.network).to_equal(request.network)
+        expect(decoded.cpu_millis).to_equal(request.cpu_millis)
+        expect(decoded.memory_bytes).to_equal(request.memory_bytes)
+        expect(decoded.terminal_mode).to_equal(request.terminal_mode)
+        expect(decoded.cols).to_equal(request.cols)
+        expect(decoded.rows).to_equal(request.rows)
+        expect(decoded.mounts.len()).to_equal(1)
+        expect(decoded.mounts[0].host_path).to_equal(request.mounts[0].host_path)
+        expect(decoded.mounts[0].guest_path).to_equal(request.mounts[0].guest_path)
+        expect(decoded.mounts[0].read_only).to_equal(true)
+        expect(local_container_request_bytes_v1(decoded).unwrap()).to_equal(bytes)
+
+    it "changes the digest when exact argv order or mount permissions change":
+        step("Bind preserved ordered values rather than a joined command string")
+        val original = local_container_request_digest_v1(local_request_fixture_v1()).unwrap()
+        var request = local_request_fixture_v1()
+        request.argv = ["two words", "", "x=y", "quote\"slash\\", "line\nnext", "λ"]
+        expect(local_container_request_digest_v1(request).unwrap() == original).to_equal(false)
+        request = local_request_fixture_v1()
+        request.mounts = [LocalContainerMountV1(host_path: "/home/user/project", guest_path: "/workspace", read_only: false)]
+        expect(local_container_request_digest_v1(request).unwrap() == original).to_equal(false)
+
+    it "accepts POSIX and Windows fixed-drive lexical paths without rewriting payloads":
+        step("Validate both path families and retain their authored spelling")
+        for path in ["/", "/work/./project/", "/work.", "/work ", "/CON.txt", "/wild*card?", "C:\\Work\\Project", "d:/work/project", "C:/"]:
+            var request = local_request_fixture_v1()
+            request.working_directory = path
+            request.mounts = [LocalContainerMountV1(host_path: path, guest_path: path, read_only: false)]
+            val bytes = local_container_request_bytes_v1(request).unwrap()
+            val decoded = local_container_request_decode_v1(bytes).unwrap()
+            expect(decoded.working_directory).to_equal(path)
+            expect(decoded.mounts[0].host_path).to_equal(path)
+            expect(decoded.mounts[0].guest_path).to_equal(path)
+
+    it "rejects relative parent UNC ADS and control-bearing paths in every path role":
+        step("Refuse ambiguous lexical roots before any host interpretation")
+        for path in ["", "relative", "../project", "/a/../b", "/a\\..\\b", "C:relative", "\\rooted",
+                "\\", "\\rooted/child", "\\/rooted", "/\\rooted", "c:rooted\\child",
+                "//server/share", "\\\\server\\share", "C:/data:stream", "/data:stream", "C:/../root", "/work\nnext"]:
+            var request = local_request_fixture_v1()
+            request.working_directory = path
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+            request = local_request_fixture_v1()
+            request.mounts = [LocalContainerMountV1(host_path: path, guest_path: "/valid", read_only: true)]
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+            request.mounts = [LocalContainerMountV1(host_path: "/valid", guest_path: path, read_only: true)]
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+
+    it "rejects Windows trailing-dot space device and wildcard aliases in every path role":
+        step("Admit the ordinary Windows destination then refuse its trailing-dot alias")
+        var ordinary = local_request_fixture_v1()
+        ordinary.working_directory = "C:/work"
+        ordinary.mounts = [LocalContainerMountV1(host_path: "C:/host", guest_path: "C:/work", read_only: true)]
+        expect(local_container_request_validate_v1(ordinary).is_ok()).to_equal(true)
+        ordinary.mounts.push(LocalContainerMountV1(host_path: "C:/other", guest_path: "C:/work.", read_only: false))
+        expect(local_container_request_validate_v1(ordinary).unwrap_err()).to_equal("local-container-path-invalid")
+        step("Refuse ambiguous components for cwd and both sides of mounts")
+        for path in ["C:/work.", "C:/work ", "C:/dir./child", "C:/dir /child", "C:/work/.",
+                "C:/CON", "C:/con.txt", "C:/NUL.log", "C:/nul", "C:/AUX.data", "C:/PRN",
+                "C:/COM1.txt", "C:/lpt9.log", "C:/COM¹.txt", "C:/CON .txt", "C:/CONIN$", "C:/CONOUT$.txt",
+                "C:/wild*card", "C:/wild?card", "C:/bad<name", "C:/bad>name", "C:/bad|name", "C:/bad\"name"]:
+            var request = local_request_fixture_v1()
+            request.working_directory = path
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+            request = local_request_fixture_v1()
+            request.mounts = [LocalContainerMountV1(host_path: path, guest_path: "/valid", read_only: true)]
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+            request.mounts = [LocalContainerMountV1(host_path: "/valid", guest_path: path, read_only: true)]
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+
+    it "rejects guest mount aliases after conservative separator dot and case folding":
+        step("Require a unique guest destination without altering serialized paths")
+        for alias in ["/workspace", "/WORKSPACE/", "/./workspace", "/workspace//."]:
+            var request = local_request_fixture_v1()
+            request.mounts.push(LocalContainerMountV1(host_path: "/another", guest_path: alias, read_only: false))
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-mount-duplicate")
+        var request = local_request_fixture_v1()
+        request.mounts = [LocalContainerMountV1(host_path: "/one", guest_path: "C:\\Work", read_only: true),
+            LocalContainerMountV1(host_path: "/two", guest_path: "c:/work/", read_only: false)]
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-mount-duplicate")
+
+    it "rejects invalid images empty executable and NUL without splitting argv":
+        step("Reject unsafe image and native string boundaries")
+        for image in ["", "-option", "bad\nimage", "bad\timage", "bad\0image", "bad\u007Fimage", "bad\u0085image"]:
+            var request = local_request_fixture_v1()
+            request.image = image
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-image-invalid")
+        for executable in ["", "simple\0hidden"]:
+            var request = local_request_fixture_v1()
+            request.executable = executable
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-executable-invalid")
+        var request = local_request_fixture_v1()
+        request.argv = ["valid", "bad\0hidden"]
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-argument-invalid")
+
+    it "preserves environment equals and rejects malformed or duplicate names":
+        step("Allow equals in values and an empty value after a valid name")
+        val request = local_request_fixture_v1()
+        val decoded = local_container_request_decode_v1(local_container_request_bytes_v1(request).unwrap()).unwrap()
+        expect(decoded.environment).to_equal(["PATH=/usr/bin", "VALUE=a=b=c", "EMPTY="])
+        step("Reject invalid names and case-insensitive duplicates")
+        for entry in ["missing", "=value", "1NAME=value", "BAD-NAME=value", "BAD NAME=value", "NAλ=value", "GOOD=bad\0value"]:
+            var changed = local_request_fixture_v1()
+            changed.environment = [entry]
+            expect(local_container_request_validate_v1(changed).unwrap_err()).to_equal("local-container-environment-invalid")
+        var changed = local_request_fixture_v1()
+        changed.environment = ["PATH=one", "path=two"]
+        expect(local_container_request_validate_v1(changed).unwrap_err()).to_equal("local-container-environment-duplicate")
+
+    it "enforces network terminal and inclusive numeric bounds":
+        step("Admit each named network and terminal mode at both numeric limits")
+        for network in ["host", "private", "none"]:
+            for terminal in ["tty", "stdin"]:
+                var request = local_request_fixture_v1()
+                request.network = network
+                request.terminal_mode = terminal
+                request.cpu_millis = 1
+                request.memory_bytes = 1
+                request.cols = 1
+                request.rows = 1
+                expect(local_container_request_validate_v1(request).is_ok()).to_equal(true)
+                request.cpu_millis = 64000
+                request.memory_bytes = 1125899906842624
+                request.cols = 1000
+                request.rows = 1000
+                expect(local_container_request_validate_v1(request).is_ok()).to_equal(true)
+        step("Reject values immediately outside each admitted interval")
+        for number in [0, 64001]:
+            var request = local_request_fixture_v1()
+            request.cpu_millis = number
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-bounds")
+        for number in [0, 1125899906842625]:
+            var request = local_request_fixture_v1()
+            request.memory_bytes = number
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-bounds")
+        for number in [0, 1001]:
+            var request = local_request_fixture_v1()
+            request.cols = number
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-bounds")
+            request = local_request_fixture_v1()
+            request.rows = number
+            expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-bounds")
+        var request = local_request_fixture_v1()
+        request.network = "bridge"
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-network-invalid")
+        request = local_request_fixture_v1()
+        request.terminal_mode = "shell"
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-terminal-invalid")
+
+    it "bounds each text in bytes and rejects oversized aggregate canonical bytes":
+        step("Admit exactly 16384 bytes and reject one more byte or multibyte overflow")
+        var request = local_request_fixture_v1()
+        request.argv = [local_request_text_fixture_v1(16384)]
+        expect(local_container_request_validate_v1(request).is_ok()).to_equal(true)
+        request.argv = [local_request_text_fixture_v1(16385)]
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-argument-invalid")
+        request.argv = [local_request_text_fixture_v1(16383) + "λ"]
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-argument-invalid")
+        step("Bound image executable directory mount and environment text independently")
+        val oversized = local_request_text_fixture_v1(16385)
+        request = local_request_fixture_v1()
+        request.image = oversized
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-image-invalid")
+        request = local_request_fixture_v1()
+        request.executable = oversized
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-executable-invalid")
+        request = local_request_fixture_v1()
+        request.working_directory = "/" + oversized
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+        request = local_request_fixture_v1()
+        request.mounts = [LocalContainerMountV1(host_path: "/" + oversized, guest_path: "/valid", read_only: true)]
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+        request.mounts = [LocalContainerMountV1(host_path: "/valid", guest_path: "/" + oversized, read_only: true)]
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-path-invalid")
+        request = local_request_fixture_v1()
+        request.environment = ["KEY=" + oversized]
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-environment-invalid")
+        step("Admit exactly one MiB then reject the next byte despite valid individual fields")
+        request = local_request_fixture_v1()
+        request.argv = []
+        val large = local_request_text_fixture_v1(16384)
+        for index in 0..63: request.argv.push(large)
+        val baseline = local_container_request_bytes_v1(request).unwrap()
+        # Appending a nonempty bare ASCII string adds its bytes and a comma/space.
+        val final_size = 1048576 - baseline.byte_len() - 2
+        val last = local_request_text_fixture_v1(final_size)
+        request.argv.push(last)
+        val at_limit = local_container_request_bytes_v1(request).unwrap()
+        expect(at_limit.byte_len()).to_equal(1048576)
+        expect(local_container_request_decode_v1(at_limit).is_ok()).to_equal(true)
+        request.argv = []
+        for index in 0..63: request.argv.push(large)
+        request.argv.push(last + "x")
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-source-size")
+        expect(local_container_request_decode_v1(local_request_text_fixture_v1(1048577)).unwrap_err()).to_equal("local-container-source-size")
+        expect(local_container_request_decode_v1("").unwrap_err()).to_equal("local-container-source-size")
+
+    it "admits maximum counts and rejects the next argv environment or mount entry":
+        step("Admit all bounded arrays at their maximum counts and roundtrip them")
+        var request = local_request_fixture_v1()
+        request.argv = []
+        request.environment = []
+        request.mounts = []
+        for index in 0..128:
+            request.argv.push("")
+            request.environment.push("KEY_{index}=value")
+        for index in 0..64:
+            request.mounts.push(LocalContainerMountV1(host_path: "/host/{index}", guest_path: "/guest/{index}", read_only: false))
+        val bytes = local_container_request_bytes_v1(request).unwrap()
+        val decoded = local_container_request_decode_v1(bytes).unwrap()
+        expect(decoded.argv.len()).to_equal(128)
+        expect(decoded.environment.len()).to_equal(128)
+        expect(decoded.mounts.len()).to_equal(64)
+        request.argv.push("")
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-field-count")
+        request = local_container_request_decode_v1(bytes).unwrap()
+        request.environment.push("EXTRA=value")
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-field-count")
+        request = local_container_request_decode_v1(bytes).unwrap()
+        request.mounts.push(LocalContainerMountV1(host_path: "/host/extra", guest_path: "/guest/extra", read_only: false))
+        expect(local_container_request_validate_v1(request).unwrap_err()).to_equal("local-container-field-count")
+
+    it "refuses unknown missing duplicated mistyped and noncanonical SDN":
+        step("Mutate real canonical bytes to exercise the strict wire boundary")
+        val source = local_container_request_bytes_v1(local_request_fixture_v1()).unwrap()
+        for invalid in [source.replace("{argv:", "{extra: 1, argv:"), source.replace("cols: 80, ", ""),
+                source.replace("{argv:", "{cols: 80, argv:"), source.replace("version: 1", "version: 2"),
+                source.replace("version: 1", "version: true"), source.replace("local-container-request", "another-kind"),
+                source.replace("cpuMillis: 1000", "cpuMillis: 1000.0"), source.replace("rows: 24", "rows: \"24\""),
+                source.replace("readOnly: true", "readOnly: 1"), source.replace("readOnly: true", "readOnly: true, extra: false"),
+                source.replace("readOnly: true", "readOnly: true, readOnly: false"), source.replace("readOnly: true", "readOnly: true, guestPath: /other"),
+                source.replace("kind: local-container-request", "kind: true"), source.replace("hostPath: /home/user/project", "hostPath: 1"),
+                source.replace("image: \"simple/dev:1\"", "image: false"), source.replace("argv: [", "argv: [false, "),
+                source.replace("mounts: [{", "mounts: [false, {"), source.replace("cols: 80", "cols: 0"),
+                source + "# extra comment\n", source + "another: value\n", " " + source, source.substring(0, source.byte_len() - 1),
+                "[]\n", "{broken\n"]:
+            expect(local_container_request_decode_v1(invalid).is_err()).to_equal(true)

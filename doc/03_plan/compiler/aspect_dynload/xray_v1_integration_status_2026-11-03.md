@@ -508,3 +508,47 @@ Target matrix once these land (to be filled from executed runs only):
 | container switch | as above | as above | pending |
 | rollback / close_admission | as above | as above | pending |
 | layer / feature edge profile | not written | n/a (fold only) | pending |
+
+**xrayfg result (2026-11-14, `work/xray-win-flagguard-20261114`):** step 0 PASS (seed-attr, llvm
+backend, 3-function fixture: DLL exports `add1/scaled/traced`, 128 s, no zero-function receipt;
+PR #9153 fix holds). IR half of the flag-guard route DONE: `xray_llvm_attrs_spec.spl` 22/22
+(Windows sleds, slots, one exported descriptor, hook indirection, mode 1 still refused, off =
+no xray text); guard IR assembles at -O2 with llvm-mingw clang; off-identity DLL rebuilt: only
+the PE TimeDateStamp differs, disassembly identical. Not done: leaf, backend enum, admission,
+real run, on-vs-off timing — decisions listed in
+`doc/08_tracking/bug/xray_llvm_windows_flag_guard_leaf_and_admission_decisions_2026-11-14.md`.
+The release/1.0.0 tip needs a seed workaround to compile at all
+(`seed_bare_list_literal_after_match_parsed_as_index_2026-11-14.md`).
+
+**Windows system-spec re-run (2026-11-15, lane xraysys, seed-attr2, Windows 11, after #9376).**
+Re-run to check whether the ring/export fix unblocks the BLOCKED system specs. It does not:
+every blocker is an ELF/Linux lane gate or a missing Windows lane script, unrelated to the
+handler/dllexport problem, so no spec was converted to the ring path.
+
+| spec | passed/failed | blocker |
+|---|---|---|
+| `test/03_system/xray/xray_spy_program_out_spec.spl` | 0/10 | ELF lanes `check-xray-native-program-e2e.shs`, `check-xray-llvm-adapter-e2e.shs` need Linux + clang + compiler-rt |
+| `test/03_system/xray/xray_backend_differential_out_spec.spl` | 1/3 failed (4 total) | ELF lanes `check-xray-llvm-adapter-e2e.shs`, `check-xray-native-inprocess-e2e.shs`; `check-xray-native-win64-inprocess-e2e.shs` does not exist (win64 execution lane never written) |
+| `test/01_unit/lib/xray/xray_win_flag_leaf_v1_spec.spl` | 9/0 | green |
+| `test/01_unit/compiler/backend/xray_llvm_attrs_spec.spl` | 27/0 | green |
+
+The Windows ring path is covered by `xray_win_ring_e2e_host.spl` (fixture run, not an SSpec).
+A Windows system spec wrapping it needs a new lane script and is not part of this change.
+
+## Shared wrapper + spy/profile (lane xrayshared, 2026-11-15)
+
+| Item | State |
+|---|---|
+| `XrayBackendV1` = `XrayLlvmLeafV1` + `XrayEdgeSourceV1` (`src/lib/nogc_sync_mut/trace/xray_spy_v1.spl`) | landed in PR |
+| Linux backend (`XrayBackendV1.linux`): spec with fake compiler-rt-style leaf | green |
+| Windows backend (`XrayBackendV1.windows`): real `XrayWinFlagLeafV1` over modelled DLL ring | green except time |
+| `XraySpyV1.log_lines()` (spy) / `.profile()`: identical on both backends | green |
+| Windows edges stamped (profile time) | RED: bug `xray_win_ring_edges_unstamped_profile_time_zero_2026-11-15` |
+| Linux fixture `xray_native_program_host.spl` repointed onto `XraySpyV1` | open (Linux-only lane, not runnable here) |
+
+Spec: `test/01_unit/lib/xray/xray_spy_backend_v1_spec.spl` 6 pass / 1 fail. Off-identity: no existing file changed in `src/`; `xray_win_flag_leaf_v1_spec` 9/0 and `xray_llvm_adapter_v1_spec` 16/0 are unchanged.
+**Update (2026-11-15, lane xraywin64, seed-attr2, Windows 11).** The win64 lane now exists:
+`scripts/check/check-xray-native-win64-inprocess-e2e.shs` (driver + ring host, CC = llvm-mingw
+clang; ERROR exit 2 off Windows x64). Lane: PASS, ~327 s.
+`xray_backend_differential_out_spec.spl`: 2/4 passed (was 1/4); "traces a --xray DLL in-process
+on a Windows x64 host" is green. The 2 remaining failures are the Linux/ELF lanes above.

@@ -1,0 +1,54 @@
+use compiler.semantics.lint.sffi_abi_mismatch.{check_sffi_abi_mismatch, sffi_abi_deprecation_notes}
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.platform.{host_arch, host_os}
+
+# SPL-SFFI-ABI-001 (config/policy/diagnostic_policy.sdn): deny. The lint API has
+# no target field yet, so the triple is SIMPLE_TARGET_TRIPLE when set, else the
+# host triple. An unresolvable HOST (no explicit target) yields no findings: a deny
+# there would be a false positive on every @c_abi line. An unknown EXPLICIT target
+# still reports an unknown-target deny, never a default.
+pub fn sffi_abi_lint_triple(explicit: text, arch: text, os: text) -> text:
+    if explicit != "":
+        return explicit
+    if arch == "" or os == "":
+        return ""
+    if os == "freebsd":
+        if arch == "x86_64" or arch == "aarch64" or arch == "riscv64":
+            return arch + "-unknown-freebsd"
+        return ""
+    if os == "linux" and (arch == "arm" or arch == "armv7" or arch == "armv7l"):
+        return "armv7-unknown-linux-gnueabihf"
+    if arch != "x86_64" and arch != "aarch64" and arch != "riscv64" and arch != "i686":
+        return ""
+    if os == "linux":
+        return arch + "-unknown-linux-gnu"
+    if os == "macos" or os == "darwin":
+        return arch + "-apple-darwin"
+    if os == "windows":
+        return arch + "-pc-windows-msvc"
+    ""
+
+pub fn sffi_abi_check_with_triple(unit: LintUnit, triple: text) -> [StaticLintFinding]:
+    var out: [StaticLintFinding] = []
+    for f in check_sffi_abi_mismatch(unit.content, unit.path, triple):
+        out.push(StaticLintFinding(f.code, StaticLintLevel.Deny, StaticLintCategory.Safety, f.message, "", f.line_num, 0))
+    for n in sffi_abi_deprecation_notes(unit.content):
+        out.push(StaticLintFinding(n.code, StaticLintLevel.Warn, StaticLintCategory.Safety, n.message, "", n.line_num, 0))
+    out
+
+pub fn sffi_abi_row_findings(unit: LintUnit, explicit: text, arch: text, os: text) -> [StaticLintFinding]:
+    val triple = sffi_abi_lint_triple(explicit, arch, os)
+    if triple == "":
+        return []
+    sffi_abi_check_with_triple(unit, triple)
+
+fn sffi_abi_mismatch_check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    if not unit.content.contains("@c_abi("):
+        return []
+    val explicit = env_get_nullable("SIMPLE_TARGET_TRIPLE") ?? ""
+    sffi_abi_row_findings(unit, explicit, host_arch(), host_os())
+
+pub fn sffi_abi_mismatch_lint_rule() -> StaticLintRule:
+    static_lint_rule("sffi_abi_mismatch", lint_rule_provider_iface("sffi_abi_mismatch"), sffi_abi_mismatch_check_rule)

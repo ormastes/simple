@@ -813,6 +813,7 @@ pub(crate) fn compile_file_to_object(
     // `Global(EnumName)` with `ty=ANY`).
     if imports.populate_global_enum_defs {
         lowerer.set_global_enum_defs(std::sync::Arc::clone(&imports.enum_defs));
+        lowerer.set_merged_global_enum_names(std::sync::Arc::clone(&imports.duplicate_enum_names));
         lowerer.register_global_enums();
     }
     let (mut hir, function_return_types) = lowerer

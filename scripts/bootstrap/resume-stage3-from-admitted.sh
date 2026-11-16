@@ -963,7 +963,14 @@ esac
 # Go-to-end: SIMPLE_BOOTSTRAP_GO_TO_END (default 1, 0 stops at the first
 # failing module), the same knob and default as the bootstrap-from-scratch.sh
 # Stage 3, forwarded as SIMPLE_NATIVE_GO_TO_END. Both reach the env -i worker
-# as per-file lane items (per-file:fw=0|1:gte=0|1), in that order.
+# as per-file lane items (per-file:fw=0|1:gte=0|1:msc=<n>), in that order.
+# MIR shard count: the MIR pool gives one worker ceil(schedule / count) modules
+# and count defaults to the number of LIVE workers, so a single admitted worker
+# claimed the whole closure (run 32: claimed=1664, 26.4 GiB, one codegen abort
+# failed all 1664). SIMPLE_MIR_SHARD_COUNT (caller) >
+# SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT > 9, forwarded as
+# SIMPLE_MIR_SHARD_COUNT. It sets the claim size only: admission still prices
+# live workers, and the variable is outside the native cache identity.
 . "$root/scripts/bootstrap/bootstrap-jobs.shs"
 bootstrap_select_stage3_file_workers "$root/config/bootstrap.sdn" || exit 1
 echo "Stage 3 file workers: ${stage3_file_workers:-compiler default} (source: $stage3_file_workers_source)"
@@ -977,7 +984,32 @@ if [ "$stage3_lowering_lane" = per-file ]; then
   fi
   stage3_per_file_env="${stage3_per_file_env:+$stage3_per_file_env }SIMPLE_NATIVE_GO_TO_END=$stage3_go_to_end"
   stage3_per_file_lane="$stage3_per_file_lane:gte=$stage3_go_to_end"
+  stage3_mir_shard_count=${SIMPLE_MIR_SHARD_COUNT:-${SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT:-9}}
+  case "$stage3_mir_shard_count" in
+    ''|*[!0-9]*|0*|????*) stage3_mir_shard_count= ;;
+  esac
+  if [ -z "$stage3_mir_shard_count" ] || [ "$stage3_mir_shard_count" -gt 128 ]; then
+    echo "error: Stage 3 MIR shard count must be an integer 1..128 (SIMPLE_MIR_SHARD_COUNT or SIMPLE_BOOTSTRAP_STAGE3_MIR_SHARD_COUNT)" >&2
+    exit 1
+  fi
+  stage3_per_file_env="$stage3_per_file_env SIMPLE_MIR_SHARD_COUNT=$stage3_mir_shard_count"
+  stage3_per_file_lane="$stage3_per_file_lane:msc=$stage3_mir_shard_count"
   stage3_lowering_lane="per-file$stage3_per_file_lane"
+fi
+# Keep the hash, transcribed compiler environment and worker route in agreement
+# for the opt-in low-memory HIR residency lane. The launchers below also pass
+# these values through systemd/cgroup boundaries, which may drop ambient env.
+stage3_streaming_surfaces=0 stage3_mir_interface_hir_env= stage3_mir_shard_count_env=
+if [ "${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" = 1 ]; then
+  stage3_streaming_surfaces=1
+  stage3_mir_interface_hir_env=SIMPLE_MIR_SHARD_INTERFACE_HIR=1
+  if [ "$stage3_lowering_lane" = whole-program ]; then
+    stage3_mir_shard_count_env="SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-8}"
+  fi
+fi
+stage3_file_worker_batch_env=
+if [ -n "${SIMPLE_FILE_WORKER_BATCH:-}" ]; then
+  stage3_file_worker_batch_env="SIMPLE_FILE_WORKER_BATCH=${SIMPLE_FILE_WORKER_BATCH}"
 fi
 stage3_cold_init_env=
 case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
@@ -1026,7 +1058,8 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_ABI_POLICY=$resume_abi_policy" \
   "SIMPLE_ABI_ADMISSION_RECEIPT=$stage2_admission" \
   "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_STAGE3_STREAMING_SURFACES=0" \
+  "SIMPLE_STAGE3_STREAMING_SURFACES=$stage3_streaming_surfaces" \
+  ${stage3_mir_interface_hir_env} ${stage3_mir_shard_count_env} ${stage3_file_worker_batch_env} \
   "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route" \
   "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route" \
   "SIMPLE_FRONTEND_CACHE=1" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
@@ -1067,7 +1100,7 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     --group "$stage3_guard_unit" \
     --high "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     --maximum "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" -- \
-    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
     "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
@@ -1080,7 +1113,7 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     --property=KillMode=control-group \
     --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB}M" \
     --property="MemoryMax=${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB}M" \
-    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
     "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
@@ -1108,7 +1141,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     --max-rss-kib="$stage3_darwin_rss_cap_kib" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="$stage3_log.rss.env" -- \
-    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
     "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
@@ -1117,7 +1150,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 else
-  "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+  env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
     "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \

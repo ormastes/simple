@@ -1,0 +1,239 @@
+# AUTHORED_NOT_RUN. Pure DATA records and modeled WAL rows only. This does not
+# prove installed custody, machine authority, native admission or execution.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.{MachineFreshEpochRecordV1}
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2,
+    ContainerExecutionRequestV2, ContainerMountProjectionV2}
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.contracts.distributed_operation_state_v2.{distributed_operation_transition_v2,
+    distributed_operation_duplicate_v2}
+use std.nogc_sync_mut.container.machine_fresh_workload_settlement_v2.*
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.nogc_sync_mut.database.wal.{WalEntryType}
+
+fn workload_record_epoch_v2() -> MachineFreshEpochRecordV1:
+    MachineFreshEpochRecordV1(authority_id: "machine_1", physical_host_id: "host_1",
+        native_machine_id: "linux-machine-id-v1:1234", epoch_id: "installed_epoch_1", epoch_generation: 7,
+        profile_digest: "a".repeat(64), machine_policy_digest: "b".repeat(64), process_identity_digest: "c".repeat(64),
+        principal_id: "linux:uid:20001", service_uid: 20001, service_gid: 20001, manager_unique_name: ":1.23",
+        partition_identity_digest: "d".repeat(64), store_identity_digest: "e".repeat(64),
+        provider_policy_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        capacity_cpu_millis: 8000, capacity_memory_bytes: 8192,
+        observed_cpu_millis: 4000, observed_memory_bytes: 4096,
+        reserved_cpu_millis: 500, reserved_memory_bytes: 512,
+        outside_cpu_millis: 4000, outside_memory_bytes: 4096,
+        usable_cpu_millis: 3500, usable_memory_bytes: 3584)
+
+fn workload_record_scope_v2() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "service_1",
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "linux-machine-id-v1:1234",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+
+fn workload_record_request_v2() -> ContainerExecutionRequestV2:
+    val native = LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/true"],
+        args: [], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1024,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    val scope = workload_record_scope_v2()
+    val digest = linux_oci_request_digest_v1(native).unwrap()
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: digest,
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode,
+        continuity_id: scope.continuity_id)
+    ContainerExecutionRequestV2(plan: plan, request_bytes: linux_oci_retained_request_encode_v1(native).unwrap())
+
+fn workload_record_v2() -> MachineFreshWorkloadRecordV2:
+    machine_fresh_workload_record_v2(workload_record_epoch_v2(), "9".repeat(64),
+        workload_record_scope_v2(), workload_record_request_v2(), "linux:uid:20001", "8".repeat(64), 500, 512).unwrap()
+
+describe "fresh workload V2 DATA accounting and operation rows":
+    it "charges helper and workload inside usable capacity with exact remainder conservation":
+        step("Keep the prior epoch's outside and Host reservation accounting unchanged")
+        val record = workload_record_v2()
+        expect(record.cpu_millis).to_equal(1000)
+        expect(record.helper_cpu_millis).to_equal(500)
+        expect(record.remaining_cpu_millis).to_equal(2000)
+        expect(record.remaining_cpu_millis + record.cpu_millis + record.helper_cpu_millis).to_equal(3500)
+        expect(record.memory_bytes).to_equal(1024)
+        expect(record.helper_memory_bytes).to_equal(512)
+        expect(record.remaining_memory_bytes).to_equal(2048)
+        expect(record.remaining_memory_bytes + record.memory_bytes + record.helper_memory_bytes).to_equal(3584)
+
+    it "accepts the exact cpu and memory boundary and refuses one unit over":
+        step("Use the available capacity after helper debit without overflowing a sum")
+        val scope = workload_record_scope_v2()
+        var request = workload_record_request_v2()
+        var exact_native = LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+            image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/true"],
+            args: [], timeout_ms: 30000, cpu_limit_millis: 3000, memory_limit_bytes: 3072,
+            pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+        request.request_bytes = linux_oci_retained_request_encode_v1(exact_native).unwrap()
+        request.plan.request_digest = linux_oci_request_digest_v1(exact_native).unwrap()
+        val exact = machine_fresh_workload_record_v2(workload_record_epoch_v2(), "9".repeat(64),
+            scope, request, "linux:uid:20001", "8".repeat(64), 500, 512).unwrap()
+        expect(exact.remaining_cpu_millis).to_equal(0)
+        expect(exact.remaining_memory_bytes).to_equal(0)
+        exact_native.cpu_limit_millis = 3001
+        request.request_bytes = linux_oci_retained_request_encode_v1(exact_native).unwrap()
+        request.plan.request_digest = linux_oci_request_digest_v1(exact_native).unwrap()
+        val cpu_over = machine_fresh_workload_record_v2(workload_record_epoch_v2(), "9".repeat(64),
+            scope, request, "linux:uid:20001", "8".repeat(64), 500, 512)
+        expect(cpu_over.is_err()).to_equal(true)
+        expect(cpu_over.unwrap_err()).to_equal("machine-fresh-workload-capacity")
+        exact_native.cpu_limit_millis = 3000
+        exact_native.memory_limit_bytes = 3073
+        request.request_bytes = linux_oci_retained_request_encode_v1(exact_native).unwrap()
+        request.plan.request_digest = linux_oci_request_digest_v1(exact_native).unwrap()
+        val memory_over = machine_fresh_workload_record_v2(workload_record_epoch_v2(), "9".repeat(64),
+            scope, request, "linux:uid:20001", "8".repeat(64), 500, 512)
+        expect(memory_over.is_err()).to_equal(true)
+        expect(memory_over.unwrap_err()).to_equal("machine-fresh-workload-capacity")
+
+    it "binds plan scope and retained request digest while refusing mounts and terminal mode":
+        step("Check each immutable native request binding before producing a record")
+        val scope = workload_record_scope_v2()
+        val original = workload_record_request_v2()
+        var changed = original
+        changed.plan.request_digest = "7".repeat(64)
+        expect(machine_fresh_workload_request_v2(scope, changed).unwrap_err()).to_equal("machine-fresh-workload-request-binding")
+        changed = original
+        changed.plan.workload_uid = "other_job"
+        expect(machine_fresh_workload_request_v2(scope, changed).unwrap_err()).to_equal("machine-fresh-workload-request-binding")
+        changed = original
+        changed.plan.physical_host_id = "other_host"
+        expect(machine_fresh_workload_request_v2(scope, changed).unwrap_err()).to_equal("machine-fresh-workload-scope")
+        val native = LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+            image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/true"],
+            args: [], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1024,
+            pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+        var local_transport = native
+        local_transport.image = "oci:/host/object@sha256:" + "2".repeat(64)
+        var local_request = original
+        local_request.request_bytes = linux_oci_retained_request_encode_v1(local_transport).unwrap()
+        local_request.plan.request_digest = linux_oci_request_digest_v1(local_transport).unwrap()
+        expect(machine_fresh_workload_request_v2(scope, local_request).is_err()).to_equal(true)
+        var mounts = native
+        mounts.mounts = [ContainerMountProjectionV2(host_root: "/host", guest_root: "/data", read_only: true)]
+        var mount_request = original
+        mount_request.request_bytes = linux_oci_retained_request_encode_v1(mounts).unwrap()
+        mount_request.plan.request_digest = linux_oci_request_digest_v1(mounts).unwrap()
+        expect(machine_fresh_workload_request_v2(scope, mount_request).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+        var terminal = native
+        terminal.terminal_mode = "tty"
+        var terminal_request = original
+        terminal_request.request_bytes = linux_oci_retained_request_encode_v1(terminal).unwrap()
+        terminal_request.plan.request_digest = linux_oci_request_digest_v1(terminal).unwrap()
+        expect(machine_fresh_workload_request_v2(scope, terminal_request).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+
+    it "writes three uncertain reservation rows then returns only this partition and workload on settlement":
+        step("Model a completed transition digest while preserving all unrelated Host and outside rows")
+        val record = workload_record_v2()
+        val initial = machine_fresh_workload_action_initial_v2(record, "create", 1).unwrap()
+        expect(initial.state).to_equal("admitted")
+        val executing = distributed_operation_transition_v2(initial, "executing", "").unwrap()
+        expect(distributed_operation_transition_v2(executing, "executing", "").is_err()).to_equal(true)
+        expect(distributed_operation_transition_v2(executing, "completed", "").is_err()).to_equal(true)
+        val completed = distributed_operation_transition_v2(executing, "completed", "6".repeat(64)).unwrap()
+        expect(distributed_operation_duplicate_v2(completed, initial.envelope)).to_equal("RETAINED_OUTCOME")
+        val reserve = machine_fresh_workload_reserve_entries_v2(record, 100).unwrap()
+        expect(reserve.len()).to_equal(3)
+        expect(reserve[0].table_name).to_equal("machine-fresh-workloads-v2")
+        expect(reserve[0].entry_type).to_equal(WalEntryType.Insert)
+        expect(reserve[1].row_key).to_start_with("partition-")
+        expect(reserve[1].data).to_contain("uncertain")
+        expect(reserve[2].row_key).to_start_with("workload-")
+        expect(reserve[2].data).to_contain("uncertain")
+        val charge = sdn_parse_strict_v1(reserve[2].data, SdnStrictLimitsV1()).unwrap().value
+        val devices = charge.get("exclusiveDevices").unwrap().as_array().unwrap()
+        expect(devices.len()).to_equal(0)
+        val settled = machine_fresh_workload_settle_entries_v2(record, completed, 200).unwrap()
+        expect(settled.len()).to_equal(3)
+        expect(settled[0].table_name).to_equal("machine-fresh-workload-actions-v2")
+        expect(settled[0].data).to_contain("6".repeat(64))
+        expect(settled[1].row_key).to_equal(reserve[2].row_key)
+        expect(settled[1].data).to_contain("released")
+        expect(settled[2].row_key).to_equal(reserve[1].row_key)
+        expect(settled[2].data).to_contain("3500")
+        expect(settled[2].data).to_contain("3584")
+        expect(settled[0].table_name == "host-reservations-v1").to_equal(false)
+        expect(settled[1].table_name == "outside-obligations-v1").to_equal(false)
+        expect(machine_fresh_workload_settle_entries_v2(record, executing, 200).is_err()).to_equal(true)
+
+    it "rejects invalid actions and malformed modeled result evidence":
+        step("Keep this transition oracle separate from admission and machine authority")
+        val record = workload_record_v2()
+        expect(machine_fresh_workload_action_initial_v2(record, "gpu", 1).is_err()).to_equal(true)
+        val state = machine_fresh_workload_action_initial_v2(record, "create", 1).unwrap()
+        expect(machine_fresh_workload_action_entries_v2(record, state, "not-a-digest", "evidence", 10).is_err()).to_equal(true)
+        expect(machine_fresh_workload_action_entries_v2(record, state, "", "x".repeat(65537), 10).is_err()).to_equal(true)
+        expect(machine_fresh_workload_action_entries_v2(record, state, "", "evidence", 0).is_err()).to_equal(true)
+
+    it "requires every modeled settlement prerequisite before preparing release rows":
+        step("Refuse inspect-confirm completion without association and allow a complete modeled history")
+        val record = workload_record_v2()
+        val admitted = machine_fresh_workload_action_initial_v2(record, "inspect-confirm", 2).unwrap()
+        val executing = distributed_operation_transition_v2(admitted, "executing", "").unwrap()
+        val terminal = distributed_operation_transition_v2(executing, "completed", "5".repeat(64)).unwrap()
+        val unassociated = MachineFreshWorkloadSettlementProgressV2(associated: false,
+            helper_retired: true, native_retained: true, absence_completed: true,
+            uncertain: false, settled: false, phase: "idle")
+        val rejected = machine_fresh_workload_prepare_settlement_v2(unassociated, record, terminal, 300)
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("machine-fresh-workload-settlement-ineligible")
+        var eligible = unassociated
+        eligible.associated = true
+        val (reserved, rows) = machine_fresh_workload_prepare_settlement_v2(eligible, record, terminal, 301).unwrap()
+        expect(reserved.phase).to_equal("settlement-reserved")
+        expect(rows.len()).to_equal(3)
+        val finalized = machine_fresh_workload_finalize_settlement_v2(reserved).unwrap()
+        expect(finalized.phase).to_equal("settled")
+        expect(machine_fresh_workload_finalize_settlement_v2(finalized).is_err()).to_equal(true)
+
+    it "reserves the full projected history budget before modeled appends":
+        step("Accept exact bounded totals and reject a batch before it exceeds its budget")
+        expect(machine_fresh_workload_history_budget_v2(38, 6, false).is_ok()).to_equal(true)
+        val noncleanup_over = machine_fresh_workload_history_budget_v2(39, 6, false)
+        expect(noncleanup_over.unwrap_err()).to_equal("machine-fresh-workload-history-budget")
+        expect(machine_fresh_workload_history_budget_v2(57, 7, true).is_ok()).to_equal(true)
+        val cleanup_over = machine_fresh_workload_history_budget_v2(58, 7, true)
+        expect(cleanup_over.unwrap_err()).to_equal("machine-fresh-workload-history-budget")
+
+    it "keeps the first modeled diagnostic across later polling and empty retry results":
+        step("Preserve the first reported native diagnostic without injecting a native failure")
+        val first = machine_fresh_workload_first_diagnostic_v2("modeled-start-error", "")
+        val after_poll = machine_fresh_workload_first_diagnostic_v2(first, "modeled-poll-timeout")
+        val after_retry = machine_fresh_workload_first_diagnostic_v2(after_poll, "")
+        val after_later_error = machine_fresh_workload_first_diagnostic_v2(after_retry, "modeled-cleanup-error")
+        expect(first).to_equal("modeled-start-error")
+        expect(after_poll).to_equal(first)
+        expect(after_retry).to_equal(first)
+        expect(after_later_error).to_equal(first)
+
+    it "never upgrades staged or uncertain reservation data into an action grant on identical retry":
+        step("Exercise the production reservation guard after invalid time and unknown publication")
+        val record = workload_record_v2()
+        val empty = MachineFreshWorkloadReservationProgressV2()
+        val staged = machine_fresh_workload_reservation_stage_v2(empty, record).unwrap()
+        expect(staged.phase).to_equal("staged")
+        # Actual production row constructor fails after request/template staging.
+        expect(machine_fresh_workload_reserve_entries_v2(record, 0).unwrap_err()).to_equal("machine-fresh-workload-clock")
+        expect(machine_fresh_workload_reservation_require_v2(staged, record).unwrap_err()).to_equal("machine-fresh-workload-reservation-publication-unproven")
+        expect(machine_fresh_workload_reservation_stage_v2(staged, record).is_err()).to_equal(true)
+        expect(machine_fresh_workload_reservation_confirm_v2(staged, record).is_err()).to_equal(true)
+        # This transition is recorded before the real CAS; failure/ambiguity
+        # leaves it unadmitted. No native writer or success is fabricated here.
+        val pending = machine_fresh_workload_reservation_pending_v2(staged).unwrap()
+        expect(pending.phase).to_equal("publication-unknown")
+        expect(machine_fresh_workload_reservation_require_v2(pending, record).is_err()).to_equal(true)
+        expect(machine_fresh_workload_reservation_stage_v2(pending, record).is_err()).to_equal(true)
+        # DATA models the final guard only. Production invokes confirmation
+        # solely after exact reserve CAS/readback on its retained original writer.
+        val admitted = machine_fresh_workload_reservation_confirm_v2(pending, record).unwrap()
+        expect(admitted.phase).to_equal("admitted")
+        expect(machine_fresh_workload_reservation_require_v2(admitted, record).is_ok()).to_equal(true)
+        expect(machine_fresh_workload_reservation_confirm_v2(admitted, record).is_err()).to_equal(true)

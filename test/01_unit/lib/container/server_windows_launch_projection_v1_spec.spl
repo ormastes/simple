@@ -1,0 +1,96 @@
+# REQ-002 REQ-005. Source-only NOT_RUN; no native Windows/engine effects.
+use std.common.config_core.server_context_types_v1.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_execution_plan_digest_v2}
+use std.common.contracts.container.execution_options_v1.OciEnvironmentEntryV1
+use std.nogc_async_mut.container.server_windows_launch_projection_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.*
+
+fn windows_server_policy_fixture_v1() -> WindowsDockerPolicyV1:
+    WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe",
+        endpoint: "npipe:////./pipe/docker_engine", engine_id: "engine-a", node_boot_id: "boot-a",
+        provider_generation: 4, expected_kernel_version: "10.0 20348 (20348.2402.amd64fre)",
+        image_os_version: "10.0.20348.2402", expected_image_id: "sha256:" + "a".repeat(64),
+        timeout_ms: 5000, max_output_bytes: 8192, system_root: "C:\\Windows", temp_directory: "C:\\Temp",
+        network_id: "f".repeat(64), network_name: "simple-nat")
+
+fn windows_server_scope_fixture_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "physical", service_scope_id: "service",
+        boot_id: "boot-a", provider_generation: 4, native_machine_id: "native-machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-a")
+
+fn windows_server_native_fixture_v1() -> WindowsDockerRequestV1:
+    WindowsDockerRequestV1(pod_uid: "job", attempt: 1, operation_id: "launch",
+        image: "mcr.microsoft.com/windows/servercore@sha256:" + "b".repeat(64),
+        command: ["C:\\simple\\simple.exe", "orchestrator", "servers", "show"], args: [],
+        cpu_count: 2, memory_limit_bytes: 536870912, network: "f".repeat(64))
+
+fn windows_server_selection_fixture_v1(host: text) -> ResolvedServerV1:
+    val record = ServerRecordV1(name: "shared", transport: "ssh", host: "localhost", port: 22,
+        container_host: host, auth_ref: "secret://container-job/read-only",
+        tls_ref: "trust://company/server", remote_executable: "/opt/simple/bin/simple")
+    ResolvedServerV1(record: record, consumer: "orchestrator", context: "work", source: "context_shared")
+
+describe "Windows typed server discovery before immutable container signing":
+    it "binds injected public discovery to Windows retained request and plan digests":
+        step("Compute provider-owned digest and retained bytes after environment projection")
+        val policy = windows_server_policy_fixture_v1()
+        val original = windows_server_native_fixture_v1()
+        val execution = container_server_windows_request_v1(windows_server_scope_fixture_v1(), policy,
+            original, windows_server_selection_fixture_v1("server.internal")).unwrap()
+        val native = windows_docker_request_decode_v1(policy, execution.request_bytes).unwrap()
+        expect(native.environment.len()).to_equal(3)
+        expect(original.environment.len()).to_equal(0)
+        expect(execution.plan.backend).to_equal("windows-docker-process")
+        expect(execution.plan.request_digest).to_equal(windows_docker_request_digest_v1(policy, native).unwrap())
+        expect(execution.plan.request_digest == windows_docker_request_digest_v1(policy, original).unwrap()).to_equal(false)
+        val changed = container_server_windows_request_v1(windows_server_scope_fixture_v1(), policy,
+            original, windows_server_selection_fixture_v1("other.internal")).unwrap()
+        expect(execution.plan.request_digest == changed.plan.request_digest).to_equal(false)
+        expect(container_execution_plan_digest_v2(execution.plan).unwrap() ==
+            container_execution_plan_digest_v2(changed.plan).unwrap()).to_equal(false)
+
+    it "emits actual Windows Docker create argv with the pinned network and public environment":
+        step("Observe exact direct --env and --network arguments used by provider create")
+        val policy = windows_server_policy_fixture_v1()
+        val execution = container_server_windows_request_v1(windows_server_scope_fixture_v1(), policy,
+            windows_server_native_fixture_v1(), windows_server_selection_fixture_v1("server.internal")).unwrap()
+        val native = windows_docker_request_decode_v1(policy, execution.request_bytes).unwrap()
+        val command = windows_docker_create_command_v1(policy, native).unwrap()
+        expect(command.args[6]).to_equal("--network")
+        expect(command.args[7]).to_equal(policy.network_id)
+        expect(command.args.contains("--env")).to_equal(true)
+        expect(command.args.contains("SIMPLE_SERVER_CLIENT_SCOPE=container")).to_equal(true)
+        expect(command.args.contains("SIMPLE_SERVERS_CONFIG=")).to_equal(true)
+        expect(command.args.contains("SIMPLE_SERVERS_SDN=" + native.environment[0].value)).to_equal(true)
+
+    it "refuses a disabled or unapproved network without changing the unsigned request":
+        step("Keep native network policy independent from server configuration")
+        val policy = windows_server_policy_fixture_v1()
+        var native = windows_server_native_fixture_v1()
+        native.network = "none"
+        val denied = container_server_windows_request_v1(windows_server_scope_fixture_v1(), policy,
+            native, windows_server_selection_fixture_v1("server.internal"))
+        expect(denied.unwrap_err()).to_equal("container-server-network-unavailable")
+        expect(native.environment.len()).to_equal(0)
+        native.network = "e".repeat(64)
+        expect(container_server_windows_request_v1(windows_server_scope_fixture_v1(), policy,
+            native, windows_server_selection_fixture_v1("server.internal")).is_err()).to_equal(true)
+
+    it "rejects loopback inline credential data and conflicting or case aliased reserved environment":
+        step("Apply shared endpoint policy and Windows environment name semantics before signing")
+        val policy = windows_server_policy_fixture_v1()
+        val scope = windows_server_scope_fixture_v1()
+        val native = windows_server_native_fixture_v1()
+        expect(container_server_windows_request_v1(scope, policy, native,
+            windows_server_selection_fixture_v1("127.0.0.1")).is_err()).to_equal(true)
+        var selected = windows_server_selection_fixture_v1("server.internal")
+        selected.record.auth_ref = "PRIVATE KEY DATA"
+        expect(container_server_windows_request_v1(scope, policy, native, selected).is_err()).to_equal(true)
+        var conflicting = native
+        conflicting.environment = [OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_CONFIG", value: "C:\\private\\servers.sdn")]
+        expect(container_server_windows_request_v1(scope, policy, conflicting,
+            windows_server_selection_fixture_v1("server.internal")).is_err()).to_equal(true)
+        conflicting.environment = [OciEnvironmentEntryV1(name: "simple_servers_sdn", value: "shadow")]
+        expect(container_server_windows_request_v1(scope, policy, conflicting,
+            windows_server_selection_fixture_v1("server.internal")).is_err()).to_equal(true)

@@ -1,58 +1,401 @@
-# Interactive attachment lease scenarios
+# Interactive attachment lease acceptance scenarios
 
-**TEST_BLOCKED — authored source/manual; compilation, execution, docgen and live
-client-kill recovery have not run.**
+**AUTHORED_NOT_RUN / TEST_BLOCKED.** Authored modern manual, not generated
+runtime evidence. Compilation, registered native SSpec execution, API captures
+and `spipe-docgen` zero-stub validation remain pending admitted tools.
 
 Source: `test/03_system/tools/smux_client_leases_spec.spl`.
-Requirements: `REQ-CMUX-002` (attachment lifecycle), `REQ-CMUX-003` (notification scope), and `NFR-CMUX-006` (crash/stale identity recovery).
+Requirements: REQ-CMUX-002, REQ-CMUX-003, NFR-CMUX-006. Supporting evidence for
+AT-MUX-03/06 at the attachment-token boundary, not full independent CoreMux input
+and geometry authority, viewer replay cursors, or native terminal qualification.
 
-The nine scenarios use production lease arithmetic and actual service APIs.
-Deterministic time is supplied only to the same pure transforms used by the
-production API; no test replaces the attachment registry or backend.
+## Fixture and cleanup
 
-1. Admit at monotonic time 100, renew at 3100, and observe deadline 18100.
-   A foreign session or regressing clock refuses. Equality expires the lease;
-   neither a heartbeat at the deadline nor one after removal revives it.
-2. Admit four clients, refuse a fifth, and remove four exact expired identities.
-   A new admission uses generation five and recovers capacity.
-3. Collect an expiry candidate, rebind the client, and reject the old candidate
-   and heartbeat. Detach/reattach advances the counter. A fresh owner nonce
-   rejects the previous owner's token even when both counters equal one.
-4. Refuse missing/malformed owner entropy, malformed token framing, negative
-   time and a deadline that would overflow.
-5. Use actual leased attachment APIs to replace an attachment, refuse the old
-   client's heartbeat/resize/detach and refuse tokenless downgrade. A live token
-   resizes successfully; a separate legacy persistent attachment remains.
-   Token-specific detach leaves the production pane ID intact.
-6. Reset the actual service, reuse its session/client IDs, and require a fresh
-   entropy-backed token. API and protocol heartbeat reject the old token.
-7. Admit through `client-attach`, bind the canonical session ID from the reply,
-   rename the session, and successfully heartbeat, resize and detach using the
-   stable ID. The reply has four fields: `smux: leased TOKEN SESSION_ID`.
-8. Rebind the actual attachment, then queue a fresh notification. The previous
-   lease token cannot poll or acknowledge it. Its actual failed-heartbeat reply
-   is rejected by `smux_remote_reply_ok`, not treated as a successful receipt.
-   The current token still peeks the exact message, acknowledges it, and then
-   observes an empty queue.
-9. Validate every leased request before dispatch. A stale token cannot create a
-   window or send input; current-token discovery succeeds. Foreign session
-   commands, recursive envelopes and mismatched inner lease identities refuse
-   without changing pane/window ownership. These are actual dispatcher calls,
-   not evidence that a native terminal crash has been recovered.
+The first four scenarios call the production pure lease owner with explicit
+synthetic nonce/time inputs. Service scenarios use actual in-process attachment,
+notification and dispatcher APIs plus the checked entropy source. Logical
+`smux_create_session` creates metadata; these tests do not start a native agent.
+Neither a fake registry nor an alternate lease implementation is introduced.
 
-`REQ-CMUX-006` capability discovery is a separate acceptance obligation; these
-lease rows do not claim to verify the complete capability manifest.
+Every registered case has an `after_each` reset through the production test reset
+port and asserts empty logical sessions/clients. Each service setup checks the
+same reset result before further effects. The actual reset can retain a native
+owner instead of discarding it; nonempty retained state records failure and stops
+that setup. There is no forced kill, private-state replacement or native-owner
+cleanup proof in this suite. A fatal process crash still requires independent
+system cleanup/qualification, not this in-process hook.
 
-Limits: four leased attachments at most (shared with the four-slot attachment
-registry), 15-second TTL, intended 3-second heartbeat and 1-second server sweep.
-These are configured deadlines and scheduling targets, not real-time guarantees.
-Legacy API attachments are explicitly persistent/unmanaged; N2 interactive
-admission must use the leased route.
+## Scenario flow
 
-Required live follow-up: start a background child and two native clients; kill
-one client without graceful detach; observe its exact attachment, notification
-queue and canvas constraint disappear after bounded server housekeeping while
-the other client and child continue. Repeat after reconnect/rebind and server
-restart; reject delayed old heartbeats and detach requests. Both tmux and native
-providers need their selected CoreMux acceptance evidence. The authored helper
-and API rows do not claim this live recovery or broader CoreMux qualification.
+### Should use monotonic deadlines and refuses expiry-time renewal rather than reviving a lease
+1. Create the production pure lease owner with an explicit test clock.
+2. Renew before the deadline using the same identity.
+3. At equality the lease expires and cannot heartbeat back to life.
+
+### Should bound the owner to four slots and recovers capacity only through checked expiry
+1. Admit four synthetic identities through the production bounded lease owner.
+2. Remove the exact expired candidates and admit a new generation.
+
+### Should reject stale expiry and heartbeat identities after rebind detach and owner restart
+1. Create the production pure lease owner with an explicit test clock.
+2. A previously collected expiry candidate cannot detach the replacement.
+3. A fresh server incarnation rejects an old token even when counter one is reused.
+
+### Should fail closed on malformed owner identity token framing and deadline overflow
+1. Reject invalid incarnation tokens and overflowing clock input.
+2. Create the production pure lease owner with an explicit test clock.
+
+### Should protect actual attachments from old client resize and detach while preserving legacy compatibility
+1. Reject stale mutation and tokenless downgrade on the real attachment owner.
+2. Token-specific detach removes only the client and retains pane owners.
+
+### Should validate the current lease before dispatching any scoped interactive request
+1. Reject stale mutation before new-window can allocate or spawn anything.
+2. A current lease may query its own windows without spawning a child.
+3. Refuse cross-session inner commands recursive envelopes and mismatched inner lease identities.
+
+### Should create a fresh entropy-backed incarnation after reset even when service IDs are reused
+1. Create an actual logical attachment then reset its service incarnation.
+
+### Should return a canonical session ID and retains leased requests after the session is renamed
+1. Admit through the production protocol and bind its canonical session ID.
+2. Heartbeat resize and detach keep using the same stable session ID.
+
+### Should refuse a replaced client token before notification polling or acknowledgment can consume a new message
+1. Queue a real notification only after the replacement client is admitted.
+2. A failed heartbeat must remain a failed callback receipt.
+3. The current token still peeks and acknowledges the exact queued message.
+
+### Should refuse repeated old detach after the same client attaches with a new token
+1. Detach one real logical attachment and admit its successor under the same client ID.
+2. Replay the old detach twice and observe the unchanged successor and pane.
+
+## Oracles and limits
+
+Nine existing cases preserve monotonic deadline equality, four-slot admission,
+rebind/incarnation refusal, malformed input, actual attachment mutation checks,
+scoped dispatcher guards, entropy renewal, canonical session identity after
+rename, and notification protection. The new tenth case detaches the original
+attachment, admits a replacement with the same client ID, and replays old detach
+twice. Each replay must return exactly `client lease identity mismatch`; the
+replacement retains its 40x12 geometry, current token, sole-client count, window
+and pane identity. Only its current token can perform the final detach.
+
+The source contains ten registered cases plus a shared cleanup assertion; source
+assertion-site counts are not runtime assertion counts. Negative dispatch cases
+must reject before allocating windows or sending input; successful discovery does
+not demonstrate actual terminal execution. Notification read/ack checks do not
+prove terminal replay byte positions.
+
+Configured targets remain four leased attachments, 15-second TTL, intended
+3-second heartbeat and 1-second sweep. Injected time checks validate arithmetic,
+not real-time scheduling. Legacy attachments are persistent/unmanaged. Native
+client death, server restart, child survival, stream gaps, independent input and
+geometry leases, and two viewers with different replay positions require their
+separate real provider/service fixtures. These scenarios do not close AT-MUX-05,
+07 or 08, nor the live portion of AT-MUX-03/06.
+
+<details>
+<summary>Executable SSpec source (authored, unexecuted)</summary>
+
+```simple
+# codex-system-test
+# @acceptance AT-MUX-03 AT-MUX-06
+"""
+## Purpose and audience
+Interactive attachment lease identity, deadline refusal and bounded admission
+for smux service maintainers. Time-injected rows call the production pure owner;
+service rows call real attachment APIs and the checked entropy provider.
+## Evidence boundary
+TEST_BLOCKED: authored, no compilation, execution or generated evidence.
+No test replaces the lease owner, SOSIX provider or attachment registry. Pure
+deadline rows do not prove a running server's sweep cadence or killed-client
+recovery. A real client-kill recovery row remains required on both providers.
+# @manual: primary
+# @capture: api
+# @req REQ-CMUX-002
+# @req NFR-CMUX-006
+"""
+use std.spec.{describe, it, expect, step, fail, after_each}
+use os.apps.smux.client_leases.{smux_leases_new, smux_lease_admit,
+    smux_lease_heartbeat, smux_lease_check, smux_lease_expiry_candidates, smux_lease_expire,
+    smux_lease_remove, client_lease_token_valid, SMUX_CLIENT_LEASE_TTL_MS}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session, smux_list_clients, smux_list_sessions,
+    smux_list_windows, smux_list_panes, smux_attach, smux_attach_leased,
+    smux_client_heartbeat, smux_client_resize_leased, smux_detach_leased,
+    smux_detach_from, smux_reap_expired_clients, smux_rename_session, smux_client_check_lease}
+use os.apps.smux.smux_remote.{smux_remote_dispatch, smux_remote_reply_ok}
+
+# The actual reset may retain a native owner rather than discard it. Never
+# continue a logical-only scenario if that retained state prevents reset.
+fn reset_lease_fixture() -> bool:
+    smux_reset_for_test()
+    val empty = smux_list_sessions().len() == 0 and smux_list_clients().len() == 0
+    if not empty: fail("smux fixture reset retained prior service state; refusing further fixture effects")
+    empty
+
+describe "interactive client lease ownership and deadlines":
+    after_each:
+        expect(reset_lease_fixture()).to_equal(true)
+
+    it "should use monotonic deadlines and refuses expiry-time renewal rather than reviving a lease":
+        # @req REQ-CMUX-002
+        # @req NFR-CMUX-006
+        step("Create the production pure lease owner with an explicit test clock")
+        val owner = smux_leases_new("0123456789abcdef0123456789abcdef").unwrap()
+        val admission = smux_lease_admit(owner, "s", "c", 100).unwrap()
+        val token = admission.lease.token
+        expect(client_lease_token_valid(token)).to_equal(true)
+        expect(admission.lease.deadline_ms).to_equal(100 + SMUX_CLIENT_LEASE_TTL_MS)
+        step("Renew before the deadline using the same identity")
+        val renewed = smux_lease_heartbeat(admission.state, "s", "c", token, 3100).unwrap()
+        expect(renewed.leases[0].deadline_ms).to_equal(18100)
+        expect(renewed.leases[0].token).to_equal(token)
+        expect(smux_lease_expiry_candidates(renewed, 18099).unwrap().len()).to_equal(0)
+        expect(smux_lease_check(renewed, "s", "c", token, 18099).is_ok()).to_equal(true)
+        expect(renewed.leases[0].deadline_ms).to_equal(18100)
+        expect(smux_lease_heartbeat(renewed, "wrong", "c", token, 4000).is_err()).to_equal(true)
+        expect(smux_lease_heartbeat(renewed, "s", "c", token, 3099).is_err()).to_equal(true)
+        step("At equality the lease expires and cannot heartbeat back to life")
+        expect(smux_lease_expiry_candidates(renewed, 18100).unwrap().len()).to_equal(1)
+        expect(smux_lease_heartbeat(renewed, "s", "c", token, 18100).is_err()).to_equal(true)
+        expect(smux_lease_check(renewed, "s", "c", token, 18100).is_err()).to_equal(true)
+        expect(smux_lease_expire(renewed, "s", "c", token, 18099).is_err()).to_equal(true)
+        val expired = smux_lease_expire(renewed, "s", "c", token, 18100).unwrap()
+        expect(expired.leases.len()).to_equal(0)
+        expect(smux_lease_heartbeat(expired, "s", "c", token, 18101).is_err()).to_equal(true)
+
+    it "should bound the owner to four slots and recovers capacity only through checked expiry":
+        # @req REQ-CMUX-002
+        # @req NFR-CMUX-006
+        step("Admit four synthetic identities through the production bounded lease owner")
+        var owner = smux_leases_new("0123456789abcdef0123456789abcdef").unwrap()
+        for client in ["a", "b", "c", "d"]:
+            owner = smux_lease_admit(owner, "s", client, 100).unwrap().state
+        expect(owner.leases.len()).to_equal(4)
+        expect(smux_lease_admit(owner, "s", "e", 101).is_err()).to_equal(true)
+        step("Remove the exact expired candidates and admit a new generation")
+        val expired = smux_lease_expiry_candidates(owner, 15100).unwrap()
+        expect(expired.len()).to_equal(4)
+        for lease in expired:
+            owner = smux_lease_expire(owner, lease.session_id, lease.client_id, lease.token, 15100).unwrap()
+        expect(owner.leases.len()).to_equal(0)
+        val next = smux_lease_admit(owner, "s", "e", 15101).unwrap()
+        expect(next.lease.generation).to_equal(5)
+        expect(next.state.leases.len()).to_equal(1)
+
+    it "should reject stale expiry and heartbeat identities after rebind detach and owner restart":
+        # @req REQ-CMUX-002
+        # @req NFR-CMUX-006
+        step("Create the production pure lease owner with an explicit test clock")
+        val owner = smux_leases_new("0123456789abcdef0123456789abcdef").unwrap()
+        val first = smux_lease_admit(owner, "s", "c", 100).unwrap()
+        val stale = smux_lease_expiry_candidates(first.state, 15100).unwrap()[0]
+        val rebound = smux_lease_admit(first.state, "s", "c", 15100).unwrap()
+        step("A previously collected expiry candidate cannot detach the replacement")
+        expect(rebound.lease.token == first.lease.token).to_equal(false)
+        expect(smux_lease_expire(rebound.state, "s", "c", stale.token, 15100).is_err()).to_equal(true)
+        expect(smux_lease_remove(rebound.state, "s", "c", stale.token).leases.len()).to_equal(1)
+        expect(smux_lease_heartbeat(rebound.state, "s", "c", first.lease.token, 15101).is_err()).to_equal(true)
+        val detached = smux_lease_remove(rebound.state, "s", "c", rebound.lease.token)
+        val reattached = smux_lease_admit(detached, "s", "c", 15102).unwrap()
+        expect(reattached.lease.generation).to_equal(3)
+        step("A fresh server incarnation rejects an old token even when counter one is reused")
+        val restarted = smux_leases_new("fedcba9876543210fedcba9876543210").unwrap()
+        val current = smux_lease_admit(restarted, "s", "c", 15103).unwrap()
+        expect(current.lease.generation).to_equal(first.lease.generation)
+        expect(current.lease.token == first.lease.token).to_equal(false)
+        expect(smux_lease_heartbeat(current.state, "s", "c", first.lease.token, 15104).is_err()).to_equal(true)
+
+    it "should fail closed on malformed owner identity token framing and deadline overflow":
+        # @req REQ-CMUX-002
+        # @req NFR-CMUX-006
+        step("Reject invalid incarnation tokens and overflowing clock input")
+        expect(smux_leases_new("").is_err()).to_equal(true)
+        expect(smux_leases_new("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err()).to_equal(true)
+        for token in ["", "0123456789abcdef0123456789abcdef:0", "0123456789abcdef0123456789abcdef:01", "0123456789abcdef0123456789abcdef:1x", "0123456789abcdef0123456789abcdef:9999999999999999999"]:
+            expect(client_lease_token_valid(token)).to_equal(false)
+        step("Create the production pure lease owner with an explicit test clock")
+        val owner = smux_leases_new("0123456789abcdef0123456789abcdef").unwrap()
+        expect(smux_lease_admit(owner, "s", "c", -1).is_err()).to_equal(true)
+        expect(smux_lease_admit(owner, "s", "c", 9223372036854775807).is_err()).to_equal(true)
+
+    it "should protect actual attachments from old client resize and detach while preserving legacy compatibility":
+        # @req REQ-CMUX-002
+        # @req NFR-CMUX-006
+        if not reset_lease_fixture(): return
+        val session = smux_create_session("leased")
+        val first = smux_attach_leased(session.id, "client", 80, 24)
+        expect(first.is_ok()).to_equal(true)
+        val old_token = first.unwrap()
+        val second = smux_attach_leased(session.id, "client", 40, 12)
+        expect(second.is_ok()).to_equal(true)
+        val token = second.unwrap()
+        expect(token == old_token).to_equal(false)
+        expect(smux_list_clients().len()).to_equal(1)
+        step("Reject stale mutation and tokenless downgrade on the real attachment owner")
+        expect(smux_client_heartbeat(session.id, "client", old_token).is_err()).to_equal(true)
+        expect(smux_client_check_lease(session.id, "client", old_token).is_err()).to_equal(true)
+        expect(smux_client_check_lease(session.id, "client", token).is_ok()).to_equal(true)
+        expect(smux_client_resize_leased(session.id, "client", old_token, 10, 4).is_err()).to_equal(true)
+        expect(smux_detach_leased(session.id, "client", old_token).is_err()).to_equal(true)
+        expect(smux_attach(session.id, "client", 10, 4).attached).to_equal(false)
+        expect(smux_list_clients()[0].cols).to_equal(40)
+        expect(smux_client_resize_leased(session.id, "client", token, 72, 20).is_ok()).to_equal(true)
+        expect(smux_list_clients()[0].cols).to_equal(72)
+        expect(smux_client_heartbeat(session.id, "client", token).is_ok()).to_equal(true)
+        expect(smux_attach(session.id, "legacy", 60, 18).attached).to_equal(true)
+        expect(smux_reap_expired_clients().is_ok()).to_equal(true)
+        expect(smux_list_clients().len()).to_equal(2)
+        step("Token-specific detach removes only the client and retains pane owners")
+        val window = smux_list_windows(session.id)[0]
+        val pane_id = smux_list_panes(session.id, window.id)[0].id
+        expect(smux_detach_leased(session.id, "client", token).is_ok()).to_equal(true)
+        expect(smux_list_clients().len()).to_equal(1)
+        expect(smux_list_clients()[0].client_id).to_equal("legacy")
+        expect(smux_list_panes(session.id, window.id)[0].id).to_equal(pane_id)
+        expect(smux_detach_from(session.id, "legacy")).to_equal(true)
+
+    it "should validate the current lease before dispatching any scoped interactive request":
+        # @req REQ-CMUX-002
+        # @req REQ-CMUX-003
+        # @req NFR-CMUX-006
+        if not reset_lease_fixture(): return
+        val session = smux_create_session("request-owner")
+        val other = smux_create_session("request-other")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+        val old_token = smux_attach_leased(session.id, "client", 80, 24).unwrap()
+        val token = smux_attach_leased(session.id, "client", 80, 24).unwrap()
+        val different_token = smux_attach_leased(session.id, "different", 80, 24).unwrap()
+        val old_request = "client-request " + session.id + " client " + old_token + " "
+        val request = "client-request " + session.id + " client " + token + " "
+        step("Reject stale mutation before new-window can allocate or spawn anything")
+        val rejected = smux_remote_dispatch(old_request + "new-window " + session.id + " blocked")
+        expect(rejected).to_start_with("smux: client request failed:")
+        expect(smux_remote_reply_ok(rejected)).to_equal(false)
+        expect(smux_list_windows(session.id).len()).to_equal(1)
+        val stale_input = smux_remote_dispatch(old_request + "input " + session.id + " " + window.id + " " + pane.id + " 78")
+        expect(stale_input).to_start_with("smux: client request failed:")
+        step("A current lease may query its own windows without spawning a child")
+        val current = smux_remote_dispatch(request + "windows " + session.id)
+        expect(current).to_start_with("smux: windows[" + session.id + "]:\n")
+        expect(current).to_contain(window.id)
+        expect(smux_remote_reply_ok(current)).to_equal(true)
+        step("Refuse cross-session inner commands recursive envelopes and mismatched inner lease identities")
+        expect(smux_remote_dispatch(request + "new-window " + other.id + " blocked")).to_equal("smux: client request session mismatch")
+        expect(smux_list_windows(other.id).len()).to_equal(1)
+        expect(smux_remote_dispatch(request + request + "windows " + session.id)).to_equal("smux: client request command is not supported")
+        expect(smux_remote_dispatch(request + "client-heartbeat " + session.id + " different " + different_token)).to_equal("smux: client request lease target mismatch")
+        expect(smux_remote_dispatch(request + "client-heartbeat " + session.id + " client " + different_token)).to_equal("smux: client request lease target mismatch")
+        val failed_heartbeat = smux_remote_dispatch("client-heartbeat " + session.id + " client " + old_token)
+        expect(failed_heartbeat).to_start_with("smux: heartbeat failed:")
+        expect(smux_remote_reply_ok(failed_heartbeat)).to_equal(false)
+        expect(smux_list_windows(session.id).len()).to_equal(1)
+        expect(smux_list_panes(session.id, window.id)[0].id).to_equal(pane.id)
+        expect(smux_detach_leased(session.id, "client", token).is_ok()).to_equal(true)
+        expect(smux_detach_leased(session.id, "different", different_token).is_ok()).to_equal(true)
+        expect(smux_list_clients().len()).to_equal(0)
+
+    it "should create a fresh entropy-backed incarnation after reset even when service IDs are reused":
+        # @req REQ-CMUX-002
+        # @req NFR-CMUX-006
+        if not reset_lease_fixture(): return
+        step("Create an actual logical attachment then reset its service incarnation")
+        val old_session = smux_create_session("before")
+        val old_token = smux_attach_leased(old_session.id, "client", 80, 24).unwrap()
+        if not reset_lease_fixture(): return
+        val new_session = smux_create_session("after")
+        expect(new_session.id).to_equal(old_session.id)
+        val token = smux_attach_leased(new_session.id, "client", 80, 24).unwrap()
+        expect(token == old_token).to_equal(false)
+        expect(smux_client_heartbeat(new_session.id, "client", old_token).is_err()).to_equal(true)
+        expect(smux_remote_dispatch("client-heartbeat " + new_session.id + " client " + old_token)).to_start_with("smux: heartbeat failed:")
+        expect(smux_detach_leased(new_session.id, "client", old_token).is_err()).to_equal(true)
+        expect(smux_detach_leased(new_session.id, "client", token).is_ok()).to_equal(true)
+
+    it "should return a canonical session ID and retains leased requests after the session is renamed":
+        # @req REQ-CMUX-002
+        # @req NFR-CMUX-006
+        if not reset_lease_fixture(): return
+        val session = smux_create_session("original")
+        step("Admit through the production protocol and bind its canonical session ID")
+        val admitted = smux_remote_dispatch("client-attach original terminal 80 24")
+        expect(admitted).to_start_with("smux: leased ")
+        val fields = admitted.split(" ")
+        expect(fields.len()).to_equal(4)
+        val token = fields[2]
+        val canonical = fields[3]
+        expect(client_lease_token_valid(token)).to_equal(true)
+        expect(canonical).to_equal(session.id)
+        expect(smux_rename_session(session.id, "renamed").is_ok()).to_equal(true)
+        step("Heartbeat resize and detach keep using the same stable session ID")
+        expect(smux_client_heartbeat(canonical, "terminal", token).is_ok()).to_equal(true)
+        expect(smux_remote_dispatch("client-heartbeat " + canonical + " terminal " + token)).to_equal("smux: heartbeat accepted terminal")
+        expect(smux_remote_dispatch("client-size-leased " + canonical + " terminal " + token + " 72 20")).to_equal("smux: sized terminal")
+        expect(smux_list_clients()[0].session_id).to_equal(canonical)
+        expect(smux_list_clients()[0].cols).to_equal(72)
+        expect(smux_remote_dispatch("client-detach " + canonical + " terminal " + token)).to_equal("smux: detached terminal from " + canonical)
+        expect(smux_list_clients().len()).to_equal(0)
+
+    it "should refuse a replaced client token before notification polling or acknowledgment can consume a new message":
+        # @req REQ-CMUX-002
+        # @req REQ-CMUX-003
+        # @req NFR-CMUX-006
+        if not reset_lease_fixture(): return
+        val session = smux_create_session("lease-notices")
+        val old_token = smux_attach_leased(session.id, "client", 80, 24).unwrap()
+        val token = smux_attach_leased(session.id, "client", 80, 24).unwrap()
+        step("Queue a real notification only after the replacement client is admitted")
+        val queued = smux_remote_dispatch("notify " + session.id + " client 6672657368")
+        expect(queued).to_start_with("smux: notification queued ")
+        val queued_fields = queued.split(" ")
+        expect(queued_fields.len()).to_equal(4)
+        val message_id = queued_fields[3]
+        expect(message_id.to_i64() ?? 0).to_be_greater_than(0)
+        val address = session.id + " client "
+        val stale_poll = smux_remote_dispatch("notifications-leased " + address + old_token)
+        expect(stale_poll).to_start_with("smux: notification lease failed:")
+        expect(smux_remote_reply_ok(stale_poll)).to_equal(false)
+        val stale_ack = smux_remote_dispatch("ack-notification-leased " + address + old_token + " " + message_id)
+        expect(stale_ack).to_start_with("smux: notification lease failed:")
+        expect(smux_remote_reply_ok(stale_ack)).to_equal(false)
+        step("A failed heartbeat must remain a failed callback receipt")
+        val stale_heartbeat = smux_remote_dispatch("client-heartbeat " + address + old_token)
+        expect(stale_heartbeat).to_start_with("smux: heartbeat failed:")
+        expect(smux_remote_reply_ok(stale_heartbeat)).to_equal(false)
+        step("The current token still peeks and acknowledges the exact queued message")
+        val current_poll = smux_remote_dispatch("notifications-leased " + address + token)
+        expect(current_poll).to_equal("smux: notification " + message_id + " 6672657368")
+        expect(smux_remote_reply_ok(current_poll)).to_equal(true)
+        expect(smux_remote_dispatch("ack-notification-leased " + address + token + " " + message_id)).to_equal("smux: notification acknowledged " + message_id)
+        expect(smux_remote_dispatch("notifications-leased " + address + token)).to_equal("smux: notification none")
+        expect(smux_detach_leased(session.id, "client", token).is_ok()).to_equal(true)
+
+    it "should refuse repeated old detach after the same client attaches with a new token":
+        # @req REQ-CMUX-002
+        step("Detach one real logical attachment and admit its successor under the same client ID")
+        if not reset_lease_fixture(): return
+        val session = smux_create_session("duplicate-detach")
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+        val old_token = smux_attach_leased(session.id, "client", 80, 24).unwrap()
+        expect(smux_detach_leased(session.id, "client", old_token).unwrap()).to_equal(true)
+        expect(smux_list_clients().len()).to_equal(0)
+        val current_token = smux_attach_leased(session.id, "client", 40, 12).unwrap()
+        expect(current_token == old_token).to_equal(false)
+        step("Replay the old detach twice and observe the unchanged successor and pane")
+        for _ in 0..2:
+            expect(smux_detach_leased(session.id, "client", old_token).unwrap_err()).to_equal("client lease identity mismatch")
+            expect(smux_list_clients().len()).to_equal(1)
+            expect(smux_list_clients()[0].client_id).to_equal("client")
+            expect(smux_list_clients()[0].cols).to_equal(40)
+            expect(smux_list_clients()[0].rows).to_equal(12)
+            expect(smux_client_check_lease(session.id, "client", current_token).is_ok()).to_equal(true)
+            expect(smux_list_windows(session.id).len()).to_equal(1)
+            expect(smux_list_panes(session.id, window.id)[0].id).to_equal(pane.id)
+        expect(smux_detach_leased(session.id, "client", current_token).unwrap()).to_equal(true)
+        expect(smux_list_clients().len()).to_equal(0)
+```
+
+</details>

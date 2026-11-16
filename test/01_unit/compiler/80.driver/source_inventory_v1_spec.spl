@@ -1,0 +1,137 @@
+"""
+## Purpose and audience
+Purpose: Prove the build-unit source inventory receipt is deterministic and
+content-sensitive, and that the ownership checker reports duplicate owners and
+orphans as SPL-BUILD-SRC-001.
+Audience: build and driver engineers maintaining library-unit planning.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Pure functions over an already-resolved file list; no filesystem walking.
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md (section 4.2).
+"""
+# @req: REQ-BUILD-SRC-001
+
+use std.spec.*
+use std.spec.step
+use compiler.driver.driver_build.source_inventory_v1.{
+    SourceInventoryFileV1, SourceInventoryUnitV1,
+    source_inventory_receipt_v1, source_inventory_snapshot_digest_v1,
+    source_inventory_ownership_check_v1}
+
+fn f(path: text, digest: text) -> SourceInventoryFileV1:
+    SourceInventoryFileV1(path: path, digest: digest)
+
+fn receipt(files: [SourceInventoryFileV1]) -> text:
+    source_inventory_receipt_v1("core", "library", "x86_64-linux", "pol1", files)
+
+fn snap(policy: text, files: [SourceInventoryFileV1]) -> text:
+    source_inventory_snapshot_digest_v1("core", "library", "x86_64-linux", policy, files)
+
+# @manual_section: source_inventory
+describe "source_inventory receipt":
+    """One build unit's resolved file list becomes a sorted, digested receipt."""
+
+    it "is identical for order-shuffled input":
+        # @req: REQ-BUILD-SRC-001
+        step("Build receipts from two permutations of the same files")
+        val a = receipt([f("src/b.spl", "d2"), f("src/a.spl", "d1"), f("src/c.spl", "d3")])
+        val b = receipt([f("src/c.spl", "d3"), f("src/a.spl", "d1"), f("src/b.spl", "d2")])
+        expect(a).to_equal(b)
+
+    it "lists paths in canonical sorted order and is marked complete":
+        # @req: REQ-BUILD-SRC-001
+        step("Check ordering and completeness fields of the receipt")
+        val r = receipt([f("src/b.spl", "d2"), f("src/a.spl", "d1")])
+        expect(r).to_contain("completeness: complete")
+        expect(r).to_contain("file_count: 2")
+        expect(r).to_contain("unit: core")
+        expect(r).to_contain("kind: library")
+        expect(r).to_contain("target: x86_64-linux")
+        expect(r).to_contain("policy_digest: pol1")
+        val ia = r.index_of("src/a.spl") ?? -1
+        val ib = r.index_of("src/b.spl") ?? -1
+        expect(ia > 0).to_equal(true)
+        expect(ib > ia).to_equal(true)
+
+    it "changes the snapshot digest when any content digest changes":
+        # @req: REQ-BUILD-SRC-001
+        step("Flip each file's digest in turn and compare snapshot digests")
+        val d0 = snap("pol1", [f("src/a.spl", "d1"), f("src/b.spl", "d2"), f("src/c.spl", "d3")])
+        expect(d0.len()).to_equal(64)
+        val m0 = snap("pol1", [f("src/a.spl", "X"), f("src/b.spl", "d2"), f("src/c.spl", "d3")])
+        val m1 = snap("pol1", [f("src/a.spl", "d1"), f("src/b.spl", "X"), f("src/c.spl", "d3")])
+        val m2 = snap("pol1", [f("src/a.spl", "d1"), f("src/b.spl", "d2"), f("src/c.spl", "X")])
+        expect(m0 == d0).to_equal(false)
+        expect(m1 == d0).to_equal(false)
+        expect(m2 == d0).to_equal(false)
+        expect(m0 == m1).to_equal(false)
+
+    it "changes the snapshot digest when the policy digest or file set changes":
+        # @req: REQ-BUILD-SRC-001
+        step("Vary policy digest, then add a file")
+        val d0 = snap("pol1", [f("src/a.spl", "d1")])
+        val dp = snap("pol2", [f("src/a.spl", "d1")])
+        val dn = snap("pol1", [f("src/a.spl", "d1"), f("src/b.spl", "d1")])
+        expect(dp == d0).to_equal(false)
+        expect(dn == d0).to_equal(false)
+
+    it "does not let adjacent path and digest texts collide":
+        # @req: REQ-BUILD-SRC-001
+        step("Shift a character between path and digest")
+        expect(snap("p", [f("a", "bc")]) == snap("p", [f("ab", "c")])).to_equal(false)
+
+describe "source_inventory ownership":
+    """Exactly one unit must own each in-scope file."""
+
+    it "reports no findings when every scanned file has one owner":
+        # @req: REQ-BUILD-SRC-001
+        step("Check two disjoint units covering the scanned roots")
+        val units = [
+            SourceInventoryUnitV1(name: "a", files: [f("src/a.spl", "1")]),
+            SourceInventoryUnitV1(name: "b", files: [f("src/b.spl", "2")])]
+        val fs = source_inventory_ownership_check_v1(units, ["src/a.spl", "src/b.spl"])
+        expect(fs.len()).to_equal(0)
+
+    it "reports a file owned by two units as SPL-BUILD-SRC-001 naming both":
+        # @req: REQ-BUILD-SRC-001
+        step("Check two units that both claim one shared file")
+        val units = [
+            SourceInventoryUnitV1(name: "b", files: [f("src/shared.spl", "1")]),
+            SourceInventoryUnitV1(name: "a", files: [f("src/shared.spl", "1"), f("src/a.spl", "2")])]
+        val fs = source_inventory_ownership_check_v1(units, ["src/a.spl", "src/shared.spl"])
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BUILD-SRC-001")
+        expect(fs[0].path).to_equal("src/shared.spl")
+        expect(fs[0].message).to_contain("a, b")
+
+    it "reports a scanned file owned by no unit as an orphan":
+        # @req: REQ-BUILD-SRC-001
+        step("Scan a root that holds files no unit lists")
+        val units = [SourceInventoryUnitV1(name: "a", files: [f("src/a.spl", "1")])]
+        val fs = source_inventory_ownership_check_v1(units, ["src/z.spl", "src/a.spl", "src/m.spl"])
+        expect(fs.len()).to_equal(2)
+        expect(fs[0].code).to_equal("SPL-BUILD-SRC-001")
+        expect(fs[0].path).to_equal("src/m.spl")
+        expect(fs[0].message).to_contain("no unit")
+        expect(fs[1].path).to_equal("src/z.spl")
+
+    it "does not count the same unit listing a file twice as a duplicate owner":
+        # @req: REQ-BUILD-SRC-001
+        step("List one file twice inside a single unit")
+        val units = [SourceInventoryUnitV1(name: "a", files: [f("src/a.spl", "1"), f("src/a.spl", "1")])]
+        val fs = source_inventory_ownership_check_v1(units, ["src/a.spl"])
+        expect(fs.len()).to_equal(0)
+
+    it "is independent of unit and scanned-path input order":
+        # @req: REQ-BUILD-SRC-001
+        step("Shuffle units and scanned paths and compare findings")
+        val u1 = SourceInventoryUnitV1(name: "a", files: [f("src/s.spl", "1")])
+        val u2 = SourceInventoryUnitV1(name: "b", files: [f("src/s.spl", "1")])
+        val p = source_inventory_ownership_check_v1([u1, u2], ["src/s.spl", "src/o.spl"])
+        val q = source_inventory_ownership_check_v1([u2, u1], ["src/o.spl", "src/s.spl"])
+        expect(p.len()).to_equal(2)
+        expect(q.len()).to_equal(2)
+        expect(p[0].path).to_equal(q[0].path)
+        expect(p[0].message).to_equal(q[0].message)
+        expect(p[1].path).to_equal(q[1].path)

@@ -11,6 +11,8 @@ use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_dig
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists, file_fsync, directory_fsync}
 use std.nogc_sync_mut.io_runtime.dir_create
 use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_read_required_v3}
+use std.nogc_sync_mut.orchestration.host_execution_archive_v3.{host_execution_archive_relative_v3, host_execution_archive_publish_v3}
 
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
 
@@ -214,3 +216,16 @@ pub fn host_execution_inspection_store_v2(root: text, value: HostExecutionObserv
     if file_read_regular_no_follow_bounded(path, 65536)? != bytes: return Err("host-inspection-readback-mismatch")
     if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root): return Err("host-inspection-sync-failed")
     Ok(path)
+
+pub fn host_execution_observation_load_owned_v3(journal: DistributedOperationJournalV2,
+        operation_id: text) -> Result<HostExecutionObservationV2, text>:
+    val relative = host_execution_archive_relative_v3("host-execution-observations-v2", operation_id)?
+    val value = host_execution_observation_decode_v2(distributed_operation_journal_read_required_v3(journal, relative, 65536)?)?
+    if value.operation_id != operation_id: return Err("host-observation-operation-mismatch")
+    Ok(value)
+
+pub fn host_execution_observation_store_owned_v3(journal: DistributedOperationJournalV2,
+        value: HostExecutionObservationV2) -> Result<text, text>:
+    if journal.windows_store.is_none(): return host_execution_observation_store_v2(journal.root, value)
+    host_execution_archive_publish_v3(journal, "host-execution-observations-v2", value.operation_id,
+        host_execution_observation_encode_v2(value)?, 65536)

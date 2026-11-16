@@ -1,0 +1,53 @@
+# AUTHORED_NOT_RUN. Caller supplies actual admitted Host/image/probe owners;
+# no fake selection, signed grant, native output or task result is constructed.
+use std.spec.{expect, step, fail}
+use app.llm_caret.provider_cli_adapter_types_v1.{ProviderCliRequestDataV1, ProviderCliActionV1}
+use app.llm_caret.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1, ProviderCliContainedProbeReceiptV1}
+use app.llm_caret.provider_cli_contained_task_v1.provider_cli_contained_task_effect_v1
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceTurnV3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_decode_v2
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
+
+fn real_contained_task_capacity_v1(domain: HostServiceDomainV3) -> HostCapacityOwnerV1:
+    match domain.local:
+        case HostLocalRootV3.Linux(local): local.capacity
+        case HostLocalRootV3.Windows(local): local.capacity_v3()
+        case HostLocalRootV3.LinuxService(local):
+            if local.capacity.is_none(): fail("Linux service owner retains no capacity journal")
+            local.capacity.unwrap()
+
+pub fn run_real_contained_start_fixture_v1(domain: HostServiceDomainV3,
+        selection: ProviderCliContainedSelectionV1, receipt: ProviderCliContainedProbeReceiptV1,
+        signed_request: HostServiceRequestV2, action: ProviderCliRequestDataV1,
+        expected_request_digest: text, expected_workload_uid: text) -> HostServiceTurnV3:
+    step("Invoke the production app consumer using genuine completed probes and signed Host admission")
+    val before = real_contained_task_capacity_v1(domain)
+    val turn = provider_cli_contained_task_effect_v1(domain, selection, receipt, signed_request, action)
+    expect(turn.exit_code).to_equal(0)
+    val observed = host_execution_observation_decode_v2(turn.response)
+    if observed.is_err():
+        fail("actual contained Host execution observation required: " + observed.unwrap_err())
+        return turn
+    expect(observed.unwrap().request_digest).to_equal(expected_request_digest)
+    expect(observed.unwrap().runtime.pod_uid).to_equal(expected_workload_uid)
+    expect(observed.unwrap().create_status).to_equal("ok")
+    expect(observed.unwrap().start_status).to_equal("ok")
+    val after = real_contained_task_capacity_v1(turn.owner)
+    expect(after.journal.lease_digest).to_equal(before.journal.lease_digest)
+    turn
+
+pub fn run_real_contained_resume_refusal_fixture_v1(domain: HostServiceDomainV3,
+        selection: ProviderCliContainedSelectionV1, receipt: ProviderCliContainedProbeReceiptV1,
+        signed_request: HostServiceRequestV2) -> HostServiceTurnV3:
+    step("Require actual session/source ownership before any Resume task effect")
+    val before = real_contained_task_capacity_v1(domain)
+    val turn = provider_cli_contained_task_effect_v1(domain, selection, receipt, signed_request,
+        ProviderCliRequestDataV1(action: ProviderCliActionV1.Resume, prompt: "continue", session_id: "fixture-session"))
+    expect(turn.exit_code).to_equal(1)
+    expect(turn.response.contains("provider-contained-resume-source-session-owner-required")).to_equal(true)
+    val after = real_contained_task_capacity_v1(turn.owner)
+    expect(after.journal.lease_digest).to_equal(before.journal.lease_digest)
+    expect(after.ledger.revision).to_equal(before.ledger.revision)
+    turn

@@ -227,12 +227,15 @@ pub trait CodegenEmitter {
     // =========================================================================
     fn emit_enum_discriminant(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error>;
     fn emit_enum_payload(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error>;
-    fn emit_enum_unit(&mut self, dest: VReg, enum_name: &str, variant_name: &str) -> Result<(), Self::Error>;
+    /// `discriminant` is the owning enum's declared variant index (#6953).
+    fn emit_enum_unit(&mut self, dest: VReg, enum_name: &str, variant_name: &str, discriminant: u32)
+        -> Result<(), Self::Error>;
     fn emit_enum_with(
         &mut self,
         dest: VReg,
         enum_name: &str,
         variant_name: &str,
+        discriminant: u32,
         payload: VReg,
     ) -> Result<(), Self::Error>;
     fn emit_union_discriminant(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error>;

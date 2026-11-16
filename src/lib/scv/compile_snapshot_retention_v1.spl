@@ -13,7 +13,7 @@ use std.io_runtime.{env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time}
 use std.nogc_sync_mut.io_runtime.{dir_list_or_empty, dir_remove, getpid}
-use std.nogc_sync_mut.io.process_ops.{process_exists}
+use std.nogc_sync_mut.io.process_ops.{process_exists, eprint}
 use std.scv.store.{scv_write_text}
 
 export scv_compile_snapshot_recover_v1, scv_compile_snapshot_gc_v1
@@ -22,6 +22,8 @@ export scv_compile_snapshot_cleanup_v1, scv_compile_snapshot_touch_v1
 export scv_compile_snapshot_max_keep_v1, scv_compile_snapshot_min_age_v1
 export scv_compile_snapshot_retain_newest_v2
 export scv_compile_snapshot_lease_acquire_v1, scv_compile_snapshot_lease_release_v1
+export scv_compile_snapshot_lease_pin_v1, scv_compile_snapshot_lease_unpin_v1
+export scv_compile_snapshot_pin_warning_v1, scv_compile_snapshot_pin_max_v1
 
 fn scv_compile_snapshot_recover_v1(cache_root: text) -> i64:
     val snapshots_root = "{cache_root}/snapshots"
@@ -161,14 +163,79 @@ fn scv_compile_snapshot_lease_release_v1(cache_root: text, name: text):
     if file_exists(path):
         val _deleted = file_delete(path)
 
+# Named pins (REV-01, owner decision 2026-11-15 option 1): a process that
+# holds several revisions at once (the LSP) pins each by name. Unlike the
+# build lease above, a pin never moves: it lasts until unpin or until the
+# owning process is gone. One file per (snapshot, process), owner-written.
+fn scv_compile_snapshot_pin_path_v1(cache_root: text, name: text, pid: i64) -> text:
+    "{cache_root}/receipts/{name}.pin.{pid}"
+
+# SIMPLE_SCV_PIN_MAX: per-process pin cap (default 16, a generous LSP
+# open-document bound). A pin beyond it is refused, never evicting a pin.
+fn scv_compile_snapshot_pin_max_v1() -> i64:
+    val raw = env_get("SIMPLE_SCV_PIN_MAX")
+    if raw != "":
+        val parsed = raw.to_i64()
+        if parsed != nil and parsed! > 0:
+            return parsed!
+    16
+
+fn scv_compile_snapshot_own_pin_count_v1(cache_root: text) -> i64:
+    val own_suffix = ".pin.{getpid()}"
+    var count = 0
+    for entry in dir_list_or_empty(cache_root + "/receipts"):
+        if entry.ends_with(own_suffix):
+            count = count + 1
+    count
+
+# Over-retention warning for this process's pins; "" when none applies.
+fn scv_compile_snapshot_pin_warning_v1(cache_root: text) -> text:
+    val count = scv_compile_snapshot_own_pin_count_v1(cache_root)
+    if count >= scv_compile_snapshot_pin_max_v1():
+        return "warning: scv pins at cap ({count}/SIMPLE_SCV_PIN_MAX={scv_compile_snapshot_pin_max_v1()}) in {cache_root}; unpin revisions no longer read"
+    if count > scv_compile_snapshot_max_keep_v1():
+        return "warning: scv pins ({count}) exceed SIMPLE_SCV_SNAPSHOT_MAX={scv_compile_snapshot_max_keep_v1()} in {cache_root}; retention cannot meet its cap until unpin"
+    ""
+
+fn scv_compile_snapshot_lease_pin_v1(cache_root: text, name: text) -> Result<i64, text>:
+    if name == "" or name.contains("/") or name.contains("\\") or name.starts_with("."):
+        return Err("scv pin: invalid revision name")
+    if not dir_exists(cache_root + "/receipts"): dir_create(cache_root + "/receipts", true)
+    val pid = getpid()
+    val path = scv_compile_snapshot_pin_path_v1(cache_root, name, pid)
+    if file_exists(path):
+        return Ok(scv_compile_snapshot_own_pin_count_v1(cache_root))
+    val before = scv_compile_snapshot_own_pin_count_v1(cache_root)
+    if before >= scv_compile_snapshot_pin_max_v1():
+        return Err("scv pin: cap SIMPLE_SCV_PIN_MAX={scv_compile_snapshot_pin_max_v1()} reached; unpin first")
+    if not scv_write_text(path, "{pid}"):
+        return Err("scv pin: write failed")
+    val warning = scv_compile_snapshot_pin_warning_v1(cache_root)
+    # Emit once, on the pin that crosses a threshold.
+    if warning != "" and (before + 1 == scv_compile_snapshot_pin_max_v1() or
+            before == scv_compile_snapshot_max_keep_v1()):
+        eprint(warning)
+    Ok(before + 1)
+
+fn scv_compile_snapshot_lease_unpin_v1(cache_root: text, name: text):
+    val path = scv_compile_snapshot_pin_path_v1(cache_root, name, getpid())
+    if file_exists(path):
+        val _deleted = file_delete(path)
+
 fn scv_compile_snapshot_has_live_lease_v1(cache_root: text, name: text) -> bool:
     val receipts = cache_root + "/receipts"
     if not dir_exists(receipts):
         return false
     val prefix = name + ".lease."
+    val pin_prefix = name + ".pin."
     for entry in dir_list_or_empty(receipts):
+        var owner = ""
         if entry.starts_with(prefix):
-            val pid = entry[prefix.len():].to_i64() ?? 0
+            owner = entry[prefix.len():]
+        elif entry.starts_with(pin_prefix):
+            owner = entry[pin_prefix.len():]
+        if owner != "":
+            val pid = owner.to_i64() ?? 0
             if pid > 0 and process_exists(pid):
                 return true
             # The owner is gone: nobody else writes this file, so reaping it

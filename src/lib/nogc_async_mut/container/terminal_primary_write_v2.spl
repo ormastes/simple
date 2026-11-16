@@ -1,0 +1,137 @@
+# Trusted-local common input port. The service reserves an attempt and refreshes
+# its live issuer immediately before write; these public records are not grants.
+# An Err after invocation does not prove that no IO occurred. Retain the reserved
+# attempt as Unknown and observe its exact native receipt before any retry.
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlLeaseV1,
+    SessionRuntimeControlTargetV1, session_runtime_control_target_digest_v1}
+use std.common.contracts.container.primary_connection_v2.container_primary_connection_binding_digest_v2
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+use std.common.process.input_control_v1.ProcessInputWriteDispositionV1
+use std.common.process.windows_engine_control_v2.{WindowsEnginePipeWriteReceiptV2,
+    WindowsEnginePipeWriteStatusV2}
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
+    container_primary_input_write_v1, container_primary_input_state_v1}
+use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessionV2
+use std.nogc_async_mut.container.terminal_primary_v2.container_primary_terminal_view_v2
+use std.nogc_async_mut.container.providers.windows.primary_connection_v2.{
+    windows_primary_connection_input_write_v2, windows_primary_connection_input_state_v2}
+
+pub enum ContainerPrimaryInputDispositionV2:
+    Rejected
+    Queued
+    Completed
+    Unknown
+
+pub struct ContainerPrimaryInputRequestV2:
+    lease: SessionRuntimeControlLeaseV1
+    target: SessionRuntimeControlTargetV1
+    principal: text
+    nonce: text
+    attempt: i64
+    frame_sequence: i64
+    payload: text
+    offset: i64
+    maximum: i64
+
+# Observation only. Completed means the native write completed, not that the
+# container application consumed it. accepted_bytes is the actual known prefix;
+# Legacy Unknown preserves its native -1 sentinel (no known prefix).
+pub struct ContainerPrimaryInputWriteV2:
+    disposition: ContainerPrimaryInputDispositionV2
+    attempt: i64
+    accepted_bytes: i64
+    error: text
+
+fn require_primary_v2(session: ContainerOwnedTerminalSessionV2) -> Result<(), text>:
+    val view = container_primary_terminal_view_v2(session)?
+    if view.adoption == nil: return Err("primary-input-not-adopted")
+    Ok(())
+
+fn request_bounds_v2(request: ContainerPrimaryInputRequestV2) -> Result<(), text>:
+    val size = request.payload.byte_len()
+    if (size < 1 or size > 65536 or request.attempt < 1 or request.attempt > 1152921504606846975 or
+            request.frame_sequence < 1 or request.frame_sequence > 1152921504606846975 or
+            request.offset < 0 or request.offset >= size or request.maximum < 1 or request.maximum > 4096 or
+            request.maximum > size - request.offset): return Err("primary-input-range")
+    if request.nonce == "" or request.nonce.byte_len() > 256: return Err("primary-input-nonce-bound")
+    if request.lease.expires_monotonic_ms < 1 or request.lease.expires_monotonic_ms > 9223372036854:
+        return Err("primary-input-deadline-bound")
+    Ok(())
+
+fn windows_receipt_v2(receipt: WindowsEnginePipeWriteReceiptV2,
+        request: ContainerPrimaryInputRequestV2) -> Result<ContainerPrimaryInputWriteV2, text>:
+    val attempt = receipt.attempt
+    val control = attempt.control
+    if (attempt.sequence != request.attempt or attempt.frame_sequence != request.frame_sequence or
+            attempt.payload_digest != sha256_u8_hex(base_encoding_text_to_bytes(request.payload)) or
+            attempt.payload_bytes != request.payload.byte_len() or attempt.offset != request.offset or
+            attempt.requested_bytes != request.maximum or control.kind != "input" or
+            control.target_digest != session_runtime_control_target_digest_v1(request.target)? or
+            control.binding_digest != container_primary_connection_binding_digest_v2(request.target)? or
+            control.nonce_digest != sha256_text(request.nonce) or control.revision != request.lease.revision or
+            control.expires_monotonic_ns != request.lease.expires_monotonic_ms * 1000000 or
+            receipt.accepted_bytes < 0 or receipt.accepted_bytes > request.maximum):
+        return Err("primary-input-native-receipt-mismatch")
+    val disposition = match receipt.status:
+        case WindowsEnginePipeWriteStatusV2.Queued: ContainerPrimaryInputDispositionV2.Queued
+        case WindowsEnginePipeWriteStatusV2.Completed: ContainerPrimaryInputDispositionV2.Completed
+        case WindowsEnginePipeWriteStatusV2.Unknown: ContainerPrimaryInputDispositionV2.Unknown
+    Ok(ContainerPrimaryInputWriteV2(disposition, request.attempt, receipt.accepted_bytes, ""))
+
+fn legacy_disposition_v2(value: ProcessInputWriteDispositionV1) -> ContainerPrimaryInputDispositionV2:
+    match value:
+        case ProcessInputWriteDispositionV1.Rejected: ContainerPrimaryInputDispositionV2.Rejected
+        case ProcessInputWriteDispositionV1.Recorded: ContainerPrimaryInputDispositionV2.Completed
+        case ProcessInputWriteDispositionV1.Unknown: ContainerPrimaryInputDispositionV2.Unknown
+
+pub fn container_primary_input_write_v2(session: ContainerOwnedTerminalSessionV2,
+        request: ContainerPrimaryInputRequestV2) -> Result<ContainerPrimaryInputWriteV2, text>:
+    require_primary_v2(session)?
+    request_bounds_v2(request)?
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            val written = container_primary_input_write_v1(primary, request.lease, request.target,
+                request.principal, request.nonce, request.attempt, request.payload, request.offset, request.maximum)
+            val unknown_prefix = written.disposition == ProcessInputWriteDispositionV1.Unknown and written.accepted_bytes == -1
+            if (written.attempt_sequence != request.attempt or
+                    (not unknown_prefix and (written.accepted_bytes < 0 or written.accepted_bytes > request.maximum))):
+                return Err("primary-input-native-receipt-mismatch")
+            Ok(ContainerPrimaryInputWriteV2(legacy_disposition_v2(written.disposition),
+                written.attempt_sequence, written.accepted_bytes, written.error))
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val written = windows_primary_connection_input_write_v2(connection, request.lease, request.target,
+                request.principal, request.nonce, request.attempt, request.frame_sequence,
+                base_encoding_text_to_bytes(request.payload), request.offset, request.maximum)?
+            windows_receipt_v2(written, request)
+        case _: Err("container-primary-terminal-required")
+
+# Observe the reserved request, including after expiry/revocation. This performs
+# no new write and does not reinstall authority. Missing/unrelated history is
+# None, never a manufactured zero-byte completion that permits replay.
+pub fn container_primary_input_observe_v2(session: ContainerOwnedTerminalSessionV2,
+        request: ContainerPrimaryInputRequestV2) -> Result<ContainerPrimaryInputWriteV2?, text>:
+    require_primary_v2(session)?
+    request_bounds_v2(request)?
+    match session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(primary)):
+            val state = container_primary_input_state_v1(primary)?
+            if (state.last_attempt_sequence != request.attempt or state.last_revision != request.lease.revision or
+                    state.last_target_digest != session_runtime_control_target_digest_v1(request.target)? or
+                    state.last_nonce_digest != sha256_text(request.nonce) or
+                    state.last_expires_monotonic_ns != request.lease.expires_monotonic_ms * 1000000): return Ok(None)
+            val unknown_prefix = state.last_disposition == ProcessInputWriteDispositionV1.Unknown and state.last_accepted_bytes == -1
+            if not unknown_prefix and (state.last_accepted_bytes < 0 or state.last_accepted_bytes > request.maximum):
+                return Err("primary-input-native-receipt-mismatch")
+            # V1 native history has no frame/payload digest: the caller must
+            # correlate the already reserved immutable request in its ledger.
+            val error = if state.last_status == 0: "" else: "primary-input-native-status:{state.last_status}"
+            Ok(Some(ContainerPrimaryInputWriteV2(legacy_disposition_v2(state.last_disposition),
+                request.attempt, state.last_accepted_bytes, error)))
+        case ContainerOwnedTerminalSessionV2.WindowsConnection(connection):
+            val state = windows_primary_connection_input_state_v2(connection)?
+            if val receipt = state.last:
+                if receipt.attempt.sequence != request.attempt: return Ok(None)
+                return Ok(Some(windows_receipt_v2(receipt, request)?))
+            Ok(None)
+        case _: Err("container-primary-terminal-required")

@@ -1,0 +1,270 @@
+# Public-only identity exchange over the installed authenticated SSH gateway.
+# Transport/profile/allowlist admission belongs to the gateway and parent CLI.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.host_identity_public_v1.{HostPublicKeyV1, host_identity_public_parse_v1}
+use app.orchestrator.host_identity_command_v1.{host_identity_command_v1, host_identity_public_file_v1,
+    host_identity_pin_received_v1, host_identity_reply_v1, host_identity_failure_v1,
+    host_identity_finish_v1, host_identity_store_error_v1, host_identity_open_failure_v1}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.config_core.server_context_types_v1.{ServerRecordV1, server_name_valid_v1, server_record_validate_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.text_bytes.bytes_to_text
+use std.nogc_sync_mut.io.host_identity_store_v1.*
+
+fn identity_exchange_fields_v1(source: text) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() < 1 or source.byte_len() > 16384: return Err("host-identity-exchange-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Err(_): return Err("host-identity-exchange-syntax")
+        case Ok(value): value
+    match parsed.value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("host-identity-exchange-object")
+
+fn identity_exchange_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("host-identity-exchange-fields")
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-identity-exchange-text")
+
+fn identity_exchange_bool_v1(fields: Dict<text, SdnValue>, key: text) -> Result<bool, text>:
+    if not fields.contains_key(key): return Err("host-identity-exchange-fields")
+    match fields[key]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("host-identity-exchange-bool")
+
+fn identity_exchange_correlation_v1(controller: text, uid: text, server: text) -> bool:
+    builder_identifier_valid_v1(controller) and builder_identifier_valid_v1(uid) and server_name_valid_v1(server)
+
+# Returns only the canonical SERVER SSH host public key after full semantic
+# correlation. Neither a pending upload nor this public receipt grants access.
+pub fn host_identity_exchange_response_v1(action: text, controller: text, uid: text,
+        expected_server: text, response: text) -> Result<text, text>:
+    if action != "identity-register" and action != "identity-server": return Err("host-identity-exchange-action")
+    if not identity_exchange_correlation_v1(controller, uid, expected_server):
+        return Err("host-identity-exchange-correlation")
+    val fields = identity_exchange_fields_v1(response)?
+    var names = ["version", "kind", "status", "exchangeAction", "controllerId", "requestUid", "serverName",
+        "keyType", "serverPublicKey", "fingerprint", "authorized", "enrolled", "registered", "pendingGrant",
+        "uploadedKeyPossession", "cleanupPending"]
+    if action == "identity-register":
+        names.push("clientPublicKey")
+        names.push("clientFingerprint")
+        names.push("fileSynced")
+        names.push("namespaceSynced")
+    if fields.len() != names.len(): return Err("host-identity-exchange-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("host-identity-exchange-fields")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 1: return Err("host-identity-exchange-version")
+        case _: return Err("host-identity-exchange-version")
+    if (identity_exchange_text_v1(fields, "kind")? != "orchestration-host-identity" or
+            identity_exchange_text_v1(fields, "exchangeAction")? != action or
+            identity_exchange_text_v1(fields, "controllerId")? != controller or
+            identity_exchange_text_v1(fields, "requestUid")? != uid or
+            identity_exchange_text_v1(fields, "serverName")? != expected_server):
+        return Err("host-identity-exchange-correlation")
+    if identity_exchange_text_v1(fields, "keyType")? != "ssh-host-ed25519":
+        return Err("host-identity-exchange-key-type")
+    if (identity_exchange_bool_v1(fields, "authorized")? or identity_exchange_bool_v1(fields, "enrolled")? or
+            identity_exchange_bool_v1(fields, "registered")? or identity_exchange_bool_v1(fields, "cleanupPending")?):
+        return Err("host-identity-exchange-authority")
+    val server_source = identity_exchange_text_v1(fields, "serverPublicKey")?
+    val server_public = host_identity_public_parse_v1(server_source)?
+    if server_source != server_public.public_key or identity_exchange_text_v1(fields, "fingerprint")? != server_public.fingerprint:
+        return Err("host-identity-exchange-fingerprint")
+    val pending = action == "identity-register"
+    if identity_exchange_bool_v1(fields, "pendingGrant")? != pending:
+        return Err("host-identity-exchange-pending")
+    if pending:
+        if (identity_exchange_text_v1(fields, "status")? != "pending-registration" or
+                identity_exchange_text_v1(fields, "uploadedKeyPossession")? != "not-proven"):
+            return Err("host-identity-exchange-pending")
+        val client_source = identity_exchange_text_v1(fields, "clientPublicKey")?
+        val client_public = host_identity_public_parse_v1(client_source)?
+        if client_source != client_public.public_key or identity_exchange_text_v1(fields, "clientFingerprint")? != client_public.fingerprint:
+            return Err("host-identity-exchange-client-fingerprint")
+        identity_exchange_bool_v1(fields, "fileSynced")?
+        identity_exchange_bool_v1(fields, "namespaceSynced")?
+    else:
+        if (identity_exchange_text_v1(fields, "status")? != "server-key" or
+                identity_exchange_text_v1(fields, "uploadedKeyPossession")? != "not-applicable"):
+            return Err("host-identity-exchange-server-status")
+    Ok(server_public.public_key)
+
+fn identity_exchange_server_fields_v1(action: text, controller: text, uid: text,
+        server: text, key: HostPublicKeyV1) -> Dict<text, SdnValue>:
+    val pending = action == "identity-register"
+    {"status": SdnValue.String(if pending: "pending-registration" else: "server-key"),
+        "exchangeAction": SdnValue.String(action), "controllerId": SdnValue.String(controller),
+        "requestUid": SdnValue.String(uid), "serverName": SdnValue.String(server),
+        "keyType": SdnValue.String("ssh-host-ed25519"), "serverPublicKey": SdnValue.String(key.public_key),
+        "fingerprint": SdnValue.String(key.fingerprint), "registered": SdnValue.Bool(false),
+        "pendingGrant": SdnValue.Bool(pending), "cleanupPending": SdnValue.Bool(false),
+        "uploadedKeyPossession": SdnValue.String(if pending: "not-proven" else: "not-applicable")}
+
+# Only the already-authorized gateway supplies installed server/root/path
+# configuration. No peer wire field selects these filesystem authorities.
+pub fn host_identity_gateway_v1(action: text, controller_id: text, request_uid: text,
+        server_name: text, store_root: text, server_public_key_path: text,
+        source: text) -> OrchestratorValidationReplyV1:
+    if action != "identity-register" and action != "identity-server":
+        return host_identity_failure_v1("host-identity-exchange-action", 2)
+    if not identity_exchange_correlation_v1(controller_id, request_uid, server_name):
+        return host_identity_failure_v1("host-identity-exchange-correlation", 2)
+    if action == "identity-server" and source != "":
+        return host_identity_failure_v1("host-identity-exchange-unused-source", 2)
+    var client: Option<HostPublicKeyV1> = nil
+    if action == "identity-register":
+        client = match host_identity_public_parse_v1(source):
+            case Err(reason): return host_identity_failure_v1(reason, 2)
+            case Ok(value): Some(value)
+    val server_key = match host_identity_public_file_v1(server_public_key_path):
+        case Err(reason): return host_identity_failure_v1(reason, 1)
+        case Ok(value): value
+    var fields = identity_exchange_server_fields_v1(action, controller_id, request_uid, server_name, server_key)
+    if action == "identity-server": return host_identity_reply_v1(fields, 0)
+    val uploaded = client.unwrap()
+    # Stable pending content excludes request IDs so retransmission by the same
+    # public key is exactly idempotent; correlation lives in each response.
+    val record: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("pending-ssh-public-registration"), "serverName": SdnValue.String(server_name),
+        "clientPublicKey": SdnValue.String(uploaded.public_key), "clientFingerprint": SdnValue.String(uploaded.fingerprint),
+        "pendingGrant": SdnValue.Bool(true), "authorized": SdnValue.Bool(false),
+        "enrolled": SdnValue.Bool(false), "registered": SdnValue.Bool(false),
+        "uploadedKeyPossession": SdnValue.String("not-proven")}
+    val pending_source = sdn_encode_canonical(SdnValue.Dict(record))
+    val leaf = sha256_text("pending-registration:" + server_name + ":" + uploaded.fingerprint) + ".hosts"
+    val opened = host_identity_store_open_v1(store_root)
+    if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
+        return host_identity_open_failure_v1(opened)
+    val published = host_identity_store_publish_v1(opened.owner.unwrap(), leaf, pending_source.bytes())
+    var owner = published.owner
+    if published.cleanup_pending or published.error != "":
+        return host_identity_store_error_v1("host-identity-pending-publication-uncertain", owner)
+    if published.publication == HostIdentityStorePublicationV1.Existing:
+        val actual = host_identity_store_read_v1(owner, leaf, 16384)
+        owner = actual.owner
+        if actual.cleanup_pending or actual.error != "" or actual.absent or actual.bytes == nil:
+            return host_identity_store_error_v1("host-identity-pending-read", owner)
+        if bytes_to_text(actual.bytes.unwrap()) != pending_source:
+            return host_identity_store_error_v1("host-identity-pending-conflict", owner)
+    elif published.publication != HostIdentityStorePublicationV1.Published or not published.file_synced:
+        return host_identity_store_error_v1("host-identity-pending-publication-uncertain", owner)
+    fields["clientPublicKey"] = SdnValue.String(uploaded.public_key)
+    fields["clientFingerprint"] = SdnValue.String(uploaded.fingerprint)
+    fields["fileSynced"] = SdnValue.Bool(published.file_synced)
+    fields["namespaceSynced"] = SdnValue.Bool(published.namespace_synced)
+    host_identity_finish_v1(fields, 0, owner)
+
+fn identity_exchange_rejected_reply_v1(reply: OrchestratorValidationReplyV1,
+        code: text) -> OrchestratorValidationReplyV1:
+    var rejected = reply
+    rejected.exit_code = 1
+    rejected.output = host_identity_failure_v1(code, 1).output
+    rejected
+
+fn identity_exchange_has_cleanup_v1(reply: OrchestratorValidationReplyV1) -> bool:
+    (reply.journal_cleanup != nil or reply.cleanup_state != nil or reply.host_journal_cleanup != nil or
+        reply.host_cleanup_state != nil or reply.transport_cleanup != nil or reply.transport_store_cleanup != nil or reply.host_identity_cleanup != nil)
+
+# The callback owns actual SSH transport, frame hashing and installed profile
+# selection. Nonzero replies return unchanged, preserving cleanup capabilities.
+pub fn host_identity_exchange_send_v1(public_source: text, controller: text, uid: text,
+        server: text, call: fn(text) -> OrchestratorValidationReplyV1) -> OrchestratorValidationReplyV1:
+    if not identity_exchange_correlation_v1(controller, uid, server):
+        return host_identity_failure_v1("host-identity-exchange-correlation", 2)
+    val client = match host_identity_public_parse_v1(public_source):
+        case Err(reason): return host_identity_failure_v1(reason, 2)
+        case Ok(value): value
+    val reply = call(client.public_key)
+    if reply.exit_code != 0: return reply
+    if identity_exchange_has_cleanup_v1(reply): return identity_exchange_rejected_reply_v1(reply, "host-identity-exchange-cleanup-pending")
+    match host_identity_exchange_response_v1("identity-register", controller, uid, server, reply.output):
+        case Err(reason): return identity_exchange_rejected_reply_v1(reply, reason)
+        case Ok(_): ()
+    val fields = match identity_exchange_fields_v1(reply.output):
+        case Err(reason): return identity_exchange_rejected_reply_v1(reply, reason)
+        case Ok(value): value
+    match identity_exchange_text_v1(fields, "clientPublicKey"):
+        case Err(reason): return identity_exchange_rejected_reply_v1(reply, reason)
+        case Ok(value):
+            if value != client.public_key: return identity_exchange_rejected_reply_v1(reply, "host-identity-exchange-upload-mismatch")
+    reply
+
+fn identity_exchange_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
+    if args.len() < 1 or args.len() > 15 or args.len() % 2 != 1: return Err("host-identity-exchange-usage")
+    val names = ["--store-root", "--auth-ref", "--public-key-file", "--trust-ref", "--server",
+        "--controller-id", "--request-uid", "--expected-fingerprint"]
+    var options: Dict<text, text> = {}
+    var index = 1
+    while index < args.len():
+        if not names.contains(args[index]) or options.contains_key(args[index]): return Err("host-identity-exchange-options")
+        if args[index + 1].byte_len() < 1 or args[index + 1].byte_len() > 4096: return Err("host-identity-exchange-options")
+        options[args[index]] = args[index + 1]
+        index = index + 2
+    Ok(options)
+
+fn identity_exchange_exact_v1(options: Dict<text, text>, names: [text]) -> bool:
+    if options.len() != names.len(): return false
+    for name in names:
+        if not options.contains_key(name): return false
+    true
+
+pub fn host_identity_exchange_client_v1(args: [text],
+        call: fn(text) -> OrchestratorValidationReplyV1) -> OrchestratorValidationReplyV1:
+    val options = match identity_exchange_options_v1(args):
+        case Err(reason): return host_identity_failure_v1(reason, 2)
+        case Ok(value): value
+    val send = args[0] == "key-sendserver"
+    if not send and args[0] != "key-takeserver": return host_identity_failure_v1("host-identity-exchange-action", 2)
+    if send:
+        if (not identity_exchange_exact_v1(options, ["--store-root", "--auth-ref", "--server", "--controller-id", "--request-uid"]) and
+                not identity_exchange_exact_v1(options, ["--public-key-file", "--server", "--controller-id", "--request-uid"])):
+            return host_identity_failure_v1("host-identity-exchange-send-usage", 2)
+    elif not identity_exchange_exact_v1(options,
+            ["--store-root", "--trust-ref", "--server", "--controller-id", "--request-uid", "--expected-fingerprint"]):
+        return host_identity_failure_v1("host-identity-exchange-take-usage", 2)
+    val controller = options["--controller-id"]
+    val uid = options["--request-uid"]
+    val server = options["--server"]
+    if not identity_exchange_correlation_v1(controller, uid, server):
+        return host_identity_failure_v1("host-identity-exchange-correlation", 2)
+    if send:
+        var source = ""
+        if options.contains_key("--public-key-file"):
+            val public_key = match host_identity_public_file_v1(options["--public-key-file"]):
+                case Err(reason): return host_identity_failure_v1(reason, 1)
+                case Ok(value): value
+            source = public_key.public_key
+        else:
+            val loaded = host_identity_command_v1(["key-public", "--store-root", options["--store-root"], "--auth-ref", options["--auth-ref"]])
+            if loaded.exit_code != 0: return loaded
+            if identity_exchange_has_cleanup_v1(loaded): return identity_exchange_rejected_reply_v1(loaded, "host-identity-exchange-cleanup-pending")
+            val fields = match identity_exchange_fields_v1(loaded.output):
+                case Err(reason): return identity_exchange_rejected_reply_v1(loaded, reason)
+                case Ok(value): value
+            source = match identity_exchange_text_v1(fields, "publicKey"):
+                case Err(reason): return identity_exchange_rejected_reply_v1(loaded, reason)
+                case Ok(value): value
+        return host_identity_exchange_send_v1(source, controller, uid, server, call)
+    match server_record_validate_v1(ServerRecordV1(name: server, transport: "ssh", host: "localhost", port: 22,
+            container_host: "", auth_ref: "secret://exchange-validation", tls_ref: options["--trust-ref"], remote_executable: "/bin/true")):
+        case Err(_): return host_identity_failure_v1("host-identity-trust-reference", 2)
+        case Ok(_): ()
+    val reply = call("")
+    if reply.exit_code != 0: return reply
+    if identity_exchange_has_cleanup_v1(reply): return identity_exchange_rejected_reply_v1(reply, "host-identity-exchange-cleanup-pending")
+    val server_public = match host_identity_exchange_response_v1("identity-server", controller, uid, server, reply.output):
+        case Err(reason): return identity_exchange_rejected_reply_v1(reply, reason)
+        case Ok(value): value
+    host_identity_pin_received_v1(options["--store-root"], options["--trust-ref"], server,
+        server_public, options["--expected-fingerprint"])
+
+export host_identity_gateway_v1, host_identity_exchange_response_v1
+export host_identity_exchange_client_v1, host_identity_exchange_send_v1

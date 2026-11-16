@@ -1,0 +1,175 @@
+# AUTHORED_NOT_RUN. Real signatures/journal, explicitly scripted Windows leaf.
+# @req REQ-HOST-WINDOWS-PROGRESS-001
+# @req REQ-HOST-WINDOWS-PROGRESS-002
+# @req REQ-HOST-WINDOWS-PROGRESS-003
+use std.spec.*
+use test.fixtures.orchestration.host_execution_windows_progress_v4.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.{windows_adapter_consumed_fixture_v2,
+    windows_adapter_native_id_fixture_v2, windows_adapter_scope_fixture_v2, windows_adapter_deadline_fixture_v2}
+use std.nogc_async_mut.container.execution_progress_v4.*
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.host_execution_intent_load_owned_v3
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+
+fn begin_progress(fixture: HostWindowsProgressFixtureV4) -> HostExecutionProgressTurnV4:
+    host_authorized_execution_begin_v4(fixture.owner, fixture.container,
+        host_execute_request_encode_v2(fixture.envelope).unwrap(), fixture.policy,
+        fixture.provider_digest, "service-a", fixture.context, host_windows_progress_clock_v4)
+
+fn advance_to_cursor(initial: HostExecutionProgressTurnV4, target: i64) -> HostExecutionProgressTurnV4:
+    var turn = initial
+    for index in 0..64:
+        val consumed = windows_adapter_consumed_fixture_v2(turn.container)
+        assert(consumed <= target)
+        if consumed == target: return turn
+        assert(turn.continuation.is_some())
+        turn = host_authorized_execution_step_v4(turn.owner, turn.container, turn.continuation.unwrap(),
+            host_windows_progress_clock_v4(), false)
+        expect(turn.error).to_equal("")
+    assert(windows_adapter_consumed_fixture_v2(turn.container) == target)
+    turn
+
+fn assert_execution_charged(turn: HostExecutionProgressTurnV4):
+    expect(turn.owner.journal.operations["operation-a"].state).to_equal("executing")
+    val available = host_available_capacity_v1(turn.owner.ledger).unwrap()
+    expect(available.cpu_millis).to_equal(2000)
+    expect(available.memory_bytes).to_equal(536870912)
+
+describe "Cooperative signed host execution through scripted Windows provider":
+    after_each:
+        host_windows_progress_sweep_v4()
+
+    it "advances copied provider progress through the canonical cursor and refuses retired aliases":
+        step("Begin common prepare progress on the genuine scripted provider owner")
+        val fixture = host_windows_progress_fixture_v4()
+        val beginning = simple_container_execution_begin_v4(fixture.container, "prepare",
+            fixture.envelope.execution, windows_adapter_deadline_fixture_v2())
+        expect(beginning.error).to_equal("")
+        assert(beginning.progress.is_some())
+        val old_progress = beginning.progress.unwrap()
+        step("Consume engine information once and retain the original copied progress alias")
+        val first = simple_container_execution_step_v4(beginning.owner, old_progress, false)
+        expect(first.error).to_equal("")
+        expect(windows_adapter_consumed_fixture_v2(first.owner)).to_equal(1)
+        assert(first.progress.is_some())
+        step("Use the current owner with the old alias and consume the canonical next image command")
+        val completed = simple_container_execution_step_v4(first.owner, old_progress, false)
+        expect(completed.error).to_equal("")
+        expect(windows_adapter_consumed_fixture_v2(completed.owner)).to_equal(2)
+        assert(completed.progress.is_none())
+        expect(completed.operation.unwrap().status).to_equal("ok")
+        step("Reject the retired provider alias without another scripted command")
+        val retired = simple_container_execution_step_v4(completed.owner, old_progress, false)
+        assert(retired.progress.is_none())
+        expect(retired.operation.unwrap().status).to_equal("blocked")
+        expect(retired.operation.unwrap().reason).to_equal("docker-progress-owner-retired")
+        expect(windows_adapter_consumed_fixture_v2(retired.owner)).to_equal(2)
+        assert(host_capacity_owner_close_v1(fixture.owner).unwrap())
+
+    it "preserves finite signed execution through the same prepare create start inspect reducer":
+        step("Execute the existing finite API with actual signed authority and the same exact command script")
+        val fixture = host_windows_progress_fixture_v4()
+        val finite = host_authorized_execute_v2(fixture.owner, fixture.container,
+            host_execute_request_encode_v2(fixture.envelope).unwrap(), fixture.policy,
+            fixture.provider_digest, "service-a", fixture.context, host_windows_progress_clock_v4)
+        expect(finite.error).to_equal("")
+        expect(finite.recovery_required).to_equal(false)
+        expect(windows_adapter_consumed_fixture_v2(finite.container)).to_equal(14)
+        val observed = finite.observation.unwrap()
+        expect(observed.phase).to_equal("running")
+        expect(observed.runtime.native_id).to_equal(windows_adapter_native_id_fixture_v2())
+        expect(observed.provider_identity_digest).to_equal(fixture.provider_digest)
+        val intent = host_execution_intent_load_owned_v3(finite.owner.journal, "operation-a").unwrap()
+        expect(intent.phase).to_equal("created")
+        expect(intent.native_id).to_equal(observed.runtime.native_id)
+        expect(finite.owner.journal.operations["operation-a"].state).to_equal("executing")
+        val available = host_available_capacity_v1(finite.owner.ledger).unwrap()
+        expect(available.cpu_millis).to_equal(2000)
+        expect(available.memory_bytes).to_equal(536870912)
+        assert(host_capacity_owner_close_v1(finite.owner).unwrap())
+
+    it "prepares before create and durably stores exact creation identity before start":
+        step("Reserve actual shared-journal capacity with valid signed Windows scope authority")
+        val fixture = host_windows_progress_fixture_v4()
+        expect(fixture.owner.journal.operations["operation-a"].state).to_equal("admitted")
+        var turn = begin_progress(fixture)
+        expect(turn.error).to_equal("")
+        assert(turn.continuation.is_some())
+        assert_execution_charged(turn)
+        expect(windows_adapter_consumed_fixture_v2(turn.container)).to_equal(0)
+        step("Consume only engine and image preparation before create is eligible")
+        turn = advance_to_cursor(turn, 2)
+        assert(turn.continuation.is_some())
+        assert(host_execution_intent_load_owned_v3(turn.owner.journal, "operation-a").is_err())
+        step("Persist exact created identity after create inspection and before any start command")
+        turn = advance_to_cursor(turn, 7)
+        val intent = host_execution_intent_load_owned_v3(turn.owner.journal, "operation-a").unwrap()
+        expect(intent.native_id).to_equal(windows_adapter_native_id_fixture_v2())
+        expect(intent.phase).to_equal("created")
+        expect(intent.operation_id).to_equal("operation-a")
+        expect(intent.node_boot_id).to_equal(container_scope_fence_id_v2(windows_adapter_scope_fixture_v2()).unwrap())
+        assert_execution_charged(turn)
+        step("Start the exact retained identity and independently inspect running state")
+        turn = advance_to_cursor(turn, 14)
+        assert(turn.continuation.is_none())
+        expect(turn.error).to_equal("")
+        expect(turn.recovery_required).to_equal(false)
+        val observed = turn.observation.unwrap()
+        expect(observed.phase).to_equal("running")
+        expect(observed.runtime.native_id).to_equal(intent.native_id)
+        expect(observed.provider_identity_digest).to_equal(fixture.provider_digest)
+        assert_execution_charged(turn)
+        assert(host_capacity_owner_close_v1(turn.owner).unwrap())
+
+    it "cancels after preparation without consuming create or releasing executing capacity":
+        step("Reach prepared provider state through the real two scripted commands")
+        val fixture = host_windows_progress_fixture_v4()
+        val prepared = advance_to_cursor(begin_progress(fixture), 2)
+        val cancelled = host_authorized_execution_step_v4(prepared.owner, prepared.container,
+            prepared.continuation.unwrap(), fixture.context, true)
+        expect(cancelled.error).to_equal("host-execution-cancelled")
+        assert(cancelled.continuation.is_none())
+        expect(cancelled.recovery_required).to_equal(true)
+        expect(windows_adapter_consumed_fixture_v2(cancelled.container)).to_equal(2)
+        assert(host_execution_intent_load_owned_v3(cancelled.owner.journal, "operation-a").is_err())
+        assert_execution_charged(cancelled)
+        assert(host_capacity_owner_close_v1(cancelled.owner).unwrap())
+
+    it "refuses a new launch when approval expires between cooperative turns":
+        step("Expire authority after preparation and before create submission")
+        val fixture = host_windows_progress_fixture_v4()
+        val prepared = advance_to_cursor(begin_progress(fixture), 2)
+        var expired_context = fixture.context
+        expired_context.grant_clock = 9000
+        expired_context.monotonic_ms = 1001
+        val expired = host_authorized_execution_step_v4(prepared.owner, prepared.container,
+            prepared.continuation.unwrap(), expired_context, false)
+        expect(expired.error).to_equal("APPROVAL_EXPIRED")
+        assert(expired.continuation.is_none())
+        expect(expired.recovery_required).to_equal(true)
+        expect(windows_adapter_consumed_fixture_v2(expired.container)).to_equal(2)
+        assert_execution_charged(expired)
+        assert(host_capacity_owner_close_v1(expired.owner).unwrap())
+
+    it "rejects replay of a retired continuation without consuming provider effects":
+        step("Retire a continuation before provider command creation")
+        val fixture = host_windows_progress_fixture_v4()
+        val beginning = begin_progress(fixture)
+        assert(beginning.continuation.is_some())
+        val retained = beginning.continuation.unwrap()
+        val cancelled = host_authorized_execution_step_v4(beginning.owner, beginning.container,
+            retained, fixture.context, true)
+        expect(cancelled.error).to_equal("host-execution-cancelled")
+        assert(cancelled.continuation.is_none())
+        step("Retry the stale continuation and preserve the same canonical charged owner")
+        val replay = host_authorized_execution_step_v4(cancelled.owner, cancelled.container,
+            retained, fixture.context, false)
+        expect(replay.error).to_equal("host-execution-continuation-retired")
+        assert(replay.continuation.is_none())
+        expect(windows_adapter_consumed_fixture_v2(replay.container)).to_equal(0)
+        expect(replay.owner.journal.sequence).to_equal(cancelled.owner.journal.sequence)
+        assert_execution_charged(replay)
+        assert(host_capacity_owner_close_v1(replay.owner).unwrap())
