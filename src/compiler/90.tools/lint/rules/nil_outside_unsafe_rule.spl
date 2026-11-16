@@ -5,10 +5,13 @@
 # form and the one-line `unsafe: expr` form). Comments, strings, docstrings and
 # names that contain `nil` are skipped.
 #
-# Presence tests (`x == nil`, `x != nil`, `case nil:`) are NOT flagged: natively
+# Presence tests (`x == nil`, `x != nil`, `case nil:`) ARE flagged too (owner
+# directive 2026-11-16: comparing with nil is not allowed in safe code). Natively
 # `None` is an Option object and `nil` the word 3, and `rt_native_eq(None, nil)`
-# is 0, so rewriting `x != nil` as `x != None` changes the result. Those want
-# `.?` / `if val` / `case None`, which is a separate migration.
+# is 0, so rewriting `x != nil` as `x != None` changes the result. The hint
+# points at `.is_none()` / `.is_some()` / `if val` / `case None`; the callee's
+# `return nil` must become `return None` in the same change. No auto-fix: the
+# static-rule finding record has no replacement field.
 #
 # The one safe nil is the value of the unit type `Nil` (= `()`): `return nil`
 # / tail `nil` in a single-line `-> Nil` header's body, and `Ok(nil)` in a
@@ -130,7 +133,7 @@ fn nil_lint_columns(code: text) -> [i64]:
         if at < 0: break
         val before_ok = at == 0 or (not nil_lint_is_word_char(code.substring(at - 1, at)) and code.substring(at - 1, at) != ".")
         val after_ok = at + 3 >= code.len() or not nil_lint_is_word_char(code.substring(at + 3, at + 4))
-        if before_ok and after_ok and not nil_lint_is_presence_test(code, at): cols.push(at)
+        if before_ok and after_ok: cols.push(at)
         start = at + 3
     cols
 
@@ -210,6 +213,13 @@ pub fn check_nil_outside_unsafe(content: text) -> [StaticLintFinding]:
         for col in nil_lint_columns(code):
             if inline_unsafe >= 0 and col > inline_unsafe: continue
             if unit_fn_kind > 0 and nil_lint_is_unit_value(code, col, unit_fn_kind): continue
+            if nil_lint_is_presence_test(code, col):
+                findings.push(StaticLintFinding(
+                    "NIL-UNSAFE-001", StaticLintLevel.Warn, StaticLintCategory.Safety,
+                    "comparison with `nil` outside `unsafe`: test Option presence instead",
+                    "`x == nil` -> `x.is_none()`, `x != nil` -> `x.is_some()`, `case nil` -> `case None`, or `if val v = x` (None != nil natively; migrate the callee's `return nil` to `return None` in the same change)",
+                    line_num, col + 1))
+                continue
             findings.push(StaticLintFinding(
                 "NIL-UNSAFE-001", StaticLintLevel.Warn, StaticLintCategory.Safety,
                 "`nil` outside `unsafe`: safe code spells absence `None`",
