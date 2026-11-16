@@ -27,7 +27,20 @@
 |---|---|---|---|
 | before (release/1.0.0 @ 017665fc70b) | 29622 | 10.1 GB | reference |
 | after (TLS pair set) | 7903 | 1.06 GB | byte-identical |
+| round 2 (Result-free per-reloc paths) | 4498 | 820 MB | byte-identical |
 | ld.lld / mold (WSL) | 120 / 100 | 68 MB / 7 MB | - |
+
+Round 2: the per-relocation helpers returned `Result`, which costs about 5 us
+and leaks per call natively (`native_result_call_cost_2026-11-16.md`).
+`elf_symref` is now infallible (error as `SYMREF_ERR`), the collect place is
+inlined, and the prep loop and local symtab rows use `elf_ref_value_fast` /
+`elf_in_vaddr_fast` with a Result fallback. Phases: refs 1.8 s -> 0.42 s,
+relocated (prep + apply) 4.3 s -> 2.1 s, symtab 0.73 s. RSS is pinned by
+`test/05_perf/compiler/linker/elf_link_rss_budget.shs` (ratchet 850000 KiB).
+The prep loop's symbol resolution is precomputed by `elf_ref_values_fast`, which shards per ref range through `elf_par` (worker `elf_prep_worker`); on ca081c452a2 at jobs=16 relocated drops to 1.86 s (apply 0.81 s), output byte-identical, peak 1.14 GB. The remaining serial prep (~1 s) is the per-ref loop body and job encoding.
+Turning `ElfStaticInputs`/`ElfLinkCtx`/`ElfLayout` into classes measured
+4137 ms / 675 MB but was left out: the parallel path shares ctx through a
+global, and that path belongs to the concurrency lane.
 
 Fixed: x86_64 `_tls_relax_object` called `_tls_is_pair(obj, i)` for every
 non-TLS relocation. Each call scanned every relocation in the object, and for
@@ -37,15 +50,12 @@ and the phase takes 18 ms.
 
 ## Open
 
-1. Sharing an input object made later phases much slower, and the cause is
-   unexplained. An `if no TLS heads: return Ok(obj)` early-out was tried and
-   then removed (it is not in the landed change). With it, output stayed
-   byte-identical. Even so, refs collection went from 1.8 s to
-   38 s, apply from 4.2 s to 21.8 s, and symtab from 0.7 s to 21.9 s. Those
-   phases never touch TLS. A short, safe form is therefore forcing a workaround:
-   the x86_64 path always rebuilds the object. `_tls_relax_object_a64` still
-   has that early-out, so aarch64 links probably pay the same penalty
-   (unmeasured).
+1. Resolved in round 2. Re-adding the `return Ok(obj)` early-out on the
+   round-2 tree measured 4413 ms / 799 MB against 4498 ms / 820 MB without it:
+   no slowdown. The earlier 5-32x was the Result-call cost interacting with
+   the shared object, gone with the Result-free paths. aarch64's early-out
+   is therefore fine. x86_64 still rebuilds because an empty pair set does not
+   rule out unpaired heads that must be rejected.
 2. The remaining 7.9 s is spread across per-relocation work, with no O(n^2)
    loop left:
    - The relocation prep loop before `elf_apply_jobs` takes about 3 s, from
@@ -62,5 +72,11 @@ and the phase takes 18 ms.
    about 480 MB, roughly 4 KB per relocation that is never released. Refs
    collection adds another 235 MB.
 4. The jobs=16 parallel path is owned by the concurrency lane.
+
+5. Remaining after round 2 (4.5 s / 820 MB): serial apply calls the sealed
+   `operations.relocate` (Result) and allocates two windows per relocation;
+   symtab does ~4 text-keyed dict ops per symbol over 81k symbols; refs keep a
+   `"global:"+name` key text per relocation (~1 KB/reloc retained in collect,
+   ~1.5 KB/reloc in prep+apply).
 
 Target: under 2 s and under 500 MB on this set. Not met yet.
