@@ -3856,6 +3856,17 @@ pub fn rt_file_unlock(args: &[Value]) -> Result<Value, CompileError> {
 // ============================================================================
 
 /// Get current process PID
+/// Windows kernel object identity (`CompareObjectHandles`); delegates to the
+/// runtime twin. Non-integer handles fail closed as "not identical" (0).
+pub fn rt_win_compare_object_handles(args: &[Value]) -> Result<Value, CompileError> {
+    let (Some(Value::Int(first)), Some(Value::Int(second))) = (args.first(), args.get(1)) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(
+        simple_runtime::value::sffi::rt_win_compare_object_handles(*first, *second) as i64,
+    ))
+}
+
 pub fn rt_getpid(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(std::process::id() as i64))
 }
