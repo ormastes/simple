@@ -40,6 +40,9 @@ impl Lowerer {
         }
         // Check for special builtins: generator, future, spawn, await, print, etc.
         if let Expr::Identifier(name) = callee {
+            if let Some(erased) = self.lower_record_unit_ctor(name, args, ctx)? {
+                return Ok(erased);
+            }
             if let Some((type_name, "new")) = name.rsplit_once('.') {
                 if let Some(type_id) = self.module.types.lookup(type_name) {
                     if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) {
