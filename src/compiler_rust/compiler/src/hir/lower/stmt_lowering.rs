@@ -2883,6 +2883,7 @@ impl Lowerer {
                         ty: subject_ty,
                     };
                     let slot_expr = Self::payload_slot_expr(enum_variant, &subject_ref, i, payload_patterns.len());
+                    let slot_expr = self.or_pattern_payload_slot(slot_expr, enum_name, enum_variant, subject_ty, i, p);
                     self.bind_subpattern(&slot_expr, p, &binding_type_map, ctx, &mut binding_stmts);
                 }
             }
@@ -2915,8 +2916,37 @@ impl Lowerer {
         let arity = payload_patterns.len();
         for (j, sub) in payload_patterns.iter().enumerate() {
             let slot = Self::payload_slot_expr(variant, enum_expr, j, arity);
+            let slot = if enum_expr.ty == TypeId::ANY {
+                slot
+            } else {
+                self.or_pattern_payload_slot(slot, "_", variant, enum_expr.ty, j, sub)
+            };
             self.bind_subpattern(&slot, sub, binding_type_map, ctx, out);
         }
+    }
+
+    /// #6953: a payload slot expression is ANY-typed. An or-pattern sitting in
+    /// it types its per-alternative binding guards by `slot.ty`, so give the
+    /// slot the variant's DECLARED field type -- the type
+    /// `nested_payload_condition` tests the same slot with. Other sub-pattern
+    /// kinds keep the ANY slot they always had.
+    fn or_pattern_payload_slot(
+        &self,
+        slot: HirExpr,
+        enum_name: &str,
+        variant: &str,
+        owner_ty: TypeId,
+        index: usize,
+        sub: &Pattern,
+    ) -> HirExpr {
+        if !matches!(sub, Pattern::Or(_)) {
+            return slot;
+        }
+        let ty = self
+            .get_enum_variant_field_types_with_hint(enum_name, variant, owner_ty)
+            .and_then(|types| types.get(index).copied())
+            .unwrap_or(TypeId::ANY);
+        HirExpr { ty, ..slot }
     }
 
     /// Emit the `Let` bindings for ONE sub-pattern whose value sits at `slot`.

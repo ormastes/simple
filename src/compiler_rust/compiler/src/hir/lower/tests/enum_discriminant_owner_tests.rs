@@ -266,6 +266,7 @@ fn is_ok_on_a_user_enum_tests_its_own_declared_index() {
             _ => None,
         })
         .collect();
-    consts.sort();
-    assert_eq!(consts, vec![0, 1], "enum id wildcard 0 + Probe6953.Ok's declared index 1");
+    // [Probe6953's enum id, tested discriminant]: the discriminant must be
+    // Probe6953.Ok's declared index 1, not the builtin Result.Ok's 0.
+    assert!(consts.contains(&1) && !consts.contains(&0), "consts {consts:?}");
 }

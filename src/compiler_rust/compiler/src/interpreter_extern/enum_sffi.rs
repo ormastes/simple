@@ -8,23 +8,52 @@
 //! externs directly on ordinary enum values (`TypeKind`, `ExprKind`,
 //! `StmtKind`, `HirExprKind`, `HirBinOp`, ...), so the interpreter must expose
 //! the same two externs against `Value::Enum` and reproduce the runtime's
-//! semantics EXACTLY — including reusing the shared `hash_variant_discriminant`
-//! name-hash so a discriminant computed here always matches the constant
-//! codegen bakes in for the same variant name (task #113).
+//! semantics EXACTLY — the discriminant is the owning enum's declaration
+//! index, the same constant codegen bakes in for that owner (#6953).
 
 use crate::codegen::shared::enum_runtime_type_id;
 use crate::error::CompileError;
 use crate::value::Value;
-use simple_runtime::value::hash_variant_discriminant;
+use simple_parser::ast::EnumDef;
+use simple_runtime::value::declared_variant_discriminant;
+
+/// #6953: discriminant of an interpreter enum value -- the declaration index
+/// of `variant` in its OWNING enum `enum_name`, which the value carries.
+/// Builtin `Option`/`Result` keep their fixed ABI values. This is the value
+/// codegen bakes into the owner's constructors and match arms, so a value
+/// crossing the interpreter/native bridge is tested correctly. An owner the
+/// interpreter has no definition for falls back by name, reported.
+pub(crate) fn interpreter_enum_discriminant(enum_name: &str, variant: &str) -> u32 {
+    if let Some(builtin) = crate::hir::builtin_owner_discriminant(enum_name, variant) {
+        return builtin as u32;
+    }
+    let tail = enum_name.rsplit(['.', ':']).next().unwrap_or(enum_name);
+    let index_in = |def: &EnumDef| declared_variant_discriminant(def.variants.iter().map(|v| v.name.as_str()), variant);
+    [enum_name, tail]
+        .into_iter()
+        .find_map(|name| {
+            crate::interpreter::BLOCK_SCOPED_ENUMS
+                .with(|enums| enums.borrow().get(name).and_then(|def| index_in(def)))
+                .or_else(|| {
+                    crate::interpreter_sffi::interp_enum_variant_names(name).and_then(|names| {
+                        declared_variant_discriminant(names.iter().map(String::as_str), variant)
+                    })
+                })
+                .or_else(|| {
+                    crate::interpreter::GLOBAL_ENUMS.with(|enums| enums.borrow().get(name).and_then(|def| index_in(def)))
+                })
+        })
+        .unwrap_or_else(|| crate::hir::name_only_variant_discriminant("interpreter enum value", variant) as u32)
+}
 
 /// Get the discriminant (declaration index) of an enum value.
 ///
 /// Mirrors `simple_runtime::value::objects::rt_enum_discriminant`: returns
-/// the positional declaration index (via the seed positional registry) for
-/// an enum value, or -1 if the value is not an enum.
+/// the owning enum's declaration index for an enum value, or -1 if the value
+/// is not an enum.
 pub fn rt_enum_discriminant_fn(args: &[Value]) -> Result<Value, CompileError> {
     let disc = match args.first() {
-        Some(Value::Enum { variant, .. }) => hash_variant_discriminant(variant) as i64,
+        Some(Value::Enum { enum_name, variant, .. }) => i64::from(interpreter_enum_discriminant(enum_name, variant)),
         _ => -1,
     };
     Ok(Value::Int(disc))

@@ -2582,9 +2582,9 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         "is_ok" | "is_err" => {
             let check_variant = if method == "is_ok" { "Ok" } else { "Err" };
-            let disc = {
-                simple_runtime::value::hash_variant_discriminant(check_variant) as i64
-            };
+            // Receiver type unknown here (MIR lowers typed receivers with the
+            // owner's index), so `Ok`/`Err` may belong to a user enum (#6953).
+            let disc = crate::hir::name_only_variant_discriminant("codegen is_ok/is_err", check_variant);
             let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_variant") else {
                 return Ok(None);
             };

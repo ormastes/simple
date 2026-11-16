@@ -55,24 +55,36 @@ impl Default for TypeIdAllocator {
 ///
 /// The answer comes from the process-global name-keyed registry, so it is
 /// registration-order dependent and may disagree with the owner's declared
-/// index that every resolved site uses. Builtin `Ok`/`Err`/`Some`/`None` are
-/// fixed ABI values and stay silent; any other variant is reported once per
-/// name (`warning[enum-discriminant-owner-unresolved]`). With
+/// index that every resolved site uses. That includes `Ok`/`Err`/`Some`/`None`:
+/// user enums declare those names at other indexes (`TraceLevel.None` = 0),
+/// so the builtin 0/1 is an owner answer (`builtin_owner_discriminant`), never
+/// a name-only one. Every variant reaching here is reported once per name
+/// (`warning[enum-discriminant-owner-unresolved]`). With
 /// `SIMPLE_ENUM_OWNER_STRICT=1` the report is fatal.
 pub fn name_only_variant_discriminant(site: &'static str, variant: &str) -> i64 {
-    if !matches!(variant, "Ok" | "Err" | "Some" | "None") {
-        static REPORTED: std::sync::OnceLock<dashmap::DashSet<String>> = std::sync::OnceLock::new();
-        if REPORTED.get_or_init(dashmap::DashSet::new).insert(variant.to_string()) {
-            eprintln!(
-                "warning[enum-discriminant-owner-unresolved]: variant `{variant}` lowered by name only at {site}; \
-                 its discriminant is not tied to its owning enum (see #6953)"
-            );
-            if std::env::var_os("SIMPLE_ENUM_OWNER_STRICT").is_some_and(|v| v == "1") {
-                panic!("SIMPLE_ENUM_OWNER_STRICT=1: unresolved enum owner for variant `{variant}` at {site}");
-            }
+    static REPORTED: std::sync::OnceLock<dashmap::DashSet<String>> = std::sync::OnceLock::new();
+    if REPORTED.get_or_init(dashmap::DashSet::new).insert(variant.to_string()) {
+        eprintln!(
+            "warning[enum-discriminant-owner-unresolved]: variant `{variant}` lowered by name only at {site}; \
+             its discriminant is not tied to its owning enum (see #6953)"
+        );
+        if std::env::var_os("SIMPLE_ENUM_OWNER_STRICT").is_some_and(|v| v == "1") {
+            panic!("SIMPLE_ENUM_OWNER_STRICT=1: unresolved enum owner for variant `{variant}` at {site}");
         }
     }
     simple_runtime::value::hash_variant_discriminant(variant) as i64
+}
+
+/// The fixed ABI discriminant of a builtin `Option`/`Result` variant, when the
+/// owner IS that builtin (`enum_name` is `Option`/`Result`, or its last path
+/// segment is). A user enum's `None`/`Ok` is not answered here.
+pub fn builtin_owner_discriminant(enum_name: &str, variant: &str) -> Option<i64> {
+    let tail = enum_name.rsplit(['.', ':']).next().unwrap_or(enum_name);
+    match (tail, variant) {
+        ("Result", "Ok") | ("Option", "Some") => Some(0),
+        ("Result", "Err") | ("Option", "None") => Some(1),
+        _ => None,
+    }
 }
 
 /// Type registry that maps TypeId to HirType
@@ -275,6 +287,7 @@ impl TypeRegistry {
             .into_iter()
             .filter_map(|candidate| self.lookup(candidate))
             .find_map(|id| self.declared_index_through(id, variant, 0))
+            .or_else(|| builtin_owner_discriminant(name, variant))
     }
 
     /// Like `owned_variant_discriminant`, then -- for an erased subject and a
@@ -304,7 +317,13 @@ impl TypeRegistry {
                 _ => agreed = Some(i64::from(index)),
             }
         }
-        agreed
+        // No enum visible to this module declares `variant`: a builtin
+        // variant name can then only be the builtin Option/Result.
+        agreed.or_else(|| match variant {
+            "Ok" | "Err" => builtin_owner_discriminant("Result", variant),
+            "Some" | "None" => builtin_owner_discriminant("Option", variant),
+            _ => None,
+        })
     }
 
     fn declared_index_through(&self, ty: TypeId, variant: &str, depth: u8) -> Option<i64> {

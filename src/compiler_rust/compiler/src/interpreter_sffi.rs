@@ -197,6 +197,13 @@ pub fn init_interpreter_state(items: &[Node]) {
     publish_interp_definitions_snapshot();
 }
 
+/// Declared variant names of the enum the hybrid interpreter knows as `name`.
+pub(crate) fn interp_enum_variant_names(name: &str) -> Option<Vec<String>> {
+    INTERP_ENUMS.with(|enums| {
+        enums.borrow().get(name).map(|def| def.variants.iter().map(|v| v.name.clone()).collect())
+    })
+}
+
 /// Clear interpreter state
 pub fn clear_interpreter_state() {
     INTERP_FUNCTIONS.with(|f| f.borrow_mut().clear());
