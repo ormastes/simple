@@ -11,6 +11,8 @@ use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnosti
 use compiler.types.cfg_decl_check.{cfg_decl_check_module}
 use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1}
 use compiler.types.type_infer.api_signature_projection_v1.{project_api_signatures_v1}
+use compiler.driver.driver_unit_profile.{unit_profile_apply, unit_profile_drain_diagnostics}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 # The only values a typecheck body lease may retain. No HIR/type/symbol roots.
 struct HirTypecheckReceiptV1:
@@ -73,7 +75,19 @@ pub fn collect_module_typecheck_receipt_v1(
     # Type inference diagnostics (unification / occurs-check / mismatch),
     # including declared-vs-actual return type mismatches.
     var ictx = HmInferContext.with_builtins()
+    # SPL-UNIT-004: the active profile's policy row picks unit_ops strict
+    # mode (Deny verdicts arrive via ictx.errors); default-mode warnings are
+    # drained below. Stale warnings from an earlier module are discarded.
+    unit_profile_apply(env_get("SIMPLE_TYPECHECK_PROFILE"))
+    val _stale_unit = unit_profile_drain_diagnostics(name)
     ictx.infer_module(m)
+    for umsg in unit_profile_drain_diagnostics(name):
+        out = out.push(umsg)
+        match severity:
+            case TypecheckPassSeverity.Advisory:
+                val _ = 0
+            case _:
+                warnings.push(umsg)
     var signature_facts: ApiSignatureFactsV1? = nil
     if collect_api_signatures:
         var projected = project_api_signatures_v1(m, ictx)

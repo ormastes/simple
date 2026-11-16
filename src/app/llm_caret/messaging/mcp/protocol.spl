@@ -7,9 +7,9 @@ use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal}
 use app.llm_caret.messaging.application.task_service.{TaskState}
 use app.llm_caret.messaging.domain.model.{MessageOrigin}
 use app.llm_caret.messaging.mcp.server.{MessagingMcpServer}
-use app.llm_caret.messaging.mcp.types.{ChatTool, ChatToolRequest, ChatToolResult}
+use app.llm_caret.messaging.mcp.types.{ChatTool, ChatToolRequest, ChatToolResult, empty_chat_result}
 
-var PROTOCOL_SERVER: MessagingMcpServer = MessagingMcpServer.memory()
+var PROTOCOL_SERVER: MessagingMcpServer? = None
 var PROTOCOL_IDENTITY: text = "local-agent"
 var PROTOCOL_WORKSPACE: text = "default"
 var PROTOCOL_SCOPES: [text] = ["room:read", "room:write", "profile:read", "dm:write", "agent:control"]
@@ -197,7 +197,12 @@ fn result_text(result: ChatToolResult) -> text:
         "," + jp("artifacts", "[" + artifacts.join(",") + "]") + RB()
 
 fn call(tool: ChatTool, args: text) -> text:
-    result_text(PROTOCOL_SERVER.dispatch(make_request(tool, args)))
+    match PROTOCOL_SERVER:
+        case Some(server):
+            var live = server
+            result_text(live.dispatch(make_request(tool, args)))
+        case None:
+            result_text(empty_chat_result(503, "messaging_not_configured"))
 
 fn schema_properties() -> text:
     "\"workspace_id\":{\"type\":\"string\"},\"identity_id\":{\"type\":\"string\"}," +
@@ -255,25 +260,34 @@ fn register_messaging_tools():
     mcp_server_tool("chat_publish_artifact", "Publish a canonical task artifact", artifact_schema, on_publish_artifact)
     mcp_server_tool("chat_get_context", "Read bounded canonical agent context", context_schema, on_get_context)
 
-fn configure_messaging_mcp_memory(identity_id: text, workspace_id: text, scopes: [text]):
-    PROTOCOL_SERVER.close()
-    PROTOCOL_SERVER = MessagingMcpServer.memory()
+fn close_protocol_server():
+    match PROTOCOL_SERVER:
+        case Some(server): server.close()
+        case None: pass
+
+fn configure_messaging_mcp_memory(identity_id: text, workspace_id: text, scopes: [text]) -> Result<(), text>:
+    val fresh = match MessagingMcpServer.memory():
+        case Ok(server): server
+        case Err(reason): return Err(reason)
+    close_protocol_server()
+    PROTOCOL_SERVER = Some(fresh)
     PROTOCOL_IDENTITY = identity_id
     PROTOCOL_WORKSPACE = workspace_id
     PROTOCOL_SCOPES = scopes
+    Ok(())
 
 fn serve_messaging_mcp(database_path: text, identity_id: text, workspace_id: text, scopes: [text]) -> Result<(), text>:
     val opened = match MessagingMcpServer.open(database_path):
         case Ok(server): server
         case Err(reason): return Err(reason)
-    PROTOCOL_SERVER.close()
-    PROTOCOL_SERVER = opened
+    close_protocol_server()
+    PROTOCOL_SERVER = Some(opened)
     PROTOCOL_IDENTITY = identity_id
     PROTOCOL_WORKSPACE = workspace_id
     PROTOCOL_SCOPES = scopes
     register_messaging_tools()
     mcp_serve(MessagingStdioTransport.new())
-    PROTOCOL_SERVER.close()
+    close_protocol_server()
     Ok(())
 
 export register_messaging_tools, configure_messaging_mcp_memory, serve_messaging_mcp

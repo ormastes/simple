@@ -2139,3 +2139,22 @@ fn callable_or_type_value_never_lowers_into_an_enum_slot() {
     let same_named_variant = "enum Token:\n    Token\n    Other\n\nfn tok(t: Token) -> i64:\n    1\n\nfn pair(n: i64, k: Token) -> i64:\n    n\n\nfn main():\n    val t: Token = Token.Token\n    print(tok(Token.Token))\n    print(pair(k: Token.Other, n: 2))\n";
     parse_and_lower(same_named_variant).expect("a variant named like its enum is not a type reference");
 }
+
+/// A one-field record unit (`unit Name: T`) is erased to its scalar for HIR/JIT:
+/// `.value` must not hit "cannot infer field type ... struct 'ANY'", and the
+/// constructor must lower to the bare scalar rather than a class value.
+#[test]
+fn record_unit_is_erased_to_scalar() {
+    let src = "unit Length: i64\n\nfn dbl(x: Length) -> i64:\n    x.value * 2\n\nfn add(a: Length, b: Length) -> Length:\n    a + b\n\nfn lt(a: Length, b: Length) -> bool:\n    a < b\n\nfn mk() -> Length:\n    Length(value: 3)\n\nfn mk2() -> Length:\n    Length(4)\n";
+    let module = parse_and_lower(src).expect("record unit must lower without demotion");
+    for name in ["dbl", "add", "lt", "mk", "mk2"] {
+        assert!(module.functions.iter().any(|f| f.name == name), "{name} missing");
+    }
+    let mk = module.functions.iter().find(|f| f.name == "mk").unwrap();
+    assert_eq!(mk.return_type, TypeId::I64, "unit return is the scalar type");
+    let has_struct_init = mk
+        .body
+        .iter()
+        .any(|s| matches!(s, HirStmt::Return(Some(e)) if matches!(e.kind, HirExprKind::StructInit { .. })));
+    assert!(!has_struct_init, "unit constructor must not build a class value");
+}

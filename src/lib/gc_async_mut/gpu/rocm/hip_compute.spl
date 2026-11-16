@@ -234,11 +234,14 @@ pub fn rocm_sync(dev: RocmDevice) -> Result<i64, text>:
 # Compile `source` with hipRTC, load the code object, return the kernel
 # function handle for `kernel`. Cached per device by `kernel`: the second call
 # for the same name returns the cached handle without compiling.
+# The program handle stays in scratch[0..8] until it is destroyed; every other
+# out-parameter (sizes, module, function) uses the slot at scratch+16.
 pub fn rocm_kernel(dev: RocmDevice, kernel: text, source: text) -> Result<i64, text>:
     val cached = dev.kernels.get(kernel)
     if cached.is_some():
         return Ok(cached.unwrap())
     val s = dev.scratch
+    val w = s + 16
     val c_src = _cstring(dev, source)
     val c_name = _cstring(dev, kernel + ".hip")
     val rc_create = spl_wffi_call_i64(dev.f_rtc_create, [s, c_src, c_name, 0, 0, 0], 6)
@@ -249,28 +252,34 @@ pub fn rocm_kernel(dev: RocmDevice, kernel: text, source: text) -> Result<i64, t
     val prog = _read_i64(s)
     val rc_compile = spl_wffi_call_i64(dev.f_rtc_compile, [prog, 0, 0], 3)
     if rc_compile != 0:
-        spl_wffi_call_i64(dev.f_rtc_log_size, [prog, s], 2)
-        val log_n = _read_i64(s)
+        spl_wffi_call_i64(dev.f_rtc_log_size, [prog, w], 2)
+        val log_n = _read_i64(w)
         val log_buf = spl_wffi_call_i64(dev.c_malloc, [log_n + 8], 1)
         spl_wffi_call_i64(dev.f_rtc_log, [prog, log_buf], 2)
         val log = _text_at(log_buf, log_n)
         spl_wffi_call_i64(dev.c_free, [log_buf], 1)
         spl_wffi_call_i64(dev.f_rtc_destroy, [s], 1)
         return Err("ROCm: hiprtc compile of {kernel} failed rc={rc_compile}: {log}")
-    spl_wffi_call_i64(dev.f_rtc_code_size, [prog, s], 2)
-    val code_n = _read_i64(s)
+    spl_wffi_call_i64(dev.f_rtc_code_size, [prog, w], 2)
+    val code_n = _read_i64(w)
     val code = spl_wffi_call_i64(dev.c_malloc, [code_n + 8], 1)
     spl_wffi_call_i64(dev.f_rtc_code, [prog, code], 2)
-    val rc_load = spl_wffi_call_i64(dev.f_modload, [s, code], 2)
+    # The code object was copied into `code`, so the program is no longer needed.
+    spl_wffi_call_i64(dev.f_rtc_destroy, [s], 1)
+    val rc_load = spl_wffi_call_i64(dev.f_modload, [w, code], 2)
+    # `code` is intentionally NOT freed: the HIP docs do not say whether
+    # hipModuleLoadData copies the image or keeps a pointer into it. Kernels are
+    # cached per device, so this is one small buffer per distinct kernel.
     if rc_load != 0:
+        spl_wffi_call_i64(dev.c_free, [code], 1)
         return Err(_hip_err("hipModuleLoadData", rc_load))
-    val module = _read_i64(s)
+    val module = _read_i64(w)
     val c_kernel = _cstring(dev, kernel)
-    val rc_fn = spl_wffi_call_i64(dev.f_getfn, [s, module, c_kernel], 3)
+    val rc_fn = spl_wffi_call_i64(dev.f_getfn, [w, module, c_kernel], 3)
     spl_wffi_call_i64(dev.c_free, [c_kernel], 1)
     if rc_fn != 0:
         return Err(_hip_err("hipModuleGetFunction({kernel})", rc_fn))
-    val kfn = _read_i64(s)
+    val kfn = _read_i64(w)
     dev.kernels[kernel] = kfn
     Ok(kfn)
 

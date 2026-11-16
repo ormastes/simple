@@ -65,3 +65,37 @@ table entry. Other `rt_win_*` externs are not listed in `runtime_sffi.rs` either
 a native-built probe resolves the symbol from the C runtime and links with no
 stub. Pinned by `test/03_system/runtime/win_compare_object_handles_native_spec.spl`
 (same handle -> true, different -> false). Interpreter twin landed in #9664.
+
+## Update 2026-11-16: stubbed-symbol census of the tip full-CLI build
+
+Build: release tip c0fecc6e751, seed `seed-20261117/simple.exe`, K1 `llvm` composition,
+`Build complete: 4 compiled, 3869 cached, 0 failed`, `cli_tip.exe` 99412 KB, 403 abort-stubbed
+symbols (`cli_tip.exe.stubbed_symbols.txt`; `rt_tls_*` excluded from this lane).
+Classification = C definition lookup under `src/runtime/**` (non-vendor) against the
+`runtime_inputs` list in `native_project/tools.rs`, then Rust-runtime lookup for the rest.
+
+| Category | Count | Families | Cause / action |
+|---|---|---|---|
+| 1. C file exists, not in Windows archive list | 15 | `rt_db_*` (`runtime_db.c`, self-contained, sole definer) | **Fixed here**: `runtime_db.c` added to the core-C list. |
+| 1b. C file exists, not in list, deliberately | 25 | `rt_vulkan_async_session_*`, `rt_metal_*`, `rt_cuda_launch_kernel_ex` (`runtime_dynload.c`) | NOT added: 12 of its exported symbols are also defined in `runtime_native.c` (duplicate-definition link error). Needs an owner split of the GPU-provider loader. |
+| 1c. Optional-SDK C files | 74 + 31 + 2 | `rt_sdl2_*`/`rt_sdl_*` (`runtime_sdl2.c`), `rt_rocm_*`/`rt_engine2d_rocm_*` (`runtime_rocm.c`), `rt_cuda_memcpy_*` (`scilib/cublas_shim.c`) | Need SDL2/ROCm/cuBLAS provider libs (dlopen'd providers in their own libs); not archive-list gaps. |
+| 1d. Wrong lane | 18 | `rt_port_*`, `rt_hlt/sti/lgdt/lidt/ltr/read_msr/write_msr/read_cr2/mmio_write_u64`, `rt_cli` (`startup/baremetal/*`), `rt_browser_http_job_free` (`test/*selfcheck.c`) | Baremetal/selfcheck sources, must not be in a hosted archive. Dead externs on the hosted CLI. |
+| 2. C owner excluded from list | 3 | `rt_set_debug_mode`, `rt_set_macro_trace`, `rt_is_macro_trace_enabled` (`runtime.c`, only used as root probe at tools.rs:476) | Rust-only in the core lane; needs a C twin in `runtime_native.c`. |
+| 2b. Non-target hosted stubs (fail closed by design) | 22 | `rt_cocoa_*` (12), `rt_win32_dib_*`/`rt_win32_window_*` (10) | `hosted_cocoa.c`/`hosted_win32.c` are in the list but compiled to fail-closed stubs on this target. Expected. |
+| 3. No C definition anywhere (Rust-only or dead) | 213 | `rt_vulkan_*` 66, `rt_cuda_*` 36, `rt_metal_*` 34, `rt_winit_*` 10, `rt_oneapi_*` 10, `rt_intel_*` 10, `rt_mmio_*_real` 5, `rt_engine2d_*` 5, `rt_webgpu` 3, `rt_virtio/virtq` 5, `rt_profiler_*` 3, `rt_term_*` 2, `rt_mem_*_boxed` 2, `rt_ghdl_*` 2, plus singletons (`rt_alloc_page_aligned`, `rt_cli_run_tests`, `rt_cpu_arch_name`, `rt_current_time_ms`, `rt_font_load_array`, `rt_gui_blend_span8`, `rt_madvise_raw`, `rt_mlock`, `rt_munlock`, `rt_msync_flags`, `rt_x86_syscall`, `rt_tls13_aes128_gcm_decrypt`, ...) | GPU backends live in the Rust runtime (`vulkan_graphics_runtime_*.rs`, `metal_graphics_runtime.rs`, `cuda_runtime.rs`); the rest are either Rust-only needing a C twin (`rt_mlock`, `rt_munlock`, `rt_msync_flags`, `rt_madvise_raw`, `rt_profiler_*`, `rt_term_*`, `rt_current_time_ms`, `rt_alloc_page_aligned`) or dead declarations. Per-symbol split is a follow-up; the full list is in the lane scratchpad (`full_cli_tip_stubbed_symbols_20261116.txt`).
+
+Counts: 15 + 25 + 107 + 18 + 3 + 22 + 213 = 403 (matches the stub file).
+### Native CLI smoke on tip (local build)
+`cli_tip.exe test` on `array_at_option_spec`, `array_get_option_spec`,
+`nogc_sync_mut/fs/host_path_spec`: each `rc=1`, `Results: 1 total, 0 passed, 1 failed`
+(`Process exited with code 1` from the child after ~99 s; no spec-level message surfaced).
+The native CLI `test` command is still not green. Open.
+
+### Local-only workarounds needed to build the tip with seed-20261117 (NOT committed)
+The tip failed HIR lowering under this seed: `trace_query_error_v1` 4th default arg
+(`query_main.spl`, `query_cmds_main_v1.spl`), `disk_admission_decide_present` (`free.value` on a
+`unit` type), `gui_render_lsp_navigation_tools_html` (`struct 'ANY' field 'path'`).
+`simple_web_html_layout_renderer.spl` needs `native-build --timeout 1200` (300 s default is
+too short, never cached).
+
+Status: verification-pending (category 1 fix not link-verified: needs a seed rebuild).

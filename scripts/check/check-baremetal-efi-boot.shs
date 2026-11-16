@@ -1,21 +1,30 @@
 #!/bin/sh
-# Baremetal x86_64 / aarch64 build + REAL-FIRMWARE boot check.
+# Baremetal build + REAL-FIRMWARE boot check (x86_64, aarch64, riscv64).
 #
-# Builds examples/09_embedded/rv64_os_boot/main.spl (or $BM_SRC) for
-# <arch>-unknown-none with the Simple compiler (--emit-object), places it in a
-# flat blob behind a tiny EFI application, and boots that application from a
-# FAT ESP through OVMF (x86_64) / AAVMF (aarch64) pflash. PASS needs the
-# program's "SimpleOS" banner on the serial port.
+# Builds examples/09_embedded/freestanding_hello/main.spl (or $BM_SRC) for
+# <arch>-unknown-none with the Simple compiler (--emit-object), links it with
+# the committed freestanding runtime:
+#   src/lib/nogc_async_mut_noalloc/baremetal/freestanding/bm_rt.spl  (pure Simple)
+#   src/lib/nogc_async_mut_noalloc/baremetal/freestanding/crt0_<arch>.S (_start,
+#     stack, putc, byte load/store, halt)
+# and boots it through real firmware:
+#   x86_64  OVMF pflash   -> FAT ESP BOOTX64.EFI  -> flat image
+#   aarch64 AAVMF pflash  -> FAT ESP BOOTAA64.EFI -> flat image
+#   riscv64 OpenSBI fw_payload (v1.4, built with clang LLVM=1) via -bios
+# PASS needs the exact transcript on serial, in order:
+#   hello from Simple bare metal / n=42 / panic: boom
+# and NOT "after panic" (proves rt_panic halted).
 #
 # .claude/rules/board-runnable.md: real firmware only -- no QEMU -kernel, no
-# isa-debug-exit. The harness shim drives COM1 (x86_64, port 0x3f8) and a PL011
-# at BM_A64_UART (default 0x09000000 = QEMU virt). Board path: set BM_A64_UART
-# to the board UART base, copy esp/EFI/BOOT/BOOT*.EFI to a FAT USB stick and
-# boot it from the board UEFI; capture serial. Board run not yet evidenced.
+# isa-debug-exit. Board path: x86_64/aarch64 copy esp/EFI/BOOT/BOOT*.EFI to a
+# FAT USB stick (aarch64: assemble crt0 with BM_A64_UART=<board PL011 base>);
+# riscv64 flash fw_payload.bin per the board's OpenSBI flow (BM_RV_UART).
+# Board run not yet evidenced.
 #
-# Usage: sh scripts/check/check-baremetal-efi-boot.shs [--arch x86_64|aarch64|all] [--keep]
-# Env:   SIMPLE_BIN (default bin/simple), BM_SRC, BM_WORK, BM_TIMEOUT_S (60),
-#        CLANG (clang), OVMF_CODE/OVMF_VARS, AAVMF_CODE/AAVMF_VARS, BM_A64_UART.
+# Usage: sh scripts/check/check-baremetal-efi-boot.shs [--arch x86_64|aarch64|riscv64|all] [--keep]
+# Env:   SIMPLE_BIN (default bin/simple), BM_SRC, BM_WORK, BM_TIMEOUT_S (30),
+#        CLANG (clang), OVMF_CODE/OVMF_VARS, AAVMF_CODE/AAVMF_VARS, BM_A64_UART,
+#        BM_RV_UART, OPENSBI_SRC (default ~/.cache/simple/opensbi-v1.4).
 # Verdict (last line): PASS -- <n> arch(es) booted / FAIL -- ... / ERROR -- nothing was checked
 set -u
 
@@ -25,19 +34,27 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --arch) arch_sel="$2"; shift 2 ;;
         --keep) keep=1; shift ;;
-        -h|--help) sed -n "2,20p" "$0"; exit 0 ;;
+        -h|--help) sed -n "2,30p" "$0"; exit 0 ;;
         *) echo "unknown argument: $1"; echo "ERROR -- nothing was checked (bad argument)"; exit 2 ;;
     esac
 done
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 SIMPLE_BIN=${SIMPLE_BIN:-$repo_root/bin/simple}
-BM_SRC=${BM_SRC:-$repo_root/examples/09_embedded/rv64_os_boot/main.spl}
-BM_TIMEOUT_S=${BM_TIMEOUT_S:-60}
+BM_SRC=${BM_SRC:-$repo_root/examples/09_embedded/freestanding_hello/main.spl}
+RT_DIR=$repo_root/src/lib/nogc_async_mut_noalloc/baremetal/freestanding
+BM_TIMEOUT_S=${BM_TIMEOUT_S:-30}
 CLANG=${CLANG:-clang}
+OPENSBI_SRC=${OPENSBI_SRC:-$HOME/.cache/simple/opensbi-v1.4}
+OPENSBI_TAG=v1.4
+OPENSBI_SHA=a2b255b88918715173942f2c5e1f97ac9e90c877  # same pin as check-simpleos-riscv64-opensbi-guest-boot.shs
 work=${BM_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/bm-efi-boot.XXXXXX")}
+RT_SYMS="rt_string_new rt_string_new_literal rt_string_data rt_string_len rt_raw_i64_to_string rt_strcat_tagged rt_interp_cstr rt_println_str rt_println rt_panic"
+EXPECT="hello from Simple bare metal
+n=42
+panic: boom"
 
-need_tools="$CLANG ld.lld lld-link llvm-objcopy timeout"
+need_tools="$CLANG ld.lld lld-link llvm-objcopy llvm-nm timeout"
 for t in $need_tools; do
     if ! command -v "$t" >/dev/null 2>&1; then
         echo "ERROR -- nothing was checked (missing tool: $t)"; exit 2
@@ -48,7 +65,7 @@ if [ ! -x "$SIMPLE_BIN" ]; then
 fi
 
 firmware_for() {
-    # prints "<code> <vars> <qemu>" or nothing
+    # prints "<code> <vars> <qemu>" or nothing (riscv64: "<opensbi-src> - <qemu>")
     case "$1" in
         x86_64)
             c=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}; v=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
@@ -56,78 +73,120 @@ firmware_for() {
         aarch64)
             c=${AAVMF_CODE:-/usr/share/AAVMF/AAVMF_CODE.fd}; v=${AAVMF_VARS:-/usr/share/AAVMF/AAVMF_VARS.fd}
             q=qemu-system-aarch64 ;;
+        riscv64)
+            command -v qemu-system-riscv64 >/dev/null 2>&1 && command -v make >/dev/null 2>&1 \
+                && echo "$OPENSBI_SRC - qemu-system-riscv64"
+            return ;;
     esac
     [ -f "$c" ] && [ -f "$v" ] && command -v "$q" >/dev/null 2>&1 && echo "$c $v $q"
 }
 
-write_shim() {
-    # Saves callee-saved regs (UEFI and SysV/AAPCS differ on x86_64), calls the
-    # program, returns to the EFI stub. rt_mmio_write8 drives the platform UART.
-    case "$1" in
-        x86_64) cat > "$2" <<'EOF'
-.section .text.boot,"ax"
-.globl blob_start
-blob_start:
-  push %rbx
-  push %rsi
-  push %rdi
-  push %r12
-  push %r13
-  push %r14
-  push %r15
-  call __simple_main
-  pop %r15
-  pop %r14
-  pop %r13
-  pop %r12
-  pop %rdi
-  pop %rsi
-  pop %rbx
-  ret
-.globl rt_mmio_write8
-rt_mmio_write8:
-  mov $0x3f8,%dx
-  mov %sil,%al
-  out %al,%dx
-  ret
-EOF
-        ;;
-        aarch64) cat > "$2" <<'EOF'
-.section .text.boot,"ax"
-.globl blob_start
-blob_start:
-  sub sp, sp, #96
-  stp x29, x30, [sp, #0]
-  stp x19, x20, [sp, #16]
-  stp x21, x22, [sp, #32]
-  stp x23, x24, [sp, #48]
-  stp x25, x26, [sp, #64]
-  stp x27, x28, [sp, #80]
-  bl __simple_main
-  ldp x29, x30, [sp, #0]
-  ldp x19, x20, [sp, #16]
-  ldp x21, x22, [sp, #32]
-  ldp x23, x24, [sp, #48]
-  ldp x25, x26, [sp, #64]
-  ldp x27, x28, [sp, #80]
-  add sp, sp, #96
-  ret
-.globl rt_mmio_write8
-rt_mmio_write8:
-  ldr x2, =BM_A64_UART
-  strb w1, [x2]
-  ret
-EOF
-        ;;
+compile_obj() {
+    # compile_obj <src> <arch> <out> <log>
+    SIMPLE_FILE_WORKERS=0 timeout 900 "$SIMPLE_BIN" native-build "$1" \
+        --target "$2-unknown-none" --emit-object -o "$3" > "$4" 2>&1
+    rc=$?
+    [ $rc -eq 0 ] && [ -s "$3" ]
+}
+
+# Builds <d>/image.bin (flat) linked at <base>. Returns non-zero with $why set.
+build_image() {
+    a=$1; d=$2; base=$3
+    compile_obj "$BM_SRC" "$a" "$d/main.o" "$d/build.log" || { why=compile; return 1; }
+    compile_obj "$RT_DIR/bm_rt.spl" "$a" "$d/bm_rt.o" "$d/rt-build.log" || { why=rt-compile; return 1; }
+    # The compiler module-prefixes definitions (<module path>.bm_rt.<name>);
+    # bind the plain ABI names. Every runtime symbol must be found.
+    redef=""
+    for s in $RT_SYMS; do
+        m=$(llvm-nm --defined-only "$d/bm_rt.o" | awk -v s="$s" '{ n=$NF; if (n ~ ("\\.bm_rt\\." s "$") || n == ("bm_rt." s)) print n }' | head -1)
+        [ -n "$m" ] || { why="rt-missing-$s"; return 1; }
+        redef="$redef --redefine-sym $m=$s"
+    done
+    llvm-objcopy $redef "$d/bm_rt.o" "$d/bm_rt_abi.o" || { why=rt-redefine; return 1; }
+    case "$a" in
+        x86_64) cflags="--target=x86_64-unknown-elf" ;;
+        aarch64) cflags="--target=aarch64-unknown-elf -DBM_UART=${BM_A64_UART:-0x09000000}" ;;
+        riscv64) cflags="--target=riscv64-unknown-elf -march=rv64imac -mabi=lp64 -DBM_UART=${BM_RV_UART:-0x10000000}" ;;
     esac
+    "$CLANG" $cflags -c "$RT_DIR/crt0_$a.S" -o "$d/crt0.o" > "$d/crt0.log" 2>&1 || { why=crt0; return 1; }
+    printf '%s\n' 'ENTRY(_start)' \
+        "SECTIONS { . = $base; .text : { *(.text.boot) *(.text*) } . = ALIGN(16); .rodata : { *(.rodata*) *(.srodata*) } . = ALIGN(16); .data : { *(.data*) *(.sdata*) *(.bss*) *(.sbss*) *(COMMON) } }" > "$d/image.ld"
+    ld.lld -T "$d/image.ld" -o "$d/image.elf" "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/link.log" 2>&1 || {
+        why=link; return 1; }
+    # No undefined runtime symbol may survive (fail closed on a partial runtime).
+    if llvm-nm -u "$d/image.elf" | grep -q .; then why=undefined; return 1; fi
+    llvm-objcopy -O binary "$d/image.elf" "$d/image.bin" || { why=objcopy; return 1; }
+}
+
+build_efi() {
+    # Wrap image.bin in a PE/COFF EFI application on a FAT ESP.
+    a=$1; d=$2
+    if [ "$a" = x86_64 ]; then wt=x86_64-unknown-windows; mach=amd64; boot=BOOTX64.EFI
+    else wt=aarch64-unknown-windows; mach=arm64; boot=BOOTAA64.EFI; fi
+    mkdir -p "$d/esp/EFI/BOOT"
+    # The image writes its own .data (arena + stack) and executes its .text,
+    # but AAVMF maps PE sections W^X (a section-resident image faulted with
+    # "Synchronous Exception" at its first write). So the stub copies it into
+    # BootServices->AllocatePages(AnyPages, EfiLoaderCode) pages, which the
+    # firmware leaves RWX, and jumps there. Offsets: SystemTable->BootServices
+    # at 96, BootServices->AllocatePages at 40 (UEFI 2.x table layout).
+    cat > "$d/stub.c" <<'EOF'
+__asm__(".section .rdata,\"dr\"\n.balign 16\nimage_start:\n.incbin \"image.bin\"\nimage_end:\n.section .text\n");
+extern const unsigned char image_start[], image_end[];
+typedef unsigned long long u64;
+typedef u64 (*alloc_pages_fn)(u64 type, u64 mem_type, u64 pages, u64 *addr);
+u64 efi_main(void *h, void *st) {
+    void *bs = *(void **)((char *)st + 96);
+    alloc_pages_fn alloc = *(alloc_pages_fn *)((char *)bs + 40);
+    u64 n = (u64)(image_end - image_start), addr = 0;
+    if (alloc(0, 1, (n + 4095) / 4096, &addr) != 0) { for (;;) {} }
+    for (u64 i = 0; i < n; i++) ((volatile unsigned char *)addr)[i] = image_start[i];
+#if defined(__aarch64__)
+    for (u64 i = 0; i < n; i += 4) __asm__ volatile("dc cvau, %0" :: "r"(addr + i));
+    __asm__ volatile("dsb ish");
+    for (u64 i = 0; i < n; i += 4) __asm__ volatile("ic ivau, %0" :: "r"(addr + i));
+    __asm__ volatile("dsb ish\nisb");
+#endif
+    ((void (*)(void))addr)();
+    for (;;) {}
+    return 0;
+}
+EOF
+    (cd "$d" && "$CLANG" --target="$wt" -ffreestanding -fno-stack-protector -c stub.c -o stub.o) || return 1
+    lld-link /subsystem:efi_application /entry:efi_main /machine:$mach /nodefaultlib \
+        /out:"$d/esp/EFI/BOOT/$boot" "$d/stub.o" > "$d/efi.log" 2>&1
+}
+
+build_opensbi() {
+    # build_opensbi <payload.bin> <outdir>: pinned OpenSBI v1.4 fw_payload, clang only.
+    if [ -d "$OPENSBI_SRC/.git" ]; then
+        have=$(git -C "$OPENSBI_SRC" rev-parse HEAD 2>/dev/null || echo none)
+        [ "$have" = "$OPENSBI_SHA" ] || { echo "OpenSBI at $have, not pinned $OPENSBI_SHA"; return 1; }
+    else
+        mkdir -p "$(dirname "$OPENSBI_SRC")"
+        git clone -q --depth 1 --branch "$OPENSBI_TAG" \
+            https://github.com/riscv-software-src/opensbi.git "$OPENSBI_SRC" > "$2/clone.log" 2>&1 || return 1
+        have=$(git -C "$OPENSBI_SRC" rev-parse HEAD)
+        [ "$have" = "$OPENSBI_SHA" ] || { echo "cloned OpenSBI is $have, not $OPENSBI_SHA"; return 1; }
+    fi
+    make -C "$OPENSBI_SRC" O="$2/opensbi-build" PLATFORM=generic LLVM=1 \
+        FW_PAYLOAD=y FW_PAYLOAD_PATH="$1" FW_PAYLOAD_OFFSET=0x200000 -j4 > "$2/opensbi.log" 2>&1 || return 1
+    [ -s "$2/opensbi-build/platform/generic/firmware/fw_payload.bin" ]
+}
+
+transcript_ok() {
+    # Exact expected lines, consecutive, starting at the first "hello from Simple".
+    tr -d '\r' < "$1" | tr -c '[:print:]\n' '?' | sed -n '/hello from Simple/,$p' | head -3 > "$1.got"
+    printf '%s\n' "$EXPECT" > "$1.want"
+    cmp -s "$1.got" "$1.want" && ! grep -a -q "after panic" "$1"
 }
 
 booted=0
 failed=""
 checked=0
 case "$arch_sel" in
-    all) arches="x86_64 aarch64" ;;
-    x86_64|aarch64) arches="$arch_sel" ;;
+    all) arches="x86_64 aarch64 riscv64" ;;
+    x86_64|aarch64|riscv64) arches="$arch_sel" ;;
     *) echo "ERROR -- nothing was checked (unsupported --arch $arch_sel)"; exit 2 ;;
 esac
 
@@ -137,59 +196,47 @@ for a in $arches; do
         echo "[$a] firmware or qemu missing"; failed="$failed $a(no-firmware)"; continue
     fi
     set -- $fw; fw_code=$1; fw_vars=$2; qemu=$3
-    d="$work/$a"; rm -rf "$d"; mkdir -p "$d/esp/EFI/BOOT"
-    if [ "$a" = x86_64 ]; then wt=x86_64-unknown-windows; mach=amd64; boot=BOOTX64.EFI
-    else wt=aarch64-unknown-windows; mach=arm64; boot=BOOTAA64.EFI; fi
+    d="$work/$a"; rm -rf "$d"; mkdir -p "$d"
+    why=""
+    if [ "$a" = riscv64 ]; then base=0x80200000; else base=0; fi
+    build_image "$a" "$d" "$base" || { echo "[$a] image build failed: $why ($d)"; failed="$failed $a($why)"; continue; }
 
-    SIMPLE_FILE_WORKERS=0 timeout 900 "$SIMPLE_BIN" native-build "$BM_SRC" \
-        --target "$a-unknown-none" --emit-object -o "$d/main.o" > "$d/build.log" 2>&1
-    rc=$?
-    if [ $rc -ne 0 ] || [ ! -s "$d/main.o" ]; then
-        echo "[$a] compile failed rc=$rc ($d/build.log)"; failed="$failed $a(compile)"; continue
-    fi
-    write_shim "$a" "$d/shim.S"
-    sed -i "s/BM_A64_UART/${BM_A64_UART:-0x09000000}/" "$d/shim.S"
-    "$CLANG" --target="$a-unknown-elf" -c "$d/shim.S" -o "$d/shim.o" || { failed="$failed $a(shim)"; continue; }
-    printf '%s\n' 'ENTRY(blob_start)' \
-        'SECTIONS { . = 0; .text : { *(.text.boot) *(.text*) } .rodata : { *(.rodata*) } .data : { *(.data*) } .bss : { *(.bss*) } }' > "$d/blob.ld"
-    ld.lld -T "$d/blob.ld" -o "$d/blob.elf" "$d/shim.o" "$d/main.o" > "$d/link.log" 2>&1 || {
-        echo "[$a] blob link failed ($d/link.log)"; failed="$failed $a(link)"; continue; }
-    llvm-objcopy -O binary "$d/blob.elf" "$d/blob.bin" || { failed="$failed $a(objcopy)"; continue; }
-    cat > "$d/stub.c" <<'EOF'
-__asm__(".section .text\n.balign 16\n.globl blob\nblob:\n.incbin \"blob.bin\"\n");
-extern void blob(void);
-unsigned long long efi_main(void *h, void *st) { blob(); for (;;) {} return 0; }
-EOF
-    (cd "$d" && "$CLANG" --target="$wt" -ffreestanding -fno-stack-protector -c stub.c -o stub.o) || {
-        failed="$failed $a(stub)"; continue; }
-    lld-link /subsystem:efi_application /entry:efi_main /machine:$mach /nodefaultlib \
-        /out:"$d/esp/EFI/BOOT/$boot" "$d/stub.o" > "$d/efi.log" 2>&1 || {
-        echo "[$a] EFI link failed ($d/efi.log)"; failed="$failed $a(efi)"; continue; }
-
-    cp "$fw_vars" "$d/vars.fd"
-    if [ "$a" = x86_64 ]; then
-        cp "$fw_code" "$d/code.fd"
-        timeout "$BM_TIMEOUT_S" "$qemu" -machine q35 -m 256M -display none -no-reboot \
-            -drive if=pflash,format=raw,readonly=on,file="$d/code.fd" \
-            -drive if=pflash,format=raw,file="$d/vars.fd" \
-            -drive file=fat:rw:"$d/esp",format=raw \
-            -serial file:"$d/serial.log" -monitor none > "$d/qemu.log" 2>&1
-    else
-        # AAVMF images must fill the 64 MiB virt pflash banks.
-        truncate -s 64M "$d/code.fd"; dd if="$fw_code" of="$d/code.fd" conv=notrunc 2>/dev/null
-        truncate -s 64M "$d/vars.fd"
-        timeout "$BM_TIMEOUT_S" "$qemu" -machine virt -cpu cortex-a57 -m 256M -display none -no-reboot \
-            -drive if=pflash,format=raw,readonly=on,file="$d/code.fd" \
-            -drive if=pflash,format=raw,file="$d/vars.fd" \
-            -drive file=fat:rw:"$d/esp",format=raw \
-            -serial file:"$d/serial.log" -monitor none > "$d/qemu.log" 2>&1
-    fi
+    rm -f "$d/serial.log"
+    case "$a" in
+        x86_64)
+            build_efi "$a" "$d" || { echo "[$a] EFI wrap failed ($d/efi.log)"; failed="$failed $a(efi)"; continue; }
+            cp "$fw_vars" "$d/vars.fd"; cp "$fw_code" "$d/code.fd"
+            set -- -machine q35 -m 256M \
+                -drive if=pflash,format=raw,readonly=on,file="$d/code.fd" \
+                -drive if=pflash,format=raw,file="$d/vars.fd" \
+                -drive file=fat:rw:"$d/esp",format=raw ;;
+        aarch64)
+            build_efi "$a" "$d" || { echo "[$a] EFI wrap failed ($d/efi.log)"; failed="$failed $a(efi)"; continue; }
+            # AAVMF images must fill the 64 MiB virt pflash banks.
+            truncate -s 64M "$d/code.fd"; dd if="$fw_code" of="$d/code.fd" conv=notrunc 2>/dev/null
+            cp "$fw_vars" "$d/vars.fd"; truncate -s 64M "$d/vars.fd"
+            set -- -machine virt -cpu cortex-a57 -m 256M \
+                -drive if=pflash,format=raw,readonly=on,file="$d/code.fd" \
+                -drive if=pflash,format=raw,file="$d/vars.fd" \
+                -drive file=fat:rw:"$d/esp",format=raw ;;
+        riscv64)
+            build_opensbi "$d/image.bin" "$d" || { echo "[$a] OpenSBI fw_payload build failed ($d)"; failed="$failed $a(opensbi)"; continue; }
+            set -- -machine virt -cpu rv64 -smp 1 -m 256M \
+                -bios "$d/opensbi-build/platform/generic/firmware/fw_payload.bin" ;;
+    esac
+    set -- "$@" -display none -no-reboot -net none -serial file:"$d/serial.log" -monitor none
+    for arg in "$@"; do
+        case "$arg" in -kernel|*isa-debug-exit*) echo "FAIL -- forbidden QEMU flag $arg"; exit 1 ;; esac
+    done
+    # The image halts (no exit device by rule); the timeout ends the run.
+    timeout "$BM_TIMEOUT_S" "$qemu" "$@" > "$d/qemu.log" 2>&1
     checked=$((checked + 1))
-    if grep -a -q "SimpleOS" "$d/serial.log" 2>/dev/null; then
-        echo "[$a] booted via firmware: $(grep -a -o 'SimpleOS[^[:cntrl:]]*' "$d/serial.log" | head -1)"
+    if [ -f "$d/serial.log" ] && transcript_ok "$d/serial.log"; then
+        echo "[$a] booted via firmware: $(tr '\n' '|' < "$d/serial.log.got")"
         booted=$((booted + 1))
     else
-        echo "[$a] no banner on serial ($d/serial.log)"; failed="$failed $a(boot)"
+        echo "[$a] transcript mismatch ($d/serial.log): $(tr '\n' '|' < "$d/serial.log.got" 2>/dev/null)"
+        failed="$failed $a(boot)"
     fi
 done
 
@@ -202,5 +249,5 @@ if [ -n "$failed" ]; then
     echo "FAIL -- $booted of $checked boot(s) passed; failed:$failed"; exit 1
 fi
 if [ $booted -eq 0 ]; then echo "ERROR -- nothing was checked"; exit 2; fi
-echo "PASS -- $booted arch(es) booted through real firmware (serial banner seen)"
+echo "PASS -- $booted arch(es) booted through real firmware (exact serial transcript, panic halted)"
 exit 0

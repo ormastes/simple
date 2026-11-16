@@ -1,0 +1,109 @@
+# slang pure backend — sampler specs on tiny synthetic logits (seconds).
+
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_argmax}
+use std.gc_async_mut.slang.model_executor.pure.sampler.{SamplerConfig, sampler_config_greedy, sampler_state_new, sampler_sample}
+
+# ln of [0.5, 0.3, 0.15, 0.05]: softmax at temperature 1 returns exactly these.
+fn _toy() -> PureTensor:
+    tensor_from_values([-0.6931471805599453, -1.2039728043259361, -1.8971199848858813, -2.995732273553991], [4])
+
+fn _cfg(t: f64, k: i64, p: f64) -> SamplerConfig:
+    SamplerConfig(temperature: t, top_k: k, top_p: p, repetition_penalty: 1.0, penalty_window: 0)
+
+fn _draws(cfg: SamplerConfig, logits: PureTensor, seed: i64, n: i64) -> [i64]:
+    var st = sampler_state_new(seed)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        val r = sampler_sample(cfg, st, logits, [])
+        st = r.state
+        out.push(r.token)
+        i = i + 1
+    out
+
+fn _count(xs: [i64], v: i64) -> i64:
+    var n: i64 = 0
+    for x in xs:
+        if x == v:
+            n = n + 1
+    n
+
+fn _flat(n: i64) -> PureTensor:
+    var v: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        v.push(0.0)
+        i = i + 1
+    tensor_from_values(v, [n])
+
+describe "pure sampler":
+    it "is tensor_argmax at temperature 0":
+        val l = tensor_from_values([0.1, 2.5, -1.0, 2.5, 0.3], [5])
+        val r = sampler_sample(sampler_config_greedy(), sampler_state_new(1), l, [])
+        expect(r.token).to_equal(tensor_argmax(l))
+        expect(r.token).to_equal(1)
+
+    it "top-k 1 equals argmax at any temperature":
+        val l = tensor_from_values([0.1, 0.2, 0.9, 0.3, 0.9], [5])
+        val toks = _draws(_cfg(1.5, 1, 1.0), l, 3, 12)
+        expect(_count(toks, 2)).to_equal(12)
+
+    it "top-k restricts draws to the k best":
+        val toks = _draws(_cfg(1.0, 2, 1.0), _toy(), 5, 200)
+        expect(_count(toks, 0) + _count(toks, 1)).to_equal(200)
+        expect(_count(toks, 0) > 0 and _count(toks, 1) > 0).to_equal(true)
+
+    it "top-p keeps the smallest set reaching p":
+        val a = _draws(_cfg(1.0, 0, 0.7), _toy(), 11, 300)
+        expect(_count(a, 0) + _count(a, 1)).to_equal(300)
+        expect(_count(a, 1) > 0).to_equal(true)
+        val b = _draws(_cfg(1.0, 0, 0.9), _toy(), 11, 300)
+        expect(_count(b, 3)).to_equal(0)
+        expect(_count(b, 2) > 0).to_equal(true)
+        val c = _draws(_cfg(1.0, 0, 0.4), _toy(), 11, 50)
+        expect(_count(c, 0)).to_equal(50)
+
+    it "top-p sorts only its boundary bucket on a flat vocab":
+        # 300 equal logits, p 0.9: nucleus = first 270 ids (ties keep low ids first).
+        val toks = _draws(_cfg(1.0, 0, 0.9), _flat(300), 4, 100)
+        var worst: i64 = 0
+        for t in toks:
+            if t > worst:
+                worst = t
+        expect(worst < 270).to_equal(true)
+        expect(worst > 64).to_equal(true)
+
+    it "is deterministic per seed and differs across seeds":
+        val l = tensor_from_values([0.0, 0.1, 0.2, 0.1], [4])
+        val a = _draws(_cfg(1.0, 0, 1.0), l, 7, 24)
+        val b = _draws(_cfg(1.0, 0, 1.0), l, 7, 24)
+        val c = _draws(_cfg(1.0, 0, 1.0), l, 8, 24)
+        expect(a).to_equal(b)
+        expect(a == c).to_equal(false)
+
+    it "repetition penalty lowers a repeated token":
+        val l = tensor_from_values([2.0, 1.9, -0.5], [3])
+        val cfg = SamplerConfig(temperature: 0.0, top_k: 0, top_p: 1.0, repetition_penalty: 2.0, penalty_window: 0)
+        expect(sampler_sample(cfg, sampler_state_new(1), l, []).token).to_equal(0)
+        expect(sampler_sample(cfg, sampler_state_new(1), l, [0]).token).to_equal(1)
+        # negative logits are multiplied: penalizing token 2 keeps it lowest
+        val neg = tensor_from_values([-1.0, -1.1], [2])
+        expect(sampler_sample(cfg, sampler_state_new(1), neg, [0]).token).to_equal(1)
+
+    it "limits the penalty to the recent window":
+        val l = tensor_from_values([2.0, 1.9, -0.5], [3])
+        val cfg = SamplerConfig(temperature: 0.0, top_k: 0, top_p: 1.0, repetition_penalty: 2.0, penalty_window: 2)
+        # token 0 is outside the 2-token window [2, 2]
+        expect(sampler_sample(cfg, sampler_state_new(1), l, [0, 2, 2]).token).to_equal(0)
+
+    it "matches the softmax distribution empirically":
+        val toks = _draws(_cfg(1.0, 0, 1.0), _toy(), 2024, 2000)
+        val f0 = _count(toks, 0) as f64 / 2000.0
+        val f1 = _count(toks, 1) as f64 / 2000.0
+        val f2 = _count(toks, 2) as f64 / 2000.0
+        val f3 = _count(toks, 3) as f64 / 2000.0
+        print "freq {f0} {f1} {f2} {f3}"
+        expect(f0 > 0.46 and f0 < 0.54).to_equal(true)
+        expect(f1 > 0.26 and f1 < 0.34).to_equal(true)
+        expect(f2 > 0.12 and f2 < 0.18).to_equal(true)
+        expect(f3 > 0.02 and f3 < 0.08).to_equal(true)

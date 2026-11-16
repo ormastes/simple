@@ -1,0 +1,61 @@
+# Unit derived-op profile wiring (RB6, decision 4A follow-up).
+#
+# unit_ops.spl owns SPL-UNIT-004 (unit*unit / unit/unit without a declared
+# derived unit) but only exposes a strict/default switch and a warning list.
+# This file connects both to the driver:
+#   - strict mode is chosen by the SPL-UNIT-004 row of
+#     config/policy/diagnostic_policy.sdn for the active profile (no profile
+#     names are hardcoded here: a `deny` baseline means strict);
+#   - default-mode warnings are drained into typecheck diagnostics.
+
+use compiler.common.assurance.policy_names.normalize_profile_name
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticPolicySnapshot, DiagnosticRuleLevel, load_diagnostic_policy_text, diagnostic_policy_default_path
+}
+use compiler.types.units.unit_ops.{unit_op_robust_profile, unit_op_default_profile, unit_op_take_warnings}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+
+val UNIT_PROFILE_RULE: text = "SPL-UNIT-004"
+
+# Loaded at most once per process (a missing/malformed file is remembered too).
+var _UNIT_POLICY_LOADED = false
+var _UNIT_POLICY: [DiagnosticPolicySnapshot] = []
+
+pub fn unit_profile_policy() -> DiagnosticPolicySnapshot?:
+    if not _UNIT_POLICY_LOADED:
+        _UNIT_POLICY_LOADED = true
+        val path = diagnostic_policy_default_path()
+        if file_exists(path):
+            match load_diagnostic_policy_text(file_read(path)):
+                case Ok(snapshot): _UNIT_POLICY.push(snapshot)
+                case Err(_): pass
+    if _UNIT_POLICY.len() == 0:
+        return None
+    Some(_UNIT_POLICY[0])
+
+# Unknown/empty profile resolves to the policy's `default` column.
+# @allow(primitive_api) yes/no strict-mode predicate mirroring unit_ops' own bool switch; no domain type applies
+pub fn unit_profile_strict_for(policy: DiagnosticPolicySnapshot?, raw_profile: text) -> bool:
+    match policy:
+        case None: false
+        case Some(snapshot):
+            val slot = snapshot.slot_of(UNIT_PROFILE_RULE)
+            if slot < 0:
+                return false
+            var mode = normalize_profile_name(raw_profile)
+            if mode == "":
+                mode = "default"
+            snapshot.baseline_level(slot, mode).rank() >= DiagnosticRuleLevel.Deny.rank()
+
+pub fn unit_profile_apply(raw_profile: text):
+    if unit_profile_strict_for(unit_profile_policy(), raw_profile):
+        unit_op_robust_profile()
+    else:
+        unit_op_default_profile()
+
+# Drains pending SPL-UNIT-004 warnings as `[unit SPL-UNIT-004] <module>: <msg>`.
+pub fn unit_profile_drain_diagnostics(module_name: text) -> [text]:
+    var out: [text] = []
+    for w in unit_op_take_warnings():
+        out.push("[unit " + UNIT_PROFILE_RULE + "] " + module_name + ": " + w)
+    out

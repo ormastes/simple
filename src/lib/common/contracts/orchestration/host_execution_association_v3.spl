@@ -17,6 +17,11 @@ pub struct HostExecutionAssociationV3:
     epoch_record_digest: text
     service_process_identity_digest: text
     execution: ContainerExecutionRequestV2
+    # milestone_0021: the signed agent intent copied from the prepared draft; the
+    # execute signature covers the association digest, so these are signed.
+    readonly_rootfs: bool = false
+    agent_invocation_manifest_digest: text = ""
+    agent_probe_list_digest: text = ""
 
 pub struct HostPreparedAssociatedReplyV3:
     prepare: HostPrepareAssociatedRequestV3
@@ -35,21 +40,26 @@ pub fn host_execution_association_encode_v3(association: HostExecutionAssociatio
             plan.native_machine_id != scope.native_machine_id or plan.service_scope_id != "epoch-" + association.epoch_record_digest):
         return Err("execution-association-scope")
     val service_bytes = container_host_scope_bytes_v2(scope)?
-    execution_associated_encode_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("host-execution-association"),
+    execution_associated_encode_v3(execution_agent_fields_put_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("host-execution-association"),
         "enrollmentDigest": SdnValue.String(association.enrollment_digest), "serviceScope": SdnValue.String(service_bytes),
         "intentDigest": SdnValue.String(association.intent_digest), "preparedReceiptDigest": SdnValue.String(association.prepared_receipt_digest),
         "preparedRevision": SdnValue.Int(association.prepared_revision), "epochRecordDigest": SdnValue.String(association.epoch_record_digest),
         "serviceProcessIdentityDigest": SdnValue.String(association.service_process_identity_digest),
-        "execution": SdnValue.String(container_execution_request_encode_v2(association.execution)?)})
+        "execution": SdnValue.String(container_execution_request_encode_v2(association.execution)?)}, association.readonly_rootfs,
+        association.agent_invocation_manifest_digest, association.agent_probe_list_digest)?)
 
 pub fn host_execution_association_decode_v3(source: text) -> Result<HostExecutionAssociationV3, text>:
     val fields = execution_associated_fields_v3(source, "host-execution-association", ["version", "kind", "enrollmentDigest", "serviceScope",
-        "intentDigest", "preparedReceiptDigest", "preparedRevision", "epochRecordDigest", "serviceProcessIdentityDigest", "execution"])?
+        "intentDigest", "preparedReceiptDigest", "preparedRevision", "epochRecordDigest", "serviceProcessIdentityDigest", "execution"],
+        execution_agent_optional_fields_v3())?
     val association = HostExecutionAssociationV3(execution_associated_text_v3(fields, "enrollmentDigest")?,
         container_host_scope_decode_v2(execution_associated_text_v3(fields, "serviceScope")?)?, execution_associated_text_v3(fields, "intentDigest")?,
         execution_associated_text_v3(fields, "preparedReceiptDigest")?, execution_associated_int_v3(fields, "preparedRevision")?,
         execution_associated_text_v3(fields, "epochRecordDigest")?, execution_associated_text_v3(fields, "serviceProcessIdentityDigest")?,
-        container_execution_request_decode_v2(execution_associated_text_v3(fields, "execution")?)?)
+        container_execution_request_decode_v2(execution_associated_text_v3(fields, "execution")?)?,
+        execution_associated_optional_bool_v3(fields, "readonlyRootfs")?,
+        execution_associated_optional_text_v3(fields, "agentInvocationManifestDigest")?,
+        execution_associated_optional_text_v3(fields, "agentProbeListDigest")?)
     if host_execution_association_encode_v3(association)? != source: return Err("execution-association-canonical")
     Ok(association)
 
@@ -69,7 +79,10 @@ pub fn host_execution_association_match_v3(association: HostExecutionAssociation
             association.prepared_receipt_digest != receipt.receipt_digest or association.prepared_revision != receipt.prepared_revision or
             execution.plan.backend != draft.backend or execution.plan.workload_uid != draft.workload_uid or
             execution.plan.attempt != draft.attempt or execution.plan.operation_id != draft.operation_id or
-            execution.plan.request_digest != draft.request_digest or execution.request_bytes != draft.request_bytes):
+            execution.plan.request_digest != draft.request_digest or execution.request_bytes != draft.request_bytes or
+            association.readonly_rootfs != draft.readonly_rootfs or
+            association.agent_invocation_manifest_digest != draft.agent_invocation_manifest_digest or
+            association.agent_probe_list_digest != draft.agent_probe_list_digest):
         return Err("execution-association-prepare-binding")
     Ok(())
 
