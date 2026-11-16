@@ -95,12 +95,33 @@ sink: `SIMPLE_BOOTSTRAP=1` erases `T?` to Int.
 Guard: `test/01_unit/compiler/mir/tail_match_optional_arm_into_plain_return_spec.spl`.
 On the seed it is red 0/2 without the fix and green 2/2 with it.
 
+Source workaround for the real site (`d648234f1fb`). It needs no Stage 2
+rebuild and can be cherry-picked into the stage3 workaround lane. In
+`lower_expr_impl`, both arms now coalesce with
+`?? self.builder.new_temp(MirType.unit())`, which is the fallback
+`lower_cfg_select` already uses. The match no longer joins to `LocalId?`.
+
+When the trap can fire (the effect of `2498a42ee19`):
+- `lower_cfg_select` never returns None; every path returns a temp.
+- `lower_inline_asm_match` returns None only after `error_fatal`, or for an
+  asm-match arm that has no asm body (`asm_and_targets.spl:487/526`).
+- Compiler source contains no `asm match`.
+
 Still open:
-- Perf: the per-arm wrap plus the tail unwrap still allocate on every
-  `lower_expr_impl` call, which is the hottest MIR path. Threading the declared
-  `T` into the arms would remove both. It is not done here because it changes
-  every struct-returning conditional tail, and only a full Stage 2 rebuild can
-  validate that.
+- Perf and memory: until the workaround is in a Stage 2,
+  `lower_expr_impl` allocates an Option box per call on the hottest MIR path.
+  With the generic fix alone, it also pays an unwrap per call. Under no-GC
+  that box is plausibly a leak.
+- Generic alternative, not done: thread the declared `T` into the arms. It is
+  held back because it changes every struct-returning conditional tail, and
+  only a full Stage 2 rebuild can validate that.
+- `SIMPLE_BOOTSTRAP=1` gap:
+  - With erased HIR, the `pick(n)` arm's call returns `(Bool, I64)` and the
+    join is a plain copy, so MIR has no `T?` evidence and the narrow does not
+    fire. Measured: `lower_impl`'s Return is `Copy 3`, and the Sel arm
+    returns pick's handle.
+  - The Stage 3 build that miscompiled used the typed path (the gdb trace
+    shows the per-arm `ensure_option_handle`).
 - An explicit `return <T?>` from `-> T` (`lower_return_expr`) is not covered or
   tested.
 - The census SEGV sites are not shown to be this class.
