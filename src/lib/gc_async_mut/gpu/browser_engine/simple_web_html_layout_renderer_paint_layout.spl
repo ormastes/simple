@@ -176,6 +176,14 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     val shadow_parse = parse_box_shadow_layers(
         st.box_shadow_raw, st.fg
     )
+    val eff_style_l = _html_draw_ir_effective_border_style(node, st.border_style_l, st.border_l)
+    val eff_style_t = _html_draw_ir_effective_border_style(node, st.border_style_t, st.border_t)
+    val eff_style_r = _html_draw_ir_effective_border_style(node, st.border_style_r, st.border_r)
+    val eff_style_b = _html_draw_ir_effective_border_style(node, st.border_style_b, st.border_b)
+    val ir_border_l = _html_draw_ir_rendered_border_width(eff_style_l, st.border_l)
+    val ir_border_t = _html_draw_ir_rendered_border_width(eff_style_t, st.border_t)
+    val ir_border_r = _html_draw_ir_rendered_border_width(eff_style_r, st.border_r)
+    val ir_border_b = _html_draw_ir_rendered_border_width(eff_style_b, st.border_b)
     var props = [
         draw_ir_style_prop("background-gradient-stop-count", "{gradient_stop_count}"),
         draw_ir_style_prop("background-gradient-stops", gradient_stops_raw),
@@ -355,17 +363,17 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("margin-right", "{st.margin_r}"),
         draw_ir_style_prop("margin-top", "{st.margin_t}"),
         draw_ir_style_prop("margin-bottom", "{st.margin_b}"),
-        draw_ir_style_prop("border-left-width", "{st.border_l}"),
-        draw_ir_style_prop("border-left-style", st.border_style_l),
+        draw_ir_style_prop("border-left-width", "{ir_border_l}"),
+        draw_ir_style_prop("border-left-style", eff_style_l),
         draw_ir_style_prop("border-radius", "{st.border_radius_px}"),
         draw_ir_style_prop("border-top-left-radius", "{st.border_radius_tl_px}"),
         draw_ir_style_prop("border-top-right-radius", "{st.border_radius_tr_px}"),
         draw_ir_style_prop("border-bottom-right-radius", "{st.border_radius_br_px}"),
         draw_ir_style_prop("border-bottom-left-radius", "{st.border_radius_bl_px}"),
-        draw_ir_style_prop("border-top-width", "{st.border_t}"),
-        draw_ir_style_prop("border-right-width", "{st.border_r}"),
-        draw_ir_style_prop("border-right-style", st.border_style_r),
-        draw_ir_style_prop("border-bottom-width", "{st.border_b}"),
+        draw_ir_style_prop("border-top-width", "{ir_border_t}"),
+        draw_ir_style_prop("border-right-width", "{ir_border_r}"),
+        draw_ir_style_prop("border-right-style", eff_style_r),
+        draw_ir_style_prop("border-bottom-width", "{ir_border_b}"),
         draw_ir_style_prop("border-top-color", "{st.border_color_t}"),
         draw_ir_style_prop("border-right-color", "{st.border_color_r}"),
         draw_ir_style_prop("border-bottom-color", "{st.border_color_b}"),
@@ -525,15 +533,18 @@ fn _html_draw_ir_resolved_text_command(
             cid, tx, ty, txt, st.fg, computed_style, clip_rect
         )
     var merged: [DrawIrStyleProp] = []
-    # cpu-lane-loop-ok: per-node style-prop merge that drops the five font-* keys the resolved font metrics supersede; bound is this node's own declared prop list
+    # cpu-lane-loop-ok: per-node style-prop merge that drops the four font-* keys the resolved font metrics supersede; bound is this node's own declared prop list
     for prop in computed_style:
         if (prop.key != "font-family" and prop.key != "font-identity" and
-            prop.key != "font-size" and prop.key != "line-height" and
-            prop.key != "font-shaping"):
+            prop.key != "font-size" and prop.key != "font-shaping"):
             merged.push(prop)
     # cpu-lane-loop-ok: appends the resolved font-metric props onto the merged list; bound is the small fixed prop set returned by draw_ir_text_shaped_font / _resolved_font
     for prop in resolved.computed_style:
-        merged.push(prop)
+        # `line-height` stays the computed CSS value (style_line_h answers the
+        # face normal metric for `normal`); the face metric must not replace
+        # an author `line-height: 20px`.
+        if prop.key != "line-height":
+            merged.push(prop)
     # Declare the wire arity of `advance_widths` for the Engine2D gate.
     merged.push(draw_ir_style_prop("font-advance-arity", "codepoint"))
     resolved.computed_style = merged
@@ -949,12 +960,23 @@ fn _html_draw_ir_two_url_background_layers(st: Style) -> [HtmlDrawIrBackgroundLa
         index = index + 1
     layers
 
+# A lone `background-image:url(...)` longhand keeps its authored text in
+# `bg_layers_raw` as the css-cascade rejection witness (13f95dfa511). That one
+# exact url layer is still the typed image, so it lowers; any other raw text
+# (multi-layer, radial, unsupported) stays fail-closed.
+fn _html_draw_ir_single_url_witness(st: Style) -> bool:
+    val raw = st.bg_layers_raw.trim()
+    st.background_image_uri != "" and raw.lower().starts_with("url(") and
+        split_top_level_commas(raw).len() == 1
+
 fn _html_draw_ir_background_layers(st: Style) -> [HtmlDrawIrBackgroundLayer]:
     val layered = _html_draw_ir_two_url_background_layers(st)
     if layered.len() == 2:
         return layered
-    if (st.bg_layers_raw != "" or st.background_image_uri == "" or
-        st.background_attachment == "local"):
+    if (
+        (st.bg_layers_raw != "" and not _html_draw_ir_single_url_witness(st)) or
+        st.background_image_uri == "" or st.background_attachment == "local"
+    ):
         return []
     [HtmlDrawIrBackgroundLayer(
         image_uri: st.background_image_uri, repeat: st.background_repeat,
@@ -1110,6 +1132,157 @@ fn _html_draw_ir_background_border_overlay(
             props.push(prop)
     command.computed_style = props
     command
+
+fn _html_draw_ir_effective_border_style(node: HNode, raw_style: text, width: i32) -> text:
+    if (node.tag == "hr" or node.tag == "fieldset") and raw_style == "none" and width > 0:
+        return "solid"
+    raw_style
+
+fn _html_draw_ir_rendered_border_width(effective_style: text, width: i32) -> i32:
+    if width <= 0:
+        return 0
+    if (
+        effective_style == "none" or effective_style == "hidden" or
+        effective_style == "dashed" or effective_style == "dotted" or
+        effective_style == "double"
+    ):
+        return 0
+    width
+
+fn _html_draw_ir_scale_color_opacity(color: u32, opacity_pct: i32) -> u32:
+    if opacity_pct >= 100 or color == 0u32:
+        return color
+    if opacity_pct <= 0:
+        return 0u32
+    val a = ((color >> 24) & 255u32) as i32
+    val na = (a * opacity_pct) / 100
+    if na <= 0:
+        return 0u32
+    ((na as u32) << 24) | (color & 0x00FFFFFFu32)
+
+fn _html_draw_ir_styled_span_commands(
+    base_id: text,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    horizontal: bool,
+    style_name: text,
+    color: u32,
+    clip: ClipRect
+) -> [DrawIrCommand]:
+    var cmds: [DrawIrCommand] = []
+    if w <= 0 or h <= 0 or color == 0u32:
+        return cmds
+    if style_name == "double":
+        val thickness = if horizontal: h else: w
+        if thickness >= 3:
+            val line_w = (thickness + 2) / 3
+            if horizontal:
+                cmds.push(_html_draw_ir_overlay_rect(base_id + "_d0", ClipRect(x0: x, y0: y, x1: x + w, y1: y + line_w), color, clip))
+                cmds.push(_html_draw_ir_overlay_rect(base_id + "_d1", ClipRect(x0: x, y0: y + h - line_w, x1: x + w, y1: y + h), color, clip))
+            else:
+                cmds.push(_html_draw_ir_overlay_rect(base_id + "_d0", ClipRect(x0: x, y0: y, x1: x + line_w, y1: y + h), color, clip))
+                cmds.push(_html_draw_ir_overlay_rect(base_id + "_d1", ClipRect(x0: x + w - line_w, y0: y, x1: x + w, y1: y + h), color, clip))
+            return cmds
+        cmds.push(_html_draw_ir_overlay_rect(base_id + "_s0", ClipRect(x0: x, y0: y, x1: x + w, y1: y + h), color, clip))
+        return cmds
+    if style_name == "dashed" or style_name == "dotted":
+        val thickness = if horizontal: h else: w
+        val stroke_t = if thickness > 0: thickness else: 1
+        val dash_len = if style_name == "dotted": stroke_t else: stroke_t * 3
+        val gap_len = if style_name == "dotted": stroke_t else: stroke_t * 2
+        val span_len = if horizontal: w else: h
+        var p = 0
+        var idx = 0
+        # cpu-lane-loop-ok: emits bounded per-dash overlay rects along one border edge; bound is span_len / (dash_len + gap_len)
+        while p < span_len and idx < 4096:
+            var seg = dash_len
+            if p + seg > span_len:
+                seg = span_len - p
+            val seg_rect = if horizontal:
+                ClipRect(x0: x + p, y0: y, x1: x + p + seg, y1: y + h)
+            else:
+                ClipRect(x0: x, y0: y + p, x1: x + w, y1: y + p + seg)
+            cmds.push(_html_draw_ir_overlay_rect("{base_id}_{idx}", seg_rect, color, clip))
+            p = p + dash_len + gap_len
+            idx = idx + 1
+    cmds
+
+fn _html_draw_ir_side_is_custom_style(eff_style: text) -> bool:
+    eff_style == "dashed" or eff_style == "dotted" or eff_style == "double"
+
+fn _html_draw_ir_styled_border_commands(
+    node: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, i: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    var cmds: [DrawIrCommand] = []
+    if w <= 0 or h <= 0 or node.tag == "#text" or st.display == "none" or st.visibility_hidden:
+        return cmds
+    val eff_l = _html_draw_ir_effective_border_style(node, st.border_style_l, st.border_l)
+    val eff_t = _html_draw_ir_effective_border_style(node, st.border_style_t, st.border_t)
+    val eff_r = _html_draw_ir_effective_border_style(node, st.border_style_r, st.border_r)
+    val eff_b = _html_draw_ir_effective_border_style(node, st.border_style_b, st.border_b)
+    if (
+        not _html_draw_ir_side_is_custom_style(eff_l) and
+        not _html_draw_ir_side_is_custom_style(eff_t) and
+        not _html_draw_ir_side_is_custom_style(eff_r) and
+        not _html_draw_ir_side_is_custom_style(eff_b)
+    ):
+        return cmds
+    val tl = clamp_corner_radius(st.border_radius_tl_px, w, h)
+    val tr = clamp_corner_radius(st.border_radius_tr_px, w, h)
+    val br_rad = clamp_corner_radius(st.border_radius_br_px, w, h)
+    val bl_rad = clamp_corner_radius(st.border_radius_bl_px, w, h)
+    val base_id = _html_draw_ir_component_id(node, i) + "_styled_border"
+    if _html_draw_ir_side_is_custom_style(eff_t) and st.border_t > 0 and st.border_color_t != 0u32:
+        val ct = _html_draw_ir_scale_color_opacity(st.border_color_t, st.opacity_pct)
+        for cmd in _html_draw_ir_styled_span_commands(base_id + "_t", x + tl, y, w - tl - tr, st.border_t, true, eff_t, ct, clip):
+            cmds.push(cmd)
+    if _html_draw_ir_side_is_custom_style(eff_b) and st.border_b > 0 and st.border_color_b != 0u32:
+        val cb = _html_draw_ir_scale_color_opacity(st.border_color_b, st.opacity_pct)
+        for cmd in _html_draw_ir_styled_span_commands(base_id + "_b", x + bl_rad, y + h - st.border_b, w - bl_rad - br_rad, st.border_b, true, eff_b, cb, clip):
+            cmds.push(cmd)
+    if _html_draw_ir_side_is_custom_style(eff_l) and st.border_l > 0 and st.border_color_l != 0u32:
+        val cl = _html_draw_ir_scale_color_opacity(st.border_color_l, st.opacity_pct)
+        for cmd in _html_draw_ir_styled_span_commands(base_id + "_l", x, y + tl, st.border_l, h - tl - bl_rad, false, eff_l, cl, clip):
+            cmds.push(cmd)
+    if _html_draw_ir_side_is_custom_style(eff_r) and st.border_r > 0 and st.border_color_r != 0u32:
+        val cr = _html_draw_ir_scale_color_opacity(st.border_color_r, st.opacity_pct)
+        for cmd in _html_draw_ir_styled_span_commands(base_id + "_r", x + w - st.border_r, y + tr, st.border_r, h - tr - br_rad, false, eff_r, cr, clip):
+            cmds.push(cmd)
+    cmds
+
+fn _html_draw_ir_select_arrow_commands(
+    node: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, i: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    if node.tag != "select" or w < 10 or h < 8 or SELECT_ARROW_WIDTH_PX <= 0 or st.display == "none" or st.visibility_hidden:
+        return []
+    var ax1 = x + w - st.border_r - st.pad_r
+    if ax1 > x + w - st.border_r:
+        ax1 = x + w - st.border_r
+    var ax0 = ax1 - SELECT_ARROW_WIDTH_PX
+    if ax0 < x + 2:
+        ax0 = x + 2
+    if ax1 - ax0 < 6:
+        ax1 = x + w - st.border_r
+        ax0 = ax1 - SELECT_ARROW_WIDTH_PX
+        if ax0 < x + 2:
+            ax0 = x + 2
+    if ax1 - ax0 < 5:
+        return []
+    val cx = (ax0 + ax1) / 2
+    val cy = (y + st.border_t + y + h - st.border_b) / 2
+    val chevron_col = _html_draw_ir_scale_color_opacity(
+        if st.fg != 0u32: st.fg else: web_argb(55, 65, 81),
+        st.opacity_pct
+    )
+    val base_id = _html_draw_ir_component_id(node, i) + "_select_chevron"
+    [
+        _html_draw_ir_overlay_rect(base_id + "_0", ClipRect(x0: cx - 3, y0: cy - 2, x1: cx + 4, y1: cy - 1), chevron_col, clip),
+        _html_draw_ir_overlay_rect(base_id + "_1", ClipRect(x0: cx - 2, y0: cy - 1, x1: cx + 3, y1: cy), chevron_col, clip),
+        _html_draw_ir_overlay_rect(base_id + "_2", ClipRect(x0: cx - 1, y0: cy, x1: cx + 2, y1: cy + 1), chevron_col, clip),
+        _html_draw_ir_overlay_rect(base_id + "_3", ClipRect(x0: cx, y0: cy + 1, x1: cx + 1, y1: cy + 2), chevron_col, clip)
+    ]
 
 fn _html_draw_ir_has_input_text(
     node: HNode, st: Style, box_width: i32
@@ -1632,19 +1805,23 @@ fn _html_draw_ir_visible(
                     var blur = parse_signed_nth_int(prefix, 2)
                     if blur == -1000000 or blur <= 0:
                         blur = 1
+                    var sp = parse_signed_nth_int(prefix, 3)
+                    if sp == -1000000 or sp < 0:
+                        sp = 0
+                    val shadow_pad = blur.to_i64() + sp.to_i64()
                     val shadow_x0 = (
-                        boxes.bx[i].to_i64() + ox.to_i64() - blur.to_i64()
+                        boxes.bx[i].to_i64() + ox.to_i64() - shadow_pad
                     )
                     val shadow_y0 = (
-                        boxes.by[i].to_i64() + oy.to_i64() - blur.to_i64()
+                        boxes.by[i].to_i64() + oy.to_i64() - shadow_pad
                     )
                     val shadow_x1 = (
                         boxes.bx[i].to_i64() + ox.to_i64() +
-                        box_w.to_i64() + blur.to_i64()
+                        box_w.to_i64() + shadow_pad
                     )
                     val shadow_y1 = (
                         boxes.by[i].to_i64() + oy.to_i64() +
-                        box_h.to_i64() + blur.to_i64()
+                        box_h.to_i64() + shadow_pad
                     )
                     if shadow_x0 < x0: x0 = shadow_x0
                     if shadow_y0 < y0: y0 = shadow_y0
@@ -2061,6 +2238,21 @@ fn _html_draw_ir_commands(
                     )
                     border_overlay.parent_id = component_id
                     commands.push(border_overlay)
+                    owner_nodes.push(i)
+            for border_cmd in _html_draw_ir_styled_border_commands(
+                nodes[i], styles[i], boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i], i, node_clip
+            ):
+                var styled_cmd = border_cmd
+                styled_cmd.parent_id = component_id
+                commands.push(styled_cmd)
+                owner_nodes.push(i)
+            if nodes[i].tag == "select":
+                for arrow_cmd in _html_draw_ir_select_arrow_commands(
+                    nodes[i], styles[i], boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i], i, node_clip
+                ):
+                    var select_cmd = arrow_cmd
+                    select_cmd.parent_id = component_id
+                    commands.push(select_cmd)
                     owner_nodes.push(i)
             if nodes[i].tag == "svg" or nodes[i].tag == "video" or nodes[i].tag == "audio":
                 # cpu-lane-loop-ok: pushes the replaced-media sub-part commands (svg rects, video surface, audio pill) for one element; bound is that element's shape count

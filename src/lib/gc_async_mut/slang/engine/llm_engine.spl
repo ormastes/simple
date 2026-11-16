@@ -19,7 +19,7 @@ use std.gc_async_mut.slang.model_executor.backend.{MediaBlob, BackendMediaGenera
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
 use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_bind_backend, paged_executor_clear_pending_backend, paged_executor_activate_config, paged_executor_configuration_text, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
-use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes}
+use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes, estimate_runtime_overhead_bytes}
 use std.io_runtime.{file_exists, env_get, host_os}
 
 # Resident state. Module-level because the model IS the process's memory: two
@@ -216,13 +216,6 @@ fn engine_kv_execution_mode_text() -> text:
 fn engine_physical_page_reason() -> text:
     physical_page_activation_text(engine_physical_page_activation())
 
-# KV cache and activations for a context of this size. A per-token-per-layer
-# estimate would need the model's own hyperparameters, which are not read until
-# the backend opens the file; this is a deliberately conservative flat figure
-# used only for admission, never for allocation.
-fn _runtime_overhead_bytes() -> i64:
-    6 * 1024 * 1024 * 1024
-
 fn engine_unload() -> Result<(), text>:
     if ENGINE_BACKEND != nil:
         if paged_executor_active():
@@ -255,7 +248,7 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
     match engine_unload():
         Err(reason): return Err("resident model is busy: " + reason)
         Ok(_): ()
-    val fit = check_fit(model.bytes, _runtime_overhead_bytes(), default_headroom_bytes())
+    val fit = check_fit(model.bytes, estimate_runtime_overhead_bytes(model.bytes, ENGINE_N_CTX), default_headroom_bytes())
     if not fit.fits:
         return Err("refusing to load '" + model.id + "': " + fit.reason)
     val lib_path = engine_lib_path()

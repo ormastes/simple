@@ -1,0 +1,66 @@
+# Public opt-in installed workspace opening. Generic/CPU opening is unchanged.
+# All acquisition cleanup remains typed; failed publication never reopens a WAL.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_close_v2}
+use std.nogc_async_mut.container.providers.linux.fresh_epoch_workload_v2.*
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
+use std.nogc_sync_mut.container.machine_fresh_epoch_cleanup_v1.machine_fresh_epoch_admission_turn_close_v1
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+
+pub struct SimpleContainerWorkspaceOpenV3:
+    owner: Option<SimpleContainerOwnerV2> = nil
+    cleanup: Option<LinuxWorkspaceRootOpenV3> = nil
+    error: text = ""
+
+pub struct SimpleContainerWorkspaceCleanupV3:
+    retained: Option<SimpleContainerWorkspaceOpenV3>
+    closed: bool
+    error: text
+
+pub fn simple_container_open_workspace_installed_v3(template: GroupProcessStreamLaunchV2) -> SimpleContainerWorkspaceOpenV3:
+    var opened = linux_workspace_root_open_installed_v3(template)
+    if opened.error != "" or opened.owner.is_none():
+        return SimpleContainerWorkspaceOpenV3(cleanup: Some(opened), error: opened.error)
+    val fresh = opened.owner.unwrap()
+    opened.owner = nil
+    opened.fresh_cleanup = Some(fresh)
+    val scope = fresh.scope_v2()
+    if scope.is_err(): return SimpleContainerWorkspaceOpenV3(cleanup: Some(opened), error: scope.unwrap_err())
+    val adapter = LinuxSimpleContainerAdapterV2.open_fresh_v2(fresh)
+    if adapter.is_err(): return SimpleContainerWorkspaceOpenV3(cleanup: Some(opened), error: adapter.unwrap_err())
+    SimpleContainerWorkspaceOpenV3(owner: Some(SimpleContainerOwnerV2.Linux(scope.unwrap(), adapter.unwrap())))
+
+pub fn simple_container_workspace_startup_cleanup_v3(original: SimpleContainerWorkspaceOpenV3) -> SimpleContainerWorkspaceCleanupV3:
+    var retained = original
+    if val owner = retained.owner:
+        val closed = simple_container_close_v2(owner)
+        retained.owner = closed.owner
+        if retained.error == "" and closed.error != "": retained.error = closed.error
+        if not closed.closed or closed.owner.is_some(): return SimpleContainerWorkspaceCleanupV3(Some(retained), false, retained.error)
+    if val pending = retained.cleanup:
+        var cleanup = pending
+        if val owner = cleanup.owner:
+            cleanup.owner = nil
+            cleanup.fresh_cleanup = Some(owner)
+        if val fresh = cleanup.fresh_cleanup:
+            val closed = fresh.close_v2()
+            cleanup.fresh_cleanup = closed.owner
+            if not closed.closed and cleanup.fresh_cleanup.is_none(): cleanup.fresh_cleanup = Some(fresh)
+            if retained.error == "" and closed.error != "": retained.error = closed.error
+            retained.cleanup = Some(cleanup)
+            if not closed.closed or cleanup.fresh_cleanup.is_some(): return SimpleContainerWorkspaceCleanupV3(Some(retained), false, retained.error)
+        if val reader = cleanup.reader_cleanup:
+            val state = reader.close_v1()
+            if not ["released", "consumed-error"].contains(state):
+                retained.cleanup = Some(cleanup)
+                return SimpleContainerWorkspaceCleanupV3(Some(retained), false,
+                    if retained.error != "": retained.error else: "linux-workspace-startup-reader-close:" + state)
+            cleanup.reader_cleanup = nil
+            if retained.error == "" and state == "consumed-error": retained.error = "linux-workspace-startup-reader-consumed-error"
+        if val admission = cleanup.admission_cleanup:
+            val closed = machine_fresh_epoch_admission_turn_close_v1(admission)
+            cleanup.admission_cleanup = closed.retained
+            if retained.error == "" and closed.error != "": retained.error = closed.error
+            retained.cleanup = Some(cleanup)
+            if not closed.closed or closed.retained.is_some(): return SimpleContainerWorkspaceCleanupV3(Some(retained), false, retained.error)
+        retained.cleanup = nil
+    SimpleContainerWorkspaceCleanupV3(nil, true, retained.error)

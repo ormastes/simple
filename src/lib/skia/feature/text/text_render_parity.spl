@@ -1,0 +1,840 @@
+# Parity text helpers for Skia CPU/Canvas and Engine2D comparisons.
+#
+# Provides shared 5x7 bitmap, 8x16 VGA bitmap, and SFNT/TrueType outline path
+# construction without depending on bridge/ or gc_async_mut/.
+
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
+use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
+use std.common.encoding.sfnt.{OtFont, OtTable}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYF_MOVE, SFNT_GLYF_LINE, SFNT_GLYF_QUAD, SFNT_GLYF_CLOSE, SfntGlyfCommand, SfntGlyfOutline, SfntBaselineGlyph, sfnt_glyf_parse_outline, sfnt_rasterize_glyph_baseline_aligned, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be, sfnt_glyf_read_i16_be, sfnt_glyf_cmap_ids_into}
+use std.common.encoding.utf8.{text_codepoints}
+use std.skia.entity.font.{sk_default_vector_font_path, sk_load_cached_font_bytes}
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.entity.path.{SkPath, sk_path_new}
+
+val _TAG_HEAD: u32 = 1751474532u32
+val _TAG_HHEA: u32 = 1751672161u32
+val _TAG_HMTX: u32 = 1752003704u32
+val _TAG_MAXP: u32 = 1835104368u32
+
+class SkParityTextMetrics:
+    width: i32
+    height: i32
+    advance: i32
+    advance_px: f64
+    ascent: f64
+    descent: f64
+    scale: i32
+    units_per_em: i64
+    bounds: SkRect
+
+class SkParityBitmapBuffer:
+    width: i32
+    height: i32
+    pixels: [u32]
+
+fn _ceil_pos_i32(v: f64) -> i32:
+    if v <= 0.0:
+        return 0i32
+    val t = v as i32
+    if t.to_f64() < v: t + 1i32 else: t
+
+fn _round_pos_i32(v: f64) -> i32:
+    if v <= 0.0:
+        return 0i32
+    (v + 0.5) as i32
+
+fn _bitmap_5x7_scale(font_size: f64) -> i32:
+    val sz = font_size as i32
+    if sz / 7 > 1: sz / 7 else: 1i32
+
+fn _bitmap_8x16_scale(scale: i32) -> i32:
+    if scale < 1: 1i32 else: scale
+
+fn _append_bitmap_row_spans(path: SkPath, cell_x: f64, row_y: f64, bits: i64, bit_count: i64, scale: i32) -> SkPath:
+    if bits == 0:
+        return path
+    var out = path
+    val sf = scale.to_f64()
+    val ry0 = row_y
+    val ry1 = row_y + sf
+    var col: i64 = 0
+    while col < bit_count:
+        val shift = bit_count - 1 - col
+        val on = ((bits >> shift) & 1) != 0
+        if on:
+            val run_start = col
+            col = col + 1
+            while col < bit_count and (((bits >> (bit_count - 1 - col)) & 1) != 0):
+                col = col + 1
+            val rx0 = cell_x + run_start.to_f64() * sf
+            val rx1 = cell_x + col.to_f64() * sf
+            out = out.move_to(rx0, ry0).line_to(rx1, ry0).line_to(rx1, ry1).line_to(rx0, ry1).close()
+        else:
+            col = col + 1
+    out
+
+# Measure 5x7 bitmap text matching Engine2D helpers_text layout.
+fn skia_bitmap_5x7_metrics(content: text, font_size: f64) -> SkParityTextMetrics:
+    val scale = _bitmap_5x7_scale(font_size)
+    val cps = text_codepoints(content)
+    val count = cps.len() as i32
+    val adv_unit = 6i32 * scale
+    val adv_total = count * adv_unit
+    val h = 7i32 * scale
+    val w = adv_total
+    SkParityTextMetrics(
+        width: w,
+        height: h,
+        advance: adv_total,
+        advance_px: adv_total.to_f64(),
+        ascent: h.to_f64(),
+        descent: 0.0,
+        scale: scale,
+        units_per_em: 7,
+        bounds: SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+    )
+
+# Build a merged-span SkPath for 5x7 bitmap text with top-left origin (x, y).
+fn skia_bitmap_5x7_path(content: text, x: f64, y: f64, font_size: f64) -> SkPath:
+    val scale = _bitmap_5x7_scale(font_size)
+    val sf = scale.to_f64()
+    val adv_px = (6i32 * scale).to_f64()
+    val cps = text_codepoints(content)
+    var path = sk_path_new()
+    var idx: i64 = 0
+    while idx < cps.len():
+        val cp = cps[idx]
+        val gi = glyph_index_for_char_code(cp as i32)
+        val cell_x = x + idx.to_f64() * adv_px
+        var row: i32 = 0
+        while row < 7i32:
+            val bits = glyph_row_bits(gi, row) as i64
+            path = _append_bitmap_row_spans(path, cell_x, y + row.to_f64() * sf, bits, 5, scale)
+            row = row + 1i32
+        idx = idx + 1
+    path
+
+# Build a 5x7 bitmap SkPath anchored at baseline_y.
+fn skia_bitmap_5x7_path_baseline(content: text, x: f64, baseline_y: f64, font_size: f64) -> SkPath:
+    val m = skia_bitmap_5x7_metrics(content, font_size)
+    skia_bitmap_5x7_path(content, x, baseline_y - m.ascent, font_size)
+
+# Measure 8x16 VGA bitmap text at integer pixel scale.
+fn skia_bitmap_8x16_metrics(content: text, scale: i32) -> SkParityTextMetrics:
+    val s = _bitmap_8x16_scale(scale)
+    val cps = text_codepoints(content)
+    val count = cps.len() as i32
+    val adv_total = count * 8i32 * s
+    val h = 16i32 * s
+    val asc = (12i32 * s).to_f64()
+    val desc = (4i32 * s).to_f64()
+    SkParityTextMetrics(
+        width: adv_total,
+        height: h,
+        advance: adv_total,
+        advance_px: adv_total.to_f64(),
+        ascent: asc,
+        descent: desc,
+        scale: s,
+        units_per_em: 16,
+        bounds: SkRect(left: 0.0, top: 0.0, right: adv_total.to_f64(), bottom: h.to_f64())
+    )
+
+# Build a merged-span SkPath for 8x16 VGA bitmap text with top-left origin (x, y).
+fn skia_bitmap_8x16_path(content: text, x: f64, y: f64, scale: i32) -> SkPath:
+    val s = _bitmap_8x16_scale(scale)
+    val sf = s.to_f64()
+    val adv_px = (8i32 * s).to_f64()
+    val cps = text_codepoints(content)
+    var path = sk_path_new()
+    var idx: i64 = 0
+    while idx < cps.len():
+        val raw_cp = cps[idx]
+        val ch = if raw_cp >= 32 and raw_cp <= 126: raw_cp as u8 else: 32u8
+        val rows = get_glyph_8x16(ch)
+        val cell_x = x + idx.to_f64() * adv_px
+        var row: i64 = 0
+        while row < 16 and row < rows.len():
+            val bits = rows[row] as i64
+            path = _append_bitmap_row_spans(path, cell_x, y + row.to_f64() * sf, bits, 8, s)
+            row = row + 1
+        idx = idx + 1
+    path
+
+# Build an 8x16 VGA bitmap SkPath anchored at baseline_y.
+fn skia_bitmap_8x16_path_baseline(content: text, x: f64, baseline_y: f64, scale: i32) -> SkPath:
+    val m = skia_bitmap_8x16_metrics(content, scale)
+    skia_bitmap_8x16_path(content, x, baseline_y - m.ascent, scale)
+
+# Render 8x16 VGA bitmap text into a tight ARGB pixel buffer for Engine2D blitting.
+fn bitmap_8x16_argb_buffer(content: text, fg: u32, bg: u32, scale: i32) -> SkParityBitmapBuffer:
+    val s = _bitmap_8x16_scale(scale)
+    val cps = text_codepoints(content)
+    val count = cps.len() as i32
+    val w = count * 8i32 * s
+    val h = 16i32 * s
+    if w <= 0 or h <= 0:
+        return SkParityBitmapBuffer(width: 0i32, height: 0i32, pixels: [])
+    val total = (w as i64) * (h as i64)
+    var pixels: [u32] = [bg; total]
+    var idx: i64 = 0
+    while idx < cps.len():
+        val raw_cp = cps[idx]
+        val ch = if raw_cp >= 32 and raw_cp <= 126: raw_cp as u8 else: 32u8
+        val rows = get_glyph_8x16(ch)
+        val gx0 = (idx as i32) * 8i32 * s
+        var row: i32 = 0
+        while row < 16i32 and (row as i64) < rows.len():
+            val bits = rows[row as i64] as i64
+            if bits != 0:
+                var col: i32 = 0
+                while col < 8i32:
+                    if ((bits >> (7i32 - col)) & 1) != 0:
+                        var dy: i32 = 0
+                        while dy < s:
+                            val py = (row * s + dy) as i64
+                            val row_base = py * (w as i64)
+                            var dx: i32 = 0
+                            while dx < s:
+                                val px = (gx0 + col * s + dx) as i64
+                                pixels[row_base + px] = fg
+                                dx = dx + 1i32
+                            dy = dy + 1i32
+                    col = col + 1i32
+            row = row + 1i32
+        idx = idx + 1
+    SkParityBitmapBuffer(width: w, height: h, pixels: pixels)
+
+# Load SFNT font bytes with a bounded 4-slot in-process cache.
+pub fn skia_load_cached_font_bytes(path: text) -> [u8]:
+    sk_load_cached_font_bytes(path)
+
+class _SfntFaceMetrics:
+    valid: bool
+    font: OtFont
+    units_per_em: i64
+    ascender: i64
+    descender: i64
+    num_h_metrics: i64
+    hmtx_offset: i64
+    hmtx_length: i64
+
+fn _sfnt_read_face_metrics(font_blob: [u8]) -> _SfntFaceMetrics:
+    val empty_font = OtFont(blob: [], tables: [])
+    val maybe_font = sfnt_glyf_parse_offset_table(font_blob)
+    val font = match maybe_font:
+        Some(f): f
+        None:
+            return _SfntFaceMetrics(valid: false, font: empty_font, units_per_em: 1000, ascender: 800, descender: -200, num_h_metrics: 0, hmtx_offset: 0, hmtx_length: 0)
+    var upm: i64 = 1000
+    match sfnt_glyf_find_table(font, _TAG_HEAD):
+        case Some(head_tbl):
+            val off = head_tbl.offset as i64
+            if (head_tbl.length as i64) >= 54 and off + 20 <= font.blob.len():
+                val raw_upm = sfnt_glyf_read_u16_be(font.blob, off + 18) as i64
+                if raw_upm > 0:
+                    upm = raw_upm
+        case None: ()
+    var ascender: i64 = (upm * 4) / 5
+    var descender: i64 = -(upm / 5)
+    var num_h_metrics: i64 = 0
+    match sfnt_glyf_find_table(font, _TAG_HHEA):
+        case Some(hhea_tbl):
+            val off = hhea_tbl.offset as i64
+            val len = hhea_tbl.length as i64
+            if len >= 36 and off + 36 <= font.blob.len():
+                ascender = sfnt_glyf_read_i16_be(font.blob, off + 4) as i64
+                descender = sfnt_glyf_read_i16_be(font.blob, off + 6) as i64
+                num_h_metrics = sfnt_glyf_read_u16_be(font.blob, off + 34) as i64
+        case None: ()
+    var hmtx_off: i64 = 0
+    var hmtx_len: i64 = 0
+    match sfnt_glyf_find_table(font, _TAG_HMTX):
+        case Some(hmtx_tbl):
+            hmtx_off = hmtx_tbl.offset as i64
+            hmtx_len = hmtx_tbl.length as i64
+        case None: ()
+    _SfntFaceMetrics(
+        valid: true,
+        font: font,
+        units_per_em: upm,
+        ascender: ascender,
+        descender: descender,
+        num_h_metrics: num_h_metrics,
+        hmtx_offset: hmtx_off,
+        hmtx_length: hmtx_len
+    )
+
+fn _sfnt_glyph_advance_units(face: _SfntFaceMetrics, glyph_id: u32) -> f64:
+    if face.hmtx_length >= 4 and face.num_h_metrics > 0:
+        val idx = if (glyph_id as i64) < face.num_h_metrics: glyph_id as i64 else: face.num_h_metrics - 1
+        val pos = face.hmtx_offset + idx * 4
+        if pos >= 0 and pos + 2 <= face.font.blob.len() and idx * 4 + 2 <= face.hmtx_length:
+            return (sfnt_glyf_read_u16_be(face.font.blob, pos) as i64).to_f64()
+    (face.units_per_em as f64) * 0.6
+
+fn _sfnt_measure_and_build_path(font_blob: [u8], content: text, origin_x: f64, origin_y: f64, font_size: f64, baseline_origin: bool, emit_path: bool) -> (SkParityTextMetrics, SkPath):
+    val cps = text_codepoints(content)
+    val sz = if font_size > 0.0: font_size else: 12.0
+    val face = _sfnt_read_face_metrics(font_blob)
+    if not face.valid:
+        val fallback_m = skia_bitmap_5x7_metrics(content, sz)
+        val fallback_p = if emit_path:
+            if baseline_origin:
+                skia_bitmap_5x7_path_baseline(content, origin_x, origin_y, sz)
+            else:
+                skia_bitmap_5x7_path(content, origin_x, origin_y, sz)
+        else:
+            sk_path_new()
+        return (fallback_m, fallback_p)
+    val scale = sz / (face.units_per_em as f64)
+    val asc_px = if face.ascender > 0: (face.ascender as f64) * scale else: sz * 0.8
+    val desc_px = if face.descender < 0: (-(face.descender as f64)) * scale else: 0.0
+    val baseline_y = if baseline_origin: origin_y else: origin_y + asc_px
+    var pen_x = origin_x
+    var path = sk_path_new()
+    var min_x = origin_x
+    var max_x = origin_x
+    var min_y = baseline_y - asc_px
+    var max_y = baseline_y + desc_px
+    var has_ink = false
+    var gids: [i64] = [0; cps.len()]
+    if cps.len() > 0:
+        sfnt_glyf_cmap_ids_into(face.font, cps, gids)
+    var ci: i64 = 0
+    while ci < cps.len():
+        val raw_gid = gids[ci]
+        val gid = if raw_gid > 0: raw_gid as u32 else: 0u32
+        val adv_units = _sfnt_glyph_advance_units(face, gid)
+        val adv_px = adv_units * scale
+        match sfnt_glyf_parse_outline(face.font, gid):
+            case Some(outline):
+                var oi: i64 = 0
+                while oi < outline.commands.len():
+                    val cmd = outline.commands[oi]
+                    if cmd.verb == SFNT_GLYF_CLOSE:
+                        if emit_path:
+                            path = path.close()
+                    else:
+                        val px1 = pen_x + cmd.x1 * scale
+                        val py1 = baseline_y - cmd.y1 * scale
+                        if not has_ink:
+                            min_x = px1
+                            max_x = px1
+                            min_y = py1
+                            max_y = py1
+                            has_ink = true
+                        else:
+                            if px1 < min_x: min_x = px1
+                            if px1 > max_x: max_x = px1
+                            if py1 < min_y: min_y = py1
+                            if py1 > max_y: max_y = py1
+                        if cmd.verb == SFNT_GLYF_MOVE:
+                            if emit_path:
+                                path = path.move_to(px1, py1)
+                        elif cmd.verb == SFNT_GLYF_LINE:
+                            if emit_path:
+                                path = path.line_to(px1, py1)
+                        elif cmd.verb == SFNT_GLYF_QUAD:
+                            val px2 = pen_x + cmd.x2 * scale
+                            val py2 = baseline_y - cmd.y2 * scale
+                            if px2 < min_x: min_x = px2
+                            if px2 > max_x: max_x = px2
+                            if py2 < min_y: min_y = py2
+                            if py2 > max_y: max_y = py2
+                            if emit_path:
+                                path = path.quad_to(px1, py1, px2, py2)
+                    oi = oi + 1
+            case None: ()
+        pen_x = pen_x + adv_px
+        ci = ci + 1
+    if pen_x > max_x:
+        max_x = pen_x
+    val total_adv = pen_x - origin_x
+    val box_w = if max_x - origin_x > total_adv: max_x - origin_x else: total_adv
+    val top_rel = if min_y < baseline_y - asc_px: min_y else: baseline_y - asc_px
+    val bot_rel = if max_y > baseline_y + desc_px: max_y else: baseline_y + desc_px
+    val box_h = bot_rel - top_rel
+    val metrics = SkParityTextMetrics(
+        width: _ceil_pos_i32(box_w),
+        height: _ceil_pos_i32(box_h),
+        advance: _round_pos_i32(total_adv),
+        advance_px: total_adv,
+        ascent: asc_px,
+        descent: desc_px,
+        scale: 1i32,
+        units_per_em: face.units_per_em,
+        bounds: SkRect(left: min_x - origin_x, top: top_rel - baseline_y, right: max_x - origin_x, bottom: bot_rel - baseline_y)
+    )
+    (metrics, path)
+
+# Measure TrueType/SFNT text bounds and advance width in pixels.
+# reason: low-level Skia/Engine2D font parity boundary takes raw pixel f64 font_size
+# @allow(primitive_api)
+pub fn skia_sfnt_text_bounds_and_advance(font_blob: [u8], content: text, font_size: f64) -> SkParityTextMetrics:
+    val result = _sfnt_measure_and_build_path(font_blob, content, 0.0, 0.0, font_size, true, false)
+    result.0
+
+# Build a TrueType/SFNT outline SkPath anchored at top-left (x, y) to match FontRenderer.
+# reason: low-level Skia path builder takes pixel f64 coords and font_size
+# @allow(primitive_api)
+pub fn skia_sfnt_text_path(font_blob: [u8], content: text, x: f64, y: f64, font_size: f64) -> SkPath:
+    val result = _sfnt_measure_and_build_path(font_blob, content, x, y, font_size, false, true)
+    result.1
+
+# Build a TrueType/SFNT outline SkPath anchored at (x, baseline_y) to match SkCanvas.draw_text_blob.
+# reason: low-level Skia path builder takes pixel f64 baseline coords and font_size
+# @allow(primitive_api)
+pub fn skia_sfnt_text_path_baseline(font_blob: [u8], content: text, x: f64, baseline_y: f64, font_size: f64) -> SkPath:
+    val result = _sfnt_measure_and_build_path(font_blob, content, x, baseline_y, font_size, true, true)
+    result.1
+
+pub fn skia_default_vector_font_path() -> text:
+    sk_default_vector_font_path()
+
+pub class SkGlyphInkBox:
+    codepoint: u32
+    glyph_id: u32
+    x0: i32
+    y0: i32
+    x1: i32
+    y1: i32
+    pen_x: f64
+    advance_px: f64
+
+class _SkPlacedGlyph:
+    codepoint: u32
+    glyph_id: u32
+    pen_x: f64
+    advance_px: f64
+    abs_x0: i64
+    abs_y0: i64
+    ink_x0: i64
+    ink_y0: i64
+    ink_x1: i64
+    ink_y1: i64
+    width: i32
+    height: i32
+    pixels: [u8]
+
+class _SkLayoutResult:
+    valid: bool
+    asc_px: f64
+    desc_px: f64
+    baseline_y_i: i64
+    end_pen_x: f64
+    glyphs: [_SkPlacedGlyph]
+
+fn _floor_f64_i64(value: f64) -> i64:
+    val whole = value as i64
+    val whole_f = whole as f64
+    if value < whole_f:
+        return whole - 1
+    whole
+
+fn _ceil_f64_i64(value: f64) -> i64:
+    val whole = value as i64
+    val whole_f = whole as f64
+    if value > whole_f:
+        return whole + 1
+    whole
+
+fn _round_f64_i64(value: f64) -> i64:
+    val shifted = if value >= 0.0: value + 0.5 else: value - 0.5
+    shifted as i64
+
+fn _blend_straight_argb(src: u32, dst: u32) -> u32:
+    val sa = (src >> 24) & 0xFFu32
+    if sa == 255u32:
+        return src
+    if sa == 0u32:
+        return dst
+    val da = (dst >> 24) & 0xFFu32
+    val sr = (src >> 16) & 0xFFu32
+    val sg = (src >> 8) & 0xFFu32
+    val sb = src & 0xFFu32
+    val dr = (dst >> 16) & 0xFFu32
+    val dg = (dst >> 8) & 0xFFu32
+    val db = dst & 0xFFu32
+    val inv_a = 255u32 - sa
+    val dst_weight = (da * inv_a) / 255u32
+    val out_a = sa + dst_weight
+    if out_a == 0u32:
+        return 0u32
+    val out_r = (sr * sa + dr * dst_weight) / out_a
+    val out_g = (sg * sa + dg * dst_weight) / out_a
+    val out_b = (sb * sa + db * dst_weight) / out_a
+    (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
+
+fn _src_argb_with_cov(fg: u32, cov: u8) -> u32:
+    val c = cov as u32
+    if c == 0u32:
+        return 0u32
+    val fg_a = (fg >> 24) & 0xFFu32
+    if fg_a == 0u32:
+        return 0u32
+    val eff_a = if fg_a == 255u32: c else: (c * fg_a + 127u32) / 255u32
+    if eff_a == 0u32:
+        return 0u32
+    (eff_a << 24) | (fg & 0x00FFFFFFu32)
+
+fn _layout_sfnt_glyphs(font_blob: [u8], content: text, origin_x: f64, origin_y: f64, font_size: f64, baseline_origin: bool) -> _SkLayoutResult:
+    val cps = text_codepoints(content)
+    val sz = if font_size > 0.0: font_size else: 12.0
+    val face = _sfnt_read_face_metrics(font_blob)
+    if not face.valid:
+        return _SkLayoutResult(valid: false, asc_px: sz * 0.8, desc_px: sz * 0.2, baseline_y_i: _round_f64_i64(origin_y), end_pen_x: origin_x, glyphs: [])
+    val scale = sz / (face.units_per_em as f64)
+    val asc_px = if face.ascender > 0: (face.ascender as f64) * scale else: sz * 0.8
+    val desc_px = if face.descender < 0: (-(face.descender as f64)) * scale else: 0.0
+    val baseline_y = if baseline_origin: origin_y else: origin_y + asc_px
+    val baseline_y_i = _round_f64_i64(baseline_y)
+    var gids: [i64] = [0; cps.len()]
+    if cps.len() > 0:
+        sfnt_glyf_cmap_ids_into(face.font, cps, gids)
+    var placed: [_SkPlacedGlyph] = []
+    var pen_x = origin_x
+    var ci: i64 = 0
+    while ci < cps.len():
+        val cp = cps[ci] as u32
+        val raw_gid = gids[ci]
+        val gid = if raw_gid > 0: raw_gid as u32 else: 0u32
+        val pen_base = _floor_f64_i64(pen_x)
+        val subpixel_x = pen_x - (pen_base as f64)
+        var adv_px = _sfnt_glyph_advance_units(face, gid) * scale
+        var abs_x0 = pen_base
+        var abs_y0 = baseline_y_i
+        var ink_x0 = pen_base
+        var ink_y0 = baseline_y_i
+        var ink_x1 = pen_base
+        var ink_y1 = baseline_y_i
+        var gw: i32 = 0i32
+        var gh: i32 = 0i32
+        var gpixels: [u8] = []
+        match sfnt_rasterize_glyph_baseline_aligned(face.font, gid, sz, subpixel_x):
+            case Some(g):
+                adv_px = g.advance_px
+                abs_x0 = pen_base + (g.x0_px as i64)
+                abs_y0 = baseline_y_i + (g.y0_px as i64)
+                gw = g.width
+                gh = g.height
+                gpixels = g.pixels
+                if gw > 0i32 and gh > 0i32:
+                    val gw_i = gw as i64
+                    val gh_i = gh as i64
+                    var min_c: i64 = gw_i
+                    var max_c: i64 = -1
+                    var min_r: i64 = gh_i
+                    var max_r: i64 = -1
+                    var row: i64 = 0
+                    while row < gh_i:
+                        val row_off = row * gw_i
+                        var col: i64 = 0
+                        while col < gw_i:
+                            if gpixels[row_off + col] > 0u8:
+                                if col < min_c: min_c = col
+                                if col > max_c: max_c = col
+                                if row < min_r: min_r = row
+                                if row > max_r: max_r = row
+                            col = col + 1
+                        row = row + 1
+                    if max_c >= min_c and max_r >= min_r:
+                        ink_x0 = abs_x0 + min_c
+                        ink_y0 = abs_y0 + min_r
+                        ink_x1 = abs_x0 + max_c + 1
+                        ink_y1 = abs_y0 + max_r + 1
+            case None: ()
+        placed = placed.push(_SkPlacedGlyph(
+            codepoint: cp,
+            glyph_id: gid,
+            pen_x: pen_x,
+            advance_px: adv_px,
+            abs_x0: abs_x0,
+            abs_y0: abs_y0,
+            ink_x0: ink_x0,
+            ink_y0: ink_y0,
+            ink_x1: ink_x1,
+            ink_y1: ink_y1,
+            width: gw,
+            height: gh,
+            pixels: gpixels
+        ))
+        pen_x = pen_x + adv_px
+        ci = ci + 1
+    _SkLayoutResult(
+        valid: true,
+        asc_px: asc_px,
+        desc_px: desc_px,
+        baseline_y_i: baseline_y_i,
+        end_pen_x: pen_x,
+        glyphs: placed
+    )
+
+# reason: low-level SFNT glyph bounding-box measurer takes pixel f64 origins and font_size
+# @allow(primitive_api)
+pub fn skia_sfnt_layout_glyph_boxes(font_blob: [u8], content: text, origin_x: f64, origin_y: f64, font_size: f64, baseline_origin: bool) -> [SkGlyphInkBox]:
+    val layout = _layout_sfnt_glyphs(font_blob, content, origin_x, origin_y, font_size, baseline_origin)
+    var boxes: [SkGlyphInkBox] = []
+    if not layout.valid:
+        return boxes
+    var i: i64 = 0
+    while i < layout.glyphs.len():
+        val pg = layout.glyphs[i]
+        boxes = boxes.push(SkGlyphInkBox(
+            codepoint: pg.codepoint,
+            glyph_id: pg.glyph_id,
+            x0: pg.ink_x0 as i32,
+            y0: pg.ink_y0 as i32,
+            x1: pg.ink_x1 as i32,
+            y1: pg.ink_y1 as i32,
+            pen_x: pg.pen_x,
+            advance_px: pg.advance_px
+        ))
+        i = i + 1
+    boxes
+
+fn _blend_placed_glyphs_onto(mut out: [u32], buf_x0: i64, buf_y0: i64, buf_w: i64, buf_h: i64, glyphs: [_SkPlacedGlyph], fg: u32) -> [u32]:
+    if buf_w <= 0 or buf_h <= 0:
+        return out
+    var gi: i64 = 0
+    while gi < glyphs.len():
+        val pg = glyphs[gi]
+        if pg.width > 0i32 and pg.height > 0i32:
+            val gw = pg.width as i64
+            val gh = pg.height as i64
+            var row: i64 = 0
+            while row < gh:
+                val dy = pg.abs_y0 + row - buf_y0
+                if dy >= 0 and dy < buf_h:
+                    val src_off = row * gw
+                    val dst_off = dy * buf_w
+                    var col: i64 = 0
+                    while col < gw:
+                        val cov = pg.pixels[src_off + col]
+                        if cov > 0u8:
+                            val dx = pg.abs_x0 + col - buf_x0
+                            if dx >= 0 and dx < buf_w:
+                                val src_argb = _src_argb_with_cov(fg, cov)
+                                if src_argb != 0u32:
+                                    out[dst_off + dx] = _blend_straight_argb(src_argb, out[dst_off + dx])
+                        col = col + 1
+                row = row + 1
+        gi = gi + 1
+    out
+
+# reason: low-level ARGB glyph-run rasterizer returns pixel origin (i32, i32) and buffer
+# @allow(primitive_api)
+pub fn skia_sfnt_rasterize_run_with_origin_argb(font_blob: [u8], content: text, font_size: f64, baseline_origin: bool, fg: u32, bg: u32) -> (i32, i32, SkParityBitmapBuffer):
+    val cps = text_codepoints(content)
+    if cps.len() == 0:
+        return (0i32, 0i32, SkParityBitmapBuffer(width: 0i32, height: 0i32, pixels: []))
+    val layout = _layout_sfnt_glyphs(font_blob, content, 0.0, 0.0, font_size, baseline_origin)
+    if not layout.valid:
+        val scale = _bitmap_8x16_scale(_bitmap_5x7_scale(font_size))
+        val bm = bitmap_8x16_argb_buffer(content, fg, bg, scale)
+        val oy = if baseline_origin: -(bm.height) else: 0i32
+        return (0i32, oy, bm)
+    var min_x: i64 = 0
+    var min_y: i64 = if baseline_origin: _floor_f64_i64(-layout.asc_px) else: 0
+    var max_x: i64 = _ceil_f64_i64(layout.end_pen_x)
+    var max_y: i64 = if baseline_origin: _ceil_f64_i64(layout.desc_px) else: _ceil_f64_i64(layout.asc_px + layout.desc_px)
+    var has_bounds = not baseline_origin
+    var gi: i64 = 0
+    while gi < layout.glyphs.len():
+        val pg = layout.glyphs[gi]
+        if pg.width > 0i32 and pg.height > 0i32:
+            val gx0 = pg.abs_x0
+            val gy0 = pg.abs_y0
+            val gx1 = gx0 + (pg.width as i64)
+            val gy1 = gy0 + (pg.height as i64)
+            if not has_bounds:
+                min_x = gx0
+                min_y = gy0
+                max_x = gx1
+                max_y = gy1
+                has_bounds = true
+            else:
+                if gx0 < min_x: min_x = gx0
+                if gy0 < min_y: min_y = gy0
+                if gx1 > max_x: max_x = gx1
+                if gy1 > max_y: max_y = gy1
+        gi = gi + 1
+    if not has_bounds or max_x <= min_x or max_y <= min_y:
+        return (0i32, 0i32, SkParityBitmapBuffer(width: 0i32, height: 0i32, pixels: []))
+    val w = max_x - min_x
+    val h = max_y - min_y
+    if w > 8192 or h > 4096 or w > 16777216 / h:
+        return (0i32, 0i32, SkParityBitmapBuffer(width: 0i32, height: 0i32, pixels: []))
+    var pixels: [u32] = [bg; w * h]
+    pixels = _blend_placed_glyphs_onto(pixels, min_x, min_y, w, h, layout.glyphs, fg)
+    (min_x as i32, min_y as i32, SkParityBitmapBuffer(width: w as i32, height: h as i32, pixels: pixels))
+
+# reason: low-level ARGB glyph-run rasterizer takes f64 size and u32 ARGB colors
+# @allow(primitive_api)
+pub fn skia_sfnt_rasterize_run_argb(font_blob: [u8], content: text, font_size: f64, fg: u32, bg: u32) -> SkParityBitmapBuffer:
+    val res = skia_sfnt_rasterize_run_with_origin_argb(font_blob, content, font_size, false, fg, bg)
+    res.2
+
+# reason: low-level ARGB buffer blender writes straight onto [u32] framebuffer at f64 coords
+# @allow(primitive_api)
+pub fn skia_sfnt_blend_run_argb(dst: [u32], dst_w: i32, dst_h: i32, origin_x: f64, origin_y: f64, baseline_origin: bool, font_blob: [u8], content: text, font_size: f64, fg: u32) -> [u32]:
+    if dst_w <= 0i32 or dst_h <= 0i32:
+        return dst
+    val dw = dst_w as i64
+    val dh = dst_h as i64
+    if dst.len() < dw * dh:
+        return dst
+    val cps = text_codepoints(content)
+    if cps.len() == 0:
+        return dst
+    val layout = _layout_sfnt_glyphs(font_blob, content, origin_x, origin_y, font_size, baseline_origin)
+    if not layout.valid:
+        val scale = _bitmap_8x16_scale(_bitmap_5x7_scale(font_size))
+        val bm = bitmap_8x16_argb_buffer(content, fg, 0u32, scale)
+        if bm.width <= 0i32 or bm.height <= 0i32:
+            return dst
+        val oy = if baseline_origin: _round_f64_i64(origin_y) - (bm.height as i64) else: _round_f64_i64(origin_y)
+        val ox = _round_f64_i64(origin_x)
+        var out_fb: [u32] = dst
+        val bw = bm.width as i64
+        val bh = bm.height as i64
+        var ry: i64 = 0
+        while ry < bh:
+            val dy = oy + ry
+            if dy >= 0 and dy < dh:
+                var rx: i64 = 0
+                while rx < bw:
+                    val sp = bm.pixels[ry * bw + rx]
+                    if sp != 0u32:
+                        val dx = ox + rx
+                        if dx >= 0 and dx < dw:
+                            out_fb[dy * dw + dx] = _blend_straight_argb(sp, out_fb[dy * dw + dx])
+                    rx = rx + 1
+            ry = ry + 1
+        return out_fb
+    var out: [u32] = dst
+    _blend_placed_glyphs_onto(out, 0, 0, dw, dh, layout.glyphs, fg)
+
+fn _sample_argb_premul_bilinear(pixels: [u32], w: i64, h: i64, sx: f64, sy: f64) -> u32:
+    val fx = sx - 0.5
+    val fy = sy - 0.5
+    val x0 = _floor_f64_i64(fx)
+    val y0 = _floor_f64_i64(fy)
+    val tx = fx - (x0 as f64)
+    val ty = fy - (y0 as f64)
+    val x1 = x0 + 1
+    val y1 = y0 + 1
+    val w00 = (1.0 - tx) * (1.0 - ty)
+    val w10 = tx * (1.0 - ty)
+    val w01 = (1.0 - tx) * ty
+    val w11 = tx * ty
+    var sum_a = 0.0
+    var sum_r = 0.0
+    var sum_g = 0.0
+    var sum_b = 0.0
+    val xs = [x0, x1, x0, x1]
+    val ys = [y0, y0, y1, y1]
+    val ws = [w00, w10, w01, w11]
+    var ti: i64 = 0
+    while ti < 4:
+        val cx = xs[ti]
+        val cy = ys[ti]
+        val wt = ws[ti]
+        if wt > 0.0 and cx >= 0 and cx < w and cy >= 0 and cy < h:
+            val px = pixels[cy * w + cx]
+            val pa = ((px >> 24) & 0xFFu32) as f64
+            if pa > 0.0:
+                val pr = ((px >> 16) & 0xFFu32) as f64
+                val pg = ((px >> 8) & 0xFFu32) as f64
+                val pb = (px & 0xFFu32) as f64
+                sum_a = sum_a + pa * wt
+                sum_r = sum_r + pr * pa * wt
+                sum_g = sum_g + pg * pa * wt
+                sum_b = sum_b + pb * pa * wt
+        ti = ti + 1
+    if sum_a <= 0.5:
+        return 0u32
+    var oa = (sum_a + 0.5) as i64
+    if oa > 255: oa = 255
+    if oa <= 0: return 0u32
+    var or_c = ((sum_r / sum_a) + 0.5) as i64
+    var og_c = ((sum_g / sum_a) + 0.5) as i64
+    var ob_c = ((sum_b / sum_a) + 0.5) as i64
+    if or_c < 0: or_c = 0
+    if or_c > 255: or_c = 255
+    if og_c < 0: og_c = 0
+    if og_c > 255: og_c = 255
+    if ob_c < 0: ob_c = 0
+    if ob_c > 255: ob_c = 255
+    ((oa as u32) << 24) | ((or_c as u32) << 16) | ((og_c as u32) << 8) | (ob_c as u32)
+
+fn _min2_f64(a: f64, b: f64) -> f64:
+    if a < b: a else: b
+
+fn _max2_f64(a: f64, b: f64) -> f64:
+    if a > b: a else: b
+
+# reason: low-level bilinear ARGB sprite transform blender over raw [u32] framebuffer and Matrix3x3
+# @allow(primitive_api)
+pub fn skia_blend_transformed_argb_onto(dst: [u32], dst_w: i32, dst_h: i32, src_buf: SkParityBitmapBuffer, local_origin_x: f64, local_origin_y: f64, xform: Matrix3x3, clip: SkRect) -> [u32]:
+    if dst_w <= 0i32 or dst_h <= 0i32 or src_buf.width <= 0i32 or src_buf.height <= 0i32:
+        return dst
+    val dw = dst_w as i64
+    val dh = dst_h as i64
+    val sw = src_buf.width as i64
+    val sh = src_buf.height as i64
+    if dst.len() < dw * dh or src_buf.pixels.len() < sw * sh:
+        return dst
+    val total_xform = xform.mul(Matrix3x3.translate(local_origin_x, local_origin_y))
+    val inv = match total_xform.invert():
+        Some(m): m
+        None: return dst
+    val p0 = total_xform.map_point(0.0, 0.0)
+    val p1 = total_xform.map_point(sw as f64, 0.0)
+    val p2 = total_xform.map_point(sw as f64, sh as f64)
+    val p3 = total_xform.map_point(0.0, sh as f64)
+    val x_min = _min2_f64(_min2_f64(p0.x, p1.x), _min2_f64(p2.x, p3.x))
+    val x_max = _max2_f64(_max2_f64(p0.x, p1.x), _max2_f64(p2.x, p3.x))
+    val y_min = _min2_f64(_min2_f64(p0.y, p1.y), _min2_f64(p2.y, p3.y))
+    val y_max = _max2_f64(_max2_f64(p0.y, p1.y), _max2_f64(p2.y, p3.y))
+    val use_clip = clip.right > clip.left and clip.bottom > clip.top
+    val cl_left = if use_clip: _max2_f64(x_min, clip.left) else: x_min
+    val cl_top = if use_clip: _max2_f64(y_min, clip.top) else: y_min
+    val cl_right = if use_clip: _min2_f64(x_max, clip.right) else: x_max
+    val cl_bottom = if use_clip: _min2_f64(y_max, clip.bottom) else: y_max
+    var x0 = _floor_f64_i64(cl_left)
+    var y0 = _floor_f64_i64(cl_top)
+    var x1 = _ceil_f64_i64(cl_right)
+    var y1 = _ceil_f64_i64(cl_bottom)
+    if x0 < 0: x0 = 0
+    if y0 < 0: y0 = 0
+    if x1 > dw: x1 = dw
+    if y1 > dh: y1 = dh
+    if x0 >= x1 or y0 >= y1:
+        return dst
+    var out: [u32] = dst
+    var py = y0
+    while py < y1:
+        val row_off = py * dw
+        var px = x0
+        while px < x1:
+            val src = inv.map_point((px as f64) + 0.5, (py as f64) + 0.5)
+            if src.x >= 0.0 and src.x < (sw as f64) and src.y >= 0.0 and src.y < (sh as f64):
+                val sampled = _sample_argb_premul_bilinear(src_buf.pixels, sw, sh, src.x, src.y)
+                if sampled != 0u32:
+                    out[row_off + px] = _blend_straight_argb(sampled, out[row_off + px])
+            px = px + 1
+        py = py + 1
+    out
+
+export SkParityTextMetrics, SkParityBitmapBuffer, SkGlyphInkBox
+export skia_bitmap_5x7_metrics, skia_bitmap_5x7_path, skia_bitmap_5x7_path_baseline
+export skia_bitmap_8x16_metrics, skia_bitmap_8x16_path, skia_bitmap_8x16_path_baseline
+export bitmap_8x16_argb_buffer
+export skia_default_vector_font_path, skia_load_cached_font_bytes
+export skia_sfnt_text_bounds_and_advance, skia_sfnt_text_path, skia_sfnt_text_path_baseline
+export skia_sfnt_layout_glyph_boxes, skia_sfnt_rasterize_run_with_origin_argb
+export skia_sfnt_rasterize_run_argb, skia_sfnt_blend_run_argb
+export skia_blend_transformed_argb_onto

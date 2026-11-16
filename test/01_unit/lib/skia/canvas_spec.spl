@@ -15,10 +15,14 @@ the state-management, recording, matrix, and non-drawing methods.
 """
 
 use std.skia.entity.canvas.{SkCanvas, SkCanvasSaveLayerRec, sk_canvas_make, sk_save_layer_rec}
-use std.skia.entity.geometry.{SkIRect, SkRect, sk_rect_make_wh}
+use std.skia.entity.geometry.{SkIRect, SkRect, sk_rect_make_wh, sk_rrect_make}
 use std.skia.entity.matrix.{Matrix3x3}
-use std.skia.entity.paint.{sk_paint_new}
+use std.skia.entity.paint.{sk_paint_new, sk_paint_fill}
 use std.skia.entity.picture.{SkPictureOpKind}
+use std.skia.entity.color.{sk_color_argb}
+use std.skia.entity.enums.{SkBlendMode}
+use std.skia.entity.font.{sk_font_default}
+use std.skia.entity.textblob.{sk_text_blob_make_from_text}
 use std.spec.step
 
 describe "SkCanvas construction":
@@ -171,3 +175,82 @@ describe "SkCanvas matrix ops":
         val picture = c2.end_recording()
         expect(picture.op_count).to_equal(1)  # oracle: expected value pinned by spec
         expect(picture.ops[0].kind).to_equal(SkPictureOpKind.SetMatrix)  # oracle: expected value pinned by spec
+
+describe "SkCanvas CTM, shapes, text, and color ops":
+    it "accumulates translate and scale on CTM and restores on restore()":
+        step("Verify: CTM accumulates translate/scale and restores on save/restore")
+        val c0 = sk_canvas_make(200, 200)
+        val c1 = c0.translate(10.0, 20.0).save().scale(2.0, 3.0)
+        val m_scaled = c1.local_to_device()
+        expect(m_scaled.tx()).to_equal(10.0)
+        expect(m_scaled.ty()).to_equal(20.0)
+        expect(m_scaled.scale_x()).to_equal(2.0)
+        expect(m_scaled.scale_y()).to_equal(3.0)
+        val c2 = c1.restore()
+        val m_restored = c2.local_to_device()
+        expect(m_restored.tx()).to_equal(10.0)
+        expect(m_restored.ty()).to_equal(20.0)
+        expect(m_restored.scale_x()).to_equal(1.0)
+        expect(m_restored.scale_y()).to_equal(1.0)
+
+    it "draw_circle records DrawOval with exact center +/- radius bounds":
+        step("Verify: draw_circle records DrawOval bounds")
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 120.0, bottom: 120.0)
+        val p = sk_paint_fill(sk_color_argb(255, 0xEE, 0x22, 0x44))
+        val pic = sk_canvas_make(120, 120).begin_recording(bounds).draw_circle(50.0, 60.0, 15.0, p).end_recording()
+        expect(pic.op_count).to_equal(1)
+        expect(pic.ops[0].kind).to_equal(SkPictureOpKind.DrawOval)
+        expect(pic.ops[0].rect.left).to_equal(35.0)
+        expect(pic.ops[0].rect.top).to_equal(45.0)
+        expect(pic.ops[0].rect.right).to_equal(65.0)
+        expect(pic.ops[0].rect.bottom).to_equal(75.0)
+
+    it "draw_rrect preserves corner radii in DrawRRect op":
+        step("Verify: draw_rrect records DrawRRect with rx/ry")
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 120.0, bottom: 120.0)
+        val rr = sk_rrect_make(SkRect(left: 10.0, top: 12.0, right: 90.0, bottom: 72.0), 8.0, 6.0)
+        val p = sk_paint_fill(sk_color_argb(255, 0x22, 0x88, 0xEE))
+        val pic = sk_canvas_make(120, 120).begin_recording(bounds).draw_rrect(rr, p).end_recording()
+        expect(pic.op_count).to_equal(1)
+        expect(pic.ops[0].kind).to_equal(SkPictureOpKind.DrawRRect)
+        expect(pic.ops[0].rx).to_equal(8.0)
+        expect(pic.ops[0].ry).to_equal(6.0)
+
+    it "draw_text_blob and draw_string record DrawTextBlob ops with positioned bounds":
+        step("Verify: draw_text_blob and draw_string record DrawTextBlob ops")
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 200.0, bottom: 100.0)
+        val font = sk_font_default()
+        val blob = sk_text_blob_make_from_text("Hi!", font)
+        val p = sk_paint_fill(sk_color_argb(255, 0x11, 0x11, 0x11))
+        val pic = sk_canvas_make(200, 100)
+            .begin_recording(bounds)
+            .draw_text_blob(blob, 15.0, 40.0, p)
+            .draw_string("Skia", 25.0, 80.0, font, p)
+            .end_recording()
+        expect(pic.op_count).to_equal(2)
+        expect(pic.ops[0].kind).to_equal(SkPictureOpKind.DrawTextBlob)
+        expect(pic.ops[0].rx).to_equal(3.0)
+        expect(pic.ops[0].x).to_equal(15.0)
+        expect(pic.ops[0].y).to_equal(40.0)
+        expect(pic.ops[1].kind).to_equal(SkPictureOpKind.DrawTextBlob)
+        expect(pic.ops[1].rx).to_equal(4.0)
+        expect(pic.ops[1].x).to_equal(25.0)
+        expect(pic.ops[1].y).to_equal(80.0)
+
+    it "clear and draw_color preserve color and blend_mode in full-canvas DrawRect ops":
+        step("Verify: clear and draw_color preserve paint color and blend_mode")
+        val bounds = SkRect(left: 0.0, top: 0.0, right: 64.0, bottom: 64.0)
+        val c1 = sk_color_argb(255, 0x10, 0x20, 0x30)
+        val c2 = sk_color_argb(128, 0x40, 0x50, 0x60)
+        val pic = sk_canvas_make(64, 64)
+            .begin_recording(bounds)
+            .clear(c1)
+            .draw_color(c2, SkBlendMode.SrcOver)
+            .end_recording()
+        expect(pic.op_count).to_equal(2)
+        expect(pic.ops[0].kind).to_equal(SkPictureOpKind.DrawRect)
+        expect(pic.ops[0].paint.color).to_equal(c1)
+        expect(pic.ops[0].paint.blend_mode).to_equal(SkBlendMode.Src)
+        expect(pic.ops[1].kind).to_equal(SkPictureOpKind.DrawRect)
+        expect(pic.ops[1].paint.color).to_equal(c2)
+        expect(pic.ops[1].paint.blend_mode).to_equal(SkBlendMode.SrcOver)
