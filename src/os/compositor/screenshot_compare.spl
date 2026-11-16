@@ -1,5 +1,6 @@
 
 use os.compositor.tolerance_profile.{ToleranceProfile, tolerance_profile_allows_acceptance}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_inspect}
 
 class ComparisonResult:
     exact_match: bool
@@ -31,6 +32,7 @@ pub fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32, thresh
     val expected = if width > 0 and height > 0: width * height else: 0
     if a.len() != b.len() or a.len() != expected:
         return ComparisonResult(exact_match: false, match_percentage: 0, different_pixels: expected, max_channel_diff: 255, total_channel_diff: 0, passed: false)
+    val _inspect = compare_view_inspect("screenshot_compare", "a", a, width, height, "b", b, width, height)
     var diff_count = 0
     var exact_diff_count = 0
     var max_diff = 0
@@ -39,16 +41,16 @@ pub fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32, thresh
     while idx < a.len():
         if a[idx] != b[idx]:
             exact_diff_count = exact_diff_count + 1
-        val ar = _channel_diff(a[idx], b[idx], 16)
-        val ag = _channel_diff(a[idx], b[idx], 8)
-        val ab = _channel_diff(a[idx], b[idx], 0)
-        val aa = _channel_diff(a[idx], b[idx], 24)
-        val pixel_max = if ar > ag and ar > ab and ar > aa: ar elif ag > ab and ag > aa: ag elif ab > aa: ab else: aa
-        total = total + ar.to_i64() + ag.to_i64() + ab.to_i64() + aa.to_i64()
-        if pixel_max > max_diff:
-            max_diff = pixel_max
-        if pixel_max > threshold:
-            diff_count = diff_count + 1
+            val ar = _channel_diff(a[idx], b[idx], 16)
+            val ag = _channel_diff(a[idx], b[idx], 8)
+            val ab = _channel_diff(a[idx], b[idx], 0)
+            val aa = _channel_diff(a[idx], b[idx], 24)
+            val pixel_max = if ar > ag and ar > ab and ar > aa: ar elif ag > ab and ag > aa: ag elif ab > aa: ab else: aa
+            total = total + ar.to_i64() + ag.to_i64() + ab.to_i64() + aa.to_i64()
+            if pixel_max > max_diff:
+                max_diff = pixel_max
+            if pixel_max > threshold:
+                diff_count = diff_count + 1
         idx = idx + 1
     val match_pct = if expected > 0: ((expected - diff_count) * 10000) / expected else: 10000
     ComparisonResult(exact_match: exact_diff_count == 0, match_percentage: match_pct, different_pixels: diff_count, max_channel_diff: max_diff, total_channel_diff: total, passed: diff_count == 0)
@@ -148,25 +150,36 @@ pub fn find_diff_regions(a: [u32], b: [u32], width: i32, height: i32, threshold:
         start = start + 1
     regions
 
-fn print_comparison_report(result: ComparisonResult):
-    ()
+pub fn print_comparison_report(result: ComparisonResult):
+    val status = if result.passed: "PASS" else: "FAIL"
+    val pct = format_percentage(result.match_percentage)
+    val exact = if result.exact_match: "exact" else: "diff"
+    print "comparison [{status}] ({exact}): match={pct}, different_pixels={result.different_pixels}, max_channel_diff={result.max_channel_diff}, total_channel_diff={result.total_channel_diff}"
 
-fn print_channel_report(result: ComparisonResult):
-    ()
+pub fn print_channel_report(result: ComparisonResult):
+    val status = if result.passed: "PASS" else: "FAIL"
+    val pct = format_percentage(result.match_percentage)
+    print "channel report [{status}]: match={pct}, different_pixels={result.different_pixels}, max_channel_diff={result.max_channel_diff}, total_channel_diff={result.total_channel_diff}"
 
-fn format_percentage(value: i32) -> text:
-    value.to_text()
+# reason: basis-point integer percentage formatter for comparison report output
+# @allow(primitive_api)
+pub fn format_percentage(value: i32) -> text:
+    val v = if value < 0: 0 else: value
+    val whole = v / 100
+    val frac = v % 100
+    val frac_text = if frac < 10: "0" + frac.to_text() else: frac.to_text()
+    whole.to_text() + "." + frac_text + "%"
 
 pub fn generate_diff_image(a: [u32], b: [u32], width: i32, height: i32) -> [u32]:
     if width <= 0 or height <= 0:
         return []
     val expected = width * height
-    var out: [u32] = []
+    var out: [u32] = [0xFFFF00FFu32; expected]
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    val limit = if n < expected: n else: expected
     var idx = 0
-    while idx < expected:
-        if idx < a.len() and idx < b.len() and a[idx] == b[idx]:
-            out.push(0xFF00FF00u32)
-        else:
-            out.push(0xFFFF00FFu32)
+    while idx < limit:
+        if a[idx] == b[idx]:
+            out[idx] = 0xFF00FF00u32
         idx = idx + 1
     out

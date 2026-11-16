@@ -1,0 +1,513 @@
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.{HostAgentWorkspaceProgressTurnV2, host_authorized_agent_workspace_begin_installed_v2}
+use std.nogc_async_mut.llm.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1, ProviderCliContainedProbeReceiptV1}
+use std.common.contracts.orchestration.host_broker_recovery_policy_v1.*
+use std.common.contracts.container.runtime_binding_policy_v3.smux_runtime_binding_policy_decode_v3
+use std.common.contracts.container.stream_v2.container_stream_policy_digest_v2
+use std.nogc_sync_mut.orchestration.host_broker_recovery_records_v7.*
+use std.nogc_sync_mut.io.group_process_recovery_owner_v3.{GroupProcessStreamRecoveryOwnerV3, group_process_stream_recover_owned_v3}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+# Internal persistent-service acquisition. The actual service retains turn.owner
+# before inspecting flags/errors. No packet restores this owner or its readers.
+use std.container.{SimpleContainerWorkspaceOpenV3, simple_container_open_workspace_installed_v3,
+    simple_container_workspace_startup_cleanup_v3, simple_container_scope_v2,
+    simple_container_observation_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2,
+    group_process_stream_template_encode_v3}
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_payload_digest_v1
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.local_authority_policy_decode_v1
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2,
+    distributed_operation_journal_open_cleanup_v2}
+use std.common.contracts.orchestration.host_capacity_v1.{HostCapacityV1, HostReservationStateV1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerHostObservationV2,
+    container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub class HostAgentInstalledOwnerV7:
+    root: text
+    root_reader: Option<LinuxProtectedRootReaderV1> = None
+    parent_reader: Option<LinuxProtectedRootReaderV1> = None
+    workspace: Option<SimpleContainerWorkspaceOpenV3> = None
+    journal_cleanup: Option<DistributedOperationJournalOpenCleanupV2> = None
+    local: Option<HostLocalRootV1> = None
+    closing: bool = false
+    closed: bool = false
+    cleanup_uncertain: bool = false
+    broker: Option<HostBrokerRecoveryCustodyV7> = None
+    error: text = ""
+
+# Quarantined custody only. No local getter, cleanup, execution or authority
+# method exists; only a later same-owner adoption may retry its provenance.
+pub class HostAgentInstalledRejectedLocalV7:
+    local: HostLocalRootV1
+
+pub struct HostAgentInstalledTurnV7:
+    owner: HostAgentInstalledOwnerV7
+    local: Option<HostLocalRootV1>
+    ready: bool
+    pending: bool
+    closed: bool
+    error: text
+    rejected_local: Option<HostAgentInstalledRejectedLocalV7> = None
+
+fn installed_reply_v7(owner: HostAgentInstalledOwnerV7) -> HostAgentInstalledTurnV7:
+    val ready = owner.local.is_some() and not owner.closing and not owner.closed and owner.error == "" and owner.local.unwrap().capacity.ledger.continuity_proven
+    HostAgentInstalledTurnV7(owner, owner.local, ready, not owner.closed and not ready, owner.closed, owner.error)
+
+fn installed_error_v7(original: HostAgentInstalledOwnerV7, reason: text) -> HostAgentInstalledTurnV7:
+    var owner = original
+    owner.error = if reason != "": reason else: "host-agent-installed-resource-return-pending"
+    installed_reply_v7(owner)
+
+fn installed_read_v7(reader: LinuxProtectedRootReaderV1, relative: text) -> Result<text, text>:
+    val value = linux_protected_root_reader_read_v1(reader, relative, 1048576)?
+    if value.is_none(): return Err("host-agent-installed-object-missing:" + relative)
+    Ok(value.unwrap())
+
+fn installed_enrollment_v7(owner: HostAgentInstalledOwnerV7, binding_bytes: text) -> Result<HostLocalEnrollmentReadV7, text>:
+    val root = owner.root_reader.unwrap()
+    val parent = owner.parent_reader.unwrap()
+    val binding = host_local_binding_decode_v1(binding_bytes)?
+    val policy = local_authority_policy_decode_v1(installed_read_v7(root, "authority-policy.sdn")?)?
+    val parent_policy = local_authority_policy_decode_v1(installed_read_v7(parent, "authority-policy.sdn")?)?
+    host_local_enrollment_check_v7(owner.root, binding_bytes, policy, parent_policy,
+        installed_read_v7(root, "host-config.sdn")?, installed_read_v7(root, "host-root.sdn")?,
+        installed_read_v7(root, "runtime-ready.sdn")?,
+        installed_read_v7(parent, "host-claim-" + sha256_text(binding.native_machine_id) + ".sdn")?,
+        installed_read_v7(root, "enrollment-credential.sdn")?, installed_read_v7(root, "container-policy.sdn")?)
+
+# template is the trusted installed service initializer's actual helper profile;
+# it is not accepted from invoke wire payloads and grants no launch authority.
+pub fn host_service_agent_installed_open_v7(root: text,
+        template: GroupProcessStreamLaunchV2) -> HostAgentInstalledTurnV7:
+    var owner = HostAgentInstalledOwnerV7(root: root)
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return installed_error_v7(owner, origin.unwrap_err())
+    val shape = group_process_stream_template_encode_v3(template)
+    if shape.is_err(): return installed_error_v7(owner, shape.unwrap_err())
+    val opened = linux_protected_root_reader_open_v1(root)
+    owner.root_reader = opened.owner
+    if not opened.ready or opened.error != "": return installed_error_v7(owner, opened.error)
+    val binding_bytes = installed_read_v7(owner.root_reader.unwrap(), "enrollment-binding.sdn")
+    if binding_bytes.is_err(): return installed_error_v7(owner, binding_bytes.unwrap_err())
+    val binding = host_local_binding_decode_v1(binding_bytes.unwrap())
+    if binding.is_err(): return installed_error_v7(owner, binding.unwrap_err())
+    if (not root.starts_with(binding.unwrap().machine_parent + "/host-root-") or
+            root.split("/").len() != binding.unwrap().machine_parent.split("/").len() + 1):
+        return installed_error_v7(owner, "host-local-root-parent-mismatch")
+    val parent = linux_protected_root_reader_open_v1(binding.unwrap().machine_parent)
+    owner.parent_reader = parent.owner
+    if not parent.ready or parent.error != "": return installed_error_v7(owner, parent.error)
+    val checked = installed_enrollment_v7(owner, binding_bytes.unwrap())
+    if checked.is_err(): return installed_error_v7(owner, checked.unwrap_err())
+    val facts = checked.unwrap()
+    val backend = host_local_backend_v1(facts.config)
+    if backend.is_err() or backend.unwrap() != "linux-podman": return installed_error_v7(owner, "host-agent-installed-linux-required")
+    # No legacy observer/open has run. This is the original genuine fresh root.
+    val workspace = simple_container_open_workspace_installed_v3(template)
+    owner.workspace = Some(workspace)
+    if workspace.error != "" or workspace.owner.is_none(): return installed_error_v7(owner, workspace.error)
+    val container = workspace.owner.unwrap()
+    val observed = simple_container_observation_v2(container)
+    val scope = simple_container_scope_v2(container)
+    val expected = ContainerHostScopeV2(physical_host_id: facts.config.physical_host_id,
+        service_scope_id: facts.config.service_scope_id, boot_id: facts.binding.native_boot_id,
+        provider_generation: 1, native_machine_id: facts.binding.native_machine_id,
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: facts.binding.native_boot_id)
+    val matched = host_agent_installed_scope_match_v7(expected, scope, observed, facts.binding.provider_identity_digest)
+    if matched.is_err(): return installed_error_v7(owner, matched.unwrap_err())
+    val live = installed_readers_current_v7(owner)
+    if live.is_err(): return installed_error_v7(owner, live.unwrap_err())
+    val digest = host_enrollment_payload_digest_v1(facts.binding)
+    val fence = container_scope_fence_id_v2(scope)
+    if digest.is_err(): return installed_error_v7(owner, digest.unwrap_err())
+    if fence.is_err(): return installed_error_v7(owner, fence.unwrap_err())
+    val nonce = sosix_random_hex(32) ?? ""
+    if nonce.byte_len() != 64: return installed_error_v7(owner, "host-local-entropy-unavailable")
+    val capacity = HostCapacityV1(physical_host_id: facts.config.physical_host_id,
+        authority_id: "host-" + digest.unwrap(), boot_id: fence.unwrap(), provider_generation: scope.provider_generation,
+        cpu_millis: facts.config.cpu_ceiling_millis, memory_bytes: facts.config.memory_ceiling_bytes,
+        exclusive_devices: facts.config.exclusive_device_ids)
+    match host_capacity_owner_open_linux_v3(root + "/journal", capacity, nonce, facts.config.maximum_journal_events):
+        case HostCapacityOpenV2.Rejected(reason): return installed_error_v7(owner, reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            owner.journal_cleanup = Some(cleanup)
+            return installed_error_v7(owner, reason)
+        case HostCapacityOpenV2.Ready(actual):
+            owner.local = Some(HostLocalRootV1(root, facts.binding, facts.config, facts.policy, scope, container, actual))
+    var local = owner.local.unwrap()
+    # Historical evidence may prove already released rows; uncertain rows stay
+    # charged and block admission. Empty history is not the only success case.
+    var reconciled = true
+    for row in local.capacity.ledger.reservations:
+        if row.state != HostReservationStateV1.Released: reconciled = false
+    local.capacity.ledger.continuity_proven = reconciled
+    owner.local = Some(local)
+    val current = host_capacity_owner_linux_current_v3(local.capacity)
+    if current.is_err(): return installed_error_v7(owner, current.unwrap_err())
+    val sources_current = installed_readers_current_v7(owner)
+    if sources_current.is_err(): return installed_error_v7(owner, sources_current.unwrap_err())
+    if not reconciled: return installed_error_v7(owner, "host-agent-installed-historical-reconciliation-required")
+    val context = host_local_context_v1(facts.policy)
+    if context.grant_clock <= 0 or context.monotonic_ms < 0: return installed_error_v7(owner, "host-local-clock-invalid")
+    installed_reply_v7(owner)
+
+fn installed_readers_current_v7(owner: HostAgentInstalledOwnerV7) -> Result<(), text>:
+    linux_machine_process_origin_check_v1()?
+    if owner.root_reader.is_none() or owner.parent_reader.is_none(): return Err("host-agent-installed-readers-unavailable")
+    linux_protected_root_reader_current_v1(owner.root_reader.unwrap())?
+    linux_protected_root_reader_current_v1(owner.parent_reader.unwrap())?
+    Ok(())
+
+# The SAME canonical service retains its actual latest local pair after every
+# workflow turn, before fallible response/permission handling. No capability is
+# reconstructed from wire data and metadata alone cannot pass current checks.
+pub fn host_service_agent_installed_retain_v7(original: HostAgentInstalledOwnerV7,
+        local: HostLocalRootV1) -> HostAgentInstalledTurnV7:
+    var owner = original
+    if owner.closing or owner.closed or owner.local.is_none(): return installed_rejected_local_v7(owner, local, "host-agent-installed-not-live")
+    val previous = owner.local.unwrap()
+    if (local.root != previous.root or local.binding != previous.binding or local.config != previous.config or
+            local.capacity.journal.root != previous.capacity.journal.root or
+            local.capacity.journal.lease_digest != previous.capacity.journal.lease_digest or
+            local.capacity.journal.authority_digest != previous.capacity.journal.authority_digest or
+            local.capacity.journal.sequence < previous.capacity.journal.sequence or
+            local.policy != previous.policy or local.scope != previous.scope or simple_container_scope_v2(local.container) != previous.scope):
+        return installed_rejected_local_v7(owner, local, "host-agent-installed-returned-owner-mismatch")
+    # SAME trusted service passes actual returned resources. Preserve their
+    # matching provenance before any fallible current/policy refresh; failure
+    # cannot discard an already advanced journal or cleanup-bearing container.
+    owner.local = Some(local)
+    var workspace = owner.workspace.unwrap()
+    workspace.owner = Some(local.container)
+    owner.workspace = Some(workspace)
+    val current = host_capacity_owner_linux_current_v3(local.capacity)
+    if current.is_err(): return installed_error_v7(owner, current.unwrap_err())
+    val live = installed_readers_current_v7(owner)
+    if live.is_err(): return installed_error_v7(owner, live.unwrap_err())
+    installed_reply_v7(owner)
+
+fn installed_rejected_local_v7(owner: HostAgentInstalledOwnerV7, incoming: HostLocalRootV1,
+        reason: text) -> HostAgentInstalledTurnV7:
+    var turn = installed_error_v7(owner, reason)
+    turn.rejected_local = Some(HostAgentInstalledRejectedLocalV7(incoming))
+    turn
+
+pub fn host_service_agent_installed_retain_rejected_v7(owner: HostAgentInstalledOwnerV7,
+        rejected: HostAgentInstalledRejectedLocalV7) -> HostAgentInstalledTurnV7:
+    host_service_agent_installed_retain_v7(owner, rejected.local)
+
+# Pre-runtime close uses genuine lower source/native cleanup gates. Active,
+# staged or uncertain resources remain in the returned owner; no boolean from
+# a caller clears a native subject, runtime charge or storage lease.
+pub fn host_service_agent_installed_cleanup_v7(original: HostAgentInstalledOwnerV7) -> HostAgentInstalledTurnV7:
+    var owner = original
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return installed_error_v7(owner, origin.unwrap_err())
+    if owner.cleanup_uncertain: return installed_error_v7(owner, owner.error)
+    owner.closing = true
+    # External recovery readers precede their journal/policy/root dependencies.
+    if owner.broker.is_some():
+        val closed_broker = host_agent_installed_broker_recovery_close_v7(owner)
+        owner = closed_broker.owner
+        if closed_broker.pending or closed_broker.error != "": return installed_error_v7(owner, closed_broker.error)
+    if val local = owner.local:
+        val current = host_capacity_owner_linux_current_v3(local.capacity)
+        if current.is_err(): return installed_error_v7(owner, current.unwrap_err())
+    if val workspace = owner.workspace:
+        val closed = simple_container_workspace_startup_cleanup_v3(workspace)
+        owner.workspace = closed.retained
+        if closed.retained.is_none() and not closed.closed: owner.cleanup_uncertain = true
+        if closed.retained.is_some() or not closed.closed: return installed_error_v7(owner, closed.error)
+        if closed.error != "": return installed_error_v7(owner, closed.error)
+    # Container returned only after actual lower cleanup, never before. This
+    # separate stage also resumes correctly after a consumed container error.
+    if val local = owner.local:
+        val closed_journal = host_capacity_owner_close_owned_v2(local.capacity)
+        owner.journal_cleanup = closed_journal.cleanup
+        owner.local = None
+        if closed_journal.cleanup.is_none() and not closed_journal.closed: owner.cleanup_uncertain = true
+        if closed_journal.error != "": return installed_error_v7(owner, closed_journal.error)
+        if not closed_journal.closed: return installed_error_v7(owner, "host-agent-installed-journal-close-pending")
+    if val cleanup = owner.journal_cleanup:
+        val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+        owner.journal_cleanup = closed.cleanup
+        if closed.cleanup.is_none() and not closed.closed: owner.cleanup_uncertain = true
+        if closed.cleanup.is_some() or not closed.closed: return installed_error_v7(owner, closed.error)
+        if closed.error != "": return installed_error_v7(owner, closed.error)
+    if val parent = owner.parent_reader:
+        val closed = linux_protected_root_reader_close_v1(parent)
+        owner.parent_reader = closed.owner
+        if closed.owner.is_none() and not closed.completed: owner.cleanup_uncertain = true
+        if closed.owner.is_some() or not closed.completed: return installed_error_v7(owner, closed.error)
+        if closed.error != "": return installed_error_v7(owner, closed.error)
+    if val root = owner.root_reader:
+        val closed = linux_protected_root_reader_close_v1(root)
+        owner.root_reader = closed.owner
+        if closed.owner.is_none() and not closed.completed: owner.cleanup_uncertain = true
+        if closed.owner.is_some() or not closed.completed: return installed_error_v7(owner, closed.error)
+        if closed.error != "": return installed_error_v7(owner, closed.error)
+    owner.closed = true
+    installed_reply_v7(owner)
+
+pub fn host_service_agent_installed_status_v7(owner: HostAgentInstalledOwnerV7) -> Result<text, text>:
+    linux_machine_process_origin_check_v1()?
+    val turn = installed_reply_v7(owner)
+    if turn.ready:
+        installed_readers_current_v7(owner)?
+        host_capacity_owner_linux_current_v3(owner.local.unwrap().capacity)?
+    val detail = if owner.error.byte_len() <= 4096: owner.error else: "host-agent-installed-error-detail-too-large"
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(7), "kind": SdnValue.String("host-agent-installed-status"),
+        "ready": SdnValue.Bool(turn.ready), "pending": SdnValue.Bool(turn.pending), "closed": SdnValue.Bool(turn.closed),
+        "cleanupUncertain": SdnValue.Bool(owner.cleanup_uncertain),
+        "brokerRecoveryRetained": SdnValue.Bool(owner.broker.is_some()),
+        "brokerRecoveryPending": SdnValue.Bool(owner.broker.is_some() and (owner.broker.unwrap().recovery.is_none() or not owner.broker.unwrap().evidence_verified)),
+        "journalRetained": SdnValue.Bool(owner.local.is_some() or owner.journal_cleanup.is_some()),
+        "containerRetained": SdnValue.Bool(owner.workspace.is_some()),
+        "protectedReadersRetained": SdnValue.Bool(owner.root_reader.is_some() or owner.parent_reader.is_some()),
+        "error": SdnValue.String(detail)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+# DATA matching only. The opener supplies its genuine fresh owner observation;
+# callers cannot turn a positive comparison into a root, grant or capability.
+pub fn host_agent_installed_scope_match_v7(expected: ContainerHostScopeV2,
+        actual: ContainerHostScopeV2, observed: ContainerHostObservationV2,
+        provider_digest: text) -> Result<bool, text>:
+    if (container_host_scope_bytes_v2(expected)? != container_host_scope_bytes_v2(actual)? or
+            observed.backend != "linux-podman" or observed.native_machine_id != expected.native_machine_id or
+            observed.native_boot_id != expected.boot_id or observed.continuity_assurance != "native-boot-incarnation-v1" or
+            observed.provider_identity_digest != provider_digest):
+        return Err("host-agent-installed-native-enrollment-mismatch")
+    Ok(true)
+
+# One bounded operation at a time in the SAME installed owner. The borrowed
+# lower view has no owning close; even partial readers remain held here.
+class HostBrokerRecoveryCustodyV7:
+    records: HostBrokerRecoveryRecordsV7
+    root: text
+    authorization_digest: text
+    cleanup_origin_ms: i64
+    cleanup_deadline_ms: i64
+    reader: Option<LinuxProtectedRootReaderV1> = None
+    recovery: Option<GroupProcessStreamRecoveryOwnerV3> = None
+    opening_failed: bool = false
+    live_cleanup_required: bool = false
+    evidence_verified: bool = false
+
+pub struct HostBrokerRecoveryTurnV7:
+    owner: HostAgentInstalledOwnerV7
+    local: Option<HostLocalRootV1>
+    recovery: Option<GroupProcessStreamRecoveryOwnerV3>
+    pending: bool
+    error: text
+
+fn broker_reply_v7(owner: HostAgentInstalledOwnerV7, recovery: Option<GroupProcessStreamRecoveryOwnerV3>,
+        pending: bool, reason: text) -> HostBrokerRecoveryTurnV7:
+    HostBrokerRecoveryTurnV7(owner, owner.local, recovery, pending, reason)
+
+fn broker_owner_current_v7(owner: HostAgentInstalledOwnerV7) -> Result<(), text>:
+    installed_readers_current_v7(owner)?
+    if owner.closing or owner.closed or owner.cleanup_uncertain or owner.local.is_none(): return Err("broker-recovery-installed-owner-not-live")
+    host_capacity_owner_linux_current_v3(owner.local.unwrap().capacity)?
+    Ok(())
+
+fn broker_authorized_root_v7(owner: HostAgentInstalledOwnerV7,
+        records: HostBrokerRecoveryRecordsV7) -> Result<(text, text), text>:
+    broker_owner_current_v7(owner)?
+    val local = owner.local.unwrap()
+    if container_host_scope_bytes_v2(records.scope)? != container_host_scope_bytes_v2(local.scope)?:
+        return Err("broker-recovery-original-installed-scope-mismatch")
+    val current_bytes = broker_current_policy_bytes_v7(owner)?
+    val current = smux_runtime_binding_policy_decode_v3(current_bytes)?
+    val current_digest = container_stream_policy_digest_v2(current.stream)?
+    var parent = ""
+    var authorization_digest = sha256_text("HOST-BROKER-RECOVERY-AUTH-V1\n" + sha256_text(current_bytes) + "\ncurrent\n")
+    if current_digest == records.stream_policy_digest:
+        parent = current.stream.root
+    else:
+        val raw = linux_protected_root_reader_read_v1(owner.root_reader.unwrap(), "host-broker-recovery-policy.sdn", 65536)?
+        if raw.is_none(): return Err("historical-broker-root-not-authorized")
+        val approved = host_broker_recovery_policy_decode_v1(raw.unwrap())?
+        parent = host_broker_recovery_policy_parent_v1(approved, host_enrollment_payload_digest_v1(local.binding)?,
+            local.config.service_scope_id, records.stream_policy_digest)?
+        authorization_digest = sha256_text("HOST-BROKER-RECOVERY-AUTH-V1\n" + sha256_text(current_bytes) + "\n" + sha256_text(raw.unwrap()) + "\n")
+    val root = host_broker_recovery_root_v1(parent, records.identity, records.domain)?
+    if records.native.launch.root != root: return Err("broker-recovery-archive-root-not-installed-selection")
+    broker_owner_current_v7(owner)?
+    Ok((root, authorization_digest))
+
+pub fn host_agent_installed_broker_recovery_open_v7(original: HostAgentInstalledOwnerV7,
+        operation_id: text, domain: HostBrokerRecoveryDomainV1) -> HostBrokerRecoveryTurnV7:
+    var owner = original
+    val current = broker_owner_current_v7(owner)
+    if current.is_err(): return broker_reply_v7(owner, None, owner.broker.is_some(), current.unwrap_err())
+    val loaded = host_broker_recovery_records_load_v7(owner.local.unwrap().capacity.journal, operation_id, domain)
+    if loaded.is_err(): return broker_reply_v7(owner, None, owner.broker.is_some(), loaded.unwrap_err())
+    val records = loaded.unwrap()
+    val selected = broker_authorized_root_v7(owner, records)
+    if selected.is_err(): return broker_reply_v7(owner, None, owner.broker.is_some(), selected.unwrap_err())
+    if val held = owner.broker:
+        if held.records.operation != records.operation or held.records.domain != domain:
+            return broker_reply_v7(owner, None, true, "broker-recovery-other-operation-retained")
+        if held.root != selected.unwrap().0 or held.authorization_digest != selected.unwrap().1:
+            return broker_reply_v7(owner, None, true, "broker-recovery-authorization-changed")
+        if held.opening_failed or held.recovery.is_none(): return broker_reply_v7(owner, None, true, "broker-recovery-open-cleanup-required")
+        val active = held.recovery.unwrap().current_v3()
+        if active.is_err(): return broker_reply_v7(owner, None, true, active.unwrap_err())
+        return broker_reply_v7(owner, held.recovery, false, "")
+    val window = broker_cleanup_window_v7(owner, records)
+    if window.is_err(): return broker_reply_v7(owner, None, false, window.unwrap_err())
+    var custody = HostBrokerRecoveryCustodyV7(records, selected.unwrap().0, selected.unwrap().1, window.unwrap().0, window.unwrap().1)
+    custody.live_cleanup_required = records.journal_state != "completed"
+    owner.broker = Some(custody)
+    # Open ONLY the installed-derived leaf, after actual journal/consumption and
+    # exact archived root comparisons. Capture partial owner before flags/error.
+    val opened = linux_protected_root_reader_open_v1(custody.root)
+    custody.reader = opened.owner
+    custody.opening_failed = not opened.ready or opened.error != ""
+    owner.broker = Some(custody)
+    if custody.opening_failed: return broker_reply_v7(owner, None, true, opened.error)
+    val recovered = group_process_stream_recover_owned_v3(custody.reader.unwrap(), records.native.launch, records.native.identity_digest)
+    if recovered.is_err(): return broker_reply_v7(owner, None, true, recovered.unwrap_err())
+    custody.recovery = Some(recovered.unwrap())
+    owner.broker = Some(custody)
+    val rechecked = broker_authorized_root_v7(owner, records)
+    if rechecked.is_err(): return broker_reply_v7(owner, None, true, rechecked.unwrap_err())
+    if rechecked.unwrap() != selected.unwrap(): return broker_reply_v7(owner, None, true, "broker-recovery-authorization-changed")
+    broker_reply_v7(owner, custody.recovery, false, "")
+
+# Completed historical rows only. No new journal outcome or live cleanup is
+# forged. The actual borrowed reader/view and SAME stored settlement/outcome
+# must all agree before one derived ledger row becomes Released.
+pub fn host_agent_installed_broker_reconcile_v7(original: HostAgentInstalledOwnerV7,
+        operation_id: text, domain: HostBrokerRecoveryDomainV1) -> HostBrokerRecoveryTurnV7:
+    val opened = host_agent_installed_broker_recovery_open_v7(original, operation_id, domain)
+    var owner = opened.owner
+    if opened.error != "" or opened.recovery.is_none(): return opened
+    val custody = owner.broker.unwrap()
+    var local = owner.local.unwrap()
+    val row = distributed_operation_journal_lookup_v2(local.capacity.journal, operation_id)
+    if row.is_err(): return broker_reply_v7(owner, None, true, row.unwrap_err())
+    if row.unwrap().state != "completed":
+        var held = custody
+        held.live_cleanup_required = true
+        owner.broker = Some(held)
+        return broker_reply_v7(owner, opened.recovery, true, "broker-recovery-live-control-required")
+    val evidence = host_broker_recovery_evidence_owned_v7(local.capacity.journal, custody.records, opened.recovery.unwrap())
+    if evidence.is_err(): return broker_reply_v7(owner, None, true, evidence.unwrap_err())
+    if row.unwrap().outcome_digest != sha256_text(evidence.unwrap()): return broker_reply_v7(owner, None, true, "broker-recovery-committed-outcome-mismatch")
+    val selected = broker_authorized_root_v7(owner, custody.records)
+    if selected.is_err(): return broker_reply_v7(owner, None, true, selected.unwrap_err())
+    if selected.unwrap() != (custody.root, custody.authorization_digest): return broker_reply_v7(owner, None, true, "broker-recovery-authorization-changed")
+    val current = broker_owner_current_v7(owner)
+    if current.is_err(): return broker_reply_v7(owner, None, true, current.unwrap_err())
+    var found = false
+    for index in 0..local.capacity.ledger.reservations.len():
+        var reservation = local.capacity.ledger.reservations[index]
+        if reservation.operation_id == operation_id:
+            if reservation.payload_digest != custody.records.operation.payload_digest: return broker_reply_v7(owner, None, true, "broker-recovery-ledger-original-mismatch")
+            reservation.state = HostReservationStateV1.Released
+            local.capacity.ledger.reservations[index] = reservation
+            found = true
+    if not found: return broker_reply_v7(owner, None, true, "broker-recovery-ledger-row-missing")
+    var reconciled = true
+    for reservation in local.capacity.ledger.reservations:
+        if reservation.state != HostReservationStateV1.Released: reconciled = false
+    local.capacity.ledger.continuity_proven = reconciled
+    owner.local = Some(local)
+    var verified = custody
+    verified.evidence_verified = true
+    verified.live_cleanup_required = false
+    owner.broker = Some(verified)
+    if reconciled and owner.error == "host-agent-installed-historical-reconciliation-required": owner.error = ""
+    broker_reply_v7(owner, opened.recovery, not reconciled, "")
+
+pub fn host_agent_installed_broker_recovery_close_v7(original: HostAgentInstalledOwnerV7) -> HostBrokerRecoveryTurnV7:
+    var owner = original
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return broker_reply_v7(owner, None, owner.broker.is_some(), origin.unwrap_err())
+    if owner.cleanup_uncertain: return broker_reply_v7(owner, None, true, owner.error)
+    if owner.broker.is_none(): return broker_reply_v7(owner, None, false, "")
+    var custody = owner.broker.unwrap()
+    if custody.recovery.is_some() and not custody.evidence_verified:
+        return broker_reply_v7(owner, None, true, "broker-recovery-proof-or-live-control-return-required")
+    custody.recovery = None
+    owner.broker = Some(custody)
+    if val reader = custody.reader:
+        val closed = linux_protected_root_reader_close_v1(reader)
+        custody.reader = closed.owner
+        owner.broker = Some(custody)
+        if closed.owner.is_none() and not closed.completed:
+            owner.cleanup_uncertain = true
+            owner.error = closed.error
+        if closed.owner.is_some() or not closed.completed: return broker_reply_v7(owner, None, true, closed.error)
+        owner.broker = None
+        if closed.error != "": return broker_reply_v7(owner, None, false, closed.error)
+    else:
+        owner.broker = None
+    broker_reply_v7(owner, None, false, "")
+
+# One original cleanup window, retained BEFORE acquisition/control effects.
+# Expired admission never relaunches anything. Existing actual helper duration
+# bounds this cleanup attempt; current installed policy can only shorten it.
+fn broker_cleanup_window_v7(owner: HostAgentInstalledOwnerV7,
+        records: HostBrokerRecoveryRecordsV7) -> Result<(i64, i64), text>:
+    broker_owner_current_v7(owner)?
+    val policy = smux_runtime_binding_policy_decode_v3(broker_current_policy_bytes_v7(owner)?)?
+    var duration = policy.stream.timeout_ms
+    if records.operation.duration_ms < duration: duration = records.operation.duration_ms
+    val clock = host_local_context_v1(owner.local.unwrap().policy)
+    if (duration <= 0 or duration > 86400000 or clock.grant_clock <= 0 or clock.monotonic_ms < 0 or
+            clock.monotonic_ms > 9223372036854775807 - duration): return Err("broker-recovery-cleanup-window-invalid")
+    Ok((clock.monotonic_ms, clock.monotonic_ms + duration))
+
+fn broker_current_policy_bytes_v7(owner: HostAgentInstalledOwnerV7) -> Result<text, text>:
+    val value = linux_protected_root_reader_read_v1(owner.root_reader.unwrap(), "smux-runtime-policy.sdn", 8388608)?
+    if value.is_none(): return Err("broker-recovery-current-policy-missing")
+    Ok(value.unwrap())
+
+# Actual canonical service caller stores BOTH the complete installed turn
+# (including rejected custody) and progress before any error/response handling.
+pub struct HostAgentInstalledInvokeTurnV7:
+    installed: HostAgentInstalledTurnV7
+    progress: Option<HostAgentWorkspaceProgressTurnV2>
+    error: text
+
+fn installed_context_v7(owner: HostAgentInstalledOwnerV7) -> HostReservationAuthorizationContextV1:
+    val rejected = HostReservationAuthorizationContextV1(grant_clock: -1, monotonic_ms: -1,
+        policy_revision: -1, revocation_epoch: -1, session_generation: -1)
+    if installed_readers_current_v7(owner).is_err() or owner.local.is_none(): return rejected
+    val bytes = installed_read_v7(owner.root_reader.unwrap(), "authority-policy.sdn")
+    if bytes.is_err(): return rejected
+    val policy = local_authority_policy_decode_v1(bytes.unwrap())
+    if policy.is_err() or policy.unwrap().source_digest != owner.local.unwrap().binding.policy_digest: return rejected
+    val parent = installed_read_v7(owner.parent_reader.unwrap(), "authority-policy.sdn")
+    if parent.is_err() or sha256_text(parent.unwrap()) != policy.unwrap().source_digest: return rejected
+    host_local_context_v1(policy.unwrap())
+
+pub fn host_service_agent_installed_begin_v7(original: HostAgentInstalledOwnerV7, payload: text,
+        selection: ProviderCliContainedSelectionV1, receipt: ProviderCliContainedProbeReceiptV1) -> HostAgentInstalledInvokeTurnV7:
+    var owner = original
+    val current = broker_owner_current_v7(owner)
+    if current.is_err(): return HostAgentInstalledInvokeTurnV7(installed_error_v7(owner, current.unwrap_err()), None, current.unwrap_err())
+    if not installed_reply_v7(owner).ready: return HostAgentInstalledInvokeTurnV7(installed_reply_v7(owner), None, "host-agent-installed-admission-not-ready")
+    if owner.broker.is_some(): return HostAgentInstalledInvokeTurnV7(installed_reply_v7(owner), None, "host-agent-installed-broker-recovery-retained")
+    var local = owner.local.unwrap()
+    val refresh = fn() -> HostReservationAuthorizationContextV1:
+        installed_context_v7(owner)
+    val context = installed_context_v7(owner)
+    # No lease parameter/getter, second Host root or initializer. The existing
+    # core verifies actual grants/selection/reservation before source admission.
+    val progress = host_authorized_agent_workspace_begin_installed_v2(local.capacity, local.container,
+        payload, selection, receipt, local.policy, local.binding.provider_identity_digest,
+        local.config.service_scope_id, context, refresh)
+    local.capacity = progress.owner
+    local.container = progress.container
+    val retained = host_service_agent_installed_retain_v7(owner, local)
+    HostAgentInstalledInvokeTurnV7(retained, Some(progress), if retained.error != "": retained.error else: progress.error)

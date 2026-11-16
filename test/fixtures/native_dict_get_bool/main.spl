@@ -1,0 +1,76 @@
+# Native bool-valued dict read oracle.
+# Bug: doc/08_tracking/bug/native_dict_get_bool_coalesce_decoded_as_int_2026-11-16.md
+# Every row prints `<form> <key>: <value>`; a native build (cranelift and
+# llvm) must print exactly the seed's stdout below (`simple run main.spl`).
+# Key 1 holds true, key 2 holds false (tagged word 19 -> 2 when int-unboxed),
+# key 9 is a miss.
+# SEED_STDOUT_BEGIN
+#   coalesce 1: true
+#   coalesce 2: false
+#   coalesce 9: false
+#   coalesce_default_true 9: true
+#   if_val 1: some true
+#   if_val 2: some false
+#   if_val 9: none
+#   unwrap_or 1: true
+#   unwrap_or 2: false
+#   unwrap_or 9: false
+#   index 1: true
+#   index 2: false
+#   field_coalesce 2: false
+#   field_if_val 2: some false
+# SEED_STDOUT_END
+
+class BoolOwners:
+    flags: {i64: bool}
+
+fn flags() -> {i64: bool}:
+    var d: {i64: bool} = {}
+    d[1] = true
+    d[2] = false
+    d
+
+fn coalesce(d: {i64: bool}, k: i64) -> bool:
+    d.get(k) ?? false
+
+fn coalesce_default_true(d: {i64: bool}, k: i64) -> bool:
+    d.get(k) ?? true
+
+fn if_val(d: {i64: bool}, k: i64) -> text:
+    if val v = d.get(k):
+        return "some {v}"
+    "none"
+
+fn unwrap_or(d: {i64: bool}, k: i64) -> bool:
+    # The direct `d.get(k).unwrap_or(false)` does not build on the integ2
+    # Stage 2 (unresolved method call unwrap_or, receiver untyped); the
+    # annotated binder keeps this row about the decode.
+    val got: bool? = d.get(k)
+    got.unwrap_or(false)
+
+fn index(d: {i64: bool}, k: i64) -> bool:
+    d[k]
+
+impl BoolOwners:
+    fn field_coalesce(k: i64) -> bool:
+        self.flags.get(k) ?? false
+
+    fn field_if_val(k: i64) -> text:
+        if val v = self.flags.get(k):
+            return "some {v}"
+        "none"
+
+fn main():
+    val d = flags()
+    for k in [1, 2, 9]:
+        print "coalesce {k}: {coalesce(d, k)}"
+    print "coalesce_default_true 9: {coalesce_default_true(d, 9)}"
+    for k in [1, 2, 9]:
+        print "if_val {k}: {if_val(d, k)}"
+    for k in [1, 2, 9]:
+        print "unwrap_or {k}: {unwrap_or(d, k)}"
+    for k in [1, 2]:
+        print "index {k}: {index(d, k)}"
+    val owners = BoolOwners(flags: d)
+    print "field_coalesce 2: {owners.field_coalesce(2)}"
+    print "field_if_val 2: {owners.field_if_val(2)}"

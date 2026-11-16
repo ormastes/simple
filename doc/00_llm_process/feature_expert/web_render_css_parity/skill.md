@@ -2067,3 +2067,32 @@ never cache an answer computed while exhausted) —
 ## 2026-11-16 — background shorthand after the size group
 
 - `_parse_background_shorthand` is a token state machine. `after_slash` must END at the first non-size token, or every box, attachment or colour keyword after `pos / size` fails the whole layer closed. Its regression partner is `layout_renderer_background_and_grid_decls_spec` "refuses a malformed position/size slash": `center / 1px 2px 3px` must stay invalid, which is why a position token after the slash returns empty.
+
+## 2026-11-16 — text Draw IR line-height
+
+- `_html_draw_ir_resolved_text_command` merges the resolved-font props over the CSS computed style. `line-height` must stay the CSS value (`style_line_h`); the face metric only stands in for `normal`, and `style_line_h` already answers that. Nothing in Engine2D reads the value, only its presence.
+- Narrow Draw IR fixtures drop text that starts past the surface edge. Spans with no whitespace between them never wrap, so a fixture that once fit with bitmap metrics culls once real faces are wider. Widen the surface; don't relax the expect.
+
+## 2026-11-16 — background-image longhand witness
+
+- `bg_layers_raw` does double duty: it is the fail-closed witness (css-cascade spec), and Draw IR treats any non-empty value as "not lowerable". A lone exact `url()` longhand keeps its text there and must still lower: `_html_draw_ir_single_url_witness`. When adding a raw witness to a new branch in decl_apply, check `_html_draw_ir_background_layers` and the material gate (`raw_layers_empty`) in paint_layout.
+
+## 2026-11-16 — raster-only paint is invisible
+
+- The pixel API (`simple_web_render_html_to_pixels`) renders Draw IR through Engine2D. Anything painted only in `paint_raster.spl`'s `paint` never reaches it: the widget-image placeholder (now ported) and the widget panel, button and chrome-text fills (still open). When a pixel row shows only the page background, grep `paint_raster.spl` for the feature before debugging layout.
+
+## 2026-11-16 — device-scale (>=300 dpi) render path
+
+- Rule: Chrome-vs-Simple pixel checks run at >= 300 dpi (device scale >= 3.125); we use integer k=4 (384 dpi). Same font file on both sides; never enlarge CSS font sizes to pass.
+- Entry: `simple_web_render_html_to_pixels_at_device_scale(html, css_w, css_h, k)` (simple_web_renderer.spl) -> `simple_web_layout_render_html_pixels_engine2d_at_device_scale` (simple_web_layout_engine2d_fast.spl). Layout and the document cache stay in CSS px; only the composed Draw IR is scaled, by `draw_ir_composition_at_device_scale` (src/lib/common/ui/draw_ir_device_scale.spl), then painted into a (css_w*k)x(css_h*k) target.
+- Scaled: command x/y/w/h, border/content/hit/clip rects, embedding x/y/w/h, points, edge points, advance_widths, glyph-run xs/ys, fractional geometry, affine tx/ty; style props font-size, line-height, letter-/word-spacing, text-indent, stroke-width, outline-width/-offset, text-decoration-thickness, text-underline-offset, border-*-width, border-*radius, box-shadow-blur-radius, box-shadow-layer-N-{offset-x,offset-y,blur-radius,spread-radius}, background-tile-*/shape-*/radius-*, backdrop-filter-realized-blur-radius-px, the two px ints of legacy box-shadow/text-shadow, every entry of font-advance-widths. Text is re-rasterized at k x font-size (real outlines), not upscaled.
+- NOT scaled, by design: colors, gradient stops (colors + permille positions), angles, counts, identities; raw CSS text (box-shadow-raw, backdrop-filter, background-layers-raw, box-geometry-raw-tokens) because Engine2D reads their scaled typed twins; layout INPUT props (width, margin-*, padding-*, left, background-size-*/position-*) because paint never reads them and they can hold sentinels.
+- Known gap: the Engine2D linear-stroke path admits only stroke-width 1, so a scaled straight edge/path (stroke-width k) is skipped and the pixel entry returns []. Not exercised by the spec fixtures; fix before a gate page uses SVG/edge strokes.
+- Measured (Chrome for Testing 159.0.8154.6 aarch64, `--headless --force-device-scale-factor=k`, tol 8, boxes + "Hello Simple" in DejaVu Sans 16px, both sides /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 759720 B): k=1 3.85% (770/20000), k=4 0.93% (2990/320000). Spec: test/01_unit/browser_engine/web_device_scale_spec.spl.
+
+## 2026-11-16 — input text overflows and is clipped, never truncated
+
+- `input_text_paint_plan(nd, st, x, y, w, h, ancestor_clip)` paints the WHOLE value (password: one `*` per codepoint) and relies on `plan.clip` (content box ∩ ancestor clip). There was a `content_w / advance + 1` glyph cap at five call sites; Chrome 159 keeps the full value (`scrollWidth` 56 in a 36px content box) and clips it. Do not reintroduce a cap to save glyph work: all three painters (raster TTF, raster bitmap, Engine2D `set_clip`) honour the clip.
+- An overflowing value ignores `text-align` (CSS Text 3 §6.1): LTR starts at `content_x`, RTL ends at the content right edge. Buttons (`type=button/submit/reset`) still centre an overflowing label. That is a known divergence: Chrome 159 start-aligns it (a 40px submit with 2px padding and 12 Arial-8px `M`s paints ink from x=3 to x=41, past the content box, so it is clipped at the border box, not the content box). It is open for the owner.
+- Chrome 159 gives `<input>` a default `box-sizing:border-box`, but the engine uses content-box. Author `box-sizing` explicitly in input oracle pages, or the content box differs before paint is even reached.
+- Oracle: test/01_unit/browser_engine/input_text_overflow_clip_chrome159_spec.spl.

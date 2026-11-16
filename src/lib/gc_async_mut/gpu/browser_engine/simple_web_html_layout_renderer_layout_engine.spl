@@ -577,6 +577,154 @@ fn flex_item_percent_style(cst: Style, container_w: i32, container_h: i32) -> St
     basis.flex_basis_permille = -1
     basis
 
+# Shifts placed inline items on a closing line for `text-align: center | right`
+# (and logical `end` / RTL `start`). Widened sole `#text` runs already fill to
+# `line_iw`, giving `free_w <= 0` and zero double shift.
+fn align_inline_line_horizontal(
+    child_index: HtmlChildIndex, st: Style,
+    line_nodes: [i32],
+    line_iw: i32, inline_x: i32,
+    bx: [i32], by: [i32]
+) -> PositionOffsetResult:
+    if line_nodes.len() == 0 or st.display == "inline":
+        return PositionOffsetResult(bx: bx, by: by)
+    val free_w = line_iw - inline_x
+    if free_w <= 0:
+        return PositionOffsetResult(bx: bx, by: by)
+    var align = st.text_align
+    if align == "start":
+        align = if st.direction_rtl: "right" else: "left"
+    elif align == "end":
+        align = if st.direction_rtl: "left" else: "right"
+    var dx = 0
+    if align == "center":
+        dx = free_w / 2
+    elif align == "right":
+        dx = free_w
+    if dx <= 0:
+        return PositionOffsetResult(bx: bx, by: by)
+    var out_bx = bx
+    var out_by = by
+    var k = 0
+    while k < line_nodes.len():
+        val shifted = offset_layout_subtree(child_index, line_nodes[k], dx, 0, out_bx, out_by)
+        out_bx = shifted.bx
+        out_by = shifted.by
+        k = k + 1
+    PositionOffsetResult(bx: out_bx, by: out_by)
+
+# Intrinsic outer width for non-growing auto-width row-flex items, covering form
+# controls, replaced media boxes, nested flex containers, inline horizontal
+# margins, and max-content boxes before falling back to `auto_weight`.
+fn inline_subtree_horizontal_margins_w(
+    nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
+    i: i32, iw: i32
+) -> i32:
+    var total = 0
+    var c = child_index.first_child[i]
+    while c >= 0:
+        val cst = styles[c]
+        if (
+            (cst.display == "inline" or cst.display == "inline-block") and
+            nodes[c].tag != "#text" and cst.float_mode == 0 and
+            not cst.position_absolute and not cst.position_fixed
+        ):
+            val cml = if cst.margin_l_auto: 0 else: resolve_horizontal_margin_px(cst.margin_l, iw)
+            val cmr = if cst.margin_r_auto: 0 else: resolve_horizontal_margin_px(cst.margin_r, iw)
+            total = total + cml + cmr
+            total = total + inline_subtree_horizontal_margins_w(nodes, styles, child_index, c, iw)
+        c = child_index.next_sibling[c]
+    total
+
+fn row_flex_item_auto_intrinsic_w(
+    nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
+    item: i32, st: Style, iw: i32, widths: [i32]
+) -> IntrinsicWidthResult:
+    val node = nodes[item]
+    val border_x = st.border_l + st.border_r
+    if node.tag == "select":
+        val select_w = (
+            form_control_widest_option_label_px(nodes, styles, child_index, item) +
+            SELECT_ARROW_WIDTH_PX + st.pad_l + st.pad_r + border_x
+        )
+        return IntrinsicWidthResult(
+            width: constrained_outer_width(node, st, select_w),
+            widths: widths
+        )
+    if node.tag == "input" or node.tag == "textarea":
+        val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+        if node.tag == "input" and (input_type == "checkbox" or input_type == "radio"):
+            return IntrinsicWidthResult(
+                width: constrained_outer_width(node, st, 13),
+                widths: widths
+            )
+        if node.tag == "input" and input_type == "hidden":
+            return IntrinsicWidthResult(width: 0, widths: widths)
+        val control_w = form_control_intrinsic_content_w(node, st, form_control_cols(node)) + st.pad_l + st.pad_r + border_x
+        return IntrinsicWidthResult(
+            width: constrained_outer_width(node, st, control_w),
+            widths: widths
+        )
+    if replaced_default_box_w(node.tag) > 0 or node.tag == "img":
+        val rep_w = replaced_auto_box_w(node, st, iw)
+        if rep_w > 0:
+            return IntrinsicWidthResult(
+                width: constrained_outer_width(node, st, rep_w),
+                widths: widths
+            )
+        return IntrinsicWidthResult(width: 0, widths: widths)
+    if st.display == "flex" or st.display == "inline-flex":
+        var out_widths = widths
+        val is_col = st.flex_direction == "column" or st.flex_direction == "column-reverse"
+        var total_w = 0
+        var flex_item_count = 0
+        var c = child_index.first_child[item]
+        while c >= 0:
+            val cst = styles[c]
+            if cst.display != "none" and not cst.position_absolute and not cst.position_fixed:
+                var cw = if cst.flex_basis_px > 0:
+                    cst.flex_basis_px
+                elif cst.width_px > 0:
+                    css_outer_width(nodes[c], cst, cst.width_px)
+                else:
+                    val sub = row_flex_item_auto_intrinsic_w(nodes, styles, child_index, c, cst, iw, out_widths)
+                    out_widths = sub.widths
+                    sub.width
+                val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
+                val item_w = cw + cml + cmr
+                if is_col:
+                    if item_w > total_w:
+                        total_w = item_w
+                else:
+                    if flex_item_count > 0:
+                        total_w = total_w + st.column_gap_px
+                    total_w = total_w + item_w
+                flex_item_count = flex_item_count + 1
+            c = child_index.next_sibling[c]
+        if total_w > 0:
+            val outer = total_w + st.pad_l + st.pad_r + border_x
+            return IntrinsicWidthResult(
+                width: constrained_outer_width(node, st, outer),
+                widths: out_widths
+            )
+    val intrinsic = intrinsic_text_width(nodes, styles, child_index, item, widths)
+    if intrinsic.width > 0:
+        val inline_margins_w = inline_subtree_horizontal_margins_w(nodes, styles, child_index, item, iw)
+        if inline_margins_w > 0:
+            return IntrinsicWidthResult(
+                width: constrained_outer_width(node, st, intrinsic.width + inline_margins_w),
+                widths: intrinsic.widths
+            )
+        return intrinsic
+    val max_content_w = flex_item_max_content_width(nodes, styles, child_index, item)
+    if max_content_w > 0:
+        return IntrinsicWidthResult(
+            width: constrained_outer_width(node, st, max_content_w),
+            widths: intrinsic.widths
+        )
+    intrinsic
+
 fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], authored_st: Style) -> LayoutResult:
     # Callers resolve percentage min-/max- sizes against the real containing
     # block (normal flow, inline atomic, float, abspos, flex). One still
@@ -1751,10 +1899,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 line_zero_excess[line_count] = zero_excess_measure
                 line_count = line_count + 1
                 total_line_h = total_line_h + line_h_measure
-            # A growing zero-basis item never ends below its automatic minimum
-            # (CSS Flexbox 9.7 step 4): one whose share of its line's free
-            # space would be smaller is frozen at that minimum, leaves the
-            # line's grow total, and the others share what is left.
+            # A growing item never ends below its automatic minimum (zero-basis)
+            # or above its declared max-width (CSS Flexbox 9.7 step 4): frozen
+            # items leave the line's grow total, update `line_widths` so any
+            # remaining free space can still distribute via `justify-content`,
+            # and the others share what is left.
             var freeze_line = 0
             while freeze_line < line_count:
                 var freeze_changed = true
@@ -1766,20 +1915,25 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     while zi < ordered_row_child_count:
                         val zrow = ordered_row_children[zi]
                         val zst = flex_item_percent_style(styles[zrow], iw, content_height_limit)
-                        if wrap_line_of[zi] == freeze_line and wrap_frozen[zi] == 0 and flex_item_zero_basis(zst) and zst.flex_grow > 0:
+                        val zis_zero = flex_item_zero_basis(zst)
+                        if wrap_line_of[zi] == freeze_line and wrap_frozen[zi] == 0 and zst.flex_grow > 0:
                             val zframe = flex_item_frame_w(zst)
+                            val zfrom = if zis_zero: zframe else: wrap_zero_floor[zi]
                             val zshare = if freeze_free > 0 and freeze_grow > 0: freeze_free * zst.flex_grow / freeze_grow else: 0
-                            val zmax = if zst.max_width_px > 0: constrained_outer_width(nodes[zrow], zst, zframe + zshare) else: zframe + zshare
-                            if zframe + zshare < wrap_zero_floor[zi]:
+                            val ztarget = zfrom + zshare
+                            val zmax = if zst.max_width_px > 0: constrained_outer_width(nodes[zrow], zst, ztarget) else: ztarget
+                            if zis_zero and ztarget < wrap_zero_floor[zi]:
                                 wrap_frozen[zi] = 1
                                 line_zero_excess[freeze_line] = line_zero_excess[freeze_line] - (wrap_zero_floor[zi] - zframe)
                                 line_grow_totals[freeze_line] = line_grow_totals[freeze_line] - zst.flex_grow
                                 freeze_changed = true
-                            elif zmax < zframe + zshare:
+                            elif zmax < ztarget:
                                 # Max violation: frozen at its max-width.
                                 wrap_frozen[zi] = 2
                                 wrap_max_w[zi] = zmax
-                                line_zero_excess[freeze_line] = line_zero_excess[freeze_line] - (zmax - zframe)
+                                line_widths[freeze_line] = line_widths[freeze_line] + (zmax - wrap_zero_floor[zi])
+                                if zis_zero:
+                                    line_zero_excess[freeze_line] = line_zero_excess[freeze_line] - (wrap_zero_floor[zi] - zframe)
                                 line_grow_totals[freeze_line] = line_grow_totals[freeze_line] - zst.flex_grow
                                 freeze_changed = true
                         zi = zi + 1
@@ -1955,7 +2109,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     # A grown item that also has a `width` is laid out in its
                     # USED width; its authored width would win otherwise.
                     var wrap_item_style = resolved_cst
-                    if flex_item_zero_basis(cst) or (base_w_wrap > 0 and cst.width_px != 0 and cst.flex_grow > 0 and base_w_wrap != flex_item_definite_base_w(nodes[fc_wrap], cst, iw)):
+                    if flex_item_zero_basis(cst) or ((wrap_frozen[fc_wrap_i] == 2 or cst.flex_grow > 0) and base_w_wrap > 0 and cst.width_px != 0 and base_w_wrap != flex_item_definite_base_w(nodes[fc_wrap], cst, iw)):
                         wrap_item_style = style_with_width(resolved_cst, if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: base_w_wrap else: base_w_wrap - cst.pad_l - cst.pad_r - cst.border_l - cst.border_r)
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
@@ -1977,6 +2131,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         out_bx = shifted.bx
                         out_by = shifted.by
                     cx_wrap = cx_wrap + out_bw[fc_wrap] + effective_cmr
+                    val actual_item_h = resolved_cst.margin_t + out_bh[fc_wrap] + resolved_cst.margin_b
+                    if actual_item_h > line_h_wrap:
+                        line_h_wrap = actual_item_h
                     val item_bottom = out_by[fc_wrap] + out_bh[fc_wrap] + resolved_cst.margin_b
                     if item_bottom > wrap_content_bottom:
                         wrap_content_bottom = item_bottom
@@ -2080,7 +2237,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     val shrink_factor = if pcst.flex_shrink > 0 and not zero_item: pcst.flex_shrink else: 0
                     shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
                 else:
-                    val intrinsic = intrinsic_text_width(nodes, styles, child_index, ps, out_intrinsic_widths)
+                    val intrinsic = row_flex_item_auto_intrinsic_w(nodes, styles, child_index, ps, pcst, iw, out_intrinsic_widths)
                     out_intrinsic_widths = intrinsic.widths
                     val intrinsic_w = intrinsic.width
                     if intrinsic_w > 0 and pcst.flex_grow == 0:
@@ -2265,7 +2422,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             remaining_w = floor_intrinsic.width
                     force_used_w = true
                 elif cst.width_px == 0 and not cst.width_zero and cst.flex_basis_px == 0 and cst.flex_grow == 0:
-                    val intrinsic = intrinsic_text_width(nodes, styles, child_index, fc, out_intrinsic_widths)
+                    val intrinsic = row_flex_item_auto_intrinsic_w(nodes, styles, child_index, fc, cst, iw, out_intrinsic_widths)
                     out_intrinsic_widths = intrinsic.widths
                     val intrinsic_w = intrinsic.width
                     if intrinsic_w > 0:
@@ -2889,6 +3046,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     out_by[c] = cy + (inline_line_h - br_content_h) / 2
                     out_bw[c] = 0
                     out_bh[c] = br_content_h
+                    val h_aligned = align_inline_line_horizontal(
+                        child_index, st, line_nodes, line_iw, inline_x,
+                        out_bx, out_by
+                    )
+                    out_bx = h_aligned.bx
+                    out_by = h_aligned.by
                     val aligned = align_inline_line_baselines(
                         child_index, st, nodes, inline_baseline_nodes,
                         inline_baseline_margin_ts, inline_baseline_margin_bs,
@@ -2947,6 +3110,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     if in_inline_run and inline_x > inline_start_x and wbr_next >= 0:
                         val wbr_next_w = first_word_advance_width(nodes[wbr_next], styles[wbr_next])
                         if wbr_next_w > 0 and inline_x + wbr_next_w > line_iw:
+                            val wbr_h_aligned = align_inline_line_horizontal(
+                                child_index, st, line_nodes, line_iw, inline_x,
+                                out_bx, out_by
+                            )
+                            out_bx = wbr_h_aligned.bx
+                            out_by = wbr_h_aligned.by
                             val wbr_aligned = align_inline_line_baselines(
                                 child_index, st, nodes, inline_baseline_nodes,
                                 inline_baseline_margin_ts, inline_baseline_margin_bs,
@@ -2975,7 +3144,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # `display:inline`, so its horizontal margins take part in the
                 # line: the UA gives a checkbox `margin: 3px 3px 3px 4px`.
                 val inline_takes_margin = (
-                    inline_block or nodes[c].tag == "input" or
+                    inline_block or
+                    (cst.display == "inline" and nodes[c].tag != "#text") or
+                    nodes[c].tag == "input" or
                     nodes[c].tag == "select" or nodes[c].tag == "textarea"
                 )
                 val inline_margin_l = if inline_takes_margin:
@@ -3166,6 +3337,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         style_run_byte_advances(cst, run_trimmed).len() == run_trimmed.byte_len()
                     ):
                         if first_word_advance_width(nodes[c], cst) > line_remainder:
+                            val broken_h = align_inline_line_horizontal(
+                                child_index, st, line_nodes, line_iw, inline_x,
+                                out_bx, out_by
+                            )
+                            out_bx = broken_h.bx
+                            out_by = broken_h.by
                             val broken = align_inline_line_baselines(
                                 child_index, st, nodes, inline_baseline_nodes,
                                 inline_baseline_margin_ts, inline_baseline_margin_bs,
@@ -3223,6 +3400,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     (inline_block or inline_replaced) and inline_x > 0 and
                     inline_x + inline_outer_w > line_iw
                 ):
+                    val h_aligned = align_inline_line_horizontal(
+                        child_index, st, line_nodes, line_iw, inline_x,
+                        out_bx, out_by
+                    )
+                    out_bx = h_aligned.bx
+                    out_by = h_aligned.by
                     val aligned = align_inline_line_baselines(
                         child_index, st, nodes, inline_baseline_nodes,
                         inline_baseline_margin_ts, inline_baseline_margin_bs,
@@ -3403,6 +3586,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 c = child_index.next_sibling[c]
                 continue
             if in_inline_run:
+                val end_run_h = align_inline_line_horizontal(
+                    child_index, st, line_nodes, line_iw, inline_x,
+                    out_bx, out_by
+                )
+                out_bx = end_run_h.bx
+                out_by = end_run_h.by
                 val aligned = align_inline_line_baselines(
                     child_index, st, nodes, inline_baseline_nodes,
                     inline_baseline_margin_ts, inline_baseline_margin_bs,
@@ -3667,6 +3856,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         c = child_index.next_sibling[c]
     if child_count > 0:
         if in_inline_run:
+            val tail_h_aligned = align_inline_line_horizontal(
+                child_index, st, line_nodes, line_iw, inline_x,
+                out_bx, out_by
+            )
+            out_bx = tail_h_aligned.bx
+            out_by = tail_h_aligned.by
             val aligned = align_inline_line_baselines(
                 child_index, st, nodes, inline_baseline_nodes,
                 inline_baseline_margin_ts, inline_baseline_margin_bs,
