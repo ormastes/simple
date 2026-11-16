@@ -1,0 +1,51 @@
+#!/bin/sh
+# linux-cross-cc.shs — print the clang command for a Linux cross target.
+#
+# Single source of truth for the Linux riscv64 / i686 / armv7 cross C driver
+# used by the WSL/Ubuntu cross lanes (CC wrapper, CARGO_TARGET_*_LINKER).
+# Never GCC (CLAUDE.md): no --gcc-install-dir, no Debian libgcc-*-cross files.
+# The runtime is LLVM compiler-rt builtins + clang_rt.crtbegin/crtend, the
+# unwinder is LLVM libunwind (static), the linker is ld.lld. The libc/crt1 come
+# from the Debian `libc6-dev-<arch>-cross` sysroot under /usr/<gnu-triple>.
+#
+# compiler-rt / libunwind for these triples are built by
+#   sh scripts/setup/build-linux-cross-compiler-rt.shs
+# into $SIMPLE_CROSS_RT_PREFIX (default ~/.simple/toolchains/llvm-cross-rt-18).
+#
+# usage: sh scripts/setup/linux-cross-cc.shs <rv64|i686|armv7>        -> command
+#        sh scripts/setup/linux-cross-cc.shs --gnu-triple <rv64|i686|armv7>
+set -eu
+
+prefix=${SIMPLE_CROSS_RT_PREFIX:-$HOME/.simple/toolchains/llvm-cross-rt-18}
+
+gnu_triple() {
+    case $1 in
+        rv64) echo riscv64-linux-gnu ;;
+        i686) echo i686-linux-gnu ;;
+        armv7) echo arm-linux-gnueabihf ;;
+        *) echo "linux-cross-cc: unknown target '$1' (want rv64|i686|armv7)" >&2; return 2 ;;
+    esac
+}
+
+clang_target() {
+    case $1 in
+        rv64) echo riscv64-linux-gnu ;;
+        i686) echo i686-linux-gnu ;;
+        armv7) echo armv7-linux-gnueabihf ;;
+    esac
+}
+
+if [ "${1:-}" = "--gnu-triple" ]; then
+    gnu_triple "${2:-}"
+    exit $?
+fi
+
+tgt=${1:-}
+gt=$(gnu_triple "$tgt") || exit 2
+ct=$(clang_target "$tgt")
+cc=${SIMPLE_CROSS_CLANG:-clang}
+
+# No --sysroot: Debian's /usr/<gt>/lib/libc.so is a linker script naming
+# ABSOLUTE /usr/<gt>/lib/libc.so.6, which ld.lld would re-prefix with the
+# sysroot. -B/-L/-isystem point the driver at the multiarch cross tree instead.
+echo "$cc --target=$ct -B/usr/$gt/lib -L/usr/$gt/lib -isystem /usr/$gt/include -resource-dir=$prefix/resource --rtlib=compiler-rt --unwindlib=libunwind -L$prefix/$gt/lib -fuse-ld=lld"
