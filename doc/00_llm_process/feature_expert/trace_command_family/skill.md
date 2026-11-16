@@ -36,3 +36,5 @@ Open work: `doc/08_tracking/bug/trace_command_family_remaining_2026-11-14.md`.
 - `trace_query_sdn_requested_v1` returns enum `TraceQueryFormatV1 (Table | Sdn)`; `trace_query_format_parse_v1` is the strict parser (case-sensitive, no default) and backs `--format` validation with the same message; `trace_query_format_name_v1` gives the wire text.
 - Spec: `test/01_unit/app/traceability/trace_app_domain_types_spec.spl` (adverse: `xml`, empty, `SDN`, bad scope/progress, malformed query exits 2).
 - `TraceQueryOptionsV1` / `TraceCliOptionsV1` text fields (format, kind, scope, progress...) are unchanged: `doc/08_tracking/bug/trace_app_text_option_fields_2026-11-15.md`.
+
+- Legacy query path (`trace missing|list|show|refs`) accepts `--profile=<p>` (default worktree); `trace_query_completion_exit_v1(graph, profile)` exits 2 for any non-worktree profile; bad value exits 2.

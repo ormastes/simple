@@ -17,6 +17,7 @@ use app.traceability.structural_report_v1.{TraceSnapshotCompletenessV1,
 use app.traceability.core.{TraceDiagnosticLimitV1}
 use app.traceability.query_main.{TraceExitCodeV1, trace_query_error_exit_v1, trace_query_completion_exit_v1, run_trace_query_v1}
 use std.common.traceability.model.{TraceGraph, SnapshotSubject}
+use std.common.traceability.profile_v1.{TraceProfile}
 
 describe "Traceability app domain types":
     it "parses the closed query format set and names it back":
@@ -89,8 +90,27 @@ describe "Traceability app domain types":
         var incomplete = complete
         incomplete.complete = false
         step("Adverse: an incomplete graph exits 2, never 1 (plan section 6)")
-        expect(trace_query_completion_exit_v1(incomplete).value).to_equal(2)
+        expect(trace_query_completion_exit_v1(incomplete, TraceProfile.Worktree).value).to_equal(2)
         step("A complete graph exits 0")
-        expect(trace_query_completion_exit_v1(complete).value).to_equal(0)
+        expect(trace_query_completion_exit_v1(complete, TraceProfile.Worktree).value).to_equal(0)
         step("Adverse: a missing item still exits 1, distinct from incomplete")
         expect(trace_query_error_exit_v1("TRACE-QUERY-NOT-FOUND: x").value).to_equal(1)
+
+    it "exits 2 for a non-worktree profile on a complete graph and parses --profile on the legacy path":
+        # @req REQ-TRC-007
+        val subject = SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
+            kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256")
+        val complete = TraceGraph(subject: subject, input_manifest_id: "inputs:one", generation_id: "generation:one",
+            complete: true, nodes: [], test_definitions: [], claims: [], edges: [], edge_origins: [],
+            origins: [], locators: [], diagnostics: [])
+        step("A worktree profile on a complete graph exits 0")
+        expect(trace_query_completion_exit_v1(complete, TraceProfile.Worktree).value).to_equal(0)
+        step("Adverse: a release profile never reports a preview graph as admitted, so it exits 2")
+        expect(trace_query_completion_exit_v1(complete, TraceProfile.Release).value).to_equal(2)
+        step("The legacy parser defaults to worktree and accepts both option spellings")
+        expect(trace_query_options_parse_v1(["missing"]).unwrap().profile).to_equal(TraceProfile.Worktree)
+        expect(trace_query_options_parse_v1(["missing", "--profile=release"]).unwrap().profile).to_equal(TraceProfile.Release)
+        expect(trace_query_options_parse_v1(["missing", "--profile", "ci"]).unwrap().profile).to_equal(TraceProfile.Ci)
+        step("Adverse: an unknown profile value and a repeated --profile are rejected")
+        expect(trace_query_options_parse_v1(["missing", "--profile=bogus"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["missing", "--profile=ci", "--profile=push"]).is_err()).to_be(true)
