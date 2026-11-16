@@ -158,23 +158,24 @@ fn _tls_desc_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
         i = i + 1
     -1
 
-fn _tls_is_pair(obj: ElfObject, index: i64) -> bool:
-    val candidate = obj.relocations[index]
-    if elf_reloc_type(candidate) != R_X86_64_PLT32_TLS and
-            elf_reloc_type(candidate) != R_X86_64_TLSDESC_CALL_TLS:
-        return false
-    var i: i64 = 0
-    while i < obj.relocations.len():
-        val r = obj.relocations[i]
-        if (elf_reloc_type(r) == R_X86_64_TLSGD_TLS and _tls_gd_pair(obj, r) == index) or
-                (elf_reloc_type(r) == R_X86_64_TLSLD_TLS and _tls_ld_pair(obj, r) == index):
-            return true
-        if elf_reloc_type(r) == R_X86_64_GOTPC32_TLSDESC_TLS and _tls_desc_pair(obj, r) == index:
-            return true
-        i = i + 1
-    false
+fn _tls_pair_members(obj: ElfObject) -> {i64: bool}:
+    """Indices that `_tls_is_pair` accepts, computed in one pass over the
+    heads instead of a full relocation scan per candidate (was O(n^2))."""
+    var members: {i64: bool} = {}
+    for r in obj.relocations:
+        val rtype = elf_reloc_type(r)
+        var p: i64 = -1
+        if rtype == R_X86_64_TLSGD_TLS: p = _tls_gd_pair(obj, r)
+        else if rtype == R_X86_64_TLSLD_TLS: p = _tls_ld_pair(obj, r)
+        else if rtype == R_X86_64_GOTPC32_TLSDESC_TLS: p = _tls_desc_pair(obj, r)
+        if p >= 0: members[p] = true
+    members
 
 fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
+    # workaround: doc/08_tracking/bug/internal_elf_linker_perf_200obj_2026-11-16.md
+    # No `return Ok(obj)` early-out: returning the shared input object made the
+    # later refs/apply/symtab phases 5-32x slower natively; always rebuild.
+    val members = _tls_pair_members(obj)
     var raw = obj.raw
     var relocs: [ElfRelocation] = []
     var i: i64 = 0
@@ -247,9 +248,9 @@ fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
                 r_addend: r.r_addend, section_idx: r.section_idx,
                 target_section_idx: r.target_section_idx))
         else if rtype == R_X86_64_TLSDESC_CALL_TLS:
-            if not _tls_is_pair(obj, i):
+            if not members.has(i):
                 return Err("UnsupportedFeature: unpaired R_X86_64_TLSDESC_CALL")
-        else if not _tls_is_pair(obj, i):
+        else if not members.has(i):
             relocs = relocs.push(r)
         i = i + 1
     Ok(ElfObject(header: obj.header, sections: obj.sections, symbols: obj.symbols,
