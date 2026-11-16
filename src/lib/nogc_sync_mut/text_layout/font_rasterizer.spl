@@ -476,10 +476,12 @@ fn rasterize_vector_accelerated(cmds: [i32], codepoint: i32, font_size: i32) -> 
 
 fn rasterize_vector(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
     val glyph_w = vf_glyph_width(codepoint)
-    val pixel_w = glyph_w * font_size / 24
     val pixel_h = font_size
-    if pixel_w <= 0 or pixel_h <= 0:
+    if glyph_w <= 0 or pixel_h <= 0:
         return CachedGlyph.empty(codepoint, font_size)
+    var pixel_w = (glyph_w * font_size + 12) / 24
+    if pixel_w < 1:
+        pixel_w = 1
 
     _vector_font_glyph_rasterizations = _vector_font_glyph_rasterizations + 1
     _vector_font_command_triplets = _vector_font_command_triplets + (cmds.len() / 3).to_i64()
@@ -526,14 +528,18 @@ fn vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) ->
     """Ray-casting point-in-polygon test (even-odd rule)."""
     var crossings = 0
     var i = 0
-    var move_x = 0
-    var move_y = 0
-    var cur_x = 0
-    var cur_y = 0
+    val sn = (scale_n as i64) * 2
+    val sd = scale_d as i64
+    val sx = ((px as i64) * 2 + 1) * sd
+    val sy = ((py as i64) * 2 + 1) * sd
+    var move_x: i64 = 0
+    var move_y: i64 = 0
+    var cur_x: i64 = 0
+    var cur_y: i64 = 0
     while i + 2 < cmds.len():
         val cmd = cmds[i]
-        val cx = cmds[i + 1] * scale_n / scale_d
-        val cy = cmds[i + 2] * scale_n / scale_d
+        val cx = (cmds[i + 1] as i64) * sn
+        val cy = (cmds[i + 2] as i64) * sn
         if cmd == VF_MOVE:
             move_x = cx
             move_y = cy
@@ -542,22 +548,26 @@ fn vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) ->
         else if cmd == VF_LINE:
             val y1 = cur_y
             val y2 = cy
-            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+            if (y1 <= sy and sy < y2) or (y2 <= sy and sy < y1):
                 val dy = y2 - y1
-                if dy != 0:
-                    val ix = cur_x + (py - y1) * (cx - cur_x) / dy
-                    if px < ix:
+                if dy > 0:
+                    if (sx - cur_x) * dy < (sy - y1) * (cx - cur_x):
+                        crossings = crossings + 1
+                else if dy < 0:
+                    if (sx - cur_x) * dy > (sy - y1) * (cx - cur_x):
                         crossings = crossings + 1
             cur_x = cx
             cur_y = cy
         else if cmd == VF_CLOSE:
             val y1 = cur_y
             val y2 = move_y
-            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+            if (y1 <= sy and sy < y2) or (y2 <= sy and sy < y1):
                 val dy = y2 - y1
-                if dy != 0:
-                    val ix = cur_x + (py - y1) * (move_x - cur_x) / dy
-                    if px < ix:
+                if dy > 0:
+                    if (sx - cur_x) * dy < (sy - y1) * (move_x - cur_x):
+                        crossings = crossings + 1
+                else if dy < 0:
+                    if (sx - cur_x) * dy > (sy - y1) * (move_x - cur_x):
                         crossings = crossings + 1
             cur_x = move_x
             cur_y = move_y

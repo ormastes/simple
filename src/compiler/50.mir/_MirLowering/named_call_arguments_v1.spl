@@ -1,0 +1,82 @@
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{mir_operand_copy}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir.call_argument_slots_v1.{mir_call_argument_slots_v1}
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir._MirLowering.resident_default_global_owner.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+impl MirLowering:
+    me named_call_slots_v1(callee_name: text, args: [HirCallArg]) -> Result<[i64], text>:
+        var has_named = false
+        for arg in args:
+            if arg.has_name:
+                has_named = true
+                break
+        if not has_named: return Ok([])
+        var names: [text] = []
+        for arg in args:
+            names.push(if arg.has_name: arg.name else: "")
+        var parameters: [text] = []
+        var defaults: [bool] = []
+        if self.declaration_repository != None:
+            if self.declaration_parameter_defaults_ambiguous.has(callee_name) or not self.declaration_parameter_defaults.has(callee_name):
+                return Err("named call lacks unique declaration metadata: {callee_name}")
+            val declaration = self.declaration_parameter_defaults[callee_name]
+            for param in declaration.function.params:
+                parameters.push(param.name)
+                defaults.push(param.has_default)
+        else:
+            if val params = bootstrap_fn_param_defaults_lookup(callee_name):
+                for param in params:
+                    parameters.push(param.name)
+                    defaults.push(param.has_default)
+                val slots = mir_call_argument_slots_v1(parameters, defaults, names)?
+                var index = 0
+                while index < params.len():
+                    if not slots.contains(index):
+                        val literal = match params[index].default.kind:
+                            case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.FloatLexeme(_, _) | HirExprKind.BoolLit(_) | HirExprKind.CharLit(_) | HirExprKind.NilLit | HirExprKind.UnitLit: true
+                            case HirExprKind.StringLit(_, interpolations): interpolations.len() == 0
+                            case _: false
+                        if not literal:
+                            return Err("named default requires admitted declaration scope: {callee_name}.{params[index].name}")
+                    index = index + 1
+                return Ok(slots)
+            else:
+                return Err("named call lacks bootstrap parameter metadata: {callee_name}")
+        mir_call_argument_slots_v1(parameters, defaults, names)
+
+    me complete_named_call_operands_v1(callee_name: text, supplied: [MirOperand], slots: [i64]) -> [MirOperand]:
+        if self.declaration_repository != None:
+            match self.complete_declaration_call_args_v1(callee_name, supplied, slots):
+                case Ok(completed): return completed
+                case Err(reason):
+                    self.error_fatal(reason, None)
+                    return []
+        val params = bootstrap_fn_param_defaults_lookup(callee_name) ?? []
+        if params.len() < slots.len() or slots.len() != supplied.len():
+            self.error_fatal("named call bootstrap declaration changed during lowering", None)
+            return []
+        var supplied_by_slot: Dict<i64, MirOperand> = {}
+        var index = 0
+        while index < slots.len():
+            supplied_by_slot[slots[index]] = supplied[index]
+            index = index + 1
+        var result: [MirOperand] = []
+        index = 0
+        while index < params.len():
+            if supplied_by_slot.has(index):
+                result.push(supplied_by_slot[index])
+            else:
+                val expression = self.bind_resident_default_global_v1(callee_name, params[index].default)
+                var local = self.lower_expr_for_slot(expression, params[index].type_)
+                match params[index].type_.kind:
+                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _): local = self.box_runtime_value(local)
+                    case _: ()
+                result.push(mir_operand_copy(local))
+            index = index + 1
+        result

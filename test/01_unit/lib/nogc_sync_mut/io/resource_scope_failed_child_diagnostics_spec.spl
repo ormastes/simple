@@ -1,0 +1,48 @@
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, standard_resource_budget, execution_resource_scope_with_budget, run_in_owned_test_resource_scope}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io_runtime.{env_get, getpid, file_write}
+
+# Bug: doc/08_tracking/bug/test_runner_native_producer_failure_reported_as_exit_minus_one_empty_output_2026-11-12.md
+# A native producer that fails after writing more stderr than the capture cap
+# used to come back to the test runner with an EMPTY stderr: the Windows owned
+# scope dropped the whole redirected stream once it exceeded max_output_bytes,
+# so the runner's "Native backend compilation failed" line carried nothing.
+
+fn flooding_child(lines: i64, last_line: text, exit_code: i64) -> (text, [text]):
+    if host_is_windows_host():
+        val root = env_get("TEMP")
+        val script = "{root}/simple-fake-producer-{getpid()}-{lines}.cmd"
+        val body = "@echo off\r\nfor /L %%i in (1,1,{lines}) do echo filler-diagnostic-line-padding-0123456789 1>&2\r\necho {last_line} 1>&2\r\nexit /b {exit_code}\r\n"
+        expect(file_write(script, body)).to_equal(true)
+        ("C:/WINDOWS/system32/cmd.exe", ["/c", script.replace("/", "\\")])
+    else:
+        ("/bin/sh", ["-c", "i=0; while [ $i -lt {lines} ]; do echo filler-diagnostic-line-padding-0123456789 >&2; i=$((i+1)); done; echo {last_line} >&2; exit {exit_code}"])
+
+describe "owned test resource scope keeps a failed child's diagnostics":
+    """
+    As a developer reading a failed native spec compile, I want the producer's
+    real exit status and the tail of its stderr in the result, even when the
+    producer wrote more diagnostics than the capture cap, so that a compiler
+    error is not mistaken for an infrastructure kill.
+    """
+
+    it "reports the producer's exit code and final error line past the capture cap":
+        step("Run a fake producer that floods stderr past the cap, then prints its real error and exits 9")
+        val (cmd, args) = flooding_child(1000, "producer-final-error-unresolved-method", 9)
+        val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit,
+            standard_resource_budget(ExecutionResourceClass.Unit), 16_384)
+        val result = run_in_owned_test_resource_scope(scope, cmd, args)
+        step("Read the exit code and stderr the runner would print")
+        expect(result.process.usage.exit_code).to_equal(9)
+        expect(result.process.stderr_truncated).to_equal(true)
+        expect(result.process.stderr).to_contain("producer-final-error-unresolved-method")
+
+    it "keeps a small failed child's stderr verbatim":
+        val (cmd, args) = flooding_child(3, "small-producer-error", 4)
+        val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit,
+            standard_resource_budget(ExecutionResourceClass.Unit), 16_384)
+        val result = run_in_owned_test_resource_scope(scope, cmd, args)
+        expect(result.process.usage.exit_code).to_equal(4)
+        expect(result.process.stderr_truncated).to_equal(false)
+        expect(result.process.stderr).to_contain("small-producer-error")

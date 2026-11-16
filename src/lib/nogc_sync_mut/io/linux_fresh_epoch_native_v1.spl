@@ -26,6 +26,10 @@ pub class LinuxFreshEpochNativeOwnerV1:
     pub fn preparation_v1() -> Result<LinuxFreshEpochNativeObservationV1, text>: epoch_native_current_v1(self.slot, self.generation, true)
     pub fn successor_v1() -> Result<LinuxFreshEpochNativeObservationV1, text>: epoch_native_current_v1(self.slot, self.generation, false)
     pub fn observe_probe_absence_v3() -> Result<LinuxFreshEpochNativeObservationV1, text>: epoch_native_probe_absence_v3(self.slot, self.generation)
+    # Offline whole-store read for the successor: the retained graph and run
+    # roots must still be empty (no on-disk provider format is parsed).
+    pub fn observe_store_inventory_v1() -> Result<LinuxFreshEpochNativeObservationV1, text>:
+        epoch_native_store_inventory_v1(self.slot, self.generation)
     pub fn bind_profiled_launch_v1(template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
         epoch_native_bind_launch_v1(self.slot, self.generation, template)
     # Borrowed actual READ component only: no raw FD/path/writer or effect grant.
@@ -581,6 +585,30 @@ fn epoch_native_probe_absence_v3(slot: i64, generation: i64) -> Result<LinuxFres
     if before != after: return Err("fresh-probe-cohort-native-context-changed")
     Ok(after)
 
+# Offline store inventory (milestone_0019 M1). The installed provider is masked
+# and never started this boot (fresh-epoch manager, rechecked by the successor
+# observation), so nothing else can populate the retained graph and run roots,
+# which preparation already proved empty. Both are re-enumerated here through
+# the retained, identity-rechecked descriptors: any entry refuses. The cursor
+# and any pending descriptor are consumed on every outcome.
+@unsafe(reason: "consumes the enumeration cursor and pending descriptor on a refused store read", capabilities: [ffi])
+fn epoch_native_store_inventory_v1(slot: i64, generation: i64) -> Result<LinuxFreshEpochNativeObservationV1, text>:
+    val before = epoch_native_current_v1(slot, generation, false)?
+    val state = epoch_native_state_v1(slot, generation)?
+    var listed = epoch_native_empty_v1(slot, state.handles[state.graph].fd)
+    if listed.is_ok(): listed = epoch_native_empty_v1(slot, state.handles[state.run].fd)
+    val cursor = epoch_native_cursor_close_v1(slot)
+    val pending = epoch_native_slots_v1[slot].cursor_fd
+    epoch_native_slots_v1[slot].cursor_fd = -1
+    if cursor.is_err() or (pending >= 0 and close(pending as i32) != 0):
+        if epoch_native_slots_v1[slot].error == "": epoch_native_slots_v1[slot].error = "fresh-epoch-store-inventory-cursor-close-consumed-error"
+        epoch_native_slots_v1[slot].phase = "cleanup"
+        return Err(epoch_native_slots_v1[slot].error)
+    listed?
+    val after = epoch_native_current_v1(slot, generation, false)?
+    if before != after: return Err("fresh-epoch-store-inventory-context-changed")
+    Ok(after)
+
 fn epoch_native_current_v1(slot: i64, generation: i64, preparation: bool) -> Result<LinuxFreshEpochNativeObservationV1, text>:
     val result = epoch_native_current_body_v1(slot, generation, preparation)
     if (result.is_err() and linux_machine_process_origin_check_v1().is_ok() and slot >= 0 and slot < epoch_native_slots_v1.len() and
@@ -780,6 +808,7 @@ fn epoch_native_close_v1(slot: i64, generation: i64) -> LinuxFreshEpochNativeClo
     LinuxFreshEpochNativeCloseTurnV1(nil, true, epoch_native_slots_v1[slot].error)
 @else:
 fn epoch_native_probe_absence_v3(slot: i64, generation: i64) -> Result<LinuxFreshEpochNativeObservationV1, text>: Err("fresh-probe-linux-required")
+fn epoch_native_store_inventory_v1(slot: i64, generation: i64) -> Result<LinuxFreshEpochNativeObservationV1, text>: Err("fresh-epoch-native-linux-required")
 fn epoch_native_workload_v2(slot: i64, generation: i64) -> Result<LinuxFreshWorkloadNativeV2, text>: Err("fresh-workload-linux-required")
 fn epoch_native_bind_launch_v1(slot: i64, generation: i64, template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
     Err("fresh-epoch-native-linux-required")

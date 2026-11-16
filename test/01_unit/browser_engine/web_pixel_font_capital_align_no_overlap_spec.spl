@@ -1,0 +1,334 @@
+"""
+## Purpose and audience
+Purpose: Verify Simple Web renders TrueType (SFNT glyf) antialiased glyphs
+instead of upscaled 5x7 blocks, with shared baseline vertical alignment across
+capitals, proper x-height and descenders, and non-overlapping proportional
+advances while preserving `_web_bitmap_paint_lane`.
+Audience: browser-engine paint and typography maintainers.
+"""
+
+use std.spec.*
+use std.common.encoding.utf8.{text_codepoints}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    parse_html, extract_css_vw, build_child_index, compute_styles,
+    layout, paint, TextWrapCache,
+    zero_i32_list, empty_i32_lists, neg_one_i32_list,
+    web_set_bitmap_paint_lane, web_argb
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    browser_layout_framebuffer_filled,
+    ClipRect,
+    fb_text_ttf_available,
+    fb_text_ttf_line_baseline_y,
+    fb_text_ttf_aa_clip_range_adv
+}
+
+class _InkSpan:
+    x0: i32
+    x1: i32
+    min_y: i32
+    max_y: i32
+    aa_count: i32
+    solid_count: i32
+
+fn _is_inked(px: u32) -> bool:
+    val r = (px >> 16) & 255u32
+    val g = (px >> 8) & 255u32
+    val b = px & 255u32
+    r < 250u32 or g < 250u32 or b < 250u32
+
+fn _is_intermediate_aa(px: u32) -> bool:
+    val r = ((px >> 16) & 255u32) as i32
+    val g = ((px >> 8) & 255u32) as i32
+    val b = (px & 255u32) as i32
+    (r > 10 and r < 245) or (g > 10 and g < 245) or (b > 10 and b < 245)
+
+fn _collect_ink_spans(fb: [u32], w: i32, h: i32) -> [_InkSpan]:
+    var spans: [_InkSpan] = []
+    var in_span = false
+    var sx0 = 0
+    var smin_y = h
+    var smax_y = -1
+    var saa = 0
+    var ssolid = 0
+    var x = 0
+    while x < w:
+        var col_inked = false
+        var y = 0
+        while y < h:
+            val p = fb[y * w + x]
+            if _is_inked(p):
+                col_inked = true
+                if y < smin_y:
+                    smin_y = y
+                if y > smax_y:
+                    smax_y = y
+                if _is_intermediate_aa(p):
+                    saa = saa + 1
+                else:
+                    ssolid = ssolid + 1
+            y = y + 1
+        if col_inked:
+            if not in_span:
+                in_span = true
+                sx0 = x
+        else:
+            if in_span:
+                spans.push(_InkSpan(
+                    x0: sx0,
+                    x1: x - 1,
+                    min_y: smin_y,
+                    max_y: smax_y,
+                    aa_count: saa,
+                    solid_count: ssolid
+                ))
+                in_span = false
+                smin_y = h
+                smax_y = -1
+                saa = 0
+                ssolid = 0
+        x = x + 1
+    if in_span:
+        spans.push(_InkSpan(
+            x0: sx0,
+            x1: w - 1,
+            min_y: smin_y,
+            max_y: smax_y,
+            aa_count: saa,
+            solid_count: ssolid
+        ))
+    spans
+
+fn _fb_ink_stats(fb: [u32], w: i32, h: i32) -> [i32]:
+    var min_y = h
+    var max_y = -1
+    var aa = 0
+    var solid = 0
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            val p = fb[y * w + x]
+            if _is_inked(p):
+                if y < min_y:
+                    min_y = y
+                if y > max_y:
+                    max_y = y
+                if _is_intermediate_aa(p):
+                    aa = aa + 1
+                else:
+                    solid = solid + 1
+            x = x + 1
+        y = y + 1
+    [min_y, max_y, aa, solid]
+
+fn _render_html_text(txt: text, fs: i32, w: i32, h: i32) -> [u32]:
+    val lh = (fs * 14) / 10
+    val html = "<html><body style=\"margin:0;background:#ffffff;color:#000000;font-family:sans-serif;font-size:" + fs.to_text() + "px;line-height:" + lh.to_text() + "px;white-space:nowrap\">" + txt + "</body></html>"
+    simple_web_layout_render_html_software_pixels(html, w, h)
+
+fn _measure_html_advances(txt: text, fs: i32, w: i32, h: i32) -> [i32]:
+    val lh = (fs * 14) / 10
+    val html = "<html><body style=\"margin:0;background:#ffffff;color:#000000;font-family:sans-serif;font-size:" + fs.to_text() + "px;line-height:" + lh.to_text() + "px;white-space:nowrap\">" + txt + "</body></html>"
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, w, false)
+    val child_index = build_child_index(nodes)
+    web_set_bitmap_paint_lane(false)
+    val styles = compute_styles(nodes, rules, child_index, false, true, w, h)
+    var i = 0
+    while i < styles.len():
+        if styles[i].resolved_font_advances.len() > 0:
+            return styles[i].resolved_font_advances
+        i = i + 1
+    []
+
+fn _assert_zero_2d_glyph_collisions(phrase: text, advs: [i32], fs: i32, w: i32, h: i32):
+    val bg = web_argb(255, 255, 255)
+    val fg = web_argb(0, 0, 0)
+    val clip = ClipRect(x0: 0, y0: 0, x1: w, y1: h)
+    val base_y = fb_text_ttf_line_baseline_y(0, (fs * 14) / 10, fs, "", "sans-serif", false, false)
+    var occ = [0; w * h]
+    var collisions = 0
+    var prev_ink_x0 = -1
+    var pen_x = 4
+    var idx = 0
+    val cps = text_codepoints(phrase)
+    while idx < cps.len():
+        val adv = advs[idx]
+        expect(adv).to_be_greater_than(0)
+        if cps[idx] != 32:
+            var single = browser_layout_framebuffer_filled(bg, w, h)
+            single = fb_text_ttf_aa_clip_range_adv(single, w, h, pen_x, base_y, phrase, idx, idx + 1, fg, fs, "", "sans-serif", false, false, clip, advs)
+            var g_min_x = w
+            var x = pen_x - 2
+            if x < 0:
+                x = 0
+            val x_lim = if pen_x + adv + 8 < w: pen_x + adv + 8 else: w
+            while x < x_lim:
+                var y = 0
+                while y < h:
+                    val r = ((single[y * w + x] >> 16) & 255u32) as i32
+                    if r < 245:
+                        if x < g_min_x:
+                            g_min_x = x
+                    if r < 160:
+                        val oi = y * w + x
+                        if occ[oi] != 0:
+                            collisions = collisions + 1
+                        occ[oi] = 1
+                    y = y + 1
+                x = x + 1
+            expect(g_min_x).to_be_greater_than(prev_ink_x0)
+            prev_ink_x0 = g_min_x
+        pen_x = pen_x + adv
+        idx = idx + 1
+    expect(collisions).to_equal(0)
+
+describe "Simple Web SFNT pixel font AA, capital alignment, and anti-overlap":
+    it "has a TrueType face available on host/assets":
+        expect(fb_text_ttf_available("", "sans-serif", false, false)).to_equal(true)
+
+    it "renders stepped sizes [100, 72, 48, 36, 24, 18, 14, 12] with AA coverage and aligned HEFILTB capitals":
+        val sizes: [i32] = [100, 72, 48, 36, 24, 18, 14, 12]
+        var prev_cap_h = 99999
+        var si = 0
+        while si < sizes.len():
+            val fs = sizes[si]
+            val w_spaced = fs * 10 + 40
+            val w_word = fs * 8 + 40
+            val h = (fs * 15) / 10 + 20
+            # 1) Render spaced "H E F I L T B" via full HTML layout+paint so all 7 capitals isolate
+            val px_spaced = _render_html_text("H E F I L T B", fs, w_spaced, h)
+            val spans = _collect_ink_spans(px_spaced, w_spaced, h)
+            expect(spans.len() as i32).to_equal(7)
+            var total_aa = 0
+            var min_top = h
+            var max_top = -1
+            var min_bot = h
+            var max_bot = -1
+            var gi = 0
+            while gi < spans.len():
+                val sp = spans[gi]
+                total_aa = total_aa + sp.aa_count
+                if sp.min_y < min_top:
+                    min_top = sp.min_y
+                if sp.min_y > max_top:
+                    max_top = sp.min_y
+                if sp.max_y < min_bot:
+                    min_bot = sp.max_y
+                if sp.max_y > max_bot:
+                    max_bot = sp.max_y
+                if gi > 0:
+                    expect(sp.x0).to_be_greater_than(spans[gi - 1].x1)
+                gi = gi + 1
+            # 0px vertical jitter across all 7 capitals at cap top and baseline
+            expect(max_top - min_top).to_equal(0)
+            expect(max_bot - min_bot).to_equal(0)
+            # True AA intermediate shades exist (not binary 5x7 blocks)
+            expect(total_aa).to_be_greater_than(4)
+
+            # 2) Render contiguous "HEFILTB" via full HTML layout+paint and check identical vertical bounds + AA
+            val px_word = _render_html_text("HEFILTB", fs, w_word, h)
+            val stats = _fb_ink_stats(px_word, w_word, h)
+            expect(stats[0]).to_equal(min_top)
+            expect(stats[1]).to_equal(max_bot)
+            expect(stats[2]).to_be_greater_than(4)
+
+            val cap_h = max_bot - min_top + 1
+            expect(cap_h).to_be_less_than(prev_cap_h)
+            prev_cap_h = cap_h
+            si = si + 1
+        # Verify kerned contiguous "HEFILTB" at 24px also has 0 2D solid-pixel collisions
+        val he_advs = _measure_html_advances("HEFILTB", 24, 232, 56)
+        _assert_zero_2d_glyph_collisions("HEFILTB", he_advs, 24, 232, 56)
+
+    it "renders Ship faster with Acme Cloud with non-overlapping glyphs, x-height, and descenders":
+        val fs = 24
+        val w = 520
+        val h = 64
+        val phrase = "Ship faster with Acme Cloud"
+        val px = _render_html_text(phrase, fs, w, h)
+        val pstats = _fb_ink_stats(px, w, h)
+        # Pixel-level AA exists across curved glyphs
+        expect(pstats[2]).to_be_greater_than(20)
+        expect(pstats[3]).to_be_greater_than(100)
+
+        # Layout advances match proportional metrics ('i' and 'l' strictly narrower than 'S' and 'm')
+        val advs = _measure_html_advances(phrase, fs, w, h)
+        expect(advs.len() as i32).to_equal(phrase.byte_len())
+        # S=0, h=1, i=2, p=3; A=17, c=18, m=19; C=22, l=23
+        expect(advs[2]).to_be_less_than(advs[0])
+        expect(advs[2]).to_be_less_than(advs[19])
+        expect(advs[23]).to_be_less_than(advs[22])
+
+        # Verify each non-space glyph's rendered 2D ink has 0 solid-pixel collisions and monotonic X start
+        _assert_zero_2d_glyph_collisions(phrase, advs, fs, w, h)
+
+        # Check x-height alignment ('a', 'e', 'o') and descenders ('p', 'g', 'y') vs capital 'H'
+        val bg = web_argb(255, 255, 255)
+        val fg = web_argb(0, 0, 0)
+        val base_36 = fb_text_ttf_line_baseline_y(0, 48, 36, "", "sans-serif", false, false)
+        var fb = browser_layout_framebuffer_filled(bg, 360, 80)
+        fb = fb_text_ttf_aa_clip_range_adv(fb, 360, 80, 10, base_36, "H a e o p g y", 0, 13, fg, 36, "", "sans-serif", false, false, ClipRect(x0: 0, y0: 0, x1: 360, y1: 80), [])
+        val gspans = _collect_ink_spans(fb, 360, 80)
+        expect(gspans.len() as i32).to_equal(7)
+        val cap_h_span = gspans[0]
+        val lc_a = gspans[1]
+        val lc_e = gspans[2]
+        val lc_o = gspans[3]
+        val desc_p = gspans[4]
+        val desc_g = gspans[5]
+        val desc_y = gspans[6]
+        expect(lc_a.min_y).to_be_greater_than(cap_h_span.min_y)
+        expect(lc_e.min_y).to_be_greater_than(cap_h_span.min_y)
+        expect(lc_o.min_y).to_be_greater_than(cap_h_span.min_y)
+        var ae_diff = lc_a.min_y - lc_e.min_y
+        if ae_diff < 0:
+            ae_diff = 0 - ae_diff
+        expect(ae_diff).to_be_less_than(2)
+        var eo_diff = lc_e.min_y - lc_o.min_y
+        if eo_diff < 0:
+            eo_diff = 0 - eo_diff
+        expect(eo_diff).to_be_less_than(2)
+        expect(desc_p.max_y).to_be_greater_than(cap_h_span.max_y)
+        expect(desc_g.max_y).to_be_greater_than(cap_h_span.max_y)
+        expect(desc_y.max_y).to_be_greater_than(cap_h_span.max_y)
+
+    it "preserves binary 5x7 paint when web_bitmap_paint_lane is active":
+        val html = "<html><body style=\"margin:0;background:#ffffff;color:#000000;font-size:16px\">A B</body></html>"
+        val w = 64
+        val h = 28
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, w, false)
+        val child_index = build_child_index(nodes)
+        web_set_bitmap_paint_lane(true)
+        val styles = compute_styles(nodes, rules, child_index, false, true, w, h)
+        val nc = nodes.len() as i32
+        val es = empty_i32_lists(nc)
+        val ee = empty_i32_lists(nc)
+        val boxes = layout(nodes, styles, child_index, 0, 0, 0, w, w, h, zero_i32_list(nc), zero_i32_list(nc), zero_i32_list(nc), zero_i32_list(nc), es, ee, neg_one_i32_list(nc))
+        val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends, first_line_dx: boxes.first_line_dx, line_boxes: boxes.line_boxes)
+        val fb = browser_layout_framebuffer_filled(web_argb(255, 255, 255), w, h)
+        val out = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, w, h, false)
+        web_set_bitmap_paint_lane(false)
+        val spans = _collect_ink_spans(out, w, h)
+        expect(spans.len() as i32).to_equal(2)
+        # 5x7 bitmap pixels are purely binary black/white (zero AA gray pixels)
+        expect(spans[0].aa_count).to_equal(0)
+        expect(spans[1].aa_count).to_equal(0)
+        expect(spans[0].solid_count).to_be_greater_than(10)
+        expect(spans[1].solid_count).to_be_greater_than(10)
+
+    it "paints bold, italic, text-decoration underline, and input text with TTF AA":
+        val html_bi = "<html><body style=\"margin:0;background:#ffffff;color:#000000;font-family:sans-serif;font-size:24px;line-height:33px\"><span style=\"font-weight:bold;font-style:italic;text-decoration:underline\">Hi</span></body></html>"
+        val fb_bi = simple_web_layout_render_html_software_pixels(html_bi, 100, 44)
+        val bi_stats = _fb_ink_stats(fb_bi, 100, 44)
+        expect(bi_stats[2]).to_be_greater_than(20)
+        expect(bi_stats[3]).to_be_greater_than(50)
+
+        val html_in = "<html><body style=\"margin:0;background:#ffffff;color:#000000;font-family:sans-serif;font-size:20px\"><input type=\"text\" value=\"Acme\" style=\"border:none;background:#ffffff;font-size:20px;width:120px;height:32px\"/></body></html>"
+        val fb_in = simple_web_layout_render_html_software_pixels(html_in, 140, 44)
+        val in_stats = _fb_ink_stats(fb_in, 140, 44)
+        expect(in_stats[2]).to_be_greater_than(20)
+        expect(in_stats[3]).to_be_greater_than(40)
