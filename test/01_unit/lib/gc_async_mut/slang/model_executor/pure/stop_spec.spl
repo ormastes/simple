@@ -1,0 +1,53 @@
+# slang pure backend — stop-condition specs.
+
+use std.gc_async_mut.slang.model_executor.pure.stop.{StopConfig, stop_is_eos, stop_length_reached, stop_scan, stop_safe_len}
+
+describe "pure stop conditions":
+    it "recognises EOS ids":
+        val cfg = StopConfig(eos_ids: [2, 7], max_new_tokens: 5, stop_strings: [])
+        expect(stop_is_eos(cfg, 7)).to_equal(true)
+        expect(stop_is_eos(cfg, 3)).to_equal(false)
+
+    it "stops at the new-token budget":
+        val cfg = StopConfig(eos_ids: [], max_new_tokens: 3, stop_strings: [])
+        expect(stop_length_reached(cfg, 2)).to_equal(false)
+        expect(stop_length_reached(cfg, 3)).to_equal(true)
+
+    it "truncates before a matched stop string":
+        val s = stop_scan("hello world\n\nUser: hi", ["\n\nUser:"])
+        expect(s.matched).to_equal(true)
+        expect(s.text).to_equal("hello world")
+        expect(s.hold_back).to_equal(0)
+
+    it "holds back a partial stop match until it resolves":
+        val stops = ["STOP"]
+        val a = stop_scan("hello ST", stops)
+        expect(a.matched).to_equal(false)
+        expect(a.hold_back).to_equal(2)
+        expect(a.text.substring(0, stop_safe_len(a))).to_equal("hello ")
+        # the next token completes the match across the token boundary
+        val b = stop_scan("hello STOP!", stops)
+        expect(b.matched).to_equal(true)
+        expect(b.text).to_equal("hello ")
+        # or breaks it: nothing is held any more
+        val c = stop_scan("hello STa", stops)
+        expect(c.matched).to_equal(false)
+        expect(c.hold_back).to_equal(0)
+
+    it "picks the earliest of several stop strings and ignores empty ones":
+        val s = stop_scan("a END b STOP c", ["STOP", "", "END"])
+        expect(s.matched).to_equal(true)
+        expect(s.text).to_equal("a ")
+
+    it "holds the longest partial across stop strings":
+        val s = stop_scan("xx<|en", ["<|endoftext|>", "n"])
+        expect(s.matched).to_equal(true)
+        val t = stop_scan("xx<|e", ["<|endoftext|>", "ee"])
+        expect(t.matched).to_equal(false)
+        expect(t.hold_back).to_equal(3)
+
+    it "reports no hold-back without stop strings":
+        val s = stop_scan("plain text", [])
+        expect(s.matched).to_equal(false)
+        expect(s.hold_back).to_equal(0)
+        expect(s.text).to_equal("plain text")

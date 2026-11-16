@@ -113,6 +113,51 @@ describe "AArch64 TLS relaxation":
             raw: [1, 0, 0, 0x90, 0, 0, 0, 0x91, 0, 0, 0, 0x94])
         expect(elf_relax_tls([obj], RelocArch.AArch64).is_err()).to_equal(true)
 
+fn x64_tlsdesc_object(with_head: bool) -> ElfObject:
+    """lea x@TLSDESC(%rip),%rax; call *x@TLSCALL(%rax); plus an unrelated PLT32."""
+    val base = a64_tls_object(0, 0)
+    val header = ElfHeader(e_type: 1, e_machine: 62, e_entry: 0,
+        e_phoff: 0, e_shoff: 0, e_shnum: 2, e_shstrndx: 0)
+    val sections = [base.sections[0],
+        ElfSectionHeader(sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 6, sh_addr: 0, sh_size: 16)]
+    var relocs: [ElfRelocation] = []
+    if with_head:
+        relocs.push(ElfRelocation(r_offset: 3, r_info: (1 << 32) | 34, r_addend: -4,
+            section_idx: 0, target_section_idx: 1))
+    relocs.push(ElfRelocation(r_offset: 7, r_info: (1 << 32) | 35, r_addend: 0,
+        section_idx: 0, target_section_idx: 1))
+    relocs.push(ElfRelocation(r_offset: 10, r_info: (2 << 32) | 4, r_addend: -4,
+        section_idx: 0, target_section_idx: 1))
+    ElfObject(header: header, sections: sections, symbols: base.symbols, relocations: relocs,
+        strtab: base.strtab, shstrtab: base.shstrtab,
+        raw: [0x48, 0x8d, 0x05, 0, 0, 0, 0, 0xff, 0x10, 0xe8, 0, 0, 0, 0, 0x90, 0x90])
+
+describe "x86_64 TLS relaxation pairing":
+    it "relaxes TLSDESC to GOTTPOFF, drops its call, keeps an unrelated PLT32":
+        val result = elf_relax_tls([x64_tlsdesc_object(true)], RelocArch.X86_64)
+        expect(result.is_ok()).to_equal(true)
+        val obj = result.unwrap()[0]
+        expect(obj.raw[1]).to_equal(0x8b)
+        expect(obj.raw[7]).to_equal(0x66)
+        expect(obj.raw[8]).to_equal(0x90)
+        expect(obj.relocations.len()).to_equal(2)
+        expect(elf_reloc_type(obj.relocations[0])).to_equal(22)
+        expect(obj.relocations[0].r_offset).to_equal(3)
+        expect(elf_reloc_type(obj.relocations[1])).to_equal(4)
+        expect(obj.relocations[1].r_offset).to_equal(10)
+
+    it "rejects a TLSDESC_CALL with no GOTPC32_TLSDESC head":
+        expect(elf_relax_tls([x64_tlsdesc_object(false)], RelocArch.X86_64).is_err()).to_equal(true)
+
+    it "keeps every relocation of an object without TLS heads":
+        val plain = x64_tlsdesc_object(true)
+        val obj = ElfObject(header: plain.header, sections: plain.sections, symbols: plain.symbols,
+            relocations: [plain.relocations[2]], strtab: plain.strtab, shstrtab: plain.shstrtab,
+            raw: plain.raw)
+        val out = elf_relax_tls([obj], RelocArch.X86_64).unwrap()[0]
+        expect(out.relocations.len()).to_equal(1)
+        expect(out.raw[1]).to_equal(0x8d)
+
 describe "ELF static TLS thread-pointer offset":
     it "places the AArch64 variant-I block at align_up(16, p_align) past TP":
         expect(elf_tls_tpoff(true, 0x1000, 0x1000, 8, 8)).to_equal(16)

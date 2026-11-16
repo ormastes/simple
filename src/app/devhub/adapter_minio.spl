@@ -13,6 +13,7 @@ use std.common.crypto.sha256.{sha256_bytes}
 use std.common.http_curl.{curl_request_bytes}
 use std.io_runtime.{host_os}
 use std.common.text_bytes.{bytes_to_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.aws_sigv4.{
     SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
     SigV4Header, SigV4QueryParam,
@@ -452,6 +453,8 @@ fn minio_list_objects(cfg: MinioConfig, bucket: text, prefix: text) -> (bool, [O
 # GetObject (text body) and streaming download (binary)
 # ---------------------------------------------------------------------------
 
+val MINIO_INVALID_UTF8_PREFIX = "object body is invalid UTF-8"
+
 class GetObjectResult:
     body: text          # text body for small/text objects
     content_length: i64 # always populated; -1 if unknown
@@ -483,7 +486,10 @@ fn _minio_get_checked(url: text, headers: [text]) -> (i64, text, text):
     val declared = _minio_header_value(response.2, "Content-Length")
     if declared != "" and declared != "{received.len()}":
         return (0, "", "truncated response: Content-Length {declared}, received {received.len()} bytes")
-    (response.0, bytes_to_text(received), "")
+    # Fail closed: lossy decoding would hand binary objects to text callers corrupted.
+    match validated_utf8_bytes_to_text_linear(received):
+        case Ok(decoded): (response.0, decoded, "")
+        case Err(why): (0, "", "{MINIO_INVALID_UTF8_PREFIX}: {why}; use minio_download for binary objects")
 
 
 fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: text) -> (bool, GetObjectResult, text):
@@ -523,6 +529,8 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
         body = r.1
         err = r.2
         attempt = attempt + 1
+        if err.starts_with(MINIO_INVALID_UTF8_PREFIX):
+            break
         if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
             break
         itf_retry_wait(attempt - 1, "")
