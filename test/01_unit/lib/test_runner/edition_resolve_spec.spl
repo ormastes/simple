@@ -14,7 +14,9 @@
 #     proves the count, mirroring deprecated_profile_alias_warn_count) and
 #     falls back to the default rather than propagating the bad value.
 
-use std.test_runner.test_runner_config.{resolve_edition, resolve_edition_from_value, edition_unknown_warn_count, EDITION_DEFAULT}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.test_runner.test_runner_config.{resolve_edition, resolve_edition_from_sdn, resolve_edition_from_value, edition_unknown_warn_count, EDITION_DEFAULT}
 
 describe "resolve_edition() -- decision-free manifest slice (no semantics gated)":
     # @manual scenario evidence
@@ -55,3 +57,25 @@ describe "resolve_edition_from_value() -- the pure resolution step":
         val resolved_again = resolve_edition_from_value("not-a-real-edition-xyz")
         expect(resolved_again).to_equal(EDITION_DEFAULT)
         expect(edition_unknown_warn_count("not-a-real-edition-xyz")).to_equal(1)
+
+# Owner decision 5C (plan §7): the editions the diagnostic policy schedules
+# (config/policy/diagnostic_policy.sdn *_lang_version) are recognized.
+describe "resolve_edition_from_value() -- policy editions (5C)":
+    it "accepts 2026.11 unchanged":
+        expect(resolve_edition_from_value("2026.11")).to_equal("2026.11")
+        expect(edition_unknown_warn_count("2026.11")).to_equal(0)
+
+    it "accepts 2027.2 unchanged":
+        expect(resolve_edition_from_value("2027.2")).to_equal("2027.2")
+        expect(edition_unknown_warn_count("2027.2")).to_equal(0)
+
+    it "unknown 2099.9 warns once and falls back":
+        expect(resolve_edition_from_value("2099.9")).to_equal(EDITION_DEFAULT)
+        expect(edition_unknown_warn_count("2099.9")).to_equal(1)
+
+    it "reads [package] edition from an explicit simple.sdn path":
+        val dir = secure_temp_dir(".", "edition-resolve-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        file_write(path, "[package]\nedition = \"2027.2\"\n")
+        expect(resolve_edition_from_sdn(path)).to_equal("2027.2")
+        dir_remove_all(dir)
