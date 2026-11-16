@@ -586,6 +586,8 @@ pub(crate) struct ModuleImports {
     /// with `ty=ANY` because the enum reached the file via re-export but
     /// not via a direct `use` chain that triggered `preregister_imported_type_names`).
     pub enum_defs: EnumDefs,
+    /// Bare enum names declared by several modules (merged `enum_defs` rows).
+    pub duplicate_enum_names: std::sync::Arc<std::collections::HashSet<String>>,
     /// Mangled enum owner to stable dotted runtime identity.
     pub enum_runtime_names: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Set of mangled names that correspond to module-level data (`val`/`var`/
@@ -1223,6 +1225,7 @@ impl NativeProjectBuilder {
                 struct_module_owners: std::sync::Arc::new(result.struct_module_owners),
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
+                duplicate_enum_names: std::sync::Arc::new(result.duplicate_enum_names),
                 enum_runtime_names: std::sync::Arc::new(result.enum_runtime_names),
                 data_exports: std::sync::Arc::new(result.data_exports),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
@@ -1247,6 +1250,7 @@ impl NativeProjectBuilder {
                 struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
                 enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),

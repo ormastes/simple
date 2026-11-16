@@ -655,6 +655,9 @@ pub enum MirInst {
         enum_name: String,
         /// Variant name
         variant_name: String,
+        /// Variant index in its OWNING enum's declaration, fixed at MIR
+        /// lowering (#6953); codegen must not re-derive it from the name.
+        discriminant: u32,
     },
 
     /// Create an enum variant with payload
@@ -664,6 +667,8 @@ pub enum MirInst {
         enum_name: String,
         /// Variant name
         variant_name: String,
+        /// Variant index in its OWNING enum's declaration (#6953).
+        discriminant: u32,
         /// Payload value
         payload: VReg,
     },

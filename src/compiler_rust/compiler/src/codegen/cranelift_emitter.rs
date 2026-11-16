@@ -489,12 +489,19 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     fn emit_enum_payload(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         super::instr::enum_union::compile_enum_payload(self.ctx, self.builder, dest, value)
     }
-    fn emit_enum_unit(&mut self, dest: VReg, enum_name: &str, variant_name: &str) -> Result<(), String> {
-        super::instr::pattern::compile_enum_unit(self.ctx, self.builder, dest, enum_name, variant_name);
+    fn emit_enum_unit(&mut self, dest: VReg, enum_name: &str, _variant_name: &str, discriminant: u32) -> Result<(), String> {
+        super::instr::pattern::compile_enum_unit(self.ctx, self.builder, dest, enum_name, discriminant);
         Ok(())
     }
-    fn emit_enum_with(&mut self, dest: VReg, enum_name: &str, variant_name: &str, payload: VReg) -> Result<(), String> {
-        super::instr::pattern::compile_enum_with(self.ctx, self.builder, dest, enum_name, variant_name, payload);
+    fn emit_enum_with(
+        &mut self,
+        dest: VReg,
+        enum_name: &str,
+        _variant_name: &str,
+        discriminant: u32,
+        payload: VReg,
+    ) -> Result<(), String> {
+        super::instr::pattern::compile_enum_with(self.ctx, self.builder, dest, enum_name, discriminant, payload);
         Ok(())
     }
     fn emit_union_discriminant(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
