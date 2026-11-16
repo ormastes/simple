@@ -1,0 +1,150 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl 1%
+# @tag: unit, browser_engine, css, selectors, chrome159
+#
+# Selector matching through the full renderer, second batch: child,
+# descendant, adjacent and general sibling combinators, :root, :has() with
+# child / descendant / sibling arguments, :not() with a list, :where(),
+# :nth-child / :nth-last-child / :nth-of-type / :nth-last-of-type with
+# odd / even / An+B / -n+B, :empty, :first-child / :last-child /
+# :only-child, compounds, an unclosed attribute selector and an unknown
+# pseudo-class.
+#
+# Oracle: Chrome 159.0.8154.6 headless shell, 900x2000. Page:
+# `body{margin:0} section,div,p,span,b,i,h1,ul,li,a,em{display:block;
+# width:10px;height:4px;margin:0;padding:0;border:0} <selector>{width:77px}`;
+# the target's `getBoundingClientRect().width` is 77 when the selector
+# matches it and 10 when it does not.
+#
+# Rows where this renderer disagrees with Chrome are filed, not asserted:
+# doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_layout_by_id}
+
+fn _w(sel: text, body: text, id: text) -> text:
+    val p = "<html><head><style>body{{margin:0}} section,div,p,span,b,i,h1,ul,li,a,em{{display:block;width:10px;height:4px;margin:0;padding:0;border:0}} " + sel + "{{width:77px}}</style></head><body>" + body + "</body></html>"
+    simple_web_layout_debug_layout_by_id(p, 900, 2000, id, "w")
+
+describe "Selector matching":
+
+    it "child comb":
+        expect(_w("section > div", "<section><div id=\"t\"></div></section>", "t")).to_equal("77")
+
+    it "child comb miss":
+        expect(_w("section > div", "<section><span><div id=\"t\"></div></span></section>", "t")).to_equal("10")
+
+    it "desc comb":
+        expect(_w("section div", "<section><p><span><div id=\"t\"></div></span></p></section>", "t")).to_equal("77")
+
+    it "adj sib":
+        expect(_w("p + div", "<p></p><div id=\"t\"></div>", "t")).to_equal("77")
+
+    it "adj sib miss":
+        expect(_w("p + div", "<p></p><span></span><div id=\"t\"></div>", "t")).to_equal("10")
+
+    it "gen sib":
+        expect(_w("p ~ div", "<p></p><span></span><div id=\"t\"></div>", "t")).to_equal("77")
+
+    it "gen sib miss":
+        expect(_w("p ~ div", "<div id=\"t\"></div><p></p>", "t")).to_equal("10")
+
+    it "root desc":
+        expect(_w(":root div", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    it "root self":
+        expect(_w(":root", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    it "has child":
+        expect(_w("section:has(> b)", "<section id=\"t\"><b></b></section>", "t")).to_equal("77")
+
+    it "has desc":
+        expect(_w("section:has(i)", "<section id=\"t\"><p><i></i></p></section>", "t")).to_equal("77")
+
+    it "has miss":
+        expect(_w("section:has(i)", "<section id=\"t\"><p></p></section>", "t")).to_equal("10")
+
+    it "has sib":
+        expect(_w("p:has(+ b)", "<p id=\"t\"></p><b></b>", "t")).to_equal("77")
+
+    it "not class":
+        expect(_w("div:not(.x)", "<div id=\"t\" class=\"y\"></div>", "t")).to_equal("77")
+
+    it "not class miss":
+        expect(_w("div:not(.x)", "<div id=\"t\" class=\"x\"></div>", "t")).to_equal("10")
+
+    it "not list":
+        expect(_w("div:not(.x, .y)", "<div id=\"t\" class=\"y\"></div>", "t")).to_equal("10")
+
+    it "where list":
+        expect(_w("section :where(div, p)", "<section><div id=\"t\"></div></section>", "t")).to_equal("77")
+
+    it "nth last":
+        expect(_w("li:nth-last-child(2)", "<ul><li></li><li id=\"t\"></li><li></li></ul>", "t")).to_equal("77")
+
+    it "nth last miss":
+        expect(_w("li:nth-last-child(2)", "<ul><li></li><li></li><li id=\"t\"></li></ul>", "t")).to_equal("10")
+
+    it "nth of type":
+        expect(_w("b:nth-of-type(2)", "<section><i></i><b></b><i></i><b id=\"t\"></b></section>", "t")).to_equal("77")
+
+    it "nth last of type":
+        expect(_w("b:nth-last-of-type(1)", "<section><b></b><b id=\"t\"></b><i></i></section>", "t")).to_equal("77")
+
+    it "nth odd":
+        expect(_w("li:nth-child(odd)", "<ul><li></li><li></li><li id=\"t\"></li></ul>", "t")).to_equal("77")
+
+    it "nth even":
+        expect(_w("li:nth-child(even)", "<ul><li></li><li id=\"t\"></li></ul>", "t")).to_equal("77")
+
+    it "nth an b":
+        expect(_w("li:nth-child(3n+1)", "<ul><li></li><li></li><li></li><li id=\"t\"></li></ul>", "t")).to_equal("77")
+
+    it "nth neg":
+        expect(_w("li:nth-child(-n+2)", "<ul><li></li><li id=\"t\"></li><li></li></ul>", "t")).to_equal("77")
+
+    it "nth neg miss":
+        expect(_w("li:nth-child(-n+2)", "<ul><li></li><li></li><li id=\"t\"></li></ul>", "t")).to_equal("10")
+
+    it "empty pseudo":
+        expect(_w("div:empty", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    it "empty miss":
+        expect(_w("div:empty", "<div id=\"t\"><b></b></div>", "t")).to_equal("10")
+
+    it "first child":
+        expect(_w("b:first-child", "<section><b id=\"t\"></b><b></b></section>", "t")).to_equal("77")
+
+    it "last child":
+        expect(_w("b:last-child", "<section><b></b><b id=\"t\"></b></section>", "t")).to_equal("77")
+
+    it "only child":
+        expect(_w("b:only-child", "<section><b id=\"t\"></b></section>", "t")).to_equal("77")
+
+    it "compound miss":
+        expect(_w("div.a.c", "<div id=\"t\" class=\"a b\"></div>", "t")).to_equal("10")
+
+    it "invalid unclosed attr":
+        expect(_w("div[x", "<div id=\"t\" x=\"1\"></div>", "t")).to_equal("10")
+
+    it "invalid pseudo":
+        expect(_w("div:frobnicate", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    it "attr and pseudo":
+        expect(_w("div[data-k=\"v\"]:first-child", "<section><div id=\"t\" data-k=\"v\"></div></section>", "t")).to_equal("77")
+
+    it "chain three":
+        expect(_w("section > p > b", "<section><p><b id=\"t\"></b></p></section>", "t")).to_equal("77")
+
+    it "chain mixed":
+        expect(_w("section p + b", "<section><p></p><b id=\"t\"></b></section>", "t")).to_equal("77")
+
+    it "universal child":
+        expect(_w("section > *", "<section><i id=\"t\"></i></section>", "t")).to_equal("77")
+
+    it "id desc":
+        expect(_w("#o b", "<section id=\"o\"><b id=\"t\"></b></section>", "t")).to_equal("77")
+
+    it "class desc miss":
+        expect(_w(".o b", "<section><b id=\"t\"></b></section>", "t")).to_equal("10")

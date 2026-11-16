@@ -1,0 +1,113 @@
+#!/bin/sh
+# check-linux-cross-no-libgcc.shs — Linux riscv64/i686/armv7 cross links must
+# not pull any GCC runtime (CLAUDE.md "Never use GCC").
+#
+# For each target it takes the cross cc command from
+# scripts/setup/linux-cross-cc.shs (override: LINUX_CROSS_CC_<tgt>="<cmd>"),
+# links a hello-world C program with `-Wl,--trace` (every RESOLVED input file,
+# so a silent fallback to GCC's crtbegin.o is seen, not just the flags) and
+# FAILs when:
+#   - the cc command carries --gcc-install-dir / names gcc-cross,
+#   - any resolved link input lives under /usr/lib/gcc or /usr/lib/gcc-cross,
+#   - any resolved input is a libgcc*/crtbegin*.o/crtend*.o outside the LLVM
+#     prefix (clang_rt.crtbegin is fine; GCC's crtbeginS.o is not),
+#   - the output has NEEDED libgcc_s.so.1,
+#   - the link line does not request --rtlib=compiler-rt.
+# With --run it also executes the binary under qemu-user and expects "hello".
+#
+# Verdict is the last stdout line:
+#   PASS — <n> target(s) checked, ...   exit 0
+#   FAIL — ...                          exit 1
+#   ERROR — nothing was checked (...)   exit 2
+# --selftest (fatal, runs first) feeds the classifier a GCC-shaped trace that
+# must be flagged and an LLVM-shaped trace that must pass.
+#
+# usage: sh scripts/check/check-linux-cross-no-libgcc.shs [--run] [--selftest] [rv64 i686 armv7]
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || exit 2
+run=0; only_selftest=0; targets=""
+for a in "$@"; do
+    case $a in
+        --run) run=1 ;;
+        --selftest) only_selftest=1 ;;
+        rv64|i686|armv7) targets="$targets $a" ;;
+        *) echo "ERROR — nothing was checked (unknown argument '$a')"; exit 2 ;;
+    esac
+done
+[ -n "$targets" ] || targets="rv64 i686 armv7"
+
+# classify_trace <trace-file> -> prints offending inputs, returns 1 if any
+classify_trace() {
+    _bad=$(grep -E '(^|/)usr/lib/gcc(-cross)?/|(^|/)libgcc[^/]*$|(^|/)crt(begin|end)[^/]*\.o$' "$1" \
+        | grep -v -E 'clang_rt\.crt(begin|end)|/\.simple/toolchains/llvm-cross-rt-[0-9]+/[^/]+/lib/libgcc_s\.a$' || true)
+    if [ -n "$_bad" ]; then printf '%s\n' "$_bad"; return 1; fi
+    return 0
+}
+
+selftest() {
+    _t=$(mktemp -d) || return 1
+    printf '%s\n' /usr/riscv64-linux-gnu/lib/crt1.o \
+        /usr/lib/gcc-cross/riscv64-linux-gnu/13/crtbegin.o \
+        /usr/lib/gcc-cross/riscv64-linux-gnu/13/libgcc.a > "$_t/bad"
+    printf '%s\n' /usr/riscv64-linux-gnu/lib/crt1.o \
+        /home/x/.simple/toolchains/llvm-cross-rt-18/resource/lib/linux/clang_rt.crtbegin-riscv64.o \
+        /home/x/.simple/toolchains/llvm-cross-rt-18/resource/lib/linux/libclang_rt.builtins-riscv64.a \
+        /home/x/.simple/toolchains/llvm-cross-rt-18/riscv64-linux-gnu/lib/libunwind.a \
+        /home/x/.simple/toolchains/llvm-cross-rt-18/riscv64-linux-gnu/lib/libgcc_s.a > "$_t/good"
+    printf '%s\n' /usr/riscv64-linux-gnu/lib/libgcc_s.so.1 >> "$_t/bad"
+    _rc=0
+    if classify_trace "$_t/bad" >/dev/null; then echo "selftest: GCC trace not flagged" >&2; _rc=1; fi
+    if ! classify_trace "$_t/good" >/dev/null; then echo "selftest: LLVM trace flagged" >&2; _rc=1; fi
+    rm -rf "$_t"
+    return $_rc
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+if [ $only_selftest = 1 ]; then echo "PASS — selftest 2 fixture(s) checked"; exit 0; fi
+
+command -v readelf >/dev/null 2>&1 || command -v llvm-readelf >/dev/null 2>&1 ||
+    { echo "ERROR — nothing was checked (no readelf/llvm-readelf)"; exit 2; }
+RE=readelf; command -v readelf >/dev/null 2>&1 || RE=llvm-readelf
+
+work=$(mktemp -d) || exit 2
+trap 'rm -rf "$work"' EXIT
+printf '#include <stdio.h>\nint main(void){puts("hello");return 0;}\n' > "$work/hello.c"
+
+checked=0; offenders=""
+for t in $targets; do
+    eval "cc=\${LINUX_CROSS_CC_$t:-}"
+    [ -n "$cc" ] || cc=$(sh "$repo_root/scripts/setup/linux-cross-cc.shs" "$t") ||
+        { offenders="$offenders $t:no-cc-command"; continue; }
+    case $cc in *gcc-install-dir*|*gcc-cross*) offenders="$offenders $t:cc-uses-gcc-install" ;; esac
+    case $cc in *--rtlib=compiler-rt*) : ;; *) offenders="$offenders $t:no-rtlib-compiler-rt" ;; esac
+    out="$work/hello-$t"
+    # shellcheck disable=SC2086
+    $cc "$work/hello.c" -o "$out" -Wl,--trace > "$work/trace-$t" 2> "$work/err-$t"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        offenders="$offenders $t:link-failed($(head -1 "$work/err-$t"))"
+        continue
+    fi
+    checked=$((checked + 1))
+    if ! classify_trace "$work/trace-$t" > "$work/bad-$t"; then
+        offenders="$offenders $t:gcc-input($(tr '\n' ' ' < "$work/bad-$t"))"
+    fi
+    if $RE -d "$out" 2>/dev/null | grep -q 'libgcc_s'; then
+        offenders="$offenders $t:NEEDED-libgcc_s"
+    fi
+    if [ $run = 1 ]; then
+        gt=$(sh "$repo_root/scripts/setup/linux-cross-cc.shs" --gnu-triple "$t")
+        case $t in rv64) q=qemu-riscv64-static ;; i686) q=qemu-i386-static ;; armv7) q=qemu-arm-static ;; esac
+        got=$($q -L "/usr/$gt" "$out" 2>&1); qrc=$?
+        [ $qrc -eq 0 ] && [ "$got" = hello ] || offenders="$offenders $t:qemu-run(rc=$qrc,$got)"
+    fi
+done
+
+[ $checked -gt 0 ] || { echo "ERROR — nothing was checked (0 targets linked:$offenders)"; exit 2; }
+if [ -n "$offenders" ]; then
+    echo "FAIL — $checked target(s) linked, GCC runtime offenders:$offenders"
+    exit 1
+fi
+echo "PASS — $checked target(s) checked ($targets), 0 GCC runtime inputs, compiler-rt + libunwind + ld.lld$( [ $run = 1 ] && echo ', qemu-user run ok')"
+exit 0

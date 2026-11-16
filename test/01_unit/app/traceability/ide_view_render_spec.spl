@@ -1,0 +1,129 @@
+"""Trace view text rendering: one line model for TUI and GUI, snapshot-safe, no foreign content."""
+# @req REQ-CARET-TRC-001 REQ-CARET-TRC-002 REQ-CARET-TRC-003
+use std.spec.*
+use std.common.traceability.model.*
+use std.common.traceability.evidence_model.*
+use std.common.traceability.query.{query_trace_graph}
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use std.common.traceability.query_refs_v1.*
+use app.traceability.ide_view_provider.*
+use app.traceability.ide_view_render.*
+
+fn g() -> TraceGraph:
+    val subject = SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:r", kind: "git_tree", revision_id: "commit:r", tree_id: "tree:r", object_format: "sha256")
+    val nodes = [TraceNode(id: "feature:f", kind: TraceNodeKind.Feature, title: "F"),
+        TraceNode(id: "req:R-1", kind: TraceNodeKind.Requirement, title: "R one"),
+        TraceNode(id: "req:R-2", kind: TraceNodeKind.Requirement, title: "R two")]
+    val claims = [
+        TraceClaim(id: "claim:c-1", from_id: "feature:f", relation: TraceRelation.Specifies, to_id: "req:R-1", origin_id: "intent:f", operation: TraceClaimOperation.Add, rule_id: "authoring-v1", scope_id: "feature:f"),
+        TraceClaim(id: "claim:c-2", from_id: "req:R-1", relation: TraceRelation.DecomposesTo, to_id: "req:R-2", origin_id: "intent:f", operation: TraceClaimOperation.Add, rule_id: "authoring-v1", scope_id: "feature:f")]
+    val edges = [TraceEdge(id: "edge:e-1", from_id: "feature:f", relation: TraceRelation.Specifies, to_id: "req:R-1"),
+        TraceEdge(id: "edge:e-2", from_id: "req:R-1", relation: TraceRelation.DecomposesTo, to_id: "req:R-2")]
+    TraceGraph(subject: subject, input_manifest_id: "inputs:r", nodes: nodes, test_definitions: [], claims: claims,
+        edges: edges, edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation:r", complete: false)
+
+fn lq(op: text, id: text) -> TraceNodeQueryV1:
+    TraceNodeQueryV1(snapshot_id: "snapshot:r", operation: op, kind: "requirements", selected_id: id, limit: 10)
+
+fn qual(req: text, status: TraceQualificationStatus) -> TraceQualification:
+    TraceQualification(subject_id: "snapshot:r", run_id: "run:1", complete: true,
+        structural_covered: 1, structural_total: 1, execution_covered: 0, execution_total: 1,
+        results: [TraceObligationResult(obligation_id: "ob:" + req, requirement_id: req, criterion_id: "ac:1",
+            test_kind: TraceTestKind.Unit, status: status, selected_observation_ids: [], reasons: [])])
+
+fn has(lines: [text], needle: text) -> bool:
+    for l in lines:
+        if l.contains(needle): return true
+    false
+
+describe "trace view rendering":
+    it "list lines match the service rows, with identity line first":
+        step("render list")
+        val lines = trace_view_lines(g(), lq("list", ""), [], "snapshot:r")
+        val result = query_trace_nodes_v1(g(), lq("list", "")).unwrap()
+        expect(lines[0]).to_equal("snapshot: snapshot:r")
+        expect(has(lines, "Structural only")).to_equal(true)
+        val body = render_rows(view_rows(result, []))
+        expect(lines.len()).to_equal(body.len() + 2)
+        var i = 0
+        while i < body.len():
+            expect(lines[i + 2]).to_equal(body[i])
+            expect(body[i].contains(result.nodes[i].id)).to_equal(true)
+            i = i + 1
+
+    it "show renders exactly the selected node":
+        val lines = trace_view_lines(g(), lq("show", "req:R-2"), [], "snapshot:r")
+        expect(has(lines, "req:R-2")).to_equal(true)
+        expect(has(lines, "req:R-1")).to_equal(false)
+
+    it "never renders unexecuted or stale as pass, and drops banner only on executed evidence":
+        step("badges")
+        val q = [qual("req:R-1", TraceQualificationStatus.NotRun), qual("req:R-2", TraceQualificationStatus.Stale)]
+        val lines = trace_view_lines(g(), lq("list", ""), q, "snapshot:r")
+        expect(has(lines, "PASS")).to_equal(false)
+        expect(has(lines, "NOT RUN")).to_equal(true)
+        expect(has(lines, "STALE")).to_equal(true)
+        expect(has(lines, "Structural only")).to_equal(true)
+        val ok = trace_view_lines(g(), lq("list", ""), [qual("req:R-1", TraceQualificationStatus.Verified)], "snapshot:r")
+        expect(has(ok, "PASS")).to_equal(true)
+        expect(has(ok, "Structural only")).to_equal(false)
+
+    it "is fixed width":
+        val lines = render_rows(view_rows(query_trace_nodes_v1(g(), lq("list", "")).unwrap(), []))
+        expect(lines[0].len()).to_equal(lines[1].len())
+
+describe "refs and ref-file rendering":
+    it "refs lines carry one row per service reference in order":
+        val rq = TraceReferenceQueryV1(snapshot_id: "snapshot:r", kind: "requirements", selected_id: "req:R-1")
+        val page = query_trace_references_v1(g(), rq).unwrap()
+        val lines = refs_view_lines(g(), rq, [], "snapshot:r")
+        expect(lines.len()).to_equal(page.references.len() + 3)
+        expect(lines[2]).to_equal("selected: req:R-1 R one")
+        var i = 0
+        while i < page.references.len():
+            expect(lines[i + 3].contains(page.references[i].other_id)).to_equal(true)
+            expect(lines[i + 3].contains(page.references[i].direction)).to_equal(true)
+            i = i + 1
+
+    it "ref-file renders a service page through the same rows":
+        val rq = TraceReferenceQueryV1(snapshot_id: "snapshot:r", kind: "requirements", selected_id: "req:R-1")
+        val page = query_trace_references_v1(g(), rq).unwrap()
+        expect(file_refs_view_lines(Ok(page), [], "snapshot:r")).to_equal(refs_view_lines(g(), rq, [], "snapshot:r"))
+        expect(has(file_refs_view_lines(Err("TRACE-QUERY-NOT-FOUND: x"), [], "snapshot:r"), "unavailable: TRACE-QUERY-NOT-FOUND")).to_equal(true)
+
+describe "reverse impact":
+    it "returns the service edges verbatim in both directions":
+        step("impact")
+        for dir in ["incoming", "outgoing"]:
+            val edges = impact_edges(g(), "req:R-1", dir, 10).unwrap()
+            val want = query_trace_graph(g(), TraceQuery(snapshot_id: "snapshot:r", selected_id: "req:R-1", direction: dir, limit: 10, cursor: "")).edges
+            expect(edges.len()).to_equal(want.len())
+            var i = 0
+            while i < want.len():
+                expect(edges[i].id).to_equal(want[i].id)
+                expect(edges[i].from_id).to_equal(want[i].from_id)
+                expect(edges[i].to_id).to_equal(want[i].to_id)
+                i = i + 1
+        expect(impact_edges(g(), "req:missing", "incoming", 10).is_err()).to_equal(true)
+
+describe "snapshot safety":
+    it "renders stale instead of a foreign revision":
+        val lines = trace_view_lines(g(), lq("list", ""), [], "snapshot:other")
+        expect(has(lines, "stale")).to_equal(true)
+        expect(has(lines, "req:R-1")).to_equal(false)
+        expect(has(lines, "snapshot:r")).to_equal(false)
+
+    it "guards stale, cancelled and missing source":
+        expect(view_state("snapshot:a", "snapshot:a", false, true) == TraceViewState.Ready).to_equal(true)
+        expect(view_state("snapshot:a", "snapshot:b", false, true) == TraceViewState.Stale).to_equal(true)
+        expect(view_state("snapshot:a", "snapshot:a", true, true) == TraceViewState.Cancelled).to_equal(true)
+        expect(view_state("snapshot:a", "snapshot:a", false, false) == TraceViewState.SourceMissing).to_equal(true)
+        expect(view_state_lines(TraceViewState.Ready).len()).to_equal(0)
+        expect(view_state_lines(TraceViewState.SourceMissing)[0].starts_with("unavailable")).to_equal(true)
+        expect(view_state_lines(TraceViewState.Cancelled)[0].starts_with("unavailable")).to_equal(true)
+        expect(view_state_lines(TraceViewState.Stale)[0].starts_with("stale")).to_equal(true)
+
+describe "unsupported journeys":
+    it "renders explicit not-available rows":
+        expect(unavailable_journey_lines("gaps")).to_equal(["not available: gaps"])
+        expect(trace_unsupported_journeys().contains("multi-hop-impact")).to_equal(true)

@@ -1,0 +1,130 @@
+#!/bin/sh
+# check-bug-close-evidence.shs — CU-015 CI side. A bug row that transitions INTO
+# fixed/closed inside a commit range must carry reproducer + prevention spec
+# evidence, or the push/PR fails.
+#
+# EVIDENCE SOURCE: the DB `bugs` row has no evidence column, so evidence is read
+# from the bug's `bug_investigation_logs` row written by `bug-resolve`:
+#   close_evidence reproducer=<path>_spec.spl prevention=<path>_spec.spl
+# Rules mirror src/lib/nogc_sync_mut/database/bug_close_gate.spl: repository-
+# relative, ends _spec.spl, distinct, and both exist at the tip commit.
+#
+# SCOPE: only bugs closed at NEW and not closed at the merge-base of BASE and NEW
+# count (the `bugs` table only). Pre-existing closed history is never judged.
+#
+# Verdict, last line of stdout:
+#   PASS  — <n> transition(s) checked ...   exit 0 (n=0 when the range closes none)
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked (...)       exit 2
+# Usage: check-bug-close-evidence.shs [<BASE>..<NEW>]   (default origin/main..HEAD)
+#        check-bug-close-evidence.shs --selftest
+set -u
+DB=doc/08_tracking/bug/bug_db.sdn
+
+# closed_ids <rev>: ids in the `bugs` table whose status is fixed|closed.
+closed_ids() {
+    git show "$1:$DB" 2>/dev/null | awk '
+        /^[^ #]/ { insec = ($1 == "bugs") ; next }
+        insec && /^    / { n = split($0, f, ", "); id = f[1]; sub(/^ +/, "", id); if (f[3] == "fixed" || f[3] == "closed") print id }'
+}
+
+# evidence_for <rev> <id>: "<reproducer> <prevention>" from the last close_evidence log.
+evidence_for() {
+    git show "$1:$DB" 2>/dev/null | awk -v want="$2" '
+        /^[^ #]/ { insec = ($1 == "bug_investigation_logs"); next }
+        insec && /^    / {
+            p = index($0, ", "); id = substr($0, 1, p - 1); sub(/^ +/, "", id)
+            if (id != want) next
+            if (match($0, /close_evidence reproducer=[^ "]*( prevention=[^ "]*)?/)) {
+                s = substr($0, RSTART, RLENGTH); r = ""; v = ""
+                if (match(s, /reproducer=[^ ]*/)) r = substr(s, RSTART + 11, RLENGTH - 11)
+                if (match(s, /prevention=[^ ]*/)) v = substr(s, RSTART + 11, RLENGTH - 11)
+                last = r " " v
+            }
+        }
+        END { if (last != "") print last }'
+}
+
+path_problem() { # <label> <path>
+    case "$2" in
+        "") echo "missing $1 evidence" ;;
+        /*|*..*|*//*|*\\*) echo "$1 evidence must be repository-relative: $2" ;;
+        *_spec.spl) ;;
+        *) echo "$1 evidence must be a _spec.spl file: $2" ;;
+    esac
+}
+
+run_scan() {
+    _range=$1
+    case "$_range" in *..*) ;; *) echo "ERROR — nothing was checked (range '$_range' must contain '..')"; return 2 ;; esac
+    _n=$(git rev-list --count "$_range" 2>/dev/null) || { echo "ERROR — nothing was checked (cannot resolve range $_range)"; return 2; }
+    [ "${_n:-0}" -gt 0 ] || { echo "ERROR — nothing was checked (range $_range resolves to 0 commits)"; return 2; }
+    _base=${_range%%..*}; _new=${_range##*..}
+    _mb=$(git merge-base "$_base" "$_new" 2>/dev/null) || _mb=$_base
+    git cat-file -e "$_new:$DB" 2>/dev/null || { echo "PASS — 0 transition(s) checked, $DB absent at $_new"; return 0; }
+    _tmp=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    closed_ids "$_mb" | sort > "$_tmp.old"
+    closed_ids "$_new" | sort > "$_tmp.new"
+    comm -13 "$_tmp.old" "$_tmp.new" > "$_tmp"
+    _checked=0; _bad=""
+    while IFS= read -r _id; do
+        [ -n "$_id" ] || continue
+        _checked=$((_checked + 1))
+        _ev=$(evidence_for "$_new" "$_id")
+        if [ -n "$_ev" ]; then _r=${_ev%% *}; _p=${_ev#* }; else _r=""; _p=""; fi
+        _why=$(path_problem reproducer "$_r")
+        [ -n "$_why" ] || _why=$(path_problem prevention "$_p")
+        [ -n "$_why" ] || { [ "$_r" != "$_p" ] || _why="reproducer and prevention must be distinct: $_r"; }
+        [ -n "$_why" ] || { git cat-file -e "$_new:$_r" 2>/dev/null || _why="reproducer spec not found at $_new: $_r"; }
+        [ -n "$_why" ] || { git cat-file -e "$_new:$_p" 2>/dev/null || _why="prevention spec not found at $_new: $_p"; }
+        [ -z "$_why" ] || _bad="$_bad
+  $_id: $_why"
+    done < "$_tmp"
+    rm -f "$_tmp" "$_tmp.old" "$_tmp.new"
+    if [ -n "$_bad" ]; then
+        printf '%s\n' "$_bad"
+        echo "FAIL — $_checked transition(s) checked in $_range, close evidence missing or invalid (see above)"
+        return 1
+    fi
+    echo "PASS — $_checked transition(s) checked in $_range, every close carries existing reproducer + prevention specs"
+    return 0
+}
+
+selftest() {
+    _d=$(mktemp -d) || { echo "ERROR — selftest cannot create temp dir"; return 2; }
+    _here=$(pwd)
+    cd "$_d" || return 2
+    git init -q . && git config user.email t@t && git config user.name t && git config core.autocrlf false
+    mkdir -p doc/08_tracking/bug t
+    _row() { printf '    %s, P2, %s, "t", f.spl, 1, -, 2026-01-01, 2026-01-01, true\n' "$1" "$2"; }
+    _db() { # <status of b1> <log line or empty>
+        { echo "bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|"
+          _row old closed; _row b1 "$1"; echo
+          echo "bug_investigation_logs |bug_id, line_num, content|"
+          [ -z "$2" ] || printf '    b1, 1, "%s"\n' "$2"; } > doc/08_tracking/bug/bug_db.sdn; }
+    _commit() { git add -A && git commit -qm "$1"; }
+    _db open ""; _commit base; _b=$(git rev-parse HEAD)
+    _fail=0
+    _expect() { # <name> <want rc>
+        _out=$(run_scan "$_b..HEAD"); _rc=$?
+        if [ "$_rc" -ne "$2" ]; then echo "selftest FAIL: $1 (rc=$_rc want $2): $_out"; _fail=1; fi; }
+    : > t/a_spec.spl; : > t/b_spec.spl
+    _db open ""; _commit noop; _expect "no transition passes (old closed history ignored)" 0
+    _db closed ""; _commit c1; _expect "closed without evidence fails" 1
+    _db closed "close_evidence reproducer=t/a_spec.spl prevention=t/a_spec.spl"; _commit c2; _expect "same spec fails" 1
+    _db closed "close_evidence reproducer=t/a_spec.spl prevention=t/missing_spec.spl"; _commit c3; _expect "missing file fails" 1
+    _db closed "close_evidence reproducer=/abs/a_spec.spl prevention=t/b_spec.spl"; _commit c4; _expect "absolute path fails" 1
+    _db closed "close_evidence reproducer=t/a.spl prevention=t/b_spec.spl"; _commit c5; _expect "non-spec fails" 1
+    _db fixed "close_evidence reproducer=t/a_spec.spl prevention=t/b_spec.spl"; _commit c6; _expect "valid evidence passes" 0
+    _out=$(run_scan "nosuch..HEAD"); [ $? -eq 2 ] || { echo "selftest FAIL: bad range must ERROR"; _fail=1; }
+    cd "$_here" && rm -rf "$_d"
+    if [ "$_fail" -ne 0 ]; then echo "FAIL — selftest"; return 1; fi
+    echo "selftest ok (8 fixtures)"; return 0
+}
+
+case "${1:-}" in
+    --selftest) selftest; exit $? ;;
+esac
+_st=$(selftest 2>&1) || { echo "$_st"; echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+run_scan "${1:-origin/main..HEAD}"
+exit $?

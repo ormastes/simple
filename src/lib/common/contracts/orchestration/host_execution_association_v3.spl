@@ -1,0 +1,93 @@
+# Association DATA. Actual Host journal/native owner checks remain mandatory.
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.host_prepare_associated_v3.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_prepare_response_v1.{host_prepare_response_encode_v1, host_prepare_response_decode_v1}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+
+pub struct HostExecutionAssociationV3:
+    enrollment_digest: text
+    service_scope: ContainerHostScopeV2
+    intent_digest: text
+    prepared_receipt_digest: text
+    prepared_revision: i64
+    epoch_record_digest: text
+    service_process_identity_digest: text
+    execution: ContainerExecutionRequestV2
+
+pub struct HostPreparedAssociatedReplyV3:
+    prepare: HostPrepareAssociatedRequestV3
+    receipt: HostPreparedReservationReceiptV1
+    association: HostExecutionAssociationV3
+
+pub fn host_execution_association_encode_v3(association: HostExecutionAssociationV3) -> Result<text, text>:
+    for digest in [association.enrollment_digest, association.intent_digest, association.prepared_receipt_digest,
+            association.epoch_record_digest, association.service_process_identity_digest]:
+        if not builder_digest_valid_v1(digest): return Err("execution-association-digest")
+    val scope = association.service_scope
+    val plan = association.execution.plan
+    if (scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != "" or association.prepared_revision <= 0 or
+            plan.backend != "linux-podman" or plan.continuity_mode != "native-boot-incarnation-v1" or plan.boot_id == "" or
+            plan.continuity_id != plan.boot_id or plan.physical_host_id != scope.physical_host_id or
+            plan.native_machine_id != scope.native_machine_id or plan.service_scope_id != "epoch-" + association.epoch_record_digest):
+        return Err("execution-association-scope")
+    val service_bytes = container_host_scope_bytes_v2(scope)?
+    execution_associated_encode_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("host-execution-association"),
+        "enrollmentDigest": SdnValue.String(association.enrollment_digest), "serviceScope": SdnValue.String(service_bytes),
+        "intentDigest": SdnValue.String(association.intent_digest), "preparedReceiptDigest": SdnValue.String(association.prepared_receipt_digest),
+        "preparedRevision": SdnValue.Int(association.prepared_revision), "epochRecordDigest": SdnValue.String(association.epoch_record_digest),
+        "serviceProcessIdentityDigest": SdnValue.String(association.service_process_identity_digest),
+        "execution": SdnValue.String(container_execution_request_encode_v2(association.execution)?)})
+
+pub fn host_execution_association_decode_v3(source: text) -> Result<HostExecutionAssociationV3, text>:
+    val fields = execution_associated_fields_v3(source, "host-execution-association", ["version", "kind", "enrollmentDigest", "serviceScope",
+        "intentDigest", "preparedReceiptDigest", "preparedRevision", "epochRecordDigest", "serviceProcessIdentityDigest", "execution"])?
+    val association = HostExecutionAssociationV3(execution_associated_text_v3(fields, "enrollmentDigest")?,
+        container_host_scope_decode_v2(execution_associated_text_v3(fields, "serviceScope")?)?, execution_associated_text_v3(fields, "intentDigest")?,
+        execution_associated_text_v3(fields, "preparedReceiptDigest")?, execution_associated_int_v3(fields, "preparedRevision")?,
+        execution_associated_text_v3(fields, "epochRecordDigest")?, execution_associated_text_v3(fields, "serviceProcessIdentityDigest")?,
+        container_execution_request_decode_v2(execution_associated_text_v3(fields, "execution")?)?)
+    if host_execution_association_encode_v3(association)? != source: return Err("execution-association-canonical")
+    Ok(association)
+
+pub fn host_execution_association_digest_v3(association: HostExecutionAssociationV3) -> Result<text, text>:
+    Ok(sha256_text(host_execution_association_encode_v3(association)?))
+
+pub fn host_execution_association_match_v3(association: HostExecutionAssociationV3,
+        prepare: HostPrepareAssociatedRequestV3, receipt: HostPreparedReservationReceiptV1) -> Result<(), text>:
+    val valid = host_execution_association_encode_v3(association)?
+    val prepare_bytes = host_prepare_associated_encode_v3(prepare)?
+    val receipt_valid = host_reservation_match_receipt_v1(receipt, prepare.prepare.intent, prepare.prepare.operation)?
+    val draft = prepare.draft
+    val execution = association.execution
+    # Compare canonical scope bytes, never struct identity/equality semantics.
+    if (container_host_scope_bytes_v2(association.service_scope)? != container_host_scope_bytes_v2(prepare.service_scope)? or
+            association.intent_digest != sha256_text(host_reservation_encode_intent_v1(prepare.prepare.intent)?) or
+            association.prepared_receipt_digest != receipt.receipt_digest or association.prepared_revision != receipt.prepared_revision or
+            execution.plan.backend != draft.backend or execution.plan.workload_uid != draft.workload_uid or
+            execution.plan.attempt != draft.attempt or execution.plan.operation_id != draft.operation_id or
+            execution.plan.request_digest != draft.request_digest or execution.request_bytes != draft.request_bytes):
+        return Err("execution-association-prepare-binding")
+    Ok(())
+
+pub fn host_prepared_associated_reply_encode_v3(reply: HostPreparedAssociatedReplyV3) -> Result<text, text>:
+    host_execution_association_match_v3(reply.association, reply.prepare, reply.receipt)?
+    execution_associated_encode_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("host-prepared-associated-reply"),
+        "prepare": SdnValue.String(host_prepare_associated_encode_v3(reply.prepare)?),
+        "receipt": SdnValue.String(host_prepare_response_encode_v1(reply.receipt, reply.prepare.prepare.intent, reply.prepare.prepare.operation)?),
+        "association": SdnValue.String(host_execution_association_encode_v3(reply.association)?)})
+
+pub fn host_prepared_associated_reply_decode_v3(source: text) -> Result<HostPreparedAssociatedReplyV3, text>:
+    val fields = execution_associated_fields_v3(source, "host-prepared-associated-reply", ["version", "kind", "prepare", "receipt", "association"])?
+    val prepare = host_prepare_associated_decode_v3(execution_associated_text_v3(fields, "prepare")?)?
+    val receipt = host_prepare_response_decode_v1(execution_associated_text_v3(fields, "receipt")?, prepare.prepare.intent, prepare.prepare.operation)?
+    val reply = HostPreparedAssociatedReplyV3(prepare, receipt, host_execution_association_decode_v3(execution_associated_text_v3(fields, "association")?)?)
+    if host_prepared_associated_reply_encode_v3(reply)? != source: return Err("prepared-association-canonical")
+    Ok(reply)
+
+export HostExecutionAssociationV3, HostPreparedAssociatedReplyV3
+export host_execution_association_encode_v3, host_execution_association_decode_v3, host_execution_association_digest_v3, host_execution_association_match_v3
+export host_prepared_associated_reply_encode_v3, host_prepared_associated_reply_decode_v3

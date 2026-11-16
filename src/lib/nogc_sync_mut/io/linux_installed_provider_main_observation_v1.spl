@@ -1,0 +1,394 @@
+# Actual read-only installed-provider process/endpoint observation.
+# AUTHORED_NOT_RUN. No signal, StopUnit, request drain, helper closure or grant.
+# A client connection correlates one peer; it never owns the server's ingress.
+use std.nogc_sync_mut.io.linux_installed_supervisor_profile_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_bus_v1.*
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+# This explicitly qualified async-family import is DATA ONLY. All native IO
+# and lifetime ownership here stay in the synchronous owner family.
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_process_codec_v1.*
+
+pub struct LinuxProviderMainPreflightObservationV1:
+    kill_mode: text
+    restart: text
+    control_pid: i64
+    exec_stop_empty: bool
+    exec_stop_post_empty: bool
+    dynamic_user: bool
+    remove_ipc: bool
+    runtime_directories: [text]
+    timeout_stop_usec: i64
+
+pub struct LinuxProviderMainObservationSnapshotV1:
+    profile_digest: text
+    machine_policy_digest: text
+    process_identity_digest: text
+    manager_unique_name: text
+    provider_process_id: i64
+    provider_incarnation: text
+    original_process_exited: bool
+    socket_device: i64
+    socket_inode: i64
+    observed_monotonic_nanos: i64
+    # Captured once during acquisition, not resampled by current_v1(). The
+    # observation timestamp dates current process/profile/manager/exit checks.
+    preflight: LinuxProviderMainPreflightObservationV1
+
+pub enum LinuxInstalledProviderCutoffPhaseV1:
+    CutoffArmed
+    RetainedUnknown
+    MainExitedClosureUnknown
+
+pub struct LinuxProviderCutoffObservationV1:
+    phase: LinuxInstalledProviderCutoffPhaseV1
+    reason: text
+    original_main: Option<LinuxProviderMainObservationSnapshotV1>
+
+pub class LinuxInstalledProviderMainObservationV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxProviderMainObservationSnapshotV1, text>:
+        provider_main_observation_current_v1(self.slot, self.generation)
+    pub fn close_v1() -> text: provider_main_observation_close_v1(self.slot, self.generation)
+    pub fn close_diagnostic_v1() -> text: provider_main_observation_close_diagnostic_v1(self.slot, self.generation)
+
+pub enum LinuxProviderMainObservationOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxInstalledProviderMainObservationV1, reason: text)
+    Observing(owner: LinuxInstalledProviderMainObservationV1)
+
+pub fn linux_provider_main_observation_open_v1(profile: LinuxInstalledSupervisorProfileV1,
+        bus: LinuxSupervisorBusV1, deadline_nanos: i64) -> LinuxProviderMainObservationOpenV1:
+    @when(os="linux"):
+    provider_main_observation_open_v1(profile, bus, deadline_nanos)
+    @else:
+    LinuxProviderMainObservationOpenV1.Rejected("provider-main-observation-linux-required")
+    @end
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_installed_supervisor_abi_v1.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u8, volatile_write_u16, volatile_write_u32}
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.string_core.char_from_code
+
+struct ProviderMainObservationStateV1:
+    generation: i64
+    profile: LinuxInstalledSupervisorProfileV1
+    bus: LinuxSupervisorBusV1
+    arena: i64
+    descriptors: [i64] = []
+    pidfd: i64 = -1
+    process_directory: i64 = -1
+    process_stat: i64 = -1
+    process_status: i64 = -1
+    provider_pid: i64 = 0
+    provider_path: text = ""
+    provider_incarnation: text = ""
+    profile_digest: text = ""
+    manager: text = ""
+    peer: Option<LocalUnixPeerV1> = None
+    connection: Option<LocalUnixConnectionV1> = None
+    connection_retryable: bool = true
+    preflight: Option<LinuxProviderMainPreflightObservationV1> = None
+    started: i64
+    deadline: i64
+    phase: text = "opening"
+    close_diagnostic: text = ""
+    closed: bool = false
+
+var provider_main_observation_slots_v1: [ProviderMainObservationStateV1] = []
+
+fn provider_main_observation_state_v1(slot: i64, generation: i64) -> Result<ProviderMainObservationStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= provider_main_observation_slots_v1.len(): return Err("provider-main-observation-stale")
+    val state = provider_main_observation_slots_v1[slot]
+    if state.generation != generation or state.closed: return Err("provider-main-observation-stale")
+    Ok(state)
+
+fn provider_main_observation_budget_v1(slot: i64) -> Result<i64, text>:
+    val state = provider_main_observation_slots_v1[slot]
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now < state.started or now >= state.deadline: return Err("provider-main-observation-total-budget")
+    Ok(state.deadline / 1000000)
+
+@unsafe(reason: "bounded NUL-terminated scratch path; no caller-provided roots", capabilities: [ffi, raw_ptr])
+fn provider_main_observation_z_v1(slot: i64, name: text) -> i64:
+    if name.byte_len() > 255 or name.contains("\0"): return 0
+    val pointer = provider_main_observation_slots_v1[slot].arena + 512
+    for at in 0..name.byte_len(): volatile_write_u8(pointer + at, name.byte_at(at) as i64)
+    volatile_write_u8(pointer + name.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "retain each nofollow native fd before fallible validation", capabilities: [ffi, raw_ptr])
+fn provider_main_observation_open_fd_v1(slot: i64, parent: i64, name: text, directory: bool) -> Result<i64, text>:
+    var flags: i32 = 0
+    @when(arch="x86_64"):
+    flags = if directory: 720896 else: 657408
+    @elif(arch="aarch64"):
+    flags = if directory: 573440 else: 559104
+    @end
+    if flags == 0: return Err("provider-main-observation-abi-unsupported")
+    if provider_main_observation_slots_v1[slot].descriptors.len() >= 16:
+        return Err("provider-main-observation-descriptor-bound")
+    val pointer = provider_main_observation_z_v1(slot, name)
+    if pointer == 0: return Err("provider-main-observation-name-bound")
+    val fd = openat(parent as i32, pointer, flags, 0u32) as i64
+    if fd < 0: return Err("provider-main-observation-proc-entry-unavailable")
+    val index = provider_main_observation_slots_v1[slot].descriptors.len()
+    provider_main_observation_slots_v1[slot].descriptors.push(fd)
+    val arena = provider_main_observation_slots_v1[slot].arena
+    for at in 0..256: volatile_write_u8(arena + at, 0)
+    if (statx(fd as i32, provider_main_observation_z_v1(slot, ""), 4096, 6143u32, arena) != 0 or
+            (volatile_read_u32(arena) & 6143) != 6143 or
+            (volatile_read_u16(arena + 28) & 61440) != (if directory: 16384 else: 32768)):
+        return Err("provider-main-observation-entry-identity")
+    if name != "/":
+        for at in 256..384: volatile_write_u8(arena + at, 0)
+        if fstatfs(fd as i32, arena + 256) != 0 or volatile_read_u64(arena + 256) != 40864:
+            return Err("provider-main-observation-genuine-procfs-required")
+    Ok(index)
+
+fn provider_main_observation_fd_v1(slot: i64, index: i64) -> i64:
+    provider_main_observation_slots_v1[slot].descriptors[index]
+
+@unsafe(reason: "bounded reads of retained genuine procfs entries", capabilities: [ffi, raw_ptr])
+fn provider_main_observation_read_v1(slot: i64, index: i64) -> Result<text, text>:
+    val fd = provider_main_observation_fd_v1(slot, index)
+    val pointer = provider_main_observation_slots_v1[slot].arena + 8192
+    var bytes: [u8] = []
+    var offset = 0
+    while offset <= 65536:
+        val count = pread(fd as i32, pointer, (65537 - offset) as u64, offset)
+        if count < 0 or count > 65537 - offset: return Err("provider-main-observation-proc-read")
+        if count == 0: break
+        for at in 0..count: bytes.push(volatile_read_u8(pointer + at) as u8)
+        offset = offset + count
+    if bytes.len() > 65536 or not utf8_bytes_valid(bytes): return Err("provider-main-observation-proc-read-bound")
+    Ok(bytes_to_text(bytes))
+
+@unsafe(reason: "native pidfd readiness is exit evidence for that original process, never a nonchild reap", capabilities: [ffi, raw_ptr])
+fn provider_main_observation_exited_v1(slot: i64) -> Result<bool, text>:
+    val state = provider_main_observation_slots_v1[slot]
+    if state.pidfd < 0: return Err("provider-main-observation-pidfd-unavailable")
+    val pointer = state.arena + 384
+    volatile_write_u32(pointer, state.pidfd)
+    volatile_write_u16(pointer + 4, 1) # POLLIN
+    volatile_write_u16(pointer + 6, 0)
+    val count = poll(pointer, 1u64, 0)
+    if count < 0: return Err("provider-main-observation-pidfd-poll")
+    val events = volatile_read_u16(pointer + 6)
+    if (events & 40) != 0: return Err("provider-main-observation-pidfd-error-or-invalid")
+    if count == 0:
+        if events != 0: return Err("provider-main-observation-pidfd-shape")
+        return Ok(false)
+    if count != 1 or (events & 17) == 0 or (events & 65518) != 0:
+        return Err("provider-main-observation-pidfd-unexpected-events")
+    # POLLIN (exit) or POLLHUP (already collected elsewhere) only establishes
+    # that the original process exited; this observer never called wait/reap.
+    Ok(true)
+
+@unsafe(reason: "correlate retained original proc directory and start time with the already-open pidfd", capabilities: [ffi, raw_ptr])
+fn provider_main_observation_incarnation_v1(slot: i64) -> Result<text, text>:
+    val state = provider_main_observation_slots_v1[slot]
+    val source = provider_main_observation_read_v1(slot, state.process_stat)?
+    val ticks = linux_supervisor_process_start_ticks_v1(source, state.provider_pid)?
+    val status = provider_main_observation_read_v1(slot, state.process_status)?
+    val profile = state.profile.current_v1()?
+    if not linux_supervisor_process_status_uid_v1(status, profile.service_uid, true)?:
+        return Err("provider-main-observation-provider-uid")
+    val arena = state.arena
+    for at in 0..256: volatile_write_u8(arena + at, 0)
+    val fd = provider_main_observation_fd_v1(slot, state.process_directory)
+    if (statx(fd as i32, provider_main_observation_z_v1(slot, ""), 4096, 6143u32, arena) != 0 or
+            (volatile_read_u32(arena) & 6143) != 6143):
+        return Err("provider-main-observation-process-identity")
+    val identity = str(volatile_read_u32(arena + 136)) + ":" + str(volatile_read_u32(arena + 140)) + ":" +
+        str(volatile_read_u64(arena + 32)) + ":" + str(volatile_read_u64(arena + 144))
+    Ok(sha256_text(identity + ":" + str(state.provider_pid) + ":" + str(ticks)))
+
+@unsafe(reason: "correlate freshly opened genuine procfs view with actual current process before target lookup", capabilities: [ffi, raw_ptr])
+fn provider_main_observation_proc_view_v1(slot: i64, proc: i64,
+        current: LinuxSupervisorInstalledSnapshotV1) -> Result<(), text>:
+    val fd = provider_main_observation_fd_v1(slot, proc)
+    val arena = provider_main_observation_slots_v1[slot].arena
+    for link in ["self", "thread-self"]:
+        val count = readlinkat(fd as i32, provider_main_observation_z_v1(slot, link), arena + 1024, 128u64)
+        if count <= 0 or count >= 128: return Err("provider-main-observation-current-proc-view")
+        var value = ""
+        for at in 0..count: value = value + char_from_code(volatile_read_u8(arena + 1024 + at) as u32)
+        val expected = if link == "self": str(current.process.process_id) else:
+            str(current.process.process_id) + "/task/" + str(current.process.thread_id)
+        if value != expected: return Err("provider-main-observation-foreign-proc-view")
+    Ok(())
+
+fn provider_main_observation_preflight_v1(slot: i64) -> Result<LinuxProviderMainPreflightObservationV1, text>:
+    val state = provider_main_observation_slots_v1[slot]
+    val path = state.provider_path
+    val service = "org.freedesktop.systemd1.Service"
+    val budget = provider_main_observation_budget_v1(slot)?
+    val kill_mode = state.bus.string_property_v1(path, service, "KillMode")?
+    val restart = state.bus.string_property_v1(path, service, "Restart")?
+    val control = state.bus.number_property_v1(path, service, "ControlPID")?
+    val after_identity = provider_main_observation_budget_v1(slot)?
+    val exec_stop = state.bus.empty_exec_commands_v1(path, "ExecStop")?
+    val exec_post = state.bus.empty_exec_commands_v1(path, "ExecStopPost")?
+    val after_commands = provider_main_observation_budget_v1(slot)?
+    val dynamic = state.bus.boolean_property_v1(path, service, "DynamicUser")?
+    val remove_ipc = state.bus.boolean_property_v1(path, service, "RemoveIPC")?
+    val runtime = state.bus.string_array_property_v1(path, service, "RuntimeDirectory")?
+    val timeout = state.bus.unsigned_property_v1(path, service, "TimeoutStopUSec")?
+    val completed = provider_main_observation_budget_v1(slot)?
+    Ok(LinuxProviderMainPreflightObservationV1(kill_mode, restart, control, exec_stop, exec_post,
+        dynamic, remove_ipc, runtime, timeout))
+
+@unsafe(reason: "pin original pidfd before proc lookup, then actual provider peer and native incarnation", capabilities: [ffi, raw_ptr])
+fn provider_main_observation_initialize_v1(slot: i64) -> Result<(), text>:
+    var state = provider_main_observation_slots_v1[slot]
+    val installed = state.profile.current_v1()?
+    val policy = linux_oci_installed_policy_decode_v3(installed.provider_policy)?
+    if policy.expected_service_uid != installed.service_uid: return Err("provider-main-observation-installed-uid-mismatch")
+    val manager = state.bus.manager_v1()?
+    val path = state.bus.unit_path_v1(installed.provider_unit)?
+    if (state.bus.string_property_v1(path, "org.freedesktop.systemd1.Unit", "Id")? != installed.provider_unit or
+            state.bus.string_property_v1(path, "org.freedesktop.systemd1.Unit", "ActiveState")? != "active"):
+        return Err("provider-main-observation-provider-unit-not-active")
+    val pid = state.bus.number_property_v1(path, "org.freedesktop.systemd1.Service", "MainPID")?
+    if pid <= 0 or pid > 2147483647 or pid == installed.process.process_id or state.bus.unit_by_pid_v1(pid)? != path:
+        return Err("provider-main-observation-provider-unit-process")
+    provider_main_observation_slots_v1[slot].provider_pid = pid
+    provider_main_observation_slots_v1[slot].provider_path = path
+    provider_main_observation_slots_v1[slot].manager = manager
+    provider_main_observation_slots_v1[slot].profile_digest = installed.digest
+    # Publish ownership immediately. A missing/failed pin cannot become exit.
+    val pidfd = pidfd_open(pid as i32, 0u32) as i64
+    provider_main_observation_slots_v1[slot].pidfd = pidfd
+    if pidfd < 0: return Err("provider-main-observation-original-pidfd-unavailable")
+    if provider_main_observation_exited_v1(slot)?: return Err("provider-main-observation-original-process-already-exited")
+    val root = provider_main_observation_open_fd_v1(slot, -100, "/", true)?
+    val proc = provider_main_observation_open_fd_v1(slot, provider_main_observation_fd_v1(slot, root), "proc", true)?
+    provider_main_observation_proc_view_v1(slot, proc, installed)?
+    val directory = provider_main_observation_open_fd_v1(slot, provider_main_observation_fd_v1(slot, proc), str(pid), true)?
+    provider_main_observation_slots_v1[slot].process_directory = directory
+    val stat = provider_main_observation_open_fd_v1(slot, provider_main_observation_fd_v1(slot, directory), "stat", false)?
+    provider_main_observation_slots_v1[slot].process_stat = stat
+    val status = provider_main_observation_open_fd_v1(slot, provider_main_observation_fd_v1(slot, directory), "status", false)?
+    provider_main_observation_slots_v1[slot].process_status = status
+    val incarnation = provider_main_observation_incarnation_v1(slot)?
+    provider_main_observation_slots_v1[slot].provider_incarnation = incarnation
+    val deadline = provider_main_observation_budget_v1(slot)?
+    val connected = local_unix_connect_v1(policy.socket_path, policy.expected_service_uid, deadline)
+    provider_main_observation_slots_v1[slot].connection = connected.owner
+    if connected.error != "" or connected.owner == None or connected.peer == None:
+        return Err("provider-main-observation-endpoint-connect:" + connected.error)
+    val peer = connected.peer.unwrap()
+    provider_main_observation_slots_v1[slot].peer = Some(peer)
+    if peer.uid != installed.service_uid or peer.pid != pid or peer.socket_inode <= 0:
+        return Err("provider-main-observation-endpoint-peer-mismatch")
+    val preflight = provider_main_observation_preflight_v1(slot)?
+    provider_main_observation_slots_v1[slot].preflight = Some(preflight)
+    if (provider_main_observation_exited_v1(slot)? or provider_main_observation_incarnation_v1(slot)? != incarnation or
+            state.bus.number_property_v1(path, "org.freedesktop.systemd1.Service", "MainPID")? != pid or
+            state.bus.manager_v1()? != manager):
+        return Err("provider-main-observation-original-process-changed")
+    val finished = provider_main_observation_budget_v1(slot)?
+    provider_main_observation_slots_v1[slot].phase = "observing"
+    Ok(())
+
+@unsafe(reason: "actual borrowed installed ownership, private bounded native observer registry", capabilities: [ffi])
+fn provider_main_observation_open_v1(profile: LinuxInstalledSupervisorProfileV1,
+        bus: LinuxSupervisorBusV1, deadline_nanos: i64) -> LinuxProviderMainObservationOpenV1:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxProviderMainObservationOpenV1.Rejected(origin.unwrap_err())
+    if provider_main_observation_slots_v1.len() >= 256: return LinuxProviderMainObservationOpenV1.Rejected("provider-main-observation-owner-bound")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now > 9223372006854775807: return LinuxProviderMainObservationOpenV1.Rejected("provider-main-observation-clock")
+    if deadline_nanos <= now or deadline_nanos > now + 30000000000:
+        return LinuxProviderMainObservationOpenV1.Rejected("provider-main-observation-deadline")
+    val arena = malloc(73736u64)
+    if arena == 0: return LinuxProviderMainObservationOpenV1.Rejected("provider-main-observation-memory")
+    val slot = provider_main_observation_slots_v1.len()
+    provider_main_observation_slots_v1.push(ProviderMainObservationStateV1(generation: slot + 1,
+        profile: profile, bus: bus, arena: arena, started: now, deadline: deadline_nanos))
+    val owner = LinuxInstalledProviderMainObservationV1(slot: slot, generation: slot + 1)
+    val initialized = provider_main_observation_initialize_v1(slot)
+    if initialized.is_err():
+        provider_main_observation_slots_v1[slot].phase = "retained-refusal"
+        return LinuxProviderMainObservationOpenV1.CleanupRequired(owner, initialized.unwrap_err())
+    LinuxProviderMainObservationOpenV1.Observing(owner)
+
+fn provider_main_observation_current_v1(slot: i64, generation: i64) -> Result<LinuxProviderMainObservationSnapshotV1, text>:
+    val state = provider_main_observation_state_v1(slot, generation)?
+    if state.phase != "observing" or state.preflight == None or state.peer == None:
+        return Err("provider-main-observation-incomplete-or-closing")
+    val profile = state.profile.current_v1()?
+    if profile.digest != state.profile_digest or state.bus.manager_v1()? != state.manager:
+        return Err("provider-main-observation-installed-context-changed")
+    val exited = provider_main_observation_exited_v1(slot)?
+    if not exited:
+        if (provider_main_observation_incarnation_v1(slot)? != state.provider_incarnation or
+                state.bus.number_property_v1(state.provider_path, "org.freedesktop.systemd1.Service", "MainPID")? != state.provider_pid or
+                state.bus.unit_by_pid_v1(state.provider_pid)? != state.provider_path):
+            return Err("provider-main-observation-original-process-changed")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now < state.started: return Err("provider-main-observation-clock")
+    val peer = state.peer.unwrap()
+    Ok(LinuxProviderMainObservationSnapshotV1(profile.digest, profile.machine_policy_digest,
+        profile.process.identity_digest, state.manager, state.provider_pid, state.provider_incarnation,
+        exited, peer.socket_device, peer.socket_inode, now, state.preflight.unwrap()))
+
+fn provider_main_observation_note_close_v1(slot: i64, reason: text):
+    if provider_main_observation_slots_v1[slot].close_diagnostic == "":
+        provider_main_observation_slots_v1[slot].close_diagnostic = reason
+
+@unsafe(reason: "only owned client/proc/pidfd cleanup; never signal, wait, unlink or close borrowed profile/bus", capabilities: [ffi])
+fn provider_main_observation_close_v1(slot: i64, generation: i64) -> text:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return origin.unwrap_err()
+    if slot < 0 or slot >= provider_main_observation_slots_v1.len(): return "stale"
+    val state = provider_main_observation_slots_v1[slot]
+    if state.generation != generation: return "stale"
+    if state.closed: return if state.close_diagnostic == "": "released" else: "consumed-error"
+    provider_main_observation_slots_v1[slot].phase = "closing"
+    if state.connection != None:
+        if not state.connection_retryable: return "retained"
+        val connection = state.connection.unwrap()
+        val closed = local_unix_close_v1(connection)
+        if closed.error != "": provider_main_observation_note_close_v1(slot, closed.error)
+        if closed.closed and closed.owner == None:
+            provider_main_observation_slots_v1[slot].connection = None
+        else:
+            if closed.owner != None: provider_main_observation_slots_v1[slot].connection = closed.owner
+            provider_main_observation_slots_v1[slot].connection_retryable = false
+            provider_main_observation_note_close_v1(slot, "provider-main-observation-client-close-unconfirmed")
+            return "retained"
+    for index in 0..state.descriptors.len():
+        val fd = provider_main_observation_slots_v1[slot].descriptors[index]
+        provider_main_observation_slots_v1[slot].descriptors[index] = -1
+        if fd >= 0 and close(fd as i32) != 0:
+            provider_main_observation_note_close_v1(slot, "provider-main-observation-proc-close-consumed-error")
+    provider_main_observation_slots_v1[slot].pidfd = -1
+    if state.pidfd >= 0 and close(state.pidfd as i32) != 0:
+        provider_main_observation_note_close_v1(slot, "provider-main-observation-pidfd-close-consumed-error")
+    provider_main_observation_slots_v1[slot].arena = 0
+    free(state.arena)
+    provider_main_observation_slots_v1[slot].closed = true
+    if provider_main_observation_slots_v1[slot].close_diagnostic == "": "released" else: "consumed-error"
+
+fn provider_main_observation_close_diagnostic_v1(slot: i64, generation: i64) -> text:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return origin.unwrap_err()
+    if slot < 0 or slot >= provider_main_observation_slots_v1.len(): return "stale"
+    val state = provider_main_observation_slots_v1[slot]
+    if state.generation != generation: return "stale"
+    state.close_diagnostic
+@else:
+fn provider_main_observation_current_v1(slot: i64, generation: i64) -> Result<LinuxProviderMainObservationSnapshotV1, text>:
+    Err("provider-main-observation-linux-required")
+fn provider_main_observation_close_v1(slot: i64, generation: i64) -> text: "stale"
+fn provider_main_observation_close_diagnostic_v1(slot: i64, generation: i64) -> text: "stale"
+@end

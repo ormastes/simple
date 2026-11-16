@@ -1,0 +1,59 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/08_tracking/bug/seed_text_slice_bytes_len_chars_pure_db_unreopenable_2026-11-16.md
+
+# @req REQ-LIB-DATABASE-002
+"""
+# Pure-Simple SQL: a file database holding non-ASCII text reopens intact
+
+As a user storing Korean, accented or emoji text (for example a localized OS
+error message) in a file-backed pure database, I can close the database and
+open the same file again and read the exact text back.
+
+`len()` counts characters while `slice()`/`substring()` cut bytes (owner
+decision 2026-11-07). The v3 record codec used to bound a byte scan by
+`len()`, so any non-ASCII cell made the file fail with
+`noncanonical pure database v3 record escape`. A damaged file must still be
+rejected with an error value, never a panic.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.database.pure_sql.{PureDatabase}
+use nogc_sync_mut.database.sql.types.{DbValue}
+use std.io_runtime.{file_delete, file_read, file_write}
+
+val MIXED = "연결을 거부했습니다 café 😀 |%\t end"
+
+fn _write_mixed(path: text) -> ():
+    file_delete(path)
+    val db1 = PureDatabase.open_deferred(path).unwrap()
+    expect(db1.exec_sql("CREATE TABLE IF NOT EXISTS mm (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok()).to_equal(true)
+    expect(db1.exec("INSERT INTO mm (id, value) VALUES (?, ?)", [DbValue.Text(value: "k한"), DbValue.Text(value: MIXED)]).is_ok()).to_equal(true)
+    db1.checkpoint()
+
+fn main() -> ():
+    describe("pure_sql reopen of non-ASCII text", fn() -> ():
+        it("reads back Korean, accented and emoji text unchanged after reopen", fn() -> ():
+            # @req REQ-LIB-DATABASE-002
+            val path = "/tmp/pure_sql_reopen_multibyte_text_spec.db"
+            _write_mixed(path)
+            match PureDatabase.open_deferred(path):
+                case Ok(db2):
+                    val rows = db2.query("SELECT id, value FROM mm", []).unwrap()
+                    expect(rows.len()).to_equal(1)
+                    expect(rows[0].get_text("id") ?? "").to_equal("k한")
+                    expect(rows[0].get_text("value") ?? "").to_equal(MIXED)
+                case Err(e):
+                    expect(e.message()).to_equal("")
+        )
+        it("rejects a damaged non-ASCII record with an error instead of panicking", fn() -> ():
+            # @req REQ-LIB-DATABASE-002
+            val path = "/tmp/pure_sql_reopen_multibyte_damaged_spec.db"
+            _write_mixed(path)
+            file_write(path, file_read(path).replace("café", "cafe"))
+            val reopened = PureDatabase.open_deferred(path)
+            expect(reopened.is_err()).to_equal(true)
+        )
+    )

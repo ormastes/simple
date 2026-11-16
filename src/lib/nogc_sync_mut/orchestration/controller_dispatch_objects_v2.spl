@@ -10,6 +10,10 @@ use std.common.string_core.str_len
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_create_exclusive, file_fsync, directory_fsync}
 use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
 use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.controller_storage_owner_check_v3
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_relative_v3, distributed_operation_journal_publish_v3,
+    distributed_operation_journal_read_required_v3}
 
 fn dispatch_object_directory_v2(root: text, domain: text) -> Result<text, text>:
     val directory = root + "/" + domain
@@ -60,3 +64,47 @@ pub fn controller_dispatch_message_retain_v2(root: text, bytes: text) -> Result<
     if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root):
         return Err("dispatch-message-sync-required")
     Ok(path)
+
+pub fn controller_dispatch_packet_load_owned_v3(journal: DistributedOperationJournalV2,
+        assignment_digest: text) -> Result<ControllerDispatchRequestV2, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if journal.windows_store.is_none(): return controller_dispatch_packet_load_v2(journal.root, assignment_digest)
+    if not builder_digest_valid_v1(assignment_digest): return Err("dispatch-assignment-digest-invalid")
+    val bytes = distributed_operation_journal_read_required_v3(journal,
+        "dispatch-packets/" + assignment_digest + ".sdn", 2097152)?
+    val packet = controller_dispatch_request_decode_v2(bytes)?
+    if sha256_text(controller_assignment_bytes_v1(packet.binding)?) != assignment_digest:
+        return Err("dispatch-retained-assignment-mismatch")
+    Ok(packet)
+
+pub fn controller_dispatch_packet_retain_owned_v3(journal: DistributedOperationJournalV2,
+        packet: ControllerDispatchRequestV2) -> Result<bool, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    val bytes = controller_dispatch_request_encode_v2(packet)?
+    if bytes.byte_len() > 2097152: return Err("dispatch-packet-size")
+    if journal.windows_store.is_none(): return controller_dispatch_packet_retain_v2(journal.root, packet)
+    val digest = sha256_text(controller_assignment_bytes_v1(packet.binding)?)
+    val relative = "dispatch-packets/" + digest + ".sdn"
+    if not distributed_operation_journal_relative_v3(relative): return Err("dispatch-packet-record-path-bounds")
+    val published = distributed_operation_journal_publish_v3(journal, relative, bytes)?
+    # Refreshed proofs may differ for the SAME immutable input. Preserve the
+    # first archived packet and the existing exact-input comparison contract.
+    val prior = controller_dispatch_packet_load_owned_v3(journal, digest)?
+    if not controller_dispatch_same_input_v2(prior, packet)?: return Err("dispatch-retained-input-mismatch")
+    Ok(true)
+
+# The result is a relative key, NOT a native path or an authority projection.
+# Consumers frame bytes read through this same retained journal owner.
+pub fn controller_dispatch_message_retain_owned_v3(journal: DistributedOperationJournalV2,
+        bytes: text) -> Result<text, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if bytes.byte_len() == 0 or bytes.byte_len() > 2097152: return Err("dispatch-message-size")
+    val relative = "dispatch-messages/" + sha256_text(bytes) + ".sdn"
+    if not distributed_operation_journal_relative_v3(relative): return Err("dispatch-message-record-path-bounds")
+    if journal.windows_store.is_none():
+        val retained_path = controller_dispatch_message_retain_v2(journal.root, bytes)?
+        return Ok(relative)
+    val published = distributed_operation_journal_publish_v3(journal, relative, bytes)?
+    if distributed_operation_journal_read_required_v3(journal, relative, 2097152)? != bytes:
+        return Err("dispatch-message-content-mismatch")
+    Ok(relative)

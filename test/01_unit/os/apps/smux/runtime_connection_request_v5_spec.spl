@@ -1,0 +1,307 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. Metadata codec calls; no issuer or native owner.
+use std.spec.*
+use os.apps.smux.runtime_connection_request_v5.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.base_encoding.base64.base64url_encode
+use std.common.crypto.sha256.sha256_text
+
+fn connection_request_fixture_v5(action: text = "bind") -> SmuxRuntimeConnectionRequestV5:
+    val empty_payload = ["host-progress", "host-cancel", "progress", "cancel", "release", "input-observe"].contains(action)
+    val host_action = action == "host" or action == "host-progress" or action == "host-cancel"
+    SmuxRuntimeConnectionRequestV5(action: action, binding_uid: if host_action: "" else: "binding-a",
+        payload: if empty_payload: "" else: "x")
+
+fn connection_request_fields_v5() -> Dict<text, SdnValue>:
+    val source = smux_runtime_connection_request_encode_v5(connection_request_fixture_v5()).unwrap()
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+        max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 8)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("connection request must encode a dictionary")
+
+describe "Generic runtime connection request envelope V5":
+    it "roundtrips every allowed action through canonical bytes token and digest":
+        step("Use actual production codec calls for every generic server action")
+        for action in ["host", "host-progress", "host-cancel", "plan", "prepare", "bind", "progress", "cancel", "release",
+                "input-issue", "input-write", "input-observe", "input-revoke", "input-resolve"]:
+            val request = connection_request_fixture_v5(action)
+            expect(smux_runtime_connection_request_validate_v5(request).is_ok()).to_equal(true)
+            val source = smux_runtime_connection_request_encode_v5(request).unwrap()
+            val decoded = smux_runtime_connection_request_decode_v5(source).unwrap()
+            expect(decoded.action).to_equal(action)
+            expect(decoded.binding_uid).to_equal(request.binding_uid)
+            expect(decoded.payload).to_equal(request.payload)
+            expect(smux_runtime_connection_request_encode_v5(decoded).unwrap()).to_equal(source)
+            val token = smux_runtime_connection_request_token_v5(request).unwrap()
+            expect(token).to_equal(base64url_encode(source))
+            val restored = smux_runtime_connection_request_from_token_v5(token).unwrap()
+            expect(smux_runtime_connection_request_encode_v5(restored).unwrap()).to_equal(source)
+            expect(smux_runtime_connection_request_digest_v5(request).unwrap()).to_equal(sha256_text(source))
+
+    it "preserves UTF8 and quoted escaped payload bytes through canonical token decoding":
+        step("Roundtrip nonASCII text quotes newlines and backslashes without normalizing payload")
+        var request = connection_request_fixture_v5()
+        request.payload = "é\n\"quoted\"\\tail"
+        val source = smux_runtime_connection_request_encode_v5(request).unwrap()
+        val token = smux_runtime_connection_request_token_v5(request).unwrap()
+        val decoded = smux_runtime_connection_request_from_token_v5(token).unwrap()
+        expect(decoded.payload).to_equal(request.payload)
+        expect(smux_runtime_connection_request_encode_v5(decoded).unwrap()).to_equal(source)
+
+    it "encodes exactly the generic five-field versioned envelope":
+        step("Check fixed schema and require all effectful request fields to contribute to the digest")
+        val fields = connection_request_fields_v5()
+        expect(fields.keys().len()).to_equal(5)
+        expect(fields["version"]).to_equal(SdnValue.Int(5))
+        expect(fields["kind"]).to_equal(SdnValue.String("smux-runtime-connection-request"))
+        expect(fields["action"]).to_equal(SdnValue.String("bind"))
+        expect(fields["bindingUid"]).to_equal(SdnValue.String("binding-a"))
+        expect(fields["payload"]).to_equal(SdnValue.String("x"))
+        val original = connection_request_fixture_v5()
+        val digest = smux_runtime_connection_request_digest_v5(original).unwrap()
+        for field in ["action", "binding", "payload"]:
+            var changed = original
+            if field == "action": changed.action = "prepare"
+            elif field == "binding": changed.binding_uid = "binding-b"
+            else: changed.payload = "y"
+            expect(smux_runtime_connection_request_digest_v5(changed).unwrap() == digest).to_equal(false)
+
+    it "rejects unknown and missing fields with exact schema errors":
+        step("Add an extension and omit each required key independently")
+        var extra = connection_request_fields_v5()
+        extra["authority"] = SdnValue.Bool(true)
+        expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(extra))).unwrap_err()).to_equal(
+            "runtime-connection-request-unknown-field:authority")
+        val original = connection_request_fields_v5()
+        for missing in original.keys():
+            var fields: Dict<text, SdnValue> = {}
+            for key in original.keys():
+                if key != missing: fields[key] = original[key]
+            expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap_err()).to_equal(
+                "runtime-connection-request-missing-field:" + missing)
+
+    it "rejects field coercion wrong version and wrong kind":
+        step("Require integer version and text fields without accepting equivalent-looking values")
+        for key in ["version", "kind", "action", "bindingUid", "payload"]:
+            var fields = connection_request_fields_v5()
+            fields[key] = if key == "version": SdnValue.String("5") else: SdnValue.Int(5)
+            expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap_err()).to_equal(
+                "runtime-connection-request-type:" + key)
+        var fields = connection_request_fields_v5()
+        fields["version"] = SdnValue.Int(4)
+        expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap_err()).to_equal(
+            "runtime-connection-request-version")
+        fields = connection_request_fields_v5()
+        fields["kind"] = SdnValue.String("smux-runtime-control-request")
+        expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap_err()).to_equal(
+            "runtime-connection-request-kind")
+
+    it "requires canonical source spelling and rejects duplicate keys":
+        step("Reject semantically equivalent whitespace and strict-parser duplicate fields")
+        val source = smux_runtime_connection_request_encode_v5(connection_request_fixture_v5()).unwrap()
+        for changed in [" " + source, source + "\n"]:
+            expect(smux_runtime_connection_request_decode_v5(changed).unwrap_err()).to_equal("runtime-connection-request-noncanonical")
+            expect(smux_runtime_connection_request_from_token_v5(base64url_encode(changed)).unwrap_err()).to_equal("runtime-connection-request-noncanonical")
+        val duplicate = "{version: 5, " + source.substring(1, source.len())
+        expect(smux_runtime_connection_request_decode_v5(duplicate).unwrap_err()).to_equal("runtime-connection-request-syntax")
+
+    it "rejects unknown actions before dispatch":
+        step("Do not admit legacy or differently cased verbs through the generic envelope")
+        for action in ["", "HOST", "inspect", "write", "input"]:
+            var request = connection_request_fixture_v5()
+            request.action = action
+            expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-action")
+            expect(smux_runtime_connection_request_encode_v5(request).unwrap_err()).to_equal("runtime-connection-request-action")
+            var fields = connection_request_fields_v5()
+            fields["action"] = SdnValue.String(action)
+            expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap_err()).to_equal("runtime-connection-request-action")
+
+    it "requires empty host action UIDs and valid builder identifiers for every other action":
+        step("Keep host selection distinct from per-binding operation identity")
+        for action in ["host", "host-progress", "host-cancel"]:
+            var host = connection_request_fixture_v5(action)
+            host.binding_uid = "binding-a"
+            expect(smux_runtime_connection_request_validate_v5(host).unwrap_err()).to_equal("runtime-connection-request-binding")
+        for invalid in ["", "has space", "../binding", "a/b", "binding\nx"]:
+            var request = connection_request_fixture_v5()
+            request.binding_uid = invalid
+            expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-binding")
+            var fields = connection_request_fields_v5()
+            fields["bindingUid"] = SdnValue.String(invalid)
+            expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap_err()).to_equal("runtime-connection-request-binding")
+
+    it "requires payload only for the eight payload-bearing actions":
+        step("Refuse missing required payload and extra payload on observation or settlement verbs")
+        for action in ["host", "plan", "prepare", "bind", "input-issue", "input-write", "input-revoke", "input-resolve"]:
+            var request = connection_request_fixture_v5(action)
+            request.payload = ""
+            expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-payload-required")
+        for action in ["host-progress", "host-cancel", "progress", "cancel", "release", "input-observe"]:
+            var request = connection_request_fixture_v5(action)
+            request.payload = "unexpected"
+            expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-payload-unexpected")
+
+    it "rejects NUL in every public string field and source":
+        step("Do not permit embedded zeros in action UID payload or serialized envelope")
+        for field in ["action", "binding", "payload"]:
+            var request = connection_request_fixture_v5()
+            if field == "action": request.action = "bi\0nd"
+            elif field == "binding": request.binding_uid = "binding\0a"
+            else: request.payload = "a\0b"
+            expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-nul")
+        val source = smux_runtime_connection_request_encode_v5(connection_request_fixture_v5()).unwrap()
+        expect(smux_runtime_connection_request_decode_v5(source + "\0").unwrap_err()).to_equal("runtime-connection-request-nul")
+
+    it "accepts the exact canonical wire and token caps then refuses one extra byte":
+        step("Account for the entire canonical envelope rather than treating the payload cap as the wire cap")
+        var request = connection_request_fixture_v5()
+        val minimal = smux_runtime_connection_request_encode_v5(request).unwrap()
+        request.payload = "x".repeat(2097152 - minimal.byte_len() + 1)
+        val source = smux_runtime_connection_request_encode_v5(request).unwrap()
+        expect(source.byte_len()).to_equal(2097152)
+        val token = smux_runtime_connection_request_token_v5(request).unwrap()
+        expect(token.byte_len()).to_equal(2796203)
+        val restored = smux_runtime_connection_request_from_token_v5(token).unwrap()
+        expect(restored.payload).to_equal(request.payload)
+        request.payload = request.payload + "x"
+        expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-bound")
+        expect(smux_runtime_connection_request_encode_v5(request).unwrap_err()).to_equal("runtime-connection-request-bound")
+        expect(smux_runtime_connection_request_decode_v5(source + " ").unwrap_err()).to_equal("runtime-connection-request-bound")
+
+    it "bounds UTF8 bytes and escaped canonical size rather than character count":
+        step("Reject payloads whose multibyte encoding or escaping exceeds the full envelope budget")
+        var request = connection_request_fixture_v5()
+        request.payload = "é".repeat(1048576)
+        expect(request.payload.byte_len()).to_equal(2097152)
+        expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-bound")
+        request.payload = "\n".repeat(1048576)
+        expect(request.payload.byte_len()).to_equal(1048576)
+        expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-bound")
+
+    it "rejects token padding invalid alphabets unused-bit aliases and token bounds":
+        step("Require strict unpadded Base64URL and one canonical spelling for decoded bytes")
+        expect(smux_runtime_connection_request_from_token_v5("").unwrap_err()).to_equal("runtime-connection-request-token-bound")
+        expect(smux_runtime_connection_request_from_token_v5("A".repeat(2796204)).unwrap_err()).to_equal("runtime-connection-request-token-bound")
+        for token in ["A", "*", "Zg=", "Zg+", "Zg/", "Z g", "Zg\n"]:
+            expect(smux_runtime_connection_request_from_token_v5(token).unwrap_err()).to_equal("runtime-connection-request-token-base64")
+        expect(smux_runtime_connection_request_from_token_v5("Zh").unwrap_err()).to_equal("runtime-connection-request-token-noncanonical")
+
+    it "bounds wire input and distinguishes syntax from nonobject data":
+        step("Refuse empty oversized malformed and scalar source before any server consumer")
+        expect(smux_runtime_connection_request_decode_v5("").unwrap_err()).to_equal("runtime-connection-request-bound")
+        expect(smux_runtime_connection_request_decode_v5(" ".repeat(2097153)).unwrap_err()).to_equal("runtime-connection-request-bound")
+        expect(smux_runtime_connection_request_decode_v5("{").unwrap_err()).to_equal("runtime-connection-request-syntax")
+        expect(smux_runtime_connection_request_decode_v5("[]").unwrap_err()).to_equal("runtime-connection-request-object")
+
+# Additive protocol3 vectors. The original fourteen-action fixture and cases
+# above remain unchanged; no server/native capability is constructed here.
+fn connection_protocol3_fixture_v5(action: text) -> SmuxRuntimeConnectionRequestV5:
+    val needs_payload = ["geometry-resolve", "geometry-issue", "geometry-resize", "geometry-revoke"].contains(action)
+    SmuxRuntimeConnectionRequestV5(action: action,
+        binding_uid: if action == "capabilities": "" else: "binding-a",
+        payload: if needs_payload: "x" else: "")
+
+fn connection_protocol3_source_v5(request: SmuxRuntimeConnectionRequestV5) -> text:
+    var fields = connection_request_fields_v5()
+    fields["action"] = SdnValue.String(request.action)
+    fields["bindingUid"] = SdnValue.String(request.binding_uid)
+    fields["payload"] = SdnValue.String(request.payload)
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn connection_protocol3_refuse_v5(request: SmuxRuntimeConnectionRequestV5, reason: text):
+    expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal(reason)
+    expect(smux_runtime_connection_request_encode_v5(request).unwrap_err()).to_equal(reason)
+    val source = connection_protocol3_source_v5(request)
+    expect(smux_runtime_connection_request_decode_v5(source).unwrap_err()).to_equal(reason)
+    expect(smux_runtime_connection_request_from_token_v5(base64url_encode(source)).unwrap_err()).to_equal(reason)
+
+describe "Additive protocol3 capabilities and geometry envelopes":
+    it "roundtrips all seven additions through actual canonical wire and strict token APIs":
+        step("Keep the five-field version5 envelope while adding only the seven named classifications")
+        for action in ["capabilities", "geometry-resolve", "geometry-issue", "geometry-resize",
+                "geometry-observe", "geometry-revoke", "geometry-cancel"]:
+            val request = connection_protocol3_fixture_v5(action)
+            expect(smux_runtime_connection_request_validate_v5(request).is_ok()).to_equal(true)
+            val source = smux_runtime_connection_request_encode_v5(request).unwrap()
+            expect(source).to_equal(connection_protocol3_source_v5(request))
+            val decoded = smux_runtime_connection_request_decode_v5(source).unwrap()
+            expect(decoded.action).to_equal(action)
+            expect(decoded.binding_uid).to_equal(request.binding_uid)
+            expect(decoded.payload).to_equal(request.payload)
+            val token = smux_runtime_connection_request_token_v5(request).unwrap()
+            val restored = smux_runtime_connection_request_from_token_v5(token).unwrap()
+            expect(smux_runtime_connection_request_encode_v5(restored).unwrap()).to_equal(source)
+            expect(smux_runtime_connection_request_digest_v5(request).unwrap()).to_equal(sha256_text(source))
+
+    it "requires capabilities to have neither binding identity nor payload on every codec entrypoint":
+        step("Reject a scoped or payload-bearing capabilities request before a consumer can act")
+        var scoped = connection_protocol3_fixture_v5("capabilities")
+        scoped.binding_uid = "binding-a"
+        connection_protocol3_refuse_v5(scoped, "runtime-connection-request-binding")
+        var payload = connection_protocol3_fixture_v5("capabilities")
+        payload.payload = "unexpected"
+        connection_protocol3_refuse_v5(payload, "runtime-connection-request-payload-unexpected")
+
+    it "requires valid nonempty binding identities for all six geometry actions":
+        step("Reject unscoped or malformed geometry UIDs through validate encode decode and token paths")
+        for action in ["geometry-resolve", "geometry-issue", "geometry-resize", "geometry-observe", "geometry-revoke", "geometry-cancel"]:
+            for invalid in ["", "has space", "../binding", "a/b"]:
+                var request = connection_protocol3_fixture_v5(action)
+                request.binding_uid = invalid
+                connection_protocol3_refuse_v5(request, "runtime-connection-request-binding")
+
+    it "requires payload for four geometry actions and forbids it for observe and cancel":
+        step("Do not let a missing request or unexpected data change an action's classification")
+        for action in ["geometry-resolve", "geometry-issue", "geometry-resize", "geometry-revoke"]:
+            var request = connection_protocol3_fixture_v5(action)
+            request.payload = ""
+            connection_protocol3_refuse_v5(request, "runtime-connection-request-payload-required")
+        for action in ["geometry-observe", "geometry-cancel"]:
+            var request = connection_protocol3_fixture_v5(action)
+            request.payload = "unexpected"
+            connection_protocol3_refuse_v5(request, "runtime-connection-request-payload-unexpected")
+
+    it "does not admit unnamed aliases alongside the seven additions":
+        step("Keep the action expansion exact rather than accepting a geometry prefix or case-folded capability name")
+        for action in ["geometry", "resize", "geometry-progress", "geometry-stop", "capability", "CAPABILITIES"]:
+            connection_protocol3_refuse_v5(connection_protocol3_fixture_v5(action), "runtime-connection-request-action")
+
+    it "retains strict schema canonical source token and NUL checks for every added action":
+        step("Exercise inherited boundaries on actual encoded additions rather than only on legacy actions")
+        for action in ["capabilities", "geometry-resolve", "geometry-issue", "geometry-resize",
+                "geometry-observe", "geometry-revoke", "geometry-cancel"]:
+            val request = connection_protocol3_fixture_v5(action)
+            val source = smux_runtime_connection_request_encode_v5(request).unwrap()
+            expect(smux_runtime_connection_request_decode_v5(" " + source).unwrap_err()).to_equal("runtime-connection-request-noncanonical")
+            expect(smux_runtime_connection_request_from_token_v5(base64url_encode(source) + "=").unwrap_err()).to_equal("runtime-connection-request-token-base64")
+            var fields = connection_request_fields_v5()
+            fields["action"] = SdnValue.String(action)
+            fields["bindingUid"] = SdnValue.String(request.binding_uid)
+            fields["payload"] = SdnValue.String(request.payload)
+            fields["version"] = SdnValue.Int(6)
+            expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap_err()).to_equal("runtime-connection-request-version")
+            fields["version"] = SdnValue.Int(5)
+            fields["nativeOwner"] = SdnValue.Bool(true)
+            expect(smux_runtime_connection_request_decode_v5(sdn_encode_canonical(SdnValue.Dict(fields))).unwrap_err()).to_equal("runtime-connection-request-unknown-field:nativeOwner")
+            var nul = request
+            nul.payload = "\0"
+            connection_protocol3_refuse_v5(nul, "runtime-connection-request-nul")
+
+    it "keeps the exact existing wire and token size caps for geometry resize":
+        step("Accept a maximum canonical geometry envelope without increasing the protocol budget")
+        var request = connection_protocol3_fixture_v5("geometry-resize")
+        val minimum = smux_runtime_connection_request_encode_v5(request).unwrap()
+        request.payload = "x".repeat(2097152 - minimum.byte_len() + 1)
+        val source = smux_runtime_connection_request_encode_v5(request).unwrap()
+        expect(source.byte_len()).to_equal(2097152)
+        val token = smux_runtime_connection_request_token_v5(request).unwrap()
+        expect(token.byte_len()).to_equal(2796203)
+        expect(smux_runtime_connection_request_from_token_v5(token).unwrap().payload).to_equal(request.payload)
+        request.payload = request.payload + "x"
+        expect(smux_runtime_connection_request_validate_v5(request).unwrap_err()).to_equal("runtime-connection-request-bound")
+        expect(smux_runtime_connection_request_encode_v5(request).unwrap_err()).to_equal("runtime-connection-request-bound")
+        expect(smux_runtime_connection_request_decode_v5(connection_protocol3_source_v5(request)).unwrap_err()).to_equal("runtime-connection-request-bound")
+        expect(smux_runtime_connection_request_from_token_v5(base64url_encode(connection_protocol3_source_v5(request))).unwrap_err()).to_equal("runtime-connection-request-token-bound")

@@ -1,0 +1,36 @@
+# AUTHORED_NOT_RUN. Actual dispatcher pre-effect refusals; no native capabilities fabricated.
+use app.orchestrator.command.orchestrator_command_v1
+use app.orchestrator.controller_service_command_v3.controller_service_shape_v3
+use std.spec.{describe, it, expect, step}
+
+describe "Controller service route refuses malformed commands before native admission":
+    it "routes every explicit action without silently selecting the V2 local executor":
+        step("Call each real dispatcher action with missing required arguments")
+        for command in ["controller-service-install", "controller-service-dispatch", "controller-service-resume",
+                "controller-service-inspect", "controller-service-progress", "controller-service-cancel",
+                "controller-service-status", "controller-service-stop"]:
+            val reply = orchestrator_command_v1([command])
+            expect(reply.exit_code).to_equal(2)
+            expect(reply.output.contains("controller-service-")).to_equal(true)
+            expect(reply.controller_root_cleanup.is_none()).to_equal(true)
+            expect(reply.controller_dispatch_cleanup.is_none()).to_equal(true)
+
+    it "requires an exact installed configuration digest before opening the root":
+        step("Reject a malformed configuration pin through the production command path")
+        val reply = orchestrator_command_v1(["controller-service-status", "protected-root", "bad-pin"])
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output.contains("controller-service-config-pin")).to_equal(true)
+        expect(reply.controller_root_cleanup.is_none()).to_equal(true)
+
+    it "rejects unknown commands and framing characters before effects":
+        step("Exercise the production shape validator without an installed fixture")
+        expect(controller_service_shape_v3(["controller-service-retry"])).to_equal("controller-service-command-unsupported")
+        expect(controller_service_shape_v3(["controller-service-stop", "root\nother", "a".repeat(64)])).to_equal("controller-service-argument")
+
+    it "does not admit a changed argument shape as an operation control":
+        step("Refuse extra stop fields and invalid workload identifiers")
+        expect(controller_service_shape_v3(["controller-service-stop", "root", "a".repeat(64), "operation"])).to_equal("controller-service-status-usage")
+        val reply = orchestrator_command_v1(["controller-service-cancel", "root", "a".repeat(64), "../other"])
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output.contains("controller-service-workload-id")).to_equal(true)
+        expect(reply.controller_dispatch_cleanup.is_none()).to_equal(true)

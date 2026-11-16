@@ -1,0 +1,72 @@
+# Closed CPU-only probe DATA, never a durable action or release grant.
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.linux_fresh_workload_inspect_format_v2
+use std.common.contracts.container.execution_v2.{container_execution_request_encode_v2, container_host_scope_bytes_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
+use std.common.crypto.sha256.sha256_text
+
+pub enum LinuxFreshWorkloadProbeActionV3:
+    Wait
+    Logs
+
+pub struct LinuxFreshWorkloadProbeCommandV3:
+    workload: LinuxFreshWorkloadCommandV2
+    action: LinuxFreshWorkloadProbeActionV3
+
+# Current enforced cohort only: no Subject/running/namespace/pane witness,
+# actual OCI absence or helper retirement is asserted by this DATA snapshot.
+pub struct LinuxFreshWorkloadProbeAbsenceV3:
+    assurance: text
+    request_binding_digest: text
+    native_id: text
+    partition_identity_digest: text
+    store_identity_digest: text
+    native_machine_id: text
+    native_boot_id: text
+    excluded_process_identity_digest: text
+    service_uid: i64
+    subuid_start: i64
+    subuid_count: i64
+    owner_generation: i64
+    sample_started_monotonic_ns: i64
+    sample_finished_monotonic_ns: i64
+
+pub fn linux_fresh_workload_probe_command_validate_v3(value: LinuxFreshWorkloadProbeCommandV3) -> Result<(), text>:
+    linux_fresh_workload_command_validate_v2(value.workload)?
+    if value.workload.action != LinuxFreshWorkloadActionV2.Inspect:
+        return Err("fresh-probe-closed-inspect-identity-required")
+    Ok(())
+
+pub fn linux_fresh_workload_probe_binding_v3(value: LinuxFreshWorkloadProbeCommandV3) -> Result<text, text>:
+    linux_fresh_workload_probe_command_validate_v3(value)?
+    val c = value.workload
+    Ok(sha256_text("FRESH-WORKLOAD-PROBE-COHORT-V3\n" + container_execution_request_encode_v2(c.request)? +
+        container_host_scope_bytes_v2(c.scope)? + c.native_id + "\n" + str(c.helper_cpu_millis) + "\n" + str(c.helper_memory_bytes) + "\n"))
+
+# Caller DATA cannot make the base genuine. Actual IO factory obtains this
+# exact Inspect projection directly from the retained successor each time.
+pub fn linux_fresh_workload_probe_project_v3(base: GroupProcessStreamLaunchV2,
+        value: LinuxFreshWorkloadProbeCommandV3) -> Result<GroupProcessStreamLaunchV2, text>:
+    linux_fresh_workload_probe_command_validate_v3(value)?
+    val c = value.workload
+    if base.profile_v3.is_none(): return Err("fresh-probe-helper-profile-required")
+    if base.memory_limit_bytes != c.helper_memory_bytes or base.profile_v3.unwrap().helper_cpu.cpu_millis != c.helper_cpu_millis:
+        return Err("fresh-probe-actual-helper-subcharge-mismatch")
+    val args = base.request.args
+    if args.len() != 17: return Err("fresh-probe-closed-inspect-argv-required")
+    if (args[0] != "--remote=false" or args[1] != "--log-level=error" or args[2] != "--cgroup-manager=cgroupfs" or
+            args[3] != "--root" or args[5] != "--runroot" or args[7] != "--storage-driver" or args[8] != "vfs" or
+            args[9] != "--tmpdir" or not args[4].starts_with("/") or not args[6].starts_with("/") or args[10] != args[6] + "/tmp"):
+        return Err("fresh-probe-actual-engine-prefix-required")
+    if args[11:17] != ["container", "inspect", "--format", linux_fresh_workload_inspect_format_v2(), "--", c.native_id]:
+        return Err("fresh-probe-closed-inspect-tail-required")
+    val verb = match value.action:
+        case LinuxFreshWorkloadProbeActionV3.Wait: "wait"
+        case LinuxFreshWorkloadProbeActionV3.Logs: "logs"
+    var result = base
+    var request = result.request
+    request.args = args[0:11] + [verb, "--", c.native_id]
+    request.timeout_ms = c.timeout_ms
+    request.child_argv_digest = group_process_child_argv_digest_v2(request.program, request.args)
+    result.request = request
+    Ok(result)

@@ -1,0 +1,269 @@
+"""
+## Purpose and audience
+Executable contract for the read-only `simple test query` and `simple test
+explain` subcommands. Argument parsing and rendering are pure functions over
+domain types (limit, cursor, format, exit decision); the only I/O case opens a
+scratch TestDB and proves the command never rewrites it.
+
+Written for test-runner owners and for reviewers who must trust that a query
+cannot change the evidence it reports on.
+
+## Operator workflow
+bin/simple test test/01_unit/app/test_runner_new/test_query_cli_spec.spl
+
+## Verification guidance and troubleshooting
+A failure in the read-only case means the query path saved, migrated or sealed
+the database: check `open_test_db_read_only` in
+src/app/test_runner_new/test_query_cli.spl.
+"""
+use std.spec.{describe, it, expect, step}
+use std.database.test_extended.database.{TestDatabaseExtended}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write, file_modified_time}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, dir_list}
+use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.test_query.{
+    TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit, TestQueryCursor, TestQuery,
+    TestQueryStatus, TestQualification, TestQueryRow, TestQueryPage, TestQueryTruncation,
+    TestQueryCoverage, TestQueryError, TestQueryErrorKind, TestPlannedCaseIdentity,
+    TestAttemptIdentity, TestAttemptOrdinal, TestEvidenceProvenance, TestPlannedCaseId
+}
+use app.test_runner_new.test_query_cli.{
+    TestDbFilePath, TestQueryFormat, TestQueryCommand, TestQueryCliRequest, TestQueryExitDecision,
+    parse_test_query_args, render_test_query_page, render_test_explain_page,
+    render_test_query_outcome, test_query_exit_code, execute_test_query,
+    test_query_subcommand_args
+}
+
+val SCRATCH_DIR = "target/test-query-cli-spec"
+
+fn _key() -> TestCaseKey:
+    TestCaseKey(path: TestCasePath(value: "test/a_spec.spl"), name: TestCaseName(value: "adds"))
+
+fn _row(status: TestQueryStatus, qualification: TestQualification, attempt: TestAttemptIdentity, planned: TestPlannedCaseIdentity) -> TestQueryRow:
+    TestQueryRow(case_key: _key(), run_id: TestRunId(value: "run_1"), planned_case: planned, attempt: attempt,
+        status: status, qualification: qualification, provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
+
+fn _ordinal(n: i64) -> TestAttemptIdentity:
+    TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: n))
+
+fn _planned() -> TestPlannedCaseIdentity:
+    TestPlannedCaseIdentity.Recorded(id: TestPlannedCaseId(value: "case_9"))
+
+fn _page(rows: [TestQueryRow], truncation: TestQueryTruncation, coverage: TestQueryCoverage) -> TestQueryPage:
+    TestQueryPage(rows: rows, truncation: truncation, coverage: coverage)
+
+fn _request(args: [text]) -> TestQueryCliRequest:
+    match parse_test_query_args(args):
+        case Ok(request): request
+        case Err(error): fail("fixture args rejected: {error.detail}")
+
+fn _usage_error_of(args: [text]) -> text:
+    match parse_test_query_args(args):
+        case Ok(_): ""
+        case Err(error): error.detail
+
+describe "test query argument parsing":
+    it "parses a case with run, limit, cursor and format":
+        # @req TESTDB-011
+        step("Parse a full query command line")
+        val request = _request(["query", "test/a_spec.spl::adds", "--run", "run_7", "--limit", "5", "--cursor=10", "--format", "sdn"])
+        step("Every typed field carries the supplied value")
+        expect(request.query.case_key.path.value).to_equal("test/a_spec.spl")
+        expect(request.query.case_key.name.value).to_equal("adds")
+        expect(request.query.limit.value).to_equal(5)
+        match request.query.run_id:
+            case Some(run): expect(run.value).to_equal("run_7")
+            case None: fail("run id was dropped")
+        match request.query.cursor:
+            case Some(cursor): expect(cursor.offset).to_equal(10)
+            case None: fail("cursor was dropped")
+        match request.format:
+            case TestQueryFormat.Sdn: pass
+            case TestQueryFormat.Table: fail("format sdn parsed as table")
+
+    it "defaults to table format, limit 50 and no run or cursor":
+        # @req TESTDB-011
+        step("Parse the minimal command line")
+        val request = _request(["query", "test/a_spec.spl::adds"])
+        expect(request.query.limit.value).to_equal(50)
+        expect(request.query.run_id.?).to_equal(false)
+        expect(request.query.cursor.?).to_equal(false)
+
+    it "rejects a bad limit, a missing case separator and other malformed input":
+        # @req TESTDB-011
+        # @capture(statistics): usage error text for each malformed command line
+        step("A non-numeric limit is a usage error naming the flag")
+        expect(_usage_error_of(["query", "a::b", "--limit", "many"])).to_contain("--limit needs an integer")
+        step("A missing :: separator is a usage error")
+        expect(_usage_error_of(["query", "test/a_spec.spl"])).to_contain("missing '::'")
+        step("An empty case name is rejected")
+        expect(_usage_error_of(["query", "test/a_spec.spl::"])).to_contain("non-empty")
+        step("An unknown format, unknown flag, missing value and missing case are rejected")
+        expect(_usage_error_of(["query", "a::b", "--format", "xml"])).to_contain("table or sdn")
+        expect(_usage_error_of(["query", "a::b", "--bogus", "1"])).to_contain("unknown flag")
+        expect(_usage_error_of(["query", "a::b", "--run"])).to_contain("needs a value")
+        expect(_usage_error_of(["query"])).to_contain("missing <path>::<case>")
+        step("Explain takes no cursor")
+        expect(_usage_error_of(["explain", "a::b", "--cursor", "3"])).to_contain("explain does not take --cursor")
+
+    it "recognises only the query and explain subcommands":
+        # @req TESTDB-011
+        step("Plain test arguments are not claimed by the query facade")
+        expect(test_query_subcommand_args(["query", "a::b"]).len() > 0).to_equal(true)
+        expect(test_query_subcommand_args(["explain", "a::b"]).len() > 0).to_equal(true)
+        expect(test_query_subcommand_args(["test/a_spec.spl"]).len() > 0).to_equal(false)
+        expect(test_query_subcommand_args([]).len() > 0).to_equal(false)
+        step("The dispatcher's leading `test` token is accepted, and a lone `test` or `test query` path-less call is not a subcommand run")
+        expect(test_query_subcommand_args(["test", "query", "a::b"])).to_equal(["query", "a::b"])
+        expect(test_query_subcommand_args(["test"]).len() > 0).to_equal(false)
+        expect(test_query_subcommand_args(["test", "test/query_spec.spl"]).len() > 0).to_equal(false)
+
+describe "test query rendering":
+    it "renders typed rows in table form with qualification":
+        # @req TESTDB-012
+        step("Render one failed and one passed attempt")
+        val page = _page([
+            _row(TestQueryStatus.Failed, TestQualification.NotPass, _ordinal(0), _planned()),
+            _row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(1), _planned())],
+            TestQueryTruncation.Complete, TestQueryCoverage.Full)
+        val out = render_test_query_page(page, TestQueryFormat.Table)
+        step("Each row states status and qualification; a complete page has no partial marker")
+        expect(out).to_contain("run_1 | case_9 | 0 | failed | not_pass")
+        expect(out).to_contain("run_1 | case_9 | 1 | passed | pass")
+        expect(out).to_contain("rows: 2")
+        expect(out.contains("partial")).to_equal(false)
+
+    it "renders sdn form":
+        # @req TESTDB-012
+        step("Render one row as SDN")
+        val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())],
+            TestQueryTruncation.Complete, TestQueryCoverage.Full)
+        val out = render_test_query_page(page, TestQueryFormat.Sdn)
+        expect(out).to_contain("test_query_rows |run, planned_case, attempt, status, qualification, provenance|")
+        expect(out).to_contain("    run_1, case_9, 0, passed, pass")
+
+    it "announces truncation with a partial marker and the next cursor":
+        # @req TESTDB-013
+        step("Render a truncated page")
+        val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())],
+            TestQueryTruncation.Truncated(next: TestQueryCursor(offset: 1)), TestQueryCoverage.Full)
+        val out = render_test_query_page(page, TestQueryFormat.Table)
+        step("The cut is never silent")
+        expect(out).to_contain("partial: truncated")
+        expect(out).to_contain("next cursor: 1")
+
+    it "marks unfinished or identity-less attempts as partial":
+        # @req TESTDB-013
+        step("Render a partial-coverage page with a missing attempt identity")
+        val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, TestAttemptIdentity.Missing, TestPlannedCaseIdentity.Missing)],
+            TestQueryTruncation.Complete, TestQueryCoverage.Partial)
+        val out = render_test_query_page(page, TestQueryFormat.Sdn)
+        expect(out).to_contain("partial: some attempts")
+        expect(out).to_contain("missing, passed")
+
+describe "test explain":
+    it "explains why a passed attempt qualifies and a skipped one does not":
+        # @req TESTDB-014
+        step("Explain a passed and a skipped attempt")
+        val page = _page([
+            _row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned()),
+            _row(TestQueryStatus.Skipped, TestQualification.NotPass, _ordinal(1), _planned())],
+            TestQueryTruncation.Complete, TestQueryCoverage.Full)
+        val out = render_test_explain_page(page)
+        expect(out).to_contain("status=passed")
+        expect(out).to_contain("qualifies as PASS")
+        expect(out).to_contain("status=skipped")
+        expect(out).to_contain("does not qualify: skipped means the case did not execute")
+        expect(out).to_contain("identity: complete")
+
+    it "never qualifies cached, blocked or unknown statuses":
+        # @req TESTDB-014
+        step("Explain cached, blocked and unrecognised attempts")
+        val page = _page([
+            _row(TestQueryStatus.Cached, TestQualification.NotPass, _ordinal(0), _planned()),
+            _row(TestQueryStatus.Blocked, TestQualification.NotPass, _ordinal(1), _planned()),
+            _row(TestQueryStatus.Unknown(raw: "weird"), TestQualification.NotPass, _ordinal(2), _planned())],
+            TestQueryTruncation.Complete, TestQueryCoverage.Full)
+        val out = render_test_explain_page(page)
+        expect(out).to_contain("a cached result was reused")
+        expect(out).to_contain("blocked means execution was prevented")
+        expect(out).to_contain("unrecognised status 'weird' is never PASS")
+        expect(out.contains("qualifies as PASS")).to_equal(false)
+
+    it "says explicitly when identity fields are missing":
+        # @req TESTDB-014
+        step("Explain an attempt with neither planned case nor attempt identity")
+        val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, TestAttemptIdentity.Missing, TestPlannedCaseIdentity.Missing)],
+            TestQueryTruncation.Complete, TestQueryCoverage.Partial)
+        val out = render_test_explain_page(page)
+        expect(out).to_contain("identity missing: planned case id missing")
+        expect(out).to_contain("attempt identity missing")
+
+describe "test query exit decisions":
+    it "maps outcomes to the documented exit codes":
+        # @req TESTDB-015
+        step("Rows found is 0, no rows is 1, usage and unreadable store are 2")
+        val request = _request(["query", "test/a_spec.spl::adds"])
+        val found = render_test_query_outcome(request, Ok(_page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())], TestQueryTruncation.Complete, TestQueryCoverage.Full)))
+        expect(test_query_exit_code(found.decision).value).to_equal(0)
+        val empty = render_test_query_outcome(request, Ok(_page([], TestQueryTruncation.Complete, TestQueryCoverage.Full)))
+        expect(test_query_exit_code(empty.decision).value).to_equal(1)
+        expect(empty.text).to_contain("no rows")
+        val unreadable = render_test_query_outcome(request, Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "boom")))
+        expect(test_query_exit_code(unreadable.decision).value).to_equal(2)
+        expect(unreadable.text).to_contain("test database unreadable: boom")
+        val unknown_run = render_test_query_outcome(request, Err(TestQueryError(kind: TestQueryErrorKind.UnknownRun, detail: "run not found: x")))
+        expect(test_query_exit_code(unknown_run.decision).value).to_equal(2)
+
+describe "test query against a real database file":
+    it "leaves the database, its wal and its directory byte-for-byte unchanged":
+        # @req TESTDB-016
+        step("Save a scratch database with one run of the queried case")
+        dir_remove_all(SCRATCH_DIR)
+        dir_create_all(SCRATCH_DIR)
+        val db_path = SCRATCH_DIR + "/test_db.sdn"
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(db_path), current_run_id: "")
+        val run_id = owner.start_run()
+        match owner.db.record_trace_case_events(run_id, "test/a_spec.spl", [TraceCaseEvent("adds", "started", "not_finished"), TraceCaseEvent("adds", "finished", "passed")]):
+            case Ok(_): pass
+            case Err(reason): fail("fixture events rejected: {reason}")
+        match owner.save():
+            case Ok(_): pass
+            case Err(reason): fail("fixture save failed: {reason}")
+        val bytes_before = file_read(db_path)
+        val mtime_before = file_modified_time(db_path)
+        val listing_before = dir_list(SCRATCH_DIR)
+        val wal_before = file_exists(db_path + ".wal")
+        step("Run query and explain through the real command path")
+        val query_out = execute_test_query(_request(["query", "test/a_spec.spl::adds"]), TestDbFilePath(value: db_path))
+        val explain_out = execute_test_query(_request(["explain", "test/a_spec.spl::adds"]), TestDbFilePath(value: db_path))
+        expect(test_query_exit_code(query_out.decision).value).to_equal(0)
+        expect(query_out.text).to_contain("passed | pass")
+        expect(explain_out.text).to_contain("qualifies as PASS")
+        step("Bytes, mtime, wal presence and directory listing are all unchanged")
+        expect(file_read(db_path) == bytes_before).to_equal(true)
+        expect(file_modified_time(db_path)).to_equal(mtime_before)
+        expect(file_exists(db_path + ".wal")).to_equal(wal_before)
+        expect(dir_list(SCRATCH_DIR).len()).to_equal(listing_before.len())
+        dir_remove_all(SCRATCH_DIR)
+
+    it "reports a missing or corrupt database as exit 2 and creates nothing":
+        # @req TESTDB-016
+        step("A missing database is a typed error and is not cold-started")
+        dir_remove_all(SCRATCH_DIR)
+        dir_create_all(SCRATCH_DIR)
+        val missing = TestDbFilePath(value: SCRATCH_DIR + "/absent.sdn")
+        val request = _request(["query", "test/a_spec.spl::adds"])
+        val absent = execute_test_query(request, missing)
+        expect(test_query_exit_code(absent.decision).value).to_equal(2)
+        expect(absent.text).to_contain("no test database at")
+        expect(file_exists(missing.value)).to_equal(false)
+        step("An empty (corrupt) database file is exit 2 with typed text and stays untouched")
+        val corrupt = TestDbFilePath(value: SCRATCH_DIR + "/corrupt.sdn")
+        expect(file_write(corrupt.value, "")).to_equal(true)
+        val broken = execute_test_query(request, corrupt)
+        expect(test_query_exit_code(broken.decision).value).to_equal(2)
+        expect(broken.text).to_contain("test database unreadable")
+        expect(file_read(corrupt.value)).to_equal("")
+        dir_remove_all(SCRATCH_DIR)

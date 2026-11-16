@@ -1,0 +1,77 @@
+# @req REQ-001 REQ-003 REQ-004 REQ-005
+# NOT_RUN: requires an admitted self-hosted runtime. Uses real controller WAL.
+use std.spec
+use std.io.file.read_file
+use app.io.mod.cwd
+use app.orchestrator.local_controller.orchestrator_local_command_v1
+use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
+use app.orchestrator.controller_gateway_v1.*
+use app.orchestrator.server_command_v1.server_selection_v1
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.common.crypto.sha256.sha256_text
+
+fn server_test_root_v1() -> text:
+    val reply = orchestrator_reply_cleanup_v2(orchestrator_local_command_v1(["local-init", "/tmp", "server-test-controller"]))
+    expect(reply.exit_code).to_equal(0)
+    val parsed = sdn_parse_strict_v1(reply.output, SdnStrictLimitsV1(max_source_bytes: 65536,
+        max_depth: 4, max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 32)).unwrap()
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: panic("controller initialization did not return an object")
+    match fields["stateRoot"]:
+        case SdnValue.String(root): root
+        case _: panic("controller initialization did not return its private root")
+
+fn server_test_call_v1(config: ControllerGatewayConfigV1, request: ControllerGatewayRequestV1) -> text:
+    val source = controller_gateway_request_encode_v1(request).unwrap()
+    val header = controller_gateway_header_v1(source).unwrap()
+    val dispatched = controller_gateway_dispatch_v1(config, header, source).unwrap()
+    val reply = orchestrator_reply_cleanup_v2(dispatched)
+    expect(reply.exit_code).to_equal(0)
+    expect(reply.journal_cleanup.is_none()).to_equal(true)
+    controller_gateway_response_v1(source, reply.output).unwrap()
+
+describe "Shared server selection and actual controller state":
+    it "selects shared and separate service contexts through the application command":
+        step("Select a shared orchestration server")
+        val path = cwd() + "/test/fixtures/server_contexts/shared.sdn"
+        val simple = server_selection_v1(["server-resolve", path, "simple", "-", "-", "host"]).unwrap()
+        val orchestrator = server_selection_v1(["server-resolve", path, "orchestrator", "-", "-", "host"]).unwrap()
+        expect(simple.record.name).to_equal("shared")
+        expect(orchestrator.record.auth_ref).to_equal(simple.record.auth_ref)
+        step("Override a consumer server")
+        val caret = server_selection_v1(["server-resolve", path, "caret", "development", "-", "host"]).unwrap()
+        expect(caret.record.transport).to_equal("local")
+        val agent = server_selection_v1(["server-resolve", path, "agent", "development", "-", "container"]).unwrap()
+        expect(agent.record.host).to_equal("192.168.50.2")
+
+    it "retains submission and cancellation through the typed controller gateway":
+        step("Install a private local controller for this scenario")
+        val root = server_test_root_v1()
+        val config = ControllerGatewayConfigV1(state_root: root, controller_id: "server-test-controller",
+            allowed_actions: ["submit", "inspect", "cancel"])
+        val source = read_file("test/fixtures/orchestration/caret_agent_session.sdn")
+        var request = ControllerGatewayRequestV1(action: "submit", controller_id: "server-test-controller",
+            request_uid: "server-context-session", source: source, ns: "caret", name: "review-simple", source_digest: "")
+        step("Submit an AgentSession as retained intent")
+        val submitted = server_test_call_v1(config, request)
+        expect(submitted).to_contain("intent-retained")
+        expect(submitted).to_contain("executionAuthorized: false")
+        request.action = "inspect"
+        request.source = ""
+        request.ns = ""
+        request.name = ""
+        step("Inspect the same immutable request identity")
+        val inspected = server_test_call_v1(config, request)
+        expect(inspected).to_contain("server-context-session")
+        request.action = "cancel"
+        request.source_digest = sha256_text(source)
+        step("Request cancellation without claiming process termination")
+        val cancelled = server_test_call_v1(config, request)
+        expect(cancelled).to_contain("intent-cancelled")
+        expect(cancelled).to_contain("terminationObserved: false")
+        request.action = "inspect"
+        request.source_digest = ""
+        expect(server_test_call_v1(config, request)).to_contain("intent-cancelled")

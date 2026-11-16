@@ -59,11 +59,11 @@ describe "vulkan_jit lane -- step-budget decrement/exhaustion-check emission (de
         b.emit_function_end()
 
         step("Assert the generated assembly contains the decrement+check sequence in order")
-        val asm = b.build()
-        val load_idx = asm.find("OpLoad")
-        val isub_idx = asm.find("OpISub")
-        val store_idx = asm.find("OpStore")
-        val iequal_idx = asm.find("OpIEqual")
+        val spirv_text = b.build()
+        val load_idx = spirv_text.find("OpLoad")
+        val isub_idx = spirv_text.find("OpISub")
+        val store_idx = spirv_text.find("OpStore")
+        val iequal_idx = spirv_text.find("OpIEqual")
 
         assert_true(load_idx >= 0)
         assert_true(isub_idx >= 0)
@@ -74,7 +74,7 @@ describe "vulkan_jit lane -- step-budget decrement/exhaustion-check emission (de
         assert_true(store_idx < iequal_idx)
 
         step("Assert the decrement subtracts exactly 1 (a fresh OpConstant ... 1 feeds OpISub)")
-        assert_true(asm.contains("= OpConstant %{uint_t} 1"))
+        assert_true(spirv_text.contains("= OpConstant %{uint_t} 1"))
 
     it "the exhaustion check compares the decremented budget against zero, not the pre-decrement value":
         # @req REQ-SSPEC-COMPILER
@@ -87,12 +87,12 @@ describe "vulkan_jit lane -- step-budget decrement/exhaustion-check emission (de
 
         val ids = emit_step_budget_decrement_check(b, uint_t, bool_t, budget_ptr)
 
-        val asm = b.build()
-        val iequal_line_start = asm.find("OpIEqual")
+        val spirv_text = b.build()
+        val iequal_line_start = spirv_text.find("OpIEqual")
         val decremented_ref = "%{ids.decremented_budget}"
         step("The OpIEqual operands must reference the post-decrement id, not the loaded id")
         assert_true(iequal_line_start >= 0)
-        val tail = asm[iequal_line_start:asm.len()]
+        val tail = spirv_text[iequal_line_start:spirv_text.len()]
         assert_true(tail.contains(decremented_ref))
 
 describe "vulkan_jit lane -- while-true loop kernel wires the budget check into real control flow (design §6.3)":
@@ -106,19 +106,19 @@ describe "vulkan_jit lane -- while-true loop kernel wires the budget check into 
     it "contains the budget-decrement sequence AND a conditional branch out of the loop":
         # @req REQ-SSPEC-COMPILER
         step("contains the budget-decrement sequence AND a conditional branch out of the loop")
-        val asm = build_while_true_budget_loop_spirv()
+        val spirv_text = build_while_true_budget_loop_spirv()
 
         step("Budget-decrement sequence present")
-        assert_true(asm.contains("OpLoad"))
-        assert_true(asm.contains("OpISub"))
-        assert_true(asm.contains("OpIEqual"))
+        assert_true(spirv_text.contains("OpLoad"))
+        assert_true(spirv_text.contains("OpISub"))
+        assert_true(spirv_text.contains("OpIEqual"))
 
         step("Conditional branch-out (never an unconditional OpBranch back into the loop alone)")
-        assert_true(asm.contains("OpBranchConditional"))
-        assert_true(asm.contains("OpSelectionMerge"))
+        assert_true(spirv_text.contains("OpBranchConditional"))
+        assert_true(spirv_text.contains("OpSelectionMerge"))
 
         step("The GMB-1 timeout sentinel 0xDEAD0000 is written on the exhausted path")
-        assert_true(asm.contains("3735097344"))
+        assert_true(spirv_text.contains("3735097344"))
 
     it "assembles cleanly with spirv-as when the tool is present on this host (host-aware optional)":
         # @req REQ-SSPEC-COMPILER
@@ -129,10 +129,10 @@ describe "vulkan_jit lane -- while-true loop kernel wires the budget check into 
             step("skip: spirv-as not found on this host")
             assert_true(true)
         else:
-            val asm = build_while_true_budget_loop_spirv()
+            val spirv_text = build_while_true_budget_loop_spirv()
             val asm_path = "build/tmp/vulkan_jit_step_budget_loop_unit_spec.spvasm"
             val bin_path = "build/tmp/vulkan_jit_step_budget_loop_unit_spec.spv"
-            assert_true(file_write(asm_path, asm))
+            assert_true(file_write(asm_path, spirv_text))
             val (stdout, stderr, exit_code) = process_run_bounded(
                 "spirv-as", [asm_path, "-o", bin_path], 30000, 65536)
             expect(exit_code).to_equal(0)

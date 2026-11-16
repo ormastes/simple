@@ -18,7 +18,9 @@
 # Verdict (last stdout line): PASS — <n> function(s) checked, 0 mixed
 #                            FAIL — <n> function(s) checked, <k> mixed: ...
 #                            ERROR — nothing was checked
-# Exit 0 / 1 / 2. --selftest runs 15 fixtures first and is fatal.
+# Exit 0 / 1 / 2. --selftest runs regression fixtures first and is fatal.
+# Explicit [u8] parameters/local bindings have byte-count len(); their simple
+# receiver uses are excluded, with lexical shadowing and per-function reset.
 #
 # Rule 4 (len()-bounded byte scan, bug
 # doc/08_tracking/bug/len_bounded_byte_scanners_non_ascii_2026_11_14.md):
@@ -36,6 +38,117 @@ scan_file() {
   # prints "file:line receiver" for each byte_len() line whose enclosing fn
   # also applies `recv[` ; prints "FNCOUNT <n>" on stderr-free channel last
   awk -v F="$1" '
+    function binding_code(text,   i, c, quote, escaped, result) {
+      # Binding keywords/backslashes inside quoted values are not syntax.
+      result = ""; quote = ""; escaped = 0
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (quote != "") {
+          if (escaped) escaped = 0
+          else if (c == "\\") escaped = 1
+          else if (c == quote) quote = ""
+          result = result " "
+        } else if (c == "\"" || c == sprintf("%c", 39)) {
+          quote = c; result = result " "
+        } else result = result c
+      }
+      return result
+    }
+    function bind_type(name, depth, byte_array) {
+      binding_count++
+      binding_name[binding_count] = name
+      binding_depth[binding_count] = depth
+      binding_byte[binding_count] = byte_array
+    }
+    function byte_receiver(text, start, name,   i, previous, prefix) {
+      # Inline conditional/pattern/lambda bodies may shadow on this line.
+      if (binding_header_here) return 0
+      # Do not mistake object.bytes.len() for a local parameter named bytes.
+      previous = start > 1 ? substr(text, start - 1, 1) : ""
+      if (previous ~ /[A-Za-z_0-9.]/) return 0
+      prefix = substr(text, 1, start - 1)
+      sub(/[ \t]+$/, "", prefix)
+      if (substr(prefix, length(prefix), 1) == ".") return 0
+      for (i = binding_count; i > 0; i--)
+        if (binding_name[i] == name) return binding_byte[i]
+      return 0
+    }
+    function byte_annotations(text, depth,   item, name) {
+      while (match(text, /[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*\[[ \t]*u8[ \t]*\]([ \t]*[,=)]|[ \t]*$)/)) {
+        item = substr(text, RSTART, RLENGTH)
+        name = item; sub(/[ \t]*:.*/, "", name)
+        bind_type(name, depth, 1)
+        text = substr(text, RSTART + RLENGTH)
+      }
+    }
+    function signature_types(text, depth,   i, c, part) {
+      # Only the parameter list, including continued lines, grants a type.
+      # Parenthesized defaults do not end the outer signature early.
+      part = ""
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (signature_quote) {
+          if (signature_escape) signature_escape = 0
+          else if (c == "\\") signature_escape = 1
+          else if (c == "\"") signature_quote = 0
+          part = part " "; continue
+        }
+        if (c == "\"") { signature_quote = 1; part = part " "; continue }
+        if (c == "(") { signature_depth++; signature_started = 1 }
+        if (signature_started) part = part (signature_depth == 1 ? c : " ")
+        if (c == ")") {
+          signature_depth--
+          if (signature_started && signature_depth == 0) { signature_active = 0; break }
+        }
+      }
+      byte_annotations(part, depth + 1)
+    }
+    function local_types(text, depth,   declaration, name, explicit_byte, i, prior) {
+      # A new local binding shadows a parameter even when its type is inferred.
+      # Install after scanning its initializer, where an outer name may occur.
+      if (text ~ /^[ \t]*(val|var)[ \t]+/) {
+        declaration = text
+        sub(/^[ \t]*(val|var)[ \t]+/, "", declaration)
+        sub(/=.*/, "", declaration)
+        explicit_byte = declaration ~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*\[[ \t]*u8[ \t]*\][ \t]*$/
+        if (explicit_byte) byte_annotations(declaration, depth)
+        else {
+          # Includes tuple destructuring; unknown types never grant exemption.
+          sub(/:.*/, "", declaration)
+          while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
+            name = substr(declaration, RSTART, RLENGTH)
+            bind_type(name, depth, 0)
+            declaration = substr(declaration, RSTART + RLENGTH)
+          }
+        }
+      } else if (text ~ /^[ \t]*for[ \t]+/ || text ~ /^[ \t]*case[ \t]+/) {
+        declaration = text
+        sub(/^[ \t]*(for|case)[ \t]+/, "", declaration)
+        sub(/[ \t]+in[ \t].*|:.*/, "", declaration)
+        while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
+          name = substr(declaration, RSTART, RLENGTH)
+          bind_type(name, depth + 1, 0)
+          declaration = substr(declaration, RSTART + RLENGTH)
+        }
+      }
+      # Conditional bindings are body-local, including expression/inline forms.
+      if (match(text, /(^|[^A-Za-z_0-9])(if|elif|while)[ \t]+(val|var)[ \t]+/)) {
+        declaration = substr(text, RSTART + RLENGTH)
+        sub(/[=:].*/, "", declaration)
+        while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
+          name = substr(declaration, RSTART, RLENGTH)
+          bind_type(name, depth + 1, 0)
+          declaration = substr(declaration, RSTART + RLENGTH)
+        }
+      }
+      # Do not infer lambda parameter/capture types. Conservatively suspend
+      # inherited exemptions for its body, then restore them on lexical dedent.
+      if (index(text, "\\") > 0) {
+        prior = binding_count
+        for (i = 1; i <= prior; i++)
+          if (binding_byte[i]) bind_type(binding_name[i], depth + 1, 0)
+      }
+    }
     function flush(   r, l, x, scanned) {
       scanned = 0
       for (r in bl) {
@@ -68,10 +181,15 @@ scan_file() {
       if (!fnbl) for (r in lb) if ((r) in bop) print "R4 " F " " fname " " r
       delete bl; delete ix; delete bf; delete argref; delete lu; delete alias; delete sameline
       delete lb; delete bop; fnbl = 0
+      delete binding_name; delete binding_depth; delete binding_byte; binding_count = 0
+      signature_active = 0; signature_started = 0; signature_depth = 0
+      signature_quote = 0; signature_escape = 0
     }
     /^[ \t]*(pub |export )?(fn|me|async fn|async me|static fn) / {
       flush(); fncount++
       fname = $0; sub(/^[ \t]*(pub |export )?(async |static )?(fn|me) +/, "", fname); sub(/[^A-Za-z_0-9].*$/, "", fname)
+      signature_active = 1
+      signature_indent = match($0, /[^ \t]/) - 1
     }
     /^[ \t]*#/ { next }
     {
@@ -82,6 +200,14 @@ scan_file() {
       if (in_doc) next
       line = $0
       sub(/#.*$/, "", line)
+      indent = match(line, /[^ \t]/) - 1
+      if (indent < 0) next
+      if (!signature_active)
+        while (binding_count > 0 && binding_depth[binding_count] > indent) binding_count--
+      binding_line = binding_code(line)
+      binding_header_here = binding_line ~ /^[ \t]*(for|case)[ \t]+/ ||
+        binding_line ~ /(^|[^A-Za-z_0-9])(if|elif|while)[ \t]+(val|var)[ \t]+/ || index(binding_line, "\\") > 0
+      if (signature_active) signature_types(line, signature_indent)
       if (line ~ /\.byte_len\(\)/) fnbl = 1
       tmp = line
       while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.(substring|byte_at|char_code_at)\(/)) {
@@ -92,7 +218,7 @@ scan_file() {
       while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.len\(\)/)) {
         r = substr(tmp, RSTART, RLENGTH - 6)
         rest = substr(tmp, RSTART + RLENGTH)
-        if (rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) lb[r] = 1
+        if (!byte_receiver(tmp, RSTART, r) && rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) lb[r] = 1
         tmp = rest
       }
       tmp = line
@@ -133,12 +259,14 @@ scan_file() {
       tmp = line
       while (match(tmp, /[A-Za-z_][A-Za-z_0-9]*\.len\(\)/)) {
         r = substr(tmp, RSTART, RLENGTH - 6)
-        lu[r] = lu[r] "," NR
+        is_bytes = byte_receiver(tmp, RSTART, r)
+        if (!is_bytes) lu[r] = lu[r] "," NR
         rest = substr(tmp, RSTART + RLENGTH)
         # An emptiness test (X.len() == 0 / != 0 / > 0) is unit-free.
-        if (bytecall_here && rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) sameline[r] = 1
+        if (!is_bytes && bytecall_here && rest !~ /^ *(==|!=|>|<=) *0([^0-9]|$)/) sameline[r] = 1
         tmp = substr(tmp, RSTART + RLENGTH)
       }
+      local_types(binding_line, indent)
       # Rule 3: a text LITERAL whose len() sits in a byte-unit expression
       # ("APOLV2-".len() next to value.byte_len()) is the same cross-receiver
       # unit mix; a literal has no receiver name, so report it directly.
@@ -296,7 +424,155 @@ selftest() {
     s.byte_len()
 " > src/lib/t.spl)
   v=$(cd "$gr" && scope_tip=HEAD; scope_files="$fx/scope_t"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: broken tip + clean working copy must FAIL, got rc=$rc: $v"; exit 2; }
-  echo "selftest: 15 fixtures OK"
+  # A typed byte array counts bytes with len(). Exemption belongs to the
+  # actual simple binding, not its spelling elsewhere in the file/function.
+  mkdir -p "$fx/typed" "$fx/shadowed"
+  cat > "$fx/typed/arrays.spl" <<'FIXTURE'
+fn parameter(bytes: [u8], value: text) -> bool:
+    value.byte_len() == bytes.len()
+
+fn multiline(
+    bytes: [u8],
+    value: text
+) -> bool:
+    value.byte_len() == bytes.len()
+
+fn local(value: text) -> bool:
+    val bytes: [u8] = value.to_bytes()
+    value.byte_len() == bytes.len()
+
+fn width(bytes: [u8], value: text) -> text:
+    val count = bytes.len()
+    value.substring(0, count)
+
+fn restored(bytes: [u8], value: text, condition: bool) -> bool:
+    if condition:
+        val bytes: text = value
+        print bytes
+    value.byte_len() == bytes.len()
+
+fn matched(value: text) -> bool:
+    val bytes: [u8] = match value.to_bytes_checked():
+        case Ok(result): result
+        case Err(_): return false
+    value.byte_len() == bytes.len()
+
+fn conditional_restored(bytes: [u8], value: text, item: Option<text>) -> bool:
+    if val bytes = item:
+        print bytes
+    value.byte_len() == bytes.len()
+
+fn quoted(bytes: [u8], value: text) -> bool:
+    val note = "\\bytes: if val bytes = item"
+    value.byte_len() == bytes.len()
+FIXTURE
+  v=$(run_scan "$fx/typed"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: explicit byte arrays must PASS, got rc=$rc: $v"; exit 2; }
+  cat > "$fx/shadowed/text.spl" <<'FIXTURE'
+fn text_receiver(bytes: text, value: text) -> bool:
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/local.spl" <<'FIXTURE'
+fn shadow(bytes: [u8], value: text) -> bool:
+    val bytes = value
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/nested.spl" <<'FIXTURE'
+fn shadow(bytes: [u8], value: text, condition: bool) -> bool:
+    if condition:
+        val bytes: text = value
+        return value.byte_len() == bytes.len()
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/function.spl" <<'FIXTURE'
+fn first(bytes: [u8], value: text) -> bool:
+    value.byte_len() == bytes.len()
+
+fn second(bytes: text, value: text) -> bool:
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/member.spl" <<'FIXTURE'
+fn member(bytes: [u8], value: text, object: Record) -> bool:
+    value.byte_len() == object.bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/member_space.spl" <<'FIXTURE'
+fn member(bytes: [u8], value: text, object: Record) -> bool:
+    value.byte_len() == object. bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/loop.spl" <<'FIXTURE'
+fn loop(bytes: [u8], value: text, values: [text]) -> bool:
+    for bytes in values:
+        if value.byte_len() == bytes.len(): return true
+    false
+FIXTURE
+  cat > "$fx/shadowed/match.spl" <<'FIXTURE'
+fn matched(bytes: [u8], value: text, item: Option<text>) -> bool:
+    match item:
+        case Some(bytes):
+            value.byte_len() == bytes.len()
+        case None: false
+FIXTURE
+  cat > "$fx/shadowed/inline.spl" <<'FIXTURE'
+fn matched(bytes: [u8], value: text, item: Option<text>) -> bool:
+    match item:
+        case Some(bytes): value.byte_len() == bytes.len()
+        case None: false
+FIXTURE
+  cat > "$fx/shadowed/tuple.spl" <<'FIXTURE'
+fn unpack(bytes: [u8], value: text, pair: (text, i64)) -> bool:
+    val (bytes, count) = pair
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/initializer.spl" <<'FIXTURE'
+fn initializer(bytes: text, value: text) -> bool:
+    val bytes: [u8] = value.substring(0, bytes.len()).to_bytes()
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/unknown.spl" <<'FIXTURE'
+fn inferred(bytes, value: text) -> bool:
+    value.byte_len() == bytes.len()
+FIXTURE
+  cat > "$fx/shadowed/ifval.spl" <<'FIXTURE'
+fn conditional(bytes: [u8], value: text, item: Option<text>) -> bool:
+    if val bytes = item:
+        return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  cat > "$fx/shadowed/ifval_inline.spl" <<'FIXTURE'
+fn conditional_inline(bytes: [u8], value: text, item: Option<text>) -> bool:
+    if val bytes = item: return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  cat > "$fx/shadowed/whileval.spl" <<'FIXTURE'
+fn conditional_loop(bytes: [u8], value: text, item: Option<text>) -> bool:
+    while val bytes = item:
+        return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  cat > "$fx/shadowed/elifvar.spl" <<'FIXTURE'
+fn conditional_branch(bytes: [u8], value: text, item: Option<text>, condition: bool) -> bool:
+    if condition:
+        return false
+    elif var bytes = item:
+        return value.byte_len() == bytes.len()
+    false
+FIXTURE
+  cat > "$fx/shadowed/lambda.spl" <<'FIXTURE'
+fn lambda_shadow(bytes: [u8], value: text, values: [text]):
+    values.map(\bytes: value.byte_len() == bytes.len())
+FIXTURE
+  cat > "$fx/shadowed/lambda_multiline.spl" <<'FIXTURE'
+fn lambda_shadow(bytes: [u8], value: text):
+    val compare = \bytes:
+        value.byte_len() == bytes.len()
+    compare
+FIXTURE
+  v=$(run_scan "$fx/shadowed"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: text/unknown/shadowed bindings must FAIL, got rc=$rc: $v"; exit 2; }
+  for fixture in text local nested function member member_space loop match inline tuple initializer unknown ifval ifval_inline whileval elifvar lambda lambda_multiline; do
+    printf '%s\n' "$v" | grep -Fq "$fixture.spl bytes (len() as byte width) (NEW" || { echo "selftest: $fixture text-width evidence was lost: $v"; exit 2; }
+  done
+  hits=$(printf '%s\n' "$v" | grep -c '(NEW byte/code-point unit mix)' || true)
+  [ "$hits" -eq 18 ] || { echo "selftest: expected exactly 18 unsafe typed-binding fixtures, got $hits: $v"; exit 2; }
+  echo "selftest: existing ratchets and 26 typed-binding cases OK"
 }
 
 do_selftest=0

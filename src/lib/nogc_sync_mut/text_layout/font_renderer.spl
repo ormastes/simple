@@ -344,7 +344,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # a 3-character string 6 times and read phantom zero codepoints past the end —
 # inflating every non-ASCII advance array, width, and rendered run.
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
-use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
@@ -363,13 +363,13 @@ use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex
 use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
-use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_face_blob_sha256_hex_cached, shaper_new, shaper_shape_with_language, shaper_with_ot_face_blob_hex, shaper_with_ot_font}
+use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_face_blob_sha256_hex_cached, shaper_new, shaper_shape_with_language, shaper_with_ot_face_blob_hex, shaper_with_registered_ot_font}
 use std.skia.feature.shaper.script_detect.{Script, script_of}
 export use std.nogc_sync_mut.text_layout.font_types.{
     CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
     FontRenderConfig, FontExecutionPolicy, font_execution_plan, font_execution_plan_into, font_render_category_name,
     font_render_config_normalize, font_render_config_default_for_size,
-    font_render_config_identity, font_render_config_valid,
+    font_render_config_identity, font_render_config_identity_sizeless, font_render_config_valid,
     font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity
 }
 
@@ -1226,6 +1226,8 @@ class FontRenderer:
     # the wipe, i.e. to the previous behaviour.
     atlas_parks: [FontAtlasPark] = []
     active_render_config_identity: text = ""
+    # The same identity with `size=` masked: what decides an atlas wipe.
+    active_render_config_atlas_identity: text = ""
     # ---- Staged FontRenderBatch payload -----------------------------------
     # The prepared batch is written HERE instead of being returned. A
     # FontRenderBatch returned across a call kept its scalars/identity/atlas
@@ -1507,9 +1509,14 @@ class FontRenderer:
             var cache = self.cache
             cache.sync_render_config_identity(identity)
             self.cache = cache
-            if self.active_render_config_identity != "":
+            # Atlas cells are keyed by size already (`_font_atlas_entry_index`),
+            # so a size-only change keeps the atlas. Wiping it here re-rasterised
+            # every glyph and forced a full GPU atlas repack per size switch.
+            val atlas_identity = font_render_config_identity_sizeless(identity)
+            if self.active_render_config_atlas_identity != "" and atlas_identity != self.active_render_config_atlas_identity:
                 self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
             self.active_render_config_identity = identity
+            self.active_render_config_atlas_identity = atlas_identity
 
     # Copy an inbound batch into the staged slot and answer with the quad
     # count. The aggregate crosses only as an INBOUND parameter and the answer
@@ -1860,7 +1867,20 @@ class FontRenderer:
         # below happens INLINE in this method body (never delegated to a
         # separate free-function push helper) -- see the comment on
         # `_glyph_raster_keys` above for why that boundary matters.
-        val raster_identity = if active_rasterizer != nil: active_rasterizer.cache_identity() else: ""
+        # Without a rasterizer the glyph comes from the fallback tier chosen in
+        # "Rasterize" below (ttf handle, vector outline, or bitmap), so the tier
+        # is part of the key: an empty identity alone served the vector 'A'
+        # (7 px) to a bitmap-tier renderer (8x16).
+        val raster_identity = if active_rasterizer != nil:
+            active_rasterizer.cache_identity()
+        else if self.has_ttf():
+            "fallback=ttf:{self.ttf_handle}"
+        else if self.use_vector:
+            "fallback=vector"
+        else if self.use_bitmap:
+            "fallback=bitmap"
+        else:
+            "fallback=none"
         val raster_key = "{raster_identity};cp={codepoint};fs={font_size}"
         var raster_idx = 0
         var raster_hit: CachedGlyph? = nil
@@ -2411,7 +2431,7 @@ class FontRenderer:
                     byte_offset: fallback_byte_offset
                 ))
                 fallback_x = fallback_x + glyph.advance.to_i64()
-                fallback_byte_offset = fallback_byte_offset + 1
+                fallback_byte_offset = fallback_byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())
                 ci = ci + 1
         if layout.len() == 0:
             return FontTextPayload(valid: false, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
@@ -2714,6 +2734,7 @@ class FontRenderer:
         # structs whenever the fallback produced them.
         var fallback_cps: [i32] = []
         var fallback_xs: [i64] = []
+        var fallback_byte_offsets: [i64] = []
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] active-after-layout_text layout_len={layout.len()} use_vector={self.use_vector} use_bitmap={self.use_bitmap} content_len={content.len()}")
@@ -2759,8 +2780,10 @@ class FontRenderer:
                 ))
                 fallback_cps = fallback_cps.push(codepoint)
                 fallback_xs = fallback_xs.push(fallback_x)
+                fallback_byte_offsets = fallback_byte_offsets.push(fallback_byte_offset)
                 fallback_x = fallback_x + glyph.advance.to_i64()
-                fallback_byte_offset = fallback_byte_offset + 1
+                # UTF-8 byte offset (owner decision 2026-11-13: text offsets are bytes).
+                fallback_byte_offset = fallback_byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())
                 ci = ci + 1
         self.text_phase_layout_nonempty = layout.len() > 0
         if layout.len() == 0:
@@ -2831,7 +2854,7 @@ class FontRenderer:
                     requad_cp = fallback_cps[i]
                     quad_dst_x = fallback_xs[i]
                     quad_dst_y = 0
-                    quad_byte_offset = i.to_i64()
+                    quad_byte_offset = fallback_byte_offsets[i]
                 val glyph = self.get_glyph(requad_cp, font_size)
                 if i < fallback_cps.len():
                     quad_dst_x = quad_dst_x + glyph.bearing_x.to_i64()
@@ -3297,7 +3320,7 @@ fn _browser_face_line_units(path: text) -> [i64]:
     _browser_face_line_units_memo_count = _browser_face_line_units_memo_count + 1
     units
 
-fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, font_size: i32) -> i32:
+pub fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, font_size: i32) -> i32:
     if font_size <= 0 or font_size > 512:
         return 0
     if not browser_host_has_measured_linux_face_set():
@@ -3385,7 +3408,10 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
         return _resolved_font_empty_shaped()
     val shaped = if registered_only:
         val font = sk_font_new(sk_typeface_from_attached_font(candidate.family, sk_font_style_normal(), font_path, 0), font_size.to_f64())
-        val shaper = shaper_with_ot_font(shaper_new(fallback_chain_new(font)), parsed.?)
+        # Registered bytes were validated against the pinned digest at
+        # registration (`_registered_selected_font_bytes` returned true), so the
+        # pinned digest names them; see `shaper_with_registered_ot_font`.
+        val shaper = shaper_with_registered_ot_font(shaper_new(fallback_chain_new(font)), parsed.?, candidate.sha256)
         (shaper_shape_with_language(shaper, codepoints, font, 0.0, 0.0, language), 0, 0)
     else:
         val loaded = load_font(font_path)

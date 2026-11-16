@@ -89,7 +89,7 @@ the guide's "Reverse references" subsection for how to read `authority`.
 ## Spec driver and links (2026-11-06)
 
 `check-trace-query-p0.shs` falls back from `test` to `run <spec>` when `test`
-yields no `SPEC FILE VERDICT:` line. Query exit 1 = incomplete graph only (sidecar
+yields no `SPEC FILE VERDICT:` line. Query exit 2 = incomplete graph only (1 = not found; sidecar
 warnings do not change it). req->spec is a sidecar `verified_by` row (`--spec-root`),
 never a graph claim; spec->test-case edges are not ingested (native-only
 `sspec_inventory`). See `doc/07_guide/infra/trace_query_p0.md`.

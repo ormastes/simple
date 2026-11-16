@@ -1,0 +1,342 @@
+"""
+## Purpose and audience
+Purpose: Prove that SPL-BOUND-002 reports a late primitive-to-unit cast of a
+foreign-origin value, and stays silent on ordinary text, typed boundary
+adapters, and Simple-origin domain construction.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Single-file, function-local origin tracking only. Units are recognised when
+declared in the file or imported from a `unit.` module. Cross-file and
+cross-function origin summaries are later slices of the robust-boundary plan
+(doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md).
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts, BoundLateCastFinding}
+
+# @manual_section: bound_late_cast
+describe "SPL-BOUND-002: late foreign-origin unit cast":
+    """A foreign value must become a unit at its SFFI/HAL boundary, not in an
+    arbitrary later function."""
+
+    it "reports a unit cast of a value returned by a raw extern in a safe function":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a safe function that casts a raw extern result to a declared unit")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    return DistanceKm(raw)\n"
+        val fs = check_bound_late_casts(src, "app/client.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+        expect(fs[0].line_num).to_equal(5)
+        expect(fs[0].message).to_contain("DistanceKm")
+
+    it "reports a direct cast wrapping the raw extern call":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast applied directly to an extern call expression")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+        val fs = check_bound_late_casts(src, "app/client.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(4)
+
+    it "follows a copy of the foreign value to the late cast":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a foreign value copied once before the cast")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    val copy = raw\n    DistanceKm(copy)\n"
+        expect(check_bound_late_casts(src, "app/client.spl").len()).to_equal(1)
+
+    it "accepts the cast inside an explicit ffi-unsafe boundary adapter":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint the same cast inside an @unsafe(capabilities: [ffi]) adapter")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\n@unsafe(reason: \"verified C ABI\", capabilities: [ffi])\nfn hal_read_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+        expect(check_bound_late_casts(src, "hal/distance.spl").len()).to_equal(0)
+
+    it "accepts Simple-origin domain construction and ordinary text":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a unit built from a parsed literal and a plain text function")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn parse(n: i32) -> DistanceKm:\n    val v = n + 1\n    DistanceKm(v)\nfn echo(message: text) -> text:\n    message\n"
+        expect(check_bound_late_casts(src, "app/domain.spl").len()).to_equal(0)
+
+    it "does not treat a non-unit call of a foreign value as a cast":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a foreign value passed to an ordinary function")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn show() -> text:\n    val raw = c_read_distance()\n    format_num(raw)\n"
+        expect(check_bound_late_casts(src, "app/show.spl").len()).to_equal(0)
+
+    it "does not leak foreign origin from one function into the next":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint two functions that reuse the same local name")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn a() -> text:\n    val raw = c_read_distance()\n    format_num(raw)\nfn b(raw: i32) -> DistanceKm:\n    DistanceKm(raw)\n"
+        expect(check_bound_late_casts(src, "app/two.spl").len()).to_equal(0)
+
+    it "recognises a unit imported from a unit module":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast to a unit imported via use unit.length")
+        val src = "use unit.length.{{Meter}\nextern fn c_read_len() -> f64\nfn len() -> Meter:\n    Meter(c_read_len())\n"
+        expect(check_bound_late_casts(src, "app/len.spl").len()).to_equal(1)
+
+# Review regressions (2026-11-15): each pins one false positive / negative.
+describe "SPL-BOUND-002 precision regressions":
+    it "accepts an adapter whose @unsafe annotation spans several lines":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a boundary adapter with a two-line @unsafe annotation")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"x\",\n        capabilities: [ffi])\nfn hal() -> Km:\n    Km(c_read())\n"
+        expect(check_bound_late_casts(src, "hal/km.spl").len()).to_equal(0)
+
+    it "does not inherit an annotation from the previous function's body":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a safe function placed directly after a boundary adapter")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"x\", capabilities: [ffi])\nfn hal() -> Km:\n    Km(c_read())\nfn late() -> Km:\n    Km(c_read())\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(7)
+
+    it "clears foreign origin when the name is rebound to a Simple value":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a shadowed binding before the cast")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    val raw = c_read()\n    val raw = 5\n    Km(raw)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "does not match a field that shares a foreign value's name":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast of cfg.raw while a local raw is foreign")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f(cfg: Cfg) -> Km:\n    val raw = c_read()\n    Km(cfg.raw)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "checks every unit cast on a line, not only the first":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a line with a literal cast followed by a foreign cast")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Pair:\n    pair(Km(1), Km(c_read()))\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(1)
+
+    it "recognises the local alias of an imported unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a cast through an aliased unit import (Meter as M)")
+        val src = "use unit.length.{{Meter as M}\nextern fn c_read_len() -> f64\nfn len() -> M:\n    M(c_read_len())\n"
+        expect(check_bound_late_casts(src, "app/len.spl").len()).to_equal(1)
+
+    it "scans async and unsafe function bodies":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint late casts inside async fn and pub unsafe fn")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nasync fn a() -> Km:\n    Km(c_read())\npub unsafe fn b() -> Km:\n    Km(c_read())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(2)
+
+    it "does not match a unit name that is a suffix of another call":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint MyKm(...) where only Km is a unit")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> i32:\n    MyKm(c_read())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "does not inherit an @unsafe that belongs to a preceding extern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a plain function declared right after an annotated extern")
+        val src = "unit Km: i32 as km\n@unsafe(reason: \"x\", capabilities: [ffi])\nextern fn c_read() -> i32\nfn late() -> Km:\n    Km(c_read())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(1)
+
+    it "clears foreign origin on a plain reassignment":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint var x = c_read(), then x = 0, then Km(x)")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    var x = c_read()\n    x = 0\n    Km(x)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "keeps foreign origin when reassigned from another foreign value":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint var x = 0, then x = c_read(), then Km(x)")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    var x = 0\n    x = c_read()\n    Km(x)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(1)
+
+describe "SPL-BOUND-002 as-cast form":
+    it "reports a foreign value cast with as":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint raw as Km after a raw extern read")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    val raw = c_read()\n    raw as Km\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+        expect(fs[0].line_num).to_equal(5)
+
+    it "reports an as cast applied to a direct extern call":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint (c_read() as Km)")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    c_read() as Km\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(1)
+
+    it "accepts an as cast of a Simple-origin value and of a field":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint n as Km and cfg.raw as Km with a foreign local present")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f(n: i32, cfg: Cfg) -> Km:\n    val raw = c_read()\n    val a = n as Km\n    cfg.raw as Km\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "accepts an as cast inside an ffi boundary adapter":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint raw as Km inside an @unsafe ffi adapter")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"x\", capabilities: [ffi])\nfn hal() -> Km:\n    c_read() as Km\n"
+        expect(check_bound_late_casts(src, "hal/km.spl").len()).to_equal(0)
+
+    it "does not match an as cast to a longer type name":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint raw as Kmh where only Km is a unit")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> i32:\n    val raw = c_read()\n    val x = raw as Kmh\n    0\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+describe "SPL-BOUND-001: raw extern result escapes unconverted":
+    """A primitive foreign value must not leave a non-boundary function raw."""
+
+    it "reports return of a raw extern result":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint return raw where raw is a bare extern read")
+        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    val raw = c_read()\n    return raw\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")
+        expect(fs[0].line_num).to_equal(4)
+
+    it "reports a final bare expression and a copy of the raw value":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint val copy = raw followed by a bare copy as the final expression")
+        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    val raw = c_read()\n    val copy = raw\n    copy\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(5)
+
+    it "reports a directly returned extern call":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a function whose body is the bare extern call")
+        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    c_read()\n"
+        expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(1)
+
+    it "control: this escaping raw return MUST be flagged":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint the canonical unit-less raw escape, so the rule cannot silently go dead")
+        val src = "extern fn c_temp() -> i32\nfn temperature() -> i32:\n    val t = c_temp()\n    return t\n"
+        val fs = check_bound_late_casts(src, "app/temp.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")
+
+    it "accepts the raw return inside an ffi boundary adapter":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint return raw inside an @unsafe ffi adapter")
+        val src = "extern fn c_read() -> i32\n@unsafe(reason: \"x\", capabilities: [ffi])\nfn hal() -> i32:\n    val raw = c_read()\n    return raw\n"
+        expect(check_bound_late_casts(src, "hal/f.spl").len()).to_equal(0)
+
+    it "accepts a Simple-origin value returned bare":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint return of a parameter-derived value")
+        val src = "extern fn c_read() -> i32\nfn f(n: i32) -> i32:\n    val v = n + 1\n    return v\n"
+        expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(0)
+
+    it "accepts a value converted before return":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a raw value passed through a converting call before return")
+        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    val raw = c_read()\n    val ok = clamp_range(raw)\n    return ok\n"
+        expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(0)
+
+    it "accepts a rebound raw name and a Nil function":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a shadowed raw, and a Nil function that returns the raw read")
+        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    var raw = c_read()\n    raw = 0\n    raw\nfn g() -> Nil:\n    val raw = c_read()\n    return raw\n"
+        expect(check_bound_late_casts(src, "app/f.spl").len()).to_equal(0)
+
+fn _blc_count(fs: [BoundLateCastFinding], code: text) -> i64:
+    var n = 0
+    for f in fs:
+        if f.code == code:
+            n = n + 1
+    n
+
+describe "SPL-BOUND-002 same-file cross-function origin summaries":
+    """A non-boundary function that returns a raw foreign value makes calls to
+    it foreign; a boundary adapter that returns a unit does not."""
+
+    it "follows a foreign value through one helper function":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint Km(read_raw()) where read_raw returns the bare extern result")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn read_raw() -> i32:\n    c_read()\nfn late() -> Km:\n    Km(read_raw())\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(_blc_count(fs, "SPL-BOUND-002")).to_equal(1)
+        expect(fs[fs.len() - 1].line_num).to_equal(6)
+
+    it "follows a foreign value through two helper functions":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint Km(mid()) where mid returns read_raw() which returns the extern")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn read_raw() -> i32:\n    return c_read()\nfn mid() -> i32:\n    val v = read_raw()\n    v\nfn late() -> Km:\n    Km(mid())\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(_blc_count(fs, "SPL-BOUND-002")).to_equal(1)
+        expect(fs[fs.len() - 1].line_num).to_equal(9)
+
+    it "terminates on recursion and mutual recursion":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint self and mutually recursive helpers that never reach an extern")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn a() -> i32:\n    b()\nfn b() -> i32:\n    a()\nfn s() -> i32:\n    s()\nfn late() -> Km:\n    Km(a())\n"
+        expect(_blc_count(check_bound_late_casts(src, "app/km.spl"), "SPL-BOUND-002")).to_equal(0)
+
+    it "terminates and still reports when recursion reaches an extern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint mutually recursive helpers where one returns the extern")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn a() -> i32:\n    b()\nfn b() -> i32:\n    val x = c_read()\n    return x\nfn late() -> Km:\n    Km(a())\n"
+        expect(_blc_count(check_bound_late_casts(src, "app/km.spl"), "SPL-BOUND-002")).to_equal(1)
+
+    it "does not treat a boundary adapter returning a unit as foreign":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a wrapper chain that goes through an ffi adapter returning Km")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"x\", capabilities: [ffi])\nfn hal() -> Km:\n    Km(c_read())\nfn wrap() -> Km:\n    hal()\nfn again() -> Km:\n    Km(wrap())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "does not treat a converted helper result as foreign":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a helper that clamps the extern result before returning it")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn safe_read() -> i32:\n    clamp_range(c_read())\nfn late() -> Km:\n    Km(safe_read())\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "does not leak wrapper names into the raw extern set (no BOUND-001 for callers)":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a caller that returns the result of a foreign wrapper")
+        val src = "extern fn c_read() -> i32\nfn read_raw() -> i32:\n    c_read()\nfn caller() -> i32:\n    val v = read_raw()\n    return v\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(_blc_count(fs, "SPL-BOUND-001")).to_equal(1)
+        expect(fs[0].line_num).to_equal(3)
+
+describe "SPL-BOUND review follow-ups":
+    """Compound assignment, unit return types, multi-line headers, and wrapped
+    or branch-nested returns."""
+
+    it "keeps foreign origin through a compound assignment":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint x += foreign and foreign-then-x += 1 before a unit cast")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    var x = 0\n    x += c_read()\n    Km(x)\nfn g() -> Km:\n    var y = c_read()\n    y += 1\n    Km(y)\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(fs.len()).to_equal(2)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+
+    it "does not flag a raw return when the declared return type is a unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint return raw from a function declared to return a unit")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn f() -> Km:\n    val raw = c_read()\n    return raw\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "reads the return type of a multi-line function header":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a raw return from a function whose header spans lines")
+        val src = "extern fn c_read() -> i32\nfn f(\n    a: i32,\n    b: i32\n) -> i32:\n    val raw = c_read()\n    return raw\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")
+        expect(fs[0].line_num).to_equal(7)
+
+    it "reports a parenthesised or wrapped raw return":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint return (raw) and a return wrapped across lines")
+        val src = "extern fn c_read() -> i32\nfn f() -> i32:\n    val raw = c_read()\n    return (raw)\nfn g() -> i32:\n    val raw = c_read()\n    return (\n        raw\n    )\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(2)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")
+
+    it "reports a raw value ending each branch of a final if/else":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a function whose final if/else yields the raw value in each branch")
+        val src = "extern fn c_read() -> i32\nfn f(c: bool) -> i32:\n    val raw = c_read()\n    if c:\n        raw\n    else:\n        raw\n"
+        val fs = check_bound_late_casts(src, "app/f.spl")
+        expect(fs.len()).to_equal(2)
+        expect(fs[0].code).to_equal("SPL-BOUND-001")

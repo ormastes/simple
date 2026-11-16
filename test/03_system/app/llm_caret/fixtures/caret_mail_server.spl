@@ -1,0 +1,153 @@
+# Loopback SMTP + IMAP fixture for infra_servers_system_spec.spl.
+# Usage: simple run caret_mail_server.spl <state_dir> <user> <secret>
+# Binds two 127.0.0.1:0 listeners and writes "<smtp_port> <imap_port>" to
+# <state_dir>/ports. Serves exactly what app.llm_caret.infra_mail uses, in the
+# spec's order: one SMTP session (EHLO, AUTH PLAIN, MAIL, RCPT, DATA, QUIT),
+# then two IMAP sessions (LOGIN, SELECT, FETCH / UID FETCH, LOGOUT). Received
+# messages live in memory only. Exits after those sessions or 60 s without a
+# connection, so a crashed spec leaves no orphan.
+use std.nogc_sync_mut.io.tcp.{TcpListener, tcp_listener_bind_fd, tcp_listener_accept_fd_timeout, tcp_fd_set_read_timeout, tcp_fd_read_line_bounded_or_empty, tcp_fd_write_text, tcp_fd_close}
+use app.io.mod.{file_write, get_args}
+
+fn server_port(listener: i64) -> i64:
+    val view = TcpListener(fd: listener, open: true)
+    val address = match view.local_addr():
+        Ok(value): value
+        Err(_): ""
+    val parts = address.split(":")
+    parts[parts.len() - 1].to_i64() ?? 0
+
+fn strip_eol(line: text) -> text:
+    var s = line
+    while s.ends_with("\n") or s.ends_with("\r"):
+        s = s.substring(0, s.byte_len() - 1)
+    s
+
+fn read_line(peer: i64) -> text:
+    strip_eol(tcp_fd_read_line_bounded_or_empty(peer, 65536))
+
+# Returns the received message (CRLF lines, dot-unstuffed) or "" on failure.
+fn serve_smtp(peer: i64) -> text:
+    tcp_fd_set_read_timeout(peer, 10000)
+    tcp_fd_write_text(peer, "220 loopback ESMTP\r\n")
+    var message = ""
+    var guard = 0
+    while guard < 64:
+        guard = guard + 1
+        val line = read_line(peer)
+        val verb = line.split(" ")[0].upper()
+        if verb == "":
+            break
+        if verb == "EHLO" or verb == "HELO":
+            tcp_fd_write_text(peer, "250-loopback\r\n250 AUTH PLAIN\r\n")
+        elif verb == "AUTH":
+            tcp_fd_write_text(peer, "235 2.7.0 authenticated\r\n")
+        elif verb == "MAIL" or verb == "RCPT":
+            tcp_fd_write_text(peer, "250 2.1.0 ok\r\n")
+        elif verb == "DATA":
+            tcp_fd_write_text(peer, "354 end with <CRLF>.<CRLF>\r\n")
+            var lines: [text] = []
+            var data = read_line(peer)
+            var n = 0
+            while data != "." and n < 100000:
+                n = n + 1
+                if data.starts_with(".."):
+                    lines.push(data.substring(1))
+                else:
+                    lines.push(data)
+                data = read_line(peer)
+            message = lines.join("\r\n") + "\r\n"
+            tcp_fd_write_text(peer, "250 2.0.0 queued as 1\r\n")
+        elif verb == "QUIT":
+            tcp_fd_write_text(peer, "221 2.0.0 bye\r\n")
+            break
+        else:
+            tcp_fd_write_text(peer, "502 5.5.2 unsupported\r\n")
+    tcp_fd_close(peer)
+    message
+
+fn header_fields(message: text) -> text:
+    var out = ""
+    for raw in message.split("\n"):
+        val line = strip_eol(raw)
+        if line == "":
+            break
+        val lower = line.lower()
+        if lower.starts_with("subject:") or lower.starts_with("from:") or lower.starts_with("date:"):
+            out = out + line + "\r\n"
+    out + "\r\n"
+
+fn literal(body: text) -> text:
+    "{{" + body.byte_len().to_text() + "}}\r\n" + body
+
+fn serve_imap(peer: i64, user: text, secret: text, messages: [text]):
+    tcp_fd_set_read_timeout(peer, 10000)
+    tcp_fd_write_text(peer, "* OK loopback IMAP4rev1 ready\r\n")
+    var guard = 0
+    while guard < 64:
+        guard = guard + 1
+        val line = read_line(peer)
+        val words = line.split(" ")
+        if words.len() < 2:
+            break
+        val tag = words[0]
+        val verb = words[1].upper()
+        if verb == "LOGIN":
+            if words.len() == 4 and words[2] == user and words[3] == secret:
+                tcp_fd_write_text(peer, tag + " OK LOGIN completed\r\n")
+            else:
+                tcp_fd_write_text(peer, tag + " NO LOGIN rejected\r\n")
+        elif verb == "SELECT":
+            tcp_fd_write_text(peer, "* " + messages.len().to_text() + " EXISTS\r\n* 0 RECENT\r\n" + tag + " OK [READ-WRITE] SELECT completed\r\n")
+        elif verb == "FETCH" and words.len() >= 3:
+            val range = words[2].split(":")
+            val lo = range[0].to_i64() ?? 1
+            val hi = (range[range.len() - 1].to_i64() ?? 0)
+            var reply = ""
+            var seq = lo
+            while seq >= 1 and seq <= hi and seq <= messages.len():
+                reply = reply + "* " + seq.to_text() + " FETCH (UID " + seq.to_text() + " BODY[HEADER.FIELDS (SUBJECT FROM DATE)] " + literal(header_fields(messages[seq - 1])) + ")\r\n"
+                seq = seq + 1
+            tcp_fd_write_text(peer, reply + tag + " OK FETCH completed\r\n")
+        elif verb == "UID" and words.len() >= 4 and words[2].upper() == "FETCH":
+            val uid = words[3].to_i64() ?? 0
+            var reply = ""
+            if uid >= 1 and uid <= messages.len():
+                reply = "* " + uid.to_text() + " FETCH (UID " + uid.to_text() + " BODY[] " + literal(messages[uid - 1]) + ")\r\n"
+            tcp_fd_write_text(peer, reply + tag + " OK UID FETCH completed\r\n")
+        elif verb == "LOGOUT":
+            tcp_fd_write_text(peer, "* BYE loopback logging out\r\n" + tag + " OK LOGOUT completed\r\n")
+            break
+        else:
+            tcp_fd_write_text(peer, tag + " BAD unsupported\r\n")
+    tcp_fd_close(peer)
+
+fn main():
+    val args = get_args()
+    if args.len() < 3:
+        return
+    val state_dir = args[args.len() - 3]
+    val user = args[args.len() - 2]
+    val secret = args[args.len() - 1]
+    val smtp = tcp_listener_bind_fd("127.0.0.1:0")
+    val imap = tcp_listener_bind_fd("127.0.0.1:0")
+    if smtp < 0 or imap < 0:
+        return
+    file_write(state_dir + "/ports", "{server_port(smtp)} {server_port(imap)}")
+    var messages: [text] = []
+    val speer = tcp_listener_accept_fd_timeout(smtp, 60000)
+    if speer >= 0:
+        val msg = serve_smtp(speer)
+        if msg != "":
+            messages.push(msg)
+    var served = 0
+    while served < 2:
+        val ipeer = tcp_listener_accept_fd_timeout(imap, 60000)
+        if ipeer < 0:
+            break
+        serve_imap(ipeer, user, secret, messages)
+        served = served + 1
+    tcp_fd_close(smtp)
+    tcp_fd_close(imap)
+
+main()

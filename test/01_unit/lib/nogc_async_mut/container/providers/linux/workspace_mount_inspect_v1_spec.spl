@@ -1,0 +1,61 @@
+# AUTHORED_NOT_RUN: engine projection data and query correlation only.
+use std.spec.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use std.nogc_async_mut.container.providers.linux.workspace_mount_inspect_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_route_v1
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+
+fn mount_inspect_request_v1() -> LinuxOciRequestV1:
+    var request = linux_container_leaf_fixture_v2()
+    request.mounts = [ContainerMountProjectionV2(host_root: "/srv/work tree", guest_root: "/work", read_only: true)]
+    request
+
+fn mount_inspect_identity_v1() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "workload-1", attempt: 1, provider_generation: 7,
+        operation_id: "create-api", engine: "podman", native_id: "b".repeat(64), node_boot_id: "boot-1")
+
+fn mount_inspect_json_v1() -> text:
+    "{\"id\":\"" + "b".repeat(64) + "\",\"pod_uid\":\"workload-1\",\"attempt\":\"1\",\"node_boot_id\":\"boot-1\",\"provider_generation\":\"7\",\"operation_id\":\"create-api\",\"mounts\":[{\"type\":\"bind\",\"source\":\"/srv/work tree\",\"destination\":\"/work\",\"rw\":false}]}"
+
+describe "actual Podman engine-declared Mounts projection":
+    it "accepts exact native generation and single bind with spaces":
+        val parsed = linux_workspace_mount_inspect_parse_v1(mount_inspect_json_v1(), mount_inspect_identity_v1(), mount_inspect_request_v1()).unwrap()
+        expect(parsed.source).to_equal("/srv/work tree")
+        expect(parsed.destination).to_equal("/work")
+        expect(parsed.read_only).to_equal(true)
+        expect(parsed.native_id).to_equal("b".repeat(64))
+
+    it "rejects root aliases, permission changes, foreign sources and non-bind mounts":
+        val raw = mount_inspect_json_v1()
+        for changed in [raw.replace("/work\"", "/work/nested\""), raw.replace("rw\":false", "rw\":true"),
+                raw.replace("/srv/work tree", "/other"), raw.replace("\"bind\"", "\"volume\"")]:
+            expect(linux_workspace_mount_inspect_parse_v1(changed, mount_inspect_identity_v1(), mount_inspect_request_v1()).unwrap_err()).to_equal("workspace-inspect-mapping-mismatch")
+
+    it "rejects extra engine mounts and stale provider labels":
+        val raw = mount_inspect_json_v1()
+        val extra = raw.replace("}]}", "},{\"type\":\"bind\",\"source\":\"/run/podman.sock\",\"destination\":\"/engine\",\"rw\":true}]}")
+        expect(linux_workspace_mount_inspect_parse_v1(extra, mount_inspect_identity_v1(), mount_inspect_request_v1()).unwrap_err()).to_equal("workspace-inspect-extra-or-missing-mount")
+        expect(linux_workspace_mount_inspect_parse_v1(raw.replace("generation\":\"7", "generation\":\"8"), mount_inspect_identity_v1(), mount_inspect_request_v1()).unwrap_err()).to_equal("workspace-inspect-identity-mismatch")
+
+    it "rejects duplicate fields, wrong bool types and oversized or deeply nested input":
+        val raw = mount_inspect_json_v1()
+        for changed in [raw.replace("rw\":false", "rw\":false,\"rw\":true"), raw.replace("rw\":false", "rw\":\"false\""),
+                "[".repeat(8) + "]".repeat(8), " ".repeat(65537)]:
+            expect(linux_workspace_mount_inspect_parse_v1(changed, mount_inspect_identity_v1(), mount_inspect_request_v1()).unwrap_err().len()).to_be_greater_than(0)
+
+    it "consumes configured observation receipts and rejects substituted query argv":
+        val expected = mount_inspect_identity_v1()
+        val policy = linux_container_policy_fixture_v2()
+        var query = linux_workspace_mount_inspect_command_v1(expected).unwrap()
+        expect(query.program).to_equal("podman")
+        expect(query.args[0]).to_equal("container")
+        query.program = policy.executable_path
+        query.args = linux_oci_engine_route_v1(policy, query.args).unwrap()
+        var observed = RuntimeOperationV1(status: "ok", operation: query.operation, command: query,
+            state: RuntimeStateV1(phase: "created", identity: expected, exit_code: 0, reason: ""),
+            exit_code: 0, stdout: mount_inspect_json_v1(), stderr: "", reason: "")
+        expect(linux_workspace_mount_inspect_observation_v1(observed, policy, expected, mount_inspect_request_v1()).unwrap().source).to_equal("/srv/work tree")
+        observed.command.args = ["container", "inspect", "another-container"]
+        expect(linux_workspace_mount_inspect_observation_v1(observed, policy, expected, mount_inspect_request_v1()).unwrap_err()).to_equal("workspace-inspect-observation-query-mismatch")

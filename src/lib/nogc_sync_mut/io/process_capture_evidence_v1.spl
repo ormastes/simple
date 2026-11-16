@@ -1,0 +1,310 @@
+# Explicit opt-in receipt-preserving read capture. Old capture APIs unchanged.
+# SOURCE_AUTHORED_NOT_RUN. No executor/native export or caller-proof factory.
+use std.common.process.observation_v1.{ObservedProcessRequestV1, ObservedProcessStartStatusV1,
+    ObservedProcessResultStatusV1, ObservedProcessResultV1}
+use std.nogc_sync_mut.io.process_observation_v1.{process_observation_start_v1}
+use std.nogc_sync_mut.io.process_ops.{ProcessObservationOwnerV1,
+    process_observation_owner_capture_collect_v1, process_observation_owner_capture_cancel_v1,
+    process_capture_native_mode_check_v1}
+use std.nogc_sync_mut.io.windows_command_owner_v2.{WindowsCommandOwnerV2,
+    WindowsCommandRequestV2, WindowsCommandCaptureTurnV1,
+    windows_command_capture_begin_v1, windows_command_capture_step_v1, windows_command_thread_check_v2}
+use std.nogc_sync_mut.io_runtime.ProcessResult
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
+use std.common.text_bytes.{utf8_bytes_valid, bytes_to_text}
+
+pub struct ProcessCaptureRequestV1:
+    command: text
+    args: [text]
+    timeout_ms: i64
+    stdout_limit: i64
+    stderr_limit: i64
+    term_grace_ms: i64
+
+pub class ProcessCaptureOwnerV1:
+    slot: i64
+    generation: i64
+
+# Pure transition value, not authority. Only real lower receipts can supply
+# positive_retired inside the private canonical registry.
+pub struct ProcessCaptureProgressV1:
+    retired: bool
+    error: text
+
+pub fn process_capture_progress_reduce_v1(before: ProcessCaptureProgressV1,
+        positive_retired: bool, reason: text) -> ProcessCaptureProgressV1:
+    ProcessCaptureProgressV1(retired: before.retired or positive_retired,
+        error: if before.error != "": before.error else: reason)
+
+struct CaptureStateV1:
+    generation: i64
+    observation: Option<ProcessObservationOwnerV1> = nil
+    command: Option<WindowsCommandOwnerV2> = nil
+    progress: ProcessCaptureProgressV1
+    busy: bool = true
+
+var capture_slots_v1: [CaptureStateV1] = []
+var capture_active_v1: i64 = 0
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@end
+
+# Every registry entry, including closed tombstones, first proves the actual
+# native calling origin. Linux is explicitly main-thread-only, with the shared
+# genuine procfs/fork/PID-namespace guard; Windows uses its canonical thread.
+fn capture_entry_v1() -> Result<(), text>:
+    process_capture_native_mode_check_v1()?
+    @when(os="linux"):
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    @elif(os="windows"):
+    windows_command_thread_check_v2()
+    @else:
+    Err("process-capture-origin-provider-unsupported")
+    @end
+
+fn capture_reserve_v1() -> Result<ProcessCaptureOwnerV1, text>:
+    capture_entry_v1()?
+    if capture_active_v1 >= 32 or capture_slots_v1.len() >= 100000:
+        return Err("process-capture-owner-bound")
+    val slot = capture_slots_v1.len()
+    val generation = slot + 1
+    capture_slots_v1.push(CaptureStateV1(generation: generation,
+        progress: ProcessCaptureProgressV1(retired: false, error: "")))
+    capture_active_v1 = capture_active_v1 + 1
+    Ok(ProcessCaptureOwnerV1(slot: slot, generation: generation))
+
+fn capture_load_v1(owner: ProcessCaptureOwnerV1) -> Result<CaptureStateV1, text>:
+    capture_entry_v1()?
+    if owner.slot < 0 or owner.slot >= capture_slots_v1.len(): return Err("process-capture-owner-unknown")
+    val state = capture_slots_v1[owner.slot]
+    if state.generation != owner.generation: return Err("process-capture-owner-generation-mismatch")
+    if state.busy: return Err("process-capture-owner-busy")
+    Ok(state)
+
+# Private updates occur only within the already guarded, nonreentrant entry.
+# Positive retirement clears the real resource once and keeps a small
+# nonreused tombstone with its first diagnostic; raw stale is never an input.
+fn capture_progress_v1(slot: i64, positive_retired: bool, reason: text):
+    var state = capture_slots_v1[slot]
+    val before = state.progress.retired
+    state.progress = process_capture_progress_reduce_v1(state.progress, positive_retired, reason)
+    if not before and state.progress.retired:
+        state.observation = nil
+        state.command = nil
+        capture_active_v1 = capture_active_v1 - 1
+    capture_slots_v1[slot] = state
+
+fn capture_finish_v1(owner: ProcessCaptureOwnerV1, evidence: Option<ProcessCaptureEvidenceV1>) -> ProcessCaptureTurnV1:
+    var state = capture_slots_v1[owner.slot]
+    state.busy = false
+    capture_slots_v1[owner.slot] = state
+    ProcessCaptureTurnV1(if state.progress.retired: nil else: Some(owner), evidence, state.progress.error)
+
+# This private constructor is called only after a real owner receipt. Accessors
+# copy mutable byte arrays; the receiver cannot be forged from a caller DTO.
+pub class ProcessCaptureEvidenceV1:
+    result: Option<ProcessResult>
+    stdout: [u8]
+    stderr: [u8]
+    output_complete: Option<bool>
+    stdout_eof: Option<bool>
+    stderr_eof: Option<bool>
+    stdout_seen: Option<i64>
+    stderr_seen: Option<i64>
+    stdout_kept: Option<i64>
+    stderr_kept: Option<i64>
+    stdout_truncated: Option<bool>
+    stderr_truncated: Option<bool>
+    terminal: Option<bool>
+    reaped: Option<bool>
+    identity_revalidated: Option<bool>
+    native_error: Option<i64>
+    cancel_requested: Option<bool>
+    observation_status: Option<ObservedProcessResultStatusV1>
+    retirement_confirmed: bool
+    effect_attempted: Option<bool>
+
+    pub fn process_result_v1() -> Option<ProcessResult>: self.result
+    pub fn stdout_bytes_v1() -> [u8]: process_capture_bytes_copy_v1(self.stdout)
+    pub fn stderr_bytes_v1() -> [u8]: process_capture_bytes_copy_v1(self.stderr)
+    pub fn output_complete_v1() -> Option<bool>: self.output_complete
+    pub fn stdout_eof_v1() -> Option<bool>: self.stdout_eof
+    pub fn stderr_eof_v1() -> Option<bool>: self.stderr_eof
+    pub fn stdout_seen_v1() -> Option<i64>: self.stdout_seen
+    pub fn stderr_seen_v1() -> Option<i64>: self.stderr_seen
+    pub fn stdout_kept_v1() -> Option<i64>: self.stdout_kept
+    pub fn stderr_kept_v1() -> Option<i64>: self.stderr_kept
+    pub fn stdout_delivered_v1() -> i64: self.stdout.len()
+    pub fn stderr_delivered_v1() -> i64: self.stderr.len()
+    pub fn stdout_truncated_v1() -> Option<bool>: self.stdout_truncated
+    pub fn stderr_truncated_v1() -> Option<bool>: self.stderr_truncated
+    pub fn terminal_v1() -> Option<bool>: self.terminal
+    pub fn reaped_v1() -> Option<bool>: self.reaped
+    pub fn identity_revalidated_v1() -> Option<bool>: self.identity_revalidated
+    pub fn native_error_v1() -> Option<i64>: self.native_error
+    pub fn cancel_requested_v1() -> Option<bool>: self.cancel_requested
+    pub fn observation_status_v1() -> Option<ObservedProcessResultStatusV1>: self.observation_status
+    pub fn retirement_confirmed_v1() -> bool: self.retirement_confirmed
+    pub fn effect_attempted_v1() -> Option<bool>: self.effect_attempted
+
+pub struct ProcessCaptureTurnV1:
+    owner: Option<ProcessCaptureOwnerV1>
+    evidence: Option<ProcessCaptureEvidenceV1>
+    error: text
+
+pub fn process_capture_bytes_copy_v1(bytes: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for byte in bytes: copied.push(byte)
+    copied
+
+pub fn process_capture_request_validate_v1(request: ProcessCaptureRequestV1) -> Result<(), text>:
+    if (not host_path_is_absolute(request.command) or request.command.contains("\0") or
+            request.timeout_ms < 1 or request.timeout_ms > 3600000 or
+            request.term_grace_ms < 1 or request.term_grace_ms > 30000 or
+            request.stdout_limit < 0 or request.stdout_limit > 1048576 or
+            request.stderr_limit < 0 or request.stderr_limit > 1048576 or request.args.len() > 32768):
+        return Err("process-capture-existing-observation-v1-bounds")
+    var bytes = request.command.byte_len()
+    for arg in request.args:
+        if arg.contains("\0"): return Err("process-capture-argument-nul")
+        bytes = bytes + arg.byte_len()
+        if bytes > 4194304: return Err("process-capture-argument-byte-bound")
+    Ok(())
+
+# This is deliberately not the ordinary four-word capture executor. It opts
+# into the existing observation owner: inherited trusted Host environment,
+# native V1 capability admission and exact existing per-stream resource bounds.
+# No environment/cwd/Unix-expiry/image/descendant authority is synthesized.
+pub fn process_capture_begin_v1(request: ProcessCaptureRequestV1) -> ProcessCaptureTurnV1:
+    val valid = process_capture_request_validate_v1(request)
+    if valid.is_err(): return ProcessCaptureTurnV1(nil, nil, valid.unwrap_err())
+    val reserved = capture_reserve_v1()
+    if reserved.is_err(): return ProcessCaptureTurnV1(nil, nil, reserved.unwrap_err())
+    val owner = reserved.unwrap()
+    var arguments: [text] = []
+    for arg in request.args: arguments.push(arg)
+    val started = process_observation_start_v1(ObservedProcessRequestV1(command: request.command,
+        args: arguments, deadline_ms: request.timeout_ms, term_grace_ms: request.term_grace_ms,
+        stdout_limit: request.stdout_limit, stderr_limit: request.stderr_limit, pin_executable: false))
+    var state = capture_slots_v1[owner.slot]
+    state.observation = Some(started.lease)
+    capture_slots_v1[owner.slot] = state
+    if (started.status != ObservedProcessStartStatusV1.Started and
+            started.status != ObservedProcessStartStatusV1.CleanupPending):
+        # The rejected lower start returned no native owner. Release only this
+        # unexposed empty reservation; no native completion evidence is minted.
+        capture_progress_v1(owner.slot, true, "process-capture-observation-start-unavailable-or-failed")
+        return capture_finish_v1(owner, nil)
+    if started.status == ObservedProcessStartStatusV1.CleanupPending:
+        capture_progress_v1(owner.slot, false, "process-capture-start-cleanup-pending")
+    capture_finish_v1(owner, nil)
+
+# Windows supplies the installed policy's exact explicit env/cwd/expiry. No
+# SSH stdin executor. Reserve facade ownership before any lower admission.
+pub fn process_capture_windows_begin_v1(request: WindowsCommandRequestV2) -> ProcessCaptureTurnV1:
+    val reserved = capture_reserve_v1()
+    if reserved.is_err(): return ProcessCaptureTurnV1(nil, nil, reserved.unwrap_err())
+    val owner = reserved.unwrap()
+    var args: [text] = []
+    var environment: [text] = []
+    for arg in request.args: args.push(arg)
+    for assignment in request.environment: environment.push(assignment)
+    val frozen = WindowsCommandRequestV2(program: request.program, args: args, environment: environment,
+        directory: request.directory, timeout_ms: request.timeout_ms, max_output_bytes: request.max_output_bytes,
+        expires_at_unix_ms: request.expires_at_unix_ms)
+    val started = windows_command_capture_begin_v1(frozen)
+    var state = capture_slots_v1[owner.slot]
+    state.command = started.owner
+    capture_slots_v1[owner.slot] = state
+    # No lower owner was returned: this unexposed admission reservation is
+    # empty. A caller never receives native-retirement evidence for rejection.
+    capture_progress_v1(owner.slot, started.owner.is_none(), started.error)
+    capture_finish_v1(owner, nil)
+
+fn capture_observed_evidence_v1(observed: ObservedProcessResultV1, result: Option<ProcessResult>) -> ProcessCaptureEvidenceV1:
+    ProcessCaptureEvidenceV1(result: result,
+        stdout: process_capture_bytes_copy_v1(observed.stdout.bytes), stderr: process_capture_bytes_copy_v1(observed.stderr.bytes),
+        output_complete: if observed.output_complete_observed: Some(observed.output_complete) else: nil,
+        stdout_eof: nil, stderr_eof: nil,
+        stdout_seen: if observed.stream_counts_observed: Some(observed.stdout.seen_bytes) else: nil,
+        stderr_seen: if observed.stream_counts_observed: Some(observed.stderr.seen_bytes) else: nil,
+        stdout_kept: if observed.stream_counts_observed: Some(observed.stdout.retained_bytes) else: nil,
+        stderr_kept: if observed.stream_counts_observed: Some(observed.stderr.retained_bytes) else: nil,
+        stdout_truncated: if observed.stream_counts_observed: Some(observed.stdout.truncated) else: nil,
+        stderr_truncated: if observed.stream_counts_observed: Some(observed.stderr.truncated) else: nil,
+        terminal: observed.terminal_observed,
+        reaped: if observed.stream_counts_observed: Some(observed.reaped) else: nil,
+        identity_revalidated: observed.identity_revalidated, native_error: observed.native_error,
+        cancel_requested: observed.cancel_requested, observation_status: Some(observed.status),
+        retirement_confirmed: observed.native_retired, effect_attempted: nil)
+
+fn capture_observed_step_v1(owner: ProcessCaptureOwnerV1, cancel: bool) -> ProcessCaptureTurnV1:
+    var lease = capture_slots_v1[owner.slot].observation.unwrap()
+    if cancel:
+        val advanced = process_observation_owner_capture_cancel_v1(lease)
+        lease = advanced.0
+        var current = capture_slots_v1[owner.slot]
+        current.observation = Some(lease)
+        capture_slots_v1[owner.slot] = current
+        val canceled = advanced.1
+        if canceled.is_err(): capture_progress_v1(owner.slot, false, canceled.unwrap_err())
+        elif canceled.unwrap().runtime_error != 0: capture_progress_v1(owner.slot, false, "process-capture-cancel-native-error")
+    val advanced = process_observation_owner_capture_collect_v1(lease)
+    var current = capture_slots_v1[owner.slot]
+    current.observation = Some(advanced.0)
+    capture_slots_v1[owner.slot] = current
+    val observed = advanced.1
+    capture_progress_v1(owner.slot, observed.native_retired, "")
+    var result: Option<ProcessResult> = nil
+    if observed.status == ObservedProcessResultStatusV1.Collected:
+        if utf8_bytes_valid(observed.stdout.bytes) and utf8_bytes_valid(observed.stderr.bytes):
+            val limited = observed.stdout.truncated or observed.stderr.truncated
+            result = Some(ProcessResult(stdout: bytes_to_text(observed.stdout.bytes), stderr: bytes_to_text(observed.stderr.bytes),
+                exit_code: observed.exit_code, limit_exceeded: observed.deadline_exceeded or limited,
+                limit_type: if observed.deadline_exceeded: "timeout" else: if limited: "output" else: ""))
+        else: capture_progress_v1(owner.slot, false, "process-capture-output-not-utf8")
+    elif observed.status != ObservedProcessResultStatusV1.CleanupPending:
+        capture_progress_v1(owner.slot, false, "process-capture-observation-provider-or-receipt-failed")
+    val evidence = capture_observed_evidence_v1(observed, result)
+    capture_finish_v1(owner, Some(evidence))
+
+fn capture_windows_step_v1(owner: ProcessCaptureOwnerV1, cancel: bool) -> ProcessCaptureTurnV1:
+    val turn = windows_command_capture_step_v1(capture_slots_v1[owner.slot].command.unwrap(), cancel)
+    var current = capture_slots_v1[owner.slot]
+    current.command = turn.owner
+    capture_slots_v1[owner.slot] = current
+    capture_progress_v1(owner.slot, turn.retirement_confirmed, turn.error)
+    if turn.evidence.is_none():
+        return capture_finish_v1(owner, nil)
+    val native = turn.evidence.unwrap()
+    val stdout = native.stdout_bytes_v1()
+    val stderr = native.stderr_bytes_v1()
+    var result: Option<ProcessResult> = nil
+    if turn.result.is_some() and utf8_bytes_valid(stdout) and utf8_bytes_valid(stderr):
+        val actual = turn.result.unwrap()
+        result = Some(ProcessResult(stdout: actual.stdout, stderr: actual.stderr, exit_code: actual.exit_code,
+            limit_exceeded: actual.limit_type != "", limit_type: actual.limit_type))
+    else: capture_progress_v1(owner.slot, false, "process-capture-output-result-unavailable")
+    val evidence = ProcessCaptureEvidenceV1(result: result, stdout: stdout, stderr: stderr,
+        output_complete: Some(native.stdout_eof_v1() and native.stderr_eof_v1()),
+        stdout_eof: Some(native.stdout_eof_v1()), stderr_eof: Some(native.stderr_eof_v1()),
+        stdout_seen: nil, stderr_seen: nil, stdout_kept: Some(stdout.len()), stderr_kept: Some(stderr.len()),
+        stdout_truncated: nil, stderr_truncated: nil, terminal: Some(native.terminal_v1()),
+        reaped: nil, identity_revalidated: nil, native_error: nil, cancel_requested: nil, observation_status: nil,
+        retirement_confirmed: native.cleanup_confirmed_v1(), effect_attempted: Some(native.effect_attempted_v1()))
+    capture_finish_v1(owner, Some(evidence))
+
+pub fn process_capture_step_v1(owner: ProcessCaptureOwnerV1, cancel: bool = false) -> ProcessCaptureTurnV1:
+    val loaded = capture_load_v1(owner)
+    if loaded.is_err(): return ProcessCaptureTurnV1(Some(owner), nil, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if state.progress.retired:
+        return ProcessCaptureTurnV1(nil, nil,
+            if state.progress.error != "": state.progress.error else: "process-capture-owner-retired")
+    state.busy = true
+    capture_slots_v1[owner.slot] = state
+    if state.observation.is_some(): return capture_observed_step_v1(owner, cancel)
+    if state.command.is_some(): return capture_windows_step_v1(owner, cancel)
+    capture_progress_v1(owner.slot, false, "process-capture-owner-origin-unavailable")
+    capture_finish_v1(owner, nil)

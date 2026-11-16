@@ -4,6 +4,7 @@ use std.common.sdn.value.{SdnValue}
 use std.common.sdn.parser.{parse_with_spans_and_issues}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.traceability.model.*
+use std.common.traceability.trace_ids_v1.{TraceEdgeIdV1, TraceOriginIdV1}
 use std.common.traceability.schema.*
 
 fn record(names: [text], values: [SdnValue]) -> SdnValue:
@@ -84,7 +85,7 @@ fn read_edge(value: SdnValue) -> Result<TraceEdge, text>:
 
 fn read_binding(value: SdnValue) -> Result<TraceEdgeOrigin, text>:
     val f = checked_record(value, ["edge_id", "origin_id"])?
-    Ok(TraceEdgeOrigin(edge_id: text_field(f, "edge_id")?, origin_id: text_field(f, "origin_id")?))
+    Ok(TraceEdgeOrigin(edge_id: TraceEdgeIdV1(value: text_field(f, "edge_id")?), origin_id: TraceOriginIdV1(value: text_field(f, "origin_id")?)))
 
 fn read_locator(value: SdnValue) -> Result<TraceLocator, text>:
     val f = checked_record(value, ["entity_id", "path", "locator_kind", "locator", "blob_id"])?
@@ -168,7 +169,7 @@ pub fn decode_trace_document(source: text) -> Result<TraceDocument, [TraceDiagno
                 Ok(document)
 
 fn read_declarations(value: SdnValue, subject: SnapshotSubject, owner_path: text, blob_id: text) -> Result<TraceFacts, text>:
-    if not trace_path_valid(owner_path) or blob_id == "":
+    if trace_path_parse_v1(owner_path).is_none() or blob_id == "":
         return Err("declaration source requires safe frozen owner path and blob identity")
     val f = checked_record(value, ["schema", "nodes", "test_definitions", "claims", "origins", "locators"])?
     val schema = checked_record(f["schema"], ["name", "version"])?
@@ -184,7 +185,7 @@ fn read_declarations(value: SdnValue, subject: SnapshotSubject, owner_path: text
     var node_ids: Dict<text, bool> = {}
     for row in array_field(f, "nodes")?:
         val node = read_node(row)?
-        if not trace_id_valid(node.id) or node_ids.contains_key(node.id):
+        if trace_entity_id_parse_v1(node.id).is_none() or node_ids.contains_key(node.id):
             return Err("invalid or duplicate declaration node ID")
         node_ids[node.id] = true
         nodes.push(node)
@@ -197,7 +198,7 @@ fn read_declarations(value: SdnValue, subject: SnapshotSubject, owner_path: text
         val fields = checked_record(row, ["id", "kind", "locator"])?
         val id = text_field(fields, "id")?
         val kind = parse_origin_kind(text_field(fields, "kind")?)?
-        if not trace_id_valid(id) or origin_ids.contains_key(id):
+        if trace_entity_id_parse_v1(id).is_none() or origin_ids.contains_key(id):
             return Err("invalid or duplicate authored origin identity")
         if kind != TraceOriginKind.Explicit and kind != TraceOriginKind.Annotation:
             return Err("declaration cannot assert derived or observed authority")
@@ -207,9 +208,9 @@ fn read_declarations(value: SdnValue, subject: SnapshotSubject, owner_path: text
     var claim_ids: Dict<text, bool> = {}
     for row in array_field(f, "claims")?:
         val claim = read_claim(row)?
-        if not trace_id_valid(claim.id) or claim_ids.contains_key(claim.id) or not origin_ids.contains_key(claim.origin_id):
+        if trace_entity_id_parse_v1(claim.id).is_none() or claim_ids.contains_key(claim.id) or not origin_ids.contains_key(claim.origin_id):
             return Err("invalid/duplicate claim or missing local declaration origin")
-        if not trace_id_valid(claim.from_id) or (claim.operation != TraceClaimOperation.Suppress and not trace_id_valid(claim.to_id)):
+        if trace_entity_id_parse_v1(claim.from_id).is_none() or (claim.operation != TraceClaimOperation.Suppress and trace_entity_id_parse_v1(claim.to_id).is_none()):
             return Err("invalid declaration endpoint identity")
         claim_ids[claim.id] = true
         claims.push(claim)
@@ -217,7 +218,7 @@ fn read_declarations(value: SdnValue, subject: SnapshotSubject, owner_path: text
     for row in array_field(f, "locators")?:
         val fields = checked_record(row, ["entity_id", "path", "locator_kind", "locator"])?
         val path = text_field(fields, "path")?
-        if not trace_path_valid(path):
+        if trace_path_parse_v1(path).is_none():
             return Err("declaration locator escapes the repository path policy")
         val pinned = if path == owner_path: blob_id else: ""
         locators.push(TraceLocator(entity_id: text_field(fields, "entity_id")?, path: path, locator_kind: text_field(fields, "locator_kind")?, locator: text_field(fields, "locator")?, blob_id: pinned))
@@ -263,7 +264,7 @@ fn write_graph(graph: TraceGraph) -> SdnValue:
         edges[edge.id] = strings(["id", "from_id", "relation", "to_id"], [edge.id, edge.from_id, relation_name(edge.relation), edge.to_id])
     var bindings: Dict<text, SdnValue> = {}
     for binding in graph.edge_origins:
-        bindings[binding.edge_id + "|" + binding.origin_id] = strings(["edge_id", "origin_id"], [binding.edge_id, binding.origin_id])
+        bindings[binding.edge_id.value + "|" + binding.origin_id.value] = strings(["edge_id", "origin_id"], [binding.edge_id.value, binding.origin_id.value])
     var origins: Dict<text, SdnValue> = {}
     for origin in graph.origins:
         origins[origin.id] = strings(["id", "kind", "owner_path", "locator", "rule_version"], [origin.id, origin_kind_name(origin.kind), origin.owner_path, origin.locator, origin.rule_version])

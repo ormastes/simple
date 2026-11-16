@@ -1,0 +1,58 @@
+# Orchestration half of the Linux service records (split in signing step 5).
+# The verifier, records DATA and the sealed proof live in the single io owner
+# std.nogc_sync_mut.io.host_linux_service_records_v4. This half keeps only what
+# needs the protected root reader or the journal, both of which import
+# owner_health and therefore cannot be imported by the io verifier.
+# Actual retained-reader acquisition; returned metadata remains DATA. Neither a
+# record nor a signed enrollment credential constructs a native provider owner.
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.*
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
+use std.nogc_sync_mut.io.host_linux_service_records_v4.{HostLinuxServiceRecordsV4, HostLinuxServiceRecordSourcesV4,
+    host_linux_service_records_verify_v4, host_linux_service_claim_name_v4}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub(package) fn host_linux_service_read_v4(reader: LinuxProtectedRootReaderV1, relative: text) -> Result<text, text>:
+    val source = linux_protected_root_reader_read_v1(reader, relative, 1048576)?
+    if source.is_none(): return Err("linux-host-service-record-missing:" + relative)
+    Ok(source.unwrap())
+
+pub(package) fn host_linux_service_records_load_v4(root: text, reader: LinuxProtectedRootReaderV1,
+        parent: LinuxProtectedRootReaderV1) -> Result<HostLinuxServiceRecordsV4, text>:
+    linux_protected_root_reader_current_v1(reader)?
+    linux_protected_root_reader_current_v1(parent)?
+    val enrollment = host_linux_service_read_v4(reader, "linux-service-enrollment-v3.sdn")?
+    val binding = host_linux_service_enrollment_decode_v3(enrollment)?
+    val sources = HostLinuxServiceRecordSourcesV4(enrollment: enrollment,
+        policy: host_linux_service_read_v4(reader, "authority-policy.sdn")?,
+        configuration: host_linux_service_read_v4(reader, "host-config.sdn")?,
+        engine_policy: host_linux_service_read_v4(reader, "engine-policy.sdn")?,
+        broker_policy: host_linux_service_read_v4(reader, "broker-policy.sdn")?,
+        parent_policy: host_linux_service_read_v4(parent, "authority-policy.sdn")?,
+        credential: host_linux_service_read_v4(reader, "linux-service-enrollment-credential-v3.sdn")?,
+        claim: host_linux_service_read_v4(parent, host_linux_service_claim_name_v4(binding))?,
+        root_record: host_linux_service_read_v4(reader, "linux-service-root-v3.sdn")?)
+    linux_protected_root_reader_current_v1(reader)?
+    linux_protected_root_reader_current_v1(parent)?
+    host_linux_service_records_verify_v4(root, sources)
+
+pub(package) fn linux_service_current_bytes_v4(binding: HostLinuxServiceEnrollmentBindingV3, scope: ContainerHostScopeV2,
+        native: LinuxServiceNativeIdentitySnapshotV3, epoch_digest: text, claim_digest: text,
+        journal: DistributedOperationJournalV2) -> Result<text, text>:
+    # Caller-owned digests are still validated here: a malformed epoch/claim
+    # digest must never be canonically encoded into a current record.
+    if not builder_digest_valid_v1(epoch_digest) or not builder_digest_valid_v1(claim_digest):
+        return Err("linux-host-service-current-digest")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-service-current"),
+        "enrollmentDigest": SdnValue.String(host_linux_service_enrollment_digest_v3(binding)?),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(scope)?), "claimDigest": SdnValue.String(claim_digest),
+        "nativeMachineId": SdnValue.String(native.native_machine_id), "nativeBootId": SdnValue.String(native.native_boot_id),
+        "architecture": SdnValue.String(native.architecture), "providerGeneration": SdnValue.Int(native.owner_generation),
+        "processIdentityDigest": SdnValue.String(native.process_identity_digest), "processGeneration": SdnValue.Int(native.process_generation),
+        "authorityNamespaceId": SdnValue.String(native.authority_namespace_id), "initialEpochDigest": SdnValue.String(epoch_digest),
+        "journalLeaseDigest": SdnValue.String(journal.lease_digest), "journalAuthorityDigest": SdnValue.String(journal.authority_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
