@@ -28,5 +28,31 @@ describe "restricted workspace source loan boundary":
                 "-> LinuxWorkspaceSourceOwnerV1", "pub fn close", "pub fn begin_binding", "pub fn retire_native", "pub fn retained_metadata"]:
             expect(source.contains(forbidden)).to_equal(false)
 
-    # The Host V2 consumer cases (raw-owner absence in host_agent_workspace_execution_v2)
-    # land with that Host file in the HostV1_8/Host21 unit, not here.
+    it "does not expose a raw SourceOwner through the Host V2 state or return":
+        step("Carry only the restricted loan through the invocation boundary")
+        val leaf = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_agent_workspace_execution_v2.spl")
+        expect(leaf.contains("source: LinuxWorkspaceSourceLoanV3")).to_equal(true)
+        expect(leaf.contains("source: Option<LinuxWorkspaceSourceLoanV3>")).to_equal(true)
+        expect(leaf.contains("LinuxWorkspaceSourceOwnerV1")).to_equal(false)
+        val shared = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl")
+        val sections = shared.split("# V2 uses the SAME existing canonical progress registry")
+        expect(sections.len()).to_equal(2)
+        expect(sections[1].contains("source: Option<LinuxWorkspaceSourceLoanV3>")).to_equal(true)
+        expect(sections[1].contains("source: Option<LinuxWorkspaceSourceOwnerV1>")).to_equal(false)
+
+    it "captures the actual stage-returned loan before reading failure or readiness":
+        step("Preserve returned loan custody on every stage outcome")
+        val source = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_agent_workspace_execution_v2.spl")
+        val after_stage = source.split("val staged = state.source.stage_agent_invocation_v2(")
+        expect(after_stage.len()).to_equal(2)
+        val before_outcome = after_stage[1].split("if staged.error")
+        expect(before_outcome.len()).to_be_greater_than(1)
+        expect(before_outcome[0].contains("state.source = staged.loan")).to_equal(true)
+        expect(before_outcome[0].contains("staged.owner")).to_equal(false)
+
+    it "keeps external Host V2 consumers away from raw lifecycle and parent getters":
+        step("Use the closed container owner for runtime and retirement")
+        val source = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_agent_workspace_execution_v2.spl")
+        for forbidden in ["state.source.close", "state.source.reader", "state.source.storage", "state.source.lease",
+                "state.source.begin_binding", "state.source.retire_native", "state.source.retained_metadata", "state.source.owner"]:
+            expect(source.contains(forbidden)).to_equal(false)
