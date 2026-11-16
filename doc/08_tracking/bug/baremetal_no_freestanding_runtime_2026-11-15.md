@@ -2,7 +2,20 @@
 
 - id: `baremetal_no_freestanding_runtime_2026_11_15`
 - severity: P2
-- status: open (gap filed only; not implemented)
+- status: fix-implemented-verification-pending (2026-11-17)
+
+## Fix (2026-11-17)
+The pure-Simple runtime is `src/lib/nogc_async_mut_noalloc/baremetal/freestanding/bm_rt.spl`,
+which provides `rt_string_*`, `rt_interp_cstr`, `rt_println*`, `rt_panic` and a
+bump arena. The per-arch asm (`_start`, stack, putc, byte load/store, halt) is in
+`crt0_{x86_64,aarch64,riscv64}.S`. `scripts/check/check-baremetal-efi-boot.shs`
+boots `examples/09_embedded/freestanding_hello` with exact transcript checks.
+x86_64 boots through OVMF, aarch64 through AAVMF, and riscv64 through an OpenSBI
+v1.4 fw_payload; all three PASS under QEMU. Still open: the check does the
+link itself; `baremetal_native_link.spl` does not link the runtime automatically
+yet. Board runs are not yet evidenced. 32-bit blockers are filed in
+`baremetal_{riscv32,i686}_no_firmware_boot_lane_2026-11-17.md` and
+`baremetal_arm32_aavmf32_no_esp_boot_2026-11-17.md`.
 
 ## Gap
 
