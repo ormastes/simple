@@ -63,7 +63,8 @@ impl Default for TypeIdAllocator {
 /// `SIMPLE_ENUM_OWNER_STRICT=1` the report is fatal.
 pub fn name_only_variant_discriminant(site: &'static str, variant: &str) -> i64 {
     static REPORTED: std::sync::OnceLock<dashmap::DashSet<String>> = std::sync::OnceLock::new();
-    if REPORTED.get_or_init(dashmap::DashSet::new).insert(variant.to_string()) {
+    let reported = REPORTED.get_or_init(dashmap::DashSet::new);
+    if !reported.contains(variant) && reported.insert(variant.to_string()) {
         eprintln!(
             "warning[enum-discriminant-owner-unresolved]: variant `{variant}` lowered by name only at {site}; \
              its discriminant is not tied to its owning enum (see #6953)"
@@ -299,6 +300,18 @@ impl TypeRegistry {
         if let Some(index) = self.owned_variant_discriminant(ty, enum_name, variant) {
             return Some(index);
         }
+        // An erased subject (ANY/NIL, no owner) carrying a builtin variant
+        // name is the builtin Option/Result: a user enum that also declares
+        // `Err`/`None` must not hand its index to `r.is_err()` / `case Err` on
+        // an untyped Result (UdpResult.Err=2 made builtin is_err always false).
+        let builtin = match variant {
+            "Ok" | "Err" => builtin_owner_discriminant("Result", variant),
+            "Some" | "None" => builtin_owner_discriminant("Option", variant),
+            _ => None,
+        };
+        if builtin.is_some() {
+            return builtin;
+        }
         let mut agreed: Option<i64> = None;
         for (id, ty) in &self.types {
             let HirType::Enum { variants, .. } = ty else {
@@ -317,13 +330,7 @@ impl TypeRegistry {
                 _ => agreed = Some(i64::from(index)),
             }
         }
-        // No enum visible to this module declares `variant`: a builtin
-        // variant name can then only be the builtin Option/Result.
-        agreed.or_else(|| match variant {
-            "Ok" | "Err" => builtin_owner_discriminant("Result", variant),
-            "Some" | "None" => builtin_owner_discriminant("Option", variant),
-            _ => None,
-        })
+        agreed
     }
 
     fn declared_index_through(&self, ty: TypeId, variant: &str, depth: u8) -> Option<i64> {

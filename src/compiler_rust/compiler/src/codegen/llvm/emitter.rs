@@ -634,7 +634,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             let recv = self.get(args[0])?;
             let variant = if method == "is_ok" { "Ok" } else { "Err" };
             let enum_id = self.i64_const(0);
-            let disc = self.i64_const(Self::enum_variant_discriminant(variant));
+            // Untyped receiver: builtin Result (MIR lowers typed receivers by owner, #6953).
+            let disc = self.i64_const(crate::hir::builtin_owner_discriminant("Result", variant).unwrap_or(0));
             let result = self.call_runtime("rt_enum_check_variant", &[recv, enum_id, disc])?;
             if let Some(d) = dest {
                 self.set(*d, result);

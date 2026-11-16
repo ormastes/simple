@@ -2649,11 +2649,10 @@ impl LlvmBackend {
                 let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
                 let variant = if method_name == "is_ok" { "Ok" } else { "Err" };
                 let enum_id = i64_type.const_zero();
-                // Untyped receiver: `Ok`/`Err` may belong to a user enum (#6953).
-                let disc = i64_type.const_int(
-                    crate::hir::name_only_variant_discriminant("llvm is_ok/is_err", variant) as u64,
-                    false,
-                );
+                // Untyped receiver: MIR already lowered typed (incl. user-enum)
+                // receivers with the owner's index, so this is builtin Result (#6953).
+                let disc = i64_type
+                    .const_int(crate::hir::builtin_owner_discriminant("Result", variant).unwrap_or(0) as u64, false);
                 let call_site = builder
                     .build_call(rt_func, &[recv.into(), enum_id.into(), disc.into()], "direct_enum_variant")
                     .map_err(|e| crate::error::factory::llvm_build_failed("direct enum variant call", &e))?;

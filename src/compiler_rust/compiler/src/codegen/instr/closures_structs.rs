@@ -2582,9 +2582,9 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         "is_ok" | "is_err" => {
             let check_variant = if method == "is_ok" { "Ok" } else { "Err" };
-            // Receiver type unknown here (MIR lowers typed receivers with the
-            // owner's index), so `Ok`/`Err` may belong to a user enum (#6953).
-            let disc = crate::hir::name_only_variant_discriminant("codegen is_ok/is_err", check_variant);
+            // Untyped receiver: MIR already lowered typed (incl. user-enum)
+            // receivers with the owner's index, so this is builtin Result (#6953).
+            let disc = crate::hir::builtin_owner_discriminant("Result", check_variant).unwrap_or(0);
             let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_variant") else {
                 return Ok(None);
             };

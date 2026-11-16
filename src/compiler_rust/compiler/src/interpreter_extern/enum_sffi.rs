@@ -29,16 +29,13 @@ pub(crate) fn interpreter_enum_discriminant(enum_name: &str, variant: &str) -> u
     }
     let tail = enum_name.rsplit(['.', ':']).next().unwrap_or(enum_name);
     let index_in = |def: &EnumDef| declared_variant_discriminant(def.variants.iter().map(|v| v.name.as_str()), variant);
-    [enum_name, tail]
-        .into_iter()
-        .find_map(|name| {
+    let names: &[&str] = if tail == enum_name { &[enum_name] } else { &[enum_name, tail] };
+    names
+        .iter()
+        .find_map(|&name| {
             crate::interpreter::BLOCK_SCOPED_ENUMS
                 .with(|enums| enums.borrow().get(name).and_then(|def| index_in(def)))
-                .or_else(|| {
-                    crate::interpreter_sffi::interp_enum_variant_names(name).and_then(|names| {
-                        declared_variant_discriminant(names.iter().map(String::as_str), variant)
-                    })
-                })
+                .or_else(|| crate::interpreter_sffi::interp_enum_variant_index(name, variant))
                 .or_else(|| {
                     crate::interpreter::GLOBAL_ENUMS.with(|enums| enums.borrow().get(name).and_then(|def| index_in(def)))
                 })

@@ -83,4 +83,13 @@ Open, recorded rather than fixed:
   in the integ4 Stage 2 build (1517 modules, 0 owner-unresolved warnings).
 - Untyped `.is_ok()`/`.is_err()` in Cranelift/LLVM codegen and the
   `?`-operator `Err` checks (`hir/lower/expr/control.rs`) assume the builtin
-  Result; the codegen sites now report through the fallback.
+  Result. An erased (ANY/NIL) subject with a builtin variant name now resolves
+  to builtin `Result`/`Option` in `owned_or_unique_variant_discriminant`, so a
+  visible user enum declaring `Err` at another index no longer hands its index
+  to `r.is_err()` / `case Err` on an untyped Result. A user-enum value reaching
+  an erased subject is still tested against the builtin index (wildcard enum id 0).
+- **native -> interpreter enums are not bridged at all:**
+  `runtime_bridge.rs` `runtime_to_value_inner` (~442) has no
+  `HeapObjectType::Enum` arm, so a native enum value crossing back into the
+  interpreter becomes `Value::Nil` through the unsupported-heap fallback. The
+  owner-index fix covers interp -> native only.
