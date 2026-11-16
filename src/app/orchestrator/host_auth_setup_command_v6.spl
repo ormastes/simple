@@ -1,0 +1,37 @@
+# Explicit administrative setup for the distinct V6 MAC credential.
+# This is not an SSH identity and never reads or converts a legacy bearer.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.nogc_sync_mut.io.host_service_auth_setup_v1.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub fn host_auth_setup_command_v6(args: [text]) -> OrchestratorValidationReplyV1:
+    if (args.len() != 2 or args[0] != "host-auth-setup" or args[1] == "" or
+            args[1].contains("\0") or args[1].contains("\n") or args[1].contains("\r")):
+        return OrchestratorValidationReplyV1(exit_code: 2, output: "host-auth-setup-usage\n")
+    var turn = host_service_auth_setup_open_v1(args[1])
+    var steps = 0
+    while turn.owner.is_some() and not turn.completed and turn.error == "" and steps < 64:
+        turn = host_service_auth_setup_step_v1(turn.owner.unwrap())
+        steps = steps + 1
+    # Preserve publication history even when the final resource drain fails.
+    var first_error = turn.error
+    val publication = turn.setup_publication
+    val publication_uid = turn.publication_uid
+    val setup_digest = turn.setup_digest
+    var close_steps = 0
+    while turn.owner.is_some() and close_steps < 64:
+        turn = host_service_auth_setup_close_v1(turn.owner.unwrap())
+        close_steps = close_steps + 1
+        if first_error == "" and turn.error != "": first_error = turn.error
+        if turn.error != "": break
+    if turn.owner.is_some() and first_error == "": first_error = "host-auth-setup-cleanup-pending"
+    if not turn.completed and first_error == "": first_error = "host-auth-setup-not-complete"
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(6),
+        "kind": SdnValue.String("host-auth-setup-result"), "phase": SdnValue.String(turn.phase),
+        "setupPublication": SdnValue.String(publication),
+        "publicationUid": SdnValue.String(publication_uid), "setupDigest": SdnValue.String(setup_digest),
+        "completed": SdnValue.Bool(turn.completed and first_error == ""),
+        "cleanupPending": SdnValue.Bool(turn.owner.is_some()), "error": SdnValue.String(first_error)}
+    OrchestratorValidationReplyV1(exit_code: if turn.completed and first_error == "": 0 else: 2,
+        output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", host_auth_setup_cleanup: turn.owner)

@@ -82,6 +82,20 @@ val R_ARM_THM_PC12: i64 = 54  # S + A - Pa, signed Thumb-2 literal imm12
 val R_ARM_THM_JUMP11: i64 = 102 # S + A - P, Thumb-1 unconditional B imm11
 val R_ARM_THM_JUMP8: i64 = 103  # S + A - P, Thumb-1 conditional B imm8
 
+# i386 (psABI, SHT_REL implicit addends; the parser extracts A from the field)
+val R_386_NONE: i64 = 0
+val R_386_32: i64 = 1        # S + A
+val R_386_PC32: i64 = 2      # S + A - P
+val R_386_GOT32: i64 = 3     # G + A - GOT (driver: S = slot, P = GOT)
+val R_386_PLT32: i64 = 4     # L + A - P (static: S + A - P)
+val R_386_GOTOFF: i64 = 9    # S + A - GOT (driver: P = GOT)
+val R_386_GOTPC: i64 = 10    # GOT + A - P (driver: S = GOT)
+val R_386_16: i64 = 20
+val R_386_PC16: i64 = 21
+val R_386_8: i64 = 22
+val R_386_PC8: i64 = 23
+val R_386_GOT32X: i64 = 43   # relaxable GOT32 (applied unrelaxed)
+
 # ============================================================================
 # AArch64 Relocation Types (subset)
 # ============================================================================
@@ -209,6 +223,7 @@ enum RelocArch:
     AArch64
     Riscv32
     Riscv64
+    I386
 
 # ============================================================================
 # Relocation Target
@@ -412,6 +427,41 @@ fn reloc_apply_x86_64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: 
         return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_GOTPCREL[X] out of signed 32-bit range (G + A - P)")
 
     RelocResult(success: false, offset: offset, value: 0, error: "unsupported x86_64 reloc type {rtype}")
+
+# ============================================================================
+# i386 Relocation Application
+# ============================================================================
+
+fn reloc_i386_fit(offset: i64, v: i64, bits: i64, name: text) -> RelocResult:
+    """Accept v when it fits `bits` as signed or unsigned (ld.lld checkIntUInt);
+    the result value is the low `bits` of v."""
+    val span = 1 << bits
+    if v < -(span >> 1) or v >= span:
+        return RelocResult(success: false, offset: offset, value: 0,
+            error: "{name} out of range: value must fit {bits} bits")
+    RelocResult(success: true, offset: offset, value: v & (span - 1), error: "")
+
+# reason: positional linker reloc_engine API
+fn reloc_apply_i386(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> RelocResult:
+    if rtype == R_386_NONE:
+        return RelocResult(success: true, offset: offset, value: 0, error: "")
+    if rtype == R_386_32:
+        return reloc_i386_fit(offset, s + a, 32, "R_386_32")
+    # GOT-relative kinds: the driver folds GOT into S (GOTPC) or P (GOTOFF,
+    # GOT32, GOT32X), so each evaluates as S + A - P in 32-bit wrap-around
+    # arithmetic, as on the i386 hardware.
+    if rtype == R_386_PC32 or rtype == R_386_PLT32 or rtype == R_386_GOTPC or
+            rtype == R_386_GOTOFF or rtype == R_386_GOT32 or rtype == R_386_GOT32X:
+        return reloc_i386_fit(offset, s + a - p, 32, "R_386 32-bit relative")
+    if rtype == R_386_16:
+        return reloc_i386_fit(offset, s + a, 16, "R_386_16")
+    if rtype == R_386_PC16:
+        return reloc_i386_fit(offset, s + a - p, 16, "R_386_PC16")
+    if rtype == R_386_8:
+        return reloc_i386_fit(offset, s + a, 8, "R_386_8")
+    if rtype == R_386_PC8:
+        return reloc_i386_fit(offset, s + a - p, 8, "R_386_PC8")
+    RelocResult(success: false, offset: offset, value: 0, error: "unsupported i386 reloc type {rtype}")
 
 # ============================================================================
 # ARM32 Relocation Application
@@ -1074,6 +1124,11 @@ fn reloc_patch_width(arch: RelocArch, rtype: i64) -> i64:
             riscv_static_width(rtype)
         case Riscv64:
             riscv_static_width(rtype)
+        case I386:
+            if rtype == R_386_NONE: return 0
+            if rtype == R_386_16 or rtype == R_386_PC16: return 2
+            if rtype == R_386_8 or rtype == R_386_PC8: return 1
+            4
 
 fn reloc_patch_range_valid(byte_len: i64, offset: i64, width: i64) -> bool:
     offset >= 0 and width >= 0 and offset <= byte_len and width <= byte_len - offset
@@ -1091,6 +1146,8 @@ fn reloc_apply(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: i64, a
             reloc_apply_riscv_xlen(bytes, offset, rtype, s, a, p, 32)
         case Riscv64:
             reloc_apply_riscv(bytes, offset, rtype, s, a, p)
+        case I386:
+            reloc_apply_i386(bytes, offset, rtype, s, a, p)
 
 # reason: positional linker reloc_engine API
 fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> [i64]:
@@ -1285,6 +1342,15 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
             reloc_patch_riscv_bytes(bytes, offset, rtype, result.value)
         case Riscv64:
             reloc_patch_riscv_bytes(bytes, offset, rtype, result.value)
+        case I386:
+            if rtype == R_386_NONE:
+                bytes
+            else if rtype == R_386_16 or rtype == R_386_PC16:
+                patch_u16_le(bytes, offset, result.value)
+            else if rtype == R_386_8 or rtype == R_386_PC8:
+                patch_u8(bytes, offset, result.value)
+            else:
+                patch_u32_le(bytes, offset, result.value)
 
 fn reloc_patch_riscv_bytes(bytes: [i64], offset: i64, rtype: i64, value: i64) -> [i64]:
     if rtype == R_RISCV_NONE or rtype == 51 or rtype == 32: return bytes
@@ -1329,16 +1395,26 @@ fn reloc_arch_from_machine(machine: i64) -> RelocArch:
         RelocArch.AArch64
     else if machine == 243:
         RelocArch.Riscv64
+    else if machine == 3:
+        RelocArch.I386
     else:
         RelocArch.X86_64
+
+fn reloc_arch_from_machine_checked(machine: i64) -> Result<RelocArch, text>:
+    # Fail-closed lookup: an unsupported e_machine (e.g. EM_MIPS = 8) must not be
+    # patched with x86_64 formulas, which reloc_arch_from_machine silently does.
+    if machine == 62 or machine == 40 or machine == 183 or machine == 243 or machine == 3:
+        return Ok(reloc_arch_from_machine(machine))
+    Err("reloc_engine: unsupported ELF e_machine {machine}")
 
 # ============================================================================
 # Exports
 # ============================================================================
 
 export RelocArch, RelocTarget, RelocResult
-export reloc_apply, reloc_apply_x86_64, reloc_apply_arm32, reloc_apply_aarch64, reloc_apply_riscv
+export reloc_apply, reloc_apply_x86_64, reloc_apply_arm32, reloc_apply_i386, reloc_apply_aarch64, reloc_apply_riscv
 export reloc_patch_bytes, reloc_patch_width, reloc_patch_range_valid, reloc_arch_from_machine
+export reloc_arch_from_machine_checked
 export patch_u8, patch_u16_le, patch_u32_le, patch_u64_le, read_u16_le, read_u32_le
 export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64, R_X86_64_GOTPC32
 export R_X86_64_GOTOFF64
@@ -1357,6 +1433,8 @@ export R_ARM_MOVW_ABS_NC, R_ARM_MOVT_ABS, R_ARM_MOVW_PREL_NC, R_ARM_MOVT_PREL
 export R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS, R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL
 export R_ARM_THM_PC12
 export R_ARM_THM_JUMP11, R_ARM_THM_JUMP8
+export R_386_NONE, R_386_32, R_386_PC32, R_386_GOT32, R_386_PLT32, R_386_GOTOFF, R_386_GOTPC
+export R_386_16, R_386_PC16, R_386_8, R_386_PC8, R_386_GOT32X
 export R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_PLT32
 export R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G0_NC
 export R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G1_NC

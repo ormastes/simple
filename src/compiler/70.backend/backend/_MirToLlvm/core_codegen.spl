@@ -29,6 +29,14 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at, bootstrap_mir_static_external_at}
 # Records in the Windows XRay ring-mode ring (__simple_xray_ring_v2); 32 B each.
 const XRAY_RING_CAPACITY_V2: i64 = 65536
+
+# MSVC export list for the flag-guard data symbols (no auto-export on MSVC).
+fn xray_msvc_export_directives(ring_wrap: bool) -> [text]:
+    var out = ["/EXPORT:__simple_xray_descriptor_v1,DATA", "/EXPORT:__simple_xray_names_v1,DATA",
+        "/EXPORT:__simple_xray_hook_v1,DATA", "/EXPORT:__simple_xray_ring_v2,DATA"]
+    if ring_wrap:
+        out = out.push("/EXPORT:__simple_xray_ring_wrap_v2,DATA")
+    out
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
@@ -41,6 +49,7 @@ use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integ
     llvm_ir_builder_push_line, llvm_codegen_error_module}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+use compiler.mir.text_extern_abi.{runtime_tuple_result_facade}
 use compiler.mir.mir_coverage_probe_admission.{
     mir_coverage_probe_admission_diagnostic_module_v1
 }
@@ -575,6 +584,8 @@ impl MirTextCodegen for MirToLlvm:
             self.xray_flag_guard = self.target_os.starts_with("windows")
             if not self.xray_flag_guard and not self.target_os.starts_with("linux"):
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux and Windows triples only (target os '{self.target_os}')")
+            # MSVC (clang-cl / --msvc) has no auto-export: emit_xray_flag_guard_globals
+            # writes an explicit `/EXPORT:<sym>,DATA` list into .drectve instead.
             if self.bootstrap_string_globals_active:
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on the bootstrap translation path")
             for fn_mode in mir_module_functions_sorted(module):
@@ -1189,6 +1200,14 @@ impl MirTextCodegen for MirToLlvm:
         # No dllexport: one explicit export turns MinGW lld auto-export off and
         # the DLL loses every function export (bug
         # xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15).
+        # MSVC link has no auto-export: export the data symbols by an explicit
+        # list in the object's .drectve (read by lld-link, link.exe and the
+        # in-house COFF linker). MinGW keeps auto-export (no list, no dllexport).
+        if self.target_env == "msvc":
+            self.builder.emit("module asm \".section .drectve,\\22yn\\22\"")
+            for directive in xray_msvc_export_directives(module.xray_ring_wrap):
+                self.builder.emit("module asm \".ascii \\22 {directive}\\22\"")
+            self.builder.emit("module asm \".text\"")
         for slot_name in slot_names:
             self.builder.emit("{slot_name} = internal global i8 0")
         self.builder.emit("@__simple_xray_descriptor_v1 = constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
@@ -1223,6 +1242,9 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit("  br label %xe_done")
         self.builder.emit("xe_ring:")
         self.builder.emit("  %xe_widx = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 1")
+        if module.xray_ring_wrap:
+            self.emit_xray_ring_wrap_store(ring_ty, cap)
+            return
         self.builder.emit("  %xe_i = atomicrmw add ptr %xe_widx, i64 1 monotonic")
         self.builder.emit("  %xe_full = icmp uge i64 %xe_i, {cap}")
         self.builder.emit("  br i1 %xe_full, label %xe_drop, label %xe_store")
@@ -1246,6 +1268,32 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit("  ret void")
         self.builder.emit("}}")
         self.builder.emit("declare i64 @llvm.readcyclecounter()")
+
+    me emit_xray_ring_wrap_store(ring_ty: text, cap: i64):
+        """Wrap ring (MirModule.xray_ring_wrap): keep the most recent `cap`
+        edges. Slot = claim mod cap; seq := 0, fence, payload, seq := claim+1
+        (release), so a reader rejects a slot whose seq is not claim+1 before
+        and after reading it (overwritten or torn). Never drops."""
+        self.builder.emit("  %xe_c = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        self.builder.emit("  %xe_i = urem i64 %xe_c, {cap}")
+        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 3")
+        self.builder.emit("  store atomic i64 0, ptr %xe_rseq monotonic, align 8")
+        self.builder.emit("  fence release")
+        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 0")
+        self.builder.emit("  store i64 %site, ptr %xe_rsite, align 8")
+        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 1")
+        self.builder.emit("  store i32 %kind, ptr %xe_rkind, align 4")
+        self.builder.emit("  %xe_ts = call i64 @llvm.readcyclecounter()")
+        self.builder.emit("  %xe_rts = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4")
+        self.builder.emit("  store i64 %xe_ts, ptr %xe_rts, align 8")
+        self.builder.emit("  %xe_seq = add i64 %xe_c, 1")
+        self.builder.emit("  store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_done:")
+        self.builder.emit("  ret void")
+        self.builder.emit("}}")
+        self.builder.emit("declare i64 @llvm.readcyclecounter()")
+        self.builder.emit("@__simple_xray_ring_wrap_v2 = constant i64 1")
 
     me emit_xray_flag_guard(name: text, kind: i64, continue_label: text):
         """Load the slot; when set call the edge hook. Falls through to
@@ -2949,10 +2997,8 @@ impl MirTextCodegen for MirToLlvm:
         # the same (ptr, len, args, ...) words and return the rt_alloc'd
         # 3-word tuple block the destructure loads expect (declares
         # registered in emit_runtime_declarations, asm_constraints_helpers.spl).
-        # rt_process_run_inherit returns a plain i64 and needs no facade.
-        # Each facade is guarded by its post-split word count (cmd = ptr + len),
-        # like the MIR split and the Cranelift remap: a different-arity import
-        # of the same name (wasm `rt_process_run(cmd) -> i64`) keeps its callee.
+        # The name/word-count table is runtime_tuple_result_facade
+        # (compiler.mir.text_extern_abi), shared with the Cranelift adapter.
         # A nonlocal bare `env_get` callee (an importer's view of the @always_inline
         # config.env_get / std.env.env_get providers) carries ONE boxed text
         # word -- MIR's (ptr, len) split is keyed on `rt_env_get`, not on the
@@ -2963,9 +3009,13 @@ impl MirTextCodegen for MirToLlvm:
         val imported_env_get = bare_name_for_call == "env_get" and not self.owned_name_has_local.has("env_get")
         val imported_argv = (bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args") and not self.owned_name_has_local.has(bare_name_for_call)
         val imported_eprint = bare_name_for_call == "eprint" and not self.owned_name_has_local.has("eprint")
-        var call_func_name = if imported_argv: "@rt_get_args" elif imported_env_get and args.len() == 1: "@rt_env_get_value" elif imported_env_get: "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif imported_eprint: "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run" and args.len() == 3: "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded" and args.len() == 5: "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_bounded_bytes" and args.len() == 5: "@rt_process_run_bounded_bytes_tuple" elif bare_name_for_call == "rt_cpuid_tuple" and args.len() == 2: "@rt_cpuid_tuple_block" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout" and args.len() == 4: "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value" and args.len() == 5: "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
+        var call_func_name = if imported_argv: "@rt_get_args" elif imported_env_get and args.len() == 1: "@rt_env_get_value" elif imported_env_get: "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif imported_eprint: "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
         if func.call_origin != MirCallOrigin.Runtime:
             call_func_name = func_name
+        # Tuple-result owners: runtime AND foreign (stdlib extern) origin.
+        val tuple_facade = if func.call_origin == MirCallOrigin.Source: "" else: runtime_tuple_result_facade(bare_name_for_call, args.len())
+        if tuple_facade != "":
+            call_func_name = "@" + tuple_facade
         call_func_name = self.normalize_call_callee(call_func_name)
         # Inline typed-bytes LE loads (no per-call registry lock). Only when
         # the destination is a plain i64; anything else keeps the runtime call.

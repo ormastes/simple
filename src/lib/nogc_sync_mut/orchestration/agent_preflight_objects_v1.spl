@@ -7,8 +7,10 @@ use std.common.contracts.orchestration.agent_policy_resolution_v1.AgentPolicyRes
 use std.common.contracts.orchestration.execution_policy_v1.runtime_class_backend_v1
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
-use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2}
-use std.nogc_sync_mut.orchestration.desired_input_objects_v1.{controller_desired_operation_id_v1, desired_object_put_v1}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_read_required_v3}
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.{controller_desired_operation_id_v1, desired_object_put_v1,
+    desired_object_put_owned_v3, controller_storage_owner_check_v3}
 use std.nogc_sync_mut.orchestration.agent_policy_objects_v1.controller_agent_policy_read_v1
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.common.crypto.sha256.sha256_text
@@ -34,11 +36,15 @@ pub fn agent_preflight_proof_retain_v1(root: text, packet: AgentPreflightDispatc
 
 pub fn agent_preflight_objects_read_v1(journal: DistributedOperationJournalV2,
         operation: OperationEnvelopeV2, controller_id: text) -> Result<AgentPreflightBindingV1, text>:
+    val current = controller_storage_owner_check_v3(journal)?
     # Validate before using the payload digest as a filename.
     val envelope = distributed_encode_operation_v2(operation)?
     if operation.operation != "controller_agent_preflight_v1" or operation.host_id != controller_id:
         return Err("agent-preflight-controller-mismatch")
-    val bytes = file_read_regular_no_follow_bounded(journal.root + "/desired-input-objects/" + operation.payload_digest + ".sdn", 65536)?
+    val bytes = if journal.windows_store.is_none():
+        file_read_regular_no_follow_bounded(journal.root + "/desired-input-objects/" + operation.payload_digest + ".sdn", 65536)?
+    else:
+        distributed_operation_journal_read_required_v3(journal, "desired-input-objects/" + operation.payload_digest + ".sdn", 65536)?
     if sha256_text(bytes) != operation.payload_digest: return Err("agent-preflight-object-mismatch")
     val binding = agent_preflight_binding_decode_v1(bytes)?
     if binding.controller_id != controller_id or distributed_encode_operation_v2(agent_preflight_operation_v1(binding)?)? != envelope:
@@ -69,3 +75,17 @@ pub fn agent_preflight_for_workload_v1(journal: DistributedOperationJournalV2,
             return Err("agent-preflight-association-not-committed")
         found = Some(binding)
     Ok(found)
+
+pub fn agent_preflight_objects_retain_owned_v3(journal: DistributedOperationJournalV2,
+        binding: AgentPreflightBindingV1) -> Result<bool, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if journal.windows_store.is_none(): return agent_preflight_objects_retain_v1(journal.root, binding)
+    val bytes = agent_preflight_binding_encode_v1(binding)?
+    desired_object_put_owned_v3(journal, sha256_text(bytes), bytes, 65536)
+
+pub fn agent_preflight_proof_retain_owned_v3(journal: DistributedOperationJournalV2,
+        packet: AgentPreflightDispatchV1) -> Result<bool, text>:
+    val current = controller_storage_owner_check_v3(journal)?
+    if journal.windows_store.is_none(): return agent_preflight_proof_retain_v1(journal.root, packet)
+    val bytes = agent_preflight_dispatch_encode_v1(packet)?
+    desired_object_put_owned_v3(journal, sha256_text(bytes), bytes, 4194304)

@@ -1,0 +1,58 @@
+"""
+## Purpose and audience
+Purpose: Pin that an absolutely positioned box with `top` and `bottom` both
+`auto` sits at its STATIC position (CSS 2.2 §10.6.4): the y it would have in
+normal flow, after the previous sibling and its bottom margin, plus its own
+margin-top; it takes no space in the flow.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `body{margin:0}`, parents
+`position:relative;width:200px`, getBoundingClientRect, 2026-11-16):
+
+| case                                                        | x,y,w,h    |
+|-------------------------------------------------------------|------------|
+| parent `padding-top:7px`, after a 13px block                | 0,20,10,10 |
+| parent at y=20, after a 13px block, own `margin-top:4px`    | 0,37,10,10 |
+| next in-flow sibling (abs takes no space)                   | 0,33,200,5 |
+| parent at y=70, after a 13px block with `margin-bottom:6px` | 0,89,10,10 |
+
+Filed as `abs_static_pos` in
+doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-ABS-STATIC-POSITION-001 — auto-inset absolute boxes sit at their static position.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .p{{position:relative;width:200px}}</style></head><body>" +
+    "<div class=p style=\"padding-top:7px\"><div style=\"height:13px\"></div><div id=a style=\"position:absolute;width:10px;height:10px\"></div></div>" +
+    "<div class=p style=\"height:50px\"><div style=\"height:13px\"></div><div id=b style=\"position:absolute;width:10px;height:10px;margin-top:4px\"></div><div id=n style=\"height:5px\"></div></div>" +
+    "<div class=p style=\"height:50px\"><div style=\"height:13px;margin-bottom:6px\"></div><div id=c style=\"position:absolute;width:10px;height:10px\"></div></div>" +
+    "</body></html>"
+
+fn _box(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "x") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "y") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "w") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "h")
+
+describe "absolute static position":
+    it "AC-1: after a block inside a padded parent":
+        step("Chrome 159: 7 padding + 13 = 20")
+        expect(_box("a")).to_equal("0,20,10,10")
+
+    it "AC-2: own margin-top adds to the static position":
+        step("Chrome 159: 20 + 13 + 4 = 37")
+        expect(_box("b")).to_equal("0,37,10,10")
+
+    it "AC-3: the absolute box takes no space in the flow":
+        expect(_box("n")).to_equal("0,33,200,5")
+
+    it "AC-4: the previous sibling's bottom margin comes first":
+        step("Chrome 159: 70 + 13 + 6 = 89")
+        expect(_box("c")).to_equal("0,89,10,10")

@@ -1,0 +1,561 @@
+# Same-process sealed-ELF replacement. Success NEVER returns. Source-only,
+# NOT_RUN: Linux x86_64/AArch64 LP64 native/link/exec/signal/fault qualification outstanding.
+# This mechanism mints no grant, workspace exclusion, image closure or deadline.
+pub use std.nogc_sync_mut.io.linux_process_replace_contract_v1.LinuxProcessReplaceRequestV1
+use std.nogc_sync_mut.io.linux_process_replace_contract_v1.{linux_process_replace_request_validate_v1,
+    linux_process_replace_deadline_v1, linux_process_replace_first_error_v1, linux_process_replace_copy_texts_v1, linux_process_replace_elf_header_v1, LinuxProcessReplaceCopyProgressV1,
+    linux_process_replace_copy_accept_v1, linux_process_replace_hash_ready_v1, linux_process_replace_target_matches_v1}
+use std.nogc_sync_mut.io.retained_file.RetainedDirectoryOwnerV1
+
+pub class LinuxProcessReplaceOwnerV1:
+    slot: i64
+    generation: i64
+
+pub struct LinuxProcessReplaceTurnV1:
+    owner: Option<LinuxProcessReplaceOwnerV1>
+    cwd: Option<RetainedDirectoryOwnerV1>
+    phase: text
+    facts_known: bool
+    exec_attempted: bool
+    descriptor_table_isolated: bool
+    filesystem_context_isolated: bool
+    cwd_changed: bool
+    cleanup_pending: bool
+    error: text
+
+fn replacement_refused_v1(cwd: Option<RetainedDirectoryOwnerV1>, reason: text) -> LinuxProcessReplaceTurnV1:
+    LinuxProcessReplaceTurnV1(owner: nil, cwd: cwd, phase: "rejected", facts_known: true, exec_attempted: false,
+        descriptor_table_isolated: false, filesystem_context_isolated: false,
+        cwd_changed: false, cleanup_pending: false, error: reason)
+
+# Failed origin/lookup is never retirement proof. Carry the exact opaque token
+# without reading foreign canonical state or asserting any effect facts.
+fn replacement_unknown_v1(owner: LinuxProcessReplaceOwnerV1, reason: text) -> LinuxProcessReplaceTurnV1:
+    LinuxProcessReplaceTurnV1(owner: Some(owner), cwd: nil, phase: "unknown", facts_known: false, exec_attempted: false,
+        descriptor_table_isolated: false, filesystem_context_isolated: false,
+        cwd_changed: false, cleanup_pending: true, error: reason)
+
+fn replacement_isolated_refused_v1(cwd: RetainedDirectoryOwnerV1, reason: text) -> LinuxProcessReplaceTurnV1:
+    LinuxProcessReplaceTurnV1(owner: nil, cwd: Some(cwd), phase: "rejected", facts_known: true,
+        exec_attempted: false, descriptor_table_isolated: true, filesystem_context_isolated: true,
+        cwd_changed: false, cleanup_pending: false, error: reason)
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_process_replace_abi_v1.*
+use std.nogc_sync_mut.io.linux_process_replace_target_v1.*
+use std.nogc_sync_mut.io.anchored_io_linux_v1.{anchored_linux_metadata_v1, anchored_linux_file_flags_v1, anchored_linux_directory_flags_v1}
+use std.nogc_sync_mut.io.linux_process_replace_native_v1.*
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.{getpid, gettid}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.process_ops.process_capture_native_mode_check_v1
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_write_u8, volatile_write_u64}
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new}
+
+struct ReplacementStateV1:
+    generation: i64
+    cwd: Option<RetainedDirectoryOwnerV1>
+    request: Option<LinuxProcessReplaceRequestV1>
+    arena: i64 = 0
+    pin: i64 = -1
+    source: i64 = -1
+    source_identity: [u8] = []
+    source_revision: [u8] = []
+    copy_phase: text = "copy"
+    copy_offset: i64 = 0
+    pending_length: i64 = 0
+    pending_written: i64 = 0
+    original_cwd: i64 = -1
+    task_fd: i64 = -1
+    allocations: [i64] = []
+    argv: i64 = 0
+    environment: i64 = 0
+    size: i64 = 0
+    offset: i64 = 0
+    hash: Option<Sha256StreamV1> = nil
+    phase: text = "preparing"
+    error: text = ""
+    busy: bool = true
+    retired: bool = false
+    close_uncertain: bool = false
+    signals_saved: bool = false
+    signals_changed: bool = false
+    mask_saved: bool = false
+    mask_needs_restore: bool = false
+    exec_attempted: bool = false
+    descriptor_table_isolated: bool = false
+    filesystem_context_isolated: bool = false
+    cwd_changed: bool = false
+
+var replacement_slots_v1: [ReplacementStateV1] = []
+var replacement_active_v1: bool = false
+
+fn replacement_entry_v1() -> Result<(), text>:
+    @when(arch="x86_64"):
+    process_capture_native_mode_check_v1()?
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    @elif(arch="aarch64"):
+    process_capture_native_mode_check_v1()?
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    @else:
+    Err("linux-replace-abi-unsupported")
+    @end
+
+fn replacement_load_v1(owner: LinuxProcessReplaceOwnerV1) -> Result<ReplacementStateV1, text>:
+    replacement_entry_v1()?
+    if owner.slot < 0 or owner.slot >= replacement_slots_v1.len(): return Err("linux-replace-owner-unknown")
+    val state = replacement_slots_v1[owner.slot]
+    if state.generation != owner.generation: return Err("linux-replace-generation-mismatch")
+    if state.busy: return Err("linux-replace-owner-busy")
+    Ok(state)
+
+fn replacement_error_v1(slot: i64, reason: text):
+    var state = replacement_slots_v1[slot]
+    state.error = linux_process_replace_first_error_v1(state.error, reason)
+    state.phase = "failed"
+    replacement_slots_v1[slot] = state
+
+fn replacement_turn_v1(owner: LinuxProcessReplaceOwnerV1,
+        returned_cwd: Option<RetainedDirectoryOwnerV1> = nil) -> LinuxProcessReplaceTurnV1:
+    var state = replacement_slots_v1[owner.slot]
+    state.busy = false
+    replacement_slots_v1[owner.slot] = state
+    LinuxProcessReplaceTurnV1(owner: if state.retired: nil else: Some(owner), cwd: returned_cwd,
+        phase: state.phase, facts_known: true, exec_attempted: state.exec_attempted,
+        descriptor_table_isolated: state.descriptor_table_isolated,
+        filesystem_context_isolated: state.filesystem_context_isolated,
+        cwd_changed: state.cwd_changed, cleanup_pending: not state.retired, error: state.error)
+
+fn replacement_deadline_v1(state: ReplacementStateV1) -> bool:
+    if not state.request.?: return false
+    val request = state.request.unwrap()
+    val micros = time_sample_unix_micros_or_failure()
+    val now = time_sample_monotonic_nanos_or_failure()
+    micros >= 0 and linux_process_replace_deadline_v1(request.expires_at_unix_ms,
+        request.preparation_started_ns, request.preparation_budget_ns, micros / 1000, now)
+
+@unsafe(reason: "retains every native argv/env allocation before copying bytes; no caller pointers survive admission", capabilities: [ffi, raw_ptr])
+fn replacement_vector_v1(slot: i64, values: [text]) -> Result<i64, text>:
+    val vector = malloc(((values.len() + 1) * 8) as u64)
+    if vector == 0: return Err("linux-replace-allocation")
+    var updated_0 = replacement_slots_v1[slot]
+    updated_0.allocations.push(vector)
+    replacement_slots_v1[slot] = updated_0
+    for index in 0..values.len() + 1: volatile_write_u64(vector + index * 8, 0)
+    for index in 0..values.len():
+        val value = values[index]
+        val pointer = malloc((value.byte_len() + 1) as u64)
+        if pointer == 0: return Err("linux-replace-allocation")
+        var updated_1 = replacement_slots_v1[slot]
+        updated_1.allocations.push(pointer)
+        replacement_slots_v1[slot] = updated_1
+        for offset in 0..value.byte_len(): volatile_write_u8(pointer + offset, value.byte_at(offset) as i64)
+        volatile_write_u8(pointer + value.byte_len(), 0)
+        volatile_write_u64(vector + index * 8, pointer)
+    Ok(vector)
+
+# Borrows caller cwd. Original is returned IMMEDIATELY, even with ownerSome;
+# canonical owner privately holds ONLY its validated independent duplicate.
+@unsafe(reason: "kernel admission isolation precedes lifetime resources; bounded private image producer", capabilities: [ffi, raw_ptr])
+pub fn linux_process_replace_open_v1(request: LinuxProcessReplaceRequestV1,
+        cwd: RetainedDirectoryOwnerV1) -> LinuxProcessReplaceTurnV1:
+    val mode = process_capture_native_mode_check_v1()
+    if mode.is_err(): return replacement_refused_v1(Some(cwd), mode.unwrap_err())
+    val initial_pid = getpid()
+    if initial_pid <= 0 or gettid() != initial_pid:
+        return replacement_refused_v1(Some(cwd), "linux-replace-main-thread-required")
+    if linux_replace_machine_v1() < 0: return replacement_refused_v1(Some(cwd), "linux-replace-abi-unsupported")
+    if not linux_process_replace_target_matches_v1(request.architecture, linux_replace_architecture_v1()):
+        return replacement_refused_v1(Some(cwd), "linux-replace-target-architecture-mismatch")
+    val valid = linux_process_replace_request_validate_v1(request)
+    if valid.is_err(): return replacement_refused_v1(Some(cwd), valid.unwrap_err())
+    # VM/SIGHAND/THREAD are kernel nonsharing VALIDATION (no VM split);
+    # FILES/FS actually split, BEFORE registry/origin descriptors/pin/hash.
+    if syscall(linux_replace_unshare_number_v1(), 69376, 0, 0, 0, 0, 0) != 0:
+        return replacement_refused_v1(Some(cwd), "linux-replace-admission-isolation-refused")
+    if getpid() != initial_pid or gettid() != initial_pid:
+        return replacement_isolated_refused_v1(cwd, "linux-replace-admission-process-changed")
+    val entry = replacement_entry_v1()
+    if entry.is_err(): return replacement_isolated_refused_v1(cwd, entry.unwrap_err())
+    if replacement_active_v1 or replacement_slots_v1.len() >= 4096:
+        return replacement_isolated_refused_v1(cwd, "linux-replace-owner-bound")
+    val slot = replacement_slots_v1.len()
+    val owner = LinuxProcessReplaceOwnerV1(slot: slot, generation: slot + 1)
+    val args = linux_process_replace_copy_texts_v1(request.args)
+    val environment = linux_process_replace_copy_texts_v1(request.environment)
+    val frozen = LinuxProcessReplaceRequestV1(program: request.program, expected_digest: request.expected_digest,
+        expected_size_bytes: request.expected_size_bytes, max_image_bytes: request.max_image_bytes, architecture: request.architecture,
+        args: args, environment: environment, expires_at_unix_ms: request.expires_at_unix_ms,
+        preparation_started_ns: request.preparation_started_ns, preparation_budget_ns: request.preparation_budget_ns)
+    replacement_slots_v1.push(ReplacementStateV1(generation: owner.generation, cwd: nil, request: Some(frozen),
+        descriptor_table_isolated: true, filesystem_context_isolated: true))
+    replacement_active_v1 = true
+    if not replacement_deadline_v1(replacement_slots_v1[slot]):
+        replacement_error_v1(slot, "linux-replace-deadline")
+        return replacement_turn_v1(owner, Some(cwd))
+    val (duplicate, duplicate_error) = cwd.duplicate_as_process_cwd_v1()
+    var state = replacement_slots_v1[slot]
+    state.cwd = duplicate # Publish ANY acquired copy before classifying its error.
+    replacement_slots_v1[slot] = state
+    if duplicate_error != "" or duplicate.is_none():
+        replacement_error_v1(slot, if duplicate_error != "": duplicate_error else: "linux-replace-cwd-duplicate-missing")
+        return replacement_turn_v1(owner, Some(cwd))
+    state.arena = malloc(70400u64)
+    replacement_slots_v1[slot] = state
+    if state.arena == 0:
+        replacement_error_v1(slot, "linux-replace-allocation")
+        return replacement_turn_v1(owner, Some(cwd))
+    val vector = replacement_vector_v1(slot, args)
+    if vector.is_err():
+        replacement_error_v1(slot, vector.unwrap_err())
+        return replacement_turn_v1(owner, Some(cwd))
+    state = replacement_slots_v1[slot]
+    state.argv = vector.unwrap()
+    replacement_slots_v1[slot] = state
+    val env_vector = replacement_vector_v1(slot, environment)
+    if env_vector.is_err():
+        replacement_error_v1(slot, env_vector.unwrap_err())
+        return replacement_turn_v1(owner, Some(cwd))
+    state = replacement_slots_v1[slot]
+    state.environment = env_vector.unwrap()
+    replacement_slots_v1[slot] = state
+    if not replacement_deadline_v1(state):
+        replacement_error_v1(slot, "linux-replace-deadline")
+        return replacement_turn_v1(owner, Some(cwd))
+    state.source = openat(-100, linux_replace_name_v1(state.arena, frozen.program), anchored_linux_file_flags_v1(), 0u32) as i64
+    replacement_slots_v1[slot] = state
+    if state.source < 3:
+        replacement_error_v1(slot, "linux-replace-source-open")
+        return replacement_turn_v1(owner, Some(cwd))
+    val metadata = anchored_linux_metadata_v1(state.source, "", true)
+    if metadata.is_err():
+        replacement_error_v1(slot, "linux-replace-source-metadata")
+        return replacement_turn_v1(owner, Some(cwd))
+    val actual = metadata.unwrap()
+    if ((actual.mode & 61440u32) != 32768u32 or (actual.mode & 73u32) == 0u32 or
+            actual.size != frozen.expected_size_bytes or actual.size > frozen.max_image_bytes):
+        replacement_error_v1(slot, "linux-replace-source-image-policy")
+        return replacement_turn_v1(owner, Some(cwd))
+    state.size = actual.size
+    state.source_identity = actual.identity
+    state.source_revision = actual.revision
+    replacement_slots_v1[slot] = state
+    # Caller must ALREADY account full memfd+scratch/arrays in original admitted
+    # memory budget. max_image_bytes is a bound, NEVER a new reservation/grant.
+    state.pin = memfd_create(linux_replace_name_v1(state.arena, "simple-agent-primary-v1"), 3u32) as i64
+    replacement_slots_v1[slot] = state
+    if state.pin < 3:
+        replacement_error_v1(slot, "linux-replace-image-allocation")
+        return replacement_turn_v1(owner, Some(cwd))
+    replacement_turn_v1(owner, Some(cwd))
+
+@unsafe(reason: "one bounded source/copy/hash chunk; accepted writes only, original deadline each turn", capabilities: [ffi, raw_ptr])
+pub fn linux_process_replace_prepare_step_v1(owner: LinuxProcessReplaceOwnerV1) -> LinuxProcessReplaceTurnV1:
+    val loaded = replacement_load_v1(owner)
+    if loaded.is_err(): return replacement_unknown_v1(owner, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if state.retired or state.phase != "preparing": return replacement_turn_v1(owner)
+    state.busy = true
+    replacement_slots_v1[owner.slot] = state
+    val slot = owner.slot
+    if not replacement_deadline_v1(state):
+        replacement_error_v1(slot, "linux-replace-deadline")
+        return replacement_turn_v1(owner)
+    if state.copy_phase == "copy":
+        if state.pending_length == 0:
+            if state.copy_offset == state.size:
+                state.copy_phase = "seal"
+                replacement_slots_v1[slot] = state
+                return replacement_turn_v1(owner)
+            val count = pread(state.source as i32, state.arena + 4096,
+                min(65536, state.size - state.copy_offset) as u64, state.copy_offset)
+            if count <= 0 or count > min(65536, state.size - state.copy_offset):
+                replacement_error_v1(slot, "linux-replace-source-read")
+                return replacement_turn_v1(owner)
+            state.pending_length = count
+            state.pending_written = 0
+            replacement_slots_v1[slot] = state
+        if not replacement_deadline_v1(state):
+            replacement_error_v1(slot, "linux-replace-deadline")
+            return replacement_turn_v1(owner)
+        val accepted = pwrite(state.pin as i32, state.arena + 4096 + state.pending_written,
+            (state.pending_length - state.pending_written) as u64, state.copy_offset + state.pending_written)
+        val advanced = linux_process_replace_copy_accept_v1(LinuxProcessReplaceCopyProgressV1(
+            copied: state.copy_offset, pending: state.pending_length, accepted: state.pending_written), accepted)
+        if advanced.is_err():
+            replacement_error_v1(slot, advanced.unwrap_err())
+            return replacement_turn_v1(owner)
+        state.copy_offset = advanced.unwrap().copied
+        state.pending_length = advanced.unwrap().pending
+        state.pending_written = advanced.unwrap().accepted
+        replacement_slots_v1[slot] = state
+        return replacement_turn_v1(owner)
+    if state.copy_phase == "seal":
+        val after = anchored_linux_metadata_v1(state.source, "", true)
+        if after.is_err():
+            replacement_error_v1(slot, "linux-replace-source-final-metadata")
+            return replacement_turn_v1(owner)
+        if (after.unwrap().identity != state.source_identity or after.unwrap().revision != state.source_revision or
+                after.unwrap().size != state.size or lseek(state.pin as i32, 0, 2) != state.size):
+            replacement_error_v1(slot, "linux-replace-source-changed")
+            return replacement_turn_v1(owner)
+        if not replacement_deadline_v1(state):
+            replacement_error_v1(slot, "linux-replace-deadline")
+            return replacement_turn_v1(owner)
+        if fchmod(state.pin as i32, 320u32) != 0 or fcntl(state.pin as i32, 1033, 15) != 0:
+            replacement_error_v1(slot, "linux-replace-image-seal")
+            return replacement_turn_v1(owner)
+        val seals = fcntl(state.pin as i32, 1034, 0)
+        if not linux_process_replace_hash_ready_v1(state.copy_offset, state.size, state.pending_length, seals):
+            replacement_error_v1(slot, "linux-replace-image-seal")
+            return replacement_turn_v1(owner)
+        if pread(state.pin as i32, state.arena + 4096, 64u64, 0) != 64:
+            replacement_error_v1(slot, "linux-replace-elf-header-read")
+            return replacement_turn_v1(owner)
+        var header: [u8] = []
+        for at in 0..64: header.push(volatile_read_u8(state.arena + 4096 + at) as u8)
+        val valid_header = linux_process_replace_elf_header_v1(header, state.size, linux_replace_machine_v1())
+        if valid_header.is_err():
+            replacement_error_v1(slot, valid_header.unwrap_err())
+            return replacement_turn_v1(owner)
+        state.hash = Some(sha256_stream_v1_new())
+        state.offset = 0
+        state.copy_phase = "hash"
+        replacement_slots_v1[slot] = state
+        return replacement_turn_v1(owner)
+    if state.copy_phase != "hash":
+        replacement_error_v1(slot, "linux-replace-producer-phase")
+        return replacement_turn_v1(owner)
+    val observed = linux_replace_sealed_hash_read_v1(state.pin, state.arena + 4096, state.offset, state.size)
+    if observed.is_err():
+        replacement_error_v1(slot, observed.unwrap_err())
+        return replacement_turn_v1(owner)
+    val bytes = observed.unwrap()
+    val count = bytes.len()
+    var hash = state.hash.unwrap()
+    if not hash.update(bytes):
+        replacement_error_v1(slot, "linux-replace-pin-hash")
+        return replacement_turn_v1(owner)
+    state.hash = Some(hash)
+    state.offset = state.offset + count
+    if state.offset == state.size:
+        val digest = hash.finish_hex()
+        if not digest.? or digest.unwrap() != state.request.unwrap().expected_digest:
+            replacement_slots_v1[slot] = state
+            replacement_error_v1(slot, "linux-replace-image-digest-mismatch")
+            return replacement_turn_v1(owner)
+        state.hash = nil
+        state.phase = "ready"
+    replacement_slots_v1[slot] = state
+    replacement_turn_v1(owner)
+
+# Actual private-custody observation for correlation/qualification, not authority.
+@unsafe(reason: "reads identity of exact privately duplicated cwd under canonical origin", capabilities: [ffi, raw_ptr])
+pub fn linux_process_replace_cwd_identity_v1(owner: LinuxProcessReplaceOwnerV1) -> Result<[u8], text>:
+    val state = replacement_load_v1(owner)?
+    if state.retired or state.cwd.is_none(): return Err("linux-replace-cwd-unavailable")
+    state.cwd.unwrap().stage_identity_v1()
+
+# Failure restoration is retriable; the executable effect itself NEVER is.
+@unsafe(reason: "restores exact saved cwd, dispositions and mask; failures retain all original cleanup resources", capabilities: [ffi, raw_ptr])
+fn replacement_restore_v1(slot: i64):
+    var state = replacement_slots_v1[slot]
+    if state.cwd_changed:
+        if state.original_cwd >= 0 and fchdir(state.original_cwd as i32) == 0:
+            state.cwd_changed = false
+        else:
+            state.error = linux_process_replace_first_error_v1(state.error, "linux-replace-cwd-restore-failed")
+    if state.signals_changed:
+        if linux_replace_signal_restore_v1(state.arena):
+            state.signals_changed = false
+        else:
+            state.error = linux_process_replace_first_error_v1(state.error, "linux-replace-signals-restore-failed")
+    # Never unblock a partially restored handler set; cleanup may retry.
+    if state.mask_needs_restore and not state.signals_changed:
+        if linux_replace_mask_restore_v1(state.arena):
+            state.mask_needs_restore = false
+        else:
+            state.error = linux_process_replace_first_error_v1(state.error, "linux-replace-mask-restore-failed")
+    replacement_slots_v1[slot] = state
+
+@unsafe(reason: "same-process execveat exact sealed fd; success does not return and no fallback/retry is attempted", capabilities: [ffi, raw_ptr])
+pub fn linux_process_replace_replace_v1(owner: LinuxProcessReplaceOwnerV1) -> LinuxProcessReplaceTurnV1:
+    val loaded = replacement_load_v1(owner)
+    if loaded.is_err(): return replacement_unknown_v1(owner, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if state.retired or state.exec_attempted or state.phase != "ready":
+        if not state.retired: replacement_error_v1(owner.slot, "linux-replace-not-ready-or-consumed")
+        return replacement_turn_v1(owner)
+    state.busy = true
+    replacement_slots_v1[owner.slot] = state
+    val slot = owner.slot
+    if not replacement_deadline_v1(state):
+        replacement_error_v1(slot, "linux-replace-deadline")
+        return replacement_turn_v1(owner)
+    # No user signal handler can run while sole-thread state is established.
+    if not linux_replace_block_v1(state.arena, true):
+        replacement_error_v1(slot, "linux-replace-signal-block")
+        return replacement_turn_v1(owner)
+    # Recheck origin under blocked signals, closing the pre-block handler/fork window.
+    val blocked_entry = replacement_entry_v1()
+    if blocked_entry.is_err():
+        val restored = linux_replace_mask_restore_v1(state.arena)
+        return replacement_unknown_v1(owner, if restored: blocked_entry.unwrap_err() else: "linux-replace-foreign-mask-restore-failed")
+    var updated_8 = replacement_slots_v1[slot]
+    updated_8.mask_saved = true
+    replacement_slots_v1[slot] = updated_8
+    var updated_9 = replacement_slots_v1[slot]
+    updated_9.mask_needs_restore = true
+    replacement_slots_v1[slot] = updated_9
+    val task_name = linux_replace_name_v1(state.arena, "/proc/self/task")
+    var updated_10 = replacement_slots_v1[slot]
+    updated_10.task_fd = openat(-100, task_name, anchored_linux_directory_flags_v1(), 0u32) as i64
+    replacement_slots_v1[slot] = updated_10
+    if (replacement_slots_v1[slot].task_fd < 0 or
+            not linux_replace_single_task_v1(replacement_slots_v1[slot].task_fd, state.arena, getpid() as i64)):
+        replacement_error_v1(slot, "linux-replace-single-thread-unproven")
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    if syscall(linux_replace_unshare_number_v1(), 67840, 0, 0, 0, 0, 0) != 0:
+        replacement_error_v1(slot, "linux-replace-execution-sharing-refused")
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    if not linux_replace_signal_save_v1(state.arena):
+        replacement_error_v1(slot, "linux-replace-signal-query")
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    var updated_11 = replacement_slots_v1[slot]
+    updated_11.signals_saved = true
+    replacement_slots_v1[slot] = updated_11
+    # Set flag BEFORE first possible partial disposition mutation.
+    var updated_12 = replacement_slots_v1[slot]
+    updated_12.signals_changed = true
+    replacement_slots_v1[slot] = updated_12
+    if not linux_replace_signal_reset_v1(state.arena):
+        replacement_error_v1(slot, "linux-replace-signal-reset")
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    var updated_13 = replacement_slots_v1[slot]
+    updated_13.original_cwd = openat(-100, linux_replace_name_v1(state.arena, "."), anchored_linux_directory_flags_v1(), 0u32) as i64
+    replacement_slots_v1[slot] = updated_13
+    if replacement_slots_v1[slot].original_cwd < 0:
+        replacement_error_v1(slot, "linux-replace-original-cwd")
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    # UNSHARE|CLOEXEC, all descriptors >=3. No procfd walk or inherited allowlist.
+    if syscall(436, 3, 4294967295, 6, 0, 0, 0) != 0:
+        replacement_error_v1(slot, "linux-replace-fd-isolation-unsupported")
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    var updated_15 = replacement_slots_v1[slot]
+    updated_15.descriptor_table_isolated = true
+    replacement_slots_v1[slot] = updated_15
+    val entered = state.cwd.unwrap().enter_as_process_cwd_v1()
+    if entered.is_err():
+        replacement_error_v1(slot, entered.unwrap_err())
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    var updated_16 = replacement_slots_v1[slot]
+    updated_16.cwd_changed = true
+    replacement_slots_v1[slot] = updated_16
+    # Last deadline check uses original container-local samples, never a renewal.
+    if not replacement_deadline_v1(replacement_slots_v1[slot]):
+        replacement_error_v1(slot, "linux-replace-deadline")
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    if not linux_replace_mask_restore_v1(state.arena):
+        replacement_error_v1(slot, "linux-replace-mask-restore-failed")
+        replacement_restore_v1(slot)
+        return replacement_turn_v1(owner)
+    var updated_17 = replacement_slots_v1[slot]
+    updated_17.mask_needs_restore = false
+    replacement_slots_v1[slot] = updated_17
+    var updated_18 = replacement_slots_v1[slot]
+    updated_18.exec_attempted = true
+    replacement_slots_v1[slot] = updated_18
+    # Empty string, not /proc/self/fd or original path. ELF main image only;
+    # installed image policy must separately bind interpreter/loader/libraries.
+    val empty = linux_replace_name_v1(state.arena, "")
+    val result = execveat(state.pin as i32, empty, state.argv, state.environment, 4096)
+    replacement_error_v1(slot, "linux-replace-execveat-failed")
+    # exec failure returns with reset/default/ignored handlers. Reblock before
+    # restoring caught original handlers; failed reblock is retained uncertainty.
+    if not linux_replace_block_v1(state.arena, false):
+        replacement_error_v1(slot, "linux-replace-reblock-failed")
+        var updated_19 = replacement_slots_v1[slot]
+        updated_19.mask_needs_restore = true
+        replacement_slots_v1[slot] = updated_19
+        return replacement_turn_v1(owner)
+    var updated_20 = replacement_slots_v1[slot]
+    updated_20.mask_needs_restore = true
+    replacement_slots_v1[slot] = updated_20
+    replacement_restore_v1(slot)
+    replacement_turn_v1(owner)
+
+@unsafe(reason: "positive-only private cwd/image cleanup, no caller handback or uncertain-fd retry", capabilities: [ffi, raw_ptr])
+pub fn linux_process_replace_close_v1(owner: LinuxProcessReplaceOwnerV1) -> LinuxProcessReplaceTurnV1:
+    val loaded = replacement_load_v1(owner)
+    if loaded.is_err(): return replacement_unknown_v1(owner, loaded.unwrap_err())
+    var state = loaded.unwrap()
+    if state.retired: return replacement_turn_v1(owner)
+    state.busy = true
+    replacement_slots_v1[owner.slot] = state
+    if state.mask_saved and (state.signals_changed or state.mask_needs_restore):
+        if not linux_replace_block_v1(state.arena, false):
+            replacement_error_v1(owner.slot, "linux-replace-reblock-failed")
+            return replacement_turn_v1(owner)
+        var updated_21 = replacement_slots_v1[owner.slot]
+        updated_21.mask_needs_restore = true
+        replacement_slots_v1[owner.slot] = updated_21
+    replacement_restore_v1(owner.slot)
+    state = replacement_slots_v1[owner.slot]
+    if state.cwd_changed or state.signals_changed or state.mask_needs_restore or state.close_uncertain:
+        return replacement_turn_v1(owner)
+    # close failure is ambiguous on Linux: quarantine, NEVER retry its integer.
+    for descriptor in [state.task_fd, state.original_cwd, state.source, state.pin]:
+        if descriptor >= 0:
+            if close(descriptor as i32) != 0:
+                state.close_uncertain = true
+                state.error = linux_process_replace_first_error_v1(state.error, "linux-replace-close-uncertain")
+    state.task_fd = -1
+    state.original_cwd = -1
+    state.pin = -1
+    state.source = -1
+    replacement_slots_v1[owner.slot] = state
+    if state.close_uncertain: return replacement_turn_v1(owner)
+    if state.cwd.is_some():
+        var duplicate = state.cwd.unwrap()
+        if not duplicate.close():
+            state.cwd = Some(duplicate)
+            state.close_uncertain = true
+            state.error = linux_process_replace_first_error_v1(state.error, "linux-replace-cwd-close-uncertain")
+            replacement_slots_v1[owner.slot] = state
+            return replacement_turn_v1(owner)
+    for pointer in state.allocations: free(pointer)
+    if state.arena != 0: free(state.arena)
+    state.cwd = nil
+    state.request = nil
+    state.hash = nil
+    state.source_identity = []
+    state.source_revision = []
+    state.allocations = []
+    state.argv = 0
+    state.environment = 0
+    state.arena = 0
+    state.retired = true
+    state.phase = "closed"
+    replacement_slots_v1[owner.slot] = state
+    replacement_active_v1 = false
+    replacement_turn_v1(owner)
+@else:
+pub fn linux_process_replace_cwd_identity_v1(owner: LinuxProcessReplaceOwnerV1) -> Result<[u8], text>:
+    Err("linux-replace-platform-unsupported")
+pub fn linux_process_replace_open_v1(request: LinuxProcessReplaceRequestV1, cwd: RetainedDirectoryOwnerV1) -> LinuxProcessReplaceTurnV1:
+    replacement_refused_v1(Some(cwd), "linux-replace-platform-unsupported")
+pub fn linux_process_replace_prepare_step_v1(owner: LinuxProcessReplaceOwnerV1) -> LinuxProcessReplaceTurnV1:
+    replacement_unknown_v1(owner, "linux-replace-platform-unsupported")
+pub fn linux_process_replace_replace_v1(owner: LinuxProcessReplaceOwnerV1) -> LinuxProcessReplaceTurnV1:
+    replacement_unknown_v1(owner, "linux-replace-platform-unsupported")
+pub fn linux_process_replace_close_v1(owner: LinuxProcessReplaceOwnerV1) -> LinuxProcessReplaceTurnV1:
+    replacement_unknown_v1(owner, "linux-replace-platform-unsupported")
+@end

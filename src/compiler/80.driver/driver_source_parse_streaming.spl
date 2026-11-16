@@ -48,9 +48,10 @@ use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_sel
     worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1,
     worker_admitted_edges_v1, worker_admitted_edges_selected_v1, worker_admitted_closure_v1, worker_admitted_order_v1,
     worker_admitted_error_v1, WorkerAdmittedGraphV1}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_content_hash}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_closure_walk_check_v1, tldr_imports_enabled_v1, unit_tldr_imports_enabled_v1}
 use compiler.driver.driver_unit_tldr_imports_v1.{UnitTldrPlanV1, unit_tldr_plan_v1, unit_tldr_empty_plan_v1,
-    unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1, unit_tldr_log_line_v1}
+    unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1, unit_tldr_surface_for_row_v1, unit_tldr_log_line_v1}
 use compiler.driver.driver_tldr_import_route_v1.{TldrFrozenRoutePlanV1, tldr_route_frozen_inputs_v1}
 use compiler.driver.driver_tldr_frozen_surface_route_v1.{tldr_frozen_surface_lane_error_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_closure_incomplete_publish_v1,
@@ -119,7 +120,8 @@ use compiler.driver.driver_source_parse_support.{
 }
 
 use compiler.driver.driver_unit_order_index_v1.{unit_admitted_graph_v1, unit_order_index_enabled_v1,
-    UNIT_ORDER_INDEX_ENV_V1}
+    UNIT_ORDER_INDEX_ENV_V1, UNIT_ORDER_SKIP_FRESH_ENV_V1, unit_order_skip_fresh_enabled_v1,
+    unit_order_fresh_flags_v1, unit_order_skip_fresh_order_v1}
 
 var _worker_readiness_edges_reported_v1: bool = false
 
@@ -189,6 +191,12 @@ impl CompilerDriver:
             return false
         var admitted_graph = WorkerAdmittedGraphV1(edges: [], errors: [])
         if worker_unit:
+            # Skip-fresh reads the PREVIOUS index, so it runs before the
+            # graph step below republishes it.
+            val unit_fresh = unit_order_fresh_flags_v1(
+                unit_order_skip_fresh_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_SKIP_FRESH_ENV_V1) ?? "",
+                    driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "", source_paths, source_contents)
             val edge_result = unit_admitted_graph_v1(
                 unit_order_index_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
                 driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
@@ -200,7 +208,7 @@ impl CompilerDriver:
             admitted_graph = edge_result.unwrap()
             val pick_result = worker_unit_pick_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
                 driver_parse_env_get_v1("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
-                worker_admitted_order_v1(admitted_graph.edges),
+                unit_order_skip_fresh_order_v1(worker_admitted_order_v1(admitted_graph.edges), unit_fresh),
                 native_file_worker_batch_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? ""))
             if pick_result.is_err():
                 self.ctx.add_error("file-worker unit pick failed: {pick_result.unwrap_err()}")
@@ -329,12 +337,17 @@ impl CompilerDriver:
                         "Module surface extraction error: {alias_result.unwrap_err()} source='{source_paths[source_index]}' module='{source_module_names[source_index]}' index={source_index}")
                     return false
             elif unit_tldr_on and not worker_needed[source_index] and
-                    unit_tldr_surface_for_v1(unit_tldr_plan, source_module_names[source_index]) != nil:
+                    unit_tldr_surface_for_row_v1(unit_tldr_plan, source_module_names[source_index], canonical_path) != nil:
                 # PM3: an import not parsed here gets its summary-built surface.
-                var tldr_surface: ModuleSurface = unit_tldr_surface_for_v1(unit_tldr_plan, source_module_names[source_index]).unwrap()
+                var tldr_surface: ModuleSurface = unit_tldr_surface_for_row_v1(unit_tldr_plan, source_module_names[source_index], canonical_path).unwrap()
                 # Bind the summary surface to this admitted row: HIR deps records
                 # resolve import edges through surface.source_index (layer 2).
                 tldr_surface.source_index = source_index
+                # Physical content identity of THIS row's bytes: a lib.X/std.X
+                # twin row for the same path takes the alias lane, which
+                # compares these against its own source_contents entry.
+                tldr_surface.content_length = source_contents[source_index].byte_len()
+                tldr_surface.content_hash = module_surface_content_hash(source_contents[source_index])
                 val tldr_added = builder.add_surface_canonical_identity(tldr_surface,
                     source_module_names[source_index], canonical_path)
                 if tldr_added.is_err():

@@ -1532,6 +1532,10 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
 
     let path = resolve_app_path(app_relative_path)?;
 
+    // `lint`/`fix`/`fmt`: the loader's advisory diagnostics about the LINTER'S OWN
+    // import closure are not about the linted file; keep them off stderr.
+    simple_common::tool_closure_quiet::quiet_tool_closure_for_app(app_relative_path);
+
     if app_relative_path == "src/compiler/90.tools/sffi_gen/main.spl" {
         let previous_force_args = std::env::var("SIMPLE_FORCE_ARGS").ok();
         let forced_args = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");

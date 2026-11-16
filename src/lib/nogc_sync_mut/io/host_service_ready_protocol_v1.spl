@@ -1,0 +1,193 @@
+# Pure shape/data helpers only. Protected-file provenance belongs to actual IO
+# owners. A record can be forged by a trusted administrator; it is not entropy
+# attestation against that authority.
+use std.nogc_sync_mut.io.retained_private_credential_protocol_v2.retained_credential_bytes_equal_v2
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.contracts.orchestration.host_service_auth_v6.{HostServiceAuthContextV6, host_service_auth_tag_v6, host_service_auth_verify_v6}
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes, utf8_bytes_valid}
+
+pub struct HostServiceReadyPathV1:
+    parent: text
+    setup_leaf: text
+
+pub struct HostServiceReadyMetadataV1:
+    endpoint: text
+    incarnation: text
+    service_pid: i64
+    publication_uid: text
+    setup_digest: text
+    host_lease_digest: text
+    host_authority_digest: text
+
+# Do not normalize an entire native path. In particular \GLOBAL??\ survives
+# unchanged, including Unicode parent components. Native retained root open
+# remains responsible for actual namespace, ancestry, ACL and identity proof.
+pub fn host_service_auth_setup_path_v1(path: text) -> Result<HostServiceReadyPathV1, text>:
+    if path.byte_len() < 4 or path.byte_len() > 32000 or path.contains("\0"):
+        return Err("host-ready-path-shape")
+    var at: i64 = -1
+    for index in 0..path.byte_len():
+        val code = path.byte_at(index)
+        if code == 92 or code == 47: at = index
+    if at < 3 or at >= path.byte_len() - 1: return Err("host-ready-path-parent-required")
+    val parent = path.substring(0, at)
+    if parent.ends_with(":"): return Err("host-ready-private-parent-required")
+    var leaf = path.substring(at + 1, path.byte_len())
+    if leaf.byte_len() < 1 or leaf.byte_len() > 220 or leaf == "." or leaf == ".." or leaf.ends_with("."):
+        return Err("host-ready-leaf-shape")
+    for byte in leaf.bytes():
+        val code = byte as i64
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+                (code >= 97 and code <= 122) or code == 45 or code == 46 or code == 95):
+            return Err("host-ready-leaf-shape")
+    if leaf.ends_with(".ready"): return Err("host-ready-setup-leaf-reserved")
+    Ok(HostServiceReadyPathV1(parent: parent, setup_leaf: leaf))
+
+pub struct HostServiceAuthSetupMetadataV1:
+    publication_uid: text
+    setup_digest: text
+
+fn setup_fields_v1(bytes: [u8], count: i64) -> Result<Dict<text, SdnValue>, text>:
+    if bytes.len() < 1 or bytes.len() > 512 or not utf8_bytes_valid(bytes): return Err("host-auth-record-bound-or-text")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 512, max_depth: 2, max_nodes: 32,
+        max_rows: 0, max_cells: 0, max_columns: 9)
+    val document = sdn_parse_strict_v1(bytes_to_text(bytes), limits)
+    if document.is_err(): return Err("host-auth-record-sdn")
+    val fields = match document.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-auth-record-object")
+    if fields.len() != count: return Err("host-auth-record-field-count")
+    Ok(fields)
+
+fn setup_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("host-auth-record-field-missing")
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-auth-record-field-type")
+
+fn setup_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("host-auth-record-field-missing")
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-auth-record-field-type")
+
+pub fn host_service_auth_setup_record_v1(uid: text, secret: text) -> Result<[u8], text>:
+    if not host_service_hex_shape_v6(uid, 32) or not host_service_hex_shape_v6(secret, 64):
+        return Err("host-auth-setup-fields")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(6), "kind": SdnValue.String("host-service-auth-setup"),
+        "generator": SdnValue.String("host-service-auth-setup-v1"), "entropySource": SdnValue.String("sosix-os-csprng"),
+        "publicationUid": SdnValue.String(uid), "secret": SdnValue.String(secret),
+        "uidBytes": SdnValue.Int(16), "secretBytes": SdnValue.Int(32)}
+    val bytes = text_to_utf8_bytes(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    if bytes.len() > 512: return Err("host-auth-setup-record-bound")
+    Ok(bytes)
+
+pub fn host_service_auth_setup_validate_v1(bytes: [u8], expected_digest: text,
+        expected_uid: text = "") -> Result<HostServiceAuthSetupMetadataV1, text>:
+    if not host_service_hex_shape_v6(expected_digest, 64): return Err("host-auth-setup-pin-shape")
+    if expected_uid != "" and not host_service_hex_shape_v6(expected_uid, 32): return Err("host-auth-setup-uid-shape")
+    val fields = setup_fields_v1(bytes, 8)?
+    if (setup_int_v1(fields, "version")? != 6 or setup_text_v1(fields, "kind")? != "host-service-auth-setup" or
+            setup_text_v1(fields, "generator")? != "host-service-auth-setup-v1" or
+            setup_text_v1(fields, "entropySource")? != "sosix-os-csprng" or
+            setup_int_v1(fields, "uidBytes")? != 16 or setup_int_v1(fields, "secretBytes")? != 32):
+        return Err("host-auth-setup-generator-or-version")
+    val uid = setup_text_v1(fields, "publicationUid")?
+    val secret = setup_text_v1(fields, "secret")?
+    val canonical = host_service_auth_setup_record_v1(uid, secret)?
+    if not retained_credential_bytes_equal_v2(bytes, canonical): return Err("host-auth-setup-not-canonical")
+    val digest = sha256_text(bytes_to_text(canonical))
+    if digest != expected_digest or (expected_uid != "" and uid != expected_uid): return Err("host-auth-setup-pin-mismatch")
+    Ok(HostServiceAuthSetupMetadataV1(publication_uid: uid, setup_digest: digest))
+
+pub fn host_service_auth_endpoint_valid_v1(endpoint: text) -> bool:
+    if not endpoint.starts_with("127.0.0.1:"): return false
+    val value = endpoint.substring(10, endpoint.byte_len())
+    if value.byte_len() < 1 or value.byte_len() > 5 or value.byte_at(0) == 48: return false
+    var port: i64 = 0
+    for byte in value.bytes():
+        if byte < 48 or byte > 57: return false
+        port = port * 10 + byte as i64 - 48
+    port > 0 and port <= 65535
+
+pub fn host_service_auth_ready_record_v1(uid: text, setup_digest: text, endpoint: text,
+        service_pid: i64, incarnation: text, host_lease_digest: text, host_authority_digest: text) -> Result<[u8], text>:
+    if (not host_service_hex_shape_v6(uid, 32) or not host_service_hex_shape_v6(setup_digest, 64) or
+            not host_service_hex_shape_v6(incarnation, 32) or not host_service_hex_shape_v6(host_lease_digest, 64) or
+            not host_service_hex_shape_v6(host_authority_digest, 64) or service_pid < 1 or not host_service_auth_endpoint_valid_v1(endpoint)):
+        return Err("host-auth-ready-fields")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(6), "kind": SdnValue.String("host-service-auth-ready"),
+        "publicationUid": SdnValue.String(uid), "setupDigest": SdnValue.String(setup_digest),
+        "endpoint": SdnValue.String(endpoint), "servicePid": SdnValue.Int(service_pid),
+        "serviceIncarnation": SdnValue.String(incarnation),
+        "hostLeaseDigest": SdnValue.String(host_lease_digest), "hostAuthorityDigest": SdnValue.String(host_authority_digest)}
+    val bytes = text_to_utf8_bytes(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    if bytes.len() > 512: return Err("host-auth-ready-record-bound")
+    Ok(bytes)
+
+pub fn host_service_ready_validate_v1(bytes: [u8], setup: [u8], expected_digest: text,
+        expected_host_lease_digest: text, expected_host_authority_digest: text, expected_uid: text = "") -> Result<HostServiceReadyMetadataV1, text>:
+    val installed = host_service_auth_setup_validate_v1(setup, expected_digest, expected_uid)?
+    val fields = setup_fields_v1(bytes, 9)?
+    if setup_int_v1(fields, "version")? != 6 or setup_text_v1(fields, "kind")? != "host-service-auth-ready":
+        return Err("host-auth-ready-version")
+    val uid = setup_text_v1(fields, "publicationUid")?
+    val digest = setup_text_v1(fields, "setupDigest")?
+    val endpoint = setup_text_v1(fields, "endpoint")?
+    val pid = setup_int_v1(fields, "servicePid")?
+    val incarnation = setup_text_v1(fields, "serviceIncarnation")?
+    val lease = setup_text_v1(fields, "hostLeaseDigest")?
+    val authority = setup_text_v1(fields, "hostAuthorityDigest")?
+    if lease != expected_host_lease_digest or authority != expected_host_authority_digest:
+        return Err("host-auth-ready-host-lease-association")
+    if uid != installed.publication_uid or digest != installed.setup_digest: return Err("host-auth-ready-setup-association")
+    val canonical = host_service_auth_ready_record_v1(uid, digest, endpoint, pid, incarnation, lease, authority)?
+    if not retained_credential_bytes_equal_v2(bytes, canonical): return Err("host-auth-ready-not-canonical")
+    Ok(HostServiceReadyMetadataV1(endpoint: endpoint, incarnation: incarnation,
+        service_pid: pid, publication_uid: uid, setup_digest: digest,
+        host_lease_digest: lease, host_authority_digest: authority))
+
+# Pure trusted-IO helper over supplied data, NOT a retained-reader factory.
+# Actual reader custody is checked separately before and after this call.
+# The key never becomes a public getter or a plaintext network frame.
+pub(package) fn host_service_setup_auth_v1(setup: [u8], expected_digest: text, expected_uid: text,
+        role: text, context: HostServiceAuthContextV6, body: text, tag: Option<text>) -> Result<text, text>:
+    val valid = host_service_auth_setup_validate_v1(setup, expected_digest, expected_uid)?
+    val fields = setup_fields_v1(setup, 8)?
+    val key = setup_text_v1(fields, "secret")?
+    if tag.is_none():
+        val signed = host_service_auth_tag_v6(key, role, context, body)
+        if signed.is_err(): return Err("host-ready-auth-sign-rejected")
+        return Ok(signed.unwrap())
+    val verified = host_service_auth_verify_v6(key, role, context, body, tag.unwrap())
+    if verified.is_err(): return Err("host-ready-auth-verify-rejected")
+    Ok(if verified.unwrap(): "verified" else: "mismatch")
+
+
+# Data decoded ONLY after an actual short owned read in the caller. Snapshot
+# equality is not Host liveness; Windows can leave parent.lease after close.
+pub struct HostServiceAuthLeaseV1:
+    lease_digest: text
+    authority_digest: text
+
+pub fn host_service_auth_lease_validate_v1(bytes: [u8], expected_authority: text) -> Result<HostServiceAuthLeaseV1, text>:
+    if bytes.len() < 1 or bytes.len() > 512 or not utf8_bytes_valid(bytes): return Err("host-auth-lease-bound-or-text")
+    if not host_service_hex_shape_v6(expected_authority, 64): return Err("host-auth-lease-authority-shape")
+    val source = bytes_to_text(bytes)
+    val fields = source.split("\n")
+    if fields.len() != 4 or fields[0] != "DISTRIBUTED-OPERATION-LEASE-V2" or fields[3] != "":
+        return Err("host-auth-lease-format")
+    if not host_service_hex_shape_v6(fields[1], 64) or fields[2] != expected_authority:
+        return Err("host-auth-lease-authority-or-nonce")
+    if source != "DISTRIBUTED-OPERATION-LEASE-V2\n" + fields[1] + "\n" + fields[2] + "\n":
+        return Err("host-auth-lease-noncanonical")
+    Ok(HostServiceAuthLeaseV1(lease_digest: sha256_text(source), authority_digest: fields[2]))
+
+pub fn host_service_auth_ready_relative_v1(lease_digest: text) -> Result<text, text>:
+    if not host_service_hex_shape_v6(lease_digest, 64): return Err("host-auth-ready-lease-shape")
+    Ok("host-service-ready-v6/" + lease_digest + ".sdn")

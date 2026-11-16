@@ -6,6 +6,9 @@ use std.nogc_sync_mut.container.machine_authority_v1.*
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
 use std.nogc_sync_mut.io.machine_local_process_principal_v1.MachineLocalProcessPrincipalV1
 use std.common.contracts.container.local_session_v1.{LocalContainerRequestV1, local_container_request_bytes_v1}
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.nogc_async_mut.container.providers.linux.fresh_epoch_creator_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_cleanup_v1.machine_fresh_epoch_admission_turn_close_v1
 
 pub class LocalContainerServiceDomainV1:
     authority: MachineContainerAuthorityV1
@@ -68,3 +71,45 @@ pub fn local_container_service_open_v1() -> LocalContainerServiceOpenV1:
     # Reservation/delegation, workload execution and terminal adoption are not
     # exposed until their real admission and settlement ports are implemented.
     LocalContainerServiceOpenV1.Ready(domain)
+
+# Explicit positive first-epoch entry. Never an implicit fallback for a
+# generic missing/unknown ledger, a remote client's identity or legacy stores.
+pub enum LocalFreshEpochServiceOpenV1:
+    NotStarted(retained: MachineFreshEpochAdmissionTurnV1)
+    Started(owner: LinuxFreshEpochProviderCreatorV1)
+    Retained(owner: LinuxFreshEpochProviderCreatorV1, reason: text)
+
+pub struct LocalFreshEpochServiceCloseTurnV1:
+    retained: Option<LocalFreshEpochServiceOpenV1>
+    closed: bool
+    error: text
+
+pub fn local_container_service_start_fresh_epoch_v1(template: GroupProcessStreamLaunchV2) -> LocalFreshEpochServiceOpenV1:
+    val admitted = machine_container_authority_open_fresh_epoch_v1()
+    if admitted.error != "" or admitted.owner.is_none(): return LocalFreshEpochServiceOpenV1.NotStarted(admitted)
+    match linux_fresh_epoch_provider_start_v1(admitted.owner.unwrap(), template):
+        case LinuxFreshEpochProviderOpenV1.Started(owner): LocalFreshEpochServiceOpenV1.Started(owner)
+        case LinuxFreshEpochProviderOpenV1.Retained(owner, reason): LocalFreshEpochServiceOpenV1.Retained(owner, reason)
+
+pub fn local_container_service_fresh_close_v1(original: LocalFreshEpochServiceOpenV1) -> LocalFreshEpochServiceCloseTurnV1:
+    match original:
+        case LocalFreshEpochServiceOpenV1.NotStarted(retained):
+            val closed = machine_fresh_epoch_admission_turn_close_v1(retained)
+            val pending = if closed.retained.is_some(): Some(LocalFreshEpochServiceOpenV1.NotStarted(closed.retained.unwrap())) else: nil
+            LocalFreshEpochServiceCloseTurnV1(pending, closed.closed, closed.error)
+        case LocalFreshEpochServiceOpenV1.Started(owner):
+            val closed = owner.close_v1()
+            val pending = if closed.owner.is_some(): Some(LocalFreshEpochServiceOpenV1.Started(closed.owner.unwrap())) else: nil
+            LocalFreshEpochServiceCloseTurnV1(pending, closed.closed, closed.error)
+        case LocalFreshEpochServiceOpenV1.Retained(owner, reason):
+            val closed = owner.close_v1()
+            val pending = if closed.owner.is_some(): Some(LocalFreshEpochServiceOpenV1.Retained(closed.owner.unwrap(), reason)) else: nil
+            LocalFreshEpochServiceCloseTurnV1(pending, closed.closed, closed.error)
+
+# The common API receives the actual fresh owner; this is independent of the
+# startup-only command API above and never relabels its result as a workload.
+use std.nogc_async_mut.container.api_v2.{SimpleContainerFreshOpenV2, simple_container_open_fresh_v2}
+
+pub fn local_container_service_workload_open_v2(principal: MachineLocalProcessPrincipalV1,
+        template: GroupProcessStreamLaunchV2) -> SimpleContainerFreshOpenV2:
+    simple_container_open_fresh_v2(principal, template)

@@ -1,0 +1,500 @@
+# Native `if val` presence-test oracle.
+# Bug: doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+# Every row prints `<row> <value>`; a native build must print exactly the
+# seed's stdout below (`simple run main.spl`). Payloads 0, 3 (== the nil
+# marker word) and a negative number are deliberate.
+# SEED-DIVERGENT rows (after the `--- seed-divergent` line): the seed
+# interpreter prints `none` for `if val x = 3` on a plain i64 and for
+# `if val x = r.ok` when r is Ok(3) -- it reads the payload word 3 as nil
+# (a SEED bug; the language says a present 3 is present). The correct
+# output, which native must print, is given after the seed block.
+# SEED_STDOUT_BEGIN
+#   call_int 0: none
+#   call_int 1: some 0
+#   call_int 2: some 3
+#   call_int 3: some -7
+#   call_text t: some hi
+#   call_text f: none
+#   call_bool 0: none
+#   call_bool 1: some false
+#   call_bool 2: some true
+#   call_float t: some -2.5
+#   call_float f: none
+#   call_arr t: some 2 5
+#   call_arr f: none
+#   call_point t: some 3 -1
+#   call_point f: none
+#   local 0: none
+#   param 0: none
+#   field 0: none false -100
+#   index 0: none
+#   elif 0: none
+#   match 0: none
+#   exists 0: absent
+#   try 0: none
+#   coalesce 0: got -99
+#   generic 0: none
+#   local 1: some 0
+#   param 1: some 0
+#   field 1: some 0 true 0
+#   index 1: some 0
+#   elif 1: some 0
+#   match 1: some 0
+#   exists 1: present
+#   try 1: some 10
+#   coalesce 1: got 0
+#   generic 1: some 0
+#   local 2: some 3
+#   param 2: some 3
+#   field 2: some 3 true 3
+#   index 2: some 3
+#   elif 2: some 3
+#   match 2: some 3
+#   exists 2: present
+#   try 2: some 13
+#   coalesce 2: got 3
+#   generic 2: some 3
+#   local 3: some -7
+#   param 3: some -7
+#   field 3: some -7 true -7
+#   index 3: some -7
+#   elif 3: some -7
+#   match 3: some -7
+#   exists 3: present
+#   try 3: some 3
+#   coalesce 3: got -7
+#   generic 3: some -3
+#   param lit-none: none
+#   index_f64 0: none
+#   index_bool 0: none
+#   index_text 0: none
+#   index_point 0: none
+#   index_field 0: none
+#   index_f64 1: some 0.0
+#   index_bool 1: some false
+#   index_text 1: some a
+#   index_point 1: some 3 -1
+#   index_field 1: some 0
+#   index_f64 2: some -2.5
+#   index_bool 2: some true
+#   index_text 2: some bc
+#   index_point 2: none
+#   index_field 2: some 3
+#   dict a: some 0
+#   dict b: some 3
+#   dict c: some 16
+#   dict d: some -8
+#   dict z: none
+#   ok t: some 42
+#   ok f: none
+#   nested 2 0: outer 3
+#   nested 2 1: both 3 0
+#   nested 0 2: none
+#   plain -7: some -7
+#   plain 0: some 0
+#   dget_agree z: ifval 0 coal 0
+#   dget_agree t: ifval 3 coal 3
+#   dget_agree q: eqnil eqnone coal -5
+#   var_loop_eq: p0 a1
+#   var_loop_ne: p0 a1 p2
+#   var_loop_ifval: some0 none
+#   var_nested_loop: p00 a01 a10 a11
+#   var_arm_join 0: p0 p1
+#   var_arm_join 1: a0 a1
+#   var_closure: lam-p a
+#   --- seed-divergent
+#   ok3 t: none
+#   ok3 f: none
+#   plain 3: none
+#   while: seen 2,1,0,
+# SEED_STDOUT_END
+# Correct (native) output differs from the seed ONLY in the three
+# seed-divergent rows: `ok3 t: some 3`, `ok3 f: none`, `plain 3: some 3`.
+# Build (from a probe dir OUTSIDE test/): SIMPLE_BOOTSTRAP=1 native-build
+#   main.spl --entry-closure --backend=cranelift|llvm
+
+struct Point:
+    x: i64
+    y: i64
+
+class Holder:
+    slot: i64?
+
+    fn has() -> bool:
+        if val _v = self.slot:
+            return true
+        false
+
+    fn read() -> i64:
+        if val v = self.slot:
+            return v
+        -100
+
+fn opt_int(k: i64) -> i64?:
+    if k == 0: return None
+    if k == 1: return Some(0)
+    if k == 2: return Some(3)
+    Some(-7)
+
+fn opt_text(b: bool) -> text?:
+    if b: return Some("hi")
+    None
+
+fn opt_bool(k: i64) -> bool?:
+    if k == 0: return None
+    if k == 1: return Some(false)
+    Some(true)
+
+fn opt_float(b: bool) -> f64?:
+    if b: return Some(-2.5)
+    None
+
+fn opt_arr(b: bool) -> [i64]?:
+    if b: return Some([4, 5])
+    None
+
+fn opt_point(b: bool) -> Point?:
+    if b: return Some(Point(x: 3, y: -1))
+    None
+
+fn res(b: bool) -> Result<i64, text>:
+    if b: return Ok(42)
+    Err("bad")
+
+fn row_call_int(k: i64) -> text:
+    if val x = opt_int(k):
+        return "some {x}"
+    "none"
+
+fn row_call_text(b: bool) -> text:
+    if val x = opt_text(b):
+        return "some {x}"
+    "none"
+
+fn row_call_bool(k: i64) -> text:
+    if val x = opt_bool(k):
+        if x: return "some true"
+        return "some false"
+    "none"
+
+fn row_call_float(b: bool) -> text:
+    if val x = opt_float(b):
+        return "some {x}"
+    "none"
+
+fn row_call_arr(b: bool) -> text:
+    if val x = opt_arr(b):
+        return "some {x.len()} {x[1]}"
+    "none"
+
+fn row_call_point(b: bool) -> text:
+    if val p = opt_point(b):
+        return "some {p.x} {p.y}"
+    "none"
+
+fn row_local(k: i64) -> text:
+    val o: i64? = opt_int(k)
+    if val x = o:
+        return "some {x}"
+    "none"
+
+fn row_param(o: i64?) -> text:
+    if val x = o:
+        return "some {x}"
+    "none"
+
+fn row_field(k: i64) -> text:
+    val slot: i64? = opt_int(k)
+    val h = Holder(slot: slot)
+    if val x = h.slot:
+        return "some {x} {h.has()} {h.read()}"
+    "none {h.has()} {h.read()}"
+
+fn row_index(k: i64) -> text:
+    val xs: [i64?] = [None, Some(0), Some(3), Some(-7)]
+    if val x = xs[k]:
+        return "some {x}"
+    "none"
+
+fn index_f64(k: i64) -> text:
+    val xs: [f64?] = [None, Some(0.0), Some(-2.5)]
+    if val x = xs[k]:
+        return "some {x}"
+    "none"
+
+fn index_bool(k: i64) -> text:
+    val xs: [bool?] = [None, Some(false), Some(true)]
+    if val x = xs[k]:
+        if x: return "some true"
+        return "some false"
+    "none"
+
+fn index_text(k: i64) -> text:
+    val xs: [text?] = [None, Some("a"), Some("bc")]
+    if val x = xs[k]:
+        return "some {x}"
+    "none"
+
+fn index_point(k: i64) -> text:
+    val xs: [Point?] = [None, Some(Point(x: 3, y: -1)), None]
+    if val p = xs[k]:
+        return "some {p.x} {p.y}"
+    "none"
+
+struct OptBag:
+    items: [i64?]
+
+fn bag_items() -> [i64?]:
+    [None, Some(0), Some(3)]
+
+fn index_field(k: i64) -> text:
+    val items: [i64?] = bag_items()
+    val b = OptBag(items: items)
+    if val x = b.items[k]:
+        return "some {x}"
+    "none"
+
+fn row_dict(k: text) -> text:
+    val d: {text: i64} = {"a": 0, "b": 3, "c": 16, "d": -8}
+    if val x = d.get(k):
+        return "some {x}"
+    "none"
+
+fn row_ok(b: bool) -> text:
+    if val x = res(b).ok:
+        return "some {x}"
+    "none"
+
+fn row_elif(k: i64) -> text:
+    if k == 99:
+        return "never"
+    elif val x = opt_int(k):
+        return "some {x}"
+    "none"
+
+fn row_nested(a: i64, b: i64) -> text:
+    if val x = opt_int(a):
+        if val y = opt_int(b):
+            return "both {x} {y}"
+        return "outer {x}"
+    "none"
+
+var while_left: i64 = 3
+
+fn next_item() -> i64?:
+    if while_left == 0: return None
+    while_left = while_left - 1
+    Some(while_left)
+
+fn row_while() -> text:
+    var acc = ""
+    while val x = next_item():
+        acc = acc + "{x},"
+    "seen {acc}"
+
+# Control rows: shapes that must not change behaviour.
+fn first_of<T>(xs: [T]) -> T?:
+    if xs.len() == 0: return None
+    Some(xs[0])
+
+fn row_generic(k: i64) -> text:
+    var xs: [i64] = []
+    if k == 1: xs = [0]
+    if k == 2: xs = [3]
+    if k == 3: xs = [-3]
+    if val x = first_of(xs):
+        return "some {x}"
+    "none"
+
+fn row_match(k: i64) -> text:
+    match opt_int(k):
+        case Some(x): "some {x}"
+        case None: "none"
+
+fn row_exists(k: i64) -> text:
+    if opt_int(k).?: return "present"
+    "absent"
+
+fn try_add(k: i64) -> i64?:
+    val x = opt_int(k)?
+    Some(x + 10)
+
+fn row_try(k: i64) -> text:
+    row_param(try_add(k))
+
+fn row_coalesce(k: i64) -> text:
+    val x = opt_int(k) ?? -99
+    "got {x}"
+
+fn res3(b: bool) -> Result<i64, text>:
+    if b: return Ok(3)
+    Err("bad")
+
+fn row_ok3(b: bool) -> text:
+    if val x = res3(b).ok:
+        return "some {x}"
+    "none"
+
+fn row_plain_scalar(v: i64) -> text:
+    if val x = v:
+        return "some {x}"
+    "none"
+
+# Loop-carried `var`: a test lowered BEFORE the reassignment runs again on
+# the next iteration, so a presence bit copied at `var g = d.get(..)` would
+# be stale there (review of 59a93f2a5aa). d holds 0, never the nil word.
+fn var_loop_eq() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    var i = 0
+    while i < 2:
+        if g == nil:
+            s = s + "a{i} "
+        else:
+            s = s + "p{i} "
+        g = nil
+        i = i + 1
+    s
+
+fn var_loop_ne() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    for i in [0, 1, 2]:
+        if g != nil:
+            s = s + "p{i} "
+        else:
+            s = s + "a{i} "
+        if i == 0: g = d.get("missing")
+        if i == 1: g = d.get("t")
+    s
+
+fn var_loop_ifval() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    var i = 0
+    while i < 2:
+        if val x = g:
+            s = s + "some{x} "
+        else:
+            s = s + "none "
+        g = d.get("missing")
+        i = i + 1
+    s
+
+fn var_nested_loop() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    for j in [0, 1]:
+        for i in [0, 1]:
+            if g != nil:
+                s = s + "p{j}{i} "
+            else:
+                s = s + "a{j}{i} "
+            g = nil
+    s
+
+fn var_arm_join(k: i64) -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    var s = ""
+    for i in [0, 1]:
+        match k:
+            case 1:
+                if i == 0:
+                    g = nil
+            case _: ()
+        if g == nil:
+            s = s + "a{i} "
+        else:
+            s = s + "p{i} "
+    s
+
+fn var_closure() -> text:
+    val d: {text: i64} = {"t": 0}
+    var g = d.get("t")
+    val f = \: if g != nil: "lam-p" else: "lam-a"
+    g = nil
+    val now = if g != nil: "p" else: "a"
+    "{f()} {now}"
+
+# `== nil`, `== None`, `if val` and `??` must agree on one `d.get(k)` word,
+# including a stored 3 (the nil word).
+fn dget_agree(k: text) -> text:
+    val d: {text: i64} = {"z": 0, "t": 3}
+    val g = d.get(k)
+    var s = ""
+    if g == nil: s = s + "eqnil "
+    if g == None: s = s + "eqnone "
+    if val x = g: s = s + "ifval {x} "
+    "{s}coal {g ?? -5}"
+
+fn main():
+    var k = 0
+    while k < 4:
+        print "call_int {k}: {row_call_int(k)}"
+        k = k + 1
+    print "call_text t: {row_call_text(true)}"
+    print "call_text f: {row_call_text(false)}"
+    print "call_bool 0: {row_call_bool(0)}"
+    print "call_bool 1: {row_call_bool(1)}"
+    print "call_bool 2: {row_call_bool(2)}"
+    print "call_float t: {row_call_float(true)}"
+    print "call_float f: {row_call_float(false)}"
+    print "call_arr t: {row_call_arr(true)}"
+    print "call_arr f: {row_call_arr(false)}"
+    print "call_point t: {row_call_point(true)}"
+    print "call_point f: {row_call_point(false)}"
+    k = 0
+    while k < 4:
+        print "local {k}: {row_local(k)}"
+        print "param {k}: {row_param(opt_int(k))}"
+        print "field {k}: {row_field(k)}"
+        print "index {k}: {row_index(k)}"
+        print "elif {k}: {row_elif(k)}"
+        print "match {k}: {row_match(k)}"
+        print "exists {k}: {row_exists(k)}"
+        print "try {k}: {row_try(k)}"
+        print "coalesce {k}: {row_coalesce(k)}"
+        print "generic {k}: {row_generic(k)}"
+        k = k + 1
+    print "param lit-none: {row_param(None)}"
+    k = 0
+    while k < 3:
+        print "index_f64 {k}: {index_f64(k)}"
+        print "index_bool {k}: {index_bool(k)}"
+        print "index_text {k}: {index_text(k)}"
+        print "index_point {k}: {index_point(k)}"
+        print "index_field {k}: {index_field(k)}"
+        k = k + 1
+    print "dict a: {row_dict(\"a\")}"
+    print "dict b: {row_dict(\"b\")}"
+    print "dict c: {row_dict(\"c\")}"
+    print "dict d: {row_dict(\"d\")}"
+    print "dict z: {row_dict(\"z\")}"
+    print "ok t: {row_ok(true)}"
+    print "ok f: {row_ok(false)}"
+    print "nested 2 0: {row_nested(2, 0)}"
+    print "nested 2 1: {row_nested(2, 1)}"
+    print "nested 0 2: {row_nested(0, 2)}"
+    print "plain -7: {row_plain_scalar(-7)}"
+    print "plain 0: {row_plain_scalar(0)}"
+    print "dget_agree z: {dget_agree(\"z\")}"
+    print "dget_agree t: {dget_agree(\"t\")}"
+    print "dget_agree q: {dget_agree(\"q\")}"
+    print "var_loop_eq: {var_loop_eq()}"
+    print "var_loop_ne: {var_loop_ne()}"
+    print "var_loop_ifval: {var_loop_ifval()}"
+    print "var_nested_loop: {var_nested_loop()}"
+    print "var_arm_join 0: {var_arm_join(0)}"
+    print "var_arm_join 1: {var_arm_join(1)}"
+    print "var_closure: {var_closure()}"
+    print "--- seed-divergent"
+    print "ok3 t: {row_ok3(true)}"
+    print "ok3 f: {row_ok3(false)}"
+    print "plain 3: {row_plain_scalar(3)}"
+    # Last: a dropped presence test makes this loop never end.
+    print "while: {row_while()}"

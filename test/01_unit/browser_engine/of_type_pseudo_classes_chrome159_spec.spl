@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Purpose: Pin `:first-of-type`, `:last-of-type` and `:only-of-type`
+(Selectors 4 §14.4), including inside `:not()`.
+Audience: browser-engine selector maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `b,i{display:block;width:10px}`,
+getBoundingClientRect width, 2026-11-16). Rules in order:
+`b:first-of-type{77}` `b:last-of-type{66}` `b:only-of-type{55}`
+`i:not(:first-of-type){44}`.
+
+| element                                  | width |
+|------------------------------------------|------:|
+| first `b` of three (after an `i`)        | 77 |
+| middle `b`                               | 10 |
+| last `b` (before an `i`)                 | 66 |
+| only `b` (first+last+only; last rule wins) | 55 |
+| first `i`                                | 10 |
+| second `i`, same section                 | 44 |
+| second `i`, second section               | 44 |
+
+Filed as `first_of_type`/`last_of_type`/`only_of_type` in
+doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-OF-TYPE-PSEUDO-001 — first/last/only-of-type match by element type position.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} b,i{{display:block;width:10px;height:5px}}" +
+    " b:first-of-type{{width:77px}} b:last-of-type{{width:66px}} b:only-of-type{{width:55px}}" +
+    " i:not(:first-of-type){{width:44px}}</style></head><body>" +
+    "<section><i id=i1></i><b id=f1></b><b id=f2></b><b id=f3></b><i id=i2></i></section>" +
+    "<section><i></i><b id=o1></b><i id=i3></i></section>" +
+    "</body></html>"
+
+fn _w(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "w")
+
+describe "of-type pseudo-classes":
+    it "AC-1: first-of-type skips a different leading tag":
+        expect(_w("f1")).to_equal("77")
+
+    it "AC-2: a middle element is neither first nor last of its type":
+        expect(_w("f2")).to_equal("10")
+
+    it "AC-3: last-of-type skips a different trailing tag":
+        expect(_w("f3")).to_equal("66")
+
+    it "AC-4: only-of-type":
+        step("Chrome 159: first, last and only all match; the later only rule wins")
+        expect(_w("o1")).to_equal("55")
+
+    it "AC-5: not(:first-of-type) leaves the first i":
+        expect(_w("i1")).to_equal("10")
+
+    it "AC-6: not(:first-of-type) matches a later i":
+        expect(_w("i2")).to_equal("44")
+
+    it "AC-7: not(:first-of-type) in another section":
+        expect(_w("i3")).to_equal("44")

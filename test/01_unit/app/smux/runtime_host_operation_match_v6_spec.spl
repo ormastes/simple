@@ -1,0 +1,34 @@
+use std.spec.{describe, it, expect}
+use std.common.contracts.orchestration.host_service_operation_v6.HostServiceOperationRequestV6
+use os.apps.smux.runtime_host_operation_match_v6.smux_host_operation_match_v6
+
+fn bound_operation_v6(action: text) -> HostServiceOperationRequestV6:
+    HostServiceOperationRequestV6(action, "a".repeat(32), "host-operation", "b".repeat(64), "c".repeat(64), "")
+
+describe "Host operation correlation before canonical progress or cancel":
+    it "accepts only the exact retained tuple for progress and cancellation":
+        for action in ["progress", "cancel"]:
+            expect(smux_host_operation_match_v6(bound_operation_v6(action), "a".repeat(32),
+                "b".repeat(64), "host-operation", "c".repeat(64)).unwrap()).to_equal(true)
+
+    it "refuses a different active operation and an altered execute digest":
+        val request = bound_operation_v6("cancel")
+        expect(smux_host_operation_match_v6(request, "a".repeat(32), "b".repeat(64),
+            "other-operation", "c".repeat(64)).unwrap_err()).to_equal("runtime-host-bound-operation-mismatch")
+        expect(smux_host_operation_match_v6(request, "a".repeat(32), "b".repeat(64),
+            "host-operation", "d".repeat(64)).unwrap_err()).to_equal("runtime-host-bound-operation-mismatch")
+
+    it "refuses prior service incarnation or changed actual scope despite matching operation":
+        val request = bound_operation_v6("progress")
+        expect(smux_host_operation_match_v6(request, "d".repeat(32), "b".repeat(64),
+            "host-operation", "c".repeat(64)).is_err()).to_equal(true)
+        expect(smux_host_operation_match_v6(request, "a".repeat(32), "d".repeat(64),
+            "host-operation", "c".repeat(64)).is_err()).to_equal(true)
+
+    it "does not turn a status request or malformed cancellation into execution authority":
+        val status = HostServiceOperationRequestV6("status", "a".repeat(32), "", "", "", "")
+        expect(smux_host_operation_match_v6(status, "a".repeat(32), "", "", "").unwrap_err()).to_equal("runtime-host-bound-action")
+        var request = bound_operation_v6("cancel")
+        request.payload = "unexpected payload"
+        expect(smux_host_operation_match_v6(request, "a".repeat(32), "b".repeat(64),
+            "host-operation", "c".repeat(64)).is_err()).to_equal(true)

@@ -23,10 +23,10 @@
 # the schedule largest-first (native_mir_shard_lpt_order_v1).
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
-use std.io_runtime.{file_exists, file_read}
+use std.io_runtime.{file_exists, file_read, file_size_raw}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_atomic_write_bytes}
-use std.nogc_sync_mut.io_runtime.{file_read_bytes_result}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_empty}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
 
 pub const NATIVE_MIR_SHARD_ENV_V1: text = "SIMPLE_MIR_SHARD"
 pub const NATIVE_MIR_SHARD_QUEUE_ENV_V1: text = "SIMPLE_MIR_SHARD_QUEUE"
@@ -274,3 +274,129 @@ pub fn native_mir_shard_smf_part_read_v1(queue: text, module_name: text) -> Resu
     if queue == "" or module_name == "":
         return Err("MIR shard SMF part: ledger or module missing")
     file_read_bytes_result(native_mir_shard_record_base_v1(queue, module_name) + ".smfpart")
+
+# ===== Claim resume across launches (run_mir_shards) =========================
+#
+# A relaunch of the same build adopts the killed launch's finished rows instead
+# of re-lowering them. Admission is whole-run equality: every input that can
+# change an object or which module lands in which claim is one named component
+# of the run key; the memory/thread knobs (worker KiB, --threads/--jobs/-j,
+# dataset cap) are not. Source edits move the projected environment
+# (SIMPLE_SCV_* rows).
+
+# --jobs and -j are native-build aliases of --threads: their only reader is
+# native_build_requested_shard_threads (process count, not object bytes).
+fn native_mir_shard_run_key_args_v1(args: [text]) -> [text]:
+    var kept: [text] = []
+    var skip_next = false
+    for arg in args:
+        if skip_next:
+            skip_next = false
+        elif arg == "--threads" or arg == "--jobs" or arg == "-j":
+            skip_next = true
+        elif not arg.starts_with("--threads=") and not arg.starts_with("--jobs="):
+            kept = kept.push(arg)
+    kept
+
+# Module-selection and failure-tolerance knobs the projected environment drops
+# (they do not change an object's bytes) but that change WHICH rows a pass
+# produces or whether the link is allowed. Without them a relaunch with
+# SIMPLE_ICE_SKIP_MODULES=gamma adopted every row of a complete run and linked
+# what a full pass with that skip refuses. Census of the sibling knobs:
+# - SIMPLE_ICE_SKIP_MODULES, SIMPLE_NATIVE_GO_TO_END, SIMPLE_MIR_SHARD_ONLY_PATHS:
+#   here (dropped by the module-environment projection).
+# - SIMPLE_COMPILE_FAIL_FAST, SIMPLE_NO_STUB_FALLBACK, SIMPLE_ALLOW_UNLOWERED_MIR,
+#   SIMPLE_STUB_HIR, SIMPLE_UNSTUB_HIR, SIMPLE_MCDC_EXCLUDE,
+#   SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER, SIMPLE_MIR_SELECTIVE: already in the
+#   environment component (every SIMPLE_* the projection keeps).
+# - --go-to-end and other flags: the argv component.
+# - Shard count / fork workers: their own components.
+pub fn native_mir_shard_run_key_selection_v1(ice_skip: text, go_to_end: text,
+        only_paths: text) -> text:
+    "ice-skip={sha256_text(ice_skip)}\ngo-to-end={sha256_text(go_to_end)}\nonly-paths={sha256_text(only_paths)}\n"
+
+# The resume decision line printed for a full pass.
+pub fn native_mir_shard_resume_full_pass_line_v1(mismatch: text, prior: text) -> text:
+    if mismatch == "no-prior-ledger": return "[mir-shard] resume: no prior ledger; full pass"
+    "[mir-shard] resume: full pass; run key component {mismatch} differs from prior ledger {prior}"
+
+# One "<component>=<value>" row per input, in a fixed order.
+pub fn native_mir_shard_run_key_v1(compiler: text, environment: text, guards: text,
+        lane: text, args: [text], count: i64, fork_workers: i64, selection: text) -> text:
+    val argv = native_mir_shard_run_key_args_v1(args).join("\n")
+    "native-mir-shard-run-key-v1\ncompiler={sha256_text(compiler)}\nenvironment={sha256_text(environment)}\nguards={sha256_text(guards)}\nlane={sha256_text(lane)}\nargv={sha256_text(argv)}\nshards={count}\nfork-workers={fork_workers}\n{selection}"
+
+# "" when equal, else the name of the first differing component.
+pub fn native_mir_shard_run_key_mismatch_v1(prior: text, current: text) -> text:
+    if prior == current: return ""
+    if prior == "": return "run-key-absent"
+    val p = prior.split("\n")
+    val c = current.split("\n")
+    var index = 0
+    while index < p.len() and index < c.len():
+        if p[index] != c[index]:
+            val eq = c[index].index_of("=")
+            return if eq > 0: c[index].substring(0, eq) else: "version"
+        index = index + 1
+    "version"
+
+pub struct NativeMirShardResumeV1:
+    adopted: i64
+    requeued: i64
+    reason: text
+
+# Why a prior row cannot be adopted ("" = adoptable): it must be a PASS for
+# the prior inventory's identity with a whole sidecar; an object row's object
+# must still be the bytes its capsule receipt names, for the sidecar's capsule
+# (a later build of other sources at the same path writes another capsule).
+fn native_mir_shard_resume_row_reason_v1(prior: text, name: text, identity: text) -> text:
+    val base = native_mir_shard_record_base_v1(prior, name)
+    val terminal = file_read("{base}.terminal").split("\n")
+    if terminal.len() != 6 or terminal[0] != "PASS" or terminal[2] != name or terminal[3] != identity:
+        return "not-pass"
+    val sidecar = file_read("{base}.object").split("\n")
+    if sidecar.len() != 5 or sidecar[4] != "": return "sidecar-malformed"
+    val object_path = sidecar[0]
+    if object_path == "":
+        return if terminal[4] == "UNCACHED": "" else: "objectless-cache-mismatch"
+    if terminal[4] != "CACHE_STORED" or sidecar[3] == "": return "object-unbound"
+    if not file_exists(object_path): return "object-missing"
+    val size = file_size_raw(object_path)
+    val digest = file_hash_sha256_or_empty(object_path)
+    if size < 0 or digest == "": return "object-unreadable"
+    val expected = "native-capsule-result-v1\n{sidecar[3]}\n{object_path}\n{size}\n{digest}\n"
+    if file_read(object_path + ".capsule-receipt") != expected: return "receipt-mismatch"
+    ""
+
+# Seed `queue` (fresh, before any worker) from the prior ledger: publish its
+# inventory, then claim + record every adoptable row under owner "resume"
+# (never a coordinator "<i>/<n>@<g>" owner, so no seal touches it). Every
+# other row stays unclaimed and is lowered again by this launch's workers.
+pub fn native_mir_shard_resume_adopt_v1(prior: text, queue: text) -> NativeMirShardResumeV1:
+    val inventory = file_read("{prior}/inventory").split("\n")
+    if inventory.len() < 2 or inventory[0] == "":
+        return NativeMirShardResumeV1(adopted: 0, requeued: 0, reason: "prior inventory unreadable")
+    val identity = inventory[0]
+    val names = inventory[1:]
+    if not hir_shard_recovery_inventory(queue, identity, names):
+        return NativeMirShardResumeV1(adopted: 0, requeued: 0, reason: "inventory not published")
+    var adopted: i64 = 0
+    var requeued: i64 = 0
+    for name in names:
+        if native_mir_shard_resume_row_reason_v1(prior, name, identity) != "":
+            requeued = requeued + 1
+            continue
+        if hir_shard_recovery_claim(queue, "resume", name, identity) != 1:
+            return NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "claim refused: {name}")
+        val prior_base = native_mir_shard_record_base_v1(prior, name)
+        val base = native_mir_shard_record_base_v1(queue, name)
+        if file_exists("{prior_base}.smfpart"):
+            val part = file_read_bytes_result("{prior_base}.smfpart")
+            if part.is_err() or not file_atomic_write_bytes("{base}.smfpart", part.unwrap()):
+                return NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "SMF part not copied: {name}")
+        val sidecar = file_read("{prior_base}.object")
+        if not file_atomic_write("{base}.object", sidecar) or
+                not hir_shard_recovery_terminal(queue, "resume", name, "PASS", not sidecar.starts_with("\n")):
+            return NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "record not published: {name}")
+        adopted = adopted + 1
+    NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "")

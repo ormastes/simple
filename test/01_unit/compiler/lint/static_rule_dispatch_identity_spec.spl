@@ -21,6 +21,8 @@ use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, static_lint_rule_t
 use compiler.tools.lint.rules.nil_outside_unsafe_rule.{nil_outside_unsafe_lint_rule}
 use compiler.tools.lint.rules.robust_option_surface_rule.{robust_option_surface_lint_rule}
 use compiler.tools.lint.rules.bound_late_cast_rule.{bound_late_cast_lint_rule}
+use compiler.tools.lint.rules.bound_unit_reassert_rule.{bound_unit_reassert_lint_rule}
+use compiler.tools.lint.rules.sffi_abi_mismatch_rule.{sffi_abi_check_with_triple}
 
 fn row_codes(rule_id: text, path: text, src: text) -> [text]:
     var out: [text] = []
@@ -63,6 +65,16 @@ describe "static lint row dispatch identity":
         val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
         expect([f.code for f in run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/app/client.spl", src), [bound_late_cast_lint_rule()]).findings]).to_equal(["SPL-BOUND-002"])
         expect(rows_emitting("SPL-BOUND-002", "src/app/client.spl", src)).to_equal(["bound_late_cast"])
+
+    it "runs SPL-BOUND-003 only from the bound_unit_reassert row":
+        val src = "unit Meters: f64 as m\nunit Seconds: f64 as s\nfn bad(d: Meters) -> Seconds:\n    Seconds(d.value)\n"
+        expect([f.code for f in run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("src/app/phys.spl", src), [bound_unit_reassert_lint_rule()]).findings]).to_equal(["SPL-BOUND-003"])
+        expect(rows_emitting("SPL-BOUND-003", "src/app/phys.spl", src)).to_equal(["bound_unit_reassert"])
+
+    it "runs SPL-SFFI-ABI-001 only from the sffi_abi_mismatch row":
+        val src = "unit Ticks: i32 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        expect([f.code for f in sffi_abi_check_with_triple(LintUnit("src/app/ffi.spl", src), "x86_64-unknown-linux-gnu")]).to_equal(["SPL-SFFI-ABI-001"])
+        expect(rows_emitting("SPL-SFFI-ABI-001", "src/app/ffi.spl", src)).to_equal(["sffi_abi_mismatch"])
 
     it "reports each code exactly once through the full table":
         val src = "pub fn connect(host: i64, timeout: Option<i64>) -> i64:\n    return nil\n"

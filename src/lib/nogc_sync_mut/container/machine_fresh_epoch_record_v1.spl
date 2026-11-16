@@ -1,0 +1,251 @@
+# Neutral exact-byte accounting only. No decoder or data projection constructs
+# installed epoch custody, a machine writer, a launch permit or a local grant.
+# Fresh epochs have a distinct four-row history; managed two-row replay is not
+# reinterpreted. Every reservation remains charged across close and uncertainty.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.contracts.orchestration.host_capacity_v1.{HostCapacityV1, HostCapacityLedgerV1,
+    HostReservationV1, HostReservationStateV1, HostAvailableCapacityV1, host_available_capacity_v1}
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+
+pub struct MachineFreshEpochRecordV1:
+    authority_id: text
+    physical_host_id: text
+    native_machine_id: text
+    epoch_id: text
+    epoch_generation: i64
+    profile_digest: text
+    machine_policy_digest: text
+    process_identity_digest: text
+    principal_id: text
+    service_uid: i64
+    service_gid: i64
+    manager_unique_name: text
+    partition_identity_digest: text
+    store_identity_digest: text
+    provider_policy_digest: text
+    provider_identity_digest: text
+    capacity_cpu_millis: i64
+    capacity_memory_bytes: i64
+    observed_cpu_millis: i64
+    observed_memory_bytes: i64
+    reserved_cpu_millis: i64
+    reserved_memory_bytes: i64
+    outside_cpu_millis: i64
+    outside_memory_bytes: i64
+    usable_cpu_millis: i64
+    usable_memory_bytes: i64
+
+fn fresh_epoch_identity_v1(value: text) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > 256: return false
+    for ch in value.chars():
+        val scalar = ch.char_code_at(0)
+        if scalar < 32 or scalar == 127: return false
+    true
+
+pub fn machine_fresh_epoch_record_validate_v1(record: MachineFreshEpochRecordV1) -> Result<(), text>:
+    for value in [record.authority_id, record.physical_host_id, record.epoch_id]:
+        if not builder_identifier_valid_v1(value): return Err("machine-fresh-epoch-record-identifier")
+    for value in [record.native_machine_id, record.principal_id, record.manager_unique_name]:
+        if not fresh_epoch_identity_v1(value): return Err("machine-fresh-epoch-record-identity")
+    for digest in [record.profile_digest, record.machine_policy_digest, record.process_identity_digest,
+            record.partition_identity_digest, record.store_identity_digest, record.provider_policy_digest,
+            record.provider_identity_digest]:
+        if not builder_digest_valid_v1(digest): return Err("machine-fresh-epoch-record-digest")
+    if (record.epoch_generation <= 0 or record.service_uid <= 0 or record.service_uid > 4294967295 or
+            record.service_gid <= 0 or record.service_gid > 4294967295):
+        return Err("machine-fresh-epoch-record-process")
+    if (record.capacity_cpu_millis < 1 or record.capacity_cpu_millis > 64000 or
+            record.capacity_memory_bytes < 1 or record.capacity_memory_bytes > 1125899906842624 or
+            record.observed_cpu_millis < 1 or record.observed_memory_bytes < 1 or
+            record.observed_cpu_millis > record.capacity_cpu_millis or
+            record.observed_memory_bytes > record.capacity_memory_bytes):
+        return Err("machine-fresh-epoch-record-capacity")
+    if (record.reserved_cpu_millis < 1 or record.reserved_memory_bytes < 1 or
+            record.reserved_cpu_millis >= record.observed_cpu_millis or
+            record.reserved_memory_bytes >= record.observed_memory_bytes):
+        return Err("machine-fresh-epoch-record-overhead")
+    if (record.usable_cpu_millis != record.observed_cpu_millis - record.reserved_cpu_millis or
+            record.usable_memory_bytes != record.observed_memory_bytes - record.reserved_memory_bytes):
+        return Err("machine-fresh-epoch-record-partition-subdivision")
+    # Compare before adding: outside obligations cannot overflow a sum or be
+    # discarded merely because the new provider's catalog was observed empty.
+    if (record.outside_cpu_millis < 0 or record.outside_memory_bytes < 0 or
+            record.outside_cpu_millis > record.capacity_cpu_millis - record.observed_cpu_millis or
+            record.outside_memory_bytes > record.capacity_memory_bytes - record.observed_memory_bytes):
+        return Err("machine-fresh-epoch-record-outside-capacity")
+    Ok(())
+
+fn fresh_epoch_value_v1(record: MachineFreshEpochRecordV1, stable: bool) -> SdnValue:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String(if stable: "machine-fresh-epoch-stable-binding" else: "machine-fresh-provider-epoch"),
+        "mode": SdnValue.String("standalone"), "authorityId": SdnValue.String(record.authority_id),
+        "physicalHostId": SdnValue.String(record.physical_host_id), "nativeMachineId": SdnValue.String(record.native_machine_id),
+        "epochId": SdnValue.String(record.epoch_id), "profileDigest": SdnValue.String(record.profile_digest),
+        "machinePolicyDigest": SdnValue.String(record.machine_policy_digest), "principalId": SdnValue.String(record.principal_id),
+        "serviceUid": SdnValue.Int(record.service_uid), "serviceGid": SdnValue.Int(record.service_gid),
+        "partitionIdentityDigest": SdnValue.String(record.partition_identity_digest),
+        "storeIdentityDigest": SdnValue.String(record.store_identity_digest),
+        "providerPolicyDigest": SdnValue.String(record.provider_policy_digest),
+        "providerIdentityDigest": SdnValue.String(record.provider_identity_digest),
+        "capacityCpuMillis": SdnValue.Int(record.capacity_cpu_millis), "capacityMemoryBytes": SdnValue.Int(record.capacity_memory_bytes),
+        "observedCpuMillis": SdnValue.Int(record.observed_cpu_millis), "observedMemoryBytes": SdnValue.Int(record.observed_memory_bytes),
+        "reservedCpuMillis": SdnValue.Int(record.reserved_cpu_millis), "reservedMemoryBytes": SdnValue.Int(record.reserved_memory_bytes),
+        "outsideCpuMillis": SdnValue.Int(record.outside_cpu_millis), "outsideMemoryBytes": SdnValue.Int(record.outside_memory_bytes),
+        "usableCpuMillis": SdnValue.Int(record.usable_cpu_millis), "usableMemoryBytes": SdnValue.Int(record.usable_memory_bytes)}
+    if not stable:
+        fields["epochGeneration"] = SdnValue.Int(record.epoch_generation)
+        fields["processIdentityDigest"] = SdnValue.String(record.process_identity_digest)
+        fields["managerUniqueName"] = SdnValue.String(record.manager_unique_name)
+    SdnValue.Dict(fields)
+
+pub fn machine_fresh_epoch_record_bytes_v1(record: MachineFreshEpochRecordV1) -> Result<text, text>:
+    val checked = machine_fresh_epoch_record_validate_v1(record)?
+    Ok(sdn_encode_canonical(fresh_epoch_value_v1(record, false)))
+
+# Installation binding excludes historical process/manager/registry-generation
+# observations. This digest alone is never custody or recovery authority.
+pub fn machine_fresh_epoch_stable_v1(record: MachineFreshEpochRecordV1) -> Result<text, text>:
+    val checked = machine_fresh_epoch_record_validate_v1(record)?
+    Ok(sha256_text(sdn_encode_canonical(fresh_epoch_value_v1(record, true))))
+
+fn fresh_epoch_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("machine-fresh-epoch-record-text:" + name)
+
+fn fresh_epoch_int_v1(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("machine-fresh-epoch-record-integer:" + name)
+
+pub fn machine_fresh_epoch_record_decode_v1(source: text) -> Result<MachineFreshEpochRecordV1, text>:
+    if source.byte_len() < 1 or source.byte_len() > 16384: return Err("machine-fresh-epoch-record-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,
+            max_depth: 2, max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 40)):
+        case Ok(value): value.value
+        case Err(_): return Err("machine-fresh-epoch-record-syntax")
+    val fields = match parsed:
+        case SdnValue.Dict(value): value
+        case _: return Err("machine-fresh-epoch-record-object")
+    val names = ["version", "kind", "mode", "authorityId", "physicalHostId", "nativeMachineId", "epochId", "epochGeneration",
+        "profileDigest", "machinePolicyDigest", "processIdentityDigest", "principalId", "serviceUid", "serviceGid",
+        "managerUniqueName", "partitionIdentityDigest", "storeIdentityDigest", "providerPolicyDigest", "providerIdentityDigest",
+        "capacityCpuMillis", "capacityMemoryBytes", "observedCpuMillis", "observedMemoryBytes", "reservedCpuMillis",
+        "reservedMemoryBytes", "outsideCpuMillis", "outsideMemoryBytes", "usableCpuMillis", "usableMemoryBytes"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("machine-fresh-epoch-record-unknown:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("machine-fresh-epoch-record-missing:" + name)
+    if (fresh_epoch_int_v1(fields, "version")? != 1 or fresh_epoch_text_v1(fields, "kind")? != "machine-fresh-provider-epoch" or
+            fresh_epoch_text_v1(fields, "mode")? != "standalone"):
+        return Err("machine-fresh-epoch-record-kind")
+    val record = MachineFreshEpochRecordV1(authority_id: fresh_epoch_text_v1(fields, "authorityId")?,
+        physical_host_id: fresh_epoch_text_v1(fields, "physicalHostId")?, native_machine_id: fresh_epoch_text_v1(fields, "nativeMachineId")?,
+        epoch_id: fresh_epoch_text_v1(fields, "epochId")?, epoch_generation: fresh_epoch_int_v1(fields, "epochGeneration")?,
+        profile_digest: fresh_epoch_text_v1(fields, "profileDigest")?, machine_policy_digest: fresh_epoch_text_v1(fields, "machinePolicyDigest")?,
+        process_identity_digest: fresh_epoch_text_v1(fields, "processIdentityDigest")?, principal_id: fresh_epoch_text_v1(fields, "principalId")?,
+        service_uid: fresh_epoch_int_v1(fields, "serviceUid")?, service_gid: fresh_epoch_int_v1(fields, "serviceGid")?,
+        manager_unique_name: fresh_epoch_text_v1(fields, "managerUniqueName")?,
+        partition_identity_digest: fresh_epoch_text_v1(fields, "partitionIdentityDigest")?,
+        store_identity_digest: fresh_epoch_text_v1(fields, "storeIdentityDigest")?,
+        provider_policy_digest: fresh_epoch_text_v1(fields, "providerPolicyDigest")?,
+        provider_identity_digest: fresh_epoch_text_v1(fields, "providerIdentityDigest")?,
+        capacity_cpu_millis: fresh_epoch_int_v1(fields, "capacityCpuMillis")?, capacity_memory_bytes: fresh_epoch_int_v1(fields, "capacityMemoryBytes")?,
+        observed_cpu_millis: fresh_epoch_int_v1(fields, "observedCpuMillis")?, observed_memory_bytes: fresh_epoch_int_v1(fields, "observedMemoryBytes")?,
+        reserved_cpu_millis: fresh_epoch_int_v1(fields, "reservedCpuMillis")?, reserved_memory_bytes: fresh_epoch_int_v1(fields, "reservedMemoryBytes")?,
+        outside_cpu_millis: fresh_epoch_int_v1(fields, "outsideCpuMillis")?, outside_memory_bytes: fresh_epoch_int_v1(fields, "outsideMemoryBytes")?,
+        usable_cpu_millis: fresh_epoch_int_v1(fields, "usableCpuMillis")?, usable_memory_bytes: fresh_epoch_int_v1(fields, "usableMemoryBytes")?)
+    if machine_fresh_epoch_record_bytes_v1(record)? != source: return Err("machine-fresh-epoch-record-noncanonical")
+    Ok(record)
+
+fn fresh_epoch_reservations_v1(record: MachineFreshEpochRecordV1) -> Result<[HostReservationV1], text>:
+    val source = machine_fresh_epoch_record_bytes_v1(record)?
+    val digest = sha256_text(source)
+    val rows = [("outside", record.outside_cpu_millis, record.outside_memory_bytes),
+        ("overhead", record.reserved_cpu_millis, record.reserved_memory_bytes),
+        ("partition", record.usable_cpu_millis, record.usable_memory_bytes)]
+    var result: [HostReservationV1] = []
+    for row in rows:
+        val nonce = sha256_text(row.0 + "\n" + digest)
+        result.push(HostReservationV1(id: row.0 + "-" + digest, operation_id: "epoch-" + nonce,
+            payload_digest: digest, service_scope_id: "epoch-" + digest, assignment_generation: record.epoch_generation,
+            nonce: nonce, cpu_millis: row.1, memory_bytes: row.2, exclusive_devices: [],
+            prepare_deadline_ms: 9223372036854775807, state: HostReservationStateV1.Uncertain))
+    Ok(result)
+
+pub fn machine_fresh_epoch_capacity_v1(record: MachineFreshEpochRecordV1) -> Result<HostAvailableCapacityV1, text>:
+    val rows = fresh_epoch_reservations_v1(record)?
+    host_available_capacity_v1(HostCapacityLedgerV1(capacity: HostCapacityV1(physical_host_id: record.physical_host_id,
+        authority_id: record.authority_id, boot_id: machine_fresh_epoch_stable_v1(record)?, provider_generation: record.epoch_generation,
+        cpu_millis: record.capacity_cpu_millis, memory_bytes: record.capacity_memory_bytes, exclusive_devices: []),
+        revision: 1, continuity_proven: false, reservations: rows))
+
+fn fresh_epoch_reservation_bytes_v1(row: HostReservationV1) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("machine-fresh-epoch-reservation"),
+        "state": SdnValue.String("uncertain"), "id": SdnValue.String(row.id), "operationId": SdnValue.String(row.operation_id),
+        "payloadDigest": SdnValue.String(row.payload_digest), "serviceScopeId": SdnValue.String(row.service_scope_id),
+        "assignmentGeneration": SdnValue.Int(row.assignment_generation), "nonce": SdnValue.String(row.nonce),
+        "cpuMillis": SdnValue.Int(row.cpu_millis), "memoryBytes": SdnValue.Int(row.memory_bytes),
+        "prepareDeadlineMs": SdnValue.Int(row.prepare_deadline_ms), "exclusiveDevices": SdnValue.Array([])}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn machine_fresh_epoch_entries_v1(record: MachineFreshEpochRecordV1, at: i64) -> Result<[WalEntry], text>:
+    if at <= 0: return Err("machine-fresh-epoch-record-clock")
+    val available = machine_fresh_epoch_capacity_v1(record)?
+    val source = machine_fresh_epoch_record_bytes_v1(record)?
+    var entries = [WalEntry(0, WalEntryType.Insert, "machine-container-scope-v1", "fresh-epoch", source, at)]
+    for row in fresh_epoch_reservations_v1(record)?:
+        entries.push(WalEntry(0, WalEntryType.Insert, "machine-container-reservations-v1", row.id,
+            fresh_epoch_reservation_bytes_v1(row), at))
+    Ok(entries)
+
+pub fn machine_fresh_epoch_replay_v1(entries: [WalEntry], record: MachineFreshEpochRecordV1) -> Result<bool, text>:
+    if entries.len() != 4: return Err("machine-fresh-epoch-record-count")
+    val expected = machine_fresh_epoch_entries_v1(record, entries[0].timestamp)?
+    for index in 0..4:
+        val row = entries[index]
+        val wanted = expected[index]
+        if (row.sequence != index + 1 or row.entry_type != wanted.entry_type or row.table_name != wanted.table_name or
+                row.row_key != wanted.row_key or row.data != wanted.data or row.timestamp != wanted.timestamp):
+            return Err("machine-fresh-epoch-record-history")
+    Ok(true)
+
+# One creator intent reclassifies the already charged overhead row. It never
+# adds another budget pool, refunds the row or mints a reusable spawn right.
+pub fn machine_fresh_epoch_creator_entries_v1(record: MachineFreshEpochRecordV1, template: text,
+        deadline: i64, at: i64) -> Result<[WalEntry], text>:
+    val checked = machine_fresh_epoch_record_validate_v1(record)?
+    if template.byte_len() < 1 or template.byte_len() > 32768 or at <= 0 or deadline <= at:
+        return Err("machine-fresh-epoch-creator-intent-fields")
+    val record_digest = sha256_text(machine_fresh_epoch_record_bytes_v1(record)?)
+    val template_digest = sha256_text(template)
+    val intent: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("machine-fresh-epoch-provider-create-intent"), "state": SdnValue.String("unknown"),
+        "recordDigest": SdnValue.String(record_digest), "templateDigest": SdnValue.String(template_digest),
+        "template": SdnValue.String(template), "launchDeadlineUnixMs": SdnValue.Int(deadline)}
+    val debit: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("machine-fresh-epoch-creator-debit"), "state": SdnValue.String("uncertain"),
+        "recordDigest": SdnValue.String(record_digest), "templateDigest": SdnValue.String(template_digest),
+        "cpuMillis": SdnValue.Int(record.reserved_cpu_millis), "memoryBytes": SdnValue.Int(record.reserved_memory_bytes),
+        "exclusiveDevices": SdnValue.Array([])}
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-container-creator-intents-v1", "provider-" + record_digest,
+            sdn_encode_canonical(SdnValue.Dict(intent)), at),
+        WalEntry(0, WalEntryType.Update, "machine-container-reservations-v1", "overhead-" + record_digest,
+            sdn_encode_canonical(SdnValue.Dict(debit)), at)])
+
+pub fn machine_fresh_epoch_creator_replay_v1(entries: [WalEntry], record: MachineFreshEpochRecordV1,
+        template: text, deadline: i64, at: i64) -> Result<bool, text>:
+    if entries.len() != 2: return Err("machine-fresh-epoch-creator-record-count")
+    val expected = machine_fresh_epoch_creator_entries_v1(record, template, deadline, at)?
+    for index in 0..2:
+        val row = entries[index]
+        val wanted = expected[index]
+        if (row.sequence != index + 5 or row.entry_type != wanted.entry_type or row.table_name != wanted.table_name or
+                row.row_key != wanted.row_key or row.data != wanted.data or row.timestamp != wanted.timestamp):
+            return Err("machine-fresh-epoch-creator-record-history")
+    Ok(true)

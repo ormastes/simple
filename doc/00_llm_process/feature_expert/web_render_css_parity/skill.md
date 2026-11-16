@@ -1771,7 +1771,10 @@ never cache an answer computed while exhausted) —
   upload at once moves it only to `2697952473848308`, and this branch (atlas kept
   across sizes) gives `2697955134348331`: the lane depends on atlas layout and
   upload order. The gap is the sum-equivalent of ~15.4k black-to-white pixels
-  (no framebuffer diff yet); cause open.
+  (no framebuffer diff yet); cause open. RESOLVED: the deferred u32 copy
+  declined under the compiled array ABI after the dispatch was recorded, so
+  the lane drew no text; see
+  `doc/08_tracking/bug/vulkan_font_u32_lane_draws_no_text_compiled_abi_2026-11-15.md`.
 - Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
   wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
   (boxes under 1025 px skip the table; a table per box cost +87 MB).
@@ -1971,3 +1974,101 @@ never cache an answer computed while exhausted) —
   endpoint-exact `mix_channel_gradient_centered` (t = pos/(span-1)) is wrong
   against this; Draw IR already samples centres (AC-12 in
   `linear_gradient_angle_draw_ir_chrome159_spec`).
+
+### Batch 3b/3c (2026-11-15): opacity composite, paint order, ink rows
+
+- **A group-opacity composite must honour the child's own alpha.**
+  `engine2d_composite_region_milli` (`engine.spl`) blended the child at a
+  constant alpha since `ece10b378c8`; with a full-viewport opacity layer every
+  transparent pixel darkened the page (`0x807c7d7e`). Effective alpha is now
+  `src_a * a8 / 255`.
+- **Positioned z-auto boxes paint after in-flow content.** The Draw IR paint
+  order (`_html_draw_ir_node_paint_order`) groups positioned boxes with
+  `z-index >= 0` after their context's in-flow members.
+- **8 px text has no exact-colour pixels in Chrome.** Assert ink, not the
+  text colour, for small text; exact-colour counts only describe the 5x7
+  bitmap face.
+- **Never pair a probe with a create to gate a GPU row.** The GPU is shared;
+  take name and reason from one `..._resolved_backend_name_with_reason` call.
+- **Put a seed probe inside the worktree it tests** (e.g. an ignored
+  `build/wr_probe/`): from a scratch dir, `std.*` can fail to resolve
+  root ("resolves from the project stdlib roots only").
+- **Old trees do not run on the current seed** (HIR lowering errors before
+  ~2026-11-14), so find introducing commits from the code and `git log -S`.
+
+## Gradient ramps (2026-11-15)
+
+- **Chrome never paints a stop colour exactly on a vertical ramp.** It samples
+  row centres, `t = (2*row+1)/(2*h)`, then dithers per device pixel with Skia's
+  8x8 ordered matrix: `X = x`, `Y = y ^ x`, `M` interleaves the low 3 bits
+  (`Y&1<<5 | X&1<<4 | Y&2<<2 | X&2<<1 | Y&4>>1 | X&4>>2`), stored
+  `floor(v + (2M+1)/128)`. `gradient_dither_threshold` returns `M`.
+- **Fit before porting.** Replay a candidate model in a scratch awk script
+  against every Chrome pixel you have (`cpixel.shs`) and port only on an exact
+  match. Pins that hit stop colours exactly were never Chrome values.
+- Dither uses DEVICE coordinates; within one row only `x & 7` matters, so the
+  painter computes 8 phase colours per row and merges equal runs.
+
+## 2026-11-16 — min-width beats max-width
+
+- **Order matters:** CSS 2.1 10.4 applies `max-width` first, then `min-width`, so `min-width` wins a conflict. `constrained_outer_width` (`..._layout_foundation.spl`) clamped in the opposite order, and the auto-margin centring clamp (`..._layout_engine.spl`) never consulted `min-width`. `width:50%;max-width:300px;min-width:500px` was 300 wide; Chrome 159 makes it 500.
+- **Trap — running the gates by hand:** both Chrome gates need `SIMPLE_BIN` (seed path) and `CHROME_BIN` (full Chrome) in the environment; without them they print `ERROR — nothing was checked` and exit 2, which is easy to miss in a chained script.
+- **Gates at the fix:** matrix 95/979 (no change), catalog 900 worst 6.80 (no change).
+
+## 2026-11-16 — rem uses the root font-size
+
+- **Root font is cascade state:** `css_cascade_root_font_set` is set to 16 at the start of `compute_styles_with_material`, set to the `html` node's computed `font_size` once that node is stored, and reset at pass end. Every `rem` reads it (`css_cascade_root_font_px()` in `..._decl_apply.spl`, `_css_cascade_root_font_px` in `..._declarations.spl`). The root's own `font-size:Nrem` still uses 16, which is the initial value.
+- **Trap — two dispatchers:** `margin-left` is parsed in BOTH `_apply_decls_dispatch` (`..._declarations.spl`, fast path) and `_apply_decls_without_grid_inner` (`..._decl_apply.spl`). Fixing one leaves the spec red; grep both for any longhand you touch.
+
+## 2026-11-16 — box-sizing:inherit
+
+- **`inherit` on a non-inherited property** needs the parent's value carried on the child Style, as `inherit_font_size` is. `inherit_border_box` is set in `inherit_from`, copied in `copy_from`, and added to `inherited_digest`. Skip the digest and the cascade memo can hand a child the style computed under a different parent.
+- **Trap — CSS braces in spec literals:** write `body{{margin:0}}`. A bare `{margin:0}` inside a `"..."` literal is interpolation and fails with `variable margin not found`; `{margin:0;font:...}` only happens to survive.
+
+## 2026-11-16 — compound selectors in any order
+
+- **One splitter, four consumers.** `_compound_base_tokens` feeds `parse_selector_part` (ParsedSel), `base_selector_matches` (text path, the debug oracle's other side), `selector_bucket_kind/value_from_base` (rule candidate buckets), and `_part_specificity`. If a bucket key is wrong, the rule is never a candidate. The matcher alone cannot show this: `.a#t` matched once parsed, but it sat in the `a#t` class bucket.
+
+## 2026-11-16 — :first/last/only-of-type
+
+- **A new structural pseudo-class needs SIX touch points** in `..._core_selectors.spl`: the `PSEUDO_*` code, `_pseudo_code_for`, the text-path allow-list in `simple_match` (the `pseudo != ...` chain), the text-path ctx branch, the parsed-path ctx branch, and `_option_needs_ctx` (without it, `:not(X)` is evaluated with no siblings). Miss the allow-list and the text path returns false while the parsed path matches; `web_selector_parsed_equivalence_spec` catches that.
+
+## 2026-11-16 — absolute height stretch and margins
+
+- **`absolute_containing_h` is the PADDING-box height** (`content_height_limit + pad_t + pad_b` at every call site), while `containing_w` is the CONTENT width and callers add the padding back. Mixing the two up gives the wrong stretch only when the parent has padding, so the spec includes a padded parent.
+- Absolute boxes now take their margins in `absolute_child_x/y` and in the width stretch. Before this an abs box with `margin:1px` sat at the inset with no offset, which no catalog page exercised.
+- **Trap — per-call-site variable names:** the five `absolute_child_style` call sites name the child `c`, `fc`, `fc_wrap` and `flex_c`. A blanket `nodes[c]` replace only fails with `variable c not found` when a flex absolute child is actually laid out. `layout_renderer_box_geometry_chrome159_spec` ("flex row/col abs child") caught it, and nothing at load time did.
+
+## 2026-11-16 — absolute static position
+
+- The static y of an auto-inset absolute box is `cy + prev_margin_b + margin-top`, not `cy`. The previous sibling's bottom margin is still pending in `prev_margin_b` (it has not been added to `cy` yet), and Chrome places the box after it.
+
+## 2026-11-16 — percentage flex-basis
+
+- A percentage that is only known at layout lives in its own Style field with default `-1` (`flex_basis_permille`), so none of the giant `Style(...)` constructors need editing. Only the decl_apply constructor passes it, and `copy_from` copies it. `flex_item_percent_style` (called at every ROW flex item site) resolves it into `flex_basis_px` and resets it to -1. The column path at the `flex_c` loop deliberately does not call it, so a column percent basis stays auto (it needs a definite height).
+
+## 2026-11-16 — flex min-width freeze
+
+- The §9.7 freeze loop for zero-basis items already existed. It keyed on `zero_floor_w` (the automatic minimum), which returned the bare frame when `min-width` was set. Making the floor the declared min-width was enough: no new loop.
+
+## 2026-11-16 — column flex grow and shrink
+
+- **The column path had no grow/shrink at all** (row-only Flexbox 9.7). `col_flex_target_heights` returns per-child outer targets in SIBLING order (-1 = untouched, empty = nothing to do), and the item loop indexes it with a `col_k` counter bumped on every child, absolute and `display:none` included. Keep the two loops walking the same `first_child`/`next_sibling` chain.
+- **The natural-first rule** applies only to auto-height items with children: lay out once with the original style, and keep that result if it is at least the target. It costs a second layout only in that case. Explicit-height items take the target directly, which is what lets a 40px text item shrink to its line height.
+- **The natural pass and floats:** `layout_with_style` APPENDS floats (`float_ctx_add`), while line boxes are indexed per node and get overwritten. So the second (target) layout first calls `float_ctx_truncate` back to the count from before the natural pass and restores `g_float_max_y1`.
+- **Bail rather than guess:** an auto-height item with element children returns base -1 and the helper returns `[]` for the whole container, which keeps the old layout. A one-line estimate there made siblings shrink or grow wrongly (review finding), which is worse than doing nothing.
+- **Perf:** the helper returns early unless the container has a height, max-height or min-height. Measured on `layout_renderer_box_geometry_chrome159_spec` with the seed 59635056 B (2026-11-14 09:32): 16.3 / 15.9 s and 428 MB on head vs 15.4 / 15.6 s and 428 MB on base.
+- **Trap:** a merged Chrome oracle page shifts every y. Re-measure the COMBINED page, never add offsets by hand.
+
+## 2026-11-16 — single-line row flex cross alignment
+
+- The wrap path aligned items per line after layout, but the single-line path had no such pass: stretch, center and end there only used `st.height_px`. The fix is the wrap path's loop run once with `max_child_h` as the line. Stretch only raises `out_bh`, since block content stays at the top; center and end move the subtree with `offset_layout_subtree`.
+
+## 2026-11-16 — background shorthand after the size group
+
+- `_parse_background_shorthand` is a token state machine. `after_slash` must END at the first non-size token, or every box, attachment or colour keyword after `pos / size` fails the whole layer closed. Its regression partner is `layout_renderer_background_and_grid_decls_spec` "refuses a malformed position/size slash": `center / 1px 2px 3px` must stay invalid, which is why a position token after the slash returns empty.
+
+## 2026-11-16 — text Draw IR line-height
+
+- `_html_draw_ir_resolved_text_command` merges the resolved-font props over the CSS computed style. `line-height` must stay the CSS value (`style_line_h`); the face metric only stands in for `normal`, and `style_line_h` already answers that. Nothing in Engine2D reads the value, only its presence.
+- Narrow Draw IR fixtures drop text that starts past the surface edge. Spans with no whitespace between them never wrap, so a fixture that once fit with bitmap metrics culls once real faces are wider. Widen the surface; don't relax the expect.

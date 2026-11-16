@@ -1,0 +1,210 @@
+# Exact observed CLI adapters. Pure DATA, never an execution admission factory.
+# Local --version/--help research: Codex0.169.0, Claude2.1.325,
+# Gemini0.68.0, Kimi2.5.3. Future versions require independent observation.
+use std.common.contracts.provider_cli.adapter_types_v1.*
+use std.common.crypto.sha256.sha256_text
+
+pub fn decode_provider_cli_provider_v1(name: text) -> Result<ProviderCliProviderV1, text>:
+    match name:
+        case "codex": Ok(ProviderCliProviderV1.Codex)
+        case "claude": Ok(ProviderCliProviderV1.Claude)
+        case "claude_cli": Ok(ProviderCliProviderV1.Claude)
+        case "gemini": Ok(ProviderCliProviderV1.Gemini)
+        case "gemini_cli": Ok(ProviderCliProviderV1.Gemini)
+        case "kimi": Ok(ProviderCliProviderV1.Kimi)
+        case "kimi_cli": Ok(ProviderCliProviderV1.Kimi)
+        case _: Err("provider-cli-unknown-provider")
+
+pub fn provider_cli_expected_version_v1(provider: ProviderCliProviderV1) -> text:
+    match provider:
+        case ProviderCliProviderV1.Codex: "0.169.0"
+        case ProviderCliProviderV1.Claude: "2.1.325"
+        case ProviderCliProviderV1.Gemini: "0.68.0"
+        case ProviderCliProviderV1.Kimi: "2.5.3"
+
+fn provider_cli_version_match_v1(version: ProviderCliVersionDataV1) -> Result<(), text>:
+    if version.version != provider_cli_expected_version_v1(version.provider):
+        return Err("provider-cli-version-unsupported")
+    Ok(())
+
+pub fn decode_provider_cli_version_v1(provider: ProviderCliProviderV1,
+        stdout: text) -> Result<ProviderCliVersionDataV1, text>:
+    if stdout.byte_len() < 1 or stdout.byte_len() > 256 or stdout.contains("\0"):
+        return Err("provider-cli-version-output-bound")
+    val expected = provider_cli_expected_version_v1(provider)
+    val wire = match provider:
+        case ProviderCliProviderV1.Codex: "codex-cli " + expected
+        case ProviderCliProviderV1.Claude: expected + " (Claude Code)"
+        case _: expected
+    if stdout.trim() != wire: return Err("provider-cli-version-unsupported-or-family-mismatch")
+    Ok(ProviderCliVersionDataV1(provider: provider, version: expected))
+
+# These argv arrays are exclusively read-only help/version probes. Index zero
+# is version; later indices are help. This does not attest who executed them.
+pub fn provider_cli_probe_count_v1(provider: ProviderCliProviderV1) -> i64:
+    match provider:
+        case ProviderCliProviderV1.Codex: 5
+        case ProviderCliProviderV1.Claude: 3
+        case _: 2
+
+pub fn provider_cli_probe_argv_v1(provider: ProviderCliProviderV1, index: i64) -> Result<[text], text>:
+    if index < 0 or index >= provider_cli_probe_count_v1(provider):
+        return Err("provider-cli-probe-index")
+    if index == 0: return Ok(["--version"])
+    if index == 1: return Ok(["--help"])
+    if provider == ProviderCliProviderV1.Codex:
+        if index == 2: return Ok(["exec", "--help"])
+        if index == 3: return Ok(["exec", "resume", "--help"])
+        return Ok(["login", "status", "--help"])
+    Ok(["auth", "status", "--help"])
+
+pub fn decode_provider_cli_help_v1(version: ProviderCliVersionDataV1, index: i64,
+        stdout: text) -> Result<ProviderCliHelpDataV1, text>:
+    provider_cli_version_match_v1(version)?
+    if index < 1 or index >= provider_cli_probe_count_v1(version.provider):
+        return Err("provider-cli-help-index")
+    if stdout.byte_len() < 1 or stdout.byte_len() > 131072 or stdout.contains("\0"):
+        return Err("provider-cli-help-output-bound")
+    var tokens: [text] = []
+    match version.provider:
+        case ProviderCliProviderV1.Codex:
+            if index == 1: tokens = ["Codex CLI", "exec", "login", "--model"]
+            elif index == 2: tokens = ["Usage: codex exec ", "--json", "--model", "--color"]
+            elif index == 3: tokens = ["Usage: codex exec resume ", "[SESSION_ID]", "[PROMPT]", "--json", "--model"]
+            else: tokens = ["Usage: codex login status ", "Show login status"]
+        case ProviderCliProviderV1.Claude:
+            if index == 1: tokens = ["Usage: claude ", "--print", "--resume", "--model", "--output-format", "--verbose"]
+            else: tokens = ["Usage: claude auth status ", "--json", "Show authentication status"]
+        case ProviderCliProviderV1.Gemini:
+            tokens = ["Usage: gemini ", "--prompt", "--output-format", "--resume", "--model"]
+        case ProviderCliProviderV1.Kimi:
+            tokens = ["Usage: kimi ", "--prompt", "--output-format", "--session", "--model"]
+    for token in tokens:
+        if not stdout.contains(token): return Err("provider-cli-help-shape-unsupported")
+    Ok(ProviderCliHelpDataV1(provider: version.provider, version: version.version,
+        probe_index: index, stdout_digest: sha256_text(stdout)))
+
+fn provider_cli_scalar_v1(value: text, maximum: i64) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > maximum or value.starts_with("-"): return false
+    for byte in value.bytes():
+        if byte <= 32 or byte == 127: return false
+    true
+
+fn provider_cli_exact_session_v1(value: text) -> bool:
+    if not provider_cli_scalar_v1(value, 128) or ["latest", "last"].contains(value.lower()): return false
+    var non_digit = false
+    for byte in value.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+                (byte >= 97 and byte <= 122) or byte == 45 or byte == 95): return false
+        if byte < 48 or byte > 57: non_digit = true
+    non_digit
+
+fn provider_cli_uuid_session_v1(value: text) -> bool:
+    if value.byte_len() != 36: return false
+    for index in 0..36:
+        val byte = value.byte_at(index)
+        if [8, 13, 18, 23].contains(index):
+            if byte != 45: return false
+        elif not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 70) or (byte >= 97 and byte <= 102)):
+            return false
+    true
+
+# No blacklist. Each accepted extra has a fixed typed shape, family and action.
+# Neither output/protocol/session overrides nor permission/sandbox/config flags
+# can pass by spelling them --flag=value or splitting flag and value.
+fn provider_cli_options_v1(version: ProviderCliVersionDataV1,
+        request: ProviderCliRequestDataV1) -> Result<[text], text>:
+    if request.extra_args.len() > 2: return Err("provider-cli-options-not-allowlisted")
+    if request.extra_args.len() == 0: return Ok([])
+    if version.provider == ProviderCliProviderV1.Claude and request.extra_args == ["--verbose"]:
+        return Ok(["--verbose"])
+    if version.provider == ProviderCliProviderV1.Codex and request.action == ProviderCliActionV1.Start:
+        if request.extra_args == ["--color", "never"] or request.extra_args == ["--color=never"]:
+            return Ok(["--color", "never"])
+    Err("provider-cli-options-not-allowlisted")
+
+fn provider_cli_auth_plan_v1(version: ProviderCliVersionDataV1) -> ProviderCliPlanDataV1:
+    var argv: [text] = []
+    var output = ProviderCliOutputDataV1.None
+    var control = ProviderCliControlDataV1.ExternalCredentialInspectionRequired
+    var mechanism = "provider-managed-existing-credentials-no-status-command"
+    var names: [text] = []
+    match version.provider:
+        case ProviderCliProviderV1.Codex:
+            argv = ["login", "status"]
+            output = ProviderCliOutputDataV1.Text
+            control = ProviderCliControlDataV1.Argv
+            mechanism = "existing-codex-login-status"
+        case ProviderCliProviderV1.Claude:
+            argv = ["auth", "status", "--json"]
+            output = ProviderCliOutputDataV1.JsonDocument
+            control = ProviderCliControlDataV1.Argv
+            mechanism = "existing-claude-auth-status"
+        case ProviderCliProviderV1.Gemini:
+            mechanism = "existing-google-login-or-api-key-or-vertex-adc"
+            names = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"]
+        case ProviderCliProviderV1.Kimi:
+            mechanism = "provider-managed-existing-login-no-readonly-status-command"
+    ProviderCliPlanDataV1(provider: version.provider, version: version.version,
+        action: ProviderCliActionV1.AuthInspect, control: control, argv: argv,
+        stdin_text: "", output: output, requires_external_containment: false,
+        auth_mechanism: mechanism, credential_environment_names: names)
+
+pub fn plan_provider_cli_action_v1(version: ProviderCliVersionDataV1,
+        request: ProviderCliRequestDataV1) -> Result<ProviderCliPlanDataV1, text>:
+    provider_cli_version_match_v1(version)?
+    if request.action == ProviderCliActionV1.AuthInspect or request.action == ProviderCliActionV1.Interrupt:
+        if request.prompt != "" or request.model != "" or request.session_id != "" or request.extra_args.len() != 0:
+            return Err("provider-cli-control-action-fields")
+        if request.action == ProviderCliActionV1.AuthInspect: return Ok(provider_cli_auth_plan_v1(version))
+        return Ok(ProviderCliPlanDataV1(provider: version.provider, version: version.version,
+            action: request.action, control: ProviderCliControlDataV1.OwnedCancel, argv: [],
+            stdin_text: "", output: ProviderCliOutputDataV1.None, requires_external_containment: false,
+            auth_mechanism: "existing-contained-invocation-control-required"))
+    if request.prompt.byte_len() < 1 or request.prompt.byte_len() > 65536 or request.prompt.contains("\0"):
+        return Err("provider-cli-prompt-bound")
+    if request.model != "" and not provider_cli_scalar_v1(request.model, 256):
+        return Err("provider-cli-model-invalid")
+    if request.action == ProviderCliActionV1.Start and request.session_id != "":
+        return Err("provider-cli-start-session-forbidden")
+    if request.action == ProviderCliActionV1.Resume and not provider_cli_exact_session_v1(request.session_id):
+        return Err("provider-cli-exact-session-required")
+    # Gemini 0.68.0's installed/pinned source compares the complete stored UUID
+    # before considering numeric indexes. It does not support prefix selection.
+    if (request.action == ProviderCliActionV1.Resume and version.provider == ProviderCliProviderV1.Gemini and
+            not provider_cli_uuid_session_v1(request.session_id)):
+        return Err("provider-cli-gemini-full-session-uuid-required")
+    val options = provider_cli_options_v1(version, request)?
+    var argv: [text] = []
+    var stdin_text = ""
+    var output = ProviderCliOutputDataV1.JsonDocument
+    match version.provider:
+        case ProviderCliProviderV1.Codex:
+            argv = if request.action == ProviderCliActionV1.Resume: ["exec", "resume", "--json"]
+                else: ["exec", "--json"]
+            if request.model != "": argv = argv + ["--model", request.model]
+            argv = argv + options
+            if request.action == ProviderCliActionV1.Resume: argv.push(request.session_id)
+            # Exact observed help documents '-' as stdin, including resume.
+            argv.push("-")
+            stdin_text = request.prompt
+            output = ProviderCliOutputDataV1.JsonLines
+        case ProviderCliProviderV1.Claude:
+            argv = ["--print", "--output-format", "json"]
+            if request.model != "": argv = argv + ["--model", request.model]
+            if request.action == ProviderCliActionV1.Resume: argv = argv + ["--resume", request.session_id]
+            argv = argv + options + ["--", request.prompt]
+        case ProviderCliProviderV1.Gemini:
+            argv = ["--prompt=" + request.prompt, "--output-format", "json"]
+            if request.model != "": argv = argv + ["--model", request.model]
+            if request.action == ProviderCliActionV1.Resume: argv = argv + ["--resume", request.session_id]
+        case ProviderCliProviderV1.Kimi:
+            argv = ["--prompt=" + request.prompt, "--output-format", "stream-json"]
+            if request.model != "": argv = argv + ["--model", request.model]
+            if request.action == ProviderCliActionV1.Resume: argv = argv + ["--session", request.session_id]
+            output = ProviderCliOutputDataV1.JsonLines
+    Ok(ProviderCliPlanDataV1(provider: version.provider, version: version.version,
+        action: request.action, control: ProviderCliControlDataV1.Argv, argv: argv,
+        stdin_text: stdin_text, output: output,
+        requires_external_containment: true,
+        auth_mechanism: "retain-existing-credentials-without-auth-mutation"))

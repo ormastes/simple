@@ -1,0 +1,78 @@
+# Retained actual Git registration observations, never stdout-only readiness.
+use std.nogc_sync_mut.io.retained_file.RetainedDirectoryOwnerV1
+use std.common.contracts.container.agent_workspace_manifest_v1.AgentWorkspaceManifestV1
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+fn bootstrap_read_v1(directory: RetainedDirectoryOwnerV1, name: text) -> Result<text, text>:
+    var file = directory.open_file(name, 4096u64)?
+    val read = file.read_stage_input_v1(4096)
+    val consumed = file.close()
+    if not consumed: return Err("bootstrap-registration-file-close")
+    val bytes = read?
+    if not utf8_bytes_valid(bytes): return Err("bootstrap-registration-utf8")
+    Ok(bytes_to_text(bytes))
+
+fn bootstrap_registry_v1(registry: RetainedDirectoryOwnerV1, repo_path: text,
+        checkout_path: text, oid: text) -> Result<(), text>:
+    if bootstrap_read_v1(registry, "HEAD")? != oid + "\n": return Err("bootstrap-detached-head-differs")
+    if bootstrap_read_v1(registry, "commondir")? != "../..\n": return Err("bootstrap-common-dir-differs")
+    if bootstrap_read_v1(registry, "gitdir")? != checkout_path + "/.git\n": return Err("bootstrap-worktree-registration-differs")
+    Ok(())
+
+fn bootstrap_registered_v1(repo: RetainedDirectoryOwnerV1, repo_path: text,
+        checkout_path: text, oid: text) -> Result<(), text>:
+    var worktrees = repo.stage_directory_v1("worktrees", false)?
+    val opened = worktrees.stage_directory_v1("worktree", false)
+    if opened.is_err():
+        val consumed = worktrees.close()
+        return Err(opened.unwrap_err())
+    var registry = opened.unwrap()
+    val observed = bootstrap_registry_v1(registry, repo_path, checkout_path, oid)
+    val named = worktrees.stage_child_match_v1("worktree", registry)
+    val registry_closed = registry.close()
+    val worktrees_named = repo.stage_child_match_v1("worktrees", worktrees)
+    val worktrees_closed = worktrees.close()
+    if not registry_closed or not worktrees_closed: return Err("bootstrap-registry-directory-close")
+    observed?
+    named?
+    worktrees_named?
+    Ok(())
+
+fn bootstrap_attempt_verify_v1(attempt: RetainedDirectoryOwnerV1, root_path: text,
+        manifest: AgentWorkspaceManifestV1) -> Result<RetainedDirectoryOwnerV1, text>:
+    val prefix = root_path + "/" + manifest.attempt_leaf
+    var repo = attempt.stage_directory_v1("repo", false)?
+    val registered = bootstrap_registered_v1(repo, prefix + "/repo", prefix + "/worktree", manifest.revision_oid)
+    val repo_named = attempt.stage_child_match_v1("repo", repo)
+    val repo_closed = repo.close()
+    if not repo_closed: return Err("bootstrap-repo-directory-close")
+    registered?
+    repo_named?
+    var checkout = attempt.stage_directory_v1("worktree", false)?
+    val marker = bootstrap_read_v1(checkout, ".git")
+    val checkout_named = attempt.stage_child_match_v1("worktree", checkout)
+    if marker.is_err() or checkout_named.is_err():
+        val consumed = checkout.close()
+        return Err("bootstrap-checkout-marker-unavailable")
+    if marker.unwrap() != "gitdir: " + prefix + "/repo/worktrees/worktree\n":
+        val consumed = checkout.close()
+        return Err("bootstrap-checkout-marker-differs")
+    Ok(checkout)
+
+pub fn agent_worktree_verify_v1(root: RetainedDirectoryOwnerV1, root_path: text,
+        manifest: AgentWorkspaceManifestV1) -> Result<RetainedDirectoryOwnerV1, text>:
+    var attempt = root.stage_directory_v1(manifest.attempt_leaf, false)?
+    val verified = bootstrap_attempt_verify_v1(attempt, root_path, manifest)
+    val named = root.stage_child_match_v1(manifest.attempt_leaf, attempt)
+    val consumed = attempt.close()
+    if not consumed or named.is_err():
+        if verified.is_ok():
+            var child = verified.unwrap()
+            val child_consumed = child.close()
+        return Err("bootstrap-attempt-retained-binding")
+    verified
+
+pub fn agent_worktree_porcelain_v1(root_path: text, manifest: AgentWorkspaceManifestV1) -> text:
+    val prefix = root_path + "/" + manifest.attempt_leaf
+    "worktree " + prefix + "/repo\u0000bare\u0000\u0000worktree " + prefix + "/worktree\u0000HEAD " +
+        manifest.revision_oid + "\u0000detached\u0000\u0000"

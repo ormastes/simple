@@ -1,0 +1,81 @@
+# Lower continuation wrapper only. No Domain/journal copy is stored in the
+# session; callers publish every returned Domain before interpreting errors.
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
+use std.nogc_sync_mut.orchestration.host_controller_observation_v3.{HostControllerInspectionV3,
+    HostControllerInspectionTurnV3, host_controller_inspection_begin_v3, host_controller_inspection_step_v3}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_encode_v2
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+
+# Opaque in-process continuation, with no wire codec or restoration factory.
+# An actual lower inspection carries its own native origin/lifecycle checks.
+pub class HostControllerInspectionSessionV3:
+    operation_id: text
+    execute_request_digest: text
+    var inspection: Option<HostControllerInspectionV3>
+    var response: text
+    var error: text
+    var cancelled: bool
+
+impl HostControllerInspectionSessionV3:
+    pub fn matches_v3(operation_id: text, execute_request_digest: text) -> bool:
+        (builder_identifier_valid_v1(operation_id) and builder_digest_valid_v1(execute_request_digest) and
+            self.operation_id == operation_id and self.execute_request_digest == execute_request_digest)
+
+    pub fn pending_v3() -> bool: self.inspection.is_some()
+    pub fn response_v3() -> text: self.response
+    pub fn error_v3() -> text: self.error
+
+    pub fn exit_code_v3() -> i64:
+        if self.error != "" or self.cancelled: return 2
+        if self.inspection.is_none() and self.response == "": return 2
+        # Pending is explicit metadata, not completion or cleanup success.
+        0
+
+pub struct HostControllerInspectionSessionTurnV3:
+    domain: HostServiceDomainV3
+    session: HostControllerInspectionSessionV3
+
+fn inspection_session_accept_v3(session: HostControllerInspectionSessionV3,
+        turn: HostControllerInspectionTurnV3) -> HostControllerInspectionSessionTurnV3:
+    # Capture the returned Domain and actual pending owner BEFORE checking any
+    # error, cancellation, observation, encoding or completion outcome.
+    val returned_domain = turn.domain
+    var retained = session
+    retained.inspection = turn.inspection
+    if retained.error == "" and turn.error != "": retained.error = turn.error
+    if retained.error == "" and retained.cancelled: retained.error = "controller-host-inspect-cancelled"
+    if retained.inspection.is_some(): return HostControllerInspectionSessionTurnV3(returned_domain, retained)
+    if retained.error != "": return HostControllerInspectionSessionTurnV3(returned_domain, retained)
+    if turn.observation.is_none():
+        retained.error = "controller-host-inspection-session-result-unknown"
+        return HostControllerInspectionSessionTurnV3(returned_domain, retained)
+    # Only an actual completed lower turn reaches the existing observation
+    # codec. There is no public raw-observation-to-session authority factory.
+    match host_execution_observation_encode_v2(turn.observation.unwrap()):
+        case Ok(source): retained.response = source
+        case Err(reason): retained.error = reason
+    HostControllerInspectionSessionTurnV3(returned_domain, retained)
+
+pub fn host_controller_inspection_session_begin_v3(domain: HostServiceDomainV3,
+        operation_id: text, execute_request_digest: text) -> HostControllerInspectionSessionTurnV3:
+    val session = HostControllerInspectionSessionV3(operation_id: operation_id,
+        execute_request_digest: execute_request_digest, inspection: nil, response: "", error: "", cancelled: false)
+    if not builder_identifier_valid_v1(operation_id) or not builder_digest_valid_v1(execute_request_digest):
+        var rejected = session
+        rejected.error = "controller-host-inspection-session-operation"
+        return HostControllerInspectionSessionTurnV3(domain, rejected)
+    val turn = host_controller_inspection_begin_v3(domain, operation_id, execute_request_digest)
+    inspection_session_accept_v3(session, turn)
+
+pub fn host_controller_inspection_session_step_v3(domain: HostServiceDomainV3,
+        session: HostControllerInspectionSessionV3, cancel: bool = false) -> HostControllerInspectionSessionTurnV3:
+    # A cached terminal result is retained until its canonical caller reads
+    # and discards it. Polling/cancel after completion never starts a new probe.
+    if session.inspection.is_none(): return HostControllerInspectionSessionTurnV3(domain, session)
+    var retained = session
+    retained.cancelled = retained.cancelled or cancel
+    val turn = host_controller_inspection_step_v3(domain, retained.inspection.unwrap(), retained.cancelled)
+    inspection_session_accept_v3(retained, turn)
+
+export HostControllerInspectionSessionV3, HostControllerInspectionSessionTurnV3
+export host_controller_inspection_session_begin_v3, host_controller_inspection_session_step_v3

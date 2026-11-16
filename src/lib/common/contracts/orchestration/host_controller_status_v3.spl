@@ -1,0 +1,89 @@
+# Canonical Host status data. Native authority belongs to its actual producer.
+use std.common.contracts.container.execution_v2.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct HostControllerStatusV3:
+    scope: ContainerHostScopeV2
+    authority_id: text
+    enrollment_digest: text
+    provider_identity_digest: text
+    revision: i64
+    cpu_millis: i64
+    memory_bytes: i64
+    available_cpu_millis: i64
+    available_memory_bytes: i64
+    retained_reservations: i64
+    ready: bool
+
+pub fn host_controller_status_encode_v3(status: HostControllerStatusV3) -> Result<text, text>:
+    val scope = status.scope
+    val fence = container_scope_fence_id_v2(scope)?
+    if (scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != "" or
+            not builder_digest_valid_v1(status.enrollment_digest) or not builder_digest_valid_v1(status.provider_identity_digest) or
+            status.authority_id != "host-" + status.enrollment_digest or status.revision <= 0 or
+            status.cpu_millis <= 0 or status.memory_bytes <= 0 or status.available_cpu_millis < 0 or
+            status.available_memory_bytes < 0 or status.available_cpu_millis > status.cpu_millis or
+            status.available_memory_bytes > status.memory_bytes or status.retained_reservations < 0):
+        return Err("controller-host-status-fields")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("controller-host-status"),
+        "backend": SdnValue.String("windows-docker-process"), "physicalHostId": SdnValue.String(scope.physical_host_id),
+        "serviceScopeId": SdnValue.String(scope.service_scope_id), "bootId": SdnValue.String(scope.boot_id),
+        "nativeMachineId": SdnValue.String(scope.native_machine_id), "continuityMode": SdnValue.String(scope.continuity_mode),
+        "continuityId": SdnValue.String(scope.continuity_id), "providerGeneration": SdnValue.Int(scope.provider_generation),
+        "fenceId": SdnValue.String(fence), "authorityId": SdnValue.String(status.authority_id),
+        "enrollmentBindingDigest": SdnValue.String(status.enrollment_digest),
+        "providerIdentityDigest": SdnValue.String(status.provider_identity_digest), "revision": SdnValue.Int(status.revision),
+        "cpuMillis": SdnValue.Int(status.cpu_millis), "memoryBytes": SdnValue.Int(status.memory_bytes),
+        "availableCpuMillis": SdnValue.Int(status.available_cpu_millis), "availableMemoryBytes": SdnValue.Int(status.available_memory_bytes),
+        "retainedReservations": SdnValue.Int(status.retained_reservations), "ready": SdnValue.Bool(status.ready)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn status_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("controller-host-status-text:" + name)
+
+fn status_int_v3(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("controller-host-status-int:" + name)
+
+pub fn host_controller_status_decode_v3(source: text) -> Result<HostControllerStatusV3, text>:
+    if source.byte_len() == 0 or source.byte_len() > 8192: return Err("controller-host-status-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 8192,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(issue): return Err("controller-host-status-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("controller-host-status-object")
+    val allowed = ["version", "kind", "backend", "physicalHostId", "serviceScopeId", "bootId", "nativeMachineId",
+        "continuityMode", "continuityId", "providerGeneration", "fenceId", "authorityId", "enrollmentBindingDigest",
+        "providerIdentityDigest", "revision", "cpuMillis", "memoryBytes", "availableCpuMillis", "availableMemoryBytes",
+        "retainedReservations", "ready"]
+    for name in fields.keys():
+        if not allowed.contains(name): return Err("controller-host-status-unknown:" + name)
+    for name in allowed:
+        if not fields.contains_key(name): return Err("controller-host-status-missing:" + name)
+    if (status_int_v3(fields, "version")? != 3 or status_text_v3(fields, "kind")? != "controller-host-status" or
+            status_text_v3(fields, "backend")? != "windows-docker-process"): return Err("controller-host-status-version")
+    val scope = ContainerHostScopeV2(physical_host_id: status_text_v3(fields, "physicalHostId")?,
+        service_scope_id: status_text_v3(fields, "serviceScopeId")?, boot_id: status_text_v3(fields, "bootId")?,
+        provider_generation: status_int_v3(fields, "providerGeneration")?, native_machine_id: status_text_v3(fields, "nativeMachineId")?,
+        continuity_mode: status_text_v3(fields, "continuityMode")?, continuity_id: status_text_v3(fields, "continuityId")?)
+    if container_scope_fence_id_v2(scope)? != status_text_v3(fields, "fenceId")?: return Err("controller-host-status-fence")
+    val ready = match fields["ready"]:
+        case SdnValue.Bool(value): value
+        case _: return Err("controller-host-status-ready")
+    val status = HostControllerStatusV3(scope, status_text_v3(fields, "authorityId")?,
+        status_text_v3(fields, "enrollmentBindingDigest")?, status_text_v3(fields, "providerIdentityDigest")?,
+        status_int_v3(fields, "revision")?, status_int_v3(fields, "cpuMillis")?, status_int_v3(fields, "memoryBytes")?,
+        status_int_v3(fields, "availableCpuMillis")?, status_int_v3(fields, "availableMemoryBytes")?,
+        status_int_v3(fields, "retainedReservations")?, ready)
+    if host_controller_status_encode_v3(status)? != source: return Err("controller-host-status-noncanonical")
+    Ok(status)
+

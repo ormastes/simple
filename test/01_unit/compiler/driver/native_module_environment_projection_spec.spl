@@ -201,6 +201,34 @@ describe "native module delivery-intent projection":
         expect(native_build_environment_snapshot_fingerprint_v1(launch_1).digest ==
             native_build_environment_snapshot_fingerprint_v1(launch_2).digest).to_equal(false)
 
+    it "keeps the object scope when a relaunch changes only a Stage 3 route knob":
+        # The bootstrap exports both route knobs into every MIR shard worker.
+        # REQUESTED_ROUTE is read only by bootstrap_main's dispatch (shard
+        # workers carry SIMPLE_NATIVE_BUILD_WORKER=1) and FALLBACK_ROUTE by no
+        # compiler source; a relaunch that retunes either must keep its scope.
+        var routed = objreuse_mir_worker_env_v1("1473763", "4806744499",
+            "1473763", "BZ7QDHQu", "18432000000")
+        routed.push(("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", "coordinator"))
+        routed.push(("SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", "direct"))
+        val first = native_build_module_environment_snapshot_fingerprint_v1(routed)
+        expect(first.valid).to_equal(true)
+        val requested = native_build_module_environment_snapshot_fingerprint_v1(
+            objreuse_env_replace_v1(routed, "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", "direct"))
+        val fallback = native_build_module_environment_snapshot_fingerprint_v1(
+            objreuse_env_replace_v1(routed, "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", "none"))
+        expect(requested.digest).to_equal(first.digest)
+        expect(fallback.digest).to_equal(first.digest)
+        # The watchdog's cap provenance labels follow the memory admission
+        # (stage3-native-build-worker.sh); no compiler source reads them.
+        var capped = routed
+        capped.push(("SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE", "memory-admission"))
+        capped.push(("SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND", "memory-high"))
+        val relabelled = objreuse_env_replace_v1(objreuse_env_replace_v1(capped,
+            "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE", "explicit"),
+            "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND", "memory-max")
+        expect(native_build_module_environment_snapshot_fingerprint_v1(capped).digest).to_equal(first.digest)
+        expect(native_build_module_environment_snapshot_fingerprint_v1(relabelled).digest).to_equal(first.digest)
+
 fn objreuse_env_replace_v1(env: [(text, text)], name: text, value: text) -> [(text, text)]:
     var out: [(text, text)] = []
     for pair in env:

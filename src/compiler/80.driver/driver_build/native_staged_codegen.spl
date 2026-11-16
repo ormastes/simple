@@ -44,6 +44,11 @@ pub class NativeStagedCodegenStateV1:
     scheduled_names: [text]
     batches_flushed: i64
     modules_flushed: i64
+    # Modules of batches that emitted no object (lowering/verify/borrow/codegen
+    # failure). Reported as the native_staged progress `failed` count; before
+    # this the progress line hard-coded failed=0 while whole batches were
+    # silently withheld (doc/08_tracking/bug/native_staged_progress_failed_zero_2026-11-16.md).
+    modules_withheld: i64
     lowering_failed: bool
     verify_failed: bool
     borrow_failed: bool
@@ -84,13 +89,19 @@ impl NativeStagedCodegenStateV1:
     me record_batch_lowering_v1(batch_failed: bool):
         self.lowering_failed = batch_failed
 
+    # Count the modules of one flushed batch that did not reach an object.
+    # `flushed_delta` is how far modules_flushed advanced for this batch.
+    me record_batch_withheld_v1(batch_module_count: i64, flushed_delta: i64):
+        self.modules_withheld = self.modules_withheld +
+            native_staged_withheld_count_v1(batch_module_count, flushed_delta)
+
     static fn inactive() -> NativeStagedCodegenStateV1:
         NativeStagedCodegenStateV1.begin(0)
 
     static fn begin(batch_size: i64) -> NativeStagedCodegenStateV1:
         NativeStagedCodegenStateV1(active: batch_size > 0,
             batch_size: batch_size, flushing: false, scheduled_names: [],
-            batches_flushed: 0, modules_flushed: 0,
+            batches_flushed: 0, modules_flushed: 0, modules_withheld: 0,
             lowering_failed: false, verify_failed: false, borrow_failed: false,
             failed_batches: [], object_files: [], collection_bindings: [],
             module_outcomes: BuildOutcomeSet.empty(), module_unit_id: 0,
@@ -102,6 +113,14 @@ impl NativeStagedCodegenStateV1:
             phase2_native_rejections: 0, shard_queue: "",
             shard_claimed_names: [], module_objects: {},
             smf_part_objects: smf_object_spool_begin_v1(smf_object_spool_dir_v1()), smf_part_manifests: {})
+
+# Modules of a batch that emitted no object: the batch size minus how many
+# modules compile_to_native recorded as flushed for it, never negative.
+pub fn native_staged_withheld_count_v1(batch_module_count: i64, flushed_delta: i64) -> i64:
+    if batch_module_count <= 0: return 0
+    if flushed_delta <= 0: return batch_module_count
+    if flushed_delta >= batch_module_count: return 0
+    batch_module_count - flushed_delta
 
 # Strict decimal parse. Empty means "unset" (default batch); anything that is
 # not a plain non-negative decimal is -1 so the caller fails closed instead of

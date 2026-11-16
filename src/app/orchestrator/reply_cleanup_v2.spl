@@ -1,3 +1,4 @@
+use std.nogc_sync_mut.io.host_service_auth_setup_v1.host_service_auth_setup_close_v1
 # One-shot executable finalization only. Persistent callers retain the returned
 # cleanup owners beyond their wire reply and refuse further mutation until the
 # canonical owner confirms release. No native token is serialized here.
@@ -5,6 +6,8 @@ use app.orchestrator.validation.OrchestratorValidationReplyV1
 use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
 use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.host_service_cleanup_v3
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.controller_local_root_close_v3
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.controller_dispatch_close_v3
 use os.apps.smux.runtime_connection_recovery_v5.{smux_runtime_server_recover_v5, smux_runtime_server_recovery_pending_v5}
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
@@ -12,6 +15,20 @@ use std.common.sdn.encode.sdn_encode_canonical
 pub fn orchestrator_reply_cleanup_v2(reply: OrchestratorValidationReplyV1) -> OrchestratorValidationReplyV1:
     var current = reply
     var errors: [text] = []
+    if val cleanup = current.host_auth_setup_cleanup:
+        val turn = host_service_auth_setup_close_v1(cleanup)
+        current.host_auth_setup_cleanup = turn.owner
+        if turn.owner.is_some() or turn.cleanup_pending or turn.error != "":
+            errors.push("host-auth-setup-cleanup:" + turn.error)
+    if val cleanup = current.controller_dispatch_cleanup:
+        val turn = controller_dispatch_close_v3(cleanup)
+        current.controller_dispatch_cleanup = turn.owner
+        if not turn.completed or turn.cleanup_pending or turn.error != "":
+            errors.push("controller-dispatch-cleanup:" + turn.error)
+    if val cleanup = current.controller_root_cleanup:
+        val turn = controller_local_root_close_v3(cleanup)
+        current.controller_root_cleanup = turn.owner
+        if not turn.closed or turn.error != "": errors.push("controller-root-cleanup:" + turn.error)
     if val recovery = current.primary_service_recovery:
         val turn = smux_runtime_server_recover_v5(recovery)
         current.primary_service_recovery = Some(turn)

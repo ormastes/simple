@@ -176,6 +176,11 @@ link hosted. Precedent for doing it in both: `rt_text_cmp_any`.
   `tree-rss-policy.shs` and the inherited-override check in
   `product-frontend-policy.shs` to move together (open follow-up).
 - Record: `doc/08_tracking/bug/stage2_compiler_tests_frontend_shard_rss_2026-10-25.md`.
+- (2026-11-15) Host key `worker_mem_mib` is a MIR SHARD figure: it prices only
+  the MIR shard mode. Per-file pool HIR/MIR prices take the per-file default
+  (scaled to host); `SIMPLE_{HIR,MIR}_SHARD_WORKER_KB` still win everywhere
+  (`file_worker_pool_phase_price_kb_v1`). Record:
+  `doc/08_tracking/bug/phase3_per_file_pool_refused_26gib_worker_price_windows_2026-11-15.md`.
 
 ## Stage 4 live projection is in-process on Linux (2026-10-20)
 
@@ -349,6 +354,12 @@ A unit child (`SIMPLE_FILE_WORKER_UNIT=1`) parses only its pick and resolves imp
 ## Per-file unit order index (2026-11-15, default OFF)
 
 Each unit child used to run `worker_admitted_edges_v1` over the whole inventory, one import resolution per source, just to get the deps-first pick order. That order is the same for every unit of a build. With `SIMPLE_UNIT_ORDER_INDEX=1`, the first unit publishes the graph to `<hir_queue>/unit_order.idx` (pid temp file, then atomic rename). Its header records the inventory count and the sha256 of the path list. Later units decode the index, so they do zero resolutions. A missing, stale or garbled index falls back to the full walk. When the switch is off, behaviour is the same as before. Code: `src/compiler/80.driver/driver_unit_order_index_v1.spl`. Cost probe: `worker_admitted_sources_scanned_v1`. Spec: `test/01_unit/compiler/driver/unit_order_index_spec.spl`. Still O(closure), and not addressed yet:
+
+Phase 1 skip-fresh (follow-up to #9479): with `SIMPLE_UNIT_ORDER_SKIP_FRESH=1` (off by default; it is ignored unless `SIMPLE_UNIT_ORDER_INDEX=1` is also set), a unit child reads the previous `unit_order.idx` before the index is republished. Index rows now carry an optional third column, the sha256 of the source content. A source is dropped from the pick order only when the header magic, count and path digest all match, its row hash equals the current content hash, and its HIR ledger terminal `<queue>/<sha256(path)>.terminal` is a `PASS` for that path marked `CACHE_STORED`. Any mismatch, a missing artifact or a garbled file rebuilds the source (fail closed). A changed stamp alone does not invalidate the per-file rows. Spec: `test/01_unit/compiler/driver/unit_order_skip_fresh_spec.spl`.
 - phase 1 reads every source;
 - line 271's advice scan runs over all contents;
 - `worker_unit_pick_v1` stats a `.pick`/`.claim` file for each entry that is already taken.
+
+## Tuple-returning runtime externs (2026-11-15)
+
+A stdlib `extern fn` call is FOREIGN origin; MIR reads a tuple result with raw `GetField` loads, but the process-run/cpuid owners return a registered SplArray. Both AOT backends route those calls to the raw-block `*_tuple` facades through ONE table, `runtime_tuple_result_facade(name, word_count)` in `src/compiler/50.mir/text_extern_abi.spl` (runtime and foreign origin; source origin keeps its callee). A new tuple-returning extern must be added there or to the named unrouted list in `test/01_unit/compiler/backend/runtime_tuple_result_facade_census_spec.spl`. Oracle fixture: `test/fixtures/native_process_run_tuple_abi/main.spl`. Record: `doc/08_tracking/bug/native_tuple_returning_externs_without_facade_2026-11-15.md`.

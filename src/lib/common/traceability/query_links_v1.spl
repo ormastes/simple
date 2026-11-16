@@ -1,0 +1,70 @@
+# `trace links --check`: structural integrity of the graph's links. Pure.
+# A valid link only proves reachability, never verified coverage: the result
+# counts requirements by Linked and Verified separately, and Verified needs
+# passing evidence.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.schema.{trace_endpoint_relation_v1}
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceSnapshotIdV1, TraceRequirementCountV1,
+    TraceGraphCompletenessV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1, TraceCommandVerdictV1,
+    trace_requirement_statuses_v1, trace_requirement_overall_v1, trace_graph_completeness_v1, trace_command_verdict_v1}
+
+pub struct TraceEdgeIdV1:
+    value: text
+
+pub enum TraceLinkIssueKindV1:
+    DanglingEndpoint
+    InvalidEndpointKinds
+
+pub struct TraceLinkIssueV1:
+    edge_id: TraceEdgeIdV1
+    kind: TraceLinkIssueKindV1
+
+pub struct TraceLinksResultV1:
+    snapshot_id: TraceSnapshotIdV1
+    issues: [TraceLinkIssueV1]    # sorted by edge id
+    checked: TraceRequirementCountV1    # edges examined
+    linked_requirements: TraceRequirementCountV1
+    verified_requirements: TraceRequirementCountV1
+    completeness: TraceGraphCompletenessV1
+    verdict: TraceCommandVerdictV1
+
+pub fn trace_link_issue_kind_name_v1(kind: TraceLinkIssueKindV1) -> text:
+    match kind:
+        case TraceLinkIssueKindV1.DanglingEndpoint: "dangling_endpoint"
+        case TraceLinkIssueKindV1.InvalidEndpointKinds: "invalid_endpoint_kinds"
+
+pub fn trace_links_check_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1], evidence: [TracePassingEvidenceV1],
+    profile: TraceProfile) -> TraceLinksResultV1:
+    """Check every edge for existing endpoints and schema-valid endpoint kinds."""
+    var kinds: Dict<text, TraceNodeKind> = {}
+    for node in graph.nodes:
+        kinds[node.id] = node.kind
+    var by_id: Dict<text, TraceLinkIssueV1> = {}
+    var ids: [text] = []
+    for edge in graph.edges:
+        if not kinds.contains_key(edge.from_id) or not kinds.contains_key(edge.to_id):
+            by_id[edge.id] = TraceLinkIssueV1(edge_id: TraceEdgeIdV1(value: edge.id), kind: TraceLinkIssueKindV1.DanglingEndpoint)
+            ids.push(edge.id)
+        elif trace_endpoint_relation_v1(edge.relation, kinds[edge.from_id], kinds[edge.to_id]).is_none():
+            by_id[edge.id] = TraceLinkIssueV1(edge_id: TraceEdgeIdV1(value: edge.id), kind: TraceLinkIssueKindV1.InvalidEndpointKinds)
+            ids.push(edge.id)
+    var issues: [TraceLinkIssueV1] = []
+    for id in trace_sorted_ids(ids):
+        issues.push(by_id[id])
+    var linked = 0
+    var verified = 0
+    for status in trace_requirement_statuses_v1(graph, sidecar, evidence):
+        val overall = trace_requirement_overall_v1(status)
+        if overall == TraceLinkStatus.Verified: verified = verified + 1
+        elif overall == TraceLinkStatus.Linked: linked = linked + 1
+    val completeness = trace_graph_completeness_v1(graph)
+    TraceLinksResultV1(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id), issues: issues,
+        checked: TraceRequirementCountV1(value: graph.edges.len()),
+        linked_requirements: TraceRequirementCountV1(value: linked),
+        verified_requirements: TraceRequirementCountV1(value: verified),
+        completeness: completeness, verdict: trace_command_verdict_v1(completeness, profile))
+

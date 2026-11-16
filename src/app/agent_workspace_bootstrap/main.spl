@@ -1,0 +1,20 @@
+# Compiled trusted Container primary only; no host execution wrapper/fallback.
+use std.cli.cli_util.get_cli_args
+use std.nogc_sync_mut.io.time_ops.sleep_ms
+use std.nogc_async_mut.container.providers.linux.agent_workspace_bootstrap_v1.*
+
+fn main() -> i32:
+    val arguments = get_cli_args()
+    if arguments.len() != 2 or arguments[0] != "--invocation-manifest-sha256": return 2
+    var turn = linux_agent_bootstrap_open_v1(arguments[1])
+    while turn.owner != nil:
+        if turn.error == "": turn = linux_agent_bootstrap_step_v1(turn.owner.unwrap())
+        else: turn = linux_agent_bootstrap_close_v1(turn.owner.unwrap())
+        # Uncertain actual child/replacement cleanup keeps this PRIMARY alive
+        # with custody. Only genuine outer Host workload control may end it.
+        # Never drain primary TTY or wait for agent exit through helper pipes.
+        # Each preparing step performs bounded real copy/hash work. Sleeping
+        # here would impose >88s on the observed290MB image before IO costs.
+        if turn.owner != nil and turn.phase != "preparing-agent-exec": sleep_ms(10)
+    # Successful image replacement never returns to this entrypoint.
+    1

@@ -98,7 +98,12 @@ impl Value {
             Value::Object { fields, .. } if fields.len() == 1 && fields.contains_key("value") => {
                 fields.get("value").unwrap().as_int()
             }
-            Value::ClassInstance(inst) if inst.with_fields(|f| f.len() == 1 && f.contains_key("value")) => {
+            // Only `unit`/numeric-`newtype` record classes unwrap; an ordinary class
+            // with a lone `value` field (and methods) must not silently become an int.
+            Value::ClassInstance(inst)
+                if inst.with_fields(|f| f.len() == 1 && f.contains_key("value"))
+                    && crate::interpreter_unit::is_record_unit_class(inst.class()) =>
+            {
                 inst.field("value").unwrap().as_int()
             }
             Value::Str(_) => {
