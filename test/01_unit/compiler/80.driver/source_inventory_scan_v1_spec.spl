@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Prove the library source scan walks a directory tree into a sorted,
+root-relative `.spl` path list, skipping vendor/build/hidden directories, and
+that the result feeds source_inventory_resolve_unit_v1.
+Audience: build and driver engineers maintaining library-unit planning.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Builds a small fixture tree under build/tmp; real filesystem walk.
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md (section 4).
+"""
+# @req: REQ-BUILD-SRC-001
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write}
+use compiler.driver.driver_build.source_inventory_scan_v1.{
+    source_inventory_scan_skip_dir_v1, source_inventory_scan_v1,
+    source_inventory_scan_resolve_v1}
+
+val SCAN_ROOT = "build/tmp/source_inventory_scan_v1_fixture"
+
+fn _make_fixture():
+    dir_remove_all(SCAN_ROOT)
+    for d in ["b", "a/z", "vendor/x", "build", "target", ".git", "a/.hidden"]:
+        dir_create_all(SCAN_ROOT + "/" + d)
+    for f in ["b/m.spl", "a/z/q.spl", "a/k.spl", "top.spl", "a/notes.md",
+              "vendor/x/v.spl", "build/g.spl", "target/t.spl", ".git/h.spl",
+              "a/.hidden/s.spl"]:
+        file_write(SCAN_ROOT + "/" + f, "# fixture\n")
+
+# @manual_section: source_inventory_scan
+describe "source_inventory filesystem scan":
+    """A library root walks into a deterministic .spl path list."""
+
+    it "skips vendor, build, target and hidden directories":
+        # @req: REQ-BUILD-SRC-001
+        step("Classify directory names")
+        expect(source_inventory_scan_skip_dir_v1("vendor")).to_equal(true)
+        expect(source_inventory_scan_skip_dir_v1("build")).to_equal(true)
+        expect(source_inventory_scan_skip_dir_v1("target")).to_equal(true)
+        expect(source_inventory_scan_skip_dir_v1(".git")).to_equal(true)
+        expect(source_inventory_scan_skip_dir_v1(".hidden")).to_equal(true)
+        expect(source_inventory_scan_skip_dir_v1("common")).to_equal(false)
+        expect(source_inventory_scan_skip_dir_v1("vendored_doc")).to_equal(false)
+
+    it "walks a tree into sorted root-relative .spl paths":
+        # @req: REQ-BUILD-SRC-001
+        step("Scan the fixture tree")
+        _make_fixture()
+        val got = source_inventory_scan_v1(SCAN_ROOT)
+        expect(got.join(",")).to_equal("a/k.spl,a/z/q.spl,b/m.spl,top.spl")
+
+    it "is stable across repeated scans":
+        # @req: REQ-BUILD-SRC-001
+        step("Scan twice and compare")
+        _make_fixture()
+        expect(source_inventory_scan_v1(SCAN_ROOT).join(",")).to_equal(source_inventory_scan_v1(SCAN_ROOT).join(","))
+
+    it "accepts a trailing slash on the root":
+        # @req: REQ-BUILD-SRC-001
+        step("Scan with trailing slash")
+        _make_fixture()
+        expect(source_inventory_scan_v1(SCAN_ROOT + "/").join(",")).to_equal("a/k.spl,a/z/q.spl,b/m.spl,top.spl")
+
+    it "returns empty for a missing root":
+        # @req: REQ-BUILD-SRC-001
+        step("Scan a nonexistent directory")
+        expect(source_inventory_scan_v1(SCAN_ROOT + "/does_not_exist").len()).to_equal(0)
+
+    it "applies include and exclude globs over the scan":
+        # @req: REQ-BUILD-SRC-001
+        step("Resolve globs over a live scan")
+        _make_fixture()
+        val got = source_inventory_scan_resolve_v1(SCAN_ROOT, ["**/*.spl"], ["a/z/**"])
+        expect(got.join(",")).to_equal("a/k.spl,b/m.spl,top.spl")
