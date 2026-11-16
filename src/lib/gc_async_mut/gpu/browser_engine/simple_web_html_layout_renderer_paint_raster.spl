@@ -262,7 +262,12 @@ fn fb_vertical_scrollbar_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, h: 
         row = row + 1
     out
 
-fn fb_widget_image_placeholder_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, object_fit: text, object_position: text, clip: ClipRect) -> [u32]:
+# Placeholder geometry for `<img class="widget-image">` (24x16 intrinsic):
+# flat [x, y, w, h] per rect, painted in WIDGET_IMAGE_PLACEHOLDER_COLORS order.
+# One source for the CPU raster and the Draw IR producer.
+val WIDGET_IMAGE_PLACEHOLDER_COLORS: [u32] = [0xFF2563EBu32, 0xFFF59E0Bu32, 0xFF22C55Eu32]
+
+fn widget_image_placeholder_rects(x: i32, y: i32, w: i32, h: i32, object_fit: text, object_position: text) -> [i32]:
     val intrinsic_w = 24
     val intrinsic_h = 16
     var draw_w = w
@@ -285,17 +290,26 @@ fn fb_widget_image_placeholder_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
         draw_w = if intrinsic_w < w: intrinsic_w else: w
         draw_h = if intrinsic_h < h: intrinsic_h else: h
     if draw_w <= 0 or draw_h <= 0:
-        return fb
+        return []
     val draw_x = x + (((w - draw_w) * object_position_x_pct(object_position)) / 100)
     val draw_y = y + (((h - draw_h) * object_position_y_pct(object_position)) / 100)
-    var out = fb_rect_clip(fb, fbw, fbh, draw_x, draw_y, draw_w, draw_h, web_argb(37, 99, 235), clip)
     val accent_w = if draw_w >= 8: 8 else: draw_w
     val accent_h = if draw_h >= 7: 7 else: draw_h
     val accent_x = draw_x + if draw_w > 11: 3 else: 0
     val accent_y = draw_y + if draw_h > 11: 4 else: 0
-    out = fb_rect_clip(out, fbw, fbh, accent_x, accent_y, accent_w, accent_h, web_argb(245, 158, 11), clip)
+    var rects = [draw_x, draw_y, draw_w, draw_h, accent_x, accent_y, accent_w, accent_h]
     if draw_w >= 21 and draw_h >= 11:
-        out = fb_rect_clip(out, fbw, fbh, draw_x + 13, draw_y + 5, 8, 6, web_argb(34, 197, 94), clip)
+        rects = rects + [draw_x + 13, draw_y + 5, 8, 6]
+    rects
+
+fn fb_widget_image_placeholder_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, object_fit: text, object_position: text, clip: ClipRect) -> [u32]:
+    val rects = widget_image_placeholder_rects(x, y, w, h, object_fit, object_position)
+    var out = fb
+    var k = 0
+    # cpu-lane-loop-ok: at most 3 placeholder rects
+    while k * 4 < rects.len():
+        out = fb_rect_clip(out, fbw, fbh, rects[k * 4], rects[k * 4 + 1], rects[k * 4 + 2], rects[k * 4 + 3], WIDGET_IMAGE_PLACEHOLDER_COLORS[k], clip)
+        k = k + 1
     out
 
 fn input_uses_accent_color(nd: HNode) -> bool:
