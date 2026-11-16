@@ -401,7 +401,17 @@ fn flex_item_definite_base_w(node: HNode, st: Style, container_w: i32) -> i32:
 # A flex item's percentage min-/max- sizes are of the flex container's
 # content box; an abspos child resolves its own in absolute_child_style.
 fn flex_item_percent_style(cst: Style, container_w: i32, container_h: i32) -> Style:
-    if cst.position_absolute: cst else: style_with_resolved_percent_min_max(cst, container_w, container_h)
+    if cst.position_absolute:
+        return cst
+    val out = style_with_resolved_percent_min_max(cst, container_w, container_h)
+    if cst.flex_basis_permille < 0 or container_w <= 0:
+        return out
+    # A percentage flex-basis is of the container content width (Flexbox 7.2.3).
+    val basis = style_with_width(out, out.width_px)
+    basis.flex_basis_px = container_w * cst.flex_basis_permille / 1000
+    basis.flex_basis_zero = basis.flex_basis_px == 0
+    basis.flex_basis_permille = -1
+    basis
 
 fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], authored_st: Style) -> LayoutResult:
     # Callers resolve percentage min-/max- sizes against the real containing
@@ -2311,7 +2321,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var flex_c = child_index.first_child[i]
         var flex_child_count_col = 0
         while flex_c >= 0:
-            val cst = flex_item_percent_style(styles[flex_c], iw, content_height_limit)
+            # ponytail: a column percent basis needs a definite height; it stays auto.
+            val cst = if styles[flex_c].position_absolute: styles[flex_c] else: style_with_resolved_percent_min_max(styles[flex_c], iw, content_height_limit)
             if simple_web_style_hot_is_display_none(computed_style_hot_from(cst)):
                 # No flex item (whitespace-only text included): no gap either.
                 out_bw[flex_c] = 0
