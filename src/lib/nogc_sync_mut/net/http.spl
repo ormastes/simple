@@ -126,6 +126,19 @@ class HttpRequest:
 # HttpResponse - HTTP Response
 # ============================================================================
 
+enum StatusClass:
+    Success
+    Redirect
+    ClientError
+    ServerError
+    Other
+
+
+enum RedirectPolicy:
+    Follow
+    DoNotFollow
+
+
 class HttpResponse:
     """HTTP response.
 
@@ -139,37 +152,22 @@ class HttpResponse:
     headers: {text: text}
     body: [u8]
 
-    fn is_success() -> bool:
-        """Check if response is successful (2xx).
+    fn status_class() -> StatusClass:
+        """Classify the response status (2xx..5xx).
 
         Returns:
-            true if status 200-299
+            StatusClass for the status code
         """
-        self.status >= 200 and self.status < 300
-
-    fn is_redirect() -> bool:
-        """Check if response is redirect (3xx).
-
-        Returns:
-            true if status 300-399
-        """
-        self.status >= 300 and self.status < 400
-
-    fn is_client_error() -> bool:
-        """Check if response is client error (4xx).
-
-        Returns:
-            true if status 400-499
-        """
-        self.status >= 400 and self.status < 500
-
-    fn is_server_error() -> bool:
-        """Check if response is server error (5xx).
-
-        Returns:
-            true if status 500-599
-        """
-        self.status >= 500 and self.status < 600
+        if self.status >= 200 and self.status < 300:
+            StatusClass.Success
+        elif self.status >= 300 and self.status < 400:
+            StatusClass.Redirect
+        elif self.status >= 400 and self.status < 500:
+            StatusClass.ClientError
+        elif self.status >= 500 and self.status < 600:
+            StatusClass.ServerError
+        else:
+            StatusClass.Other
 
     fn body_text() -> text:
         """Get body as text.
@@ -202,11 +200,11 @@ class HttpClient:
     Example:
         val client = HttpClient.new()
         val resp = client.get("https://api.example.com/users")?
-        if resp.is_success():
+        if resp.status_class() == StatusClass.Success:
             print resp.body_text()
     """
     timeout_ms: i64?
-    follow_redirects: bool
+    follow_redirects: RedirectPolicy
     max_redirects: i64
 
     static fn new() -> HttpClient:
@@ -217,7 +215,7 @@ class HttpClient:
         """
         HttpClient(
             timeout_ms: Some(30000),  # 30 second default
-            follow_redirects: true,
+            follow_redirects: RedirectPolicy.Follow,
             max_redirects: 10
         )
 
@@ -233,11 +231,11 @@ class HttpClient:
         self.timeout_ms = timeout_ms
         self
 
-    me set_follow_redirects(follow: bool) -> HttpClient:
+    me set_follow_redirects(follow: RedirectPolicy) -> HttpClient:
         """Set redirect following.
 
         Args:
-            follow: true to follow redirects
+            follow: RedirectPolicy.Follow to follow redirects
 
         Returns:
             Self (for chaining)
@@ -340,7 +338,7 @@ class HttpClient:
         var redirect_count = 0
         while true:
             val response = self._request_once(current_url, current_request)?
-            if not self.follow_redirects or not _http_redirect_status(response.status):
+            if self.follow_redirects == RedirectPolicy.DoNotFollow or not _http_redirect_status(response.status):
                 return Ok(response)
             match response.header("location"):
                 nil:
@@ -811,7 +809,7 @@ fn download(url: text, path: text) -> Result<(), SimpleError>:
         download("https://example.com/file.zip", "file.zip")?
     """
     val resp = get(url)?
-    if not resp.is_success():
+    if resp.status_class() != StatusClass.Success:
         return Err(error("HTTP {resp.status}: {resp.reason}"))
 
     file_write_bytes(path, resp.body)?
@@ -821,5 +819,5 @@ fn download(url: text, path: text) -> Result<(), SimpleError>:
 # Exports
 # ============================================================================
 
-export NetHttpMethod, HttpRequest, HttpResponse, HttpClient
+export NetHttpMethod, HttpRequest, HttpResponse, HttpClient, StatusClass, RedirectPolicy
 export Url, UrlBuilder, get, post, get_url, post_url, download
