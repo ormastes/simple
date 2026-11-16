@@ -1,0 +1,370 @@
+"""
+# Simple Aqua Window Manager — Chrome vs Pure-Simple Parity Spec
+
+Renders a layered multi-window Simple Aqua desktop scene (unfocused back window
+behind an overlapping focused front window with translucent glass titlebar,
+left-aligned circular traffic lights, transparent title text, and bottom
+translucent dock pill) via:
+  1. Headless Chrome GPU-rasterized HTML (`host_chrome_scene_html`)
+  2. Pure-Simple DrawIR on `Engine2D` `"software"` (`shared_wm_scene_aqua_draw_ir_composition`)
+  3. Pure-Simple DrawIR on `Engine2D` `"vulkan"` (`cpu_fallback_used == false`)
+  4. Pure-Simple Web Engine2D (`simple_web_layout_render_html_readback(..., "vulkan")`)
+
+Asserts Chrome vs Pure-Simple pixel agreement >= 95%, Vulkan zero CPU fallback,
+traffic light color accuracy (#FF5F56 / #FFBD2E / #27C93F + muted unfocused),
+focused vs unfocused titlebar RGB separation, glass alpha over overlapping
+window, and transparent-background title text.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{
+    dir_create_all, dir_remove_all, env_get, file_delete, file_exists,
+    file_read_bytes_result, file_write, getpid, host_os, process_run
+}
+use std.common.image.png_decode.{PngImage, decode_png_to_argb}
+use common.ui.wm_chrome_theme.{
+    reset_wm_chrome_theme, wm_chrome_theme,
+    WM_AQUA_TITLEBAR_HEIGHT, WM_AQUA_TRAFFIC_RADIUS,
+    WM_AQUA_TRAFFIC_CLOSE_X, WM_AQUA_TRAFFIC_MIN_X, WM_AQUA_TRAFFIC_MAX_X,
+    WM_AQUA_TRAFFIC_Y, WM_AQUA_TITLE_X
+}
+use common.ui.window_scene.{
+    SharedWmScene, SharedWmWindow, WM_CHROME_KIND_TITLED,
+    simple_gui_internal_window_scene,
+    simple_gui_internal_window_with_chrome_kind
+}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_aqua_draw_ir_composition}
+use os.compositor.host_compositor_core.{
+    HostedWindow, host_chrome_scene_html, HOST_CONTENT_OWNER_LOCAL_WEB
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_composition_owner_with_images
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_readback
+}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_find_browser, compare_view_inspect}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.text_render.{draw_text_shadow}
+use os.compositor.window_effects.{draw_glass_window_enhanced}
+use os.compositor.glass_port.{GlassPortConfig}
+
+val VIEW_W: i32 = 800
+val VIEW_H: i32 = 600
+val EXPECTED_PIXELS: i32 = 480000
+
+fn _px_r(c: u32) -> i32:
+    ((c >> 16) & 255u32) as i32
+
+fn _px_g(c: u32) -> i32:
+    ((c >> 8) & 255u32) as i32
+
+fn _px_b(c: u32) -> i32:
+    (c & 255u32) as i32
+
+fn _abs_diff(a: i32, b: i32) -> i32:
+    if a >= b: a - b else: b - a
+
+fn _max_channel_diff(a: u32, b: u32) -> i32:
+    val dr = _abs_diff(_px_r(a), _px_r(b))
+    val dg = _abs_diff(_px_g(a), _px_g(b))
+    val db = _abs_diff(_px_b(a), _px_b(b))
+    var m = dr
+    if dg > m:
+        m = dg
+    if db > m:
+        m = db
+    m
+
+fn _pixel_luma(c: u32) -> i32:
+    (_px_r(c) * 299 + _px_g(c) * 587 + _px_b(c) * 114) / 1000
+
+fn _pixel_at(pixels: [u32], x: i32, y: i32) -> u32:
+    pixels[y * VIEW_W + x]
+
+fn _agreement_per_mille(a: [u32], b: [u32], tol: i32) -> i64:
+    val total = EXPECTED_PIXELS
+    if (a.len() as i32) < total or (b.len() as i32) < total:
+        return 0
+    var matched: i64 = 0
+    var i: i32 = 0
+    while i < total:
+        if _max_channel_diff(a[i], b[i]) <= tol:
+            matched = matched + 1
+        i = i + 1
+    (matched * 1000) / (total as i64)
+
+fn _count_dark_glyph_pixels(pixels: [u32], x0: i32, y0: i32, w: i32, h: i32, max_luma: i32) -> i32:
+    var count: i32 = 0
+    var y = y0
+    while y < y0 + h:
+        var x = x0
+        while x < x0 + w:
+            if _pixel_luma(_pixel_at(pixels, x, y)) <= max_luma:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+fn _crop_chrome_800x600(img: PngImage) -> [u32]:
+    if img.width == VIEW_W and img.height == VIEW_H and (img.pixels.len() as i32) >= EXPECTED_PIXELS:
+        return img.pixels
+    if img.width == VIEW_W and img.height > VIEW_H and (img.pixels.len() as i32) >= VIEW_W * VIEW_H:
+        var cropped: [u32] = [0u32; EXPECTED_PIXELS]
+        var idx: i32 = 0
+        while idx < EXPECTED_PIXELS:
+            cropped[idx] = img.pixels[idx]
+            idx = idx + 1
+        return cropped
+    if img.width == VIEW_W * 2 and img.height >= VIEW_H * 2 and (img.pixels.len() as i32) >= VIEW_W * 2 * VIEW_H * 2:
+        var scaled: [u32] = [0u32; EXPECTED_PIXELS]
+        var y: i32 = 0
+        while y < VIEW_H:
+            val sy = y * 2 * img.width
+            val dy = y * VIEW_W
+            var x: i32 = 0
+            while x < VIEW_W:
+                scaled[dy + x] = img.pixels[sy + x * 2]
+                x = x + 1
+            y = y + 1
+        return scaled
+    []
+
+fn _chrome_gpu_flags() -> [text]:
+    val disable_gpu = (env_get("CHROME_CAPTURE_DISABLE_GPU") ?? "false").trim().lower() == "true"
+    if disable_gpu:
+        return ["--disable-gpu"]
+    val os_name = host_os().trim().lower()
+    if os_name == "macos" or os_name == "darwin":
+        return [
+            "--use-angle=metal",
+            "--enable-gpu-rasterization",
+            "--ignore-gpu-blocklist"
+        ]
+    [
+        "--no-sandbox",
+        "--disable-gpu-sandbox",
+        "--disable-dev-shm-usage",
+        "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE",
+        "--use-angle=vulkan",
+        "--enable-gpu-rasterization",
+        "--ignore-gpu-blocklist"
+    ]
+
+fn _capture_chrome_html(browser_bin: text, html: text) -> [u32]:
+    val pid = getpid()
+    val tmp_dir = "/tmp/simple_wm_aqua_parity_{pid}"
+    val tmp_html = tmp_dir + "/scene.html"
+    val tmp_png = tmp_dir + "/shot.png"
+    val tmp_profile = tmp_dir + "/profile"
+    dir_create_all(tmp_profile)
+    file_write(tmp_html, html)
+    var args: [text] = ["--headless=new"]
+    for flag in _chrome_gpu_flags():
+        args.push(flag)
+    args.push("--hide-scrollbars")
+    args.push("--force-device-scale-factor=1")
+    args.push("--force-color-profile=srgb")
+    args.push("--no-first-run")
+    args.push("--no-default-browser-check")
+    args.push("--user-data-dir=" + tmp_profile)
+    args.push("--window-size=800,687")
+    args.push("--screenshot=" + tmp_png)
+    args.push("file://" + tmp_html)
+    val (_out, err, code) = process_run(browser_bin, args)
+    var result: [u32] = []
+    if code == 0 and file_exists(tmp_png):
+        val bytes_res = file_read_bytes_result(tmp_png)
+        match bytes_res:
+            Ok(bytes):
+                val decoded = decode_png_to_argb(bytes)
+                match decoded:
+                    Ok(img):
+                        result = _crop_chrome_800x600(img)
+                    Err(msg):
+                        print "chrome decode failed: {msg}"
+            Err(msg):
+                print "chrome read failed: {msg}"
+    elif code != 0:
+        print "chrome capture failed (code={code}): {err}"
+    if file_exists(tmp_png):
+        file_delete(tmp_png)
+    if file_exists(tmp_html):
+        file_delete(tmp_html)
+    dir_remove_all(tmp_dir)
+    result
+
+fn _build_hosted_aqua_windows() -> [HostedWindow]:
+    val win1 = HostedWindow(
+        id: 1,
+        owner_port: 1001,
+        title: "Terminal",
+        x: 70,
+        y: 70,
+        w: 380,
+        h: 280,
+        content: "",
+        process_id: 101,
+        app_id: "terminal",
+        content_owner: HOST_CONTENT_OWNER_LOCAL_WEB,
+        minimized: false,
+        focused: false
+    )
+    val win2 = HostedWindow(
+        id: 2,
+        owner_port: 1002,
+        title: "Finder",
+        x: 220,
+        y: 130,
+        w: 440,
+        h: 300,
+        content: "",
+        process_id: 102,
+        app_id: "finder",
+        content_owner: HOST_CONTENT_OWNER_LOCAL_WEB,
+        minimized: false,
+        focused: true
+    )
+    [win1, win2]
+
+fn _build_shared_aqua_scene() -> SharedWmScene:
+    val win1 = simple_gui_internal_window_with_chrome_kind(
+        "surf-1", "win-1", 101u64, "terminal", "Terminal",
+        70, 70, 380, 280, "", false, false, 0, WM_CHROME_KIND_TITLED
+    )
+    val win2 = simple_gui_internal_window_with_chrome_kind(
+        "surf-2", "win-2", 102u64, "finder", "Finder",
+        220, 130, 440, 300, "", false, true, 1, WM_CHROME_KIND_TITLED
+    )
+    simple_gui_internal_window_scene(VIEW_W, VIEW_H, "aqua-parity", [win1, win2])
+
+fn _assert_aqua_theme_pixels(label: text, pixels: [u32]):
+    expect(pixels.len() as i32).to_equal(EXPECTED_PIXELS)
+
+    # 1. Desktop backdrop (#5A7FB5) at top-left outside windows
+    val bg_px = _pixel_at(pixels, 20, 20)
+    expect(_max_channel_diff(bg_px, 0xFF5A7FB5u32)).to_be_less_than(4)
+
+    # 2. Focused front window (220, 130) traffic light dots:
+    #    Close = #FF5F56, Min = #FFBD2E, Max = #27C93F
+    val cy_front = 130 + WM_AQUA_TRAFFIC_Y + WM_AQUA_TRAFFIC_RADIUS
+    val close_px = _pixel_at(pixels, 220 + WM_AQUA_TRAFFIC_CLOSE_X + WM_AQUA_TRAFFIC_RADIUS, cy_front)
+    val min_px = _pixel_at(pixels, 220 + WM_AQUA_TRAFFIC_MIN_X + WM_AQUA_TRAFFIC_RADIUS, cy_front)
+    val max_px = _pixel_at(pixels, 220 + WM_AQUA_TRAFFIC_MAX_X + WM_AQUA_TRAFFIC_RADIUS, cy_front)
+    expect(_max_channel_diff(close_px, 0xFFFF5F56u32)).to_be_less_than(6)
+    expect(_max_channel_diff(min_px, 0xFFFFBD2Eu32)).to_be_less_than(6)
+    expect(_max_channel_diff(max_px, 0xFF27C93Fu32)).to_be_less_than(6)
+
+    # 3. Unfocused back window (70, 70) traffic light dots muted/desaturated
+    val cy_back = 70 + WM_AQUA_TRAFFIC_Y + WM_AQUA_TRAFFIC_RADIUS
+    val back_close = _pixel_at(pixels, 70 + WM_AQUA_TRAFFIC_CLOSE_X + WM_AQUA_TRAFFIC_RADIUS, cy_back)
+    expect(_abs_diff(_px_r(back_close), _px_b(back_close))).to_be_less_than(12)
+    expect(_max_channel_diff(back_close, 0xFFC2C4CAu32)).to_be_less_than(8)
+
+    # 4. Focused Aqua glass titlebar vs unfocused titlebar RGB separation
+    val focused_bar_over_desktop = _pixel_at(pixels, 560, 148)
+    val focused_bar_over_back = _pixel_at(pixels, 380, 148)
+    val focused_top_hl = _pixel_at(pixels, 560, 130)
+    val unfocused_bar = _pixel_at(pixels, 380, 84)
+    expect(_max_channel_diff(focused_bar_over_desktop, unfocused_bar)).to_be_greater_than(15)
+    # Translucent frost shows overlapping back window beneath front titlebar
+    expect(_max_channel_diff(focused_bar_over_back, focused_bar_over_desktop)).to_be_greater_than(12)
+    # Luminous top highlight on row 0 is brighter than lower bar
+    expect(_pixel_luma(focused_top_hl)).to_be_greater_than(_pixel_luma(focused_bar_over_desktop))
+
+    # 5. Title text rendered cleanly with transparent background (no black box)
+    val title_pad_bg = _pixel_at(pixels, 220 + WM_AQUA_TITLE_X + 120, 145)
+    expect(_max_channel_diff(title_pad_bg, focused_bar_over_back)).to_be_less_than(16)
+    val front_ink_count = _count_dark_glyph_pixels(pixels, 220 + WM_AQUA_TITLE_X - 2, 135, 64, 18, 120)
+    val back_ink_count = _count_dark_glyph_pixels(pixels, 70 + WM_AQUA_TITLE_X - 2, 75, 80, 18, 135)
+    print "[aqua-parity] {label} front_ink={front_ink_count} back_ink={back_ink_count}"
+    expect(front_ink_count).to_be_greater_than(12)
+    expect(back_ink_count).to_be_greater_than(12)
+
+    # 6. Bottom translucent dock pill differs from desktop backdrop
+    val dock_px = _pixel_at(pixels, VIEW_W / 2, VIEW_H - 40)
+    expect(_max_channel_diff(dock_px, bg_px)).to_be_greater_than(30)
+
+describe "Window Manager Simple Aqua Theme — Chrome vs Pure-Simple Parity":
+
+    it "matches Chrome GPU HTML and Pure-Simple DrawIR (Software + Vulkan) at >= 95% pixel agreement":
+        reset_wm_chrome_theme()
+        val theme = wm_chrome_theme()
+        expect(theme.close_button).to_equal(0xFFFF5F56u32)
+
+        val browser_bin = compare_view_find_browser("")
+        expect(browser_bin != "").to_equal(true)
+
+        val hosted_windows = _build_hosted_aqua_windows()
+        val html = host_chrome_scene_html(hosted_windows, VIEW_W, VIEW_H)
+        val chrome_px = _capture_chrome_html(browser_bin, html)
+        expect(chrome_px.len() as i32).to_equal(EXPECTED_PIXELS)
+
+        val scene = _build_shared_aqua_scene()
+        val sw_comp = shared_wm_scene_aqua_draw_ir_composition(scene, "software")
+        val sw_eng = Engine2D.create_with_backend(VIEW_W, VIEW_H, "software")
+        val sw_owned = engine2d_draw_ir_adv_composition_owner_with_images(sw_eng, sw_comp, false, [])
+        val sw_px = sw_owned.result.pixels
+        expect(sw_px.len() as i32).to_equal(EXPECTED_PIXELS)
+
+        val vk_comp = shared_wm_scene_aqua_draw_ir_composition(scene, "vulkan")
+        val vk_eng = Engine2D.create_with_backend(VIEW_W, VIEW_H, "vulkan")
+        val vk_owned = engine2d_draw_ir_adv_composition_owner_with_images(vk_eng, vk_comp, true, [])
+        val vk_px = vk_owned.result.pixels
+        expect(vk_px.len() as i32).to_equal(EXPECTED_PIXELS)
+        expect(vk_owned.result.fallback_required).to_equal(false)
+        expect(vk_owned.result.device_identity > 0).to_equal(true)
+        expect(vk_owned.result.readback_source != "cpu_fallback").to_equal(true)
+        expect(vk_owned.engine.vulkan_cpu_fallback_reason()).to_equal("")
+        var vk_fallback_used = true
+        if val Some(vk) = vk_owned.engine.vulkan_backend:
+            vk_fallback_used = vk.cpu_fallback_used
+        expect(vk_fallback_used).to_equal(false)
+
+        val web_vk = simple_web_layout_render_html_readback(html, VIEW_W, VIEW_H, "vulkan")
+        expect(web_vk.pixels.len() as i32).to_equal(EXPECTED_PIXELS)
+
+        _assert_aqua_theme_pixels("chrome", chrome_px)
+        _assert_aqua_theme_pixels("pure-simple-software", sw_px)
+        _assert_aqua_theme_pixels("pure-simple-vulkan", vk_px)
+
+        val sw_vs_vk = _agreement_per_mille(sw_px, vk_px, 4)
+        val chrome_vs_sw = _agreement_per_mille(chrome_px, sw_px, 16)
+        val chrome_vs_vk = _agreement_per_mille(chrome_px, vk_px, 16)
+        val chrome_vs_web_vk = _agreement_per_mille(chrome_px, web_vk.pixels, 16)
+        print "[aqua-parity] sw_vs_vk={sw_vs_vk}/1000 chrome_vs_sw={chrome_vs_sw}/1000 chrome_vs_vk={chrome_vs_vk}/1000 chrome_vs_web_vk={chrome_vs_web_vk}/1000 vk_cpu_fallback={vk_fallback_used}"
+
+        val cmp_sw = compare_view_inspect("wm-aqua-sw", "chrome", chrome_px, VIEW_W, VIEW_H, "pure-simple-sw", sw_px, VIEW_W, VIEW_H)
+        val cmp_vk = compare_view_inspect("wm-aqua-vk", "chrome", chrome_px, VIEW_W, VIEW_H, "pure-simple-vk", vk_px, VIEW_W, VIEW_H)
+        print "[aqua-parity] inspect_sw={cmp_sw} inspect_vk={cmp_vk}"
+
+        expect(cmp_sw.starts_with("bad-buffer:")).to_equal(false)
+        expect(cmp_vk.starts_with("bad-buffer:")).to_equal(false)
+        expect(sw_vs_vk).to_be_greater_than(994)
+        expect(chrome_vs_sw).to_be_greater_than(949)
+        expect(chrome_vs_vk).to_be_greater_than(949)
+        expect(chrome_vs_web_vk).to_be_greater_than(949)
+
+    it "renders crisp 5x7 transparent glyphs, alpha drop shadows, and Aqua traffic lights via window_effects":
+        val text_bg = BrowserCompositorBackend.with_color(120, 40, 0xFFDCEAFBu32)
+        draw_text_shadow(text_bg, 10, 10, "T", 0xFF1D1D1Fu32, 0x00000000u32, 96)
+        val tb_px = text_bg.get_pixel_buffer()
+        # Top-bar glyph 'T' row 0: (10..14, 10) is ink; below crossbar at (10, 12) stays transparent bg
+        expect(tb_px[10 * 120 + 10]).to_equal(0xFF1D1D1Fu32)
+        expect(tb_px[10 * 120 + 12]).to_equal(0xFF1D1D1Fu32)
+        expect(tb_px[12 * 120 + 10]).to_equal(0xFFDCEAFBu32)
+        # Drop shadow below stem at (13, 17) is partially darkened over 0xFFDCEAFB, NOT opaque black
+        val shadow_px = tb_px[17 * 120 + 13]
+        expect(shadow_px != 0xFFDCEAFBu32).to_equal(true)
+        expect(_px_b(shadow_px)).to_be_greater_than(120)
+
+        val fx_be = BrowserCompositorBackend.with_color(260, 140, 0xFF5A7FB5u32)
+        draw_glass_window_enhanced(fx_be, 20, 20, 220, 100, "Aqua", true, GlassPortConfig.light(), 28, false)
+        val fx_px = fx_be.get_pixel_buffer()
+        val close_sample = fx_px[(20 + 17) * 260 + (20 + 18)]
+        val min_sample = fx_px[(20 + 17) * 260 + (20 + 38)]
+        val max_sample = fx_px[(20 + 17) * 260 + (20 + 58)]
+        expect(_max_channel_diff(close_sample, 0xFFFF5F56u32)).to_be_less_than(10)
+        expect(_max_channel_diff(min_sample, 0xFFFFBD2Eu32)).to_be_less_than(10)
+        expect(_max_channel_diff(max_sample, 0xFF27C93Fu32)).to_be_less_than(10)
