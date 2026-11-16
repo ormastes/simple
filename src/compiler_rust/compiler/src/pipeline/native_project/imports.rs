@@ -61,6 +61,9 @@ pub(crate) struct ImportMapResult {
     /// `expr/access.rs::lower_field_access` returned None and the
     /// enum-variant early-return fell through to the field-access fallback.
     pub enum_defs: std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>,
+    /// Bare enum names declared by more than one module. Their `enum_defs`
+    /// entry is a merged variant union, never one owner's order (#6953).
+    pub duplicate_enum_names: std::collections::HashSet<String>,
     /// Mangled enum owner (`module__Enum`) to stable dotted runtime identity.
     pub enum_runtime_names: std::collections::HashMap<String, String>,
     /// First project-wide stable-ID collision, if any.
@@ -1171,6 +1174,7 @@ pub(crate) fn build_import_map(
     // A bare payload owner that has multiple definitions is not safe to
     // resolve through the global name table. Erase the whole field, including
     // nested wrappers, so discovery order cannot invent an owner.
+    let duplicate_enum_names = duplicate_enum_defs.clone();
     let mut ambiguous_type_owners = duplicate_enum_defs;
     ambiguous_type_owners.extend(duplicate_struct_defs.keys().cloned());
     for variants in enum_defs.values_mut() {
@@ -1211,6 +1215,7 @@ pub(crate) fn build_import_map(
         struct_module_owners,
         duplicate_struct_defs,
         enum_defs,
+        duplicate_enum_names,
         enum_runtime_names,
         enum_runtime_collision,
         data_exports,

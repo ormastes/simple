@@ -1,0 +1,68 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+A text argument to an erased generic `T` (or `Any`) parameter keeps its identity.
+
+Bug s2-transient-promote-dangle (doc/08_tracking/bug/transient_promote_generic_text_arg_copy_dangles_2026-11-16.md).
+
+The call-argument boundary for `HirTypeKind.Any | HirTypeKind.TypeParam` boxed a
+text local through box_runtime_value, whose `local_is_str` arm materializes
+rt_string_new(rt_interp_cstr(v), rt_strlen(..)) -- a COPY -- whenever the local
+lacks a static tagged-text note (every call result does). Passed to
+`rt_transient_heap_promote<T>` or the `transient_promote<T>` wrapper inside a
+paused scope, the copy is persistent (promote = no-op success) while the
+caller returns the ORIGINAL, which scope end frees: the promoted value dangles.
+
+The boundary now uses box_runtime_dictionary_key_v1, which asks rt_string_data
+at run time whether the word is a tagged handle (pass through, identity kept)
+or a borrowed char* (only then materialize). The probe is visible in MIR as a
+call to rt_string_data in the caller.
+
+Native oracle: diaglink rep3/transient3.spl (V1/V2/V3 must print len 24/64/64).
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "generic_text_arg.spl", "generic_text_arg.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("generic_text_arg.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+val SOURCE: text = "extern fn rt_transient_heap_promote<T>(value: T) -> bool\n\n" +
+    "fn hold<T>(mut value: T) -> bool:\n    rt_transient_heap_promote(value)\n\n" +
+    "fn make() -> text:\n    \"digest:\" + \"rows\"\n\n" +
+    "fn via_extern() -> text:\n    val d = make()\n    val ok = rt_transient_heap_promote(d)\n    d\n\n" +
+    "fn via_wrapper() -> text:\n    val d = make()\n    val ok = hold(d)\n    d\n\n" +
+    "fn int_arg() -> bool:\n    val n = 7\n    hold(n)\n"
+
+describe "text argument to an erased generic parameter keeps its identity":
+    it "generic extern: a call-result text is probed with rt_string_data before any copy":
+        val mir = lower_module_json(SOURCE)["via_extern"] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir).to_contain("rt_transient_heap_promote")
+        expect(mir).to_contain("rt_string_data")
+
+    it "generic Simple wrapper: a call-result text is probed with rt_string_data before any copy":
+        val mir = lower_module_json(SOURCE)["via_wrapper"] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir).to_contain("rt_string_data")
+
+    it "control: a non-text argument to the same parameter takes no text probe":
+        val mir = lower_module_json(SOURCE)["int_arg"] ?? ""
+        expect(mir.len() > 0).to_equal(true)
+        expect(mir.contains("rt_string_data")).to_equal(false)

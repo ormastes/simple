@@ -1,0 +1,245 @@
+# Integer device-scale transform for a Draw IR composition.
+#
+# Layout runs in CSS px. A device-pixel-ratio render (e.g. k=4 = 384 dpi, the
+# >=300-dpi Chrome-parity gate) keeps that layout and multiplies every geometry
+# field and every LENGTH style prop Engine2D consumes by k, so Engine2D paints
+# into a (css_w*k)x(css_h*k) target. Text is NOT upscaled: `font-size`,
+# advances and glyph positions are multiplied, so Engine2D re-rasterizes the
+# real vector glyphs at k x the CSS size.
+#
+# Non-length props (colors, angles, permille gradient positions, counts,
+# identities, families, enum keywords) pass through unchanged. Raw CSS text
+# props (`box-shadow-raw`, `backdrop-filter`, `background-layers-raw`,
+# `box-geometry-raw-tokens`) are not rewritten: Engine2D reads their resolved
+# typed twins instead (`box-shadow-layer-*`, `backdrop-filter-realized-*`,
+# `background-tile-*`/`-shape-*`/`-radius-*`), which are scaled here. Layout
+# INPUT props (`width`, `margin-*`, `padding-*`, `left`, ...) are not consumed
+# by paint — the layout result is already in the command geometry — and may
+# carry sentinels, so they are left in CSS px.
+
+use common.ui.draw_ir.{
+    DrawEdge, DrawIrBatch, DrawIrCommand, DrawIrComposition, DrawIrPoint,
+    DrawIrRect, DrawIrStyleProp, draw_ir_next_composition_generation
+}
+use common.ui.draw_ir_v4_state.{DrawIrAffine2D, DrawIrFractionalGeometry}
+
+val _DIR_SCALE_I32_MIN: i64 = -2147483648
+val _DIR_SCALE_I32_MAX: i64 = 2147483647
+
+fn _dir_scale_i32(value: i32, k: i32) -> i32:
+    val scaled = (value as i64) * (k as i64)
+    if scaled < _DIR_SCALE_I32_MIN:
+        return _DIR_SCALE_I32_MIN as i32
+    if scaled > _DIR_SCALE_I32_MAX:
+        return _DIR_SCALE_I32_MAX as i32
+    scaled as i32
+
+fn _dir_scale_rect(rect: DrawIrRect, k: i32) -> DrawIrRect:
+    DrawIrRect(
+        present: rect.present,
+        x: _dir_scale_i32(rect.x, k),
+        y: _dir_scale_i32(rect.y, k),
+        width: _dir_scale_i32(rect.width, k),
+        height: _dir_scale_i32(rect.height, k)
+    )
+
+fn _dir_scale_points(points: [DrawIrPoint], k: i32) -> [DrawIrPoint]:
+    var out: [DrawIrPoint] = []
+    for point in points:
+        out.push(DrawIrPoint(x: _dir_scale_i32(point.x, k), y: _dir_scale_i32(point.y, k)))
+    out
+
+fn _dir_scale_i32_list(values: [i32], k: i32) -> [i32]:
+    var out: [i32] = []
+    for value in values:
+        out.push(_dir_scale_i32(value, k))
+    out
+
+# Strict decimal integer (optional leading "-"), at most 18 bytes.
+fn _dir_is_int(value: text) -> bool:
+    if value.byte_len() == 0 or value.byte_len() > 18:
+        return false
+    var index: i64 = 0
+    if value.char_code_at(0) == 45:
+        index = 1
+    if index >= value.byte_len():
+        return false
+    while index < value.byte_len():
+        val ch: i64 = value.char_code_at(index)
+        if ch < 48 or ch > 57:
+            return false
+        index = index + 1
+    true
+
+# Caller must check _dir_is_int first.
+fn _dir_parse_int(value: text) -> i64:
+    var index: i64 = 0
+    var negative = false
+    if value.char_code_at(0) == 45:
+        negative = true
+        index = 1
+    var parsed: i64 = 0
+    while index < value.byte_len():
+        val ch: i64 = value.char_code_at(index)
+        parsed = parsed * 10 + (ch - 48)
+        index = index + 1
+    if negative:
+        parsed = 0 - parsed
+    parsed
+
+fn _dir_scale_int_text(value: text, k: i32) -> text:
+    if not _dir_is_int(value):
+        return value
+    val scaled: i64 = _dir_parse_int(value) * (k as i64)
+    "{scaled}"
+
+# Scale the first `limit` integer tokens of a mixed value such as the legacy
+# `box-shadow` / `text-shadow` form `<x>px <y>px <color>`; later tokens (the
+# packed color) are not lengths.
+fn _dir_scale_leading_ints(value: text, limit: i32, k: i32) -> text:
+    val cs = value.chars()
+    var out = ""
+    var seen = 0
+    var index: i64 = 0
+    while index < cs.len():
+        val first: i64 = cs[index].char_code_at(0)
+        var starts = first >= 48 and first <= 57
+        if first == 45 and index + 1 < cs.len():
+            val next: i64 = cs[index + 1].char_code_at(0)
+            starts = next >= 48 and next <= 57
+        if starts and seen < limit:
+            var token = ""
+            if first == 45:
+                token = "-"
+                index = index + 1
+            while index < cs.len():
+                val ch: i64 = cs[index].char_code_at(0)
+                if ch < 48 or ch > 57:
+                    break
+                token = token + cs[index]
+                index = index + 1
+            out = out + _dir_scale_int_text(token, k)
+            seen = seen + 1
+        else:
+            out = out + cs[index]
+            index = index + 1
+    out
+
+fn _dir_scale_int_csv(value: text, k: i32) -> text:
+    if value == "":
+        return value
+    var out = ""
+    var first = true
+    for part in value.split(","):
+        if not first:
+            out = out + ","
+        out = out + _dir_scale_int_text(part, k)
+        first = false
+    out
+
+# Single-integer CSS px lengths that Engine2D (or the paint metadata it is
+# derived from) reads.
+fn _dir_is_scalar_length_key(key: text) -> bool:
+    if (key == "font-size" or key == "line-height" or key == "letter-spacing" or
+        key == "word-spacing" or key == "text-indent" or key == "stroke-width" or
+        key == "outline-width" or key == "outline-offset" or
+        key == "text-decoration-thickness" or key == "text-underline-offset" or
+        key == "box-shadow-blur-radius" or
+        key == "backdrop-filter-realized-blur-radius-px" or
+        key == "border-radius"):
+        return true
+    if key.starts_with("border-") and (key.ends_with("-width") or key.ends_with("-radius")):
+        return true
+    if (key.starts_with("background-tile-") or key.starts_with("background-shape-") or
+        key.starts_with("background-radius-")):
+        return true
+    if key.starts_with("box-shadow-layer-"):
+        return (key.ends_with("-offset-x") or key.ends_with("-offset-y") or
+            key.ends_with("-blur-radius") or key.ends_with("-spread-radius"))
+    false
+
+fn _dir_scale_style_prop(prop: DrawIrStyleProp, k: i32) -> DrawIrStyleProp:
+    val key = prop.key
+    if _dir_is_scalar_length_key(key):
+        return DrawIrStyleProp(key: key, value: _dir_scale_int_text(prop.value, k))
+    if key == "box-shadow" or key == "text-shadow":
+        return DrawIrStyleProp(key: key, value: _dir_scale_leading_ints(prop.value, 2, k))
+    if key == "font-advance-widths":
+        return DrawIrStyleProp(key: key, value: _dir_scale_int_csv(prop.value, k))
+    prop
+
+fn _dir_scale_style(style: [DrawIrStyleProp], k: i32) -> [DrawIrStyleProp]:
+    var out: [DrawIrStyleProp] = []
+    for prop in style:
+        out.push(_dir_scale_style_prop(prop, k))
+    out
+
+fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
+    var scaled = command
+    scaled.x = _dir_scale_i32(command.x, k)
+    scaled.y = _dir_scale_i32(command.y, k)
+    scaled.width = _dir_scale_i32(command.width, k)
+    scaled.height = _dir_scale_i32(command.height, k)
+    scaled.advance_widths = _dir_scale_i32_list(command.advance_widths, k)
+    scaled.border_rect = _dir_scale_rect(command.border_rect, k)
+    scaled.content_rect = _dir_scale_rect(command.content_rect, k)
+    scaled.hit_rect = _dir_scale_rect(command.hit_rect, k)
+    scaled.clip_rect = _dir_scale_rect(command.clip_rect, k)
+    scaled.computed_style = _dir_scale_style(command.computed_style, k)
+    scaled.points = _dir_scale_points(command.points, k)
+    var run = command.glyph_run
+    run.xs = _dir_scale_i32_list(command.glyph_run.xs, k)
+    run.ys = _dir_scale_i32_list(command.glyph_run.ys, k)
+    scaled.glyph_run = run
+    if val edge = command.edge:
+        var scaled_edge: DrawEdge = edge
+        scaled_edge.points = _dir_scale_points(edge.points, k)
+        scaled_edge.style = _dir_scale_style(edge.style, k)
+        scaled.edge = scaled_edge
+    if val geometry = command.fractional_geometry:
+        val kf = k as f64
+        scaled.fractional_geometry = DrawIrFractionalGeometry(
+            x: geometry.x * kf, y: geometry.y * kf,
+            width: geometry.width * kf, height: geometry.height * kf)
+    if val affine = command.affine_transform:
+        # Device map = S * T * S^-1: the linear part is scale-invariant, only
+        # the translation is in px.
+        val kf = k as f64
+        scaled.affine_transform = DrawIrAffine2D(
+            a: affine.a, b: affine.b, c: affine.c, d: affine.d,
+            tx: affine.tx * kf, ty: affine.ty * kf)
+    scaled
+
+fn _dir_scale_batch(batch: DrawIrBatch, k: i32) -> DrawIrBatch:
+    var scaled = batch
+    var embedding = batch.embedding
+    embedding.x = _dir_scale_i32(batch.embedding.x, k)
+    embedding.y = _dir_scale_i32(batch.embedding.y, k)
+    embedding.width = _dir_scale_i32(batch.embedding.width, k)
+    embedding.height = _dir_scale_i32(batch.embedding.height, k)
+    scaled.embedding = embedding
+    var commands: [DrawIrCommand] = []
+    for command in batch.commands:
+        commands.push(_dir_scale_command(command, k))
+    scaled.commands = commands
+    scaled
+
+# Scale a CSS-px composition to device px by the integer factor k (k >= 1).
+# k == 1 returns the composition's batches unchanged; a scaled composition gets
+# a fresh generation because its content differs from the source.
+# reason: k is a dimensionless integer device-pixel ratio, not a unit-bearing quantity
+# @allow(primitive_api)
+pub fn draw_ir_composition_at_device_scale(composition: DrawIrComposition, k: i32) -> DrawIrComposition:
+    if k < 1:
+        panic("draw_ir_composition_at_device_scale: device scale must be >= 1")
+    if k == 1:
+        return composition
+    var batches: [DrawIrBatch] = []
+    for batch in composition.batches:
+        batches.push(_dir_scale_batch(batch, k))
+    var scaled = composition
+    scaled.batches = batches
+    scaled.generation = draw_ir_next_composition_generation()
+    scaled
+
+export draw_ir_composition_at_device_scale

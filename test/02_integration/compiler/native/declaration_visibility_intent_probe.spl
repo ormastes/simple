@@ -1,0 +1,82 @@
+# Success requires the exact count and exit 77, not merely a zero exit status.
+use compiler.core.ast.{ast_reset, decl_count, decl_get_name, decl_get_visibility_text, decl_struct_def}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
+use compiler.frontend.core._ParserDecls.enum_module_body.{
+    parser_top_level_visibility_intent_count_v1, parser_top_level_visibility_intent_offset_v1,
+    parser_top_level_visibility_intent_modifier_v1, flat_pending_pools_dump,
+    flat_pending_pools_restore, pending_decl_attr_state_take, pending_decl_attr_state_install}
+
+fn check_intent(label: text, actual: text, expected: text) -> i64:
+    if actual != expected:
+        print "FAIL {label}: actual={actual} expected={expected}"
+        return 1
+    0
+
+fn legacy_visibility(name: text) -> text:
+    for index in 0..decl_count():
+        if decl_get_name(index) == name: return decl_get_visibility_text(index)
+    "missing"
+
+fn main() -> i64:
+    val source = "fn folder_value() -> i64:\n    1\npri fn file_value() -> i64:\n    2\npub fn public_value() -> i64:\n    3\npub(peer) fn peer_value() -> i64:\n    4\nclass Owner:\n    pri: i64\n    pri me hidden() -> i64:\n        1\npri static fn local_static() -> i64:\n    2\npri macro identity(x):\n    x\n"
+    ast_reset()
+    parser_init_with_path(source, "visibility_intent.spl")
+    parse_module_body()
+    if parser_has_errors() or parser_top_level_visibility_intent_count_v1() != 7:
+        print "FAIL production parser or top-level observation count"
+        return 98
+    var failures = 0
+    failures = failures + check_intent("omitted", parser_top_level_visibility_intent_modifier_v1(0), "omitted")
+    failures = failures + check_intent("pri", parser_top_level_visibility_intent_modifier_v1(1), "pri")
+    failures = failures + check_intent("pub", parser_top_level_visibility_intent_modifier_v1(2), "public")
+    failures = failures + check_intent("scoped", parser_top_level_visibility_intent_modifier_v1(3), "peer")
+    failures = failures + check_intent("class", parser_top_level_visibility_intent_modifier_v1(4), "omitted")
+    failures = failures + check_intent("static", parser_top_level_visibility_intent_modifier_v1(5), "pri")
+    failures = failures + check_intent("macro", parser_top_level_visibility_intent_modifier_v1(6), "pri")
+    failures = failures + check_intent("legacy omitted", legacy_visibility("folder_value"), "private")
+    failures = failures + check_intent("legacy pri", legacy_visibility("file_value"), "private")
+    failures = failures + check_intent("legacy member", legacy_visibility("Owner__hidden"), "private")
+    failures = failures + check_intent("legacy static", legacy_visibility("local_static"), "private")
+    val generated = decl_struct_def("Generated", [], [], [], [], 0)
+    failures = failures + check_intent("legacy generated", decl_get_visibility_text(generated), "private")
+    val encoded = flat_pending_pools_dump()
+    val state = pending_decl_attr_state_take()
+    if parser_top_level_visibility_intent_count_v1() != 0: return 99
+    pending_decl_attr_state_install(state)
+    failures = failures + check_intent("state restore", parser_top_level_visibility_intent_modifier_v1(1), "pri")
+    parser_init_with_path("", "empty.spl")
+    parse_module_body()
+    if parser_top_level_visibility_intent_count_v1() != 0: return 100
+    if flat_pending_pools_restore(FlatPoolReader.new(encoded)): return 101
+    parser_init_with_path(source, "visibility_intent.spl")
+    parse_module_body()
+    if not flat_pending_pools_restore(FlatPoolReader.new(encoded)): return 111
+    if parser_top_level_visibility_intent_count_v1() != 7: return 102
+    failures = failures + check_intent("codec omitted", parser_top_level_visibility_intent_modifier_v1(0), "omitted")
+    failures = failures + check_intent("codec pri", parser_top_level_visibility_intent_modifier_v1(1), "pri")
+    failures = failures + check_intent("absent", parser_top_level_visibility_intent_modifier_v1(99), "unknown")
+    failures = failures + check_intent("cache identity", FLAT_POOL_CODEC_VERSION, "spl-flatpool-v18-aspect-owner-declaration-intent-binding-v1")
+    if parser_top_level_visibility_intent_offset_v1(0) != 0: return 103
+    ast_reset()
+    parser_init_with_path("# é\npri fn f():\n    0\npub\nfn g():\n    0\n", "utf8.spl")
+    parse_module_body()
+    if parser_has_errors() or parser_top_level_visibility_intent_count_v1() != 2: return 104
+    failures = failures + check_intent("utf8 pri offset", str(parser_top_level_visibility_intent_offset_v1(0)), "5")
+    failures = failures + check_intent("multiline pub offset", str(parser_top_level_visibility_intent_offset_v1(1)), "23")
+    failures = failures + check_intent("utf8 pri", parser_top_level_visibility_intent_modifier_v1(0), "pri")
+    failures = failures + check_intent("multiline pub", parser_top_level_visibility_intent_modifier_v1(1), "public")
+    if flat_pending_pools_restore(FlatPoolReader.new("0\n")): return 105
+    if parser_top_level_visibility_intent_count_v1() != 0: return 106
+    failures = failures + check_intent("malformed restore", parser_top_level_visibility_intent_modifier_v1(0), "unknown")
+    ast_reset()
+    parser_init_with_path("pub fn\n", "invalid.spl")
+    parse_module_body()
+    if not parser_has_errors(): return 107
+    if parser_top_level_visibility_intent_count_v1() != 0: return 108
+    if parser_top_level_visibility_intent_offset_v1(0) != -1: return 109
+    failures = failures + check_intent("failed parse", parser_top_level_visibility_intent_modifier_v1(0), "unknown")
+    print "declaration_visibility_intent_cases=23 failures={failures}"
+    if failures != 0: return 110 + failures
+    77

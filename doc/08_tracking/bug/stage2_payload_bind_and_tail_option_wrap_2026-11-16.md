@@ -213,6 +213,77 @@ seed already printed the right answer.
 `rt_unwrap_or_trap`, so None aborts and nil is never widened. Seed spec goes
 from 3/4 to 4/4.
 
+## Review follow-ups (after integ3 snapshot `67f01c764dc`)
+
+Red specs are in `a434369aa85`. The B spec now uses a two-field struct and
+asserts `"field":1`.
+
+- `38621441aa4`: the multi-binder path `case Both(a, b): a.id` over
+  `Two<P, i64>` had the same gap as B. `enum_payload_key_uses_declared_slots`
+  is false for generic owners, so `a` stayed an untyped `A` and lowered to
+  `field=0` into a Unit dest. That path now instantiates the slot and tags it
+  like the single-binder path. The single-binder path also now uses the
+  decode's returned local instead of discarding it. Seed: 1/3 -> 3/3.
+- `721a6a2f853`: Tuple was a plain sink, but the declared-slot decode has no
+  Tuple arm. `-> (i64, text): return pick_pair(n)` returned an I64 local. The
+  fix narrows through `recover_optional_tuple_payload`, which fails closed on
+  unsupported element types. Slice already decodes. Seed: tail 4/5 -> 5/5.
+- `f8f1a4adf61`: the tail and explicit-return paths now share one trait guard,
+  `is_plain_payload_return_v1`.
+
+## Second review: two more silent wrong values (pre-existing)
+
+Red specs are in `83f6dae5031`. Seed: generic 3/4 -> 4/4, tail 6/8 -> 8/8.
+
+- Concrete record slot in a generic variant. `case M(a, l): l.id` over
+  `Mix<i64>` (`M(a: T, l: Lid)`) read field 0 (pad) into a Unit dest.
+  `decode_instantiated_enum_payload_slot_v1` only re-decoded a `TypeParam`
+  slot. It now also tags a slot declared as a concrete Struct/Class.
+  Concrete enum, text and collection slots in generic owners are left as
+  they were. They may have the same gap, but it is not measured.
+- Tuple `T?` if-join into `-> T`. Two shapes:
+  - tail: `fn tok_tail(n, k) -> (i64, bool): if k > 0: pick_ok(n) else: (0, false)`
+  - explicit: `return if ...` of the same `if`
+
+  Neither emitted `rt_unwrap_or_trap`. The join saw a bare tuple arm, so
+  `optional_join_bare_payload_ok` was false and the slot never got a `T?`
+  type. Normalising the join at runtime is unsafe for tuples: a native tuple
+  is a headerless N-word allocation, so `rt_enum_id` would read element 0.
+  The fix narrows each `(A, B)?` arm before the join:
+  - `is_plain_tuple_conditional_return_v1` threads the declared tuple into
+    the tail and into `lower_return_expr`.
+  - `lower_block_expected` narrows the arm with `option_payload_for_plain_sink`.
+
+  Only tuples are threaded. Record tails keep the normalise-then-narrow path.
+  A/B on tuple tails with no `T?` arm: the only MIR change is that the
+  dominating `Const 0 : I64` default def of the tuple join slot is gone.
+  Both arms already define the slot.
+- Typed HIR (Stage 2) records `value.type_ = (A, B)?` on the narrowed arm and
+  on the join. `lower_block_expected` therefore skips that record once it has
+  narrowed (`tail_tuple_narrowed`), so the tail cannot unwrap the raw tuple
+  pointer a second time. The seed spec pipeline is untyped and cannot show
+  this. The typed path is guarded in code; native confirmation waits for the
+  next Stage 2.
+- Typed HIR also threads `expr.type_` into value-position if/match
+  (`expr_dispatch.spl`, `expected_if_type` / `expected_match_type`). The arm
+  narrow therefore also fires outside return position when that type is a
+  plain tuple. It traps on None instead of returning a silent wrong value.
+- Review P2-1, fixed by `join_needs_default_def_v1`: dropping that default
+  left the join slot undefined on a live edge when an arm diverges through a
+  unit call, as in `fn die_arm(k) -> (i64, bool): if k > 0: (k, true) else:
+  die("neg")` and in the `elif` form `chain_die`. This is the NULL
+  merge-operand class (`mir_lower_child_tasks_append_access_violation_2026-10-19`).
+  `lower_if` and `lower_if_chain` now keep the default for a plain-tuple
+  expected slot. Guard: `child_tasks_append_lowering_spec`, which runs the
+  every-edge check, seed 2/3 -> 3/3. The same unit-arm shape is
+  pre-existing, and unchanged here, for `-> bool` tails and enum matches.
+- Not covered: a non-return conditional that typed HIR joins to `(A, B)?`
+  still sends its raw tuple arm through `ensure_option_handle`. That is the
+  same headerless-normalise hazard, and this change does not fix it.
+- Guards with no red phase, green before and after the fix:
+  - the `tup_ret` assertion now checks Return <- Copy <- Cast to Ptr(Tuple)
+  - the `(f32, i64)?` fatal path
+
 ## Census of compiler source (2026-11-16, awk heuristic)
 
 | class | hits |

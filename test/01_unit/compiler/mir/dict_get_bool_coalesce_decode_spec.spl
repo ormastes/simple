@@ -1,0 +1,159 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+`d.get(k) ?? false` on a `{K: bool}` must decode the hit as a BOOL word.
+
+Bug: doc/08_tracking/bug/native_dict_get_bool_coalesce_decoded_as_int_2026-11-16.md
+
+`lower_dict_runtime_read` returns the raw `rt_dict_get` word for a
+`d.get(k)` whose value type is bool (the Option<bool> raw-word arm), but it
+did not record the read's `bool?` HIR type the way every other `d.get(k)`
+arm does. `??` then found no Option inner type, left the merge typed as the
+erased i64 default, and decoded the hit with `rt_value_as_int_wide`. The
+tagged false word is 19, `19 >> 3` is 2, so a stored `false` read back as
+true. In the Stage 3 self-build this made `generic_enum_constructor_owners
+.get(id) ?? false` (HIR declared_enum_constructor_owner) treat every enum as
+generic, so no declared enum constructor was lowered to an EnumLit and
+`MirOperandKind.Const(MirConstValue.Int(v), ..)` failed with "payload type
+mismatch at 0".
+
+The rows lower HIR and MIR on the typed path (SIMPLE_BOOTSTRAP empty, as
+Stage 3 runs) and inspect the `null_coalesce_left` block.
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "dict_get_bool.spl", "dict_get_bool.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("dict_get_bool.spl")
+    env_set("SIMPLE_BOOTSTRAP", "")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn coalesce_left_block(mir: text) -> text:
+    """The instructions of the `??` present arm, or "" when absent."""
+    val start = mir.index_of("\"label\":\"null_coalesce_left\"")
+    if start < 0:
+        return ""
+    val tail = mir.substring(start, mir.len())
+    val end = tail.index_of("\"label\":\"null_coalesce_right\"")
+    if end < 0:
+        return tail
+    tail.substring(0, end)
+
+fn bool_decode_problem(fns: Dict<text, text>, name: text) -> text:
+    """Empty when the present arm decodes the hit as a bool word."""
+    val mir = fns[name] ?? ""
+    if mir == "":
+        return "{name}: no MIR"
+    val left = coalesce_left_block(mir)
+    if left == "":
+        return "{name}: no null_coalesce_left block"
+    if left.contains("rt_value_as_int_wide"):
+        return "{name}: bool hit decoded with the wide-int unbox: {left}"
+    if not left.contains("\"op\":\"Eq\""):
+        return "{name}: bool hit not decoded as `word == true-word`: {left}"
+    ""
+
+fn labeled_block(mir: text, label: text) -> text:
+    """The instructions of block `label` (up to the next block), or "" when absent."""
+    val start = mir.index_of("\"label\":\"" + label + "\"")
+    if start < 0:
+        return ""
+    val tail = mir.substring(start + 9, mir.len())
+    val end = tail.index_of("\"label\":\"")
+    if end < 0:
+        return tail
+    tail.substring(0, end)
+
+fn block_bool_decode_problem(fns: Dict<text, text>, name: text, label: text) -> text:
+    """Empty when block `label` decodes the bool word as `word == true-word`."""
+    val mir = fns[name] ?? ""
+    if mir == "":
+        return "{name}: no MIR"
+    val block = labeled_block(mir, label)
+    if block == "":
+        return "{name}: no {label} block"
+    if block.contains("rt_value_as_int_wide"):
+        return "{name}: {label} decodes the bool word with the wide-int unbox: {block}"
+    if not block.contains("\"op\":\"Eq\""):
+        return "{name}: {label} does not decode the bool word as `word == true-word`: {block}"
+    ""
+
+val NL: text = "\n"
+
+val SOURCE: text = "class Holder:" + NL +
+    "    owners: {i64: bool}" + NL +
+    "    names: {text: bool}" + NL + NL +
+    "fn param_dict(d: {i64: bool}) -> bool:" + NL +
+    "    d.get(6) ?? false" + NL + NL +
+    "fn field_dict(h: Holder, k: i64) -> bool:" + NL +
+    "    h.owners.get(k) ?? false" + NL + NL +
+    "fn field_text_dict(h: Holder) -> bool:" + NL +
+    "    h.names.get(\"E\") ?? false" + NL + NL +
+    "impl Holder:" + NL +
+    "    fn self_owner(k: i64) -> bool:" + NL +
+    "        self.owners.get(k) ?? false" + NL +
+    "    fn self_not_owner(k: i64) -> bool:" + NL +
+    "        not (self.owners.get(k) ?? false)" + NL + NL +
+    "fn if_val_dict(d: {i64: bool}, k: i64) -> bool:" + NL +
+    "    if val v = d.get(k):" + NL +
+    "        return v" + NL +
+    "    false" + NL + NL +
+    "fn coalesce_true(d: {i64: bool}, k: i64) -> bool:" + NL +
+    "    d.get(k) ?? true" + NL + NL +
+    "fn literal_dict(k: i64) -> bool:" + NL +
+    "    val d = {1: true, 2: false}" + NL +
+    "    d.get(k) ?? false" + NL + NL +
+    "fn annotated_unwrap_or(d: {i64: bool}, k: i64) -> bool:" + NL +
+    "    val got: bool? = d.get(k)" + NL +
+    "    got.unwrap_or(false)" + NL + NL +
+    "fn int_control(d: {i64: i64}) -> i64:" + NL +
+    "    d.get(6) ?? 0" + NL
+
+describe "d.get(k) ?? false on a bool-valued dict decodes a bool word":
+    it "decodes the hit as bool for a parameter, an i64-keyed field and a text-keyed field":
+        val fns = lower_module_json(SOURCE)
+        for name in ["param_dict", "field_dict", "field_text_dict"]:
+            expect(bool_decode_problem(fns, name)).to_equal("")
+
+    it "decodes the hit as bool for a self field read inside an impl method, also under not":
+        val fns = lower_module_json(SOURCE)
+        for name in ["self_owner", "self_not_owner"]:
+            expect(bool_decode_problem(fns, name)).to_equal("")
+
+    it "keeps the wide-int unbox and no bool decode for an i64-valued dict (control)":
+        val fns = lower_module_json(SOURCE)
+        val mir = fns["int_control"] ?? ""
+        expect(mir.contains("rt_value_as_int_wide")).to_equal(true)
+        expect(bool_decode_problem(fns, "int_control") == "").to_equal(false)
+
+    it "decodes an `if val v = d.get(k)` runtime-word payload as bool, not as a wide int":
+        val fns = lower_module_json(SOURCE)
+        expect(block_bool_decode_problem(fns, "if_val_dict", "option_element_runtime_word")).to_equal("")
+
+    it "keeps the miss default of `?? true` and still decodes the hit as bool":
+        val fns = lower_module_json(SOURCE)
+        expect(bool_decode_problem(fns, "coalesce_true")).to_equal("")
+        val mir = fns["coalesce_true"] ?? ""
+        expect(labeled_block(mir, "null_coalesce_right").contains("\"value\":true")).to_equal(true)
+
+    it "decodes the hit as bool for an untyped literal dict and an annotated unwrap_or":
+        val fns = lower_module_json(SOURCE)
+        expect(bool_decode_problem(fns, "literal_dict")).to_equal("")
+        expect(block_bool_decode_problem(fns, "annotated_unwrap_or", "unwrap_or_some")).to_equal("")
