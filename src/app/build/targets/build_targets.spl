@@ -14,6 +14,9 @@
 #         depends: compiler
 #
 # `depends:` accepts a comma-separated inline list or indented child lines.
+# Optional `cpu_tier:` (a tier from config/build/cpu_tiers.sdn) and `triple:`
+# (arch-vendor-os[-env]); absent = host/baseline. A target with a triple is
+# never default-selected.
 #
 # Validation is fail-closed: every rejection is a distinct named error and
 # nothing is silently defaulted. Error codes (stable, one per line):
@@ -24,6 +27,8 @@
 #     target-error: invalid-kind: <name>: <kind>
 #     target-error: missing-field: <name>: <field>
 #     target-error: dependency-cycle: a -> b -> a
+#     target-error: unknown-cpu-tier: <name>: <tier>
+#     target-error: malformed-triple: <name>: <triple>
 #     target-error: parse: <detail>
 #
 # This module is self-contained on purpose: it does not read or import the
@@ -37,6 +42,8 @@ struct BuildTarget:
     entry: text
     output: text
     deps: [text]
+    cpu_tier: text
+    triple: text
 
 struct BuildGroup:
     name: text
@@ -110,6 +117,8 @@ pub fn parse_targets_text(src: text) -> TargetSet:
     var cur_entry = ""
     var cur_output = ""
     var cur_deps: [text] = []
+    var cur_tier = ""
+    var cur_triple = ""
     var deps_block = false
 
     var i = 0
@@ -130,7 +139,7 @@ pub fn parse_targets_text(src: text) -> TargetSet:
 
         if indent == 0:
             if in_target:
-                targets.push(BuildTarget(cur_name, cur_kind, cur_entry, cur_output, cur_deps))
+                targets.push(BuildTarget(cur_name, cur_kind, cur_entry, cur_output, cur_deps, cur_tier, cur_triple))
                 in_target = false
             if in_group:
                 groups.push(BuildGroup(grp_name, grp_default, grp_members))
@@ -177,6 +186,8 @@ pub fn parse_targets_text(src: text) -> TargetSet:
                 cur_entry = ""
                 cur_output = ""
                 cur_deps = []
+                cur_tier = ""
+                cur_triple = ""
             i = i + 1
             continue
 
@@ -239,6 +250,10 @@ pub fn parse_targets_text(src: text) -> TargetSet:
             cur_kind = value
         elif key == "entry":
             cur_entry = value
+        elif key == "cpu_tier":
+            cur_tier = value
+        elif key == "triple":
+            cur_triple = value
         elif key == "output":
             cur_output = value
         elif key == "depends" or key == "deps":
@@ -316,6 +331,69 @@ fn find_cycle(ts: TargetSet) -> text:
         start = start + 1
     ""
 
+fn _triple_part_ok(p: text) -> bool:
+    if p.len() == 0:
+        return false
+    var i = 0
+    while i < p.len():
+        val c = p[i:i + 1]
+        val ok = (c >= "a" and c <= "z") or (c >= "0" and c <= "9") or c == "_" or c == "."
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+@allow(primitive_api)  # config-text boundary: triple string read from targets.sdn
+pub fn is_well_formed_triple(t: text) -> bool:
+    """`arch-vendor-os[-env]`: 3 or 4 non-empty lowercase `[a-z0-9_.]` parts."""
+    val parts = t.split("-")
+    if parts.len() < 3 or parts.len() > 4:
+        return false
+    var i = 0
+    while i < parts.len():
+        if not _triple_part_ok(parts[i]):
+            return false
+        i = i + 1
+    true
+
+fn _bracket_items(value: text, open: text, close: text) -> [text]:
+    var v = value.trim()
+    if v.starts_with(open):
+        v = v[1:]
+    if v.ends_with(close):
+        v = v[0:v.len() - 1]
+    _split_list(v)
+
+fn _declared_cpu_tiers(repo_root: text) -> [text]:
+    """Every tier name declared in config/build/cpu_tiers.sdn: `levels`,
+    `default_tiers` and alias keys. Empty when the file is missing."""
+    var out: [text] = []
+    val path = repo_root + "/config/build/cpu_tiers.sdn"
+    if not file_exists(path):
+        return out
+    val lines = file_read(path).split("\n")
+    var i = 0
+    while i < lines.len():
+        val s = _strip_comment(lines[i]).trim()
+        var items: [text] = []
+        if s.starts_with("levels:"):
+            items = _bracket_items(s[7:], "[", "]")
+        elif s.starts_with("default_tiers:"):
+            items = _bracket_items(s[14:], "[", "]")
+        elif s.starts_with("aliases:"):
+            val pairs = _bracket_items(s[8:], "{", "}")
+            var p = 0
+            while p < pairs.len():
+                items.push(pairs[p].split(":")[0].trim())
+                p = p + 1
+        var k = 0
+        while k < items.len():
+            if not out.contains(items[k]):
+                out.push(items[k])
+            k = k + 1
+        i = i + 1
+    out
+
 pub fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
     """Full fail-closed validation. Returns every error found (never throws).
 
@@ -328,9 +406,19 @@ pub fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
         errors.push(ts.errors[e])
         e = e + 1
 
+    var tiers: [text] = []
+    var tiers_loaded = false
     var i = 0
     while i < ts.targets.len():
         val t = ts.targets[i]
+        if t.cpu_tier.len() > 0:
+            if not tiers_loaded:
+                tiers = _declared_cpu_tiers(repo_root)
+                tiers_loaded = true
+            if not tiers.contains(t.cpu_tier):
+                errors.push("target-error: unknown-cpu-tier: " + t.name + ": " + t.cpu_tier)
+        if t.triple.len() > 0 and not is_well_formed_triple(t.triple):
+            errors.push("target-error: malformed-triple: " + t.name + ": " + t.triple)
         var j = 0
         while j < i:
             if ts.targets[j].name == t.name:
@@ -393,12 +481,14 @@ pub fn group_targets(ts: TargetSet, group: text) -> [text]:
 pub fn default_group_targets(ts: TargetSet) -> [text]:
     """Targets a default build selects: members of `default: true` groups.
 
-    A file that declares no group keeps the pre-group meaning: every target."""
+    A file that declares no group keeps the pre-group meaning: every target.
+    A target with an explicit `triple:` is cross (opt-in) and never selected."""
     var out: [text] = []
     if ts.groups.len() == 0:
         var i = 0
         while i < ts.targets.len():
-            out.push(ts.targets[i].name)
+            if ts.targets[i].triple.len() == 0:
+                out.push(ts.targets[i].name)
             i = i + 1
         return out
     var g = 0
@@ -406,7 +496,9 @@ pub fn default_group_targets(ts: TargetSet) -> [text]:
         if ts.groups[g].is_default:
             var m = 0
             while m < ts.groups[g].members.len():
-                out.push(ts.groups[g].members[m])
+                val idx = find_target(ts, ts.groups[g].members[m])
+                if idx < 0 or ts.targets[idx].triple.len() == 0:
+                    out.push(ts.groups[g].members[m])
                 m = m + 1
         g = g + 1
     out
