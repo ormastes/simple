@@ -771,6 +771,8 @@ struct CliNativeBuildParsedOptionsV1:
     source_dirs: [text] = []
     entry_closure: bool = false
     release: bool = false
+    xray_enabled: bool = false
+    xray_startup_consumer_v1: bool = false
     profile: text = "prod"
     managed_build_phase: text = ""
     opt_level: i64 = 0
@@ -821,6 +823,8 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
         return cli_native_build_parse_failure_v1()
     val target_profile = target_selection.unwrap()
     var release = target_profile.release
+    var xray_enabled = false
+    var xray_startup_consumer_v1 = false
     var opt_level = cli_native_default_opt_level()
     var native_target = ""
     var native_cpu = ""
@@ -1020,6 +1024,10 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
             j = j + 1
         elif a.starts_with("--profile=") or a.starts_with("--managed-build-phase="):
             pass  # Shared intake above validated and selected this policy.
+        elif a == "--xray-startup-consumer":
+            xray_startup_consumer_v1 = true
+        elif a == "--xray":
+            xray_enabled = true
         elif a == "--release":
             release = true
             if not optimization_requested:
@@ -1127,6 +1135,10 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
         elif not a.starts_with("-") and entry_point == "":
             entry_point = a
         j = j + 1
+    if xray_startup_consumer_v1 and (not xray_enabled or build_mode != "one-binary" or
+            emit_smf or emit_object or emit_entry_object or emit_archive or emit_shared):
+        _cli_eprint("XRAY-E-STARTUP-CONSUMER: requires --xray --mode one-binary executable output")
+        return cli_native_build_parse_failure_v1()
     CliNativeBuildParsedOptionsV1(
         ok: true, status: 0,
         entry_point: entry_point,
@@ -1142,6 +1154,8 @@ fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOption
         source_dirs: source_dirs,
         entry_closure: entry_closure,
         release: release,
+        xray_enabled: xray_enabled,
+        xray_startup_consumer_v1: xray_startup_consumer_v1,
         profile: target_profile.profile,
         managed_build_phase: target_profile.managed_build_phase,
         opt_level: opt_level,
@@ -1186,6 +1200,8 @@ fn cli_native_build_print_help_v1() -> i64:
     print "  --collection-memory-budget <bytes>  Proven extra-storage budget"
     print "  --release            Release target profile (optimization is independent)"
     print "  --profile <dev|prod>  Native target profile (default: prod)"
+    print "  --xray-startup-consumer Request a checked resident startup consumer (requires explicit --xray, LLVM/Linux executable)"
+    print "  --xray               Request XRay instrumentation (requires --profile dev --mode one-binary and a supported backend/target)"
     print "  --managed-build-phase <phase3|phase4>  Managed target policy; never admission authority"
     print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
     cli_print_shared_opt_level_help()
@@ -1375,6 +1391,8 @@ fn _cli_native_build(
         var source_dirs: [text] = parsed.source_dirs
         var entry_closure: bool = parsed.entry_closure
         var release: bool = parsed.release
+        val xray_enabled = parsed.xray_enabled
+        val xray_startup_consumer_v1 = parsed.xray_startup_consumer_v1
         val target_profile = parsed.profile
         val managed_build_phase = parsed.managed_build_phase
         var opt_level: i64 = parsed.opt_level
@@ -1672,6 +1690,8 @@ fn _cli_native_build(
             options.backend = backend
             options.native_target = native_target
             options.release = release
+            options.xray_enabled = xray_enabled
+            options.xray_startup_consumer_v1 = xray_startup_consumer_v1
             options.profile = target_profile
             options.managed_build_phase = managed_build_phase
             options.strip_output = strip
@@ -1728,6 +1748,8 @@ fn _cli_native_build(
             options.backend = backend
             options.native_target = native_target
             options.release = release
+            options.xray_enabled = xray_enabled
+            options.xray_startup_consumer_v1 = xray_startup_consumer_v1
             options.profile = target_profile
             options.managed_build_phase = managed_build_phase
             options.strip_output = strip

@@ -1,0 +1,70 @@
+# Offline, authenticated whole-store inventory of the held fresh-epoch provider
+# store (milestone_0019 M1). SOURCE_AUTHORED / NOT_RUN.
+#
+# The installed provider stays masked and never started for the whole fresh
+# epoch (linux_fresh_epoch_manager_current_v1, rechecked on every successor
+# observation), so no provider process is queried. The successor custody
+# re-enumerates its retained, identity-rechecked graph and run roots, which
+# preparation proved empty; any entry refuses. No on-disk provider format
+# (containers.json, the libpod database) is parsed and no object rows exist:
+# a successful read IS the observation "no provider object exists in this
+# epoch's store"; a non-empty store is a refusal, never a partial listing.
+#
+# Authentication: the boot id and process context come from the lender's own
+# machine-policy reader, the store, partition and owner generation from the
+# successor custody, both observed before and after the store read. The
+# owner generation is the process-local fresh-epoch owner generation (the
+# ledger's provider generation); it detects a stale generation within one
+# process only, so the store and partition identity digests are bound too.
+#
+# Only borrow construction mints the borrow, from an actual reader and
+# successor custody plus the lender's epoch digest (sha256 of its admitted
+# record); it holds no writer and closes nothing.
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachinePolicyOwnerV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+
+# One authenticated empty-store observation.
+pub struct LinuxFreshEpochStoreInventoryV1:
+    epoch_digest: text
+    native_boot_id: text
+    owner_generation: i64
+    process_identity_digest: text
+    store_identity_digest: text
+    partition_identity_digest: text
+
+pub class LinuxFreshEpochStoreInventoryBorrowV1:
+    reader: LinuxMachinePolicyOwnerV1
+    successor: LinuxFreshEpochSuccessorCustodyV1
+    epoch_digest: text
+
+    # A fresh offline read on every call; nothing is cached.
+    pub fn current_v1() -> Result<LinuxFreshEpochStoreInventoryV1, text>:
+        store_inventory_observe_v1(self.reader, self.successor, self.epoch_digest)
+
+fn store_inventory_observe_v1(reader: LinuxMachinePolicyOwnerV1,
+        successor: LinuxFreshEpochSuccessorCustodyV1, epoch_digest: text) -> Result<LinuxFreshEpochStoreInventoryV1, text>:
+    if epoch_digest.byte_len() != 64: return Err("fresh-epoch-store-inventory-epoch-digest")
+    val process = reader.actual_process_context_v1()?
+    val boot = reader.actual_boot_id_v2()?
+    val host = successor.current_host_context_v2()?
+    val store = successor.observe_store_inventory_v1()?
+    val final_host = successor.current_host_context_v2()?
+    val final_boot = reader.actual_boot_id_v2()?
+    val final_process = reader.actual_process_context_v1()?
+    if boot == "" or boot != host.native_boot_id or final_boot != boot or final_host != host:
+        return Err("fresh-epoch-store-inventory-boot-mismatch")
+    if host.owner_generation < 1 or store.owner_generation != host.owner_generation:
+        return Err("fresh-epoch-store-inventory-generation-mismatch")
+    if process != final_process or process.identity_digest != store.process_identity_digest:
+        return Err("fresh-epoch-store-inventory-process-mismatch")
+    Ok(LinuxFreshEpochStoreInventoryV1(epoch_digest: epoch_digest, native_boot_id: boot, owner_generation: store.owner_generation,
+        process_identity_digest: process.identity_digest, store_identity_digest: store.store_identity_digest,
+        partition_identity_digest: store.partition_identity_digest))
+
+pub fn linux_fresh_epoch_store_inventory_borrow_v1(reader: LinuxMachinePolicyOwnerV1,
+        successor: LinuxFreshEpochSuccessorCustodyV1, epoch_digest: text) -> Result<LinuxFreshEpochStoreInventoryBorrowV1, text>:
+    store_inventory_observe_v1(reader, successor, epoch_digest)?
+    Ok(LinuxFreshEpochStoreInventoryBorrowV1(reader: reader, successor: successor, epoch_digest: epoch_digest))
+
+export LinuxFreshEpochStoreInventoryV1, LinuxFreshEpochStoreInventoryBorrowV1
+export linux_fresh_epoch_store_inventory_borrow_v1

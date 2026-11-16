@@ -50,7 +50,36 @@ use common.ui.window_scene.{
     shared_wm_scene_layout_key,
     shared_wm_scene_resolve_background
 }
-use common.ui.wm_chrome_theme.{active_wm_theme_material_sha256, active_wm_theme_snapshot_present, active_wm_theme_snapshot_unchecked, wm_chrome_theme, WmChromeColors}
+use common.ui.wm_chrome_theme.{
+    active_wm_theme_material_sha256,
+    active_wm_theme_snapshot_present,
+    active_wm_theme_snapshot_unchecked,
+    wm_chrome_theme,
+    wm_aqua_traffic_color,
+    WmChromeColors,
+    WM_AQUA_TITLEBAR_HEIGHT,
+    WM_AQUA_TRAFFIC_RADIUS,
+    WM_AQUA_TRAFFIC_SIZE,
+    WM_AQUA_TRAFFIC_Y,
+    WM_AQUA_TRAFFIC_CLOSE_X,
+    WM_AQUA_TRAFFIC_MIN_X,
+    WM_AQUA_TRAFFIC_MAX_X,
+    WM_AQUA_TITLE_X,
+    WM_AQUA_FOCUSED_TITLE_GLASS,
+    WM_AQUA_FOCUSED_TITLE_SHEEN,
+    WM_AQUA_FOCUSED_TOP_HIGHLIGHT,
+    WM_AQUA_FOCUSED_TITLE_BORDER,
+    WM_AQUA_UNFOCUSED_TOP_EDGE,
+    WM_AQUA_UNFOCUSED_TITLE_BORDER,
+    WM_AQUA_UNFOCUSED_TEXT,
+    WM_AQUA_DOCK_GLASS_BG,
+    WM_AQUA_DOCK_TOP_HIGHLIGHT,
+    WM_AQUA_DOCK_ITEM_FOCUSED,
+    WM_AQUA_DOCK_ITEM_UNFOCUSED,
+    WM_AQUA_DOCK_ITEM_MINIMIZED,
+    WM_AQUA_DOCK_RADIUS,
+    WM_AQUA_DOCK_ITEM_RADIUS
+}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
 use common.ui.theme_draw_ir_material.{
     theme_draw_ir_surface_command_color,
@@ -396,10 +425,12 @@ class SharedWmPixelBufferBackend:
 
     # i64 bit-test + byte accessor: works around native-lane u8 !=-miscompile and char_code_at tag-shift (see doc/08_tracking/bug/, 2026-07-19 glyph probes)
     me _px_draw_text(x: i32, y: i32, text_value: text, fg: u32, bg: u32):
+        val bg_opaque = ((bg >> 24) & 0xFFu32) != 0u32
         var cx = x
         var ti = 0
         val text_bytes = text_value.bytes()
-        while ti < text_value.len():
+        val byte_count = text_bytes.len()
+        while ti < byte_count:
             val glyph = get_glyph_8x16(text_bytes[ti])
             var row = 0
             while row < 16:
@@ -408,8 +439,10 @@ class SharedWmPixelBufferBackend:
                 while col < 8:
                     val bits_i = bits as i64
                     val mask_i = (0x80 >> col)
-                    val px_color = if (bits_i & mask_i) != 0: fg else: bg
-                    _shared_wm_px_store((cx + col) as i64, (y + row) as i64, px_color)
+                    if (bits_i & mask_i) != 0:
+                        _shared_wm_px_store((cx + col) as i64, (y + row) as i64, fg)
+                    elif bg_opaque:
+                        _shared_wm_px_store((cx + col) as i64, (y + row) as i64, bg)
                     col = col + 1
                 row = row + 1
             cx = cx + 8
@@ -433,19 +466,34 @@ class SharedWmPixelBufferBackend:
         self._px_fill_rect(0, height - taskbar_h, width, taskbar_h, theme.taskbar)
         self._px_fill_rect(0, height - taskbar_h, width, 2, theme.accent)
 
+    me _px_fill_circle(cx: i32, cy: i32, r: i32, color: u32):
+        var dy = 0 - r
+        while dy <= r:
+            var hw = 0
+            while (hw + 1) * (hw + 1) + dy * dy <= r * r:
+                hw = hw + 1
+            if hw > 0:
+                self._px_fill_rect(cx - hw, cy + dy, hw * 2, 1, color)
+            dy = dy + 1
+
     me _px_draw_window_chrome(window: SharedWmWindow, theme: WmChromeColors):
         if window.minimized:
             return
+        val title_h = WM_AQUA_TITLEBAR_HEIGHT
         val title_color = if window.focused: theme.title_focused else: theme.title_unfocused
         self._px_fill_rect(window.x + WM_WINDOW_SHADOW_OFFSET_X, window.y + WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow)
-        self._px_fill_rect(window.x, window.y, window.width, window.height, theme.host_window_body)
-        self._px_fill_titlebar_gradient(window.x, window.y, window.width, 28, title_color)
-        self._px_fill_rect(window.x + 12, window.y + 9, 10, 10, 0xFFE74C3Cu32)
-        self._px_fill_rect(window.x + 30, window.y + 9, 10, 10, 0xFFF1C40Fu32)
-        self._px_fill_rect(window.x + 48, window.y + 9, 10, 10, 0xFF27AE60u32)
-        self._px_text_fit(window.x + 66, window.y + 6, window.title, theme.text_primary, title_color, if window.width > 92: (window.width - 92) / 8 else: 0)
-        self._px_fill_rect(window.x + window.width - 24, window.y + 2, 20, 20, theme.close_button)
-        self._px_text_fit(window.x + window.width - 18, window.y + 4, "X", theme.text_primary, theme.close_button, 1)
+        if window.height > title_h:
+            self._px_fill_rect(window.x, window.y + title_h, window.width, window.height - title_h, theme.host_window_body)
+        self._px_fill_titlebar_gradient(window.x, window.y, window.width, title_h, title_color)
+        if window.focused:
+            self._px_fill_rect(window.x, window.y, window.width, 1, _wm_titlebar_shade(title_color, 26))
+        val dot_r = WM_AQUA_TRAFFIC_RADIUS
+        val dot_cy = window.y + WM_AQUA_TRAFFIC_Y + dot_r
+        self._px_fill_circle(window.x + WM_AQUA_TRAFFIC_CLOSE_X + dot_r, dot_cy, dot_r, wm_aqua_traffic_color(window.focused, "close"))
+        self._px_fill_circle(window.x + WM_AQUA_TRAFFIC_MIN_X + dot_r, dot_cy, dot_r, wm_aqua_traffic_color(window.focused, "min"))
+        self._px_fill_circle(window.x + WM_AQUA_TRAFFIC_MAX_X + dot_r, dot_cy, dot_r, wm_aqua_traffic_color(window.focused, "max"))
+        val title_fg = if window.focused: theme.text_primary else: WM_AQUA_UNFOCUSED_TEXT
+        self._px_text_fit(window.x + WM_AQUA_TITLE_X, window.y + 6, window.title, title_fg, 0u32, if window.width > 92: (window.width - 92) / 8 else: 0)
         if window.app_id == "browser":
             val toolbar_y = window.y + 28
             self._px_fill_rect(window.x + 4, toolbar_y, window.width - 8, WM_BROWSER_TOOLBAR_HEIGHT, theme.host_window_body)
@@ -1071,10 +1119,10 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
         val title_color = theme_draw_ir_surface_command_color(
             chrome_snapshot, window.focused, "titlebar", backend_target
         )
-        commands.push(_wm_draw_ir_window_box(chrome_snapshot, window, "{window.window_id}-titlebar", "titlebar", 0, 0, window.width, 28, title_color, backend_target))
-        commands.push(draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32))
-        commands.push(draw_ir_rect("{window.window_id}-traffic-yellow", 30, 9, 10, 10, 0xFFF1C40Fu32))
-        commands.push(draw_ir_rect("{window.window_id}-traffic-green", 48, 9, 10, 10, 0xFF27AE60u32))
+        commands.push(_wm_draw_ir_window_box(chrome_snapshot, window, "{window.window_id}-titlebar", "titlebar", 0, 0, window.width, WM_AQUA_TITLEBAR_HEIGHT, title_color, backend_target))
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-traffic-red", WM_AQUA_TRAFFIC_CLOSE_X, WM_AQUA_TRAFFIC_Y, WM_AQUA_TRAFFIC_SIZE, WM_AQUA_TRAFFIC_SIZE, wm_aqua_traffic_color(window.focused, "close"), WM_AQUA_TRAFFIC_RADIUS, window.width, window.height))
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-traffic-yellow", WM_AQUA_TRAFFIC_MIN_X, WM_AQUA_TRAFFIC_Y, WM_AQUA_TRAFFIC_SIZE, WM_AQUA_TRAFFIC_SIZE, wm_aqua_traffic_color(window.focused, "min"), WM_AQUA_TRAFFIC_RADIUS, window.width, window.height))
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-traffic-green", WM_AQUA_TRAFFIC_MAX_X, WM_AQUA_TRAFFIC_Y, WM_AQUA_TRAFFIC_SIZE, WM_AQUA_TRAFFIC_SIZE, wm_aqua_traffic_color(window.focused, "max"), WM_AQUA_TRAFFIC_RADIUS, window.width, window.height))
         val maximize_label = if window.maximized: "-" else: "+"
         commands.push(_wm_draw_ir_text("{window.window_id}-maximize-state", 49, 18, 2, 10, maximize_label, chrome_snapshot.material.text_rgba, "und"))
         commands.push(_wm_draw_ir_window_title_text(chrome_snapshot, window, chrome_snapshot.material.text_rgba))
@@ -1343,17 +1391,30 @@ fn _wm_draw_titlebar_gradient(backend: CompositorBackend, x: i32, y: i32, width:
     if height > 1:
         backend.fill_rect(x, y + height - 1, width, 1, border)
 
+fn _draw_shared_wm_backend_circle(backend: CompositorBackend, cx: i32, cy: i32, r: i32, color: u32):
+    var dy: i32 = 0 - r
+    while dy <= r:
+        var hw: i32 = 0
+        while (hw + 1) * (hw + 1) + dy * dy <= r * r:
+            hw = hw + 1
+        if hw > 0:
+            backend.fill_rect(cx - hw, cy + dy, hw * 2, 1, color)
+        dy = dy + 1
+
 fn shared_wm_scene_draw_window_chrome(backend: CompositorBackend, window: SharedWmWindow, theme: WmChromeColors):
     if window.minimized:
         return
     val title_color = if window.focused: theme.title_focused else: theme.title_unfocused
     backend.fill_rect(window.x + WM_WINDOW_SHADOW_OFFSET_X, window.y + WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow)
     backend.fill_rect(window.x, window.y, window.width, window.height, theme.host_window_body)
-    _wm_draw_titlebar_gradient(backend, window.x, window.y, window.width, 28, title_color)
-    backend.fill_rect(window.x + 12, window.y + 9, 10, 10, 0xFFE74C3Cu32)
-    backend.fill_rect(window.x + 30, window.y + 9, 10, 10, 0xFFF1C40Fu32)
-    backend.fill_rect(window.x + 48, window.y + 9, 10, 10, 0xFF27AE60u32)
-    _draw_shared_wm_backend_text_fit(backend, window.x + 66, window.y + 6, window.title, theme.text_primary, title_color, if window.width > 92: (window.width - 92) / 8 else: 0)
+    _wm_draw_titlebar_gradient(backend, window.x, window.y, window.width, WM_AQUA_TITLEBAR_HEIGHT, title_color)
+    val dot_r = WM_AQUA_TRAFFIC_RADIUS
+    val dot_cy = window.y + WM_AQUA_TRAFFIC_Y + dot_r
+    _draw_shared_wm_backend_circle(backend, window.x + WM_AQUA_TRAFFIC_CLOSE_X + dot_r, dot_cy, dot_r, wm_aqua_traffic_color(window.focused, "close"))
+    _draw_shared_wm_backend_circle(backend, window.x + WM_AQUA_TRAFFIC_MIN_X + dot_r, dot_cy, dot_r, wm_aqua_traffic_color(window.focused, "min"))
+    _draw_shared_wm_backend_circle(backend, window.x + WM_AQUA_TRAFFIC_MAX_X + dot_r, dot_cy, dot_r, wm_aqua_traffic_color(window.focused, "max"))
+    val title_fg = if window.focused: theme.text_primary else: WM_AQUA_UNFOCUSED_TEXT
+    _draw_shared_wm_backend_text_fit(backend, window.x + WM_AQUA_TITLE_X, window.y + 6, window.title, title_fg, title_color, if window.width > 92: (window.width - 92) / 8 else: 0)
     backend.fill_rect(window.x + window.width - 24, window.y + 2, 20, 20, theme.close_button)
     _draw_shared_wm_backend_text_fit(backend, window.x + window.width - 18, window.y + 4, "X", theme.text_primary, theme.close_button, 1)
     if window.app_id == "browser":
@@ -1771,6 +1832,103 @@ fn _shared_wm_scene_render_compat_content_to_backend(backend: CompositorBackend,
             shared_wm_scene_render_app_content(backend, window.title, content.x, content.y, content.width, content.height, window.html)
             content_pixel_count = content_pixel_count + _shared_wm_scene_window_content_pixel_count(window)
     SharedWmSceneRenderStats(content_pixel_count: content_pixel_count)
+
+fn _wm_aqua_rounded_box(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, radius: i32, clip_w: i32, clip_h: i32) -> DrawIrCommand:
+    val rect = draw_ir_rect_bounds(x, y, width, height)
+    val clip_rect = draw_ir_rect_bounds(0, 0, clip_w, clip_h)
+    val style: [DrawIrStyleProp] = if radius > 0: [draw_ir_style_prop("border-radius", radius.to_string())] else: []
+    draw_ir_box_with_style(component_id, x, y, width, height, color, rect, rect, rect, clip_rect, style)
+
+fn _wm_aqua_text_command(component_id: text, x: i32, y: i32, width: i32, value: text, color: u32) -> DrawIrCommand:
+    var cmd = draw_ir_text(component_id, x, y, value, color)
+    cmd.width = width
+    cmd.height = 14
+    cmd.computed_style = [draw_ir_style_prop("font-size", "12")]
+    cmd
+
+fn _wm_aqua_window_batch(scene: SharedWmScene, window: SharedWmWindow, layer: i32, backend_target: text) -> DrawIrBatch:
+    val theme = wm_chrome_theme()
+    val embedding = draw_ir_embedding_config(window.surface_id, window.window_id, 0, 0, scene.width, scene.height, layer, 1000, false)
+    var commands: [DrawIrCommand] = []
+    val title_h = WM_AQUA_TITLEBAR_HEIGHT
+    val body_h = if window.height > title_h: window.height - title_h else: 0
+    commands.push(_wm_aqua_rounded_box("{window.window_id}-shadow", window.x + WM_WINDOW_SHADOW_OFFSET_X, window.y + WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow, 0, scene.width, scene.height))
+    if body_h > 0:
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-body", window.x, window.y + title_h, window.width, body_h, theme.host_window_body, 0, scene.width, scene.height))
+    if window.focused:
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-titlebar", window.x, window.y, window.width, title_h, WM_AQUA_FOCUSED_TITLE_GLASS, 0, scene.width, scene.height))
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-titlebar-sheen", window.x, window.y, window.width, 14, WM_AQUA_FOCUSED_TITLE_SHEEN, 0, scene.width, scene.height))
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-titlebar-top", window.x, window.y, window.width, 1, WM_AQUA_FOCUSED_TOP_HIGHLIGHT, 0, scene.width, scene.height))
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-titlebar-border", window.x, window.y + title_h - 1, window.width, 1, WM_AQUA_FOCUSED_TITLE_BORDER, 0, scene.width, scene.height))
+    else:
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-titlebar", window.x, window.y, window.width, title_h, theme.title_unfocused, 0, scene.width, scene.height))
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-titlebar-top", window.x, window.y, window.width, 1, WM_AQUA_UNFOCUSED_TOP_EDGE, 0, scene.width, scene.height))
+        commands.push(_wm_aqua_rounded_box("{window.window_id}-titlebar-border", window.x, window.y + title_h - 1, window.width, 1, WM_AQUA_UNFOCUSED_TITLE_BORDER, 0, scene.width, scene.height))
+    val dot_y = window.y + WM_AQUA_TRAFFIC_Y
+    commands.push(_wm_aqua_rounded_box("{window.window_id}-traffic-close", window.x + WM_AQUA_TRAFFIC_CLOSE_X, dot_y, WM_AQUA_TRAFFIC_SIZE, WM_AQUA_TRAFFIC_SIZE, wm_aqua_traffic_color(window.focused, "close"), WM_AQUA_TRAFFIC_RADIUS, scene.width, scene.height))
+    commands.push(_wm_aqua_rounded_box("{window.window_id}-traffic-min", window.x + WM_AQUA_TRAFFIC_MIN_X, dot_y, WM_AQUA_TRAFFIC_SIZE, WM_AQUA_TRAFFIC_SIZE, wm_aqua_traffic_color(window.focused, "min"), WM_AQUA_TRAFFIC_RADIUS, scene.width, scene.height))
+    commands.push(_wm_aqua_rounded_box("{window.window_id}-traffic-max", window.x + WM_AQUA_TRAFFIC_MAX_X, dot_y, WM_AQUA_TRAFFIC_SIZE, WM_AQUA_TRAFFIC_SIZE, wm_aqua_traffic_color(window.focused, "max"), WM_AQUA_TRAFFIC_RADIUS, scene.width, scene.height))
+    val title_fg = if window.focused: theme.text_primary else: WM_AQUA_UNFOCUSED_TEXT
+    val title_w = if window.width > WM_AQUA_TITLE_X + 12: window.width - (WM_AQUA_TITLE_X + 12) else: 0
+    commands.push(_wm_aqua_text_command("{window.window_id}-title", window.x + WM_AQUA_TITLE_X, window.y + 10, title_w, window.title, title_fg))
+    draw_ir_batch_with_source(
+        "aqua-window-{window.window_id}",
+        backend_target,
+        embedding,
+        commands,
+        _wm_draw_ir_source("wm.aqua.window.{window.window_id}", "wm.aqua.window", _wm_draw_ir_window_revision(window))
+    )
+
+fn _wm_aqua_dock_batch(scene: SharedWmScene, backend_target: text) -> DrawIrBatch:
+    val theme = wm_chrome_theme()
+    val count = scene.windows.len() as i32
+    val embedding = draw_ir_embedding_config("wm-aqua-dock", "wm-aqua-dock", 0, 0, scene.width, scene.height, 1000, 1000, false)
+    var commands: [DrawIrCommand] = []
+    if count > 0:
+        val dock_w = wm_taskbar_dock_width(scene.width, count)
+        val dock_x = (scene.width - dock_w) / 2
+        val dock_y = scene.height - 62
+        val item_w = wm_taskbar_item_width(scene.width, count)
+        commands.push(_wm_aqua_rounded_box("aqua-dock-bg", dock_x, dock_y, dock_w, 44, WM_AQUA_DOCK_GLASS_BG, WM_AQUA_DOCK_RADIUS, scene.width, scene.height))
+        val hl_w = dock_w - WM_AQUA_DOCK_RADIUS * 2
+        if hl_w > 0:
+            commands.push(_wm_aqua_rounded_box("aqua-dock-top", dock_x + WM_AQUA_DOCK_RADIUS, dock_y, hl_w, 1, WM_AQUA_DOCK_TOP_HIGHLIGHT, 0, scene.width, scene.height))
+        var ti: i32 = 0
+        while ti < count:
+            val twin = scene.windows[ti]
+            val tix = wm_taskbar_item_x(scene.width, count, ti)
+            var item_color = WM_AQUA_DOCK_ITEM_UNFOCUSED
+            var label_fg = WM_AQUA_UNFOCUSED_TEXT
+            if twin.focused and not twin.minimized:
+                item_color = WM_AQUA_DOCK_ITEM_FOCUSED
+                label_fg = theme.text_primary
+            elif twin.minimized:
+                item_color = WM_AQUA_DOCK_ITEM_MINIMIZED
+            val item_inner_w = item_w - 4
+            val label_w = if item_w > 16: item_w - 16 else: 0
+            commands.push(_wm_aqua_rounded_box("aqua-dock-item-{ti}", tix + 2, dock_y + 4, item_inner_w, 36, item_color, WM_AQUA_DOCK_ITEM_RADIUS, scene.width, scene.height))
+            commands.push(_wm_aqua_text_command("aqua-dock-label-{ti}", tix + 8, dock_y + 18, label_w, twin.title, label_fg))
+            ti = ti + 1
+    draw_ir_batch_with_source(
+        "wm-aqua-dock",
+        backend_target,
+        embedding,
+        commands,
+        _wm_draw_ir_source("wm.aqua.dock", "wm.aqua.dock", "count={count}")
+    )
+
+pub fn shared_wm_scene_aqua_draw_ir_composition(scene: SharedWmScene, backend_target: text) -> DrawIrComposition:
+    val desktop_batch = _wm_draw_ir_desktop_batch(scene, backend_target)
+    var batches: [DrawIrBatch] = [desktop_batch]
+    val windows = _wm_draw_ir_visible_windows_by_layer(scene)
+    var layer_idx = 0
+    for window in windows:
+        if window.chrome_kind != WM_CHROME_KIND_BORDERLESS:
+            batches.push(_wm_aqua_window_batch(scene, window, 10 + layer_idx, backend_target))
+        layer_idx = layer_idx + 1
+    if scene.windows.len() > 0:
+        batches.push(_wm_aqua_dock_batch(scene, backend_target))
+    draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, batches)
 
 fn shared_wm_scene_render_to_backend(backend: CompositorBackend, scene: SharedWmScene, t_micros: i64 = 0) -> SharedWmSceneRenderStats:
     val stats = _shared_wm_scene_render_compat_content_to_backend(backend, scene, t_micros)

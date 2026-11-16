@@ -176,15 +176,44 @@ available. These source paths and their manuals remain NOT_RUN.
   domain only status and close reach it; every other route refuses it. The 26 Windows-only wildcard matches
   already refuse.
 - **Custody fix** (#9751): no panic after acquisition or after a committed begin in host execution.
-- **Still blocked** (details in `.spipe/simple_orchestrator/continuation_20261116/milestone_0018_service40_execution/DESIGN.md`):
-  - Listener/startup: nothing in production builds the LinuxService domain. The native identity borrow needs the
-    machine policy reader plus the fresh-epoch successor custody that `machine_container_authority_open_fresh_epoch_v1`
-    retains, which needs an owner decision. The smux startup v4 draft also needs the fenced cut-4 `server.spl` factory.
-  - Assembly remainder (service7/wireR2/wireR3/driver3/wire_redaction_test8): most of it has no production caller
-    until cut 4, and cut 4 needs authR2's `host_service_ready_reader_v1`. Cut 1 is held under the
-    no-unused-code rule.
-  - Reconciliation, which needs the upper Linux provider inventory. The owner stays quarantined.
-  - The epoch digest, which has no landed producer, so the caller supplies it.
+- **Lease tokens** (#9775): each smux client lease token is
+  `hex(HMAC-SHA256(owner_nonce, "smux-client-lease-v1|" + len:session|len:client|gen))[0:32] + ":" + gen`.
+  The nonce never appears in a token or on the wire. Its only other use is process-internal: `attachment_owner` in
+  service_revision.
+- **Serving path + reconcile landed** (#9798, merge 4b89efd8dc4; SOURCE_AUTHORED, specs NOT_RUN). Independent
+  opus review reached r3 APPROVE.
+  - `host_linux_service_open_installed_v4` runs the read-only checks first. It then does the durable fresh-epoch
+    admission, `lend_service_identity_v1`, `lend_store_inventory_v1`, a re-pin, and `start_v4`. Start publishes,
+    then calls `host_linux_service_reconcile_flip_v4(owner, native, inventory)`. The flip is the only continuity
+    flip; its proof stays private to the module.
+  - Production reachability: `host-authenticated-service` -> `open_installed_v3('linux-service')` -> the opener.
+  - **M1** `io/linux_fresh_epoch_store_inventory_v1.spl` is an OFFLINE read. The installed provider stays masked
+    and never starts. The successor custody re-enumerates its retained graphRoot/runRoot fds, which must be empty;
+    any entry refuses. The read is bound to boot, owner generation, process identity, store/partition digests and
+    the lender's epoch digest. No provider format is parsed and there are no object rows.
+  - **M2** On `MachineFreshEpochAdmissionOwnerV1`, the store-inventory loan exists only inside the service loan,
+    in phase `admitted`. While it is active, `end_service_loan_v1`, `transfer_workload_v2`, `start_provider_v1`
+    and `close_v1` all refuse. `close_v4` ends it first.
+  - **M3 release rule:** released rows release by receipt, and never-begun rows (admitted, or abort receipt) by
+    absence. A begun row needs a plan for THIS native machine with an `epoch-`+64hex scope. The plan's boot and
+    generation are not compared (owner decision 2026-11-16, after an independent soundness review): the graph root
+    is persistent, preparation proved both roots empty and censused the service uid range, and the provider units stay
+    masked, so a plan from an earlier boot or process cannot be live. The generation is a process-local counter.
+    Repro spec: S40-RECONCILE-12.
+  - The provider start is refused for a lent or once-lent epoch (S40-LOAN-06, hermetic).
+- **Open owner items (pre-existing):** SB-P1, no check ties a plan's objects to the observed roots ("fixed per
+  install" is asserted, not verified); SB-P2, helper and child-barrier rows never release after a reboot.
+  Receipts: `.spipe/simple_orchestrator/continuation_20261116/milestone_0020_service40_section_i/` (host-local).
+- **The Agent V7 wire (assembly cuts 1-4) is not landed, and it is blocked on a coordinator decision.**
+  - In the held cut bytes, nothing ever sets `ServiceSlotV5.installed` (E2-1). Invoke therefore always refuses, and
+    invoke is the only creator of `session.workspace`.
+  - The installed slot cannot be filled from the Linux-service startup. `HostAgentInstalledOwnerV7`:
+    - reads a linux-podman `enrollment-binding.sdn`, which a linux-service root does not have;
+    - opens its own journal at `root/journal`, the same path the V4 owner holds;
+    - starts the container provider, which M1 keeps masked for the whole fresh epoch;
+    - flips `continuity_proven` from ledger flags (Host21).
+  - Options: (A) a V4-native agent owner; (B) a separate linux-podman install main; (C) retire the wire.
+    See milestone_0020 DESIGN.md.
 
 ### Traps
 - Never reconcile a Linux journal from ledger flags alone. The capacity owner requires native inventory/quarantine
@@ -197,4 +226,14 @@ available. These source paths and their manuals remain NOT_RUN.
   1–3 s window.
 - An import is not a caller. Before landing a staged unit, check production reachability, not just import
   closure. Specs do not count (wire v7 cut 1 was held for this, 2026-11-16).
+- Simple does not enforce field privacy: any module can construct or mutate a "private" class field. A proof
+  value is a seal only if it never leaves its module, so do the check and the effect in one call there.
+- A start that ALWAYS refuses after durable work (admission, journal open, current publish) is dead weight, not
+  fail-closed. Check refusal reachability before admitting a backend at the primary shape.
 - `std.spec` `fail()` records the failure and returns. Code after it still runs, so return explicitly.
+- Never bind a release to THIS epoch's scope. Every start admits a new epoch, so released and never-begun
+  history rows from earlier epochs would quarantine every restart (milestone_0019 r2 P1). Check plan
+  boot/generation/scope only for begun, unreleased rows.
+- `check-continuity-proven-setters.shs` also counts positional `HostCapacityLedgerV1(` constructions, using a
+  paren-depth scan across lines. Multi-line named constructions are therefore fine, but a `)` inside a string can
+  skew the scan.
