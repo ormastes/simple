@@ -483,7 +483,10 @@ Pinned GLSL->SPIR-V kernels, one gate each (fail-closed; no
 (`check-rect-batch-spirv-pinned.shs`), `blit` (`check-blit-spirv-pinned.shs`),
 `blur_rect` (`check-blur-rect-spirv-pinned.shs`), `shadow_rect`
 (`check-shadow-rect-spirv-pinned.shs`), `glass_material`
-(`check-glass-material-spirv-pinned.shs`). After editing a `.comp` shader,
+(`check-glass-material-spirv-pinned.shs`), packed font batch
+(`shaders/font_atlas_batch.comp` -> `backend_vulkan_font_spirv.spl`,
+`check-font-atlas-batch-spirv-pinned.shs`; compiled with plain `glslangValidator -V`
+and also pins the `# Source SHA-256` and the runtime-trusted sha). After editing a `.comp` shader,
 regen via `scripts/tool/gen-rect-batch-spirv.shs` (or the kernel's equivalent)
 before re-running its pin gate.
 

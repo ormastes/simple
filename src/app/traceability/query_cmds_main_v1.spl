@@ -10,7 +10,7 @@ use std.common.traceability.query_diff_v1.{trace_diff_v1}
 use std.common.traceability.query_report_v1.{trace_report_v1}
 use app.traceability.query_options_v1.{trace_query_sdn_requested_v1}
 use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
-use app.traceability.query_render_v1.{trace_query_error_v1}
+use app.traceability.query_render_v1.{trace_query_error_v1, TraceQueryCaptureV1}
 use std.common.traceability.model.*
 use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
 use std.common.traceability.test_query.{TestQueryError}
@@ -70,11 +70,11 @@ pub fn trace_cmd_execute_v1(args: [text]) -> TraceCmdResultV1:
         case Ok(value): value
         case Err(reason):
             val format = if trace_query_sdn_requested_v1(args): "sdn" else: "table"
-            return cmd_result_v1(2, trace_query_error_v1(reason, "unresolved", format))
+            return cmd_result_v1(2, trace_query_error_v1(reason, "unresolved", format, TraceQueryCaptureV1.Uncaptured))
     val build = match trace_query_build_snapshot_v1(options.query):
         case Ok(value): value
         case Err(reason):
-            return cmd_result_v1(2, trace_query_error_v1(reason, options.query.snapshot, options.query.format))
+            return cmd_result_v1(2, trace_query_error_v1(reason, options.query.snapshot, options.query.format, TraceQueryCaptureV1.Uncaptured))
     val graph = build.graph
     # Evidence is off unless --evidence=testdb is explicit, so default output is
     # unchanged and nothing reaches Verified (trace_cmds_no_passing_evidence_source_2026-11-15.md).
@@ -82,7 +82,7 @@ pub fn trace_cmd_execute_v1(args: [text]) -> TraceCmdResultV1:
         case Ok(value): value
         case Err(error):
             return cmd_result_v1(2, trace_query_error_v1("TRACE-QUERY-EVIDENCE: " + error.detail,
-                graph.subject.snapshot_id, options.query.format))
+                graph.subject.snapshot_id, options.query.format, TraceQueryCaptureV1.Uncaptured))
     match options.command:
         case TraceCmdKindV1.Matrix:
             val result = trace_matrix_v1(graph, build.sidecar_references, evidence, options.rows, options.cols, options.profile)
@@ -97,18 +97,18 @@ pub fn trace_cmd_execute_v1(args: [text]) -> TraceCmdResultV1:
                     return cmd_result_v1(cmd_exit_v1(result.verdict, false), trace_cmd_render_explain_v1(result, options))
                 case None:
                     return cmd_result_v1(1, trace_query_error_v1("TRACE-QUERY-NOT-FOUND: no requirement " + id.value,
-                        graph.subject.snapshot_id, options.query.format, true))
+                        graph.subject.snapshot_id, options.query.format, TraceQueryCaptureV1.Captured))
         case TraceCmdKindV1.Diff:
             val base_options = options.base.unwrap()
             val base_build = match trace_query_build_snapshot_v1(base_options):
                 case Ok(value): value
                 case Err(reason):
-                    return cmd_result_v1(2, trace_query_error_v1(reason, base_options.snapshot, options.query.format))
+                    return cmd_result_v1(2, trace_query_error_v1(reason, base_options.snapshot, options.query.format, TraceQueryCaptureV1.Uncaptured))
             val base_evidence = match cmd_evidence_v1(options, base_build.graph, base_build.sidecar_references):
                 case Ok(value): value
                 case Err(error):
                     return cmd_result_v1(2, trace_query_error_v1("TRACE-QUERY-EVIDENCE: " + error.detail,
-                        base_options.snapshot, options.query.format))
+                        base_options.snapshot, options.query.format, TraceQueryCaptureV1.Uncaptured))
             val result = trace_diff_v1(base_build.graph, base_build.sidecar_references, base_evidence,
                 graph, build.sidecar_references, evidence, options.profile)
             return cmd_result_v1(cmd_exit_v1(result.verdict, false), trace_cmd_render_diff_v1(result, options))

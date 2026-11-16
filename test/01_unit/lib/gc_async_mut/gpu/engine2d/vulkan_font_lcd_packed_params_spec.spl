@@ -1,0 +1,104 @@
+# Purpose and audience: pin the LCD trailer of the packed Vulkan font params for
+# the engine2d font maintainers. The kernel (shaders/font_atlas_batch.comp) reads
+# per-glyph LCD table indices and per-colour s32 tables from the params buffer;
+# these rows pin that layout without needing a device.
+# @req REQ-SSPEC-UNIT
+# @tag: unit, engine2d, vulkan, font, lcd
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_FONT_LCD_MAX_COLORS, VULKAN_BITMAP_FONT_CONFIG_IDENTITY, vulkan_font_packed_params, vulkan_font_packed_params_lcd, vulkan_font_packed_has_lcd_trailer, vulkan_font_quad_key, vulkan_font_lcd_veto_keys, vulkan_bitmap_text_clip_quads}
+use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+
+val NO_VETO: [text] = []
+
+fn _quad(dst_x: i32, dst_y: i32, atlas_x: i32, color: u32) -> FontRenderQuad:
+    FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: dst_x, dst_y: dst_y,
+        width: 2, height: 1, atlas_x: atlas_x, atlas_y: 0, color: color)
+
+# 4x1 atlas: cell 0/1 = gray full coverage, cell 2/3 = LCD (rgb != 0xFFFFFF).
+fn _batch(quads: [FontRenderQuad], config: text) -> FontRenderBatch:
+    FontRenderBatch(program_version: 1, font_identity: "lcd-font", face_generation: 1,
+        valid: true, atlas_width: 4, atlas_height: 1,
+        atlas_pixels: [0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xC0102030u32, 0x80FF0000u32],
+        quads: quads, atlas_generation: 1, dirty_rects: [],
+        render_config_identity: config)
+
+fn _word(b: [u8], word: i64) -> i64:
+    val o = word * 4
+    b[o].to_i64() + b[o + 1].to_i64() * 256 + b[o + 2].to_i64() * 65536 + b[o + 3].to_i64() * 16777216
+
+describe "packed Vulkan font params LCD trailer":
+    it "keeps the legacy layout byte for byte when the atlas has no LCD cell":
+        val batch = _batch([_quad(0, 0, 0, 0xFF000000u32)], "cfg")
+        val legacy = vulkan_font_packed_params(batch, 0, 0, 8, 4)
+        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO)).to_equal(legacy)
+        expect(vulkan_font_packed_has_lcd_trailer(legacy)).to_be(false)
+
+    it "appends a per-glyph table index and the shared s32 tables for an LCD quad":
+        val black = 0xFF000000u32
+        val batch = _batch([_quad(0, 0, 2, black), _quad(4, 0, 0, black)], "cfg")
+        val legacy = vulkan_font_packed_params(batch, 0, 0, 8, 4)
+        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO)
+        expect(vulkan_font_packed_has_lcd_trailer(packed)).to_be(true)
+        # 8 header words + 2 glyph records of 7 words, then 2 index words, then one table
+        expect(packed.len().to_i64()).to_equal((8 + 14 + 2 + 768) * 4)
+        expect(_word(packed, 22)).to_equal(0)           # glyph 0 (LCD cell) -> table 0
+        expect(_word(packed, 23)).to_equal(4294967295)  # glyph 1 (gray cells) -> no LCD
+        val table = engine2d_lcd_s32_tables(black)
+        expect(_word(packed, 24 + 255)).to_equal(table[255])
+        expect(_word(packed, 24 + 256 + 128)).to_equal(table[256 + 128])
+        expect(_word(packed, 24 + 512 + 7)).to_equal(table[512 + 7])
+        # the glyph records and header (apart from the trailer flag bit) are the legacy bytes
+        var i = 0
+        var diff = 0
+        while i < legacy.len():
+            if packed[i] != legacy[i]:
+                diff = diff + 1
+            i = i + 1
+        expect(diff).to_equal(1)  # byte 31: bit 31 of header word 7
+
+    it "shares one table between quads of the same colour and adds one per colour":
+        val a = 0xFF000000u32
+        val b = 0xFFFFFFFFu32
+        val batch = _batch([_quad(0, 0, 2, a), _quad(4, 0, 2, a), _quad(8, 0, 2, b)], "cfg")
+        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 12, 4, true, NO_VETO)
+        expect(packed.len().to_i64()).to_equal((8 + 21 + 3 + 2 * 768) * 4)
+        expect(_word(packed, 29)).to_equal(0)
+        expect(_word(packed, 30)).to_equal(0)
+        expect(_word(packed, 31)).to_equal(1)
+
+    it "draws a vetoed quad gray (no table) while its neighbour keeps LCD":
+        val black = 0xFF000000u32
+        val q0 = _quad(0, 0, 2, black)
+        val q1 = _quad(4, 0, 2, black)
+        val batch = _batch([q0, q1], "cfg")
+        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, [vulkan_font_quad_key(q0)])
+        expect(_word(packed, 8 + 14 + 0)).to_equal(4294967295)
+        expect(_word(packed, 8 + 14 + 1)).to_equal(0)
+
+    it "never takes the LCD branch for the rgb-less bitmap atlas":
+        val batch = _batch([_quad(0, 0, 2, 0xFF000000u32)], VULKAN_BITMAP_FONT_CONFIG_IDENTITY)
+        val legacy = vulkan_font_packed_params(batch, 0, 0, 8, 4)
+        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO)).to_equal(legacy)
+
+    it "refuses a batch with more distinct LCD colours than the trailer holds":
+        var quads: [FontRenderQuad] = []
+        var i: i64 = 0
+        while i < VULKAN_FONT_LCD_MAX_COLORS + 1:
+            quads.push(_quad(0, 0, 2, (0xFF000000u32 | i.to_u32())))
+            i = i + 1
+        val batch = _batch(quads, "cfg")
+        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO).len()).to_equal(0)
+
+    it "marks only the trimmed quads whose untrimmed rect left the surface":
+        val inside = _quad(4, 0, 2, 0xFF000000u32)
+        val hang = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: -1, dst_y: 0,
+            width: 2, height: 1, atlas_x: 2, atlas_y: 0, color: 0xFF000000u32)
+        val quads = [hang, inside]
+        val kept = vulkan_bitmap_text_clip_quads(quads, 0, 0, 0, 0, 8, 4)
+        val keys = vulkan_font_lcd_veto_keys(quads, kept, 0, 0, 0, 0, 8, 4, 8, 4)
+        # the overhanging quad is trimmed to dst x 0 width 1 and atlas x 3
+        expect(keys.len().to_i64()).to_equal(1)
+        expect(keys[0]).to_equal(vulkan_font_quad_key(kept[0]))
+        expect(kept[0].width).to_equal(1)
