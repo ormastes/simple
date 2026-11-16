@@ -169,3 +169,97 @@ Windows stage2 lane is this codegen SIGSEGV (plus Regression 1's AttrOwnerV1
 object-safety at >= b5d93e48cd8, absent at 189dabae8e3, untested at
 43d32352d40's test_runner row — which PASSED in cycle 26, so Regression 1
 appears fixed by the native-trait lanes landing near #9563).
+
+## 2026-11-16 addendum 3: cycle 28 — the correlation is NATIVE-BATCH COUNT, not module offset; and the tree watchdog under-counts the row
+
+Cycle 28 (receipt-authorized full run, clean tip 35cc470d245 — carries the
+parse-parity fix #9597, native-trait tail conversion #9563, and the
+copy-thunk dispatch-record fix): `compiler_cli_build` STILL SIGSEGVs
+(status 139) at 7,416 s — `phase=native_staged ... done=616 total=3797
+current=batch-79`, immediately after `[NATIVE] codegen: 8 uncached
+module(s), concurrency=1 (serial lane in this process)`.
+
+Cross-crash table (all receipt-authorized MSVC stage2 rows):
+
+| cycle | tip       | crash point        | batch |
+|-------|-----------|--------------------|-------|
+| 24d   | b5d93e48cd8 | done=672/3157    | 85    |
+| 25b   | 189dabae8e3 | done=650/3148    | 81    |
+| 26    | 43d32352d40 | done=672/3186    | 85    |
+| 28    | 35cc470d245 | done=616/3797    | 79    |
+
+Addendum 2's "constant closure offset 672" was an artifact of similar
+closure sizes: the true correlation is the SERIAL IN-PROCESS CODEGEN BATCH
+COUNT (~79-85 batches of 8 modules). The crashing batch's FIRST module
+differs per tip (lib.common.ui.ios.builder at 25b/26, lib.common.crypto.hmac
+at 28), so no single source module is at fault — the lane dies after a
+roughly fixed number of codegen batches regardless of WHICH modules they
+contain. This is accumulation-shaped (leak/exhaustion in the serial codegen
+lane's per-batch state), not content-shaped.
+
+Row self-reported RSS at crash VARIES: 33.5 GiB (25b) vs 51.3 GiB (28) — so
+it is not a fixed RSS threshold either. Host commit limit during cycle 28
+(64 GiB RAM + 12.5 GiB pagefile ≈ 76 GiB; system ~11 GiB) was probably not
+exceeded.
+
+MONITORING GAP (separate owner ask): the tree watchdog under-counts the row.
+Cycle 28 progress samples showed tree_rss_kb ~30 GiB while the row's own log
+reported rss_mib=51329 (50.1 GiB) in the same window (tree_scan_misses>0
+samples present). The 56 GiB cap (intended to kill the tree before the OS
+does) therefore never sees the real consumer and would not have fired even
+at 56 GiB of actual row RSS. The row self-report (rss_mib in the row log) is
+the reliable signal; the watchdog's sampling should be reconciled with it.
+
+Not cured by any of: e250454f1aa, 10502b44377/92237f6276d, #9563,
+copy-thunk fix, #9597. Next routes to try: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
+(single-process whole-program build, bypasses the batch lane per upstream
+workaround doc stage2_sanity_mir_workers_zero_pool_refusal_2026-11-15.md),
+and a debugger attached to the row process for the stack at crash.
+
+## 2026-11-16 addendum 4: ROOT CAUSE FOUND — the row dies of memory-commit exhaustion under the Hyper-V balloon; SIGSEGV and SIGABRT are the same OOM
+
+Cycle 29 (receipt-authorized full run, clean tip c189f67185e, whole-program
+route): `compiler_cli_build` CRASH with **status 134 (SIGABRT)**, the row's
+final log lines:
+
+```
+[build] phase=native_cache state=running ...
+memory allocation of 2228240 bytes failed
+note: run with RUST_BACKTRACE=1 environment variable to display a backtrace
+```
+
+`memory allocation of N bytes failed` is the Rust global-alloc error message —
+the process ABORTED because a 2.2 MB allocation could not be satisfied. That
+unifies ALL FIVE crashes (24d/25b/26/28 status 139 SIGSEGV, 29 status 134
+SIGABRT): the stage2 candidate (a Rust-hosted binary) exhausts memory commit;
+the SIGSEGV cycles were the same failure torn down through a different path
+(seed-era alloc-failure handling vs the current abort handler).
+
+Why the crash RSS varies (33.5 / 41 / 50.34 / 51.3 GiB) and sits BELOW the
+nominal 76 GiB commit limit (64 GiB RAM + 12.5 GiB pagefile): the host is a
+Hyper-V DYNAMIC-MEMORY guest. The balloon driver holds physical pages (at
+times ~45 GiB attributable to no process), so the guest's effective commit
+ceiling floats well below RAM+pagefile and moves with host-side memory
+pressure; a row process that reaches 33-51 GiB of commit can be at the true
+ceiling. The tree watchdog's 56 GiB cap (addendum 3's under-count aside)
+cannot protect a process from a ceiling the host sets dynamically.
+
+Fixes, in cost order:
+1. HOST: enlarge the pagefile (fixed 48-64 GiB on C:, which has 200+ GiB
+   free) so the commit ceiling stays above the row's ~50 GiB working set even
+   when the balloon is inflated. No compiler change. (Session token here was
+   not actually elevated despite showing High Mandatory; needs an elevated
+   PowerShell: `Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\
+   Session Manager\Memory Management' PagingFiles 'C:\pagefile.sys 49152
+   65536'` — may require a reboot.)
+2. COMPILER: the in-flight upstream memory reductions (backend-lazy-registry
+   #9624, placeholder-cache scalar-only a0d424f8a2a, essential-backend closure
+   shrink 7074bd686e7 lineage, stage2-smoke-perf #9638) shrink the row's
+   working set itself; the whole-program route (this cycle) reached 41 GiB
+   before OOM — better than the batch lane's growth curve but not yet enough.
+3. LANE: bound/resume the row per phase so a single process never holds the
+   whole closure (the pre-existing owner asks in
+   bootstrap_stage2_seed_parent_retention_oom_2026-10-22.md remain valid).
+
+The whole-program route ALSO validated per-module MIR error isolation: one
+module (controller_dispatch_owner_v3) failed MIR and the row continued.

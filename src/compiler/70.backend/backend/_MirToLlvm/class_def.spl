@@ -153,7 +153,7 @@ class MirToLlvm:
     # return. `xray_guard_seq` numbers the guard labels/temps of one module.
     xray_flag_guard: bool = false
     # Triple env ("msvc", "gnu", ...) of explicit-target translators; "" when
-    # unknown. Only the XRay admission reads it (MSVC has no auto-export).
+    # unknown. Only XRay reads it: MSVC (no auto-export) gets an explicit /EXPORT list.
     target_env: text = ""
     xray_site: Dict<text, i64> = {}
     xray_guard_seq: i64 = 0
@@ -245,10 +245,14 @@ class MirToLlvm:
         # `@global` (design A.2): the unmangled Simple name IS the symbol.
         if self.fn_global.has(name):
             return name
-        if mir_runtime_owned_call_name(name):
-            return mir_runtime_owned_local_symbol(name)
+        # `--no-mangle` builds the C-ABI runtime provider itself: its `rt_*`
+        # definitions ARE the runtime symbols and must keep the bare name, so
+        # this check precedes the runtime-owned `__simple_local_` rename.
+        # See doc/08_tracking/bug/no_mangle_emits_module_qualified_symbols_2026-11-16.md
         if self.no_mangle:
             return name
+        if mir_runtime_owned_call_name(name):
+            return mir_runtime_owned_local_symbol(name)
         # Cross-module linkability: a non-entry module's own functions are
         # emitted (and called) under `<logical module>.<fn>`, the same
         # spelling every cross-module call site already uses. Runs LAST so

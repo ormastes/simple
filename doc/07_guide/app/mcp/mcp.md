@@ -454,7 +454,7 @@ request is in the server (`lsp_visibility_last_view`) and in the
 `simple.setVisibility` reply (`{visibility, view}`).
 Design: `doc/05_design/app/source_view/public_view_by_feature_layer.md` § Session view state.
 
-### Context (9 tools)
+### Context (10 tools)
 
 Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 `src/app/mcp/main_lazy_ctx_tools.spl`; specs:
@@ -472,6 +472,7 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 | `simple_ctx_stats` | Store location, chunk/source counts, bytes indexed/returned/saved, per-tool call counts | |
 | `simple_ctx_doctor` | Self-check checklist for the ctx store (schema version, store reachability, hook wiring) | |
 | `simple_ctx_upgrade` | Re-index / compact the chunk store and migrate it to the current schema version | |
+| `simple_ctx_purge` | DESTRUCTIVE retention purge by source-label prefix, `older_than_secs` and/or `max_bytes`; dry run unless `apply:true`; refuses an empty selector or a non-positive limit | at least one of source, older_than_secs, max_bytes |
 | `simple_token_stats` | Per-feature token savings (ctx-mimic, ponytail-mimic, total; 7-day window); `reset: true` or `args: "--reset"` clears the ledger | |
 | `simple_token_burn` | Code burn: which feature/tool spent the budget, ranked by bytes returned to the model, with tokens saved vs the unoptimized original | |
 | `simple_trace` | Read-only `trace missing` over a snapshot (`snapshot`: worktree/index/git:REV, `format`: table/sdn, `limit` 1..200, `operation`: missing). Result starts with `profile`, `status` (complete/incomplete) and `exit_code`; an unbuildable or partial snapshot is `incomplete`, `exit_code: 2`, `isError: true`, never an empty success. Unknown profile or missing argument is a tool error. Logic: `src/app/mcp/main_lazy_trace_tools.spl` | profile |
@@ -484,6 +485,9 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
   unlike the plugin's per-process temp DB. Every hot path over captured
   output is linear and built from native string ops (no per-char loops):
   see `doc/08_tracking/bug/mcp_ctx_batch_execute_crash_hang_on_real_output_2026-08-28.md`.
+- **Postings**: once a cache generation has served 128 hits, `simple_ctx_search` builds term postings (`ctx_postings.spl`) and scores only chunks containing a query term; results are bit-identical to the full scan (`ctx_bm25_search_index_scan`, the parity oracle). Deferred because the build costs ~2.5 s on a 3.7k-chunk store and any append invalidates the generation.
+- **Purge**: `simple_ctx_purge` (`ctx_retention.spl`, pure decision) never runs implicitly from index or search. Source and age combine as AND; `max_bytes` then trims the oldest chunks of the source scope. Default is a dry-run count; `apply:true` rewrites the store atomically. Not lock-protected: an append racing an applied purge can be lost.
+- **Redaction**: `ctx_index_text` masks secrets BEFORE chunking (`ctx_redaction.spl`): Authorization/Proxy-Authorization/X-Api-Key/Cookie headers, `password|secret|token|api_key|...` key=value and JSON pairs, `ghp_`/`github_pat_`/`sk-`/`AKIA`/`xox?-`/`AIza` tokens, JWTs, URL passwords, PEM private keys. Hex digests (SHA-256, git ids) and prose are never masked.
 - **Sandbox**: `std.nogc_sync_mut.io.resource_scope` bounded run — wall
   timeout (default 15 s, max 120 s), per-command capture cap enforced at the
   reader (default 8 MiB; `SIMPLE_CTX_CAPTURE_MAX_BYTES` env or `capture_bytes`
@@ -628,6 +632,19 @@ bin/simple query sem-query 'FIND fn WHERE return_type = "i64"'
 bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_count > 2'
 ```
 
+
+### Progressive hints (3 tools)
+
+Logic: `src/app/mcp/main_lazy_hint_tools.spl`. State is one hint record per
+session and capability, held in process memory (no file I/O).
+
+| Tool | Description | Params |
+|------|-------------|--------|
+| `simple_help` | Always returns full guidance for a capability topic (default: quickstart); read-only | topic?, session_id? |
+| `simple_capabilities` | Without `topic`: lists capabilities and records nothing. With `topic`: counts as a capability use; first call full guidance, then brief, then quiet | topic?, session_id? |
+| `simple_hint_status` | Reports stored state (`seen_count`, `success_count`, `last_hint`); never mutates | topic?, session_id? |
+
+An unknown topic is a tool error. `session_id` defaults to `default`.
 ---
 
 ## Resources (URIs)

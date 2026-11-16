@@ -1240,6 +1240,20 @@ impl MirLowering:
         b_merge.switch_to_block(merge_block)
         self.builder = b_merge
         self.remember_local_hir_type(result_local.id, payload_type, 0, 0)
+        # `.ok` / `.err` (nil fallback) yields a decoded payload-or-nil word
+        # typed by the payload; the variant tag is its presence. A scalar
+        # payload cannot answer presence by value (Ok(3) is the nil word).
+        # doc/08_tracking/bug/native_if_val_presence_test_dropped_2026-11-15.md
+        if val projection_default = default_expr:
+            match projection_default.kind:
+                case HirExprKind.NilLit:
+                    match payload_type.kind:
+                        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
+                            self.presence_word_locals[result_local.id] = has_payload.id
+                            if is_text:
+                                self.mark_decoded_text_option_local(result_local.id)
+                        case _: ()
+                case _: ()
         if result_is_optional:
             self.option_value_locals[result_local.id] = true
             self.mark_runtime_value_local(result_local.id)

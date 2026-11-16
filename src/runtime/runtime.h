@@ -718,6 +718,12 @@ int64_t  spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value,
                                     int64_t nargs);
 int64_t  spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
                                     int64_t nargs, int64_t* out_value);
+int64_t  spl_wffi_call_i64_with_bytes_checked(int64_t fptr, int64_t prefix_args,
+                                              int64_t bytes, int64_t offset,
+                                              int64_t length, int64_t suffix_args);
+int64_t  spl_wffi_call_i64_with_bytes(int64_t fptr, int64_t prefix_args,
+                                      int64_t bytes, int64_t offset,
+                                      int64_t length, int64_t suffix_args);
 int64_t  spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value);
 int64_t  spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0,
                                      int8_t* out_value);
@@ -1829,6 +1835,7 @@ bool         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path
 int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len);
+int32_t     rt_win_compare_object_handles(int64_t first, int64_t second);
 /* Encoded byte-array RuntimeValues, not semantic text pointer/length pairs. */
 int64_t     rt_sosix_directory_pair_open_v1(int64_t shared_bytes, int64_t private_bytes);
 int64_t     rt_sosix_directory_pair_check_v1(int64_t shared_bytes, int64_t private_bytes);

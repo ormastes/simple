@@ -1,0 +1,66 @@
+# AUTHORED_NOT_RUN. Real protected current-user Linux roots/files required.
+# No fabricated reader, process association, broker authorization or close FD.
+use std.spec.*
+use std.io_runtime.env_get_nullable
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.*
+
+var broker_reader_fixture_owners_v1: [LinuxProtectedRootReaderV1] = []
+
+fn broker_reader_fixture_drain_v1() -> bool:
+    for step_index in 0..1024:
+        if broker_reader_fixture_owners_v1.len() == 0: return true
+        val closed = linux_protected_root_reader_close_v1(broker_reader_fixture_owners_v1[0])
+        if val pending = closed.owner: broker_reader_fixture_owners_v1[0] = pending
+        else: broker_reader_fixture_owners_v1 = broker_reader_fixture_owners_v1[1:broker_reader_fixture_owners_v1.len()]
+    false
+
+fn broker_reader_fixture_open_v1(path: text) -> LinuxProtectedRootReaderV1:
+    val opened = linux_protected_root_reader_open_v1(path)
+    if val owner = opened.owner: broker_reader_fixture_owners_v1.push(owner)
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        panic("required actual protected broker reader unavailable; partial owner retained")
+    opened.owner.unwrap()
+
+# @req REQ-LINUX-BROKER-PROTECTED-READ
+describe "actual expected-root and bounded broker input compatibility":
+    after_each:
+        expect(broker_reader_fixture_drain_v1()).to_equal(true)
+
+    it "cannot use copied request bytes in rootB as proof of original rootA":
+        if not broker_reader_fixture_drain_v1(): panic("prior actual broker reader cleanup remains retained")
+        step("Require two distinct original private roots with identical private broker.request bytes")
+        val a = env_get_nullable("SIMPLE_LINUX_BROKER_ROOT_A")
+        val b = env_get_nullable("SIMPLE_LINUX_BROKER_ROOT_B")
+        if a.is_none() or b.is_none() or a.unwrap() == b.unwrap(): panic("two distinct genuine broker fixture roots required")
+        val root_a = broker_reader_fixture_open_v1(a.unwrap())
+        val root_b = broker_reader_fixture_open_v1(b.unwrap())
+        expect(linux_protected_root_reader_require_root_v1(root_a, a.unwrap()).is_ok()).to_equal(true)
+        expect(linux_protected_root_reader_require_root_v1(root_b, b.unwrap()).is_ok()).to_equal(true)
+        val bytes_a = linux_protected_root_reader_read_v1(root_a, "broker.request", 16777216).unwrap()
+        val bytes_b = linux_protected_root_reader_read_v1(root_b, "broker.request", 16777216).unwrap()
+        expect(bytes_a.is_some() and bytes_a == bytes_b).to_equal(true)
+        expect(linux_protected_root_reader_require_root_v1(root_b, a.unwrap()).unwrap_err()).to_equal("protected-root-reader-root-mismatch")
+        # Caller expectation mismatch neither alters actual custody nor promotes
+        # a DATA copy into an original-root claim.
+        expect(linux_protected_root_reader_current_v1(root_b).is_ok()).to_equal(true)
+
+    it "reads a real broker file above8MiB through16MiB and rechecks retained currentness":
+        if not broker_reader_fixture_drain_v1(): panic("prior actual broker reader cleanup remains retained")
+        step("Require a prepared0600 regular single-link UTF8 broker.request between8MiB+1 and16MiB")
+        val path = env_get_nullable("SIMPLE_LINUX_BROKER_LARGE_ROOT")
+        if path.is_none(): panic("actual large private broker fixture required")
+        val owner = broker_reader_fixture_open_v1(path.unwrap())
+        expect(linux_protected_root_reader_require_root_v1(owner, path.unwrap()).is_ok()).to_equal(true)
+        val first = linux_protected_root_reader_read_v1(owner, "broker.request", 16777216)
+        expect(first.is_ok() and first.unwrap().is_some()).to_equal(true)
+        val size = first.unwrap().unwrap().byte_len()
+        expect(size).to_be_greater_than(8388608)
+        expect(size <= 16777216).to_equal(true)
+        expect(linux_protected_root_reader_current_v1(owner).is_ok()).to_equal(true)
+        val cached = linux_protected_root_reader_read_v1(owner, "broker.request", 16777216)
+        expect(cached.is_ok() and cached.unwrap() == first.unwrap()).to_equal(true)
+        expect(linux_protected_root_reader_require_root_v1(owner, path.unwrap()).is_ok()).to_equal(true)
+        # Auth still asks for512; caller-specific limits are never inferred from
+        # the larger retained-current ceiling or previous successful large read.
+        expect(linux_protected_root_reader_read_v1(owner, "broker.request", 512).is_err()).to_equal(true)
+        expect(linux_protected_root_reader_current_v1(owner).is_err()).to_equal(true)

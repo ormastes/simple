@@ -1,0 +1,10 @@
+# Linux fresh workspace native V3
+
+Selected by the root/architecture owners: a single interactive workspace primary inside the existing dedicated-service-UID fresh epoch, same machine writer, actual source/exclusion custody and trusted administrator-approved immutable image/runtime topology. Existing CPU V2 contracts remain closed. This is new functionality; prior native/workload correction counts are inherited rather than reset.
+
+- REQ-LINUX-WORKSPACE-NATIVE-001: activation requires the genuine fixed installed V2 agent profile, original source parent/root, live native quota lease and exclusion, exact full canonical request/manifest/invocation and actual service identity. No DTO, caller path, marker or boolean mints custody.
+- REQ-LINUX-WORKSPACE-NATIVE-002: derive a closed V3 one-writable-root keep-id TTY/OpenStdin bootstrap command, compare actual complete created configuration before Start, and associate actual original subject birth/namespace/cgroup/mount/resource identities afterward. CPU V2 rejects this request.
+- REQ-LINUX-WORKSPACE-NATIVE-003: AgentObserved is a direct genuine same-subject point observation of the approved native ELF, exact argv/full InvocationManifestV2, original pidfd/start/namespaces/cgroup and retained source. Initial hashing advances at most 64 KiB per call under the unchanged original preparation deadline; completed sealed-image evidence can be reobserved without rehashing the entire image.
+- REQ-LINUX-WORKSPACE-NATIVE-004: a native retirement token can be produced only from the same previously confirmed subject's actual original-container closure and original pidfd no-task evidence, and remains bound to the actual source/generations. It proves neither OCI/helper/transport/HostACK cleanup nor accounting release. No token exists for prebirth staging failure.
+
+The administrator approval digest is policy, not measured image qualification. Actual approved-image, XFS quota, native ABI, race/fault and end-to-end acceptance remain NOT_RUN/NOT_COVERED. No privileged provisioning, new runtime exports or execution campaign is authorized by these artifacts.

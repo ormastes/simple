@@ -1,0 +1,42 @@
+# Seeds the durable outbox that bridge_worker drains, or drains it in-process.
+# Usage: bridge_outbox_fixture.spl queue PORT DB | drain PORT
+# `drain` uses an in-memory store and the same drain_transport_outbox pass
+# bridge_worker runs, so outbox states are read without reopening a file.
+use std.nogc_async_mut.io_runtime.{get_args}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredTransportRequest}
+use app.llm_caret.messaging.adapter.chat.http_delivery.{drain_transport_outbox}
+
+fn queued(id: text, port: text, path: text) -> StoredTransportRequest:
+    StoredTransportRequest(delivery_id: id, message_id: "message-" + id, binding_id: "binding-bridge",
+        method: "POST", url_template: "http://127.0.0.1:" + port + path,
+        headers: ["Content-Type: application/json"], body: "{{\"text\":\"bridge-payload-" + id + "\"}}",
+        credential_ref: "secret://bridge/probe", credential_mode: "bearer",
+        idempotency_key: "idem-" + id)
+
+fn main() -> i64:
+    val args = get_args()
+    val n = args.len()
+    if n >= 4 and args[n - 3] == "queue":
+        val port = args[n - 2]
+        var store = PureSqlMessagingStore.open(args[n - 1]).unwrap()
+        val a = store.enqueue_transport_request(queued("routed", port, "/deliver"), 0)
+        val b = store.enqueue_transport_request(queued("unrouted", port, "/missing"), 0)
+        store.close()
+        print "queued: " + a.ok.to_text() + " " + b.ok.to_text()
+        return if a.ok and b.ok: 0 else: 1
+    if n >= 3 and args[n - 2] == "drain":
+        val port = args[n - 1]
+        val closed_port = ((port.to_int() ?? 0) + 1).to_text()
+        var store = PureSqlMessagingStore.open_memory()
+        store.enqueue_transport_request(queued("routed", port, "/deliver"), 0)
+        store.enqueue_transport_request(queued("unrouted", port, "/missing"), 0)
+        store.enqueue_transport_request(queued("refused", closed_port, "/deliver"), 0)
+        val drained = drain_transport_outbox(store, 10, 10, 1000, 5)
+        print "drain delivered=" + drained.0.to_text() + " failed=" + drained.1.to_text()
+        print "state routed=" + store.outbox_state("routed") + " unrouted=" + store.outbox_state("unrouted") +
+            " refused=" + store.outbox_state("refused")
+        return 0
+    print "usage: queue PORT DB | drain PORT"
+    2
+
+main()

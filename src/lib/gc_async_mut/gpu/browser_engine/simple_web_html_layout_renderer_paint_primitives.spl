@@ -794,60 +794,32 @@ fn paint_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i3
         return fb_soft_box_shadow(fb, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st.box_shadow_color, st.box_shadow_blur_px, st.box_shadow_alpha, clip)
     fb_style_rounded_rect_opacity_clip(fb, fbw, fbh, x + st.box_shadow_x_px, y + st.box_shadow_y_px, w, h, st, st.box_shadow_color, 100, clip)
 
+# Skia's 8x8 ordered-dither level M (0..63) at DEVICE pixel (px, py), as
+# Chrome's raster pipeline computes it: X = px, Y = py ^ px, and M interleaves
+# the low 3 bits of each. The stored channel is floor(v + (2M+1)/128) for an
+# exact value v in 0..255 (dither in (-63/128, 63/128), then round-to-nearest).
+# Replayed against 42 Chrome 159 gradient pixels, 42/42 exact.
 fn gradient_dither_threshold(px: i32, py: i32) -> i32:
-    val mx = px % 4
-    val my = py % 4
-    if my == 0:
-        if mx == 0: return 7
-        if mx == 1: return 10
-        if mx == 2: return 4
-        return 7
-    if my == 1:
-        if mx == 0: return 12
-        if mx == 1: return 2
-        if mx == 2: return 14
-        return 2
-    if my == 2:
-        if mx == 0:
-            if px % 8 == 4:
-                return 3
-            return 7
-        if mx == 1: return 11
-        if mx == 2: return 7
-        return 9
-    if mx == 0: return 15
-    if mx == 1: return 2
-    if mx == 2: return 12
-    5
+    val x = px & 7
+    val y = (py ^ px) & 7
+    ((y & 1) << 5) | ((x & 1) << 4) | ((y & 2) << 2) | ((x & 2) << 1) | ((y & 4) >> 1) | ((x & 4) >> 2)
 
-# Endpoint-exact vertical gradient ramp with ordered dither on the remainder.
-# Chromium/Skia hit the stop colors exactly at both ends of a linear-gradient
-# tile (t = pos / (span - 1)), and the ordered Bayer threshold only resolves
-# the fractional pixel between the two nearest integers; all channels (R, G,
-# B, A) share the same matrix and rounding rule. The previous centered
-# variant (b_weight = 2*pos + 1 over 2*span) never reached the end stop and
-# biased every channel fraction, which is what made the B channel look like
-# it followed a different rule.
+# Pixel-centre vertical gradient ramp with Chrome's ordered dither.
+# Chrome 159 samples each row at its centre, t = (2*pos + 1) / (2*span), so
+# no row is an exact stop: a 4px #000 -> #fff ramp paints 1F/60/9F/DF and a
+# 2px one 3F/BF. 92b33870986 had switched this to endpoint-exact
+# t = pos / (span - 1) to satisfy spec pins that Chrome never painted.
+# (px, py) are device pixel coordinates; see gradient_dither_threshold.
 fn mix_channel_gradient_centered(a: i32, b: i32, pos: i32, span: i32, px: i32, py: i32) -> i32:
     if span <= 0:
         return a
-    if span == 1:
-        # 1-px tile: the ramp degenerates to the dithered midpoint of the two
-        # stops (pinned by paint_primitives coverage byte oracles).
-        val weighted = a + b
-        var base = weighted / 2
-        val rem = weighted - base * 2
-        if rem > 0 and rem * 16 > gradient_dither_threshold(px, py) * 2:
-            base = base + 1
-        return base
-    val denom = span - 1
-    val b_weight = pos
+    val denom = span * 2
+    val b_weight = pos * 2 + 1
     val weighted = a * (denom - b_weight) + b * b_weight
-    var base = weighted / denom
-    val rem = weighted - base * denom
-    if rem > 0 and rem * 16 > gradient_dither_threshold(px, py) * denom:
-        base = base + 1
-    base
+    val out = (weighted * 128 + (gradient_dither_threshold(px, py) * 2 + 1) * denom) / (denom * 128)
+    if out > 255:
+        return 255
+    out
 
 fn mix_color_vertical_centered(a: u32, b: u32, pos: i32, span: i32, px: i32, py: i32) -> u32:
     if span <= 0:
@@ -934,22 +906,27 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
     if linear_gradient_needs_general_raster(st):
         return fb_linear_gradient_general_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, tile_w, tile_h, max_x, max_y, image_base_x, image_base_y, image_clip)
     var py = 0
-    val small_no_repeat_gradient_tile = st.background_repeat == "no-repeat" and tile_w <= 64 and tile_h <= 64
     while py < max_y:
         val tile_py = py % tile_h
-        if small_no_repeat_gradient_tile:
-            var px = 0
-            while px < max_x:
-                val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, px, tile_py)
+        val dev_y = image_base_y + py
+        # Chrome dithers every device pixel. Within one row the dither level
+        # depends only on x & 7, so the row has at most 8 colours; equal
+        # neighbours are merged into one span.
+        var phase: [u32] = []
+        var k = 0
+        while k < 8:
+            phase.push(mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, image_base_x + k, dev_y))
+            k = k + 1
+        var run_x = 0
+        var px = 1
+        while px <= max_x:
+            if px == max_x or phase[px & 7] != phase[run_x & 7]:
+                val color = phase[run_x & 7]
                 val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
                 if opacity > 0:
-                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + px, 1, color | 0xFF000000u32, opacity, image_clip)
-                px = px + 1
-        else:
-            val color = mix_color_vertical_centered(st.background_gradient_from, st.background_gradient_to, tile_py, tile_h, 0, tile_py)
-            val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
-            if opacity > 0:
-                out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x, max_x, color | 0xFF000000u32, opacity, image_clip)
+                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, dev_y, image_base_x + run_x, px - run_x, color | 0xFF000000u32, opacity, image_clip)
+                run_x = px
+            px = px + 1
         py = py + 1
     out
 

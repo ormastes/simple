@@ -1,6 +1,6 @@
 # Phase-3 MIR shard aggregate failure with no per-shard diagnostic (2026-11-15)
 
-- status: open
+- status: verification-pending
 - severity: P1 (blocks phase-3 acceptance on Windows)
 - binary: C:/dev/wt/seed-stage-20261115/stage2.exe (has SIMPLE_NODE_ATTR, SIMPLE_UNIT_TLDR_ROOT)
 - host: Windows 11, 31 GB free commit at launch, --threads 16
@@ -42,3 +42,29 @@ host with at least 40 GB free commit.
 
 ## Node-attr sanity gate
 Inconclusive. Both lanes produced 0 objects, so OFF==ON cannot be judged from this run.
+
+## Root cause (2026-11-15, lane p3mir)
+The cause was visible all along, but only in stderr (`p3_off.log.err`), not in the log:
+```
+error: per-file worker pool refused (hir_workers=0 mir_workers=2, need >= 2): not enough free memory
+for 2 workers. Free memory=31112100 kB, per-worker budget=6815744 kB ...
+```
+- The emitter is `bootstrap_main.spl` `bootstrap_capsule_shard_prepass_routed`, not `native_build_main.spl:2396`.
+- `run_file_worker_pool_v1` refused before it spawned anything, because the HIR count was 0
+  (defect 2). The `"fail"` it returned was then printed as a bare aggregate failure.
+- No shard ever ran, so no `owner=` lines could exist.
+- Defect 3 is the parse-shard admission (`native_build_main.spl:789`). It priced workers via
+  `SIMPLE_PARSE_SHARD_WORKER_KB`, then host `worker_mem_mib`. It cost only parse parallelism.
+
+## Fix (work/p3-mir-shard-diag-20261115)
+1. The aggregate line now carries the reason, via `shard_aggregate_failure_line_v1` and
+   `native_build_shard_aggregate_fail_reason_v1`. The reason is the refusal text, or the pool's
+   exit/failed_modules/claims/blocked values plus a pointer to the per-owner lines.
+2. Parse price: `shard_parse_worker_budget_kb_for_v1`. The parse override wins. Otherwise the price is
+   host or default, capped by `SIMPLE_HIR_SHARD_WORKER_KB`.
+3. Memory-only refusal degrades to 1 serial worker (`file_worker_pool_serial_memory_admits_v1`) when raw
+   free memory is at least one worker estimate plus the 4 GiB coordinator. The pool still fails closed
+   on HIR opt-outs, serial requests, or not enough raw memory.
+
+Spec: `test/01_unit/app/cli/p3_shard_admission_diag_spec.spl`. It was RED 3/3 and is now GREEN 3/3.
+Workaround until stage2 is rebuilt: also set `SIMPLE_PARSE_SHARD_WORKER_KB`.

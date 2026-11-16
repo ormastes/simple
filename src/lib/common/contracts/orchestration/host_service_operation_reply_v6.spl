@@ -1,0 +1,131 @@
+# Pure reply schema and request correlation. Neither a matching DTO nor
+# pending=false is execution success, cleanup proof or native authority.
+use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOperationRequestV6,
+    host_service_operation_validate_v6, host_service_hex_shape_v6}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub const HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6: i64 = 1048576
+
+pub struct HostServiceOperationReplyV6:
+    action: text
+    service_incarnation: text
+    operation_id: text
+    scope_digest: text
+    request_digest: text
+    pending: bool
+    exit_code: i64
+    payload: text
+    error: text
+
+fn host_service_operation_reply_size_v6(reply: HostServiceOperationReplyV6) -> i64:
+    val keys = ["version", "kind", "action", "serviceIncarnation", "operationId", "scopeDigest",
+        "requestDigest", "pending", "exitCode", "payload", "error"]
+    # Braces + final LF, ': ' per field, ', ' between fields, integer version 6.
+    var total: i64 = 3 + 2 * 11 + 2 * 10 + 1
+    for key in keys: total = total + key.byte_len()
+    total = total + sdn_encoded_text_size_v1("host-operation-reply")
+    val exit_text = reply.exit_code.to_text()
+    total = total + (if reply.pending: 4 else: 5) + exit_text.byte_len()
+    for value in [reply.action, reply.service_incarnation, reply.operation_id, reply.scope_digest, reply.request_digest, reply.payload, reply.error]:
+        total = total + sdn_encoded_text_size_v1(value)
+    total
+
+pub fn host_service_operation_reply_validate_v6(reply: HostServiceOperationReplyV6) -> Result<bool, text>:
+    if not ["status", "validate", "prepare", "execute", "inspect", "progress", "cancel", "service-stop"].contains(reply.action):
+        return Err("host-operation-reply-action-unsupported")
+    if not host_service_hex_shape_v6(reply.service_incarnation, 32): return Err("host-operation-reply-incarnation-shape")
+    if reply.exit_code < 0 or reply.exit_code > 255: return Err("host-operation-reply-exit-code")
+    if reply.error != "" and reply.exit_code == 0: return Err("host-operation-reply-error-requires-failure")
+    if reply.pending and not ["execute", "inspect", "progress", "cancel"].contains(reply.action):
+        return Err("host-operation-reply-pending-action")
+    if reply.payload.byte_len() > HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6 or reply.error.byte_len() > HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6:
+        return Err("host-operation-reply-payload-size")
+    if reply.action == "status":
+        if reply.operation_id != "" or reply.scope_digest != "" or reply.request_digest != "":
+            return Err("host-operation-reply-status-fields")
+    elif reply.action == "service-stop":
+        if reply.operation_id != "" or reply.request_digest != "": return Err("host-operation-reply-service-stop-fields")
+        if not host_service_hex_shape_v6(reply.scope_digest, 64): return Err("host-operation-reply-scope-shape")
+    else:
+        if not builder_identifier_valid_v1(reply.operation_id): return Err("host-operation-reply-id-invalid")
+        if not host_service_hex_shape_v6(reply.scope_digest, 64): return Err("host-operation-reply-scope-shape")
+        if not host_service_hex_shape_v6(reply.request_digest, 64): return Err("host-operation-reply-request-digest-shape")
+    if host_service_operation_reply_size_v6(reply) > HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6:
+        return Err("host-operation-reply-encoded-size")
+    Ok(true)
+
+pub fn host_service_operation_reply_encode_v6(reply: HostServiceOperationReplyV6) -> Result<text, text>:
+    val valid = host_service_operation_reply_validate_v6(reply)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(6), "kind": SdnValue.String("host-operation-reply"),
+        "action": SdnValue.String(reply.action), "serviceIncarnation": SdnValue.String(reply.service_incarnation),
+        "operationId": SdnValue.String(reply.operation_id), "scopeDigest": SdnValue.String(reply.scope_digest),
+        "requestDigest": SdnValue.String(reply.request_digest), "pending": SdnValue.Bool(reply.pending),
+        "exitCode": SdnValue.Int(reply.exit_code), "payload": SdnValue.String(reply.payload), "error": SdnValue.String(reply.error)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.byte_len() > HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6: return Err("host-operation-reply-encoded-size")
+    Ok(source)
+
+fn host_service_operation_reply_text_v6(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("host-operation-reply-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-operation-reply-field-type:" + key)
+
+fn host_service_operation_reply_bool_v6(fields: Dict<text, SdnValue>, key: text) -> Result<bool, text>:
+    if not fields.contains_key(key): return Err("host-operation-reply-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("host-operation-reply-field-type:" + key)
+
+fn host_service_operation_reply_int_v6(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("host-operation-reply-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-operation-reply-field-type:" + key)
+
+pub fn host_service_operation_reply_decode_v6(source: text) -> Result<HostServiceOperationReplyV6, text>:
+    if source.byte_len() < 1 or source.byte_len() > HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6:
+        return Err("host-operation-reply-source-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6,
+        max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 11)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("host-operation-reply-sdn:" + issue.code)
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-operation-reply-object-required")
+    val known = ["version", "kind", "action", "serviceIncarnation", "operationId", "scopeDigest",
+        "requestDigest", "pending", "exitCode", "payload", "error"]
+    if fields.len() != 11: return Err("host-operation-reply-field-count")
+    for key in fields.keys():
+        if not known.contains(key): return Err("host-operation-reply-field-unknown:" + key)
+    if host_service_operation_reply_int_v6(fields, "version")? != 6: return Err("host-operation-reply-version")
+    if host_service_operation_reply_text_v6(fields, "kind")? != "host-operation-reply": return Err("host-operation-reply-kind")
+    val reply = HostServiceOperationReplyV6(action: host_service_operation_reply_text_v6(fields, "action")?,
+        service_incarnation: host_service_operation_reply_text_v6(fields, "serviceIncarnation")?,
+        operation_id: host_service_operation_reply_text_v6(fields, "operationId")?, scope_digest: host_service_operation_reply_text_v6(fields, "scopeDigest")?,
+        request_digest: host_service_operation_reply_text_v6(fields, "requestDigest")?, pending: host_service_operation_reply_bool_v6(fields, "pending")?,
+        exit_code: host_service_operation_reply_int_v6(fields, "exitCode")?, payload: host_service_operation_reply_text_v6(fields, "payload")?,
+        error: host_service_operation_reply_text_v6(fields, "error")?)
+    if host_service_operation_reply_encode_v6(reply)? != source: return Err("host-operation-reply-noncanonical")
+    Ok(reply)
+
+pub fn host_service_operation_reply_match_v6(reply: HostServiceOperationReplyV6,
+        request: HostServiceOperationRequestV6) -> Result<bool, text>:
+    val valid_reply = host_service_operation_reply_validate_v6(reply)?
+    val valid_request = host_service_operation_validate_v6(request)?
+    if (reply.action != request.action or reply.service_incarnation != request.service_incarnation or
+            reply.operation_id != request.operation_id or reply.scope_digest != request.scope_digest or
+            reply.request_digest != request.request_digest):
+        return Err("host-operation-reply-request-mismatch")
+    # Matching identities do not promote nonzero/error/pending results or
+    # validate an opaque typed Host-status payload. Consumers own those gates.
+    Ok(true)
+
+export HostServiceOperationReplyV6, HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6
+export host_service_operation_reply_validate_v6, host_service_operation_reply_encode_v6
+export host_service_operation_reply_decode_v6, host_service_operation_reply_match_v6

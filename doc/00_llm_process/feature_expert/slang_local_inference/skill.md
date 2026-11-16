@@ -27,6 +27,7 @@ when it drives cuBLAS/FlashAttention rather than writing GEMMs.
 Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
 `src/app/llm_caret/provider.spl`; model root config in `config.spl`
 (`SLANG_MODEL_ROOT`).
+`slang_local` sends the conversation as chat frames (`slang_generate_chat`, the model's own chat template, stops at its end-of-turn token); the old raw transcript made the model role-play "Assistant:" turns to the token cap. Admission overhead is `estimate_runtime_overhead_bytes(model_bytes, ENGINE_N_CTX)` (`memory_budget.spl`; KV = n_ctx * clamp(model_bytes/32768, 16..512 KiB) + 512 MiB), ~0.6 GiB for a 1.5B Q4 model at 4096 ctx.
 
 ## Things that will bite you
 
@@ -98,6 +99,10 @@ backend does — that is what the seam is for.
 
 ### Operational traps confirmed today
 
+- **Gate signals**: `check-slang-ggml-inference.shs` runs each model in the
+  background and `wait`s, so HUP/INT/TERM exit 129/130/143 at once, kill the
+  model run and remove the work dir (a foreground child deferred the trap and
+  orphaned the run; verified TERM -> 143, no child left, 2026-11-15).
 - **Shim symbol drift**: `backend.spl` at origin/main dlsyms 17 symbols
   including `slang_ggml_capabilities`; a shim built from older source exports
   14 and the TUI dies with `spl_dlsym: unresolved symbol`. Rebuild with
@@ -225,7 +230,7 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
 - Layering: pure runner -> GPU API -> ROCm. Backend: `src/lib/gc_async_mut/gpu/rocm/hip_compute.spl` (HIP + hipRTC via `spl_dlopen`/`spl_wffi_call_i64`; launch through `hipDrvLaunchKernelEx`, 4 int args, so no wide C shim). Ops: `pure/tensor_ops_rocm.spl` (device-resident f32 `RocmTensor`; matvec, rmsnorm, add, mul, silu, attention; all `Result<_, text>`). Weights upload once; CPU `tensor_ops.spl` is untouched.
 - Specs: `test/01_unit/lib/gc_async_mut/slang/model_executor/pure/tensor_ops_rocm_spec.spl`, `test/03_system/lib/slang/feature/slang_pure_rocm_ops_spec.spl` (skip with reason when `C:\Program Files\AMD\ROCm\7.2\bin` DLLs are absent).
 - Weights go to the device as raw F32 bytes (`rocm_tensor_upload_f32_bytes`, ranges from `pure_weights_f32_ranges`): the 32000x288 head uploads in ~23 ms (was ~330 s with per-element f64->f32 staging). Downloads are bulk bytes but decoded per element in the seed interpreter (~2 s for 32000 values), so keep reductions such as argmax on device. `hip_compute.spl` declares no `rt_*` externs (libc malloc/memcpy via `spl_wffi_*`, reads via `sffi.raw_bytes`). `SLANG_ROCM_BIN` overrides the ROCm bin dir.
-- **Windows memory probe.** `mem_available_bytes()` uses `Win32_PerfFormattedData_PerfOS_Memory.AvailableBytes` (free+standby), not `FreePhysicalMemory`, which collapses after reading big model files and falsely refuses loads (`doc/08_tracking/bug/slang_windows_mem_available_uses_free_not_available_2026-11-15.md`). Runtime overhead in admission is a flat 6 GiB (`llm_engine.spl:219`).
+- **Windows memory probe.** `mem_available_bytes()` uses `Win32_PerfFormattedData_PerfOS_Memory.AvailableBytes` (free+standby), not `FreePhysicalMemory`, which collapses after reading big model files and falsely refuses loads (`doc/08_tracking/bug/slang_windows_mem_available_uses_free_not_available_2026-11-15.md`). Runtime overhead in admission scales with n_ctx and model size (`estimate_runtime_overhead_bytes`).
 ## Multimodal input (image / audio / video; in progress, 2026-11-15)
 
 - **Protocol (done):** `protocol.chat_messages_parse` keeps typed `ChatPart`s
@@ -246,8 +251,7 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   mm_eval_prompt (clears KV; never touches the prefix cache). Engine loads the
   projector after the context; `engine_media_caps()` is what actually works.
   Media decode is C-side (stb_image/miniaudio); pure-Simple decoders are not wired.
-- **Memory gate trap:** `_runtime_overhead_bytes` is a flat 6 GiB, so a 0.3 GB
-  VLM needs 10 GiB free and is refused on a busy shared host with
-  `model_not_runnable` (503) — see the live spec's `mm_answers.txt` record.
+- **Memory gate:** overhead is `estimate_runtime_overhead_bytes` (n_ctx- and model-scaled, no GGUF parse), so a small model at small context no longer needs ~10 GiB free; the per-token constant is an admission-only upper bound, not exact KV size.
 - **Runner trap:** `skip(...)` inside an example is counted as PASSED
   (`skipped=0`); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.
+- **Live spec timeout knob:** `SLANG_RUN_TIMEOUT_MS` (default 600000) bounds each child in `caret_slang_local_hello_system_spec.spl`; the 3-model gate (`check-slang-ggml-inference.shs`, 9 dirs) took 34m50s on a loaded Windows host, so set e.g. 3300000 with `SIMPLE_TIMEOUT_SECONDS=3600`.
