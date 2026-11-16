@@ -120,3 +120,16 @@ kept out of them until fixed.
     - **Overflowing button label:** `type=submit/button/reset` still centres. Chrome 159 start-aligns it (ink from x=3) and clips at the border box.
     - **Dead helper:** `input_text_prefix` has no `src` caller left. Two specs (`non_ascii_byte_index_helpers_spec`, the paint_layout coverage-closure spec) still test it, so removing it is left to the owner.
 - Open (2026-11-16), "uses generated widget chrome text only when non-empty text sits under a widget ancestor": `widget_mode` comes from `simple_web_layout_uses_legacy_widget_chrome(html)`, and only the raster `paint` draws the legacy chrome (panel F5F5F5, button fill, generated chrome text glyphs). Whether legacy widget chrome should exist on the Draw IR pixel path at all is an owner decision; it was not ported.
+
+## 2026-11-16 — coverage lane: divergences pinned red (not skipped)
+
+These rows come from `layout_core_block_flex_chrome159_spec.spl` and
+`input_text_overlay_plan_contract_spec.spl`. `layout_core.spl` is reached
+only through the older `layout.spl` engine, not the main HTML layout renderer.
+
+| id | where | Chrome 159 | engine |
+|----|-------|-----------|--------|
+| `lc_width_border_box` | `_layout_block_be` | `width:100px` + padding/border gives a 120px border box | 100px (treats `width` as the border box) |
+| `lc_margin_collapse` | `_layout_block_be` | adjacent sibling margins collapse: second box at y=35 | added: y=45 |
+| `lc_border_content_w` | `_layout_block_be` | 300px parent with a 5px border keeps a 300px content width | 290px |
+| `overlay_nonboundary_focus` | `input_text_paint_plan_with_overlay` | (contract) one rule for scroll and caret | a non-char-boundary focus byte scrolls as if at the end but puts the caret at the start (x=2, not 17) |

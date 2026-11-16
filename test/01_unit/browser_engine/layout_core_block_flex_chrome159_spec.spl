@@ -1,0 +1,237 @@
+"""
+## Purpose and audience
+Purpose: Cover `layout_core.spl`'s block and flex layout entry points
+(`layout_node`, `_layout_block_be`, `layout_flex`, `flex_shift_boxes_x`,
+`flex_distribute_x`) with geometry pinned to Chrome 159. Before this spec the
+module measured 22.2% line coverage (18/81) in the 2026-11-14 sweep
+(doc/10_metrics/gpu/render_coverage_2026-11-14.md): no spec reached the block
+or flex paths at all.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless --no-sandbox
+--window-size=900,2000 --dump-dom`, 2026-11-16). Page: `html,body` margin 0,
+every parent `width:300px; margin:0`; child geometry is
+`getBoundingClientRect()` relative to the parent, written into `<pre id=o>`:
+
+| case | child style(s) | Chrome child x,y,w,h | Chrome parent h |
+|------|----------------|----------------------|-----------------|
+| a | `margin-left:10px;margin-right:20px;height:30px` | 10,0,270,30 | 30 |
+| b | `width:100px;padding:10px;height:20px` | 0,0,120,40 | 40 |
+| c | `height:50px;padding:5px` | 0,0,300,60 | 60 |
+| d | `height:20px;margin-bottom:10px` + `height:30px;margin-top:15px` | d2 at y=35 | 65 |
+| e | `height:20px` + `height:30px` | e2 at y=20 | 50 |
+| f | `height:20px` + `display:none;height:99px` + `height:30px` | f3 at y=20 | 50 |
+| g | parent `display:flex`; `50x20` + `70x40` | g2 at 50,0 | 40 |
+| h | parent `display:flex;flex-direction:column`; `50x20` + `70x40` | h2 at 0,20 | 60 |
+| i | `justify-content:space-between`, three `flex:none` 50px items | x = 0,125,250 | - |
+| j | `column-gap:10px`, three `flex:none` 50px items | x = 0,60,120 | - |
+| k | `justify-content:flex-end`, three `flex:none` 50px items | x = 150,200,250 | - |
+| border | parent `border:5px solid`; child `height:20px` | 5,5,300,20 | 30 (border box 310 wide) |
+| none-root | parent `width:300px;display:none` with a `height:20px` child | no box | 0 (0x0 rect) |
+| flex-height | parent `display:flex;height:100px`; child `50x20` | 0,0,50,20 | 100 |
+
+Known divergences, kept at the Chrome value and left RED (not skipped):
+- case b: `width` is a content-box width in CSS (`box-sizing:content-box`
+  default), so the child is 120px wide; `_layout_block_be` uses `style.width`
+  as the border-box width (100).
+- case d: adjoining sibling margins collapse (CSS 2.1 §8.3.1) to
+  max(10,15)=15; `_layout_block_be` adds them (10+15=25, d2 at y=45).
+- border: a 300px content-box parent with a 5px border has a 300px content
+  width; `_layout_block_be` subtracts the border from `style.width` (290).
+"""
+
+"""
+Traceability: REQ-SSPEC-BROWSER_ENGINE — block and flex box geometry matches Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout_core.spl 79%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
+use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox}
+use std.gc_async_mut.gpu.browser_engine.layout_core.{layout_node, layout_flex, flex_shift_boxes_x, flex_distribute_x}
+use std.gc_async_mut.gpu.browser_engine.layout_float.{FloatContext}
+
+fn _root() -> BeLayoutBox:
+    BeLayoutBox.block_for(BeDomNode.element("div"), 0.0, 0.0, 900.0, 2000.0)
+
+fn _parent() -> BeDomNode:
+    var p = BeDomNode.element("div")
+    p.set_style("width", "300px")
+    p
+
+fn _child(height: text) -> BeDomNode:
+    var c = BeDomNode.element("div")
+    c.set_style("height", height)
+    c
+
+fn _sized(width: text, height: text) -> BeDomNode:
+    var c = BeDomNode.element("div")
+    c.set_style("width", width)
+    c.set_style("height", height)
+    c
+
+fn _lay(parent: BeDomNode) -> BeLayoutBox:
+    layout_node(parent, _root(), be_default_style(), FloatContext.create())
+
+fn _row(xs: [f64]) -> [BeLayoutBox]:
+    var boxes: [BeLayoutBox] = []
+    for x in xs:
+        boxes.push(BeLayoutBox.block_for(BeDomNode.element("div"), x, 0.0, 50.0, 10.0))
+    boxes
+
+describe "layout_core block formatting context (Chrome 159)":
+    it "case a: an auto-width block fills the container minus its horizontal margins":
+        var p = _parent()
+        var a = _child("30px")
+        a.set_style("margin-left", "10px")
+        a.set_style("margin-right", "20px")
+        p.add_child(a)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(10.0)
+        expect(box_.children[0].y).to_equal(0.0)
+        expect(box_.children[0].width).to_equal(270.0)
+        expect(box_.children[0].height).to_equal(30.0)
+        expect(box_.height).to_equal(30.0)
+
+    it "case b: width is a content-box width, so padding widens the box to 120px":
+        # RED: _layout_block_be treats style.width as the border-box width (100).
+        var p = _parent()
+        var b = _sized("100px", "20px")
+        b.style.padding_top = 10.0
+        b.style.padding_right = 10.0
+        b.style.padding_bottom = 10.0
+        b.style.padding_left = 10.0
+        p.add_child(b)
+        val box_ = _lay(p)
+        expect(box_.children[0].height).to_equal(40.0)
+        expect(box_.children[0].width).to_equal(120.0)
+
+    it "case c: an explicit height is the content height, padding adds to the border box":
+        var p = _parent()
+        var c = _child("50px")
+        c.style.padding_top = 5.0
+        c.style.padding_right = 5.0
+        c.style.padding_bottom = 5.0
+        c.style.padding_left = 5.0
+        p.add_child(c)
+        val box_ = _lay(p)
+        expect(box_.children[0].width).to_equal(300.0)
+        expect(box_.children[0].height).to_equal(60.0)
+        expect(box_.height).to_equal(60.0)
+
+    it "case d: adjoining sibling margins collapse to the larger margin":
+        # RED: _layout_block_be adds the margins (d2 at y=45, parent 75).
+        var p = _parent()
+        var d1 = _child("20px")
+        d1.set_style("margin-bottom", "10px")
+        var d2 = _child("30px")
+        d2.set_style("margin-top", "15px")
+        p.add_child(d1)
+        p.add_child(d2)
+        val box_ = _lay(p)
+        expect(box_.children[1].y).to_equal(35.0)
+        expect(box_.height).to_equal(65.0)
+
+    it "case e: block children stack and the auto-height parent wraps them":
+        var p = _parent()
+        p.add_child(_child("20px"))
+        p.add_child(_child("30px"))
+        val box_ = _lay(p)
+        expect(box_.children.len()).to_equal(2)
+        expect(box_.children[0].y).to_equal(0.0)
+        expect(box_.children[1].y).to_equal(20.0)
+        expect(box_.children[1].width).to_equal(300.0)
+        expect(box_.height).to_equal(50.0)
+
+    it "case f: a display:none child generates no box and takes no space":
+        var p = _parent()
+        p.add_child(_child("20px"))
+        var hidden = _child("99px")
+        hidden.set_style("display", "none")
+        p.add_child(hidden)
+        p.add_child(_child("30px"))
+        val box_ = _lay(p)
+        expect(box_.children.len()).to_equal(2)
+        expect(box_.children[1].y).to_equal(20.0)
+        expect(box_.height).to_equal(50.0)
+
+    it "a display:none root lays out as an empty box":
+        var p = _parent()
+        p.set_style("display", "none")
+        p.add_child(_child("20px"))
+        val box_ = _lay(p)
+        expect(box_.width).to_equal(0.0)
+        expect(box_.height).to_equal(0.0)
+
+    it "border: a bordered parent offsets its child by the border width":
+        var p = _parent()
+        p.style.border_width = 5.0
+        p.add_child(_child("20px"))
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(5.0)
+        expect(box_.children[0].y).to_equal(5.0)
+        expect(box_.height).to_equal(30.0)
+
+    it "border: the bordered parent keeps its full 300px content width":
+        # RED: _layout_block_be subtracts the border from style.width (290).
+        var p = _parent()
+        p.style.border_width = 5.0
+        p.add_child(_child("20px"))
+        val box_ = _lay(p)
+        expect(box_.children[0].width).to_equal(300.0)
+        expect(box_.width).to_equal(310.0)
+
+describe "layout_core flex containers (Chrome 159)":
+    it "case g: a row flex container places items side by side and is as tall as the tallest":
+        var p = _parent()
+        p.set_style("display", "flex")
+        p.add_child(_sized("50px", "20px"))
+        p.add_child(_sized("70px", "40px"))
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(0.0)
+        expect(box_.children[0].y).to_equal(0.0)
+        expect(box_.children[1].x).to_equal(50.0)
+        expect(box_.children[1].y).to_equal(0.0)
+        expect(box_.children[1].width).to_equal(70.0)
+        expect(box_.height).to_equal(40.0)
+
+    it "case h: a column flex container stacks items like blocks":
+        var p = _parent()
+        p.set_style("display", "flex")
+        p.set_style("flex-direction", "column")
+        p.add_child(_sized("50px", "20px"))
+        p.add_child(_sized("70px", "40px"))
+        val box_ = _lay(p)
+        expect(box_.children[1].x).to_equal(0.0)
+        expect(box_.children[1].y).to_equal(20.0)
+        expect(box_.height).to_equal(60.0)
+
+    it "layout_flex called directly with an explicit height keeps that height":
+        var p = _parent()
+        p.set_style("display", "flex")
+        p.set_style("height", "100px")
+        p.add_child(_sized("50px", "20px"))
+        val box_ = layout_flex(p, _root(), p.style, FloatContext.create())
+        expect(box_.height).to_equal(100.0)
+        expect(box_.children[0].x).to_equal(0.0)
+
+    it "case i: flex_distribute_x spreads space-between free space (150px over 2 gaps)":
+        val boxes = _row([0.0, 50.0, 100.0])
+        flex_distribute_x(boxes, 0.0, 75.0, 0.0)
+        expect(boxes[0].x).to_equal(0.0)
+        expect(boxes[1].x).to_equal(125.0)
+        expect(boxes[2].x).to_equal(250.0)
+
+    it "case j: flex_distribute_x applies a 10px column gap":
+        val boxes = _row([0.0, 50.0, 100.0])
+        flex_distribute_x(boxes, 0.0, 0.0, 10.0)
+        expect(boxes[0].x).to_equal(0.0)
+        expect(boxes[1].x).to_equal(60.0)
+        expect(boxes[2].x).to_equal(120.0)
+
+    it "case k: flex_shift_boxes_x moves a packed row to flex-end (150px free space)":
+        val boxes = _row([0.0, 50.0, 100.0])
+        flex_shift_boxes_x(boxes, 150.0)
+        expect(boxes[0].x).to_equal(150.0)
+        expect(boxes[1].x).to_equal(200.0)
+        expect(boxes[2].x).to_equal(250.0)
