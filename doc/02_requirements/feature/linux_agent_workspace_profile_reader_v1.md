@@ -1,0 +1,5 @@
+# Fixed agent workspace profile reader v1
+
+Selected additive source scope: REQ-LINUX-AGENT-WORKSPACE-PROFILE-001. LinuxMachinePolicyOwnerV1.read_agent_workspace_profile_v1() returns Result<text,text> for only /etc/simple/container/agent-workspace-profile.sdn, using the existing retained strict fixed-child mechanism and rejecting invalid UTF8. There is no caller name/root, privilege change, writer or admission constructor. Existing current process, root ownership/mode, ancestry, pinned-byte and canonical close guarantees continue to apply.
+
+Evidence: actual linux_agent_workspace_profile_reader_v1_spec.spl plus separately provisioned invalid-UTF8 linux_agent_workspace_profile_utf8_v1_spec.spl and corresponding manuals. Both are AUTHORED_NOT_RUN; unsafe provenance/UTF8/replacement/fork/close fault reproduction remains NOT_COVERED until genuine disposable-host qualification. This is new functionality, not a reopened exhausted workload/native repair campaign. Prior identity/workload counts remain unchanged. No runtime exports, root provisioning, native tests or staging effects are performed.
