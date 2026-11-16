@@ -1,11 +1,14 @@
+# codex-system-test
 # @req DAE-01 DAE-03
-# Real journal/response-publication integration. NOT_RUN pending admitted runtime.
-use std.spec.{describe, it, expect, fail}
+# @acceptance AT-DAE-01 AT-DAE-03
+# AUTHORED_NOT_RUN: real local journal plus injected delivery callbacks.
+# Partial AT-DAE-01 only: no native effect, process crash, or power-loss proof.
+use std.spec.{describe, it, expect, fail, step}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.task_runner.distributed_operation_journal_v2.*
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.*
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_read}
-use std.nogc_sync_mut.io_runtime.{dir_remove, file_delete}
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_delete, file_exists}
 use std.common.crypto.sha256.sha256_text
 
 fn request_fixture() -> OperationEnvelopeV2:
@@ -16,11 +19,13 @@ fn request_fixture() -> OperationEnvelopeV2:
         memory_bytes: 1024, duration_ms: 1000)
 
 fn new_owner() -> DistributedOperationJournalV2:
+    step("Open the isolated real operation journal")
     val root = secure_temp_dir("build", "daemon-operation-v2").unwrap()
     distributed_operation_journal_open_v2(root, "c".repeat(64), "d".repeat(64), 32).unwrap()
 
 fn terminal_owner() -> DistributedOperationJournalV2:
     val original = new_owner()
+    step("Admit the exact operation and publish its execution intent")
     val admitted = daemon_operation_admit_v2(original, request_fixture()).unwrap()
     val executing = daemon_operation_begin_v2(admitted.journal, request_fixture()).unwrap()
     val bytes = "status: completed\nresult: retained\n"
@@ -28,7 +33,15 @@ fn terminal_owner() -> DistributedOperationJournalV2:
     daemon_operation_record_outcome_v2(executing, request_fixture(), "completed", sha256_text(bytes)).unwrap()
 
 fn cleanup(owner: DistributedOperationJournalV2):
-    expect(distributed_operation_journal_close_v2(owner).unwrap()).to_equal(true)
+    step("Close only the exact fixture journal")
+    match distributed_operation_journal_close_v2(owner):
+        case Err(reason):
+            fail("fixture journal close failed: " + reason)
+            return
+        case Ok(closed):
+            if not closed:
+                fail("fixture journal close did not confirm release")
+                return
     expect(dir_remove(owner.root, true)).to_equal(true)
 
 fn forbidden_publish(id: text, bytes: text) -> bool:
@@ -46,7 +59,8 @@ fn reject_acknowledge(id: text) -> bool:
     false
 
 describe "shared daemon operations retain outcomes across response failure":
-    it "admits once and rejects changed payload for the same identity":
+    it "should admit once and reject changed payload for the same identity":
+        step("Admit one immutable request and compare duplicate and changed payloads")
         val original = new_owner()
         val first = daemon_operation_admit_v2(original, request_fixture()).unwrap()
         expect(first.disposition).to_equal("NEWLY_ADMITTED")
@@ -60,7 +74,8 @@ describe "shared daemon operations retain outcomes across response failure":
             case Err(reason): expect(reason).to_equal("OPERATION_PAYLOAD_MISMATCH")
         cleanup(first.journal)
 
-    it "does not skip execution intent or execute twice":
+    it "should require execution intent and refuse a second begin":
+        step("Admit the exact operation and publish its execution intent")
         val original = new_owner()
         val admitted = daemon_operation_admit_v2(original, request_fixture()).unwrap()
         expect(daemon_operation_record_outcome_v2(admitted.journal, request_fixture(), "completed", "f".repeat(64)).is_err()).to_equal(true)
@@ -71,18 +86,23 @@ describe "shared daemon operations retain outcomes across response failure":
         expect(daemon_operation_begin_v2(admitted.journal, request_fixture()).is_err()).to_equal(true)
         cleanup(executing)
 
-    it "never acknowledges a request when response publication fails":
+    it "should retain the request when response publication fails":
+        step("Observe retained state after response or acknowledgement failure")
         val owner = terminal_owner()
         val outcome = file_read(owner.root + "/outcome.sdn")
+        expect(file_atomic_write(owner.root + "/request", "operation_1")).to_equal(true)
         match daemon_operation_publish_v2(owner, request_fixture(), outcome, reject_publish, forbidden_acknowledge):
             case Ok(_): fail("failed publication reported success")
             case Err(reason): expect(reason).to_equal("RESPONSE_PUBLICATION_FAILED")
         val retained = distributed_operation_journal_lookup_v2(owner, "operation_1").unwrap()
         expect(retained.state).to_equal("completed")
         expect(retained.outcome_digest).to_equal(sha256_text(outcome))
+        expect(file_read(owner.root + "/request")).to_equal("operation_1")
+        expect(file_exists(owner.root + "/response.sdn")).to_equal(false)
         cleanup(owner)
 
-    it "reopens and publishes the retained outcome without another execution":
+    it "should reopen and publish the retained outcome without another execution":
+        step("Reopen the same journal and reject another execution")
         val owner = terminal_owner()
         val root = owner.root
         val outcome = file_read(root + "/outcome.sdn")
@@ -98,23 +118,28 @@ describe "shared daemon operations retain outcomes across response failure":
             \id: file_delete(root + "/request")).unwrap()
         expect(published).to_equal(true)
         expect(file_read(root + "/response.sdn")).to_equal(outcome)
+        expect(file_exists(root + "/request")).to_equal(false)
         expect(daemon_operation_begin_v2(reopened, request_fixture()).is_err()).to_equal(true)
         cleanup(reopened)
 
-    it "retains the outcome when acknowledgement fails after response publication":
+    it "should retain the request and outcome after acknowledgement failure":
+        step("Observe retained state after response or acknowledgement failure")
         val owner = terminal_owner()
         val root = owner.root
         val outcome = file_read(root + "/outcome.sdn")
+        expect(file_atomic_write(root + "/request", "operation_1")).to_equal(true)
         match daemon_operation_publish_v2(owner, request_fixture(), outcome,
                 \id, bytes: file_atomic_write(root + "/response.sdn", bytes), reject_acknowledge):
             case Ok(_): fail("failed acknowledgement reported success")
             case Err(reason): expect(reason).to_equal("REQUEST_ACKNOWLEDGEMENT_FAILED")
         expect(file_read(root + "/response.sdn")).to_equal(outcome)
+        expect(file_read(root + "/request")).to_equal("operation_1")
         val duplicate = daemon_operation_admit_v2(owner, request_fixture()).unwrap()
         expect(duplicate.disposition).to_equal("RETAINED_OUTCOME")
         cleanup(owner)
 
-    it "does not disclose outcome bytes with a mismatched digest or request":
+    it "should reject mismatched bytes or requests before disclosure":
+        step("Reject mismatched bytes and identity before either callback")
         val owner = terminal_owner()
         match daemon_operation_publish_v2(owner, request_fixture(), "changed", forbidden_publish, forbidden_acknowledge):
             case Ok(_): fail("changed outcome published")
@@ -127,7 +152,8 @@ describe "shared daemon operations retain outcomes across response failure":
             case Err(reason): expect(reason).to_equal("OPERATION_PAYLOAD_MISMATCH")
         cleanup(owner)
 
-    it "rejects publication for nonterminal operations and changed terminal outcomes":
+    it "should reject nonterminal publication and changed terminal outcomes":
+        step("Reject early publication and preserve the original terminal result")
         val original = new_owner()
         val admitted = daemon_operation_admit_v2(original, request_fixture()).unwrap()
         match daemon_operation_publish_v2(admitted.journal, request_fixture(), "", forbidden_publish, forbidden_acknowledge):
@@ -143,7 +169,8 @@ describe "shared daemon operations retain outcomes across response failure":
         expect(daemon_operation_record_outcome_v2(owner, request_fixture(), "completed", "f".repeat(64)).is_err()).to_equal(true)
         cleanup(owner)
 
-    it "preserves outcome-unknown after owner recovery and refuses a new begin":
+    it "should preserve outcome-unknown after recovery and refuse a new begin":
+        step("Reopen the same journal and reject another execution")
         val original = new_owner()
         val admitted = daemon_operation_admit_v2(original, request_fixture()).unwrap()
         val executing = daemon_operation_begin_v2(admitted.journal, request_fixture()).unwrap()
