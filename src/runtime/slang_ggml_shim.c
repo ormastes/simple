@@ -75,6 +75,13 @@ static pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
 #define SLANG_PHYSICAL_PAGE_ABI_V1 1
 #define SLANG_CAP_PHYSICAL_PAGED_KV 32
 #define SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS 64
+/* Bit 128: the mtmd group at the end of this file; set only when built with
+ * -DSLANG_WITH_MTMD, so a text-only build never advertises it. */
+#ifdef SLANG_WITH_MTMD
+#  define SLANG_CAP_MTMD 128
+#else
+#  define SLANG_CAP_MTMD 0
+#endif
 
 /* Error codes. Negative so a caller can test `< 0` without a sentinel table. */
 #define SLANG_ERR_NO_MODEL     (-1)
@@ -487,6 +494,11 @@ static int64_t slang_model_load_locked(int64_t n_gpu_layers) {
     return 0;
 }
 
+/* Offload evidence: 1 when this llama.cpp build can place layers on a GPU
+ * device, and 1 when the resident model was loaded with layers requested there. */
+int64_t slang_ggml_gpu_offload_supported(void) { return llama_supports_gpu_offload() ? 1 : 0; }
+int64_t slang_ggml_model_offloaded(void) { return g_model_offloaded ? 1 : 0; }
+
 int64_t slang_ggml_model_load(int64_t n_gpu_layers) {
     SLANG_LOCK();
     int64_t result = slang_model_load_locked(n_gpu_layers);
@@ -611,7 +623,7 @@ int64_t slang_ggml_ctx_create(int64_t n_ctx) {
  * advertised only when this shim was compiled against the complete external
  * paged-request API. */
 int64_t slang_ggml_capabilities(void) {
-    return 1 | 2 | 4 | 8 | 16 |
+    return 1 | 2 | 4 | 8 | 16 | SLANG_CAP_MTMD |
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
         SLANG_CAP_PHYSICAL_PAGED_KV | SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS;
 #else
@@ -1105,11 +1117,25 @@ int64_t slang_ggml_request_eval_prompt(int64_t handle) {
         return SLANG_ERR_DECODE;
     }
     if (suffix_len > 0) {
+        /* The last prompt token is always decoded alone, on the cold path and
+         * the prefix-hit path alike, so its logits come from one batch shape
+         * (doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md).
+         * Skipped while the first-micro-batch workaround needs a full batch. */
+        int64_t head = suffix_len > 1 && slang_request_first_ubatch(request) == 0
+                           ? suffix_len - 1 : suffix_len;
         struct llama_batch batch = llama_batch_get_one(
-            request->tok + request->eval_start, (int32_t)suffix_len);
+            request->tok + request->eval_start, (int32_t)head);
         if (llama_decode(request->ctx, batch) != 0) {
             slang_request_release_lease(request);
             return SLANG_ERR_DECODE;
+        }
+        if (head < suffix_len) {
+            struct llama_batch last = llama_batch_get_one(
+                request->tok + request->tok_len - 1, 1);
+            if (llama_decode(request->ctx, last) != 0) {
+                slang_request_release_lease(request);
+                return SLANG_ERR_DECODE;
+            }
         }
         if (suffix_len >= (int64_t)llama_n_ubatch(request->ctx)) request->warm = 1;
     }
@@ -1601,3 +1627,233 @@ int64_t slang_ggml_page_bytes(int64_t pool_handle) {
     return pool == NULL ? SLANG_ERR_INVALID : pool->page_bytes;
 }
 #endif
+
+/* ===== mtmd group =====
+ * Multimodal input (image / audio) through llama.cpp's libmtmd. Everything
+ * below is compiled only with -DSLANG_WITH_MTMD, so the default build without
+ * libmtmd is unchanged. int64-only ABI; media bytes arrive through
+ * spl_wffi_call_i64_with_bytes as (ptr, len) and are decoded here before the
+ * call returns, so no pointer outlives it. The shim never opens a host file.
+ *
+ * Decoding is the encoded-bytes boundary (stb_image / miniaudio inside
+ * libmtmd), reached only after a magic-byte sniff admits the container. Video
+ * containers are refused by the sniff, so the helper's ffmpeg/ffprobe
+ * subprocess path is unreachable from client bytes.
+ *
+ * A media request bypasses the prefix cache entirely: it never calls
+ * slang_request_prefix_prepare_locked or slang_prefix_admit, and clears its KV
+ * before the multimodal prefill. */
+#ifdef SLANG_WITH_MTMD
+#include "mtmd.h"
+#include "mtmd-helper.h"
+
+#define SLANG_MM_MAX_BITMAPS 16
+#define SLANG_MM_MAX_BYTES ((int64_t)256 * 1024 * 1024)
+#define SLANG_ERR_MM_MARKERS   (-12)
+#define SLANG_ERR_MM_PREPROC   (-13)
+#define SLANG_ERR_MM_FORMAT    (-14)
+
+/* mtmd_helper_eval_chunks is NOT thread-safe on the shared mtmd_context, and the
+ * context's encoder state is shared by every request: this lock is the one
+ * documented exception to lockless-by-default, held only around the encode and
+ * decode of a media prefill. */
+#if defined(_WIN32)
+static SRWLOCK g_mm_lock = SRWLOCK_INIT;
+#  define SLANG_MM_LOCK()   AcquireSRWLockExclusive(&g_mm_lock)
+#  define SLANG_MM_UNLOCK() ReleaseSRWLockExclusive(&g_mm_lock)
+#else
+static pthread_mutex_t g_mm_lock = PTHREAD_MUTEX_INITIALIZER;
+#  define SLANG_MM_LOCK()   pthread_mutex_lock(&g_mm_lock)
+#  define SLANG_MM_UNLOCK() pthread_mutex_unlock(&g_mm_lock)
+#endif
+
+struct slang_mm_slot {
+    uint64_t generation;               /* request generation this slot belongs to */
+    mtmd_bitmap *bitmaps[SLANG_MM_MAX_BITMAPS];
+    int64_t n_bitmaps;
+    mtmd_input_chunks *chunks;
+};
+
+static mtmd_context *g_mm_ctx = NULL;
+static struct slang_mm_slot g_mm_slots[SLANG_REQUEST_MAX_ENTRIES];
+
+static void slang_mm_slot_clear(struct slang_mm_slot *slot) {
+    for (int64_t i = 0; i < slot->n_bitmaps; i++) mtmd_bitmap_free(slot->bitmaps[i]);
+    if (slot->chunks != NULL) mtmd_input_chunks_free(slot->chunks);
+    memset(slot, 0, sizeof(*slot));
+}
+
+/* The slot of a live request. A slot left behind by a request that closed
+ * without mm_reset belongs to an older generation and is freed here, so a
+ * recycled request slot never inherits another request's media. */
+static struct slang_mm_slot *slang_mm_slot_for(struct slang_request *request) {
+    struct slang_mm_slot *slot = &g_mm_slots[(int64_t)(request - g_requests)];
+    if (slot->generation != request->generation) {
+        slang_mm_slot_clear(slot);
+        slot->generation = request->generation;
+    }
+    return slot;
+}
+
+static int slang_mm_sniff_ok(const uint8_t *b, int64_t n) {
+    if (n < 12) return 0;
+    if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return 1;                 /* jpeg */
+    if (memcmp(b, "\x89PNG\r\n\x1a\n", 8) == 0) return 1;                       /* png */
+    if (memcmp(b, "GIF8", 4) == 0 || (b[0] == 'B' && b[1] == 'M')) return 1;    /* gif, bmp */
+    if (memcmp(b, "RIFF", 4) == 0 && memcmp(b + 8, "WAVE", 4) == 0) return 1;   /* wav */
+    if (memcmp(b, "ID3", 3) == 0 || memcmp(b, "fLaC", 4) == 0) return 1;        /* mp3, flac */
+    if (b[0] == 0xFF && (b[1] & 0xE0) == 0xE0) return 1;                        /* mp3 frame */
+    return 0;
+}
+
+/* Loads the projector whose path is in the string buffer (the compat request's
+ * when one is open, else the load buffer). Returns the capability mask
+ * (1 = vision, 2 = audio) or a negative error. */
+int64_t slang_ggml_mm_load(void) {
+    SLANG_LOCK();
+    int64_t result;
+    struct slang_request *compat = slang_compat_request();
+    const char *path = compat != NULL ? compat->str : g_load_str;
+    if (g_model == NULL) {
+        result = SLANG_ERR_NO_MODEL;
+    } else if (g_mm_ctx != NULL) {
+        result = SLANG_ERR_ALREADY;
+    } else if (path[0] == '\0') {
+        result = SLANG_ERR_LOAD_FAILED;
+    } else {
+        struct mtmd_context_params params = mtmd_context_params_default();
+        params.media_marker = mtmd_default_marker();
+        params.print_timings = false;
+        if (g_context_threads > 0) params.n_threads = g_context_threads;
+        g_mm_ctx = mtmd_init_from_file(path, g_model, params);
+        if (g_mm_ctx == NULL) {
+            result = SLANG_ERR_LOAD_FAILED;
+        } else {
+            result = (mtmd_support_vision(g_mm_ctx) ? 1 : 0) | (mtmd_support_audio(g_mm_ctx) ? 2 : 0);
+        }
+    }
+    SLANG_UNLOCK();
+    return result;
+}
+
+int64_t slang_ggml_mm_caps(void) {
+    if (g_mm_ctx == NULL) return 0;
+    return (mtmd_support_vision(g_mm_ctx) ? 1 : 0) | (mtmd_support_audio(g_mm_ctx) ? 2 : 0);
+}
+
+/* Must run before slang_ggml_free releases the model the projector was built on. */
+int64_t slang_ggml_mm_free(void) {
+    SLANG_MM_LOCK();
+    SLANG_LOCK();
+    for (int64_t i = 0; i < SLANG_REQUEST_MAX_ENTRIES; i++) slang_mm_slot_clear(&g_mm_slots[i]);
+    if (g_mm_ctx != NULL) { mtmd_free(g_mm_ctx); g_mm_ctx = NULL; }
+    SLANG_UNLOCK();
+    SLANG_MM_UNLOCK();
+    return 0;
+}
+
+int64_t slang_ggml_request_mm_reset(int64_t handle) {
+    SLANG_LOCK();
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL) { SLANG_UNLOCK(); return SLANG_ERR_INVALID; }
+    struct slang_mm_slot *slot = slang_mm_slot_for(request);
+    slang_mm_slot_clear(slot);
+    slot->generation = request->generation;
+    SLANG_UNLOCK();
+    return 0;
+}
+
+/* Adds one encoded image or audio file (the bytes arrive as ptr,len). Returns
+ * the number of media items now pending (>= 1), or a negative error. */
+int64_t slang_ggml_request_mm_add_encoded(int64_t handle, const uint8_t *buf, int64_t len) {
+    if (g_mm_ctx == NULL) return SLANG_ERR_NO_MODEL;
+    if (buf == NULL || len <= 0 || len > SLANG_MM_MAX_BYTES) return SLANG_ERR_INVALID;
+    if (!slang_mm_sniff_ok(buf, len)) return SLANG_ERR_MM_FORMAT;
+    SLANG_LOCK();
+    struct slang_request *request = slang_request_get(handle);
+    struct slang_mm_slot *slot = request == NULL ? NULL : slang_mm_slot_for(request);
+    int64_t result = SLANG_ERR_INVALID;
+    if (slot != NULL && slot->n_bitmaps >= SLANG_MM_MAX_BITMAPS) {
+        result = SLANG_ERR_OVERFLOW;
+    } else if (slot != NULL) {
+        struct mtmd_helper_bitmap_wrapper w = mtmd_helper_bitmap_init_from_buf(
+            g_mm_ctx, buf, (size_t)len, false, mtmd_helper_init_opt_default());
+        if (w.video_ctx != NULL) {
+            mtmd_helper_video_free(w.video_ctx);
+            if (w.bitmap != NULL) mtmd_bitmap_free(w.bitmap);
+            result = SLANG_ERR_MM_FORMAT;
+        } else if (w.bitmap == NULL) {
+            result = SLANG_ERR_MM_PREPROC;
+        } else {
+            slot->bitmaps[slot->n_bitmaps++] = w.bitmap;
+            result = slot->n_bitmaps;
+        }
+    }
+    SLANG_UNLOCK();
+    return result;
+}
+
+/* Tokenizes the request string buffer (the rendered prompt, holding one marker
+ * per pending media item) together with the pending media. Returns the number
+ * of KV positions the prompt consumes, -12 when marker and media counts differ,
+ * -13 when media preprocessing failed. */
+int64_t slang_ggml_request_mm_tokenize(int64_t handle) {
+    SLANG_LOCK();
+    struct slang_request *request = slang_request_get(handle);
+    int64_t result;
+    if (request == NULL) {
+        result = SLANG_ERR_INVALID;
+    } else if (g_mm_ctx == NULL) {
+        result = SLANG_ERR_NO_MODEL;
+    } else {
+        struct slang_mm_slot *slot = slang_mm_slot_for(request);
+        if (slot->chunks != NULL) { mtmd_input_chunks_free(slot->chunks); slot->chunks = NULL; }
+        slot->chunks = mtmd_input_chunks_init();
+        struct mtmd_input_text text;
+        text.text = request->str;
+        text.text_len = (size_t)request->str_len;
+        text.add_special = true;
+        text.parse_special = true;
+        int32_t rc = mtmd_tokenize(g_mm_ctx, slot->chunks, &text,
+                                   (const mtmd_bitmap *const *)slot->bitmaps,
+                                   (size_t)slot->n_bitmaps);
+        if (rc == 1) result = SLANG_ERR_MM_MARKERS;
+        else if (rc != 0) result = SLANG_ERR_MM_PREPROC;
+        else result = (int64_t)mtmd_helper_get_n_pos(slot->chunks);
+        if (result < 0) { mtmd_input_chunks_free(slot->chunks); slot->chunks = NULL; }
+    }
+    SLANG_UNLOCK();
+    return result;
+}
+
+/* Multimodal prefill: clears the KV (no prefix reuse, no admission), encodes the
+ * media and decodes every chunk, leaving logits for the last token. Returns the
+ * new position count. Decoding runs outside the state lock like every other
+ * decode; the mm lock serialises use of the shared mtmd_context. */
+int64_t slang_ggml_request_mm_eval_prompt(int64_t handle) {
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL) return SLANG_ERR_INVALID;
+    if (request->ctx == NULL || g_mm_ctx == NULL) return SLANG_ERR_INVALID;
+    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    struct slang_mm_slot *slot = &g_mm_slots[(int64_t)(request - g_requests)];
+    if (slot->generation != request->generation || slot->chunks == NULL) return SLANG_ERR_INVALID;
+    slang_request_release_lease(request);
+    request->legacy_logits_valid = 0;
+    request->eval_start = 0;
+    llama_memory_clear(llama_get_memory(request->ctx), true);
+    llama_pos new_n_past = 0;
+    SLANG_MM_LOCK();
+    int32_t rc = mtmd_helper_eval_chunks(g_mm_ctx, request->ctx, slot->chunks, 0, 0,
+                                         (int32_t)llama_n_batch(request->ctx), true,
+                                         &new_n_past);
+    SLANG_MM_UNLOCK();
+    SLANG_LOCK();
+    slang_mm_slot_clear(slot);
+    slot->generation = request->generation;
+    SLANG_UNLOCK();
+    if (rc != 0) return SLANG_ERR_DECODE;
+    request->legacy_logits_valid = 1;
+    return (int64_t)new_n_past;
+}
+#endif /* SLANG_WITH_MTMD */
+/* ===== end mtmd group ===== */

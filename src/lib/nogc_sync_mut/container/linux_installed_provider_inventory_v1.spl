@@ -1,0 +1,379 @@
+# Actual service-backed whole delegated-store observation COMPONENT.
+# AUTHORED_NOT_RUN. CompleteInventory is neither absence nor safe admission.
+# Open accepts only a genuine retained supervisor; bytes/labels mint no owner.
+use std.nogc_sync_mut.io.linux_installed_supervisor_owner_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_profile_v1.LinuxSupervisorInstalledSnapshotV1
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_async_mut.container.providers.linux.whole_inventory_http_v1.*
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_encode_v1
+use std.common.contracts.container.machine_policy_v1.machine_container_policy_decode_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub enum LinuxInstalledProviderInventoryStatusV1:
+    CompleteInventory
+    ExistingExecutionQuarantined
+    Incomplete
+    Unknown
+
+pub struct LinuxInstalledProviderInventorySnapshotV1:
+    status: LinuxInstalledProviderInventoryStatusV1
+    profile_digest: text = ""
+    machine_policy_digest: text = ""
+    installed_policy_digest: text = ""
+    closed_store_set_digest: text = ""
+    service_store_digest: text = ""
+    native_service_identity_digest: text = ""
+    provider_incarnation: text = ""
+    provider_process_id: i64 = 0
+    process_identity_digest: text = ""
+    supervisor_generation: i64 = 0
+    inventory_generation: i64 = 0
+    rows: [LinuxProviderInventoryResourceV1] = []
+    query_digest: text = ""
+    response_digest: text = ""
+    total_bytes: i64 = 0
+    total_transport_bytes: i64 = 0
+    endpoint_count: i64 = 0
+    execution_candidates: i64 = 0
+    body_byte_limit: i64 = 1048576
+    response_wire_byte_limit: i64 = 2113536
+    aggregate_list_wire_byte_limit: i64 = 12681216
+    aggregate_row_limit: i64 = 4096
+    collection_budget_ms: i64 = 30000
+    unresolved_storage_and_endpoints: bool = true
+    provider_drain_proven: bool = false
+    machine_genesis_admitted: bool = false
+    reason: text = "inventory-not-collected"
+
+pub class LinuxInstalledProviderInventoryOwnerV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<LinuxInstalledProviderInventorySnapshotV1, text>:
+        inventory_current_v1(self.slot, self.generation)
+    # Releases only this component's reader/socket. The borrowed real supervisor
+    # remains inhibited; this cannot unmask, adopt, delete, discharge or hand off.
+    pub fn close_v1() -> text: inventory_close_v1(self.slot, self.generation)
+    pub fn cleanup_diagnostic_v1() -> Result<text, text>:
+        inventory_cleanup_diagnostic_v1(self.slot, self.generation)
+
+pub enum LinuxInstalledProviderInventoryOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxInstalledProviderInventoryOwnerV1, reason: text)
+    Ready(owner: LinuxInstalledProviderInventoryOwnerV1)
+
+struct InventoryStateV1:
+    generation: i64
+    supervisor: LinuxInstalledSupervisorOwnerV1
+    reader: Option<LinuxMachinePolicyOwnerV1> = None
+    installed: Option<LinuxSupervisorInstalledSnapshotV1> = None
+    policy: Option<LinuxOciInstalledPolicyV3> = None
+    peer: Option<LocalUnixPeerV1> = None
+    connection: Option<LocalUnixConnectionV1> = None
+    snapshot: LinuxInstalledProviderInventorySnapshotV1
+    query_digests: [text] = []
+    response_digests: [text] = []
+    store_digest: text = ""
+    started: i64
+    deadline: i64
+    all_wire_bytes: i64 = 0
+    cleanup: LinuxInventoryCleanupProgressV1
+    closed: bool = false
+
+var inventory_slots_v1: [InventoryStateV1] = []
+
+fn inventory_state_v1(slot: i64, generation: i64) -> Result<InventoryStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= inventory_slots_v1.len(): return Err("inventory-stale-owner")
+    val state = inventory_slots_v1[slot]
+    if state.closed or state.generation != generation: return Err("inventory-stale-owner")
+    Ok(state)
+
+fn inventory_budget_v1(slot: i64) -> Result<(), text>:
+    val state = inventory_slots_v1[slot]
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now < state.started or now >= state.deadline:
+        return Err("inventory-incomplete-total-deadline")
+    Ok(())
+
+fn inventory_same_peer_v1(left: LocalUnixPeerV1, right: LocalUnixPeerV1) -> bool:
+    left.uid == right.uid and left.gid == right.gid and left.pid == right.pid and
+        left.socket_device == right.socket_device and left.socket_inode == right.socket_inode
+
+fn inventory_supervisor_current_v1(slot: i64) -> Result<LinuxSupervisorExclusionDiagnosticV1, text>:
+    val state = inventory_slots_v1[slot]
+    val observed = state.supervisor.current_v1()?
+    val expected = state.snapshot
+    if not observed.exclusion_component_live or observed.owner_generation != expected.supervisor_generation or
+            observed.process_identity_digest != expected.process_identity_digest or
+            observed.profile_digest != expected.profile_digest or observed.machine_policy_digest != expected.machine_policy_digest or
+            observed.provider_process_id != expected.provider_process_id or observed.provider_incarnation != expected.provider_incarnation:
+        return Err("inventory-supervisor-generation-or-provider-changed")
+    val installed = state.supervisor.installed_snapshot_v1()?
+    if installed.digest != expected.profile_digest or installed.provider_policy != state.installed.unwrap().provider_policy or
+            installed.closed_provider_model != "single-rootless-uid-all-stores-pinned-v1":
+        return Err("inventory-authoritative-closed-store-set-changed")
+    val bytes = state.reader.unwrap().read_policy_v1()?
+    if sha256_u8_hex(bytes) != expected.machine_policy_digest:
+        return Err("inventory-installed-machine-policy-changed")
+    Ok(observed)
+
+fn inventory_socket_close_v1(slot: i64) -> Result<(), text>:
+    val owned = inventory_slots_v1[slot].connection
+    if owned == None: return Ok(())
+    val closed = local_unix_close_v1(owned.unwrap())
+    # The native owner explicitly says whether cleanup remains. Generic errors
+    # never synthesize consumption, successful EOF, emptiness or released state.
+    val consumed = closed.closed and closed.owner == None
+    inventory_slots_v1[slot].connection = if consumed: None
+        elif closed.owner != None: closed.owner
+        else: owned
+    val diagnostic = if closed.error != "" or not consumed: "inventory-socket-close-unconfirmed:" + closed.error
+        else: ""
+    val disposition = if not consumed: "retained"
+        elif closed.error != "": "consumed-error"
+        else: "released"
+    inventory_slots_v1[slot].cleanup = linux_inventory_cleanup_record_v1(inventory_slots_v1[slot].cleanup,
+        LinuxInventoryCleanupComponentV1.Socket, disposition, diagnostic)
+    if diagnostic != "": return Err(diagnostic)
+    Ok(())
+
+# Finite native owner progression with one absolute collection deadline.
+# Requests are generated by the closed codec; this helper is module-private.
+fn inventory_exchange_v1(slot: i64, request: [u8]) -> Result<[u8], text>:
+    inventory_budget_v1(slot)?
+    val observed = inventory_supervisor_current_v1(slot)?
+    inventory_budget_v1(slot)?
+    val policy = inventory_slots_v1[slot].policy.unwrap()
+    val deadline = inventory_slots_v1[slot].deadline / 1000000
+    val connected = local_unix_connect_v1(policy.socket_path, policy.expected_service_uid, deadline)
+    inventory_slots_v1[slot].connection = connected.owner
+    if connected.owner != None: inventory_slots_v1[slot].cleanup.socket_consumed = false
+    if connected.error != "": return Err("inventory-stream-connect:" + connected.error)
+    if connected.owner == None or connected.peer == None: return Err("inventory-stream-connect-unconfirmed")
+    val peer = connected.peer.unwrap()
+    if peer.uid != policy.expected_service_uid or peer.pid != observed.provider_process_id:
+        return Err("inventory-provider-unit-peer-mismatch")
+    if inventory_slots_v1[slot].peer != None:
+        if not inventory_same_peer_v1(inventory_slots_v1[slot].peer.unwrap(), peer):
+            return Err("inventory-native-service-peer-changed")
+    else:
+        inventory_slots_v1[slot].peer = Some(peer)
+    var offset = 0
+    while offset < request.len():
+        inventory_budget_v1(slot)?
+        val count = if request.len() - offset > 65536: 65536 else: request.len() - offset
+        val written = local_unix_write_some_v1(inventory_slots_v1[slot].connection.unwrap(), request, offset, count, deadline)
+        inventory_slots_v1[slot].connection = Some(written.owner)
+        if written.error != "": return Err("inventory-stream-write:" + written.error)
+        if written.accepted_bytes <= 0 or written.accepted_bytes > count:
+            return Err("inventory-stream-write-progress")
+        offset = offset + written.accepted_bytes
+    var wire: [u8] = []
+    while true:
+        inventory_budget_v1(slot)?
+        val remaining = LINUX_INVENTORY_WIRE_LIMIT_V1 + 1 - wire.len()
+        val maximum = if remaining < 65536: remaining else: 65536
+        val read = local_unix_read_v1(inventory_slots_v1[slot].connection.unwrap(), maximum, deadline)
+        inventory_slots_v1[slot].connection = Some(read.owner)
+        if read.error != "": return Err("inventory-stream-read:" + read.error)
+        if read.bytes.len() > maximum: return Err("inventory-stream-read-contract")
+        inventory_slots_v1[slot].all_wire_bytes = inventory_slots_v1[slot].all_wire_bytes + read.bytes.len()
+        inventory_slots_v1[slot].snapshot.total_transport_bytes = inventory_slots_v1[slot].all_wire_bytes
+        # Six lists plus two info observations, each itself bounded. Lists also
+        # have a separate six-response aggregate bound recorded in snapshot.
+        if inventory_slots_v1[slot].all_wire_bytes > 8 * LINUX_INVENTORY_WIRE_LIMIT_V1:
+            return Err("inventory-incomplete-all-wire-bound")
+        for byte in read.bytes: wire.push(byte)
+        if wire.len() > LINUX_INVENTORY_WIRE_LIMIT_V1: return Err("inventory-incomplete-http-byte-bound")
+        if read.eof: break
+        if read.bytes.len() == 0: return Err("inventory-stream-read-no-progress")
+    inventory_socket_close_v1(slot)?
+    inventory_budget_v1(slot)?
+    val after = inventory_supervisor_current_v1(slot)?
+    if after.provider_incarnation != observed.provider_incarnation:
+        return Err("inventory-provider-incarnation-changed")
+    inventory_budget_v1(slot)?
+    Ok(wire)
+
+fn inventory_bind_v1(slot: i64) -> Result<(), text>:
+    val supervisor = inventory_slots_v1[slot].supervisor
+    val diagnostic = supervisor.current_v1()?
+    val installed = supervisor.installed_snapshot_v1()?
+    if not diagnostic.exclusion_component_live or installed.digest != diagnostic.profile_digest or
+            installed.machine_policy_digest != diagnostic.machine_policy_digest or
+            installed.closed_provider_model != "single-rootless-uid-all-stores-pinned-v1":
+        return Err("inventory-incomplete-authoritative-closed-model")
+    val policy = linux_oci_installed_policy_decode_v3(installed.provider_policy)?
+    if policy.expected_service_uid != installed.service_uid or
+            installed.process.real_uid != installed.service_uid or installed.process.effective_uid != installed.service_uid:
+        return Err("inventory-installed-service-uid-mismatch")
+    match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Rejected(reason): return Err(reason)
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            inventory_slots_v1[slot].reader = Some(owner)
+            inventory_slots_v1[slot].cleanup.reader_consumed = false
+            return Err(reason)
+        case LinuxMachinePolicyOpenV1.Ready(owner):
+            inventory_slots_v1[slot].reader = Some(owner)
+            inventory_slots_v1[slot].cleanup.reader_consumed = false
+    val reader = inventory_slots_v1[slot].reader.unwrap()
+    val process = reader.actual_process_context_v1()?
+    # Each genuine reader has its own generation. Compare actual process
+    # identity, not unrelated owner-table generation numbers.
+    if process.identity_digest != installed.process.identity_digest or process.process_id != installed.process.process_id or
+            process.thread_id != installed.process.thread_id or process.authority_namespace_id != installed.process.authority_namespace_id:
+        return Err("inventory-installed-process-context-mismatch")
+    val bytes = reader.read_policy_v1()?
+    if not utf8_bytes_valid(bytes) or sha256_u8_hex(bytes) != installed.machine_policy_digest:
+        return Err("inventory-installed-machine-policy-mismatch")
+    val machine = machine_container_policy_decode_v1(bytes_to_text(bytes))?
+    if machine.providers.len() != 1: return Err("inventory-incomplete-extra-or-missing-delegated-provider")
+    val provider = machine.providers[0]
+    if provider.backend != "linux-podman" or provider.policy_bytes != linux_oci_engine_policy_encode_v1(policy.cli_policy)?:
+        return Err("inventory-incomplete-delegated-store-membership")
+    val set_fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-installed-closed-provider-set-v1"),
+        "profile": SdnValue.String(installed.digest), "machinePolicy": SdnValue.String(installed.machine_policy_digest),
+        "providerIdentity": SdnValue.String(provider.identity_digest),
+        "providerPolicy": SdnValue.String(linux_oci_installed_policy_digest_v3(policy)?),
+        "closedProviderModel": SdnValue.String(installed.closed_provider_model)}
+    inventory_slots_v1[slot].installed = Some(installed)
+    inventory_slots_v1[slot].policy = Some(policy)
+    inventory_slots_v1[slot].snapshot.profile_digest = installed.digest
+    inventory_slots_v1[slot].snapshot.machine_policy_digest = installed.machine_policy_digest
+    inventory_slots_v1[slot].snapshot.installed_policy_digest = linux_oci_installed_policy_digest_v3(policy)?
+    inventory_slots_v1[slot].snapshot.closed_store_set_digest = sha256_text(sdn_encode_canonical(SdnValue.Dict(set_fields)))
+    inventory_slots_v1[slot].snapshot.provider_incarnation = diagnostic.provider_incarnation
+    inventory_slots_v1[slot].snapshot.provider_process_id = diagnostic.provider_process_id
+    inventory_slots_v1[slot].snapshot.process_identity_digest = diagnostic.process_identity_digest
+    inventory_slots_v1[slot].snapshot.supervisor_generation = diagnostic.owner_generation
+    Ok(())
+
+fn inventory_collect_v1(slot: i64) -> Result<(), text>:
+    inventory_bind_v1(slot)?
+    val policy = inventory_slots_v1[slot].policy.unwrap()
+    val before_wire = inventory_exchange_v1(slot, linux_whole_inventory_info_request_v1())?
+    val before = linux_whole_inventory_info_v1(policy.cli_policy, before_wire)?
+    inventory_slots_v1[slot].store_digest = before.store_digest
+    inventory_slots_v1[slot].snapshot.service_store_digest = before.store_digest
+    val peer = inventory_slots_v1[slot].peer.unwrap()
+    val native_identity: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-inventory-native-service-v1"),
+        "store": SdnValue.String(before.store_digest), "incarnation": SdnValue.String(inventory_slots_v1[slot].snapshot.provider_incarnation),
+        "uid": SdnValue.Int(peer.uid), "gid": SdnValue.Int(peer.gid), "pid": SdnValue.Int(peer.pid),
+        "socketDevice": SdnValue.Int(peer.socket_device), "socketInode": SdnValue.Int(peer.socket_inode)}
+    inventory_slots_v1[slot].snapshot.native_service_identity_digest = sha256_text(sdn_encode_canonical(SdnValue.Dict(native_identity)))
+    for resource_class in linux_whole_inventory_classes_v1():
+        val query = linux_whole_inventory_request_v1(resource_class)?
+        val wire = inventory_exchange_v1(slot, query)?
+        val rows = linux_whole_inventory_response_v1(resource_class, wire)?
+        val snapshot = inventory_slots_v1[slot].snapshot
+        if rows.len() > LINUX_INVENTORY_ROW_LIMIT_V1 - snapshot.rows.len():
+            return Err("inventory-incomplete-aggregate-row-bound")
+        if wire.len() > LINUX_INVENTORY_AGGREGATE_WIRE_LIMIT_V1 - snapshot.total_bytes:
+            return Err("inventory-incomplete-six-response-wire-bound")
+        for row in rows:
+            inventory_slots_v1[slot].snapshot.rows.push(row)
+            if row.resource_class == "containers" or row.resource_class == "pods":
+                inventory_slots_v1[slot].snapshot.execution_candidates = inventory_slots_v1[slot].snapshot.execution_candidates + 1
+        inventory_slots_v1[slot].snapshot.total_bytes = snapshot.total_bytes + wire.len()
+        inventory_slots_v1[slot].snapshot.endpoint_count = snapshot.endpoint_count + 1
+        inventory_slots_v1[slot].query_digests.push(sha256_u8_hex(query))
+        inventory_slots_v1[slot].response_digests.push(sha256_u8_hex(wire))
+    val after_wire = inventory_exchange_v1(slot, linux_whole_inventory_info_request_v1())?
+    val after = linux_whole_inventory_info_v1(policy.cli_policy, after_wire)?
+    if after.store_digest != before.store_digest: return Err("inventory-service-store-changed")
+    inventory_budget_v1(slot)?
+    val checked = inventory_supervisor_current_v1(slot)?
+    inventory_budget_v1(slot)?
+    var queries: [SdnValue] = []
+    var responses: [SdnValue] = []
+    for digest in inventory_slots_v1[slot].query_digests: queries.push(SdnValue.String(digest))
+    for digest in inventory_slots_v1[slot].response_digests: responses.push(SdnValue.String(digest))
+    val evidence: Dict<text, SdnValue> = {"closedStoreSet": SdnValue.String(inventory_slots_v1[slot].snapshot.closed_store_set_digest),
+        "serviceStore": SdnValue.String(before.store_digest), "providerIncarnation": SdnValue.String(checked.provider_incarnation),
+        "nativeServiceIdentity": SdnValue.String(inventory_slots_v1[slot].snapshot.native_service_identity_digest),
+        "beforeInfo": SdnValue.String(sha256_u8_hex(before_wire)), "afterInfo": SdnValue.String(sha256_u8_hex(after_wire)),
+        "responses": SdnValue.Array(responses)}
+    inventory_slots_v1[slot].snapshot.query_digest = sha256_text(sdn_encode_canonical(SdnValue.Array(queries)))
+    inventory_slots_v1[slot].snapshot.response_digest = sha256_text(sdn_encode_canonical(SdnValue.Dict(evidence)))
+    inventory_slots_v1[slot].snapshot.status = if inventory_slots_v1[slot].snapshot.execution_candidates > 0:
+        LinuxInstalledProviderInventoryStatusV1.ExistingExecutionQuarantined
+        else: LinuxInstalledProviderInventoryStatusV1.CompleteInventory
+    inventory_slots_v1[slot].snapshot.reason = "all-six-installed-store-queries-completed; provider-drain-and-ledger-accounting-unproved"
+    Ok(())
+
+pub fn linux_installed_provider_inventory_open_v1(supervisor: LinuxInstalledSupervisorOwnerV1) -> LinuxInstalledProviderInventoryOpenV1:
+    val entered = linux_machine_process_origin_check_v1()
+    if entered.is_err(): return LinuxInstalledProviderInventoryOpenV1.Rejected(entered.unwrap_err())
+    if inventory_slots_v1.len() >= 64: return LinuxInstalledProviderInventoryOpenV1.Rejected("inventory-owner-bound")
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now > 9223372006854775807:
+        return LinuxInstalledProviderInventoryOpenV1.Rejected("inventory-clock-unavailable")
+    val slot = inventory_slots_v1.len()
+    inventory_slots_v1.push(InventoryStateV1(generation: slot + 1, supervisor: supervisor,
+        snapshot: LinuxInstalledProviderInventorySnapshotV1(status: LinuxInstalledProviderInventoryStatusV1.Unknown,
+            inventory_generation: slot + 1), started: now, deadline: now + 30000000000,
+        cleanup: LinuxInventoryCleanupProgressV1()))
+    val owner = LinuxInstalledProviderInventoryOwnerV1(slot: slot, generation: slot + 1)
+    val collected = inventory_collect_v1(slot)
+    if collected.is_err():
+        val reason = collected.unwrap_err()
+        inventory_slots_v1[slot].snapshot.status = if reason.starts_with("inventory-incomplete"):
+            LinuxInstalledProviderInventoryStatusV1.Incomplete
+            else: LinuxInstalledProviderInventoryStatusV1.Unknown
+        inventory_slots_v1[slot].snapshot.reason = reason
+        # Return the owner even if socket cleanup failed. The same registry is
+        # shared by aliases, and the actual protected reader remains retained.
+        val cleanup = inventory_socket_close_v1(slot)
+        if cleanup.is_err():
+            inventory_slots_v1[slot].snapshot.status = LinuxInstalledProviderInventoryStatusV1.Unknown
+            inventory_slots_v1[slot].snapshot.reason = reason + "; " + cleanup.unwrap_err()
+        return LinuxInstalledProviderInventoryOpenV1.CleanupRequired(owner, inventory_slots_v1[slot].snapshot.reason)
+    LinuxInstalledProviderInventoryOpenV1.Ready(owner)
+
+fn inventory_current_v1(slot: i64, generation: i64) -> Result<LinuxInstalledProviderInventorySnapshotV1, text>:
+    val state = inventory_state_v1(slot, generation)?
+    if state.snapshot.status == LinuxInstalledProviderInventoryStatusV1.CompleteInventory or
+            state.snapshot.status == LinuxInstalledProviderInventoryStatusV1.ExistingExecutionQuarantined:
+        # Collection is a bounded observation, never a renewable lease. Once
+        # the collection window expires, no positive status survives.
+        val budget = inventory_budget_v1(slot)
+        val current = inventory_supervisor_current_v1(slot)
+        val after = inventory_budget_v1(slot)
+        if budget.is_err() or current.is_err() or after.is_err():
+            inventory_slots_v1[slot].snapshot.status = LinuxInstalledProviderInventoryStatusV1.Unknown
+            inventory_slots_v1[slot].snapshot.reason = if current.is_err(): current.unwrap_err()
+                elif budget.is_err(): budget.unwrap_err()
+                else: after.unwrap_err()
+    Ok(inventory_slots_v1[slot].snapshot)
+
+fn inventory_close_v1(slot: i64, generation: i64) -> text:
+    val observed = inventory_state_v1(slot, generation)
+    if observed.is_err(): return observed.unwrap_err()
+    val socket = inventory_socket_close_v1(slot)
+    if socket.is_err() and inventory_slots_v1[slot].connection != None: return socket.unwrap_err()
+    if inventory_slots_v1[slot].reader != None:
+        val closed = inventory_slots_v1[slot].reader.unwrap().close_v1()
+        val diagnostic = if closed == "released": "" else: "inventory-reader-close:" + closed
+        inventory_slots_v1[slot].cleanup = linux_inventory_cleanup_record_v1(inventory_slots_v1[slot].cleanup,
+            LinuxInventoryCleanupComponentV1.Reader, closed, diagnostic)
+        if not inventory_slots_v1[slot].cleanup.reader_consumed: return "inventory-reader-retained:" + closed
+        inventory_slots_v1[slot].reader = None
+    inventory_slots_v1[slot].closed = true
+    if inventory_slots_v1[slot].cleanup.first_diagnostic != "": return "consumed-error"
+    "released-inventory-only-supervisor-retained"
+
+# Sticky diagnostics remain readable after confirmed inventory consumption.
+# This does not revive closed owners or weaken process/generation validation.
+fn inventory_cleanup_diagnostic_v1(slot: i64, generation: i64) -> Result<text, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= inventory_slots_v1.len(): return Err("inventory-stale-owner")
+    val state = inventory_slots_v1[slot]
+    if state.generation != generation: return Err("inventory-stale-owner")
+    Ok(state.cleanup.first_diagnostic)

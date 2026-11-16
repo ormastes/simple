@@ -454,7 +454,7 @@ request is in the server (`lsp_visibility_last_view`) and in the
 `simple.setVisibility` reply (`{visibility, view}`).
 Design: `doc/05_design/app/source_view/public_view_by_feature_layer.md` § Session view state.
 
-### Context (9 tools)
+### Context (10 tools)
 
 Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 `src/app/mcp/main_lazy_ctx_tools.spl`; specs:
@@ -472,8 +472,11 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 | `simple_ctx_stats` | Store location, chunk/source counts, bytes indexed/returned/saved, per-tool call counts | |
 | `simple_ctx_doctor` | Self-check checklist for the ctx store (schema version, store reachability, hook wiring) | |
 | `simple_ctx_upgrade` | Re-index / compact the chunk store and migrate it to the current schema version | |
+| `simple_ctx_purge` | DESTRUCTIVE retention purge by source-label prefix, `older_than_secs` and/or `max_bytes`; dry run unless `apply:true`; refuses an empty selector or a non-positive limit | at least one of source, older_than_secs, max_bytes |
 | `simple_token_stats` | Per-feature token savings (ctx-mimic, ponytail-mimic, total; 7-day window); `reset: true` or `args: "--reset"` clears the ledger | |
 | `simple_token_burn` | Code burn: which feature/tool spent the budget, ranked by bytes returned to the model, with tokens saved vs the unoptimized original | |
+| `simple_trace` | Read-only `trace missing` over a snapshot (`snapshot`: worktree/index/git:REV, `format`: table/sdn, `limit` 1..200, `operation`: missing). Result starts with `profile`, `status` (complete/incomplete) and `exit_code`; an unbuildable or partial snapshot is `incomplete`, `exit_code: 2`, `isError: true`, never an empty success. Unknown profile or missing argument is a tool error. Logic: `src/app/mcp/main_lazy_trace_tools.spl` | profile |
+| `simple_test_query` | Read-only TestDB query of attempt rows for one exact case (`run_id`, `limit` 1..1000 default 50, `cursor` offset optional). Rows carry planned-case and attempt identity, status, qualification (only an executed-and-passed attempt is `pass`) and the `unverified_framework_observation` provenance; page reports `coverage` and `truncation`. An absent or unreadable `doc/08_tracking/test/test_db.sdn` is a tool error (the store is never cold-started) | path, name |
 | `simple_log_optimize` | Filter a clang/rust/ninja/cmake/simple build log through its plugin descriptor; no `log` argument lists the installed plugins | log |
 
 - **Persistent store**: `.simple/ctx/` (override with `SIMPLE_CTX_DIR`), two
@@ -482,6 +485,9 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
   unlike the plugin's per-process temp DB. Every hot path over captured
   output is linear and built from native string ops (no per-char loops):
   see `doc/08_tracking/bug/mcp_ctx_batch_execute_crash_hang_on_real_output_2026-08-28.md`.
+- **Postings**: once a cache generation has served 128 hits, `simple_ctx_search` builds term postings (`ctx_postings.spl`) and scores only chunks containing a query term; results are bit-identical to the full scan (`ctx_bm25_search_index_scan`, the parity oracle). Deferred because the build costs ~2.5 s on a 3.7k-chunk store and a foreign append invalidates the generation. An append made by this process to a generation that already has postings is merged incrementally (`ctx_postings_append`: the new chunks' terms take the next slots, the cached key advances only if the store grew by exactly the bytes written), so the next search finds it with no store re-read and no rebuild; rankings equal a full rebuild (spec compares both). An append by another process, or before postings exist, still rebuilds as before.
+- **Purge**: `simple_ctx_purge` (`ctx_retention.spl`, pure decision) never runs implicitly from index or search. Source and age combine as AND; `max_bytes` then trims the oldest chunks of the source scope. Default is a dry-run count; `apply:true` rewrites the store atomically. Lock-free: the apply is a compare-and-swap on the store generation key (`ctx_purge_snapshot` reads key then chunks; `ctx_purge_commit` re-reads the key and renames only if unchanged). A store that moved is re-snapshotted, so an append that completed before the commit is always kept; after 4 moved attempts the purge errors with nothing deleted. Residual window: an append landing between the final key check and the atomic rename still targets the replaced file (no OS compare-and-rename exists).
+- **Redaction**: `ctx_index_text` masks secrets BEFORE chunking (`ctx_redaction.spl`): Authorization/Proxy-Authorization/X-Api-Key/Cookie headers, `password|secret|token|api_key|...` key=value and JSON pairs, `ghp_`/`github_pat_`/`sk-`/`AKIA`/`xox?-`/`AIza` tokens, JWTs, URL passwords, PEM private keys. Hex digests (SHA-256, git ids) and prose are never masked.
 - **Sandbox**: `std.nogc_sync_mut.io.resource_scope` bounded run — wall
   timeout (default 15 s, max 120 s), per-command capture cap enforced at the
   reader (default 8 MiB; `SIMPLE_CTX_CAPTURE_MAX_BYTES` env or `capture_bytes`
@@ -626,6 +632,19 @@ bin/simple query sem-query 'FIND fn WHERE return_type = "i64"'
 bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_count > 2'
 ```
 
+
+### Progressive hints (3 tools)
+
+Logic: `src/app/mcp/main_lazy_hint_tools.spl`. State is one hint record per
+session and capability, held in process memory (no file I/O).
+
+| Tool | Description | Params |
+|------|-------------|--------|
+| `simple_help` | Always returns full guidance for a capability topic (default: quickstart); read-only | topic?, session_id? |
+| `simple_capabilities` | Without `topic`: lists capabilities and records nothing. With `topic`: counts as a capability use; first call full guidance, then brief, then quiet | topic?, session_id? |
+| `simple_hint_status` | Reports stored state (`seen_count`, `success_count`, `last_hint`); never mutates | topic?, session_id? |
+
+An unknown topic is a tool error. `session_id` defaults to `default`.
 ---
 
 ## Resources (URIs)

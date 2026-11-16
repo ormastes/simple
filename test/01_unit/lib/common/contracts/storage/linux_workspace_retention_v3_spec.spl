@@ -1,0 +1,35 @@
+# SOURCE_AUTHORED_NOT_RUN. DATA tests are not actual native-token fixtures.
+use std.spec.{describe, it, expect}
+use std.common.contracts.storage.linux_workspace_retention_v3.*
+use std.nogc_async_mut.container.providers.linux.agent_workspace_retention_v3.*
+use std.nogc_async_mut.container.providers.linux.agent_workspace_stage_v1.LinuxAgentWorkspaceCreationV1
+use std.common.contracts.container.agent_executable_profile_v1.*
+
+describe "Workspace retention DATA without authority":
+    it "REQ-WORKSPACE-RETAIN-001 separates pre-subject uncertainty from native absence":
+        val value = LinuxWorkspaceCreationRetainedMetadataV3(parent_identity: [1u8, 2u8], root_identity: [3u8, 4u8],
+            invocation_digest: "a".repeat(64), creation_plan_digest: "b".repeat(64),
+            creation_receipts_digest: "c".repeat(64), uncertain_creation: true)
+        val encoded = linux_workspace_creation_metadata_encode_v3(value)
+        expect(encoded.contains("linux-workspace-creation-retained")).to_equal(true)
+        expect(encoded.contains("nativeRetirement")).to_equal(false)
+        expect(encoded.contains("storageFreed")).to_equal(false)
+        val copied = linux_workspace_creation_metadata_copy_v3(value)
+        expect(linux_workspace_creation_metadata_encode_v3(copied)).to_equal(encoded)
+
+    it "REQ-WORKSPACE-RETAIN-002 hashes actual receipt identities and ordered creation plan":
+        val first = LinuxAgentWorkspaceCreationV1(relative_path: "attempt/repo", kind: "directory",
+            parent_identity: [1u8], identity: [2u8])
+        val changed = LinuxAgentWorkspaceCreationV1(relative_path: "attempt/repo", kind: "directory",
+            parent_identity: [1u8], identity: [3u8])
+        expect(linux_agent_creation_receipts_digest_v3([first]) == linux_agent_creation_receipts_digest_v3([changed])).to_equal(false)
+        expect(linux_agent_creation_plan_digest_v3(["a", "b"]) == linux_agent_creation_plan_digest_v3(["b", "a"])).to_equal(false)
+        expect(linux_agent_creation_receipts_digest_v3([]) == linux_agent_creation_receipts_digest_v3([first])).to_equal(false)
+
+    it "REQ-WORKSPACE-RETAIN-003 checks exact image memory and arithmetic overflow without granting it":
+        val profile = AgentExecutableProfileV1(architecture: "linux-aarch64", image_size_bytes: 290069784,
+            max_image_bytes: 536870912, bootstrap_memory_bytes: 402653184, agent_memory_bytes: 268435456)
+        expect(agent_executable_profile_minimum_memory_v1(profile).unwrap()).to_equal(961223960)
+        val overflow = AgentExecutableProfileV1(architecture: "linux-x86_64", image_size_bytes: 1,
+            max_image_bytes: 536870912, bootstrap_memory_bytes: 9223372036854775807, agent_memory_bytes: 1)
+        expect(agent_executable_profile_minimum_memory_v1(overflow).is_err()).to_equal(true)

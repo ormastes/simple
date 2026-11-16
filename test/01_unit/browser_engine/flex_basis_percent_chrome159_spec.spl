@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: Pin that a percentage `flex-basis` (longhand and `flex` shorthand)
+resolves against the flex container's content width (CSS Flexbox 1 §7.2.3).
+Audience: browser-engine flex layout maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `body{margin:0}`, rows
+`display:flex;width:200px;height:10px`, getBoundingClientRect x,width,
+2026-11-16):
+
+| item                                           | x,w     |
+|------------------------------------------------|---------|
+| `flex-basis:25%;flex-shrink:0`                 | 0,50    |
+| next `flex-basis:50%;flex-shrink:0`            | 50,100  |
+| `flex-basis:25%;flex-grow:1` (grows 50 -> 100) | 0,100   |
+| next `flex-basis:50%`                          | 100,100 |
+| `flex:0 0 30%`                                 | 0,60    |
+| next `flex:1 1 10%` (grows 20 -> 140)          | 60,140  |
+| row `padding:0 20px`, `flex-basis:50%`         | 20,100  |
+
+Filed as `flex_basis_pct` in
+doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLEX-BASIS-PERCENT-001 — percentage flex-basis resolves against the container width.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .r{{display:flex;width:200px;height:10px}} .r div{{height:10px}}</style></head><body>" +
+    "<div class=r><div id=a style=\"flex-basis:25%;flex-shrink:0\"></div><div id=b style=\"flex-basis:50%;flex-shrink:0\"></div></div>" +
+    "<div class=r><div id=c style=\"flex-basis:25%;flex-grow:1\"></div><div id=d style=\"flex-basis:50%\"></div></div>" +
+    "<div class=r><div id=e style=\"flex:0 0 30%\"></div><div id=f style=\"flex:1 1 10%\"></div></div>" +
+    "<div class=r style=\"padding:0 20px\"><div id=g style=\"flex-basis:50%;flex-shrink:0\"></div></div>" +
+    "</body></html>"
+
+fn _xw(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "x") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "w")
+
+describe "percentage flex-basis":
+    it "AC-1: 25% of a 200px row":
+        expect(_xw("a")).to_equal("0,50")
+
+    it "AC-2: 50% after a 25% sibling":
+        expect(_xw("b")).to_equal("50,100")
+
+    it "AC-3: a 25% basis grows into the free space":
+        expect(_xw("c")).to_equal("0,100")
+
+    it "AC-4: the 50% sibling keeps its basis":
+        expect(_xw("d")).to_equal("100,100")
+
+    it "AC-5: flex shorthand 0 0 30%":
+        expect(_xw("e")).to_equal("0,60")
+
+    it "AC-6: flex shorthand 1 1 10% grows":
+        expect(_xw("f")).to_equal("60,140")
+
+    it "AC-7: percent of the content box, not the padding box":
+        expect(_xw("g")).to_equal("20,100")

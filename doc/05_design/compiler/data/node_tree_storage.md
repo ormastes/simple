@@ -435,26 +435,105 @@ Switch: env `SIMPLE_NODE_ATTR=extra=<token>,s_val=<token>` (tokens `direct`,
 `column`, `sparse_hash`), read ONCE per `expr_reset` by `expr_attr_apply_config` in
 `10.frontend/core/_AstExpr/nodes.spl`; per access only an `[i64]` mode slot is read, no
 string compare. Unset/`direct` = today's owner arrays, no store constructed. An unknown
-token returns Err and leaves everything off. The switch does NOT yet flow through the SDN
-rule / `data_attr_storage_resolve_v1` (env-only).
+token returns Err and leaves everything off.
+
+SDN rule (2026-11-15, lane nodeattr2): placement is also selectable by the existing
+`data_policy.rules` layout rows (no new format) addressed `compiler.ast.Expr.extra` /
+`compiler.ast.Expr.s_val` (site), `compiler.ast.Expr` (type), `compiler.ast` (module) or
+project, resolved by `data_attr_storage_resolve_v1` with default `direct`
+(`expr_attr_apply_sdn(source, path, override_spec)`). The rule file path comes from env
+`SIMPLE_NODE_ATTR_SDN`, read at `expr_reset`; `SIMPLE_NODE_ATTR` is applied AFTER the
+rules and overrides them. Neither set, or empty rules plus empty override, is the off
+identity (no store). A bad layout token or a bad/unreadable rule file returns Err and
+leaves the switch off. Default stays OFF.
 
 Applied (real `ExprStore` owner arrays `expr_extra`, `expr_s_val`; `inferred_type` has no
 owner in the real AST pool, so the 0.4%-dense `extra` is the sparse-hash candidate and
-69%-dense `s_val` the dense-column candidate). `op` was NOT applied (7.9% dense).
+69%-dense `s_val` the dense-column candidate). `op` was NOT applied in that step
+(7.9% dense); it is applied below (2026-11-15, lane nodeattr-op).
 Writes go through `expr_*_put`, reads through `expr_*_get`; the flat snapshot codec
 uses `*_dense()` / `*_load()`.
 
-Evidence (seed-tip interpreter, Windows, `ast_attr_apply_spec` 7/7): off-identity
+Evidence (seed-tip interpreter, Windows, `ast_attr_apply_spec` 11/11 (7 env + 4 SDN-rule: site rules for both attrs with identical parse, no-rules/override precedence, bogus layout rejected, rule file via env at reset)): off-identity
 (parse fingerprint equals the pre-change constant), value+presence parity for extra on
 hash and column, s_val (text) on column and hash, array<->hash<->column switching by
 config alone with parity both ways, combined extra+s_val identical fingerprint.
 Regressions: `ast_pool_snapshot_spec` 5/5, `ast_node_pool_pilot_spec` 6/6,
 `attribute_schema_v1_spec` 9/9.
 
-Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs, 2 rounds alternating,
-parse_ms): extra direct 139424/134025, hash 149614/131478, column 135562/135697;
-s_val direct 136022/136287, column 143757/134590, hash 134580/131719. Noise-level, no
-measurable difference. `memory_usage()` (current RSS, not max RSS, units unrecorded):
-~6455 off vs ~6491-6496 on (+36..41). Only 2 rounds, not 3.
+Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs; same seed binary and tree,
+only the switch toggled; 3 alternating rounds, one process per run; wall = in-process
+parse_ms, peak RSS = PowerShell `Process.PeakWorkingSet64` polled externally every
+100 ms; host loaded, so rounds drift 84 s -> 118 s):
+
+| run | off parse_ms / peak MB | extra=sparse_hash | s_val=column |
+|---|---|---|---|
+| round 1 | 83910 / 231.3 | 79336 / 231.0 | 84647 / 231.7 |
+| round 2 | 92077 / 230.8 | 91034 / 230.8 | 91149 / 230.9 |
+| round 3 | 118385 / 231.0 | 96244 / 231.2 | 92294 / 230.8 |
+| mean | 98124 | 88871 | 89363 |
+
+Round-to-round drift (load) dwarfs any switch effect; within each round the on-runs are
+not slower than off. Peak working set is identical to 0.5 MB (about 231 MB for every
+config). `memory_usage()` in-process: 6455 off, 6496 extra=sparse_hash, 6491
+s_val=column (+36..41, units unrecorded). Conclusion: no measurable time or peak-RSS
+cost; no win either on the interpreter lane.
 Caveats: static fan-in of `expr_get_extra(` is 23 sites/10 files; dynamic read counters
-need a product hook and were not added. Default stays off.
+need a product hook (no cheap existing one) and were not added. Default stays off.
+(Superseded by 7.6: counters now exist behind `SIMPLE_NODE_ATTR_COUNT`.)
+
+### 7.6 `op` applied, access counters, driver latch (2026-11-15, lane nodeattr-op)
+
+Decision for `op`: **sparse_hash** (column accepted for parity only). `op` is the
+`i_val` slot of BINARY (7), UNARY (8) and COMPOUND_ASSIGN (24) nodes — 7.9% of the
+global id space (7.4), so a column over global ids is 92% empty; it would win only with
+a per-tag-family index, which the store does not have. Other tags keep `i_val` in the
+owner array (it is 68% dense and main-node). Mechanism: `op=<token>` in the same switch;
+op-family writes go through `expr_op_put`, reads through `expr_owner_int` (off path: one
+`[i64]` route-slot read, then the array); `expr_owner_tag_set` moves the value between
+store and array when a tag change alters op-ness; the snapshot codec uses
+`expr_i_val_dense()` / `expr_i_val_load()` (load runs after `expr_tag` is restored).
+Moving `op` out saves no bytes while `i_val` stays a dense array for the other tags; the
+switch exists so the choice can be measured, not as a memory win.
+
+Access counters: `SIMPLE_NODE_ATTR_COUNT=1` (resolved at `expr_reset`, default off)
+counts reads/writes of `extra`, `s_val`, `op` (process-cumulative, zeroed when switched
+on); `expr_attr_access_counts(attr)` -> `[reads, writes]` (`[-1,-1]` off),
+`expr_attr_access_summary()`. Parse-only of `mir_lowering_stmts.spl` (12,266 exprs):
+`extra reads=3 writes=56; s_val reads=3926 writes=9377; op reads=6 writes=844` — during
+parsing all three are write-dominated; read frequency must be taken from later phases
+(HIR lowering), which the probe does not run. The driver does not print the summary (no
+end-of-compile hook); the perf probe does.
+
+Driver adoption (C.2): `CompilerDriver.create` calls `expr_attr_driver_latch()`, which
+captures `SIMPLE_NODE_ATTR`, `SIMPLE_NODE_ATTR_SDN`, `SIMPLE_NODE_ATTR_COUNT` once (first
+call wins) and applies them; later `expr_reset` calls use the latched values instead of
+re-reading env. A rejected config is reported once on stderr and stays off. Without a
+driver (specs, tools) `expr_reset` still reads env. `expr_attr_latch_clear()` drops it.
+
+Evidence (seed `/c/dev/wt/seed-attr2/simple.exe`, interpreter, Windows):
+`ast_attr_op_counters_spec` 6/6 (RED first: 1/6 before the change), `ast_attr_apply_spec`
+11/11, `ast_pool_snapshot_spec` 5/5 off and 5/5 with `op=sparse_hash,extra=sparse_hash`,
+`ast_node_pool_pilot_spec` 6/6, `attribute_schema_v1_spec` 9/9,
+`node_lifecycle_contracts_spec` 14/14, `compiler_driver_identity_id_spec` 2/2.
+
+Perf (parse-only of `mir_lowering_stmts.spl`, 12,266 exprs, 844 op nodes; same seed and
+tree, only `op` toggled; 3 alternating rounds, one process each; wall = external
+stopwatch, peak = PowerShell `PeakWorkingSet64` polled every 500 ms; host loaded):
+
+| round | off wall / parse ms / peak MB | op=sparse_hash (hash) | op=column (array) |
+|---|---|---|---|
+| 1 | 174685 / 156807 / 230 | 192958 / 170309 / 231 | 201543 / 178441 / 230 |
+| 2 | 206258 / 180602 / 231 | 202693 / 182122 / 233 | 197432 / 175719 / 231 |
+| 3 | 195636 / 178274 / 231 | 199686 / 179876 / 230 | 192841 / 170422 / 233 |
+| mean | 192193 / 171894 / 231 | 198446 / 177436 / 231 | 197272 / 174861 / 231 |
+
+Pre-change tree (same seed, measured earlier that day, not interleaved): wall
+172939 / 177430 / 169297 / 163911 ms, parse mean 159798 ms, peak 232 MB. On-vs-off
+spread (+2-3% parse) is inside the round-to-round drift (off alone ranged 157-181 s);
+peak working set is identical (230-233 MB). The ~+7% pre-vs-post gap in those
+non-interleaved numbers is load drift: an interleaved off-path check (base files swapped
+in and out of the same worktree, pre/post/pre/post) gave pre parse 179852 / 174356 ms
+(peak 232 MB) vs post 181995 / 177672 ms (peak 231 MB), +1.5%, inside noise.
+Conclusion: no measurable off-path or peak-RSS cost; no time win for `op` on the
+interpreter lane.

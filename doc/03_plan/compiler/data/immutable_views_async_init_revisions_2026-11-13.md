@@ -114,6 +114,17 @@ code. The census is non-zero, so the default stays `off`. Migration
 candidates are the DESUGARED optional pairs, which want a real `T?` or field
 defaults, and `@required_init(warning)` per module.
 
+**Re-run sample (2026-11-15, revhooks lane; partial, NOT a full census).** Verifier
+at `origin/release/1.0.0` @ `cd0630ec257` (includes the named/positional mapping
+fix), `src/compiler` files declaring a struct/class (1,481 listed, 61 chunks of
+25, textual prefilter not applied), seed `simple.exe`, one process at a time.
+Stopped by the coordinator after 2 chunks: 50 files
+(`00.common/_Attributes/decl_attrs.spl` .. `00.common/cache_contract/hash_algorithm_registry_v1.spl`,
+alphabetical, so one directory prefix only), 278 sites judged, 0 offender rows,
+0 unjudged, 0 parse-failed. Each chunk took about 4-5 minutes, so the full pass is
+several hours. The 2026-11-13 figures above stay the reference; the default
+stays `off`.
+
 **Verifier false positive found and fixed.** The first chunk reported 6 rows
 at `00.common/cache_contract/aspect_match_shard_v1.spl:190`. That site is a
 struct update `T(..f, facts_key: …)`. The spread arrives as
@@ -147,8 +158,10 @@ tracked in the progress file's "Owner goal and lane assignment (2026-11-14)".
 | Phase | Lane / branch | Order and limits |
 |---|---|---|
 | P2 `Immutable<T>` (IMM-01/02) | immview, `work/immutable-views-async-init-2-20261114` | First. Real grammar and type support, not lenience; a write through the projection is a named compile error. The seed must accept the syntax; a seed change is reported, not rebuilt by the lane |
-| P3 async registered init (ASY-01/02/06/07/08) | immview | Second. On `phase_cell_*_v1` by name; includes parsing `async <expr>` as a constructor argument |
-| P2 `RevisionImmutable<T>` / `FrozenImmutable<T>` (IMM-03/04) | immview | Third. Handle semantics only; REV-01/02 cache identity stays with W8 and the missing hook is named |
+| P3 async registered init (ASY-01/02/06/07/08) | immview | Second. On `phase_cell_*_v1` by name; includes parsing `async <expr>` as a constructor argument. 2026-11-15: ASY-02 / `E_ATTR_NOT_READY` landed for direct unawaited pending-field reads (`attr_not_ready_v1_spec`); `E_INIT_CAPABILITY_ESCAPE` region decided by owner 2026-11-15 (immutable-input rule, `doc/08_tracking/bug/immutable_async_open_questions_2026-11-15.md` section 4), implemented default off (`init_capability_escape_v1_spec` 12/12, verification-pending) |
+| P2 `RevisionImmutable<T>` / `FrozenImmutable<T>` (IMM-03/04) | immview | Third. Handle semantics only; REV-01/02 cache identity stays with W8 and the missing hook is named | 
+| W8 REV-01/02 hooks (revhooks, 2026-11-15) | `work/revision-hooks-20261115` | REV-02: `FileAstV1` codec pinned by `rev02_frozen_file_ast_codec_spec` (5/5). REV-01: SCV lease hook; `rev01_pinned_revision_lease_spec` 1 green, 1 RED (one lease per process), bug filed, owner decision. `E_INIT_CAPABILITY_ESCAPE`: owner rule (producer input must be immutable; nested + closure captures), default off, `init_capability_escape_v1_spec` 12/12 |
+| W8 REV-01/02 hooks (revhooks, 2026-11-15) | `work/revision-hooks-20261115` | REV-02: `FileAstV1` codec pinned by `rev02_frozen_file_ast_codec_spec` (5/5). REV-01: SCV lease hook + named pins (owner option 1 + cap `SIMPLE_SCV_PIN_MAX` + over-retention warning); `rev01_pinned_revision_lease_spec` 6/6, verification-pending. `E_INIT_CAPABILITY_ESCAPE`: PROVISIONAL region, default off, `init_capability_escape_v1_spec` 4/4 |
 | P1 census re-run | immview | The 2026-11-13 figures predate the named/positional mapping fix; re-run for `src/compiler`. The gate default stays `off` |
 | P4 storage backend unification | nodeattr, `work/node-attr-storage-20261114` | One `AttributeSchema`; array <-> hash switch by tag or SDN rule; default off |
 | P5 static profile-guided selection (PROF-01) | tracesel, `work/trace-layer-feature-select-20261114` | After the layer/feature trace fold |
@@ -245,7 +258,7 @@ The logical field remains `T`; an internal once-only initialization gate need no
 | Pending field read without proven readiness/await | Compile error `E_ATTR_NOT_READY` |
 | Double registration or completion | Compile-time error when statically evident; otherwise typed runtime failure |
 | Producer type differs from declared attribute type | Compile error `E_ASYNC_INIT_TYPE` |
-| Producer or mutable alias illegally escapes its region | Compile error `E_INIT_CAPABILITY_ESCAPE` |
+| Producer or mutable alias illegally escapes its region (region = producer input must be immutable at assignment, owner 2026-11-15) | Compile error `E_INIT_CAPABILITY_ESCAPE` |
 | Concurrent unsynchronized mutation read through live immutable view | Reject if statically provable; sanitizer/diagnostics otherwise |
 | Freeze/serialize while required semantic fields remain pending | Error/await barrier; never write partial artifact |
 Run checks on **effective visibility** (folder privacy, feature-public, `__init__.spl` layer-public exports). Constructor defaults, named constructors, generated getters/setters, cloning, inheritance, generic specialization, ABI/FFI access, field forwarding must participate. Required initialization is path-sensitive.

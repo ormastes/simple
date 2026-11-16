@@ -6,7 +6,11 @@ use app.io.minimal_runtime_ops.{report_error, exit}
 use app.traceability.cli_options_v1.{trace_cli_options_parse_v1, trace_cli_help_v1}
 use app.traceability.capture_v1.{trace_capture_worktree_v1, TraceCaptureLimitsV1}
 use app.traceability.structural_report_v1.{trace_evaluate_captured_v1,
-    trace_qualification_from_structural_result_v1, trace_qualification_infrastructure_v1}
+    trace_qualification_from_structural_result_v1, trace_qualification_infrastructure_v1,
+    trace_qualification_profile_unavailable_v1,
+    TraceSnapshotCompletenessV1}
+use app.traceability.core.{TraceDiagnosticLimitV1}
+use std.common.traceability.profile_v1.{TraceProfile}
 use std.common.traceability.types_v1.{TraceQualificationV1, trace_qualification_codec_limits_v1}
 use std.common.traceability.qualification_v1.{trace_qualification_encode_v1}
 
@@ -23,15 +27,18 @@ fn trace_cli_run_v1(args: [text]) -> i64:
     var document: TraceQualificationV1
     match trace_capture_worktree_v1(options, TraceCaptureLimitsV1()):
         case Err(issue):
-            document = trace_qualification_infrastructure_v1(issue.snapshot_id, false,
+            document = trace_qualification_infrastructure_v1(issue.snapshot_id, TraceSnapshotCompletenessV1.Incomplete,
                 options, issue.code, issue.path, issue.message)
         case Ok(inputs):
-            match trace_evaluate_captured_v1(inputs, options.scope, 100000):
-                case Ok(warnings):
-                    document = trace_qualification_from_structural_result_v1(inputs.snapshot_id, options, warnings)
-                case Err(reason):
-                    document = trace_qualification_infrastructure_v1(inputs.snapshot_id, true,
-                        options, "TRC-EVALUATION-BUDGET", "", reason)
+            if options.profile != TraceProfile.Worktree:
+                document = trace_qualification_profile_unavailable_v1(inputs.snapshot_id, options)
+            else:
+                match trace_evaluate_captured_v1(inputs, options.scope, TraceDiagnosticLimitV1(value: 100000)):
+                    case Ok(warnings):
+                        document = trace_qualification_from_structural_result_v1(inputs.snapshot_id, options, warnings)
+                    case Err(reason):
+                        document = trace_qualification_infrastructure_v1(inputs.snapshot_id, TraceSnapshotCompletenessV1.Complete,
+                            options, "TRC-EVALUATION-BUDGET", "", reason)
     var code = document.evaluation.exit_code
     var output = ""
     match trace_qualification_encode_v1(document, trace_qualification_codec_limits_v1()):
@@ -41,8 +48,9 @@ fn trace_cli_run_v1(args: [text]) -> i64:
             # standard 1 MiB report budget for this infrastructure summary,
             # retaining the captured snapshot and authored selection.
             code = 2
+            val completeness = if document.snapshot.complete: TraceSnapshotCompletenessV1.Complete else: TraceSnapshotCompletenessV1.Incomplete
             val incomplete = trace_qualification_infrastructure_v1(document.snapshot.id,
-                document.snapshot.complete, options, "TRC-REPORT", "",
+                completeness, options, "TRC-REPORT", "",
                 "Cannot encode the complete structural report within the codec contract")
             match trace_qualification_encode_v1(incomplete, trace_qualification_codec_limits_v1()):
                 case Ok(encoded): output = encoded

@@ -1584,3 +1584,612 @@ never cache an answer computed while exhausted) —
   were lowered. Run it with
   `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json … --width 3840
   --height 2160 --backend vulkan`.
+
+## 2026-11-14 — matrix clusters: inline button baseline, max-content of mixed inline content, control UA font (169 -> 106 cells)
+
+- **Cluster census at 169 cells / 290 ids (by root cause, largest first):**
+  inline `<button>` position (about 44 cells: every `*/button` child cell and
+  most `button/*` cells); non-replaced inline boxes taking `width` / `height`
+  / `min-*` and vertical padding/border growing the line (about 20: `span/*`,
+  `display:inline` cells); `td` parents (24 cells on two pages); controls
+  inheriting the parent font (9); `td` with a non-`table-cell` display or
+  out-of-flow position (9); flex column / column-reverse / wrapped-line
+  stretch (18); `display:inline-flex` (10); `width: min-content |
+  max-content` and `white-space: pre-wrap` (8); percentage / negative
+  offsets (5).
+- **Inline button.** A `<button>` is an inline-block WITH a text child, so the
+  run loop's baseline-set test (`display == "inline" or child_count == 0`)
+  skipped it and it stayed at the line top. It is now in the set and
+  `inline_widget_baseline_from_top` gives its baseline: the LAST label
+  line's (Chrome: a three-line 51 px button sits at the top of a 52 px
+  line), the label block centred in the content box; an empty button aligns
+  on its content-box bottom. Margins take part through the existing
+  `margin_ts` / `margin_bs`.
+- **Max-content.** `flex_item_max_content_width` (auto table columns,
+  absolute / float / flex shrink-to-fit) now mirrors `intrinsic_text_width`
+  for inline content: a collapsible space between pieces counts, `<br>` ends
+  the measured line, replaced inline children use
+  `inline_replaced_predicted_width`, text controls
+  `text_control_auto_outer_w`.
+- **Control font.** `font: -webkit-small-control` is a whole shorthand: the
+  tag defaults for `button` / `input` / `select` reset family
+  (`sans-serif`), weight and style, not only size and line height.
+- **Trap — whole-pixel pieces drift.** `ab <button>cd</button> ef` in a `td`
+  is 78 px where Chrome has 76.13: five pieces each rounded to a pixel. The
+  matrix keeps `tt-td-button-w/-p` baselined for it.
+- **Heading margins.** `h6` carried 26 px margins; 2.33em of its 10.72 px
+  font is 24.98. The others were already right.
+- **`html` catalog page (15.98%) by area, 900x760:** rows 124-219 are 10.8
+  of the 15.98 points -- the article's `<header>` has
+  `background: linear-gradient(120deg, #173b7a, #6d28d9)` and the CPU raster
+  lane paints it FLAT (`#173b7a`): `fb_style_background_opacity_clip` only
+  knows the two-colour vertical form (`background_gradient_from/to`), while
+  an angled or N-stop gradient is carried as stop lists for the Draw IR
+  lane. A paint defect, not geometry. Text rows 240-760 are about 4.6
+  points (glyph raster differences); the rest 0.6. Element geometry inside
+  the viewport matches Chrome; the first geometry delta on the page is the
+  `h6` example at y = 4534 (fixed above), then `<q>` without quotation marks
+  (10 px narrower) and a `tbody` 2 px low.
+- **Trap — the geometry differ's default Chrome run has a 15 px scrollbar.**
+  Without `GEOM_DIFF_CHROME_EXTRA_FLAGS="--hide-scrollbars
+  --force-device-scale-factor=1"` every block on a page taller than the
+  viewport reports `dw = 15` and the real deltas drown (357 "mismatches"
+  against 162 with the flag).
+- Specs: `inline_button_baseline_chrome159_spec`,
+  `table_cell_max_content_inline_chrome159_spec`,
+  `form_control_ua_font_reset_chrome159_spec`,
+  `heading_ua_margins_chrome159_spec` (all in `test/01_unit/browser_engine`).
+- Residue: `doc/08_tracking/bug/web_matrix_table_button_html_page_residue_2026-11-14.md`.
+- **Trap — an atomic inline box keeps its edge spaces inside.**
+  `inline_subtree_edge_is_space` follows an inline element's first / last
+  text to find a space on the line; it must not be asked about an
+  inline-block, button or replaced child (`ab<button> cd </button>ef` is as
+  wide as `ab<button>cd</button>ef`). The call sites gate on
+  `display == "inline"` and not replaced. `white-space: nowrap` still
+  collapses (only `pre` keeps spaces), so a nowrap cell keeps the
+  inter-inline space in max-content.
+- **Trap — `max-width: <percent>` used to be N px.** Percentage min-/max-
+  sizes are now the negative sentinel (like `width`) and resolve in
+  `style_with_resolved_percent_min_max`; every clamp reader tests `> 0`, so an
+  unresolved sentinel is `none`, which is what max-content needs. Resolve at
+  EACH call site against that site's containing block (normal flow, inline
+  atomic, float, abspos padding box, flex container); `layout_with_style`
+  only maps a leftover sentinel to `none`. Resolving there against the box's
+  own width was wrong everywhere it mattered: an inline input came out 16 px,
+  a float 193 instead of 200, an abspos 193 instead of 210, and
+  `td{max-width:10%}` (ignored by Chrome) shrank the cell to 13 px. A flex
+  item also needs the clamp INSIDE distribution (`flex:1;max-width:25%` of
+  400 is 100 / 300), not only on the final width.
+- **Trap — a gradient row has two painters.** The CPU raster paints a typed
+  `linear-gradient` in `fb_style_background_opacity_clip` (fb lane) AND the
+  Draw IR engine2d ramp (`emu_draw_linear_gradient_stops`); a fix in one
+  lane only is invisible or half-visible, so run each new spec row red first
+  to learn which lane it hits. Corner keywords are box-dependent: the parser
+  stores 1000 + the square angle and both lanes resolve it with
+  `gradient_corner_dir_q16`. Interpolation is premultiplied; stop positions
+  never decrease. Emit a ramp a ROW at a time (`draw_image`): one
+  `draw_rect_filled` per colour run cost the catalog `html` page 120 s.
+  (`parse_color("red")` was #dc3232 until 2026-11-15.) The corner codes
+  (>= 1000) share the angle slot, so every real angle must be reduced to
+  0..359 first (`3turn` painted as "to top left" until it was). Ramp
+  positions multiply by 1000: keep them in i64 past ~1073 px.
+- **Trap — a UA reset needs `inherit` to exist.** Resetting the control
+  font exposed that NO font property resolved the `inherit` keyword
+  (`font-family: inherit` stored the literal text; `font: inherit` cleared
+  weight and style). It only looked right while controls inherited by
+  default; `button, input { font: inherit }` (normalize, Tailwind preflight)
+  would have rendered every control in the UA font. `Style.inherit_font_*`
+  / `inherit_bold` / `inherit_italic` / `inherit_line_height_px` capture the
+  PARENT's computed values in `inherit_from` and `inherit_style`; `font`,
+  `font-family`, `font-size`, `font-weight`, `font-style` and `line-height`
+  read them for `inherit`. Before adding any tag default that replaces an
+  inherited value, check that `inherit` restores it.
+- **Button baseline, any content.** With auto height the content fills the
+  content box, so the last line's baseline is `h - border_b - pad_b -
+  descent` whatever the content is (a label in `<b>`, `ab<br>cd`, an image).
+  Only an explicit height needs the centring lead, and that path still looks
+  for a direct text child.
+- **Max-content, spaces.** One collapsible space counts between inline
+  pieces wherever it sits: a whitespace-only text node (`<a>Edit</a>
+  <a>Del</a>`), the end of the previous element's text (`<span>ab
+  </span>cd`), or the start of the next (`inline_subtree_edge_is_space`).
+  Text controls are clamped by min/max-width (`constrained_outer_width`)
+  and atomic inline boxes carry their horizontal margins.
+- **Trap — one colour parser, CSS Color 4 values.** `parse_color` and
+  `parse_color_alpha` hand `rgb()` / `hsl()` and keywords to dom_color's
+  `parse_color_value_checked`, alpha kept in every syntax. 0 means
+  "transparent or invalid" to every caller, so an invalid value must be
+  rejected (never read as 0 = black), and a colour longhand OR shorthand
+  (`background`, `border*`, `outline`) holding a malformed colour function
+  is dropped whole in `_decl_table_build_inner`. A shortcut keyword above the table (`red` = #dc3232 survived
+  for months) silently repaints every page; pin new forms in
+  `css_color_parse_chrome159_spec.spl` against `getComputedStyle`.
+- **Trap — a collapsed cell's box overlaps its neighbour.** In
+  `border-collapse: collapse` the tracks hold half of each shared border, so
+  the cell box is laid out from `cell_x - (b+1)/2` to `cell_right + b/2`
+  (layout_engine table loop) and paints its full border with the ordinary
+  paint path. Moving the border paint instead of the box leaves the content
+  one pixel off (seen and reverted). Column edges round half up in both
+  `table_distribute_auto_columns` and the fixed split; probe a fraction
+  >= .5 when pinning one, or floor passes too
+  (`table_collapsed_border_paint_chrome159_spec.spl`).
+
+## 2026-11-15 — lane parity: Draw IR gradients, cpu_simd vs Vulkan census, hardware Vulkan 4K
+
+- **Draw IR angled / multi-stop linear gradients now match the fb raster
+  bit for bit (opaque).**
+  `emu_draw_linear_gradient_stops` (`engine2d/backend_emu.spl`) used the
+  corner pixel CENTRES as the line ends (`(w-1)` span) and truncated alpha;
+  it now uses the fb raster's mapping (integer Q16 sin/cos tables generated
+  from `gradient_angle_sin_cos_q16`'s series -- this file is also the
+  baremetal raster, so no `f64` -- line `|w sin a| + |h cos a|`, `t16 / 64`
+  quantisation, rounded premultiplied alpha). Was 13-16 levels off on 10x10 /
+  12x6 boxes. Spec: `test/01_unit/browser_engine/linear_gradient_angle_draw_ir_chrome159_spec.spl`
+  (Chrome 159 rows for 45/135deg, `to bottom right` on 12x6, translucent
+  stops, and a whole-box lane-parity row; 9/11 -> 11/11). Translucent stops
+  stay up to 2 apart: the fb raster quantises alpha to 0..100 %.
+- **The default top-to-bottom two-stop ramp changed on the Draw IR lane
+  too** (it goes through the same primitive): row centres along the line
+  instead of exact stops on the first/last row. That is what Chrome does --
+  10x10 `#000 -> #fff` row 0: Chrome #0d0d0d, Draw IR #0d0d0d (was #000000).
+  The fb raster keeps its endpoint-exact dithered painter
+  (`mix_color_vertical_centered`), which is now the outlier: #000000 there,
+  up to 21 off on 12x6, within 2 on 200x100 (AC-11 bounds it at 2, AC-12
+  pins Chrome). AC-13 runs the primitive on a real `VulkanBackend`
+  (llvmpipe): device readback equals the software reference pixel for pixel.
+- **Trap: the catalog gate's `vulkan` lane never calls that function.**
+  `simple_web_render_html_to_pixels_with_engine2d_backend` paints non-"text
+  document" pages through the fb raster and presents them; only the Draw IR
+  entry `simple_web_layout_render_html_pixels_engine2d` reaches
+  `draw_gradient_rect_stops`. And that entry with `"vulkan"` resolved to
+  `selected=cpu` in a probe -- read `Engine2dDrawIrAdvResult.selected_backend`
+  before claiming a GPU ran. `feature_showcase.spl` is the place where the
+  primitive runs on a real `VulkanBackend` (byte-identical, 38 primitives).
+- **cpu_simd vs Vulkan (llvmpipe), 900x760: 62 pixels over all 8 pages**,
+  all text ink: some glyphs one row lower on Vulkan; Chrome mismatch
+  identical per page. FIXED the same day (see the next section). Record + 25 px repro:
+  `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`.
+- **Hardware Vulkan 4K (NVIDIA GB10, driver 580.173.02,
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`, strict
+  backend):** runs. overview 0.24, html 1.67, css-layout 2.09, css-paint
+  2.41, forms-media 1.96, animation 2.23, evidence 0.15, tab-bar 0.05 --
+  identical to the llvmpipe rows. 932 s for 8 pages (llvmpipe 1012 s), max
+  RSS 4.5 GB: the interpreted page pipeline dominates, not the device. Run
+  with `--baseline <nonexistent>` so it is compared, not judged against the
+  llvmpipe file. The RenderDoc layer still cannot load on this driver.
+- **Perf note (superseded 2026-11-15):** the "54 s of 76 s" `font_atlas_pack_u32_to_u8`
+  figure is stale. On tree `7b88ee7874a` with the same seed, forms-media renders
+  in 13-17 s and the pack was 0.8-1.5 s (21 packs, ~60 ms each); the drop came
+  from upstream source, not from the binary. 12 of those packs were full
+  repacks caused by the atlas being wiped on every text-size change, fixed in
+  `doc/08_tracking/bug/font_atlas_wiped_on_size_change_full_vulkan_repacks_2026-11-15.md`
+  (12 -> 3 full packs). The opt-in `SIMPLE_VK_FONT_UPLOAD=u32` lane renders a
+  DIFFERENT pixel sum (`2697956136642868` vs `2697697746427296`) and must not
+  become the default until that is explained. Checked 2026-11-15: it is already
+  so on base `b8b14272484`; disabling the #9435 `clipped-out` return leaves the
+  u32 sum byte-identical, so that is NOT the cause; draining the deferred u32
+  upload at once moves it only to `2697952473848308`, and this branch (atlas kept
+  across sizes) gives `2697955134348331`: the lane depends on atlas layout and
+  upload order. The gap is the sum-equivalent of ~15.4k black-to-white pixels
+  (no framebuffer diff yet); cause open. RESOLVED: the deferred u32 copy
+  declined under the compiled array ABI after the dispatch was recorded, so
+  the lane drew no text; see
+  `doc/08_tracking/bug/vulkan_font_u32_lane_draws_no_text_compiled_abi_2026-11-15.md`.
+- Gradient paint cost, same seed: 300 x 900x100 120deg boxes 1.02 s -> 0.39 s
+  wall (startup 0.24 s), RSS +4 MB; 6000 12x6 boxes 0.25 s -> 0.25 s, +5 MB
+  (boxes under 1025 px skip the table; a table per box cost +87 MB).
+
+## 2026-11-15 — transparent is a value, mitred border corners, `width:0`, column-reverse, border cascade, whitespace by computed display
+
+- **Trap — 0 still means "unset" to the parsers; transparency is decided at
+  the applier.** `_parse_color_delegated` keeps returning 0 for both
+  `transparent` and garbage. Every applier that must *override* an earlier
+  colour asks `_decl_transparent_color(raw)` (any top-level token with alpha
+  0, functions kept whole by `_decl_top_level_tokens`), so
+  `background:red;background:transparent`, `color:transparent` and
+  `border-*-color:transparent` clear the earlier value instead of being
+  ignored. Both paths need it: the declaration table appliers
+  (`_decl_apply`) AND the dispatch fast path in `..._declarations.spl`
+  (`color`, `outline`) — the review caught the fast path missing it.
+  Alpha-0 hex (`#f000`, `#ff000000`) returns 0 too.
+- **Trap — named colours inside shorthands never parsed.** `border:4px solid
+  blue` painted nothing until `_shorthand_color_token` ran before the
+  rgb/hsl/hash fallback in `parse_color_any`. Multi-value `border-color`
+  takes 1-4 values (top right bottom left); a first-token-only parse
+  painted a square instead of a triangle.
+- **Mitre.** A corner pixel belongs to a side when
+  `(2c+1)*side_w > (2r+1)*cross_w`; the exact diagonal pixel gets ONE
+  premultiplied 50/50 mix (`mitre_mix_color`; Chrome #7f0080 for red/blue,
+  #ff7f7f for red/transparent). Blending it once per side double-blends.
+  Framebuffer twin `_fb_border_sides_mitred`, Draw IR twin
+  `_engine2d_draw_ir_render_borders_mitred`; only taken when adjacent sides
+  differ.
+- **`width:0` is a set width.** `node_w == 0` used to mean auto, so a CSS
+  triangle was full width and `width:0;white-space:nowrap` grew. The
+  `width_zero` style flag (copied in `copy_from`, `style_with_width`,
+  `style_with_height_without_grid_fields`; false whenever the final width is
+  not 0, so `width:0;inline-size:50%` is 150) is honoured by the "is width
+  set" tests in layout_engine, `constrained_outer_width` (its `< 1 -> 1`
+  clamp made every zero box 1px -- the first cut missed it), floats, abspos
+  and the flex sizing branches. `height:0` is still auto (48 sites; filed).
+- **Text alpha.** `_fb_text_px` blends glyph pixels with alpha 1..254 in the
+  5x7 bitmap lane; engine2d `SoftwareBackend.draw_text` blends via
+  `sw_blend_const_raw_span`. TTF and other backends: open.
+- **Unclosed function at the end of an inline style** (`color:rgb(0,255,0`)
+  is closed by `_inline_style_closed` before the priority split (CSS
+  Syntax: EOF closes open blocks).
+- **Trap — whitespace is judged by COMPUTED display, never by tag.** The
+  parser keeps a whitespace-only text node after any element as one space
+  (never inside `<pre>`), and `compute_styles_with_material` hides it
+  (display:none) inside flex/grid/table containers and beside a block-level
+  sibling. The first cut kept it after "inline tags" and broke two catalog
+  pages: forms-media (`label{display:block}` -> an extra line per control,
+  6.37 -> 9.46) and tab-bar (a space flex item + two gaps between every
+  button, 0.68 -> 2.00). Flex row/column and grid loops now skip
+  display:none children (no item, no gap). Kept whitespace fixed the
+  animation page's 4-9px shifts. Simple's space advance is 6px vs Chrome
+  4.45 — open.
+- **Trap — a shorthand must store its longhands at its own source
+  position.** The appliers run in a fixed order, so
+  `border-top-color:red;border-color:blue` stayed red until
+  `_border_shorthand_longhands` (foundation, `_decl_table_build_inner`)
+  started writing `border-*-color/width/style` entries right after the
+  shorthand; the last-wins lookup then sees source order. A `border-color`
+  with a non-colour token returns `["!"]` and drops the whole declaration.
+  A shorthand also stores what it omits (width 3px, style none, color
+  `currentcolor` -> the element colour): `border-top-style:dashed;border:2px
+  red` paints nothing in Chrome. Logical properties (shorthands AND
+  longhands) are stored as their physical longhands only (horizontal-tb
+  ltr), so the fixed-order logical appliers never re-apply them; only a
+  `var()` value still reaches them. Trap: the table used to be allocated at
+  26 slots per declaration whenever the text held "border" (even
+  `box-sizing:border-box`) and was never trimmed -- every lookup scanned
+  the empty slots. It is cut to the used length now.
+- **Trap -- abspos stretch tests must read "is set", not "> 0".**
+  `left:0` and `inset:0` were never stretched because the test was
+  `left_px > 0`; use `left_auto`. The rtl over-constraint rule applies only
+  with a definite width and uses the containing block's direction.
+- **Trap -- outline `auto` is not a border style.** `css_border_style_token`
+  does not know it; `outline_shorthand_paint_width_px` is the one resolver
+  for both appliers (omitted width = 3px, omitted style = no paint).
+- **Trap -- `white_space_pre` means nowrap too.** It cannot carry
+  `pre-wrap`/`pre-line`; a kept newline between elements uses
+  `Style.white_space_newline` + `HNode.ws_raw` (`html_kept_newlines` counts
+  them; extra newlines add line heights) and is laid out by the `<br>`
+  branches (layout_engine, layout_foundation measure). A multi-space
+  whitespace node is NOT collapsed by normal-mode layout, so the parser
+  stores the space count only inside preformatted tags.
+- **`flex-direction: column-reverse`** restacks bottom-up from the content
+  bottom in DOM order with physical margins (reflecting the column result
+  got asymmetric margins wrong: t=38 vs Chrome 42). Chrome 159:
+  flex-start/normal/`end` pack at the bottom, flex-end and `start` (the
+  physical top) at the top, center/space-* keep the reversed order. Move
+  items with `offset_layout_subtree` by (target - flow y): `out_by` already
+  holds the `position:relative` offset, so subtracting it from the box y
+  instead dropped `top:10px`. Auto main margins and `order` are not
+  modelled (filed). Next cluster: flex-wrap line stretch under a definite
+  height (align-content stretch; Chrome items 45 tall, Simple 24).
+
+## 2026-11-15 — Vulkan text clip: cpu_simd and Vulkan byte-identical
+
+- Root cause of the 62 px: `VulkanBackend.composite_font_batch` (the
+  vector-face path behind `draw_text_with_advances`) ignored `set_clip`; only
+  the bitmap path baked the clip into its quads. Draw IR clips control text to
+  its box, so descenders spilled below `<input>`/`<select>` on Vulkan only.
+  Fixed by clipping the quads on the host; a fully clipped batch is the
+  admitted status `clipped-out`. Record:
+  `doc/08_tracking/bug/web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`;
+  RenderDoc params-buffer evidence in the simple_renderdoc skill.
+- 900x760: all 8 catalog pages `cmp`-identical cpu_simd vs Vulkan (llvmpipe).
+- `draw_ir_adv_branch_coverage_spec` hostile-advance row expected 8 skips,
+  but the executor now paints such runs with the font's own advances
+  (`text-advance-arity` fallback; no code emits `text-font-advances` any more,
+  only a stale comment at `draw_ir_adv.spl:555`). Row re-pinned to 9 rendered /
+  0 skipped plus a pixel row proving hostile advances paint exactly like no
+  advances.
+- `engine2d_software_offscreen_dispatch_spec` (0/3) asserts a software rung
+  that `engine.spl` todo 303 says does not exist; filed, not edited:
+  `doc/08_tracking/bug/engine2d_software_offscreen_dispatch_spec_asserts_missing_rung_2026-11-15.md`.
+- Hosts without `/usr/share/vulkan/icd.d/lvp_icd.json` do NOT exercise the
+  Vulkan rows of `vulkan_text_advances_clip_parity_spec` or AC-13 of
+  `linear_gradient_angle_draw_ir_chrome159_spec`: each prints a
+  `[skip] ... was not exercised` line and returns. Read the log, not the
+  pass count, before citing them as Vulkan evidence.
+- Draw IR advances are applied only when they sum to the command width;
+  otherwise the run silently paints with the font's own advances. A test of
+  "advances applied" must set the width to the sum (see the `7,7` row).
+
+## 2026-11-15 — wrapped flex lines size their items; the headless shell is not the oracle
+
+- **Trap — the gates must run FULL Chrome.** With no `CHROME_BIN`, the
+  harvester (`check-chrome-layout-geometry-diff.shs --print-chrome`) prefers
+  the Playwright headless shell, which resolves `monospace` to DejaVu Sans
+  Mono through fontconfig: every `<code>` line box is 1px shorter and the
+  matrix reports 28 NEW ids (127 cells) at an untouched base. Full Chrome
+  (`CHROME_BIN=$HOME/.cache/ms-playwright/chromium-1255/chrome-linux-arm64/chrome
+  CHROME_NO_SANDBOX=1`) gives the recorded 102. Never baseline those ids;
+  cross-check any hand measurement of text from the headless shell.
+- **Fonts on both sides (audit).** Simple's Linux face set is Liberation
+  Sans / Serif / Mono (`browser_host_has_measured_linux_face_set`). Chrome is
+  not handed that file: it resolves the generics through fontconfig to its
+  Arial / Times New Roman / Courier New defaults, which this host aliases to
+  the same Liberation files -- same face by host configuration only. The
+  catalog uses 16px / 24px text and no `@font-face`; no fixture enlarges
+  text to hide a mismatch. High-DPI comparison (owner rule: >= 300 dpi or a
+  shared 1px bitmap font) is blocked on a device scale the renderer does not
+  have: `doc/08_tracking/bug/web_render_no_device_scale_hidpi_gate_2026-11-15.md`.
+- **Wrapped lines align their items.** The wrap branch placed each line at
+  its align-content-stretched offset but laid every item out at content
+  height. After the line loop, each in-flow item is aligned inside its line
+  (CSS Flexbox 9.4 step 11): an auto-height `stretch` item (not replaced,
+  no max-height, no auto cross margin) grows to the line's cross size, an
+  `end`/`flex-end`/`center` item moves down by the free space
+  (`offset_layout_subtree`). The line cross size is the larger of the
+  stretched estimate and the tallest real item, and the next line starts
+  below the REAL items (`line_heights` estimates an auto-height item as one
+  line box, so `aa<br>bb` used to overlap the next line). `wrap-reverse`
+  keeps the old placement. Matrix 102 -> 95 cells (21 `cc-fx-fw-wrap-*`
+  ids). Spec: `flex_wrap_line_stretch_chrome159_spec.spl`.
+
+## 2026-11-15 — `simple_web_renderer_spec` was red from a stale snapshot; the matrix gate picks full Chrome
+
+- **Trap — a red main spec can be a lost harness, not a lost feature.**
+  `88aac2ffe28` (release/1.0 transplant) replaced the spec with an older copy:
+  five helpers, three rows, ten imports and the head of the content-visibility
+  row vanished, so 9 rows died on `function/variable ... not found`. Before
+  triaging a value, grep the spec for every `_helper(` it calls and diff the
+  row against `88aac2ffe28^`. Restored: 111 -> 114 rows, 83 -> 92 passing;
+  the 22 left are classed in
+  `doc/08_tracking/bug/simple_web_renderer_spec_red_rows_2026-11-15.md`.
+- **The matrix gate no longer takes the headless shell.** Without
+  `CHROME_BIN` it uses a system Chrome, else the newest Playwright
+  `chromium-*/chrome-linux*/chrome`; a headless shell (found or passed) is an
+  ERROR naming the reason (`full_chrome_in`, `is_headless_shell`; selftest 11
+  -> 14 fixtures). The geometry differ's own preference for the shell is
+  unchanged.
+- Batch 1 (`71ff31154d5`) catalog 900 px: every page equal to its row
+  (worst css-paint 6.80); `html` 216.2 s vs 226.6 s at base, `css-layout`
+  266.0 s vs 274.3 s, same seed.
+
+### Batch 3a (2026-11-15): host-dependent renderer rows, numeric Playwright pick
+
+- **Playwright build is picked by number, not by glob order.** Both the
+  matrix gate (`full_chrome_in`) and the catalog gate
+  (`newest_playwright_chrome`) parse the `chromium-<n>` build and keep the
+  largest, so `chromium-999` can no longer shadow `chromium-1255`. Each gate's
+  selftest has a 999/1255/1200 fixture expecting 1255.
+- **A backend-name row is host-dependent, not a regression.** The resolver
+  probes the real device and honestly falls back to `software`
+  (`9970185d1de` surfaced the reason). Expect the canonical name only where an
+  independent `Engine2D.probe_backend` initializes; check aliases with
+  `backend_canonical_name`. On this aarch64 host: cuda/vulkan/cpu_simd
+  initialize; hip, opencl and metal ("Metal requires macOS") do not.
+- **Chrome pixel probe without ImageMagick:** screenshot with full Chrome,
+  then load the PNG into a canvas in a second headless page
+  (`--allow-file-access-from-files --disable-web-security`) and print
+  `getImageData` through `--dump-dom`.
+- **Chrome samples a vertical 2-stop ramp at row centres.** Measured
+  2026-11-15, Chrome 159: a 4 px `#000 -> #fff` ramp gives 1F/60/9F/DF, and a
+  16 px one gives 08 at the top row and F7 at the bottom. The CPU raster's
+  endpoint-exact `mix_channel_gradient_centered` (t = pos/(span-1)) is wrong
+  against this; Draw IR already samples centres (AC-12 in
+  `linear_gradient_angle_draw_ir_chrome159_spec`).
+
+### Batch 3b/3c (2026-11-15): opacity composite, paint order, ink rows
+
+- **A group-opacity composite must honour the child's own alpha.**
+  `engine2d_composite_region_milli` (`engine.spl`) blended the child at a
+  constant alpha since `ece10b378c8`; with a full-viewport opacity layer every
+  transparent pixel darkened the page (`0x807c7d7e`). Effective alpha is now
+  `src_a * a8 / 255`.
+- **Positioned z-auto boxes paint after in-flow content.** The Draw IR paint
+  order (`_html_draw_ir_node_paint_order`) groups positioned boxes with
+  `z-index >= 0` after their context's in-flow members.
+- **8 px text has no exact-colour pixels in Chrome.** Assert ink, not the
+  text colour, for small text; exact-colour counts only describe the 5x7
+  bitmap face.
+- **Never pair a probe with a create to gate a GPU row.** The GPU is shared;
+  take name and reason from one `..._resolved_backend_name_with_reason` call.
+- **Put a seed probe inside the worktree it tests** (e.g. an ignored
+  `build/wr_probe/`): from a scratch dir, `std.*` can fail to resolve
+  root ("resolves from the project stdlib roots only").
+- **Old trees do not run on the current seed** (HIR lowering errors before
+  ~2026-11-14), so find introducing commits from the code and `git log -S`.
+
+## Gradient ramps (2026-11-15)
+
+- **Chrome never paints a stop colour exactly on a vertical ramp.** It samples
+  row centres, `t = (2*row+1)/(2*h)`, then dithers per device pixel with Skia's
+  8x8 ordered matrix: `X = x`, `Y = y ^ x`, `M` interleaves the low 3 bits
+  (`Y&1<<5 | X&1<<4 | Y&2<<2 | X&2<<1 | Y&4>>1 | X&4>>2`), stored
+  `floor(v + (2M+1)/128)`. `gradient_dither_threshold` returns `M`.
+- **Fit before porting.** Replay a candidate model in a scratch awk script
+  against every Chrome pixel you have (`cpixel.shs`) and port only on an exact
+  match. Pins that hit stop colours exactly were never Chrome values.
+- Dither uses DEVICE coordinates; within one row only `x & 7` matters, so the
+  painter computes 8 phase colours per row and merges equal runs.
+
+## 2026-11-16 — min-width beats max-width
+
+- **Order matters:** CSS 2.1 10.4 applies `max-width` first, then `min-width`, so `min-width` wins a conflict. `constrained_outer_width` (`..._layout_foundation.spl`) clamped in the opposite order, and the auto-margin centring clamp (`..._layout_engine.spl`) never consulted `min-width`. `width:50%;max-width:300px;min-width:500px` was 300 wide; Chrome 159 makes it 500.
+- **Trap — running the gates by hand:** both Chrome gates need `SIMPLE_BIN` (seed path) and `CHROME_BIN` (full Chrome) in the environment; without them they print `ERROR — nothing was checked` and exit 2, which is easy to miss in a chained script.
+- **Gates at the fix:** matrix 95/979 (no change), catalog 900 worst 6.80 (no change).
+
+## 2026-11-16 — rem uses the root font-size
+
+- **Root font is cascade state:** `css_cascade_root_font_set` is set to 16 at the start of `compute_styles_with_material`, set to the `html` node's computed `font_size` once that node is stored, and reset at pass end. Every `rem` reads it (`css_cascade_root_font_px()` in `..._decl_apply.spl`, `_css_cascade_root_font_px` in `..._declarations.spl`). The root's own `font-size:Nrem` still uses 16, which is the initial value.
+- **Trap — two dispatchers:** `margin-left` is parsed in BOTH `_apply_decls_dispatch` (`..._declarations.spl`, fast path) and `_apply_decls_without_grid_inner` (`..._decl_apply.spl`). Fixing one leaves the spec red; grep both for any longhand you touch.
+
+## 2026-11-16 — box-sizing:inherit
+
+- **`inherit` on a non-inherited property** needs the parent's value carried on the child Style, as `inherit_font_size` is. `inherit_border_box` is set in `inherit_from`, copied in `copy_from`, and added to `inherited_digest`. Skip the digest and the cascade memo can hand a child the style computed under a different parent.
+- **Trap — CSS braces in spec literals:** write `body{{margin:0}}`. A bare `{margin:0}` inside a `"..."` literal is interpolation and fails with `variable margin not found`; `{margin:0;font:...}` only happens to survive.
+
+## 2026-11-16 — compound selectors in any order
+
+- **One splitter, four consumers.** `_compound_base_tokens` feeds `parse_selector_part` (ParsedSel), `base_selector_matches` (text path, the debug oracle's other side), `selector_bucket_kind/value_from_base` (rule candidate buckets), and `_part_specificity`. If a bucket key is wrong, the rule is never a candidate. The matcher alone cannot show this: `.a#t` matched once parsed, but it sat in the `a#t` class bucket.
+
+## 2026-11-16 — :first/last/only-of-type
+
+- **A new structural pseudo-class needs SIX touch points** in `..._core_selectors.spl`: the `PSEUDO_*` code, `_pseudo_code_for`, the text-path allow-list in `simple_match` (the `pseudo != ...` chain), the text-path ctx branch, the parsed-path ctx branch, and `_option_needs_ctx` (without it, `:not(X)` is evaluated with no siblings). Miss the allow-list and the text path returns false while the parsed path matches; `web_selector_parsed_equivalence_spec` catches that.
+
+## 2026-11-16 — absolute height stretch and margins
+
+- **`absolute_containing_h` is the PADDING-box height** (`content_height_limit + pad_t + pad_b` at every call site), while `containing_w` is the CONTENT width and callers add the padding back. Mixing the two up gives the wrong stretch only when the parent has padding, so the spec includes a padded parent.
+- Absolute boxes now take their margins in `absolute_child_x/y` and in the width stretch. Before this an abs box with `margin:1px` sat at the inset with no offset, which no catalog page exercised.
+- **Trap — per-call-site variable names:** the five `absolute_child_style` call sites name the child `c`, `fc`, `fc_wrap` and `flex_c`. A blanket `nodes[c]` replace only fails with `variable c not found` when a flex absolute child is actually laid out. `layout_renderer_box_geometry_chrome159_spec` ("flex row/col abs child") caught it, and nothing at load time did.
+
+## 2026-11-16 — absolute static position
+
+- The static y of an auto-inset absolute box is `cy + prev_margin_b + margin-top`, not `cy`. The previous sibling's bottom margin is still pending in `prev_margin_b` (it has not been added to `cy` yet), and Chrome places the box after it.
+
+## 2026-11-16 — percentage flex-basis
+
+- A percentage that is only known at layout lives in its own Style field with default `-1` (`flex_basis_permille`), so none of the giant `Style(...)` constructors need editing. Only the decl_apply constructor passes it, and `copy_from` copies it. `flex_item_percent_style` (called at every ROW flex item site) resolves it into `flex_basis_px` and resets it to -1. The column path at the `flex_c` loop deliberately does not call it, so a column percent basis stays auto (it needs a definite height).
+
+## 2026-11-16 — flex min-width freeze
+
+- The §9.7 freeze loop for zero-basis items already existed. It keyed on `zero_floor_w` (the automatic minimum), which returned the bare frame when `min-width` was set. Making the floor the declared min-width was enough: no new loop.
+
+## 2026-11-16 — column flex grow and shrink
+
+- **The column path had no grow/shrink at all** (row-only Flexbox 9.7). `col_flex_target_heights` returns per-child outer targets in SIBLING order (-1 = untouched, empty = nothing to do), and the item loop indexes it with a `col_k` counter bumped on every child, absolute and `display:none` included. Keep the two loops walking the same `first_child`/`next_sibling` chain.
+- **The natural-first rule** applies only to auto-height items with children: lay out once with the original style, and keep that result if it is at least the target. It costs a second layout only in that case. Explicit-height items take the target directly, which is what lets a 40px text item shrink to its line height.
+- **The natural pass and floats:** `layout_with_style` APPENDS floats (`float_ctx_add`), while line boxes are indexed per node and get overwritten. So the second (target) layout first calls `float_ctx_truncate` back to the count from before the natural pass and restores `g_float_max_y1`.
+- **Bail rather than guess:** an auto-height item with element children returns base -1 and the helper returns `[]` for the whole container, which keeps the old layout. A one-line estimate there made siblings shrink or grow wrongly (review finding), which is worse than doing nothing.
+- **Perf:** the helper returns early unless the container has a height, max-height or min-height. Measured on `layout_renderer_box_geometry_chrome159_spec` with the seed 59635056 B (2026-11-14 09:32): 16.3 / 15.9 s and 428 MB on head vs 15.4 / 15.6 s and 428 MB on base.
+- **Trap:** a merged Chrome oracle page shifts every y. Re-measure the COMBINED page, never add offsets by hand.
+
+## 2026-11-16 — single-line row flex cross alignment
+
+- The wrap path aligned items per line after layout, but the single-line path had no such pass: stretch, center and end there only used `st.height_px`. The fix is the wrap path's loop run once with `max_child_h` as the line. Stretch only raises `out_bh`, since block content stays at the top; center and end move the subtree with `offset_layout_subtree`.
+
+## 2026-11-16 — background shorthand after the size group
+
+- `_parse_background_shorthand` is a token state machine. `after_slash` must END at the first non-size token, or every box, attachment or colour keyword after `pos / size` fails the whole layer closed. Its regression partner is `layout_renderer_background_and_grid_decls_spec` "refuses a malformed position/size slash": `center / 1px 2px 3px` must stay invalid, which is why a position token after the slash returns empty.
+
+## 2026-11-16 — text Draw IR line-height
+
+- `_html_draw_ir_resolved_text_command` merges the resolved-font props over the CSS computed style. `line-height` must stay the CSS value (`style_line_h`); the face metric only stands in for `normal`, and `style_line_h` already answers that. Nothing in Engine2D reads the value, only its presence.
+- Narrow Draw IR fixtures drop text that starts past the surface edge. Spans with no whitespace between them never wrap, so a fixture that once fit with bitmap metrics culls once real faces are wider. Widen the surface; don't relax the expect.
+
+## 2026-11-16 — background-image longhand witness
+
+- `bg_layers_raw` does double duty: it is the fail-closed witness (css-cascade spec), and Draw IR treats any non-empty value as "not lowerable". A lone exact `url()` longhand keeps its text there and must still lower: `_html_draw_ir_single_url_witness`. When adding a raw witness to a new branch in decl_apply, check `_html_draw_ir_background_layers` and the material gate (`raw_layers_empty`) in paint_layout.
+
+## 2026-11-16 — raster-only paint is invisible
+
+- The pixel API (`simple_web_render_html_to_pixels`) renders Draw IR through Engine2D. Anything painted only in `paint_raster.spl`'s `paint` never reaches it: the widget-image placeholder (now ported) and the widget panel, button and chrome-text fills (still open). When a pixel row shows only the page background, grep `paint_raster.spl` for the feature before debugging layout.
+
+## 2026-11-16 — device-scale (>=300 dpi) render path
+
+- Rule: Chrome-vs-Simple pixel checks run at >= 300 dpi (device scale >= 3.125); we use integer k=4 (384 dpi). Same font file on both sides; never enlarge CSS font sizes to pass.
+- Entry: `simple_web_render_html_to_pixels_at_device_scale(html, css_w, css_h, k)` (simple_web_renderer.spl) -> `simple_web_layout_render_html_pixels_engine2d_at_device_scale` (simple_web_layout_engine2d_fast.spl). Layout and the document cache stay in CSS px; only the composed Draw IR is scaled, by `draw_ir_composition_at_device_scale` (src/lib/common/ui/draw_ir_device_scale.spl), then painted into a (css_w*k)x(css_h*k) target.
+- Scaled: command x/y/w/h, border/content/hit/clip rects, embedding x/y/w/h, points, edge points, advance_widths, glyph-run xs/ys, fractional geometry, affine tx/ty; style props font-size, line-height, letter-/word-spacing, text-indent, stroke-width, outline-width/-offset, text-decoration-thickness, text-underline-offset, border-*-width, border-*radius, box-shadow-blur-radius, box-shadow-layer-N-{offset-x,offset-y,blur-radius,spread-radius}, background-tile-*/shape-*/radius-*, backdrop-filter-realized-blur-radius-px, the two px ints of legacy box-shadow/text-shadow, every entry of font-advance-widths. Text is re-rasterized at k x font-size (real outlines), not upscaled.
+- NOT scaled, by design: colors, gradient stops (colors + permille positions), angles, counts, identities; raw CSS text (box-shadow-raw, backdrop-filter, background-layers-raw, box-geometry-raw-tokens) because Engine2D reads their scaled typed twins; layout INPUT props (width, margin-*, padding-*, left, background-size-*/position-*) because paint never reads them and they can hold sentinels.
+- Known gap: the Engine2D linear-stroke path admits only stroke-width 1, so a scaled straight edge/path (stroke-width k) is skipped and the pixel entry returns []. Not exercised by the spec fixtures; fix before a gate page uses SVG/edge strokes.
+- Measured (Chrome for Testing 159.0.8154.6 aarch64, `--headless --force-device-scale-factor=k`, tol 8, boxes + "Hello Simple" in DejaVu Sans 16px, both sides /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 759720 B): k=1 3.85% (770/20000), k=4 0.93% (2990/320000). Spec: test/01_unit/browser_engine/web_device_scale_spec.spl.
+
+## 2026-11-16 — input text overflows and is clipped, never truncated
+
+- `input_text_paint_plan(nd, st, x, y, w, h, ancestor_clip)` paints the WHOLE value (password: one `*` per codepoint) and relies on `plan.clip` (content box ∩ ancestor clip). There was a `content_w / advance + 1` glyph cap at five call sites; Chrome 159 keeps the full value (`scrollWidth` 56 in a 36px content box) and clips it. Do not reintroduce a cap to save glyph work: all three painters (raster TTF, raster bitmap, Engine2D `set_clip`) honour the clip.
+- An overflowing value ignores `text-align` (CSS Text 3 §6.1): LTR starts at `content_x`, RTL ends at the content right edge. Buttons (`type=button/submit/reset`) still centre an overflowing label. That is a known divergence: Chrome 159 start-aligns it (a 40px submit with 2px padding and 12 Arial-8px `M`s paints ink from x=3 to x=41, past the content box, so it is clipped at the border box, not the content box). It is open for the owner.
+- Chrome 159 gives `<input>` a default `box-sizing:border-box`, but the engine uses content-box. Author `box-sizing` explicitly in input oracle pages, or the content box differs before paint is even reached.
+- Oracle: test/01_unit/browser_engine/input_text_overflow_clip_chrome159_spec.spl.
+
+## 2026-11-16 — catalog gate `--device-scale K` (384-dpi lane)
+
+- `sh scripts/check/check-chrome-catalog-pixel-diff.shs --device-scale 4` (integer >= 1, default 1 = old behaviour byte-for-byte). Chrome gets `--force-device-scale-factor=K` on both the viewport probe and the capture; `--window-size`/`innerHeight`/deficit stay CSS px (Chrome 159 fresh profile: deficit 200 at K=1 and K=4); differ crop is `--ref-viewport-rows H*K`; frames are 3600x3040 at K=4.
+- Simple side: `examples/06_io/ui/web_render_page_ppm.spl` reads `PAGE_DEVICE_SCALE`; K=1 keeps the old entry, K>1 calls `simple_web_layout_render_html_pixels_engine2d_at_device_scale` with the backend resolved at DEVICE px (the public `simple_web_render_html_to_pixels_at_device_scale` hardcodes "auto", which would defeat `SIMPLE_2D_BACKEND_STRICT`). An empty frame at K>1 prints `error: device_scale=K render returned 0 px (skipped commands ...)` (the stroke-width>1 gap).
+- Pipeline attribution: the at_device_scale path at K=1 is byte-identical (`cmp`) to the gate's K=1 PPM on tab-bar, so a K=1 vs K=4 delta is the dpi change, not a pipeline change.
+- Fonts (Chrome canvas measureText, 40px probe): `sans-serif` = `Arial` = `"Liberation Sans"` (1133.926) != `"DejaVu Sans"` (1286.992); `monospace` = `"DejaVu Sans Mono"` (1444.922). Simple's font_provider uses the same two files. Do NOT use `fc-match sans-serif` (says DejaVu Sans) — Chrome resolves the generic via its Arial pref.
+- Baseline: own file per scale, `chrome_catalog_pixel_diff_baseline.<host>[.<w>x<h>.<backend>].dprK.txt`; the 1x file is untouched.
+- Measured K=1 -> K=4 mismatch_pct (baseline `chrome_catalog_pixel_diff_baseline.Linux-aarch64.dpr4.txt`): overview 2.88->1.49, html 5.25->3.74, css-layout 5.85->4.01, css-paint 6.80->4.49, forms-media 6.37->5.86, animation 6.75->4.14, evidence 1.72->0.58, tab-bar 0.68->0.54. All 8 pages render at K=4 (no stroke-gap empties).
+- Cost (cpu_simd, interpreter, 2 lanes in parallel on a shared box): Simple 14.5-38.7 min per page at K=4 (evidence 14.5, tab-bar 17.3, overview 19.9, html 29.1, forms-media 36.8, css-paint 37.0, animation 37.3, css-layout 38.7) vs 0.4-5.4 min at K=1; Chrome <1 s. Full 8-page K=4 run ~2 h wall as two --pages halves (7508 s + 6398 s); serial would be ~3.8 h. Each K=4 PPM is 32.8 MB.
+
+## 2026-11-16 — coverage lane on this tree + layout_core / input overlay specs
+
+- Coverage lane (seed `08aba9746a813ee7…`): `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<x>.sdn simple run <spec>`, then score with `coverage_module_report` (doc/10_metrics/gpu/render_coverage_2026-11-14.md). `simple spl-coverage module` itself no longer loads on release/1.0.0 `49e6a927ae8` (`error[E1002]: function friend not found`; dropping its `std.fs` import is enough to avoid it, `std.platform` was not isolated). A driver importing only `std.common.coverage_module_report` plus an `rt_file_read_text` extern gives the same numbers. `SIMPLE_COVERAGE=1 simple test` still fails with the child-APK receipt error.
+- `layout_core.spl` went from 22.2% (18/81, 2026-11-14 sweep; 14/81 from its existing specs on this tree) to 96.2% (78/81) union. Spec: test/01_unit/browser_engine/layout_core_block_flex_chrome159_spec.spl, 12/15 green. The 3 red examples are Chrome 159 divergences in `_layout_block_be`: (1) `width` is used as the border-box width, not the content-box width; (2) adjoining sibling margins are added (25) instead of collapsed (15); (3) a bordered 300px parent gets a 290px content width.
+- `input_text_source_byte_at_x` was never called by any spec, and the overlay branches of `input_text_paint_plan_with_overlay` were also unreached. Spec: test/01_unit/browser_engine/input_text_overlay_plan_contract_spec.spl, 12/13 green, expectations from the overlay contract. It found one divergence (red): for a focus byte that is not a boundary, scrolling resolves focus to the end, but the caret x uses byte-not-found = 0, so the caret is painted at the value start.
+- 2026-11-16 `layout_core.spl` `_layout_block_be`: explicit `width`/`height` are content-box unless `StyleProps.box_sizing == "border-box"` (new field, `set_style("box-sizing")`); sibling vertical margins collapse in block flow only (never for flex, incl. column flex which reuses this fn); `layout_core_block_flex_chrome159_spec` 12/15 -> 15/15. `layout.spl` `_layout_block_node` (layout_tree path) still adds margins and treats width as border box.
+- 2026-11-16 `layout.spl` `_layout_block_node` (the `layout_tree` path behind `browser_renderer` and `engine_merge`) now follows the same box model as `_layout_block_be`: content-box `width`/`height` (border-box floored at the insets, content height >= 0), sibling margin collapse in block flow only, and a bordered parent keeps its content width. Porting trap: `_layout_block_node` places the child at the `y` it is given (it does not add its own `margin-top`), so pass `cursor + gap` directly — copying layout_core's `cursor + gap - margin_top` lands the second box 15px too high. Spec: test/01_unit/browser_engine/layout_block_node_chrome159_spec.spl (base 2/7, head 7/7). Still open there: horizontal margins (case a), `display:none` children (case f).
+- 2026-11-16 `layout.spl` `_layout_block_node` second pass: the PARENT loop applies a child's horizontal margins (passes x = content x + `margin-left`, avail = content width - both margins, clamped at 0), mirroring how it already applies `margin-top`, so the layout root's own margins stay unapplied; `display:none` children are skipped before margin bookkeeping so siblings around them still collapse (Chrome 159: f-collapse y=35). `layout_block_node_chrome159_spec` 7/12 -> 12/12. Open: `margin:auto` (parses to 0, no auto flag), parent/child collapse, `display:none` root.
+
+## 2026-11-16 — K=4 paint cost: extern span calls copied the whole frame per row
+
+- Cause: the software backend's span primitives (`sw_fill_raw_span`, `sw_copy_raw_span`, `sw_blend_const_raw_span`, the native branch of `draw_image_blend`) handed `self.buf` to an extern (`rt_engine2d_simd_*_span_u32`) or to `simd_span_batch_execute` (`var work_buf = self.buf`, then the first store forces a copy-on-write). Under the interpreter every such call unpacks and repacks the WHOLE framebuffer (`unpack_u32_array`/`pack_u32_array` in the seed's `interpreter_extern/simd.rs`). One call per scanline gives O(rows x surface), about k^3: 64x at K=4 for a 16x pixel increase. Hit by `clear()`, every opaque/alpha fill, every glyph-quad row, the shadow `draw_image`, and the host-memory writeback `engine.draw_image(0,0,W,H,read_pixels())` (3040 rows x 2 whole-array copies).
+- Fix (pure Simple, `backend_software.spl`): `sw_span_scratch(offset, count)` copies only the span out; the SAME kernel runs on it; `self.buf.write_span(...)` writes it back in place. Copy spans call `write_span` directly. `simd_isa_fill_const` replaced its per-pixel store loop with one `dst.write_span(row, ...)`. `record_simd_*_hit` and `simd_batch_hits` accounting is unchanged.
+- Byte identity and timing were measured on the interpreter lane only, which is the lane the gate uses. The effect on native/JIT lanes is unmeasured. There the extern already worked in place, so the scratch path only adds an O(span) copy per call. `record_simd_copy_hit()` now counts a `write_span` copy, not SIMD execution.
+- Byte identity: `cmp` was identical, base vs fix, for tab-bar K=4, evidence K=4 and tab-bar K=1. Spec failures are identical on base and branch (same test names): simple_web_renderer 112/114, simple_web_engine2d_renderer 14/21, web_device_scale 7/7, backend_software_simd 10/14, backend_software_kernel_table_bucket 20/20. On the branch only: simd_provider 10/10 and simd_isa_provider 24/24.
+- Measured (seed `/home/yoon/.cache/cargo-target-webrender-vk/release/simple`, 59635056 B, 2026-11-14 09:32; cpu_simd, interpreter, aarch64 host, MemoryMax=8G, one job at a time). On aarch64 the font path reports `cpu_simd:no-native-alpha-hit`, because its winner check requires `active_arch_text() == "x86_64"`:
+
+  | page | K | before wall / RSS | after wall / RSS |
+  |---|---|---|---|
+  | tab-bar | 1 | 21.3 s / 0.81 GB | 7.9 s / 0.75 GB |
+  | tab-bar | 4 | 839 s / 5.02 GB | 91.6 s / 2.93 GB |
+  | evidence | 4 | 1153 s / 5.12 GB | 245 s / 2.88 GB |
+
+  Phases for tab-bar at K=4, before -> after: document (parse, style, layout, compose) 0.46 s -> 0.46 s; device-scale pass 0.04 s -> 0.04 s; paint 810 s -> 69 s; PPM encode 27 s -> 21 s. Phase lines come from `SIMPLE_WEB_PHASE_TRACE=1`, which also covers the at_device_scale entry.
+- Remaining cost: interpreter per-pixel work (the box-shadow loop, 64 px glyph raster, the PPM encoder). See `doc/08_tracking/bug/web_render_dpr4_residual_per_pixel_cost_2026-11-16.md`.
+
+## 2026-11-16 — select UA background, native vs styled
+
+- Chrome 159 computes `background-color: ButtonFace` (`rgb(239,239,239)`) for every `<select>`, but paints it only when the author styles the box: any `border*` (radius alone counts), `background*`, `box-shadow` or non-`auto` `appearance`. Otherwise the native menulist paints a WHITE field. `padding`, `color` and `font-size` do not count. A listbox (`multiple`, or `size` > 1) is a white `Field` either way. The UA fill is in `form_control_ua_box_decls`; the native white is the cascade tail's `_select_author_styled` check (`..._core.spl`). Spec: `select_ua_background_chrome159_spec`. forms-media 6.37 -> 6.08 at 1x.
+- **Trap — computed value is not painted value for `appearance:auto` controls.** `getComputedStyle` says ButtonFace on the unstyled select too; only a `--screenshot` pixel shows the white. Pin control colours from pixels, not from computed style.
+- **Trap — Chrome's catalog screenshots use LCD subpixel text AA** (colour fringes, e.g. `f0ce8c`/`6ec0f2` next to a `#172033` stem); Engine2D is grayscale. On forms-media the list text bands are about 70 % of the remaining mismatch with geometry aligned to <= 1 px. Before chasing a text band, sample a few pixels: coloured fringes mean AA mode, not layout. Changing the gate's Chrome flags (`--disable-lcd-text`) would rebase every row and is an owner decision. **Superseded 2026-11-16:** the owner chose to implement LCD text in Simple; see the LCD section below.
+- Method that found it: a tile map (50x20 px mismatch counts) plus per-row ink profiles of the two frames. Rows aligned within a pixel ruled out layout; the remaining non-text tiles were the select.
+- Gates at the fix: matrix 979 cells, 88 mismatching (no change, geometry-only gate); catalog 1x worst 6.80 (css-paint), every row unchanged except forms-media 6.37 -> 6.08 (baseline lowered).
+- 2026-11-16 `layout.spl` `_layout_block_node` third pass: `margin:auto` via `StyleProps.margin_left_auto`/`margin_right_auto` (set by the longhands and every `margin` shorthand form; the f64 stays 0.0) resolved in the PARENT loop by `_used_horizontal_margins` (CSS 2.2 §10.3.3: explicit width only, split/one-side/over-constrained -> 0), and a `display:none` layout root returns a 0x0 childless box. `layout_block_node_chrome159_spec` 16/22 -> 22/22. Trap: `width` 0 means auto, so `width:0`/percent widths never centre. Open: parent/child collapse, root's own margins.
+
+## 2026-11-16 — WM material alpha is per-mille opacity on every backend; widget chrome text on Draw IR
+
+- **WM material alpha (`wm-material-surface-alpha-milli`).** The CPU twin, Metal and Vulkan all read it as opacity: alpha `255 * milli / 1000`, straight-alpha src-over, result copied in place. The files are `draw_ir_glass_material.spl:222`, `backend_metal_msl.spl:361,373` and `shaders/glass_material.comp:146`, plus `backend_vulkan.spl:2857` `VK_IMAGE_COMPOSITE_COPY`. It is read once, backend-neutrally, at `draw_ir_adv.spl:805`, so there is no per-backend value to emit. 0.80 → 800. The old 200 oracle was 1000 - 800, which no consumer reads. On lavapipe it paints a 20 % surface (0xFFD2D2D2 instead of 0xFF4B4B4D).
+- **Trap: a spec value that disagrees with its sibling field is the tell.** The row's own `background-color` carried alpha 0xCC, so 800 was the only value consistent with it.
+- **Vulkan device proof recipe:** `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`, `simple_web_render_html_to_pixels_with_resolved_engine2d_backend(html, w, h, "vulkan")`, then `vulkan_device_glass_material_count()` (reset with `vulkan_device_material_census_reset()`). Compare against `"cpu_simd"`. Rows are in `backend_vulkan_device_glass_blur_spec`. Metal stays static analysis on Linux.
+- **Legacy widget chrome text on Draw IR.** `simple_web_layout_uses_legacy_widget_chrome` pages now get the F5F5F5 base (`_simple_web_layout_canvas_base`) and the generated chrome-text table (`generated_widget_chrome_text_pixels`). The Draw IR producer emits the table as `widget-chrome-text-<k>` 1x1 rects, gated by `widget_chrome_text_active`, and skips `#text` nodes under that gate. The raster uses the same three helpers. The frame rects, the sparse +8/+7 text and the background skipping are still raster-only.
+- **Trap: in widget mode an empty `widget-panel` section fills the viewport height in Draw IR layout.** Text after it is off screen, so put a fixture's non-widget text before the panel.
+- Gates at the fix: matrix 979 cells, 88 mismatching (no change); catalog 1x worst 6.80 (no change). Specs, base -> branch, same failing names otherwise: `simple_web_renderer_spec` 112/114 -> 116/116 (2 new rows); `simple_web_engine2d_renderer_spec` 14/21 = 14/21; `browser_renderer_spec` 130/131 = 130/131; `simple_web_html_layout_renderer_coverage_spec` 36/39 = 36/39; `paint_layout_coverage_closure_spec` 52/52; `paint_primitives_coverage_closure_spec` 26/26; `web_draw_ir_clip_cache_contract_spec` 1/2 = 1/2; `backend_vulkan_device_glass_blur_spec` 9/9 (2 new rows, lavapipe).
+- Reach of the gate, checked 2026-11-16: `simple_web_layout_uses_legacy_widget_chrome` is `widget-panel` with no `<style` tag. No real producer hits it. `ios_css.spl`, `glass_css_components.spl` and `ui.web/html_css.spl` emit CSS only, and `glass_debug.spl` emits a text tree. `ui.render/html_widgets.spl` emits fragments that `ui.render/html.spl` / `ui.web/html.spl` wrap in a document with `<style>`. `glass_test_page.spl` carries `<style`. `widget_to_dom.spl` builds a DOM rendered through `render_dom_to_pixels`, not through the HTML gate. Only test fixtures reach it. The WM/widget specs (`theme_package`, `glass_css_backdrop_admission`, `widget_draw_ir_theme`, `glass_debug_interface`, `glass_css_output`, `dom_build_gpu_offload`) fail the same names on base and branch.
+## 2026-11-16 — four owner-approved form-control / RTL behaviours ("all same as chrome")
+
+Owner decision 2026-11-16: password mask, overflowing button label, RTL Latin order and the `<input>` UA `box-sizing` all follow Chrome 159. Each has its own `*_chrome159_spec.spl` with a Vulkan (lavapipe) device-readback row that asserts `resolved == "vulkan"` and `source == "device_readback"` before comparing pixels.
+
+- **Password mask = U+2022.** `INPUT_PASSWORD_MASK_GLYPH` in `..._paint_raster.spl`. **Trap — the shared 5x7 table is the glyph source for BOTH the browser raster and Engine2D.** A non-ASCII mark needs a new packed cell AND a `glyph_index_for_char_code` arm; `FONT_CHARSET` stays ASCII (it is byte-indexed by `host_web`/`host_tui`/`cross_app_glyph_capture`). Appending a cell moves the Engine2D atlas unknown slot (`glyph_atlas_unknown_index`, now 89). The Vulkan bitmap-font atlas covers only ASCII 32..126 and rejects a run with anything else, so a bullet goes through the shared raster on that lane. Spec: `input_password_mask_chrome159_spec` (base 0/5, head 5/5).
+- **Oracle trap — headless `--screenshot` stopped painting part-way down several pages** (everything below y≈52 was blank, even with `--virtual-time-budget`). Put every probed row near y=0, add a coloured sentinel box at the bottom and check it is painted before trusting a band. Pixels can be read back with Chrome itself: load the PNG into a canvas with `--allow-file-access-from-files`, then `getImageData`.
+- **Overflowing button label = start edge, padding-box clip.** In `input_text_paint_plan` (`..._paint_raster.spl`), `type=submit|button|reset` labels are centred only when they fit. An overflowing label uses the text-value rule (content x, or content right minus width under RTL) and is clipped at the padding box. Chrome inks 3..28 in a 30px/1px-border/2px-padding button: into the padding, never into the border. Spec: `input_button_label_overflow_chrome159_spec` (base 0/6, head 6/6).
+- **RTL = bidi visual order, not glyph reversal.** `bidi_visual_text_for_rtl` (`..._paint_primitives.spl`) replaced `reverse_text_for_paint` at every paint/metric site. **Trap — the `core.spl` advance-metric table must use the SAME visual string as the painters**, or a reordered glyph takes its neighbour's fractional advance. `input_text_visual_map` mirrors carets only when the text has a strong RTL character. **Trap — div text differs between the legacy software raster and the Engine2D path** (440 px on a 96x64 page, unrelated to direction), so a Vulkan row compares the device frame with `simple_web_render_html_to_pixels`, not with the software raster. Spec: `direction_rtl_bidi_order_chrome159_spec` (base 1/6, head 6/6).
+- **`<input>` UA `box-sizing: border-box`** (all types but `image`/`hidden`) is one UA declaration in `form_control_ua_box_decls` (`..._core.spl`). It goes ahead of author declarations, so `box-sizing:content-box` still wins. Layout already honoured `st.border_box` for explicit control sizes, and an auto-sized input stays 185x21. **Re-pin rule (coordinator, 2026-11-16):** when a behaviour change moves an existing row, pin the EXACT new engine value with Chrome's measurement in a comment beside it. Never loosen a check to a range or a relation; a Chrome-closeness check can only be an extra assertion. Spec: `input_ua_box_sizing_chrome159_spec` (base 3/7, head 7/7).
+- Gates after all four behaviours (2026-11-16, Chrome 159.0.8154.6, seed `cargo-target-webrender-vk`): matrix 979 cells, 88 mismatching (no change; the matrix has no form-control-only cells that these touch). Catalog 1x PASS, worst 6.80 (css-paint); forms-media 6.08 (no change); animation 6.75 -> 6.68 (baseline lowered; not attributed, since the base catalog was not re-run); every other row unchanged. Regression base -> head over 26 specs: 0 head-only failures.
+## 2026-11-16 — LCD subpixel text (Chrome 159 LCD16) on the CPU lanes
+
+Owner decision: implement LCD text in Simple; Chrome's flags stay as they are. Setting `SIMPLE_WEB_LCD_TEXT` (`engine2d_draw_ir_lcd_text_enabled`, `draw_ir_adv.spl`) defaults to on, like Chrome. `SIMPLE_WEB_LCD_TEXT=0` gives grayscale.
+
+Measured Chrome behaviour (probed with `--headless=new --disable-gpu`, one `l` per page):
+- **Mask.** Skia LCD16, 5 bits per channel, RGB order left to right. Black on white is always `255 - 8k`.
+- **Blend.** `d + (((src - d) * s32) >> 5)`, where `s5 = cov >> 3` and `s32 = s5 + (s5 >> 4)`.
+- **FIR.** A joint fit over four phases (48 subpixel samples) gives `[0.090, 0.225, 0.370, 0.225, 0.090]`, RMS 0.33/32. FreeType's default filter fits at 0.91/32 and Skia's gaussian at 0.50/32.
+- **Size.** LCD when the DEVICE size is 48 px or less, grayscale from 49 px. At dpr4, 12px CSS text is LCD and 16px CSS text (64 device px) is grayscale.
+- **Layers.** `will-change:transform` gives grayscale. `opacity` and `rotate` keep LCD.
+- **Quarter-pixel phases.** Glyph pens snap to a quarter pixel: 1/3 becomes 1/4, 2/3 becomes 3/4. Left 1/1.25/1.5/1.75 px gives `ffe7b7 5f1f07 2f77cf f7ffff` / `ffffdf a74f17 0f3f97 d7f7ff` / `fffff7 d78f3f 0f174f a7e7ff` / `ffffff efc777 2f0f1f 67bfef`.
+- **Mask gamma (preblend).** Light text gets thicker coverage per channel. Same glyphs, white on black vs black on white, step 2 becomes 3, 8 becomes 10.5, 17 becomes 19, out of 32. This is modelled as `cov^(1 - 0.22 * L/255)` per text-colour channel L.
+
+Code path:
+- `sfnt_render_glyph_lcd` (`sfnt_glyf.spl`) builds a 3x horizontal exact-span raster with 4 rows, then the FIR.
+- `FontRenderer._lcd_glyph` produces atlas cells `(avg<<24)|(r<<16)|(g<<8)|b`.
+- `_lcd_apply_pen_phases` swaps a quad to a phase cell (glyph_index `-1 - phase`) when the exact milli pen (`_text_pen_milli`, shared with `measure_text_advances`) rounds to a non-zero quarter.
+- `engine2d_lcd_quad_composite` (`engine.spl`) applies the preblend tables and the Skia blend on an opaque destination. A non-opaque destination falls back to the grayscale blend.
+- `_lcd_text_active` restricts all of this to `cpu`/`cpu_simd`/`software`. Vulkan stays grayscale; see `doc/08_tracking/bug/vulkan_font_lcd_subpixel_text_not_implemented_2026-11-16.md`.
+- Spec: `test/01_unit/browser_engine/lcd_subpixel_text_chrome159_spec.spl` (AC-1..5).
+
+Gates and remaining gaps:
+- Catalog 1x went from 2.88/5.25/5.85/6.80/6.08/6.75/1.72/0.68 to 2.53/5.14/4.74/5.68/5.17/4.93/1.07/0.71 (overview, html, css-layout, css-paint, forms-media, animation, evidence, tab-bar).
+- tab-bar is +0.03 against a base rerun of 0.68; its row was not raised. The cause is geometry, not the mask. Centred white tab labels sit about 3/4 px right of Chrome, because only the run-relative fraction is phased and a fractional run ORIGIN is still snapped. Chrome also snaps horizontal strokes to whole rows (vertical hinting) and we do not.
+- **Trap — div-only pages never reach this path.** Only pages that `_simple_web_engine2d_text_document` admits (`<p`, `<span`, `<h1`, ...) use Draw IR to Engine2D. A `<div>`-only probe page renders through the software raster and shows no LCD at all. Chrome paints `<p>` and `<div>` identically, so probe with `<p>`.
+- **Trap — `simple run` of a scratch render script OOMs at 8G**, on base too. Run renders through `simple test` with a scratch spec.
+- Catalog 4x, run on two pages only: forms-media 5.86 -> 5.56 (row lowered); tab-bar 0.54 -> 0.54. Its 16 px CSS text is 64 device px, so it stays grayscale.
+- **Two assertions encoded grayscale AA, and Chrome's own pixels failed them.** Both are re-pinned (2026-11-17, owner: same as Chrome) to exact engine values at the same strength, with the Chrome value beside each:
+  - `simple_web_renderer_spec` "uses explicit line-height for wrapped text layout" expected at least one pixel exactly `#0f172a` in 8 px text. Chrome's screenshot of the same HTML has 0 such pixels, because LCD coverage never saturates all three channels on a 1 px stem. It now pins the engine's darkest ink, `0xFF352A44` x 2 (Chrome: `0xFF4B3E5A` x 1). The y=42 `.after` line-height check is unchanged.
+  - `web_device_scale_spec` "re-rasterizes text at k x font-size" expected 4x ink > 10 x 1x ink. It now pins the ink counts exactly: 1x 190, 4x 1629, i.e. 8.6x (Chrome: 199 and 1640, i.e. 8.2x). LCD fringes widen the 1x ink. The non-uniform 4x4 block check is kept.
+- Perf: the first LCD commit was 45-51 % slower. After optimising the composite (s32 tables per colour, LCD before the gray subrect, empty and solid fast paths) and adding an O(1) atlas slot hint for phase cells: 1x 3.22 -> 3.52 s (+9 %), 4x 26.6 -> 30.4 s (+14 %). Frame digests are byte-identical to the first LCD commit. The remainder is the interpreted per-pixel blend; see `doc/08_tracking/bug/lcd_text_cpu_composite_44pct_slower_2026-11-17.md`.
+- Combo matrix: 979 cells, 88 mismatching. Unchanged; it is a geometry gate.

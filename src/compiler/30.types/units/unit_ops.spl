@@ -10,8 +10,11 @@
 #
 # Facts come from the canonical UnitDecl pool (compiler.core.types):
 #   role "nominal"  — a count/quantity: U+U -> U, U-U -> U, U*int -> U,
-#                     int*U -> U, U/int -> U, U/U denied (ratio not enabled),
-#                     comparisons -> bool. No U+int, no U-int.
+#                     int*U -> U, U/int -> U, comparisons -> bool. U*U and
+#                     U/U are allowed (owner decision 2026-11-15) and yield
+#                     the unit's underlying scalar type (a ratio / raw
+#                     product; the author wraps it explicitly). No U+int,
+#                     no U-int.
 #   role "point"    — an absolute position whose delta type is `alias_of`
 #                     (Timestamp with Duration, ByteOffset with ByteCount):
 #                     P-P -> D, P+D -> P, D+P -> P, P-D -> P, P+P denied,
@@ -25,7 +28,10 @@
 # declares them.
 
 use compiler.core.types.{
-    unit_decl_find, unit_decl_role_at, unit_decl_alias_of_at, unit_decl_legacy_origin_at
+    unit_decl_find, unit_decl_role_at, unit_decl_alias_of_at, unit_decl_legacy_origin_at,
+    unit_decl_count, unit_decl_name_at,
+    unit_decl_underlying_tag_at, TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64,
+    TYPE_I8, TYPE_I16, TYPE_I32, TYPE_F64
 }
 
 # Operator classes understood by the matrix. Callers map their own operator
@@ -71,7 +77,56 @@ fn unit_op_role(name: text) -> text:
     val idx = unit_decl_find(name)
     if idx < 0:
         return ""
-    unit_decl_role_at(idx)
+    val role = unit_decl_role_at(idx)
+    # A declared derived unit (`unit Speed = Meter / Second`) is a nominal
+    # quantity once declared; its formula only matters for U*U / U/U lookup.
+    if role == "derived":
+        return "nominal"
+    role
+
+# Owner decision 4A (2026-11-16): unit*unit and unit/unit need a declared
+# derived unit. A missing declaration is SPL-UNIT-004: a recorded warning in
+# the default profile (result = the underlying scalar, as before), an error
+# when the robust profile sets strict mode.
+var unit_op_strict: bool = false
+var unit_op_warnings: [text] = []
+
+pub fn unit_op_robust_profile():
+    unit_op_strict = true
+
+pub fn unit_op_default_profile():
+    unit_op_strict = false
+
+pub fn unit_op_take_warnings() -> [text]:
+    val out = unit_op_warnings
+    unit_op_warnings = []
+    out
+
+fn unit_op_find_derived(op: text, lhs: text, rhs: text) -> text:
+    """Name of the derived unit declared as `lhs op rhs` ("" if none).
+    A product also matches its commuted declaration."""
+    val sym = if op == UNIT_OP_MUL: "*" else: "/"
+    val want = lhs + sym + rhs
+    val want_rev = rhs + sym + lhs
+    var i = 0
+    while i < unit_decl_count():
+        if unit_decl_role_at(i) == "derived":
+            val f = unit_decl_alias_of_at(i)
+            if f == want or (op == UNIT_OP_MUL and f == want_rev):
+                return unit_decl_name_at(i)
+        i = i + 1
+    ""
+
+fn unit_op_product_verdict(op: text, lhs: text, rhs: text) -> UnitOpVerdict:
+    val derived = unit_op_find_derived(op, lhs, rhs)
+    if derived != "":
+        return UnitOpVerdict.Allow(derived)
+    val sym = if op == UNIT_OP_MUL: "*" else: "/"
+    val msg = "SPL-UNIT-004: `" + lhs + " " + sym + " " + rhs + "` has no derived-unit declaration; declare `unit <Name> = " + lhs + " " + sym + " " + rhs + "`"
+    if unit_op_strict:
+        return UnitOpVerdict.Deny(msg)
+    unit_op_warnings.push(msg)
+    UnitOpVerdict.Allow(unit_op_scalar_name(lhs))
 
 fn unit_op_delta(name: text) -> text:
     val idx = unit_decl_find(name)
@@ -87,6 +142,19 @@ fn unit_op_is_legacy_newtype(name: text) -> bool:
 
 fn unit_op_is_scalar(name: text) -> bool:
     name == UNIT_OPERAND_INT or name == UNIT_OPERAND_FLOAT
+
+fn unit_op_scalar_name(name: text) -> text:
+    """Underlying scalar type name of a unit: the result of U*U and U/U."""
+    val tag = unit_decl_underlying_tag_at(unit_decl_find(name))
+    if tag == TYPE_U8: return "u8"
+    if tag == TYPE_U16: return "u16"
+    if tag == TYPE_U32: return "u32"
+    if tag == TYPE_U64: return "u64"
+    if tag == TYPE_I8: return "i8"
+    if tag == TYPE_I16: return "i16"
+    if tag == TYPE_I32: return "i32"
+    if tag == TYPE_F64: return "f64"
+    "i64"
 
 fn unit_op_deny(op: text, lhs: text, rhs: text, why: text) -> UnitOpVerdict:
     UnitOpVerdict.Deny("SPL-UNIT-002: `" + lhs + " " + op + " " + rhs + "` is not an approved unit operation: " + why)
@@ -124,9 +192,9 @@ pub fn unit_op_verdict(op: text, lhs_in: text, rhs_in: text) -> UnitOpVerdict:
             if lrole == "nominal":
                 if op == UNIT_OP_ADD or op == UNIT_OP_SUB:
                     return UnitOpVerdict.Allow(lhs)
-                if op == UNIT_OP_DIV:
-                    return unit_op_deny(op, lhs, rhs, "unit/unit ratio is not enabled for `" + lhs + "`")
-                return unit_op_deny(op, lhs, rhs, "a count times a count has no declared dimension")
+                if op == UNIT_OP_MUL or op == UNIT_OP_DIV:
+                    return unit_op_product_verdict(op, lhs, rhs)
+                return unit_op_deny(op, lhs, rhs, "unsupported operator on `" + lhs + "`")
             if lrole == "point":
                 if op == UNIT_OP_SUB:
                     val d = unit_op_delta(lhs)
@@ -144,6 +212,14 @@ pub fn unit_op_verdict(op: text, lhs_in: text, rhs_in: text) -> UnitOpVerdict:
             if op == UNIT_OP_ADD:
                 return UnitOpVerdict.Allow(rhs)
             return unit_op_deny(op, lhs, rhs, "a delta and a point combine only by +")
+        if lrole == "nominal" and rrole == "nominal" and (op == UNIT_OP_MUL or op == UNIT_OP_DIV):
+            # Distinct units were never implicitly combinable, so an undeclared
+            # product stays an error; the message names the missing declaration.
+            val derived = unit_op_find_derived(op, lhs, rhs)
+            if derived != "":
+                return UnitOpVerdict.Allow(derived)
+            val sym = if op == UNIT_OP_MUL: "*" else: "/"
+            return unit_op_deny(op, lhs, rhs, "no derived-unit declaration; declare `unit <Name> = " + lhs + " " + sym + " " + rhs + "` (SPL-UNIT-004)")
         return unit_op_deny(op, lhs, rhs, "distinct units never mix implicitly")
 
     # Exactly one unit operand.

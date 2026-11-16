@@ -16,7 +16,9 @@
 #      the work single-flight inside the process,
 #   4. gives every other module an empty-text PLACEHOLDER surface. Identity
 #      fields (path, content hash/length, names) still come from the source,
-#      so hir_cache_closure_digest -- the HIR cache key -- is unchanged,
+#      so hir_cache_closure_digest -- the HIR cache key -- is unchanged
+#      under its default CONTENT rows (a placeholder's semantic digest is an
+#      empty module's, which is why interface rows are opt-in only),
 #   5. after freeze, claims only modules whose whole resolved import/export
 #      route closure (the real resolver's import_target_indices) is built
 #      (worker_surface_ready_v1). A module that is not ready is left
@@ -39,6 +41,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_list_optional, getpid}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
 use compiler.driver.driver_worker_surface_path_v1.{worker_surface_path_suffix_v1}
 use compiler.driver.driver_log_helpers.{driver_phase_trace_enabled, log_phase}
@@ -55,6 +58,10 @@ use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver
 extern fn rt_process_start_identity(pid: i64) -> i64
 extern fn rt_heap_live_bytes() -> i64
 extern fn rt_heap_aux_live_bytes() -> i64
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_transient_array_scope_end() -> bool
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v2"
 
@@ -158,6 +165,37 @@ fn _ws_canonical_key_v1(resolved: text, canonical_paths: [text], by_canonical: D
 # Resolve the same admitted owner as phase 1. Phase-1 scans are required;
 # extra scanner candidates include speculative grouped members and qualified
 # export providers, so a missing candidate is not an import failure.
+# Sources whose imports the admitted-graph walk resolved (per-unit cost probe).
+var _wa_sources_scanned: i64 = 0
+
+pub fn worker_admitted_sources_scanned_v1() -> i64:
+    _wa_sources_scanned
+
+# Import resolutions (resolve + native-owner check) the walk actually ran.
+# Bug unit_child_first_walk_resolves_every_edge_2026-11-16: every edge paid a
+# resolve + owner rescan, so one unit child's walk over a 3747-module
+# inventory outlived a 31-minute phase-3 run before its first ledger write.
+# SIMPLE_WORKER_ADMITTED_MEMO=1 (default off) memoizes the outcome per
+# (candidate, importer dir[, logical owner]) within one walk.
+var _wa_resolutions: i64 = 0
+pub const WORKER_ADMITTED_MEMO_ENV_V1: text = "SIMPLE_WORKER_ADMITTED_MEMO"
+const WORKER_ADMITTED_MEMO_MISSING_V1: i64 = -2
+
+pub struct WorkerAdmittedResolutionsV1:
+    count: i64
+
+pub fn worker_admitted_resolutions_v1() -> WorkerAdmittedResolutionsV1:
+    WorkerAdmittedResolutionsV1(count: _wa_resolutions)
+
+fn worker_admitted_memo_enabled_v1(raw: text) -> bool:
+    raw == "1"
+
+# The resolver reads (candidate, roots, importer dir, library_mode, owner);
+# roots and mode are fixed for one walk, the owner matters only in a
+# library mode.
+fn worker_admitted_memo_key_v1(candidate: text, dir: text, library_mode: text, owner: text) -> text:
+    if library_mode == "": "{candidate}\t{dir}" else: "{candidate}\t{dir}\t{owner}"
+
 pub struct WorkerAdmittedGraphV1:
     edges: [[i64]]
     errors: [text]
@@ -195,10 +233,17 @@ pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names:
         queued.push(seeds[i])
         if seeds[i]: queue.push(i)
         i = i + 1
+    val memo_on = worker_admitted_memo_enabled_v1(sosix_env_get_nullable(WORKER_ADMITTED_MEMO_ENV_V1) ?? "")
+    var memo: Dict<text, i64> = {}
     var head = 0
     while head < queue.len():
         i = queue[head]
         head = head + 1
+        _wa_sources_scanned = _wa_sources_scanned + 1
+        # Preprocessing, import-ID extraction and candidate resolution allocate
+        # per-source scratch in the no-GC runtime. Reclaim it at this boundary;
+        # only the dependency row and diagnostic escape into the frozen graph.
+        val scope_owned = rt_transient_array_scope_begin()
         val required = driver_closure_import_specs_from_source_v1(paths[i], contents[i])
         var candidates: [text] = []
         for candidate in required:
@@ -208,8 +253,25 @@ pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names:
         val dir = _driver_entry_import_dirname(paths[i])
         var deps: [i64] = []
         var error = ""
+        var memo_keys: [text] = []
+        var memo_vals: [i64] = []
         for candidate in candidates:
             val is_required = required.contains(candidate)
+            # Memo hit: same (candidate, importer dir[, owner]) resolved earlier
+            # in this walk. Only Found+admitted (dep index) and Missing are
+            # memoized; every error-text outcome is recomputed below.
+            val memo_key = worker_admitted_memo_key_v1(candidate, dir, library_mode, names[i])
+            if memo_on and memo.contains_key(memo_key):
+                val hit = memo[memo_key]
+                if hit >= 0:
+                    if hit != i and not deps.contains(hit): deps.push(hit)
+                    if not queued[hit]:
+                        queued[hit] = true
+                        queue.push(hit)
+                elif is_required and candidate.contains(".") and error == "":
+                    error = "WORKER_IMPORT_MISSING: " + paths[i] + "|" + candidate
+                continue
+            _wa_resolutions = _wa_resolutions + 1
             val result = driver_library_mode_resolve_v1(candidate, roots, dir, library_mode, names[i])
             if result.is_err():
                 if is_required and error == "": error = result.unwrap_err()
@@ -221,6 +283,9 @@ pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names:
                 case SourceRootResolutionV1.Ambiguous(directory):
                     if is_required and error == "": error = "SOURCE_ROOT_AMBIGUOUS: " + paths[i] + "|" + candidate + "|" + directory
                 case SourceRootResolutionV1.Missing:
+                    if memo_on:
+                        memo_keys.push(memo_key)
+                        memo_vals.push(WORKER_ADMITTED_MEMO_MISSING_V1)
                     if is_required and candidate.contains(".") and error == "":
                         error = "WORKER_IMPORT_MISSING: " + paths[i] + "|" + candidate
             if target == "": continue
@@ -230,10 +295,30 @@ pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names:
                 if is_required and error == "": error = "WORKER_PROVIDER_NOT_ADMITTED: " + paths[i] + "|" + candidate + "|" + owner
                 continue
             val dep = by_physical[physical]
+            if memo_on:
+                memo_keys.push(memo_key)
+                memo_vals.push(dep)
             if dep != i and not deps.contains(dep): deps.push(dep)
             if not queued[dep]:
                 queued[dep] = true
                 queue.push(dep)
+        if scope_owned:
+            if not rt_transient_array_scope_pause():
+                val _scope_abandoned = rt_transient_array_scope_end()
+                return Err("worker admitted graph scope pause failed for {paths[i]}")
+            val deps_retained = rt_transient_heap_promote(deps)
+            val error_retained = rt_transient_heap_promote(error)
+            val keys_retained = rt_transient_heap_promote(memo_keys)
+            val vals_retained = rt_transient_heap_promote(memo_vals)
+            val scope_ended = rt_transient_array_scope_end()
+            if not (deps_retained and error_retained and keys_retained and vals_retained and scope_ended):
+                return Err("worker admitted graph retention failed for {paths[i]}")
+        # Memo rows enter the walk-owned Dict only after the scope ended, so
+        # the Dict never grows inside reclaimed scratch.
+        var mi = 0
+        while mi < memo_keys.len():
+            memo[memo_keys[mi]] = memo_vals[mi]
+            mi = mi + 1
         graph[i] = deps
         errors[i] = error
         if driver_phase_trace_enabled() and head % 128 == 0:
@@ -559,4 +644,5 @@ export worker_mir_scoped_targets_v1, worker_surface_import_closure_v1
 export worker_source_may_declare_advice_v1, source_path_by_canonical_map_v1
 export worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_counters_v1
 export worker_unit_pick_lease_v1, worker_unit_pick_owner_dead_v1
+export WorkerAdmittedResolutionsV1, worker_admitted_resolutions_v1, WORKER_ADMITTED_MEMO_ENV_V1
 export worker_unit_pick_order_v1, worker_unit_pick_v1, worker_unit_drained_path_v1, worker_unit_pick_seal_v1

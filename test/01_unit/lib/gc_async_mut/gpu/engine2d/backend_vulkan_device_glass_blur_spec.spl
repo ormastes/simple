@@ -56,7 +56,37 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassMaterialConfig, engine2d_draw_ir_glass_material_pixels}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
     vulkan_readback_count, vulkan_device_blur_rect_count,
-    vulkan_device_material_census_reset}
+    vulkan_device_material_census_reset, vulkan_device_glass_material_count}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+# The WM Web material fixture's own surface (simple_web_renderer_spec):
+# rgba(31,31,33,0.80) projects "wm-material-surface-alpha-milli" 800 and
+# "background-color" 0xCC1F1F21, under the layered rgba(255,255,255,0.08) ->
+# rgba(255,255,255,0.025) gradient.
+fn wm_material_config() -> Engine2dGlassMaterialConfig:
+    Engine2dGlassMaterialConfig(
+        framebuffer_width: FB_W, framebuffer_height: FB_H,
+        x: 20, y: 10, width: 100, height: 80,
+        radius: 12, blur_radius: 4, saturation_milli: 1700,
+        surface_alpha_milli: 800, surface_color: 0xCC1F1F21u32,
+        gradient_from: 0x14FFFFFFu32, gradient_to: 0x06FFFFFFu32,
+        gradient_enabled: true, gradient_layered_over_surface: true)
+
+fn glass_region_mismatches(config: Engine2dGlassMaterialConfig, want_region: [u32], after: [u32]) -> i64:
+    var wrong: i64 = 0
+    var py: i32 = 0
+    while py < config.height:
+        var px: i32 = 0
+        while px < config.width:
+            val want = want_region[py.to_i64() * config.width.to_i64() + px.to_i64()]
+            val got = after[(config.y + py).to_i64() * FB_W.to_i64()
+                + (config.x + px).to_i64()]
+            if want != got:
+                wrong = wrong + 1
+            px = px + 1
+        py = py + 1
+    wrong
 
 val FB_W: i32 = 160
 val FB_H: i32 = 120
@@ -213,3 +243,47 @@ describe "The Vulkan backdrop blur and glass material run on the device, pixel-f
         dev.shutdown()
         expect(outcome.applied).to_equal(true)
         expect(after - before).to_equal(0)
+
+    it "paints the WM material's 800 per-mille surface as 80 % opacity on the device, over opaque and half-alpha backdrops":
+        # The Metal kernel (backend_metal_msl.spl kernel_glass_material) and
+        # this Vulkan kernel both tint with alpha 255 * milli / 1000 and blend
+        # straight-alpha src-over, then COPY the result in place (Metal writes
+        # framebuffer[...] directly; Vulkan copies back with
+        # VK_IMAGE_COMPOSITE_COPY). So the CPU twin is the oracle for both,
+        # and a translucent backdrop must not change that.
+        val config = wm_material_config()
+        var opaque = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        opaque = paint_backdrop(opaque)
+        val opaque_want = engine2d_draw_ir_glass_material_pixels(
+            opaque.read_pixels(), config)
+        val opaque_outcome = opaque.draw_ir_apply_glass_material(config)
+        val opaque_after = opaque.read_pixels()
+        opaque.shutdown()
+
+        var half = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        half.clear(0x80336699u32)
+        half.draw_rect_filled(0, 0, 80, 120, 0x80C04020u32)
+        val half_want = engine2d_draw_ir_glass_material_pixels(
+            half.read_pixels(), config)
+        val half_outcome = half.draw_ir_apply_glass_material(config)
+        val half_after = half.read_pixels()
+        half.shutdown()
+
+        expect(opaque_outcome.execution_target).to_equal("vulkan-device-glass-v1")
+        expect(half_outcome.execution_target).to_equal("vulkan-device-glass-v1")
+        expect(glass_region_mismatches(config, opaque_want, opaque_after)).to_equal(0)
+        expect(glass_region_mismatches(config, half_want, half_after)).to_equal(0)
+
+    it "renders the WM Web material page on the device with the surface at 80 % opacity, as cpu_simd does":
+        # End to end: HTML -> Draw IR ("wm-material-surface-alpha-milli" 800)
+        # -> Engine2D on the Vulkan device. The card covers (0,0)..(11,7) on
+        # a white canvas; rgb(31,31,33) at alpha 204 over white is
+        # (75,75,77). Read as transparency (alpha 51) it would be (210,210,211).
+        val html = "<html><body style='margin:0;background:#ffffff'><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+        vulkan_device_material_census_reset()
+        val device = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(html, 32, 20, "vulkan")
+        val device_glass = vulkan_device_glass_material_count()
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(html, 32, 20, "cpu_simd")
+        expect(device_glass).to_equal(1)
+        expect(device[2 * 32 + 2]).to_equal(0xFF4B4B4Du32)
+        expect(mismatch_count(cpu, device)).to_equal(0)

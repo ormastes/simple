@@ -1,0 +1,93 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+A HIR shard worker builds REAL surfaces only for its own closure slice and an
+empty-text PLACEHOLDER surface for every other module
+(`driver_worker_surface_closure_v1.spl` step 4, `worker_mode == 2` in
+`driver_source_parse_selected.spl`). The placeholder keeps the module's
+identity fields (path, content hash/length, names) but its semantic interface
+digest is the digest of an EMPTY module. Two workers seeded from different
+entry slices therefore hold different real/placeholder splits of the same
+frozen surface set.
+
+The HIR frozen inventory (`hir_shard_recovery_inventory`) requires every
+worker to publish the same closure digest. With interface-keyed rows the
+workers disagreed and every one after the first failed with
+`HIR frozen inventory publication failed: closure identity differs`
+(WSL x86_64/aarch64 cross builds of lint_entry.spl and test_runner_new,
+2026-11-15). The default closure key must be a function of the sources only.
+Audience: compiler engineers maintaining the HIR cache and the shard route.
+"""
+
+# @tag: unit, compiler, driver, cache
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{env_get, env_remove_process}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.driver.driver_hir_cache.{hir_cache_closure_digest}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+val WPD_LEAF: text = "pub struct Pt:\n    x: i64\n\npub fn area(p: Pt) -> i64:\n    p.x * 2\n"
+val WPD_USER: text = "use wpd.leaf.\{Pt, area\}\n\npub fn run() -> i64:\n    area(Pt(x: 3))\n"
+
+# `real_leaf` / `real_user`: which modules this process parsed for real; the
+# other one is a placeholder parsed from "" with identity from the source.
+fn wpd_registry(real_leaf: bool, real_user: bool) -> ModuleSurfacesByName:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    modules["wpd.leaf"] = parse_full_frontend(if real_leaf: WPD_LEAF else: "", "wpd/leaf.spl", "wpd.leaf", log)
+    modules["wpd.user"] = parse_full_frontend(if real_user: WPD_USER else: "", "wpd/user.spl", "wpd.user", log)
+    val sources = [
+        SourceFile(path: "wpd/leaf.spl", content: WPD_LEAF, module_name: "wpd.leaf"),
+        SourceFile(path: "wpd/user.spl", content: WPD_USER, module_name: "wpd.user")
+    ]
+    module_surfaces_from_test_modules(modules, sources).unwrap()
+
+describe "HIR shard workers with different placeholder splits agree on the closure digest":
+    it "uses the default closure key (no SIMPLE_HIR_CACHE_CLOSURE_KEY)":
+        val _cleared = env_remove_process("SIMPLE_HIR_CACHE_CLOSURE_KEY")
+        expect(env_get("SIMPLE_HIR_CACHE_CLOSURE_KEY") ?? "").to_equal("")
+
+    it "gives two workers seeded from different entry modules the same digest":
+        step("Worker A built the leaf for real, worker B built the user for real")
+        val worker_a = hir_cache_closure_digest(wpd_registry(true, false))
+        val worker_b = hir_cache_closure_digest(wpd_registry(false, true))
+        expect(worker_a.len()).to_equal(64)
+        expect(worker_b).to_equal(worker_a)
+
+    it "gives a worker the same digest as a consumer that built every surface":
+        step("The MIR / final consumer parses every module from its full source")
+        val consumer = hir_cache_closure_digest(wpd_registry(true, true))
+        val worker = hir_cache_closure_digest(wpd_registry(true, false))
+        expect(worker).to_equal(consumer)
+
+    it "ignores alias spellings and registration order":
+        val worker_a = hir_cache_closure_digest(wpd_registry(true, false))
+        var reordered = wpd_registry(false, true)
+        reordered.surfaces = reordered.surfaces.reversed()
+        reordered.surfaces[0].module_name = "worker.local.alias.leaf"
+        reordered.surfaces[0].logical_name = "worker.local.alias.leaf"
+        reordered.surfaces[1].module_name = "worker.local.alias.user"
+        reordered.surfaces[1].logical_name = "worker.local.alias.user"
+        expect(hir_cache_closure_digest(reordered)).to_equal(worker_a)
+
+    it "still moves the digest when a source really changes":
+        val before = hir_cache_closure_digest(wpd_registry(true, true))
+        val log = Logger(level: 0)
+        val edited = WPD_LEAF.replace("p.x * 2", "p.x * 4")
+        var modules: Dict<text, ParserModule> = {}
+        modules["wpd.leaf"] = parse_full_frontend(edited, "wpd/leaf.spl", "wpd.leaf", log)
+        modules["wpd.user"] = parse_full_frontend(WPD_USER, "wpd/user.spl", "wpd.user", log)
+        val sources = [
+            SourceFile(path: "wpd/leaf.spl", content: edited, module_name: "wpd.leaf"),
+            SourceFile(path: "wpd/user.spl", content: WPD_USER, module_name: "wpd.user")
+        ]
+        val after = hir_cache_closure_digest(module_surfaces_from_test_modules(modules, sources).unwrap())
+        expect(after).to_not_equal(before)

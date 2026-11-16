@@ -1,7 +1,30 @@
 # Slang prefix-cache hit decodes different greedy bytes than a full prefill
 
-Date: 2026-11-14. Status: open. Owner decision needed.
-Tracked by: `test/03_system/lib/slang/feature/slang_kv_cache_live_exact_output_spec.spl` (`@tag:in-development`).
+Date: 2026-11-14. Status: fixed 2026-11-15.
+Tracked by: `test/03_system/lib/slang/feature/slang_kv_cache_live_exact_output_spec.spl` (now untagged and passing).
+
+## Resolution (2026-11-15)
+
+Root cause: batch shape of the LAST prompt token. A cold prefill decoded all
+988 tokens as one batch, so the final token's hidden state (and the logits for
+the first generated token) came from the large-batch kernel path; a hit
+restored 987 positions and decoded the final token(s) as a batch of 1..7
+(`src/runtime/slang_ggml_shim.c`, `slang_ggml_request_eval_prompt`). ggml CPU
+kernels are not bit-identical across those shapes and greedy decoding flipped
+on near-ties. Ruled out: sampler state (a fresh context and greedy sampler per
+request, `slang_request_create_locked`), stale KV past the kept prefix (the
+snapshot holds only prompt positions and `llama_memory_seq_rm` trims to
+`reuse`), token mismatch (`memcmp` of token ids before restore).
+
+Fix: `slang_ggml_request_eval_prompt` decodes `[eval_start, tok_len-1)` as one
+batch and the last token alone, on both paths, so the logits always come from a
+batch of 1 over the same KV. Cost: one extra single-token decode on a cold
+prompt. Measured (Qwen2.5-1.5B Q4_K_M, CPU): exact_repeat 38.86x, prefix_extension
+29.76x, byte-identical output in all four live workloads
+(`build/probe/split_live.log`, `build/probe/split_exact.log`). The first-micro-batch
+CUDA workaround keeps the single full batch.
+
+(Original report follows.)
 
 ## Symptom
 

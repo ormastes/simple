@@ -1,0 +1,126 @@
+"""`--evidence=testdb` loader: read a real TestDB file into passing evidence.
+
+Purpose: prove the loader reads frozen run plans and recorded attempts from an
+actual database file, counts only a plan-bound run at the graph's snapshot, lets
+the later run win, treats an unplanned run as no evidence, fails closed on a
+missing database, and never writes the file. Audience: maintainers of the
+`simple trace` family and reviewers of what Verified may claim.
+"""
+# @req REQ-TRC-021
+use std.spec.{describe, it, expect, step}
+use std.database.test_extended.database.{TestDatabaseExtended}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_modified_time}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.run_plan.{TraceRunPlan, TracePlannedCase}
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.test_query.{TestQueryErrorKind}
+use app.test_runner_new.test_query_cli.{TestDbFilePath}
+use app.traceability.query_evidence_testdb_v1.{trace_testdb_passing_evidence_v1}
+
+val SCRATCH_DIR = "target/trace-evidence-testdb-spec"
+
+fn _graph(snapshot: text) -> TraceGraph:
+    TraceGraph(subject: SnapshotSubject(repository_id: "repo:test", snapshot_id: snapshot,
+        kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256"),
+        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: true,
+        nodes: [TraceNode(id: "req:side", kind: TraceNodeKind.Requirement, title: "Sidecar verified")],
+        test_definitions: [], claims: [], origins: [], edge_origins: [], locators: [], diagnostics: [], edges: [])
+
+fn _sidecar() -> [TraceSidecarReferenceV1]:
+    [TraceSidecarReferenceV1(source_kind: "annotation", from_id: "req:side", relation: "verified_by",
+        path: "test/a_spec.spl", locator: "header", authority: "annotation-claim")]
+
+fn _plan(run_id: text, subject: text) -> TraceRunPlan:
+    TraceRunPlan(run_id: run_id, subject_id: subject, configuration_id: "cfg", expectation_id: "exp", binary_id: "bin",
+        cases: [TracePlannedCase(case_id: "case-adds", test_path: "test/a_spec.spl", case_name: "adds",
+            test_definition_id: "def-adds", lane_id: "lane")])
+
+# One run: optionally frozen to a plan, with started + finished(outcome) events for "adds".
+fn _record_run(owner: RunnerTestDb, subject: text, outcome: text) -> RunnerTestDb:
+    var db = owner
+    val run_id = db.start_run()
+    if subject != "":
+        match db.db.record_trace_run_plan(_plan(run_id, subject)):
+            case Ok(_): pass
+            case Err(reason): fail("fixture plan rejected: {reason}")
+    match db.db.record_trace_case_events(run_id, "test/a_spec.spl",
+        [TraceCaseEvent("adds", "started", "not_finished"), TraceCaseEvent("adds", "finished", outcome)]):
+        case Ok(_): pass
+        case Err(reason): fail("fixture events rejected: {reason}")
+    db.complete_run(run_id, 1, 1, 0, 0)
+    db
+
+fn _save(owner: RunnerTestDb):
+    var db = owner
+    match db.save():
+        case Ok(_): pass
+        case Err(reason): fail("fixture save failed: {reason}")
+
+fn _fresh(name: text) -> text:
+    dir_remove_all(SCRATCH_DIR)
+    dir_create_all(SCRATCH_DIR)
+    SCRATCH_DIR + "/" + name
+
+fn _ids(path: text, snapshot: text) -> [text]:
+    var out: [text] = []
+    match trace_testdb_passing_evidence_v1(TestDbFilePath(value: path), _graph(snapshot), _sidecar()):
+        case Ok(items):
+            for item in items:
+                out.push(item.requirement_id.value)
+        case Err(error): fail("loader failed: {error.detail}")
+    out
+
+describe "trace evidence from a TestDB file":
+    it "verifies from a plan-bound passing run and leaves the file untouched":
+        # @req REQ-TRC-021
+        step("Save a database with one run frozen to snapshot:one whose case passed")
+        val path = _fresh("passed.sdn")
+        _save(_record_run(RunnerTestDb(db: TestDatabaseExtended.create(path), current_run_id: ""), "snapshot:one", "passed"))
+        val bytes_before = file_read(path)
+        val mtime_before = file_modified_time(path)
+        step("The graph at snapshot:one gets evidence for the linked requirement")
+        expect(_ids(path, "snapshot:one")).to_equal(["req:side"])
+        step("The file bytes and mtime are unchanged after reading")
+        expect(file_read(path) == bytes_before).to_equal(true)
+        expect(file_modified_time(path)).to_equal(mtime_before)
+        dir_remove_all(SCRATCH_DIR)
+
+    it "gives nothing for another snapshot, a failed run, or a run without a plan":
+        # @req REQ-TRC-021
+        step("Passed run frozen to a different snapshot")
+        val path = _fresh("stale.sdn")
+        _save(_record_run(RunnerTestDb(db: TestDatabaseExtended.create(path), current_run_id: ""), "snapshot:old", "passed"))
+        expect(_ids(path, "snapshot:one").len()).to_equal(0)
+        step("Failed run frozen to the current snapshot")
+        val failed = _fresh("failed.sdn")
+        _save(_record_run(RunnerTestDb(db: TestDatabaseExtended.create(failed), current_run_id: ""), "snapshot:one", "failed"))
+        expect(_ids(failed, "snapshot:one").len()).to_equal(0)
+        step("Passed run with no frozen plan has no snapshot, so it is not evidence")
+        val unplanned = _fresh("unplanned.sdn")
+        _save(_record_run(RunnerTestDb(db: TestDatabaseExtended.create(unplanned), current_run_id: ""), "", "passed"))
+        expect(_ids(unplanned, "snapshot:one").len()).to_equal(0)
+        dir_remove_all(SCRATCH_DIR)
+
+    it "lets the later run win":
+        # @req REQ-TRC-021
+        step("A failed run followed by a passing run verifies")
+        val path = _fresh("later.sdn")
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(path), current_run_id: "")
+        owner = _record_run(owner, "snapshot:one", "failed")
+        owner = _record_run(owner, "snapshot:one", "passed")
+        _save(owner)
+        expect(_ids(path, "snapshot:one")).to_equal(["req:side"])
+        dir_remove_all(SCRATCH_DIR)
+
+    it "fails closed on a missing database and creates nothing":
+        # @req REQ-TRC-021
+        step("A missing file is a typed StoreUnreadable error, not an empty success")
+        val path = _fresh("absent.sdn")
+        match trace_testdb_passing_evidence_v1(TestDbFilePath(value: path), _graph("snapshot:one"), _sidecar()):
+            case Ok(_): fail("expected an error for a missing database")
+            case Err(error): expect(error.kind).to_equal(TestQueryErrorKind.StoreUnreadable)
+        expect(file_exists(path)).to_equal(false)
+        dir_remove_all(SCRATCH_DIR)

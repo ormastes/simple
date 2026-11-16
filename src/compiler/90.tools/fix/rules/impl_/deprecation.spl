@@ -3,6 +3,8 @@
 # Rules that fix deprecated syntax:
 #   L:deprecated_if_let          — Replace `if let` with `if val`
 #   L:struct_construction_parens — Replace ClassName(field: val) with ClassName { field: val }
+#   SPL-UNIT-001                 — Replace deprecated `newunit` keyword with `unit`
+#   SPL-UNIT-003                 — Propose `unit Name: T` for a numeric `newtype Name = T`
 
 use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use std.tooling.easy_fix.*
@@ -115,4 +117,172 @@ pub fn check_struct_construction_parens_with_contexts(file: String, contexts: [L
 
                         fixes.push(fix)
 
+    fixes
+
+# ============================================================================
+# Rules SPL-UNIT-001 / SPL-UNIT-003: deprecated unit spellings
+#
+# `newunit Name: T as suffix` is the deprecated spelling of
+# `unit Name: T as suffix`; both lower into the same canonical UnitDecl
+# (10.frontend/core/_ParserDecls/enum_module_body.spl). The fix replaces only
+# the `newunit` keyword token. Confidence: Likely (the record keeps
+# legacy_origin "newunit" until rewritten, so registry paths change).
+#
+# A numeric `newtype Name = T` (SPL-UNIT-003) auto-derives arithmetic that a
+# `unit` does not, so the `unit Name: T` proposal is Uncertain and never
+# auto-applied; the reviewer must add `as <suffix>` and approved operators.
+#
+# Only declarations are matched: the keyword must open the line (after
+# indentation and an optional `pub`) and be followed by `Name:` / `Name =`.
+# Comments, strings, prose and triple-quoted blocks are never touched.
+# ============================================================================
+
+# Mirror of unit_decl_inner_is_numeric (enum_module_body.spl).
+val UNIT_FIX_NUMERIC_INNER: [text] = [
+    "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8",
+    "f64", "f32", "Int", "Float"
+]
+
+fn unit_fix_char_at(s: text, i: i64) -> text:
+    if i < 0 or i >= s.len():
+        return ""
+    s.slice(i, i + 1)
+
+fn unit_fix_is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+fn unit_fix_skip_ws(s: text, start: i64) -> i64:
+    var i = start
+    while unit_fix_char_at(s, i) == " " or unit_fix_char_at(s, i) == "\t":
+        i = i + 1
+    i
+
+fn unit_fix_ident_end(s: text, start: i64) -> i64:
+    val first = unit_fix_char_at(s, start)
+    if first == "" or (first >= "0" and first <= "9"):
+        return start
+    var i = start
+    while unit_fix_is_ident_char(unit_fix_char_at(s, i)):
+        i = i + 1
+    i
+
+# Column of `keyword` when it opens a declaration on this line, else -1.
+fn unit_fix_keyword_col(line: text, keyword: text) -> i64:
+    var pos = unit_fix_skip_ws(line, 0)
+    if line.slice(pos, pos + 4) == "pub " or line.slice(pos, pos + 4) == "pub\t":
+        pos = unit_fix_skip_ws(line, pos + 4)
+    val kw_end = pos + keyword.len()
+    if line.slice(pos, kw_end) != keyword:
+        return -1
+    val after = unit_fix_char_at(line, kw_end)
+    if after != " " and after != "\t":
+        return -1
+    pos
+
+# Per-line flag: true when the line starts inside a triple-quoted block.
+fn unit_fix_in_triple_quote(lines: [text]) -> [bool]:
+    var out: [bool] = []
+    var inside = false
+    for line in lines:
+        out.push(inside)
+        val marks = line.split("\"\"\"").len() - 1
+        if marks % 2 == 1:
+            inside = not inside
+    out
+
+pub fn check_newunit_deprecation(source: text, file: text) -> [EasyFix]:
+    check_newunit_deprecation_with_contexts(file, line_contexts(source))
+
+pub fn check_newunit_deprecation_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
+    var lines: [text] = []
+    for raw_ctx in contexts:
+        val c: LineContext = raw_ctx
+        lines.push(c.line)
+    val in_tq = unit_fix_in_triple_quote(lines)
+    var fixes: [EasyFix] = []
+    var idx = 0
+    for raw_ctx in contexts:
+        val ctx: LineContext = raw_ctx
+        val skip = in_tq[idx]
+        idx = idx + 1
+        if skip:
+            continue
+        val kw = unit_fix_keyword_col(ctx.line, "newunit")
+        if kw < 0:
+            continue
+        val name_start = unit_fix_skip_ws(ctx.line, kw + 7)
+        val name_end = unit_fix_ident_end(ctx.line, name_start)
+        if name_end == name_start:
+            continue
+        if unit_fix_char_at(ctx.line, unit_fix_skip_ws(ctx.line, name_end)) != ":":
+            continue
+        var fix = EasyFix.create(
+            id: "SPL-UNIT-001:{ctx.line_num}",
+            description: "replace deprecated `newunit` with `unit`",
+            confidence: FixConfidence.Likely
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: ctx.byte_offset + kw,
+            end: ctx.byte_offset + kw + 7,
+            line: ctx.line_num,
+            column: kw + 1,
+            new_text: "unit"
+        ))
+        fixes.push(fix)
+    fixes
+
+pub fn check_numeric_newtype_deprecation(source: text, file: text) -> [EasyFix]:
+    check_numeric_newtype_deprecation_with_contexts(file, line_contexts(source))
+
+pub fn check_numeric_newtype_deprecation_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
+    var lines: [text] = []
+    for raw_ctx in contexts:
+        val c: LineContext = raw_ctx
+        lines.push(c.line)
+    val in_tq = unit_fix_in_triple_quote(lines)
+    var fixes: [EasyFix] = []
+    var idx = 0
+    for raw_ctx in contexts:
+        val ctx: LineContext = raw_ctx
+        val skip = in_tq[idx]
+        idx = idx + 1
+        if skip:
+            continue
+        val line = ctx.line
+        val kw = unit_fix_keyword_col(line, "newtype")
+        if kw < 0:
+            continue
+        val name_start = unit_fix_skip_ws(line, kw + 7)
+        val name_end = unit_fix_ident_end(line, name_start)
+        if name_end == name_start:
+            continue
+        val eq = unit_fix_skip_ws(line, name_end)
+        if unit_fix_char_at(line, eq) != "=":
+            continue
+        val ty_start = unit_fix_skip_ws(line, eq + 1)
+        val ty_end = unit_fix_ident_end(line, ty_start)
+        if ty_end == ty_start:
+            continue
+        val next = unit_fix_char_at(line, ty_end)
+        if next != "" and next != " " and next != "\t" and next != "#" and next != "\r":
+            continue
+        val name = line.slice(name_start, name_end)
+        val ty = line.slice(ty_start, ty_end)
+        if not UNIT_FIX_NUMERIC_INNER.contains(ty):
+            continue
+        var fix = EasyFix.create(
+            id: "SPL-UNIT-003:{ctx.line_num}",
+            description: "numeric `newtype` is deprecated: rewrite to `unit " + name + ": " + ty + "`, then add `as <suffix>` and declare approved operators (auto-derived arithmetic is not carried over)",
+            confidence: FixConfidence.Uncertain
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: ctx.byte_offset + kw,
+            end: ctx.byte_offset + ty_end,
+            line: ctx.line_num,
+            column: kw + 1,
+            new_text: "unit " + name + ": " + ty
+        ))
+        fixes.push(fix)
     fixes

@@ -1,0 +1,53 @@
+# `trace explain <requirement> --why-incomplete`: why one requirement is not
+# fully linked, and whether the graph itself is incomplete. Pure.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.trace_ids_v1.{TraceSnapshotIdV1}
+use std.common.traceability.query_missing_v1.{TraceLinkStatus, TraceRequirementIdV1,
+    TraceGraphCompletenessV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1, TraceCommandVerdictV1, TraceRequirementStatusV1,
+    trace_requirement_statuses_v1, trace_graph_completeness_v1, trace_command_verdict_v1}
+
+pub enum TraceExplainReasonV1:
+    NoImplementation
+    NoVerification
+    NoPassingEvidence
+    GraphIncomplete
+
+pub struct TraceExplainResultV1:
+    snapshot_id: TraceSnapshotIdV1
+    status: TraceRequirementStatusV1
+    reasons: [TraceExplainReasonV1]    # empty when the requirement is Verified and the graph complete
+    completeness: TraceGraphCompletenessV1
+    verdict: TraceCommandVerdictV1
+
+pub fn trace_explain_reason_name_v1(reason: TraceExplainReasonV1) -> text:
+    match reason:
+        case TraceExplainReasonV1.NoImplementation: "no implemented_by link"
+        case TraceExplainReasonV1.NoVerification: "no verifying link"
+        case TraceExplainReasonV1.NoPassingEvidence: "linked but no passing test evidence"
+        case TraceExplainReasonV1.GraphIncomplete: "the snapshot graph is incomplete, so absence proves nothing"
+
+# None when no requirement node carries the id.
+pub fn trace_explain_requirement_v1(graph: TraceGraph, sidecar: [TraceSidecarReferenceV1],
+    evidence: [TracePassingEvidenceV1], requirement: TraceRequirementIdV1, profile: TraceProfile) -> TraceExplainResultV1?:
+    for status in trace_requirement_statuses_v1(graph, sidecar, evidence):
+        if status.requirement_id.value != requirement.value:
+            continue
+        var reasons: [TraceExplainReasonV1] = []
+        if status.implementation == TraceLinkStatus.Missing or status.implementation == TraceLinkStatus.Unknown:
+            reasons.push(TraceExplainReasonV1.NoImplementation)
+        if status.verification == TraceLinkStatus.Missing or status.verification == TraceLinkStatus.Unknown:
+            reasons.push(TraceExplainReasonV1.NoVerification)
+        elif status.verification == TraceLinkStatus.Linked:
+            reasons.push(TraceExplainReasonV1.NoPassingEvidence)
+        if not graph.complete:
+            reasons.push(TraceExplainReasonV1.GraphIncomplete)
+        val completeness = trace_graph_completeness_v1(graph)
+        return Some(TraceExplainResultV1(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id),
+            status: status, reasons: reasons, completeness: completeness,
+            verdict: trace_command_verdict_v1(completeness, profile)))
+    None
+

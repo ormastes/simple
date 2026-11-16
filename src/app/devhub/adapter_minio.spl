@@ -13,6 +13,7 @@ use std.common.crypto.sha256.{sha256_bytes}
 use std.common.http_curl.{curl_request_bytes}
 use std.io_runtime.{host_os}
 use std.common.text_bytes.{bytes_to_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.aws_sigv4.{
     SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
     SigV4Header, SigV4QueryParam,
@@ -452,6 +453,8 @@ fn minio_list_objects(cfg: MinioConfig, bucket: text, prefix: text) -> (bool, [O
 # GetObject (text body) and streaming download (binary)
 # ---------------------------------------------------------------------------
 
+val MINIO_INVALID_UTF8_PREFIX = "object body is invalid UTF-8"
+
 class GetObjectResult:
     body: text          # text body for small/text objects
     content_length: i64 # always populated; -1 if unknown
@@ -483,7 +486,10 @@ fn _minio_get_checked(url: text, headers: [text]) -> (i64, text, text):
     val declared = _minio_header_value(response.2, "Content-Length")
     if declared != "" and declared != "{received.len()}":
         return (0, "", "truncated response: Content-Length {declared}, received {received.len()} bytes")
-    (response.0, bytes_to_text(received), "")
+    # Fail closed: lossy decoding would hand binary objects to text callers corrupted.
+    match validated_utf8_bytes_to_text_linear(received):
+        case Ok(decoded): (response.0, decoded, "")
+        case Err(why): (0, "", "{MINIO_INVALID_UTF8_PREFIX}: {why}; use minio_download for binary objects")
 
 
 fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: text) -> (bool, GetObjectResult, text):
@@ -523,6 +529,8 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
         body = r.1
         err = r.2
         attempt = attempt + 1
+        if err.starts_with(MINIO_INVALID_UTF8_PREFIX):
+            break
         if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
             break
         itf_retry_wait(attempt - 1, "")
@@ -530,7 +538,7 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
     val empty = GetObjectResult(body: "", content_length: -1, etag: "")
     if mapped.kind != "ok":
         return (false, empty, mapped.message)
-    (true, GetObjectResult(body: body, content_length: body.len(), etag: ""), body)
+    (true, GetObjectResult(body: body, content_length: body.byte_len(), etag: ""), body)
 
 
 fn minio_download(cfg: MinioConfig, bucket: text, key: text, dest_path: text, expires: i64) -> (bool, i64, text):
@@ -695,7 +703,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
 
     Returns (success, etag_or_empty, raw_response_body_or_error).
     """
-    if body.len() > MINIO_MULTIPART_THRESHOLD:
+    if body.byte_len() > MINIO_MULTIPART_THRESHOLD:
         return (false, "", "minio_put_text: body exceeds {MINIO_MULTIPART_THRESHOLD} bytes — multipart not yet implemented (issue #10 follow-up)")
     val canonical_uri = _build_object_path(bucket, key)
     val amz_dt = _amz_datetime_now()
@@ -705,7 +713,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     val ct = if content_type == "": "application/octet-stream" else: content_type
 
     var sig_headers: [SigV4Header] = []
-    sig_headers = sig_headers + [SigV4Header(name: "content-length", value: "{body.len()}")]
+    sig_headers = sig_headers + [SigV4Header(name: "content-length", value: "{body.byte_len()}")]
     sig_headers = sig_headers + [SigV4Header(name: "content-type", value: ct)]
     sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
     sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
@@ -719,7 +727,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     var sffi: [text] = []
     sffi = sffi + ["Host: {host}"]
     sffi = sffi + ["Content-Type: {ct}"]
-    sffi = sffi + ["Content-Length: {body.len()}"]
+    sffi = sffi + ["Content-Length: {body.byte_len()}"]
     sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
     sffi = sffi + ["x-amz-date: {amz_dt}"]
     sffi = sffi + ["Authorization: {auth}"]

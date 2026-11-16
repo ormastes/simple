@@ -1,0 +1,129 @@
+"""
+## Purpose
+Proves the pure runner's ROCm ops provider really executes on the AMD GPU:
+device identity from HIP, GPU matvec equal to the CPU op, and a CPU-vs-GPU
+timing table for the real stories15M shapes (32000x288 head, 288x288 q_proj),
+with weights uploaded as raw F32 bytes straight from model.safetensors.
+Skips with a reason when the ROCm DLLs or the model file are absent.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_read_bytes, file_append_text, dir_create_all}
+use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_decode_f32_le}
+use std.gc_async_mut.slang.model_executor.pure.weights.{pure_weights_f32_ranges, PureF32Range}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_upload_f32_bytes, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_free, rocm_ops_sync}
+
+# The runner does not keep stdout of passing examples and counts skip() as a
+# pass, so evidence (and every skip reason) is also appended to a file.
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/pure_evidence.txt", line + "\n")
+
+extern fn rt_time_now_nanos() -> i64
+
+val MODEL = "C:/dev/model/llama2c-stories15M/model.safetensors"
+
+fn rand_values(n: i64, seed: i64) -> [f64]:
+    var out: [f64] = []
+    var s = seed
+    var i: i64 = 0
+    while i < n:
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.push(((s % 20001) as f64) / 10000.0 - 1.0)
+        i = i + 1
+    out
+
+fn rel_err(gpu: PureTensor, cpu: PureTensor) -> f64:
+    var scale = 1.0
+    var i: i64 = 0
+    while i < cpu.data.len():
+        val a = if cpu.data[i] < 0.0: -cpu.data[i] else: cpu.data[i]
+        if a > scale:
+            scale = a
+        i = i + 1
+    var worst = 0.0
+    i = 0
+    while i < cpu.data.len():
+        val d0 = gpu.data[i] - cpu.data[i]
+        val d = if d0 < 0.0: -d0 else: d0
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst / scale
+
+fn ms3(us: i64) -> text:
+    "{us / 1000}.{us % 1000}"
+
+# Benchmark one weight range of `bytes`; returns the relative error and prints a perf row.
+fn bench_range(ops, bytes: [u8], r: PureF32Range, cpu_reps: i64, gpu_reps: i64) -> f64:
+    val rows = r.shape[0]
+    val cols = r.shape[1]
+    val x = tensor_from_values(rand_values(cols, 12), [cols])
+    val w = tensor_decode_f32_le(bytes, r.offset, r.count, r.shape)
+    val tu0 = rt_time_now_nanos()
+    val dw = rocm_tensor_upload_f32_bytes(ops, bytes, r.offset, r.shape).unwrap()
+    val tu1 = rt_time_now_nanos()
+    val dx = rocm_tensor_upload(ops, x).unwrap()
+    # warm-up (kernel compile + first launch) outside the timings
+    rocm_tensor_download(ops, rocm_tensor_matvec(ops, dw, dx).unwrap()).unwrap()
+    var cpu = tensor_matvec(w, x)
+    val tc0 = rt_time_now_nanos()
+    var i: i64 = 0
+    while i < cpu_reps:
+        cpu = tensor_matvec(w, x)
+        i = i + 1
+    val tc1 = rt_time_now_nanos()
+    # excluding transfer: launch + device sync only (weights and x resident)
+    val tk0 = rt_time_now_nanos()
+    i = 0
+    while i < gpu_reps:
+        val dy0 = rocm_tensor_matvec(ops, dw, dx).unwrap()
+        rocm_ops_sync(ops).unwrap()
+        rocm_tensor_free(ops, dy0).unwrap()
+        i = i + 1
+    val tk1 = rt_time_now_nanos()
+    # including transfer: upload x, matvec, download y (weights resident)
+    val tt0 = rt_time_now_nanos()
+    var gpu = cpu
+    i = 0
+    while i < gpu_reps:
+        val dxi = rocm_tensor_upload(ops, x).unwrap()
+        val dyi = rocm_tensor_matvec(ops, dw, dxi).unwrap()
+        gpu = rocm_tensor_download(ops, dyi).unwrap()
+        rocm_tensor_free(ops, dyi).unwrap()
+        rocm_tensor_free(ops, dxi).unwrap()
+        i = i + 1
+    val tt1 = rt_time_now_nanos()
+    _record("PERF matvec {rows}x{cols}: cpu_ms={ms3((tc1 - tc0) / cpu_reps / 1000)} gpu_excl_transfer_ms={ms3((tk1 - tk0) / gpu_reps / 1000)} gpu_incl_x_up_y_down_ms={ms3((tt1 - tt0) / gpu_reps / 1000)} weight_bulk_upload_once_ms={(tu1 - tu0) / 1000000}")
+    rel_err(gpu, cpu)
+
+fn find_shape(ranges: [PureF32Range], rows: i64, cols: i64) -> PureF32Range:
+    for r in ranges:
+        if r.shape.len() == 2 and r.shape[0] == rows and r.shape[1] == cols:
+            return r
+    ranges[0]
+
+describe "slang pure runner ROCm provider (system)":
+    it "runs matvec on the Radeon GPU and matches the CPU op":
+        if not rocm_available_at(rocm_bin_default()):
+            _record("SKIPPED: ROCm DLLs not found in {rocm_bin_default()}")
+        elif not file_exists(MODEL):
+            _record("SKIPPED: {MODEL} not found")
+        else:
+            val ops = rocm_ops_open().unwrap()
+            val name = rocm_ops_device_name(ops)
+            _record("DEVICE: {name}")
+            expect(name).to_contain("Radeon")
+            val bytes = file_read_bytes(MODEL)
+            val ranges = pure_weights_f32_ranges(bytes).unwrap()
+            val small = find_shape(ranges, 288, 288)
+            val head = find_shape(ranges, 32000, 288)
+            expect(small.shape[0]).to_equal(288)
+            expect(head.shape[0]).to_equal(32000)
+            val e_small = bench_range(ops, bytes, small, 20, 200)
+            val e_head = bench_range(ops, bytes, head, 1, 20)
+            _record("PERF rel_err small={e_small} head={e_head}")
+            expect(e_small < 0.0001).to_equal(true)
+            expect(e_head < 0.0001).to_equal(true)

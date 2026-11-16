@@ -1,0 +1,88 @@
+"""
+## Purpose and audience
+S40-AGENT-10 (T-02 (a)): the V4 installed agent owner driven end to end through
+the real `host-agent-invoke` route of an installed Linux service: the signed
+probes, then the agent workload, on one lent transfer, until the Host row settles.
+For owners of the Linux Host service and the fresh-epoch machine authority.
+## Operator workflow
+Fixture-environment gate (owner decision 2026-11-16, OPEN_ISSUE B-10): with any
+variable unset the case reports BLOCKED (counted, never a pass) and touches nothing.
+- `SIMPLE_LINUX_SERVICE_ANCHOR`: the installed service anchor.
+- `SIMPLE_LINUX_AGENT_INVOKE`: a file holding a canonical `linux-host-agent-invoke`
+  request whose operation the controller has already prepared (agent draft) and
+  executed on this Host (row `executing`).
+Status: AUTHORED, NOT_RUN (2026-11-16). `unverified` until run on a real host.
+## Compatibility and limitations
+Covered here: the chain reaches `settled` within a bounded number of turns, the
+same-op replay returns the recorded reply byte-for-byte (gate 1b), and the service
+closes to `released_all`. NOT yet authored (each needs fault injection or a second
+incarnation the fixture does not provide): the advance refusals and 6-workload
+bound, linked-history successor checks, probe-order skips, the check-3 selection
+mismatches, a probe going Unknown, the duration gate, the V-01/W-01 two-lifecycle
+and second-incarnation launch cases, V-02/V-04, thread affinity, and the
+S40-AGENT-09 uid mismatch. They are tracked in the milestone_0021 PROGRESS log.
+## Verification guidance and troubleshooting
+A `wedged` stage is a fail-closed stop, not a hang: read the reply `stage` and the
+service error; the Host row stays `executing` and drains at the next reopen.
+"""
+use std.spec.{describe, it, expect, step, fail, pending}
+use std.io.file_read_text
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, host_service_domain_turn_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4,
+    host_linux_service_open_installed_v4, host_linux_service_close_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
+
+# Probes (n * 30 s) plus the agent: every turn advances at most one native step, so 4096 turns is a generous bound.
+const CHAIN_MAX_TURNS_V4: i64 = 4096
+
+fn chain_service_v4(domain: HostServiceDomainV3) -> HostLinuxServiceCurrentV4:
+    match domain.local:
+        case HostLocalRootV3.LinuxService(owner): owner
+        case _: HostLinuxServiceCurrentV4(root: "")
+
+describe "V4 agent chain through the installed Linux service route":
+    it "settles the probes and the agent on one transfer, replays the recorded reply and releases on close":
+        # @req S40-AGENT-10
+        var missing = ""
+        if env_get("SIMPLE_LINUX_SERVICE_ANCHOR") == "": missing = "SIMPLE_LINUX_SERVICE_ANCHOR"
+        if env_get("SIMPLE_LINUX_AGENT_INVOKE") == "":
+            missing = if missing == "": "SIMPLE_LINUX_AGENT_INVOKE" else: missing + ", SIMPLE_LINUX_AGENT_INVOKE"
+        if missing != "":
+            pending("BLOCKED: Linux agent chain fixture env unset: {missing}")
+            return
+        step("Open the installed service and read the prepared invoke request")
+        val opened = host_linux_service_open_installed_v4(env_get("SIMPLE_LINUX_SERVICE_ANCHOR"))
+        if opened.error != "": fail("installed service open refused: " + opened.error)
+        val payload = file_read_text(env_get("SIMPLE_LINUX_AGENT_INVOKE"))
+        val request = host_agent_invoke_request_decode_v4(payload).unwrap()
+        var domain = HostServiceDomainV3(HostLocalRootV3.LinuxService(opened.owner))
+        step("Drive host-agent-invoke until the reply is no longer pending")
+        var reply = ""
+        var turns = 0
+        var done = false
+        while not done and turns < CHAIN_MAX_TURNS_V4:
+            val turn = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-agent-invoke", request.operation_id, payload))
+            domain = turn.owner
+            turns = turns + 1
+            if turn.exit_code != 0:
+                val closed = host_linux_service_close_v4(chain_service_v4(domain))
+                fail("invoke refused at turn {turns} (exit {turn.exit_code}): " + turn.response + " close: " + closed.error)
+            reply = turn.response
+            done = reply.contains("pending: false")
+        expect(done).to_equal(true)
+        expect(reply.contains("stage: settled")).to_equal(true)
+        step("A same-op replay after settled returns the recorded reply unchanged")
+        # Gate 1b runs before the executing-only row gate (admit replay=true for a matching settled agent), so the
+        # completed row reaches host_agent_settled_v4, which answers with no effect (exit 0).
+        val replay = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-agent-invoke", request.operation_id, payload))
+        domain = replay.owner
+        expect(replay.exit_code).to_equal(0)
+        expect(replay.response).to_equal(reply)
+        step("The service closes to released_all with the agent gone")
+        val closed = host_linux_service_close_v4(chain_service_v4(domain))
+        expect(closed.error).to_equal("")
+        expect(closed.released_all).to_equal(true)
+        expect(closed.owner.agent.is_none()).to_equal(true)

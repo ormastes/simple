@@ -1,0 +1,151 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+A text dict key is reinterpreted as a word with Bitcast, never Cast.
+
+Class A of doc/07_guide/compiler/robustness/stage2_native_miscompile_classes.md.
+
+box_runtime_dictionary_key_v1 (src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl)
+asks rt_string_data whether a text key is a tagged handle or a borrowed char*,
+so it needs the key's WORD. It emitted `Cast(text -> i64)`, and Cranelift's
+cl_translate_cast lowers every text -> integer Cast as `int(text)`: it loads
+{ptr, len} through the word and calls rt_string_new + rt_string_to_int_lenient.
+A `[text]` element is a bare char*, so `cache.has(inputs[i])` SIGSEGVed in
+rt_string_new (Stage 3 hello world). Bitcast is the reinterpret every backend
+lowers as a pass-through (ensure_tagged_str already uses it for the same job).
+
+Source-level `int(text)` never reaches a raw Cast (lower_cast_or_convert routes
+it to rt_string_to_int_lenient); the control row pins that it still does.
+
+Native oracle: test/fixtures/native_dict_key_text_probe/{array_element,controls}/main.spl.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "dict_key.spl", "dict_key.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("dict_key.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn local_id_named(mir: text, name: text) -> text:
+    val marker = "\"name\":\"{name}\""
+    val at = mir.index_of(marker)
+    if at < 0:
+        return ""
+    val head = mir.substring(0, at)
+    val id_at = head.rfind("{{\"id\":")
+    if id_at < 0:
+        return ""
+    head.substring(id_at + 6, at - 1)
+
+val SOURCE: text = "var cache: {text: text} = {}\n\n" +
+    "fn lookup(path: text) -> text:\n    if cache.has(path):\n        return cache[path]\n    \"miss\"\n\n" +
+    "fn lookup_get(path: text) -> text:\n    cache.get(path) ?? \"none\"\n\n" +
+    "fn parse(path: text) -> i64:\n    int(path)\n"
+
+fn expect_key_word_bitcast(fns: Dict<text, text>, name: text):
+    val mir = fns[name] ?? ""
+    expect(mir.len() > 0).to_equal(true)
+    expect(mir).to_contain("rt_string_data")
+    val path_id = local_id_named(mir, "path")
+    expect(path_id != "").to_equal(true)
+    val operand = "\"operand\":{{\"kind\":{{\"Copy\":" + path_id + "}},\"call_origin\":\"source\"}},\"target\":\"I64\""
+    # The word read of the text key is a Bitcast; no Cast takes the text key.
+    expect(count_inst_on(mir, "Bitcast", operand) > 0).to_equal(true)
+    expect(count_inst_on(mir, "Cast", operand)).to_equal(0)
+
+fn count_inst_on(mir: text, kind: text, operand: text) -> i64:
+    """Count `kind` instructions whose operand serializes as `operand`."""
+    val head = "{{\"" + kind + "\":{{\"dest\":"
+    var rest = mir
+    var found = 0
+    var at = rest.index_of(head)
+    while at >= 0:
+        val tail = rest.substring(at + head.len(), rest.len())
+        val comma = tail.index_of(",")
+        if comma >= 0 and tail.substring(comma + 1, tail.len()).starts_with(operand):
+            found = found + 1
+        rest = tail
+        at = rest.index_of(head)
+    found
+
+describe "text dict key probe reinterprets the key word with Bitcast":
+    it "has(): the key word read is a Bitcast, not an int(text) Cast":
+        expect_key_word_bitcast(lower_module_json(SOURCE), "lookup")
+
+    it "get(): the key word read is a Bitcast, not an int(text) Cast":
+        expect_key_word_bitcast(lower_module_json(SOURCE), "lookup_get")
+
+    it "control: source-level int(text) still parses through rt_string_to_int_lenient":
+        val mir = lower_module_json(SOURCE)["parse"] ?? ""
+        expect(mir).to_contain("rt_string_to_int_lenient")
+        expect(mir.contains("rt_string_data")).to_equal(false)
+
+# Second instance of the same defect: the text slice lowering read the
+# receiver handle with `emit_cast(text -> i64)` before rt_slice
+# (method_calls_literals.spl lower_text_codepoint_slice_v1 /
+# lower_erased_receiver_slice_v1 / emit_runtime_array_slice_bounds), which
+# Cranelift lowered as rt_slice(int(text), ...).
+val SLICE_SOURCE: text = "fn mid(path: text) -> text:\n    path[1:3]\n\n" +
+    "fn from2(path: text) -> text:\n    path[2:]\n\n" +
+    "fn to3(path: text) -> text:\n    path[:3]\n\n" +
+    "fn elem_mid(xs: [text], i: i64) -> text:\n    val p = xs[i]\n    p[0:3]\n\n" +
+    "fn strip(module_path: text) -> text:\n    var path = module_path\n    if path.starts_with(\"std.\"):\n        path = path[4:path.len()]\n    elif path.starts_with(\"lib.\"):\n        path = path[4:path.len()]\n    path\n"
+
+val TEXT_TUPLE_TYPE: text = "\"type\":{{\"Tuple\":[{{\"Ptr\":{{\"pointee\":\"U8\""
+
+fn text_local_ids(mir: text) -> [text]:
+    """Ids of locals whose MIR type is the (ptr<u8>, u64) text tuple."""
+    val blocks_at = mir.index_of("\"blocks\":")
+    val locals = if blocks_at >= 0: mir.substring(0, blocks_at) else: mir
+    val head = "{{\"id\":"
+    var ids: [text] = []
+    var at = locals.index_of(head)
+    while at >= 0:
+        val tail = locals.substring(at + head.len(), locals.len())
+        val comma = tail.index_of(",")
+        val next = tail.index_of(head)
+        val entry = if next >= 0: tail.substring(0, next) else: tail
+        if comma > 0 and entry.contains(TEXT_TUPLE_TYPE):
+            ids.push(tail.substring(0, comma))
+        if next < 0:
+            return ids
+        at = at + head.len() + next
+    ids
+
+fn text_word_casts(mir: text) -> i64:
+    """Cast instructions to I64 whose operand is a text-tuple local."""
+    var total = 0
+    for id in text_local_ids(mir):
+        val operand = "\"operand\":{{\"kind\":{{\"Copy\":" + id + "}},\"call_origin\":\"source\"}},\"target\":\"I64\""
+        total = total + count_inst_on(mir, "Cast", operand)
+    total
+
+describe "text slice reads the receiver handle with Bitcast":
+    it "slices hand rt_slice a reinterpreted word, never an int(text) Cast":
+        val fns = lower_module_json(SLICE_SOURCE)
+        for name in ["mid", "from2", "to3", "elem_mid", "strip"]:
+            val mir = fns[name] ?? ""
+            expect(mir).to_contain("rt_slice")
+            expect(text_local_ids(mir).len() > 0).to_equal(true)
+            expect(text_word_casts(mir)).to_equal(0)
+
+    it "dict-key probe: no Cast takes any text local":
+        val fns = lower_module_json(SOURCE)
+        expect(text_word_casts(fns["lookup"] ?? "")).to_equal(0)
+        expect(text_word_casts(fns["lookup_get"] ?? "")).to_equal(0)

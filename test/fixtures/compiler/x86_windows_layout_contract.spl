@@ -1,0 +1,125 @@
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirField, HirExpr, HirExprKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new}
+use compiler.hir.target_hir.target_hir.{target_hir_for_context}
+use compiler.hir.target_hir.target_hir_resolution.{target_hir_builder_new, target_hir_builder_resolve_required, target_hir_builder_freeze, target_hir_layout}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, layoutattr_c_repr, layoutattr_default_, layoutattr_packed, compute_struct_layout_for_target, compute_struct_layout_for_arch}
+use compiler.mir.mir_target_hir_layout.{mir_target_hir_struct_layout, mir_target_aware_struct_layout}
+use compiler.backend.llvm_target.{LlvmTargetTriple}
+use std.common.target.{TargetArch}
+
+fn layout_probe_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span(start: 0, end: 0, line: 1, col: 1))
+
+fn layout_probe_field(name: text, id: i64, kind: HirTypeKind) -> HirField:
+    val span = Span(start: 0, end: 0, line: 1, col: 1)
+    val absent = HirExpr(kind: HirExprKind.UnitLit, has_type_: false, type_: layout_probe_type(HirTypeKind.Unit), span: span)
+    HirField(symbol: SymbolId(id: id), name: name, type_: layout_probe_type(kind),
+        has_default: false, default: absent, visibility: Visibility.Public,
+        is_public: true, is_volatile: false, has_bits_attr: false, bits_width: 0,
+        has_fixed_address: false, fixed_address: 0, span: span)
+
+fn layout_probe_fields(kind: HirTypeKind) -> [HirField]:
+    [layout_probe_field("tag", 1, HirTypeKind.Int(8, false)),
+     layout_probe_field("value", 2, kind),
+     layout_probe_field("pointer", 3, HirTypeKind.Ptr(layout_probe_type(HirTypeKind.Unit), true))]
+
+fn layout_probe_target(triple: text) -> MirTargetContext:
+    mir_target_context_from(triple, "aarch64", "macos", "llvm", 23)
+
+# Fixed expectations below come from Clang 23 reference record layouts, not
+# another Simple layout implementation. They assert both consumer paths.
+pub fn x86_windows_layout_c_contract() -> bool:
+    val snapshot = hir_snapshot_id_new("layout.probe", "x86-windows-reference", 1).unwrap()
+    for triple in ["i686-pc-windows-msvc", "i686-w64-windows-gnu", "i686-unknown-linux-gnu", "x86_64-pc-windows-msvc"]:
+        val target = layout_probe_target(triple)
+        val view = target_hir_for_context(snapshot, target, "layout").unwrap()
+        val narrow_linux = target.arch == "x86" and target.os == "linux"
+        val expected_align: i64 = if narrow_linux: 4 else: 8
+        val expected_size: i64 = if narrow_linux: 16 else: 24
+        val expected_pointer: i64 = if narrow_linux: 12 else: 16
+        for scalar in ["i64", "u64", "f64"]:
+            val kind = if scalar == "f64": HirTypeKind.Float(64) else: HirTypeKind.Int(64, scalar == "i64")
+            val fields = layout_probe_fields(kind)
+            val layout = compute_struct_layout_for_target(fields, layoutattr_c_repr(), target).unwrap()
+            if layout.size != expected_size or layout.align != expected_align: return false
+            if layout.fields[0].offset != 0 or layout.fields[1].offset != expected_align: return false
+            if layout.fields[2].offset != expected_pointer: return false
+            val typed = mir_target_hir_struct_layout(view, snapshot, "Probe", fields, layoutattr_c_repr()).unwrap()
+            if typed.size != expected_size or typed.align != expected_align: return false
+            if typed.field_offsets[1] != expected_align or typed.field_offsets[2] != expected_pointer: return false
+            val legacy = mir_target_aware_struct_layout(target, fields, layoutattr_c_repr())
+            if legacy.size != expected_size or legacy.fields[1].offset != expected_align: return false
+            val builder = target_hir_builder_resolve_required(target_hir_builder_new(view, [scalar])).unwrap()
+            val resolved = target_hir_builder_freeze(builder).unwrap()
+            if target_hir_layout(resolved, scalar).unwrap().align != layout.fields[1].align: return false
+    true
+
+pub fn x86_windows_layout_policy_contract() -> bool:
+    val target = layout_probe_target("i686-pc-windows-msvc")
+    val fields = layout_probe_fields(HirTypeKind.Int(64, true))
+    val packed = compute_struct_layout_for_target(fields, layoutattr_packed(), target).unwrap()
+    if packed.size != 13 or packed.align != 1: return false
+    if packed.fields[1].offset != 1 or packed.fields[2].offset != 9: return false
+    val reordered = compute_struct_layout_for_target(fields, layoutattr_default_(), target).unwrap()
+    if reordered.size != 16 or reordered.align != 8: return false
+    if reordered.fields[0].name != "value" or reordered.fields[0].offset != 0: return false
+    if reordered.fields[1].name != "pointer" or reordered.fields[1].offset != 8: return false
+    if reordered.fields[2].name != "tag" or reordered.fields[2].offset != 12: return false
+    var ordered_attr = layoutattr_default_()
+    ordered_attr.is_preserve_order = true
+    val ordered = compute_struct_layout_for_target(fields, ordered_attr, target).unwrap()
+    if ordered.size != 24 or ordered.fields[1].offset != 8: return false
+    var aligned_attr = layoutattr_c_repr()
+    aligned_attr.has_explicit_align = true
+    aligned_attr.explicit_align = 16
+    val aligned = compute_struct_layout_for_target(fields, aligned_attr, target).unwrap()
+    if aligned.align != 16 or aligned.size != 32 or aligned.fields[1].offset != 8: return false
+    var transparent_attr = layoutattr_default_()
+    transparent_attr.layout_kind = TypeLayoutKind.Transparent
+    val transparent = compute_struct_layout_for_target([fields[1]], transparent_attr, target).unwrap()
+    if transparent.size != 8 or transparent.align != 8: return false
+    val baseline = compute_struct_layout_for_arch(fields, layoutattr_c_repr(), TargetArch.X86)
+    if baseline.size != 16 or baseline.align != 4 or baseline.fields[1].offset != 4: return false
+    true
+
+pub fn x86_windows_layout_datalayout_contract() -> bool:
+    for env in ["msvc", "gnu"]:
+        val triple = LlvmTargetTriple(arch: "i686", vendor: "pc", os: "windows", env: Some(env))
+        val data = triple.datalayout()
+        if not data.contains("-i64:64-") or not data.contains("-f64:64-"): return false
+        if not data.contains("-p:32:32-"): return false
+    val linux = LlvmTargetTriple(arch: "i686", vendor: "unknown", os: "linux", env: Some("gnu"))
+    if not linux.datalayout().contains("-f64:32:64-"): return false
+    if linux.datalayout().contains("-i64:64-"): return false
+    true
+
+pub fn x86_windows_layout_rejects_unknown() -> bool:
+    val target = MirTargetContext(arch: "unknown", os: "windows", abi: "msvc", backend: "llvm", version: 23)
+    val result = compute_struct_layout_for_target(layout_probe_fields(HirTypeKind.Int(64, true)), layoutattr_c_repr(), target)
+    result.is_err()
+
+pub fn x86_windows_layout_alias_bitfield_contract() -> bool:
+    val fields = layout_probe_fields(HirTypeKind.Int(64, true))
+    for arch in ["x86", "i386", "i686"]:
+        val direct = MirTargetContext(arch: arch, os: "windows", abi: "msvc", backend: "llvm", version: 23)
+        val layout = compute_struct_layout_for_target(fields, layoutattr_c_repr(), direct).unwrap()
+        if layout.align != 8 or layout.size != 24 or layout.fields[1].offset != 8: return false
+    var first = layout_probe_field("first", 4, HirTypeKind.Int(64, false))
+    first.has_bits_attr = true
+    first.bits_width = 3
+    var second = layout_probe_field("second", 5, HirTypeKind.Int(64, false))
+    second.has_bits_attr = true
+    second.bits_width = 5
+    val bitfields = [fields[0], first, second]
+    for triple in ["i686-pc-windows-msvc", "i686-unknown-linux-gnu"]:
+        val target = layout_probe_target(triple)
+        val expected: i64 = if target.os == "windows": 8 else: 4
+        val layout = compute_struct_layout_for_target(bitfields, layoutattr_c_repr(), target).unwrap()
+        if layout.align != expected or layout.size != expected + 8: return false
+        if layout.fields[1].offset != expected or layout.fields[2].offset != expected: return false
+        if layout.fields[1].bit_offset != 0 or layout.fields[2].bit_offset != 3: return false
+    true

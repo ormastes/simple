@@ -1,0 +1,295 @@
+# MCP traceability tools — read-only `simple_trace` and `simple_test_query`.
+#
+#   simple_trace(profile, operation?, snapshot?, limit?, format?)
+#       runs `trace missing` over the requested snapshot and returns the
+#       rendered result with an explicit complete/incomplete status. An
+#       unbuildable or partial snapshot is `incomplete` (exit 2, isError), never
+#       an empty success.
+#   simple_test_query(path, name, run_id?, limit?, cursor?)
+#       read-only typed attempt rows for one exact TestDB case.
+#
+# Strictly read-only: the snapshot is built in memory exactly like
+# `simple trace missing`, the TestDB is read through
+# `RunnerTestDb.query_case_attempts`, and nothing is written. When
+# the TestDB file is absent the tool reports a store error instead of letting
+# the loader cold-start a fresh database.
+#
+# Argument parsing and result shaping are pure and public so specs reach them
+# without a server; the heavy backends are imported inside the run functions so
+# server startup does not grow.
+# @req REQ-TRC-021 TESTDB-001
+
+use .main_lazy_json.{extract_field, make_tool_error, make_tool_result_status}
+use std.common.traceability.profile_v1.{TraceProfile, trace_profile_name_v1, trace_profile_names_v1, trace_profile_parse_v1}
+use std.common.traceability.test_query.{TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseIdentity, TestAttemptIdentity, TestQueryStatus, TestQualification, TestQueryLimit, TestQueryCursor, TestQuery, TestQueryTruncation, TestQueryCoverage, TestQueryPage, TestQueryError, TestQueryErrorKind}
+
+const TRACE_TOOL_DEFAULT_LIMIT: i64 = 100
+const TRACE_TOOL_MAX_LIMIT: i64 = 200
+const TEST_QUERY_TOOL_DEFAULT_LIMIT: i64 = 50
+const TEST_QUERY_TOOL_MAX_LIMIT: i64 = 1000
+const TRACE_TOOL_INCOMPLETE_EXIT: i64 = 2
+const TEST_QUERY_DB_FILE: text = "doc/08_tracking/test/test_db.sdn"
+
+# The raw `tools/call` JSON body: the only text-typed boundary into this module.
+pub struct TraceToolBody:
+    value: text
+
+pub enum TraceToolErrorKind:
+    MissingArgument
+    InvalidArgument
+    UnknownProfile
+    UnsupportedOperation
+
+pub struct TraceToolError:
+    kind: TraceToolErrorKind
+    message: text
+
+pub enum TraceToolOperation:
+    Missing
+
+pub struct TraceToolRevision:
+    selector: text
+
+pub enum TraceToolSnapshot:
+    Worktree
+    Index
+    Revision(revision: TraceToolRevision)
+
+pub enum TraceToolFormat:
+    Table
+    Sdn
+
+pub struct TraceToolLimit:
+    value: i64
+
+pub struct TraceToolRequest:
+    operation: TraceToolOperation
+    profile: TraceProfile
+    snapshot: TraceToolSnapshot
+    format: TraceToolFormat
+    limit: TraceToolLimit
+
+pub enum TraceToolStatus:
+    Complete
+    Incomplete
+
+pub struct TraceToolExitCode:
+    value: i64
+
+pub struct TraceToolOutcome:
+    profile: TraceProfile
+    status: TraceToolStatus
+    exit_code: TraceToolExitCode
+    rendered: text
+
+pub struct TestQueryToolRequest:
+    query: TestQuery
+
+fn _arg_error(kind: TraceToolErrorKind, message: text) -> TraceToolError:
+    TraceToolError(kind: kind, message: message)
+
+fn _is_digits(value: text) -> bool:
+    if value == "":
+        return false
+    for ch in value.chars():
+        if not "0123456789".contains(ch):
+            return false
+    true
+
+# Optional numeric argument in [low, high]; `fallback` when absent.
+fn _int_arg(body: TraceToolBody, key: text, fallback: i64, low: i64, high: i64) -> Result<i64, TraceToolError>:
+    val raw = extract_field(body.value, key)
+    if raw == "":
+        return Ok(fallback)
+    if raw.len() > 9 or not _is_digits(raw):
+        return Err(_arg_error(TraceToolErrorKind.InvalidArgument, key + " must be a whole number between " + low.to_text() + " and " + high.to_text()))
+    val parsed = raw.to_int()
+    if parsed < low or parsed > high:
+        return Err(_arg_error(TraceToolErrorKind.InvalidArgument, key + " must be between " + low.to_text() + " and " + high.to_text()))
+    Ok(parsed)
+
+pub fn trace_tool_parse_request(body: TraceToolBody) -> Result<TraceToolRequest, TraceToolError>:
+    val profile_raw = extract_field(body.value, "profile")
+    if profile_raw == "":
+        return Err(_arg_error(TraceToolErrorKind.MissingArgument,
+            "Missing required parameter: profile (one of " + trace_profile_names_v1().join(", ") + ")"))
+    val profile = match trace_profile_parse_v1(profile_raw):
+        case Ok(parsed): parsed
+        case Err(_): return Err(_arg_error(TraceToolErrorKind.UnknownProfile,
+            "Unknown profile: " + profile_raw + " (one of " + trace_profile_names_v1().join(", ") + ")"))
+    val operation_raw = extract_field(body.value, "operation")
+    if operation_raw != "" and operation_raw != "missing":
+        return Err(_arg_error(TraceToolErrorKind.UnsupportedOperation, "Unsupported operation: " + operation_raw + " (only: missing)"))
+    val snapshot_raw = extract_field(body.value, "snapshot")
+    var snapshot = TraceToolSnapshot.Worktree
+    if snapshot_raw == "index":
+        snapshot = TraceToolSnapshot.Index
+    elif snapshot_raw.starts_with("git:") and snapshot_raw.len() > 4:
+        snapshot = TraceToolSnapshot.Revision(revision: TraceToolRevision(selector: snapshot_raw.substring(4, snapshot_raw.byte_len())))
+    elif snapshot_raw != "" and snapshot_raw != "worktree":
+        return Err(_arg_error(TraceToolErrorKind.InvalidArgument, "snapshot must be worktree, index or git:REV"))
+    val format_raw = extract_field(body.value, "format")
+    var format = TraceToolFormat.Table
+    if format_raw == "sdn":
+        format = TraceToolFormat.Sdn
+    elif format_raw != "" and format_raw != "table":
+        return Err(_arg_error(TraceToolErrorKind.InvalidArgument, "format must be table or sdn"))
+    val limit = _int_arg(body, "limit", TRACE_TOOL_DEFAULT_LIMIT, 1, TRACE_TOOL_MAX_LIMIT)?
+    Ok(TraceToolRequest(operation: TraceToolOperation.Missing, profile: profile, snapshot: snapshot,
+        format: format, limit: TraceToolLimit(value: limit)))
+
+# Argument vector for the existing `trace missing` option parser.
+pub fn trace_tool_cli_args(request: TraceToolRequest) -> [text]:
+    val snapshot = match request.snapshot:
+        case TraceToolSnapshot.Worktree: "worktree"
+        case TraceToolSnapshot.Index: "index"
+        case TraceToolSnapshot.Revision(revision): "git:" + revision.selector
+    val format = match request.format:
+        case TraceToolFormat.Table: "table"
+        case TraceToolFormat.Sdn: "sdn"
+    val args = ["missing", "--snapshot=" + snapshot, "--format=" + format, "--limit=" + request.limit.value.to_text()]
+    args
+
+pub fn trace_tool_status_name(status: TraceToolStatus) -> text:
+    match status:
+        case TraceToolStatus.Complete: "complete"
+        case TraceToolStatus.Incomplete: "incomplete"
+
+# Incomplete is never an empty success: it carries the CLI-style failing exit.
+pub fn trace_tool_outcome(profile: TraceProfile, status: TraceToolStatus, rendered: text) -> TraceToolOutcome:
+    if status == TraceToolStatus.Complete:
+        return TraceToolOutcome(profile: profile, status: TraceToolStatus.Complete, exit_code: TraceToolExitCode(value: 0), rendered: rendered)
+    TraceToolOutcome(profile: profile, status: TraceToolStatus.Incomplete,
+        exit_code: TraceToolExitCode(value: TRACE_TOOL_INCOMPLETE_EXIT), rendered: rendered)
+
+pub fn trace_tool_shape_result(outcome: TraceToolOutcome) -> text:
+    "profile: " + trace_profile_name_v1(outcome.profile) + "\n" +
+        "status: " + trace_tool_status_name(outcome.status) + "\n" +
+        "exit_code: " + outcome.exit_code.value.to_text() + "\n---\n" + outcome.rendered
+
+fn _trace_tool_is_failure(outcome: TraceToolOutcome) -> bool:
+    match outcome.status:
+        case TraceToolStatus.Complete: false
+        case TraceToolStatus.Incomplete: true
+
+# Builds the snapshot in memory (same path as `simple trace missing`) and
+# renders the missing-requirements result. A snapshot that cannot be built or
+# whose graph is incomplete is reported Incomplete, never as an empty list.
+pub fn trace_tool_run(request: TraceToolRequest) -> TraceToolOutcome:
+    use app.traceability.query_options_v1.{trace_query_options_parse_v1}
+    use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
+    use app.traceability.query_render_v1.{trace_query_error_v1}
+    use app.traceability.query_render_missing_v1.{trace_query_render_missing_v1}
+    use std.common.traceability.query_missing_v1.{trace_missing_requirements_v1}
+    val format = match request.format:
+        case TraceToolFormat.Table: "table"
+        case TraceToolFormat.Sdn: "sdn"
+    val options = match trace_query_options_parse_v1(trace_tool_cli_args(request)):
+        case Ok(value): value
+        case Err(reason): return trace_tool_outcome(request.profile, TraceToolStatus.Incomplete, trace_query_error_v1(reason, "unresolved", format))
+    val build = match trace_query_build_snapshot_v1(options):
+        case Ok(value): value
+        case Err(reason): return trace_tool_outcome(request.profile, TraceToolStatus.Incomplete, trace_query_error_v1(reason, options.snapshot, format))
+    val missing = trace_missing_requirements_v1(build.graph, build.sidecar_references)
+    val status = if build.graph.complete: TraceToolStatus.Complete else: TraceToolStatus.Incomplete
+    trace_tool_outcome(request.profile, status, trace_query_render_missing_v1(build, missing, options))
+
+pub fn handle_simple_trace(id: text, body: text) -> text:
+    val request = match trace_tool_parse_request(TraceToolBody(value: body)):
+        case Ok(parsed): parsed
+        case Err(error): return make_tool_error(id, -32602, error.message)
+    val outcome = trace_tool_run(request)
+    make_tool_result_status(id, trace_tool_shape_result(outcome), _trace_tool_is_failure(outcome))
+
+# ---------------------------------------------------------------------------
+# simple_test_query
+# ---------------------------------------------------------------------------
+
+pub fn test_query_tool_parse_request(body: TraceToolBody) -> Result<TestQueryToolRequest, TraceToolError>:
+    val path = extract_field(body.value, "path")
+    if path == "":
+        return Err(_arg_error(TraceToolErrorKind.MissingArgument, "Missing required parameter: path (test spec path)"))
+    val name = extract_field(body.value, "name")
+    if name == "":
+        return Err(_arg_error(TraceToolErrorKind.MissingArgument, "Missing required parameter: name (exact case name)"))
+    val run_raw = extract_field(body.value, "run_id")
+    var run_id: TestRunId? = None
+    if run_raw != "":
+        run_id = Some(TestRunId(value: run_raw))
+    val limit = _int_arg(body, "limit", TEST_QUERY_TOOL_DEFAULT_LIMIT, 1, TEST_QUERY_TOOL_MAX_LIMIT)?
+    val cursor_raw = extract_field(body.value, "cursor")
+    var cursor: TestQueryCursor? = None
+    if cursor_raw != "":
+        cursor = Some(TestQueryCursor(token: cursor_raw))
+    Ok(TestQueryToolRequest(query: TestQuery(case_key: TestCaseKey(path: TestCasePath(value: path), name: TestCaseName(value: name)),
+        run_id: run_id, limit: TestQueryLimit(value: limit), cursor: cursor)))
+
+fn _status_name(status: TestQueryStatus) -> text:
+    match status:
+        case TestQueryStatus.Passed: "passed"
+        case TestQueryStatus.Failed: "failed"
+        case TestQueryStatus.Skipped: "skipped"
+        case TestQueryStatus.Ignored: "ignored"
+        case TestQueryStatus.QualifiedIgnore: "qualifiedignore"
+        case TestQueryStatus.Pending: "pending"
+        case TestQueryStatus.InDevelopment: "in_development"
+        case TestQueryStatus.FeatureGated: "feature_gated"
+        case TestQueryStatus.Blocked: "blocked"
+        case TestQueryStatus.NotFinished: "not_finished"
+        case TestQueryStatus.Cached: "cached"
+        case TestQueryStatus.Unknown(raw): "unknown:" + raw
+
+fn _planned_text(planned: TestPlannedCaseIdentity) -> text:
+    match planned:
+        case TestPlannedCaseIdentity.Recorded(id): id.value
+        case TestPlannedCaseIdentity.Missing: "missing"
+
+fn _attempt_text(attempt: TestAttemptIdentity) -> text:
+    match attempt:
+        case TestAttemptIdentity.StreamOrder(ordinal): ordinal.value.to_text()
+        case TestAttemptIdentity.Missing: "missing"
+
+fn _qualification_text(qualification: TestQualification) -> text:
+    match qualification:
+        case TestQualification.Pass: "pass"
+        case TestQualification.NotPass: "not_pass"
+
+pub fn test_query_error_text(error: TestQueryError) -> text:
+    val kind = match error.kind:
+        case TestQueryErrorKind.InvalidQuery: "invalid_query"
+        case TestQueryErrorKind.UnknownRun: "unknown_run"
+        case TestQueryErrorKind.StoreUnreadable: "store_unreadable"
+    "test query " + kind + ": " + error.detail
+
+pub fn test_query_shape_result(page: TestQueryPage) -> text:
+    val coverage = match page.coverage:
+        case TestQueryCoverage.Full: "full"
+        case TestQueryCoverage.Partial: "partial"
+    val truncation = match page.truncation:
+        case TestQueryTruncation.Complete: "complete"
+        case TestQueryTruncation.Truncated(next): "truncated next_cursor=" + next.token
+    var out = "coverage: " + coverage + "\ntruncation: " + truncation + "\nrows: " + page.rows.len().to_text() + "\n"
+    out = out + "run_id\tplanned_case\tattempt\tstatus\tqualification\tprovenance\n"
+    for row in page.rows:
+        out = out + row.run_id.value + "\t" + _planned_text(row.planned_case) + "\t" + _attempt_text(row.attempt) + "\t" +
+            _status_name(row.status) + "\t" + _qualification_text(row.qualification) + "\tunverified_framework_observation\n"
+    out
+
+# Read-only: an absent store is a typed error, not a cold-start database.
+pub fn test_query_tool_run(request: TestQueryToolRequest) -> Result<TestQueryPage, TestQueryError>:
+    use std.io_runtime.{file_exists}
+    use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+    if not file_exists(TEST_QUERY_DB_FILE):
+        return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "test database not found: " + TEST_QUERY_DB_FILE))
+    val db = match RunnerTestDb.load():
+        case Ok(loaded): loaded
+        case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+    db.query_case_attempts(request.query)
+
+pub fn handle_simple_test_query(id: text, body: text) -> text:
+    val request = match test_query_tool_parse_request(TraceToolBody(value: body)):
+        case Ok(parsed): parsed
+        case Err(error): return make_tool_error(id, -32602, error.message)
+    match test_query_tool_run(request):
+        case Ok(page): make_tool_result_status(id, test_query_shape_result(page), false)
+        case Err(error): make_tool_error(id, -32602, test_query_error_text(error))

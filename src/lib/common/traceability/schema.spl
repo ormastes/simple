@@ -1,8 +1,9 @@
 # Boundary validation. Claims may be unresolved; published edges may not dangle.
 # @req REQ-TRC-001 REQ-TRC-006 REQ-TRC-007 REQ-TRC-020
 use std.common.traceability.model.*
+use std.common.traceability.trace_ids_v1.{TraceEntityIdV1, TracePathV1, TraceTestRoleMarkV1}
 
-pub fn trace_id_valid(value: text) -> bool:
+fn trace_id_ok(value: text) -> bool:
     if value == "" or value.len() > 1024:
         return false
     for ch in value.chars():
@@ -27,7 +28,7 @@ fn trace_integer_token_valid(token: text) -> bool:
     while digits.len() > 1 and digits.starts_with("0"):
         digits = digits.slice(1, digits.byte_len())
     val bound = if negative: "9223372036854775808" else: "9223372036854775807"
-    digits.len() < 19 or (digits.len() == 19 and not trace_text_less(bound, digits))
+    digits.len() < 19 or (digits.len() == 19 and trace_text_order(bound, digits) == TraceTextOrder.NotBefore)
 
 pub fn trace_sdn_preflight(source: text) -> Result<(), text>:
     if source.len() > 1048576:
@@ -89,7 +90,7 @@ pub fn trace_sdn_preflight(source: text) -> Result<(), text>:
         return Err("integer exceeds signed 64-bit range")
     Ok(())
 
-pub fn trace_path_valid(path: text) -> bool:
+fn trace_path_ok(path: text) -> bool:
     if path == "" or path.starts_with("/") or path.contains("\\") or path.contains(":"):
         return false
     for part in path.split("/"):
@@ -169,26 +170,26 @@ pub fn parse_claim_operation(value: text) -> Result<TraceClaimOperation, text>:
         case "suppress": Ok(TraceClaimOperation.Suppress)
         case _: Err("unknown claim operation: " + value)
 
-pub fn trace_test_kind(kind: TraceNodeKind) -> bool:
+fn trace_test_kind_ok(kind: TraceNodeKind) -> bool:
     kind == TraceNodeKind.TestCase or kind == TraceNodeKind.ParameterizedCase
 
-pub fn trace_implementation_kind(kind: TraceNodeKind) -> bool:
+fn trace_implementation_kind_ok(kind: TraceNodeKind) -> bool:
     kind == TraceNodeKind.SourceFile or kind == TraceNodeKind.Symbol or kind == TraceNodeKind.Component
 
-pub fn trace_endpoint_kinds_valid(relation: TraceRelation, source: TraceNodeKind, target: TraceNodeKind) -> bool:
+fn trace_endpoint_kinds_ok(relation: TraceRelation, source: TraceNodeKind, target: TraceNodeKind) -> bool:
     match relation:
         case TraceRelation.Specifies:
             source == TraceNodeKind.Feature and target == TraceNodeKind.Requirement
         case TraceRelation.DecomposesTo:
             source == TraceNodeKind.Requirement and target == TraceNodeKind.AcceptanceCriterion
         case TraceRelation.AcceptedBy:
-            source == TraceNodeKind.AcceptanceCriterion and trace_test_kind(target)
+            source == TraceNodeKind.AcceptanceCriterion and trace_test_kind_ok(target)
         case TraceRelation.VerifiedBy:
-            (source == TraceNodeKind.Requirement or source == TraceNodeKind.AcceptanceCriterion) and trace_test_kind(target)
+            (source == TraceNodeKind.Requirement or source == TraceNodeKind.AcceptanceCriterion) and trace_test_kind_ok(target)
         case TraceRelation.Targets:
-            (trace_test_kind(source) or source == TraceNodeKind.TestSuite) and trace_implementation_kind(target)
+            (trace_test_kind_ok(source) or source == TraceNodeKind.TestSuite) and trace_implementation_kind_ok(target)
         case TraceRelation.ImplementedBy:
-            (source == TraceNodeKind.Requirement or source == TraceNodeKind.Feature) and trace_implementation_kind(target)
+            (source == TraceNodeKind.Requirement or source == TraceNodeKind.Feature) and trace_implementation_kind_ok(target)
         case TraceRelation.MotivatedBy:
             (source == TraceNodeKind.Requirement or source == TraceNodeKind.Feature) and (target == TraceNodeKind.Research or target == TraceNodeKind.Decision)
         case TraceRelation.DescribedBy:
@@ -196,13 +197,13 @@ pub fn trace_endpoint_kinds_valid(relation: TraceRelation, source: TraceNodeKind
         case TraceRelation.BelongsTo:
             target == TraceNodeKind.Component or target == TraceNodeKind.Layer or target == TraceNodeKind.Feature
         case TraceRelation.GeneratedFrom:
-            source == TraceNodeKind.Document and (target == TraceNodeKind.TestSuite or trace_test_kind(target) or target == TraceNodeKind.Feature)
+            source == TraceNodeKind.Document and (target == TraceNodeKind.TestSuite or trace_test_kind_ok(target) or target == TraceNodeKind.Feature)
         case TraceRelation.ObservedIn:
-            trace_test_kind(source) and target == TraceNodeKind.Observation
+            trace_test_kind_ok(source) and target == TraceNodeKind.Observation
         case TraceRelation.Produced:
             source == TraceNodeKind.Observation and target == TraceNodeKind.EvidenceArtifact
         case TraceRelation.DependsOn:
-            source == TraceNodeKind.Component or source == TraceNodeKind.Symbol or trace_test_kind(source)
+            source == TraceNodeKind.Component or source == TraceNodeKind.Symbol or trace_test_kind_ok(source)
         case TraceRelation.Supersedes:
             source == target
         case TraceRelation.Aliases:
@@ -213,7 +214,7 @@ pub fn trace_endpoint_kinds_valid(relation: TraceRelation, source: TraceNodeKind
 pub fn trace_edge_id(source: text, relation: TraceRelation, target: text) -> text:
     "edge:" + source.len().to_text() + ":" + source + ":" + relation_name(relation) + ":" + target.len().to_text() + ":" + target
 
-pub fn trace_relation_test_role_valid(relation: TraceRelation, target: text, roles: Dict<text, bool>) -> bool:
+fn trace_test_role_ok(relation: TraceRelation, target: text, roles: Dict<text, TraceTestRoleMarkV1>) -> bool:
     if relation == TraceRelation.AcceptedBy:
         return roles.contains_key(target + "|acceptance")
     if relation == TraceRelation.VerifiedBy:
@@ -223,10 +224,48 @@ pub fn trace_relation_test_role_valid(relation: TraceRelation, target: text, rol
         return false
     true
 
+pub fn trace_entity_id_parse_v1(raw: text) -> TraceEntityIdV1?:
+    if trace_id_ok(raw):
+        Some(TraceEntityIdV1(value: raw))
+    else:
+        None
+
+pub fn trace_path_parse_v1(raw: text) -> TracePathV1?:
+    if trace_path_ok(raw):
+        Some(TracePathV1(value: raw))
+    else:
+        None
+
+pub fn trace_test_node_kind_v1(kind: TraceNodeKind) -> TraceNodeKind?:
+    if trace_test_kind_ok(kind):
+        Some(kind)
+    else:
+        None
+
+pub fn trace_implementation_node_kind_v1(kind: TraceNodeKind) -> TraceNodeKind?:
+    if trace_implementation_kind_ok(kind):
+        Some(kind)
+    else:
+        None
+
+# Some(relation) when the endpoint kinds are legal for that relation.
+pub fn trace_endpoint_relation_v1(relation: TraceRelation, source: TraceNodeKind, target: TraceNodeKind) -> TraceRelation?:
+    if trace_endpoint_kinds_ok(relation, source, target):
+        Some(relation)
+    else:
+        None
+
+# Some(relation) when the target carries the test role the relation needs.
+pub fn trace_test_role_relation_v1(relation: TraceRelation, target: text, roles: Dict<text, TraceTestRoleMarkV1>) -> TraceRelation?:
+    if trace_test_role_ok(relation, target, roles):
+        Some(relation)
+    else:
+        None
+
 pub fn validate_trace_graph(graph: TraceGraph) -> [TraceDiagnostic]:
     var issues: [TraceDiagnostic] = []
     val subject = graph.subject.snapshot_id
-    if not trace_id_valid(subject) or not trace_id_valid(graph.generation_id) or not trace_id_valid(graph.input_manifest_id):
+    if trace_entity_id_parse_v1(subject).is_none() or trace_entity_id_parse_v1(graph.generation_id).is_none() or trace_entity_id_parse_v1(graph.input_manifest_id).is_none():
         issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "identity", subject, "", "invalid snapshot, generation or input identity"))
     if graph.subject.repository_id == "" or graph.subject.kind == "" or graph.subject.object_format == "":
         issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "subject", subject, "", "repository, subject kind and object format are required"))
@@ -234,19 +273,19 @@ pub fn validate_trace_graph(graph: TraceGraph) -> [TraceDiagnostic]:
         issues.push(trace_diagnostic("TRACE-SNAPSHOT-INCOMPLETE", subject, "subject", subject, "", "subject has no revision or frozen tree identity"))
     var nodes: Dict<text, TraceNodeKind> = {}
     for node in graph.nodes:
-        if not trace_id_valid(node.id) or nodes.contains_key(node.id):
+        if trace_entity_id_parse_v1(node.id).is_none() or nodes.contains_key(node.id):
             issues.push(trace_diagnostic("TRACE-DUPLICATE-ID", subject, "node", node.id, "", "invalid or duplicate node identity"))
         nodes[node.id] = node.kind
     var origins: Dict<text, bool> = {}
-    var definitions: Dict<text, bool> = {}
+    var definitions: Dict<text, TraceTestRoleMarkV1> = {}
     for definition in graph.test_definitions:
         val key = definition.node_id + "|" + test_kind_name(definition.kind)
         if definitions.contains_key(key):
             issues.push(trace_diagnostic("TRACE-DUPLICATE-ID", subject, "test_definition", definition.node_id, "", "duplicate test role for one canonical node"))
-        definitions[key] = true
+        definitions[key] = TraceTestRoleMarkV1.Present
         if not nodes.contains_key(definition.node_id) or not nodes.contains_key(definition.definition_id):
             issues.push(trace_diagnostic("TRACE-MISSING-ENDPOINT", subject, "test_definition", definition.node_id, "", "test definition or parameter base node is missing"))
-        elif not trace_test_kind(nodes[definition.node_id]) or nodes[definition.definition_id] != TraceNodeKind.TestCase:
+        elif not trace_test_kind_ok(nodes[definition.node_id]) or nodes[definition.definition_id] != TraceNodeKind.TestCase:
             issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "test_definition", definition.node_id, "", "test facet must reference a case and a base test definition"))
         elif nodes[definition.node_id] == TraceNodeKind.ParameterizedCase:
             if definition.parameter_digest == "" or definition.node_id == definition.definition_id:
@@ -256,19 +295,19 @@ pub fn validate_trace_graph(graph: TraceGraph) -> [TraceDiagnostic]:
         if definition.definition_digest == "":
             issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "test_definition", definition.node_id, "", "test definition content identity is required"))
     for origin in graph.origins:
-        if not trace_id_valid(origin.id) or origins.contains_key(origin.id):
-            issues.push(trace_diagnostic("TRACE-DUPLICATE-ID", subject, "origin", origin.id, origin.id, "invalid or duplicate origin identity"))
-        if not trace_path_valid(origin.owner_path) or origin.rule_version == "":
-            issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "origin", origin.id, origin.id, "origin needs safe owner path and extractor/rule version"))
-        origins[origin.id] = true
+        if trace_entity_id_parse_v1(origin.id.value).is_none() or origins.contains_key(origin.id.value):
+            issues.push(trace_diagnostic("TRACE-DUPLICATE-ID", subject, "origin", origin.id.value, origin.id.value, "invalid or duplicate origin identity"))
+        if trace_path_parse_v1(origin.owner_path.value).is_none() or origin.rule_version.value == "":
+            issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "origin", origin.id.value, origin.id.value, "origin needs safe owner path and extractor/rule version"))
+        origins[origin.id.value] = true
     var claims: Dict<text, bool> = {}
     for claim in graph.claims:
-        if not trace_id_valid(claim.id) or claims.contains_key(claim.id):
+        if trace_entity_id_parse_v1(claim.id).is_none() or claims.contains_key(claim.id):
             issues.push(trace_diagnostic("TRACE-DUPLICATE-ID", subject, "claim", claim.id, claim.origin_id, "invalid or duplicate claim identity"))
         claims[claim.id] = true
         if not origins.contains_key(claim.origin_id):
             issues.push(trace_diagnostic("TRACE-MISSING-ENDPOINT", subject, claim.rule_id, claim.id, claim.origin_id, "claim origin is missing"))
-        if not trace_id_valid(claim.from_id) or (claim.operation != TraceClaimOperation.Suppress and not trace_id_valid(claim.to_id)):
+        if trace_entity_id_parse_v1(claim.from_id).is_none() or (claim.operation != TraceClaimOperation.Suppress and trace_entity_id_parse_v1(claim.to_id).is_none()):
             issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, claim.rule_id, claim.id, claim.origin_id, "claim endpoint identity is invalid"))
     var edges: Dict<text, bool> = {}
     for edge in graph.edges:
@@ -277,25 +316,25 @@ pub fn validate_trace_graph(graph: TraceGraph) -> [TraceDiagnostic]:
         edges[edge.id] = true
         if not nodes.contains_key(edge.from_id) or not nodes.contains_key(edge.to_id):
             issues.push(trace_diagnostic("TRACE-MISSING-ENDPOINT", subject, "edge", edge.id, "", "resolved edge has missing endpoint"))
-        elif not trace_endpoint_kinds_valid(edge.relation, nodes[edge.from_id], nodes[edge.to_id]):
+        elif trace_endpoint_relation_v1(edge.relation, nodes[edge.from_id], nodes[edge.to_id]).is_none():
             issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "edge", edge.id, "", "relation has invalid endpoint kinds"))
-        elif not trace_relation_test_role_valid(edge.relation, edge.to_id, definitions):
+        elif trace_test_role_relation_v1(edge.relation, edge.to_id, definitions).is_none():
             issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "test_definition", edge.id, "", "test association lacks its required acceptance/supporting role"))
     var bindings: Dict<text, bool> = {}
     var explained: Dict<text, bool> = {}
     for binding in graph.edge_origins:
-        val key = binding.edge_id + "|" + binding.origin_id
-        if not edges.contains_key(binding.edge_id) or not origins.contains_key(binding.origin_id) or bindings.contains_key(key):
-            issues.push(trace_diagnostic("TRACE-MISSING-ENDPOINT", subject, "edge_origin", binding.edge_id, binding.origin_id, "origin binding is dangling or duplicated"))
+        val key = binding.edge_id.value + "|" + binding.origin_id.value
+        if not edges.contains_key(binding.edge_id.value) or not origins.contains_key(binding.origin_id.value) or bindings.contains_key(key):
+            issues.push(trace_diagnostic("TRACE-MISSING-ENDPOINT", subject, "edge_origin", binding.edge_id.value, binding.origin_id.value, "origin binding is dangling or duplicated"))
         bindings[key] = true
-        explained[binding.edge_id] = true
+        explained[binding.edge_id.value] = true
     for edge in graph.edges:
         if not explained.contains_key(edge.id):
             issues.push(trace_diagnostic("TRACE-MISSING-ENDPOINT", subject, "edge_origin", edge.id, "", "resolved edge has no provenance"))
     var locations: Dict<text, bool> = {}
     for locator in graph.locators:
         val key = locator.entity_id + "|" + locator.path + "|" + locator.locator_kind + "|" + locator.locator
-        if not nodes.contains_key(locator.entity_id) or not trace_path_valid(locator.path) or locator.blob_id == "" or locations.contains_key(key):
+        if not nodes.contains_key(locator.entity_id) or trace_path_parse_v1(locator.path).is_none() or locator.blob_id == "" or locations.contains_key(key):
             issues.push(trace_diagnostic("TRACE-SDN-SCHEMA", subject, "locator", locator.entity_id, "", "locator needs unique safe pinned location and existing node"))
         locations[key] = true
     for diagnostic in graph.diagnostics:

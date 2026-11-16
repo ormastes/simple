@@ -1,0 +1,986 @@
+# Service 40 host-side composition over landed modules only: Linux service V4
+# startup, structural current-before-status ordering, and associated
+# prepare/execute dispatch on the sole Host capacity journal.
+# SOURCE_AUTHORED / NOT_RUN. Reconcile (host_linux_service_reconcile_v4) runs
+# at startup over the offline fresh-epoch store inventory lent by the same
+# admission (milestone_0019 M1-M3); after a PROVED reconcile the opener hands
+# that inventory back (milestone_0021 PR1); the agent owner
+# (host_linux_service_agent_v4, milestone_0021 PR2) composes the native launch
+# behind `host_agent_invoke_v4`; see
+# .spipe/simple_orchestrator/continuation_20261116/milestone_0016_service40/DESIGN.md and milestone_0017_service40_reconcile/DESIGN.md.
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{HostLinuxServiceEnrollmentBindingV3,
+    host_linux_service_enrollment_digest_v3, host_linux_service_allocatable_v3, host_linux_service_enrollment_decode_v3}
+use std.common.contracts.orchestration.host_prepare_associated_v3.{HostPrepareAssociatedRequestV3,
+    host_prepare_associated_decode_v3, host_prepare_associated_transport_v3}
+use std.common.contracts.orchestration.host_execution_association_v3.{HostExecutionAssociationV3, HostPreparedAssociatedReplyV3,
+    host_execution_association_encode_v3, host_execution_association_match_v3, host_prepared_associated_reply_encode_v3,
+    host_execution_association_digest_v3}
+use std.common.contracts.orchestration.host_execute_associated_v3.{HostExecuteAssociatedRequestV3,
+    host_execute_associated_decode_v3, host_execute_associated_encode_v3}
+use std.common.contracts.orchestration.host_reservation_codec_v1.{HostPreparedReservationReceiptV1, host_reservation_encode_intent_v1}
+use std.common.contracts.orchestration.host_capacity_v1.{HostCapacityV1, HostLedgerFenceV1, HostReservationStateV1}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
+use std.common.contracts.container.execution_draft_v3.{ContainerExecutionDraftV3, container_execution_draft_bind_v3}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionRequestV2,
+    container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.distributed_control_v2.ExecutionGrantV2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2,
+    distributed_operation_journal_open_cleanup_v2,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3,
+    distributed_operation_journal_read_required_v3}
+use std.nogc_sync_mut.io.host_linux_service_records_v4.{HostLinuxServiceRecordsV4, LinuxServiceVerifiedEnrollmentV1,
+    linux_service_enrollment_installed_v1, linux_service_enrollment_verify_v1, linux_service_enrollment_fixed_files_v1,
+    host_linux_service_root_path_v4}
+use std.nogc_sync_mut.io.host_private_metadata_v2.HostPrivateMetadataV2
+use std.nogc_sync_mut.io.host_enrollment_v1.{HostEnrollmentCredentialV1, host_enrollment_credential_encode_v1,
+    host_enrollment_credential_decode_v1}
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.{LinuxProtectedRootReaderV1, linux_protected_root_reader_close_v1,
+    linux_protected_root_reader_open_v1, linux_protected_root_reader_require_root_v1}
+# Lending upper (fresh-epoch admission). Orchestration already reaches this
+# module through nogc_async_mut.container.api_v2; its closure imports no
+# Host-domain/local-root/service module, so this adds no cycle.
+use std.nogc_sync_mut.container.machine_authority_v1.{MachineFreshEpochAdmissionTurnV1,
+    machine_container_authority_open_fresh_epoch_v1}
+use std.nogc_sync_mut.container.machine_fresh_epoch_cleanup_v1.machine_fresh_epoch_admission_turn_close_v1
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.machine_fresh_epoch_record_bytes_v1
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.{LinuxServiceNativeIdentityBorrowV3, LinuxServiceNativeIdentitySnapshotV3}
+use std.nogc_sync_mut.io.local_authority_policy_v1.{LocalAuthorityPolicyV1, host_local_context_v1}
+use std.nogc_sync_mut.orchestration.host_linux_service_records_v4.{host_linux_service_read_v4,
+    host_linux_service_records_load_v4, linux_service_current_bytes_v4}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, HostCapacityOpenV2,
+    host_capacity_owner_open_linux_v3, host_capacity_owner_linux_current_v3, host_capacity_owner_prepare_v1,
+    host_capacity_owner_prepared_receipt_v1, host_capacity_owner_close_owned_v2, host_capacity_owner_begin_associated_v3,
+    host_capacity_owner_expire_prepared_owned_v3}
+# milestone_0021 PR2: the agent owner. It never imports this module (no cycle); the invoke glue below owns the
+# private archive/association paths and hands it the stored bytes.
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4,
+    host_agent_invoke_request_decode_v4, host_linux_service_agent_execute_v4, host_linux_service_agent_admit_v4,
+    host_linux_service_agent_input_v4, host_linux_service_agent_budget_v4, host_linux_service_agent_open_v4,
+    host_linux_service_agent_step_v4, host_linux_service_agent_reply_v4, host_linux_service_agent_epoch_v4,
+    host_linux_service_agent_close_v4, host_linux_service_agent_release_v4}
+use std.container.LinuxWorkspaceRootBorrowV3
+use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
+use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+# Owner of one genuine Linux service startup. Every acquired owner is retained
+# here, including on a failed turn. `published` is set only after the immutable
+# current record was read back byte-exact from the same Host journal, and
+# status_v4 is the only ready/status producer: it cannot run before that.
+pub class HostLinuxServiceCurrentV4:
+    root: text
+    root_reader: Option<LinuxProtectedRootReaderV1> = None
+    parent_reader: Option<LinuxProtectedRootReaderV1> = None
+    proof: Option<LinuxServiceVerifiedEnrollmentV1> = None
+    native: Option<LinuxServiceNativeIdentityBorrowV3> = None
+    # Offline store-inventory borrow lent by the same admission; handed back
+    # after a proved startup reconcile, else before the native loan ends.
+    inventory: Option<LinuxFreshEpochStoreInventoryBorrowV1> = None
+    # Set only by linux_service_inventory_return_v4 after the exact borrow was
+    # handed back; current_v4 then requires the in-memory continuity proof.
+    inventory_returned: bool = false
+    native_snapshot: Option<LinuxServiceNativeIdentitySnapshotV3> = None
+    records: Option<HostLinuxServiceRecordsV4> = None
+    capacity: Option<HostCapacityOwnerV1> = None
+    journal_cleanup: Option<DistributedOperationJournalOpenCleanupV2> = None
+    scope: Option<ContainerHostScopeV2> = None
+    initial_epoch: text = ""
+    current_relative: text = ""
+    current_bytes: text = ""
+    published: bool = false
+    reconcile_error: text = ""
+    closed: bool = false
+    close_error: text = ""
+    # Installed opener only: the fresh-epoch admission that lent `native`.
+    # Owned for the whole service lifetime and closed last, after the loan ends.
+    admission: Option<MachineFreshEpochAdmissionTurnV1> = None
+    # milestone_0021 PR2 (DESIGN section 2): the ONE agent of this incarnation. After its transfer the admission
+    # owner lives in the agent's holder and `admission` keeps only the residue (F9).
+    agent: Option<HostLinuxServiceAgentV4> = None
+    agent_consumed: bool = false
+    # N-06/T-08 slot: set before the agent prepare charges; one agent operation per incarnation.
+    agent_operation_id: text = ""
+    # P2R1-F8: the slot's signed operation envelope, for the public exact lookup (set with agent_operation_id).
+    agent_operation: Option<OperationEnvelopeV2> = None
+    # 3.3 N-05: a pre-transfer workspace-root borrow whose loan end the lender refused; ended first at close.
+    agent_root: Option<LinuxWorkspaceRootBorrowV3> = None
+    # U-05 (hco:366-368): a post-outcome projection failure of the slot expiry; sticky until restart.
+    journal_quarantine: text = ""
+
+    # Rechecks readers, installed records, the sealed proof under freshly read
+    # installed policy, the actual native identity, Linux-protected journal
+    # currency and the stored current record before returning metadata.
+    pub fn current_v4() -> Result<HostPrivateMetadataV2, text>:
+        if self.closed: return Err("linux-host-service-closed")
+        if self.journal_quarantine != "": return Err(self.journal_quarantine)
+        if not self.published or self.current_bytes == "" or self.current_relative == "":
+            return Err("linux-host-service-current-unpublished")
+        if (self.root_reader.is_none() or self.parent_reader.is_none() or self.proof.is_none() or
+                self.native.is_none() or self.native_snapshot.is_none() or self.records.is_none() or
+                self.capacity.is_none() or self.scope.is_none()):
+            return Err("linux-host-service-acquisition-incomplete")
+        # The lending admission (installed opener) must still be current, still
+        # lent to this service, and still the exact epoch whose digest it lent.
+        if val agent = self.agent:
+            # 3.5: after the transfer the epoch is read through whichever holder has it; workload liveness is
+            # never consulted. The inventory can only be returned and proven here (a transfer follows the handoff).
+            if self.admission.is_some() and self.admission.unwrap().owner.is_some():
+                return Err("linux-host-service-admission-duplicated")
+            if (not self.inventory_returned or self.inventory.is_some() or
+                    not self.capacity.unwrap().ledger.continuity_proven):
+                return Err("linux-host-service-inventory-return-unproven")
+            val epoch = host_linux_service_agent_epoch_v4(agent)?
+            if sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?) != self.initial_epoch:
+                return Err("linux-host-service-epoch-changed")
+        elif val admission = self.admission:
+            if admission.owner.is_none(): return Err("linux-host-service-admission-missing")
+            val lender = admission.owner.unwrap()
+            if not lender.service_loaned: return Err("linux-host-service-loan-inactive")
+            # The store loan is either still out (held here, not returned) or
+            # was returned by the post-reconcile handoff, which needs the proof.
+            if lender.store_inventory_loaned:
+                if self.inventory.is_none() or self.inventory_returned:
+                    return Err("linux-host-service-inventory-loan-inactive")
+            elif (not self.inventory_returned or self.inventory.is_some() or
+                    not self.capacity.unwrap().ledger.continuity_proven):
+                return Err("linux-host-service-inventory-return-unproven")
+            val epoch = lender.current_v1()?
+            if sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?) != self.initial_epoch:
+                return Err("linux-host-service-epoch-changed")
+        val loaded = host_linux_service_records_load_v4(self.root, self.root_reader.unwrap(), self.parent_reader.unwrap())?
+        linux_service_records_same_v4(self.records.unwrap(), loaded)?
+        linux_service_proof_read_v4(self.proof.unwrap(), loaded.binding, loaded.credential, self.root_reader.unwrap())?
+        val native = self.native.unwrap().current_v3()?
+        if linux_service_native_key_v4(native) != linux_service_native_key_v4(self.native_snapshot.unwrap()):
+            return Err("linux-host-service-native-changed")
+        val capacity = self.capacity.unwrap()
+        host_capacity_owner_linux_current_v3(capacity)?
+        if capacity.journal.root != linux_service_journal_root_v4(self.root, loaded.metadata):
+            return Err("linux-host-service-journal-root-mismatch")
+        if distributed_operation_journal_read_required_v3(capacity.journal, self.current_relative, 16384)? != self.current_bytes:
+            return Err("linux-host-service-current-record-changed")
+        if linux_service_current_bytes_v4(loaded.binding, self.scope.unwrap(), native, self.initial_epoch,
+                loaded.claim_digest, capacity.journal)? != self.current_bytes:
+            return Err("linux-host-service-current-binding-mismatch")
+        Ok(loaded.metadata)
+
+    # Scope for correlation through the shared Host domain. Before startup it
+    # is an empty scope whose fence id is refused, never a fabricated one.
+    pub fn scope_v4() -> ContainerHostScopeV2:
+        if self.scope.is_some(): return self.scope.unwrap()
+        ContainerHostScopeV2(physical_host_id: "", service_scope_id: "", boot_id: "", provider_generation: 0,
+            native_machine_id: "", continuity_mode: "", continuity_id: "")
+
+    # The only ready/status publication. Unreconciled historical reservations
+    # keep the service quarantined; no empty-ledger assertion releases them.
+    pub fn status_v4() -> Result<text, text>:
+        val metadata = self.current_v4()?
+        if not self.capacity.unwrap().ledger.continuity_proven:
+            if self.reconcile_error != "": return Err("linux-host-service-reconciliation-required:" + self.reconcile_error)
+            return Err("linux-host-service-reconciliation-required")
+        linux_service_status_bytes_v4(self.records.unwrap().binding, self.scope.unwrap(), self.current_bytes, self.published)
+
+pub struct HostLinuxServiceStartTurnV4:
+    owner: HostLinuxServiceCurrentV4
+    error: text
+
+pub struct HostLinuxServiceReplyV4:
+    owner: HostLinuxServiceCurrentV4
+    response: text
+    error: text
+    effect_attempted: bool
+
+fn linux_service_start_error_v4(owner: HostLinuxServiceCurrentV4, error: text) -> HostLinuxServiceStartTurnV4:
+    HostLinuxServiceStartTurnV4(owner: owner, error: error)
+
+fn linux_service_reply_v4(owner: HostLinuxServiceCurrentV4, response: text, error: text,
+        effect_attempted: bool) -> HostLinuxServiceReplyV4:
+    HostLinuxServiceReplyV4(owner: owner, response: response, error: error, effect_attempted: effect_attempted)
+
+fn linux_service_native_key_v4(native: LinuxServiceNativeIdentitySnapshotV3) -> text:
+    native.native_machine_id + "\n" + native.native_boot_id + "\n" + native.architecture + "\n" +
+        native.owner_generation.to_text() + "\n" + native.process_identity_digest + "\n" +
+        native.process_generation.to_text() + "\n" + native.authority_namespace_id
+
+# Canonical identity comparison, never struct equality.
+fn linux_service_records_same_v4(original: HostLinuxServiceRecordsV4, loaded: HostLinuxServiceRecordsV4) -> Result<(), text>:
+    if (host_linux_service_enrollment_digest_v3(original.binding)? != host_linux_service_enrollment_digest_v3(loaded.binding)? or
+            original.claim_digest != loaded.claim_digest or original.authorized_at != loaded.authorized_at or
+            original.metadata.policy.source_digest != loaded.metadata.policy.source_digest):
+        return Err("linux-host-service-installed-records-changed")
+    Ok(())
+
+# The proof must be this installed association AND its installed credential,
+# and must re-verify, with a fresh clock, against policy bytes `held` that the
+# caller read through its OWN protected reader. An approval that expired while
+# down is refused here.
+fn linux_service_proof_held_v4(proof: LinuxServiceVerifiedEnrollmentV1, binding: HostLinuxServiceEnrollmentBindingV3,
+        credential: HostEnrollmentCredentialV1, held: Option<text>) -> Result<(), text>:
+    if proof.binding_digest()? != host_linux_service_enrollment_digest_v3(binding)?:
+        return Err("linux-host-service-proof-binding-mismatch")
+    if proof.credential_digest()? != sha256_text(host_enrollment_credential_encode_v1(credential)?):
+        return Err("linux-host-service-proof-credential-mismatch")
+    linux_service_enrollment_installed_v1(proof, held)
+
+fn linux_service_proof_read_v4(proof: LinuxServiceVerifiedEnrollmentV1, binding: HostLinuxServiceEnrollmentBindingV3,
+        credential: HostEnrollmentCredentialV1, reader: LinuxProtectedRootReaderV1) -> Result<(), text>:
+    val held = host_linux_service_read_v4(reader, "authority-policy.sdn")?
+    linux_service_proof_held_v4(proof, binding, credential, Some(held))
+
+# Stable service scope: signed physical/service IDs, actual native machine and
+# provider generation, empty boot and one fresh OS-random incarnation.
+fn linux_service_scope_v4(binding: HostLinuxServiceEnrollmentBindingV3, native: LinuxServiceNativeIdentitySnapshotV3,
+        incarnation: text) -> Result<ContainerHostScopeV2, text>:
+    if not host_service_hex_shape_v6(incarnation, 32): return Err("linux-host-service-entropy-unavailable")
+    if native.native_machine_id != binding.native_machine_id: return Err("linux-host-service-native-machine-mismatch")
+    if native.owner_generation < 1: return Err("linux-host-service-native-generation")
+    val scope = ContainerHostScopeV2(physical_host_id: binding.physical_host_id, service_scope_id: binding.service_scope_id,
+        boot_id: "", provider_generation: native.owner_generation, native_machine_id: native.native_machine_id,
+        continuity_mode: "service-incarnation-v1", continuity_id: incarnation)
+    val valid = container_host_scope_bytes_v2(scope)?
+    Ok(scope)
+
+fn linux_service_capacity_v4(binding: HostLinuxServiceEnrollmentBindingV3, scope: ContainerHostScopeV2) -> Result<HostCapacityV1, text>:
+    val allowed = host_linux_service_allocatable_v3(binding)?
+    Ok(HostCapacityV1(physical_host_id: binding.physical_host_id,
+        authority_id: "host-" + host_linux_service_enrollment_digest_v3(binding)?,
+        boot_id: container_scope_fence_id_v2(scope)?, provider_generation: scope.provider_generation,
+        cpu_millis: allowed.cpu_millis, memory_bytes: allowed.memory_bytes, exclusive_devices: []))
+
+# The installed journal root, never a caller-chosen path.
+fn linux_service_journal_root_v4(root: text, metadata: HostPrivateMetadataV2) -> text:
+    root + "/" + metadata.configuration.journal_root
+
+# The protected open must reproduce exactly the fenced capacity it was given.
+fn linux_service_capacity_same_v4(owner: HostCapacityOwnerV1, expected: HostCapacityV1) -> Result<(), text>:
+    val actual = owner.ledger.capacity
+    if (actual.physical_host_id != expected.physical_host_id or actual.authority_id != expected.authority_id or
+            actual.boot_id != expected.boot_id or actual.provider_generation != expected.provider_generation or
+            actual.cpu_millis != expected.cpu_millis or actual.memory_bytes != expected.memory_bytes or
+            actual.exclusive_devices.len() != 0):
+        return Err("linux-host-service-capacity-mismatch")
+    Ok(())
+
+fn linux_service_status_bytes_v4(binding: HostLinuxServiceEnrollmentBindingV3, scope: ContainerHostScopeV2,
+        current_bytes: text, published: bool) -> Result<text, text>:
+    if not published or current_bytes == "": return Err("linux-host-service-current-unpublished")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-service-status"),
+        "enrollmentDigest": SdnValue.String(host_linux_service_enrollment_digest_v3(binding)?),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(scope)?),
+        "currentRecordDigest": SdnValue.String(sha256_text(current_bytes)), "state": SdnValue.String("ready")}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+# Actual startup. `initial_epoch_digest` is the lent epoch digest
+# (MachineFreshEpochServiceLoanTurnV1.epoch_digest); prepare binds every
+# projected plan to service_scope_id == "epoch-" + this digest (start itself
+# only validates its shape). The sole Host capacity journal is opened here, Linux-protected, at the
+# installed journal root, for exactly the fenced capacity of this incarnation.
+pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootReaderV1,
+        parent_reader: LinuxProtectedRootReaderV1, proof: LinuxServiceVerifiedEnrollmentV1,
+        native: LinuxServiceNativeIdentityBorrowV3, initial_epoch_digest: text,
+        inventory: LinuxFreshEpochStoreInventoryBorrowV1) -> HostLinuxServiceStartTurnV4:
+    var owner = HostLinuxServiceCurrentV4(root: root, root_reader: Some(root_reader), parent_reader: Some(parent_reader),
+        proof: Some(proof), native: Some(native), inventory: Some(inventory))
+    if not builder_digest_valid_v1(initial_epoch_digest): return linux_service_start_error_v4(owner, "linux-host-service-epoch-digest")
+    owner.initial_epoch = initial_epoch_digest
+    val loaded = host_linux_service_records_load_v4(root, root_reader, parent_reader)
+    if loaded.is_err(): return linux_service_start_error_v4(owner, loaded.unwrap_err())
+    owner.records = Some(loaded.unwrap())
+    val binding = loaded.unwrap().binding
+    val proved = linux_service_proof_read_v4(proof, binding, loaded.unwrap().credential, root_reader)
+    if proved.is_err(): return linux_service_start_error_v4(owner, proved.unwrap_err())
+    val observed = native.current_v3()
+    if observed.is_err(): return linux_service_start_error_v4(owner, observed.unwrap_err())
+    owner.native_snapshot = Some(observed.unwrap())
+    val incarnation = sosix_random_hex(16) ?? ""
+    val journal_nonce = sosix_random_hex(32) ?? ""
+    if not host_service_hex_shape_v6(journal_nonce, 64): return linux_service_start_error_v4(owner, "linux-host-service-entropy-unavailable")
+    val scope = linux_service_scope_v4(binding, observed.unwrap(), incarnation)
+    if scope.is_err(): return linux_service_start_error_v4(owner, scope.unwrap_err())
+    owner.scope = Some(scope.unwrap())
+    val expected = linux_service_capacity_v4(binding, scope.unwrap())
+    if expected.is_err(): return linux_service_start_error_v4(owner, expected.unwrap_err())
+    val configuration = loaded.unwrap().metadata.configuration
+    match host_capacity_owner_open_linux_v3(linux_service_journal_root_v4(root, loaded.unwrap().metadata), expected.unwrap(),
+            journal_nonce, configuration.maximum_journal_events):
+        case HostCapacityOpenV2.Rejected(reason): return linux_service_start_error_v4(owner, reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            owner.journal_cleanup = Some(cleanup)
+            return linux_service_start_error_v4(owner, reason)
+        case HostCapacityOpenV2.Ready(actual): owner.capacity = Some(actual)
+    val journal = owner.capacity.unwrap().journal
+    val same = linux_service_capacity_same_v4(owner.capacity.unwrap(), expected.unwrap())
+    if same.is_err(): return linux_service_start_error_v4(owner, same.unwrap_err())
+    # No current record is ever written to an unprotected or stale journal.
+    val protected = host_capacity_owner_linux_current_v3(owner.capacity.unwrap())
+    if protected.is_err(): return linux_service_start_error_v4(owner, protected.unwrap_err())
+    val bytes = linux_service_current_bytes_v4(binding, scope.unwrap(), observed.unwrap(), initial_epoch_digest,
+        loaded.unwrap().claim_digest, journal)
+    if bytes.is_err(): return linux_service_start_error_v4(owner, bytes.unwrap_err())
+    val relative = "linux-service-current/" + incarnation + ".sdn"
+    val stored = distributed_operation_journal_publish_v3(journal, relative, bytes.unwrap())
+    if stored.is_err(): return linux_service_start_error_v4(owner, stored.unwrap_err())
+    # A fresh incarnation path that already exists is never adopted.
+    if not stored.unwrap(): return linux_service_start_error_v4(owner, "linux-host-service-current-record-exists")
+    val readback = distributed_operation_journal_read_required_v3(journal, relative, 16384)
+    if readback.is_err(): return linux_service_start_error_v4(owner, readback.unwrap_err())
+    if readback.unwrap() != bytes.unwrap(): return linux_service_start_error_v4(owner, "linux-host-service-current-record-readback")
+    owner.current_relative = relative
+    owner.current_bytes = bytes.unwrap()
+    owner.published = true
+    val current = owner.current_v4()
+    if current.is_err(): return linux_service_start_error_v4(owner, current.unwrap_err())
+    # Fail-closed reconcile (milestone_0018 F, milestone_0019 M3), AFTER the
+    # journal writer is held: two offline store reads through the lent borrow,
+    # continuity flipped in memory only. The inventory must be lent for the
+    # same epoch as this service; on any refusal startup stays published but
+    # quarantined (status_v4 refuses).
+    if inventory.epoch_digest != initial_epoch_digest: owner.reconcile_error = "linux-host-service-inventory-epoch-mismatch"
+    else:
+        val flipped = host_linux_service_reconcile_flip_v4(owner.capacity.unwrap(), native, inventory)
+        if flipped.is_err(): owner.reconcile_error = flipped.unwrap_err()
+        else: owner.capacity = Some(flipped.unwrap())
+    linux_service_start_error_v4(owner, "")
+
+# Administrator anchor = the installed child root `<parent>/host-root-<64 hex>`
+# (the root the signed installer reports as residue). The parent is this string
+# prefix only, never a decoded field; decoded bytes must later reproduce both.
+pub fn host_linux_service_anchor_parent_v4(anchor: text) -> Result<text, text>:
+    if (anchor.byte_len() < 2 or anchor.byte_len() > 4096 or not anchor.starts_with("/") or anchor.ends_with("/") or
+            anchor.contains("\0") or anchor.contains("\n") or anchor.contains("\r") or anchor.contains("\\")):
+        return Err("linux-host-service-anchor-invalid")
+    val split = anchor.last_index_of("/")
+    if split < 1: return Err("linux-host-service-anchor-invalid")
+    val leaf = anchor.substring(split + 1, anchor.byte_len())
+    if not leaf.starts_with("host-root-") or leaf.byte_len() != 74 or not builder_digest_valid_v1(leaf.substring(10, 74)):
+        return Err("linux-host-service-anchor-leaf")
+    for part in anchor.substring(1, split).split("/"):
+        if part == "" or part == "." or part == "..": return Err("linux-host-service-anchor-invalid")
+    Ok(anchor.substring(0, split))
+
+# Rebuilds the sealed proof from the INSTALLED fixed files only, read through
+# the two protected readers whose actual canonical roots are first pinned to
+# the anchor and its parent. The decoded binding must reproduce both paths
+# before any of its fields is used. Policy is the parent's (the installer's
+# verify input); the root's six fixed files must then equal, byte for byte,
+# what this proof would publish.
+fn linux_service_installed_proof_v4(anchor: text, parent: text, root_reader: LinuxProtectedRootReaderV1,
+        parent_reader: LinuxProtectedRootReaderV1) -> Result<LinuxServiceVerifiedEnrollmentV1, text>:
+    linux_protected_root_reader_require_root_v1(root_reader, anchor)?
+    linux_protected_root_reader_require_root_v1(parent_reader, parent)?
+    val binding = host_linux_service_enrollment_decode_v3(host_linux_service_read_v4(root_reader, "linux-service-enrollment-v3.sdn")?)?
+    if host_linux_service_root_path_v4(binding)? != anchor or binding.machine_parent != parent:
+        return Err("linux-host-service-anchor-binding-mismatch")
+    val credential = host_enrollment_credential_decode_v1(
+        host_linux_service_read_v4(root_reader, "linux-service-enrollment-credential-v3.sdn")?)?
+    val proof = linux_service_enrollment_verify_v1(host_linux_service_read_v4(parent_reader, "authority-policy.sdn")?,
+        binding, credential, host_linux_service_read_v4(root_reader, "host-config.sdn")?,
+        host_linux_service_read_v4(root_reader, "engine-policy.sdn")?, host_linux_service_read_v4(root_reader, "broker-policy.sdn")?)?
+    val prefix = proof.child()? + "/"
+    for item in linux_service_enrollment_fixed_files_v1(proof)?:
+        if not item.0.starts_with(prefix): return Err("linux-host-service-installed-file-path")
+        val leaf = item.0.substring(prefix.byte_len(), item.0.byte_len())
+        if host_linux_service_read_v4(root_reader, leaf)? != item.1: return Err("linux-host-service-installed-file-mismatch:" + leaf)
+    linux_protected_root_reader_require_root_v1(root_reader, anchor)?
+    linux_protected_root_reader_require_root_v1(parent_reader, parent)?
+    Ok(proof)
+
+fn linux_service_readers_pinned_v4(anchor: text, parent: text, root_reader: LinuxProtectedRootReaderV1,
+        parent_reader: LinuxProtectedRootReaderV1) -> Result<(), text>:
+    linux_protected_root_reader_require_root_v1(root_reader, anchor)?
+    linux_protected_root_reader_require_root_v1(parent_reader, parent)?
+    Ok(())
+
+fn linux_service_open_error_v4(owner: HostLinuxServiceCurrentV4, error: text, fallback: text) -> HostLinuxServiceStartTurnV4:
+    linux_service_start_error_v4(owner, if error != "": error else: fallback)
+
+# Installed opener (administrator startup, never a request decoder). Order:
+# every READ-ONLY check first (anchor, protected root + parent readers,
+# installed proof), so a missing, tampered or mismatched install never
+# consumes a fresh epoch; only then the durable fresh-epoch admission and the
+# native identity lend, a re-pin of both reader roots, and
+# host_linux_service_start_v4 with the lent borrow and digest. Every acquired
+# owner is in the returned owner on every path; the admission is retained for
+# the service lifetime.
+pub fn host_linux_service_open_installed_v4(anchor: text) -> HostLinuxServiceStartTurnV4:
+    var shell = HostLinuxServiceCurrentV4(root: anchor)
+    val parent = host_linux_service_anchor_parent_v4(anchor)
+    if parent.is_err(): return linux_service_start_error_v4(shell, parent.unwrap_err())
+    val opened = linux_protected_root_reader_open_v1(anchor)
+    shell.root_reader = opened.owner
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        return linux_service_open_error_v4(shell, opened.error, "linux-host-service-root-reader")
+    val opened_parent = linux_protected_root_reader_open_v1(parent.unwrap())
+    shell.parent_reader = opened_parent.owner
+    if not opened_parent.ready or opened_parent.owner.is_none() or opened_parent.error != "":
+        return linux_service_open_error_v4(shell, opened_parent.error, "linux-host-service-parent-reader")
+    val proof = linux_service_installed_proof_v4(anchor, parent.unwrap(), opened.owner.unwrap(), opened_parent.owner.unwrap())
+    if proof.is_err(): return linux_service_start_error_v4(shell, proof.unwrap_err())
+    var admission = machine_container_authority_open_fresh_epoch_v1()
+    shell.admission = Some(admission)
+    if admission.error != "" or admission.owner.is_none():
+        return linux_service_open_error_v4(shell, admission.error, "linux-host-service-admission-missing")
+    val lent = admission.owner.unwrap().lend_service_identity_v1()
+    admission.owner = Some(lent.owner)
+    shell.admission = Some(admission)
+    if lent.error != "" or lent.native.is_none():
+        return linux_service_open_error_v4(shell, lent.error, "linux-host-service-native-loan-missing")
+    shell.native = lent.native
+    # The offline store inventory for the startup reconcile, from the SAME
+    # admission, reader and successor custody (the provider stays masked).
+    val stored = admission.owner.unwrap().lend_store_inventory_v1()
+    admission.owner = Some(stored.owner)
+    shell.admission = Some(admission)
+    if stored.error != "" or stored.inventory.is_none():
+        return linux_service_open_error_v4(shell, stored.error, "linux-host-service-inventory-loan-missing")
+    shell.inventory = stored.inventory
+    # The admission ran between the proof and start: the readers must still be
+    # pinned to the anchor and its parent before start re-reads through them.
+    val repinned = linux_service_readers_pinned_v4(anchor, parent.unwrap(), opened.owner.unwrap(), opened_parent.owner.unwrap())
+    if repinned.is_err(): return linux_service_start_error_v4(shell, repinned.unwrap_err())
+    val started = host_linux_service_start_v4(anchor, opened.owner.unwrap(), opened_parent.owner.unwrap(), proof.unwrap(),
+        lent.native.unwrap(), lent.epoch_digest, stored.inventory.unwrap())
+    var owner = started.owner
+    owner.admission = shell.admission
+    if started.error != "": return HostLinuxServiceStartTurnV4(owner: owner, error: started.error)
+    # A quarantined start keeps the inventory lent (status_v4 keeps refusing).
+    if owner.reconcile_error != "" or owner.capacity.is_none() or not owner.capacity.unwrap().ledger.continuity_proven:
+        return HostLinuxServiceStartTurnV4(owner: owner, error: "")
+    linux_service_inventory_handoff_v4(owner)
+
+# Post-reconcile handoff (milestone_0021 PR1). The store-inventory loan exists
+# for the startup reconcile only. Once that reconcile PROVED continuity on this
+# owner's published journal, the exact lent borrow goes back to the lender.
+# Returning it grants nothing: start_provider_v1 and transfer_workload_v2 still
+# refuse a once-lent epoch (retained service reader).
+fn linux_service_inventory_handoff_v4(owner: HostLinuxServiceCurrentV4) -> HostLinuxServiceStartTurnV4:
+    if (not owner.published or owner.reconcile_error != "" or owner.capacity.is_none() or
+            not owner.capacity.unwrap().ledger.continuity_proven):
+        return linux_service_start_error_v4(owner, "linux-host-service-inventory-handoff-unproven")
+    linux_service_inventory_return_v4(owner)
+
+# The exact-borrow return behind the proof gate above. The lender verifies the
+# borrow aliases its own reader and custody; a refusal keeps the borrow here
+# and the loan active, so close still hands it back first.
+fn linux_service_inventory_return_v4(original: HostLinuxServiceCurrentV4) -> HostLinuxServiceStartTurnV4:
+    var owner = original
+    if owner.inventory_returned: return linux_service_start_error_v4(owner, "linux-host-service-inventory-returned")
+    if owner.inventory.is_none(): return linux_service_start_error_v4(owner, "linux-host-service-inventory-borrow-missing")
+    if owner.admission.is_none() or owner.admission.unwrap().owner.is_none():
+        return linux_service_start_error_v4(owner, "linux-host-service-admission-missing")
+    var admission = owner.admission.unwrap()
+    val returned = admission.owner.unwrap().end_store_inventory_loan_v1(owner.inventory.unwrap())
+    admission.owner = Some(returned.owner)
+    owner.admission = Some(admission)
+    if returned.error != "": return linux_service_start_error_v4(owner, returned.error)
+    owner.inventory = None
+    owner.inventory_returned = true
+    linux_service_start_error_v4(owner, "")
+
+# Signed associated prepare authorization: transport bounds, exact live scope,
+# configured controller and fresh issuer + approver signatures under the
+# installed policy. Returns the verified grant only; no capacity is touched.
+fn linux_service_prepare_authorize_v4(scope: ContainerHostScopeV2, policy: LocalAuthorityPolicyV1, controller_ref: text,
+        request: HostPrepareAssociatedRequestV3, context: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    val transport = host_prepare_associated_transport_v3(request)?
+    if container_host_scope_bytes_v2(request.service_scope)? != container_host_scope_bytes_v2(scope)?:
+        return Err("linux-host-service-prepare-scope-mismatch")
+    val signed = request.prepare
+    if signed.signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, signed.signed, signed.approval, signed.operation,
+        context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)
+
+# Binds the exact unchanged provider request to the actual native boot,
+# provider generation, machine and startup epoch. The projected plan is DATA
+# from the upper port and is checked here against the actual native borrow.
+fn linux_service_association_v4(binding: HostLinuxServiceEnrollmentBindingV3, scope: ContainerHostScopeV2,
+        epoch_digest: text, native: LinuxServiceNativeIdentitySnapshotV3, prepare: HostPrepareAssociatedRequestV3,
+        receipt: HostPreparedReservationReceiptV1, execution: ContainerExecutionRequestV2) -> Result<HostExecutionAssociationV3, text>:
+    val plan = execution.plan
+    if (plan.boot_id != native.native_boot_id or plan.provider_generation != native.owner_generation or
+            plan.native_machine_id != native.native_machine_id or plan.service_scope_id != "epoch-" + epoch_digest):
+        return Err("linux-host-service-native-projection-mismatch")
+    val association = HostExecutionAssociationV3(enrollment_digest: host_linux_service_enrollment_digest_v3(binding)?,
+        service_scope: scope, intent_digest: sha256_text(host_reservation_encode_intent_v1(prepare.prepare.intent)?),
+        prepared_receipt_digest: receipt.receipt_digest, prepared_revision: receipt.prepared_revision,
+        epoch_record_digest: epoch_digest, service_process_identity_digest: native.process_identity_digest,
+        execution: execution, readonly_rootfs: prepare.draft.readonly_rootfs,
+        agent_invocation_manifest_digest: prepare.draft.agent_invocation_manifest_digest,
+        agent_probe_list_digest: prepare.draft.agent_probe_list_digest)
+    host_execution_association_match_v3(association, prepare, receipt)?
+    Ok(association)
+
+# Keyed by this service incarnation's fence and the operation ID, so an ID
+# reused under a later incarnation never collides with an older record.
+fn linux_service_association_relative_v4(scope: ContainerHostScopeV2, operation_id: text) -> Result<text, text>:
+    Ok("host-execution-associations/" + sha256_text(container_scope_fence_id_v2(scope)? + "\n" + operation_id) + ".sdn")
+
+# Associated execute authorization. The request association must be the exact
+# bytes this owner stored for that operation; the operation must be the
+# association-bound envelope; signatures must verify under installed policy.
+fn linux_service_execute_authorize_core_v4(scope: ContainerHostScopeV2, policy: LocalAuthorityPolicyV1, controller_ref: text,
+        request: HostExecuteAssociatedRequestV3, stored: Option<text>,
+        context: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    if stored.is_none(): return Err("linux-host-service-association-missing")
+    if host_execution_association_encode_v3(request.association)? != stored.unwrap():
+        return Err("linux-host-service-association-foreign")
+    val live = container_host_scope_bytes_v2(scope)?
+    if (container_host_scope_bytes_v2(request.association.service_scope)? != live or
+            container_host_scope_bytes_v2(request.prepare.service_scope)? != live):
+        return Err("linux-host-service-execute-scope-mismatch")
+    val bound = host_execute_associated_encode_v3(request)?
+    if request.signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, request.signed, request.approval, request.operation,
+        context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)
+
+# Prepare: authorize, admit through the landed capacity owner (an exact
+# same-ID replay re-reads the retained intent, so the original deadline is
+# kept and any renewed intent is refused), project, associate, publish and
+# read back on the same journal, and only then return the prepared reply.
+pub fn host_linux_service_prepare_v4(original: HostLinuxServiceCurrentV4, source: text,
+        project: fn(ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    if not owner.capacity.unwrap().ledger.continuity_proven:
+        return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
+    val request = host_prepare_associated_decode_v3(source)
+    if request.is_err(): return linux_service_reply_v4(owner, "", request.unwrap_err(), false)
+    val policy = metadata.unwrap().policy
+    val grant = linux_service_prepare_authorize_v4(owner.scope.unwrap(), policy, metadata.unwrap().configuration.controller_ref,
+        request.unwrap(), host_local_context_v1(policy))
+    if grant.is_err(): return linux_service_reply_v4(owner, "", grant.unwrap_err(), false)
+    val intent = request.unwrap().prepare.intent
+    val operation = request.unwrap().prepare.operation
+    # N-06/T-08/U-05: one agent per incarnation, enforced BEFORE any charge; the slot is reserved first.
+    val agent_draft = request.unwrap().draft.agent_invocation_manifest_digest != ""
+    if agent_draft:
+        val slot = linux_service_agent_slot_v4(owner, operation.id, host_local_context_v1(policy).monotonic_ms)
+        owner = slot.owner
+        if slot.error != "": return slot
+        owner.agent_operation_id = operation.id
+        owner.agent_operation = Some(operation)
+    val admitted = host_capacity_owner_prepare_v1(owner.capacity.unwrap(), intent, operation, grant.unwrap(), host_local_context_v1(policy))
+    # An error may follow a committed admission: report it as attempted. The slot is cleared only when the
+    # journal has no row for this operation (refused before the charge).
+    if admitted.is_err():
+        # P2R1-F8: cleared only on the explicit not-found reason; any other lookup error keeps the slot (fail closed).
+        if agent_draft:
+            val prior = daemon_operation_exact_v2(owner.capacity.unwrap().journal, operation)
+            if prior.is_err() and prior.unwrap_err() == "OPERATION_NOT_FOUND":
+                owner.agent_operation_id = ""
+                owner.agent_operation = None
+        return linux_service_reply_v4(owner, "", admitted.unwrap_err(), true)
+    owner.capacity = Some(admitted.unwrap())
+    val receipt = host_capacity_owner_prepared_receipt_v1(owner.capacity.unwrap(), intent, operation, grant.unwrap(),
+        host_local_context_v1(policy))
+    if receipt.is_err(): return linux_service_reply_v4(owner, "", receipt.unwrap_err(), true)
+    val execution = project(request.unwrap().draft)
+    if execution.is_err(): return linux_service_reply_v4(owner, "", execution.unwrap_err(), true)
+    val native = owner.native.unwrap().current_v3()
+    if native.is_err(): return linux_service_reply_v4(owner, "", native.unwrap_err(), true)
+    val association = linux_service_association_v4(owner.records.unwrap().binding, owner.scope.unwrap(), owner.initial_epoch,
+        native.unwrap(), request.unwrap(), receipt.unwrap(), execution.unwrap())
+    if association.is_err(): return linux_service_reply_v4(owner, "", association.unwrap_err(), true)
+    val bytes = host_execution_association_encode_v3(association.unwrap())
+    if bytes.is_err(): return linux_service_reply_v4(owner, "", bytes.unwrap_err(), true)
+    val journal = owner.capacity.unwrap().journal
+    val relative = linux_service_association_relative_v4(owner.scope.unwrap(), operation.id)
+    if relative.is_err(): return linux_service_reply_v4(owner, "", relative.unwrap_err(), true)
+    # No-replace publication: a same-ID retry must reproduce the original bytes.
+    val saved = distributed_operation_journal_publish_v3(journal, relative.unwrap(), bytes.unwrap())
+    if saved.is_err(): return linux_service_reply_v4(owner, "", saved.unwrap_err(), true)
+    val readback = distributed_operation_journal_read_required_v3(journal, relative.unwrap(), 2097152)
+    if readback.is_err(): return linux_service_reply_v4(owner, "", readback.unwrap_err(), true)
+    if readback.unwrap() != bytes.unwrap(): return linux_service_reply_v4(owner, "", "linux-host-service-association-retained-mismatch", true)
+    val current = owner.current_v4()
+    if current.is_err(): return linux_service_reply_v4(owner, "", current.unwrap_err(), true)
+    val reply = host_prepared_associated_reply_encode_v3(HostPreparedAssociatedReplyV3(request.unwrap(), receipt.unwrap(), association.unwrap()))
+    if reply.is_err(): return linux_service_reply_v4(owner, "", reply.unwrap_err(), true)
+    linux_service_reply_v4(owner, reply.unwrap(), "", true)
+
+# Verified authorization only; host_linux_service_execute_v4 commits.
+# The preparation must still be live: its signed prepare re-verifies now and
+# the capacity owner reissues the identical receipt for the retained intent
+# (expired, aborted or consumed preparations get none). Fail closed.
+pub fn host_linux_service_execute_authorize_v4(owner: HostLinuxServiceCurrentV4, source: text) -> Result<ExecutionGrantV2, text>:
+    val metadata = owner.current_v4()?
+    val request = host_execute_associated_decode_v3(source)?
+    val journal = owner.capacity.unwrap().journal
+    val scope = owner.scope.unwrap()
+    val stored = distributed_operation_journal_read_v3(journal,
+        linux_service_association_relative_v4(scope, request.prepare.prepare.operation.id)?, 2097152)?
+    val policy = metadata.policy
+    val controller = metadata.configuration.controller_ref
+    val grant = linux_service_execute_authorize_core_v4(scope, policy, controller, request, stored, host_local_context_v1(policy))?
+    val prepared = linux_service_prepare_authorize_v4(scope, policy, controller, request.prepare, host_local_context_v1(policy))?
+    val live = host_capacity_owner_prepared_receipt_v1(owner.capacity.unwrap(), request.prepare.prepare.intent,
+        request.prepare.prepare.operation, prepared, host_local_context_v1(policy))?
+    if live.receipt_digest != request.receipt.receipt_digest or live.prepared_revision != request.receipt.prepared_revision:
+        return Err("linux-host-service-execute-receipt-stale")
+    val current = owner.current_v4()?
+    Ok(grant)
+
+fn linux_service_execute_relative_v4(scope: ContainerHostScopeV2, operation_id: text) -> Result<text, text>:
+    Ok("host-execute-associated/" + sha256_text(container_scope_fence_id_v2(scope)? + "\n" + operation_id) + ".sdn")
+
+fn linux_service_admitted_reply_v4(owner: HostLinuxServiceCurrentV4, operation_id: text, association_digest: text,
+        effect_attempted: bool) -> HostLinuxServiceReplyV4:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-execution-admission"),
+        "operationId": SdnValue.String(operation_id), "associationDigest": SdnValue.String(association_digest),
+        "state": SdnValue.String("execution-admitted"), "pending": SdnValue.Bool(true)}
+    linux_service_reply_v4(owner, sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", "", effect_attempted)
+
+# Execute commit. A same-ID retry of the exact archived packet whose journal
+# row already left "admitted" is answered from the journal with no new
+# effect; a different packet for that operation is refused. Otherwise:
+# full re-authorization, a no-replace archive of the exact signed packet
+# (read back), then ONE associated begin on the original reservation row.
+# The actually returned journal is adopted even on error. Admission only:
+# the native launch is not composed here (DESIGN.md, milestone_0018).
+pub fn host_linux_service_execute_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val request = host_execute_associated_decode_v3(source)
+    if request.is_err(): return linux_service_reply_v4(owner, "", request.unwrap_err(), false)
+    val prepare = request.unwrap().prepare.prepare
+    # N-06: no second executing agent row; an agent association must be the slot's, refused before the archive.
+    if (request.unwrap().association.agent_invocation_manifest_digest != "" and
+            prepare.operation.id != owner.agent_operation_id):
+        return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
+    val digest = host_execution_association_digest_v3(request.unwrap().association)
+    if digest.is_err(): return linux_service_reply_v4(owner, "", digest.unwrap_err(), false)
+    val relative = linux_service_execute_relative_v4(owner.scope.unwrap(), prepare.operation.id)
+    if relative.is_err(): return linux_service_reply_v4(owner, "", relative.unwrap_err(), false)
+    val journal = owner.capacity.unwrap().journal
+    val archived = distributed_operation_journal_read_v3(journal, relative.unwrap(), 2097152)
+    if archived.is_err(): return linux_service_reply_v4(owner, "", archived.unwrap_err(), false)
+    if archived.unwrap().is_some():
+        if archived.unwrap().unwrap() != source: return linux_service_reply_v4(owner, "", "linux-host-service-execution-packet-conflict", false)
+        val row = daemon_operation_exact_v2(journal, prepare.operation)
+        if row.is_err(): return linux_service_reply_v4(owner, "", row.unwrap_err(), false)
+        if row.unwrap().state != "admitted":
+            if row.unwrap().state != "executing": return linux_service_reply_v4(owner, "", "linux-host-service-execution-state-changed", true)
+            return linux_service_admitted_reply_v4(owner, prepare.operation.id, digest.unwrap(), false)
+    # Freshness baseline taken BEFORE authorization, so the commit-time gate
+    # covers the whole authorize -> archive -> begin window.
+    val before = host_local_context_v1(metadata.unwrap().policy)
+    val grant = host_linux_service_execute_authorize_v4(owner, source)
+    if grant.is_err(): return linux_service_reply_v4(owner, "", grant.unwrap_err(), false)
+    val approval = request.unwrap().approval
+    val deadline = if approval.expires_at < grant.unwrap().expires_at: approval.expires_at else: grant.unwrap().expires_at
+    # No-replace: an existing archive must be these exact bytes.
+    val saved = distributed_operation_journal_publish_v3(journal, relative.unwrap(), source)
+    if saved.is_err(): return linux_service_reply_v4(owner, "", saved.unwrap_err(), true)
+    val readback = distributed_operation_journal_read_required_v3(journal, relative.unwrap(), 2097152)
+    if readback.is_err(): return linux_service_reply_v4(owner, "", readback.unwrap_err(), true)
+    if readback.unwrap() != source: return linux_service_reply_v4(owner, "", "linux-host-service-execution-packet-conflict", true)
+    # Re-read installed policy after the archive; the commit refresh uses it.
+    val recheck = owner.current_v4()
+    if recheck.is_err(): return linux_service_reply_v4(owner, "", recheck.unwrap_err(), true)
+    val policy = recheck.unwrap().policy
+    val capacity = owner.capacity.unwrap()
+    val fence = HostLedgerFenceV1(capacity.ledger.capacity.authority_id, capacity.ledger.capacity.boot_id,
+        capacity.ledger.capacity.provider_generation, capacity.ledger.revision)
+    val refresh = fn() -> HostReservationAuthorizationContextV1: host_local_context_v1(policy)
+    val begun = host_capacity_owner_begin_associated_v3(capacity, prepare.intent, prepare.operation, request.unwrap().receipt,
+        fence, request.unwrap().association, request.unwrap().operation, grant.unwrap(), before, deadline, refresh)
+    owner.capacity = Some(begun.owner)
+    if begun.error != "": return linux_service_reply_v4(owner, "", begun.error, true)
+    linux_service_admitted_reply_v4(owner, prepare.operation.id, digest.unwrap(), true)
+
+# N-06/T-08/U-05 slot check for an agent-draft prepare, before any charge. Busy when the incarnation's agent
+# is consumed, or the slot names an admitted (unexpired) or executing row of another operation. An admitted
+# slot row past its prepare deadline (the hco:288-290 monotonic rule) is expired through the SAME journal
+# writer, read back `cancelled`, and the slot cleared. A post-outcome projection failure stores the returned
+# journal (single writer) and quarantines the owner until restart.
+fn linux_service_agent_slot_v4(original: HostLinuxServiceCurrentV4, operation_id: text,
+        now_ms: i64) -> HostLinuxServiceReplyV4:
+    var owner = original
+    if owner.agent_operation_id == operation_id: return linux_service_reply_v4(owner, "", "", false)
+    if owner.agent_consumed: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
+    if owner.agent_operation_id == "": return linux_service_reply_v4(owner, "", "", false)
+    val slot = owner.agent_operation_id
+    var state = ""
+    var deadline: i64 = 0
+    for row in owner.capacity.unwrap().ledger.reservations:
+        if row.operation_id != slot: continue
+        if row.state == HostReservationStateV1.Prepared:
+            state = "admitted"
+            deadline = row.prepare_deadline_ms
+        elif row.state == HostReservationStateV1.Executing: state = "executing"
+        else: state = "ended"
+    if state == "executing": return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
+    if state == "admitted":
+        if now_ms < deadline: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
+        val expired = host_capacity_owner_expire_prepared_owned_v3(owner.capacity.unwrap(), slot, now_ms)
+        owner.capacity = Some(expired.owner)
+        if expired.error == "host-projection-reopen-required":
+            owner.journal_quarantine = "linux-host-service-journal-quarantined"
+            return linux_service_reply_v4(owner, "", owner.journal_quarantine, true)
+        if not expired.settled or expired.error != "": return linux_service_reply_v4(owner, "", expired.error, false)
+        if owner.agent_operation.is_none(): return linux_service_reply_v4(owner, "", "linux-host-agent-slot-operation-missing", true)
+        val readback = daemon_operation_exact_v2(owner.capacity.unwrap().journal, owner.agent_operation.unwrap())
+        if readback.is_err(): return linux_service_reply_v4(owner, "", readback.unwrap_err(), true)
+        if readback.unwrap().state != "cancelled":
+            return linux_service_reply_v4(owner, "", "linux-host-agent-slot-expiry-readback", true)
+    owner.agent_operation_id = ""
+    owner.agent_operation = None
+    linux_service_reply_v4(owner, "", "", state == "admitted")
+
+# Agent invoke glue (milestone_0021 PR2, DESIGN section 2; deviation D14: the owner-bound entry lives here
+# because the agent module cannot import this one). Gate 1 here; gates 2-5 and every effect in the agent module,
+# over the bytes this owner stored. Every call re-derives the step input from the archived signed execute and
+# a fresh clock; each call advances at most one bounded step. An error after stage `transfer` is effect-attempted.
+pub fn host_linux_service_agent_invoke_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    if not owner.capacity.unwrap().ledger.continuity_proven:
+        return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
+    if owner.reconcile_error != "" or not owner.inventory_returned:
+        return linux_service_reply_v4(owner, "", "linux-host-agent-before-reconcile", false)
+    val invoke = host_agent_invoke_request_decode_v4(source)
+    if invoke.is_err(): return linux_service_reply_v4(owner, "", invoke.unwrap_err(), false)
+    val operation_id = invoke.unwrap().operation_id
+    val payload_digest = sha256_text(source)
+    if val agent = owner.agent:
+        if agent.operation_id != operation_id: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-consumed", false)
+        if agent.payload_digest != payload_digest: return linux_service_reply_v4(owner, "", "linux-host-agent-invoke-conflict", false)
+    elif owner.agent_consumed: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-consumed", false)
+    elif owner.agent_operation_id != operation_id: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
+    val scope = owner.scope.unwrap()
+    val journal = owner.capacity.unwrap().journal
+    val execute_path = linux_service_execute_relative_v4(scope, operation_id)
+    if execute_path.is_err(): return linux_service_reply_v4(owner, "", execute_path.unwrap_err(), false)
+    val archived = distributed_operation_journal_read_v3(journal, execute_path.unwrap(), 2097152)
+    if archived.is_err(): return linux_service_reply_v4(owner, "", archived.unwrap_err(), false)
+    val execute = host_linux_service_agent_execute_v4(archived.unwrap(), operation_id)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), false)
+    val association_path = linux_service_association_relative_v4(scope, operation_id)
+    if association_path.is_err(): return linux_service_reply_v4(owner, "", association_path.unwrap_err(), false)
+    val stored = distributed_operation_journal_read_v3(journal, association_path.unwrap(), 2097152)
+    if stored.is_err(): return linux_service_reply_v4(owner, "", stored.unwrap_err(), false)
+    # Gate 1b first (P2R1-F1): a matching agent at `settled`/`host-settle` takes the replay/resume path.
+    var replay = false
+    if val agent = owner.agent: replay = agent.stage == "settled" or agent.stage == "host-settle"
+    val manifest = host_linux_service_agent_admit_v4(owner.capacity.unwrap(), scope, execute.unwrap(), stored.unwrap(),
+        invoke.unwrap(), replay)
+    if manifest.is_err(): return linux_service_reply_v4(owner, "", manifest.unwrap_err(), owner.agent.is_some())
+    # F15 (B): the enrollment-pinned template, statically re-checked by every current_v4 records reload.
+    val template = owner.records.unwrap().agent_helper_template
+    if template.is_none(): return linux_service_reply_v4(owner, "", "linux-host-agent-helper-template-invalid", owner.agent.is_some())
+    val input = host_linux_service_agent_input_v4(execute.unwrap(), manifest.unwrap(), template.unwrap(),
+        host_local_context_v1(metadata.unwrap().policy), "epoch-" + owner.initial_epoch, scope,
+        owner.records.unwrap().binding.provider_identity_digest)
+    if input.is_err(): return linux_service_reply_v4(owner, "", input.unwrap_err(), owner.agent.is_some())
+    if owner.agent.is_none():
+        # Stage `transfer` (3.4): the budget gate before any effect, then the admission owner moves whole into
+        # the factory and lives in exactly one place afterwards.
+        val budget = host_linux_service_agent_budget_v4(input.unwrap())
+        if budget.is_err(): return linux_service_reply_v4(owner, "", budget.unwrap_err(), false)
+        val association_digest = host_execution_association_digest_v3(execute.unwrap().association)
+        if association_digest.is_err(): return linux_service_reply_v4(owner, "", association_digest.unwrap_err(), false)
+        if owner.admission.is_none() or owner.admission.unwrap().owner.is_none() or owner.native.is_none():
+            return linux_service_reply_v4(owner, "", "linux-host-service-admission-missing", false)
+        if owner.agent_root.is_some(): return linux_service_reply_v4(owner, "", "linux-host-agent-root-loan-retained", false)
+        var admission = owner.admission.unwrap()
+        val lender = admission.owner.unwrap()
+        admission.owner = None
+        val opened = host_linux_service_agent_open_v4(lender, owner.native.unwrap(), input.unwrap(), operation_id,
+            association_digest.unwrap(), payload_digest)
+        # T-04: a pre-transfer failure returns the admission whole (retryable unless the lend kept R3); a
+        # post-transfer failure is an agent in stage `failed`. No live Host release either way.
+        admission.owner = opened.admission
+        owner.admission = Some(admission)
+        if opened.root.is_some(): owner.agent_root = opened.root
+        if opened.agent.is_some():
+            owner.agent = opened.agent
+            owner.agent_consumed = true
+            if opened.error != "": return linux_service_reply_v4(owner, "", opened.error, true)
+            return linux_service_reply_v4(owner, host_linux_service_agent_reply_v4(opened.agent.unwrap()), "", true)
+        return linux_service_reply_v4(owner, "", if opened.error != "": opened.error else: "linux-host-agent-transfer-refused", true)
+    val turn = host_linux_service_agent_step_v4(owner.agent.unwrap(), owner.capacity.unwrap(), input.unwrap())
+    owner.agent = Some(turn.agent)
+    # The returned Host capacity owner is the single journal writer: adopted on every path.
+    owner.capacity = Some(turn.capacity)
+    linux_service_reply_v4(owner, turn.response, turn.error, turn.effect_attempted)
+
+# Accepted-connection dispatch: the two associated actions and the agent invoke (milestone_0021 PR2).
+pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: text, source: text,
+        project: fn(ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>) -> HostLinuxServiceReplyV4:
+    if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
+    if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
+    if action == "host_agent_invoke_v4": return host_linux_service_agent_invoke_v4(owner, source)
+    linux_service_reply_v4(owner, "", "linux-host-service-action-unknown", false)
+
+# The workload scope of this service's lending epoch: the bound host (the same
+# physical_host_id association_match_v3 compares), "epoch-" + the lent digest
+# and the startup native snapshot (machine_fresh_workload_scope_v2 convention).
+# Prepare re-verifies it against a fresh native observation.
+fn linux_service_native_scope_v4(owner: HostLinuxServiceCurrentV4) -> Result<ContainerHostScopeV2, text>:
+    if owner.native_snapshot.is_none(): return Err("linux-host-service-projection-native-required")
+    val native = owner.native_snapshot.unwrap()
+    Ok(ContainerHostScopeV2(physical_host_id: owner.scope_v4().physical_host_id, service_scope_id: "epoch-" + owner.initial_epoch,
+        boot_id: native.native_boot_id, provider_generation: native.owner_generation, native_machine_id: native.native_machine_id,
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: native.native_boot_id))
+
+# Production entry for the V6 Host routes (host_service_domain_turn_v3 prepare,
+# host_service_execution_v4 execute). The full current_v4 recheck runs first so
+# its refusal is the one reported (recovery required, like the Windows arm).
+# The projector binds the request's draft to this owner's own epoch scope;
+# nothing in the request selects the scope.
+pub fn host_linux_service_dispatch_installed_v4(owner: HostLinuxServiceCurrentV4, action: text,
+        source: text) -> HostLinuxServiceReplyV4:
+    val current = owner.current_v4()
+    if current.is_err(): return linux_service_reply_v4(owner, "", current.unwrap_err(), true)
+    val scope = linux_service_native_scope_v4(owner)
+    if scope.is_err(): return linux_service_reply_v4(owner, "", scope.unwrap_err(), false)
+    val bound = scope.unwrap()
+    host_linux_service_dispatch_v4(owner, action, source,
+        fn(draft: ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>: container_execution_draft_bind_v3(draft, bound))
+
+pub struct HostLinuxServiceCloseV4:
+    owner: HostLinuxServiceCurrentV4
+    completed: bool
+    released_all: bool
+    error: text
+
+fn linux_service_close_reason_v4(error: text, fallback: text) -> text:
+    if error != "": return error
+    fallback
+
+# Shutdown. `closed` is set first so no status/prepare/execute can follow.
+# Owner-bearing carriers stay ONLY in the returned owner: the journal owner is
+# cleared only once its close completed or its cleanup carrier was taken over;
+# readers are replaced by whatever the landed close retained. A failed release
+# is sticky in `close_error`, so a retry never reports a clean completion over
+# an earlier failure. The native identity borrow is released with its upper
+# parent: the retained lending admission, closed after the loan ends. An
+# inventory already returned after the proof is skipped (store loan inactive).
+#
+# milestone_0021 3.7 order with an agent: (1) the agent close (collector cancel, workspace-root loan end, workload
+# close), (2) journal and readers, (3) the service loan on the transfer's admission, (4) the epoch close then the
+# helper-root removal, (5) the admission residue, (6) agent = None. A wedged agent or a pending stop/settle
+# keeps the agent and its transfer here (fail closed): steps 3-6 do not run; the next start's reconcile drains.
+pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostLinuxServiceCloseV4:
+    var owner = original
+    owner.closed = true
+    var error = ""
+    if val agent = owner.agent:
+        if not agent.workload_closed:
+            val closed = host_linux_service_agent_close_v4(agent)
+            owner.agent = Some(closed.agent)
+            if not closed.closed and error == "": error = closed.error
+    if owner.journal_cleanup.is_some():
+        val turn = distributed_operation_journal_open_cleanup_v2(owner.journal_cleanup.unwrap())
+        owner.journal_cleanup = turn.cleanup
+        if (not turn.closed or turn.error != "") and error == "":
+            error = linux_service_close_reason_v4(turn.error, "linux-host-service-journal-close-pending")
+    if owner.capacity.is_some() and owner.journal_cleanup.is_none():
+        val turn = host_capacity_owner_close_owned_v2(owner.capacity.unwrap())
+        if turn.closed and turn.error == "":
+            owner.capacity = None
+        elif turn.cleanup.is_some():
+            owner.capacity = None
+            owner.journal_cleanup = turn.cleanup
+        if not turn.closed or turn.error != "":
+            if error == "": error = linux_service_close_reason_v4(turn.error, "linux-host-service-journal-close-pending")
+    elif owner.capacity.is_some():
+        if error == "": error = "linux-host-service-journal-cleanup-pending"
+    if owner.parent_reader.is_some():
+        val closed = linux_protected_root_reader_close_v1(owner.parent_reader.unwrap())
+        owner.parent_reader = closed.owner
+        if not closed.completed and error == "": error = linux_service_close_reason_v4(closed.error, "linux-host-service-reader-close-pending")
+    if owner.root_reader.is_some():
+        val closed = linux_protected_root_reader_close_v1(owner.root_reader.unwrap())
+        owner.root_reader = closed.owner
+        if not closed.completed and error == "": error = linux_service_close_reason_v4(closed.error, "linux-host-service-reader-close-pending")
+    # Lending admission last, and only once every service part above is
+    # released: drop the native borrow, end the loan, then close the owner.
+    # Anything pending keeps the admission (and its loan) in this owner.
+    val service_released = (owner.capacity.is_none() and owner.journal_cleanup.is_none() and owner.parent_reader.is_none() and
+        owner.root_reader.is_none())
+    if val agent = owner.agent:
+        if not service_released:
+            if error == "": error = "linux-host-service-admission-close-pending"
+        elif agent.workload_closed:
+            # The release ends the service loan once, then (re)tries the epoch close (P2R1-F2).
+            val released = host_linux_service_agent_release_v4(agent, owner.native)
+            owner.agent = released.agent
+            owner.native = released.native
+            if released.error != "" and error == "": error = released.error
+            if owner.agent.is_none() and owner.admission.is_some():
+                # Step 5: the residue turn; its owner already moved into the closed transfer.
+                val closed = machine_fresh_epoch_admission_turn_close_v1(owner.admission.unwrap())
+                owner.admission = closed.retained
+                if (not closed.closed or closed.retained.is_some() or closed.error != "") and error == "":
+                    error = linux_service_close_reason_v4(closed.error, "linux-host-service-admission-close-pending")
+    elif owner.admission.is_some():
+        if not service_released:
+            if error == "": error = "linux-host-service-admission-close-pending"
+        else:
+            # The loan ends only by handing the exact lent borrow back; the
+            # lender verifies it aliases its own reader and custody. A refused
+            # or impossible return keeps the borrow, loan and admission here.
+            var admission = owner.admission.unwrap()
+            var loan_error = ""
+            if val held = admission.owner:
+                # The store-inventory loan ends first: the lender refuses to
+                # end the service loan while it is active.
+                var lender = held
+                # 3.3 N-05: a pre-transfer root whose loan end was refused is ended first (it also closes a
+                # never-adopted R3), before the store and service loans.
+                if val root = owner.agent_root:
+                    val ended = lender.end_workspace_root_loan_v1(root)
+                    lender = ended.owner
+                    admission.owner = Some(lender)
+                    if ended.error != "": loan_error = ended.error
+                    else: owner.agent_root = None
+                if loan_error == "" and lender.store_inventory_loaned:
+                    if owner.inventory.is_none(): loan_error = "linux-host-service-inventory-borrow-missing"
+                    else:
+                        val returned = lender.end_store_inventory_loan_v1(owner.inventory.unwrap())
+                        lender = returned.owner
+                        admission.owner = Some(lender)
+                        if returned.error != "": loan_error = returned.error
+                        else: owner.inventory = None
+                if loan_error == "" and lender.service_loaned:
+                    if owner.native.is_none(): loan_error = "linux-host-service-loan-borrow-missing"
+                    else:
+                        val ended = lender.end_service_loan_v1(owner.native.unwrap())
+                        admission.owner = Some(ended.owner)
+                        if ended.error != "": loan_error = ended.error
+            owner.admission = Some(admission)
+            if loan_error != "":
+                if error == "": error = loan_error
+            else:
+                owner.native = None
+                val closed = machine_fresh_epoch_admission_turn_close_v1(admission)
+                owner.admission = closed.retained
+                if (not closed.closed or closed.retained.is_some() or closed.error != "") and error == "":
+                    error = linux_service_close_reason_v4(closed.error, "linux-host-service-admission-close-pending")
+    if error != "": owner.close_error = error
+    val reported = if error != "": error else: owner.close_error
+    # released_all: nothing owner-bearing is retained now, even if an earlier
+    # attempt failed (that failure stays visible in `error`/`completed`).
+    val released = service_released and owner.admission.is_none() and owner.agent.is_none()
+    HostLinuxServiceCloseV4(owner: owner, completed: reported == "", released_all: released, error: reported)
+
+export HostLinuxServiceCurrentV4, HostLinuxServiceStartTurnV4, HostLinuxServiceReplyV4, HostLinuxServiceCloseV4
+export host_linux_service_close_v4
+export host_linux_service_start_v4, host_linux_service_prepare_v4, host_linux_service_execute_authorize_v4
+export host_linux_service_open_installed_v4, host_linux_service_anchor_parent_v4
+export host_linux_service_dispatch_v4, host_linux_service_execute_v4, host_linux_service_dispatch_installed_v4
+export host_linux_service_agent_invoke_v4

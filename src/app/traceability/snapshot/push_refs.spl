@@ -38,22 +38,26 @@ fn trace_oid_zero(oid: text) -> bool:
 
 # Reject Git's prohibited ref syntax before a value reaches any object command.
 # The effectful adapter additionally resolves the exact object/type with Git.
-pub fn trace_remote_ref_valid(name: text) -> bool:
+pub enum TraceRemoteRefCheckV1:
+    Valid
+    Invalid
+
+pub fn trace_remote_ref_valid(name: text) -> TraceRemoteRefCheckV1:
     if not name.starts_with("refs/") or name.ends_with("/"):
-        return false
+        return TraceRemoteRefCheckV1.Invalid
     if name.ends_with(".") or name.contains("..") or name.contains("@{"):
-        return false
+        return TraceRemoteRefCheckV1.Invalid
     val forbidden = [" ", "\t", "\r", "\n", "~", "^", ":", "?", "*", "[", "\\"]
     for token in forbidden:
         if name.contains(token):
-            return false
+            return TraceRemoteRefCheckV1.Invalid
     for ch in name.bytes():
         if ch < 32 or ch == 127:
-            return false
+            return TraceRemoteRefCheckV1.Invalid
     for part in name.split("/"):
         if part == "" or part.starts_with(".") or part.ends_with(".lock"):
-            return false
-    true
+            return TraceRemoteRefCheckV1.Invalid
+    TraceRemoteRefCheckV1.Valid
 
 fn trace_ref_kind(name: text) -> TraceRefKind:
     if name.starts_with("refs/heads/"):
@@ -64,7 +68,11 @@ fn trace_ref_kind(name: text) -> TraceRefKind:
 
 # Parse the complete captured Git hook stdin once, before children can consume
 # it. Every row remains a separate subject. The output is not a passing receipt.
-pub fn parse_trace_push_refs(input: text, max_refs: i64) -> Result<[TraceRefUpdate], text>:
+pub struct TracePushRefLimitV1:
+    value: i64
+
+pub fn parse_trace_push_refs(input: text, ref_limit: TracePushRefLimitV1) -> Result<[TraceRefUpdate], text>:
+    val max_refs = ref_limit.value
     if max_refs < 1 or max_refs > 4096:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid ref budget")
     if input == "" or input.len() > 1048576:
@@ -92,7 +100,7 @@ pub fn parse_trace_push_refs(input: text, max_refs: i64) -> Result<[TraceRefUpda
         if object_width != 0 and object_width != local_oid.len():
             return Err("TRACE-SNAPSHOT-INCOMPLETE: mixed repository object formats")
         object_width = local_oid.len()
-        if not trace_remote_ref_valid(remote_ref):
+        if trace_remote_ref_valid(remote_ref) != TraceRemoteRefCheckV1.Valid:
             return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid remote ref in row {index + 1}")
         if remote_names.contains(remote_ref):
             return Err("TRACE-SNAPSHOT-INCOMPLETE: duplicate remote ref {remote_ref}")

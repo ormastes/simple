@@ -1686,6 +1686,8 @@ pub(crate) fn apply_dict_mutation_in_place(
         }
         "merge" | "extend" => match value {
             Some(Value::Dict(other)) => {
+                // Merging a module namespace copies its fns into a plain dict.
+                crate::interpreter::interpreter_call::gate_module_namespace_handout(&other)?;
                 map.extend(other.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
             _ => {
@@ -1713,6 +1715,15 @@ pub fn handle_dict_methods(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
+    // Every method that reads no fn out of the dict, or reads one key that
+    // its own arm judges, skips the namespace gate; any other method hands a
+    // module namespace's values out (or copies it) and is judged first.
+    if !matches!(
+        method,
+        "len" | "length" | "is_empty" | "has" | "contains_key" | "contains" | "keys" | "get" | "get_or"
+    ) {
+        crate::interpreter::interpreter_call::gate_module_namespace_handout(map)?;
+    }
     let result = match method {
         "len" | "length" => Value::Int(map.len() as i64),
         "is_empty" => Value::Bool(map.is_empty()),
@@ -1806,6 +1817,15 @@ pub fn handle_dict_methods(
             let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let key = key_val.to_key_string();
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            // Names `f` like `m.get("f")`.
+            if let Some(Value::Function { def, .. }) = map.get(&key) {
+                if matches!(def.visibility, simple_parser::ast::Visibility::Private)
+                    && def.name == key
+                    && crate::interpreter::is_module_namespace_dict(map)
+                {
+                    crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
+                }
+            }
             map.get(&key)
                 .cloned()
                 .map(|stored| Value::unwrap_dict_entry(&key_val, stored))

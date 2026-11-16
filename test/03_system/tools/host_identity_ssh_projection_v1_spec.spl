@@ -1,0 +1,207 @@
+# AUTHORED_NOT_RUN. Genuine independently provisioned retained OS fixtures.
+# Windows requires actual Service5 logon and explicit native GLOBAL root.
+# No injected namespace, fabricated fd, decoded grant, key publication or skip.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io_runtime.env_get
+use std.nogc_sync_mut.io.host_identity_store_v1.{HostIdentityStoreV1, HostIdentityStoreCloseTurnV1,
+    host_identity_store_open_v1, host_identity_store_read_v1, host_identity_store_close_v1}
+use std.nogc_sync_mut.io.host_identity_ssh_projection_v1.*
+
+var identity_ssh_fixture_stores_v1: [HostIdentityStoreV1] = []
+var identity_ssh_fixture_projections_v1: [HostIdentitySshProjectionV1] = []
+
+fn identity_ssh_fixture_required_v1(name: text) -> text:
+    val value = env_get(name)
+    if value == "": panic("independently prepared identity SSH projection fixture required")
+    value
+
+fn identity_ssh_fixture_store_close_v1(owner: HostIdentityStoreV1) -> HostIdentityStoreCloseTurnV1:
+    var turn = host_identity_store_close_v1(owner)
+    var remaining = 128
+    while turn.owner != None and remaining > 0:
+        if turn.error != "" and turn.error != "identity-store-projection-cleanup-pending": return turn
+        val actual = turn.owner.unwrap()
+        turn = host_identity_store_close_v1(actual)
+        remaining = remaining - 1
+    turn
+
+fn identity_ssh_fixture_projection_close_v1(owner: HostIdentitySshProjectionV1) -> HostIdentitySshProjectionCloseTurnV1:
+    var turn = host_identity_ssh_projection_close_v1(owner)
+    var remaining = 128
+    while turn.owner != None and remaining > 0:
+        if turn.error != "" and turn.error != "identity-ssh-projection-cleanup-pending": return turn
+        val actual = turn.owner.unwrap()
+        turn = host_identity_ssh_projection_close_v1(actual)
+        remaining = remaining - 1
+    turn
+
+fn identity_ssh_fixture_store_v1(root: text) -> Result<HostIdentityStoreV1, text>:
+    val opened = host_identity_store_open_v1(root)
+    if val actual = opened.owner:
+        identity_ssh_fixture_stores_v1.push(actual)
+        if opened.ready and opened.error == "" and not opened.cleanup_pending: return Ok(actual)
+        val closed = identity_ssh_fixture_store_close_v1(actual)
+        return Err("actual identity SSH store fixture refused; cleanup-completed=" + str(closed.completed))
+    Err("actual identity SSH store fixture owner required")
+
+fn identity_ssh_fixture_begin_v1(store: HostIdentityStoreV1, key: text, hosts: text) -> Result<HostIdentitySshProjectionV1, text>:
+    val opened = host_identity_ssh_projection_begin_v1(store, key, hosts)
+    if val actual = opened.owner:
+        identity_ssh_fixture_projections_v1.push(actual)
+        if opened.error == "": return Ok(actual)
+        val child_closed = identity_ssh_fixture_projection_close_v1(actual)
+    val store_closed = identity_ssh_fixture_store_close_v1(store)
+    Err("actual identity SSH projection acquisition required: " + opened.error)
+
+fn identity_ssh_fixture_ready_v1(store: HostIdentityStoreV1, key: text, hosts: text) -> Result<HostIdentitySshProjectionV1, text>:
+    val owner = identity_ssh_fixture_begin_v1(store, key, hosts)?
+    var turn = host_identity_ssh_projection_step_v1(owner, store)
+    var remaining = 128
+    while turn.owner != None and not turn.ready and turn.error == "" and remaining > 0:
+        val actual = turn.owner.unwrap()
+        turn = host_identity_ssh_projection_step_v1(actual, store)
+        remaining = remaining - 1
+    if turn.ready and turn.owner != None and turn.error == "": return Ok(turn.owner.unwrap())
+    if val actual = turn.owner:
+        identity_ssh_fixture_projections_v1.push(actual)
+        val child_closed = identity_ssh_fixture_projection_close_v1(actual)
+    val store_closed = identity_ssh_fixture_store_close_v1(store)
+    Err("actual identity SSH paired projection fixture did not become ready: " + turn.error)
+
+fn identity_ssh_fixture_bytes_equal_v1(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    for at in 0..left.len():
+        if left[at] != right[at]: return false
+    true
+
+describe "Actual retained paired SSH identity projection v1":
+    it "retains both existing files and invalidates paths before partial projection cleanup":
+        step("Open a genuine protected store with independently generated key and bound known-hosts files")
+        val root = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_PROJECTION_ROOT")
+        val key = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_KEY_LEAF")
+        val hosts = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_HOSTS_LEAF")
+        val store = identity_ssh_fixture_store_v1(root).unwrap()
+        val before_key = host_identity_store_read_v1(store, key, 65536)
+        val before_hosts = host_identity_store_read_v1(store, hosts, 65536)
+        val owner = identity_ssh_fixture_ready_v1(store, key, hosts).unwrap()
+        val copied = owner
+        step("Require actual pair readiness before requesting transport path data")
+        val paths = host_identity_ssh_projection_paths_v1(owner, store)
+        val current = host_identity_ssh_projection_step_v1(copied, store)
+        step("Close one actual retained file and immediately reject copied path use")
+        val partial = host_identity_ssh_projection_close_v1(owner)
+        val invalidated = host_identity_ssh_projection_paths_v1(copied, store)
+        val closed = identity_ssh_fixture_projection_close_v1(copied)
+        val stale = host_identity_ssh_projection_paths_v1(copied, store)
+        val after_key = host_identity_store_read_v1(store, key, 65536)
+        val after_hosts = host_identity_store_read_v1(store, hosts, 65536)
+        val store_closed = identity_ssh_fixture_store_close_v1(store)
+        # All cleanup attempts precede assertions; secret bytes are compared
+        # through boolean results, never printed as assertion values/captures.
+        expect(store_closed.completed).to_equal(true)
+        expect(closed.completed).to_equal(true)
+        expect(partial.owner != None).to_equal(true)
+        expect(partial.completed).to_equal(false)
+        expect(paths.is_ok()).to_equal(true)
+        val actual_paths = paths.unwrap()
+        expect(actual_paths.identity_path.ends_with("/journal/" + key)).to_equal(true)
+        expect(actual_paths.known_hosts_path.ends_with("/journal/" + hosts)).to_equal(true)
+        expect(current.ready).to_equal(true)
+        expect(invalidated.is_err()).to_equal(true)
+        expect(stale.is_err()).to_equal(true)
+        expect(before_key.error).to_equal("")
+        expect(before_hosts.error).to_equal("")
+        expect(after_key.error).to_equal("")
+        expect(after_hosts.error).to_equal("")
+        expect(identity_ssh_fixture_bytes_equal_v1(before_key.bytes.unwrap(), after_key.bytes.unwrap())).to_equal(true)
+        expect(identity_ssh_fixture_bytes_equal_v1(before_hosts.bytes.unwrap(), after_hosts.bytes.unwrap())).to_equal(true)
+
+    it "invalidates the pair immediately when store cleanup starts and drains it before the root":
+        step("Acquire the actual paired projection and retain copied aliases")
+        val root = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_PROJECTION_ROOT")
+        val key = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_KEY_LEAF")
+        val hosts = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_HOSTS_LEAF")
+        val store = identity_ssh_fixture_store_v1(root).unwrap()
+        val owner = identity_ssh_fixture_ready_v1(store, key, hosts).unwrap()
+        step("Start owner-bearing store close before querying the copied projection")
+        val partial = host_identity_store_close_v1(store)
+        val invalidated = host_identity_ssh_projection_paths_v1(owner, store)
+        val continuation = host_identity_ssh_projection_step_v1(owner, store)
+        val closed = identity_ssh_fixture_store_close_v1(store)
+        val stale = host_identity_ssh_projection_paths_v1(owner, store)
+        expect(partial.owner != None).to_equal(true)
+        expect(partial.completed).to_equal(false)
+        expect(invalidated.is_err()).to_equal(true)
+        expect(continuation.ready).to_equal(false)
+        expect(closed.completed).to_equal(true)
+        expect(closed.owner == None).to_equal(true)
+        expect(stale.is_err()).to_equal(true)
+
+    it "refuses a foreign actual store without abandoning the original retained pair":
+        val root = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_PROJECTION_ROOT")
+        val other_root = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_OTHER_ROOT")
+        val key = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_KEY_LEAF")
+        val hosts = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_HOSTS_LEAF")
+        val store = identity_ssh_fixture_store_v1(root).unwrap()
+        val other = identity_ssh_fixture_store_v1(other_root)
+        if other.is_err():
+            val store_closed = identity_ssh_fixture_store_close_v1(store)
+        val other_store = other.unwrap()
+        val owner = identity_ssh_fixture_ready_v1(store, key, hosts)
+        if owner.is_err():
+            val other_closed = identity_ssh_fixture_store_close_v1(other_store)
+        val actual = owner.unwrap()
+        val refused = host_identity_ssh_projection_step_v1(actual, other_store)
+        val invalidated = host_identity_ssh_projection_paths_v1(actual, store)
+        val child_closed = identity_ssh_fixture_projection_close_v1(actual)
+        val store_closed = identity_ssh_fixture_store_close_v1(store)
+        val other_closed = identity_ssh_fixture_store_close_v1(other_store)
+        expect(refused.owner != None).to_equal(true)
+        expect(refused.ready).to_equal(false)
+        expect(refused.error).to_equal("identity-ssh-projection-foreign-store")
+        expect(invalidated.is_err()).to_equal(true)
+        expect(child_closed.completed).to_equal(true)
+        expect(store_closed.completed).to_equal(true)
+        expect(other_closed.completed).to_equal(true)
+
+    it "bounds concurrent children and retires generations without a lifetime eight-use limit":
+        val root = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_PROJECTION_ROOT")
+        val key = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_KEY_LEAF")
+        val hosts = identity_ssh_fixture_required_v1("SIMPLE_HOST_IDENTITY_SSH_HOSTS_LEAF")
+        val store = identity_ssh_fixture_store_v1(root).unwrap()
+        var owners: [HostIdentitySshProjectionV1] = []
+        var admitted = true
+        for at in 0..8:
+            val begun = host_identity_ssh_projection_begin_v1(store, key, hosts)
+            if begun.error != "" or begun.ready: admitted = false
+            if val actual = begun.owner:
+                owners.push(actual)
+                identity_ssh_fixture_projections_v1.push(actual)
+            else: admitted = false
+        val ninth = host_identity_ssh_projection_begin_v1(store, key, hosts)
+        if val unexpected = ninth.owner:
+            identity_ssh_fixture_projections_v1.push(unexpected)
+            val closed = identity_ssh_fixture_projection_close_v1(unexpected)
+        var retired = true
+        for owner in owners:
+            val closed = identity_ssh_fixture_projection_close_v1(owner)
+            if not closed.completed: retired = false
+        val next = host_identity_ssh_projection_begin_v1(store, key, hosts)
+        var next_closed = false
+        if val actual = next.owner:
+            identity_ssh_fixture_projections_v1.push(actual)
+            val closed = identity_ssh_fixture_projection_close_v1(actual)
+            next_closed = closed.completed
+        var stale_refused = true
+        for old in owners:
+            if host_identity_ssh_projection_paths_v1(old, store).is_ok(): stale_refused = false
+        val store_closed = identity_ssh_fixture_store_close_v1(store)
+        expect(store_closed.completed).to_equal(true)
+        expect(admitted).to_equal(true)
+        expect(owners.len()).to_equal(8)
+        expect(ninth.owner == None).to_equal(true)
+        expect(ninth.error).to_equal("identity-ssh-projection-owner-bound")
+        expect(retired).to_equal(true)
+        expect(next.owner != None).to_equal(true)
+        expect(next_closed).to_equal(true)
+        expect(stale_refused).to_equal(true)

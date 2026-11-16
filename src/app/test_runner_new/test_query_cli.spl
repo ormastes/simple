@@ -1,0 +1,318 @@
+# Read-only `simple test query` / `simple test explain` facade.
+# Argument parsing and rendering are pure; only `execute_test_query` touches
+# the filesystem, and it never saves, rewrites or seals the TestDB.
+use std.common.traceability.test_query.{
+    TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit, TestQueryCursor, TestQuery,
+    TestQueryStatus, TestQualification, TestQueryRow, TestQueryPage, TestQueryTruncation,
+    TestQueryCoverage, TestQueryError, TestQueryErrorKind, TestPlannedCaseIdentity,
+    TestAttemptIdentity
+}
+use std.database.test_extended.factory.{load_test_database_extended}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+
+val TEST_QUERY_DEFAULT_LIMIT: i64 = 50
+val TEST_EXPLAIN_LIMIT: i64 = 1000
+
+pub struct TestDbFilePath:
+    value: text
+
+pub enum TestQueryFormat:
+    Table
+    Sdn
+
+pub enum TestQueryCommand:
+    Query
+    Explain
+
+pub struct TestQueryCliRequest:
+    command: TestQueryCommand
+    query: TestQuery
+    format: TestQueryFormat
+
+pub struct TestQueryUsageError:
+    detail: text
+
+# Exit codes: RowsFound 0, NoRows 1, UsageError 2, StoreUnreadable 2.
+pub enum TestQueryExitDecision:
+    RowsFound
+    NoRows
+    UsageError
+    StoreUnreadable
+
+pub struct TestQueryCliOutput:
+    text: text
+    decision: TestQueryExitDecision
+
+pub struct TestQueryExitCode:
+    value: i64
+
+pub fn test_query_exit_code(decision: TestQueryExitDecision) -> TestQueryExitCode:
+    match decision:
+        case TestQueryExitDecision.RowsFound: TestQueryExitCode(value: 0)
+        case TestQueryExitDecision.NoRows: TestQueryExitCode(value: 1)
+        case TestQueryExitDecision.UsageError: TestQueryExitCode(value: 2)
+        case TestQueryExitDecision.StoreUnreadable: TestQueryExitCode(value: 2)
+
+# The dispatcher hands the runner `[test, query, ...]`; a direct entry run hands
+# `[query, ...]`. Returns the arguments from the subcommand on, or [] when the
+# invocation is not a query/explain subcommand (plain `test <path>` runs).
+pub fn test_query_subcommand_args(args: [text]) -> [text]:
+    val start = if args.len() > 0 and args[0] == "test": 1 else: 0
+    if start >= args.len():
+        return []
+    if args[start] != "query" and args[start] != "explain":
+        return []
+    args.slice(start, args.len())
+
+fn _usage(detail: text) -> TestQueryUsageError:
+    TestQueryUsageError(detail: detail)
+
+fn _parse_case_key(spec: text) -> Result<TestCaseKey, TestQueryUsageError>:
+    val sep = spec.index_of("::") ?? -1
+    if sep < 0:
+        return Err(_usage("case must be <path>::<case>, missing '::' in: " + spec))
+    val path = spec.substring(0, sep)
+    val name = spec.substring(sep + 2, spec.byte_len())
+    if path == "" or name == "":
+        return Err(_usage("case must be <path>::<case> with both parts non-empty: " + spec))
+    Ok(TestCaseKey(path: TestCasePath(value: path), name: TestCaseName(value: name)))
+
+fn _parse_count(flag: text, raw: text) -> Result<i64, TestQueryUsageError>:
+    match raw.parse_int():
+        case Some(n): Ok(n)
+        case None: Err(_usage(flag + " needs an integer, got: " + raw))
+
+fn _parse_format(raw: text) -> Result<TestQueryFormat, TestQueryUsageError>:
+    match raw:
+        case "table": Ok(TestQueryFormat.Table)
+        case "sdn": Ok(TestQueryFormat.Sdn)
+        case _: Err(_usage("--format must be table or sdn, got: " + raw))
+
+# `--flag=value` carries its value inline; a bare `--flag` takes the next token.
+fn _flag_name(token: text) -> text:
+    val eq = token.index_of("=") ?? -1
+    if token.starts_with("--") and eq > 0:
+        return token.substring(0, eq)
+    token
+
+fn _inline_value(token: text) -> text?:
+    val eq = token.index_of("=") ?? -1
+    if token.starts_with("--") and eq > 0:
+        return Some(token.substring(eq + 1, token.byte_len()))
+    None
+
+# args: ["query"|"explain", "<path>::<case>", flags...]
+pub fn parse_test_query_args(args: [text]) -> Result<TestQueryCliRequest, TestQueryUsageError>:
+    if args.len() == 0:
+        return Err(_usage("expected 'query' or 'explain'"))
+    val command = match args[0]:
+        case "query": TestQueryCommand.Query
+        case "explain": TestQueryCommand.Explain
+        case other: return Err(_usage("unknown subcommand: " + other))
+    var case_spec: text? = None
+    var run_id: TestRunId? = None
+    var limit = if command == TestQueryCommand.Explain: TEST_EXPLAIN_LIMIT else: TEST_QUERY_DEFAULT_LIMIT
+    var cursor: TestQueryCursor? = None
+    var format = TestQueryFormat.Table
+    var i = 1
+    while i < args.len():
+        val token = args[i]
+        if token.starts_with("--"):
+            val flag = _flag_name(token)
+            var value = ""
+            match _inline_value(token):
+                case Some(v): value = v
+                case None:
+                    if i + 1 >= args.len():
+                        return Err(_usage(flag + " needs a value"))
+                    i = i + 1
+                    value = args[i]
+            match flag:
+                case "--run":
+                    if value == "":
+                        return Err(_usage("--run needs a non-empty run id"))
+                    run_id = Some(TestRunId(value: value))
+                case "--limit":
+                    limit = _parse_count(flag, value)?
+                case "--cursor":
+                    cursor = Some(TestQueryCursor(token: value))
+                case "--format":
+                    format = _parse_format(value)?
+                case _:
+                    return Err(_usage("unknown flag: " + flag))
+        else:
+            match case_spec:
+                case Some(_): return Err(_usage("only one <path>::<case> is allowed, extra: " + token))
+                case None: case_spec = Some(token)
+        i = i + 1
+    val spec = match case_spec:
+        case Some(s): s
+        case None: return Err(_usage("missing <path>::<case>"))
+    if command == TestQueryCommand.Explain and cursor.?:
+        return Err(_usage("explain does not take --cursor"))
+    val key = _parse_case_key(spec)?
+    Ok(TestQueryCliRequest(command: command,
+        query: TestQuery(case_key: key, run_id: run_id, limit: TestQueryLimit(value: limit), cursor: cursor),
+        format: format))
+
+fn _status_text(status: TestQueryStatus) -> text:
+    match status:
+        case TestQueryStatus.Passed: "passed"
+        case TestQueryStatus.Failed: "failed"
+        case TestQueryStatus.Skipped: "skipped"
+        case TestQueryStatus.Ignored: "ignored"
+        case TestQueryStatus.QualifiedIgnore: "qualified_ignore"
+        case TestQueryStatus.Pending: "pending"
+        case TestQueryStatus.InDevelopment: "in_development"
+        case TestQueryStatus.FeatureGated: "feature_gated"
+        case TestQueryStatus.Blocked: "blocked"
+        case TestQueryStatus.NotFinished: "not_finished"
+        case TestQueryStatus.Cached: "cached"
+        case TestQueryStatus.Unknown(raw): "unknown(" + raw + ")"
+
+fn _qualification_text(q: TestQualification) -> text:
+    match q:
+        case TestQualification.Pass: "pass"
+        case TestQualification.NotPass: "not_pass"
+
+fn _planned_text(planned: TestPlannedCaseIdentity) -> text:
+    match planned:
+        case TestPlannedCaseIdentity.Recorded(id): id.value
+        case TestPlannedCaseIdentity.Missing: "missing"
+
+fn _attempt_text(attempt: TestAttemptIdentity) -> text:
+    match attempt:
+        case TestAttemptIdentity.StreamOrder(ordinal): "{ordinal.value}"
+        case TestAttemptIdentity.Missing: "missing"
+
+fn _key_text(row: TestQueryRow) -> text:
+    row.case_key.path.value + "::" + row.case_key.name.value
+
+# Every cut or incomplete page is announced; nothing is dropped silently.
+fn _partial_lines(page: TestQueryPage) -> [text]:
+    var lines: [text] = []
+    match page.truncation:
+        case TestQueryTruncation.Truncated(next):
+            lines.push("partial: truncated, more rows exist")
+            lines.push("next cursor: {next.token}")
+        case TestQueryTruncation.Complete: pass
+    match page.coverage:
+        case TestQueryCoverage.Partial:
+            lines.push("partial: some attempts are unfinished or have missing identity")
+        case TestQueryCoverage.Full: pass
+    lines
+
+fn _join(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+pub fn render_test_query_page(page: TestQueryPage, format: TestQueryFormat) -> text:
+    var lines: [text] = []
+    match format:
+        case TestQueryFormat.Table:
+            lines.push("run | planned_case | attempt | status | qualification | provenance")
+            for row in page.rows:
+                lines.push(row.run_id.value + " | " + _planned_text(row.planned_case) + " | " + _attempt_text(row.attempt) + " | " + _status_text(row.status) + " | " + _qualification_text(row.qualification) + " | unverified_framework_observation")
+            lines.push("rows: {page.rows.len()}")
+            for line in _partial_lines(page):
+                lines.push(line)
+        case TestQueryFormat.Sdn:
+            lines.push("test_query_rows |run, planned_case, attempt, status, qualification, provenance|")
+            for row in page.rows:
+                lines.push("    " + row.run_id.value + ", " + _planned_text(row.planned_case) + ", " + _attempt_text(row.attempt) + ", " + _status_text(row.status) + ", " + _qualification_text(row.qualification) + ", unverified_framework_observation")
+            lines.push("row_count: {page.rows.len()}")
+            for line in _partial_lines(page):
+                lines.push(line)
+    _join(lines)
+
+fn _qualification_reason(status: TestQueryStatus) -> text:
+    match status:
+        case TestQueryStatus.Passed: "qualifies as PASS: the attempt executed and finished passed"
+        case TestQueryStatus.Failed: "does not qualify: the attempt failed"
+        case TestQueryStatus.Skipped: "does not qualify: skipped means the case did not execute"
+        case TestQueryStatus.Ignored: "does not qualify: ignored cases are not executed"
+        case TestQueryStatus.QualifiedIgnore: "does not qualify: an ignore with a qualification is not an execution"
+        case TestQueryStatus.Pending: "does not qualify: pending means no result exists yet"
+        case TestQueryStatus.InDevelopment: "does not qualify: in-development cases are expected to fail"
+        case TestQueryStatus.FeatureGated: "does not qualify: feature-gated cases did not run"
+        case TestQueryStatus.Blocked: "does not qualify: blocked means execution was prevented"
+        case TestQueryStatus.NotFinished: "does not qualify: the attempt started but no finished event was recorded"
+        case TestQueryStatus.Cached: "does not qualify: a cached result was reused, not executed in this run"
+        case TestQueryStatus.Unknown(raw): "does not qualify: unrecognised status '" + raw + "' is never PASS"
+
+fn _identity_gaps(row: TestQueryRow) -> text:
+    var gaps: [text] = []
+    match row.planned_case:
+        case TestPlannedCaseIdentity.Missing: gaps.push("planned case id missing (run has no frozen plan entry for this case)")
+        case TestPlannedCaseIdentity.Recorded(_): pass
+    match row.attempt:
+        case TestAttemptIdentity.Missing: gaps.push("attempt identity missing (finished event without a matching start)")
+        case TestAttemptIdentity.StreamOrder(_): pass
+    if gaps.len() == 0:
+        return "identity: complete"
+    "identity missing: " + gaps.join("; ")
+
+pub fn render_test_explain_page(page: TestQueryPage) -> text:
+    var lines: [text] = []
+    for row in page.rows:
+        lines.push("attempt " + _attempt_text(row.attempt) + " of " + _key_text(row) + " in run " + row.run_id.value + ": status=" + _status_text(row.status))
+        lines.push("  " + _qualification_reason(row.status))
+        lines.push("  " + _identity_gaps(row))
+        lines.push("  provenance: unverified framework observation, not admitted evidence")
+    for line in _partial_lines(page):
+        lines.push(line)
+    _join(lines)
+
+pub fn render_test_query_error(error: TestQueryError) -> text:
+    val label = match error.kind:
+        case TestQueryErrorKind.InvalidQuery: "invalid query"
+        case TestQueryErrorKind.UnknownRun: "unknown run"
+        case TestQueryErrorKind.StoreUnreadable: "test database unreadable"
+    "error: " + label + ": " + error.detail + "\n"
+
+pub fn test_query_usage_text() -> text:
+    "usage: simple test query <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]\n       simple test explain <path>::<case> [--run <id>]\nexit codes: 0 rows found, 1 no rows, 2 usage error or unreadable/corrupt test database\n"
+
+# Pure outcome: maps a query result to the text to print and the exit decision.
+pub fn render_test_query_outcome(request: TestQueryCliRequest, result: Result<TestQueryPage, TestQueryError>) -> TestQueryCliOutput:
+    match result:
+        case Err(error):
+            val decision = match error.kind:
+                case TestQueryErrorKind.StoreUnreadable: TestQueryExitDecision.StoreUnreadable
+                case _: TestQueryExitDecision.UsageError
+            TestQueryCliOutput(text: render_test_query_error(error), decision: decision)
+        case Ok(page):
+            if page.rows.len() == 0:
+                return TestQueryCliOutput(text: "no rows: no recorded attempts for " + request.query.case_key.path.value + "::" + request.query.case_key.name.value + "\n", decision: TestQueryExitDecision.NoRows)
+            val body = match request.command:
+                case TestQueryCommand.Query: render_test_query_page(page, request.format)
+                case TestQueryCommand.Explain: render_test_explain_page(page)
+            TestQueryCliOutput(text: body, decision: TestQueryExitDecision.RowsFound)
+
+# Opens the TestDB read-only: a missing or corrupt file is a typed error and no
+# cold-start database is created, migrated, saved or sealed.
+pub fn open_test_db_read_only(path: TestDbFilePath) -> Result<RunnerTestDb, TestQueryError>:
+    if not file_exists(path.value):
+        return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "no test database at " + path.value))
+    match load_test_database_extended(path.value):
+        case Some(db): Ok(RunnerTestDb(db: db, current_run_id: ""))
+        case None: Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "cannot parse or verify seal of " + path.value))
+
+pub fn execute_test_query(request: TestQueryCliRequest, path: TestDbFilePath) -> TestQueryCliOutput:
+    match open_test_db_read_only(path):
+        case Err(error): render_test_query_outcome(request, Err(error))
+        case Ok(owner): render_test_query_outcome(request, owner.query_case_attempts(request.query))
+
+pub fn run_test_query_cli(args: [text]) -> TestQueryExitCode:
+    match parse_test_query_args(test_query_subcommand_args(args)):
+        case Err(error):
+            eprint "error: " + error.detail
+            print test_query_usage_text()
+            test_query_exit_code(TestQueryExitDecision.UsageError)
+        case Ok(request):
+            val output = execute_test_query(request, TestDbFilePath(value: "doc/08_tracking/test/test_db.sdn"))
+            print output.text
+            test_query_exit_code(output.decision)

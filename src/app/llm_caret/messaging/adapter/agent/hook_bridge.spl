@@ -1,10 +1,11 @@
 """Provider lifecycle normalization for durably queued hook events."""
 
-use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredHookCorrelation}
 use app.llm_caret.messaging.application.task_service.{TaskState, transition_task}
 use app.llm_caret.messaging.application.message_service.{prepare_message}
 use app.llm_caret.messaging.domain.model.{MessageOrigin}
 use app.llm_caret.messaging.domain.receipt.{MessageReceipt, ReceiptState, ReceiptEvidence}
+use app.llm_caret.observer.observer_log.{observer_record_hook, observer_record_skill, OBSERVER_HOOK_GENERATION}
 
 struct HookBridgeDecision:
     accepted: bool
@@ -65,27 +66,40 @@ fn terminal_hook_state(state: text) -> bool:
 
 fn publish_hook_progress(store: PureSqlMessagingStore, event_id: text, task_id: text,
         room_id: text, agent_id: text, state: text, progress_kind: text, at: i64) -> bool:
-    val room = store.room(room_id)
+    val room = match store.room(room_id):
+        case Ok(found): found
+        case Err(_): return false
     if room.room_id.value == "": return false
     var publish = true
-    for binding in store.agent_bindings():
+    val bindings = match store.agent_bindings():
+        case Ok(found): found
+        case Err(_): return false
+    for binding in bindings:
         if binding.room_id.value == room_id and binding.agent_id.value == agent_id:
             if binding.update_policy == "silent": publish = false
             if binding.update_policy == "final_only" and not terminal_hook_state(state): publish = false
     if not publish: return true
     val body = "Task " + task_id + " " + state
+    val sequence_hint = match store.message_count():
+        case Ok(found): found
+        case Err(_): return false
     val prepared = prepare_message("update-" + event_id, room.workspace_id.value, room_id,
-        store.message_count() + 1, agent_id, agent_id, MessageOrigin.AgentUpdate, body,
+        sequence_hint + 1, agent_id, agent_id, MessageOrigin.AgentUpdate, body,
         "", "", task_id, event_id, 0, at)
     if not prepared.accepted: return false
     store.append_message(prepared.message, "hook-update-" + event_id).ok
 
 fn apply_hook_task_event(store: PureSqlMessagingStore, event_id: text,
         decision: HookBridgeDecision, at: i64) -> bool:
-    val correlation = store.hook_correlation(event_id)
+    val correlation = match store.hook_correlation(event_id):
+        case Ok(found): found
+        case Err(_): return false
     if correlation.event_id == "": return true
     var found = false
-    for task in store.tasks():
+    val stored_tasks = match store.tasks():
+        case Ok(found): found
+        case Err(_): return false
+    for task in stored_tasks:
         if task.task_id == correlation.task_id:
             found = true
             var required_input = ""
@@ -107,8 +121,21 @@ fn apply_hook_task_event(store: PureSqlMessagingStore, event_id: text,
 fn drain_hook_events(store: PureSqlMessagingStore, limit: i64) -> (i64, i64):
     var handled = 0
     var failed = 0
-    for event in store.queued_hook_events(limit):
+    val queued = match store.queued_hook_events(limit):
+        case Ok(found): found
+        case Err(_): return (0, 1)
+    for event in queued:
         val decision = normalize_hook_event(event.provider, event.event_name)
+        # Live receive point: feed the observer log (keyed by the correlated agent).
+        val correlation = match store.hook_correlation(event.event_id):
+            case Ok(found): found
+            case Err(_): StoredHookCorrelation(event_id: "", task_id: "", room_id: "", agent_id: "")
+        if decision.accepted and correlation.event_id != "":
+            observer_record_hook(event.provider, correlation.agent_id, OBSERVER_HOOK_GENERATION, event.event_id, event.received_at, event.event_name)
+        # Codex tool/prompt hooks (PreToolUse, UserPromptSubmit) are not lifecycle
+        # notifications, so the skill signal is recorded independent of acceptance.
+        if correlation.event_id != "":
+            observer_record_skill(event.provider, correlation.agent_id, event.event_name, event.payload, event.event_id)
         if decision.accepted and apply_hook_task_event(store, event.event_id, decision, event.received_at):
             store.append_audit("agent_hook_" + decision.progress_kind, event.provider,
                 event.event_id, "state=" + decision.lifecycle_state, event.received_at)

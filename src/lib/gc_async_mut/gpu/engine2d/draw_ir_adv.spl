@@ -641,6 +641,12 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
     if radius > 0 and uniform and _engine2d_draw_ir_has_visible_alpha(top_c):
         eng.draw_rounded_rect_outline(x, y, w, h, radius, top_c, top_w)
         return eng
+    val tl = top_w > 0 and left_w > 0 and top_c != left_c
+    val tr = top_w > 0 and right_w > 0 and top_c != right_c
+    val bl = bottom_w > 0 and left_w > 0 and bottom_c != left_c
+    val br = bottom_w > 0 and right_w > 0 and bottom_c != right_c
+    if tl or tr or bl or br:
+        return _engine2d_draw_ir_render_borders_mitred(eng, x, y, w, h, left_w, top_w, right_w, bottom_w, left_c, top_c, right_c, bottom_c)
     if top_w > 0 and _engine2d_draw_ir_has_visible_alpha(top_c):
         eng.draw_rect_filled(x, y, w, top_w, top_c)
     if bottom_w > 0 and _engine2d_draw_ir_has_visible_alpha(bottom_c):
@@ -649,6 +655,86 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
         eng.draw_rect_filled(x, y, left_w, h, left_c)
     if right_w > 0 and _engine2d_draw_ir_has_visible_alpha(right_c):
         eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
+    eng
+
+# Adjacent sides of different colours (`transparent` included) meet on the
+# diagonal from the outer to the inner corner, as Chrome paints them -- a CSS
+# triangle is a triangle. Twin of the framebuffer lane's
+# `_fb_border_sides_mitred` (browser_engine paint_primitives); keep the two in
+# step. A pixel belongs to a side when its centre lies past the diagonal; the
+# pixel the diagonal halves gets half of each side's alpha.
+fn _engine2d_draw_ir_mitre_cut(r: i32, side_w: i32, cross_w: i32) -> i32:
+    val num = (2 * r + 1) * cross_w
+    var c = 0
+    while (2 * c + 1) * side_w <= num:
+        c = c + 1
+    if c > 0 and (2 * c - 1) * side_w == num:
+        return c * 2 + 1
+    c * 2
+
+# 50/50 mix of the two sides on the diagonal pixel, painted once; an
+# invisible (alpha 0) side contributes nothing. Premultiplied average.
+fn _engine2d_draw_ir_mitre_mix(ca: u32, cb: u32) -> u32:
+    var r: u32 = 0u32
+    var g: u32 = 0u32
+    var b: u32 = 0u32
+    var a_sum: u32 = 0u32
+    for c in [ca, cb]:
+        val a = (c >> 24) & 0xFFu32
+        r = r + ((c >> 16) & 0xFFu32) * a
+        g = g + ((c >> 8) & 0xFFu32) * a
+        b = b + (c & 0xFFu32) * a
+        a_sum = a_sum + a
+    if a_sum == 0u32:
+        return 0u32
+    ((a_sum / 2u32) << 24) | ((r / a_sum) << 16) | ((g / a_sum) << 8) | (b / a_sum)
+
+fn _engine2d_draw_ir_render_borders_mitred(engine: Engine2D, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32) -> Engine2D:
+    var eng = engine
+    for side in [0, 1]:
+        val thick = if side == 0: bt else: bb
+        val c = if side == 0: ct else: cb
+        val visible = _engine2d_draw_ir_has_visible_alpha(c)
+        var r = 0
+        while r < thick:
+            val py = if side == 0: y + r else: y + h - 1 - r
+            var l_full = 0
+            var r_full = 0
+            if bl > 0 and cl != c:
+                val cut = _engine2d_draw_ir_mitre_cut(r, thick, bl)
+                l_full = cut / 2
+                if cut % 2 == 1:
+                    if _engine2d_draw_ir_has_visible_alpha(c) or _engine2d_draw_ir_has_visible_alpha(cl):
+                        eng.draw_rect_filled(x + l_full - 1, py, 1, 1, _engine2d_draw_ir_mitre_mix(c, cl))
+            if br > 0 and cr != c:
+                val cut = _engine2d_draw_ir_mitre_cut(r, thick, br)
+                r_full = cut / 2
+                if cut % 2 == 1:
+                    if _engine2d_draw_ir_has_visible_alpha(c) or _engine2d_draw_ir_has_visible_alpha(cr):
+                        eng.draw_rect_filled(x + w - r_full, py, 1, 1, _engine2d_draw_ir_mitre_mix(c, cr))
+            if visible and w - l_full - r_full > 0:
+                eng.draw_rect_filled(x + l_full, py, w - l_full - r_full, 1, c)
+            r = r + 1
+    for side in [0, 1]:
+        val thick = if side == 0: bl else: br
+        val c = if side == 0: cl else: cr
+        if thick > 0 and _engine2d_draw_ir_has_visible_alpha(c):
+            val px0 = if side == 0: x else: x + w - thick
+            if h - bt - bb > 0:
+                eng.draw_rect_filled(px0, y + bt, thick, h - bt - bb, c)
+            for end in [0, 1]:
+                val cross = if end == 0: bt else: bb
+                val cc = if end == 0: ct else: cb
+                if cross > 0 and cc != c:
+                    var r = 0
+                    while r < cross:
+                        val cut = _engine2d_draw_ir_mitre_cut(r, cross, thick)
+                        val own = cut / 2 - cut % 2
+                        if own > 0:
+                            val py = if end == 0: y + r else: y + h - 1 - r
+                            val ox = if side == 0: x else: x + w - own
+                            eng.draw_rect_filled(ox, py, own, 1, c)
+                        r = r + 1
     eng
 
 fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32, radius: i32, fb_w: i32, fb_h: i32) -> Engine2dDrawIrGlassOutcome:
@@ -2137,8 +2223,16 @@ fn _engine2d_draw_ir_select_damage_indexed(
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # Engine2D is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
+# Draw IR text follows Chrome's default text antialiasing: LCD subpixel for
+# text <= 48 device px on CPU-composited backends (owner decision 2026-11-16:
+# match Chrome's LCD text rather than disable it there).
+# SIMPLE_WEB_LCD_TEXT=0 selects grayscale, for A/B comparison.
+fn engine2d_draw_ir_lcd_text_enabled() -> bool:
+    (env_get("SIMPLE_WEB_LCD_TEXT") ?? "") != "0"
+
 fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2dDrawIrCommandPlan, offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, prove_occlusion: bool = true) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
+    eng.set_lcd_text(engine2d_draw_ir_lcd_text_enabled())
     # Surface dimensions read ONCE at loop entry and threaded down to the
     # glass-material bounds check; deep re-reads of eng.width()/height()
     # returned corrupted values on the freestanding lane (see

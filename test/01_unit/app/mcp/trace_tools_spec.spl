@@ -1,0 +1,141 @@
+# Purpose and audience: pins the read-only `simple_trace` and `simple_test_query`
+# MCP tool contracts for MCP facade authors and evidence reviewers.
+# @req REQ-TRC-021 TESTDB-001 TESTDB-004
+use std.spec.*
+use app.mcp.main_lazy_trace_tools.{TraceToolBody, TraceToolErrorKind, TraceToolSnapshot, TraceToolFormat, TraceToolStatus, trace_tool_parse_request, trace_tool_cli_args, trace_tool_run, trace_tool_outcome, trace_tool_shape_result, test_query_tool_parse_request, test_query_shape_result, test_query_error_text}
+use app.mcp.main_dispatch.{dispatch_tool}
+use std.common.traceability.profile_v1.{TraceProfile}
+use std.common.traceability.test_query.{TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseIdentity, TestAttemptIdentity, TestAttemptOrdinal, TestQueryStatus, TestQualification, TestEvidenceProvenance, TestQueryRow, TestQueryPage, TestQueryTruncation, TestQueryCursor, TestQueryCoverage, TestQueryError, TestQueryErrorKind}
+
+"""
+# MCP traceability tools
+
+Purpose: an agent calling `simple_trace` or `simple_test_query` gets validated
+arguments, a rendered result and an explicit status: an unknown profile or a
+missing argument is a tool error, an incomplete snapshot is `incomplete` with
+exit 2 (never an empty success), and a skipped or unknown test status is never
+reported as a pass. Audience: MCP facade authors and reviewers of trace
+evidence. Pure parsing and shaping are exercised without a server.
+"""
+
+fn _body(args: text) -> TraceToolBody:
+    TraceToolBody(value: "{\"arguments\":{" + args + "}}")
+
+fn _row(status: TestQueryStatus, qualification: TestQualification) -> TestQueryRow:
+    TestQueryRow(case_key: TestCaseKey(path: TestCasePath(value: "t/a_spec.spl"), name: TestCaseName(value: "adds")),
+        run_id: TestRunId(value: "run-7"), planned_case: TestPlannedCaseIdentity.Missing,
+        attempt: TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: 0)),
+        status: status, qualification: qualification, provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
+
+describe "simple_trace argument parsing":
+    it "accepts a known profile and defaults snapshot, format and limit":
+        step("parse a minimal request")
+        # @req REQ-TRC-021
+        val parsed = trace_tool_parse_request(_body("\"profile\":\"commit\""))
+        expect(parsed.is_ok()).to_equal(true)
+        val request = parsed.unwrap()
+        expect(request.profile == TraceProfile.Commit).to_equal(true)
+        expect(request.limit.value).to_equal(100)
+        expect(request.snapshot == TraceToolSnapshot.Worktree).to_equal(true)
+        expect(request.format == TraceToolFormat.Table).to_equal(true)
+
+    it "rejects an unknown profile with a clear message":
+        step("parse profile bogus")
+        # @req REQ-TRC-021
+        val parsed = trace_tool_parse_request(_body("\"profile\":\"bogus\""))
+        expect(parsed.is_err()).to_equal(true)
+        val error = parsed.unwrap_err()
+        expect(error.kind == TraceToolErrorKind.UnknownProfile).to_equal(true)
+        expect(error.message.contains("Unknown profile: bogus")).to_equal(true)
+
+    it "rejects a missing profile, a bad operation and an out-of-range limit":
+        step("missing profile")
+        # @req REQ-TRC-021
+        expect(trace_tool_parse_request(_body("\"limit\":5")).unwrap_err().kind == TraceToolErrorKind.MissingArgument).to_equal(true)
+        step("unsupported operation")
+        expect(trace_tool_parse_request(_body("\"profile\":\"push\",\"operation\":\"explain\"")).unwrap_err().kind == TraceToolErrorKind.UnsupportedOperation).to_equal(true)
+        step("limit above the cap")
+        expect(trace_tool_parse_request(_body("\"profile\":\"push\",\"limit\":999")).unwrap_err().kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
+
+    it "builds the trace missing argument vector from a git snapshot":
+        step("parse git snapshot request")
+        # @req REQ-TRC-021
+        val request = trace_tool_parse_request(_body("\"profile\":\"audit\",\"snapshot\":\"git:abc123\",\"format\":\"sdn\",\"limit\":7")).unwrap()
+        val args = trace_tool_cli_args(request)
+        expect(args.join(" ")).to_equal("missing --snapshot=git:abc123 --format=sdn --limit=7")
+
+describe "simple_trace result shaping":
+    it "reports an incomplete snapshot as incomplete with exit 2":
+        step("shape an incomplete outcome")
+        # @req REQ-TRC-021
+        val outcome = trace_tool_outcome(TraceProfile.Push, TraceToolStatus.Incomplete, "TRACE-SNAPSHOT-INCOMPLETE")
+        expect(outcome.status == TraceToolStatus.Incomplete).to_equal(true)
+        expect(outcome.exit_code.value).to_equal(2)
+        val text = trace_tool_shape_result(outcome)
+        expect(text.contains("status: incomplete")).to_equal(true)
+        expect(text.contains("exit_code: 2")).to_equal(true)
+        expect(text.contains("profile: push")).to_equal(true)
+
+    it "reports a complete graph as complete with exit 0":
+        step("shape a complete outcome")
+        # @req REQ-TRC-021
+        val outcome = trace_tool_outcome(TraceProfile.Worktree, TraceToolStatus.Complete, "ID IMPLEMENTATION")
+        expect(outcome.exit_code.value).to_equal(0)
+        expect(trace_tool_shape_result(outcome).contains("status: complete")).to_equal(true)
+
+describe "simple_test_query":
+    it "parses an exact case query with optional run and paging":
+        step("parse a full request")
+        # @req TESTDB-001
+        val request = test_query_tool_parse_request(_body("\"path\":\"t/a_spec.spl\",\"name\":\"adds\",\"run_id\":\"run-7\",\"limit\":5,\"cursor\":\"tq1:abc:10\"")).unwrap()
+        expect(request.query.case_key.path.value).to_equal("t/a_spec.spl")
+        expect(request.query.limit.value).to_equal(5)
+        expect(request.query.run_id.?).to_equal(true)
+        expect(request.query.cursor.?).to_equal(true)
+
+    it "rejects a missing name and an oversized limit":
+        step("missing name")
+        # @req TESTDB-001
+        expect(test_query_tool_parse_request(_body("\"path\":\"t/a_spec.spl\"")).unwrap_err().kind == TraceToolErrorKind.MissingArgument).to_equal(true)
+        step("limit 5000")
+        expect(test_query_tool_parse_request(_body("\"path\":\"p\",\"name\":\"n\",\"limit\":5000")).unwrap_err().kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
+
+    it "never reports a skipped or unknown status as a pass":
+        step("shape a page with passed, skipped and unknown rows")
+        # @req TESTDB-004
+        val rows = [_row(TestQueryStatus.Passed, TestQualification.Pass),
+            _row(TestQueryStatus.Skipped, TestQualification.NotPass),
+            _row(TestQueryStatus.Unknown(raw: "weird"), TestQualification.NotPass)]
+        val page = TestQueryPage(rows: rows, truncation: TestQueryTruncation.Truncated(next: TestQueryCursor(token: "tq1:abc:3")), coverage: TestQueryCoverage.Partial)
+        val text = test_query_shape_result(page)
+        expect(text.contains("coverage: partial")).to_equal(true)
+        expect(text.contains("truncated next_cursor=tq1:abc:3")).to_equal(true)
+        expect(text.contains("skipped\tnot_pass")).to_equal(true)
+        expect(text.contains("unknown:weird\tnot_pass")).to_equal(true)
+        expect(text.contains("passed\tpass")).to_equal(true)
+
+    it "renders a store error as a typed message":
+        step("format an unreadable store error")
+        # @req TESTDB-004
+        val error = TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "test database not found")
+        expect(test_query_error_text(error)).to_equal("test query store_unreadable: test database not found")
+
+describe "dispatch registration":
+    it "routes both tools and returns a tool error for bad arguments":
+        step("call simple_trace without a profile")
+        # @req REQ-TRC-021
+        val trace_reply = dispatch_tool("1", "simple_trace", "{\"arguments\":{}}")
+        expect(trace_reply.contains("Missing required parameter: profile")).to_equal(true)
+        step("call simple_test_query without a name")
+        val query_reply = dispatch_tool("2", "simple_test_query", "{\"arguments\":{\"path\":\"x\"}}")
+        expect(query_reply.contains("Missing required parameter: name")).to_equal(true)
+
+describe "simple_trace against an unbuildable snapshot":
+    it "reports a nonexistent git revision as incomplete, never an empty success":
+        step("run trace missing over a revision that does not exist")
+        # @req REQ-TRC-021
+        val request = trace_tool_parse_request(_body("\"profile\":\"ci\",\"snapshot\":\"git:no-such-revision-zzz\"")).unwrap()
+        val outcome = trace_tool_run(request)
+        expect(outcome.status == TraceToolStatus.Incomplete).to_equal(true)
+        expect(outcome.exit_code.value).to_equal(2)
+        expect(outcome.rendered.len() > 0).to_equal(true)

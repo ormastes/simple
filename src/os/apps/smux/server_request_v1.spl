@@ -1,0 +1,124 @@
+use std.sosix.time.sosix_time_now_monotonic_ms as time_now_monotonic_ms
+# Existing disposable legacy client and wire metadata helpers, extracted without
+# changing wire behavior. This module owns no service/domain or credential state.
+use std.io.tcp.TcpStream
+use std.common.string_core.{bytes_to_text, text_to_bytes}
+use os.apps.smux.service.ServiceState
+
+const REQUEST_LIMIT: i64 = 4096
+const CONNECTION_REQUEST_LIMIT_V5: i64 = 2796500
+const REPLY_LIMIT: i64 = 1048576
+
+pub fn smux_server_token_valid_v1(token: text) -> bool:
+    return token != "" and token.len() <= 128 and not token.contains(" ") and not token.contains("\t") and not token.contains("\r") and not token.contains("\n")
+
+pub fn smux_server_endpoint_valid_v1(address: text) -> bool:
+    if not address.starts_with("127.0.0.1:"):
+        return false
+    val parts = address.split(":")
+    if parts.len() != 2:
+        return false
+    val port = parts[1].to_int() ?? 0
+    return port > 0 and port <= 65535
+
+# Pure stop admission; no native handle, signal or process lookup is performed.
+
+pub fn smux_server_stop_reply_v1(snapshot: ServiceState) -> text:
+    var index = 0
+    while index < snapshot.pane_count:
+        val pane = snapshot.get_pane(index)
+        if (pane.owned_terminal_session != nil or pane.helper_cleaned_awaiting_release or
+                pane.terminal_ref != nil):
+            return "smux: stop refused: terminal cleanup or host release pending"
+        index = index + 1
+    # Authenticated dispatch separately checks the configured owner, including
+    # provider CleanupRequired authority that has no pane/reference yet.
+    return "smux: stopping server"
+
+# One complete frame, without its newline. Authentication precedes command
+# dispatch, including stop-server. Neither errors nor logs reveal the token.
+
+pub fn smux_server_decode_reply(wire: [u8]) -> Result<text, text>:
+    var newline: i64 = -1
+    var i: i64 = 0
+    while i < wire.len() and i < 32 and newline < 0:
+        if wire[i] == 10:
+            newline = i
+        i = i + 1
+    if newline < 0:
+        return Err("invalid smux response header")
+    val header = bytes_to_text(wire[0:newline])
+    if not header.starts_with("SMUX/1 "):
+        return Err("invalid smux response header")
+    # to_int() yields 0 (not nil) for non-numeric text, so admit digits explicitly.
+    val length_text = header[7:]
+    if length_text == "" or length_text.len() > 19:
+        return Err("invalid smux response length")
+    for ch in length_text:
+        if ch < "0" or ch > "9":
+            return Err("invalid smux response length")
+    val length = length_text.to_int() ?? -1
+    if length < 0 or length > REPLY_LIMIT:
+        return Err("invalid smux response length")
+    if wire.len() - newline - 1 != length:
+        return Err("incomplete smux response")
+    return Ok(bytes_to_text(wire[newline + 1:]))
+
+# Explicit owner lifetime: EOF or closure of a request socket closes ONLY that
+# socket. Only authenticated stop-server shuts down children and the listener.
+
+pub fn smux_server_request(address: text, token: text, command: text) -> Result<text, text>:
+    smux_server_request_within(address, token, command, 1000)
+
+pub fn smux_server_request_within(address: text, token: text, command: text, reply_ms: i64) -> Result<text, text>:
+    if not smux_server_endpoint_valid_v1(address) or not smux_server_token_valid_v1(token):
+        return Err("invalid smux endpoint or token")
+    if reply_ms < 1000:
+        return Err("invalid smux reply window")
+    val frame = token + " " + command
+    val request_limit = if command.starts_with("runtime-connection-v5 "): CONNECTION_REQUEST_LIMIT_V5 else: REQUEST_LIMIT
+    if text_to_bytes(frame).len() > request_limit or frame.contains("\n") or frame.contains("\r"):
+        return Err("invalid smux request")
+    val connected = TcpStream.connect_timeout(address, 1000)
+    if connected.is_err():
+        return Err("smux owner unavailable")
+    var stream = connected.unwrap()
+    if stream.set_read_timeout(reply_ms).is_err() or stream.set_write_timeout(1000).is_err():
+        val _closed = stream.close()
+        return Err("smux transport timeout unavailable")
+    val deadline = time_now_monotonic_ms() + reply_ms + 4000
+    val request_bytes = text_to_bytes(frame + "\n")
+    var offset: i64 = 0
+    while offset < request_bytes.len() and time_now_monotonic_ms() < deadline:
+        val written = stream.write(request_bytes[offset:])
+        if written.is_err():
+            val _closed = stream.close()
+            return Err("smux request write failed")
+        val count = written.unwrap()
+        if count <= 0:
+            val _closed = stream.close()
+            return Err("smux request write failed")
+        offset = offset + count
+    if offset != request_bytes.len():
+        val _closed = stream.close()
+        return Err("smux request write timeout")
+    var output: [u8] = []
+    while time_now_monotonic_ms() < deadline:
+        val read = stream.read(4096)
+        if read.is_err():
+            val _closed = stream.close()
+            return Err("smux response read failed")
+        if read.is_ok():
+            val chunk = read.unwrap()
+            if chunk.len() == 0:
+                if stream.close().is_err():
+                    return Err("smux response close failed")
+                if output.len() == 0:
+                    return Err("empty smux response")
+                return smux_server_decode_reply(output)
+            output = output + chunk
+            if output.len() > REPLY_LIMIT + 32:
+                val _closed = stream.close()
+                return Err("smux response exceeds limit")
+    val _closed = stream.close()
+    return Err("smux response timeout")

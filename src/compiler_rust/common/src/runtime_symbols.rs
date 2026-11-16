@@ -996,6 +996,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_tcp_connect",
     "rt_io_tcp_connect_timeout",
     "rt_dns_lookup",
+    "rt_dns_lookup_timeout_ms",
     "rt_browser_http_job_start",
     "rt_browser_http_job_start_public_limited",
     "rt_browser_http_job_poll",

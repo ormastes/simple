@@ -1,0 +1,418 @@
+# GPU-compatible DOM Arena Attribute Selection & Bitmask Column
+#
+# Additive companion to `dom_arena_types.spl` (`DomArena`, `DomAttributeArena`,
+# `DomStringTable`). Implements Tier 1+2 bitmask-filtered attribute selection
+# over CSR `(attr_starts, attr_counts)` spans using pure `u32` Pod/SoA storage,
+# plus Tier 3 host-only `DomHostIdSidecar` (`Dict<text, u32>`).
+#
+# Architectural boundary (GPU/CUDA/Vulkan Pod/SoA rule):
+# - `DomAttrBitmaskColumn`, `DomArena`, `DomAttributeArena`, and `DomStringTable`
+#   MUST NEVER contain `Dict`/`HashMap` fields. GPU kernels and DMA transfers
+#   (including `DrawIrV3Command` 52B stride, `CudaLayoutExecutionPort` 13xu32
+#   `.param` records, and `GpuWebBackendStrideProfile` 64B stride / 256B Vulkan
+#   alignment) operate over contiguous 0-based `u32` arrays (`0xffffffff` =
+#   `DOM_NO_ID`), whereas `Dict`/`HashMap` uses CPU heap pointers, dynamic
+#   bucket rehashing, and pointer-chasing chains that diverge across warps.
+# - `Dict<text, u32>` lives strictly on CPU host sidecar structures such as
+#   `DomHostIdSidecar` (`id_to_node`) and `DomIdentityIndex`.
+
+use std.gc_async_mut.gpu.browser_engine.gpu_web.dom.dom_arena_types.{
+    DomArena,
+    DomSpan,
+    DOM_NO_ID,
+    DOM_NO_ID_I64,
+    DOM_NODE_KIND_NONE,
+    dom_arena_node_count,
+    dom_arena_in_range,
+    dom_arena_attribute_span,
+    dom_string_count,
+    dom_string_text
+}
+
+# CSS Selectors Level 4 attribute operator codes (GPU-safe u32 POD discriminants).
+pub val DOM_ATTR_OP_PRESENT: u32 = 0u32
+pub val DOM_ATTR_OP_EXACT: u32 = 1u32
+pub val DOM_ATTR_OP_WORD: u32 = 2u32
+pub val DOM_ATTR_OP_DASH_PREFIX: u32 = 3u32
+pub val DOM_ATTR_OP_PREFIX: u32 = 4u32
+pub val DOM_ATTR_OP_SUFFIX: u32 = 5u32
+pub val DOM_ATTR_OP_SUBSTRING: u32 = 6u32
+
+pub enum DomAttrSelectOp:
+    """CSS Selectors Level 4 attribute matching operator."""
+    Present
+    Exact
+    Word
+    DashPrefix
+    Prefix
+    Suffix
+    Substring
+
+# reason: GPU ABI u32 bitmask/index primitives shared with DomArena SoA columns
+# @allow(primitive_api)
+pub fn dom_attr_select_op_code(op: DomAttrSelectOp) -> u32:
+    """Map `DomAttrSelectOp` to its `u32` GPU ABI discriminant (0..6)."""
+    match op:
+        DomAttrSelectOp.Present: return DOM_ATTR_OP_PRESENT
+        DomAttrSelectOp.Exact: return DOM_ATTR_OP_EXACT
+        DomAttrSelectOp.Word: return DOM_ATTR_OP_WORD
+        DomAttrSelectOp.DashPrefix: return DOM_ATTR_OP_DASH_PREFIX
+        DomAttrSelectOp.Prefix: return DOM_ATTR_OP_PREFIX
+        DomAttrSelectOp.Suffix: return DOM_ATTR_OP_SUFFIX
+        DomAttrSelectOp.Substring: return DOM_ATTR_OP_SUBSTRING
+
+# Lower 16 hot attribute presence bits (aligned with `HNODE_ATTR_*` bits 0..15).
+pub val DOM_ARENA_ATTR_ID_BIT: u32 = 1u32
+pub val DOM_ARENA_ATTR_CLASS_BIT: u32 = 2u32
+pub val DOM_ARENA_ATTR_STYLE_BIT: u32 = 4u32
+pub val DOM_ARENA_ATTR_HIDDEN_BIT: u32 = 8u32
+pub val DOM_ARENA_ATTR_DISABLED_BIT: u32 = 16u32
+pub val DOM_ARENA_ATTR_CHECKED_BIT: u32 = 32u32
+pub val DOM_ARENA_ATTR_SELECTED_BIT: u32 = 64u32
+pub val DOM_ARENA_ATTR_OPEN_BIT: u32 = 128u32
+pub val DOM_ARENA_ATTR_ROLE_BIT: u32 = 256u32
+pub val DOM_ARENA_ATTR_TYPE_BIT: u32 = 512u32
+pub val DOM_ARENA_ATTR_NAME_BIT: u32 = 1024u32
+pub val DOM_ARENA_ATTR_HREF_BIT: u32 = 2048u32
+pub val DOM_ARENA_ATTR_SRC_BIT: u32 = 4096u32
+pub val DOM_ARENA_ATTR_LANG_BIT: u32 = 8192u32
+pub val DOM_ARENA_ATTR_ARIA_BIT: u32 = 16384u32
+pub val DOM_ARENA_ATTR_DATA_BIT: u32 = 32768u32
+
+pub class DomAttrBitmaskColumn:
+    """Flat GPU-compatible SoA attribute presence/Bloom bitmask column.
+
+    One `u32` per `DomArena` node (`masks.len() == node_count`). Zero
+    `Dict`/`HashMap` fields so the column can be uploaded directly to GPU/CUDA
+    or Vulkan storage buffers alongside `DomArena` columns.
+    """
+    masks: [u32]
+    node_count: u32
+
+pub class DomHostIdSidecar:
+    """CPU host-only `id -> node_idx` hash index over a `DomArena`.
+
+    Contains a `Dict<text, u32>` for host O(1) `#id` lookup and is intentionally
+    excluded from GPU-offloaded structs (`DomArena`, `DomAttrBitmaskColumn`).
+    """
+    id_to_node: Dict<text, u32>
+    node_count: u32
+
+# reason: GPU ABI u32 Bloom filter bitmask for DomArena SoA column
+# @allow(primitive_api)
+pub fn dom_arena_attr_bloom_bit(attr_lower: text) -> u32:
+    """Compute single upper-16-bit Bloom filter bit for a lowercase attribute name."""
+    var h: u32 = 5381u32
+    var i = 0
+    val n = attr_lower.byte_len()
+    while i < n:
+        val b = attr_lower.byte_at(i).to_u32()
+        h = ((h << 5) + h + b) & 65535u32
+        i = i + 1
+    val slot = (h ^ (h >> 4)) & 15u32
+    1u32 << (16u32 + slot)
+
+# reason: GPU ABI u32 hot-attribute bitmask matching HNODE_ATTR_* flags
+# @allow(primitive_api)
+pub fn dom_arena_attr_hot_bit(attr_lower: text) -> u32:
+    """Return lower-16 presence bit for hot DOM attributes, or 0u32 if cold."""
+    if attr_lower == "id": return DOM_ARENA_ATTR_ID_BIT
+    if attr_lower == "class": return DOM_ARENA_ATTR_CLASS_BIT
+    if attr_lower == "style": return DOM_ARENA_ATTR_STYLE_BIT
+    if attr_lower == "hidden": return DOM_ARENA_ATTR_HIDDEN_BIT
+    if attr_lower == "disabled": return DOM_ARENA_ATTR_DISABLED_BIT
+    if attr_lower == "checked": return DOM_ARENA_ATTR_CHECKED_BIT
+    if attr_lower == "selected": return DOM_ARENA_ATTR_SELECTED_BIT
+    if attr_lower == "open": return DOM_ARENA_ATTR_OPEN_BIT
+    if attr_lower == "role": return DOM_ARENA_ATTR_ROLE_BIT
+    if attr_lower == "type": return DOM_ARENA_ATTR_TYPE_BIT
+    if attr_lower == "name": return DOM_ARENA_ATTR_NAME_BIT
+    if attr_lower == "href": return DOM_ARENA_ATTR_HREF_BIT
+    if attr_lower == "src": return DOM_ARENA_ATTR_SRC_BIT
+    if attr_lower == "lang": return DOM_ARENA_ATTR_LANG_BIT
+    if attr_lower.starts_with("aria-"): return DOM_ARENA_ATTR_ARIA_BIT
+    if attr_lower.starts_with("data-"): return DOM_ARENA_ATTR_DATA_BIT
+    0u32
+
+# reason: GPU ABI u32 combined presence + Bloom bitmask matching DomArena SoA
+# @allow(primitive_api)
+pub fn dom_arena_attr_mask_bit(attr_lower: text) -> u32:
+    """Return combined hot presence bit + upper-16 Bloom bit for `attr_lower`."""
+    val lower = attr_lower.lower()
+    dom_arena_attr_hot_bit(lower) | dom_arena_attr_bloom_bit(lower)
+
+pub fn dom_build_attr_bitmask_column(arena: DomArena) -> DomAttrBitmaskColumn:
+    """Build flat `DomAttrBitmaskColumn` in one pass over `DomArena` CSR spans.
+
+    Nodes with zero attributes (`#text`, `#document`, `#comment`, plain elements)
+    retain `0u32` and perform zero attribute reads.
+    """
+    val n = dom_arena_node_count(arena)
+    var masks: [u32] = []
+    var i = 0
+    while i < n:
+        masks.push(0u32)
+        i = i + 1
+
+    val total_attrs = arena.attributes.count.to_i64()
+    var ni = 0
+    while ni < n:
+        val span = dom_arena_attribute_span(arena, ni)
+        val count = span.count.to_i64()
+        if count > 0:
+            val start = span.start.to_i64()
+            var mask: u32 = 0u32
+            var ai = 0
+            while ai < count:
+                val slot = start + ai
+                if slot >= 0 and slot < total_attrs:
+                    val attr_name = dom_string_text(
+                        arena.strings, arena.attributes.name_ids[slot].to_i64()
+                    )
+                    if attr_name != "":
+                        mask = mask | dom_arena_attr_mask_bit(attr_name.lower())
+                ai = ai + 1
+            masks[ni] = mask
+        ni = ni + 1
+
+    DomAttrBitmaskColumn(masks: masks, node_count: arena.node_count)
+
+# reason: returns raw DomStringTable index or DOM_NO_ID_I64 sentinel for GPU SoA lookup
+# @allow(primitive_api)
+pub fn dom_arena_find_string_id(arena: DomArena, target: text) -> i64:
+    """Return interned `StringId` equal to `target`, or `DOM_NO_ID_I64` if absent."""
+    val count = dom_string_count(arena.strings)
+    var i = 0
+    while i < count:
+        if dom_string_text(arena.strings, i) == target:
+            return i
+        i = i + 1
+    DOM_NO_ID_I64
+
+fn _dom_arena_matching_name_ids(arena: DomArena, attr_lower: text) -> [i64]:
+    """Collect all interned `StringId`s matching `attr_lower` ASCII case-insensitively."""
+    var ids: [i64] = []
+    if attr_lower == "":
+        return ids
+    val count = dom_string_count(arena.strings)
+    var i = 0
+    while i < count:
+        val s = dom_string_text(arena.strings, i)
+        if s.lower() == attr_lower:
+            ids.push(i)
+        i = i + 1
+    ids
+
+fn _dom_arena_id_in_list(target_id: i64, ids: [i64]) -> bool:
+    var i = 0
+    while i < ids.len():
+        if ids[i] == target_id:
+            return true
+        i = i + 1
+    false
+
+fn _dom_arena_split_ws(value: text) -> [text]:
+    val norm = value.trim().replace("\t", " ").replace("\n", " ").replace("\r", " ")
+    val parts = norm.split(" ")
+    var out: [text] = []
+    var i = 0
+    while i < parts.len():
+        val p = parts[i].trim()
+        if p != "":
+            out.push(p)
+        i = i + 1
+    out
+
+fn _dom_arena_value_matches(
+    actual: text,
+    op: DomAttrSelectOp,
+    target: text,
+    case_insensitive: bool
+) -> bool:
+    val a = if case_insensitive: actual.lower() else: actual
+    val t = if case_insensitive: target.lower() else: target
+    match op:
+        DomAttrSelectOp.Present:
+            return true
+        DomAttrSelectOp.Exact:
+            return a == t
+        DomAttrSelectOp.Word:
+            if t == "" or t.contains(" ") or t.contains("\t") or t.contains("\n") or t.contains("\r"):
+                return false
+            val words = _dom_arena_split_ws(a)
+            var wi = 0
+            while wi < words.len():
+                if words[wi] == t:
+                    return true
+                wi = wi + 1
+            return false
+        DomAttrSelectOp.DashPrefix:
+            return a == t or a.starts_with(t + "-")
+        DomAttrSelectOp.Prefix:
+            return t != "" and a.starts_with(t)
+        DomAttrSelectOp.Suffix:
+            return t != "" and a.ends_with(t)
+        DomAttrSelectOp.Substring:
+            return t != "" and a.contains(t)
+
+fn _dom_arena_node_matches_precomputed(
+    arena: DomArena,
+    col: DomAttrBitmaskColumn,
+    node_idx: i64,
+    need_mask: u32,
+    name_ids: [i64],
+    op: DomAttrSelectOp,
+    target_value: text,
+    exact_val_id: i64,
+    use_exact_id: bool,
+    case_insensitive: bool
+) -> bool:
+    """Three-stage check: Stage 1 bitmask reject -> Stage 3 CSR span scan."""
+    if not dom_arena_in_range(arena, node_idx):
+        return false
+    if node_idx >= col.masks.len():
+        return false
+    if need_mask == 0u32 or (col.masks[node_idx] & need_mask) != need_mask:
+        return false
+    if name_ids.len() == 0:
+        return false
+
+    val span = dom_arena_attribute_span(arena, node_idx)
+    val count = span.count.to_i64()
+    if count <= 0:
+        return false
+    val start = span.start.to_i64()
+    val total_attrs = arena.attributes.count.to_i64()
+
+    var ai = 0
+    while ai < count:
+        val slot = start + ai
+        if slot >= 0 and slot < total_attrs:
+            val slot_name_id = arena.attributes.name_ids[slot].to_i64()
+            if _dom_arena_id_in_list(slot_name_id, name_ids):
+                val op_code = dom_attr_select_op_code(op)
+                if op_code == DOM_ATTR_OP_PRESENT:
+                    return true
+                val slot_val_id = arena.attributes.value_ids[slot].to_i64()
+                if use_exact_id:
+                    if slot_val_id == exact_val_id:
+                        return true
+                else:
+                    val actual = dom_string_text(arena.strings, slot_val_id)
+                    if _dom_arena_value_matches(actual, op, target_value, case_insensitive):
+                        return true
+        ai = ai + 1
+    false
+
+pub fn dom_arena_node_matches_attr(
+    arena: DomArena,
+    col: DomAttrBitmaskColumn,
+    node_idx: i64,
+    attr_name: text,
+    op: DomAttrSelectOp,
+    value: text,
+    case_insensitive: bool = false
+) -> bool:
+    """Evaluate a CSS attribute predicate against a single `DomArena` node.
+
+    Stage 1 rejects nodes lacking hot/Bloom bits in `col.masks[node_idx]`
+    with one bitwise `&`; Stage 3 scans the node's bounded CSR attribute span,
+    comparing interned `u32` `StringId`s directly for `Present` and
+    case-sensitive `Exact`.
+    """
+    val attr_lower = attr_name.trim().lower()
+    if attr_lower == "":
+        return false
+    if not dom_arena_in_range(arena, node_idx) or node_idx >= col.masks.len():
+        return false
+    val need_mask = dom_arena_attr_mask_bit(attr_lower)
+    if (col.masks[node_idx] & need_mask) != need_mask:
+        return false
+    val name_ids = _dom_arena_matching_name_ids(arena, attr_lower)
+    if name_ids.len() == 0:
+        return false
+    val use_exact_id = dom_attr_select_op_code(op) == DOM_ATTR_OP_EXACT and not case_insensitive
+    val exact_val_id = if use_exact_id: dom_arena_find_string_id(arena, value) else: DOM_NO_ID_I64
+    if use_exact_id and exact_val_id == DOM_NO_ID_I64:
+        return false
+    _dom_arena_node_matches_precomputed(
+        arena, col, node_idx, need_mask, name_ids, op, value, exact_val_id, use_exact_id, case_insensitive
+    )
+
+pub fn dom_arena_select_attr(
+    arena: DomArena,
+    col: DomAttrBitmaskColumn,
+    attr_name: text,
+    op: DomAttrSelectOp,
+    value: text,
+    case_insensitive: bool = false
+) -> [u32]:
+    """Select all 0-based `DomArena` node indices matching an attribute predicate.
+
+    Precomputes bitmask filter and interned `StringId`s once per query, skips
+    non-matching nodes via single bitwise `&` against `col.masks`, and scans
+    CSR attribute spans only on surviving candidates.
+    """
+    var matches: [u32] = []
+    val attr_lower = attr_name.trim().lower()
+    if attr_lower == "":
+        return matches
+    val name_ids = _dom_arena_matching_name_ids(arena, attr_lower)
+    if name_ids.len() == 0:
+        return matches
+    val use_exact_id = dom_attr_select_op_code(op) == DOM_ATTR_OP_EXACT and not case_insensitive
+    val exact_val_id = if use_exact_id: dom_arena_find_string_id(arena, value) else: DOM_NO_ID_I64
+    if use_exact_id and exact_val_id == DOM_NO_ID_I64:
+        return matches
+    val need_mask = dom_arena_attr_mask_bit(attr_lower)
+    val n = dom_arena_node_count(arena)
+    val mask_len = col.masks.len()
+    val limit = if n < mask_len: n else: mask_len
+    var ni = 0
+    while ni < limit:
+        if (col.masks[ni] & need_mask) == need_mask:
+            if _dom_arena_node_matches_precomputed(
+                arena, col, ni, need_mask, name_ids, op, value, exact_val_id, use_exact_id, case_insensitive
+            ):
+                matches.push(ni.to_u32())
+        ni = ni + 1
+    matches
+
+pub fn dom_build_host_id_sidecar(arena: DomArena) -> DomHostIdSidecar:
+    """Build CPU host-only `id -> node_idx` `Dict` sidecar over `DomArena`."""
+    var id_to_node: Dict<text, u32> = {}
+    val id_name_ids = _dom_arena_matching_name_ids(arena, "id")
+    if id_name_ids.len() == 0:
+        return DomHostIdSidecar(id_to_node: id_to_node, node_count: arena.node_count)
+    val n = dom_arena_node_count(arena)
+    val total_attrs = arena.attributes.count.to_i64()
+    var ni = 0
+    while ni < n:
+        val span = dom_arena_attribute_span(arena, ni)
+        val count = span.count.to_i64()
+        if count > 0:
+            val start = span.start.to_i64()
+            var ai = 0
+            while ai < count:
+                val slot = start + ai
+                if slot >= 0 and slot < total_attrs:
+                    val slot_name_id = arena.attributes.name_ids[slot].to_i64()
+                    if _dom_arena_id_in_list(slot_name_id, id_name_ids):
+                        val id_val = dom_string_text(
+                            arena.strings, arena.attributes.value_ids[slot].to_i64()
+                        )
+                        if id_val != "" and not id_to_node.contains_key(id_val):
+                            id_to_node[id_val] = ni.to_u32()
+                ai = ai + 1
+        ni = ni + 1
+    DomHostIdSidecar(id_to_node: id_to_node, node_count: arena.node_count)
+
+# reason: GPU ABI u32 node index / DOM_NO_ID sentinel from host hash sidecar
+# @allow(primitive_api)
+pub fn dom_host_sidecar_find_id(sidecar: DomHostIdSidecar, id_value: text) -> u32:
+    """Look up first `DomArena` node index with `id == id_value`, or `DOM_NO_ID`."""
+    if id_value == "":
+        return DOM_NO_ID
+    if sidecar.id_to_node.contains_key(id_value):
+        return sidecar.id_to_node[id_value]
+    DOM_NO_ID

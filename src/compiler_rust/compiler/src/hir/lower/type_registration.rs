@@ -17,6 +17,24 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    fn record_field_declarations(&mut self, type_id: TypeId, owner: String, fields: &[ast::Field]) {
+        let declared = fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        match self.struct_field_declared_types.get(&type_id) {
+            Some(None) => return,
+            Some(Some((previous_owner, _))) if previous_owner != &owner => {
+                self.struct_field_declared_types.insert(type_id, None);
+                return;
+            }
+            _ => {}
+        }
+        self.struct_field_declared_types.insert(type_id, Some((owner, declared)));
+    }
+
+    fn field_declaration_owner<'a>(&self, attrs: impl IntoIterator<Item = &'a str>) -> String {
+        Self::flatten_owner_of(attrs)
+            .or_else(|| self.current_file.as_ref().map(|p| crate::interpreter::normalize_path_key(p).to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "<local-module>".to_string())
+    }
     fn register_named_struct_preserving_distinct_layout(&mut self, name: String, hir_type: HirType) -> TypeId {
         let HirType::Struct { fields: new_fields, .. } = &hir_type else {
             return self.module.types.update_named(name, hir_type);
@@ -58,17 +76,6 @@ impl Lowerer {
             .collect();
         if !defaults.is_empty() {
             self.struct_field_defaults.insert(c.name.clone(), defaults);
-        }
-        let type_names: std::collections::HashMap<String, String> = c
-            .fields
-            .iter()
-            .filter_map(|f| match &f.ty {
-                ast::Type::Simple(n) => Some((f.name.clone(), n.clone())),
-                _ => None,
-            })
-            .collect();
-        if !type_names.is_empty() {
-            self.struct_field_type_names.insert(c.name.clone(), type_names);
         }
 
         // F1/S3 — carry the declaration KIND the parser knew into HIR. `class`
@@ -121,6 +128,9 @@ impl Lowerer {
                 type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
             },
         );
+        let owner = self.field_declaration_owner(c.attributes.iter().map(|a| a.name.as_str())
+            .chain(c.methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str()))));
+        self.record_field_declarations(type_id, owner, &c.fields);
         if let Some(canonical_key) = self.global_struct_key_for_name(&c.name) {
             if canonical_key != c.name {
                 self.module.types.register_alias(canonical_key, type_id);
@@ -193,17 +203,6 @@ impl Lowerer {
         if !defaults.is_empty() {
             self.struct_field_defaults.insert(s.name.clone(), defaults);
         }
-        let type_names: std::collections::HashMap<String, String> = s
-            .fields
-            .iter()
-            .filter_map(|f| match &f.ty {
-                ast::Type::Simple(n) => Some((f.name.clone(), n.clone())),
-                _ => None,
-            })
-            .collect();
-        if !type_names.is_empty() {
-            self.struct_field_type_names.insert(s.name.clone(), type_names);
-        }
 
         let mut fields = Vec::new();
         for field in &s.fields {
@@ -227,6 +226,9 @@ impl Lowerer {
         };
 
         let type_id = self.register_named_struct_preserving_distinct_layout(s.name.clone(), hir_type);
+        let owner = self.field_declaration_owner(s.attributes.iter().map(|a| a.name.as_str())
+            .chain(s.methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str()))));
+        self.record_field_declarations(type_id, owner, &s.fields);
         if let Some(canonical_key) = self.global_struct_key_for_name(&s.name) {
             if canonical_key != s.name {
                 self.module.types.register_alias(canonical_key, type_id);
@@ -459,6 +461,52 @@ impl Lowerer {
         let type_id = self.module.types.register_named(m.name.clone(), hir_type);
 
         Ok(type_id)
+    }
+
+    /// Erase a one-field record unit (`unit Name: T`) to its scalar `T` for
+    /// native/JIT lowering. The name becomes an alias of `T`, so operators and
+    /// parameter passing run on the scalar; see `lower_record_unit_ctor` and the
+    /// `.value` identity in field access. Non-scalar bases are left to the
+    /// existing (interpreter) path.
+    pub(crate) fn register_record_unit_scalar(&mut self, u: &ast::UnitDef) {
+        if u.base_types.len() != 1 {
+            return;
+        }
+        let Ok(base) = self.resolve_type(&u.base_types[0]) else {
+            return;
+        };
+        if !Self::is_scalar_type(self.module.types.get(base)) {
+            return;
+        }
+        self.module.types.register_alias(u.name.clone(), base);
+        self.record_unit_scalars.insert(u.name.clone(), base);
+    }
+
+    pub(crate) fn is_scalar_type(ty: Option<&HirType>) -> bool {
+        matches!(
+            ty,
+            Some(HirType::Bool | HirType::Char | HirType::Int { .. } | HirType::Float { .. } | HirType::String)
+        )
+    }
+
+    /// `Name(v)` / `Name(value: v)` for an erased record unit lowers to `v`.
+    pub(crate) fn lower_record_unit_ctor(
+        &mut self,
+        name: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        let Some(&base) = self.record_unit_scalars.get(name) else {
+            return Ok(None);
+        };
+        if args.len() != 1 || args[0].name.as_deref().is_some_and(|n| n != "value") {
+            return Ok(None);
+        }
+        let mut inner = self.lower_expr(&args[0].value, ctx)?;
+        if inner.ty == TypeId::ANY {
+            inner.ty = base;
+        }
+        Ok(Some(inner))
     }
 
     /// Register a type alias, with optional refinement predicate (CTR-020)

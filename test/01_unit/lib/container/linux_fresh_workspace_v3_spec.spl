@@ -1,0 +1,229 @@
+# AUTHORED_NOT_RUN. Production DATA validators only, never synthetic native
+# custody, a token factory, an actual map observation, or AgentReady evidence.
+# @req REQ-LINUX-WORKSPACE-NATIVE-001
+# @req REQ-LINUX-WORKSPACE-NATIVE-002
+# @req REQ-LINUX-WORKSPACE-NATIVE-003
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.agent_executable_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v2.*
+use std.common.contracts.container.linux_workspace_profile_v1.*
+use std.common.contracts.container.linux_fresh_workspace_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workspace_inspect_v3.*
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.linux_fresh_workload_inspect_text_v2
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.common.contracts.container.execution_v2.*
+use std.nogc_sync_mut.io.linux_fresh_workspace_launch_v3.linux_fresh_workspace_argv_v3
+use std.nogc_sync_mut.io.linux_fresh_workspace_primary_read_v3.linux_fresh_primary_hash_step_v3
+use std.nogc_sync_mut.io.linux_fresh_workload_process_facts_v3.{linux_fresh_workspace_keep_id_validate_v3, linux_fresh_workspace_mountinfo_validate_v3}
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.sdn.value.SdnValue
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.text_to_utf8_bytes
+use std.common.json.value.*
+
+fn workspace_policy_data_v3() -> LinuxWorkspaceInstalledProfileV1:
+    LinuxWorkspaceInstalledProfileV1(machine_policy_digest: "a".repeat(64), provider_policy_digest: "b".repeat(64),
+        containment_profile_digest: "c".repeat(64), protected_parent: "/srv/workspaces", leaf_name: "slot_1",
+        expected_pool_id: "xfs:1:2:3:4", expected_workspace_id: "inode:1:2:3:20001", quota_id: 17,
+        hard_bytes: 1073741824, guest_root: "/workspace", read_only: false)
+
+fn workspace_executable_data_v3() -> AgentExecutableProfileV1:
+    AgentExecutableProfileV1(architecture: "linux-x86_64", image_size_bytes: 290069784, max_image_bytes: 536870912,
+        bootstrap_memory_bytes: 400000000, agent_memory_bytes: 512000000)
+
+fn workspace_agent_data_v3() -> LinuxAgentWorkspaceProfileV1:
+    LinuxAgentWorkspaceProfileV1(machine_policy_digest: "a".repeat(64),
+        workspace_profile_digest: sha256_text(linux_workspace_installed_profile_encode_v1(workspace_policy_data_v3()).unwrap()),
+        assets_root: "/srv/approved-assets", repository_ref: "repo_1", revision_oid: "1".repeat(40), object_format: "sha1",
+        source_manifest_digest: "2".repeat(64), bootstrap_digest: "3".repeat(64), git_digest: "4".repeat(64), agent_digest: "5".repeat(64),
+        bootstrap_program: "/opt/simple/bootstrap", image: "registry.example/agent@sha256:" + "6".repeat(64),
+        agent_program: "/usr/bin/codex", image_config_id: "7".repeat(64))
+
+fn workspace_approved_data_v3() -> LinuxAgentWorkspaceProfileV2:
+    val base = workspace_agent_data_v3()
+    val executable = workspace_executable_data_v3()
+    LinuxAgentWorkspaceProfileV2(base: base, bootstrap_profile: "linux-agent-worktree-bootstrap-v1",
+        approved_layout: "reserved-workspace-immutable-assets-v1",
+        approved_layout_digest: linux_agent_workspace_layout_digest_v2(base, executable).unwrap(), executable_profile: executable)
+
+fn workspace_command_data_v3() -> LinuxFreshWorkspaceCommandV3:
+    val policy = workspace_policy_data_v3()
+    val agent = workspace_agent_data_v3()
+    val native = LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1", image: agent.image,
+        bundle_path: "", command: [agent.bootstrap_program], args: ["--invocation-manifest-sha256", "8".repeat(64)],
+        timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1342177280, pid_limit: 128,
+        network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true, working_directory: policy.guest_root,
+        terminal_mode: "tty", user_uid: 20001, user_gid: 20001, user_namespace_mode: "keep-id",
+        containment_profile_digest: policy.containment_profile_digest,
+        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: policy.guest_root, read_only: false)])
+    val scope = ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "9".repeat(64),
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "f".repeat(32), continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid, attempt: native.attempt,
+        operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(), physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    LinuxFreshWorkspaceCommandV3(command: LinuxFreshWorkloadCommandV2(request: ContainerExecutionRequestV2(plan, linux_oci_retained_request_encode_v1(native).unwrap()),
+        scope: scope, action: LinuxFreshWorkloadActionV2.Create, native_id: "", image: native.image, entrypoint: native.command, args: native.args,
+        cpu_millis: native.cpu_limit_millis, memory_bytes: native.memory_limit_bytes, pid_limit: native.pid_limit, timeout_ms: native.timeout_ms,
+        helper_cpu_millis: 500, helper_memory_bytes: 134217728))
+
+fn workspace_epoch_data_v3() -> LinuxFreshEpochProfileV1:
+    LinuxFreshEpochProfileV1(fields: {"graphRoot": SdnValue.String("/srv/provider/graph"), "runRoot": SdnValue.String("/srv/provider/run"),
+        "delegatedCgroup": SdnValue.String("/simple/containers"), "serviceUid": SdnValue.Int(20001), "serviceGid": SdnValue.Int(20001),
+        "subuidStart": SdnValue.Int(100000), "subuidCount": SdnValue.Int(65536), "subgidStart": SdnValue.Int(200000), "subgidCount": SdnValue.Int(65536)})
+
+fn workspace_created_data_v3(command: LinuxFreshWorkspaceCommandV3) -> JsonValue:
+    var value = JsonValue.Object([], [])
+    for key in linux_fresh_workspace_inspect_field_names_v3(): value = json_value_object_set(value, key, JsonValue.Null)
+    val c = command.command
+    val p = c.request.plan
+    for pair in [("id", c.native_id), ("pod_uid", p.workload_uid), ("attempt", str(p.attempt)),
+            ("node_boot_id", container_scope_fence_id_v2(c.scope).unwrap()), ("provider_generation", str(c.scope.provider_generation)),
+            ("operation_id", p.operation_id), ("cgroup", ""), ("status", "created"), ("runtime", "crun"), ("manager", "cgroupfs"),
+            ("cgroup_mode", "private"), ("pid_mode", "private"), ("cgroups", "default"), ("network_mode", "none"), ("userns_mode", "private"),
+            ("image_digest", "sha256:" + "6".repeat(64)), ("image_name", c.image), ("path", "/opt/simple/bootstrap"),
+            ("workdir", "/workspace"), ("configured_user", "20001:20001"), ("cgroup_parent", "/simple/containers")]:
+        value = json_value_object_set(value, pair.0, JsonValue.Str(pair.1))
+    for pair in [("pid", 0), ("effective_caps", 0), ("bounding_caps", 0), ("cpu_period", 100000), ("cpu_quota", 100000),
+            ("memory_bytes", 1342177280), ("memory_swap", 1342177280), ("pids_limit", 128)]:
+        value = json_value_object_set(value, pair.0, JsonValue.Int(pair.1))
+    for pair in [("privileged", false), ("readonly_rootfs", true), ("no_new_privileges", true), ("tty", true), ("open_stdin", true), ("stdin_once", false)]:
+        value = json_value_object_set(value, pair.0, JsonValue.Bool(pair.1))
+    value = json_value_object_set(value, "args", json_value_str_array(["--invocation-manifest-sha256", "8".repeat(64)]))
+    value = json_value_object_set(value, "environment", json_value_str_array(["PATH=/usr/bin", "TERM=xterm"]))
+    value = json_value_object_set(value, "security_options", json_value_str_array(["no-new-privileges"]))
+    value = json_value_object_set(value, "create_command", json_value_str_array(["/usr/bin/podman", "create"]))
+    var mount = JsonValue.Object([], [])
+    for pair in [("Type", "bind"), ("Source", "/srv/workspaces/slot_1"), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+        mount = json_value_object_set(mount, pair.0, JsonValue.Str(pair.1))
+    mount = json_value_object_set(mount, "Options", json_value_str_array(["rbind", "nosuid", "nodev"]))
+    mount = json_value_object_set(mount, "RW", JsonValue.Bool(true))
+    value = json_value_object_set(value, "mounts", JsonValue.Array([mount]))
+    value = json_value_object_set(value, "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate,nosuid,nodev"]))
+    value
+
+describe "Explicit Linux workspace policy and request DATA v3":
+    it "checks exact executable size ISA mechanical ceiling and overflow without granting memory":
+        step("Keep approved policy separate from actual Host/container allocation")
+        val value = workspace_executable_data_v3()
+        expect(agent_executable_profile_minimum_memory_v1(value).unwrap()).to_equal(1202135320)
+        expect(agent_executable_profile_decode_v1(agent_executable_profile_encode_v1(value).unwrap()).unwrap()).to_equal(value)
+        var changed = value
+        changed.max_image_bytes = changed.image_size_bytes - 1
+        expect(agent_executable_profile_encode_v1(changed).is_err()).to_equal(true)
+        changed = value
+        changed.max_image_bytes = 536870913
+        expect(agent_executable_profile_encode_v1(changed).is_err()).to_equal(true)
+        changed = value
+        changed.bootstrap_memory_bytes = 9223372036854775807
+        expect(agent_executable_profile_minimum_memory_v1(changed).unwrap_err()).to_equal("agent-executable-minimum-memory-overflow")
+        changed = value
+        changed.architecture = "linux-riscv64"
+        expect(agent_executable_profile_encode_v1(changed).is_err()).to_equal(true)
+
+    it "preserves strict old V1 bytes while requiring the explicit new approval and compiled budget floor":
+        step("Hash canonical approval policy; do not label it observed qualification")
+        val value = workspace_approved_data_v3()
+        val bytes = linux_agent_workspace_profile_encode_v2(value).unwrap()
+        expect(linux_agent_workspace_profile_decode_v2(bytes).unwrap()).to_equal(value)
+        expect(linux_agent_workspace_profile_decode_v1(bytes).is_err()).to_equal(true)
+        expect(linux_agent_workspace_profile_decode_v2(linux_agent_workspace_profile_encode_v1(value.base).unwrap()).is_err()).to_equal(true)
+        var changed = value
+        changed.executable_profile.image_size_bytes = changed.executable_profile.image_size_bytes + 1
+        expect(linux_agent_workspace_profile_encode_v2(changed).is_err()).to_equal(true)
+        changed = value
+        changed.executable_profile.bootstrap_memory_bytes = 336794368
+        expect(linux_agent_workspace_profile_encode_v2(changed).unwrap_err()).to_equal("agent-profile-v2-bootstrap-memory-floor")
+
+    it "accepts only the installed one-root keep-id TTY bootstrap request and keeps CPU V2 closed":
+        step("Use the real retained request encoder, not a token or native fixture")
+        val value = workspace_command_data_v3()
+        expect(linux_fresh_workspace_command_validate_v3(value, workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001).is_ok()).to_equal(true)
+        expect(linux_fresh_workload_command_validate_v2(value.command).is_err()).to_equal(true)
+        var changed = value
+        changed.command.memory_bytes = changed.command.memory_bytes - 1
+        expect(linux_fresh_workspace_command_validate_v3(changed, workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001).is_err()).to_equal(true)
+        var policy = workspace_policy_data_v3()
+        policy.guest_root = "/usr"
+        expect(linux_fresh_workspace_command_validate_v3(value, policy, workspace_agent_data_v3(), "8".repeat(64), 20001, 20001).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_command_validate_v3(value, workspace_policy_data_v3(), workspace_agent_data_v3(), "9".repeat(64), 20001, 20001).is_err()).to_equal(true)
+
+    it "derives exact one-root writable and interactive CLI flags without raw argv authority":
+        step("Preserve the actual trusted provider root and namespace selection")
+        val value = workspace_command_data_v3()
+        val args = linux_fresh_workspace_argv_v3(workspace_epoch_data_v3(), workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, value).unwrap()
+        for item in ["--tty", "--interactive", "--userns=keep-id", "--user=20001:20001", "--pull=never", "--read-only", "--cap-drop=ALL",
+                "type=bind,src=/srv/workspaces/slot_1,dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate"]:
+            expect(args.contains(item)).to_equal(true)
+        expect(args[args.len() - 2]).to_equal("--invocation-manifest-sha256")
+        expect(args[args.len() - 1]).to_equal("8".repeat(64))
+
+    it "reports actual Podman private mode yet refuses wrong keep-id kernel map DATA":
+        step("A display mode string cannot replace actual original-proc mapping checks")
+        val format = linux_fresh_workspace_inspect_format_v3()
+        expect(format).to_contain("""{{json .HostConfig.UsernsMode}}""")
+        expect(format).to_contain("""{{json .Config.Tty}}""")
+        expect(format.contains("""{{{{""")).to_equal(false)
+        expect(linux_fresh_workspace_inspect_field_names_v3().len()).to_equal(46)
+        val status = "Uid:\t20001\t20001\t20001\t20001\nGid:\t20001\t20001\t20001\t20001\n"
+        val uid = "0 100000 20001\n20001 20001 1\n20002 120001 45535\n"
+        val gid = "0 200000 20001\n20001 20001 1\n20002 220001 45535\n"
+        expect(linux_fresh_workspace_keep_id_validate_v3(status, uid, gid, workspace_epoch_data_v3()).is_ok()).to_equal(true)
+        expect(linux_fresh_workspace_keep_id_validate_v3(status, "0 20001 1\n1 100000 65536\n", gid, workspace_epoch_data_v3()).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_keep_id_validate_v3(status, uid, "0 0 65536\n", workspace_epoch_data_v3()).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_keep_id_validate_v3(status.replace("20001", "20002"), uid, gid, workspace_epoch_data_v3()).is_err()).to_equal(true)
+
+    it "advances only a bounded hash cursor and cannot create AgentObserved from DATA":
+        step("Exercise the exact production cursor arithmetic with an independent SHA vector")
+        val bytes = text_to_utf8_bytes("a".repeat(32))
+        val first = linux_fresh_primary_hash_step_v3(nil, 0, bytes, 64).unwrap()
+        expect(first.offset).to_equal(32)
+        expect(first.digest.is_none()).to_equal(true)
+        val last = linux_fresh_primary_hash_step_v3(first.stream, first.offset, bytes, 64).unwrap()
+        expect(last.offset).to_equal(64)
+        expect(last.digest.unwrap()).to_equal("ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb")
+        expect(linux_fresh_primary_hash_step_v3(nil, 32, bytes, 64).is_err()).to_equal(true)
+        expect(linux_fresh_primary_hash_step_v3(nil, 0, text_to_utf8_bytes("a".repeat(65537)), 100000).is_err()).to_equal(true)
+        expect(linux_fresh_primary_hash_step_v3(nil, 0, bytes, 536870913).is_err()).to_equal(true)
+    it "refuses missing TTY unknown config altered memory and substituted writable mounts before Start":
+        step("Validate complete fixed created output DATA, separately from actual producer provenance")
+        var command = workspace_command_data_v3()
+        command.command.action = LinuxFreshWorkloadActionV2.Inspect
+        command.command.native_id = "3".repeat(64)
+        val original = workspace_created_data_v3(command)
+        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(original)).is_ok()).to_equal(true)
+        for pair in [("tty", JsonValue.Bool(false)), ("open_stdin", JsonValue.Null), ("stdin_once", JsonValue.Bool(true)),
+                ("memory_bytes", JsonValue.Int(1342177281)), ("memory_swap", JsonValue.Int(-1)), ("pid", JsonValue.Int(22)),
+                ("userns_mode", JsonValue.Str("host")), ("mounts", JsonValue.Array([])),
+                ("binds", json_value_str_array(["/srv/workspaces/other:/workspace:rw,rbind,rprivate,nosuid,nodev"]))]:
+            val changed = json_value_object_set(original, pair.0, pair.1)
+            expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(changed)).is_err()).to_equal(true)
+        val unknown = json_value_object_set(original, "unknown", JsonValue.Bool(false))
+        expect(linux_fresh_workspace_inspect_fields_v3(json_value_serialize(unknown)).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_inspect_fields_v3("""{{"tty":true,"tty":true}}""").is_err()).to_equal(true)
+
+    it "requires nosuid and nodev on the writable workspace bind in inspect DATA and the guest mount view":
+        step("A host-backed writable root without nosuid,nodev is refused before Start")
+        var command = workspace_command_data_v3()
+        command.command.action = LinuxFreshWorkloadActionV2.Inspect
+        command.command.native_id = "3".repeat(64)
+        val original = workspace_created_data_v3(command)
+        var mount = JsonValue.Object([], [])
+        for pair in [("Type", "bind"), ("Source", "/srv/workspaces/slot_1"), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+            mount = json_value_object_set(mount, pair.0, JsonValue.Str(pair.1))
+        mount = json_value_object_set(mount, "Options", json_value_str_array(["rbind"]))
+        mount = json_value_object_set(mount, "RW", JsonValue.Bool(true))
+        val no_flags = json_value_object_set(json_value_object_set(original, "mounts", JsonValue.Array([mount])),
+            "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate"]))
+        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(no_flags)).is_err()).to_equal(true)
+        val bind_only_nosuid = json_value_object_set(original, "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate,nosuid"]))
+        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(bind_only_nosuid)).is_err()).to_equal(true)
+        val good = "36 35 98:0 / /workspace rw,nosuid,nodev,relatime shared:1 - xfs /dev/sda1 rw,attr2"
+        expect(linux_fresh_workspace_mountinfo_validate_v3(good, "/workspace", 36).is_ok()).to_equal(true)
+        val suid = "36 35 98:0 / /workspace rw,nodev,relatime shared:1 - xfs /dev/sda1 rw,attr2"
+        expect(linux_fresh_workspace_mountinfo_validate_v3(suid, "/workspace", 36).is_err()).to_equal(true)
+        val dev = "36 35 98:0 / /workspace rw,nosuid,relatime shared:1 - xfs /dev/sda1 rw,attr2"
+        expect(linux_fresh_workspace_mountinfo_validate_v3(dev, "/workspace", 36).is_err()).to_equal(true)

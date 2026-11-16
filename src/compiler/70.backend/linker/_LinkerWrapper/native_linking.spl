@@ -69,7 +69,7 @@ use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
 use compiler.backend.linker.platform_defaults.{elf_emulation}
 use compiler.backend.linker._LinkerWrapper.link_command_record.{record_link_command, link_command_record_path}
-use compiler.backend.runtime_compiler.{find_c_compiler, c_driver_admit_v1, hosted_c_compiler_plan, hosted_cross_c_target_args, windows_link_flavor_for_target}
+use compiler.backend.runtime_compiler.{find_c_compiler, c_driver_admit_v1, hosted_c_compiler_plan, hosted_cross_c_target_args, hosted_mingw_clang_target, windows_link_flavor_for_target}
 
 # Internal ELF engine (lane A7/B3): SIMPLE_LINKER=internal routes here instead
 # of an external linker. Same imports link_engine_external.spl uses for its
@@ -2002,6 +2002,12 @@ fn cc_fallback_extra_flags(extra_flags: [text]) -> [text]:
         if flag == "-rpath" and index + 1 < extra_flags.len():
             result = result.push("-Wl,-rpath," + extra_flags[index + 1])
             index = index + 2
+        elif flag == "--build-id=sha1":
+            result = result.push("-Wl,--build-id=sha1")
+            index = index + 1
+        elif flag == "-z" and index + 1 < extra_flags.len() and extra_flags[index + 1] == "start-stop-gc":
+            result = result.push("-Wl,-z,start-stop-gc")
+            index = index + 2
         else:
             result = result.push(flag)
             index = index + 1
@@ -2439,7 +2445,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     else:
         var args: [text] = []
         if link_os == "windows-mingw":
-            args.push("--target=x86_64-w64-windows-gnu")
+            args.push("--target=" + hosted_mingw_clang_target(target))
         # An explicit SIMPLE_LINKER request wins over this arm's historical
         # default. With neither set, behaviour is byte-identical to before.
         if requested_fuse_ld != "":
@@ -2608,7 +2614,7 @@ fn link_native_windows_with_engine(object_files: [text], output: text, config: N
                 val llvm = with_llvm[with_llvm.len() - 1]
                 if not library_files.contains(llvm): library_files.push(llvm)
         var support_libraries = ["kernel32.lib", "ws2_32.lib", "mswsock.lib", "bcrypt.lib",
-            "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
+            "userenv.lib", "ntdll.lib", "advapi32.lib", "shell32.lib", "ole32.lib", "d3d11.lib", "dxgi.lib"]
         for library in native_all_msvc_support_libraries(support_inputs):
             if not support_libraries.contains(library): support_libraries.push(library)
         # Do not make an unused SDK library an unconditional prerequisite.
@@ -2740,7 +2746,7 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     # CROSS-PLATFORM: this list is inside _link_native_msvc and is reached
     # only on the Windows/MSVC link path; Linux, macOS and mingw are
     # byte-unaffected.
-    val win_libs = ["kernel32.lib", "ws2_32.lib", "mswsock.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
+    val win_libs = ["kernel32.lib", "ws2_32.lib", "mswsock.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "shell32.lib", "ole32.lib", "d3d11.lib", "dxgi.lib"]
     for wlib in win_libs:
         if not msvc_config.libs.contains(wlib):
             msvc_config.libs.push(wlib)

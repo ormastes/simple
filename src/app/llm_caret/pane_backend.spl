@@ -21,7 +21,7 @@ use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_send_text, smux_capture, smux_capture_styled,
     smux_paste_text}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
-use app.io.mod.{env_get, env_set, file_write, file_remove, dir_remove}
+use app.io.mod.{env_get, env_set, file_write, file_remove, dir_remove, process_spawn_async, process_wait}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.package_sffi.{set_permissions}
 
@@ -93,6 +93,26 @@ fn smux_owner_argv(exe: text, interpreter: text, client: text, owner_file: text)
         return Err("smux owner needs a simple interpreter: set SIMPLE_BINARY (running as " + base + ")")
     Ok([interpreter] + tail)
 
+fn powershell_quote_arg(arg: text) -> text:
+    "'" + arg.replace("'", "''") + "'"
+
+# Starts argv hidden in `dir` on Windows so that it keeps running after this
+# call returns and after this process exits. Start-Process (ShellExecute)
+# hands the new process NO handles, so a caller reading this process through
+# a pipe still sees EOF while the started process lives.
+fn start_outliving_process(dir: text, argv: [text]) -> bool:
+    # Start-Process joins -ArgumentList with spaces, so each element is double-quoted.
+    var arglist: [text] = []
+    for a in argv[1:]:
+        arglist.push(powershell_quote_arg("\"" + a + "\""))
+    val start = "Start-Process -WindowStyle Hidden -WorkingDirectory " + powershell_quote_arg(dir) +
+        " -FilePath " + powershell_quote_arg(argv[0]) + " -ArgumentList " + arglist.join(",")
+    # Not process_run*: a natively built caret runs those children in a
+    # kill-on-close job, which would take the started process down as soon as
+    # this PowerShell hop returns. A spawned child is in no job.
+    val hop = process_spawn_async("powershell", ["-NoProfile", "-NonInteractive", "-Command", start])
+    hop > 0 and process_wait(hop, 30000) == 0
+
 # POSIX shell single-quoting: 'it'\''s'.
 fn posix_quote_arg(arg: text) -> text:
     "'" + arg.replace("'", "'\\''") + "'"
@@ -146,6 +166,14 @@ fn posix_pane_launcher_create(cmd: text, args: [text], stderr_path: text) -> tex
         posix_pane_launcher_remove(directory)
         return ""
     directory
+
+# The command line that runs a launcher. The shell READS the script; it is
+# never exec'd directly, because exec of a file that any process still holds
+# open for writing fails with ETXTBSY ("Text file busy") -- observed on every
+# agent launch from the cs dashboard on Linux (2026-11-15).
+fn posix_pane_launcher_line(directory: text) -> text:
+    val shell = (sosix_pty_native_exec_argv("").unwrap_or(["/bin/sh"]))[0]
+    posix_command_line(shell, [directory + "/launch"])
 
 # tmux emits one line per pane. pane_title may contain spaces, so it is LAST and
 # the remaining columns are rejoined into it. `.split(sep, N)` ignores N on this
@@ -343,7 +371,7 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
         launcher_dir = posix_pane_launcher_create(cmd, args, stderr_path)
         if launcher_dir == "":
             return _no_pane(title, "could not create the POSIX pane launcher")
-        line = launcher_dir + "/launch"
+        line = posix_pane_launcher_line(launcher_dir)
     # The ConPTY spawn inherits this process environment (pty_spawn takes no
     # env parameter), and TUIs such as Codex refuse to start when TERM is
     # "dumb" or unset. The POSIX launcher forces TERM=xterm-256color per pane;
@@ -446,6 +474,17 @@ fn pane_send(session: text, pane_id: text, body: text) -> bool:
     if not _tmux_ok(pane_send_literal_argv(pane_id, body)):
         return false
     _tmux_ok(pane_send_enter_argv(pane_id))
+
+# Types `body` into a pane exactly as given: no paste wrapping, no Enter. Used
+# for live terminal passthrough. The smux primitive takes text, so the caller
+# passes the key bytes decoded as UTF-8.
+fn pane_send_raw(session: text, pane_id: text, body: text) -> bool:
+    if session == "" or pane_id == "" or body == "":
+        return false
+    if not _use_tmux():
+        val scope = _smux_scope(session)
+        return smux_send_text(scope.session_id, scope.window_id, pane_id, body).is_ok()
+    _tmux_ok(pane_send_literal_argv(pane_id, body))
 
 # Named keys an agent's own dialogs need (accept, dismiss, move, interrupt),
 # as the bytes a terminal sends and as tmux key names. Unknown name -> "".
@@ -585,9 +624,10 @@ export pane_parse_line, pane_parse_lines
 export pane_list_argv, pane_select_argv, pane_zoom_argv, pane_kill_argv, pane_capture_argv
 export pane_send_literal_argv, pane_send_enter_argv
 export windows_quote_arg, windows_command_line, windows_spawn_command_line, smux_owner_argv
+export start_outliving_process
 export posix_quote_arg, posix_command_line, posix_exec_line
-export posix_pane_launcher_create, posix_pane_launcher_remove
+export posix_pane_launcher_create, posix_pane_launcher_remove, posix_pane_launcher_line
 export pane_backend_name
 export pane_list, pane_select, pane_zoom, pane_spawn, pane_spawn_at, pane_resize
-export pane_kill, pane_send, pane_capture, pane_capture_styled
+export pane_kill, pane_send, pane_send_raw, pane_capture, pane_capture_styled
 export pane_send_key, pane_key_bytes, pane_key_tmux_name

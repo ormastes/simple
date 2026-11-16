@@ -90,17 +90,12 @@ impl Lowerer {
         }
     }
 
-    fn enum_variant_discriminant_for_builtin_method(&self, variant_name: &str) -> i64 {
-        // Step (d), 2026-08-02: delegate to the SINGLE authoritative definition
-        // in the runtime crate. This value is a RUNTIME ABI, not a
-        // compiler-internal convention: `rt_option_some`/`rt_option_none`
-        // (runtime/src/value/objects.rs) build Option values with it, the
-        // bytecode compiler emits it into the instruction stream, and the
-        // interpreter SFFI reads it back. A second copy here that drifted by
-        // one character would desynchronize compiled code from the runtime
-        // silently. See
-        // doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
-        simple_runtime::value::hash_variant_discriminant(variant_name) as i64
+    /// #6953: `variant`'s index in the enum that owns it for a receiver of
+    /// type `owner_ty` (or the enum named `enum_name`). A user enum declaring
+    /// `Ok`/`None` answers its own index; the builtin Result/Option answers its
+    /// fixed ABI value.
+    fn enum_variant_discriminant_for_builtin_method(&self, owner_ty: TypeId, enum_name: Option<&str>, variant_name: &str) -> i64 {
+        self.owner_variant_discriminant(owner_ty, enum_name, variant_name, "hir builtin enum method")
     }
 
     fn build_result_method_projection(
@@ -129,7 +124,7 @@ impl Lowerer {
                         ty: TypeId::I64,
                     },
                     HirExpr {
-                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method(variant)),
+                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method(subject.ty, Some("Result"), variant)),
                         ty: TypeId::I64,
                     },
                 ],
@@ -210,7 +205,7 @@ impl Lowerer {
                 args: vec![
                     HirExpr { kind: HirExprKind::Integer(1), ty: TypeId::I64 },
                     HirExpr {
-                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method("None")),
+                        kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method(TypeId::ANY, Some("Option"), "None")),
                         ty: TypeId::I64,
                     },
                     HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL },
@@ -1039,21 +1034,25 @@ impl Lowerer {
         }))
     }
 
-    /// Declared trait dispatch of `base.field`, when `base` is a local of a
-    /// class/struct whose `field` was authored with a trait type name.
-    pub(super) fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+    /// Recover the authored field type only through the receiver's declared
+    /// struct/class owner. No method-name or same-field-name search is allowed.
+    pub(super) fn receiver_field_declared_type(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<(&str, &ast::Type)> {
         let Expr::Identifier(name) = base else { return None };
         let idx = ctx.lookup(name)?;
         let mut ty = ctx.locals.get(idx)?.ty;
         if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(ty) {
             ty = *inner;
         }
-        let owner = match self.module.types.get(ty)? {
-            HirType::Struct { name, .. } => name.clone(),
-            _ => return None,
-        };
-        let trait_name = self.struct_field_type_names.get(&owner)?.get(field)?;
-        self.trait_declaration_for_current_owner(trait_name)
+        if !matches!(self.module.types.get(ty)?, HirType::Struct { .. }) { return None; }
+        let (owner, fields) = self.struct_field_declared_types.get(&ty)?.as_ref()?;
+        Some((owner.as_str(), fields.get(field)?))
+    }
+
+    /// Direct trait fields may dispatch through their declaration. Optional
+    /// fields deliberately return None: their carrier has Option semantics.
+    pub(super) fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+        let (owner, declared) = self.receiver_field_declared_type(base, field, ctx)?;
+        self.declared_trait_dispatch_in_owner(declared, owner)
     }
 
     /// Resolved callback parameter types for the lambda arguments of a
@@ -2090,7 +2089,7 @@ impl Lowerer {
                                     ty: TypeId::I64,
                                 },
                                 HirExpr {
-                                    kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method("Ok")),
+                                    kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method(receiver.ty, None, "Ok")),
                                     ty: TypeId::I64,
                                 },
                             ],
@@ -2113,7 +2112,7 @@ impl Lowerer {
                                 },
                                 HirExpr {
                                     kind: HirExprKind::Integer(
-                                        self.enum_variant_discriminant_for_builtin_method("Err"),
+                                        self.enum_variant_discriminant_for_builtin_method(receiver.ty, None, "Err"),
                                     ),
                                     ty: TypeId::I64,
                                 },

@@ -126,3 +126,46 @@ Lesson recorded for future lanes: the exclusive-admission gate (no concurrent
 native-build AT LAUNCH) is necessary but NOT sufficient — the runtime guard
 needs the box to STAY quiet for the whole run. Lanes on a shared host must
 serialize their heavy builds or expect reserve-crossed aborts.
+
+## Runtime reserve policy note (2026-11-14): 48 GiB reserve vs shared-host reality
+
+Attempt I #1's abort and ~10 subsequent K-lane attempt deaths (2026-11-13/14)
+were all the runtime headroom guard: runtime_reserve_mib defaults to the stage2
+transcript headroom (49152), demanding MemAvailable > 48 GiB AT ALL TIMES.
+On the shared 121.7 GiB host with multiple active lanes holding 40-70 GiB,
+that reserve is arithmetically unreachable while a 26-36 GiB compiler runs
+(26 + 48 + ~50 others > 121.7). The reserve is host-safety, not correctness;
+the hard bounds remain ceiling=48 GiB and cap=48 GiB (tree-wide). K lane now
+sets SIMPLE_BOOTSTRAP_STAGE3_RUNTIME_RESERVE_MIB=8192: an 8 GiB floor still
+guarantees the base system never OOMs (worst case: 48 cap + 8 reserve + all
+other usage <= 121.7), while admitting the build on this box.
+Recorded so future lanes do not re-derive this; if the host becomes exclusive
+again, restore the default reserve.
+
+## Strategic pivot (2026-11-15 ~19:30 KST): re-pin to the MIR-shard fix tip
+
+After ~3 days of K-lane stage3 attempts dying on the shared-host memory wall
+(admission needs MemAvailable >= 64 GiB for the 48 GiB transcript ceiling;
+the box held 40-62 under other lanes), the K lane re-pinned from
+80de9b9d66f4 to 70d542b8ab3, which carries the project's own fix for exactly
+this wall: 9cfdcb0c195 (stage3 forwards a MIR shard count so one worker never
+claims the whole closure), 5f80235594b (serial low-memory MIR sharding via
+SIMPLE_MIR_SHARD_INTERFACE_HIR=1 + SIMPLE_MIR_SHARD_COUNT=8),
+d1acc111b99/4f532c82f21 (serial low-memory file workers). Sharded workers
+hold ~1/8 of the closure instead of all 1650 modules, cutting the per-process
+peak from ~36 GiB to an estimated ~5-8 GiB -- under any plausible admission
+floor. Stage2 rebuild required (the stage2 binary must carry the shard
+machinery). The old pin's admitted stage2 remains on disk as evidence.
+
+## Ratchet is host-global and monotonic (2026-11-16 ~03:00 KST)
+
+Attempting to rebase the stage3 admission floor by rebuilding stage2 under a
+48 GiB ceiling FAILED: `previous` stays 58720256 even with a fresh
+--output dir. The ceiling ratchet is recorded host-globally (not per-output)
+and is monotonic -- the 56 GiB widened default (eighth widening) is now the
+permanent floor on this host. Consequence: stage3 admission requires
+MemAvailable >= 74.7 GiB (4/3 x 56) for ANY lane on this host, regardless of
+the actual (MIR-sharded ~13 GiB) footprint. The only honest paths: a host
+memory window >= 74.7 GiB, or a tip change making the admission shard-aware
+(the claim-size comment at resume-stage3-from-admitted.sh:972 says admission
+still prices the full closure).

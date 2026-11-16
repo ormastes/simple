@@ -1,0 +1,118 @@
+#!/bin/sh
+# Library-unit source drift gate (plan section 4.2,
+# doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md).
+#
+# Shell twin of library_unit_drift_v1
+# (src/compiler/80.driver/driver_build/library_unit_drift_v1.spl): compares a
+# library dir's RECORDED inventory against the ACTUAL source set.
+#   recorded: <dir>/source_inventory.lock, one root-relative path per line
+#             ('#' comments and blank lines ignored)
+#   actual:   every *.spl under <dir>, root-relative, skipping vendor, build,
+#             target, node_modules and dot dirs (same rule as
+#             source_inventory_scan_v1)
+# Any added or removed path is drift. Both sets empty is ERROR, never a pass.
+#
+# Usage: sh scripts/check/check-library-unit-drift.shs [--selftest] <lib dir>
+# Verdict is the last stdout line. Exit 0 PASS / 1 FAIL / 2 ERROR.
+# NOT wired into any push-tier gate.
+
+LC_ALL=C
+export LC_ALL
+
+scan_actual() {
+    ( cd "$1" 2>/dev/null && find . \
+        \( -name vendor -o -name build -o -name target -o -name node_modules \
+           -o -name '.?*' \) -prune -o -type f -name '*.spl' -print 2>/dev/null \
+        | sed 's|^\./||' | sort -u )
+}
+
+read_recorded() {
+    grep -v '^[[:space:]]*#' "$1" 2>/dev/null | sed 's/\r$//' | grep -v '^[[:space:]]*$' | sort -u
+}
+
+# check <dir> -> prints verdict, returns 0/1/2
+check_dir() {
+    dir=$1
+    lock="$dir/source_inventory.lock"
+    if [ ! -d "$dir" ]; then
+        echo "ERROR — nothing was checked (not a directory: $dir)"; return 2
+    fi
+    if [ ! -f "$lock" ]; then
+        echo "ERROR — nothing was checked (no recorded inventory: $lock)"; return 2
+    fi
+    tmp=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    read_recorded "$lock" > "$tmp/decl"
+    scan_actual "$dir" > "$tmp/act"
+    nd=$(wc -l < "$tmp/decl" | tr -d ' ')
+    na=$(wc -l < "$tmp/act" | tr -d ' ')
+    if [ "$nd" -eq 0 ] && [ "$na" -eq 0 ]; then
+        rm -rf "$tmp"
+        echo "ERROR — nothing was checked (declared and actual inventories are both empty)"; return 2
+    fi
+    comm -13 "$tmp/decl" "$tmp/act" > "$tmp/added"
+    comm -23 "$tmp/decl" "$tmp/act" > "$tmp/removed"
+    nadd=$(wc -l < "$tmp/added" | tr -d ' ')
+    nrem=$(wc -l < "$tmp/removed" | tr -d ' ')
+    checked=$((nd + nadd))
+    if [ "$nadd" -eq 0 ] && [ "$nrem" -eq 0 ]; then
+        rm -rf "$tmp"
+        echo "PASS — $checked checked, 0 added, 0 removed"; return 0
+    fi
+    parts=""
+    [ "$nadd" -gt 0 ] && parts="added: $(paste -sd, "$tmp/added" | sed 's/,/, /g')"
+    if [ "$nrem" -gt 0 ]; then
+        r="removed: $(paste -sd, "$tmp/removed" | sed 's/,/, /g')"
+        if [ -n "$parts" ]; then parts="$parts; $r"; else parts="$r"; fi
+    fi
+    rm -rf "$tmp"
+    echo "FAIL — $checked checked, $nadd added, $nrem removed; $parts"; return 1
+}
+
+expect() { # name want_rc dir
+    out=$(check_dir "$3"); rc=$?
+    if [ "$rc" -ne "$2" ]; then
+        echo "selftest FAIL: $1 expected rc=$2 got rc=$rc ($out)"; return 1
+    fi
+    return 0
+}
+
+selftest() {
+    root=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (selftest mktemp failed)"; return 2; }
+    bad=0
+    mk() { mkdir -p "$root/$1/sub" "$root/$1/vendor"; printf 'x\n' > "$root/$1/a.spl"; printf 'x\n' > "$root/$1/sub/b.spl"
+           printf 'x\n' > "$root/$1/vendor/ignored.spl"; printf '# recorded\na.spl\nsub/b.spl\n' > "$root/$1/source_inventory.lock"; }
+    mk clean
+    mk added;   printf 'x\n' > "$root/added/c.spl"
+    mk removed; rm "$root/removed/sub/b.spl"
+    mkdir -p "$root/empty"; : > "$root/empty/source_inventory.lock"
+    mkdir -p "$root/nolock"
+    expect clean-pass 0 "$root/clean" || bad=1
+    expect added-fail 1 "$root/added" || bad=1
+    expect removed-fail 1 "$root/removed" || bad=1
+    expect empty-error 2 "$root/empty" || bad=1
+    expect nolock-error 2 "$root/nolock" || bad=1
+    out=$(check_dir "$root/added")
+    case $out in *"added: c.spl"*) ;; *) echo "selftest FAIL: added verdict does not name c.spl ($out)"; bad=1;; esac
+    rm -rf "$root"
+    if [ "$bad" -ne 0 ]; then echo "ERROR — selftest failed, nothing was checked"; return 2; fi
+    return 0
+}
+
+run_selftest=0
+dir=""
+for a in "$@"; do
+    case $a in
+        --selftest) run_selftest=1 ;;
+        *) dir=$a ;;
+    esac
+done
+
+selftest || exit 2
+if [ "$run_selftest" -eq 1 ] && [ -z "$dir" ]; then
+    echo "PASS — selftest: 5 fixture(s) checked"; exit 0
+fi
+if [ -z "$dir" ]; then
+    echo "ERROR — nothing was checked (usage: check-library-unit-drift.shs [--selftest] <lib dir>)"; exit 2
+fi
+check_dir "$dir"
+exit $?

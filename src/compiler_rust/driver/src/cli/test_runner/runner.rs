@@ -302,6 +302,24 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     let doctest_cache = discover_all_doctests(&options);
     let doctest_count =
         doctest_cache.src_examples.len() + doctest_cache.doc_examples.len() + doctest_cache.md_examples.len();
+    let platform_skipped = PLATFORM_SKIPPED.load(std::sync::atomic::Ordering::Relaxed);
+    if options.path.is_some() && test_files.is_empty() && doctest_count == 0 && platform_skipped > 0 {
+        // Every explicitly named file was excluded by a host-OS @platform tag:
+        // a counted, reasoned skip (lines already printed), never a failure.
+        if !quiet {
+            println!("Results: 0 total, 0 passed, 0 failed, {} skipped", platform_skipped);
+            println!("{}", platform_skip_summary_line(platform_skipped));
+        }
+        return TestRunResult {
+            files: Vec::new(),
+            total_listed: 0,
+            total_passed: 0,
+            total_failed: 0,
+            total_skipped: platform_skipped,
+            total_ignored: 0,
+            total_duration_ms: suite_start.elapsed().as_millis() as u64,
+        };
+    }
     if targeted_discovery_is_empty(options.path.is_some(), test_files.len(), doctest_count) {
         if !quiet {
             eprintln!("No tests discovered for explicit path: {}", test_path.display());
@@ -490,6 +508,12 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
             &mut total_failed,
             quiet,
         );
+    }
+
+    let platform_skipped = PLATFORM_SKIPPED.load(std::sync::atomic::Ordering::Relaxed);
+    total_skipped += platform_skipped;
+    if platform_skipped > 0 && !quiet {
+        println!("{}", platform_skip_summary_line(platform_skipped));
     }
 
     let result = TestRunResult {
@@ -805,6 +829,27 @@ fn discover_and_filter_tests(test_path: &Path, options: &TestOptions) -> Vec<Pat
         });
     }
 
+    // Host-OS @platform tags (windows/macos/linux/freebsd/unix): a mismatch is
+    // a COUNTED skip with a printed reason, mirroring src/lib/nogc_sync_mut/spec/platform_os.spl.
+    let host = host_os_name();
+    let quiet_discovery = matches!(options.format, OutputFormat::Json);
+    test_files.retain(|path| {
+        let tags = read_platform_tags(path);
+        match platform_os_skip_reason(&tags, host) {
+            Some(reason) => {
+                PLATFORM_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if !quiet_discovery {
+                    println!("PLATFORM SKIP {} ({}; @platform)", path.display(), reason);
+                    println!(
+                        "SPEC FILE VERDICT: {} outcome=NOT_RUN declared>=0 executed=0 passed=0 failed=0 in_development=0 blocked=0 dropped=0 skipped=1 reason=platform-os-mismatch",
+                        path.display()
+                    );
+                }
+                false
+            }
+            None => true,
+        }
+    });
     test_files.retain(|path| platform_tags_match(path, &options.execution_mode));
 
     debug_log!(DebugLevel::Basic, "Discovery", "Found {} test files", test_files.len());
@@ -851,7 +896,69 @@ fn platform_tags_match(path: &Path, mode: &TestExecutionMode) -> bool {
     if tags.is_empty() {
         return true;
     }
-    tags.iter().any(|tag| platform_tag_matches_mode(tag, mode))
+    // OS tags are handled by platform_os_skip_reason (counted skip); only mode
+    // tags filter here. OS-only files therefore pass this filter.
+    let mode_tags: Vec<&String> = tags.iter().filter(|t| !is_os_platform_tag(t)).collect();
+    if mode_tags.is_empty() {
+        return true;
+    }
+    mode_tags.iter().any(|tag| platform_tag_matches_mode(tag, mode))
+}
+
+/// Files excluded in this process by a host-OS `@platform` tag.
+static PLATFORM_SKIPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn read_platform_tags(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|content| {
+            content
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("# @platform:").map(|t| t.trim().to_string()))
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn host_os_name() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "macos",
+        "linux" => "linux",
+        "freebsd" => "freebsd",
+        other => other,
+    }
+}
+
+/// Mirrors `is_os_platform_tag` in src/lib/nogc_sync_mut/spec/platform_os.spl.
+fn is_os_platform_tag(tag: &str) -> bool {
+    matches!(tag.trim().to_ascii_lowercase().as_str(), "windows" | "macos" | "linux" | "freebsd" | "unix")
+}
+
+fn os_platform_tag_matches(tag: &str, host: &str) -> bool {
+    let t = tag.trim().to_ascii_lowercase();
+    if t == "unix" {
+        return !host.is_empty() && host != "windows";
+    }
+    t == host
+}
+
+/// `None` = may run on `host`; `Some(reason)` = platform skip (same text as the Simple runner).
+fn platform_os_skip_reason(tags: &[String], host: &str) -> Option<String> {
+    let os_tags: Vec<String> = tags
+        .iter()
+        .flat_map(|line| line.split(','))
+        .filter(|t| is_os_platform_tag(t))
+        .map(|t| t.trim().to_ascii_lowercase())
+        .collect();
+    if os_tags.is_empty() || os_tags.iter().any(|t| os_platform_tag_matches(t, host)) {
+        return None;
+    }
+    Some(format!("platform: requires os={}, host={}", os_tags.join(","), host))
+}
+
+fn platform_skip_summary_line(files: usize) -> String {
+    format!("Platform-skipped: {} file(s) not run on this host OS (@platform OS tag)", files)
 }
 
 fn platform_tag_matches_mode(tag: &str, mode: &TestExecutionMode) -> bool {
@@ -1894,6 +2001,17 @@ mod tests {
     #[test]
     fn platform_specific_tag_still_requires_matching_composite_mode() {
         assert!(!platform_tag_matches_mode("baremetal", &TestExecutionMode::Interpreter));
+        // Mode filter ignores OS tags; OS tags select by host.
+        assert!(super::platform_os_skip_reason(&["windows".to_string()], "windows").is_none());
+        assert_eq!(
+            super::platform_os_skip_reason(&["windows".to_string()], "macos").as_deref(),
+            Some("platform: requires os=windows, host=macos")
+        );
+        assert!(super::platform_os_skip_reason(&["unix".to_string()], "linux").is_none());
+        assert!(super::platform_os_skip_reason(&["unix".to_string()], "windows").is_some());
+        assert!(super::platform_os_skip_reason(&["linux, freebsd".to_string()], "freebsd").is_none());
+        assert!(super::platform_os_skip_reason(&["native".to_string(), "windows".to_string()], "linux").is_some());
+        assert!(super::platform_os_skip_reason(&["native".to_string()], "windows").is_none());
         assert!(platform_tag_matches_mode(
             "baremetal",
             &TestExecutionMode::Composite("interpreter(remote(baremetal(riscv32)))".to_string())

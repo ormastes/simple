@@ -14,10 +14,14 @@ use std.spipe.*
 use std.skia.feature.shaper.script_detect.{Script, script_of, script_is_rtl}
 use std.skia.feature.shaper.feature_tags.{OpenTypeFeature, feature_tag}
 use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_new, fallback_chain_add, fallback_chain_font_for_script, fallback_chain_font_for_run, system_default_chain}
-use std.skia.feature.shaper.shaper.{Shaper, ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass, ThaiClass, MyanmarClass, KhmerClass, TibetanClass, HangulClass, HebrewClass, MongolianClass, shaper_new, shaper_with_ot_font, ascii_to_codepoints, shaper_shape, arabic_join_form, devanagari_classify, classify_thai_char, classify_myanmar_char, classify_khmer_char, classify_tibetan_char, classify_hangul_char, classify_hebrew_char, classify_mongolian_char}
+use std.skia.feature.shaper.shaper.{Shaper, ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass, ThaiClass, MyanmarClass, KhmerClass, TibetanClass, HangulClass, HebrewClass, MongolianClass, shaper_new, shaper_with_ot_font, shaper_with_registered_ot_font, shaper_shape_with_language, shaped_run_to_font_glyph_run, ascii_to_codepoints, shaper_shape, arabic_join_form, devanagari_classify, classify_thai_char, classify_myanmar_char, classify_khmer_char, classify_tibetan_char, classify_hangul_char, classify_hebrew_char, classify_mongolian_char}
 use std.skia.entity.font.{sk_font_default, sk_typeface_from_name, sk_typeface_from_attached_font, sk_font_new, sk_font_style_normal}
 use std.skia.entity.geometry.{SkPoint}
 use std.nogc_sync_mut.io.font_sffi.{load_font, free_font, get_line_height}
+use std.skia.feature.glyph.ot_parser.{OtFont, parse_offset_table}
+use std.common.encoding.font_registry.{selected_font_asset_identity_for_path}
+use std.common.encoding.utf8.{text_codepoints}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 
@@ -181,7 +185,7 @@ describe "FallbackChain":
         # @req REQ-SSPEC-LIB
         step("prefers attached fallback font when it alone covers the run")
         val demo = load_font("src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf")
-        expect (demo != nil) to_equal true
+        expect (demo.is_some()) to_equal true
         val handle = demo.unwrap()
         val primary = sk_font_new(sk_typeface_from_name("Primary Sans", sk_font_style_normal()), 12.0)
         val attached = sk_font_new(
@@ -198,7 +202,7 @@ describe "FallbackChain":
         # @req REQ-SSPEC-LIB
         step("falls back to heuristic script match when no attached font covers the run")
         val demo = load_font("src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf")
-        expect (demo != nil) to_equal true
+        expect (demo.is_some()) to_equal true
         val handle = demo.unwrap()
         val primary = sk_font_new(
             sk_typeface_from_attached_font("Demo Latin", sk_font_style_normal(), handle.path, handle.handle),
@@ -760,3 +764,43 @@ describe "classify_mongolian_char":
         step("Mongolian FVS1 U+180B is FormatControl")
         val c = classify_mongolian_char(0x180B)
         expect c to_equal MongolianClass.FormatControl
+
+val REGISTERED_ARABIC_PATH = "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
+
+# `bind`: 0 = plain shaper_with_ot_font, 1 = registered binding with `hex`.
+fn _registered_arabic_runs_valid(ot: OtFont, bind: i64, hex: text, font_path: text) -> bool:
+    var cps: [u32] = []
+    for cp in text_codepoints("العربية"):
+        cps = cps.push(cp as u32)
+    val font = sk_font_new(sk_typeface_from_attached_font("Noto Sans Arabic", sk_font_style_normal(), font_path, 0), 32.0)
+    val base = shaper_new(fallback_chain_new(font))
+    val shaper = if bind == 0: shaper_with_ot_font(base, ot) else: shaper_with_registered_ot_font(base, ot, hex)
+    val runs = shaper_shape_with_language(shaper, cps, font, 0.0, 0.0, "ar")
+    var valid = runs.len() > 0
+    for run in runs:
+        val material = shaped_run_to_font_glyph_run(run)
+        if not material.valid or material.glyph_ids.len() == 0:
+            valid = false
+    valid
+
+describe "shaper: handle-free registered OT binding":
+    # Regression: f119f8b7120 (2026-07-28) gated canonical layout on a live
+    # host handle and dropped the handle-free acceptance 83e55dfe6d7 added for
+    # registered SimpleOS bytes, so registered-only Arabic/Devanagari came back
+    # `font-shaping-unavailable`.
+    it "accepts a pinned registry face bound with its pinned digest, and nothing weaker":
+        # @req REQ-SSPEC-LIB
+        step("accepts a pinned registry face bound with its pinned digest, and nothing weaker")
+        val identity = selected_font_asset_identity_for_path(REGISTERED_ARABIC_PATH)
+        expect(identity.starts_with("sha256=")).to_be(true)
+        val pinned_hex = identity.slice(7, identity.index_of(";"))
+        expect(pinned_hex.byte_len()).to_equal(64)
+        val parsed = parse_offset_table(file_read_bytes(REGISTERED_ARABIC_PATH))
+        expect(parsed != nil).to_be(true)
+        val ot = parsed.?
+        # Negatives first: no digest, a wrong digest, an unpinned path.
+        expect(_registered_arabic_runs_valid(ot, 0, "", REGISTERED_ARABIC_PATH)).to_be(false)
+        val wrong_hex = "0000000000000000000000000000000000000000000000000000000000000000"
+        expect(_registered_arabic_runs_valid(ot, 1, wrong_hex, REGISTERED_ARABIC_PATH)).to_be(false)
+        expect(_registered_arabic_runs_valid(ot, 1, pinned_hex, "tmp/not-a-registry-font.ttf")).to_be(false)
+        expect(_registered_arabic_runs_valid(ot, 1, pinned_hex, REGISTERED_ARABIC_PATH)).to_be(true)

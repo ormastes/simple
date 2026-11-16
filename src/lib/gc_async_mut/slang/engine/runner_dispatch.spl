@@ -1,0 +1,76 @@
+# @gc — module uses GC runtime
+#
+# Runner dispatch — which runner serves a model.
+#
+#   slang -> llama.cpp wrapper (ggml lane: model_executor/backend.spl)
+#   slang -> pure LLM runner   (model_executor/pure/: safetensors Llama)
+#
+# ONE function decides, per model: `select_runner`. Rules, in order:
+#   1. SLANG_RUNNER=pure|ggml forces a choice. A forced choice the model cannot
+#      satisfy is an explicit Err, never a silent fallback to the other runner.
+#      Any other SLANG_RUNNER value is an Err.
+#   2. GGUF                            -> Ggml
+#   3. safetensors Llama the pure runner supports -> Pure
+#   4. anything else -> Err naming why (slang packs and unknown formats have no
+#      runner).
+#
+# SEAM FOR A GPU PURE RUNNER: RunnerKind.Pure is the only place a variant would
+# plug in; pure_runner_supports_model below is the gate that says what a pure
+# runner can load, and pure_lane.spl owns how it is loaded and stepped.
+
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{llama_config_from_json}
+use std.io_runtime.{env_get, file_exists, read_file}
+
+enum RunnerKind:
+    Ggml
+    Pure
+
+fn runner_kind_text(k: RunnerKind) -> text:
+    match k:
+        RunnerKind.Ggml: "ggml"
+        RunnerKind.Pure: "pure"
+
+# Empty text when the pure runner can load `dir`, else the reason it cannot.
+fn pure_runner_unsupported_reason(dir: text) -> text:
+    val cfg_path = dir + "/config.json"
+    if not file_exists(cfg_path):
+        return "no config.json in " + dir
+    if not file_exists(dir + "/model.safetensors") or not file_exists(dir + "/tokenizer.json"):
+        return "the pure runner needs a single model.safetensors and a tokenizer.json in " + dir
+    val cfg_text = read_file(cfg_path)
+    if not cfg_text.contains("\"LlamaForCausalLM\""):
+        return "config.json architecture is not LlamaForCausalLM"
+    val parsed = llama_config_from_json(cfg_text)
+    if parsed.is_err():
+        return parsed.unwrap_err()
+    ""
+
+fn _forced_runner() -> text:
+    env_get("SLANG_RUNNER")
+
+fn select_runner(model: NativeModel) -> Result<RunnerKind, text>:
+    val forced = _forced_runner()
+    if forced != "" and forced != "pure" and forced != "ggml":
+        return Err("SLANG_RUNNER='" + forced + "' is not a runner; use pure or ggml")
+    if forced == "pure":
+        if model.format != "safetensors":
+            return Err("SLANG_RUNNER=pure was forced but model '" + model.id + "' is " + model.format + "; the pure runner reads safetensors only")
+        val why = pure_runner_unsupported_reason(model.root)
+        if why != "":
+            return Err("SLANG_RUNNER=pure was forced but the pure runner cannot load '" + model.id + "': " + why)
+        return Ok(RunnerKind.Pure)
+    if forced == "ggml":
+        if model.format != "gguf":
+            return Err("SLANG_RUNNER=ggml was forced but model '" + model.id + "' is " + model.format + "; the llama.cpp wrapper reads GGUF only")
+        return Ok(RunnerKind.Ggml)
+    if model.format == "gguf":
+        return Ok(RunnerKind.Ggml)
+    if model.format == "safetensors":
+        val why = pure_runner_unsupported_reason(model.root)
+        if why != "":
+            return Err("safetensors model '" + model.id + "' has no runner: " + why)
+        return Ok(RunnerKind.Pure)
+    Err("model '" + model.id + "' (" + model.format + ") has no runner: " + model.reason)
+
+export RunnerKind, runner_kind_text, pure_runner_unsupported_reason, select_runner

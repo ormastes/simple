@@ -1,0 +1,48 @@
+# The pure-Simple HIR interpreter (engine behind the native CLI `run`/`test`)
+# must evaluate `T(x)` conversion calls, list comprehensions with `if`
+# filters, unbounded `for i in n..` ranges and `with` scoped resources.
+#
+# @cover src/compiler/70.backend/backend/interpreter_convert.spl
+#
+# doc/08_tracking/bug/native_cli_test_cannot_run_std_spec_2026-11-15.md
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.backend.backend_types.*
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.common.config.{Logger}
+
+fn ws5_run(src: text) -> text:
+    val module = parse_full_frontend(src, "ws5_main.spl", "ws5_main", Logger(level: 0))
+    var lowering = HirLowering.with_filename("ws5_main.spl")
+    val hir = lowering.lower_module(module)
+    var backend = InterpreterBackendImpl.new()
+    match backend.interpret_hir_module(hir):
+        case Ok(BackendResult.Value(Value.String(s))): "string:" + s
+        case Ok(BackendResult.Value(Value.Int(n))): "int:" + n.to_text()
+
+describe "HIR interpreter slice 5: conversions, comprehensions, open ranges, with":
+    it "parses text and truncates floats through i64(...) conversion calls":
+        expect(ws5_run("fn main() -> i64:\n    i64(\"42\") + i64(3.9)\n")).to_equal("int:45")
+
+    it "widens an integer through a float(...) conversion call":
+        expect(ws5_run("fn main() -> i64:\n    val h = float(7) / float(2)\n    i64(h * float(2))\n")).to_equal("int:7")
+
+    it "collects a filtered list comprehension over an array":
+        expect(ws5_run("fn main() -> i64:\n    val xs = [x * 10 for x in [1, 2, 3] if x > 1]\n    xs[0] + xs[1] + xs.len()\n")).to_equal("int:52")
+
+    it "collects a list comprehension over an inclusive range":
+        expect(ws5_run("fn main() -> i64:\n    val sq = [i * i for i in 1..=4]\n    sq[3]\n")).to_equal("int:16")
+
+    it "iterates an open-ended range until the loop breaks":
+        expect(ws5_run("fn main() -> i64:\n    var t = 0\n    for i in 3..:\n        if i > 5:\n            break\n        t = t + i\n    t\n")).to_equal("int:12")
+
+    it "closes a with resource after its body runs":
+        expect(ws5_run("class Res:\n    n: i64\n    fn close():\n        0\n\nfn main() -> i64:\n    var out = 0\n    with Res(n: 4) as r:\n        out = r.n + 1\n    out\n")).to_equal("int:5")
+
+    it "propagates an absent value out of a function through the ? operator":
+        expect(ws5_run("fn half(x: i64) -> i64?:\n    if x % 2 == 0:\n        return Some(x / 2)\n    None\n\nfn go(x: i64) -> i64?:\n    val h = half(x)?\n    Some(h + 100)\n\nfn main() -> i64:\n    (go(4) ?? 0) + (go(3) ?? 1000)\n")).to_equal("int:1102")
