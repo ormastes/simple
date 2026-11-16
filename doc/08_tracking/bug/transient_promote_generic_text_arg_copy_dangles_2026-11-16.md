@@ -34,6 +34,29 @@ The Any/TypeParam boundary uses `box_runtime_dictionary_key_v1`: it asks
 handle passes through with its identity. Non-text arguments are unchanged.
 Spec: `test/01_unit/compiler/mir/generic_text_arg_identity_spec.spl`.
 
+Coverage (gdb on the integ2 base binary, word at the boxing site):
+
+| shape | word | dangles on integ2 | closed by this fix |
+|---|---|---|---|
+| call result (`val d = f()`) | tagged `...761` | yes (V1-V3) | yes |
+| struct field load (`fact.kind`) | tagged `...4b1` | yes (V8) | yes |
+| `[text]` element (`xs[i]`) | raw `char*` `...790` | yes (V9) | **no** -- borrowed branch still copies |
+
+Open: a `[text]` element is a bare data pointer, so the run-time probe cannot
+tell it from a literal and still materializes a copy. Promoting the owning
+array (the usual pattern, e.g. `reverse_reference_facts.spl`) is unaffected,
+because the array walk reaches the original word.
+
+Ownership note: a tagged text now reaches a generic callee by reference rather
+than as a persistent copy, so a callee that stores it during a paused window
+stores the transient original. Statically tagged locals already behaved this
+way; the change only removes the dependence on the static note.
+
+Separate, not transient: interpolating a `sha256_text` result
+(`print "[{a}]"`, no transient scope at all) prints garbage and drops the rest
+of the line under integ2 Stage 2, so `rep3/transient2.spl` stays DIFF even
+with the full no-op shim.
+
 Takes effect only after a Stage 2 is rebuilt with it. Until then: diaglink
 `s3i2/shim_transient_narrow.c` (real scopes; re-promotes the source of the
 last `rt_string_new` copies) or the root-site source rewrite recorded in the
