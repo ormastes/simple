@@ -1039,21 +1039,25 @@ impl Lowerer {
         }))
     }
 
-    /// Declared trait dispatch of `base.field`, when `base` is a local of a
-    /// class/struct whose `field` was authored with a trait type name.
-    pub(super) fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+    /// Recover the authored field type only through the receiver's declared
+    /// struct/class owner. No method-name or same-field-name search is allowed.
+    pub(super) fn receiver_field_declared_type(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<(&str, &ast::Type)> {
         let Expr::Identifier(name) = base else { return None };
         let idx = ctx.lookup(name)?;
         let mut ty = ctx.locals.get(idx)?.ty;
         if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(ty) {
             ty = *inner;
         }
-        let owner = match self.module.types.get(ty)? {
-            HirType::Struct { name, .. } => name.clone(),
-            _ => return None,
-        };
-        let trait_name = self.struct_field_type_names.get(&owner)?.get(field)?;
-        self.trait_declaration_for_current_owner(trait_name)
+        if !matches!(self.module.types.get(ty)?, HirType::Struct { .. }) { return None; }
+        let (owner, fields) = self.struct_field_declared_types.get(&ty)?.as_ref()?;
+        Some((owner.as_str(), fields.get(field)?))
+    }
+
+    /// Direct trait fields may dispatch through their declaration. Optional
+    /// fields deliberately return None: their carrier has Option semantics.
+    pub(super) fn trait_field_dispatch(&self, base: &Expr, field: &str, ctx: &FunctionContext) -> Option<crate::hir::HirTraitDispatch> {
+        let (owner, declared) = self.receiver_field_declared_type(base, field, ctx)?;
+        self.declared_trait_dispatch_in_owner(declared, owner)
     }
 
     /// Resolved callback parameter types for the lambda arguments of a

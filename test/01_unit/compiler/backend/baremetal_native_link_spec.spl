@@ -1,0 +1,53 @@
+# Regression: a baremetal `native-build --target <arch>-unknown-none[-elf]`
+# without --emit-object took the HOSTED link path (host clang driver, host
+# crt/runtime) and produced a host-arch image or a host link error for a
+# RISC-V object. Baremetal links must keep the target and run ld.lld with a
+# linker script (default per-arch script unless the caller passes -T).
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{file_read}
+use compiler.backend.baremetal_native_link.{baremetal_link_arch_v1,
+    baremetal_default_linker_script_v1, baremetal_link_argv_v1}
+
+describe "baremetal native link":
+    it "classifies freestanding triples by architecture":
+        step("explicit none/elf triples are baremetal")
+        expect(baremetal_link_arch_v1("riscv64gc-unknown-none-elf", "x86_64")).to_equal("riscv64")
+        expect(baremetal_link_arch_v1("riscv32imac-unknown-none-elf", "x86_64")).to_equal("riscv32")
+        expect(baremetal_link_arch_v1("x86_64-unknown-none", "x86_64")).to_equal("x86_64")
+        expect(baremetal_link_arch_v1("aarch64-unknown-none-softfloat", "x86_64")).to_equal("aarch64")
+        expect(baremetal_link_arch_v1("riscv64-unknown-elf", "x86_64")).to_equal("riscv64")
+        step("a bare cross arch name has no OS to host it")
+        expect(baremetal_link_arch_v1("riscv64", "x86_64")).to_equal("riscv64")
+
+    it "leaves hosted targets on the hosted path":
+        expect(baremetal_link_arch_v1("", "x86_64")).to_equal("")
+        expect(baremetal_link_arch_v1("x86_64", "x86_64")).to_equal("")
+        expect(baremetal_link_arch_v1("x86_64-unknown-linux-gnu", "x86_64")).to_equal("")
+        expect(baremetal_link_arch_v1("aarch64-apple-darwin", "x86_64")).to_equal("")
+        expect(baremetal_link_arch_v1("x86_64-unknown-simpleos", "x86_64")).to_equal("")
+
+    it "emits a default script with an entry and a per-arch base":
+        val rv = baremetal_default_linker_script_v1("riscv64")
+        expect(rv.contains("ENTRY(_start)")).to_equal(true)
+        expect(rv.contains("0x80200000")).to_equal(true)
+        expect(baremetal_default_linker_script_v1("aarch64").contains("0x40080000")).to_equal(true)
+        expect(baremetal_default_linker_script_v1("x86_64").contains("0x100000")).to_equal(true)
+
+    it "builds an ld.lld argv that never uses a host driver":
+        val argv = baremetal_link_argv_v1(["a.o", "b.o"], "out.elf", "def.ld", [])
+        expect(argv).to_equal(["-T", "def.ld", "-o", "out.elf", "a.o", "b.o"])
+
+    it "lets a caller -T replace the default script":
+        val argv = baremetal_link_argv_v1(["a.o"], "out.elf", "def.ld", ["-T", "board.ld"])
+        expect(argv).to_equal(["-o", "out.elf", "a.o", "-T", "board.ld"])
+        val wl = baremetal_link_argv_v1(["a.o"], "out.elf", "def.ld", ["-Wl,-T,board.ld"])
+        expect(wl).to_equal(["-o", "out.elf", "a.o", "-T", "board.ld"])
+
+    it "is routed before the hosted cc link":
+        step("the orchestrator dispatches baremetal targets to ld.lld")
+        val src = file_read("src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl")
+        val route = src.index_of("link_baremetal_native_v1(user_objects") ?? -1
+        val hosted = src.index_of("val hosted_plan = hosted_c_compiler_plan(") ?? -1
+        expect(route > 0).to_equal(true)
+        expect(route < hosted).to_equal(true)

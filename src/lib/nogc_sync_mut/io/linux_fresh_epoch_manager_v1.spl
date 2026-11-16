@@ -1,0 +1,44 @@
+# Read-only manager/topology checks on genuine installed-profile bus custody.
+# No Reload, MaskUnitFiles, StartUnit or StopUnit call is made here.
+use std.nogc_sync_mut.io.linux_installed_supervisor_bus_v1.LinuxSupervisorBusV1
+use std.nogc_sync_mut.io.linux_installed_supervisor_profile_v1.LinuxInstalledSupervisorProfileV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.LinuxFreshEpochProfileSnapshotV1
+
+pub fn linux_fresh_epoch_manager_current_v1(bus: LinuxSupervisorBusV1,
+        installed: LinuxInstalledSupervisorProfileV1, fresh: LinuxFreshEpochProfileSnapshotV1) -> Result<text, text>:
+    val profile = installed.current_v1()?
+    val p = fresh.profile
+    if (profile.machine_policy_digest != p.text_v1("machinePolicyDigest")? or
+            profile.service_uid != p.number_v1("serviceUid")? or profile.supervisor_unit != p.text_v1("hostUnit")? or
+            profile.provider_unit != p.text_v1("providerUnit")? or profile.activation_units != [p.text_v1("providerSocketUnit")?] or
+            profile.process.identity_digest != fresh.process.identity_digest):
+        return Err("fresh-epoch-supervisor-profile-mismatch")
+    val manager = bus.manager_v1()?
+    val host = bus.unit_path_v1(profile.supervisor_unit)?
+    if bus.unit_by_pid_v1(fresh.process.process_id)? != host: return Err("fresh-epoch-host-manager-membership")
+    val unit = "org.freedesktop.systemd1.Unit"
+    val service = "org.freedesktop.systemd1.Service"
+    if (bus.string_property_v1(host, unit, "ActiveState")? != "active" or bus.unit_job_v1(host)? != 0 or
+            bus.number_property_v1(host, service, "MainPID")? != fresh.process.process_id or
+            bus.number_property_v1(host, service, "ControlPID")? != 0 or
+            bus.boolean_property_v1(host, service, "DynamicUser")?):
+        return Err("fresh-epoch-host-main-state")
+    if (bus.string_property_v1(host, service, "User")? != p.text_v1("serviceName")? or
+            bus.string_property_v1(host, service, "Group")? != str(p.number_v1("serviceGid")?) or
+            not bus.boolean_property_v1(host, service, "Delegate")? or
+            bus.string_property_v1(host, service, "ControlGroup")? != p.text_v1("delegatedCgroup")? or
+            bus.string_property_v1(host, unit, "FragmentPath")? != "/etc/systemd/system/" + profile.supervisor_unit):
+        return Err("fresh-epoch-host-topology")
+    for name in [profile.provider_unit, p.text_v1("providerSocketUnit")?]:
+        val path = bus.unit_path_v1(name)?
+        if (bus.unit_file_state_v1(name)? != "masked" or bus.string_property_v1(path, unit, "ActiveState")? != "inactive" or
+                bus.unit_job_v1(path)? != 0 or bus.unsigned_property_v1(path, unit, "ActiveEnterTimestampMonotonic")? != 0):
+            return Err("fresh-epoch-activation-not-inhibited-never-started")
+        if name == profile.provider_unit:
+            if (bus.number_property_v1(path, service, "MainPID")? != 0 or bus.number_property_v1(path, service, "ControlPID")? != 0 or
+                    bus.unsigned_property_v1(path, service, "ExecMainStartTimestampMonotonic")? != 0):
+                return Err("fresh-epoch-provider-not-never-started")
+    if bus.unit_file_state_v1("user@" + str(profile.service_uid) + ".service")? != "masked":
+        return Err("fresh-epoch-user-manager-placement-route")
+    if bus.manager_v1()? != manager: return Err("fresh-epoch-manager-incarnation-changed")
+    Ok(manager)

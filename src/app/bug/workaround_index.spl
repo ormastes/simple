@@ -7,6 +7,7 @@ struct WorkaroundLink:
     line: i64
     recover: text
     reason: text
+    expires: text = ""    # YYYY-MM-DD or ""
 
 struct WorkaroundIndex:
     revision: text
@@ -28,6 +29,15 @@ fn workaround_recovery_valid(value: text) -> bool:
     for ch in value:
         if not "0123456789abcdefABCDEF".contains(ch): return false
     true
+
+fn workaround_expires_valid(value: text) -> bool:
+    if value.byte_len() != 10 or value.substring(4, 5) != "-" or value.substring(7, 8) != "-":
+        return false
+    for i in 0..10:
+        if i != 4 and i != 7 and not "0123456789".contains(value.substring(i, i + 1)): return false
+    val month = value.substring(5, 7).to_i64()
+    val day = value.substring(8, 10).to_i64()
+    month >= 1 and month <= 12 and day >= 1 and day <= 31
 
 fn workaround_path_valid(path: text) -> bool:
     if path == "" or path.starts_with("/") or path.contains("\\") or path.contains(":"):
@@ -109,6 +119,7 @@ fn parse_workaround_source(path: text, content: text) -> Result<[WorkaroundLink]
         if not workaround_bug_id_valid(bug_id):
             return Err("{location}: invalid canonical bug ID")
         var recover = ""
+        var expires = ""
         var reason = ""
         var in_reason = false
         for i in 1..fields.len():
@@ -119,6 +130,10 @@ fn parse_workaround_source(path: text, content: text) -> Result<[WorkaroundLink]
                 recover = field.substring(8)
                 if not workaround_recovery_valid(recover):
                     return Err("{location}: recover must be 7-64 hexadecimal characters")
+            elif field.starts_with("expires=") and expires == "":
+                expires = field.substring(8)
+                if not workaround_expires_valid(expires):
+                    return Err("{location}: expires must be a YYYY-MM-DD date")
             elif field.starts_with("reason="):
                 reason = field.substring(7)
                 in_reason = true
@@ -134,7 +149,7 @@ fn parse_workaround_source(path: text, content: text) -> Result<[WorkaroundLink]
         if affected == "" or affected.starts_with("#") or affected.starts_with("//") or affected.starts_with("/*"):
             return Err("{location}: workaround must immediately precede the affected block")
         links.push(WorkaroundLink(bug_id: bug_id, path: path, line: offset + 1,
-            recover: recover, reason: reason))
+            recover: recover, reason: reason, expires: expires))
     Ok(links)
 
 fn replace_workaround_paths(index: WorkaroundIndex, paths: [text], replacements: [WorkaroundLink]) -> WorkaroundIndex:
@@ -156,11 +171,18 @@ fn encode_workaround_index(index: WorkaroundIndex) -> text:
     out = out + workaround_sdn_quote(index.revision)
     val completeness = if index.complete: ", true\n" else: ", false\n"
     out = out + completeness
-    out = out + "workarounds |bug_id, path, line, recover, reason|\n"
+    # The expires column is written only when some link carries one, so
+    # indexes without expiry stay byte-identical to the 5-column schema.
+    var with_expires = false
+    for link in index.links:
+        if link.expires != "": with_expires = true
+    out = out + (if with_expires: "workarounds |bug_id, path, line, recover, reason, expires|\n" else: "workarounds |bug_id, path, line, recover, reason|\n")
     for link in index.links:
         out = out + "    " + workaround_sdn_quote(link.bug_id) + ", "
         out = out + workaround_sdn_quote(link.path) + ", {link.line}, "
-        out = out + workaround_sdn_quote(link.recover) + ", " + workaround_sdn_quote(link.reason) + "\n"
+        out = out + workaround_sdn_quote(link.recover) + ", " + workaround_sdn_quote(link.reason)
+        if with_expires: out = out + ", " + workaround_sdn_quote(link.expires)
+        out = out + "\n"
     out
 
 # Strict SDN subset: quoted strings with escapes and bare scalars. Reject
@@ -216,15 +238,17 @@ fn decode_workaround_index(content: text) -> Result<WorkaroundIndex, text>:
     if header[0] != "1" or not workaround_recovery_valid(header[1]):
         return Err("unsupported workaround schema or revision")
     if header[2] != "true" and header[2] != "false": return Err("invalid completeness flag")
-    if lines[2].trim() != "workarounds |bug_id, path, line, recover, reason|":
+    val with_expires = lines[2].trim() == "workarounds |bug_id, path, line, recover, reason, expires|"
+    if not with_expires and lines[2].trim() != "workarounds |bug_id, path, line, recover, reason|":
         return Err("invalid workaround table header")
+    val width = if with_expires: 6 else: 5
     var links: [WorkaroundLink] = []
     var locations: [text] = []
     for i in 3..lines.len():
         val row = lines[i].trim()
         if row == "": continue
         val fields = workaround_sdn_fields(row)?
-        if fields.len() != 5: return Err("invalid workaround row width")
+        if fields.len() != width: return Err("invalid workaround row width")
         if not workaround_bug_id_valid(fields[0]) or not workaround_path_valid(fields[1]):
             return Err("invalid workaround bug or source path")
         if fields[2] == "": return Err("missing workaround line")
@@ -234,11 +258,14 @@ fn decode_workaround_index(content: text) -> Result<WorkaroundIndex, text>:
         if line <= 0: return Err("invalid workaround line")
         if fields[3] != "" and not workaround_recovery_valid(fields[3]):
             return Err("invalid workaround recovery reference")
+        val expires = if with_expires: fields[5] else: ""
+        if expires != "" and not workaround_expires_valid(expires):
+            return Err("invalid workaround expires date")
         val location = fields[1] + ":{line}"
         if locations.contains(location): return Err("duplicate workaround location")
         locations.push(location)
         links.push(WorkaroundLink(bug_id: fields[0], path: fields[1], line: line,
-            recover: fields[3], reason: fields[4]))
+            recover: fields[3], reason: fields[4], expires: expires))
     Ok(WorkaroundIndex(revision: header[1], complete: header[2] == "true", links: links))
 
 # One immutable per-writer publication of the index. A `base` fragment
@@ -316,3 +343,8 @@ fn merge_workaround_fragments(fragments: [WorkaroundFragment]) -> WorkaroundInde
             index = WorkaroundIndex(revision: fragment.revision, complete: complete,
                 links: replaced.links)
     index
+
+export WorkaroundLink, WorkaroundIndex, WorkaroundFragment
+export empty_workaround_index, workaround_bug_id_valid, workaround_recovery_valid, workaround_expires_valid, workaround_path_valid
+export parse_workaround_source, replace_workaround_paths, workaround_sdn_quote, workaround_sdn_fields
+export encode_workaround_index, decode_workaround_index, encode_workaround_fragment, decode_workaround_fragment, merge_workaround_fragments

@@ -1,0 +1,57 @@
+# Purpose and audience: Codex loaded-skill signal and loaded-vs-requested diff evidence, for the caret team.
+# @req CU-020
+
+use std.spec.*
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredHookCorrelation}
+use app.llm_caret.messaging.adapter.agent.hook_bridge.{drain_hook_events}
+use app.llm_caret.observer.provider_adapters.{codex_loaded_skill, codex_requested_skills}
+use app.llm_caret.observer.observer_log.{observer_reset, observer_loaded_skills, observer_all_requested_skills}
+use app.llm_caret.workbench.capability_checklist.{CapabilityStatus, CapabilityProbes, capability_row_for}
+
+fn _read_payload(path: text) -> text:
+    "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cat " + path + "\"}}"
+
+fn _enqueue(store: PureSqlMessagingStore, id: text, name: text, payload: text, at: i64):
+    store.enqueue_hook_event(id, "codex", name, payload, at)
+    store.put_hook_correlation(StoredHookCorrelation(event_id: id, task_id: "t", room_id: "r", agent_id: "cx"))
+
+fn _probes(loaded: [text], requested: [text]) -> CapabilityProbes:
+    CapabilityProbes(live_panes: 1, observer_events: 1, ext_manifest_ok: true, ext_views: 5,
+        ext_leftover: 0, trace_view_declared: true, skill_count: 12, loaded_skills: loaded, requested_skills: requested)
+
+describe "codex loaded-skill signal (CU-020)":
+    it "extracts a skill only from a Codex PreToolUse read of a SKILL.md":
+        # @req CU-020
+        step("skill file read")
+        expect(codex_loaded_skill("PreToolUse", _read_payload(".codex/skills/spipe/SKILL.md"))).to_equal("spipe")
+        expect(codex_loaded_skill("PreToolUse", _read_payload("/home/u/.codex/skills/verify/SKILL.md"))).to_equal("verify")
+        step("not a skill read")
+        expect(codex_loaded_skill("PreToolUse", _read_payload("README.md"))).to_equal("")
+        expect(codex_loaded_skill("PostToolUse", _read_payload(".codex/skills/spipe/SKILL.md"))).to_equal("")
+        expect(codex_loaded_skill("PreToolUse", "{}")).to_equal("")
+
+    it "extracts requested skills from $name tokens in a Codex prompt":
+        # @req CU-020
+        step("prompt with two skills")
+        expect(codex_requested_skills("UserPromptSubmit", "{\"prompt\":\"use $spipe then $verify please\"}")).to_equal(["spipe", "verify"])
+        step("no token or other hook")
+        expect(codex_requested_skills("UserPromptSubmit", "{\"prompt\":\"costs 5 dollars\"}")).to_equal([])
+        expect(codex_requested_skills("PreToolUse", "{\"prompt\":\"$spipe\"}")).to_equal([])
+
+    it "records codex skills from drained hooks":
+        # @req CU-020
+        observer_reset()
+        var store = PureSqlMessagingStore.open_memory()
+        _enqueue(store, "c1", "PreToolUse", _read_payload(".codex/skills/spipe/SKILL.md"), 5)
+        _enqueue(store, "c2", "UserPromptSubmit", "{\"prompt\":\"run $spipe and $verify\"}", 6)
+        drain_hook_events(store, 10)
+        expect(observer_loaded_skills("cx")).to_equal(["spipe"])
+        expect(observer_all_requested_skills()).to_equal(["spipe", "verify"])
+
+    it "checklist skills row diffs loaded against requested":
+        # @req CU-020
+        val r = capability_row_for(_probes(["spipe"], ["spipe", "verify"]), "skills")
+        expect(r.status).to_equal(CapabilityStatus.Met)
+        expect(r.reason).to_contain("requested but not loaded: verify")
+        val ok = capability_row_for(_probes(["spipe"], ["spipe"]), "skills")
+        expect(ok.reason).to_contain("all requested skills loaded")

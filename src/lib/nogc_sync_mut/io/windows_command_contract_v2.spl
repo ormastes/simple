@@ -1,0 +1,83 @@
+# Pure admission/byte contracts used by the actual command owner.
+use std.nogc_sync_mut.io.windows_process_text.{windows_process_utf16_units_v1,
+    windows_process_quote_arg_bytes_v1}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+pub struct WindowsCommandRequestV2:
+    program: text
+    args: [text]
+    environment: [text]
+    directory: text
+    timeout_ms: i64
+    max_output_bytes: i64
+    expires_at_unix_ms: i64
+
+pub struct WindowsCommandResultV2:
+    stdout: text
+    stderr: text
+    exit_code: i64
+    limit_type: text
+    effect_attempted: bool
+
+fn absolute_path(value: text) -> bool:
+    if value.byte_len() < 3: return false
+    val drive = value.byte_at(0)
+    ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)) and
+        value.byte_at(1) == 58 and (value.byte_at(2) == 92 or value.byte_at(2) == 47)
+
+pub fn windows_command_admission_clock_v2(expires: i64, micros: i64) -> Result<(), text>:
+    if expires <= 0 or micros <= 0: return Err("windows-command-admission-clock-unavailable")
+    if micros / 1000 >= expires: return Err("windows-command-admission-expired")
+    Ok(())
+
+pub fn windows_command_timeout_due_v2(resumed: bool, started: u64, now: u64,
+        timeout_ms: i64) -> Result<bool, text>:
+    if not resumed: return Ok(false)
+    if now < started: return Err("windows-command-monotonic-clock-regressed")
+    if timeout_ms <= 0: return Err("windows-command-timeout-bound")
+    Ok(now - started >= timeout_ms as u64)
+
+pub fn windows_command_request_validate_v2(request: WindowsCommandRequestV2) -> Result<(), text>:
+    if not absolute_path(request.program) or not absolute_path(request.directory):
+        return Err("windows-command-absolute-path-required")
+    for value in [request.program, request.directory]:
+        val count = windows_process_utf16_units_v1(value, false)
+        if count < 1 or count > 32760: return Err("windows-command-path-invalid")
+    if request.timeout_ms <= 0 or request.timeout_ms > 86400000 or
+            request.max_output_bytes <= 0 or request.max_output_bytes > 16777216 or request.expires_at_unix_ms <= 0:
+        return Err("windows-command-bounds")
+    if request.args.len() > 1024 or request.environment.len() > 256:
+        return Err("windows-command-field-count")
+    var keys: [text] = []
+    var units: i64 = 1
+    for assignment in request.environment:
+        val size = windows_process_utf16_units_v1(assignment, false)
+        val separator = assignment.index_of("=")
+        if size < 1 or separator <= 0: return Err("windows-command-environment-invalid")
+        val key = assignment.substring(0, separator).to_upper()
+        if keys.contains(key): return Err("windows-command-environment-duplicate")
+        keys.push(key)
+        units = units + size + 1
+        if units > 32766: return Err("windows-command-environment-bound")
+    var command_units = windows_process_utf16_units_v1(request.program, false) * 2 + 3
+    for argument in request.args:
+        val count = windows_process_utf16_units_v1(argument, false)
+        if count < 0: return Err("windows-command-argument-invalid")
+        command_units = command_units + count * 2 + 3
+        if command_units > 32766: return Err("windows-command-arguments-bound")
+    Ok(())
+
+pub fn windows_command_line_v2(request: WindowsCommandRequestV2) -> Result<text, text>:
+    val checked = windows_command_request_validate_v2(request)?
+    var command = bytes_to_text(windows_process_quote_arg_bytes_v1(request.program)?)
+    for argument in request.args:
+        command = command + " " + bytes_to_text(windows_process_quote_arg_bytes_v1(argument)?)
+    if windows_process_utf16_units_v1(command, false) > 32766:
+        return Err("windows-command-arguments-bound")
+    Ok(command)
+
+pub fn windows_command_output_decode_v2(bytes: [u8]) -> Result<text, text>:
+    if not utf8_bytes_valid(bytes): return Err("windows-command-output-invalid-utf8")
+    val value = bytes_to_text(bytes)
+    if value.byte_len() != bytes.len(): return Err("windows-command-output-decode-failed")
+    Ok(value)

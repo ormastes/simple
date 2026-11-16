@@ -1,0 +1,246 @@
+# Read-only IO mechanism: borrowed partition FD is duplicated, NEVER consumed.
+# Returned root identity is DATA, not preparation/admission. The genuine native
+# parent compares it to its own retained root and rechecks actual context.
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.string_core.char_from_code
+
+pub class LinuxFreshEpochPopulationV1:
+    slot: i64
+    generation: i64
+    pub fn current_v1() -> Result<text, text>: population_current_v1(self.slot, self.generation)
+    pub fn close_v1() -> (bool, text): population_close_v1(self.slot, self.generation)
+pub enum LinuxFreshEpochPopulationOpenV1:
+    Rejected(reason: text)
+    CleanupRequired(owner: LinuxFreshEpochPopulationV1, reason: text)
+    Ready(owner: LinuxFreshEpochPopulationV1)
+
+pub fn linux_fresh_epoch_population_open_v1(partition_fd: i64, supervisor_identity: text) -> LinuxFreshEpochPopulationOpenV1:
+    @when(os="linux"):
+    population_open_v1(partition_fd, supervisor_identity)
+    @else:
+    LinuxFreshEpochPopulationOpenV1.Rejected("fresh-population-linux-required")
+    @end
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.linux_installed_supervisor_abi_v1.{fdopendir, readdir, closedir, __errno_location}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u8, volatile_write_u32}
+struct PopulationFdV1:
+    fd: i64
+    parent: i64
+    name: text
+    identity: text
+    directory: bool
+    depth: i64
+struct PopulationStateV1:
+    generation: i64
+    arena: i64
+    pid: i64
+    supervisor_identity: text
+    var handles: [PopulationFdV1] = []
+    var cursor: i64 = 0
+    var cursor_fd: i64 = -1
+    var phase: text = "opening"
+    var error: text = ""
+var population_slots_v1: [PopulationStateV1] = []
+
+fn population_state_v1(slot: i64, generation: i64) -> Result<PopulationStateV1, text>:
+    linux_machine_process_origin_check_v1()?
+    if slot < 0 or slot >= population_slots_v1.len() or population_slots_v1[slot].generation != generation:
+        return Err("fresh-population-stale")
+    Ok(population_slots_v1[slot])
+
+fn population_flags_v1(directory: bool) -> i32:
+    @when(arch="x86_64"):
+    if directory: 720896 else: 657408
+    @elif(arch="aarch64"):
+    if directory: 573440 else: 559104
+    @else:
+    0
+    @end
+
+@unsafe(reason: "bounded owned component-name buffer", capabilities: [raw_ptr])
+fn population_name_v1(slot: i64, name: text) -> i64:
+    if name.byte_len() > 255 or name.contains("/") or name.contains("\0"): return 0
+    val pointer = population_slots_v1[slot].arena + 256
+    for at in 0..name.byte_len(): volatile_write_u8(pointer + at, name.byte_at(at) as i64)
+    volatile_write_u8(pointer + name.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "genuine cgroup2 child metadata including returned mount-ID", capabilities: [ffi, raw_ptr])
+fn population_meta_v1(slot: i64, fd: i64, name: text = "") -> Result<(text, i64), text>:
+    val arena = population_slots_v1[slot].arena
+    for at in 0..256: volatile_write_u8(arena + at, 0)
+    val pointer = population_name_v1(slot, name)
+    if pointer == 0: return Err("fresh-population-component")
+    if (statx(fd as i32, pointer, if name == "": 4096 else: 256, 6143u32, arena) != 0 or
+            (volatile_read_u32(arena) & 6143) != 6143 or volatile_read_u64(arena + 144) <= 0):
+        return Err("fresh-population-statx")
+    val mode = volatile_read_u16(arena + 28)
+    Ok((str(volatile_read_u32(arena + 136)) + ":" + str(volatile_read_u32(arena + 140)) + ":" +
+        str(volatile_read_u64(arena + 32)) + ":" + str(volatile_read_u64(arena + 144)) + ":" +
+        str(volatile_read_u32(arena + 20)) + ":" + str(mode), mode & 61440))
+
+@unsafe(reason: "records duplicate/child FD before validation and never takes ownership of borrowed parent", capabilities: [ffi, raw_ptr])
+fn population_open_child_v1(slot: i64, parent: i64, name: text, directory: bool, depth: i64) -> Result<i64, text>:
+    val state = population_slots_v1[slot]
+    if state.handles.len() >= 384 or depth > 16: return Err("fresh-population-tree-bound")
+    val pointer = population_name_v1(slot, name)
+    if pointer == 0: return Err("fresh-population-component")
+    val fd = openat(parent as i32, pointer, population_flags_v1(directory), 0u32) as i64
+    if fd < 0: return Err("fresh-population-open")
+    val index = state.handles.len()
+    population_slots_v1[slot].handles.push(PopulationFdV1(fd: fd, parent: if index == 0: -1 else: parent,
+        name: name, identity: "", directory: directory, depth: depth))
+    val meta = population_meta_v1(slot, fd)?
+    if meta.1 != (if directory: 16384 else: 32768): return Err("fresh-population-entry-type")
+    val fs = state.arena + 512
+    if fstatfs(fd as i32, fs) != 0 or volatile_read_u64(fs) != 1667723888: return Err("fresh-population-not-cgroup2")
+    if index > 0:
+        val root = population_slots_v1[slot].handles[0].identity.split(":")
+        val child = meta.0.split(":")
+        if root[0] != child[0] or root[1] != child[1] or root[3] != child[3]: return Err("fresh-population-child-mount")
+    population_slots_v1[slot].handles[index].identity = meta.0
+    Ok(index)
+
+@unsafe(reason: "retained bounded cgroup-control read", capabilities: [ffi, raw_ptr])
+fn population_text_v1(slot: i64, parent: i64, name: text) -> Result<text, text>:
+    var index = -1
+    for at in 0..population_slots_v1[slot].handles.len():
+        val item = population_slots_v1[slot].handles[at]
+        if not item.directory and item.parent == parent and item.name == name: index = at
+    if index < 0: index = population_open_child_v1(slot, parent, name, false, 0)?
+    val pointer = population_slots_v1[slot].arena + 4096
+    val count = pread(population_slots_v1[slot].handles[index].fd as i32, pointer, 4097u64, 0)
+    if count < 0 or count > 4096: return Err("fresh-population-control-bound")
+    var bytes: [u8] = []
+    for at in 0..count: bytes.push(volatile_read_u8(pointer + at) as u8)
+    if not utf8_bytes_valid(bytes): return Err("fresh-population-control-utf8")
+    Ok(bytes_to_text(bytes))
+
+@unsafe(reason: "consumes canonical iterator once, preserving all separately retained descriptors", capabilities: [ffi])
+fn population_cursor_close_v1(slot: i64) -> Result<(), text>:
+    val cursor = population_slots_v1[slot].cursor
+    population_slots_v1[slot].cursor = 0
+    if cursor != 0 and closedir(cursor) != 0: return Err("fresh-population-cursor-close-consumed-error")
+    Ok(())
+
+@unsafe(reason: "enumerates actual bounded cgroup2 descendants, not a caller's completeness list", capabilities: [ffi, raw_ptr])
+fn population_children_v1(slot: i64, index: i64) -> Result<(), text>:
+    val item = population_slots_v1[slot].handles[index]
+    if population_slots_v1[slot].cursor != 0 or population_slots_v1[slot].cursor_fd >= 0: return Err("fresh-population-cursor-pending")
+    val fd = openat(item.fd as i32, population_name_v1(slot, "."), population_flags_v1(true), 0u32) as i64
+    population_slots_v1[slot].cursor_fd = fd
+    if fd < 0: return Err("fresh-population-cursor-open")
+    val cursor = fdopendir(fd as i32)
+    if cursor == 0: return Err("fresh-population-cursor-adopt")
+    population_slots_v1[slot].cursor = cursor
+    population_slots_v1[slot].cursor_fd = -1
+    var count = 0
+    while true:
+        val error = __errno_location()
+        volatile_write_u32(error, 0)
+        val row = readdir(cursor)
+        if row == 0:
+            if volatile_read_u32(error) != 0: return Err("fresh-population-directory-read")
+            break
+        count = count + 1
+        if count > 512: return Err("fresh-population-directory-bound")
+        val length = volatile_read_u16(row + 16)
+        if length < 20 or length > 280: return Err("fresh-population-dirent")
+        var name = ""
+        var ended = false
+        for at in 19..length:
+            val byte = volatile_read_u8(row + at)
+            if byte == 0:
+                ended = true
+                break
+            if byte < 33 or byte > 126: return Err("fresh-population-name-encoding")
+            name = name + char_from_code(byte as u32)
+        if not ended: return Err("fresh-population-name-unterminated")
+        if name == "." or name == "..": continue
+        val meta = population_meta_v1(slot, item.fd, name)?
+        if meta.1 == 16384:
+            var found = false
+            for existing in population_slots_v1[slot].handles:
+                if existing.directory and existing.parent == item.fd and existing.name == name: found = true
+            if not found:
+                val child = population_open_child_v1(slot, item.fd, name, true, item.depth + 1)?
+        elif meta.1 != 32768: return Err("fresh-population-entry-type")
+    population_cursor_close_v1(slot)
+
+fn population_body_v1(slot: i64, generation: i64) -> Result<text, text>:
+    val state = population_state_v1(slot, generation)?
+    if state.phase != "ready" or state.handles.len() == 0: return Err("fresh-population-not-current")
+    var seen = 0
+    var at = 0
+    while at < population_slots_v1[slot].handles.len():
+        val item = population_slots_v1[slot].handles[at]
+        at = at + 1
+        if not item.directory: continue
+        if population_text_v1(slot, item.fd, "cgroup.type")? != "domain\n": return Err("fresh-population-threaded-unsupported")
+        val members = population_text_v1(slot, item.fd, "cgroup.procs")?
+        for cell in members.split("\n"):
+            if cell == "": continue
+            val pid = cell.to_int() ?? -1
+            if pid < 1 or pid > 2147483647 or str(pid) != cell: return Err("fresh-population-pid")
+            if pid != state.pid or item.identity != state.supervisor_identity: return Err("fresh-population-preexisting-partition-occupant")
+            seen = seen + 1
+        population_children_v1(slot, at - 1)?
+    if seen != 1: return Err("fresh-population-host-membership")
+    for item in population_slots_v1[slot].handles:
+        if population_meta_v1(slot, item.fd)?.0 != item.identity: return Err("fresh-population-retained-entry-replaced")
+        if item.parent >= 0 and population_meta_v1(slot, item.parent, item.name)?.0 != item.identity:
+            return Err("fresh-population-named-entry-replaced")
+    Ok(population_slots_v1[slot].handles[0].identity)
+
+fn population_current_v1(slot: i64, generation: i64) -> Result<text, text>:
+    val result = population_body_v1(slot, generation)
+    if result.is_err():
+        val loaded = population_state_v1(slot, generation)
+        if loaded.is_ok() and loaded.unwrap().phase != "closed": population_slots_v1[slot].phase = "cleanup"
+    result
+
+@unsafe(reason: "duplicates borrowed FD and captures actual current PID only after origin admission", capabilities: [ffi, raw_ptr])
+fn population_open_v1(partition_fd: i64, supervisor_identity: text) -> LinuxFreshEpochPopulationOpenV1:
+    val origin = linux_machine_process_origin_check_v1()
+    if origin.is_err(): return LinuxFreshEpochPopulationOpenV1.Rejected(origin.unwrap_err())
+    if population_flags_v1(true) == 0 or population_slots_v1.len() >= 4096: return LinuxFreshEpochPopulationOpenV1.Rejected("fresh-population-owner-bound")
+    val arena = malloc(12288u64)
+    if arena == 0: return LinuxFreshEpochPopulationOpenV1.Rejected("fresh-population-allocation")
+    val slot = population_slots_v1.len()
+    population_slots_v1.push(PopulationStateV1(generation: slot + 1, arena: arena, pid: getpid() as i64, supervisor_identity: supervisor_identity))
+    val owner = LinuxFreshEpochPopulationV1(slot: slot, generation: slot + 1)
+    val captured = population_open_child_v1(slot, partition_fd, ".", true, 0)
+    if captured.is_err(): return LinuxFreshEpochPopulationOpenV1.CleanupRequired(owner, captured.unwrap_err())
+    population_slots_v1[slot].phase = "ready"
+    LinuxFreshEpochPopulationOpenV1.Ready(owner)
+
+@unsafe(reason: "consumes only owned duplicate/child descriptors, never borrowed original FD", capabilities: [ffi])
+fn population_close_v1(slot: i64, generation: i64) -> (bool, text):
+    val loaded = population_state_v1(slot, generation)
+    if loaded.is_err(): return (false, loaded.unwrap_err())
+    val state = loaded.unwrap()
+    if state.phase == "closed": return (true, state.error)
+    val cursor = population_cursor_close_v1(slot)
+    if cursor.is_err() and state.error == "": population_slots_v1[slot].error = cursor.unwrap_err()
+    val fd = population_slots_v1[slot].cursor_fd
+    population_slots_v1[slot].cursor_fd = -1
+    if fd >= 0 and close(fd as i32) != 0 and population_slots_v1[slot].error == "":
+        population_slots_v1[slot].error = "fresh-population-cursor-fd-close-consumed-error"
+    var at = state.handles.len() - 1
+    while at >= 0:
+        val fd = population_slots_v1[slot].handles[at].fd
+        population_slots_v1[slot].handles[at].fd = -1
+        if fd >= 0 and close(fd as i32) != 0 and population_slots_v1[slot].error == "":
+            population_slots_v1[slot].error = "fresh-population-child-close-consumed-error"
+        at = at - 1
+    free(state.arena)
+    population_slots_v1[slot].phase = "closed"
+    (true, population_slots_v1[slot].error)
+@else:
+fn population_current_v1(slot: i64, generation: i64) -> Result<text, text>: Err("fresh-population-linux-required")
+fn population_close_v1(slot: i64, generation: i64) -> (bool, text): (false, "fresh-population-linux-required")
+@end

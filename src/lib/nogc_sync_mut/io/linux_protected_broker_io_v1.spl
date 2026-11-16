@@ -1,0 +1,233 @@
+# Unsafe package mechanism called only from the original protected storage
+# owner while its health ticket is held. Native arguments never escape a safe
+# facade; this file creates no owner registry and grants no effect authority.
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+use std.nogc_sync_mut.io.linux_protected_broker_cell_v1.*
+use std.nogc_sync_mut.io.retained_private_credential_protocol_v2.retained_credential_bytes_equal_v2
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+
+pub(package) struct LinuxBrokerFixedReadV1:
+    state: text
+    value: text = ""
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_protected_storage_abi_v1.*
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_write_u8, volatile_read_u32}
+
+pub(package) fn broker_now_ms_v1() -> Result<i64, text>:
+    val sample = time_sample_monotonic_nanos_or_failure()
+    if sample < 0: return Err("broker-control-clock-unavailable")
+    Ok(sample / 1000000)
+
+fn broker_file_valid_v1(meta: AnchoredLinuxMetadataV1, uid: i64, maximum: i64, unlinked: bool = false) -> bool:
+    ((meta.mode & 61440u32) == 32768u32 and (meta.mode & 4095u32) == 384u32 and
+        meta.uid as i64 == uid and meta.size >= 0 and meta.size <= maximum and
+        (meta.links == 1 or (unlinked and meta.links == 0)) and
+        meta.identity.len() <= 120 and meta.revision.len() <= 120)
+
+@unsafe(reason: "bounded retained file bytes, no pathname reopening", capabilities: [ffi, raw_ptr])
+fn broker_read_bytes_v1(fd: i64, size: i64) -> Result<text, text>:
+    val buffer = malloc((size + 1) as u64)
+    if buffer == 0: return Err("broker-control-memory")
+    var count: i64 = 0
+    var error = false
+    while count < size:
+        val got = pread(fd as i32, buffer + count, (size - count) as u64, count)
+        if got <= 0:
+            error = true
+            break
+        count = count + got
+    var bytes: [u8] = []
+    if not error:
+        for at in 0..count: bytes.push(volatile_read_u8(buffer + at) as u8)
+    free(buffer)
+    if error: return Err("broker-control-read")
+    if not utf8_bytes_valid(bytes): return Err("broker-control-response-text")
+    Ok(bytes_to_text(bytes))
+
+@unsafe(reason: "same held mutable response with identity brackets", capabilities: [ffi, raw_ptr])
+fn broker_fixed_read_body_v1(fd: i64, root_fd: i64, uid: i64, name: text,
+        maximum: i64, mutable: bool) -> Result<LinuxBrokerFixedReadV1, text>:
+    val before = anchored_linux_metadata_v1(fd, "", true)?
+    if not broker_file_valid_v1(before, uid, maximum, mutable): return Err("broker-control-file-metadata")
+    val bytes = broker_read_bytes_v1(fd, before.size)
+    val after = anchored_linux_metadata_v1(fd, "", true)?
+    if not broker_file_valid_v1(after, uid, maximum, mutable): return Err("broker-control-file-metadata")
+    val named = anchored_linux_metadata_v1(root_fd, name, false)
+    if named.is_err():
+        if mutable and named.unwrap_err() == "anchored-io-absent": return Ok(LinuxBrokerFixedReadV1("Changed"))
+        return Err(named.unwrap_err())
+    if not broker_file_valid_v1(named.unwrap(), uid, maximum): return Err("broker-control-named-metadata")
+    val same = (retained_credential_bytes_equal_v2(before.identity, after.identity) and
+        retained_credential_bytes_equal_v2(after.identity, named.unwrap().identity) and
+        retained_credential_bytes_equal_v2(before.revision, after.revision) and
+        retained_credential_bytes_equal_v2(after.revision, named.unwrap().revision) and before.links == 1 and after.links == 1)
+    if not same:
+        if mutable: return Ok(LinuxBrokerFixedReadV1("Changed"))
+        return Err("broker-control-fixed-file-changed")
+    if bytes.is_err(): return Err(bytes.unwrap_err())
+    Ok(LinuxBrokerFixedReadV1("Value", bytes.unwrap()))
+
+# Always bypasses the immutable cache. The transient descriptor is recorded in
+# the existing cell before metadata/read errors and consumed before close.
+@unsafe(reason: "fixed transient IO in original resource custody", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_fixed_read_v1(cell: i64, root_fd: i64, uid: i64,
+        name: text, maximum: i64, mutable: bool,
+        current: fn() -> Result<(), text>) -> Result<LinuxBrokerFixedReadV1, text>:
+    if (name != "broker.control.request" and name != "broker.control.response" and name != "tree-reaped.sdn"):
+        return Err("broker-control-fixed-name")
+    if (maximum < 1 or maximum > 16384 or
+            (name == "broker.control.response" and (maximum != 8192 or not mutable))):
+        return Err("broker-control-fixed-read-bound")
+    current()?
+    if broker_existing_read_v1(cell, 40) >= 0: return Err("broker-control-transient-pending")
+    val pointer = anchored_linux_name_v1(name)
+    if pointer == 0: return Err("broker-control-name-memory")
+    val fd = openat(root_fd as i32, pointer, anchored_linux_file_flags_v1(), 0u32) as i64
+    val code = if fd < 0: volatile_read_u32(__errno_location()) else: 0
+    free(pointer)
+    if fd < 0:
+        current()?
+        if code == 2: return Ok(LinuxBrokerFixedReadV1("Absent"))
+        return Err("broker-control-file-open")
+    broker_existing_int_v1(cell, 40, fd)
+    val read = broker_fixed_read_body_v1(fd, root_fd, uid, name, maximum, mutable)
+    broker_existing_int_v1(cell, 40, -1)
+    val closed = close(fd as i32)
+    val checked = current()
+    if closed != 0: return Err("broker-control-close-consumed-unconfirmed")
+    if checked.is_err(): return Err(checked.unwrap_err())
+    read
+
+@unsafe(reason: "bounded exact staged bytes under original root", capabilities: [ffi, raw_ptr])
+fn broker_stage_bytes_v1(fd: i64, uid: i64, payload: text, deadline: i64) -> Result<(), text>:
+    if fchmod(fd as i32, 384u32) != 0: return Err("broker-control-stage-mode")
+    val meta = anchored_linux_metadata_v1(fd, "", true)?
+    if not broker_file_valid_v1(meta, uid, 16384): return Err("broker-control-stage-metadata")
+    val bytes = text_to_utf8_bytes(payload)
+    val buffer = malloc((bytes.len() + 1) as u64)
+    if buffer == 0: return Err("broker-control-memory")
+    for at in 0..bytes.len(): volatile_write_u8(buffer + at, bytes[at] as i64)
+    var at: i64 = 0
+    var error = ""
+    while at < bytes.len():
+        val now = broker_now_ms_v1()
+        if now.is_err() or now.unwrap() >= deadline:
+            error = "broker-control-deadline-expired"
+            break
+        val count = write(fd as i32, buffer + at, (bytes.len() - at) as u64)
+        if count <= 0:
+            error = "broker-control-stage-write"
+            break
+        at = at + count
+    free(buffer)
+    if error != "": return Err(error)
+    if fsync(fd as i32) != 0: return Err("broker-control-stage-sync")
+    val after = anchored_linux_metadata_v1(fd, "", true)?
+    if not broker_file_valid_v1(after, uid, 16384) or after.size != bytes.len(): return Err("broker-control-stage-metadata")
+    if broker_read_bytes_v1(fd, after.size)? != payload: return Err("broker-control-stage-readback")
+    Ok(())
+
+@unsafe(reason: "drain only exact original unpublished stage", capabilities: [ffi, raw_ptr])
+fn broker_discard_stage_v1(cell: i64, root_fd: i64, fd: i64, name: text,
+        identity: [u8], current: fn() -> Result<(), text>) -> Result<(), text>:
+    val held = anchored_linux_metadata_v1(fd, "", true)?
+    val named = anchored_linux_metadata_v1(root_fd, name, false)?
+    if not retained_credential_bytes_equal_v2(held.identity, identity) or not retained_credential_bytes_equal_v2(named.identity, identity):
+        return Err("broker-control-stage-substituted")
+    val pointer = anchored_linux_name_v1(name)
+    if pointer == 0: return Err("broker-control-name-memory")
+    val removed = unlinkat(root_fd as i32, pointer, 0)
+    free(pointer)
+    if removed != 0: return Err("broker-control-stage-unlink")
+    broker_existing_blob_v1(cell, 128, [], 120)?
+    broker_existing_int_v1(cell, 24, -1)
+    if close(fd as i32) != 0: return Err("broker-control-close-consumed-unconfirmed")
+    if fsync(root_fd as i32) != 0: return Err("broker-control-stage-unlink-sync")
+    current()
+
+# replace selects only the fixed cancel request. no-replace selects only the
+# fixed reap receipt. There is no caller-controlled target or writer bypass.
+@unsafe(reason: "fixed anchored publication in original resource transaction", capabilities: [ffi, raw_ptr])
+pub(package) fn broker_fixed_publish_v1(cell: i64, root_fd: i64, uid: i64,
+        payload: text, deadline: i64, reap: bool,
+        current: fn() -> Result<(), text>) -> Result<text, text>:
+    val name = if reap: "tree-reaped.sdn" else: "broker.control.request"
+    val maximum = if reap: 16384 else: 4096
+    if payload.byte_len() < 1 or payload.byte_len() > maximum: return Err("broker-control-payload-bound")
+    current()?
+    if broker_existing_read_v1(cell, 24) >= 0 or broker_existing_read_v1(cell, 128) != 0:
+        return Err("broker-control-stage-pending")
+    val existing = broker_fixed_read_v1(cell, root_fd, uid, name, maximum, false, current)?
+    if reap and existing.state == "Value":
+        if existing.value != payload: return Err("broker-reap-existing-mismatch")
+        return Ok("Existing")
+    if broker_now_ms_v1()? >= deadline: return Err("broker-control-deadline-expired")
+    val nonce = sosix_random_hex(16)
+    if nonce.is_none(): return Err("broker-control-stage-entropy")
+    val stage_name = ".protected-stage-" + nonce.unwrap()
+    val stage_pointer = anchored_linux_name_v1(stage_name)
+    if stage_pointer == 0: return Err("broker-control-name-memory")
+    val fd = openat(root_fd as i32, stage_pointer, anchored_linux_file_flags_v1() | 194, 384u32) as i64
+    free(stage_pointer)
+    if fd < 0: return Err("broker-control-stage-create")
+    broker_existing_int_v1(cell, 24, fd)
+    broker_existing_int_v1(cell, 32, root_fd)
+    broker_existing_blob_v1(cell, 128, text_to_utf8_bytes(stage_name), 120)?
+    val initial = anchored_linux_metadata_v1(fd, "", true)?
+    broker_existing_blob_v1(cell, 256, initial.identity, 120)?
+    broker_stage_bytes_v1(fd, uid, payload, deadline)?
+    current()?
+    val held = anchored_linux_metadata_v1(fd, "", true)?
+    val named = anchored_linux_metadata_v1(root_fd, stage_name, false)?
+    if (not retained_credential_bytes_equal_v2(held.identity, initial.identity) or
+            not retained_credential_bytes_equal_v2(named.identity, initial.identity) or
+            not broker_file_valid_v1(held, uid, maximum) or not broker_file_valid_v1(named, uid, maximum)):
+        return Err("broker-control-stage-substituted")
+    # Check any existing target immediately before replacement, never replace a
+    # symlink or unsafe private-file candidate under an authorized root.
+    val before = broker_fixed_read_v1(cell, root_fd, uid, name, maximum, false, current)?
+    if reap and before.state == "Value":
+        if before.value != payload: return Err("broker-reap-existing-mismatch")
+        broker_discard_stage_v1(cell, root_fd, fd, stage_name, initial.identity, current)?
+        return Ok("Existing")
+    if broker_now_ms_v1()? >= deadline: return Err("broker-control-deadline-expired")
+    val source = anchored_linux_name_v1(stage_name)
+    val target = anchored_linux_name_v1(name)
+    if source == 0 or target == 0:
+        if source != 0: free(source)
+        if target != 0: free(target)
+        return Err("broker-control-name-memory")
+    broker_cell_set_int_v1(cell, if reap: 32 else: 0, if reap: 2 else: 3)
+    broker_cell_set_int_v1(cell, 24, 2)
+    val published = if reap: linkat(root_fd as i32, source, root_fd as i32, target, 0) else:
+        renameat(root_fd as i32, source, root_fd as i32, target)
+    val code = if published != 0: volatile_read_u32(__errno_location()) else: 0
+    free(source)
+    free(target)
+    if published != 0 and not (reap and code == 17): return Err("broker-control-publication-uncertain")
+    if not reap:
+        broker_existing_blob_v1(cell, 128, [], 120)?
+    else:
+        val stage_now = anchored_linux_metadata_v1(fd, "", true)?
+        val stage_named = anchored_linux_metadata_v1(root_fd, stage_name, false)?
+        if not retained_credential_bytes_equal_v2(stage_now.identity, initial.identity) or
+                not retained_credential_bytes_equal_v2(stage_named.identity, initial.identity):
+            return Err("broker-control-stage-substituted")
+        val remove_name = anchored_linux_name_v1(stage_name)
+        if remove_name == 0: return Err("broker-control-name-memory")
+        val removed = unlinkat(root_fd as i32, remove_name, 0)
+        free(remove_name)
+        if removed != 0: return Err("broker-control-stage-unlink")
+        broker_existing_blob_v1(cell, 128, [], 120)?
+    broker_existing_int_v1(cell, 24, -1)
+    if close(fd as i32) != 0: return Err("broker-control-close-consumed-unconfirmed")
+    if fsync(root_fd as i32) != 0: return Err("broker-control-publication-sync-uncertain")
+    val after = broker_fixed_read_v1(cell, root_fd, uid, name, maximum, false, current)?
+    if after.state != "Value" or after.value != payload: return Err("broker-control-publication-readback")
+    current()?
+    if broker_now_ms_v1()? >= deadline: return Err("broker-control-publication-deadline-uncertain")
+    broker_cell_set_int_v1(cell, 24, 1)
+    Ok(if published == 0: "Published" else: "Existing")
+@end

@@ -1,0 +1,115 @@
+# Protected retained SSH key/pin storage. Contents never enter diagnostics.
+# Storage is not a key parser or authentication authority; caller validates
+# existing key/public-wire/pin identity using its shared codec.
+pub use std.nogc_sync_mut.io.host_identity_store_abi_v1.HostIdentityStorePublicationV1
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.host_identity_leaf_valid_v1
+use std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1.HostIdentitySshPathsV1
+@when(os="windows"):
+use std.nogc_sync_mut.io.host_identity_store_windows_v1.{HostIdentityPlatformV1, host_identity_platform_open_v1}
+use std.nogc_sync_mut.io.host_identity_store_windows_v1.{HostIdentityPlatformProjectionV1,
+    host_identity_platform_projection_begin_v1, host_identity_platform_projection_step_v1,
+    host_identity_platform_projection_paths_v1, host_identity_platform_projection_close_v1}
+@else:
+use std.nogc_sync_mut.io.host_identity_store_linux_v1.{HostIdentityPlatformV1, host_identity_platform_open_v1}
+use std.nogc_sync_mut.io.host_identity_store_linux_v1.{HostIdentityPlatformProjectionV1,
+    host_identity_platform_projection_begin_v1, host_identity_platform_projection_step_v1,
+    host_identity_platform_projection_paths_v1, host_identity_platform_projection_close_v1}
+@end
+
+pub class HostIdentityStoreV1:
+    platform: HostIdentityPlatformV1
+
+pub struct HostIdentityStoreOpenTurnV1:
+    owner: Option<HostIdentityStoreV1>
+    ready: bool
+    cleanup_pending: bool
+    error: text
+
+pub struct HostIdentityStoreReadTurnV1:
+    owner: HostIdentityStoreV1
+    bytes: Option<[u8]>
+    absent: bool
+    cleanup_pending: bool
+    error: text
+
+pub struct HostIdentityStorePublishTurnV1:
+    owner: HostIdentityStoreV1
+    publication: HostIdentityStorePublicationV1
+    file_synced: bool
+    namespace_synced: bool
+    cleanup_pending: bool
+    error: text
+
+pub struct HostIdentityStoreCloseTurnV1:
+    owner: Option<HostIdentityStoreV1>
+    completed: bool
+    error: text
+
+pub fn host_identity_store_open_v1(root: text) -> HostIdentityStoreOpenTurnV1:
+    val opened = host_identity_platform_open_v1(root)
+    var owner: Option<HostIdentityStoreV1> = None
+    if val actual = opened.owner: owner = Some(HostIdentityStoreV1(platform: actual))
+    HostIdentityStoreOpenTurnV1(owner, opened.ready, opened.cleanup_pending, opened.error)
+
+pub fn host_identity_store_read_v1(owner: HostIdentityStoreV1, leaf: text, maximum: i64) -> HostIdentityStoreReadTurnV1:
+    val read = owner.platform.read_v1(leaf, maximum)
+    # Nil is absence only when the underlying OS proved absence explicitly.
+    HostIdentityStoreReadTurnV1(owner, read.bytes, read.absent, read.cleanup_pending, read.error)
+
+pub fn host_identity_store_publish_v1(owner: HostIdentityStoreV1, leaf: text, bytes: [u8]) -> HostIdentityStorePublishTurnV1:
+    val result = owner.platform.publish_v1(leaf, bytes)
+    HostIdentityStorePublishTurnV1(owner, result.publication, result.file_synced,
+        result.namespace_synced, result.cleanup_pending, result.error)
+
+pub fn host_identity_store_close_v1(owner: HostIdentityStoreV1) -> HostIdentityStoreCloseTurnV1:
+    val result = owner.platform.close_v1()
+    HostIdentityStoreCloseTurnV1(if result.consumed: None else: Some(owner), result.completed, result.error)
+
+pub fn host_identity_store_path_v1(owner: HostIdentityStoreV1, leaf: text) -> Result<text, text>:
+    if not host_identity_leaf_valid_v1(leaf): return Err("identity-store-leaf")
+    owner.platform.path_v1(leaf)
+
+# Check transport support before generating/publishing secret material. The
+# caller retains this same canonical owner for cleanup after either result.
+pub fn host_identity_store_transport_preflight_v1(owner: HostIdentityStoreV1) -> Result<(), text>:
+    owner.platform.transport_preflight_v1()
+
+# Protected configuration data only, never an external SSH transport path.
+# The caller retains this canonical owner through any failed query/cleanup.
+pub fn host_identity_store_profile_locator_v1(owner: HostIdentityStoreV1, leaf: text) -> Result<text, text>:
+    if not host_identity_leaf_valid_v1(leaf) or not leaf.ends_with(".profile"):
+        return Err("identity-store-profile-role")
+    owner.platform.profile_locator_v1(leaf)
+
+pub class HostIdentitySshProjectionV1:
+    platform: HostIdentityPlatformProjectionV1
+
+pub struct HostIdentitySshProjectionTurnV1:
+    owner: Option<HostIdentitySshProjectionV1>
+    ready: bool
+    cleanup_pending: bool
+    error: text
+
+pub struct HostIdentitySshProjectionCloseTurnV1:
+    owner: Option<HostIdentitySshProjectionV1>
+    completed: bool
+    error: text
+
+# Composition ports accept only actual opaque owners. No raw registry token,
+# directory, file descriptor or namespace proof is accepted from callers.
+pub fn host_identity_store_projection_begin_v1(store: HostIdentityStoreV1, key_leaf: text, hosts_leaf: text) -> HostIdentitySshProjectionTurnV1:
+    val turn = host_identity_platform_projection_begin_v1(store.platform, key_leaf, hosts_leaf)
+    var owner: Option<HostIdentitySshProjectionV1> = None
+    if val actual = turn.owner: owner = Some(HostIdentitySshProjectionV1(platform: actual))
+    HostIdentitySshProjectionTurnV1(owner, turn.ready, turn.cleanup_pending, turn.error)
+
+pub fn host_identity_store_projection_step_v1(owner: HostIdentitySshProjectionV1, store: HostIdentityStoreV1, cancel: bool) -> HostIdentitySshProjectionTurnV1:
+    val turn = host_identity_platform_projection_step_v1(owner.platform, store.platform, cancel)
+    HostIdentitySshProjectionTurnV1(if turn.owner == None: None else: Some(owner), turn.ready, turn.cleanup_pending, turn.error)
+
+pub fn host_identity_store_projection_paths_v1(owner: HostIdentitySshProjectionV1, store: HostIdentityStoreV1) -> Result<HostIdentitySshPathsV1, text>:
+    host_identity_platform_projection_paths_v1(owner.platform, store.platform)
+
+pub fn host_identity_store_projection_close_v1(owner: HostIdentitySshProjectionV1) -> HostIdentitySshProjectionCloseTurnV1:
+    val turn = host_identity_platform_projection_close_v1(owner.platform)
+    HostIdentitySshProjectionCloseTurnV1(if turn.consumed: None else: Some(owner), turn.completed, turn.error)

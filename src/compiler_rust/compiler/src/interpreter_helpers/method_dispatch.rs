@@ -761,7 +761,7 @@ pub(crate) fn call_method_on_value(
                 }
             }
 
-            // Search for method in impl blocks
+            // Search for method in impl blocks (local first, then GLOBAL_IMPL_METHODS fallback)
             if let Some(methods) = _impl_methods.get(class) {
                 if let Some(func) = methods.iter().find(|m| m.name == method) {
                     return exec_function_with_values_and_self(
@@ -775,6 +775,23 @@ pub(crate) fn call_method_on_value(
                         Some((class, fields)),
                     );
                 }
+            }
+            let global_impl = crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+                cell.borrow()
+                    .get(class)
+                    .and_then(|methods| methods.iter().find(|m| m.name == method).cloned())
+            });
+            if let Some(func) = global_impl {
+                return exec_function_with_values_and_self(
+                    &func,
+                    _args,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                    Some((class, fields)),
+                );
             }
 
             // Method not found, fall through to error
@@ -1022,6 +1039,31 @@ pub(crate) fn call_method_on_value(
         return Ok(Value::Bool(matched));
     }
 
+    // Unit receivers in chained position (`opt.unwrap().value()`): mirror the
+    // value/suffix/family/to_string/to_text arms of handle_unit_methods and
+    // forward builtin numeric methods (`to_i64`, `abs`, ...) to the inner value.
+    if let Value::Unit { value, suffix, family } = &recv_val {
+        match method {
+            "value" => return Ok((**value).clone()),
+            "suffix" => return Ok(Value::text(suffix.to_string())),
+            "family" => return Ok(family.clone().map_or(Value::Nil, Value::text_owned)),
+            "to_string" => return Ok(Value::text(format!("{}_{}", value.to_display_string(), suffix))),
+            "to_text" => return Ok(Value::text(value.to_display_string())),
+            _ => {
+                return call_method_on_value(
+                    (**value).clone(),
+                    method,
+                    _args,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                );
+            }
+        }
+    }
+
     if std::env::var("SIMPLE_DEBUG_NESTED_DISPATCH").is_ok() {
         let variant = match &recv_val {
             Value::Object { class, .. } => format!("Object(class={})", class),
@@ -1090,7 +1132,7 @@ fn find_method_and_exec(
             )?));
         }
     }
-    // Check impl methods
+    // Check impl methods (local first, then GLOBAL_IMPL_METHODS fallback)
     if let Some(methods) = impl_methods.get(class) {
         if let Some(func) = methods.iter().find(|m| m.name == method_name) {
             return Ok(Some(exec_function(
@@ -1104,6 +1146,23 @@ fn find_method_and_exec(
                 Some((class, fields)),
             )?));
         }
+    }
+    let global_impl = crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+        cell.borrow()
+            .get(class)
+            .and_then(|methods| methods.iter().find(|m| m.name == method_name).cloned())
+    });
+    if let Some(func) = global_impl {
+        return Ok(Some(exec_function(
+            &func,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            Some((class, fields)),
+        )?));
     }
 
     // Check trait implementations - search TRAIT_IMPLS for this specific type

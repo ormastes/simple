@@ -81,6 +81,10 @@ fn fixture_root(tag: text) -> text:
     val _ts = write_file(root + "/src/app/sub/topsame.spl", "use app.sub.lib_mod.*\nval TS = secret_helper()\npub fn get_ts() -> i64:\n    TS\n")
     val _tt = write_file(root + "/test/unit/toptest_helper.spl", "use app.sub.lib_mod.*\nval TT = secret_helper()\npub fn get_tt() -> i64:\n    TT\n")
     val _pc = write_file(root + "/src/app/other/pub_caller.spl", "use app.sub.lib_mod.*\npub fn call_pub() -> i64:\n    open_api()\n")
+    # Leftovers lane: a module namespace handed out whole (values, entries,
+    # iteration, get_or, map_values, a mutated or merged copy, a
+    # comprehension) names the private fns it holds, like `m["f"]`.
+    val _nv = write_file(root + "/src/app/other/nsv.spl", "use app.sub.lib_mod\nuse app.sub.hand.{{table, named_table}}\npub fn ns_values() -> i64:\n    val ks = lib_mod.keys()\n    val vs = lib_mod.values()\n    var r = 0\n    for i in 0..ks.len():\n        if ks[i] == \"secret_helper\": r = vs[i]()\n    r\npub fn ns_iter() -> i64:\n    var r = 0\n    for (k, f) in lib_mod:\n        if k == \"secret_helper\": r = f()\n    r\npub fn ns_entries() -> i64:\n    var r = 0\n    for (k, f) in lib_mod.entries():\n        if k == \"secret_helper\": r = f()\n    r\npub fn ns_getor() -> i64:\n    lib_mod.get_or(\"secret_helper\", 0)()\npub fn ns_mapv() -> i64:\n    val d = lib_mod.map_values(\\f: f)\n    d[\"secret_helper\"]()\npub fn ns_remove() -> i64:\n    var ns = lib_mod\n    ns.remove(\"open_api\")\n    ns[\"secret_helper\"]()\npub fn ns_bracket() -> i64:\n    var ns = lib_mod\n    ns[\"zz\"] = 1\n    ns[\"secret_helper\"]()\npub fn ns_merge() -> i64:\n    var d: Dict<text, fn() -> i64> = {{}}\n    d.merge(lib_mod)\n    d[\"secret_helper\"]()\npub fn ns_comp() -> i64:\n    val d = {{k: v for (k, v) in lib_mod}}\n    d[\"secret_helper\"]()\npub fn ns_keys() -> i64:\n    lib_mod.keys().len() * 14\npub fn handed_values() -> i64:\n    var r = 0\n    for f in table().values():\n        r = f()\n    for (k, f) in named_table():\n        r = f()\n    r\n")
     root
 
 # The fixture root itself must not look like a test path, or every product
@@ -365,6 +369,32 @@ describe "a dict-indexed module namespace follows the call rule":
         expect(allowed_on_every_lane("dicttest", "test/unit/di_spec.spl", "use app.sub.lib_mod\nprint lib_mod[\"secret_helper\"]()\n")).to_equal(true)
         expect(allowed_on_every_lane("dictgettest", "test/unit/dg_spec.spl", "use app.sub.lib_mod\nval ns = lib_mod\nprint ns.get(\"secret_helper\")()\nprint ns[\"secret_helper\"]()\n")).to_equal(true)
         expect(allowed_on_every_lane("handeddict", "src/app/main_hd.spl", "use app.other.hv.{{hd}}\nprint hd()\n")).to_equal(true)
+
+# Leftovers of private_call_gate_skips_import_bound_and_entry_calls_2026-11-14:
+# `m.values()` / iterating a module namespace handed its fns out unjudged.
+fn ns_row(fname: text) -> text:
+    "use app.other.nsv.{{" + fname + "}}\nprint " + fname + "()\n"
+
+describe "a module namespace handed out whole follows the call rule":
+    it "product code reading values, entries or iterating it is refused":
+        expect(refused_on_every_lane("nsvalues", "src/app/main_nsv1.spl", ns_row("ns_values"))).to_equal(true)
+        expect(refused_on_every_lane("nsiter", "src/app/main_nsv2.spl", ns_row("ns_iter"))).to_equal(true)
+        expect(refused_on_every_lane("nsentries", "src/app/main_nsv3.spl", ns_row("ns_entries"))).to_equal(true)
+        expect(refused_on_every_lane("nscomp", "src/app/main_nsv4.spl", ns_row("ns_comp"))).to_equal(true)
+
+    it "product code reaching it by get_or, map_values or a mutated or merged copy is refused":
+        expect(refused_on_every_lane("nsgetor", "src/app/main_nsv5.spl", ns_row("ns_getor"))).to_equal(true)
+        expect(refused_on_every_lane("nsmapv", "src/app/main_nsv6.spl", ns_row("ns_mapv"))).to_equal(true)
+        expect(refused_on_every_lane("nsremove", "src/app/main_nsv7.spl", ns_row("ns_remove"))).to_equal(true)
+        expect(refused_on_every_lane("nsbracket", "src/app/main_nsv8.spl", ns_row("ns_bracket"))).to_equal(true)
+        expect(refused_on_every_lane("nsmerge", "src/app/main_nsv9.spl", ns_row("ns_merge"))).to_equal(true)
+
+    it "a test or same-directory caller iterating it, its keys, and a dict a module hands out are allowed":
+        val it_src = "use app.sub.lib_mod\nfor (k, f) in lib_mod:\n    if k == \"secret_helper\": print f()\nval vs = lib_mod.values()\nprint lib_mod.keys().len()\n"
+        expect(allowed_on_every_lane("nsitertest", "test/unit/nsi_spec.spl", it_src)).to_equal(true)
+        expect(allowed_on_every_lane("nsitersame", "src/app/sub/nsi_same.spl", it_src)).to_equal(true)
+        expect(allowed_on_every_lane("nskeys", "src/app/main_nsk.spl", ns_row("ns_keys"))).to_equal(true)
+        expect(allowed_on_every_lane("nshanded", "src/app/main_nsh.spl", ns_row("handed_values"))).to_equal(true)
 
 describe "same-named private helpers in two directories":
     it "a module reaches its own helper by UFCS, pipeline and as a value":

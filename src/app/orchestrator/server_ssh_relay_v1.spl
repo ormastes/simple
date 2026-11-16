@@ -1,0 +1,106 @@
+# Reusable framing for the fixed gateway-stdio-v1 endpoint. The caller selects
+# its trusted local controller configuration BEFORE dispatch. Nothing in the
+# incoming frame selects a local socket, UID, principal or filesystem root.
+use app.orchestrator.server_ssh_types_v1.{ServerGatewayStdioRequestV1, SERVER_SSH_STDOUT_LIMIT_V1}
+use std.common.text_bytes.{text_byte_buffer, boxed_text_bytes_checked, utf8_bytes_valid}
+use std.common.string_core.str_len
+use std.nogc_sync_mut.daemon_sdk.local_gateway_protocol_v1.*
+use std.nogc_sync_mut.daemon_sdk.local_gateway_frame_v1.*
+use std.nogc_sync_mut.io.pipe.{Stdin, Stdout}
+use std.common.types.{Capacity}
+
+pub fn server_gateway_frame_encode_v1(header: LocalGatewayHeaderV1, payload: text) -> Result<[u8], text>:
+    val prefix = local_gateway_prefix_encode_v1(header)?
+    val encoded = local_gateway_header_encode_v1(header)?
+    if str_len(payload) != header.payload_bytes: return Err("gateway-payload-count")
+    val header_bytes = match boxed_text_bytes_checked(encoded):
+        case Ok(value): value
+        case Err(_): return Err("server-gateway-allocation")
+    val payload_bytes = match boxed_text_bytes_checked(payload):
+        case Ok(value): value
+        case Err(_): return Err("server-gateway-allocation")
+    if payload_bytes.len() != header.payload_bytes: return Err("gateway-payload-count")
+    if not utf8_bytes_valid(payload_bytes): return Err("gateway-payload-utf8")
+    val expected = prefix.len() + header_bytes.len() + payload_bytes.len()
+    var bytes = match text_byte_buffer(Capacity(value: expected)):
+        case Ok(value): value
+        case Err(_): return Err("server-gateway-allocation")
+    for byte in prefix: bytes.push(byte)
+    for byte in header_bytes: bytes.push(byte)
+    for byte in payload_bytes: bytes.push(byte)
+    if bytes.len() != expected: return Err("server-gateway-allocation")
+    Ok(bytes)
+
+# Pure decode of one complete byte stream, including its actual EOF. A caller
+# collecting a process must first prove terminal, drained, non-truncated output.
+pub fn server_gateway_response_decode_v1(bytes: [u8], request_id: text) -> Result<ServerGatewayStdioRequestV1, text>:
+    if bytes.len() > SERVER_SSH_STDOUT_LIMIT_V1: return Err("server-gateway-output-limit")
+    var reader = local_gateway_frame_reader_v1(true)?
+    var offset = 0
+    while offset < bytes.len():
+        if reader.complete(): return Err("gateway-frame-trailing-data")
+        val available = bytes.len() - offset
+        val limit = reader.read_limit()
+        val count = if available < limit: available else: limit
+        if count <= 0: return Err("gateway-frame-chunk")
+        var chunk = match text_byte_buffer(Capacity(value: count)):
+            case Ok(value): value
+            case Err(_): return Err("server-gateway-allocation")
+        for index in 0..count: chunk.push(bytes[offset + index])
+        if chunk.len() != count: return Err("server-gateway-allocation")
+        reader.feed(chunk)?
+        offset = offset + count
+    reader.end_of_stream()?
+    val header = reader.header.unwrap()
+    if header.request_id != request_id: return Err("gateway-response-correlation")
+    if header.handoff_metadata != "": return Err("server-gateway-remote-handoff-forbidden")
+    val payload = local_gateway_payload_decode_v1(header, reader.payload)?
+    Ok(ServerGatewayStdioRequestV1(header: header, payload: payload))
+
+# Stdin's existing facade is blocking. Counts, allocation and dispatch are
+# bounded; this helper does not claim a wall-clock bound against a stalled SSH
+# peer. Incomplete/trailing data is rejected before the caller's callback.
+pub fn server_gateway_stdio_read_v1() -> Result<ServerGatewayStdioRequestV1, text>:
+    val input = Stdin.new()
+    var reader = local_gateway_frame_reader_v1(false)?
+    while not reader.complete():
+        val chunk = match input.read(reader.read_limit()):
+            case Ok(value): value
+            case Err(_): return Err("server-gateway-stdin-read")
+        if chunk.len() == 0:
+            reader.end_of_stream()?
+            return Err("gateway-frame-truncated")
+        reader.feed(chunk)?
+    val trailing = match input.read(1):
+        case Ok(value): value
+        case Err(_): return Err("server-gateway-stdin-read")
+    if trailing.len() != 0: return Err("gateway-frame-trailing-data")
+    val header = reader.header.unwrap()
+    val payload = local_gateway_payload_decode_v1(header, reader.payload)?
+    Ok(ServerGatewayStdioRequestV1(header: header, payload: payload))
+
+pub fn server_gateway_stdio_write_v1(header: LocalGatewayHeaderV1, payload: text) -> Result<(), text>:
+    if not header.response: return Err("server-gateway-response-required")
+    if header.handoff_metadata != "": return Err("server-gateway-remote-handoff-forbidden")
+    val bytes = server_gateway_frame_encode_v1(header, payload)?
+    val output = Stdout.new()
+    var offset = 0
+    while offset < bytes.len():
+        val remaining = bytes.len() - offset
+        val count = if remaining > 65536: 65536 else: remaining
+        var chunk = match text_byte_buffer(Capacity(value: count)):
+            case Ok(value): value
+            case Err(_): return Err("server-gateway-allocation")
+        for index in 0..count: chunk.push(bytes[offset + index])
+        if chunk.len() != count: return Err("server-gateway-allocation")
+        val written = match output.write(chunk):
+            case Ok(value): value
+            case Err(_): return Err("server-gateway-stdout-write")
+        if written <= 0 or written > count: return Err("server-gateway-stdout-progress")
+        offset = offset + written
+    match output.flush():
+        case Ok(_): Ok(())
+        case Err(_): Err("server-gateway-stdout-flush")
+
+export server_gateway_frame_encode_v1, server_gateway_response_decode_v1
+export server_gateway_stdio_read_v1, server_gateway_stdio_write_v1

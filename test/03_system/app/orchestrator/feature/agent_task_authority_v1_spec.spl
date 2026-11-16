@@ -1,0 +1,148 @@
+# AUTHORED_NOT_RUN. Real signature verification, synthetic unit-boundary context
+# and clock. These cases do not claim installed-root or native owner execution.
+use std.spec
+use test.fixtures.orchestrator_acceptance.controller_container_authority_v2.*
+use std.common.contracts.orchestration.agent_task_command_v1.*
+use std.common.contracts.orchestration.agent_task_object_v1.*
+use std.common.contracts.orchestration.agent_task_use_v1.*
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.distributed_control_v2.ExecutionGrantV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.orchestration.controller_agent_task_authority_v1.*
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.ControllerDispatchContextV1
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use app.orchestrator.command.orchestrator_command_v1
+use app.orchestrator.agent_task_command_v1.orchestrator_agent_task_input_command_v1
+
+struct TaskAuthorityFixtureV1:
+    context: ControllerDispatchContextV1
+    packet: AgentTaskCommandV1
+    config_digest: text
+
+fn task_authority_seed_v1(offset: i64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push((offset + index) as u8)
+    bytes
+
+fn task_authority_fixture_v1(action: text) -> TaskAuthorityFixtureV1:
+    var context = controller_container_authority_fixture_v2("linux-podman").context
+    for id in ["grant-issuer/controller-issuer", "human-approver/controller-approver"]:
+        var key = context.policy.snapshot.keys[id]
+        key.principal = "controller"
+        key.project = "controller"
+        key.operations = ["controller_agent_task_retain_v1", "controller_agent_task_access_v1"]
+        context.policy.snapshot.keys[id] = key
+    val raw = "fix first line\r\nthen second\r"
+    val task = AgentTaskInputV1(ns: "default", reference: "task", content: raw, content_digest: sha256_text(raw))
+    val binding = AgentTaskUseBindingV1(controller_id: "controller", session_uid: "session", attempt: 1,
+        ns: "default", task_ref: "task", task_digest: task.content_digest,
+        source_digest: "a".repeat(64), catalog_digest: "b".repeat(64), provider: "codex",
+        adapter_id: "codex-root-start-0.169.0-v1", model: "", host_scope_digest: "c".repeat(64))
+    val body = if action == "retain": agent_task_object_encode_v1(task).unwrap() else: agent_task_use_encode_v1(binding).unwrap()
+    val pin = "d".repeat(64)
+    val operation = controller_agent_task_authorization_operation_v1(context, pin, action, body).unwrap()
+    val grant = ExecutionGrantV2(id: "task-grant", principal: operation.principal, project: operation.project,
+        host_id: operation.host_id, operations: [operation.operation], environment_digest: operation.environment_digest,
+        policy_revision: operation.policy_revision, revocation_epoch: operation.revocation_epoch,
+        expires_at: 1000, maximum_memory_bytes: 1, maximum_duration_ms: 1)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: "controller-issuer", key_revision: 1, signature: [])
+    signed.signature = pure_ed25519_sign_from_seed_v1(task_authority_seed_v1(1),
+        distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = DistributedSignedApprovalV2(approver_id: "controller-approver", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(),
+        request_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()),
+        policy_revision: operation.policy_revision, session_generation: operation.session_generation,
+        expires_at: 900, signature: [])
+    approval.signature = pure_ed25519_sign_from_seed_v1(task_authority_seed_v1(65),
+        distributed_approval_signature_message_v2(approval).unwrap()).signature
+    TaskAuthorityFixtureV1(context: context, config_digest: pin,
+        packet: AgentTaskCommandV1(action: action, body: body, signed: signed, approval: approval))
+
+describe "Controller TaskRef signed retention and access":
+    it "verifies separate real issuer and human signatures for both actions":
+        for action in ["retain", "use"]:
+            val fixture = task_authority_fixture_v1(action)
+            val grant = controller_agent_task_authorize_v1(fixture.context, fixture.config_digest, fixture.packet, 100).unwrap()
+            expect(grant.id).to_equal("task-grant")
+            expect(grant.operations).to_equal([if action == "retain": "controller_agent_task_retain_v1" else: "controller_agent_task_access_v1"])
+
+    it "preserves raw CR bytes through canonical signed packet decoding":
+        val fixture = task_authority_fixture_v1("retain")
+        val wire = agent_task_command_encode_v1(fixture.packet).unwrap()
+        val packet = agent_task_command_decode_v1(wire).unwrap()
+        val task = agent_task_object_decode_v1(packet.body).unwrap()
+        expect(task.content).to_equal("fix first line\r\nthen second\r")
+        expect(task.content_digest).to_equal(sha256_text(task.content))
+
+    it "rejects substituted content even with a correctly recomputed raw digest":
+        val fixture = task_authority_fixture_v1("retain")
+        var packet = fixture.packet
+        var task = agent_task_object_decode_v1(packet.body).unwrap()
+        task.content = "different task"
+        task.content_digest = sha256_text(task.content)
+        packet.body = agent_task_object_encode_v1(task).unwrap()
+        expect(controller_agent_task_authorize_v1(fixture.context, fixture.config_digest, packet, 100).is_err()).to_equal(true)
+
+    it "rejects attempt and selected Host substitution under the prior approval":
+        val fixture = task_authority_fixture_v1("use")
+        var packet = fixture.packet
+        var binding = agent_task_use_decode_v1(packet.body).unwrap()
+        binding.attempt = 2
+        packet.body = agent_task_use_encode_v1(binding).unwrap()
+        expect(controller_agent_task_authorize_v1(fixture.context, fixture.config_digest, packet, 100).is_err()).to_equal(true)
+        binding = agent_task_use_decode_v1(fixture.packet.body).unwrap()
+        binding.host_scope_digest = "f".repeat(64)
+        packet.body = agent_task_use_encode_v1(binding).unwrap()
+        expect(controller_agent_task_authorize_v1(fixture.context, fixture.config_digest, packet, 100).is_err()).to_equal(true)
+
+    it "rejects changed configuration pin and Controller epoch":
+        val fixture = task_authority_fixture_v1("use")
+        expect(controller_agent_task_authorize_v1(fixture.context, "f".repeat(64), fixture.packet, 100).is_err()).to_equal(true)
+        var context = fixture.context
+        context.config.controller_epoch = context.config.controller_epoch + 1
+        expect(controller_agent_task_authorize_v1(context, fixture.config_digest, fixture.packet, 100).is_err()).to_equal(true)
+
+    it "rejects forged issuer or approval signatures":
+        val fixture = task_authority_fixture_v1("retain")
+        var packet = fixture.packet
+        packet.signed.signature = controller_container_forge_v2(packet.signed.signature)
+        expect(controller_agent_task_authorize_v1(fixture.context, fixture.config_digest, packet, 100).is_err()).to_equal(true)
+        packet = task_authority_fixture_v1("retain").packet
+        packet.approval.signature = controller_container_forge_v2(packet.approval.signature)
+        expect(controller_agent_task_authorize_v1(fixture.context, fixture.config_digest, packet, 100).is_err()).to_equal(true)
+
+    it "rejects expired revoked and missing-clock access":
+        val fixture = task_authority_fixture_v1("use")
+        expect(controller_agent_task_authorize_v1(fixture.context, fixture.config_digest, fixture.packet, 1000).is_err()).to_equal(true)
+        expect(controller_agent_task_authorize_v1(fixture.context, fixture.config_digest, fixture.packet, 0).is_err()).to_equal(true)
+        var context = fixture.context
+        var key = context.policy.snapshot.keys["grant-issuer/controller-issuer"]
+        key.revoked = true
+        context.policy.snapshot.keys["grant-issuer/controller-issuer"] = key
+        expect(controller_agent_task_authorize_v1(context, fixture.config_digest, fixture.packet, 100).is_err()).to_equal(true)
+
+    it "rejects noncanonical and duplicate-field packet encodings":
+        val fixture = task_authority_fixture_v1("use")
+        val wire = agent_task_command_encode_v1(fixture.packet).unwrap()
+        expect(agent_task_command_decode_v1(wire + "\n").is_err()).to_equal(true)
+        expect(agent_task_command_decode_v1(wire + "action: use\n").is_err()).to_equal(true)
+
+    it "routes both real public commands and rejects missing arguments before effects":
+        for action in ["task-retain", "task-use"]:
+            val reply = orchestrator_command_v1([action])
+            expect(reply.exit_code).to_equal(2)
+            expect(reply.output).to_contain("usage: task-retain|task-use")
+            expect(reply.controller_root_cleanup.is_none()).to_equal(true)
+            expect(reply.journal_cleanup.is_none()).to_equal(true)
+
+    it "rejects packet action substitution before accessing the configured root":
+        val fixture = task_authority_fixture_v1("retain")
+        val wire = agent_task_command_encode_v1(fixture.packet).unwrap()
+        val reply = orchestrator_agent_task_input_command_v1(["task-use", "/does-not-exist", "controller", fixture.config_digest, "unused"], Some(wire))
+        expect(reply.exit_code).to_equal(2)
+        expect(reply.output).to_contain("task-packet-action-mismatch")
+        expect(reply.journal_cleanup.is_none()).to_equal(true)
+        expect(reply.controller_root_cleanup.is_none()).to_equal(true)

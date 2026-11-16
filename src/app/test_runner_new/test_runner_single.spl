@@ -29,6 +29,12 @@ use app.io.process_ops.{process_run_bounded, process_run_bounded_spec_child, SIM
 use app.io.mod.{env_get}
 use app.io.cli_ops.{cli_current_exe_path}
 use std.spec.in_development.{source_is_in_development, in_development_explicit_line}
+use std.spec.platform_os.{platform_os_skip_reason, platform_skip_line, platform_skip_summary_line}
+use std.test_runner.test_runner_files.{file_get_platform_tags}
+use std.io_runtime.{host_os}
+
+# Files skipped by a host-OS @platform tag in this process (directory summary).
+var _single_platform_skips: i64 = 0
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
 use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
@@ -1498,6 +1504,8 @@ fn run_directory_target(args: [text], dir: text, dir_at: i64) -> i64:
     print "========================================="
     print "Directory Test Summary"
     print "========================================="
+    if _single_platform_skips > 0:
+        print platform_skip_summary_line(_single_platform_skips)
     print "Directory: {dir}"
     print "Files: {specs.len()}"
     print "Passed: {files_passed}"
@@ -1529,6 +1537,15 @@ fn run_single_target(args: [text]) -> i64:
         return test_run_outcome_exit_code(TestRunOutcome.EmptySelection)
     if run.list_only:
         print run.path
+        return 0
+    # Host-OS @platform tag: counted, reasoned skip, never a failure.
+    val os_skip = platform_os_skip_reason(file_get_platform_tags(file_read_nullable(run.path) ?? ""), host_os())
+    if os_skip != "":
+        _single_platform_skips = _single_platform_skips + 1
+        print platform_skip_line(run.path, os_skip)
+        print "SPEC FILE VERDICT: {run.path} outcome=NOT_RUN declared>=0 executed=0 passed=0 failed=0 in_development=0 blocked=0 dropped=0 skipped=1 reason=platform-os-mismatch"
+        print "Results: 0 total, 0 passed, 0 failed, 1 skipped"
+        print platform_skip_summary_line(1)
         return 0
     # MC/DC: resolve the mode exactly like the full runner (same profile
     # resolution, same waiver rules -- std.test_runner.test_runner_config).

@@ -1,0 +1,183 @@
+# Native borrowed proof, never caller-asserted metadata or machine authority.
+# The machine owner MUST match authority_policy_digest to its installed pin.
+# Borrowed handles remain owned by deployment cleanup throughout claim use.
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsPrivateFileV1}
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.{HostEnrollmentCredentialV1, host_enrollment_credential_encode_v1}
+use std.nogc_sync_mut.orchestration.host_private_metadata_v2.{HostPrivateMetadataPinsV2, host_private_metadata_decode_v2}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_unix_micros, sosix_time_now_monotonic_ms}
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+# Projection only. Neither this public value nor a controller string can mint
+# VerifiedHostServiceEnrollmentV3 or a durable machine reservation.
+pub struct VerifiedHostServiceEnrollmentSnapshotV3:
+    binding: HostServiceEnrollmentBindingV2
+    issuer_id: text
+    authority_policy_digest: text
+    enrollment_digest: text
+    credential_digest: text
+    provider_generation: i64
+    authorized_at: i64
+    expires_at: i64
+    recover_only: bool
+
+pub class VerifiedHostServiceEnrollmentV3:
+    root: WindowsPrivateRootV1
+    policy_file: WindowsPrivateFileV1
+    binding: HostServiceEnrollmentBindingV2
+    credential: HostEnrollmentCredentialV1
+    configuration_bytes: text
+    engine_policy_bytes: text
+    broker_policy_bytes: text
+    manifest_file: Option<WindowsPrivateFileV1>
+    authorized_at: i64
+    recover_only: bool
+
+    pub fn current_v3() -> Result<VerifiedHostServiceEnrollmentSnapshotV3, text>:
+        enrollment_proof_current_v3(self)
+
+fn enrollment_proof_now_v3() -> i64: sosix_time_now_unix_micros() / 1000
+
+fn enrollment_proof_read_v3(original: WindowsPrivateFileV1) -> Result<text, text>:
+    var file = original
+    if not file.security_current(): return Err("host-enrollment-proof-file-security")
+    val bytes = file.read_all_bounded(1048576)?
+    val source = io_legacy_utf8(bytes)?
+    if base_encoding_text_to_bytes(source) != bytes or not file.security_current():
+        return Err("host-enrollment-proof-file-bytes")
+    Ok(source)
+
+fn enrollment_proof_fields_v3(source: text, maximum: i64) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() < 1 or source.byte_len() > maximum:
+        return Err("host-enrollment-proof-record-limit")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: maximum,
+            max_depth: 4, max_nodes: 256, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value.value
+        case Err(_): return Err("host-enrollment-proof-record-syntax")
+    if sdn_encode_canonical(parsed) + "\n" != source:
+        return Err("host-enrollment-proof-record-canonical")
+    match parsed:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("host-enrollment-proof-record-object")
+
+fn enrollment_proof_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    if not fields.contains_key(name): return Err("host-enrollment-proof-record-missing:" + name)
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-enrollment-proof-record-type:" + name)
+
+fn enrollment_proof_integer_v3(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    if not fields.contains_key(name): return Err("host-enrollment-proof-record-missing:" + name)
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-enrollment-proof-record-type:" + name)
+
+# This is historical evidence only. A machine consumer must require an exact
+# existing durable reservation; these bytes cannot authorize a fresh charge.
+fn enrollment_proof_manifest_clock_v3(file: WindowsPrivateFileV1,
+        binding: HostServiceEnrollmentBindingV2, credential_digest: text) -> Result<i64, text>:
+    val source = enrollment_proof_read_v3(file)?
+    val fields = enrollment_proof_fields_v3(source, 16384)?
+    val names = ["version", "kind", "state", "machineParent", "rootChild", "root", "nonce", "operationId",
+        "bindingDigest", "credentialDigest", "claimName", "claimDigest", "authorizedAtUnixMs"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-enrollment-proof-manifest-field")
+    for name in names:
+        if not fields.contains_key(name): return Err("host-enrollment-proof-manifest-field")
+    if (enrollment_proof_integer_v3(fields, "version")? != 2 or
+            enrollment_proof_text_v3(fields, "kind")? != "host-service-deployment-root" or
+            enrollment_proof_text_v3(fields, "state")? != "enrolled" or
+            enrollment_proof_text_v3(fields, "machineParent")? != binding.machine_parent or
+            enrollment_proof_text_v3(fields, "bindingDigest")? != host_service_enrollment_payload_digest_v2(binding)? or
+            enrollment_proof_text_v3(fields, "credentialDigest")? != credential_digest):
+        return Err("host-enrollment-proof-manifest-binding")
+    val at = enrollment_proof_integer_v3(fields, "authorizedAtUnixMs")?
+    if at <= 0 or at > enrollment_proof_now_v3(): return Err("host-enrollment-proof-manifest-clock")
+    Ok(at)
+
+fn enrollment_proof_current_v3(proof: VerifiedHostServiceEnrollmentV3) -> Result<VerifiedHostServiceEnrollmentSnapshotV3, text>:
+    if not proof.root.security_current(): return Err("host-enrollment-proof-root-security")
+    val policy_bytes = enrollment_proof_read_v3(proof.policy_file)?
+    val binding = proof.binding
+    val metadata = host_private_metadata_decode_v2(HostPrivateMetadataPinsV2(binding.policy_digest,
+        binding.config_digest, binding.engine_policy_digest, binding.broker_policy_digest),
+        base_encoding_text_to_bytes(policy_bytes), base_encoding_text_to_bytes(proof.configuration_bytes),
+        base_encoding_text_to_bytes(proof.engine_policy_bytes), base_encoding_text_to_bytes(proof.broker_policy_bytes))?
+    val policy = metadata.policy
+    val now = enrollment_proof_now_v3()
+    if proof.authorized_at <= 0 or now < proof.authorized_at: return Err("host-enrollment-proof-clock-regressed")
+    val context = HostReservationAuthorizationContextV1(grant_clock: proof.authorized_at,
+        monotonic_ms: sosix_time_now_monotonic_ms(), policy_revision: policy.snapshot.policy_revision,
+        revocation_epoch: policy.snapshot.revocation_epoch, session_generation: policy.session_generation)
+    # Authenticate before exposing or comparing an issuer identity. This alone
+    # does not trust policy origin: the installed machine pin remains required.
+    val verified = host_service_enrollment_authorize_v2(binding, proof.credential, policy, context)?
+    val issuer = proof.credential.signed.issuer_id
+    val config = metadata.configuration
+    if (config.controller_ref != issuer or config.physical_host_id != binding.physical_host_id or
+            config.service_scope_id != binding.service_scope_id or config.runtime_class_ref != binding.backend or
+            config.journal_root != "journal" or config.exclusive_device_ids.len() != 0 or
+            config.cpu_ceiling_millis != binding.physical_cpu_millis or
+            config.memory_ceiling_bytes != binding.physical_memory_bytes):
+        return Err("host-enrollment-proof-configuration-binding")
+    val credential_digest = sha256_text(host_enrollment_credential_encode_v1(proof.credential)?)
+    if val manifest = proof.manifest_file:
+        if enrollment_proof_manifest_clock_v3(manifest, binding, credential_digest)? != proof.authorized_at:
+            return Err("host-enrollment-proof-manifest-changed")
+    elif proof.recover_only:
+        return Err("host-enrollment-proof-manifest-missing")
+    val issuer_name = "grant-issuer/" + issuer
+    val approver_name = "human-approver/" + proof.credential.approval.approver_id
+    if not policy.snapshot.keys.contains_key(issuer_name) or not policy.snapshot.keys.contains_key(approver_name):
+        return Err("host-enrollment-proof-authority-key-missing")
+    var expires_at = proof.credential.signed.grant.expires_at
+    for deadline in [proof.credential.approval.expires_at, policy.snapshot.keys[issuer_name].expires_at,
+            policy.snapshot.keys[approver_name].expires_at]:
+        if deadline < expires_at: expires_at = deadline
+    val boundary = enrollment_proof_now_v3()
+    if boundary < now: return Err("host-enrollment-proof-clock-regressed")
+    if not proof.recover_only and boundary >= expires_at: return Err("host-enrollment-proof-expired")
+    val engine = enrollment_proof_fields_v3(proof.engine_policy_bytes, 16384)?
+    val generation = enrollment_proof_integer_v3(engine, "providerGeneration")?
+    if generation < 1: return Err("host-enrollment-proof-provider-generation")
+    if not proof.root.security_current() or not proof.policy_file.security_current():
+        return Err("host-enrollment-proof-owner-changed")
+    Ok(VerifiedHostServiceEnrollmentSnapshotV3(binding: binding, issuer_id: issuer,
+        authority_policy_digest: sha256_text(policy_bytes),
+        enrollment_digest: host_service_enrollment_payload_digest_v2(binding)?, credential_digest: credential_digest,
+        provider_generation: generation, authorized_at: proof.authorized_at, expires_at: expires_at,
+        recover_only: proof.recover_only))
+
+pub fn host_service_enrollment_prepare_proof_v3(root: WindowsPrivateRootV1, policy_file: WindowsPrivateFileV1,
+        binding: HostServiceEnrollmentBindingV2, credential: HostEnrollmentCredentialV1,
+        configuration_bytes: text, engine_policy_bytes: text,
+        broker_policy_bytes: text) -> Result<VerifiedHostServiceEnrollmentV3, text>:
+    for source in [configuration_bytes, engine_policy_bytes, broker_policy_bytes]:
+        if source.byte_len() < 1 or source.byte_len() > 1048576: return Err("host-enrollment-proof-metadata-limit")
+    val proof = VerifiedHostServiceEnrollmentV3(root: root, policy_file: policy_file, binding: binding,
+        credential: credential, configuration_bytes: configuration_bytes, engine_policy_bytes: engine_policy_bytes,
+        broker_policy_bytes: broker_policy_bytes, manifest_file: nil,
+        authorized_at: enrollment_proof_now_v3(), recover_only: false)
+    val current = proof.current_v3()?
+    Ok(proof)
+
+pub fn host_service_enrollment_recover_proof_v3(root: WindowsPrivateRootV1, policy_file: WindowsPrivateFileV1,
+        binding: HostServiceEnrollmentBindingV2, credential: HostEnrollmentCredentialV1,
+        configuration_bytes: text, engine_policy_bytes: text, broker_policy_bytes: text,
+        manifest_file: WindowsPrivateFileV1) -> Result<VerifiedHostServiceEnrollmentV3, text>:
+    for source in [configuration_bytes, engine_policy_bytes, broker_policy_bytes]:
+        if source.byte_len() < 1 or source.byte_len() > 1048576: return Err("host-enrollment-proof-metadata-limit")
+    val digest = sha256_text(host_enrollment_credential_encode_v1(credential)?)
+    val at = enrollment_proof_manifest_clock_v3(manifest_file, binding, digest)?
+    val proof = VerifiedHostServiceEnrollmentV3(root: root, policy_file: policy_file, binding: binding,
+        credential: credential, configuration_bytes: configuration_bytes, engine_policy_bytes: engine_policy_bytes,
+        broker_policy_bytes: broker_policy_bytes, manifest_file: Some(manifest_file), authorized_at: at, recover_only: true)
+    val current = proof.current_v3()?
+    Ok(proof)

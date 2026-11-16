@@ -1,0 +1,155 @@
+# i386 relocations + ELF32 static executable output (internal ELF linker)
+#
+# Formulas follow the i386 psABI (and ld.lld's I386::getRelExpr):
+#   R_386_32 = S + A, R_386_PC32 / R_386_PLT32 = S + A - P (static: no PLT),
+#   R_386_GOTPC = GOT + A - P, R_386_GOTOFF = S + A - GOT,
+#   R_386_GOT32 / R_386_GOT32X = G + A - GOT.
+# The engine evaluates all PC-style kinds as S + A - P; the driver supplies
+# S = GOT (GOTPC) or P = GOT (GOTOFF / GOT32*) as lld's expression kinds do.
+#
+# @cover src/compiler/70.backend/linker/reloc_engine.spl
+# @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.reloc_engine.{
+    RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_width,
+    reloc_arch_from_machine, reloc_arch_from_machine_checked,
+    R_386_NONE, R_386_32, R_386_PC32, R_386_GOT32, R_386_PLT32, R_386_GOTOFF,
+    R_386_GOTPC, R_386_16, R_386_PC16, R_386_8, R_386_PC8, R_386_GOT32X}
+use compiler.backend.linker.elf.elf_exec_writer.{
+    elf_out_sec, elf_exec_plan_class, elf_write_image32_bytes, ELF_SEG_RX, SHT_PROGBITS_E, SHF_ALLOC, SHF_EXECINSTR}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn u_le(b: [i64], at: i64, n: i64) -> i64:
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        v = v | ((b[at + i] & 0xff) << (i * 8))
+        i = i + 1
+    v
+
+fn u8_le(b: [u8], at: i64, n: i64) -> i64:
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        v = v | ((b[at + i] as i64) << (i * 8))
+        i = i + 1
+    v
+
+describe "i386 relocation engine":
+    it "maps EM_386 to I386 and admits it fail-closed":
+        expect(reloc_arch_from_machine(3) == RelocArch.I386).to_equal(true)
+        expect(reloc_arch_from_machine_checked(3).is_ok()).to_equal(true)
+
+    it "reports patch widths":
+        expect(reloc_patch_width(RelocArch.I386, R_386_NONE)).to_equal(0)
+        expect(reloc_patch_width(RelocArch.I386, R_386_32)).to_equal(4)
+        expect(reloc_patch_width(RelocArch.I386, R_386_GOT32X)).to_equal(4)
+        expect(reloc_patch_width(RelocArch.I386, R_386_16)).to_equal(2)
+        expect(reloc_patch_width(RelocArch.I386, R_386_PC8)).to_equal(1)
+
+    it "applies R_386_32 as S + A":
+        val r = reloc_apply(RelocArch.I386, [0, 0, 0, 0], 0, R_386_32, 0x8049000, 4, 0)
+        expect(r.success).to_equal(true)
+        expect(r.value).to_equal(0x8049004)
+
+    it "masks a negative R_386_PC32 to 32 bits":
+        val b = reloc_patch_bytes(RelocArch.I386, [0, 0, 0, 0], 0, R_386_PC32, 0x1000, -4, 0x2000)
+        expect(u_le(b, 0, 4)).to_equal(0xffffeffc)
+
+    it "applies PLT32 statically as S + A - P":
+        val r = reloc_apply(RelocArch.I386, [0, 0, 0, 0], 0, R_386_PLT32, 0x3000, -4, 0x1000)
+        expect(r.value).to_equal(0x1ffc)
+
+    it "evaluates GOTPC / GOTOFF / GOT32X with driver-supplied GOT terms":
+        expect(reloc_apply(RelocArch.I386, [0, 0, 0, 0], 0, R_386_GOTPC, 0x5000, 2, 0x1000).value).to_equal(0x4002)
+        expect(reloc_apply(RelocArch.I386, [0, 0, 0, 0], 0, R_386_GOTOFF, 0x4800, 0, 0x5000).value).to_equal(0xfffff800)
+        expect(reloc_apply(RelocArch.I386, [0, 0, 0, 0], 0, R_386_GOT32X, 0x5008, 0, 0x5000).value).to_equal(8)
+
+    it "rejects R_386_32 values that do not fit 32 bits":
+        expect(reloc_apply(RelocArch.I386, [0, 0, 0, 0], 0, R_386_32, 0x100000000, 0, 0).success).to_equal(false)
+
+    it "patches 16- and 8-bit forms":
+        val b16 = reloc_patch_bytes(RelocArch.I386, [0, 0], 0, R_386_16, 0x1234, 0, 0)
+        expect(u_le(b16, 0, 2)).to_equal(0x1234)
+        val b8 = reloc_patch_bytes(RelocArch.I386, [0], 0, R_386_PC8, 0x10, 0, 0x20)
+        expect(u_le(b8, 0, 1)).to_equal(0xf0)
+
+describe "ELF32 exec writer":
+    it "plans 52-byte headers and 32-byte program headers":
+        val secs = [elf_out_sec(".text", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, 8, ELF_SEG_RX)]
+        val plan = elf_exec_plan_class(secs, 0x400000, 0x1000, true).unwrap()
+        # R load + RX load + GNU_STACK + no notes
+        expect(plan.segments.len()).to_equal(3)
+        expect(plan.offsets[0] >= 52 + 3 * 32).to_equal(true)
+
+    it "serializes the ELF32 header, phdr field order and shdr size":
+        val secs = [elf_out_sec(".text", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, 4, ELF_SEG_RX)]
+        val plan = elf_exec_plan_class(secs, 0x400000, 0x1000, true).unwrap()
+        val img = elf_write_image32_bytes(2, 40, 0x05000400, 0x401000, plan, [[0x90u8, 0x90u8, 0x90u8, 0x90u8]])
+        expect(img[4] as i64).to_equal(1)           # ELFCLASS32
+        expect(u8_le(img, 18, 2)).to_equal(40)      # e_machine
+        expect(u8_le(img, 24, 4)).to_equal(0x401000) # e_entry
+        expect(u8_le(img, 28, 4)).to_equal(52)      # e_phoff
+        expect(u8_le(img, 36, 4)).to_equal(0x05000400) # e_flags
+        expect(u8_le(img, 40, 2)).to_equal(52)      # e_ehsize
+        expect(u8_le(img, 42, 2)).to_equal(32)      # e_phentsize
+        expect(u8_le(img, 46, 2)).to_equal(40)      # e_shentsize
+        # second phdr is the RX PT_LOAD: p_flags sits at +24 in ELF32
+        val ph = 52 + 32
+        expect(u8_le(img, ph, 4)).to_equal(1)
+        expect(u8_le(img, ph + 24, 4)).to_equal(5)
+        expect(u8_le(img, ph + 28, 4)).to_equal(0x1000)
+        val shoff = u8_le(img, 32, 4)
+        expect(img.len()).to_equal(shoff + 3 * 40)
+
+describe "ELF32 static links":
+    it "links i386 non-PIC objects into an ELFCLASS32 EM_386 executable":
+        val r = elf_static_link([load("elf32_hello_i386.o"), load("elf32_helper_i386.o")], [], "_start", RelocArch.I386)
+        expect(r.is_ok()).to_equal(true)
+        val img = r.unwrap()
+        expect(img[4]).to_equal(1)
+        expect(u_le(img, 18, 2)).to_equal(3)
+        expect(u_le(img, 16, 2)).to_equal(2)
+
+    it "links i386 PIC objects (GOTPC / GOTOFF / GOT32X / PLT32) statically":
+        val r = elf_static_link([load("elf32_hello_i386_pic.o"), load("elf32_helper_i386_pic.o")], [], "_start", RelocArch.I386)
+        expect(r.is_ok()).to_equal(true)
+
+    it "links armv7 objects into an EM_ARM executable carrying the inputs EABI5 e_flags":
+        val r = elf_static_link([load("elf32_hello_arm.o"), load("elf32_helper_arm.o")], [], "_start", RelocArch.Arm32)
+        expect(r.is_ok()).to_equal(true)
+        val img = r.unwrap()
+        expect(img[4]).to_equal(1)
+        expect(u_le(img, 18, 2)).to_equal(40)
+        # clang objects carry EABI5 only; lld derives the 0x400 hard-float bit
+        # from .ARM.attributes, which is not done yet (bug doc gap list).
+        expect(u_le(img, 36, 4)).to_equal(0x05000000)
+
+    it "rejects 32-bit objects against a 64-bit target":
+        val r = elf_static_link([load("elf32_hello_i386.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_err()).to_equal(true)
+
+    it "resolves base-register-less R_386_GOT32 to the absolute slot address (lld ModRM rule)":
+        val r = elf_static_link([load("elf32_got32_nobase_i386.o")], [], "_start", RelocArch.I386)
+        expect(r.is_ok()).to_equal(true)
+        val img = r.unwrap()
+        # phdr[1] is the RX PT_LOAD; its first bytes are `8b 0d <disp32>`.
+        val text_off = u_le(img, 52 + 32 + 4, 4)
+        expect(img[text_off]).to_equal(0x8b)
+        expect(img[text_off + 1]).to_equal(0x0d)
+        # Absolute G + A lands inside the image (>= 0x400000), not a small
+        # G - GOT offset as the base-register form would compute.
+        expect(u_le(img, text_off + 2, 4) >= 0x400000).to_equal(true)

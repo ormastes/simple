@@ -204,7 +204,14 @@ build_archive_part() {
         --no-mangle \
         --emit-archive \
         --output "$output" \
-        --clean
+        --threads 1
+    # --threads 1: a part's closure is one file, so build it in-process (cc1
+    # shape). No --clean: on the default per-file worker pool it makes the
+    # shard prepass return no ledger and the strict per-file route refuses it
+    # ("no sealed ledger"), masking every part's real compile error; and
+    # in-process it fails when the cache scope dir does not exist yet
+    # ("failed to remove clean cache scope"). Cached objects are admitted only
+    # by their per-module witness, and the part dir is wiped below.
     if [ -n "$TARGET" ]; then
         set -- "$@" --target "$TARGET"
     fi
@@ -233,6 +240,24 @@ if "$SIMPLE_BINARY" native-build --help 2>/dev/null | rg -q -- '--emit-archive';
         # __simple_call_module_inits owners at link time.
         rm -f "$CORE_ARCHIVE_PART_DIR/objects/$part_name/_init_all.o"
     done
+    # --no-mangle parts export bare leaf names. `ar` silently keeps both
+    # copies of a symbol defined by two parts (first-wins at link), so a
+    # cross-part leaf collision must fail closed here.
+    # See doc/08_tracking/bug/no_mangle_emits_module_qualified_symbols_2026-11-16.md
+    duplicate_symbols="$(
+        for part_dir in "$CORE_ARCHIVE_PART_DIR"/objects/*/; do
+            part_name="$(basename "$part_dir")"
+            nm -g "$part_dir"*.o 2>/dev/null |
+                awk 'NF >= 3 && $(NF-1) ~ /^[TDBRS]$/ {print $NF}' |
+                sed 's/^_//' | sort -u | sed "s|\$| $part_name|"
+        done | awk '{count[$1]++; owners[$1] = owners[$1] " " $2}
+            END {for (s in count) if (count[s] > 1) print s ":" owners[s]}' | sort
+    )"
+    if [ -n "$duplicate_symbols" ]; then
+        echo "simple_core_archive_complete=false"
+        echo "$duplicate_symbols" | sed 's/^/error=duplicate_leaf_symbol:/'
+        exit 1
+    fi
     rm -f "$CORE_ARCHIVE"
     ar rcs "$CORE_ARCHIVE" "$CORE_ARCHIVE_PART_DIR"/objects/*/*.o
 else

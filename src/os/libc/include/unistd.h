@@ -54,6 +54,7 @@ int     pipe2(int pipefd[2], int flags);
 /* File management */
 int  access(const char *path, int mode);
 int  unlink(const char *path);
+int  link(const char *oldpath, const char *newpath); /* no hard links: -1/ENOSYS */
 int  rmdir(const char *path);
 int  isatty(int fd);
 

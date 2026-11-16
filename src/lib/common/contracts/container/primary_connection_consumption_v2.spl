@@ -1,0 +1,51 @@
+# Immutable correlation, never a decoded grant or live connection. Actual
+# publication/claim requires the retained protected journal capability.
+use std.common.contracts.container.primary_connection_v2.*
+use std.common.contracts.container.stream_v2.ContainerHelperAdmissionV2
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_bytes_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_encode_intent_v1
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ContainerPrimaryConnectionConsumptionV2:
+    plan: ContainerPrimaryConnectionPlanV2
+    admission: ContainerHelperAdmissionV2
+    packet_digest: text
+    execution_proof_digest: text
+    authority_policy_digest: text
+    policy_revision: i64
+    revocation_epoch: i64
+    session_generation: i64
+
+pub fn container_primary_connection_consumption_bytes_v2(record: ContainerPrimaryConnectionConsumptionV2) -> Result<text, text>:
+    val checked = container_primary_connection_admission_validate_v2(record.plan, record.admission)?
+    for digest in [record.packet_digest, record.execution_proof_digest, record.authority_policy_digest]:
+        if not builder_digest_valid_v1(digest): return Err("primary-connection-consumption-digest")
+    if record.policy_revision < 0 or record.revocation_epoch < 0 or record.session_generation < 0:
+        return Err("primary-connection-consumption-authority")
+    val helper = record.admission
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("host-primary-connection-consumed"),
+        "plan": SdnValue.String(container_primary_connection_plan_bytes_v2(record.plan)?),
+        "planDigest": SdnValue.String(record.plan.request_digest),
+        "helperPlan": SdnValue.String(host_helper_plan_bytes_v1(helper.plan)?),
+        "operation": SdnValue.String(distributed_encode_operation_v2(helper.operation)?),
+        "intent": SdnValue.String(host_reservation_encode_intent_v1(helper.intent)?),
+        "preparedReceiptDigest": SdnValue.String(helper.receipt.receipt_digest),
+        "deadlineUnixMs": SdnValue.Int(helper.deadline.expires_at_unix_ms),
+        "grantId": SdnValue.String(helper.grant_id), "issuerId": SdnValue.String(helper.issuer_id),
+        "approverId": SdnValue.String(helper.approver_id),
+        "packetDigest": SdnValue.String(record.packet_digest),
+        "executionProofDigest": SdnValue.String(record.execution_proof_digest),
+        "authorityPolicyDigest": SdnValue.String(record.authority_policy_digest),
+        "policyRevision": SdnValue.Int(record.policy_revision), "revocationEpoch": SdnValue.Int(record.revocation_epoch),
+        "sessionGeneration": SdnValue.Int(record.session_generation)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > 8388608: return Err("primary-connection-consumption-size")
+    Ok(bytes)
+
+pub fn container_primary_connection_consumption_digest_v2(record: ContainerPrimaryConnectionConsumptionV2) -> Result<text, text>:
+    Ok(sha256_text(container_primary_connection_consumption_bytes_v2(record)?))

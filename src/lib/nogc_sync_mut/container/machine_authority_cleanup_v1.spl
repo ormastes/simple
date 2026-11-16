@@ -1,0 +1,157 @@
+# Mechanical extraction: canonical paired cleanup remains one native-origin registry.
+# Only positive native consumption clears a component; first diagnostics are sticky.
+use std.nogc_sync_mut.io.machine_storage_owner_v1.*
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.{LinuxMachinePolicyOwnerV1, LinuxMachineStorageV1}
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.common.contracts.container.cleanup_progress_v1.*
+use std.io_runtime.getpid
+use std.nogc_sync_mut.io.thread.thread_native_current_id
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@elif(os="windows"):
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.rt_windows_pty_owner_thread_guard_v1
+@end
+
+# Canonical pair progress is shared by value-copy aliases. It owns no second
+# journal or native resource; only the original typed caps may be closed.
+struct MachineAuthorityPairStateV1:
+    generation: i64
+    process_id: i64
+    thread_id: i64
+    progress: MachineCleanupProgressV1
+    successor: i64 = 0
+
+pub class MachineAuthorityPairedCleanupV1:
+    slot: i64
+    generation: i64
+
+pub class MachineAuthorityLocalProcessV1:
+    principal: MachineLocalProcessPrincipalV1
+    cleanup: MachineAuthorityPairedCleanupV1
+    successor: i64 = 0
+
+    pub fn principal_capability_v1() -> MachineLocalProcessPrincipalV1: self.principal
+
+    # Canonical logical handoff: old authority aliases cannot close the writer
+    # while its genuine workload successor retains outstanding obligations.
+    pub fn transfer_workload_v2() -> Result<MachineAuthorityLocalProcessV1, text>:
+        val state = machine_authority_pair_current_v1(self.cleanup)?
+        if state.successor != self.successor or state.progress.machine_consumed or state.progress.principal_consumed:
+            return Err("machine-authority-cleanup-transfer-stale")
+        if state.successor != 0: return Err("machine-authority-cleanup-already-transferred")
+        machine_authority_pairs_v1[self.cleanup.slot].successor = 1
+        Ok(MachineAuthorityLocalProcessV1(principal: self.principal, cleanup: self.cleanup, successor: 1))
+
+pub enum MachineAuthorityClosingOwnerV1:
+    Reader(MachinePolicyOwnerV1)
+    Storage(MachineStorageOwnerV1)
+
+var machine_authority_pairs_v1: [MachineAuthorityPairStateV1] = []
+var machine_authority_pair_origin_v1: i64 = 0
+
+pub enum MachineContainerAuthorityCleanupV1:
+    # Acquisition-only cleanup before a facade/authority exists. These are
+    # owned failure outputs, never getters from an admitted live authority.
+    LinuxReaderV3(LinuxMachinePolicyOwnerV1)
+    LinuxStorageV3(LinuxMachineStorageV1)
+    Reader(MachinePolicyOwnerV1)
+    Storage(MachineStorageOwnerV1)
+    ReaderPrincipal(reader: MachinePolicyOwnerV1, local: MachineAuthorityLocalProcessV1)
+    StoragePrincipal(storage: MachineStorageOwnerV1, local: MachineAuthorityLocalProcessV1)
+
+pub fn machine_authority_local_pair_bind_v1(principal: MachineLocalProcessPrincipalV1,
+        cleanup: MachineAuthorityPairedCleanupV1) -> MachineAuthorityLocalProcessV1:
+    MachineAuthorityLocalProcessV1(principal: principal, cleanup: cleanup)
+
+fn machine_authority_pair_entry_v1() -> Result<(), text>:
+    # Enter the genuine native origin guard before touching inherited registry
+    # state. Numeric PID/TID can collide in a forked PID namespace.
+    @when(os="linux"):
+    linux_machine_process_origin_check_v1()
+    @elif(os="windows"):
+    val status = unsafe(capabilities: [ffi]): rt_windows_pty_owner_thread_guard_v1()
+    if status != 1: return Err("machine-authority-cleanup-native-context-required")
+    Ok(())
+    @else:
+    Err("machine-authority-cleanup-host-unsupported")
+    @end
+
+pub fn machine_authority_pair_open_v1() -> Result<MachineAuthorityPairedCleanupV1, text>:
+    val entered = machine_authority_pair_entry_v1()?
+    val pid = getpid()
+    val tid = thread_native_current_id()
+    if pid <= 0 or tid <= 0: return Err("machine-authority-cleanup-context-unavailable")
+    if machine_authority_pair_origin_v1 != 0 and machine_authority_pair_origin_v1 != pid:
+        return Err("machine-authority-cleanup-foreign-process")
+    if machine_authority_pairs_v1.len() >= 100000: return Err("machine-authority-cleanup-owner-bound")
+    machine_authority_pair_origin_v1 = pid
+    val slot = machine_authority_pairs_v1.len()
+    machine_authority_pairs_v1.push(MachineAuthorityPairStateV1(generation: slot + 1,
+        process_id: pid, thread_id: tid, progress: machine_cleanup_progress_initial_v1()))
+    Ok(MachineAuthorityPairedCleanupV1(slot: slot, generation: slot + 1))
+
+fn machine_authority_pair_current_v1(owner: MachineAuthorityPairedCleanupV1) -> Result<MachineAuthorityPairStateV1, text>:
+    val entered = machine_authority_pair_entry_v1()?
+    val pid = getpid()
+    val tid = thread_native_current_id()
+    if pid != machine_authority_pair_origin_v1: return Err("machine-authority-cleanup-foreign-process")
+    if owner.slot < 0 or owner.slot >= machine_authority_pairs_v1.len(): return Err("machine-authority-cleanup-stale")
+    val state = machine_authority_pairs_v1[owner.slot]
+    if state.generation != owner.generation: return Err("machine-authority-cleanup-stale")
+    if state.process_id != pid or state.thread_id != tid: return Err("machine-authority-cleanup-foreign-thread")
+    Ok(state)
+
+fn machine_authority_close_native_v1(owner: MachineAuthorityClosingOwnerV1) -> text:
+    match owner:
+        case MachineAuthorityClosingOwnerV1.Reader(reader): reader.close_v1()
+        case MachineAuthorityClosingOwnerV1.Storage(storage): storage.close_v1()
+
+pub fn machine_authority_close_principal_v1(owner: MachineAuthorityClosingOwnerV1,
+        principal: Option<MachineAuthorityLocalProcessV1>) -> text:
+    if principal == None: return machine_authority_close_native_v1(owner)
+    val local = principal.unwrap()
+    val current = machine_authority_pair_current_v1(local.cleanup)
+    if current.is_err(): return "retained"
+    var state = current.unwrap()
+    if state.successor != local.successor: return "retained"
+    if not state.progress.machine_consumed:
+        # Only positive consumption clears this originally held component.
+        # Unknown/stale stays live; prior canonical closed state skips this call.
+        val closed = machine_authority_close_native_v1(owner)
+        state.progress = machine_cleanup_progress_record_v1(state.progress, MachineCleanupComponentV1.Machine, closed)
+        machine_authority_pairs_v1[local.cleanup.slot] = state
+    if not state.progress.machine_consumed: return "retained"
+    if not state.progress.principal_consumed:
+        val closed = local.principal.close_v1()
+        state.progress = machine_cleanup_progress_record_v1(state.progress, MachineCleanupComponentV1.Principal, closed)
+        machine_authority_pairs_v1[local.cleanup.slot] = state
+    machine_cleanup_progress_status_v1(state.progress)
+
+pub fn machine_authority_pair_diagnostic_v1(principal: Option<MachineAuthorityLocalProcessV1>) -> text:
+    if principal == None: return ""
+    val local = principal.unwrap()
+    val state = machine_authority_pair_current_v1(local.cleanup)
+    if state.is_err(): return ""
+    val current = state.unwrap()
+    current.progress.first_diagnostic
+
+pub fn machine_container_authority_cleanup_v1(owner: MachineContainerAuthorityCleanupV1) -> text:
+    match owner:
+        case MachineContainerAuthorityCleanupV1.LinuxReaderV3(reader): reader.close_v1()
+        case MachineContainerAuthorityCleanupV1.LinuxStorageV3(storage): storage.close_v1()
+        case MachineContainerAuthorityCleanupV1.Reader(reader): reader.close_v1()
+        case MachineContainerAuthorityCleanupV1.Storage(storage): storage.close_v1()
+        case MachineContainerAuthorityCleanupV1.ReaderPrincipal(reader, principal):
+            machine_authority_close_principal_v1(MachineAuthorityClosingOwnerV1.Reader(reader), Some(principal))
+        case MachineContainerAuthorityCleanupV1.StoragePrincipal(storage, principal):
+            machine_authority_close_principal_v1(MachineAuthorityClosingOwnerV1.Storage(storage), Some(principal))
+
+pub fn machine_container_authority_cleanup_diagnostic_v1(owner: MachineContainerAuthorityCleanupV1) -> text:
+    match owner:
+        case MachineContainerAuthorityCleanupV1.LinuxReaderV3(_): ""
+        case MachineContainerAuthorityCleanupV1.LinuxStorageV3(_): ""
+        case MachineContainerAuthorityCleanupV1.Reader(_): ""
+        case MachineContainerAuthorityCleanupV1.Storage(_): ""
+        case MachineContainerAuthorityCleanupV1.ReaderPrincipal(_, local): machine_authority_pair_diagnostic_v1(Some(local))
+        case MachineContainerAuthorityCleanupV1.StoragePrincipal(_, local): machine_authority_pair_diagnostic_v1(Some(local))
+

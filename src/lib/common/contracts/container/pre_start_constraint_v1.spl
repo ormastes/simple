@@ -1,0 +1,88 @@
+# Restrictive DATA only. Actual Host creation ownership and signed admission
+# remain mandatory; a matching public observation cannot mint either.
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2,
+    container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.execution_configuration_v1.{ContainerExecutionConfigurationObservationV1,
+    ContainerExecutionMountObservationV1}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct ContainerPreStartConstraintV1:
+    request_digest: text
+    scope_bytes: text
+    provider_generation: i64
+    requested_image_ref: text
+    requested_image_kind: text
+    image_config_id: text
+    primary_argv: [text]
+    working_directory: text
+    configured_user: text
+    environment_digest: text
+    mounts: [ContainerExecutionMountObservationV1]
+    require_readonly_rootfs: bool
+
+pub fn container_pre_start_constraint_copy_v1(value: ContainerPreStartConstraintV1) -> ContainerPreStartConstraintV1:
+    var argv: [text] = []
+    var mounts: [ContainerExecutionMountObservationV1] = []
+    for argument in value.primary_argv: argv.push(argument)
+    for mount in value.mounts:
+        mounts.push(ContainerExecutionMountObservationV1(kind: mount.kind, source: mount.source,
+            destination: mount.destination, read_only: mount.read_only))
+    ContainerPreStartConstraintV1(request_digest: value.request_digest, scope_bytes: value.scope_bytes,
+        provider_generation: value.provider_generation, requested_image_ref: value.requested_image_ref,
+        requested_image_kind: value.requested_image_kind, image_config_id: value.image_config_id,
+        primary_argv: argv, working_directory: value.working_directory, configured_user: value.configured_user,
+        environment_digest: value.environment_digest, mounts: mounts, require_readonly_rootfs: value.require_readonly_rootfs)
+
+fn pre_start_image_digest_v1(value: text) -> Result<text, text>:
+    val digest = if value.starts_with("sha256:"): value.substring(7, value.byte_len()) else: value
+    if not builder_digest_valid_v1(digest): return Err("pre-start-image-config-digest-invalid")
+    Ok(digest)
+
+pub fn container_pre_start_constraint_validate_v1(value: ContainerPreStartConstraintV1,
+        request: ContainerExecutionRequestV2, scope: ContainerHostScopeV2) -> Result<(), text>:
+    if (not builder_digest_valid_v1(value.request_digest) or value.request_digest != request.plan.request_digest or
+            value.scope_bytes != container_host_scope_bytes_v2(scope)? or
+            value.provider_generation != scope.provider_generation or
+            value.provider_generation != request.plan.provider_generation):
+        return Err("pre-start-request-scope-generation-mismatch")
+    val image = pre_start_image_digest_v1(value.image_config_id)?
+    if value.requested_image_kind != "repository-digest" and value.requested_image_kind != "image-config-id":
+        return Err("pre-start-immutable-image-reference-required")
+    if (value.requested_image_ref == "" or value.requested_image_ref.byte_len() > 4096 or
+            value.requested_image_ref.contains("\0") or value.primary_argv.len() == 0 or
+            value.primary_argv.len() > 4096 or value.working_directory == "" or
+            value.configured_user == "" or not builder_digest_valid_v1(value.environment_digest) or
+            value.mounts.len() > 256):
+        return Err("pre-start-constraint-invalid")
+    var bytes = 0
+    for argument in value.primary_argv:
+        bytes = bytes + argument.byte_len()
+        if argument.contains("\0") or bytes > 1048576: return Err("pre-start-argv-bound")
+    Ok(())
+
+pub fn container_pre_start_constraint_check_v1(value: ContainerPreStartConstraintV1,
+        request: ContainerExecutionRequestV2, scope: ContainerHostScopeV2,
+        created: RuntimeIdentityV1, observed: ContainerExecutionConfigurationObservationV1) -> Result<(), text>:
+    container_pre_start_constraint_validate_v1(value, request, scope)?
+    if (created.native_id == "" or created.pod_uid != request.plan.workload_uid or
+            created.attempt != request.plan.attempt or created.operation_id != request.plan.operation_id or
+            created.provider_generation != scope.provider_generation or created.node_boot_id != container_scope_fence_id_v2(scope)? or
+            observed.runtime != created or observed.request_digest != value.request_digest or
+            container_host_scope_bytes_v2(observed.scope)? != value.scope_bytes):
+        return Err("pre-start-created-runtime-mismatch")
+    if (observed.requested_image_ref != value.requested_image_ref or
+            observed.requested_image_kind != value.requested_image_kind or
+            pre_start_image_digest_v1(observed.image_config_id)? != pre_start_image_digest_v1(value.image_config_id)? or
+            pre_start_image_digest_v1(observed.runtime_image_id)? != pre_start_image_digest_v1(value.image_config_id)?):
+        return Err("pre-start-image-mismatch")
+    if value.requested_image_kind == "repository-digest" and not observed.image_repo_digests.contains(value.requested_image_ref):
+        return Err("pre-start-image-manifest-correspondence-missing")
+    if (value.requested_image_kind == "image-config-id" and
+            pre_start_image_digest_v1(value.requested_image_ref)? != pre_start_image_digest_v1(value.image_config_id)?):
+        return Err("pre-start-requested-image-config-mismatch")
+    if (observed.primary_argv != value.primary_argv or observed.working_directory != value.working_directory or
+            observed.configured_user != value.configured_user or observed.environment_digest != value.environment_digest or
+            observed.mounts != value.mounts or (value.require_readonly_rootfs and not observed.readonly_rootfs)):
+        return Err("pre-start-effective-program-environment-mount-mismatch")
+    Ok(())
