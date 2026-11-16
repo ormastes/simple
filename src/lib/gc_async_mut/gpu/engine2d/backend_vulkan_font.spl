@@ -24,6 +24,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_order_trace, vu
     vulkan_font_upload_u32_requested, vulkan_font_upload_note}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256}
+use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad, FontExecutionPolicy, font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity}
 use std.gpu.engine2d.helpers_text.{text_metrics}
@@ -52,6 +53,14 @@ val VULKAN_FONT_PACKED_HEADER_WORDS: i64 = 8
 val VULKAN_FONT_PACKED_GLYPH_WORDS: i64 = 7
 val VULKAN_FONT_FRAME_GLYPH_CAP: i64 = 4096
 val VULKAN_FONT_PACKED_MAX_BYTES: i64 = (VULKAN_FONT_PACKED_HEADER_WORDS + VULKAN_FONT_FRAME_GLYPH_CAP * VULKAN_FONT_PACKED_GLYPH_WORDS) * 4
+# LCD trailer (opt-in, after the glyph records; header word 7 bit 31 marks it):
+# one table index word per glyph, then one 3 x 256 word s32 table per distinct
+# LCD text colour. The glyph record stays 7 words, so the Metal packer's byte
+# parity and VULKAN_FONT_PACKED_MAX_BYTES are untouched; only the pooled
+# params buffer is allocated large enough for the trailer.
+val VULKAN_FONT_LCD_TABLE_WORDS: i64 = 768
+val VULKAN_FONT_LCD_MAX_COLORS: i64 = 32
+val VULKAN_FONT_PACKED_POOL_BYTES: i64 = VULKAN_FONT_PACKED_MAX_BYTES + (VULKAN_FONT_FRAME_GLYPH_CAP + VULKAN_FONT_LCD_MAX_COLORS * VULKAN_FONT_LCD_TABLE_WORDS) * 4
 val _VULKAN_STORAGE_BUFFER: i64 = 0x80
 
 fn vulkan_font_elapsed_ns(started_ns: i64, finished_ns: i64) -> i64:
@@ -121,14 +130,129 @@ fn vulkan_font_dispatch_groups(pixel_count: i64) -> i64:
 
 fn vulkan_font_packed_params(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
                              dst_width: i32, dst_height: i32) -> [u8]:
+    val no_veto: [text] = []
+    vulkan_font_packed_params_lcd(batch, origin_x, origin_y, dst_width, dst_height, false, no_veto)
+
+fn _vulkan_font_quad_has_lcd_cell(batch: FontRenderBatch, q: FontRenderQuad) -> bool:
+    """Does this quad's atlas rect hold a cell the CPU LCD composite treats as
+    LCD? Mirrors `engine2d_lcd_quad_composite`: a quad inside the atlas, with
+    at least one non-zero cell whose rgb is not the gray marker 0xFFFFFF."""
+    val aw = batch.atlas_width.to_i64()
+    val ah = batch.atlas_height.to_i64()
+    val ax = q.atlas_x.to_i64()
+    val ay = q.atlas_y.to_i64()
+    val qw = q.width.to_i64()
+    val qh = q.height.to_i64()
+    if qw <= 0 or qh <= 0 or ax < 0 or ay < 0 or ax + qw > aw or ay + qh > ah:
+        return false
+    if batch.atlas_pixels.len() < aw * ah:
+        return false
+    var row: i64 = 0
+    while row < qh:
+        val base = (ay + row) * aw + ax
+        var col: i64 = 0
+        while col < qw:
+            val cell = batch.atlas_pixels[base + col]
+            if cell != 0u32 and (cell & 0x00FFFFFFu32) != 0x00FFFFFFu32:
+                return true
+            col = col + 1
+        row = row + 1
+    false
+
+# reason: stable identity string of a trimmed quad's destination and atlas rect
+# @allow(primitive_api)
+fn vulkan_font_quad_key(q: FontRenderQuad) -> text:
+    "{q.dst_x},{q.dst_y},{q.width},{q.height},{q.atlas_x},{q.atlas_y}"
+
+# reason: pixel coordinates and clip/surface extents of a quad batch, same units as the sibling clip helpers
+# @allow(primitive_api)
+fn vulkan_font_lcd_veto_keys(quads: [FontRenderQuad], kept: [FontRenderQuad], origin_x: i32,
+                             origin_y: i32, clip_x: i32, clip_y: i32, clip_w: i32,
+                             clip_h: i32, surface_w: i32, surface_h: i32) -> [text]:
+    """Keys of the trimmed quads (`kept`, from `vulkan_bitmap_text_clip_quads`
+    over `quads` with the same clip) whose UNTRIMMED destination rect reaches
+    outside the surface.
+
+    The CPU LCD composite reads the whole untrimmed quad back; pixels off the
+    surface read as 0, which is not opaque, so it declines LCD for that quad and
+    paints it gray. Trimming bakes only the on-surface part into the quad, so
+    the kernel's opacity gate could not see that; this list carries the verdict.
+    Mirrors the drop rule of `vulkan_bitmap_text_clip_quads` to stay aligned."""
+    var keys: [text] = []
+    val cl = clip_x.to_i64()
+    val ct = clip_y.to_i64()
+    val cr = cl + clip_w.to_i64()
+    val cb = ct + clip_h.to_i64()
+    var ki: i64 = 0
+    for q in quads:
+        val dl = origin_x.to_i64() + q.dst_x.to_i64()
+        val dt = origin_y.to_i64() + q.dst_y.to_i64()
+        val dr = dl + q.width.to_i64()
+        val db = dt + q.height.to_i64()
+        val nl = if dl > cl: dl else: cl
+        val nt = if dt > ct: dt else: ct
+        val nr = if dr < cr: dr else: cr
+        val nb = if db < cb: db else: cb
+        if nr <= nl or nb <= nt:
+            continue
+        if ki >= kept.len().to_i64():
+            return keys
+        if dl < 0 or dt < 0 or dr > surface_w.to_i64() or db > surface_h.to_i64():
+            keys.push(vulkan_font_quad_key(kept[ki]))
+        ki = ki + 1
+    keys
+
+# reason: reads header word 7 bit 31 of the packed params bytes
+# @allow(primitive_api)
+fn vulkan_font_packed_has_lcd_trailer(packed: [u8]) -> bool:
+    packed.len() >= 32 and (packed[31].to_i64() & 128) != 0
+
+# reason: pixel origin and surface extents plus the packed params bytes, same units as vulkan_font_packed_params
+# @allow(primitive_api)
+fn vulkan_font_packed_params_lcd(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
+                                 dst_width: i32, dst_height: i32, lcd: bool,
+                                 veto_keys: [text]) -> [u8]:
+    """Packed params for the font batch kernel. With `lcd`, quads that hold an
+    LCD cell get a table index into a trailer of per-colour s32 tables (same
+    tables as the CPU composite); no LCD quad means the legacy layout byte for
+    byte. More than VULKAN_FONT_LCD_MAX_COLORS distinct LCD colours in one
+    batch is refused (empty result), not silently drawn gray. A quad whose
+    `vulkan_font_quad_key` is in `veto_keys` is drawn gray (see
+    `vulkan_font_lcd_veto_keys`)."""
     val glyph_count = batch.quads.len()
-    val word_count = VULKAN_FONT_PACKED_HEADER_WORDS + glyph_count * VULKAN_FONT_PACKED_GLYPH_WORDS
-    if glyph_count <= 0 or glyph_count > VULKAN_FONT_FRAME_GLYPH_CAP or word_count > 2147483647 / 4:
+    val glyph_words = VULKAN_FONT_PACKED_HEADER_WORDS + glyph_count * VULKAN_FONT_PACKED_GLYPH_WORDS
+    if glyph_count <= 0 or glyph_count > VULKAN_FONT_FRAME_GLYPH_CAP or glyph_words > 2147483647 / 4:
         return []
     val atlas_count = batch.atlas_width.to_i64() * batch.atlas_height.to_i64()
     val dst_count = dst_width.to_i64() * dst_height.to_i64()
     if atlas_count <= 0 or atlas_count > 2147483647 or dst_count <= 0 or dst_count > 2147483647:
         return []
+    var lcd_colors: [i64] = []
+    var glyph_table: [i64] = []
+    # The built-in 5x7 bitmap atlas stores alpha only (rgb = 0), which would
+    # read as "LCD cell with zero coverage"; only vector-font atlases carry the
+    # 0xFFFFFF gray marker, so the bitmap lane never takes the LCD branch.
+    if lcd and batch.render_config_identity != VULKAN_BITMAP_FONT_CONFIG_IDENTITY:
+        for q in batch.quads:
+            var table_index: i64 = -1
+            if _vulkan_font_quad_has_lcd_cell(batch, q) and not veto_keys.contains(vulkan_font_quad_key(q)):
+                val key = q.color.to_i64()
+                var k: i64 = 0
+                while k < lcd_colors.len().to_i64():
+                    if lcd_colors[k] == key:
+                        table_index = k
+                    k = k + 1
+                if table_index < 0:
+                    if lcd_colors.len().to_i64() >= VULKAN_FONT_LCD_MAX_COLORS:
+                        return []
+                    table_index = lcd_colors.len().to_i64()
+                    lcd_colors.push(key)
+            glyph_table.push(table_index)
+    val trailer = lcd_colors.len() > 0
+    val word_count = if trailer:
+        glyph_words + glyph_count + lcd_colors.len() * VULKAN_FONT_LCD_TABLE_WORDS
+    else:
+        glyph_words
     var packed: [u8] = [0u8; word_count * 4]
     var off = 0
     var max_pixels: i64 = 0
@@ -147,6 +271,15 @@ fn vulkan_font_packed_params(batch: FontRenderBatch, origin_x: i32, origin_y: i3
         for value in values:
             off = _vulkan_font_pack_i32_le(packed, off, value)
     _vulkan_font_pack_i32_le(packed, 28, max_pixels as i32)
+    if trailer:
+        packed[31] = (packed[31].to_i64() | 128) as u8
+        for t in glyph_table:
+            off = _vulkan_font_pack_i32_le(packed, off, t as i32)
+        for key in lcd_colors:
+            val table = engine2d_lcd_s32_tables(key as u32)
+            if table.len() != VULKAN_FONT_LCD_TABLE_WORDS: return []
+            for entry in table:
+                off = _vulkan_font_pack_i32_le(packed, off, entry as i32)
     packed
 
 fn vulkan_font_atlas_replacement_status(old_present: bool, old_freed: bool, fresh_freed: bool) -> text:
@@ -1232,6 +1365,11 @@ impl VulkanBackend:
             return _vulkan_font_evidence(self.font_atlas_pipeline_evidence(), "clipped-out",
                 "font-quads-outside-clip", self.d_font_atlas, 0, 0, 0,
                 batch.quads.len(), 0, false, false, self.d_framebuffer, 0, 0, 0, false)
+        self.font_lcd_veto_keys = if trim:
+            vulkan_font_lcd_veto_keys(batch.quads, drawn_quads, origin_x, origin_y,
+                self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.width(), self.height())
+        else:
+            []
         val drawn = if not trim:
             batch
         else:
@@ -1716,11 +1854,15 @@ impl VulkanBackend:
                 vulkan_font_overlap_note(batch.quads.len().to_i64(),
                     vulkan_font_count_overlapping_quads(batch.quads))
             val _t_packed = vulkan_timing_now_us()
-            val packed = vulkan_font_packed_params(batch, origin_x, origin_y, width, height)
+            # Only the pinned SPIR-V kernel knows the LCD trailer and the X = 1 grid.
+            # The `runtime-glsl` kernel is the common gray source (one 64-wide
+            # group per glyph, no stride loop): it would draw 64 pixels per glyph.
+            val lcd_kernel = pipeline.artifact_mode == "precompiled-spirv"
+            val packed = vulkan_font_packed_params_lcd(batch, origin_x, origin_y, width, height, lcd_kernel, self.font_lcd_veto_keys)
             vulkan_timing_add(VK_T_FONT_PACKED_PARAMS, _t_packed)
             val pool_index = self.pending_font_params.len()
             val use_packed_pool = self.frame_batching_enabled and not self.font_oracle_mode
-            if packed.len() == 0 or packed.len() > VULKAN_FONT_PACKED_MAX_BYTES:
+            if packed.len() == 0 or packed.len() > VULKAN_FONT_PACKED_POOL_BYTES:
                 return _vulkan_font_evidence(pipeline, "rejected", "invalid-packed-font-params", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             var packed_params: i64 = 0
             var packed_descriptor: i64 = 0
@@ -1730,7 +1872,7 @@ impl VulkanBackend:
                 if self.font_params_pool_capacity[pool_index] < packed.len():
                     return _vulkan_font_evidence(pipeline, "failed", "packed-font-pool-capacity-invalid", self.d_font_atlas, packed_params, packed_descriptor, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             else:
-                val allocation_bytes = if use_packed_pool: VULKAN_FONT_PACKED_MAX_BYTES else: packed.len()
+                val allocation_bytes = if use_packed_pool: VULKAN_FONT_PACKED_POOL_BYTES else: packed.len()
                 packed_params = vulkan_sffi_alloc_buffer(allocation_bytes, _VULKAN_STORAGE_BUFFER)
                 packed_descriptor = vulkan_sffi_create_descriptor_set(pipeline.pipeline_handle)
                 if packed_params <= 0 or packed_descriptor <= 0:
@@ -1740,7 +1882,7 @@ impl VulkanBackend:
                 if use_packed_pool:
                     self.font_params_pool.push(packed_params)
                     self.font_descriptor_pool.push(packed_descriptor)
-                    self.font_params_pool_capacity.push(VULKAN_FONT_PACKED_MAX_BYTES)
+                    self.font_params_pool_capacity.push(VULKAN_FONT_PACKED_POOL_BYTES)
             var packed_pool_bytes: i64 = 0
             for capacity in self.font_params_pool_capacity:
                 packed_pool_bytes = packed_pool_bytes + capacity
@@ -1765,10 +1907,15 @@ impl VulkanBackend:
             for q in batch.quads:
                 val glyph_pixels = q.width.to_i64() * q.height.to_i64()
                 if glyph_pixels > max_pixels: max_pixels = glyph_pixels
+            # An LCD batch gates each quad on "every destination pixel opaque",
+            # which needs the whole quad in ONE workgroup: X = 1 and the kernel
+            # strides over the quad's pixels. Gray batches keep one group per
+            # 64 pixels.
+            val packed_groups = if vulkan_font_packed_has_lcd_trailer(packed): 1 else: vulkan_font_dispatch_groups(max_pixels)
             val packed_recorded = (packed_command > 0 and
                 vulkan_sffi_bind_pipeline(packed_command, pipeline.pipeline_handle) and
                 vulkan_sffi_bind_descriptors(packed_command, packed_descriptor) and
-                vulkan_sffi_dispatch(packed_command, vulkan_font_dispatch_groups(max_pixels), batch.quads.len(), 1))
+                vulkan_sffi_dispatch(packed_command, packed_groups, batch.quads.len(), 1))
             if not packed_recorded:
                 if packed_command > 0: vulkan_sffi_quarantine_unsubmitted_command(packed_command, 0, 0)
                 if use_packed_pool:
@@ -2127,7 +2274,7 @@ export vulkan_font_timed_ns
 export vulkan_font_frame_batch_contract
 export VULKAN_FONT_FRAME_GLYPH_CAP, vulkan_font_gpu_resource_bytes_for_params
 export VULKAN_FONT_PACKED_HEADER_WORDS, VULKAN_FONT_PACKED_GLYPH_WORDS
-export VULKAN_FONT_PACKED_MAX_BYTES, vulkan_font_packed_params
+export VULKAN_FONT_PACKED_MAX_BYTES, VULKAN_FONT_PACKED_POOL_BYTES, VULKAN_FONT_LCD_MAX_COLORS, VULKAN_FONT_LCD_TABLE_WORDS, vulkan_font_packed_params, vulkan_font_packed_params_lcd, vulkan_font_quad_key, vulkan_font_lcd_veto_keys, vulkan_font_packed_has_lcd_trailer
 export vulkan_font_atlas_identity_digest, vulkan_font_count_overlapping_quads
 export vulkan_font_partition_quads, vulkan_font_partition_bucket_count
 export VULKAN_BITMAP_FONT_FIRST_CODE, VULKAN_BITMAP_FONT_LAST_CODE
