@@ -40,7 +40,7 @@ use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPT
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
 use compiler.core.types.{int_to_str, type_tag_name, flat_span_new}
 use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register, named_generic_instance_register}
-use compiler.core.types.{newunit_register, unit_decl_register_origin}
+use compiler.core.types.{newunit_register, unit_decl_register_origin, unit_decl_find, unit_decl_underlying_tag_at}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_has_errors}
@@ -51,7 +51,7 @@ use compiler.core.parser.{parser_legacy_let_decl_ahead}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
 use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
 use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
-use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS, TOK_DOT}
+use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS, TOK_DOT, TOK_STAR, TOK_SLASH}
 use compiler.frontend.core.flat_pool_codec.*
 use compiler.frontend.core.lock_level_parser.{lock_level_parse_attribute, lock_level_is_exception_attribute, lock_level_reject_non_function}
 use compiler.frontend.core.static_lock_level_metadata.{lock_level_metadata_promote}
@@ -371,6 +371,19 @@ fn parser_lower_unit_decl(name: text, inner_type: i64, suffix: text, legacy_orig
     val d = decl_struct_def(name, field_names, field_types, field_defaults, field_bits, 0)
     module_add_decl(d)
     parser_reset_pending_vhdl_decorators()
+    ()
+
+# `unit Speed = Meter / Second`: same struct lowering as a nominal unit, payload
+# type taken from the left operand unit, UnitDecl row role "derived" with the
+# formula ("Meter/Second") in alias_of for the operator matrix.
+fn parser_lower_derived_unit_decl(name: text, lhs: text, formula: text):
+    val lhs_idx = unit_decl_find(lhs)
+    if lhs_idx < 0:
+        parser_error("derived unit `" + name + "` references undeclared unit `" + lhs + "`")
+        return
+    val inner_type = unit_decl_underlying_tag_at(lhs_idx)
+    parser_lower_unit_decl(name, inner_type, "", "")
+    unit_decl_register_origin(name, "derived", "", inner_type, formula, "")
     ()
 
 fn current_ident_is_resource_decl() -> bool:
@@ -2233,14 +2246,33 @@ pub fn parse_module_body():
             parser_advance()
             val u_name = par_text_get()
             parser_expect(6)
-            parser_expect(161)
-            val u_inner = parser_parse_type()
-            var u_suffix = ""
-            if par_kind_get() == TOK_KW_AS:
+            if par_kind_get() == TOK_ASSIGN:
+                # unit Speed = Meter / Second -- declared derived unit
+                # (owner decision 4A, 2026-11-16). The formula is recorded as
+                # "A/B" or "A*B" in alias_of with role "derived".
                 parser_advance()
-                u_suffix = par_text_get()
+                val d_lhs = par_text_get()
                 parser_expect(6)
-            parser_lower_unit_decl(u_name, u_inner, u_suffix, "")
+                var d_op = ""
+                if par_kind_get() == TOK_STAR:
+                    d_op = "*"
+                elif par_kind_get() == TOK_SLASH:
+                    d_op = "/"
+                else:
+                    parser_error("expected `*` or `/` in derived unit declaration `unit " + u_name + " = A / B`")
+                parser_advance()
+                val d_rhs = par_text_get()
+                parser_expect(6)
+                parser_lower_derived_unit_decl(u_name, d_lhs, d_lhs + d_op + d_rhs)
+            else:
+                parser_expect(161)
+                val u_inner = parser_parse_type()
+                var u_suffix = ""
+                if par_kind_get() == TOK_KW_AS:
+                    parser_advance()
+                    u_suffix = par_text_get()
+                    parser_expect(6)
+                parser_lower_unit_decl(u_name, u_inner, u_suffix, "")
         elif par_kind_get() == 219:
             # newunit UserId: i64 as uid -- deprecated spelling of `unit`.
             # Lowers into the same canonical record (legacy_origin "newunit")

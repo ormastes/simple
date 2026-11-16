@@ -1,0 +1,98 @@
+# @cover src/compiler/30.types/units/unit_ops.spl 60%
+"""
+## Purpose and audience
+Executable contract for owner decision 4A (2026-11-16): derived units are
+DECLARED (`unit Speed = Meter / Second`). unit*unit and unit/unit are legal
+only when a matching derived-unit declaration exists and then yield the
+derived unit; otherwise SPL-UNIT-004 names the missing declaration (warning
+by default, error in the robust profile). unit*scalar and unit/scalar stay
+legal.
+## Operator workflow
+bin/simple test test/01_unit/compiler/types/unit_derived_decl_spec.spl
+## Compatibility and limitations
+The robust profile is selected through `unit_op_robust_profile()`.
+## Verification guidance and troubleshooting
+`allow:<scalar>` with a recorded SPL-UNIT-004 warning is the default-profile
+fallback for an undeclared product/quotient.
+"""
+
+use std.spec
+use compiler.core.types.{reset_all_pools, unit_decl_find, unit_decl_role_at, unit_decl_alias_of_at}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.types.units.unit_ops.{
+    UnitOpVerdict, unit_op_verdict, unit_op_robust_profile, unit_op_default_profile, unit_op_take_warnings
+}
+
+fn declare(src: text):
+    reset_all_pools()
+    unit_op_default_profile()
+    unit_op_take_warnings()
+    parser_init_with_path(src, "derived_world.spl")
+    parse_module_body()
+
+fn world():
+    declare("unit Meter: f64 as m\nunit Second: f64 as s\nunit Speed = Meter / Second\nunit Area = Meter * Meter\nunit Hertz: f64 as hz\nunit Count: i64 as n\n")
+
+fn v(op: text, l: text, r: text) -> text:
+    match unit_op_verdict(op, l, r):
+        case NotUnit: "notunit"
+        case Allow(x): "allow:" + x
+        case Deny(m):
+            if m.starts_with("SPL-UNIT-004"): "deny4"
+            elif m.starts_with("SPL-UNIT-002"): "deny"
+            else: "deny?"
+
+describe "Declared derived units (decision 4A)":
+    it "parses `unit X = A / B` and `unit X = A * B` as derived declarations":
+        world()
+        expect(parser_has_errors()).to_equal(false)
+        val si = unit_decl_find("Speed")
+        expect(si >= 0).to_equal(true)
+        expect(unit_decl_role_at(si)).to_equal("derived")
+        expect(unit_decl_alias_of_at(si)).to_equal("Meter/Second")
+        expect(unit_decl_alias_of_at(unit_decl_find("Area"))).to_equal("Meter*Meter")
+
+    it "a declared quotient/product yields the derived unit":
+        world()
+        expect(v("div", "Meter", "Second")).to_equal("allow:Speed")
+        expect(v("mul", "Meter", "Meter")).to_equal("allow:Area")
+
+    it "derived units behave as nominal units afterwards":
+        world()
+        expect(v("add", "Speed", "Speed")).to_equal("allow:Speed")
+        expect(v("mul", "Speed", "int")).to_equal("allow:Speed")
+        expect(v("cmp", "Speed", "Speed")).to_equal("allow:bool")
+        expect(v("add", "Speed", "Meter")).to_equal("deny")
+
+    it "product is commutative; quotient is not; distinct undeclared units stay denied":
+        declare("unit Meter: f64 as m\nunit Newton: f64 as nw\nunit Torque = Newton * Meter\nunit Second: f64 as s\n")
+        expect(v("mul", "Meter", "Newton")).to_equal("allow:Torque")
+        expect(v("div", "Second", "Meter")).to_equal("deny")
+        expect(v("mul", "Second", "Meter")).to_equal("deny")
+
+    it "an undeclared product/quotient warns naming the missing declaration (default)":
+        world()
+        unit_op_take_warnings()
+        expect(v("div", "Hertz", "Hertz")).to_equal("allow:f64")
+        val w = unit_op_take_warnings()
+        expect(w.len()).to_equal(1)
+        expect(w[0].starts_with("SPL-UNIT-004")).to_equal(true)
+        expect(w[0].contains("unit <Name> = Hertz / Hertz")).to_equal(true)
+        expect(v("mul", "Count", "Count")).to_equal("allow:i64")
+        expect(unit_op_take_warnings()[0].contains("Count * Count")).to_equal(true)
+
+    it "robust profile turns the missing declaration into an error":
+        world()
+        unit_op_robust_profile()
+        expect(v("div", "Hertz", "Hertz")).to_equal("deny4")
+        expect(v("mul", "Second", "Second")).to_equal("deny4")
+        expect(v("div", "Meter", "Second")).to_equal("allow:Speed")
+        unit_op_default_profile()
+
+    it "unit*scalar and unit/scalar stay legal without any declaration":
+        world()
+        expect(v("mul", "Meter", "float")).to_equal("allow:Meter")
+        expect(v("div", "Meter", "float")).to_equal("allow:Meter")
+        expect(v("mul", "int", "Count")).to_equal("allow:Count")
+        expect(unit_op_take_warnings().len()).to_equal(0)
