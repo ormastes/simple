@@ -67,3 +67,60 @@ describe "driver_empty_object":
         expect(b[0]).to_equal(127)
         expect(b[18]).to_equal(62)
         expect(driver_empty_object_supported("x86_64-unknown-simpleos-elf")).to_equal(true)
+
+    it "emits riscv64 ELF64 with EM_RISCV 243 and lp64d flags":
+        for target in ["riscv64gc-unknown-simpleos", "riscv64gc-unknown-linux-gnu", "riscv64-unknown-linux-gnu"]:
+            expect(driver_empty_object_supported(target)).to_equal(true)
+            val b = driver_empty_object_bytes(target, "simple_empty_module_m")!
+            expect(b.len()).to_equal(208)
+            expect(b[4]).to_equal(2)
+            expect(b[18]).to_equal(243)
+            expect(b[19]).to_equal(0)
+            # e_flags at 48: EF_RISCV_RVC (1) | EF_RISCV_FLOAT_ABI_DOUBLE (4)
+            expect(b[48]).to_equal(5)
+            expect(b[49]).to_equal(0)
+
+    it "keeps aarch64 and x86_64 e_flags at zero":
+        expect(driver_empty_object_bytes("aarch64-unknown-simpleos", "m")![48]).to_equal(0)
+        expect(driver_empty_object_bytes("x86_64-unknown-simpleos", "m")![48]).to_equal(0)
+
+    it "emits an ELF32 ET_REL for i686 with EM_386":
+        for target in ["i686-unknown-linux-gnu", "i686-unknown-simpleos"]:
+            expect(driver_empty_object_supported(target)).to_equal(true)
+            val b = driver_empty_object_bytes(target, "m")!
+            expect(b.len()).to_equal(148)
+            expect(b[0]).to_equal(127)
+            expect(b[4]).to_equal(1)       # ELFCLASS32
+            expect(b[5]).to_equal(1)       # little endian
+            expect(b[16]).to_equal(1)      # ET_REL
+            expect(b[18]).to_equal(3)      # EM_386
+            expect(b[32]).to_equal(68)     # e_shoff
+            expect(b[36]).to_equal(0)      # e_flags
+            expect(b[40]).to_equal(52)     # e_ehsize
+            expect(b[46]).to_equal(40)     # e_shentsize
+            expect(b[48]).to_equal(2)      # e_shnum
+            expect(b[50]).to_equal(1)      # e_shstrndx
+            expect(68 + 2 * 40).to_equal(b.len())
+
+    it "emits an ELF32 ET_REL for armv7 with EM_ARM and EABI5 hard-float flags":
+        for target in ["armv7-unknown-linux-gnueabihf", "armv7-unknown-simpleos"]:
+            expect(driver_empty_object_supported(target)).to_equal(true)
+            val b = driver_empty_object_bytes(target, "m")!
+            expect(b.len()).to_equal(148)
+            expect(b[4]).to_equal(1)
+            expect(b[18]).to_equal(40)     # EM_ARM
+            # e_flags 0x05000400 little endian at 36
+            expect(b[36]).to_equal(0)
+            expect(b[37]).to_equal(4)
+            expect(b[38]).to_equal(0)
+            expect(b[39]).to_equal(5)
+
+    it "still declines unknown 32-bit machines":
+        expect(driver_empty_object_bytes("riscv32-unknown-simpleos", "m") == nil).to_equal(true)
+
+    it "does not capture big-endian armv7eb and marks soft-float gnueabi without the hard-float bit":
+        expect(driver_empty_object_bytes("armv7eb-unknown-linux-gnueabihf", "m") == nil).to_equal(true)
+        val b = driver_empty_object_bytes("armv7-unknown-linux-gnueabi", "m")!
+        expect(b[36]).to_equal(0)
+        expect(b[37]).to_equal(0)
+        expect(b[39]).to_equal(5)
