@@ -17,6 +17,23 @@ fn replace_fixture_architecture_v1() -> text:
     "unsupported"
     @end
 
+# Fixture-environment gate (owner decision 2026-11-16, OPEN_ISSUE B-10). Every
+# example reports BLOCKED (counted, never a pass) and returns BEFORE any fixture
+# helper runs when one of these is unset, so open_v1 -- which irreversibly
+# unshares the runner's FILES/FS context -- never executes in an ordinary
+# shared-process runner. A configured but malformed fixture still fails.
+fn replace_fixture_missing_env_v1() -> text:
+    var missing = ""
+    for name in ["SIMPLE_REPLACE_FIXTURE_ELF", "SIMPLE_REPLACE_FIXTURE_SHA256",
+            "SIMPLE_REPLACE_FIXTURE_DIRECTORY", "SIMPLE_REPLACE_FIXTURE_BYTES",
+            "SIMPLE_REPLACE_FIXTURE_OTHER_DIRECTORY"]:
+        if (env_get_opt(name) ?? "") == "":
+            missing = if missing == "": name else: missing + ", " + name
+    missing
+
+val replace_fixture_missing_v1 = replace_fixture_missing_env_v1()
+val replace_fixture_blocked_v1 = "BLOCKED: native process-replace fixture env unset: {replace_fixture_missing_v1} (needs a dedicated native single-threaded runner)"
+
 var replace_fixture_owner_v1: Option<LinuxProcessReplaceOwnerV1> = nil
 var replace_fixture_cwd_v1: Option<RetainedDirectoryOwnerV1> = nil
 
@@ -74,6 +91,9 @@ describe "Actual Linux replacement pin ownership specimens":
         expect(replace_fixture_cleanup_v1()).to_equal(true)
 
     it "hashes the actual sealed descriptor then closes once across copied owner retries":
+        if replace_fixture_missing_v1 != "":
+            pending(replace_fixture_blocked_v1)
+            return
         step("Use a configured real ELF and independent cwd; never execute the test runner away")
         val prepared = replace_fixture_begin_v1(false).unwrap()
         expect(prepared.error).to_equal("")
@@ -94,6 +114,9 @@ describe "Actual Linux replacement pin ownership specimens":
         expect(copied_prepare.owner.is_none()).to_equal(true)
 
     it "keeps real pin and cwd cleanup on a digest mismatch and preserves its first error":
+        if replace_fixture_missing_v1 != "":
+            pending(replace_fixture_blocked_v1)
+            return
         step("Compare actual sealed image bytes to a deliberately different expected digest")
         val failed = replace_fixture_begin_v1(true).unwrap()
         expect(failed.error).to_equal("linux-replace-image-digest-mismatch")
@@ -110,6 +133,9 @@ describe "Actual Linux replacement pin ownership specimens":
         expect(closed.error).to_equal(failed.error)
 
     it "keeps the private cwd after caller alias close and opening a different directory":
+        if replace_fixture_missing_v1 != "":
+            pending(replace_fixture_blocked_v1)
+            return
         step("Close the actual borrowed original during preparation; inspect independent real custody")
         val pending = replace_fixture_begin_v1(false, false).unwrap()
         expect(pending.owner.is_some()).to_equal(true)

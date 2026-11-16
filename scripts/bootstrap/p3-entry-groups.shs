@@ -62,6 +62,22 @@ ps=$(command -v pwsh || command -v powershell || true)
 [ -f "$stage2" ] || { echo "error: stage2 missing: $stage2" >&2; exit 1; }
 mkdir -p "$out" "$cache"
 
+win_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+checkout_win=$(win_path "$checkout")
+out_win=$(win_path "$out")
+cache_win=$(win_path "$cache")
+stage2_win=$(win_path "$stage2")
+lm_win=$(win_path "$lm")
+measure_win=""
+[ -n "$measure" ] && measure_win=$(win_path "$measure")
+
 if [ "$full_backends" = "1" ]; then
     ps_sources="'--source','src/compositions/cuda_static','--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib','--source','src/plugins'"
 else
@@ -70,12 +86,14 @@ fi
 
 ptree_env_line="Remove-Item Env:SIMPLE_PROJECT_ROOT -EA SilentlyContinue"
 if [ -n "$ptree" ] && [ "$ptree" != "none" ] && [ -d "$ptree" ]; then
-    ptree_env_line="\$env:SIMPLE_PROJECT_ROOT=\"$ptree\"; \$env:SIMPLE_RT_OBJ_CACHE_DIR=\"$ptree.rtcache\""
+    ptree_win=$(win_path "$ptree")
+    ptree_env_line="\$env:SIMPLE_PROJECT_ROOT=\"$ptree_win\"; \$env:SIMPLE_RT_OBJ_CACHE_DIR=\"$ptree_win.rtcache\""
 fi
 
 # One stage2 run under the RSS-capped wrapper. $1=name $2=entry $3=emit flag $4=output
 run_stage2() {
     name=$1; entry=$2; emit=$3; o=$4
+    o_win=$(win_path "$o")
     git -C "$checkout" ls-files --error-unmatch "$entry" >/dev/null 2>&1 ||
         { echo "error: $entry is not tracked in $checkout (SCV needs a tracked entry)" >&2; return 1; }
     rm -f "$o" "$out/$name.result.txt"
@@ -92,22 +110,22 @@ run_stage2() {
 Remove-Item Env:LIB -EA SilentlyContinue
 Remove-Item Env:INCLUDE -EA SilentlyContinue
 Remove-Item Env:LIBPATH -EA SilentlyContinue
-\$lm="$lm"
+\$lm="$lm_win"
 \$env:PATH=\$env:PATH+";\$lm\\bin"; \$env:CC="\$lm\\bin\\clang.exe"; \$env:SIMPLE_LLVM_MINGW_ROOT=\$lm
 # @workaround bug=stage2_runtime_list_missing_process_tree (#5760)
 $ptree_env_line
-Set-Location "$checkout"
+Set-Location "$checkout_win"
 EOF
     if [ -n "$measure" ] && [ -f "$measure" ]; then
         cat >> "$ps1" <<EOF
-& "$measure" -Exe "$stage2" -Cache "$cache" -Log "$out/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache','$emit','-o','$o') | Tee-Object "$out/$name.result.txt"
+& "$measure_win" -Exe "$stage2_win" -Cache "$cache_win" -Log "$out_win/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$o_win') | Tee-Object "$out_win/$name.result.txt"
 EOF
     else
         cat >> "$ps1" <<EOF
-\$pOut = "$out/$name.build.log"
-\$pErr = "$out/$name.build.err"
-\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache','$emit','-o','$o')
-\$proc = Start-Process -FilePath "$stage2" -ArgumentList \$stageArgs -NoNewWindow -PassThru -RedirectStandardOutput \$pOut -RedirectStandardError \$pErr
+\$pOut = "$out_win/$name.build.log"
+\$pErr = "$out_win/$name.build.err"
+\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$o_win')
+\$proc = Start-Process -FilePath "$stage2_win" -ArgumentList \$stageArgs -NoNewWindow -PassThru -RedirectStandardOutput \$pOut -RedirectStandardError \$pErr
 \$null = \$proc.Handle
 \$sw = [System.Diagnostics.Stopwatch]::StartNew()
 \$capBytes = [int64]$cap * 1073741824
@@ -148,7 +166,7 @@ if (Test-Path \$pErr) {
 }
 \$rc = if (\$killed -eq 1 -and \$null -eq \$proc.ExitCode) { 137 } elseif (\$null -eq \$proc.ExitCode) { 1 } else { [int]\$proc.ExitCode }
 \$peakGb = [math]::Floor(\$peakBytes / 1073741824)
-"peak_tree_GB=\$peakGb killed=\$killed rc=\$rc" | Tee-Object -FilePath "$out/$name.result.txt"
+"peak_tree_GB=\$peakGb killed=\$killed rc=\$rc" | Tee-Object -FilePath "$out_win/$name.result.txt"
 exit \$rc
 EOF
     fi

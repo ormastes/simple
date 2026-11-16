@@ -33,9 +33,20 @@ use std.io_runtime.{env_get, file_exists}
 use test.support.llm_caret_cli.{caret_cli_program, caret_cli_args}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 
-val DEFAULT_MODEL = "Qwen2.5-1.5B-Instruct-GGUF"
-val RUN_TIMEOUT_MS = 600000
+val DEFAULT_MODEL = "Qwen2.5-1.5B-Instruct-Q4_K_M"
+val DEFAULT_RUN_TIMEOUT_MS = 600000
 val MAX_OUTPUT_BYTES = 1048576
+
+# SLANG_RUN_TIMEOUT_MS overrides the per-child bound (default 600000) for hosts
+# where the 3-model inference gate legitimately exceeds 10 minutes.
+fn _run_timeout_ms() -> i64:
+    val raw = env_get("SLANG_RUN_TIMEOUT_MS") ?? ""
+    if raw == "":
+        return DEFAULT_RUN_TIMEOUT_MS
+    val parsed = raw.to_i64()
+    if parsed <= 0:
+        return DEFAULT_RUN_TIMEOUT_MS
+    parsed
 
 fn _env(name: text) -> text:
     env_get(name) ?? ""
@@ -69,7 +80,7 @@ describe "caret talks to a small local model through slang":
         step("Run the slang inference gate over the model root")
         val (out, err, code) = process_run_bounded("sh",
             ["scripts/check/check-slang-ggml-inference.shs", "--models", _env("SLANG_MODEL_ROOT")],
-            RUN_TIMEOUT_MS, MAX_OUTPUT_BYTES)
+            _run_timeout_ms(), MAX_OUTPUT_BYTES)
         # @capture(text): gate verdict line
         step("The gate passes and at least one model generated tokens")
         expect(code).to_equal(0)
@@ -87,7 +98,7 @@ describe "caret talks to a small local model through slang":
         val (out, err, code) = process_run_bounded(caret_cli_program(_env("SIMPLE_BINARY")),
             caret_cli_args(["--provider", "slang_local",
                 "--model", _model(), "--prompt", "Say exactly: hello"]),
-            RUN_TIMEOUT_MS, MAX_OUTPUT_BYTES)
+            _run_timeout_ms(), MAX_OUTPUT_BYTES)
         # @capture(protocol): caret stdout for the hello prompt
         step("caret exits cleanly and the model's reply says hello")
         expect(err.contains("refusing to load")).to_equal(false)
@@ -102,7 +113,7 @@ describe "caret talks to a small local model through slang":
         val (out, err, code) = process_run_bounded(caret_cli_program(_env("SIMPLE_BINARY")),
             caret_cli_args(["--provider", "slang_local",
                 "--model", "no-such-model-9f2", "--prompt", "Say exactly: hello"]),
-            RUN_TIMEOUT_MS, MAX_OUTPUT_BYTES)
+            _run_timeout_ms(), MAX_OUTPUT_BYTES)
         # @capture(protocol): caret output for an unknown model
         step("caret names the missing model and prints no reply")
         expect((out + err)).to_contain("no-such-model-9f2")

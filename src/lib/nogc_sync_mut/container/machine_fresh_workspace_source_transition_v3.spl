@@ -1,0 +1,95 @@
+# Internal source operations over the ORIGINAL canonical lifecycle capability.
+# No source/lease can leave a fallible acquisition without being retained here.
+use std.nogc_sync_mut.container.machine_fresh_workspace_source_custody_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.MachineFreshWorkloadLifecycleV2
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.LinuxWorkspaceSourceLoanV3
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.workload_publish_v3
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.machine_fresh_epoch_record_bytes_v1
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+use std.common.contracts.container.workspace_preparation_window_v3.container_workspace_preparation_deadline_v3
+use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.{agent_workspace_invocation_manifest_decode_v2, agent_workspace_invocation_manifest_encode_v2}
+
+pub struct MachineWorkspaceSourceOpenTurnV3:
+    source: Option<LinuxWorkspaceSourceLoanV3> = nil
+    error: text = ""
+
+pub(package) fn machine_workspace_source_open_v3(state: MachineFreshWorkloadLifecycleV2,
+        root: LinuxWorkspaceRootBorrowV3, request: ContainerExecutionRequestV2) -> MachineWorkspaceSourceOpenTurnV3:
+    val begun = state.source_begin_v3()
+    if begun.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: begun.unwrap_err())
+    state.capture_source_custody_v3(machine_fresh_workspace_source_custody_v3(root, request))
+    val admitted = state.source_custody_v3().unwrap().admit_v3()
+    state.capture_source_custody_v3(admitted.owner.retain_diagnostic_v3(admitted.error))
+    if admitted.error != "": return MachineWorkspaceSourceOpenTurnV3(error: admitted.error)
+    val charged = state.source_lease_acquired_v3()
+    if charged.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: charged.unwrap_err())
+    val opened = state.source_custody_v3().unwrap().open_v3()
+    state.capture_source_custody_v3(opened.owner.retain_diagnostic_v3(opened.error))
+    if opened.error != "": return MachineWorkspaceSourceOpenTurnV3(error: opened.error)
+    val observed = state.source_observed_v3()
+    if observed.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: observed.unwrap_err())
+    val loan = opened.owner.loan_v3()
+    if loan.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: loan.unwrap_err())
+    MachineWorkspaceSourceOpenTurnV3(source: Some(loan.unwrap()))
+
+# The actual native released receipt supplies all values. This is NOT a proof
+# constructor: only original-owner code accepts its internally obtained rows.
+pub(package) fn machine_workspace_source_release_rows_v3(state: MachineFreshWorkloadLifecycleV2,
+        epoch_digest: text, at: i64) -> Result<[WalEntry], text>:
+    val actual = state.source_custody_v3()?.release_receipt_v3()?
+    if at <= 0: return Err("machine-fresh-workspace-source-release-clock")
+    val fields: Dict<text, SdnValue> = {"format": SdnValue.String("machine-workspace-acquisition-release-v3"),
+        "epochDigest": SdnValue.String(epoch_digest),
+        "requestDigest": SdnValue.String(state.source_custody_v3()?.request_digest_v3()), "bindingDigest": SdnValue.String(actual.binding_digest),
+        "policyDigest": SdnValue.String(actual.policy_digest), "kind": SdnValue.String(actual.kind),
+        "poolId": SdnValue.String(actual.pool_id), "workspaceId": SdnValue.String(actual.workspace_id),
+        "quotaId": SdnValue.Int(actual.quota_id), "hardBytes": SdnValue.Int(actual.hard_bytes),
+        "usedBytes": SdnValue.Int(actual.used_bytes), "usedInodes": SdnValue.Int(actual.used_inodes),
+        "state": SdnValue.String(actual.state)}
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-workspace-acquisition-releases-v3",
+        sha256_text(epoch_digest + "\n" + actual.binding_digest), sdn_encode_canonical(SdnValue.Dict(fields)), at)])
+
+pub(package) fn machine_workspace_source_cleanup_v3(storage: MachineStorageOwnerV1,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<bool, text>:
+    val safe = state.source_cleanup_preflight_v3()?
+    val closed = state.source_custody_v3()?.cleanup_v3()
+    state.capture_source_custody_v3(closed.owner.retain_diagnostic_v3(closed.error))
+    if closed.owner.returned_v3():
+        val returned = state.source_returned_v3()?
+        return Ok(true)
+    if closed.error != "": return Err(closed.error)
+    val epoch = state.history_v2()?.epoch
+    val rows = machine_workspace_source_release_rows_v3(state,
+        sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?), time_sample_unix_micros_or_failure() / 1000)?
+    val committed = workload_publish_v3(storage, state, rows)?
+    val published = state.source_custody_v3()?.published_v3()?
+    state.capture_source_custody_v3(published)
+    val forgotten = published.cleanup_v3()
+    state.capture_source_custody_v3(forgotten.owner.retain_diagnostic_v3(forgotten.error))
+    if not forgotten.owner.returned_v3(): return Err(forgotten.error)
+    val returned = state.source_returned_v3()?
+    Ok(true)
+
+pub(package) fn machine_workspace_enable_context_v3(state: MachineFreshWorkloadLifecycleV2,
+        request: ContainerExecutionRequestV2, manifest: text, digest: text,
+        full_invocation_source: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:
+    if sha256_text(full_invocation_source) != digest: return Err("linux-workspace-full-invocation-digest")
+    val full = agent_workspace_invocation_manifest_decode_v2(full_invocation_source)?
+    if agent_workspace_invocation_manifest_encode_v2(full)? != full_invocation_source or full.base.workspace_manifest != manifest:
+        return Err("linux-workspace-full-invocation-canonical-binding")
+    val original = state.source_started_v3()?
+    val deadline = container_workspace_preparation_deadline_v3(original, full.base.preparation_budget_ms,
+        time_sample_monotonic_nanos_or_failure(), full.base.not_after, time_sample_unix_micros_or_failure() / 1000)?
+    val source = state.source_custody_v3()?
+    val binding = source.binding_v3(request, manifest, digest)?
+    val retained = source.retain_context_v3(full_invocation_source, deadline, full.base.not_after)?
+    state.capture_source_custody_v3(retained)
+    Ok(binding)

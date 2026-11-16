@@ -236,6 +236,13 @@ released (OD5); they are treated like structs once M3's struct release exists.
 
 ### Verdict on slice S1
 
+**S1 status (2026-11-14):** conditions 2-8 met on branch
+`work/jit-array-free-s1-20261114` (evidence per condition in its PR, which targets
+`release/1.0.0`). Condition 4 was settled by exclusion: float and u64 element arrays
+are not released, because both are heap-boxed per element (`from_float`, `from_u64`).
+Condition 1: the interpreter unit directory ran under quarantine with zero hits; the
+Stage 2 run under quarantine is the open item, and the PR stays on HOLD until it is met.
+
 Branch `work/jit-array-free-s1-20261114` (commits `4e69c9a7521`, `59bca88628b` in
 worktree `simple-jit-free-s1-20261114` at the time of writing).
 

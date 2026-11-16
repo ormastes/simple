@@ -27,9 +27,20 @@ Tags: [V] verified, [U] unverified. Landed fixes are verification-pending.
 - [V] Bootstrap scrubs the env; only `SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648`
   survives. Run the self-hosted phase-2 builder (WSL `~/xc/simple-p2`) with it.
 - [U] After a seed rebuild use `--invalidate-cache=stage2`.
-- Helper scripts are not in the repo. `xc.sh` runs `native-build` for
-  linux-x86_64/aarch64; `xc2.sh` builds the per-target Rust runtime via cargo,
-  then runs `native-build`.
+- Matrix: `sh scripts/check/check-cross-compile-matrix.shs [--targets a,b]
+  [--artifacts lint,test] [--builder P] [--min-free-gb 8] [--run] [--dry-run]
+  [--selftest] [--list]`. Linux host only. Preflight (clang, ld.lld,
+  llvm-readelf, rustup target, sysroots, llvm-mingw, compiler-rt, qemu-user)
+  gives ERROR rows with fix hints; Linux rv64/i686/armv7 also run
+  `check-linux-cross-no-libgcc.shs`. One build at a time,
+  `SIMPLE_CACHE_SCOPE=xc-<target>`, artifact class/machine via
+  `file`+`llvm-readelf`/`llvm-readobj`, `--run` via qemu-user only (no wine).
+  Results `build/cross-matrix/results.tsv` + markdown table, verdict last.
+  Extra targets (NVMe FW bare-metal lane): `XC_MATRIX_EXTRA_TARGETS=<tsv>`.
+  Bare-metal rows are BLOCKED by default (no hosted runtime for lint/test).
+- Per-target status and toolchain setup: the guide's "Matrix script" and
+  "Toolchain setup" sections. [V] 2026-11-16: selftest 22/22 and dry-run
+  preflight ok for all 12 hosted targets in WSL; no real build yet.
 - [U] `SIMPLE_HIR_SHARDING=0` workaround; should be unneeded after #9427.
 - Push gates: `MUST_CHECK_PUSH_BUDGET_S=600` on loaded hosts; never `--no-verify`.
 - [U] Landed, verification-pending: #9373, #9388, #9391, #9393, #9395, #9424,

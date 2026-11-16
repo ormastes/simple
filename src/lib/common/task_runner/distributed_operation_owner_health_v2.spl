@@ -13,6 +13,8 @@ use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.nogc_sync_mut.io.linux_protected_storage_v1.{LinuxProtectedStorageResourcesV1, linux_protected_storage_resources_v1}
 use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
 use std.nogc_sync_mut.io.linux_protected_broker_state_v1.LinuxProtectedBrokerStorageTurnV1
+use std.nogc_sync_mut.io.host_linux_service_records_v4.{LinuxServiceVerifiedEnrollmentV1, linux_service_enrollment_installed_v1,
+    linux_service_enrollment_existing_v1, linux_service_enrollment_fixed_files_v1, linux_service_enrollment_publication_v1}
 
 struct OperationJournalHealthTurnV2:
     owner_id: i64
@@ -614,3 +616,135 @@ pub(package) fn operation_broker_children_close_v1(turn: OperationJournalHealthT
         if not result.completed and result.error != "": return Err(result.error)
         return Ok(false)
     Ok(true)
+
+# Signed Linux service installation (signing step 5). The ONLY public route
+# from outside io to a protected parent writer, and it requires the sealed
+# verifier proof. The private open/borrow/begin/close_step stay private; this
+# entry fixes writer=true and create_final=false (never provisions the parent)
+# and re-verifies the proof against `authority-policy.sdn` read through the
+# writer's own descriptor before and after every publication.
+pub struct OperationHealthLinuxInstallV1:
+    cleanup: Option<OperationHealthLinuxInstallCleanupV1>
+    installed: bool
+    duplicate: bool
+    closed: bool
+    phase: text
+    error: text
+    close_error: text
+
+# Opaque continuation for a partial close only: private fields, constructed
+# only here, admits only install_close_v1. It can never publish.
+pub class OperationHealthLinuxInstallCleanupV1:
+    held: OperationJournalLinuxStorageOwnerV1
+    binding: text
+    turn: Option<OperationJournalHealthTurnV2>
+
+pub struct OperationHealthLinuxInstallCloseV1:
+    cleanup: Option<OperationHealthLinuxInstallCleanupV1>
+    closed: bool
+    error: text
+
+fn operation_health_linux_install_current_v1(proof: LinuxServiceVerifiedEnrollmentV1,
+        store: OperationJournalLinuxStorageBorrowV1) -> Result<(), text>:
+    val held = store.read("authority-policy.sdn", 1048576, true)?
+    linux_service_enrollment_installed_v1(proof, held)?
+    store.current()
+
+fn operation_health_linux_install_exact_v1(store: OperationJournalLinuxStorageBorrowV1, name: text,
+        expected: text) -> Result<(), text>:
+    val actual = store.read(name, 1048576)?
+    if actual.is_none() or actual.unwrap() != expected: return Err("linux-service-install-fixed-file-mismatch:" + name)
+    Ok(())
+
+fn operation_health_linux_install_phase_v1(index: i64, count: i64, name: text) -> text:
+    if index == 0: return "claim-publication-attempted"
+    if index == count - 1: return "root-manifest-publication-attempted"
+    val slash = name.last_index_of("/")
+    "fixed-child-publication-attempted:" + (if slash >= 0: name.substring(slash + 1) else: name)
+
+fn operation_health_linux_install_body_v1(proof: LinuxServiceVerifiedEnrollmentV1,
+        store: OperationJournalLinuxStorageBorrowV1) -> (text, Result<bool, text>):
+    val before = operation_health_linux_install_current_v1(proof, store)
+    if before.is_err(): return ("parent-opening-attempted", Err(before.unwrap_err()))
+    val prior = store.read(proof.claim_name(), 16384)
+    if prior.is_err(): return ("parent-opening-attempted", Err(prior.unwrap_err()))
+    if prior.unwrap().is_some():
+        # Exact duplicate reads the original nonce/timestamp from the real
+        # protected records. No entropy, no new admission, no republication.
+        val child = proof.child()
+        if child.is_err(): return ("checking-existing", Err(child.unwrap_err()))
+        val root_bytes = store.read(child.unwrap() + "/linux-service-root-v3.sdn", 16384)
+        if root_bytes.is_err(): return ("checking-existing", Err(root_bytes.unwrap_err()))
+        if root_bytes.unwrap().is_none(): return ("checking-existing", Err("linux-service-install-partial-existing-claim"))
+        val same = linux_service_enrollment_existing_v1(proof, prior.unwrap().unwrap(), root_bytes.unwrap().unwrap())
+        if same.is_err(): return ("checking-existing", Err(same.unwrap_err()))
+        val fixed = linux_service_enrollment_fixed_files_v1(proof)
+        if fixed.is_err(): return ("checking-existing", Err(fixed.unwrap_err()))
+        for item in fixed.unwrap():
+            val checked = operation_health_linux_install_exact_v1(store, item.0, item.1)
+            if checked.is_err(): return ("checking-existing", Err(checked.unwrap_err()))
+        val after = operation_health_linux_install_current_v1(proof, store)
+        if after.is_err(): return ("checking-existing", Err(after.unwrap_err()))
+        return ("installed-existing", Ok(true))
+    val items = linux_service_enrollment_publication_v1(proof)
+    if items.is_err(): return ("parent-opening-attempted", Err(items.unwrap_err()))
+    val publication = items.unwrap()
+    var index: i64 = 0
+    for item in publication:
+        val phase = operation_health_linux_install_phase_v1(index, publication.len(), item.0)
+        val current = operation_health_linux_install_current_v1(proof, store)
+        if current.is_err(): return (phase, Err(current.unwrap_err()))
+        # No-replace linkat in the actual storage owner; an existing target is
+        # never converted to compare/replace.
+        val published = store.publish(item.0, item.1)
+        if published.is_err(): return (phase, Err(published.unwrap_err()))
+        if not published.unwrap(): return (phase, Err("linux-service-install-target-already-present:" + item.0))
+        val exact = operation_health_linux_install_exact_v1(store, item.0, item.1)
+        if exact.is_err(): return (phase, Err(exact.unwrap_err()))
+        val after = operation_health_linux_install_current_v1(proof, store)
+        if after.is_err(): return (phase, Err(after.unwrap_err()))
+        index = index + 1
+    ("installed", Ok(false))
+
+pub fn operation_health_linux_install_v1(proof: LinuxServiceVerifiedEnrollmentV1) -> OperationHealthLinuxInstallV1:
+    val token = proof.install_token()
+    if token.is_err():
+        return OperationHealthLinuxInstallV1(None, false, false, true, "parent-opening-attempted", token.unwrap_err(), "")
+    # The health slot adopts the resource cell before the first native
+    # acquisition; the same oracle owns busy-ticket exclusion and disposal.
+    val opened = operation_health_linux_open_v1(proof.machine_parent(), token.unwrap(), true, false)
+    if opened.owner.is_none():
+        return OperationHealthLinuxInstallV1(None, false, false, true, "parent-opening-attempted",
+            if opened.error == "": "linux-service-install-opening-carrier-missing" else: opened.error, "")
+    val cleanup = OperationHealthLinuxInstallCleanupV1(held: opened.owner.unwrap(), binding: token.unwrap(), turn: opened.turn)
+    var phase = "parent-opening-attempted"
+    var outcome: Result<bool, text> = Err(opened.error)
+    if opened.error == "":
+        if opened.turn.is_none():
+            outcome = Err("linux-service-install-opening-ticket-missing")
+        else:
+            val borrowed = operation_health_linux_borrow_v1(opened.owner.unwrap(), opened.turn.unwrap())
+            if borrowed.is_err():
+                outcome = Err(borrowed.unwrap_err())
+            else:
+                val applied = operation_health_linux_install_body_v1(proof, borrowed.unwrap())
+                phase = applied.0
+                outcome = applied.1
+    # Drain exact owned descriptors on every path. Published claims/records are
+    # durable residue: a failed install is never rolled back by guessed deletes.
+    val closed = operation_health_linux_install_close_v1(cleanup)
+    OperationHealthLinuxInstallV1(closed.cleanup, outcome.is_ok(), if outcome.is_ok(): outcome.unwrap() else: false,
+        closed.closed, phase, if outcome.is_err(): outcome.unwrap_err() else: "", closed.error)
+
+pub fn operation_health_linux_install_close_v1(cleanup: OperationHealthLinuxInstallCleanupV1) -> OperationHealthLinuxInstallCloseV1:
+    val acquired = if cleanup.turn.is_some(): Ok(cleanup.turn.unwrap()) else:
+        operation_health_linux_begin_v1(cleanup.held, cleanup.binding, true)
+    if acquired.is_err(): return OperationHealthLinuxInstallCloseV1(Some(cleanup), false, acquired.unwrap_err())
+    val latest = OperationHealthLinuxInstallCleanupV1(held: cleanup.held, binding: cleanup.binding, turn: Some(acquired.unwrap()))
+    val closed = operation_health_linux_close_step_v1(latest.held, acquired.unwrap())
+    if closed.is_err():
+        # UNKNOWN: the slot was positively retired; a stale carrier is dropped.
+        return OperationHealthLinuxInstallCloseV1(if closed.unwrap_err() == "OPERATION_JOURNAL_HEALTH_UNKNOWN": None else: Some(latest),
+            false, closed.unwrap_err())
+    val actual = closed.unwrap()
+    OperationHealthLinuxInstallCloseV1(if actual.closed: None else: Some(latest), actual.closed, actual.error)

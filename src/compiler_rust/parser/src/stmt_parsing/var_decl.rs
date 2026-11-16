@@ -841,6 +841,9 @@ impl Parser<'_> {
         self.expect(&TokenKind::Unit)?;
 
         let name = self.expect_identifier()?;
+        if is_newunit {
+            eprintln!("warning[SPL-UNIT-001]: `newunit` is deprecated; declare `unit Name: T as suffix` instead");
+        }
 
         // Check if this is a compound unit: unit name = unit_expr
         if self.check(&TokenKind::Assign) {
@@ -1359,6 +1362,17 @@ impl Parser<'_> {
         let name = self.expect_identifier()?;
         self.expect(&TokenKind::Assign)?;
         let inner_type = self.parse_type()?;
+        if let Type::Simple(t) = &inner_type {
+            if matches!(
+                t.as_str(),
+                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "int" | "float"
+            ) {
+                eprintln!(
+                    "warning[SPL-UNIT-003]: numeric `newtype` auto-derives arithmetic; migrate to `unit {}: {} as <suffix>` and declare approved operators",
+                    name, t
+                );
+            }
+        }
 
         Ok(Node::Newtype(NewtypeDef {
             span: Span::new(

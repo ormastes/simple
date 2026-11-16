@@ -1,0 +1,424 @@
+"""
+# Chrome + Skia GPU vs Simple Web Text, Orientation & Layout Parity Spec (800x600)
+
+Verifies stepped typography ladders, multi-card flex-wrap/grid alignment,
+inline nav spacing, centered inline-block hero buttons, CSS orientations
+(`rotate(...)`, `scaleX(-1)`), and pill/circle `border-radius: 999px` layout
+at 800x600.
+
+When Vulkan/MoltenVK and headless Chrome are usable, renders both backends and
+passes frames to `compare_view_inspect`; in sandboxed or headless CPU-only
+environments, Simple Web falls back cleanly to software readback and skips only
+Chrome pixel assertions when Chrome cannot initialize under the sandbox.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{
+    dir_create_all, dir_remove_all, env_get, file_delete, file_exists,
+    file_read_bytes_result, file_write, getpid, host_os, process_run
+}
+use std.common.image.png_decode.{PngImage, decode_png_to_argb}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_readback
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_element_geometry_lines
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_resolved_engine2d_backend_name_with_reason
+}
+use std.nogc_sync_mut.ui.compare_view_host.{compare_view_find_browser, compare_view_inspect}
+
+val VIEW_W: i32 = 800
+val VIEW_H: i32 = 600
+val EXPECTED_PIXEL_COUNT: i32 = 480000
+
+struct ParityBox:
+    id: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+struct ParityFrameStats:
+    distinct_count: i32
+    non_bg_count: i32
+    mean_luma: i32
+
+fn _abs_i32(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+fn _box_by_id(html: text, id: text) -> ParityBox:
+    val sx = simple_web_layout_debug_layout_by_id(html, VIEW_W, VIEW_H, id, "x").trim()
+    val sy = simple_web_layout_debug_layout_by_id(html, VIEW_W, VIEW_H, id, "y").trim()
+    val sw = simple_web_layout_debug_layout_by_id(html, VIEW_W, VIEW_H, id, "w").trim()
+    val sh = simple_web_layout_debug_layout_by_id(html, VIEW_W, VIEW_H, id, "h").trim()
+    val x = sx.to_int() as i32
+    val y = sy.to_int() as i32
+    val w = sw.to_int() as i32
+    val h = sh.to_int() as i32
+    ParityBox(id: id, x: x, y: y, w: w, h: h)
+
+fn _boxes_overlap(a: ParityBox, b: ParityBox) -> bool:
+    if a.w <= 0 or a.h <= 0 or b.w <= 0 or b.h <= 0:
+        return false
+    a.x < b.x + b.w and a.x + a.w > b.x and a.y < b.y + b.h and a.y + a.h > b.y
+
+fn _pixel_luma(c: u32) -> i32:
+    val r = ((c >> 16) & 255u32) as i32
+    val g = ((c >> 8) & 255u32) as i32
+    val b = (c & 255u32) as i32
+    (r * 77 + g * 150 + b * 29) >> 8
+
+fn _max_channel_diff(a: u32, b: u32) -> i32:
+    val ar = ((a >> 16) & 255u32) as i32
+    val ag = ((a >> 8) & 255u32) as i32
+    val ab = (a & 255u32) as i32
+    val br = ((b >> 16) & 255u32) as i32
+    val bg = ((b >> 8) & 255u32) as i32
+    val bb = (b & 255u32) as i32
+    val dr = if ar >= br: ar - br else: br - ar
+    val dg = if ag >= bg: ag - bg else: bg - ag
+    val db = if ab >= bb: ab - bb else: bb - ab
+    var m = dr
+    if dg > m:
+        m = dg
+    if db > m:
+        m = db
+    m
+
+fn _compute_frame_stats(pixels: [u32], w: i32, h: i32) -> ParityFrameStats:
+    val total = w * h
+    if (pixels.len() as i32) < total or total <= 0:
+        return ParityFrameStats(distinct_count: 0, non_bg_count: 0, mean_luma: 0)
+    val bg_tl = pixels[0]
+    val bg_br = pixels[total - 1]
+    var non_bg: i32 = 0
+    var luma_sum: i64 = 0
+    var seen: [u32] = []
+    var idx: i32 = 0
+    while idx < total:
+        val px = pixels[idx]
+        if _max_channel_diff(px, bg_tl) > 10 and _max_channel_diff(px, bg_br) > 10:
+            non_bg = non_bg + 1
+        luma_sum = luma_sum + _pixel_luma(px).to_i64()
+        if (seen.len() as i32) < 48:
+            var matched = false
+            var si: i32 = 0
+            while si < (seen.len() as i32):
+                if seen[si] == px:
+                    matched = true
+                    break
+                si = si + 1
+            if not matched:
+                seen.push(px)
+        idx = idx + 8
+    val sampled = (total + 7) / 8
+    val mean = if sampled > 0: (luma_sum / sampled.to_i64()) as i32 else: 0
+    ParityFrameStats(
+        distinct_count: seen.len() as i32,
+        non_bg_count: non_bg * 8,
+        mean_luma: mean
+    )
+
+fn _crop_chrome_800x600(img: PngImage) -> [u32]:
+    if img.width == VIEW_W and img.height == VIEW_H and (img.pixels.len() as i32) >= EXPECTED_PIXEL_COUNT:
+        return img.pixels
+    if img.width == VIEW_W and img.height > VIEW_H and (img.pixels.len() as i32) >= EXPECTED_PIXEL_COUNT:
+        var cropped: [u32] = [0u32; EXPECTED_PIXEL_COUNT]
+        var idx: i32 = 0
+        while idx < EXPECTED_PIXEL_COUNT:
+            cropped[idx] = img.pixels[idx]
+            idx = idx + 1
+        return cropped
+    if img.width == VIEW_W * 2 and img.height >= VIEW_H * 2 and (img.pixels.len() as i32) >= VIEW_W * 2 * VIEW_H * 2:
+        var scaled: [u32] = [0u32; EXPECTED_PIXEL_COUNT]
+        var y: i32 = 0
+        while y < VIEW_H:
+            val sy = y * 2 * img.width
+            val dy = y * VIEW_W
+            var x: i32 = 0
+            while x < VIEW_W:
+                scaled[dy + x] = img.pixels[sy + x * 2]
+                x = x + 1
+            y = y + 1
+        return scaled
+    []
+
+fn _chrome_gpu_flags() -> [text]:
+    val os_name = host_os().trim().lower()
+    if os_name == "macos" or os_name == "darwin":
+        return [
+            "--use-angle=metal",
+            "--enable-gpu-rasterization",
+            "--ignore-gpu-blocklist"
+        ]
+    [
+        "--no-sandbox",
+        "--disable-gpu-sandbox",
+        "--enable-gpu-rasterization",
+        "--ignore-gpu-blocklist"
+    ]
+
+fn _capture_chrome_screenshot(browser_bin: text, case_name: text, html: text) -> [u32]:
+    val pid = getpid()
+    val tmp_dir = "/tmp/simple_text_ori_parity_{pid}_{case_name}"
+    dir_create_all(tmp_dir)
+    val tmp_html = "{tmp_dir}/{case_name}.html"
+    val tmp_png = "{tmp_dir}/{case_name}.png"
+    file_write(tmp_html, html)
+    var args: [text] = [
+        "--headless",
+        "--hide-scrollbars",
+        "--window-size=800,600",
+        "--force-device-scale-factor=1",
+        "--user-data-dir={tmp_dir}/profile",
+        "--screenshot={tmp_png}"
+    ]
+    for flag in _chrome_gpu_flags():
+        args.push(flag)
+    args.push("file://{tmp_html}")
+    val (out, err, code) = process_run(browser_bin, args)
+    var result: [u32] = []
+    if code == 0 and file_exists(tmp_png):
+        match file_read_bytes_result(tmp_png):
+            Ok(bytes):
+                match decode_png_to_argb(bytes):
+                    Ok(img):
+                        result = _crop_chrome_800x600(img)
+                    Err(msg):
+                        print "[parity-skip] Chrome decode failed for {case_name}: {msg}"
+            Err(msg):
+                print "[parity-skip] Chrome PNG read failed for {case_name}: {msg}"
+    else:
+        print "[parity-skip] Chrome unavailable/sandboxed for {case_name} (code={code})"
+    if file_exists(tmp_png):
+        file_delete(tmp_png)
+    if file_exists(tmp_html):
+        file_delete(tmp_html)
+    dir_remove_all(tmp_dir)
+    result
+
+fn _verify_render_and_optional_chrome_parity(case_name: text, html: text):
+    val (resolved, reason) = simple_web_resolved_engine2d_backend_name_with_reason(VIEW_W, VIEW_H, "vulkan")
+    val readback = simple_web_layout_render_html_readback(html, VIEW_W, VIEW_H, "vulkan")
+    print "[parity] case={case_name} resolved={resolved} source={readback.source} reason={reason}"
+    expect(readback.pixels.len() as i32).to_equal(EXPECTED_PIXEL_COUNT)
+    expect(readback.pixel_count).to_equal(EXPECTED_PIXEL_COUNT.to_i64())
+    val s_stats = _compute_frame_stats(readback.pixels, VIEW_W, VIEW_H)
+    expect(s_stats.distinct_count).to_be_greater_than(2)
+    expect(s_stats.non_bg_count).to_be_greater_than(200)
+
+    val browser_bin = compare_view_find_browser("")
+    if browser_bin == "":
+        print "[parity-skip] No local Chrome/Chromium found via compare_view_find_browser"
+        return
+    val chrome_pixels = _capture_chrome_screenshot(browser_bin, case_name, html)
+    if (chrome_pixels.len() as i32) != EXPECTED_PIXEL_COUNT:
+        return
+    val cv_status = compare_view_inspect(
+        "chrome_vs_simple_web_" + case_name,
+        "simple_web_" + resolved,
+        readback.pixels,
+        VIEW_W,
+        VIEW_H,
+        "chrome_skia_gpu",
+        chrome_pixels,
+        VIEW_W,
+        VIEW_H
+    )
+    if (env_get("SIMPLE_COMPARE_VIEW") ?? "").trim().lower() == "html":
+        expect(cv_status.starts_with("written:")).to_equal(true)
+    val c_stats = _compute_frame_stats(chrome_pixels, VIEW_W, VIEW_H)
+    expect(c_stats.distinct_count).to_be_greater_than(2)
+    expect(c_stats.non_bg_count).to_be_greater_than(200)
+    expect(_abs_i32(s_stats.mean_luma - c_stats.mean_luma)).to_be_less_than(96)
+
+fn _case1_typography_ladder_html() -> text:
+    var html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\n"
+    html = html + "* {{ box-sizing: border-box; }}\n"
+    html = html + "body {{ margin: 0; padding: 16px; background: #ffffff; color: #0f172a; font-family: sans-serif; }}\n"
+    html = html + ".row {{ margin: 0 0 8px 0; padding: 2px 6px; background: #f8fafc; border-left: 3px solid #2563eb; }}\n"
+    html = html + "</style></head><body>\n"
+    html = html + "<div id=\"s100\" class=\"row\" style=\"font-size:100px;line-height:1.1\">HEFILTB AO80 Hamburgefontsiv</div>\n"
+    html = html + "<div id=\"s72\" class=\"row\" style=\"font-size:72px;line-height:1.1\">HEFILTB AO80 Hamburgefontsiv</div>\n"
+    html = html + "<div id=\"s48\" class=\"row\" style=\"font-size:48px;line-height:1.1\">HEFILTB AO80 Hamburgefontsiv</div>\n"
+    html = html + "<div id=\"s36\" class=\"row\" style=\"font-size:36px;line-height:1.1\">HEFILTB AO80 Hamburgefontsiv</div>\n"
+    html = html + "<div id=\"s24\" class=\"row\" style=\"font-size:24px;line-height:1.2\">HEFILTB AO80 Hamburgefontsiv</div>\n"
+    html = html + "<div id=\"s18\" class=\"row\" style=\"font-size:18px;line-height:1.2\">HEFILTB AO80 Hamburgefontsiv</div>\n"
+    html = html + "<div id=\"s14\" class=\"row\" style=\"font-size:14px;line-height:1.2\">HEFILTB AO80 Hamburgefontsiv</div>\n"
+    html = html + "<div id=\"s12\" class=\"row\" style=\"font-size:12px;line-height:1.2\">HEFILTB AO80 Hamburgefontsiv</div>\n"
+    html = html + "</body></html>\n"
+    html
+
+fn _case2_flex_grid_nav_buttons_html() -> text:
+    var html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\n"
+    html = html + "* {{ box-sizing: border-box; }}\n"
+    html = html + "body {{ margin: 0; background: #f8fafc; color: #0f172a; font-family: sans-serif; }}\n"
+    html = html + "header {{ display: flex; justify-content: space-between; align-items: center; padding: 12px 24px; background: #ffffff; border-bottom: 1px solid #cbd5e1; }}\n"
+    html = html + ".brand {{ font-size: 18px; font-weight: bold; }}\n"
+    html = html + "nav a {{ margin-left: 24px; color: #334155; text-decoration: none; font-size: 14px; }}\n"
+    html = html + "#hero {{ text-align: center; padding: 20px 24px; background: #e2e8f0; }}\n"
+    html = html + ".btn {{ display: inline-block; padding: 10px 18px; margin: 0 6px; border-radius: 8px; background: #2563eb; color: #ffffff; font-size: 14px; text-decoration: none; }}\n"
+    html = html + ".btn.alt {{ background: #ffffff; color: #0f172a; border: 1px solid #94a3b8; }}\n"
+    html = html + ".cards {{ display: flex; flex-wrap: wrap; gap: 24px; justify-content: center; padding: 20px 24px; }}\n"
+    html = html + ".card {{ flex: 1 1 260px; max-width: 320px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 10px; padding: 16px; }}\n"
+    html = html + ".grid-wrap {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding: 0 24px 20px 24px; }}\n"
+    html = html + ".gcell {{ background: #dbeafe; border: 1px solid #93c5fd; border-radius: 8px; padding: 12px; text-align: center; }}\n"
+    html = html + "</style></head><body>\n"
+    html = html + "<header>\n"
+    html = html + "  <div id=\"brand\" class=\"brand\">Simple Web</div>\n"
+    html = html + "  <nav><a id=\"n0\" href=\"#\">Home</a><a id=\"n1\" href=\"#\">Layout</a><a id=\"n2\" href=\"#\">Docs</a><a id=\"n3\" href=\"#\">Login</a></nav>\n"
+    html = html + "</header>\n"
+    html = html + "<section id=\"hero\">\n"
+    html = html + "  <h2>Centered Hero Actions</h2>\n"
+    html = html + "  <a id=\"hbtn0\" class=\"btn\" href=\"#\">Primary Action</a><a id=\"hbtn1\" class=\"btn alt\" href=\"#\">Secondary Demo</a>\n"
+    html = html + "</section>\n"
+    html = html + "<section class=\"cards\">\n"
+    html = html + "  <div id=\"c0\" class=\"card\"><h3>Card One</h3><p>Row one left flex card with wrap.</p></div>\n"
+    html = html + "  <div id=\"c1\" class=\"card\"><h3>Card Two</h3><p>Row one right flex card with wrap.</p></div>\n"
+    html = html + "  <div id=\"c2\" class=\"card\"><h3>Card Three</h3><p>Row two centered wrapped card.</p></div>\n"
+    html = html + "</section>\n"
+    html = html + "<section class=\"grid-wrap\">\n"
+    html = html + "  <div id=\"g0\" class=\"gcell\">Grid Col 1</div>\n"
+    html = html + "  <div id=\"g1\" class=\"gcell\">Grid Col 2</div>\n"
+    html = html + "  <div id=\"g2\" class=\"gcell\">Grid Col 3</div>\n"
+    html = html + "</section>\n"
+    html = html + "</body></html>\n"
+    html
+
+fn _case3_orientations_and_circles_html() -> text:
+    var html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>\n"
+    html = html + "* {{ box-sizing: border-box; }}\n"
+    html = html + "body {{ margin: 0; padding: 24px; background: #f8fafc; color: #0f172a; font-family: sans-serif; }}\n"
+    html = html + "#ori-row {{ display: flex; flex-wrap: wrap; gap: 28px; align-items: center; padding: 16px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 12px; }}\n"
+    html = html + ".ori-box {{ width: 112px; height: 48px; background: #2563eb; color: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 13px; border-radius: 8px; }}\n"
+    html = html + "#badge-row {{ display: flex; gap: 20px; align-items: center; margin-top: 28px; padding: 16px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 12px; }}\n"
+    html = html + "#circle-badge {{ width: 64px; height: 64px; border-radius: 999px; background: #10b981; color: #ffffff; display: flex; align-items: center; justify-content: center; font-weight: bold; }}\n"
+    html = html + "#pill-badge {{ display: inline-block; padding: 10px 22px; border-radius: 999px; background: #6366f1; color: #ffffff; font-size: 14px; font-weight: bold; }}\n"
+    html = html + "</style></head><body>\n"
+    html = html + "<div id=\"ori-row\">\n"
+    html = html + "  <div id=\"rot90\" class=\"ori-box\" style=\"transform: rotate(90deg)\">90deg</div>\n"
+    html = html + "  <div id=\"rot180\" class=\"ori-box\" style=\"transform: rotate(180deg)\">180deg</div>\n"
+    html = html + "  <div id=\"rot270\" class=\"ori-box\" style=\"transform: rotate(270deg)\">270deg</div>\n"
+    html = html + "  <div id=\"rot45\" class=\"ori-box\" style=\"transform: rotate(45deg)\">45deg</div>\n"
+    html = html + "  <div id=\"flipx\" class=\"ori-box\" style=\"transform: scaleX(-1)\">scaleX(-1)</div>\n"
+    html = html + "</div>\n"
+    html = html + "<div id=\"badge-row\">\n"
+    html = html + "  <div id=\"circle-badge\">999</div>\n"
+    html = html + "  <span id=\"pill-badge\">Pill Badge 999px</span>\n"
+    html = html + "</div>\n"
+    html = html + "</body></html>\n"
+    html
+
+describe "Chrome + Skia GPU vs Simple Web Text, Orientation & Layout Parity (800x600)":
+    it "Case 1: stepped typography ladder (100px down to 12px) maintains descending scale and zero overlap":
+        val html = _case1_typography_ladder_html()
+        val s100 = _box_by_id(html, "s100")
+        val s72 = _box_by_id(html, "s72")
+        val s48 = _box_by_id(html, "s48")
+        val s36 = _box_by_id(html, "s36")
+        val s24 = _box_by_id(html, "s24")
+        val s18 = _box_by_id(html, "s18")
+        val s14 = _box_by_id(html, "s14")
+        val s12 = _box_by_id(html, "s12")
+        val steps = [s100, s72, s48, s36, s24, s18, s14, s12]
+
+        var i: i32 = 0
+        while i < (steps.len() as i32):
+            expect(steps[i].w).to_be_greater_than(100)
+            expect(steps[i].h).to_be_greater_than(10)
+            expect(steps[i].x + steps[i].w).to_be_less_than(VIEW_W + 1)
+            if i + 1 < (steps.len() as i32):
+                expect(_boxes_overlap(steps[i], steps[i + 1])).to_equal(false)
+                expect(steps[i + 1].y).to_be_greater_than(steps[i].y + steps[i].h - 1)
+                expect(steps[i].h).to_be_greater_than(steps[i + 1].h)
+            i = i + 1
+        _verify_render_and_optional_chrome_parity("text_ladder", html)
+
+    it "Case 2: multi-card flex-wrap, grid alignment, spaced nav links, and centered inline-block hero buttons":
+        val html = _case2_flex_grid_nav_buttons_html()
+        val brand = _box_by_id(html, "brand")
+        val n0 = _box_by_id(html, "n0")
+        val n1 = _box_by_id(html, "n1")
+        val n2 = _box_by_id(html, "n2")
+        val n3 = _box_by_id(html, "n3")
+        expect(n0.x).to_be_greater_than(brand.x + brand.w)
+        expect(n1.x).to_be_greater_than(n0.x + n0.w)
+        expect(n2.x).to_be_greater_than(n1.x + n1.w)
+        expect(n3.x).to_be_greater_than(n2.x + n2.w)
+        expect(n3.x + n3.w).to_be_less_than(VIEW_W + 1)
+
+        val hero = _box_by_id(html, "hero")
+        val hbtn0 = _box_by_id(html, "hbtn0")
+        val hbtn1 = _box_by_id(html, "hbtn1")
+        expect(hbtn0.w).to_be_greater_than(0)
+        expect(hbtn1.w).to_be_greater_than(0)
+        expect(hbtn1.y).to_equal(hbtn0.y)
+        expect(hbtn1.x).to_be_greater_than(hbtn0.x + hbtn0.w)
+        val hero_mid = hero.x + (hero.w / 2)
+        val btns_mid = (hbtn0.x + (hbtn1.x + hbtn1.w)) / 2
+        expect(_abs_i32(btns_mid - hero_mid)).to_be_less_than(3)
+
+        val c0 = _box_by_id(html, "c0")
+        val c1 = _box_by_id(html, "c1")
+        val c2 = _box_by_id(html, "c2")
+        expect(c0.w).to_be_greater_than(200)
+        expect(c1.w).to_be_greater_than(200)
+        expect(c2.w).to_be_greater_than(200)
+        expect(_boxes_overlap(c0, c1)).to_equal(false)
+        expect(_boxes_overlap(c0, c2)).to_equal(false)
+        expect(_boxes_overlap(c1, c2)).to_equal(false)
+        expect(c1.y).to_equal(c0.y)
+        expect(c1.x).to_be_greater_than(c0.x + c0.w)
+        expect(c2.y).to_be_greater_than(c0.y + c0.h)
+        expect(c2.y).to_be_greater_than(c1.y + c1.h)
+        val c2_mid = c2.x + (c2.w / 2)
+        expect(_abs_i32(c2_mid - (VIEW_W / 2))).to_be_less_than(4)
+
+        val g0 = _box_by_id(html, "g0")
+        val g1 = _box_by_id(html, "g1")
+        val g2 = _box_by_id(html, "g2")
+        expect(g0.w).to_be_greater_than(150)
+        expect(g1.w).to_be_greater_than(150)
+        expect(g2.w).to_be_greater_than(150)
+        expect(g1.y).to_equal(g0.y)
+        expect(g2.y).to_equal(g0.y)
+        expect(g1.x).to_be_greater_than(g0.x + g0.w)
+        expect(g2.x).to_be_greater_than(g1.x + g1.w)
+        expect(g2.x + g2.w).to_be_less_than(VIEW_W + 1)
+        expect(g0.y).to_be_greater_than(c2.y + c2.h)
+        _verify_render_and_optional_chrome_parity("flex_grid_nav", html)
+
+    it "Case 3: CSS transform orientations (rotate 90/180/270/45, scaleX(-1)) and border-radius 999px badges":
+        val html = _case3_orientations_and_circles_html()
+        val rot90 = _box_by_id(html, "rot90")
+        val rot180 = _box_by_id(html, "rot180")
+        val rot270 = _box_by_id(html, "rot270")
+        val rot45 = _box_by_id(html, "rot45")
+        val flipx = _box_by_id(html, "flipx")
+        val circle = _box_by_id(html, "circle-badge")
+        val pill = _box_by_id(html, "pill-badge")
+
+        val items = [rot90, rot180, rot270, rot45, flipx, circle, pill]
+        var i: i32 = 0
+        while i < (items.len() as i32):
+            expect(items[i].w).to_be_greater_than(20)
+            expect(items[i].h).to_be_greater_than(20)
+            expect(items[i].x + items[i].w).to_be_less_than(VIEW_W + 1)
+            var j: i32 = i + 1
+            while j < (items.len() as i32):
+                expect(_boxes_overlap(items[i], items[j])).to_equal(false)
+                j = j + 1
+            i = i + 1
+
+        expect(rot90.h).to_be_greater_than(rot90.w)
+        expect(rot270.h).to_be_greater_than(rot270.w)
+        expect(rot180.w).to_be_greater_than(rot180.h)
+        expect(rot45.w).to_be_greater_than(rot45.h)
+        expect(flipx.w).to_be_greater_than(flipx.h)
+        expect(circle.w).to_equal(64)
+        expect(circle.h).to_equal(64)
+        expect(pill.x).to_be_greater_than(circle.x + circle.w)
+        _verify_render_and_optional_chrome_parity("orientations_badges", html)

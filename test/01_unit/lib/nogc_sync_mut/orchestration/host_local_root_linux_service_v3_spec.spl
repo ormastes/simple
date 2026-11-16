@@ -1,0 +1,52 @@
+"""
+## Purpose and audience
+Pins the `HostLocalRootV3.LinuxService` arm. The signed-enrollment Linux service owner
+(`host_linux_service_current_v4`) is reachable through the shared Host domain for status and close
+only. Every V2 effect, cooperative execution and primary-connection route refuses it.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-16).
+## Compatibility and limitations
+The owner here is unstarted DATA (no protected readers or journal). Status fails closed, close has
+nothing to release, and the scope is empty, so the fence id is refused. A started owner is covered by the
+configured real fixture driver (NOT_AUTHORED).
+## Verification guidance and troubleshooting
+Each refusal names the exact error string in the response payload.
+"""
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.*
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_service_execution_v4.host_service_execution_begin_v4
+use std.nogc_sync_mut.orchestration.host_primary_connection_policy_v3.host_primary_connection_policy_bytes_v3
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.HostLinuxServiceCurrentV4
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+
+fn arm_domain_v3() -> HostServiceDomainV3:
+    HostServiceDomainV3(HostLocalRootV3.LinuxService(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")))
+
+describe "HostLocalRootV3.LinuxService arm":
+    it "routes only status through the shared domain and fails closed when unpublished":
+        # @req S40-ARM-01
+        val status = host_service_domain_turn_v3(arm_domain_v3(), HostServiceRequestV2("host-status", "", ""))
+        expect(status.exit_code).to_equal(2)
+        expect(status.response.contains("linux-host-service-current-unpublished")).to_equal(true)
+        val validate = host_service_domain_turn_v3(arm_domain_v3(), HostServiceRequestV2("host-validate", "op_1", "x"))
+        expect(validate.exit_code).to_equal(1)
+        expect(validate.response.contains("host-linux-service-action-route")).to_equal(true)
+
+    it "refuses every V2 effect, cooperative execution and primary-connection route":
+        # @req S40-ARM-02
+        val effect = host_service_domain_effect_turn_v3(arm_domain_v3(), HostServiceRequestV2("host-execute", "op_1", "x"))
+        expect(effect.exit_code).to_equal(1)
+        expect(effect.response.contains("host-linux-service-execution-route")).to_equal(true)
+        val begun = host_service_execution_begin_v4(arm_domain_v3(), HostServiceRequestV2("host-execute", "op_1", "x"))
+        expect(begun.error).to_equal("host-linux-service-execution-route")
+        expect(host_primary_connection_policy_bytes_v3(arm_domain_v3().local).unwrap_err()).to_equal("host-primary-connection-direct-route-unsupported")
+
+    it "closes through the service owner and exposes no usable scope before startup":
+        # @req S40-ARM-03
+        val closed = host_service_domain_close_v3(arm_domain_v3())
+        expect(closed.closed).to_equal(true)
+        expect(closed.cleanup.is_none()).to_equal(true)
+        val owner = HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")
+        expect(container_scope_fence_id_v2(owner.scope_v4()).is_err()).to_equal(true)

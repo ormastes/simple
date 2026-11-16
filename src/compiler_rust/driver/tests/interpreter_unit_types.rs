@@ -916,7 +916,33 @@ fn interpreter_unit_decl_unit_plus_scalar_denied_scaling_allowed() {
         let err = run(e).err().unwrap_or_else(|| panic!("`{}` must be denied", e)).to_string();
         assert!(err.contains("SPL-UNIT-002"), "`{}`: {}", e, err);
     }
+    for e in [
+        "if a < 5: 1 else: 0",
+        "if a > 5: 1 else: 0",
+        "if a <= 5: 1 else: 0",
+        "if a >= 5: 1 else: 0",
+        "if a == 5: 1 else: 0",
+        "if a != 5: 1 else: 0",
+        "if 5 < a: 1 else: 0",
+    ] {
+        let err = run(e).err().unwrap_or_else(|| panic!("`{}` must be denied", e)).to_string();
+        assert!(err.contains("SPL-UNIT-002"), "`{}`: {}", e, err);
+    }
+    // Same-unit comparison stays allowed.
+    assert_eq!(run("if a < ByteCount(value: 20): 1 else: 0").unwrap().exit_code, 1);
     assert_eq!(run("(a * 2).value").unwrap().exit_code, 24);
     assert_eq!(run("(2 * a).value").unwrap().exit_code, 24);
     assert_eq!(run("(a / 3).value").unwrap().exit_code, 4);
+}
+
+#[test]
+fn interpreter_unit_decl_suffixed_same_unit_compare_and_scalar_results() {
+    let run = |expr: &str| {
+        let code = format!("unit ByteCount: u64 as Bc\n\nval a = ByteCount(value: 12)\nval b = ByteCount(value: 4)\nmain = {}\n", expr);
+        run_code(&code, &[], "")
+    };
+    assert_eq!(run("if a > b: 1 else: 0").unwrap().exit_code, 1);
+    assert_eq!(run("if a == b: 1 else: 0").unwrap().exit_code, 0);
+    assert_eq!(run("a / b").unwrap().exit_code, 3);
+    assert_eq!(run("a * b").unwrap().exit_code, 48);
 }

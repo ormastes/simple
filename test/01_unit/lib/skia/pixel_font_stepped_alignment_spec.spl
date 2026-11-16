@@ -1,0 +1,392 @@
+# SFNT baseline-aligned pixel font parity & Skia DrawText/DrawTextBlob spec.
+
+use std.spipe.*
+use std.spec.step
+use std.common.encoding.utf8.{text_codepoints}
+use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{rasterize_vector}
+use std.skia.entity.font.{SkFont, sk_font_default, sk_font_with_ttf}
+use std.skia.entity.textblob.{SkTextBlob, sk_text_blob_make_from_text}
+use std.skia.entity.canvas.{SkCanvas, sk_canvas_make}
+use std.skia.entity.paint.{SkPaint, sk_paint_fill}
+use std.skia.entity.color.{sk_color_argb}
+use std.skia.entity.geometry.{SkRect, SkIRect}
+use std.skia.entity.enums.{SkClipOp}
+use std.skia.entity.matrix.{Matrix3x3}
+use std.skia.entity.picture.{SkPictureOp, SkPictureOpKind, SkPicture}
+use std.skia.feature.text.{
+    SkParityTextMetrics, SkParityBitmapBuffer, SkGlyphInkBox,
+    skia_default_vector_font_path, skia_load_cached_font_bytes,
+    skia_sfnt_text_bounds_and_advance, skia_sfnt_layout_glyph_boxes,
+    skia_sfnt_rasterize_run_argb, skia_sfnt_blend_run_argb,
+    skia_blend_transformed_argb_onto
+}
+use std.skia.backend.cpu.backend.{CpuBackend, cpu_backend_new}
+use std.skia.backend.vulkan.backend.{
+    SkVulkanSurface, VkCommandKind, sk_vulkan_context_init, sk_vulkan_surface_make, vk_backend_init
+}
+
+fn _count_bitmap_ink_rgba(pixels: [u8], w: i64, h: i64) -> (i64, i64):
+    var nonzero: i64 = 0
+    var mid_alpha: i64 = 0
+    var i: i64 = 0
+    val total = w * h
+    while i < total:
+        val a = pixels[i * 4 + 3] as i64
+        if a > 0:
+            nonzero = nonzero + 1
+            if a < 255:
+                mid_alpha = mid_alpha + 1
+        i = i + 1
+    (nonzero, mid_alpha)
+
+fn _count_argb_aa(pixels: [u32]) -> (i64, i64):
+    var nonzero: i64 = 0
+    var mid_alpha: i64 = 0
+    var i: i64 = 0
+    while i < pixels.len():
+        val a = ((pixels[i] >> 24) & 0xFFu32) as i64
+        if a > 0:
+            nonzero = nonzero + 1
+            if a < 255:
+                mid_alpha = mid_alpha + 1
+        i = i + 1
+    (nonzero, mid_alpha)
+
+fn _find_glyph_box(boxes: [SkGlyphInkBox], cp: u32) -> Option<SkGlyphInkBox>:
+    var i: i64 = 0
+    while i < boxes.len():
+        if boxes[i].codepoint == cp:
+            return Some(boxes[i])
+        i = i + 1
+    None
+
+fn _has_interior_counter_hole(buf: SkParityBitmapBuffer, box: SkGlyphInkBox) -> bool:
+    val bw = (box.x1 - box.x0) as i64
+    val bh = (box.y1 - box.y0) as i64
+    if bw < 5 or bh < 5:
+        return false
+    val w = buf.width as i64
+    val h = buf.height as i64
+    # Scan vertical columns inside the central 40%..60% x-band and central 20%..80% y-band
+    val col_lo = (box.x0 as i64) + (bw * 2) / 5
+    val col_hi = (box.x0 as i64) + (bw * 3) / 5
+    var col = col_lo
+    while col <= col_hi:
+        if col >= 0 and col < w:
+            var seen_top = false
+            var seen_hole = false
+            var seen_bottom = false
+            var row = box.y0 as i64
+            val row_end = box.y1 as i64
+            while row < row_end:
+                if row >= 0 and row < h:
+                    val a = ((buf.pixels[row * w + col] >> 24) & 0xFFu32) as i64
+                    if not seen_top:
+                        if a >= 128:
+                            seen_top = true
+                    elif not seen_hole:
+                        if a < 64:
+                            seen_hole = true
+                    elif not seen_bottom:
+                        if a >= 128:
+                            seen_bottom = true
+                row = row + 1
+            if seen_top and seen_hole and seen_bottom:
+                return true
+        col = col + 1
+    false
+
+describe "SFNT hmtx metrics and Skia pixel font parity":
+    it "reads real proportional hmtx advances (advance('W') > advance('I'))":
+        step("Verify real hmtx advances and non-monospace SkTextBlob positions")
+        val path = skia_default_vector_font_path()
+        expect(path.len()).to_be_greater_than(0)
+        val blob_bytes = skia_load_cached_font_bytes(path)
+        expect(blob_bytes.len()).to_be_greater_than(0)
+
+        val mw = skia_sfnt_text_bounds_and_advance(blob_bytes, "W", 100.0)
+        val mi = skia_sfnt_text_bounds_and_advance(blob_bytes, "I", 100.0)
+        expect(mw.advance_px).to_be_greater_than(mi.advance_px)
+
+        val boxes = skia_sfnt_layout_glyph_boxes(blob_bytes, "WI", 0.0, 0.0, 48.0, false)
+        expect(boxes.len()).to_equal(2)
+        expect(boxes[0].advance_px).to_be_greater_than(boxes[1].advance_px)
+
+        val font = sk_font_with_ttf(path, 48.0)
+        val tb = sk_text_blob_make_from_text("WI", font)
+        expect(tb.runs.len()).to_equal(1)
+        expect(tb.runs[0].glyphs[0]).to_equal(87)
+        expect(tb.runs[0].glyphs[1]).to_equal(73)
+        expect(tb.runs[0].positions[0].x).to_equal(0.0)
+        expect(tb.runs[0].positions[1].x).to_equal(boxes[0].advance_px)
+
+    it "rasterize_vector preserves narrow glyphs ('I', 'i', 'l') at small sizes 8..14 and exact width at 24":
+        step("Verify vector rasterizer rounds narrow glyph widths safely")
+        val small_sizes: [i32] = [8i32, 10i32, 12i32, 14i32]
+        val narrow_cps: [i32] = [73i32, 105i32, 108i32]
+        var ci: i64 = 0
+        while ci < narrow_cps.len():
+            val cp = narrow_cps[ci]
+            val cmds = vf_glyph_commands(cp)
+            val base_w = vf_glyph_width(cp)
+            var si: i64 = 0
+            while si < small_sizes.len():
+                val sz = small_sizes[si]
+                val g = rasterize_vector(cmds, cp, sz)
+                expect(g.width).to_be_greater_than(0i32)
+                expect(g.height).to_equal(sz)
+                var ink: i64 = 0
+                var pi: i64 = 0
+                while pi < g.pixels.len():
+                    if g.pixels[pi] > 0u8:
+                        ink = ink + 1
+                    pi = pi + 1
+                expect(ink).to_be_greater_than(0)
+                si = si + 1
+            val g24 = rasterize_vector(cmds, cp, 24i32)
+            expect(g24.width).to_equal(base_w)
+            ci = ci + 1
+
+    it "aligns flat-top capitals 'HEFILTB' on exact same y0/y1 across stepped sizes 100..8 with crisp AA":
+        step("Verify 0px vertical cap/baseline jitter across all 10 stepped sizes")
+        val path = skia_default_vector_font_path()
+        val font_blob = skia_load_cached_font_bytes(path)
+        expect(font_blob.len()).to_be_greater_than(0)
+
+        val sizes: [f64] = [100.0, 72.0, 48.0, 36.0, 24.0, 18.0, 14.0, 12.0, 10.0, 8.0]
+        var si: i64 = 0
+        while si < sizes.len():
+            val sz = sizes[si]
+            val boxes = skia_sfnt_layout_glyph_boxes(font_blob, "HEFILTB AO80", 0.0, 0.0, sz, false)
+            expect(boxes.len()).to_equal(12)
+            val cap_y0 = boxes[0].y0
+            val cap_y1 = boxes[0].y1
+            expect(boxes[0].x1).to_be_greater_than(boxes[0].x0)
+            expect(cap_y1).to_be_greater_than(cap_y0)
+
+            var ci: i64 = 0
+            while ci < 7:
+                val b = boxes[ci]
+                expect(b.x1).to_be_greater_than(b.x0)
+                expect(b.y0).to_equal(cap_y0)
+                expect(b.y1).to_equal(cap_y1)
+                if ci > 0:
+                    expect(b.pen_x).to_be_greater_than(boxes[ci - 1].pen_x)
+                    expect(b.x0).to_be_greater_than(boxes[ci - 1].x0)
+                    expect(b.x1).to_be_greater_than(boxes[ci - 1].x1)
+                    if sz >= 10.0:
+                        expect(b.x0 >= boxes[ci - 1].x1).to_equal(true)
+                    else:
+                        # At 8px, subpixel edge gap < 1px can sample opposite sides of 1 shared AA boundary pixel column.
+                        expect(b.x0 >= boxes[ci - 1].x1 - 1).to_equal(true)
+                ci = ci + 1
+
+            # Verify multi-level AA pixel coverage & straight-alpha SrcOver bg=0 behavior
+            val buf = skia_sfnt_rasterize_run_argb(font_blob, "HEFILTB AO80", sz, 0xFFFFFFFFu32, 0u32)
+            expect(buf.width).to_be_greater_than(0i32)
+            expect(buf.height).to_be_greater_than(0i32)
+            val counts = _count_argb_aa(buf.pixels)
+            expect(counts.0).to_be_greater_than(0)
+            expect(counts.1).to_be_greater_than(0)
+
+            # Verify Hamburgefontsiv ordering & AA
+            val hboxes = skia_sfnt_layout_glyph_boxes(font_blob, "Hamburgefontsiv", 0.0, 0.0, sz, false)
+            expect(hboxes.len()).to_equal(15)
+            var hi: i64 = 1
+            while hi < hboxes.len():
+                expect(hboxes[hi].pen_x).to_be_greater_than(hboxes[hi - 1].pen_x)
+                expect(hboxes[hi].x0 >= hboxes[hi - 1].x1).to_equal(true)
+                hi = hi + 1
+
+            # Verify counter holes preserved on O, B, 8, 0 at 100px..14px
+            if sz >= 14.0:
+                match _find_glyph_box(boxes, 79u32):
+                    case Some(ob): expect(_has_interior_counter_hole(buf, ob)).to_equal(true)
+                    case None: expect(false).to_equal(true)
+                match _find_glyph_box(boxes, 66u32):
+                    case Some(bb): expect(_has_interior_counter_hole(buf, bb)).to_equal(true)
+                    case None: expect(false).to_equal(true)
+                match _find_glyph_box(boxes, 56u32):
+                    case Some(b8): expect(_has_interior_counter_hole(buf, b8)).to_equal(true)
+                    case None: expect(false).to_equal(true)
+                match _find_glyph_box(boxes, 48u32):
+                    case Some(b0): expect(_has_interior_counter_hole(buf, b0)).to_equal(true)
+                    case None: expect(false).to_equal(true)
+            si = si + 1
+
+    it "blends straight-alpha SrcOver matching Engine2D formula over opaque and transparent backgrounds":
+        step("Verify straight-alpha SrcOver blend bit-for-bit")
+        val path = skia_default_vector_font_path()
+        val font_blob = skia_load_cached_font_bytes(path)
+        val fg = 0xFF3366CCu32
+        val bg = 0xFF202020u32
+        val trans = skia_sfnt_rasterize_run_argb(font_blob, "AO", 24.0, fg, 0u32)
+        val solid = skia_sfnt_rasterize_run_argb(font_blob, "AO", 24.0, fg, bg)
+        expect(trans.width).to_equal(solid.width)
+        expect(trans.height).to_equal(solid.height)
+        var i: i64 = 0
+        while i < trans.pixels.len():
+            val sp = trans.pixels[i]
+            val sa = (sp >> 24) & 0xFFu32
+            if sa == 0u32:
+                expect(solid.pixels[i]).to_equal(bg)
+            elif sa == 255u32:
+                expect(solid.pixels[i]).to_equal(fg)
+            else:
+                val inv_a = 255u32 - sa
+                val dst_w = (255u32 * inv_a) / 255u32
+                val out_a = sa + dst_w
+                val sr = (fg >> 16) & 0xFFu32
+                val sg = (fg >> 8) & 0xFFu32
+                val sb = fg & 0xFFu32
+                val out_r = (sr * sa + 0x20u32 * dst_w) / out_a
+                val out_g = (sg * sa + 0x20u32 * dst_w) / out_a
+                val out_b = (sb * sa + 0x20u32 * dst_w) / out_a
+                val expected = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
+                expect(solid.pixels[i]).to_equal(expected)
+            i = i + 1
+
+    it "renders DrawTextBlob/DrawString through SkCanvas -> CpuBackend and VulkanBackend including rotations, mirrors, and clip":
+        step("Verify SkCanvas -> CpuBackend and VulkanBackend AA text rendering + CTM")
+        val path = skia_default_vector_font_path()
+        val font = sk_font_with_ttf(path, 24.0)
+        val paint = sk_paint_fill(sk_color_argb(255, 240, 240, 240))
+        val cull = SkRect(left: 0.0, top: 0.0, right: 160.0, bottom: 160.0)
+
+        # 1. Untransformed DrawString + DrawText via CpuBackend
+        val pic = sk_canvas_make(160, 160)
+            .begin_recording(cull)
+            .draw_string("HE", 10.0, 48.0, font, paint)
+            .draw_text("AO", 10.0, 96.0, font, paint)
+            .end_recording()
+        val bm = cpu_backend_new().render_picture(pic, cull)
+        val cpu_counts = _count_bitmap_ink_rgba(bm.pixels, bm.width, bm.height)
+        expect(cpu_counts.0).to_be_greater_than(40)
+        expect(cpu_counts.1).to_be_greater_than(5)
+
+        # 2. VulkanBackend command buffer + SkVulkanSurface flush_picture parity
+        val ctx = sk_vulkan_context_init(0)
+        var vk = vk_backend_init(ctx)
+        val cb = vk.render_picture(pic, cull)
+        var draw_cmds: i64 = 0
+        for cmd in cb.commands:
+            if cmd.kind == VkCommandKind.Draw:
+                draw_cmds = draw_cmds + 1
+        expect(draw_cmds).to_equal(2)
+
+        val vsurf = sk_vulkan_surface_make(ctx, 160, 160).flush_picture(pic).flush()
+        val vpx = vsurf.read_pixels(SkIRect(left: 0, top: 0, right: 160, bottom: 160))
+        expect(vpx.len()).to_equal(160 * 160 * 4)
+        var vk_ink: i64 = 0
+        var vi: i64 = 0
+        while vi < 160 * 160:
+            if vpx[vi * 4 + 3] > 0:
+                vk_ink = vk_ink + 1
+            vi = vi + 1
+        expect(vk_ink).to_equal(cpu_counts.0)
+
+        # 3. CTM rotations (0, 90, 180, 270, 45) & mirror (sx=-1, sy=-1) + clip
+        val rot_angles: [f64] = [0.0, 90.0, 180.0, 270.0, 45.0]
+        var ai: i64 = 0
+        while ai < rot_angles.len():
+            val deg = rot_angles[ai]
+            val rpic = sk_canvas_make(160, 160)
+                .begin_recording(cull)
+                .save()
+                .translate(80.0, 80.0)
+                .rotate(deg)
+                .draw_string("TB", 0.0, 0.0, font, paint)
+                .restore()
+                .end_recording()
+            val rbm = cpu_backend_new().render_picture(rpic, cull)
+            val rc = _count_bitmap_ink_rgba(rbm.pixels, rbm.width, rbm.height)
+            expect(rc.0).to_be_greater_than(20)
+            ai = ai + 1
+
+        # Mirror X (scale -1, 1) and Mirror Y (scale 1, -1)
+        val mpic_x = sk_canvas_make(160, 160)
+            .begin_recording(cull)
+            .save()
+            .translate(100.0, 80.0)
+            .scale(-1.0, 1.0)
+            .draw_string("F", 0.0, 0.0, font, paint)
+            .restore()
+            .end_recording()
+        val mbm_x = cpu_backend_new().render_picture(mpic_x, cull)
+        val mc_x = _count_bitmap_ink_rgba(mbm_x.pixels, mbm_x.width, mbm_x.height)
+        expect(mc_x.0).to_be_greater_than(15)
+        # In local F shifted left from x=100, ink should land in x < 100 (left of pivot), not x >= 100
+        var left_of_pivot: i64 = 0
+        var right_of_pivot: i64 = 0
+        var py: i64 = 0
+        while py < 160:
+            var px: i64 = 0
+            while px < 160:
+                if mbm_x.pixels[(py * 160 + px) * 4 + 3] > 0u8:
+                    if px < 100:
+                        left_of_pivot = left_of_pivot + 1
+                    else:
+                        right_of_pivot = right_of_pivot + 1
+                px = px + 1
+            py = py + 1
+        expect(left_of_pivot).to_be_greater_than(right_of_pivot)
+
+        val mpic_y = sk_canvas_make(160, 160)
+            .begin_recording(cull)
+            .save()
+            .translate(40.0, 80.0)
+            .scale(1.0, -1.0)
+            .draw_string("F", 0.0, 0.0, font, paint)
+            .restore()
+            .end_recording()
+        val mbm_y = cpu_backend_new().render_picture(mpic_y, cull)
+        var below_pivot: i64 = 0
+        var above_pivot: i64 = 0
+        py = 0
+        while py < 160:
+            var px: i64 = 0
+            while px < 160:
+                if mbm_y.pixels[(py * 160 + px) * 4 + 3] > 0u8:
+                    if py >= 80:
+                        below_pivot = below_pivot + 1
+                    else:
+                        above_pivot = above_pivot + 1
+                px = px + 1
+            py = py + 1
+        expect(below_pivot).to_be_greater_than(above_pivot)
+
+        # ClipRect excludes pixels outside clip
+        val cpic = sk_canvas_make(160, 160)
+            .begin_recording(cull)
+            .save()
+            .clip_rect(SkRect(left: 10.0, top: 20.0, right: 30.0, bottom: 50.0), SkClipOp.Intersect, false)
+            .draw_string("HEFILTB", 10.0, 48.0, font, paint)
+            .restore()
+            .end_recording()
+        val cbm = cpu_backend_new().render_picture(cpic, cull)
+        var outside_clip: i64 = 0
+        var inside_clip: i64 = 0
+        py = 0
+        while py < 160:
+            var px: i64 = 0
+            while px < 160:
+                if cbm.pixels[(py * 160 + px) * 4 + 3] > 0u8:
+                    if px >= 10 and px < 30 and py >= 20 and py < 50:
+                        inside_clip = inside_clip + 1
+                    else:
+                        outside_clip = outside_clip + 1
+                px = px + 1
+            py = py + 1
+        expect(inside_clip).to_be_greater_than(0)
+        expect(outside_clip).to_equal(0)
+
+        # Direct skia_blend_transformed_argb_onto helper check at 45 deg
+        val font_blob = skia_load_cached_font_bytes(path)
+        val stamp = skia_sfnt_rasterize_run_argb(font_blob, "AB", 24.0, 0xFFFFFFFFu32, 0u32)
+        var dst: [u32] = [0u32; 128 * 128]
+        val rot45 = Matrix3x3.translate(64.0, 64.0).mul(Matrix3x3.rotate_degrees(45.0))
+        dst = skia_blend_transformed_argb_onto(dst, 128i32, 128i32, stamp, 0.0, 0.0, rot45, SkRect(left: 0.0, top: 0.0, right: 128.0, bottom: 128.0))
+        val dcounts = _count_argb_aa(dst)
+        expect(dcounts.0).to_be_greater_than(20)
+        expect(dcounts.1).to_be_greater_than(5)

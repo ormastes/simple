@@ -160,13 +160,13 @@ fn test_worker_survives_panicking_task() {
 // Isolated Thread tests
 // ========================================================================
 
-fn native_closure_record(func: *const ()) -> Box<[usize; 2]> {
+fn native_closure_record(func: *const ()) -> Box<[u64; 2]> {
     // Word 1 is read for the direct-function marker; keep it in bounds.
-    Box::new([func as usize, 0])
+    Box::new([func as usize as u64, 0])
 }
 
-fn native_direct_function_record(func: *const ()) -> Box<[usize; 2]> {
-    Box::new([func as usize, NATIVE_DIRECT_FUNCTION_RECORD_MARKER])
+fn native_direct_function_record(func: *const ()) -> Box<[u64; 2]> {
+    Box::new([func as usize as u64, NATIVE_DIRECT_FUNCTION_RECORD_MARKER])
 }
 
 extern "C" fn double_value(_closure: u64, v: RuntimeValue) -> RuntimeValue {
@@ -287,7 +287,7 @@ fn test_isolated_thread_spawn_and_join_direct_function_record() {
 
     let closure = native_direct_function_record(direct_worker as *const ());
     let handle = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, 
-        (&*closure) as *const [usize; 2] as *const usize as u64,
+        (&*closure) as *const [u64; 2] as *const usize as u64,
         RuntimeValue::from_int(41),
     );
 
@@ -308,13 +308,17 @@ fn test_isolated_thread_static_direct_record_is_data_not_code() {
     extern "C" fn static_direct_worker(v: RuntimeValue) -> RuntimeValue {
         RuntimeValue::from_int(v.as_int() + 2)
     }
-    #[repr(C)]
+    // Mirror codegen's layout: two 64-bit slots on every target (the
+    // zero pad widens a 32-bit fn pointer to its little-endian u64 slot).
+    #[repr(C, align(8))]
     struct DirectRecord {
         entry: extern "C" fn(RuntimeValue) -> RuntimeValue,
-        marker: usize,
+        _pad: [u8; 8 - std::mem::size_of::<usize>()],
+        marker: u64,
     }
     static RECORD: DirectRecord = DirectRecord {
         entry: static_direct_worker,
+        _pad: [0; 8 - std::mem::size_of::<usize>()],
         marker: NATIVE_DIRECT_FUNCTION_RECORD_MARKER,
     };
     let record_addr = &RECORD as *const DirectRecord as u64;
@@ -345,7 +349,7 @@ fn test_isolated_thread_spawn_with_args_and_join_direct_function_record() {
 
     let closure = native_direct_function_record(direct_add as *const ());
     let handle = rt_thread_spawn_isolated_with_args_kind(RT_WORKER_CLOSURE_ADDRESS,
-        (&*closure) as *const [usize; 2] as *const usize as u64,
+        (&*closure) as *const [u64; 2] as *const usize as u64,
         RuntimeValue::from_int(10),
         RuntimeValue::from_int(32),
     );
@@ -530,8 +534,8 @@ impl DualDecodeFixture {
                         unmap_page(low);
                         continue;
                     }
-                    *(low as *mut [usize; 2]) = [add_raw_words as *const () as usize, 0];
-                    *(high as *mut [usize; 2]) = [add_values as *const () as usize, 0];
+                    *(low as *mut [u64; 2]) = [add_raw_words as *const () as usize as u64, 0];
+                    *(high as *mut [u64; 2]) = [add_values as *const () as usize as u64, 0];
                 }
                 return DualDecodeFixture { low, high };
             }
@@ -710,7 +714,7 @@ fn test_thread_yield() {
 // Pool function-value kind (pool_native_function_payload_value_heuristic_2026-11-06)
 // ========================================================================
 
-const POOL_DIRECT_FUNCTION_MARKER: usize = 0x5344_4952_4543_5446;
+const POOL_DIRECT_FUNCTION_MARKER: u64 = 0x5344_4952_4543_5446;
 
 extern "C" fn pool_plus_one(input: i64) -> i64 {
     input + 1
@@ -742,9 +746,9 @@ impl PoolDualFixture {
                         unmap_page(low);
                         continue;
                     }
-                    *(low as *mut [usize; 2]) = [pool_plus_one as *const () as usize, POOL_DIRECT_FUNCTION_MARKER];
-                    *(high as *mut [usize; 2]) =
-                        [pool_plus_thousand as *const () as usize, POOL_DIRECT_FUNCTION_MARKER];
+                    *(low as *mut [u64; 2]) = [pool_plus_one as *const () as usize as u64, POOL_DIRECT_FUNCTION_MARKER];
+                    *(high as *mut [u64; 2]) =
+                        [pool_plus_thousand as *const () as usize as u64, POOL_DIRECT_FUNCTION_MARKER];
                 }
                 return PoolDualFixture { low, high };
             }
@@ -762,8 +766,8 @@ impl Drop for PoolDualFixture {
     }
 }
 
-fn pool_direct_record(func: extern "C" fn(i64) -> i64) -> Box<[usize; 2]> {
-    Box::new([func as *const () as usize, POOL_DIRECT_FUNCTION_MARKER])
+fn pool_direct_record(func: extern "C" fn(i64) -> i64) -> Box<[u64; 2]> {
+    Box::new([func as *const () as usize as u64, POOL_DIRECT_FUNCTION_MARKER])
 }
 
 fn pool_run(state: i64, submit: impl Fn(i64) -> i64) -> i64 {

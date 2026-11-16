@@ -49,7 +49,8 @@ use compiler.core.ast.{macro_fact_use_push}
 # D1 arrow lambda: a parenthesised element list is a PARAMETER list only when
 # every element is a bare identifier, which needs the arena tag directly.
 use compiler.core.ast_expr.{EXPR_IDENT}
-use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool, expr_suffixed_string}
+use compiler.core.ast.{expr_binary}
+use compiler.core.ast.{expr_suffixed_int,expr_suffixed_float, expr_suffixed_bool, expr_suffixed_string}
 use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_new_alloc}
 use compiler.core.ast.{expr_list_comp, expr_dict_comp}
 use compiler.core.ast.{expr_asm, expr_asm_operands, expr_asm_match, expr_asm_assert}
@@ -759,7 +760,21 @@ pub fn parse_primary_expr() -> i64:
                     parser_lexical_scope_leave()
                     return expr_lambda(tup_elems, multi_body, 0)
             return expr_tuple(tup_elems, 0)
+        val rparen_line = par_line_get()
+        val rparen_col = par_col_get()
         parser_expect(141)
+        # `(expr)_sfx`: unit suffix glued to a group (seed parity,
+        # collections.rs apply_paren_unit_suffix) -> `expr * 1_sfx`.
+        # Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+        if par_kind_get() == 6 and par_line_get() == rparen_line and par_col_get() == rparen_col + 1:
+            val glued = par_text_get()
+            val g1 = if glued.len() > 1: glued[1:2] else: ""
+            val g1_alpha = (g1 >= "a" and g1 <= "z") or (g1 >= "A" and g1 <= "Z")
+            if glued.starts_with("_") and g1_alpha:
+                parser_advance()
+                val unit_sfx = glued[1:]
+                parser_validate_unit_suffix(unit_sfx)
+                return expr_binary(62, inner, expr_suffixed_int(1, unit_sfx, 0), 0)
         # D1: single-parameter arrow lambda — `(x) => expr`.
         if par_kind_get() == 168:
             if inner >= 0 and inner < expr_owner_len() and expr_owner_tag(inner) == EXPR_IDENT:
