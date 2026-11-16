@@ -15,7 +15,11 @@ Chrome oracle: the same pages and numbers as
 
 | case | child style(s) | Chrome child x,y,w,h | Chrome parent h |
 |------|----------------|----------------------|-----------------|
-| b | `width:100px;padding:10px;height:20px` | 0,0,120,40 | 40 |
+| a | `margin-left:10px;margin-right:20px;height:30px` | 10,0,270,30 | 30 |
+| a-width | `width:100px;margin-left:10px;margin-right:20px;height:30px` | 10,0,100,30 | 30 |
+| a-nested | parent `border:5px solid`; n1 `height:20px;margin-left:7px` > n2 `height:10px;margin:0 4px 0 3px;padding:2px` | n1 12,5,293,20; n2 15,5,286,14 | 30 |
+| f | `height:20px` + `display:none;height:99px;margin-top:40px` + `height:30px` | f3 at y=20 | 50 |
+| f-collapse | `height:20px;margin-bottom:10px` + `display:none;margin-top:50px` + `height:30px;margin-top:15px` | g3 at y=35 | 65 | `width:100px;padding:10px;height:20px` | 0,0,120,40 | 40 |
 | c | `height:50px;padding:5px` | 0,0,300,60 | 60 |
 | d | `height:20px;margin-bottom:10px` + `height:30px;margin-top:15px` | d2 at y=35 | 65 |
 | e | `height:20px` + `height:30px` | e2 at y=20 | 50 |
@@ -25,8 +29,15 @@ border-box floor: `box-sizing:border-box;width:50px;height:5px;padding:5px`
 gives 0,0,50,10 in Chrome 159 (row `border_box_height_floor`,
 doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md).
 
-Not covered here (open `_layout_block_node` divergences, filed in that bug
-doc): horizontal margins (case a) and `display:none` children (case f).
+Rows a-width, a-nested, f (with margin-top) and f-collapse were measured with
+the same Chrome binary and page setup on 2026-11-16. Cases a, a-width, a-nested,
+f and f-collapse were red before the 2026-11-16 fix (engine gave a at
+0,0,300,30; a-nested n2 at 5,5,300; f and f-collapse kept the hidden child as a
+third box, parent heights 189 and 115).
+
+Not covered here (open `_layout_block_node` divergences): `margin:auto`
+centering (auto margins parse to 0), parent/child margin collapse, and a
+`display:none` layout root.
 """
 
 """
@@ -130,3 +141,83 @@ describe "layout_tree block box model (Chrome 159)":
         val box_ = _lay(p)
         expect(box_.children[0].width).to_equal(300.0)
         expect(box_.width).to_equal(310.0)
+
+    it "case a: an auto-width block fills the container minus its horizontal margins":
+        var p = _parent()
+        var a = _child("30px")
+        a.set_style("margin-left", "10px")
+        a.set_style("margin-right", "20px")
+        p.add_child(a)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(10.0)
+        expect(box_.children[0].y).to_equal(0.0)
+        expect(box_.children[0].width).to_equal(270.0)
+        expect(box_.children[0].height).to_equal(30.0)
+        expect(box_.height).to_equal(30.0)
+
+    it "case a-width: an explicit-width block sits at x + margin-left":
+        var p = _parent()
+        var w = _child("30px")
+        w.set_style("width", "100px")
+        w.set_style("margin-left", "10px")
+        w.set_style("margin-right", "20px")
+        p.add_child(w)
+        val box_ = _lay(p)
+        expect(box_.children[0].x).to_equal(10.0)
+        expect(box_.children[0].width).to_equal(100.0)
+        expect(box_.children[0].height).to_equal(30.0)
+
+    it "case a-nested: horizontal margins accumulate through a bordered parent":
+        var p = _parent()
+        p.style.border_width = 5.0
+        var n1 = _child("20px")
+        n1.set_style("margin-left", "7px")
+        var n2 = _child("10px")
+        n2.set_style("margin-left", "3px")
+        n2.set_style("margin-right", "4px")
+        n2.style.padding_top = 2.0
+        n2.style.padding_right = 2.0
+        n2.style.padding_bottom = 2.0
+        n2.style.padding_left = 2.0
+        n1.add_child(n2)
+        p.add_child(n1)
+        val box_ = _lay(p)
+        val b1 = box_.children[0]
+        expect(b1.x).to_equal(12.0)
+        expect(b1.y).to_equal(5.0)
+        expect(b1.width).to_equal(293.0)
+        expect(b1.children[0].x).to_equal(15.0)
+        expect(b1.children[0].y).to_equal(5.0)
+        expect(b1.children[0].width).to_equal(286.0)
+        expect(b1.children[0].height).to_equal(14.0)
+        expect(box_.height).to_equal(30.0)
+
+    it "case f: a display:none child generates no box and takes no space":
+        var p = _parent()
+        p.add_child(_child("20px"))
+        var hidden = _child("99px")
+        hidden.set_style("display", "none")
+        hidden.set_style("margin-top", "40px")
+        p.add_child(hidden)
+        p.add_child(_child("30px"))
+        val box_ = _lay(p)
+        expect(box_.children.len()).to_equal(2)
+        expect(box_.children[1].y).to_equal(20.0)
+        expect(box_.height).to_equal(50.0)
+
+    it "case f-collapse: siblings around a display:none child still collapse their margins":
+        var p = _parent()
+        var g1 = _child("20px")
+        g1.set_style("margin-bottom", "10px")
+        p.add_child(g1)
+        var hidden = BeDomNode.element("div")
+        hidden.set_style("display", "none")
+        hidden.set_style("margin-top", "50px")
+        p.add_child(hidden)
+        var g3 = _child("30px")
+        g3.set_style("margin-top", "15px")
+        p.add_child(g3)
+        val box_ = _lay(p)
+        expect(box_.children.len()).to_equal(2)
+        expect(box_.children[1].y).to_equal(35.0)
+        expect(box_.height).to_equal(65.0)
