@@ -96,6 +96,20 @@ fn _sam_is_alias_line(t: text) -> bool:
 fn _sam_is_extern_line(t: text) -> bool:
     t.starts_with("extern fn ") or t.starts_with("pub extern fn ")
 
+fn _sam_depth(line: text) -> i64:
+    # Net open `(`/`<` minus close `)`/`>`, ignoring the `->` arrow.
+    val s = line.replace("->", "  ")
+    var d = 0
+    var k = 0
+    while k < s.byte_len():
+        val c = s.substring(k, k + 1)
+        if c == "(" or c == "<":
+            d = d + 1
+        elif c == ")" or c == ">":
+            d = d - 1
+        k = k + 1
+    d
+
 fn _sam_ident_char(c: text) -> bool:
     c != "" and "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(c)
 
@@ -166,8 +180,18 @@ pub fn check_sffi_abi_mismatch(source: text, file_path: text, triple: text) -> [
                 abi_ctypes.push(ctype)
     var i = 0
     while i < lines.len():
-        val t = lines[i].trimmed
+        var t = lines[i].trimmed
         if abi_names.len() > 0 and _sam_is_extern_line(t):
+            # Join a multi-line signature: until parens/angles balance and no
+            # `->` return type is pending on the next line.
+            val start = i
+            var depth = _sam_depth(t)
+            while i + 1 < lines.len() and (depth > 0 or t.ends_with("->") or lines[i + 1].trimmed.starts_with("->")):
+                i = i + 1
+                t = t + " " + lines[i].trimmed
+                depth = depth + _sam_depth(lines[i].trimmed)
+            val sig_end = i
+            i = start
             if c_target_data_model(triple) == "":
                 findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: "unknown target `{triple}`: cannot resolve the C ABI, refusing to default", line_num: i + 1))
                 i = i + 1
@@ -183,7 +207,7 @@ pub fn check_sffi_abi_mismatch(source: text, file_path: text, triple: text) -> [
                         if msg != "":
                             findings.push(SffiAbiFinding(code: "SPL-SFFI-ABI-001", message: msg, line_num: i + 1))
                 a = a + 1
-            i = i + 1
+            i = sig_end + 1
             continue
         if not _sam_is_alias_line(t):
             i = i + 1
