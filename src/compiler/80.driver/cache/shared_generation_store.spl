@@ -83,7 +83,7 @@ fn shared_generation_decode_v1(content: text, expected: text) -> (i64, text)? :
     while header_end < content.len() and header_end < 256 and separators < 4:
         if content[header_end:header_end + 1] == "\n": separators = separators + 1
         header_end = header_end + 1
-    if separators != 4: return nil
+    if separators != 4: return None
     val lines = content[:header_end].split("\n")
     if lines.len() != 5 or lines[0] != SHARED_GENERATION_SCHEMA_V1 or
             not lines[1].starts_with("parent=") or
@@ -91,7 +91,7 @@ fn shared_generation_decode_v1(content: text, expected: text) -> (i64, text)? :
             not lines[3].starts_with("payload-bytes="):
         return nil
     val parent = lines[1].substring(7)
-    if parent != "" and not sha256_lower_hex_valid(parent): return nil
+    if parent != "" and not sha256_lower_hex_valid(parent): return None
     val ordinal = lines[2].substring(8).to_i64()
     val payload_bytes = lines[3].substring(14).to_i64()
     val payload = content[header_end:]
@@ -161,7 +161,7 @@ fn shared_generation_reclaim_orphan_stages_v1(root: text) -> bool:
 fn shared_generation_store_bytes_v1(root: text) -> i64:
     var total: i64 = 0
     val root_names = dir_list_optional(root)
-    if root_names == nil or root_names!.len() > SHARED_GENERATION_MAX_ENTRIES_V1: return -1
+    if root_names.is_none() or root_names!.len() > SHARED_GENERATION_MAX_ENTRIES_V1: return -1
     for name in root_names!:
         val path = "{root}/{name}"
         if rt_file_is_regular_no_follow(path):
@@ -173,7 +173,7 @@ fn shared_generation_store_bytes_v1(root: text) -> i64:
         # it absent. A provider/read failure must not pretend evidence is empty.
         if directory == "quarantine" and not root_names!.contains(directory): continue
         val names = dir_list_optional("{root}/{directory}")
-        if names == nil or names!.len() > SHARED_GENERATION_MAX_ENTRIES_V1: return -1
+        if names.is_none() or names!.len() > SHARED_GENERATION_MAX_ENTRIES_V1: return -1
         for name in names!:
             val path = "{root}/{directory}/{name}"
             if rt_file_is_regular_no_follow(path):
@@ -535,9 +535,9 @@ pub fn shared_generation_lease_matches_v2(root: text, lease_id: text,
     if lock < 0: return false
     val content = rt_file_read_regular_no_follow_bounded("{root}/leases/{lease_id}.lease", 1024)
     var matches = false
-    if content != nil:
+    if content.is_some():
         val lease = shared_generation_lease_decode_v1(content!)
-        if lease != nil:
+        if lease.is_some():
             matches = lease!.generation == generation and lease!.owner_identity == owner_identity and
                 lease!.expires_ns > rt_time_monotonic_ns()
     val _ = file_unlock(lock)
@@ -562,20 +562,20 @@ fn shared_generation_quarantine_locked_v2(root: text, generation: text) -> Resul
     if shared_generation_read_name_v1(root) != generation:
         return Err("quarantine-current-changed")
     val names = dir_list_optional("{root}/leases")
-    if names == nil: return Err("quarantine-lease-enumeration-failed")
+    if names.is_none(): return Err("quarantine-lease-enumeration-failed")
     if not shared_generation_lease_count_admitted_v1(names!.len()):
         return Err("quarantine-lease-count-unbounded")
     for name in names!:
         if not name.ends_with(".lease"): continue
         if name.contains("/"): return Err("quarantine-lease-name-invalid")
         val bytes = rt_file_read_regular_no_follow_bounded("{root}/leases/{name}", 1024)
-        if bytes == nil: return Err("quarantine-lease-unreadable")
+        if bytes.is_none(): return Err("quarantine-lease-unreadable")
         val lease = shared_generation_lease_decode_v1(bytes!)
-        if lease == nil: return Err("quarantine-lease-invalid")
+        if lease.is_none(): return Err("quarantine-lease-invalid")
         if lease!.generation == generation: return Err("quarantine-generation-pinned")
     val source = "{root}/generations/{generation}.generation"
     val bytes = rt_file_read_regular_no_follow_bounded(source, SHARED_GENERATION_MAX_BYTES_V1)
-    if bytes == nil: return Err("quarantine-source-unreadable")
+    if bytes.is_none(): return Err("quarantine-source-unreadable")
     if not rt_dir_create_all("{root}/quarantine"): return Err("quarantine-directory-unavailable")
     val evidence = "{root}/quarantine/{generation}.generation"
     val resident = shared_generation_store_bytes_v1(root)
@@ -584,7 +584,7 @@ fn shared_generation_quarantine_locked_v2(root: text, generation: text) -> Resul
         return Err("quarantine-exceeds-store-bound")
     if not file_create_excl(evidence, bytes!):
         val retained = rt_file_read_regular_no_follow_bounded(evidence, SHARED_GENERATION_MAX_BYTES_V1)
-        if retained == nil or retained! != bytes!: return Err("quarantine-evidence-conflict")
+        if retained.is_none() or retained! != bytes!: return Err("quarantine-evidence-conflict")
     # Persist the quarantine directory entry in root before deleting source.
     if not rt_file_fsync(evidence) or not rt_file_fsync("{root}/quarantine") or not rt_file_fsync(root):
         return Err("quarantine-evidence-sync-failed")
@@ -603,23 +603,23 @@ pub fn shared_generation_prepare_root_v2(root: text) -> bool:
 pub fn shared_generation_process_owner_v2() -> text?:
     val pid = rt_getpid()
     val start = rt_process_start_identity(pid)
-    if pid <= 0 or start <= 0: return nil
+    if pid <= 0 or start <= 0: return None
     Some("pid:{pid}:{start}")
 
 # Never reuse a store incarnation while its cache root exists. The exclusive
 # marker remains after store closure; allocation is bounded and fails closed.
 pub fn shared_generation_store_incarnation_v2(root: text, owner: text) -> text?:
-    if root == "" or owner == "" or not rt_dir_create_all("{root}/owners"): return nil
+    if root == "" or owner == "" or not rt_dir_create_all("{root}/owners"): return None
     val lock = file_lock("{root}/authority.lock", 10)
-    if lock < 0: return nil
+    if lock < 0: return None
     val names = dir_list_optional("{root}/owners")
-    if names == nil or names!.len() >= SHARED_GENERATION_MAX_ENTRIES_V1:
+    if names.is_none() or names!.len() >= SHARED_GENERATION_MAX_ENTRIES_V1:
         val _ = file_unlock(lock)
-        return nil
+        return None
     val path = shared_generation_exclusive_stage_v1("{root}/owners/store", owner, owner)
     val synced = path != "" and rt_file_fsync(path) and rt_file_fsync("{root}/owners") and rt_file_fsync(root)
     val _ = file_unlock(lock)
-    if not synced: return nil
+    if not synced: return None
     Some(sha256_text(path))
 
 # Exact worst-case wrapper width for a bounded payload, 64-byte parent digest

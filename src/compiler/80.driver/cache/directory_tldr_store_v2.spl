@@ -54,11 +54,11 @@ struct DirectoryTldrHeldPinV2:
 pub fn directory_tldr_expected_identity_v2(expected: DirectoryTldrExpectedV2) -> text?:
     if not directory_source_epoch_valid_v2(expected.source_epoch) or
             package_init_tld_schema_v1(expected.package) != 3 or
-            package_init_directory_compare_v3(expected.package, expected.package, expected.facts) == nil:
-        return nil
+            package_init_directory_compare_v3(expected.package, expected.package, expected.facts).is_none():
+        return None
     val variant = config_variant_encode_v1(expected.variant)
     val bytes = package_init_tld_encode_v3(expected.package)
-    if variant == "" or bytes.len() == 0 or bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2: return nil
+    if variant == "" or bytes.len() == 0 or bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2: return None
     var identity: [u8] = []
     for field in ["directory-tldr-expected/v3", sha256_u8_hex(bytes), variant,
             "{expected.source_epoch.driver_identity}", "{expected.source_epoch.generation}"]:
@@ -100,11 +100,11 @@ fn directory_tldr_pin_cleanup_identity_v2(pin: DirectoryTldrPinnedGenerationV2) 
 
 fn directory_tldr_pin_view_identity_v2(pin: DirectoryTldrPinnedGenerationV2) -> text?:
     val compared = package_init_directory_compare_v3(pin.view.package, pin.view.package, pin.view.facts)
-    if compared == nil or pin.view.output_digest != compared!.output_digest: return nil
+    if compared.is_none() or pin.view.output_digest != compared!.output_digest: return None
     val variant = config_variant_encode_v1(pin.variant)
-    if variant == "" or config_variant_digest_v1(pin.variant) != pin.semantic_variant_identity: return nil
+    if variant == "" or config_variant_digest_v1(pin.variant) != pin.semantic_variant_identity: return None
     val package_bytes = package_init_tld_encode_v3(pin.view.package)
-    if package_bytes.len() == 0 or package_bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2: return nil
+    if package_bytes.len() == 0 or package_bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2: return None
     var bytes: [u8] = []
     for field in ["directory-pin-view/v3", sha256_u8_hex(package_bytes), variant,
             pin.view.output_digest, pin.generation, pin.pin_id, pin.canonical_bytes_digest]:
@@ -114,14 +114,14 @@ fn directory_tldr_pin_view_identity_v2(pin: DirectoryTldrPinnedGenerationV2) -> 
 pub fn directory_tldr_frame_view_v2(object: PhysicalTldObjectV1,
         expected: DirectoryTldrExpectedV2) -> DirectoryTldrViewV2?:
     if not directory_tldr_frame_bounded_v2(object) or
-            directory_tldr_expected_identity_v2(expected) == nil or
-            not package_init_tld_physical_binding_valid_v1(object): return nil
+            directory_tldr_expected_identity_v2(expected).is_none() or
+            not package_init_tld_physical_binding_valid_v1(object): return None
     for section in object.header.sections:
         if section.kind == "package_init_v1":
             val decoded = package_init_tld_decode_v3(object.canonical_sections[section.section_index])
-            if not decoded.ok or decoded.value == nil: return nil
+            if not decoded.ok or decoded.value.is_none(): return None
             return package_init_directory_compare_v3(decoded.value!, expected.package, expected.facts)
-    nil
+    None
 
 # Serialization is storage transport around the existing complete physical
 # frame, not an alternate PackageInit codec. Canonical base64 rejects lenient
@@ -164,9 +164,9 @@ pub class DirectoryTldrStoreV2:
         if driver_identity <= 0 or not shared_generation_prepare_root_v2(root):
             return Err("directory-store-unavailable")
         val owner = shared_generation_process_owner_v2()
-        if owner == nil: return Err("directory-store-process-unavailable")
+        if owner.is_none(): return Err("directory-store-process-unavailable")
         val incarnation = shared_generation_store_incarnation_v2(root, owner!)
-        if incarnation == nil: return Err("directory-store-incarnation-unavailable")
+        if incarnation.is_none(): return Err("directory-store-incarnation-unavailable")
         Ok(DirectoryTldrStoreV2(root: root, process_owner: owner!, incarnation: incarnation!,
             driver_identity: driver_identity, next_serial: 1, busy: false,
             flights: CacheSingleFlightV1.create(), held: {}, observed_generation: ""))
@@ -181,7 +181,7 @@ pub class DirectoryTldrStoreV2:
         if not self.held.contains_key(pin.pin_id): return false
         val held = self.held[pin.pin_id]
         val identity = directory_tldr_pin_view_identity_v2(pin)
-        if identity == nil or identity! != held.canonical_view_identity: return false
+        if identity.is_none() or identity! != held.canonical_view_identity: return false
         shared_generation_lease_matches_v2(held.root, held.lease_id, pin.generation, self.process_owner)
 
     me release_pin(pin: DirectoryTldrPinnedGenerationV2) -> Result<(), text>:
@@ -200,7 +200,7 @@ pub class DirectoryTldrStoreV2:
     me read_pin(expected: DirectoryTldrExpectedV2) -> Result<DirectoryTldrPinnedGenerationV2, text>:
         self.observed_generation = ""
         if not self.busy or expected.source_epoch.driver_identity != self.driver_identity or
-                directory_tldr_expected_identity_v2(expected) == nil: return Err("directory-expected-unavailable")
+                directory_tldr_expected_identity_v2(expected).is_none(): return Err("directory-expected-unavailable")
         val root = "{self.root}/{directory_tldr_scope_v2(expected)}"
         if not shared_generation_prepare_root_v2(root): return Err("directory-store-unavailable")
         val pin_id = self.allocate_id()?
@@ -219,7 +219,7 @@ pub class DirectoryTldrStoreV2:
             if quarantined.is_ok(): self.observed_generation = ""
             return Err(bytes.unwrap_err())
         val decoded = physical_tld_object_decode_bounded_v1(bytes.unwrap(), 4096, DIRECTORY_TLDR_FRAME_LIMIT_V2)
-        if not decoded.ok or decoded.value == nil:
+        if not decoded.ok or decoded.value.is_none():
             val _ = shared_generation_release_v1(root, pin_id)
             val quarantined = shared_generation_quarantine_v2(root, read.generation)
             if quarantined.is_ok(): self.observed_generation = ""
@@ -231,14 +231,14 @@ pub class DirectoryTldrStoreV2:
             if quarantined.is_ok(): self.observed_generation = ""
             return Err("directory-physical-binding-invalid")
         val view = directory_tldr_frame_view_v2(decoded.value!, expected)
-        if view == nil:
+        if view.is_none():
             val _ = shared_generation_release_v1(root, pin_id)
             return Err("directory-stale-or-incompatible")
         val pin = DirectoryTldrPinnedGenerationV2(view: view!, generation: read.generation,
             pin_id: pin_id, canonical_bytes_digest: sha256_u8_hex(bytes.unwrap()),
             variant: expected.variant, semantic_variant_identity: config_variant_digest_v1(expected.variant))
         val view_identity = directory_tldr_pin_view_identity_v2(pin)
-        if view_identity == nil:
+        if view_identity.is_none():
             val _ = shared_generation_release_v1(root, pin_id)
             return Err("directory-pin-view-invalid")
         self.held[pin_id] = DirectoryTldrHeldPinV2(root: root, lease_id: pin_id,
@@ -248,7 +248,7 @@ pub class DirectoryTldrStoreV2:
     me publish(expected: DirectoryTldrExpectedV2, object: PhysicalTldObjectV1,
             expected_parent: text) -> Result<text, text>:
         if not self.busy or expected.source_epoch.driver_identity != self.driver_identity or
-                directory_tldr_frame_view_v2(object, expected) == nil: return Err("directory-candidate-invalid")
+                directory_tldr_frame_view_v2(object, expected).is_none(): return Err("directory-candidate-invalid")
         val bytes = physical_tld_object_encode_v1(object)
         if bytes.len() == 0 or bytes.len() > DIRECTORY_TLDR_FRAME_LIMIT_V2: return Err("directory-frame-bounds")
         val payload = directory_tldr_transport_v2(bytes, config_variant_digest_v1(expected.variant))

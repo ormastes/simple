@@ -19,26 +19,26 @@ fn _initializer_category_same_v1(a: DirectoryCategoryProjectionV2, b: DirectoryC
 fn _initializer_objects_current_v1(rows: [MirInitializerObjectReceiptV1]) -> bool:
     for row in rows:
         val digest = file_hash_sha256(row.object_path)
-        if digest == nil or digest.unwrap() != row.object_digest: return false
+        if digest.is_none() or digest.unwrap() != row.object_digest: return false
     true
 
 fn _initializer_link_rows_v1(ctx: CompileContext, objects: [text], options: NativeLinkOptions) -> [MirInitializerObjectReceiptV1]?:
-    if objects.len() == 0 or ctx.initializer_object_receipts_v1.len() == 0: return nil
-    if options.target_triple != "" and options.target_triple != ctx.native_target: return nil
+    if objects.len() == 0 or ctx.initializer_object_receipts_v1.len() == 0: return None
+    if options.target_triple != "" and options.target_triple != ctx.native_target: return None
     var by_path: Dict<text, MirInitializerObjectReceiptV1> = {}
     for module_name in ctx.initializer_object_receipts_v1.keys():
         val row = ctx.initializer_object_receipts_v1[module_name]
-        if row.module_identity != module_name or row.object_path == "" or by_path.has(row.object_path): return nil
+        if row.module_identity != module_name or row.object_path == "" or by_path.has(row.object_path): return None
         by_path[row.object_path] = row
     var selected: [MirInitializerObjectReceiptV1] = []
     var modules: Dict<text, bool> = {}
     var sources: Dict<text, bool> = {}
     var image = ""
     for path in objects:
-        if not by_path.has(path): return nil
+        if not by_path.has(path): return None
         val row = by_path[path]
-        if modules.has(row.module_identity) or sources.has(row.source_path): return nil
-        if not ctx.directory_category_projections_v2.has(row.source_path): return nil
+        if modules.has(row.module_identity) or sources.has(row.source_path): return None
+        if not ctx.directory_category_projections_v2.has(row.source_path): return None
         if not directory_category_projection_valid_v2(row.category) or
                 not _initializer_category_same_v1(row.category, ctx.directory_category_projections_v2[row.source_path]) or
                 row.target_triple != ctx.native_target or
@@ -46,28 +46,28 @@ fn _initializer_link_rows_v1(ctx: CompileContext, objects: [text], options: Nati
                 row.category.source_digest != row.source_digest or row.category.canonical_path != row.source_path or
                 row.bodies.plan.module_identity != row.module_identity or
                 not three_payload_contract_digest_valid_v1(row.object_digest) or
-                not three_payload_contract_digest_valid_v1(row.executing_image_digest): return nil
-        if image != "" and image != row.executing_image_digest: return nil
+                not three_payload_contract_digest_valid_v1(row.executing_image_digest): return None
+        if image != "" and image != row.executing_image_digest: return None
         image = row.executing_image_digest
         modules[row.module_identity] = true
         sources[row.source_path] = true
         selected = selected.push(row)
     val observed = ctx.kernel_image_digest_provider()
-    if observed.is_err() or observed.unwrap().sha256 != image: return nil
-    if not _initializer_objects_current_v1(selected): return nil
+    if observed.is_err() or observed.unwrap().sha256 != image: return None
+    if not _initializer_objects_current_v1(selected): return None
     Some(selected)
 
 pub fn native_link_with_initializer_capture_v1(ctx: CompileContext, objects: [text],
         output: text, options: NativeLinkOptions) -> Result<text, text>:
-    ctx.initializer_build_receipt_v1 = nil
+    ctx.initializer_build_receipt_v1 = None
     val selected = _initializer_link_rows_v1(ctx, objects, options)
-    if selected == nil: return native_link_with_receipt_v1(objects, output, options)
+    if selected.is_none(): return native_link_with_receipt_v1(objects, output, options)
     # Fresh typed backend observation only. A retained v1/v2 record cannot fill
     # the startup slot, even if its bytes and current key happen to agree.
     val linked = native_link_with_receipt_v2(objects, output, options, true)
     if linked.is_err(): return Err(linked.unwrap_err())
     val artifact = linked.unwrap()
-    if artifact.startup == nil: return Ok(artifact.output_path)
+    if artifact.startup.is_none(): return Ok(artifact.output_path)
     val rows = selected.unwrap()
     if not _initializer_objects_current_v1(rows): return Ok(artifact.output_path)
     var expected: [text] = []
@@ -81,7 +81,7 @@ pub fn native_link_with_initializer_capture_v1(ctx: CompileContext, objects: [te
     if not native_initializer_symbol_sets_match_v2(expected, startup.ordered_init_symbols):
         return Ok(artifact.output_path)
     val output_digest = file_hash_sha256(artifact.output_path)
-    if output_digest == nil or not three_payload_contract_digest_valid_v1(output_digest.unwrap()):
+    if output_digest.is_none() or not three_payload_contract_digest_valid_v1(output_digest.unwrap()):
         return Ok(artifact.output_path)
     ctx.initializer_build_receipt_v1 = Some(MirInitializerBuildReceiptV1(
         ordered_objects: rows, startup: startup, output_path: artifact.output_path,

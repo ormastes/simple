@@ -49,19 +49,19 @@ fn _link_receipt_field_v2(line: text, prefix: text) -> text:
 
 pub fn native_link_receipt_render_v2(key: text, output_digest: text,
         object_digests: [text], startup: NativeInitializerStartupV2) -> text?:
-    if not _link_receipt_inputs_v2(key, output_digest, object_digests): return nil
+    if not _link_receipt_inputs_v2(key, output_digest, object_digests): return None
     if not three_payload_contract_digest_valid_v1(startup.entry_source_digest) or
-            not three_payload_contract_digest_valid_v1(startup.entry_object_digest): return nil
-    if startup.ordered_init_symbols.len() > NATIVE_LINK_RECEIPT_MAX_ROWS_V2: return nil
+            not three_payload_contract_digest_valid_v1(startup.entry_object_digest): return None
+    if startup.ordered_init_symbols.len() > NATIVE_LINK_RECEIPT_MAX_ROWS_V2: return None
     # Bound before constructing lines or joining. Fixed fields use <1024 bytes;
     # object rows use 80 each; init rows use symbol length plus 14.
     var budget: i64 = 1024 + object_digests.len() * 80
     var seen: Dict<text, bool> = {}
     for symbol in startup.ordered_init_symbols:
-        if not _link_receipt_symbol_v2(symbol) or seen.contains_key(symbol): return nil
+        if not _link_receipt_symbol_v2(symbol) or seen.contains_key(symbol): return None
         seen[symbol] = true
         budget = budget + symbol.byte_len() + 14
-        if budget > NATIVE_LINK_RECEIPT_MAX_BYTES_V2: return nil
+        if budget > NATIVE_LINK_RECEIPT_MAX_BYTES_V2: return None
     var lines: [text] = ["simple-link-receipt: 2", "key: " + key,
         "output-sha256: " + output_digest, "object-count: {object_digests.len()}"]
     # Repeated object hashes are valid and remain in exact link order.
@@ -74,15 +74,15 @@ pub fn native_link_receipt_render_v2(key: text, output_digest: text,
         lines = lines.push("init-symbol: " + symbol)
     val body = lines.join("\n") + "\n"
     val content = body + "receipt-sha256: " + sha256_text(body) + "\n"
-    if content.byte_len() > NATIVE_LINK_RECEIPT_MAX_BYTES_V2: return nil
+    if content.byte_len() > NATIVE_LINK_RECEIPT_MAX_BYTES_V2: return None
     Some(content)
 
 # Only version 2 can return startup metadata. Legacy v1 ordinary link reuse
 # remains in its owner and must not reinterpret absence as an empty init list.
 pub fn native_link_receipt_startup_read_v2(content: text, expected_key: text,
         expected_output_digest: text, expected_object_digests: [text]) -> NativeInitializerStartupV2?:
-    if not _link_receipt_inputs_v2(expected_key, expected_output_digest, expected_object_digests): return nil
-    if content.byte_len() > NATIVE_LINK_RECEIPT_MAX_BYTES_V2: return nil
+    if not _link_receipt_inputs_v2(expected_key, expected_output_digest, expected_object_digests): return None
+    if content.byte_len() > NATIVE_LINK_RECEIPT_MAX_BYTES_V2: return None
     # Bound split allocation too: a small byte record can contain millions
     # of empty lines. Scan without allocation before materializing the rows.
     var newline_count = 0
@@ -90,25 +90,25 @@ pub fn native_link_receipt_startup_read_v2(content: text, expected_key: text,
     while byte_index < content.byte_len():
         if content.byte_at(byte_index) == 10u8:
             newline_count = newline_count + 1
-            if newline_count > NATIVE_LINK_RECEIPT_MAX_ROWS_V2 * 2 + 8: return nil
+            if newline_count > NATIVE_LINK_RECEIPT_MAX_ROWS_V2 * 2 + 8: return None
         byte_index = byte_index + 1
     val lines = content.split("\n")
     val objects = expected_object_digests.len()
-    if lines.len() < objects + 9: return nil
+    if lines.len() < objects + 9: return None
     if lines[0] != "simple-link-receipt: 2" or lines[1] != "key: " + expected_key or
             lines[2] != "output-sha256: " + expected_output_digest or
-            lines[3] != "object-count: {objects}": return nil
+            lines[3] != "object-count: {objects}": return None
     var i = 0
     while i < objects:
-        if lines[4 + i] != "object-sha256: " + expected_object_digests[i]: return nil
+        if lines[4 + i] != "object-sha256: " + expected_object_digests[i]: return None
         i = i + 1
     val count = _link_receipt_count_v2(_link_receipt_field_v2(lines[objects + 6], "init-count: "))
-    if count < 0 or lines.len() != objects + count + 9: return nil
+    if count < 0 or lines.len() != objects + count + 9: return None
     var symbols: [text] = []
     i = 0
     while i < count:
         val symbol = _link_receipt_field_v2(lines[objects + 7 + i], "init-symbol: ")
-        if not _link_receipt_symbol_v2(symbol): return nil
+        if not _link_receipt_symbol_v2(symbol): return None
         symbols = symbols.push(symbol)
         i = i + 1
     val startup = NativeInitializerStartupV2(ordered_init_symbols: symbols,
@@ -118,6 +118,6 @@ pub fn native_link_receipt_startup_read_v2(content: text, expected_key: text,
     # final newline and complete consumption, with one format implementation.
     val canonical = native_link_receipt_render_v2(expected_key, expected_output_digest,
         expected_object_digests, startup)
-    if canonical == nil: return nil
-    if canonical.unwrap() != content: return nil
+    if canonical.is_none(): return None
+    if canonical.unwrap() != content: return None
     Some(startup)
