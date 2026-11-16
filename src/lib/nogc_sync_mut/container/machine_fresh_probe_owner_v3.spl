@@ -1,0 +1,251 @@
+# Closed probe call union, dispatched only by the ORIGINAL private authority.
+# CpuV2 meanings remain unchanged; selected compiled probes are an opt-in V3.
+use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.{machine_fresh_workload_command_v2, machine_fresh_workload_request_v2}
+use std.nogc_sync_mut.container.machine_fresh_probe_custody_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workspace_workflow_v3.machine_workspace_workflow_step_v3
+use std.nogc_sync_mut.container.machine_fresh_probe_effects_v3.*
+use std.nogc_sync_mut.container.machine_fresh_probe_record_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.{workload_publish_v3, machine_fresh_workload_begin_v3, machine_fresh_workload_progress_v3}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.io.machine_storage_owner_v1.MachineStorageOwnerV1
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
+use std.nogc_sync_mut.io.profiled_combined_capture_v1.ProfiledCombinedCaptureEvidenceV1
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerActionProjectionV2}
+use std.common.contracts.container.execution_configuration_v1.container_execution_configuration_decode_v1
+use std.common.contracts.container.linux_fresh_workload_probe_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
+use std.common.contracts.container.runtime_v1.RuntimeOperationV1
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
+
+pub enum MachineFreshProbeCallV3:
+    Select(ContainerExecutionRequestV2, ProviderCliProviderV1, i64)
+    Profile(ProviderCliProviderV1, i64)
+    Pending
+    WorkflowBegin(ContainerWorkspaceActionV3, Option<ContainerEffectDeadlineV1>)
+    WorkflowStep
+    WorkflowCancel
+    Start(Option<ContainerEffectDeadlineV1>)
+    StartStep(bool)
+    Begin(LinuxFreshWorkloadProbeActionV3)
+    Step(LinuxFreshWorkloadProbeActionV3, bool)
+    CleanupBegin(LinuxFreshWorkloadActionV2)
+    CleanupStep(LinuxFreshWorkloadActionV2, bool)
+    Settle
+    Projection
+    Evidence
+
+pub enum MachineFreshProbeReplyV3:
+    Completion(Result<(), text>)
+    Progress(Result<bool, text>)
+    Evidence(Result<ProfiledCombinedCaptureEvidenceV1, text>)
+    Operation(Result<Option<RuntimeOperationV1>, text>)
+    Projection(Result<ContainerActionProjectionV2, text>)
+
+pub fn machine_fresh_probe_rejected_v3(call: MachineFreshProbeCallV3, reason: text) -> MachineFreshProbeReplyV3:
+    match call:
+        case MachineFreshProbeCallV3.Step(_, _): MachineFreshProbeReplyV3.Progress(Err(reason))
+        case MachineFreshProbeCallV3.StartStep(_): MachineFreshProbeReplyV3.Progress(Err(reason))
+        case MachineFreshProbeCallV3.Pending: MachineFreshProbeReplyV3.Progress(Err(reason))
+        case MachineFreshProbeCallV3.CleanupStep(_, _): MachineFreshProbeReplyV3.Progress(Err(reason))
+        case MachineFreshProbeCallV3.Evidence: MachineFreshProbeReplyV3.Evidence(Err(reason))
+        case MachineFreshProbeCallV3.WorkflowStep: MachineFreshProbeReplyV3.Operation(Err(reason))
+        case MachineFreshProbeCallV3.Projection: MachineFreshProbeReplyV3.Projection(Err(reason))
+        case _: MachineFreshProbeReplyV3.Completion(Err(reason))
+
+pub(package) fn machine_fresh_probe_cleanup_call_v3(call: MachineFreshProbeCallV3) -> bool:
+    match call:
+        case MachineFreshProbeCallV3.Step(_, true): true
+        case MachineFreshProbeCallV3.StartStep(true): true
+        case MachineFreshProbeCallV3.CleanupStep(_, true): true
+        case MachineFreshProbeCallV3.WorkflowCancel: true
+        case MachineFreshProbeCallV3.Pending: true
+        case _: false
+
+pub(package) fn machine_fresh_probe_dispatch_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64, call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+    match call:
+        case MachineFreshProbeCallV3.Select(request, provider, index):
+            MachineFreshProbeReplyV3.Completion(machine_fresh_probe_select_owned_v3(storage, state, request, provider, index))
+        case MachineFreshProbeCallV3.Pending:
+            MachineFreshProbeReplyV3.Progress(machine_fresh_probe_pending_v3(state))
+        case MachineFreshProbeCallV3.Profile(provider, index):
+            MachineFreshProbeReplyV3.Completion(machine_fresh_probe_profile_owned_v3(state, provider, index))
+        case MachineFreshProbeCallV3.WorkflowBegin(action, deadline):
+            MachineFreshProbeReplyV3.Completion(machine_fresh_probe_workflow_begin_v3(state, action, deadline))
+        case MachineFreshProbeCallV3.WorkflowStep:
+            MachineFreshProbeReplyV3.Operation(machine_fresh_probe_workflow_step_v3(storage, custody, state, generation))
+        case MachineFreshProbeCallV3.WorkflowCancel:
+            MachineFreshProbeReplyV3.Completion(machine_fresh_probe_workflow_cancel_v3(state))
+        case MachineFreshProbeCallV3.Start(deadline):
+            MachineFreshProbeReplyV3.Completion(machine_fresh_probe_start_v3(storage, custody, state, generation, deadline))
+        case MachineFreshProbeCallV3.StartStep(cancel):
+            MachineFreshProbeReplyV3.Progress(machine_fresh_probe_start_step_v3(storage, custody, state, cancel))
+        case MachineFreshProbeCallV3.Begin(action):
+            MachineFreshProbeReplyV3.Completion(machine_fresh_probe_begin_v3(storage, custody, state, generation, action))
+        case MachineFreshProbeCallV3.Step(action, cancel):
+            MachineFreshProbeReplyV3.Progress(machine_fresh_probe_step_v3(storage, state, action, cancel))
+        case MachineFreshProbeCallV3.CleanupBegin(action):
+            MachineFreshProbeReplyV3.Completion(machine_fresh_probe_cleanup_begin_v3(storage, custody, state, generation, action))
+        case MachineFreshProbeCallV3.CleanupStep(action, cancel):
+            MachineFreshProbeReplyV3.Progress(machine_fresh_probe_cleanup_step_v3(storage, custody, state, action, cancel))
+        case MachineFreshProbeCallV3.Settle:
+            MachineFreshProbeReplyV3.Completion(machine_fresh_probe_settle_v3(storage, custody, state))
+        case MachineFreshProbeCallV3.Projection:
+            MachineFreshProbeReplyV3.Projection(machine_fresh_probe_projection_v3(state))
+        case MachineFreshProbeCallV3.Evidence:
+            MachineFreshProbeReplyV3.Evidence(machine_fresh_probe_evidence_owned_v3(state))
+
+fn machine_fresh_probe_select_owned_v3(storage: MachineStorageOwnerV1, state: MachineFreshWorkloadLifecycleV2,
+        request: ContainerExecutionRequestV2, provider: ProviderCliProviderV1, index: i64) -> Result<(), text>:
+    val record = state.record_v2()?
+    if record.request != request: return Err("machine-probe-original-request-mismatch")
+    val selected = machine_fresh_probe_select_v3(record, provider, index)?
+    # A single initial request plus this complete fixed finite profile fits
+    # below the original 64-segment horizon, including cleanup/settlement room.
+    # Successor chains require their own linked preflight, never this reset.
+    if state.history_v2()?.segments.len() != 1: return Err("machine-probe-initial-history-required")
+    val staged = state.install_probe_v3(selected)?
+    val rows = machine_fresh_probe_selection_entries_v3(record, provider, index, time_sample_unix_micros_or_failure() / 1000)?
+    val committed = workload_publish_v3(storage, state, rows)?
+    state.capture_probe_v3(selected.selection_published_v3()?)
+    Ok(())
+
+fn machine_fresh_probe_evidence_owned_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<ProfiledCombinedCaptureEvidenceV1, text>:
+    val record = state.record_v2()?
+    val completed = state.action_state_v2("probe-logs")?
+    if completed.state != "completed": return Err("machine-probe-logs-publication-required")
+    state.probe_custody_v3()?.evidence_v3()
+
+fn machine_fresh_probe_start_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64, deadline: Option<ContainerEffectDeadlineV1>) -> Result<(), text>:
+    val selected = state.probe_custody_v3()?.admitted_v3()?
+    val unlocked = state.workflow_legacy_idle_v3()?
+    # Start helper completion is NOT a running/AgentObserved receipt. A fast
+    # finite probe is followed by actual Wait/log capture and cohort absence.
+    machine_fresh_workload_begin_v3(storage, custody, state, generation,
+        LinuxFreshWorkloadActionV2.Start, "start", deadline)
+
+fn machine_fresh_probe_start_step_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        cancel: bool) -> Result<bool, text>:
+    val selected = state.probe_custody_v3()?.admitted_v3()?
+    val pending = state.helper_continuation_v3()?
+    if pending.1 != "start": return Err("machine-probe-start-continuation-mismatch")
+    if cancel:
+        val retained = state.unknown_v2("machine-probe-start-helper-cancelled")?
+        val retired = state.retire_helper_v2()?
+        return Err("machine-probe-start-helper-cancelled")
+    val progressed = machine_fresh_workload_progress_v3(storage, custody, state)?
+    Ok(progressed.is_some())
+
+fn machine_fresh_probe_workflow_begin_v3(state: MachineFreshWorkloadLifecycleV2,
+        action: ContainerWorkspaceActionV3, deadline: Option<ContainerEffectDeadlineV1>) -> Result<(), text>:
+    val selected = state.probe_custody_v3()?.admitted_v3()?
+    if not [ContainerWorkspaceActionV3.Prepare, ContainerWorkspaceActionV3.Create,
+            ContainerWorkspaceActionV3.Configuration, ContainerWorkspaceActionV3.InputConfiguration].contains(action):
+        return Err("machine-probe-workflow-action-unsupported")
+    state.workflow_begin_v3(action, deadline)
+
+fn machine_fresh_probe_workflow_step_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64) -> Result<Option<RuntimeOperationV1>, text>:
+    val selected = state.probe_custody_v3()?.admitted_v3()?
+    val active = state.workflow_current_v3()?
+    if not [ContainerWorkspaceActionV3.Prepare, ContainerWorkspaceActionV3.Create,
+            ContainerWorkspaceActionV3.Configuration, ContainerWorkspaceActionV3.InputConfiguration].contains(active.0):
+        return Err("machine-probe-workflow-action-unsupported")
+    # SAME existing bounded cursor and V2 oracle; no second workflow machine.
+    machine_workspace_workflow_step_v3(storage, custody, state, generation)
+
+fn machine_fresh_probe_workflow_cancel_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    val selected = state.probe_custody_v3()?.admitted_v3()?
+    val cancelled = state.workflow_cancel_v3()?
+    val retained = state.unknown_v2("machine-probe-workflow-cancelled")?
+    # Cancels/drains only the actual finite helper, never kills the payload,
+    # launches a future stage, publishes absence or refunds any charge.
+    state.retire_helper_v2()
+
+fn machine_fresh_probe_settle_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    if state.settled_v2()?: return Ok(())
+    val record = state.record_v2()?
+    val logs = state.probe_custody_v3()?.evidence_v3()?
+    for name in ["probe-wait", "probe-logs", "remove", "absence"]:
+        if state.action_state_v2(name)?.state != "completed": return Err("machine-probe-retirement-actions-incomplete")
+    if state.helper_pending_v3()?: return Err("machine-probe-helper-retirement-required")
+    val command = LinuxFreshWorkloadProbeCommandV3(workload: machine_fresh_workload_command_v2(record,
+        LinuxFreshWorkloadActionV2.Inspect, state.native_id_v2()?)?, action: LinuxFreshWorkloadProbeActionV3.Logs)
+    # This is actual whole-enforced-cohort absence, not a fabricated running
+    # Subject/namespace snapshot when the finite probe exited before capture.
+    val closure = custody.observe_probe_absence_v3(command)?
+    val epoch = state.history_v2()?.epoch
+    if (closure.assurance != "enforced-probe-cohort-empty-v3" or
+            closure.request_binding_digest != linux_fresh_workload_probe_binding_v3(command)? or
+            closure.native_id != state.native_id_v2()? or closure.partition_identity_digest != epoch.partition_identity_digest or
+            closure.store_identity_digest != epoch.store_identity_digest or closure.native_machine_id != record.scope.native_machine_id or
+            closure.native_boot_id != record.scope.boot_id or closure.owner_generation != record.scope.provider_generation or
+            closure.excluded_process_identity_digest != epoch.process_identity_digest or closure.service_uid != epoch.service_uid or
+            closure.sample_started_monotonic_ns <= 0 or closure.sample_finished_monotonic_ns < closure.sample_started_monotonic_ns):
+        return Err("machine-probe-cohort-absence-binding")
+    val rows = machine_fresh_probe_settlement_entries_v3(record, state.action_state_v2("absence")?, closure,
+        time_sample_unix_micros_or_failure() / 1000)?
+    # Every predicate and exact row constructor precedes the reserved phase and
+    # same-writer release CAS. Unknown publication keeps the charge retained.
+    val reserved = state.reserve_probe_settlement_v3()?
+    val published = workload_publish_v3(storage, state, rows)?
+    state.mark_settled_v2()
+
+fn machine_fresh_probe_cleanup_name_v3(action: LinuxFreshWorkloadActionV2) -> Result<text, text>:
+    match action:
+        case LinuxFreshWorkloadActionV2.Stop: Ok("stop")
+        case LinuxFreshWorkloadActionV2.Remove: Ok("remove")
+        case LinuxFreshWorkloadActionV2.Absence: Ok("absence")
+        case _: Err("machine-probe-cleanup-action")
+
+fn machine_fresh_probe_cleanup_begin_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        generation: i64, action: LinuxFreshWorkloadActionV2) -> Result<(), text>:
+    val selected = state.probe_custody_v3()?.admitted_v3()?
+    val unlocked = state.workflow_legacy_idle_v3()?
+    val name = machine_fresh_probe_cleanup_name_v3(action)?
+    machine_fresh_workload_begin_v3(storage, custody, state, generation, action, name, nil)
+
+fn machine_fresh_probe_cleanup_step_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
+        action: LinuxFreshWorkloadActionV2, cancel: bool) -> Result<bool, text>:
+    val name = machine_fresh_probe_cleanup_name_v3(action)?
+    val pending = state.helper_continuation_v3()?
+    if pending.1 != name: return Err("machine-probe-cleanup-continuation-mismatch")
+    if cancel:
+        val retained = state.unknown_v2("machine-probe-cleanup-helper-cancelled")?
+        val retired = state.retire_helper_v2()?
+        return Err("machine-probe-cleanup-helper-cancelled")
+    val progressed = machine_fresh_workload_progress_v3(storage, custody, state)?
+    Ok(progressed.is_some())
+
+fn machine_fresh_probe_projection_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<ContainerActionProjectionV2, text>:
+    val selected = state.probe_custody_v3()?.admitted_v3()?
+    val record = state.record_v2()?
+    val raw = state.configuration_v2(LinuxFreshWorkloadActionV2.ConfigurationAfter, state.history_v2()?.epoch)?
+    val actual = container_execution_configuration_decode_v1(raw)?
+    val request = machine_fresh_workload_request_v2(record.scope, record.request)?
+    val argv = request.command + request.args
+    if actual.primary_argv != argv or actual.mounts.len() != 0 or actual.working_directory == "":
+        return Err("machine-probe-actual-command-or-directory-unresolved")
+    # The first CPU profile inherits image cwd; resolve only from the same
+    # actual completed container/image/container query, never caller text.
+    Ok(ContainerActionProjectionV2(argv: argv, working_directory: actual.working_directory, mounts: []))
+
+fn machine_fresh_probe_profile_owned_v3(state: MachineFreshWorkloadLifecycleV2,
+        provider: ProviderCliProviderV1, index: i64) -> Result<(), text>:
+    state.probe_custody_v3()?.profile_match_v3(provider, index, state.record_v2()?.request.plan.request_digest)
+
+fn machine_fresh_probe_pending_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<bool, text>:
+    # Polling metadata only; no caller consumes this bool as retirement proof.
+    # Settlement separately validates exact native/capture/WAL obligations.
+    Ok(state.probe_custody_v3()?.retained_v3() or state.helper_pending_v3()?)

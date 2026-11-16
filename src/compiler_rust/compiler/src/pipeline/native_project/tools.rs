@@ -689,6 +689,23 @@ fn build_c_runtime_library(
         // and has ZERO overlap with the 1,302 symbols defined by the other
         // members of this list.
         "runtime_backend_plugin.c",
+        // Local Unix byte-connection owner (18 rt_local_unix_*_v1 leaves) and
+        // the retained private-credential owner (6 rt_retained_private_
+        // credential_*_v1). Same never-an-archive-member class as
+        // runtime_terminal.c above: both TUs define every leaf on every host
+        // (Linux/Darwin real, elsewhere an exact unsupported status), but this
+        // list never carried them, so the Windows smux_client link stubbed all
+        // 24 as abort-on-call (smux_client_native_windows_link_stubs_2026-11-15).
+        // Measured collision-free: the only undefined references are the
+        // rt_array_*/rt_value_int owners already in runtime_native.c.
+        "runtime_socket_nonblock.c",
+        "runtime_retained_private_credential_v1.c",
+        "runtime_local_unix_v1.h",
+        "runtime_local_unix_transfer_v1.h",
+        "runtime_local_unix_bridge_v1.h",
+        "runtime_process_tree.h",
+        "runtime_retained_private_credential_v1.h",
+        "runtime_workspace_storage_v1.h",
         "runtime_value.h",
         "runtime.h",
         "runtime_core_intrinsics_impl.h",

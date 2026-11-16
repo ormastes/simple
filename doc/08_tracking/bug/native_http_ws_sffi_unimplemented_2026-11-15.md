@@ -101,3 +101,13 @@ interpreter backing, so the configured-client header path is exercised natively
 only (interpreted lane checks the recorded headers on the wire via `http_request`).
 Verified 2026-11-15: interpreted spec `Results: 4 total, 4 passed, 0 failed`; native probe (seed-vtable native-build of both fixtures, real configured client) all lines 200 incl. `X-Lane-Probe: probe-42` and the multipart payload.
 `unbacked_extern_baseline.txt` still lists the 8 names: the census cannot run on this Windows host (seed exe has no COFF symbol table), so the reviewed regeneration is pending on a Linux host.
+
+## Update 2026-11-16 — bridge_worker request-path spec
+`test/01_unit/app/llm_caret/messaging/bridge_worker_http_delivery_spec.spl` (probe
+`fixtures/bridge_worker_http_probe.shs interp|native`) runs `bridge_worker --once`
+against a loopback server built on `http_server_core`. Native build with seed-vtable
+has no stub line (`Build complete: 2 compiled, 182 cached, 0 failed`). The native binary
+prints `{"handled":0,"failed":0,"delivered":1,"delivery_failed":1}`.
+The spec also found that `classify_http_delivery` treated the `-1` transport-failure
+status as permanent, so a refused connection was dead-lettered on its first attempt.
+That is fixed in `http_delivery.spl`.

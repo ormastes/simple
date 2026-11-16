@@ -1,0 +1,39 @@
+# System spec: the native C runtime backs `spl_wffi_call_i64_with_bytes`.
+#
+# Before this, the Rust runtime and interpreter defined the byte-descriptor
+# WFFI facade but `src/runtime/runtime_native.c` did not, so any native build
+# that reached it (llm_caret via the chrome render module) failed closed with
+# "1 internal Simple symbol(s) have no implementation ...".
+#
+# Needs SIMPLE_BINARY = a compiler that can `native-build`.
+
+use std.spec.*
+use std.io_runtime.{process_run_timeout, env_get, file_exists, file_delete, mkdir_p}
+
+val WFFI_FIXTURE = "test/fixtures/wffi_with_bytes/main.spl"
+val WFFI_BINARY = "build/wffi_with_bytes_native_spec.exe"
+
+describe "native spl_wffi_call_i64_with_bytes":
+    """
+    As a library author calling a C provider with a byte buffer, I want the
+    native build to link and pass my bytes as (ptr, len) to the callee, so a
+    native program behaves exactly like the interpreter.
+    """
+    it "links and passes the byte window as pointer and length":
+        val compiler = env_get("SIMPLE_BINARY") ?? ""
+        expect(compiler.len() > 0).to_be(true)
+        expect(mkdir_p("build")).to_be(true)
+        if file_exists(WFFI_BINARY):
+            expect(file_delete(WFFI_BINARY)).to_be(true)
+        val (build_out, build_err, build_code) = process_run_timeout(compiler, [
+            "native-build", WFFI_FIXTURE, "-o", WFFI_BINARY
+        ], 1200000)
+        expect(build_out + build_err).to_not_contain("have no implementation")
+        expect(build_code).to_equal(0)
+        val (run_out, _run_err, run_code) = process_run_timeout(WFFI_BINARY, [], 60000)
+        expect(run_code).to_equal(0)
+        expect(run_out).to_contain("null-fptr -> 0")
+        expect(run_out).to_contain("strnlen resolved -> true")
+        expect(run_out).to_contain("strnlen whole -> 2")
+        expect(run_out).to_contain("strnlen tail -> 1")
+        expect(run_out).to_contain("oob -> 0")

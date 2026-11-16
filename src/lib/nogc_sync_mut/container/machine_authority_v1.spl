@@ -2,6 +2,7 @@
 # This factory accepts no caller root, policy, budget, principal or observation.
 # SOURCE_ONLY: native journal export admission and Windows execution pending.
 use std.common.contracts.container.machine_policy_v1.*
+use std.common.contracts.container.linux_cgroup_stats_v1.LinuxFreshWorkloadStatsCountersV1
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.machine_storage_owner_v1.*
 use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
@@ -10,12 +11,28 @@ use std.nogc_sync_mut.container.machine_authority_cleanup_v1.*
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_decode_v1
 use std.nogc_sync_mut.container.machine_claim_record_v1.*
 use std.nogc_sync_mut.container.machine_authority_projection_v1.*
+use std.nogc_sync_mut.container.machine_authority_storage_prepare_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workspace_source_transition_v3.*
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_sync_mut.container.machine_authority_opening_v3.*
 export MachineManagedClaimSnapshotV1, MachineContainerAuthorityCleanupV1, machine_container_authority_cleanup_v1, machine_container_authority_cleanup_diagnostic_v1
 use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.nogc_sync_mut.container.machine_fresh_epoch_commit_v3.*
 use std.nogc_sync_mut.container.machine_fresh_epoch_projection_v1.machine_fresh_epoch_project_v1
 use std.nogc_sync_mut.container.machine_fresh_epoch_history_v1.*
 use std.nogc_sync_mut.container.machine_fresh_epoch_lifecycle_v1.*
 use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workspace_record_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_dispatch_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_native_dispatch_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workspace_workflow_v3.*
+use std.nogc_sync_mut.container.machine_fresh_workspace_primary_v3.*
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.*
+use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
+use std.common.contracts.container.runtime_v1.RuntimeOperationV1
+use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.LinuxMachinePolicyOwnerV1
 use std.nogc_sync_mut.container.machine_fresh_workload_projection_v2.machine_fresh_workload_scope_v2
 use std.nogc_sync_mut.container.machine_fresh_workload_history_v2.*
 use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.*
@@ -166,31 +183,13 @@ pub class MachineContainerAuthorityV1:
             retained.error = projected.unwrap_err()
             return retained
         val candidate = projected.unwrap()
-        val head = self.storage.fresh_epoch_head_v1(epoch, candidate)
-        if head.is_err():
-            retained.error = head.unwrap_err()
+        val published = machine_fresh_epoch_prepare_commit_v3(self.storage, epoch, candidate)
+        retained.commit_digest = published.commit_digest
+        if published.error != "" or published.record.is_none():
+            retained.error = published.error
             return retained
-        var commit = head.unwrap()
-        if commit == "":
-            val written = self.storage.fresh_epoch_commit_v1(epoch, candidate)
-            if written.is_err():
-                retained.error = "machine-fresh-epoch-publication-uncertain:" + written.unwrap_err()
-                return retained
-            commit = written.unwrap().digest
-        retained.commit_digest = commit
-        val original = machine_fresh_epoch_read_initial_v1(self.storage, commit)
-        if original.is_err():
-            retained.error = original.unwrap_err()
-            return retained
-        val record = original.unwrap()
-        val existing_binding = machine_fresh_epoch_stable_v1(record)
-        val candidate_binding = machine_fresh_epoch_stable_v1(candidate)
-        if existing_binding.is_err() or candidate_binding.is_err():
-            retained.error = "machine-fresh-epoch-existing-binding-invalid"
-            return retained
-        if existing_binding.unwrap() != candidate_binding.unwrap():
-            retained.error = "machine-fresh-epoch-existing-binding-differs"
-            return retained
+        val commit = published.commit_digest
+        val record = published.record.unwrap()
         # The original writer remains held across the canonical lower handoff.
         # Capture both actual outputs before interpreting its status/error.
         val transferred = epoch.consume_preparation_v1()
@@ -429,6 +428,11 @@ pub struct MachineFreshWorkloadTransferTurnV2:
     retained: Option<MachineFreshEpochAdmissionOwnerV1>
     error: text
 
+pub struct MachineWorkspaceReaderTurnV3:
+    owner: MachineFreshWorkloadTransferV2
+    retained_reader: Option<LinuxMachinePolicyOwnerV1>
+    error: text
+
 pub struct MachineFreshWorkloadCloseTurnV2:
     owner: Option<MachineFreshWorkloadTransferV2>
     closed: bool
@@ -444,6 +448,7 @@ pub class MachineFreshWorkloadTransferV2:
         if self.error != "" or self.admission.authority.is_none() or self.admission.custody.is_none(): return Err(if self.error != "": self.error else: "machine-fresh-workload-owner-closing")
         if self.admission.lifecycle.phase_v1()? != "workload-transferred-v2": return Err("machine-fresh-workload-transfer-stale")
         val live = self.state.live_v2()?
+        val source = self.state.workspace_binding_option_v3()?
         val authority = self.admission.authority.unwrap()
         val custody = self.admission.custody.unwrap()
         val actual = custody.current_v1()?
@@ -471,16 +476,88 @@ pub class MachineFreshWorkloadTransferV2:
             template: GroupProcessStreamLaunchV2) -> Result<MachineFreshWorkloadRecordV2, text>:
         val epoch = self.current_v2()?
         val actual = self.admission.authority.unwrap().validate_local_process_v1(principal)?
-        if template.profile_v3.is_none(): return Err("machine-fresh-workload-profile-required")
-        val record = machine_fresh_workload_record_v2(epoch, self.admission.initial_commit, self.scope_v2()?, request,
-            actual.principal_id, actual.identity_digest, template.profile_v3.unwrap().helper_cpu.cpu_millis, template.memory_limit_bytes)?
-        val existing = self.state.installed_record_v2()
-        if existing.is_ok(): return if existing.unwrap() == record: self.state.record_v2() else: Err("machine-fresh-workload-request-changed")
-        val now = time_sample_unix_micros_or_failure() / 1000
-        val reserved = self.state.reserve_v2(record, template)?
-        val committed = self.commit_v2(machine_fresh_workload_reserve_entries_v2(record, now)?)?
-        val admitted = self.state.reservation_published_v2()?
-        Ok(record)
+        machine_fresh_cpu_reserve_v3(self.admission.authority.unwrap().storage, self.state, epoch,
+            self.admission.initial_commit, self.scope_v2()?, actual, request, template)
+
+    pub fn open_workspace_source_installed_v3(root: LinuxWorkspaceRootBorrowV3,
+            request: ContainerExecutionRequestV2) -> MachineWorkspaceSourceOpenTurnV3:
+        val current = self.current_v2()
+        if current.is_err(): return MachineWorkspaceSourceOpenTurnV3(error: current.unwrap_err())
+        machine_workspace_source_open_v3(self.state, root, request)
+
+    pub fn enable_workspace_source_v3(request: ContainerExecutionRequestV2, manifest: text,
+            digest: text, full_invocation: text, template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+        val current = self.current_v2()?
+        val binding = machine_workspace_enable_context_v3(self.state, request, manifest, digest, full_invocation)?
+        val principal = self.owned_principal_v3()?
+        val reserved = self.reserve_workspace_v3(principal, request, template, binding)?
+        Ok(())
+
+    pub fn observe_workspace_primary_v3() -> LinuxFreshWorkspacePrimaryObservationTurnV3:
+        val current = self.current_v2()
+        if current.is_err(): return LinuxFreshWorkspacePrimaryObservationTurnV3(nil, false, current.unwrap_err())
+        self.state.observe_primary_v3(self.admission.custody.unwrap())
+
+    pub fn workspace_cleanup_diagnostic_v3() -> Result<text, text>: self.state.diagnostic_v2()
+
+    pub fn cleanup_workspace_source_v3() -> Result<bool, text>:
+        if self.admission.lifecycle.phase_v1()? != "workload-transferred-v2" or self.admission.authority.is_none(): return Err("machine-fresh-workspace-source-cleanup-stale")
+        machine_workspace_source_cleanup_v3(self.admission.authority.unwrap().storage, self.state)
+
+
+    pub fn adopt_workspace_reader_v3(reader: LinuxMachinePolicyOwnerV1) -> MachineWorkspaceReaderTurnV3:
+        val captured = self.state.capture_workspace_reader_v3(reader)
+        if captured.is_err(): return MachineWorkspaceReaderTurnV3(self, Some(reader), captured.unwrap_err())
+        MachineWorkspaceReaderTurnV3(self, nil, "")
+
+    pub fn restrict_workspace_startup_v3(reason: text) -> Result<(), text>: self.state.restrict_startup_v3(reason)
+
+    pub fn validate_owned_principal_v3() -> Result<(), text>:
+        val current = self.current_v2()?
+        val authority = self.admission.authority.unwrap()
+        if authority.local_principal.is_none(): return Err("machine-fresh-workspace-local-principal-required")
+        val principal = authority.local_principal.unwrap().principal_capability_v1()
+        val actual = authority.validate_local_process_v1(principal)?
+        Ok(())
+
+    # CPU-only owned reservation. A workspace reservation is reachable only
+    # through enable_workspace_source_v3, which derives the binding from this
+    # transfer's own source custody; no caller-supplied binding is accepted.
+    pub fn reserve_owned_v3(request: ContainerExecutionRequestV2, template: GroupProcessStreamLaunchV2) -> Result<MachineFreshWorkloadRecordDispatchV3, text>:
+        val principal = self.owned_principal_v3()?
+        if self.state.source_custody_v3().is_ok(): return Err("machine-fresh-probe-before-source-required")
+        Ok(MachineFreshWorkloadRecordDispatchV3.CpuV2(self.reserve_v2(principal, request, template)?))
+
+    fn owned_principal_v3() -> Result<MachineLocalProcessPrincipalV1, text>:
+        val current = self.current_v2()?
+        val authority = self.admission.authority.unwrap()
+        if authority.local_principal.is_none(): return Err("machine-fresh-workspace-local-principal-required")
+        Ok(authority.local_principal.unwrap().principal_capability_v1())
+
+    fn reserve_workspace_v3(principal: MachineLocalProcessPrincipalV1, request: ContainerExecutionRequestV2,
+            template: GroupProcessStreamLaunchV2, binding: LinuxFreshWorkspaceBindingV3) -> Result<MachineFreshWorkspaceRecordV3, text>:
+        val epoch = self.current_v2()?
+        val actual = self.admission.authority.unwrap().validate_local_process_v1(principal)?
+        machine_fresh_workspace_reserve_v3(self.admission.authority.unwrap().storage, self.state, epoch,
+            self.admission.initial_commit, self.scope_v2()?, actual, request, template, binding)
+
+    fn request_record_v3() -> Result<MachineFreshWorkloadRecordDispatchV3, text>:
+        val current = self.current_v2()?
+        self.state.record_v3()
+
+    pub fn project_workspace_request_v3(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+        val record = machine_fresh_record_workspace_v3(self.request_record_v3()?)?
+        if record.request != request: return Err("machine-fresh-workspace-request-changed")
+        val decoded = machine_fresh_workspace_request_v3(record.scope, request, record.binding)?
+        Ok(ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
+            operation_id: decoded.operation_id, request_digest: request.plan.request_digest,
+            cpu_millis: decoded.cpu_limit_millis, memory_bytes: decoded.memory_limit_bytes,
+            timeout_ms: decoded.timeout_ms, has_devices: false, has_workspace: true))
+
+    pub fn request_projection_v3() -> Result<ContainerExecutionRequestV2, text>:
+        val record = self.request_record_v3()?
+        Ok(machine_fresh_record_view_v3(record).request)
+
     pub fn request_v2() -> Result<MachineFreshWorkloadRecordV2, text>:
         val current = self.current_v2()?
         self.state.record_v2()
@@ -492,65 +569,51 @@ pub class MachineFreshWorkloadTransferV2:
     fn run_named_v2(action: LinuxFreshWorkloadActionV2, name: text,
             deadline: Option<ContainerEffectDeadlineV1>) -> Result<MachineFreshWorkloadActionResultV2, text>:
         val current = self.current_v2()?
-        val record = self.state.record_v2()?
-        val now = time_sample_unix_micros_or_failure() / 1000
-        if now <= 0 or now > 9223372036854770807: return Err("machine-fresh-workload-clock")
-        var expiry = now + 5000
-        if action == LinuxFreshWorkloadActionV2.Create or action == LinuxFreshWorkloadActionV2.Start or action == LinuxFreshWorkloadActionV2.PullImage:
-            if deadline.is_none(): return Err("machine-fresh-workload-launch-window-required")
-            val remaining = container_effect_remaining_ms_v1(deadline.unwrap(), record.request.plan.request_digest,
-                record.request.plan.operation_id, if action == LinuxFreshWorkloadActionV2.PullImage: "create" else: name, now)?
-            if remaining < 5000: expiry = deadline.unwrap().expires_at_unix_ms
-        val command = self.state.command_v2(action, name)?
-        var template = self.state.template_v2()?
-        template.root = template.root + "-" + name
-        val custody = self.admission.custody.unwrap()
-        var launch = custody.bind_workload_launch_v2(command, template)?
-        val valid = custody.validate_workload_launch_v2(command, launch)?
-        val wire = group_process_stream_template_encode_v3(launch)?
-        val states = self.state.action_begin_v2(name, self.admission.custody_generation)?
-        val rows = machine_fresh_workload_action_batch_entries_v2(record, states, self.state.native_id_v2()?, wire, now)?
-        val committed = self.commit_v2(rows)?
-        val revalidated = custody.validate_workload_launch_v2(command, launch)?
-        val consumed = self.state.consume_action_v2()?
-        launch.request.launch_deadline_unix_ms = expiry
-        # Every actual native output is captured before any fallible inspection.
-        match process_spawn_piped_owned_v2(launch):
-            case PipedProcessOwnedSpawnV2.Ready(owner, reference): self.state.capture_v2(owner, Some(reference))
-            case PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, reason):
-                self.state.capture_v2(owner, reference)
-                val retained = self.state.unknown_v2(reason)?
-                return Err(reason)
-            case PipedProcessOwnedSpawnV2.Rejected(reason):
-                val retained = self.state.rejected_v2(reason)?
-                return Err(reason)
-        val observed = self.state.validate_process_v2(wire)
-        if observed.is_err():
-            val retained = self.state.unknown_v2(observed.unwrap_err())?
-            return Err(observed.unwrap_err())
-        val result = self.state.collect_v2(command.timeout_ms)?
-        if name == "inspect-created":
-            val created = custody.validate_workload_created_config_v2(command, result.output)?
-        var native_id = self.state.native_id_v2()?
-        if name == "pull-image":
-            val image_id = machine_fresh_workload_image_id_v2(result.output)?
-            if result.exit_code != 0: return Err("machine-fresh-workload-image-pull-unconfirmed")
-        elif name == "create":
-            native_id = result.output.trim()
-            if (result.exit_code != 0 or not builder_digest_valid_v1(native_id) or
-                    (result.output != native_id and result.output != native_id + "\n" and result.output != native_id + "\r\n")):
-                val retained = self.state.unknown_v2("machine-fresh-workload-create-unconfirmed")?
-                return Err("machine-fresh-workload-create-unconfirmed")
-        elif (name == "absence" and not machine_fresh_workload_absence_v2(result.exit_code, result.output)) or (name != "absence" and result.exit_code != 0):
-            val retained = self.state.unknown_v2("machine-fresh-workload-command-failed")?
-            return Err("machine-fresh-workload-command-failed")
-        val retired = self.state.retire_helper_v2()?
-        val prior = self.state.action_state_v2(name)?
-        val completed = distributed_operation_transition_v2(prior, "completed", sha256_text(str(result.exit_code) + "\n" + result.output))?
-        val at = time_sample_unix_micros_or_failure() / 1000
-        val published = self.commit_v2(machine_fresh_workload_action_entries_v2(record, completed, native_id, result.output, at)?)?
-        val tracked = self.state.complete_v2(completed, native_id)?
-        Ok(result)
+        val unlocked = self.state.workflow_legacy_idle_v3()?
+        machine_fresh_workload_run_v3(self.admission.authority.unwrap().storage, self.admission.custody.unwrap(),
+            self.state, self.admission.custody_generation, action, name, deadline)
+
+    pub fn begin_workspace_action_v3(action: ContainerWorkspaceActionV3, request: ContainerExecutionRequestV2,
+            deadline: Option<ContainerEffectDeadlineV1> = nil) -> Result<(), text>:
+        val record = machine_fresh_record_workspace_v3(self.request_record_v3()?)?
+        if record.request != request: return Err("machine-fresh-workspace-request-changed")
+        self.state.workflow_begin_v3(action, deadline)
+
+    pub fn step_workspace_action_v3(request: ContainerExecutionRequestV2) -> Result<Option<RuntimeOperationV1>, text>:
+        val record = machine_fresh_record_workspace_v3(self.request_record_v3()?)?
+        if record.request != request: return Err("machine-fresh-workspace-request-changed")
+        machine_workspace_workflow_step_v3(self.admission.authority.unwrap().storage,
+            self.admission.custody.unwrap(), self.state, self.admission.custody_generation)
+
+    pub fn cancel_workspace_pending_v3(request: ContainerExecutionRequestV2) -> Result<bool, text>:
+        if self.admission.lifecycle.phase_v1()? != "workload-transferred-v2": return Err("machine-fresh-workspace-owner-stale")
+        val record = machine_fresh_record_workspace_v3(self.state.record_v3()?)?
+        if record.request != request: return Err("machine-fresh-workspace-request-changed")
+        self.state.workflow_cancel_v3()
+
+    pub fn probe_v3(request: ContainerExecutionRequestV2, call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        val phase = self.admission.lifecycle.phase_v1()
+        if phase.is_err(): return machine_fresh_probe_rejected_v3(call, phase.unwrap_err())
+        if phase.unwrap() != "workload-transferred-v2" or self.admission.authority.is_none() or self.admission.custody.is_none():
+            return machine_fresh_probe_rejected_v3(call, "machine-probe-original-owner-required")
+        val retained_request = self.state.record_v2()
+        if retained_request.is_err(): return machine_fresh_probe_rejected_v3(call, retained_request.unwrap_err())
+        if retained_request.unwrap().request != request: return machine_fresh_probe_rejected_v3(call, "machine-probe-original-request-mismatch")
+        if not machine_fresh_probe_cleanup_call_v3(call):
+            val current = self.current_v2()
+            if current.is_err(): return machine_fresh_probe_rejected_v3(call, current.unwrap_err())
+        machine_fresh_probe_dispatch_v3(self.admission.authority.unwrap().storage, self.admission.custody.unwrap(),
+            self.state, self.admission.custody_generation, call)
+
+    pub fn primary_v3(call: MachineWorkspacePrimaryCallV3) -> MachineWorkspacePrimaryReplyV3:
+        val phase = self.admission.lifecycle.phase_v1()
+        if phase.is_err(): return machine_workspace_primary_rejected_v3(call, phase.unwrap_err())
+        if not ["workload-transferred-v2", "closed"].contains(phase.unwrap()): return machine_workspace_primary_rejected_v3(call, "workspace-primary-owner-stale")
+        if machine_workspace_primary_requires_live_v3(call):
+            val current = self.current_v2()
+            if current.is_err(): return machine_workspace_primary_rejected_v3(call, current.unwrap_err())
+        val storage = if self.admission.authority.is_some(): Some(self.admission.authority.unwrap().storage) else: nil
+        machine_workspace_primary_dispatch_v3(storage, self.admission.custody, self.state, self.admission.custody_generation, call)
 
     pub fn host_context_v2() -> Result<LinuxFreshHostContextV2, text>:
         val current = self.current_v2()?
@@ -558,36 +621,32 @@ pub class MachineFreshWorkloadTransferV2:
 
     pub fn associate_v2() -> Result<(), text>: self.state.after_association_v2(self.associate_inner_v2())
     fn associate_inner_v2() -> Result<(), text>:
-        val record = self.request_v2()?
-        val id = self.state.native_id_v2()?
-        val before = machine_fresh_workload_inspect_v2(record, id, self.state.output_v2("inspect")?)?
-        val binding = sha256_text(machine_fresh_workload_id_v2(record)? + "\n" + id + "\n" + self.state.output_v2("inspect")?)
-        val captured = self.state.capture_subject_v2(before, binding)?
-        val confirmed = self.run_named_v2(LinuxFreshWorkloadActionV2.Inspect, "inspect-confirm", nil)?
-        val after = machine_fresh_workload_inspect_v2(record, id, confirmed.output)?
-        val command = machine_fresh_workload_command_v2(record, LinuxFreshWorkloadActionV2.Inspect, id)?
-        val evidence = self.state.validate_subject_v2(self.admission.custody.unwrap(), command, before, after)?
-        val committed = self.commit_v2(machine_fresh_workload_association_entries_v2(record, id, evidence, time_sample_unix_micros_or_failure() / 1000)?)?
-        self.state.associated_v2()
+        val current = self.current_v2()?
+        machine_fresh_workload_associate_v3(self.admission.authority.unwrap().storage,
+            self.admission.custody.unwrap(), self.state, self.admission.custody_generation)
 
     pub fn settle_v2() -> Result<(), text>:
-        if self.state.settled_v2()?: return Ok(())
-        val record = self.request_v2()?
-        val absence = self.state.action_state_v2("absence")?
-        if absence.state != "completed": return Err("machine-fresh-workload-absence-unproven")
-        val command = machine_fresh_workload_command_v2(record, LinuxFreshWorkloadActionV2.Absence, self.state.native_id_v2()?)?
-        val native = self.admission.custody.unwrap().observe_workload_absence_v2(command)?
-        val bound = self.state.validate_closure_v2(native)?
-        val committed = self.commit_v2(self.state.prepare_settlement_v2(record, absence, time_sample_unix_micros_or_failure() / 1000)?)?
-        self.state.mark_settled_v2()
+        val current = self.current_v2()?
+        machine_fresh_workload_settle_cpu_v3(self.admission.authority.unwrap().storage,
+            self.admission.custody.unwrap(), self.state)
 
     pub fn native_id_v2() -> Result<text, text>:
         val current = self.current_v2()?
         self.state.native_id_v2()
 
+    pub fn stats_v1() -> Result<LinuxFreshWorkloadStatsCountersV1, text>:
+        val record = self.request_record_v3()?
+        val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, self.state.native_id_v2()?)?
+        val result = machine_fresh_stats_observe_v1(self.admission.custody.unwrap(), record,
+            self.state.workspace_binding_option_v3()?, self.state.containment_v2()?, command)?
+        val current = self.current_v2()?
+        if (machine_fresh_record_id_v3(self.request_record_v3()?)? != machine_fresh_record_id_v3(record)? or
+                self.state.native_id_v2()? != command.native_id): return Err("container-stats-workload-binding-changed")
+        Ok(result)
+
     pub fn subject_v2() -> Result<LinuxContainerContainmentSnapshotV1, text>:
-        val record = self.request_v2()?
-        val command = machine_fresh_workload_command_v2(record, LinuxFreshWorkloadActionV2.Inspect, self.state.native_id_v2()?)?
+        val record = self.request_record_v3()?
+        val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, self.state.native_id_v2()?)?
         self.state.running_v2(self.admission.custody.unwrap(), command)
 
     pub fn configuration_v2(kind: LinuxFreshWorkloadActionV2) -> Result<text, text>: self.state.configuration_v2(kind, self.current_v2()?)
@@ -678,6 +737,24 @@ pub fn machine_container_authority_open_v1() -> MachineContainerAuthorityOpenV1:
 pub fn machine_container_authority_open_local_v1() -> MachineContainerAuthorityOpenV1:
     machine_authority_open_internal_v1(true)
 
+# Proof-bearing opt-in opening over the SAME original already-owned writer.
+# It never accepts a caller record, root, policy or missing-CURRENT marker.
+pub fn machine_container_authority_open_prepared_workspace_v3(storage: MachineStorageOwnerV1,
+        epoch: LinuxInstalledFreshEpochOwnerV1) -> MachineFreshEpochAdmissionTurnV1:
+    var retained = MachineFreshEpochAdmissionTurnV1()
+    retained.preparation = Some(epoch)
+    retained.cleanup = Some(MachineContainerAuthorityCleanupV1.Storage(storage))
+    val prepared = machine_authority_prepare_storage_v3(storage, epoch)
+    if val principal = prepared.principal:
+        retained.cleanup = Some(MachineContainerAuthorityCleanupV1.StoragePrincipal(storage, principal))
+    if prepared.error != "":
+        retained.error = prepared.error
+        return retained
+    val authority = MachineContainerAuthorityV1(storage: storage, policy_digest: prepared.policy_digest,
+        selected_backend: "linux-podman", selected_provider_digest: prepared.provider_digest,
+        selected_linux_uid: prepared.service_uid, local_principal: prepared.principal)
+    return authority.admit_fresh_provider_epoch_v1(epoch)
+
 # A genuine preparation capability is retained before opening the original
 # writer. Generic opening and generic missing-CURRENT behavior are unchanged.
 pub fn machine_container_authority_open_fresh_epoch_v1() -> MachineFreshEpochAdmissionTurnV1:
@@ -704,91 +781,14 @@ pub fn machine_container_authority_open_fresh_epoch_v1() -> MachineFreshEpochAdm
 # principal identity, namespace provenance or a capacity grant.
 fn machine_authority_open_internal_v1(standalone_only: bool,
         fresh: Option<LinuxInstalledFreshEpochOwnerV1> = nil) -> MachineContainerAuthorityOpenV1:
-    # The library selects the actual installed OS owner. No app/request picks
-    # the backend, policy path, service UID or machine-state root.
-    val reader = match machine_policy_open_v1():
-        case MachinePolicyOpenV1.Rejected(reason):
-            return MachineContainerAuthorityOpenV1.Rejected(reason)
-        case MachinePolicyOpenV1.CleanupRequired(owner, reason):
-            return machine_reader_failure_v1(owner, reason)
-        case MachinePolicyOpenV1.Ready(owner): owner
-    val bytes = reader.read_policy_v1()
-    if bytes.is_err(): return machine_reader_failure_v1(reader, bytes.unwrap_err())
-    val text_result = machine_authority_policy_text_v1(bytes.unwrap())
-    if text_result.is_err(): return machine_reader_failure_v1(reader, text_result.unwrap_err())
-    val source = text_result.unwrap()
-    val decoded = machine_container_policy_decode_v1(source)
-    if decoded.is_err(): return machine_reader_failure_v1(reader, decoded.unwrap_err())
-    val policy = decoded.unwrap()
-    if standalone_only and policy.mode != "standalone":
-        return machine_reader_failure_v1(reader, "local-container-managed-authority-required")
-    # Platform selection belongs here in the library, never in the app request.
-    val backend = reader.selected_backend_v1()
-    val selected = machine_policy_provider_v1(policy, backend)
-    if selected.is_err(): return machine_reader_failure_v1(reader, selected.unwrap_err())
-    val provider = selected.unwrap()
-    var selected_linux_uid: i64 = -1
-    if backend == "linux-podman":
-        val context = reader.actual_linux_process_context_v1()
-        if context.is_err(): return machine_reader_failure_v1(reader, context.unwrap_err())
-        val engine = linux_oci_engine_policy_decode_v1(provider.policy_bytes)
-        if engine.is_err(): return machine_reader_failure_v1(reader, engine.unwrap_err())
-        val actual = context.unwrap()
-        val configured = engine.unwrap()
-        if actual.real_uid != actual.effective_uid or actual.effective_uid <= 0 or configured.expected_uid != actual.effective_uid:
-            return machine_reader_failure_v1(reader, "machine-container-authority-linux-service-uid-mismatch")
-        selected_linux_uid = actual.effective_uid
-    var principal: Option<MachineAuthorityLocalProcessV1> = None
-    if policy.mode == "standalone":
-        val paired = machine_authority_pair_open_v1()
-        if paired.is_err(): return machine_reader_failure_v1(reader, paired.unwrap_err())
-        val cleanup = paired.unwrap()
-        match machine_local_process_principal_open_v1():
-            case MachineLocalProcessPrincipalOpenV1.Rejected(reason): return machine_reader_failure_v1(reader, reason)
-            case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
-                return machine_reader_failure_v1(reader, reason, Some(machine_authority_local_pair_bind_v1(owner, cleanup)))
-            case MachineLocalProcessPrincipalOpenV1.Ready(owner):
-                principal = Some(machine_authority_local_pair_bind_v1(owner, cleanup))
-        # Native membership is established before any provider observer runs.
-        val local = principal.unwrap()
-        val member = machine_policy_local_principal_v1(policy, backend, local.principal_capability_v1())
-        if member.is_err(): return machine_reader_failure_v1(reader, member.unwrap_err(), principal)
-    # The generic path retains its engine observation. Fresh opening must not
-    # initialize the new provider store before its actual durable admission.
-    if fresh.is_none():
-        val observed = machine_policy_observe_v1(policy, provider)
-        if observed.is_err(): return machine_reader_failure_v1(reader, observed.unwrap_err(), principal)
-    else:
-        val epoch = fresh.unwrap()
-        val observed = epoch.current_v1()
-        if observed.is_err(): return machine_reader_failure_v1(reader, observed.unwrap_err(), principal)
-        if backend != "linux-podman": return machine_reader_failure_v1(reader, "machine-fresh-epoch-linux-required", principal)
-    val storage = match reader.open_storage_v1():
-        case MachineStorageOpenV1.Rejected(reason):
-            return machine_reader_failure_v1(reader, reason, principal)
-        case MachineStorageOpenV1.CleanupRequired(owner, reason):
-            return machine_storage_failure_v1(owner, reason, principal)
-        case MachineStorageOpenV1.Ready(owner): owner
-    if val owner = principal:
-        val member = machine_policy_local_principal_v1(policy, backend, owner.principal_capability_v1())
-        if member.is_err(): return machine_storage_failure_v1(storage, member.unwrap_err(), principal)
-    # Observe again after acquiring the shared writer. A pre-lock observation
-    # never authorizes state publication or a later provider effect by itself.
-    if fresh.is_none():
-        val current = machine_policy_observe_v1(policy, provider)
-        if current.is_err(): return machine_storage_failure_v1(storage, current.unwrap_err(), principal)
-    val capacity = storage.physical_capacity_v1()
-    if capacity.is_err(): return machine_storage_failure_v1(storage, capacity.unwrap_err(), principal)
-    if policy.cpu_millis > capacity.unwrap().0 or policy.memory_bytes > capacity.unwrap().1:
-        return machine_storage_failure_v1(storage, "machine-container-authority-physical-capacity-exceeded", principal)
-    # Bind exact actual protected policy under the actual exclusive writer.
-    # Existing different mode/policy wins; no automatic reset discards charges.
-    val bound = storage.bind_policy_v1(source)
-    if bound.is_err(): return machine_storage_failure_v1(storage, bound.unwrap_err(), principal)
-    if bound.unwrap() != sha256_text(source):
-        return machine_storage_failure_v1(storage, "machine-container-authority-policy-binding-mismatch", principal)
-    val authority = MachineContainerAuthorityV1(storage: storage, policy_digest: bound.unwrap(), selected_backend: provider.backend,
-        selected_provider_digest: provider.identity_digest, selected_linux_uid: selected_linux_uid, local_principal: principal)
+    val prepared = machine_authority_opening_v3(standalone_only, fresh)
+    val (storage, digest, backend, provider_digest, linux_uid, principal) = match prepared:
+        case MachineAuthorityOpeningV3.Rejected(reason): return MachineContainerAuthorityOpenV1.Rejected(reason)
+        case MachineAuthorityOpeningV3.CleanupRequired(owner, reason): return MachineContainerAuthorityOpenV1.CleanupRequired(owner, reason)
+        case MachineAuthorityOpeningV3.Prepared(store, policy, selected, provider, uid, member):
+            (store, policy, selected, provider, uid, member)
+    val authority = MachineContainerAuthorityV1(storage: storage, policy_digest: digest, selected_backend: backend,
+        selected_provider_digest: provider_digest, selected_linux_uid: linux_uid, local_principal: principal)
     if val epoch = fresh:
         val candidate = machine_authority_fresh_record_v1(authority, epoch.current_v1())
         if candidate.is_err(): return machine_storage_failure_v1(storage, candidate.unwrap_err(), principal)

@@ -1,0 +1,61 @@
+# Service-intent plan only. It is not an executable native plan or admission.
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.host_prepare_request_v1.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encoded_text_size_v1
+
+pub struct HostPrepareAssociatedRequestV3:
+    prepare: HostPrepareRequestV1
+    draft: ContainerExecutionDraftV3
+    service_scope: ContainerHostScopeV2
+
+pub fn host_prepare_associated_encode_v3(request: HostPrepareAssociatedRequestV3) -> Result<text, text>:
+    val scope = request.service_scope
+    if scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != "": return Err("associated-prepare-service-scope")
+    val service_intent = container_execution_draft_bind_v3(request.draft, scope)?
+    val intent = request.prepare.intent
+    if (intent.physical_host_id != scope.physical_host_id or intent.reservation.service_scope_id != scope.service_scope_id or
+            intent.fence.boot_id != container_scope_fence_id_v2(scope)? or intent.fence.provider_generation != scope.provider_generation or
+            intent.plan_digest != container_execution_plan_digest_v2(service_intent.plan)? or
+            request.prepare.operation.id != request.draft.operation_id): return Err("associated-prepare-binding")
+    execution_associated_encode_v3({"version": SdnValue.Int(3), "kind": SdnValue.String("host-prepare-associated-request"),
+        "prepare": SdnValue.String(host_prepare_request_encode_v1(request.prepare)?),
+        "draft": SdnValue.String(container_execution_draft_encode_v3(request.draft)?),
+        "serviceScope": SdnValue.String(container_host_scope_bytes_v2(scope)?)})
+
+pub fn host_prepare_associated_decode_v3(source: text) -> Result<HostPrepareAssociatedRequestV3, text>:
+    val fields = execution_associated_fields_v3(source, "host-prepare-associated-request", ["version", "kind", "prepare", "draft", "serviceScope"])?
+    val request = HostPrepareAssociatedRequestV3(host_prepare_request_decode_v1(execution_associated_text_v3(fields, "prepare")?)?,
+        container_execution_draft_decode_v3(execution_associated_text_v3(fields, "draft")?)?,
+        container_host_scope_decode_v2(execution_associated_text_v3(fields, "serviceScope")?)?)
+    if host_prepare_associated_encode_v3(request)? != source: return Err("associated-prepare-canonical")
+    Ok(request)
+
+# First associated transport profile, independently narrower than the pure
+# draft codec. Count known escaped data exactly and bound the not-yet-observed
+# native scope/association metadata WITHOUT fabricating a native observation.
+# The real caller must check this BEFORE capacity admission/epoch acquisition.
+pub fn host_prepare_associated_transport_v3(request: HostPrepareAssociatedRequestV3) -> Result<bool, text>:
+    if request.draft.request_bytes.byte_len() > CONTAINER_ASSOCIATED_ROUTE_BODY_MAX_V3:
+        return Err("associated-transport-draft-bound")
+    val prepare_source = host_prepare_associated_encode_v3(request)?
+    val escaped_prepare = sdn_encoded_text_size_v1(prepare_source)
+    val service_scope_source = container_host_scope_bytes_v2(request.service_scope)?
+    # Native V2 plan fields are individually <=256 bytes and structurally
+    # validated; 16KiB exceeds their complete canonical scalar envelope.
+    val native_execution_bound = sdn_encoded_text_size_v1(request.draft.request_bytes) + 16384
+    val association_bound = 2 * native_execution_bound + sdn_encoded_text_size_v1(service_scope_source) + 8192
+    # Existing prepared receipt <=4KiB; doubled escaping plus fixed keys has
+    # 16KiB reserved. Further 4KiB per outer operation/auth envelope includes
+    # every bounded identity/digest/nonce, punctuation and scalar field.
+    val prepared_reply_bound = escaped_prepare + 2 * association_bound + 16384
+    val operation_reply_bound = 2 * prepared_reply_bound + 4096
+    val auth_reply_bound = 2 * operation_reply_bound + 4096
+    val auth_request_bound = 2 * (escaped_prepare + 4096) + 4096
+    if auth_request_bound > 2097152 or operation_reply_bound > 1048576 or auth_reply_bound > 1048576:
+        return Err("associated-transport-envelope-bound")
+    Ok(true)
+
+export HostPrepareAssociatedRequestV3, host_prepare_associated_encode_v3, host_prepare_associated_decode_v3
+export host_prepare_associated_transport_v3

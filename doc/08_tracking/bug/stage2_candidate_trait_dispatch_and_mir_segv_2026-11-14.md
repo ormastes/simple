@@ -215,3 +215,51 @@ copy-thunk fix, #9597. Next routes to try: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1
 (single-process whole-program build, bypasses the batch lane per upstream
 workaround doc stage2_sanity_mir_workers_zero_pool_refusal_2026-11-15.md),
 and a debugger attached to the row process for the stack at crash.
+
+## 2026-11-16 addendum 4: ROOT CAUSE FOUND — the row dies of memory-commit exhaustion under the Hyper-V balloon; SIGSEGV and SIGABRT are the same OOM
+
+Cycle 29 (receipt-authorized full run, clean tip c189f67185e, whole-program
+route): `compiler_cli_build` CRASH with **status 134 (SIGABRT)**, the row's
+final log lines:
+
+```
+[build] phase=native_cache state=running ...
+memory allocation of 2228240 bytes failed
+note: run with RUST_BACKTRACE=1 environment variable to display a backtrace
+```
+
+`memory allocation of N bytes failed` is the Rust global-alloc error message —
+the process ABORTED because a 2.2 MB allocation could not be satisfied. That
+unifies ALL FIVE crashes (24d/25b/26/28 status 139 SIGSEGV, 29 status 134
+SIGABRT): the stage2 candidate (a Rust-hosted binary) exhausts memory commit;
+the SIGSEGV cycles were the same failure torn down through a different path
+(seed-era alloc-failure handling vs the current abort handler).
+
+Why the crash RSS varies (33.5 / 41 / 50.34 / 51.3 GiB) and sits BELOW the
+nominal 76 GiB commit limit (64 GiB RAM + 12.5 GiB pagefile): the host is a
+Hyper-V DYNAMIC-MEMORY guest. The balloon driver holds physical pages (at
+times ~45 GiB attributable to no process), so the guest's effective commit
+ceiling floats well below RAM+pagefile and moves with host-side memory
+pressure; a row process that reaches 33-51 GiB of commit can be at the true
+ceiling. The tree watchdog's 56 GiB cap (addendum 3's under-count aside)
+cannot protect a process from a ceiling the host sets dynamically.
+
+Fixes, in cost order:
+1. HOST: enlarge the pagefile (fixed 48-64 GiB on C:, which has 200+ GiB
+   free) so the commit ceiling stays above the row's ~50 GiB working set even
+   when the balloon is inflated. No compiler change. (Session token here was
+   not actually elevated despite showing High Mandatory; needs an elevated
+   PowerShell: `Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\
+   Session Manager\Memory Management' PagingFiles 'C:\pagefile.sys 49152
+   65536'` — may require a reboot.)
+2. COMPILER: the in-flight upstream memory reductions (backend-lazy-registry
+   #9624, placeholder-cache scalar-only a0d424f8a2a, essential-backend closure
+   shrink 7074bd686e7 lineage, stage2-smoke-perf #9638) shrink the row's
+   working set itself; the whole-program route (this cycle) reached 41 GiB
+   before OOM — better than the batch lane's growth curve but not yet enough.
+3. LANE: bound/resume the row per phase so a single process never holds the
+   whole closure (the pre-existing owner asks in
+   bootstrap_stage2_seed_parent_retention_oom_2026-10-22.md remain valid).
+
+The whole-program route ALSO validated per-module MIR error isolation: one
+module (controller_dispatch_owner_v3) failed MIR and the row continued.

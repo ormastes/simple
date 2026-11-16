@@ -1,0 +1,51 @@
+# AUTHORED_NOT_RUN. Genuine fixed installed reader only, no writer, source,
+# admission, staging or launch. Missing provision is failure, never a skip.
+# @req REQ-LINUX-WORKSPACE-NATIVE-001
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v2.*
+use std.common.contracts.container.agent_executable_profile_v1.*
+
+var workspace_installed_readers_v3: [LinuxMachinePolicyOwnerV1] = []
+
+describe "Actual protected Linux workspace activation policy v3":
+    it "reads strict new policy through genuine fixed administrative custody":
+        step("Require real administrator provision and actual dedicated service context")
+        val reader = match linux_machine_policy_open_v1():
+            case LinuxMachinePolicyOpenV1.Ready(owner):
+                workspace_installed_readers_v3.push(owner)
+                owner
+            case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+                workspace_installed_readers_v3.push(owner)
+                val closed = owner.close_v1()
+                fail("actual installed reader cleanup required:" + reason + ":" + closed)
+                return
+            case LinuxMachinePolicyOpenV1.Rejected(reason):
+                fail("actual installed policy unavailable:" + reason)
+                return
+        val before = reader.actual_process_context_v1()
+        val raw = reader.read_agent_workspace_profile_v1()
+        if before.is_err() or raw.is_err():
+            val closed = reader.close_v1()
+            fail("actual installed context/profile unavailable:" + closed)
+            return
+        val decoded = linux_agent_workspace_profile_decode_v2(raw.unwrap())
+        if decoded.is_err():
+            val closed = reader.close_v1()
+            fail("actual new protected activation policy invalid:" + decoded.unwrap_err() + ":" + closed)
+            return
+        step("Validate real pinned policy budget without claiming actual image or workload qualification")
+        val policy = decoded.unwrap()
+        val encoded = linux_agent_workspace_profile_encode_v2(policy)
+        val minimum = agent_executable_profile_minimum_memory_v1(policy.executable_profile)
+        val after = reader.actual_process_context_v1()
+        if encoded.is_err() or minimum.is_err() or after.is_err():
+            val closed = reader.close_v1()
+            fail("actual installed policy validation/context failed:" + closed)
+            return
+        expect(after.unwrap().identity_digest).to_equal(before.unwrap().identity_digest)
+        expect(encoded.unwrap()).to_equal(raw.unwrap())
+        expect(minimum.unwrap()).to_be_greater_than(policy.executable_profile.image_size_bytes)
+        val closed = reader.close_v1()
+        expect(closed == "released" or closed == "consumed-error").to_equal(true)
+        expect(reader.read_agent_workspace_profile_v1().is_err()).to_equal(true)

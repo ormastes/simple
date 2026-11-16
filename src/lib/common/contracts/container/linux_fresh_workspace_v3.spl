@@ -1,0 +1,199 @@
+# Explicit workspace DATA. This does not widen CPU V2 validation or grant effects.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_workspace_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct LinuxFreshWorkspaceCommandV3:
+    command: LinuxFreshWorkloadCommandV2
+
+pub struct LinuxFreshWorkspaceBindingSnapshotV3:
+    binding_digest: text
+    machine_policy_digest: text
+    provider_policy_digest: text
+    workspace_profile_digest: text
+    agent_profile_digest: text
+    request_digest: text
+    manifest_digest: text
+    invocation_digest: text
+    lease_binding_digest: text
+    workspace_identity_digest: text
+    directory_binding_digest: text
+    source_manifest_digest: text
+    bootstrap_digest: text
+    git_digest: text
+    agent_digest: text
+    image_config_id: text
+    service_uid: i64
+    service_gid: i64
+
+# Point-in-time native evidence DATA. Neither a persistent-currentness claim
+# nor a process-owned wait/collect/release receipt.
+pub struct LinuxFreshWorkspacePrimaryObservationV3:
+    native_id: text
+    request_binding_digest: text
+    native_binding_digest: text
+    workspace_binding_digest: text
+    executable_digest: text
+    command_digest: text
+    process_id: i64
+    process_start_ticks: i64
+    cgroup_device: i64
+    cgroup_inode: i64
+    cgroup_mount_id: i64
+    partition_identity_digest: text
+    owner_generation: i64
+    sample_started_monotonic_ns: i64
+    sample_finished_monotonic_ns: i64
+
+# Progress DATA from a direct genuine owner call. SAME subject retains all
+# pending FDs/hash state; caller must keep its original successor/upper owners.
+pub struct LinuxFreshWorkspacePrimaryObservationTurnV3:
+    observation: Option<LinuxFreshWorkspacePrimaryObservationV3>
+    pending: bool
+    error: text
+
+pub struct LinuxFreshWorkspacePrimaryAttachCommandV3:
+    workspace: LinuxFreshWorkspaceCommandV3
+    invocation_source: text
+
+# Native original-domain retirement only, not OCI/helper/transport/Host ACK or
+# durable release. Only the genuine opaque token can produce a current sample.
+pub struct LinuxFreshWorkspaceNativeRetirementSnapshotV3:
+    binding: LinuxFreshWorkspaceBindingSnapshotV3
+    native: LinuxFreshWorkloadClosureV2
+    subject_generation: i64
+    provider_generation: i64
+
+pub struct LinuxFreshWorkspaceRequestV3:
+    image: text
+    entrypoint: [text]
+    args: [text]
+    cpu_millis: i64
+    memory_bytes: i64
+    pid_limit: i64
+    timeout_ms: i64
+
+fn workspace_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("fresh-workspace-request-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("fresh-workspace-request-text:" + key)
+
+fn workspace_number_v3(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("fresh-workspace-request-missing:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("fresh-workspace-request-number:" + key)
+
+fn workspace_strings_v3(values: [text]) -> SdnValue:
+    var result: [SdnValue] = []
+    for value in values: result.push(SdnValue.String(value))
+    SdnValue.Array(result)
+
+pub fn linux_fresh_workspace_request_v3(request: ContainerExecutionRequestV2, profile: LinuxWorkspaceInstalledProfileV1,
+        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64) -> Result<LinuxFreshWorkspaceRequestV3, text>:
+    val outer = container_execution_request_encode_v2(request)?
+    linux_workspace_installed_profile_validate_v1(profile)?
+    val installed = linux_agent_workspace_profile_encode_v1(agent)?
+    if profile.read_only or uid <= 0 or gid <= 0 or not builder_digest_valid_v1(invocation_digest):
+        return Err("fresh-workspace-supported-profile-required")
+    if profile.guest_root.byte_len() > 4095: return Err("fresh-workspace-guest-path-bound")
+    val components = profile.guest_root.substring(1, profile.guest_root.byte_len()).split("/")
+    if components.len() < 1 or components.len() > 32: return Err("fresh-workspace-guest-path-depth")
+    for component in components:
+        if component == "" or component == "." or component == ".." or component.byte_len() > 255:
+            return Err("fresh-workspace-guest-path-component")
+    for protected in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/etc", "/proc", "/sys", "/dev", "/run", agent.bootstrap_program, agent.agent_program]:
+        if linux_workspace_paths_overlap_v1(profile.guest_root, protected):
+            return Err("fresh-workspace-image-assets-shadowed")
+    if linux_workspace_source_root_v1(profile).contains(":") or profile.guest_root.contains(":"):
+        return Err("fresh-workspace-colon-mount-path-unsupported")
+    val parsed = match sdn_parse_strict_v1(request.request_bytes, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 4, max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value.value
+        case Err(_): return Err("fresh-workspace-request-syntax")
+    val fields = match parsed:
+        case SdnValue.Dict(value): value
+        case _: return Err("fresh-workspace-request-shape")
+    val cpu = workspace_number_v3(fields, "cpuLimitMillis")?
+    val memory = workspace_number_v3(fields, "memoryLimitBytes")?
+    val pids = workspace_number_v3(fields, "pidLimit")?
+    val timeout = workspace_number_v3(fields, "timeoutMs")?
+    if cpu < 1 or cpu > 64000 or memory < 1 or memory > 1125899906842624 or pids < 1 or pids > 4096 or timeout < 1 or timeout > 30000:
+        return Err("fresh-workspace-request-budget")
+    linux_fresh_workload_registry_image_v2(agent.image)?
+    val plan = request.plan
+    val mount: Dict<text, SdnValue> = {"hostRoot": SdnValue.String(linux_workspace_source_root_v1(profile)),
+        "guestRoot": SdnValue.String(profile.guest_root), "readOnly": SdnValue.Bool(false)}
+    val entrypoint = [agent.bootstrap_program]
+    val args = ["--invocation-manifest-sha256", invocation_digest]
+    val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(5), "kind": SdnValue.String("linux-oci-retained-request"),
+        "podUid": SdnValue.String(plan.workload_uid), "attempt": SdnValue.Int(plan.attempt),
+        "operationId": SdnValue.String(plan.operation_id), "requestDigest": SdnValue.String(plan.request_digest),
+        "image": SdnValue.String(agent.image), "bundlePath": SdnValue.String(""),
+        "command": workspace_strings_v3(entrypoint), "args": workspace_strings_v3(args),
+        "timeoutMs": SdnValue.Int(timeout), "cpuLimitMillis": SdnValue.Int(cpu), "memoryLimitBytes": SdnValue.Int(memory),
+        "pidLimit": SdnValue.Int(pids), "networkPolicy": SdnValue.String("none"), "filesystemPolicy": SdnValue.String("read-only"),
+        "buildInputRoot": SdnValue.String(""), "buildOutputRoot": SdnValue.String(""), "replaceEntrypoint": SdnValue.Bool(true),
+        "environment": SdnValue.Array([]), "workingDirectory": SdnValue.String(profile.guest_root),
+        "terminalMode": SdnValue.String("tty"), "userUid": SdnValue.Int(uid), "userGid": SdnValue.Int(gid),
+        "userNamespaceMode": SdnValue.String("keep-id"), "containmentProfileDigest": SdnValue.String(profile.containment_profile_digest),
+        "mounts": SdnValue.Array([SdnValue.Dict(mount)])}
+    if sdn_encode_canonical(SdnValue.Dict(expected)) + "\n" != request.request_bytes:
+        return Err("fresh-workspace-request-not-exact-installed-projection")
+    Ok(LinuxFreshWorkspaceRequestV3(image: agent.image, entrypoint: entrypoint, args: args,
+        cpu_millis: cpu, memory_bytes: memory, pid_limit: pids, timeout_ms: timeout))
+
+pub fn linux_fresh_workspace_command_validate_v3(value: LinuxFreshWorkspaceCommandV3, profile: LinuxWorkspaceInstalledProfileV1,
+        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64) -> Result<(), text>:
+    val command = value.command
+    val request = linux_fresh_workspace_request_v3(command.request, profile, agent, invocation_digest, uid, gid)?
+    val plan = command.request.plan
+    val actual = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    if plan.backend != "linux-podman" or container_host_scope_bytes_v2(actual)? != container_host_scope_bytes_v2(command.scope)?:
+        return Err("fresh-workspace-command-scope")
+    if command.action == LinuxFreshWorkloadActionV2.Create or command.action == LinuxFreshWorkloadActionV2.PullImage:
+        if command.native_id != "": return Err("fresh-workspace-create-pull-id-must-be-empty")
+    elif not builder_digest_valid_v1(command.native_id): return Err("fresh-workspace-full-native-id-required")
+    val image_read = command.action == LinuxFreshWorkloadActionV2.ConfigurationImage or command.action == LinuxFreshWorkloadActionV2.InputConfigurationImage
+    if image_read:
+        val id = if command.observed_image_id.starts_with("sha256:"): command.observed_image_id.substring(7, command.observed_image_id.byte_len()) else: command.observed_image_id
+        if not builder_digest_valid_v1(id): return Err("fresh-workspace-config-image-id")
+    elif command.observed_image_id != "": return Err("fresh-workspace-config-id-wrong-stage")
+    if (command.image != request.image or command.entrypoint != request.entrypoint or command.args != request.args or
+            command.cpu_millis != request.cpu_millis or command.memory_bytes != request.memory_bytes or
+            command.pid_limit != request.pid_limit or command.timeout_ms != request.timeout_ms or
+            command.helper_cpu_millis < 1 or command.helper_cpu_millis > 64000 or
+            command.helper_memory_bytes < 1 or command.helper_memory_bytes > 1125899906842624):
+        return Err("fresh-workspace-command-request-or-helper-mismatch")
+    Ok(())
+
+# Declared DATA only, used only after actual binding.validate_command_v3.
+pub fn linux_fresh_workspace_declared_directory_v3(request: ContainerExecutionRequestV2) -> Result<text, text>:
+    val parsed = match sdn_parse_strict_v1(request.request_bytes, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 4, max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value.value
+        case Err(_): return Err("fresh-workspace-request-syntax")
+    match parsed:
+        case SdnValue.Dict(fields): workspace_text_v3(fields, "workingDirectory")
+        case _: Err("fresh-workspace-request-shape")
+
+# Stable DATA correlation only; actual subject invokes genuine binding validation
+# first. A digest value never constructs a source, native subject, or grant.
+pub fn linux_fresh_workspace_subject_binding_v3(value: LinuxFreshWorkspaceCommandV3, binding_digest: text) -> Result<text, text>:
+    if not builder_digest_valid_v1(binding_digest): return Err("fresh-workspace-binding-digest")
+    val command = value.command
+    if command.action != LinuxFreshWorkloadActionV2.Inspect and command.action != LinuxFreshWorkloadActionV2.Absence:
+        return Err("fresh-workspace-subject-inspect-or-absence-required")
+    Ok(sha256_text("FRESH-WORKSPACE-SUBJECT-V3\n" + binding_digest + "\n" +
+        container_execution_request_encode_v2(command.request)? + container_host_scope_bytes_v2(command.scope)? + command.native_id + "\n" +
+        str(command.helper_cpu_millis) + "\n" + str(command.helper_memory_bytes) + "\n"))

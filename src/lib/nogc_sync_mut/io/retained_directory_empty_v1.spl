@@ -1,0 +1,67 @@
+#![allow(primitive_api)]
+# primitive_api: reviewed Linux fd/syscall-level retained-directory and process-replace mechanism keeps raw fds, byte bounds, seals, deadlines and flags as i64/bool (milestone_0012 groupB review); no raw descriptor crosses Host/workspace public APIs.
+# Bounded retained-handle emptiness observation for the immutable image template.
+# NEW IO mechanism, SOURCE_AUTHORED_NOT_RUN; no path reopen or new runtime export.
+@when(os="linux"):
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.{close, __errno_location}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_write_u32}
+@unsafe(reason: "duplicates actual retained directory fd CLOEXEC for an independent libc stream owner", capabilities: [ffi])
+extern fn fcntl(fd: i32, command: i32, minimum: i32) -> i32
+@unsafe(reason: "transfers duplicated directory fd to libc directory stream", capabilities: [ffi])
+extern fn fdopendir(fd: i32) -> i64
+@unsafe(reason: "reset the duplicated retained directory cursor before each bounded observation", capabilities: [ffi])
+extern fn lseek(fd: i32, offset: i64, whence: i32) -> i64
+@unsafe(reason: "bounded libc directory entry observation while stream remains retained", capabilities: [ffi, raw_ptr])
+extern fn readdir(stream: i64) -> i64
+@unsafe(reason: "consumes exact libc stream and its duplicated descriptor", capabilities: [ffi])
+extern fn closedir(stream: i64) -> i32
+
+@unsafe(reason: "observes only dot entries and EOF under actual retained directory, with exact stream cleanup", capabilities: [ffi, raw_ptr])
+pub fn retained_directory_empty_fd_v1(fd: i64) -> Result<bool, text>:
+    @when(arch="x86_64"):
+    retained_directory_empty_linux64_v1(fd)
+    @elif(arch="aarch64"):
+    retained_directory_empty_linux64_v1(fd)
+    @else:
+    Err("directory-empty-architecture-unsupported")
+    @end
+
+# Linux LP64 libc dirent: ino/off 64-bit, reclen@16, type@18, name@19.
+# AArch64 inspected /usr/include/aarch64-linux-gnu/bits/{dirent.h,typesizes.h,
+# fcntl-linux.h}; x86_64 existing supported profile. Not native qualification.
+@unsafe(reason: "bounded Linux LP64 libc dirent with exact stream cleanup", capabilities: [ffi, raw_ptr])
+fn retained_directory_empty_linux64_v1(fd: i64) -> Result<bool, text>:
+    val duplicate = fcntl(fd as i32, 1030, 3)
+    if duplicate < 0: return Err("directory-empty-duplicate")
+    # fcntl duplicates share the open-description offset. Reset and verify it
+    # on EVERY call so an earlier EOF cannot masquerade as an empty directory.
+    if lseek(duplicate, 0, 0) != 0:
+        val consumed = close(duplicate)
+        return Err("directory-empty-rewind")
+    val stream = fdopendir(duplicate)
+    if stream == 0:
+        val consumed = close(duplicate)
+        return Err("directory-empty-stream")
+    var empty = false
+    var failure = ""
+    for index in 0..3:
+        volatile_write_u32(__errno_location(), 0)
+        val entry = readdir(stream)
+        val native_error = volatile_read_u32(__errno_location())
+        if entry == 0:
+            if native_error != 0: failure = "directory-empty-read"
+            else: empty = true
+            break
+        val length = volatile_read_u16(entry + 16)
+        if length < 21 or length > 280:
+            failure = "directory-empty-entry-layout"
+            break
+        val first = volatile_read_u8(entry + 19)
+        val second = volatile_read_u8(entry + 20)
+        if first == 46 and second == 0: continue
+        if first == 46 and second == 46 and length >= 22 and volatile_read_u8(entry + 21) == 0: continue
+        break
+    if closedir(stream) != 0: failure = "directory-empty-close-consumed-error"
+    if failure != "": return Err(failure)
+    Ok(empty)
+@end
