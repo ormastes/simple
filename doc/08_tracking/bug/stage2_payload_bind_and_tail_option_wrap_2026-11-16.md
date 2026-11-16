@@ -1,8 +1,8 @@
 # Stage 2: `-> T` bodies return `Some(T)`; generic-enum payload/unit binds (2026-11-16)
 
-Status: OPEN. Root cause of defect A is localized to one decision in Stage 2's
-MIR lowering. The trigger for the wrong decision is context dependent and still
-unknown. Defects B and C have committed red fixtures. No fix has landed.
+Status: defect A FIXED in source (`2498a42ee19`, seed MIR spec red 0/2 ->
+green 2/2), native confirmation pending the next integration Stage 2 build.
+Defects B and C are OPEN with committed red fixtures.
 Every native claim below needs the next integration Stage 2 build to confirm it.
 
 Binaries:
@@ -57,37 +57,56 @@ This is `classify_option_word(local, _, sentinel_is_nil=true)`, reached as
 `normalize_option_handle` from `ensure_option_handle`
 (`switch_operators_calls.spl:727-782`, pinned source).
 
-### Root-cause location (Stage 2 = pinned 8453e87c8767 source)
+### Root cause
 
-`lower_function` (`_MirLowering/function_lowering.spl`, about line 1110)
-replaces `tail_return_type` with
-`resolved_call_hir_return_type(fn_.symbol)` whenever that call answers
-`Optional`. This came from `fd5056ec44e`, and the explicit `return` path
-(`lower_return_expr`) reads the same function.
+The earlier reading here (the `fd5056ec44e` tail override answering
+`Optional`) was wrong: that override only threads the type for `-> T?`, and a
+`-> LocalId` body is lowered by plain `lower_block`.
 
-The body is then lowered by `lower_block_expected(fn_.body, tail_return_type)`.
-The tail match's arms (`lower_block_expected` at about line 2028) run
-`ensure_option_handle(local, found_expected)`. So every arm value of
-`me lower_expr_impl(expr: HirExpr) -> LocalId` is wrapped into `Some`. The
-function returns that word as a plain `LocalId`.
+The real cause is the tail conditional's join. `lower_expr_impl(expr) ->
+LocalId` (`_MirLoweringExpr/expr_dispatch.spl`) ends in a match over
+`HirExprKind`. Its CfgSelect and InlineAsmMatch arms call `-> LocalId?`
+methods (`lower_cfg_select` / `lower_inline_asm_match`,
+`_MirLowering/asm_and_targets.spl:114/412`), so the whole match joins to
+`LocalId?`. Two producers then turn the result into a handle:
+- Typed HIR (the Stage 2 build): `lower_expr_impl`'s own MatchCase arm
+  (`expr_dispatch.spl:8029`, pinned 8448) passes `expr.type_` (`LocalId?`) as
+  the expected type, and `lower_block_expected` runs `ensure_option_handle` on
+  every arm (`function_lowering.spl` around line 2028). That is the IntLit-arm
+  `rt_enum_new` site gdb found.
+- Untyped HIR (the seed spec pipeline): `join_untyped_optional_arms`
+  (`mir_lowering_stmts.spl:4149`) normalizes the merged word to `T?`.
 
-The same shape explains the coordinator's census crash sites:
-- `cc_is_char_type` <- `char_int_operand_is_char`
-- `hir_binding_index_element` <- `binding_kind_type`
+Either way `lower_function` returned the `Some` handle where `LocalId` is
+declared.
 
-These are `-> HirType` functions whose returns arrive as boxes.
+Small repro (`test/fixtures/native_tail_match_optional_arm_plain_return/main.spl`):
+a `me lower_impl(k) -> Lid` whose tail match has one `self.lower_sel(n)` arm
+(`-> Lid?`). Seed `L 11 12 13`; Stage 2 cranelift and llvm `L 4 4 4`.
 
-Not ruled in yet: why `resolved_call_hir_return_type` answers `Optional` for a
-`-> LocalId` method in the Phase 3 context. Its sources, in order:
-1. `fn_return_types`. It is never written, so it is always empty.
-2. The symbol's `Function(_, ret, _)` type via `self.symbols.get_symbol_raw(fn_.symbol.id)`.
-3. `module_fn_declared_returns`. It is cleared per module and holds only `module.functions`.
-4. The name-keyed `bootstrap_fn_ret_hir_type_lookup(found_sym.name)`.
+### Fix (`2498a42ee19`)
 
-`lower_expr_impl`, `binding_kind_type` and `binding_payload_type` each have
-exactly one definition in the tree. That makes a plain name collision in (4)
-unlikely. A symbol-id / symbol-table mismatch in (2) under MIR shard workers is
-the leading hypothesis. It is not verified.
+`lower_function` narrows a tail whose lowered local is `T?` when a
+record/text/collection `T` is declared. It emits `rt_unwrap_or_trap` (None
+aborts) and decodes the payload with `decode_declared_enum_payload_slot`
+(`option_payload_for_plain_sink`, `switch_operators_calls.spl`). Int is not a
+sink: `SIMPLE_BOOTSTRAP=1` erases `T?` to Int.
+
+Guard: `test/01_unit/compiler/mir/tail_match_optional_arm_into_plain_return_spec.spl`.
+On the seed it is red 0/2 without the fix and green 2/2 with it.
+
+Still open:
+- Perf: the per-arm wrap plus the tail unwrap still allocate on every
+  `lower_expr_impl` call, which is the hottest MIR path. Threading the declared
+  `T` into the arms would remove both. It is not done here because it changes
+  every struct-returning conditional tail, and only a full Stage 2 rebuild can
+  validate that.
+- An explicit `return <T?>` from `-> T` (`lower_return_expr`) is not covered or
+  tested.
+- The census SEGV sites are not shown to be this class.
+  `binding_kind_type` (`20.hir/hir_lowering/statements.spl:112`) returns
+  through explicit `return X ?? unknown`, not through a tail join. Re-census
+  them on the next Stage 2.
 
 ### Fixtures that do NOT reproduce
 
@@ -105,20 +124,8 @@ These were also run with the Phase 3 env (`SIMPLE_BOOTSTRAP=` empty,
 `SIMPLE_NATIVE_ARENA_DECLS=1`, `SIMPLE_ABI_POLICY=v1`) and a warm HIR cache
 (second build is a cache hit).
 
-So defect A depends on the whole-program / MIR-shard context.
-
-### Next step
-
-Instrument `lower_function` to `eprint` `fn_.name`, the branch of
-`resolved_call_hir_return_type` that answered, and the answer's kind whenever
-it overrides a non-Optional `fn_.return_type`. Then recompile one module
-(`expr_dispatch.spl`) through the Phase 3 replay (`diaglink/s3i2/one_module.sh`).
-That needs a Stage 2 rebuilt with the eprint.
-
-Fail-closed fix candidate, pending that evidence: only override when
-`fn_.return_type` is the bootstrap-erased default (the case `fd5056ec44e`
-targeted). A declared non-optional `Named`/struct return must never become
-Optional.
+None of these shapes has a `T?` arm in a `-> T` tail, which is why they did
+not reproduce. The f10 shape above does.
 
 ## Defect B: generic user-enum struct payload bind loses the field read
 
