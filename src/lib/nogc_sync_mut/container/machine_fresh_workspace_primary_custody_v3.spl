@@ -1,0 +1,148 @@
+# Actual primary transport custody stored in the ORIGINAL lifecycle slot. No
+# second registry, spawn function, PTY reader or public native/ref getter.
+use std.common.contracts.container.primary_attach_v1.*
+use std.common.contracts.container.stream_v2.ContainerHelperAdmissionV2
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1,
+    container_primary_attach_plan_v1, container_primary_attach_native_matches_v1,
+    container_primary_attach_native_cleaned_v1, container_primary_attach_identity_v1}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_cleanup_proof_v2}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2,
+    PipedProcessRefV1, process_validate_piped_owned_transfer_v2, process_piped_ref_equal_v1,
+    process_retire_piped_owned_v2}
+
+pub(package) class MachineFreshWorkspacePrimaryCustodyV3:
+    plan: ContainerPrimaryAttachPlanV1
+    helper: ContainerHelperAdmissionV2
+    native: Option<GroupProcessStreamOwnerV2> = nil
+    reference: Option<PipedProcessRefV1> = nil
+    # Immutable real native metadata survives positive retirement to correlate
+    # exact repeated callbacks. Raw stale/unknown is never consumption proof.
+    native_record: Option<GroupProcessStreamOwnerV2> = nil
+    phase: text = "intent"
+    error: text = ""
+    retirement_proof: text = ""
+    session_fingerprint: text = ""
+
+    pub(package) fn consume_v3() -> Result<MachineFreshWorkspacePrimaryCustodyV3, text>:
+        if self.phase != "intent": return Err("workspace-primary-launch-already-consumed")
+        var retained = self
+        retained.phase = "spawn-unresolved"
+        Ok(retained)
+
+    pub(package) fn capture_v3(actual: PipedProcessOwnedSpawnV2) -> MachineFreshWorkspacePrimaryCustodyV3:
+        var retained = self
+        match actual:
+            case PipedProcessOwnedSpawnV2.Ready(owner, reference):
+                retained.native = Some(owner)
+                retained.native_record = Some(owner)
+                retained.reference = Some(reference)
+                # Ready alone does NOT prove that a Session was constructed.
+                retained.phase = "handoff-unresolved"
+            case PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, reason):
+                retained.native = Some(owner)
+                retained.native_record = Some(owner)
+                retained.reference = reference
+                retained.phase = "fallback-owned"
+                if retained.error == "": retained.error = reason
+            case PipedProcessOwnedSpawnV2.Rejected(reason):
+                # Actual owned-spawn Rejected carries no native obligation;
+                # every partial/ambiguous output uses CleanupRequired instead.
+                retained.phase = "native-retired"
+                retained.retirement_proof = "actual-owned-spawn-rejected-v3"
+                if retained.error == "": retained.error = reason
+        retained
+
+    fn session_match_v3(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+        if self.native_record.is_none(): return Err("workspace-primary-native-record-required")
+        if self.native_record.unwrap().launch.request.launch_deadline_unix_ms != self.helper.deadline.expires_at_unix_ms:
+            return Err("workspace-primary-helper-deadline-mismatch")
+        if self.session_fingerprint != "" and container_primary_attach_identity_v1(session) != self.session_fingerprint:
+            return Err("workspace-primary-session-fingerprint-mismatch")
+        val actual = container_primary_attach_plan_v1(session)
+        if container_primary_attach_plan_encode_v1(actual)? != container_primary_attach_plan_encode_v1(self.plan)?:
+            return Err("workspace-primary-session-plan-mismatch")
+        container_primary_attach_native_matches_v1(session, self.native_record.unwrap())
+
+    pub(package) fn session_loaned_v3(session: ContainerPrimaryAttachSessionV1) -> Result<MachineFreshWorkspacePrimaryCustodyV3, text>:
+        val matched = self.session_match_v3(session)?
+        if self.phase == "session-loaned": return Ok(self)
+        if self.phase != "handoff-unresolved": return Err("workspace-primary-session-handoff-phase")
+        var retained = self
+        val fingerprint = container_primary_attach_identity_v1(session)
+        if fingerprint == "": return Err("workspace-primary-session-fingerprint-empty")
+        retained.session_fingerprint = fingerprint
+        retained.phase = "session-loaned"
+        Ok(retained)
+
+    # The fingerprint comes only from the actual sole constructor handoff.
+    # Read loans revalidate the real session against retained native custody.
+    pub(package) fn session_binding_v3(session: ContainerPrimaryAttachSessionV1) -> Result<text, text>:
+        if not ["session-loaned", "native-retired"].contains(self.phase) or self.session_fingerprint == "":
+            return Err("workspace-primary-session-loan-required")
+        val matched = self.session_match_v3(session)?
+        Ok(self.session_fingerprint)
+
+    pub(package) fn construction_failed_v3(actual: PipedProcessOwnedTransferV2) -> Result<MachineFreshWorkspacePrimaryCustodyV3, text>:
+        if self.phase != "handoff-unresolved" or self.native_record.is_none() or self.reference.is_none():
+            return Err("workspace-primary-construction-failure-phase")
+        val validated = process_validate_piped_owned_transfer_v2(actual)?
+        if (actual.owner.identity_digest != self.native_record.unwrap().identity_digest or
+                actual.owner.launch.root != self.native_record.unwrap().launch.root or
+                not process_piped_ref_equal_v1(actual.reference, self.reference.unwrap())):
+            return Err("workspace-primary-construction-failure-native-mismatch")
+        var retained = self
+        retained.phase = "fallback-owned"
+        Ok(retained)
+
+    pub(package) fn session_return_v3(session: ContainerPrimaryAttachSessionV1) -> Result<MachineFreshWorkspacePrimaryCustodyV3, text>:
+        val matched = self.session_match_v3(session)?
+        if not container_primary_attach_native_cleaned_v1(session): return Err("workspace-primary-native-session-not-cleaned")
+        if self.phase == "native-retired": return Ok(self)
+        if self.phase != "session-loaned" and self.phase != "handoff-unresolved": return Err("workspace-primary-session-return-phase")
+        val proof = group_process_stream_cleanup_proof_v2(self.native_record.unwrap())?
+        if proof == "": return Err("workspace-primary-native-cleanup-proof-empty")
+        var retained = self
+        retained.native = nil
+        retained.reference = nil
+        retained.phase = "native-retired"
+        retained.retirement_proof = proof
+        Ok(retained)
+
+    # No Session exists in this branch. The Host may cancel the genuine helper
+    # separately; this method only positively retires after its native proof.
+    pub(package) fn fallback_cleanup_v3() -> Result<MachineFreshWorkspacePrimaryCustodyV3, text>:
+        if self.phase == "native-retired": return Ok(self)
+        if self.phase != "fallback-owned" or self.native.is_none(): return Err("workspace-primary-fallback-not-owned")
+        val proof = group_process_stream_cleanup_proof_v2(self.native.unwrap())?
+        if proof == "": return Err("workspace-primary-fallback-proof-empty")
+        val retired = process_retire_piped_owned_v2(self.native.unwrap(), self.reference)?
+        var retained = self
+        retained.native = nil
+        retained.reference = nil
+        retained.phase = "native-retired"
+        retained.retirement_proof = proof
+        Ok(retained)
+
+    pub(package) fn retirement_proof_v3() -> Result<text, text>:
+        if self.phase != "native-retired" or self.native.is_some() or self.reference.is_some() or self.retirement_proof == "":
+            return Err("workspace-primary-native-retirement-unproven")
+        Ok(self.retirement_proof)
+
+    pub(package) fn retired_native_v3() -> Result<GroupProcessStreamOwnerV2, text>:
+        val positive = self.retirement_proof_v3()?
+        if self.native_record.is_none(): return Err("workspace-primary-no-native-record")
+        # The saved value is the actual owned-spawn output, not a caller PID,
+        # reconstructed launch, missing ref or serialized retirement claim.
+        Ok(self.native_record.unwrap())
+
+    pub(package) fn retired_v3() -> bool: self.phase == "native-retired" and self.native.is_none() and self.reference.is_none()
+    pub(package) fn plan_v3() -> ContainerPrimaryAttachPlanV1: self.plan
+    pub(package) fn diagnostic_v3() -> text: self.error
+    pub(package) fn retain_diagnostic_v3(reason: text) -> MachineFreshWorkspacePrimaryCustodyV3:
+        var retained = self
+        if retained.error == "" and reason != "": retained.error = reason
+        retained
+
+pub(package) fn machine_workspace_primary_custody_v3(plan: ContainerPrimaryAttachPlanV1,
+        helper: ContainerHelperAdmissionV2) -> MachineFreshWorkspacePrimaryCustodyV3:
+    MachineFreshWorkspacePrimaryCustodyV3(plan: plan, helper: helper)

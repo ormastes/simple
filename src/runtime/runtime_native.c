@@ -11686,6 +11686,76 @@ int64_t spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
     return SPL_WFFI_OK;
 }
 
+/* Copies an all-int Simple array into raw[*count..]; 0 on a non-int array. */
+static int spl_wffi_append_int_args(int64_t value, int64_t* raw, int64_t* count) {
+    RtCoreArray* array = rt_core_as_array(value);
+    if (!array || (array->flags & RT_CORE_ARRAY_FLAG_BYTES)) return 0;
+    if (array->len > 0 && !array->data) return 0;
+    for (int64_t i = 0; i < array->len; i++) {
+        int64_t item = ((int64_t*)array->data)[i];
+        if (!rt_core_is_int(item)) return 0;
+        if (*count >= 8) { (*count)++; continue; }
+        raw[(*count)++] = rt_core_as_int(item);
+    }
+    return 1;
+}
+
+/* Byte-descriptor dispatch, twin of the Rust runtime's
+ * spl_wffi_call_i64_with_bytes_checked: the callee receives
+ * prefix..., ptr, len, suffix... (at most 8 foreign args); ptr is NULL when
+ * len == 0 and is valid only for the duration of the call. */
+int64_t spl_wffi_call_i64_with_bytes_checked(int64_t fptr, int64_t prefix_args,
+                                             int64_t bytes, int64_t offset,
+                                             int64_t length, int64_t suffix_args) {
+    if (fptr == 0) return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
+    RtCoreArray* owner = rt_core_as_array(bytes);
+    if (!owner || !(owner->flags & RT_CORE_ARRAY_FLAG_BYTES) || offset < 0 || length < 0 ||
+        offset > INT64_MAX - length || offset + length > owner->len ||
+        (length > 0 && !owner->data)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    int64_t raw[10] = {0};
+    int64_t count = 0;
+    if (!spl_wffi_append_int_args(prefix_args, raw, &count)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    int64_t prefix_count = count;
+    int64_t suffix_raw[8] = {0};
+    int64_t suffix_count = 0;
+    if (!spl_wffi_append_int_args(suffix_args, suffix_raw, &suffix_count)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    if (prefix_count + 2 + suffix_count > 8) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
+    }
+    raw[count++] = length == 0 ? 0 : (int64_t)(uintptr_t)((uint8_t*)owner->data + offset);
+    raw[count++] = length;
+    for (int64_t i = 0; i < suffix_count; i++) raw[count++] = suffix_raw[i];
+    SplArray* packed = rt_array_new(count);
+    if (!packed) return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    for (int64_t i = 0; i < count; i++) {
+        if (!rt_array_push(packed, rt_value_int(raw[i]))) {
+            rt_array_free(packed);
+            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+        }
+    }
+    int64_t value = spl_wffi_call_i64(fptr, (int64_t)(uintptr_t)packed, count);
+    rt_array_free(packed);
+    return spl_wffi_i64_checked_result(SPL_WFFI_OK, value);
+}
+
+int64_t spl_wffi_call_i64_with_bytes(int64_t fptr, int64_t prefix_args, int64_t bytes,
+                                     int64_t offset, int64_t length, int64_t suffix_args) {
+    int64_t checked = spl_wffi_call_i64_with_bytes_checked(fptr, prefix_args, bytes,
+                                                           offset, length, suffix_args);
+    RtCoreArray* pair = rt_core_as_array(checked);
+    if (!pair || pair->len != 2 || !pair->data) return 0;
+    int64_t status = rt_core_as_int(((int64_t*)pair->data)[0]);
+    int64_t value = rt_core_as_int(((int64_t*)pair->data)[1]);
+    rt_array_free((SplArray*)(uintptr_t)checked);
+    return status == SPL_WFFI_OK ? value : 0;
+}
+
 int64_t rt_array_header_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array : 0;
