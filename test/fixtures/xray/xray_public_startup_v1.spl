@@ -1,0 +1,101 @@
+# Real Simple public-facade integration input. Build normally with LLVM --xray
+# --xray-startup-consumer and opt-level 0. No hand-edited IR or fake provider.
+# CURRENT EXPECTATION: no admitted profile exists, so startup returns status2
+# and the generated entry must seal the window and exit125 before user main.
+# Once a real linked-profile issuer exists the same fixture exercises capture.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.{trace_config_defaults_v1}
+use std.nogc_sync_mut.trace.observer_resident_owner_v1.*
+
+var capture_slot: u64 = 0
+var capture_incarnation: u64 = 0
+var capture_generation: u64 = 0
+var selected_module: u64 = 0
+var selected_site: u32 = 0
+
+fn __simple_xray_fixture_config_v1() -> TraceConfigV1:
+    var observer = TraceResidentObserverV1()
+    val capabilities = observer.capabilities()
+    var config = trace_config_defaults_v1()
+    config.instrumentation = TraceInstrumentationV1.Dynamic
+    config.backend = TraceBackendV1.Llvm
+    config.max_contexts = 1
+    config.buffer_bytes = 6144
+    config.max_resident_generations = 1
+    # This spelling is requested data only. The actual provider must still
+    # refuse it until capabilities derive from a real qualified issuer.
+    config.abi_profile = "unqualified-startup-probe"
+    if capabilities.abi_profiles.len() > 0:
+        config.abi_profile = capabilities.abi_profiles[0]
+    config
+
+@export("C", name: "trace_startup_observed_v1")
+fn trace_startup_observed_v1(value: i64) -> i64:
+    value * 3 + 7
+
+@export("C", name: "__simple_xray_resident_startup_v1")
+fn __simple_xray_resident_startup_v1() -> i64:
+    # Source/export spelling uses the compiler-owned never-instrument prefix.
+    # Calls below are the real public implementation, with its closed gate.
+    var observer = TraceResidentObserverV1()
+    val config = __simple_xray_fixture_config_v1()
+    val selected = trace_resident_selection_candidate_v1("", ["trace_startup_observed_v1"])
+    match selected:
+        case Err(failure): return trace_failure_code_v1(failure) as i64
+        case Ok(selection):
+            selected_module = selection.sites[0].module_instance
+            selected_site = selection.sites[0].site_id
+            match observer.prepare(config, selection):
+                case Err(failure): return trace_failure_code_v1(failure) as i64
+                case Ok(prepared):
+                    match observer.start(prepared):
+                        case Err(failure): return trace_failure_code_v1(failure) as i64
+                        case Ok(session):
+                            capture_slot = session.slot
+                            capture_incarnation = session.incarnation
+                            capture_generation = session.generation
+    0
+
+fn main() -> i64:
+    # Reaching main without a genuinely issued startup session is a failure,
+    # never a successful refusal/capture result.
+    if capture_slot == 0 or capture_generation == 0: return 90
+    if trace_startup_observed_v1(5) != 22: return 91
+    var observer = TraceResidentObserverV1()
+    val session = TraceSessionV1(slot: capture_slot, incarnation: capture_incarnation,
+        generation: capture_generation)
+    if observer.request_stop(session).is_err(): return 92
+    var entries = 0
+    var exits = 0
+    var transitions = 0
+    for attempt in 0..8:
+        val polled = observer.poll(session, 64)
+        match polled:
+            case Err(_): return 93
+            case Ok(batch):
+                for event in batch.events:
+                    if event.generation != capture_generation or event.context_id == 0: return 94
+                    if event.kind == TraceEventKindV1.Transition:
+                        transitions = transitions + 1
+                    elif event.kind == TraceEventKindV1.Entry or event.kind == TraceEventKindV1.Exit:
+                        if event.module_instance != selected_module or event.site_id != selected_site: return 95
+                        if event.kind == TraceEventKindV1.Entry: entries = entries + 1
+                        else: exits = exits + 1
+    if entries != 1 or exits != 1 or transitions != 1: return 96
+    val drained = observer.drain(session, 18446744073709551615u64)
+    match drained:
+        case Err(_): return 97
+        case Ok(result):
+            if result.state != TraceSessionStateV1.Drained: return 98
+            if result.stats.lost != 0 or result.stats.backend_errors != 0: return 99
+    # The physical sled remains armed; closed admission must suppress records.
+    if trace_startup_observed_v1(6) != 25: return 100
+    match observer.poll(session, 64):
+        case Err(_): return 101
+        case Ok(batch):
+            if batch.events.len() != 0: return 102
+    if observer.release(session).is_err(): return 103
+    if observer.stats(session).is_ok(): return 104
+    if observer.start(TracePreparedV1(slot: capture_slot, incarnation: capture_incarnation)).is_ok(): return 105
+    print "public_startup_capture_v1 entries={entries} exits={exits} transitions={transitions} retained_armed=true"
+    0

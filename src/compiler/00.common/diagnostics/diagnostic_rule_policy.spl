@@ -15,8 +15,9 @@
 # Resolution order (first decisive stage wins):
 #   1. fatal parser/type corruption            -> deny   (stage "fatal")
 #   2. security invariant (category security)  -> deny   (stage "security"; no exception, no phase)
-#   3. edition mandatory: edition >= error_since_lang_version AND the release
-#      (or as-of) date >= error_not_before_date -> deny  (stage "edition")
+#   3. edition mandatory: edition >= error_since_lang_version AND, only when
+#      the rule sets one, release (or as-of) date >= error_not_before_date
+#      -> deny (stage "edition"). An unset date never blocks the edition.
 #   4. rule schedule: before warn_since (date and edition) -> allow (stage "schedule")
 #   5. profile baseline (mode override, else `default`)  (stage "profile")
 #   6. scoped exception, when exception_policy permits -> allow (stage "exception")
@@ -212,9 +213,9 @@ impl DiagnosticPolicySnapshot:
             out.stage = "security"
             return out
         var mandatory = false
-        if edition_reached(ctx.language_edition, r.error_since_lang_version) and date_reached(date, r.error_not_before_date):
+        if edition_reached(ctx.language_edition, r.error_since_lang_version) and date_gate_open(date, r.error_not_before_date):
             mandatory = true
-        if edition_reached(ctx.language_edition, r.remove_since_lang_version) and date_reached(date, r.remove_not_before_date):
+        if edition_reached(ctx.language_edition, r.remove_since_lang_version) and date_gate_open(date, r.remove_not_before_date):
             mandatory = true
         if mandatory:
             out.level = DiagnosticRuleLevel.Deny
@@ -253,6 +254,13 @@ fn date_reached(date: text, threshold: text) -> bool:
     if threshold == "" or date == "":
         return false
     date >= threshold
+
+# Optional extra date guard on an edition promotion. "" = no date guard: the
+# edition alone decides (owner decision 5C: promotion is by edition + profile).
+fn date_gate_open(date: text, threshold: text) -> bool:
+    if threshold == "":
+        return true
+    date_reached(date, threshold)
 
 fn edition_component(raw: text) -> i64:
     val digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]

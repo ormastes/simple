@@ -1,8 +1,8 @@
 # Immutable Git object snapshot provider. The caller supplies the trusted set of
 # repository-relative textual inputs; this module never reads the worktree.
 use std.nogc_sync_mut.io.process_ops.{OwnedProcessLease}
-use app.traceability.snapshot.git_tree.{TraceGitTreeEntry, decode_trace_git_tree}
-use app.traceability.snapshot.git_batch.{decode_trace_git_batch}
+use app.traceability.snapshot.git_tree.{TraceGitTreeEntry, TraceGitEntryLimitV1, decode_trace_git_tree}
+use app.traceability.snapshot.git_batch.{decode_trace_git_batch, TraceGitByteLimitV1, TraceGitBytesV1}
 use std.common.traceability.model.{SnapshotSubject, SnapshotArtifact, SnapshotInput}
 use std.common.crypto.sha1.{sha1_u8_hex}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -176,7 +176,8 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
     var inventory_args = ["ls-tree", "-r", "-z", "--full-tree", tree, "--"]
     for path in request.paths: inventory_args.push(":(literal){path}")
     val inventory = git_capture(root, inventory_args, [], TRACE_GIT_OUTPUT_MAX)?
-    val entries = decode_trace_git_tree(inventory, object_format, request.max_entries, TRACE_GIT_OUTPUT_MAX)?
+    val entries = decode_trace_git_tree(TraceGitBytesV1(bytes: inventory), object_format, TraceGitEntryLimitV1(value: request.max_entries),
+        TraceGitByteLimitV1(value: TRACE_GIT_OUTPUT_MAX))?
     for selected in request.paths:
         var matched = false
         for entry in entries:
@@ -197,7 +198,8 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
     if batch_limit > TRACE_GIT_OUTPUT_MAX:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: selected batch exceeds output budget")
     val batch = git_capture(root, ["cat-file", "--batch"], batch_input, batch_limit)?
-    val blobs = decode_trace_git_batch(batch, expected, request.max_blob_bytes, batch.len())?
+    val blobs = decode_trace_git_batch(TraceGitBytesV1(bytes: batch), expected, TraceGitByteLimitV1(value: request.max_blob_bytes),
+        TraceGitByteLimitV1(value: batch.len()))?
     var content_bytes: i64 = 0
     for blob in blobs:
         content_bytes += blob.byte_size

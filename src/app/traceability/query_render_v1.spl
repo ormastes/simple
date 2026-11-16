@@ -1,5 +1,6 @@
 # Presentation only: source facts, page exhaustion and qualification stay distinct.
-use std.common.traceability.model.*
+# @workaround bug=phase2_mir_glob_import_dict_payload_2026-11-15
+use std.common.traceability.model.{TraceDiagnostic, TraceQueryResult, node_kind_name}
 use std.common.traceability.trace_ids_v1.{TraceResultCountV1, TraceCursorV1, TracePageCompletenessV1}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
@@ -41,9 +42,9 @@ fn legacy_row_sdn_v1(row: LegacyBugRowV1) -> SdnValue:
 
 # Table diagnostics are not part of the result an agent parses from stdout:
 # stdout carries one summary count line, stderr carries the per-row lines.
-pub fn trace_query_table_diagnostics_summary_v1(count: i64) -> text:
-    if count == 0: return ""
-    "Diagnostics: " + count.to_text() + " (details on stderr)\n"
+pub fn trace_query_table_diagnostics_summary_v1(diagnostics: [TraceDiagnostic]) -> text:
+    if diagnostics.len() == 0: return ""
+    "Diagnostics: " + diagnostics.len().to_text() + " (details on stderr)\n"
 
 pub fn trace_query_table_diagnostics_v1(diagnostics: [TraceDiagnostic]) -> text:
     var output = ""
@@ -63,7 +64,11 @@ fn query_table_text_v1(value: text) -> text:
         else: safe = safe + ch
     safe
 
-pub fn trace_query_error_v1(message: text, snapshot: text, format: text, captured: bool = false) -> text:
+pub enum TraceQueryCaptureV1:
+    Captured
+    Uncaptured
+
+pub fn trace_query_error_v1(message: text, snapshot: text, format: text, capture: TraceQueryCaptureV1 = TraceQueryCaptureV1.Uncaptured) -> text:
     val separator = message.index_of(":") ?? -1
     var code = "TRACE-QUERY-INFRASTRUCTURE"
     var detail = message
@@ -74,7 +79,7 @@ pub fn trace_query_error_v1(message: text, snapshot: text, format: text, capture
         return sdn_encode_canonical(SdnValue.Dict({
             "schema": SdnValue.String("simple.trace.node-query/v1"),
             "status": SdnValue.String("error"), "requested_snapshot": SdnValue.String(snapshot),
-            "snapshot_available": SdnValue.Bool(captured), "query_complete": SdnValue.Bool(false),
+            "snapshot_available": SdnValue.Bool(capture == TraceQueryCaptureV1.Captured), "query_complete": SdnValue.Bool(false),
             "admission_eligible": SdnValue.Bool(false), "qualification": SdnValue.String("unverified"),
             "code": SdnValue.String(code), "message": SdnValue.String(detail)}))
     "ERROR " + query_table_text_v1(message) + "\nRequested snapshot: " + query_table_text_v1(snapshot) + "\n"
@@ -153,4 +158,4 @@ pub fn trace_query_render_v1(build: TraceSnapshotBuild, page: TraceQueryResult, 
         output = output + "\n"
     output = output + "Total selected: " + page.total_count.value.to_text() + "\n"
     if page.next_cursor.value != "": output = output + "Next cursor: " + page.next_cursor.value + "\n"
-    output + trace_query_table_diagnostics_summary_v1(page.diagnostics.len())
+    output + trace_query_table_diagnostics_summary_v1(page.diagnostics)

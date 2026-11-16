@@ -30,7 +30,8 @@
 #   - exact string and fixed-size SHF_MERGE entities coalesce with relocation remapping
 #   - x86_64 SIZE32/SIZE64 use the resolved definition extent across objects/DSOs
 #   - no COMDAT dedup; GNU versioned imports and default-version binding are emitted
-#   - single-threaded; no StageReceipts yet
+#   - relocation scan and apply run per object range on lockless workers
+#     (elf/elf_par.spl); parsing is still serial; no StageReceipts yet
 
 use compiler.backend.linker.elf_parser.{
     ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding, elf_symbol_type,
@@ -57,6 +58,7 @@ use compiler.backend.linker.elf.section_gc.{
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.link_trace.{elf_link_trace}
+use compiler.backend.linker.elf.elf_par.{elf_par_acquire, elf_par_release, elf_par_jobs, elf_par_run}
 use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros, elf_u8_from_i64, elf_i64_from_u8, elf_u8_read_le}
 use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags, elf_riscv_hi_index}
 use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
@@ -134,6 +136,7 @@ struct ElfLinkRequest:
     hash_style: text = "both" # gnu, sysv, or both
     as_needed: bool = false # emit DT_NEEDED only for provider DSOs
     gc_sections: bool = true # false retains every allocatable input section
+    jobs: i64 = 0          # link workers: 0 = auto (SIMPLE_LINK_JOBS or CPUs), 1 = serial
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -779,12 +782,104 @@ fn elf_static_join(items: [text]) -> text:
 # Relocation refs
 # ============================================================================
 
-fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[u8]]) -> Result<[ElfScanRef], text>:
-    """Resolve every relocation that lands in an allocatable section."""
-    val inputs = ctx.inputs
+fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[u8]], requested_jobs: i64) -> Result<[ElfScanRef], text>:
+    """Resolve every relocation that lands in an allocatable section, per
+    object (serial, or per-object-range parallel); refs stay in object order."""
+    val n = ctx.inputs.objects.len()
+    var total: i64 = 0
+    for o in ctx.inputs.objects: total = total + o.relocations.len()
+    val workers = elf_par_jobs(requested_jobs, total)
+    if workers > 1 and n > 1 and elf_par_acquire():
+        _elf_scan_ctx = [ctx]
+        _elf_scan_contents = contents
+        val w = if workers > n: n else: workers
+        val messages = elf_par_run(n, w, elf_scan_worker)
+        _elf_scan_ctx = []
+        _elf_scan_contents = []
+        elf_par_release()
+        if messages.is_ok():
+            var refs: [ElfScanRef] = []
+            for m in messages.unwrap():
+                var t: i64 = 0
+                while t < m.len():
+                    if m[t] < 0:
+                        # Re-run that object serially for its exact error text.
+                        return Err(elf_collect_obj_refs(ctx, contents, m[t + 1]).unwrap_err())
+                    refs.push(elf_scan_ref_decode(ctx, m, t))
+                    t = t + ELF_REF_W
+            return Ok(refs)
+        elf_link_trace("scan: parallel workers unavailable; serial scan")
     var refs: [ElfScanRef] = []
     var oi: i64 = 0
-    while oi < inputs.objects.len():
+    while oi < n:
+        refs.extend(elf_collect_obj_refs(ctx, contents, oi)?)
+        oi = oi + 1
+    Ok(refs)
+
+# One encoded ElfScanRef: [oi, sym_idx, out_sec, out_off, writable, rtype,
+# rclass, kind, stype, size, alignment, weak, addend, relax, key_kind]
+# (key_kind 0 = none, 1 = global, 2 = local); an error is [-1, oi, 0...].
+val ELF_REF_W: i64 = 15
+
+var _elf_scan_ctx: [ElfLinkCtx] = []
+var _elf_scan_contents: [[u8]] = []
+
+# @allow(primitive_api) isolated-thread worker ABI: thread_spawn_with_args carries only scalar index ranges and a flat [i64] result
+pub fn elf_scan_worker(lo: i64, hi: i64) -> [i64]:
+    val ctx = _elf_scan_ctx[0]
+    val contents = _elf_scan_contents
+    var out: [i64] = []
+    var oi = lo
+    while oi < hi:
+        val got = elf_collect_obj_refs(ctx, contents, oi)
+        if got.is_err():
+            out.push(-1)
+            out.push(oi)
+            var z: i64 = 2
+            while z < ELF_REF_W:
+                out.push(0)
+                z = z + 1
+            return out
+        for r in got.unwrap():
+            var key_kind: i64 = 0
+            if r.key.starts_with("global:"): key_kind = 1
+            else if r.key.starts_with("local:"): key_kind = 2
+            out.push(r.oi)
+            out.push(r.sym_idx)
+            out.push(r.out_sec)
+            out.push(r.out_off)
+            out.push(if r.writable: 1 else: 0)
+            out.push(r.rtype)
+            out.push(r.rclass)
+            out.push(r.kind)
+            out.push(r.stype)
+            out.push(r.size)
+            out.push(r.alignment)
+            out.push(if r.weak: 1 else: 0)
+            out.push(r.addend)
+            out.push(if r.relax: 1 else: 0)
+            out.push(key_kind)
+        oi = oi + 1
+    out
+
+fn elf_scan_ref_decode(ctx: ElfLinkCtx, m: [i64], t: i64) -> ElfScanRef:
+    val oi = m[t]
+    val sym_idx = m[t + 1]
+    var name = ""
+    if sym_idx > 0: name = ctx.inputs.objects[oi].symbols[sym_idx].name
+    var key = ""
+    if m[t + 14] == 1: key = "global:" + name
+    else if m[t + 14] == 2: key = "local:{oi}#{sym_idx}"
+    ElfScanRef(oi: oi, sym_idx: sym_idx, out_sec: m[t + 2], out_off: m[t + 3],
+        writable: m[t + 4] != 0, rtype: m[t + 5], rclass: m[t + 6], kind: m[t + 7],
+        key: key, name: name, stype: m[t + 8], size: m[t + 9], alignment: m[t + 10],
+        weak: m[t + 11] != 0, addend: m[t + 12], relax: m[t + 13] != 0)
+
+fn elf_collect_obj_refs(ctx: ElfLinkCtx, contents: [[u8]], oi: i64) -> Result<[ElfScanRef], text>:
+    """Resolved relocations of one object (pure: reads ctx/contents only)."""
+    val inputs = ctx.inputs
+    var refs: [ElfScanRef] = []
+    if oi >= 0 and oi < inputs.objects.len():
         val obj = inputs.objects[oi]
         for r in obj.relocations:
             val tsec = r.target_section_idx
@@ -827,7 +922,6 @@ fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[u8]]) -> Result<[ElfScanRef], t
                 key: seed.key, name: seed.name, stype: seed.stype, size: seed.size,
                 alignment: seed.alignment, weak: seed.weak,
                 addend: r.r_addend, relax: relax))
-        oi = oi + 1
     Ok(refs)
 
 # ============================================================================
@@ -1050,7 +1144,7 @@ fn elf_synth_shndx(plan: ElfExecPlan, name: text) -> i64:
         return -1
     k + 1
 
-fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, text>:
+fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool) -> Result<ElfSymtabOut, text>:
     """ld.lld's .symtab shape: null, then per input file its locals (STT_SECTION
     dropped; symbols in non-allocated sections dropped — they have no output
     section here) followed by the hidden globals it defines (demoted to LOCAL),
@@ -1168,7 +1262,10 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
         var name_off: i64 = 0
         if rows.names[i] != "":
             name_off = strtab.offsets[rows.names[i]]
-        b.extend(elf_sym_entry(name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i]))
+        if w32:
+            b.extend(elf_sym32_entry(name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i]))
+        else:
+            b.extend(elf_sym_entry(name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i]))
         i = i + 1
     Ok(ElfSymtabOut(symtab: b, strtab: strtab.data, first_global: first_global))
 
@@ -1254,6 +1351,321 @@ fn elf_append_symtab(image: [u8], st: ElfSymtabOut) -> Result<[u8], text>:
     b[0x3d] = (((shnum + 2) >> 8) & 0xff) as u8
     Ok(b)
 
+fn elf_sym32_entry(name_off: i64, info: i64, other: i64, shndx: i64, value: i64, size: i64) -> [i64]:
+    """One Elf32_Sym (16 bytes): name, value, size, info, other, shndx."""
+    var b = write_u32_le([], name_off)
+    b = write_u32_le(b, value)
+    b = write_u32_le(b, size)
+    b = b.push(info)
+    b = b.push(other)
+    b = b.push(shndx & 0xff)
+    b.push((shndx >> 8) & 0xff)
+
+fn elf_put_u32(b: [u8], at: i64, v: i64) -> [u8]:
+    var out = b
+    var pb: i64 = 0
+    while pb < 4:
+        out[at + pb] = ((v >> (pb * 8)) & 0xff) as u8
+        pb = pb + 1
+    out
+
+fn elf_append_symtab32(image: [u8], st: ElfSymtabOut) -> Result<[u8], text>:
+    """ELFCLASS32 twin of elf_append_symtab: same placement (the old
+    .shstrtab, the last file data, is replaced by .symtab, .strtab and the
+    grown .shstrtab), with 40-byte Elf32_Shdr and 16-byte Elf32_Sym."""
+    val shoff = elf_u8_read_le(image, 0x20, 4)
+    val shnum = elf_u8_read_le(image, 0x30, 2)
+    val shstrndx = elf_u8_read_le(image, 0x32, 2)
+    val ssh = shoff + shstrndx * 40
+    val old_off = elf_u8_read_le(image, ssh + 16, 4)
+    val old_size = elf_u8_read_le(image, ssh + 20, 4)
+    var i: i64 = 1
+    while i < shnum:
+        val h = shoff + i * 40
+        if i != shstrndx and elf_u8_read_le(image, h + 4, 4) != SHT_NOBITS_E and elf_u8_read_le(image, h + 16, 4) + elf_u8_read_le(image, h + 20, 4) > old_off:
+            return Err("internal: section header {i} has file data after .shstrtab; cannot append .symtab")
+        i = i + 1
+    val sym_off = align_up(old_off, 4)
+    val str_off = sym_off + st.symtab.len()
+    val shstr_off = str_off + st.strtab.len()
+    val new_shoff = align_up(shstr_off + old_size + 16, 4)
+    var b: [u8] = elf_u8_zeros(new_shoff + (shnum + 2) * 40)
+    b.write_span(image, 0, 0, old_off)
+    val symtab_bytes = elf_u8_from_i64(st.symtab)
+    if symtab_bytes.len() > 0: b.write_span(symtab_bytes, sym_off, 0, symtab_bytes.len())
+    val strtab_bytes = elf_u8_from_i64(st.strtab)
+    if strtab_bytes.len() > 0: b.write_span(strtab_bytes, str_off, 0, strtab_bytes.len())
+    if old_size > 0: b.write_span(image, shstr_off, old_off, old_size)
+    var names: [u8] = text_to_bytes(".symtab")
+    names.push(0u8)
+    names.extend(text_to_bytes(".strtab"))
+    names.push(0u8)
+    b.write_span(names, shstr_off + old_size, 0, 16)
+    b.write_span(image, new_shoff, shoff, shnum * 40)
+    val nssh = new_shoff + shstrndx * 40
+    b = elf_put_u32(b, nssh + 16, shstr_off)
+    b = elf_put_u32(b, nssh + 20, old_size + 16)
+    var headers: [i64] = []
+    # .symtab: sh_link = .strtab (index shnum + 1), sh_info = first global
+    headers = write_u32_le(headers, old_size)
+    headers = write_u32_le(headers, SHT_SYMTAB_L)
+    headers = write_u32_le(headers, 0)
+    headers = write_u32_le(headers, 0)
+    headers = write_u32_le(headers, sym_off)
+    headers = write_u32_le(headers, st.symtab.len())
+    headers = write_u32_le(headers, shnum + 1)
+    headers = write_u32_le(headers, st.first_global)
+    headers = write_u32_le(headers, 4)
+    headers = write_u32_le(headers, 16)
+    # .strtab
+    headers = write_u32_le(headers, old_size + 8)
+    headers = write_u32_le(headers, SHT_STRTAB_E)
+    headers = write_u32_le(headers, 0)
+    headers = write_u32_le(headers, 0)
+    headers = write_u32_le(headers, str_off)
+    headers = write_u32_le(headers, st.strtab.len())
+    headers = write_u32_le(headers, 0)
+    headers = write_u32_le(headers, 0)
+    headers = write_u32_le(headers, 1)
+    headers = write_u32_le(headers, 0)
+    val header_bytes = elf_u8_from_i64(headers)
+    b.write_span(header_bytes, new_shoff + shnum * 40, 0, header_bytes.len())
+    b = elf_put_u32(b, 0x20, new_shoff)
+    b[0x30] = ((shnum + 2) & 0xff) as u8
+    b[0x31] = (((shnum + 2) >> 8) & 0xff) as u8
+    Ok(b)
+
+# ============================================================================
+# ARM float ABI (EF_ARM_ABI_FLOAT_*)
+# ============================================================================
+
+val SHT_ARM_ATTRIBUTES: i64 = 0x70000003
+val EF_ARM_ABI_FLOAT_SOFT: i64 = 0x200
+val EF_ARM_ABI_FLOAT_HARD: i64 = 0x400
+val TAG_ABI_VFP_ARGS: i64 = 28
+
+fn elf_uleb_at(b: [u8], at: i64, end: i64) -> [i64]:
+    """[value, next offset]; next = -1 on truncation."""
+    var v: i64 = 0
+    var shift: i64 = 0
+    var p = at
+    while p < end:
+        val c = b[p] as i64
+        v = v | ((c & 0x7f) << shift)
+        p = p + 1
+        if c & 0x80 == 0: return [v, p]
+        shift = shift + 7
+        if shift > 56: return [0, -1]
+    [0, -1]
+
+fn elf_arm_vfp_args(raw: [u8], start: i64, size: i64) -> i64:
+    """Tag_ABI_VFP_args from one .ARM.attributes section, or -1 if absent.
+    Layout: 'A', then vendor subsections (u32 len, NTBS vendor); "aeabi"
+    holds Tag_File (1) with u32 len followed by ULEB tag/value pairs where
+    tags 4, 5, 67 and odd tags >= 65 carry NTBS and 32 carries ULEB + NTBS."""
+    val end = start + size
+    if size < 1 or end > raw.len() or (raw[start] as i64) != 0x41: return -1
+    var p = start + 1
+    while p + 4 <= end:
+        val sub_len = elf_u8_read_le(raw, p, 4)
+        val sub_end = p + sub_len
+        if sub_len < 5 or sub_end > end: return -1
+        var q = p + 4
+        val vendor_start = q
+        while q < sub_end and (raw[q] as i64) != 0: q = q + 1
+        val is_aeabi = q - vendor_start == 5 and (raw[vendor_start] as i64) == 0x61 and
+            (raw[vendor_start + 1] as i64) == 0x65 and (raw[vendor_start + 2] as i64) == 0x61 and
+            (raw[vendor_start + 3] as i64) == 0x62 and (raw[vendor_start + 4] as i64) == 0x69
+        q = q + 1
+        while is_aeabi and q + 5 <= sub_end:
+            val file_tag = raw[q] as i64
+            val tag_len = elf_u8_read_le(raw, q + 1, 4)
+            val tag_end = q + tag_len
+            if tag_len < 5 or tag_end > sub_end: return -1
+            var t = q + 5
+            while file_tag == 1 and t < tag_end:
+                val tag = elf_uleb_at(raw, t, tag_end)
+                if tag[1] < 0: return -1
+                t = tag[1]
+                if tag[0] == 4 or tag[0] == 5 or tag[0] == 67 or (tag[0] >= 65 and tag[0] % 2 == 1):
+                    while t < tag_end and (raw[t] as i64) != 0: t = t + 1
+                    t = t + 1
+                else if tag[0] == 32:
+                    val v = elf_uleb_at(raw, t, tag_end)
+                    if v[1] < 0: return -1
+                    t = v[1]
+                    while t < tag_end and (raw[t] as i64) != 0: t = t + 1
+                    t = t + 1
+                else:
+                    val v = elf_uleb_at(raw, t, tag_end)
+                    if v[1] < 0: return -1
+                    if tag[0] == TAG_ABI_VFP_ARGS: return v[0]
+                    t = v[1]
+            q = tag_end
+        p = sub_end
+    -1
+
+fn elf_arm_float_flags(objects: [ElfObject]) -> i64:
+    """ld.lld's float-ABI e_flags bit: HARD when an input declares
+    Tag_ABI_VFP_args = 1 (VFP registers), otherwise SOFT."""
+    for obj in objects:
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            if sec.sh_type == SHT_ARM_ATTRIBUTES:
+                # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                if elf_arm_vfp_args(obj.raw, sec.sh_addr, sec.sh_size) == 1:
+                    return EF_ARM_ABI_FLOAT_HARD
+            si = si + 1
+    EF_ARM_ABI_FLOAT_SOFT
+
+# ============================================================================
+# Relocation apply (serial or lockless per-range parallel)
+# ============================================================================
+
+# One deferred relocation: [out_sec, out_off, rtype, S, A, P, ref index].
+val ELF_JOB_W: i64 = 7
+
+# Immutable snapshot read by apply workers (see elf/elf_par.spl contract).
+# Written only by the gate owner before spawn and cleared after join.
+var _elf_apply_contents: [[u8]] = []
+var _elf_apply_jobs: [i64] = []
+var _elf_apply_target: [RelocArch] = []
+var _elf_apply_ops: [ElfSealedOperationsV1] = []
+
+fn elf_job_window(contents: [[u8]], jobs: [i64], ji: i64) -> [i64]:
+    val k = jobs[ji * ELF_JOB_W]
+    val off = jobs[ji * ELF_JOB_W + 1]
+    val n = contents[k].len()
+    var fs = off - 4
+    if fs < 0: fs = 0
+    if fs > n: fs = n
+    var fe = off + 12
+    if fe > n: fe = n
+    if fe < fs: fe = fs
+    [fs, fe]
+
+# @allow(primitive_api) isolated-thread worker ABI: thread_spawn_with_args carries only scalar index ranges and a flat [i64] result
+pub fn elf_apply_worker(lo: i64, hi: i64) -> [i64]:
+    """Relocate jobs [lo, hi) against the snapshot; returns (sec, index, byte)
+    triples for every changed byte, or the triple (-1, job, 0) on a reject."""
+    val contents = _elf_apply_contents
+    val jobs = _elf_apply_jobs
+    val target = _elf_apply_target[0]
+    val ops = _elf_apply_ops[0]
+    var out: [i64] = []
+    var ji = lo
+    while ji < hi:
+        val k = jobs[ji * ELF_JOB_W]
+        val span = elf_job_window(contents, jobs, ji)
+        var window: [i64] = []
+        var wb = span[0]
+        while wb < span[1]:
+            window.push(contents[k][wb] as i64)
+            wb = wb + 1
+        val applied = ops.relocate(target, window, jobs[ji * ELF_JOB_W + 1] - span[0],
+            jobs[ji * ELF_JOB_W + 2], jobs[ji * ELF_JOB_W + 3], jobs[ji * ELF_JOB_W + 4],
+            jobs[ji * ELF_JOB_W + 5])
+        if applied.is_err():
+            return [-1, ji, 0]
+        val patched = applied.unwrap()
+        val f_lo = jobs[ji * ELF_JOB_W + 1]
+        var f_w = reloc_patch_width(target, jobs[ji * ELF_JOB_W + 2])
+        if f_w < 1: f_w = 1
+        var wi: i64 = 0
+        while wi < patched.len():
+            if patched[wi] != window[wi]:
+                # A byte outside the field may belong to a neighbour's field;
+                # only the serial order is then defined (owner reruns serially).
+                if span[0] + wi < f_lo or span[0] + wi >= f_lo + f_w:
+                    return [-2, ji, 0]
+                out.push(k)
+                out.push(span[0] + wi)
+                out.push(patched[wi])
+            wi = wi + 1
+        ji = ji + 1
+    out
+
+fn elf_jobs_disjoint(jobs: [i64], target: RelocArch) -> bool:
+    """True when no two relocation fields share a byte (then apply order is
+    irrelevant and a parallel apply equals the serial one)."""
+    var owner: {i64: bool} = {}
+    val n = jobs.len() / ELF_JOB_W
+    var ji: i64 = 0
+    while ji < n:
+        var w = reloc_patch_width(target, jobs[ji * ELF_JOB_W + 2])
+        if w < 1: w = 1
+        var b: i64 = 0
+        while b < w:
+            val key = (jobs[ji * ELF_JOB_W] << 40) + jobs[ji * ELF_JOB_W + 1] + b
+            if owner.has(key): return false
+            owner[key] = true
+            b = b + 1
+        ji = ji + 1
+    true
+
+struct ElfApplyOut:
+    contents: [[u8]]
+    failed: i64           # -1, or the lowest rejected job index
+
+fn elf_apply_jobs(input: [[u8]], jobs: [i64], target: RelocArch,
+        operations: ElfSealedOperationsV1, requested_jobs: i64) -> ElfApplyOut:
+    """Patch every deferred relocation. On a reject the bytes are partial;
+    the caller reports the error and discards the image."""
+    var contents = input
+    val n = jobs.len() / ELF_JOB_W
+    val workers = elf_par_jobs(requested_jobs, n)
+    if workers > 1 and elf_jobs_disjoint(jobs, target) and elf_par_acquire():
+        _elf_apply_contents = contents
+        _elf_apply_jobs = jobs
+        _elf_apply_target = [target]
+        _elf_apply_ops = [operations]
+        val messages = elf_par_run(n, workers, elf_apply_worker)
+        _elf_apply_contents = []
+        _elf_apply_jobs = []
+        _elf_apply_target = []
+        _elf_apply_ops = []
+        elf_par_release()
+        if messages.is_ok():
+            # Any reject or out-of-field write: discard the parallel result and
+            # rerun serially, so bytes and the reported error match jobs=1.
+            var clean = true
+            for m in messages.unwrap():
+                if m.len() >= 3 and m[0] < 0: clean = false
+            if clean:
+                for m in messages.unwrap():
+                    var t: i64 = 0
+                    while t + 2 < m.len():
+                        contents[m[t]][m[t + 1]] = m[t + 2] as u8
+                        t = t + 3
+                return ElfApplyOut(contents: contents, failed: -1)
+            elf_link_trace("apply: parallel reject or out-of-field write; serial apply")
+        else:
+            elf_link_trace("apply: parallel workers unavailable; serial apply")
+    var ji: i64 = 0
+    while ji < n:
+        val k = jobs[ji * ELF_JOB_W]
+        val span = elf_job_window(contents, jobs, ji)
+        # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md
+        # Read the window by direct element access (no section copy per reloc).
+        var window: [i64] = []
+        var wb = span[0]
+        while wb < span[1]:
+            window.push(contents[k][wb] as i64)
+            wb = wb + 1
+        val applied = operations.relocate(target, window, jobs[ji * ELF_JOB_W + 1] - span[0],
+            jobs[ji * ELF_JOB_W + 2], jobs[ji * ELF_JOB_W + 3], jobs[ji * ELF_JOB_W + 4],
+            jobs[ji * ELF_JOB_W + 5])
+        if applied.is_err():
+            return ElfApplyOut(contents: contents, failed: ji)
+        val patched = applied.unwrap()
+        var wi: i64 = 0
+        while wi < patched.len():
+            if patched[wi] != window[wi]: contents[k][span[0] + wi] = patched[wi] as u8
+            wi = wi + 1
+        ji = ji + 1
+    ElfApplyOut(contents: contents, failed: -1)
+
 # ============================================================================
 # Entry points
 # ============================================================================
@@ -1292,7 +1704,7 @@ fn elf_request_packed(req: ElfLinkRequest) -> ElfLinkRequest:
     ElfLinkRequest(objects: objects, archives: archives, shared: req.shared, entry: req.entry,
         target: req.target, mode: req.mode, interp: req.interp, shared_names: req.shared_names,
         runpath: req.runpath, bind_now: req.bind_now, hash_style: req.hash_style,
-        as_needed: req.as_needed, gc_sections: req.gc_sections)
+        as_needed: req.as_needed, gc_sections: req.gc_sections, jobs: req.jobs)
 
 fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         retained_symbols: [text]) -> Result<[i64], text>:
@@ -1428,7 +1840,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     elf_link_trace("placed")
     val initial_contents = elf_static_contents(common.inputs)
     elf_link_trace("initial contents")
-    val refs = elf_collect_refs(ctx0, initial_contents)?
+    val refs = elf_collect_refs(ctx0, initial_contents, req.jobs)?
     elf_link_trace("refs collected")
     val sc = elf_reloc_scan(refs, target, mode)?
     elf_link_trace("reloc scan")
@@ -1625,6 +2037,10 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                     fb = fb + 1
                 riscv_uleb_widths[ri] = riscv_uleb_width(field, 0, field.len())?
             ri = ri + 1
+    # RISC-V pairs (ADD/SUB, SET/SUB ULEB128) read and rewrite the same field
+    # in order, so RISC-V keeps the in-loop apply; every other target defers.
+    val defer_apply = target != RelocArch.Riscv64
+    var apply_jobs: [i64] = []
     var j: i64 = 0
     while j < refs.len():
         val r = refs[j]
@@ -1767,6 +2183,18 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             a = 0
             p = 0
             rtype = if r.rtype == 24: 27 else: 28
+        if defer_apply:
+            # Fields are patched after the scan by elf_apply_jobs (serial or
+            # per-range parallel); nothing in this loop reads a field byte.
+            apply_jobs.push(k)
+            apply_jobs.push(r.out_off)
+            apply_jobs.push(rtype)
+            apply_jobs.push(s)
+            apply_jobs.push(a)
+            apply_jobs.push(p)
+            apply_jobs.push(j)
+            j = j + 1
+            continue
         # Relocate a small widened window around the field and write back only
         # the changed bytes in place. Passing the whole section through the
         # operation copied it once per relocation.
@@ -1794,6 +2222,29 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             if patched[wi] != window[wi]: contents[k][field_start + wi] = patched[wi]
             wi = wi + 1
         j = j + 1
+    if defer_apply:
+        val applied_out = elf_apply_jobs(contents, apply_jobs, target, operations, req.jobs)
+        contents = applied_out.contents
+        val failed = applied_out.failed
+        if failed >= 0:
+            val r = refs[apply_jobs[failed * ELF_JOB_W + 6]]
+            val fk = apply_jobs[failed * ELF_JOB_W]
+            val foff = apply_jobs[failed * ELF_JOB_W + 1]
+            var fs = foff - 4
+            if fs < 0: fs = 0
+            var fe = foff + 12
+            if fe > contents[fk].len(): fe = contents[fk].len()
+            var win: [i64] = []
+            var wb = fs
+            while wb < fe:
+                win.push(contents[fk][wb] as i64)
+                wb = wb + 1
+            val p = apply_jobs[failed * ELF_JOB_W + 5]
+            val again = operations.relocate(target, win, foff - fs, apply_jobs[failed * ELF_JOB_W + 2],
+                apply_jobs[failed * ELF_JOB_W + 3], apply_jobs[failed * ELF_JOB_W + 4], p)
+            var why = "relocation rejected"
+            if again.is_err(): why = again.unwrap_err()
+            return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {why}")
 
     elf_link_trace("relocated")
     # --- synthetic contents ---
@@ -1928,8 +2379,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     var image: [u8] = []
     if w32:
         # EM_ARM loaders check e_flags (EABI version, float ABI): carry the
-        # first input's flags. i386 defines no e_flags.
-        val e_flags = if target == RelocArch.Arm32: elf_u8_read_le(roots[0].raw, 36, 4) else: 0
+        # first input's EABI flags plus the float-ABI bit ld.lld derives from
+        # .ARM.attributes. i386 defines no e_flags.
+        val e_flags = if target == RelocArch.Arm32:
+            elf_u8_read_le(roots[0].raw, 36, 4) | elf_arm_float_flags(all)
+        else: 0
         image = elf_write_image32_bytes(e_type, machine, e_flags, entry_addr, plan, out)
     else:
         image = operations.write_image(e_type, machine, entry_addr, plan, out)?
@@ -1942,9 +2396,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         # Header identity participates in the existing final build-id hash.
         image[48] = (riscv_flags & 0xff) as u8
     elf_link_trace("image written")
-    # .symtab append is ELF64-only; ELF32 output is emitted stripped.
-    if not strip_output and not w32:
-        image = elf_append_symtab(image, elf_build_symtab(ctx, lay)?)?
+    if not strip_output:
+        val symtab = elf_build_symtab(ctx, lay, w32)?
+        image = if w32: elf_append_symtab32(image, symtab)? else: elf_append_symtab(image, symtab)?
     if riscv_attributes.len() > 0:
         image = elf_append_nonalloc_section_bytes(image,
             ".riscv.attributes", 0x70000003, riscv_attributes)?
@@ -1967,5 +2421,5 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
 export ElfStaticInputs, ElfLinkRequest
 export elf_static_link, elf_link, elf_link_stripped, elf_link_configured, elf_link_structural
 export elf_link_with_operations, ElfComposedImageV1
-export ELF_STATIC_BASE
+export ELF_STATIC_BASE, elf_arm_float_flags
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE

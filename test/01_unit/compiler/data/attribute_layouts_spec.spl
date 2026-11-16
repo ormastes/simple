@@ -1,0 +1,172 @@
+"""
+## Purpose and audience
+Combination matrix for node attribute backing layouts (`AttributeStoreV1`) and
+side-array data layouts (`AttrGroupStoreV1`, AoS / SoA). Layouts: embedded,
+column (implicit node-id index), array_index (node holds a slot index into a
+compact side array), sparse_hash, and the two pointer layouts array_ptr and
+hash_ptr. Readers are compiler authors choosing a node attribute placement.
+Category: Infrastructure.
+## Operator workflow
+bin/simple test test/01_unit/compiler/data/attribute_layouts_spec.spl
+## Compatibility and limitations
+Default OFF: `direct` stays the built-in default. array_ptr and hash_ptr fail
+fast at construction: safe Simple has no stable element reference that
+survives side-array growth or hash rehash (see the node attribute spec doc).
+## Verification guidance and troubleshooting
+Every layout must answer the same value, presence, absence and length for the
+same operation sequence, including across growth and rehash.
+"""
+# @req NODEATTR-LAYOUT-01 NODEATTR-LAYOUT-02 NODEATTR-LAYOUT-03 NODEATTR-LAYOUT-04 NODEATTR-LAYOUT-05
+# @manual_section: Node attribute layouts and AoS / SoA side arrays
+
+use std.spec.*
+use compiler.common.data.attribute_schema_v1.*
+
+class CellsV1:
+    cells: [i64?]
+
+impl CellsV1:
+    static fn create() -> CellsV1:
+        CellsV1(cells: [])
+
+impl AttrOwnerV1<i64> for CellsV1:
+    fn owner_read(node: i64) -> i64?:
+        if node < 0 or node >= self.cells.len():
+            return None
+        self.cells[node]
+    me owner_write(node: i64, value: i64?):
+        while self.cells.len() <= node:
+            self.cells = self.cells.push(None)
+        self.cells[node] = value
+
+fn store_for(token: text) -> AttributeStoreV1<i64>:
+    if token == "direct":
+        return attr_store_for_token_v1("a", token, CellsV1.create()).unwrap()
+    if token == "array_index":
+        return attr_store_indexed_v1<i64>("a", CellsV1.create())
+    attr_store_detached_v1<i64>("a", attr_placement_from_token_v1(token).unwrap()).unwrap()
+
+val SUPPORTED = ["direct", "column", "array_index", "sparse_hash"]
+
+describe "node attribute backing layouts":
+    it "resolves every layout token and round-trips it":
+        # @req NODEATTR-LAYOUT-01
+        step("Each token parses to a placement whose token reads back the same")
+        for token in ["direct", "column", "array_index", "sparse_hash", "array_ptr", "hash_ptr"]:
+            val p = attr_placement_from_token_v1(token)
+            expect(p.is_ok()).to_equal(true)
+            expect(attr_placement_token_v1(p.unwrap())).to_equal(token)
+        expect(attr_placement_from_token_v1("bogus").is_err()).to_equal(true)
+
+    it "reads back what it writes on every supported layout":
+        # @req NODEATTR-LAYOUT-02
+        for token in SUPPORTED:
+            var s = store_for(token)
+            expect(s.placement_token()).to_equal(token)
+            expect(s.has(3)).to_equal(false)
+            expect(s.set(3, 42).is_ok()).to_equal(true)
+            expect(s.set(0, 0).is_ok()).to_equal(true)
+            expect(s.get(3).unwrap()).to_equal(42)
+            expect(s.get(0).unwrap()).to_equal(0)
+            expect(s.has(1)).to_equal(false)
+            expect(s.set(3, 43).is_ok()).to_equal(true)
+            expect(s.get(3).unwrap()).to_equal(43)
+            expect(s.len()).to_equal(2)
+            expect(s.retire(3)).to_equal(true)
+            expect(s.retire(3)).to_equal(false)
+            expect(s.get(3).is_err()).to_equal(true)
+            expect(s.len()).to_equal(1)
+            expect(s.set(-1, 1).is_err()).to_equal(true)
+
+    it "keeps every value across growth and rehash on every supported layout":
+        # @req NODEATTR-LAYOUT-03
+        step("Insert 600 sparse ids, retire every third, re-insert; all layouts agree")
+        for token in SUPPORTED:
+            var s = store_for(token)
+            var i = 0
+            while i < 600:
+                s.set(i * 7, i * 3 + 1)
+                i = i + 1
+            i = 0
+            while i < 600:
+                if i % 3 == 0:
+                    s.retire(i * 7)
+                i = i + 1
+            expect(s.len()).to_equal(400)
+            i = 0
+            while i < 600:
+                if i % 3 == 0:
+                    expect(s.has(i * 7)).to_equal(false)
+                else:
+                    expect(s.get(i * 7).unwrap()).to_equal(i * 3 + 1)
+                i = i + 1
+            i = 0
+            while i < 600:
+                if i % 3 == 0:
+                    s.set(i * 7, -i)
+                i = i + 1
+            expect(s.len()).to_equal(600)
+            expect(s.get(21).unwrap()).to_equal(-3)
+
+    it "reuses retired side-array slots on array_index instead of growing":
+        # @req NODEATTR-LAYOUT-03
+        var s = attr_store_indexed_v1<i64>("a", CellsV1.create())
+        s.set(10, 1)
+        s.set(20, 2)
+        expect(s.side_slots()).to_equal(2)
+        s.retire(10)
+        s.set(30, 3)
+        expect(s.side_slots()).to_equal(2)
+        expect(s.get(30).unwrap()).to_equal(3)
+        expect(s.get(20).unwrap()).to_equal(2)
+
+    it "stores the slot index on the node for array_index":
+        val node_index = CellsV1.create()
+        var s = attr_store_indexed_v1<i64>("a", node_index)
+        s.set(5, 99)
+        expect(node_index.owner_read(5)).to_equal(Some(0))
+        s.retire(5)
+        expect(node_index.owner_read(5)).to_equal(None)
+
+    it "fails fast for the pointer layouts":
+        # @req NODEATTR-LAYOUT-04
+        step("array_ptr and hash_ptr have no safe stable reference across growth or rehash")
+        for token in ["array_ptr", "hash_ptr"]:
+            val r = attr_store_detached_v1<i64>("a", attr_placement_from_token_v1(token).unwrap())
+            expect(r.is_err()).to_equal(true)
+            expect(attr_store_for_token_v1("a", token, CellsV1.create()).is_err()).to_equal(true)
+
+describe "AoS and SoA side-array data layouts":
+    it "resolves the layout tokens with SoA as the default":
+        # @req NODEATTR-LAYOUT-05
+        expect(attr_layout_token_v1(attr_layout_from_token_v1("aos").unwrap())).to_equal("aos")
+        expect(attr_layout_token_v1(attr_layout_from_token_v1("soa").unwrap())).to_equal("soa")
+        expect(attr_layout_token_v1(attr_layout_from_token_v1("").unwrap())).to_equal("soa")
+        expect(attr_layout_from_token_v1("rows").is_err()).to_equal(true)
+
+    it "answers identically for every applicable layout x AoS/SoA":
+        # @req NODEATTR-LAYOUT-05
+        step("column and array_index side arrays take AoS or SoA; embedded and hash do not")
+        for placement in ["column", "array_index"]:
+            for layout in ["aos", "soa"]:
+                var g = attr_group_store_v1<i64>("g", attr_placement_from_token_v1(placement).unwrap(), 3,
+                                                 attr_layout_from_token_v1(layout).unwrap()).unwrap()
+                expect(g.layout_token()).to_equal(layout)
+                expect(g.has(4)).to_equal(false)
+                var i = 0
+                while i < 300:
+                    expect(g.set(i * 5, i % 3, i).is_ok()).to_equal(true)
+                    i = i + 1
+                expect(g.get(10, 2).unwrap()).to_equal(2)
+                expect(g.get(10, 0).is_err()).to_equal(true)
+                expect(g.set(10, 3, 1).is_err()).to_equal(true)
+                expect(g.rows()).to_equal(300)
+                expect(g.retire(10)).to_equal(true)
+                expect(g.has(10)).to_equal(false)
+                expect(g.rows()).to_equal(299)
+                expect(g.get(1495, 2).unwrap()).to_equal(299)
+
+    it "rejects AoS/SoA on layouts without a side array":
+        for placement in ["direct", "sparse_hash", "array_ptr", "hash_ptr"]:
+            val r = attr_group_store_v1<i64>("g", attr_placement_from_token_v1(placement).unwrap(), 2, AttrLayoutV1.Aos)
+            expect(r.is_err()).to_equal(true)

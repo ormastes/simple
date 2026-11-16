@@ -1,7 +1,8 @@
 # Typed node pages over the canonical graph. Existing one-hop queries are unchanged.
 # @req REQ-TRC-021 REQ-TRC-023
-use std.common.traceability.model.*
-use std.common.traceability.trace_ids_v1.{TraceResultCountV1, TraceCursorV1, TracePageCompletenessV1}
+# @workaround bug=phase2_mir_glob_import_dict_payload_2026-11-15
+use std.common.traceability.model.{TraceGraph, TraceNode, TraceNodeKind, TraceQueryResult, trace_sorted_ids}
+use std.common.traceability.trace_ids_v1.{TraceSnapshotIdV1, TraceResultCountV1, TraceCursorV1, TracePageCompletenessV1}
 use std.common.traceability.schema.{trace_entity_id_parse_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.value.{SdnValue}
@@ -26,8 +27,8 @@ pub fn trace_node_query_kind_v1(kind: text) -> Result<TraceNodeKind, text>:
             Err("TRACE-QUERY-UNAVAILABLE: group ingestion and canonical group kinds require P1")
         case _: Err("TRACE-QUERY-INVALID: expected features, requirements or bugs")
 
-pub fn trace_node_query_validate_v1(query: TraceNodeQueryV1) -> Result<bool, text>:
-    trace_node_query_kind_v1(query.kind)?
+pub fn trace_node_query_validate_v1(query: TraceNodeQueryV1) -> Result<TraceNodeKind, text>:
+    val kind = trace_node_query_kind_v1(query.kind)?
     if query.operation != "list" and query.operation != "show":
         return Err("TRACE-QUERY-INVALID: expected list or show")
     if query.limit < 1 or query.limit > 200:
@@ -41,7 +42,7 @@ pub fn trace_node_query_validate_v1(query: TraceNodeQueryV1) -> Result<bool, tex
             return Err("TRACE-QUERY-INVALID: show needs one identity and accepts no prefix or cursor")
     elif query.selected_id != "":
         return Err("TRACE-QUERY-INVALID: list cannot select one identity")
-    Ok(true)
+    Ok(kind)
 
 fn node_cursor_prefix_v1(graph: TraceGraph, query: TraceNodeQueryV1) -> text:
     val shape = SdnValue.Dict({
@@ -95,5 +96,5 @@ pub fn query_trace_nodes_v1(graph: TraceGraph, query: TraceNodeQueryV1) -> Resul
     var nodes: [TraceNode] = []
     for index in offset..end: nodes.push(by_id[ids[index]])
     val next = if end < ids.len(): prefix + end.to_text() else: ""
-    Ok(TraceQueryResult(snapshot_id: graph.subject.snapshot_id, nodes: nodes, edges: [],
+    Ok(TraceQueryResult(snapshot_id: TraceSnapshotIdV1(value: graph.subject.snapshot_id), nodes: nodes, edges: [],
         total_count: TraceResultCountV1(value: ids.len()), next_cursor: TraceCursorV1(value: next), complete: (if next == "": TracePageCompletenessV1.Complete else: TracePageCompletenessV1.Partial), diagnostics: graph.diagnostics))

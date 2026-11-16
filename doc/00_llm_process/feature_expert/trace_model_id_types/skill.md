@@ -2,9 +2,12 @@
 
 Feature: validated id and path types for the traceability model.
 
-- Types: `src/lib/common/traceability/trace_ids_v1.spl` (`TraceEntityIdV1`, `TracePathV1`, `TraceEdgeIdV1`, `TraceOriginIdV1`; one-field wrapper structs).
+- Types: `src/lib/common/traceability/trace_ids_v1.spl` is the single home (one-field wrapper structs and enums): `TraceEntityIdV1`, `TracePathV1`, `TracePathSuffixV1`, `TraceEdgeIdV1`, `TraceOriginIdV1`, `TraceSnapshotIdV1`, `TraceReviewIdV1`, `TraceRuleVersionV1`, `TraceSchemaNameV1`, `TraceSchemaVersionV1`, `TraceResultCountV1`, `TraceCursorV1`, enums `TracePageCompletenessV1`, `TraceTestRoleMarkV1`, `TraceOverridePermissionV1`.
 - Parsers return `T?` (None on invalid): `trace_entity_id_parse_v1`, `trace_path_parse_v1` in `schema.spl`. Kind/relation checks return the checked value as an Option: `trace_test_node_kind_v1`, `trace_implementation_node_kind_v1`, `trace_endpoint_relation_v1`, `trace_test_role_relation_v1`. Callers test `.is_none()` / `.is_some()`.
-- `evidence.spl` `trace_text_find_v1(values, value) -> text?` replaces the bool membership test.
-- `TraceEdgeOrigin` (model.spl) carries `TraceEdgeIdV1` / `TraceOriginIdV1`; the SDN wire format is unchanged (wrap/unwrap in `sdn_codec.spl`).
-- `primitive_api` lint flags only pub fn signatures, not struct fields; bare fields in the other model.spl structs remain (TraceNode 62 sites, SnapshotSubject 41, TraceDiagnostic 45, TraceEdge 32, TracePolicy 29, TraceClaim 28, TraceLocator 25, TraceQuery 18, TraceOrigin 16, TraceConventionRule 13, TraceDocument 11, TraceQueryResult 9, TraceAuthority 8).
-- Proof: specs under `test/01_unit/lib/common/traceability` (model_codec, resolution, query*, evidence).
+- `evidence.spl` predicates return enums, not bool: `trace_same_observation -> TraceObservationMatchV1`, `trace_observation_admitted -> TraceAdmissionV1`, `trace_run_binding_matches -> TraceRunBindingV1` (enums live in `evidence_model.spl`). `trace_node_query_validate_v1` returns the validated `TraceNodeKind`.
+- Pattern: wrapper field in the struct, unwrap at the use site (`x.id.value`), wrap/unwrap at the SDN codec edge so the wire format is byte-identical. Absent values are `Option` (`TraceReviewIdV1?`, `TraceSnapshotIdV1?` on `TraceAuthority`), encoded as `""` on the wire by a private helper in the encoder.
+- Converted model.spl structs: `TraceEdgeOrigin`, `TraceQueryResult` (incl. `snapshot_id`), `TraceAuthority` (`allow_override: bool` became `override_permission: TraceOverridePermissionV1`), `TraceDocument`, `TraceConventionRule`, `TraceOrigin` (`locator` stays text: a display/locator string).
+- Still bare in model.spl (use-site counts): TraceNode 62, SnapshotSubject 41, TraceDiagnostic 45, TraceEdge 32, TracePolicy 29, TraceClaim 28, TraceLocator 25, TraceQuery 18.
+- Lesson: before converting a struct, grep field ASSIGNMENTS too (`x.field = ...`), not just reads and constructors; a missed assignment only fails at runtime in the spec that executes it.
+- `primitive_api` lint flags only pub fn signatures, not struct fields.
+- Proof: specs under `test/01_unit/lib/common/traceability` and `test/01_unit/app/traceability` (model_codec, resolution, query*, evidence, snapshot_*), `test/03_system/app/traceability/feature/trace_query_authority_spec.spl`.

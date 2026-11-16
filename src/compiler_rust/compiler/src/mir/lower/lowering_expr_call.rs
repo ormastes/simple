@@ -37,6 +37,16 @@ impl<'a> MirLowerer<'a> {
     /// specialized, no registry at all). Callers MUST treat `None` as
     /// permissive and keep the previous behavior — only `Some(false)` is a
     /// positive "this enum does not have that name".
+    /// #6953: `variant_name`'s index in its OWNING enum, resolved through
+    /// `resolved_ty` / `enum_name` in this module's type registry. Carried on
+    /// the MIR instruction so no backend re-derives it from the bare name.
+    pub(super) fn owned_variant_discriminant(&self, enum_name: &str, variant_name: &str, resolved_ty: TypeId) -> u32 {
+        let owned = self
+            .type_registry
+            .and_then(|registry| registry.owned_or_unique_variant_discriminant(resolved_ty, Some(enum_name), variant_name));
+        owned.unwrap_or_else(|| crate::hir::name_only_variant_discriminant("mir enum constructor", variant_name)) as u32
+    }
+
     pub(super) fn enum_declares_variant(
         &self,
         enum_name: &str,
@@ -716,10 +726,13 @@ impl<'a> MirLowerer<'a> {
                         }
                         "is_ok" | "is_err" => {
                             if let Some(receiver) = receiver {
+                                let checked = if variant_name == "is_ok" { "Ok" } else { "Err" };
                                 let expected = HirExpr {
-                                    kind: HirExprKind::Integer(Self::enum_variant_discriminant(
-                                        if variant_name == "is_ok" { "Ok" } else { "Err" },
-                                    )),
+                                    kind: HirExprKind::Integer(i64::from(self.owned_variant_discriminant(
+                                        enum_name,
+                                        checked,
+                                        receiver.ty,
+                                    ))),
                                     ty: TypeId::I64,
                                 };
                                 let expected_enum_id = HirExpr {
@@ -831,6 +844,7 @@ impl<'a> MirLowerer<'a> {
                         || self.available_functions.contains(name.as_str()));
 
                 if is_enum && !is_declared_static_fn && !arg_regs.is_empty() {
+                    let discriminant = self.owned_variant_discriminant(enum_name, variant_name, callee.ty);
                     // Single-arg variants store the argument directly as the
                     // enum payload. Primitive payloads still need runtime
                     // boxing, the same as multi-arg payload array entries.
@@ -956,12 +970,14 @@ impl<'a> MirLowerer<'a> {
                             dest,
                             enum_name: enum_name.to_string(),
                             variant_name: variant_name.to_string(),
+                            discriminant,
                             payload: payload_reg,
                         });
                         dest
                     });
                 }
                 if is_enum && !is_declared_static_fn {
+                    let discriminant = self.owned_variant_discriminant(enum_name, variant_name, callee.ty);
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -969,6 +985,7 @@ impl<'a> MirLowerer<'a> {
                             dest,
                             enum_name: enum_name.to_string(),
                             variant_name: variant_name.to_string(),
+                            discriminant,
                         });
                         dest
                     });

@@ -233,3 +233,26 @@ build memory; (b) no provider yet exports `simple_backend_plugin_v1`, so no fami
 lazily loaded today; (c) non-backend apps are not covered by the plugin ABI and need
 separate binaries via `library_unit_link_v1` (planning only, unwired). The lazy-load seam
 is therefore blocked on PR2-3 (first provider), which this change does not attempt.
+
+## 7. Status audit (2026-11-16, origin/release/1.0.0 `00a5a1d3401`)
+
+Owner directive: "simple compiler should link non-essential as dynload, not loaded until needed."
+
+| Item | State | Evidence |
+|---|---|---|
+| Static/dynamic split design | done (this doc); no separate `backends_essential` root exists, "essential" = kernel roots re-exporting the essential installer (sec 5) | `src/compositions/kernel_llvm_cranelift/app/cli/bootstrap_backend_installer.spl:1-7` |
+| Essential static set | LLVM + Cranelift + Interpreter (`KernelLinked`), Cranelift JIT lane | `src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl:26-36,45-48` |
+| Bootstrap entry pulls plugins | no: static import closure of `app.cli.bootstrap_main` contains 0 `plugins.*` modules (approx. 1,230 modules by import grep; the real 1,542 also counts grouped/transitive roots) | scratch import-graph walk, see below |
+| Load trigger | lazy by construction: dynamic load only runs when a request carries `plugin_path` | `backend_plugin/loader.spl:40-47` (`load_dynamic_backend_plugin_lease`) |
+| Load actually reachable | no: essential composition refuses a plugin path (`PLUG-E-UNSUPPORTED`) because no provider exports `simple_backend_plugin_v1` | `src/app/cli/bootstrap_essential_backend_request.spl:24-27` |
+| Provider shim / provider entries (PR2) | not started: no `provider_shim.spl`, no `abi/provider_entry_v1.c`, no `src/plugins/backend_*/provider_entry.spl` | `git ls-files` |
+| Descriptor v2, `plugin_search.spl`, `libver` call site (PR3/4) | not started | `git grep plugin_search` = 0 in `src/compiler` |
+| Build groups (PR1), stdlib static group | done: `include:`/`group`, `config/build/backends_{c,cuda,rocm,vhdl,vulkan}.sdn`, `stdlib_static.sdn` | `targets.sdn:23-33` |
+| `backends_dynamic` composition, `placement: dynamic` (PR7) | not started; `simple.sdn` still `placement: static` | `src/compiler/simple.sdn:8` |
+| Full CLI | still links the full registry eagerly: `install_full_static_backends_for_k1_policy_v1` | `src/app/cli/_CliMain/main_and_help.spl:65,324`; `p3_groups/group_7.spl:20` |
+
+Closure composition of `bootstrap_main` (approx. import-graph count, 1,234 modules): `compiler.driver` 245 (of which `cache` 78, `driver_build` 30, `smf` 14), `compiler.backend` 113 (`linker` 22, `backend_plugin` 10), `compiler.mir` 102, `compiler.common` 90, frontend 79, semantics 71, hir 67, `std.nogc_sync_mut.io` 47, `mir_opt` 45, `std.scv` 25. Non-essential-but-static candidates, largest first: driver cache/incremental/SMF publication (about 120), `std.scv` (25), `compiler.backend.linker` alternates (up to 22), VHDL driver lane slot, wasm shim contract (3).
+
+Why no code step in this change: the only lazy seam (PR2-3, first provider exporting the v1 entry) needs a native-built dylib to validate, and wiring `plugin_search` (PR4/7) would add a caller to the bootstrap closure with nothing loadable behind it. Both are refused here rather than forced.
+
+Next, in order: (1) PR2 provider shim + `backend_c` entry, validated by one native `--emit-shared` build; (2) PR3 descriptor v2 + e2e `backend_c_dynamic_provider_spec`; (3) PR7 `backends_dynamic` composition and `plugin_search` fallback, after which the full CLI stops installing the 12 static ports eagerly. Then split `compiler.driver.cache` / SMF publication behind the same lazy seam.

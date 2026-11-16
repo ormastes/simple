@@ -20,18 +20,46 @@ use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_dig
 use std.common.crypto.sha256.sha256_text
 use std.common.contracts.orchestration.host_controller_status_v3.*
 use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_digest_v3
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@end
 
 # This guard conveys only the existing native caller origin. Cancellation uses
 # the retained operation owner and must remain possible after launch-policy
 # expiry; it does not acquire a new execution grant or refresh that policy.
 pub fn host_controller_retained_origin_v3(domain: HostServiceDomainV3) -> Result<bool, text>:
     match domain.local:
+        case HostLocalRootV3.Linux(_): Err("controller-retained-host-backend-unsupported")
         case HostLocalRootV3.Windows(_):
             windows_command_thread_check_v2()?
             Ok(true)
-        case _: Err("controller-retained-host-backend-unsupported")
+        case HostLocalRootV3.LinuxService(_): controller_linux_origin_v3()
+
+# Linux analogue of the Windows canonical-thread guard: the pinned procfs
+# origin of the original process main thread. Any other build refuses.
+fn controller_linux_origin_v3() -> Result<bool, text>:
+    @when(os="linux"):
+    linux_machine_process_origin_check_v1()?
+    return Ok(true)
+    @end
+    Err("controller-retained-host-backend-unsupported")
 
 pub fn host_controller_status_v3(domain: HostServiceDomainV3) -> Result<HostControllerStatusV3, text>:
+    match domain.local:
+        case HostLocalRootV3.LinuxService(service):
+            # current_v4 rechecks every retained owner and guarantees records
+            # and capacity are present. `ready` is the reconciliation proof
+            # status_v4 requires; before it, status reports ready=false.
+            val checked = service.current_v4()?
+            val ledger = service.capacity.unwrap().ledger
+            val available = host_available_capacity_v1(ledger)?
+            val binding = service.records.unwrap().binding
+            return Ok(HostControllerStatusV3(service.scope_v4(), ledger.capacity.authority_id,
+                host_linux_service_enrollment_digest_v3(binding)?, binding.provider_identity_digest,
+                ledger.revision, ledger.capacity.cpu_millis, ledger.capacity.memory_bytes,
+                available.cpu_millis, available.memory_bytes, ledger.reservations.len(), ledger.continuity_proven))
+        case _: pass
     val local = match domain.local:
         case HostLocalRootV3.Windows(value): value
         case _: return Err("controller-retained-host-backend-unsupported")

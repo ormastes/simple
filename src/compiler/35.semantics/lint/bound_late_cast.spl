@@ -55,6 +55,17 @@ fn _blc_extern_name(line: text) -> text:
         return ""
     _blc_leading_ident(rest.substring(10, rest.byte_len()))
 
+fn _blc_raw_primitive_return(line: text) -> bool:
+    # SPL-BOUND-001 targets externs whose declared return is a bare numeric
+    # primitive (can carry a sentinel / unvalidated magnitude). An already-safe
+    # return (`text?`, `[u8]?`, `Option<..>`, `Result<..>`, `bool`, a unit) has
+    # no sentinel to check, so passing it through is not a boundary leak.
+    val rt = _blc_return_type(line)
+    for p in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64", "int", "float"]:
+        if rt == p:
+            return true
+    false
+
 fn _blc_unit_decl_name(line: text) -> text:
     var rest = line
     if rest.starts_with("pub "):
@@ -480,11 +491,14 @@ fn _blc_run(source: text, file_path: text, deps: [BoundModuleSummary]) -> BlcPas
         return BlcPass(findings: findings, foreign_fns: [])
     val lines = code_line_snapshot(source).lines
     var externs: [text] = []
+    var raw_externs: [text] = []
     var units: [text] = []
     for line in lines:
         val e = _blc_extern_name(line.trimmed)
         if e != "" and not externs.contains(e):
             externs.push(e)
+            if _blc_raw_primitive_return(line.trimmed):
+                raw_externs.push(e)
         val u = _blc_unit_decl_name(line.trimmed)
         if u != "" and not units.contains(u):
             units.push(u)
@@ -502,7 +516,7 @@ fn _blc_run(source: text, file_path: text, deps: [BoundModuleSummary]) -> BlcPas
     for x in imported:
         if not callees.contains(x):
             callees.push(x)
-    var pass_result = _blc_pass(lines, externs, callees, units)
+    var pass_result = _blc_pass(lines, raw_externs, callees, units)
     var rounds = 0
     while rounds <= lines.len():
         var grown = false
@@ -512,7 +526,7 @@ fn _blc_run(source: text, file_path: text, deps: [BoundModuleSummary]) -> BlcPas
                 grown = true
         if not grown:
             break
-        pass_result = _blc_pass(lines, externs, callees, units)
+        pass_result = _blc_pass(lines, raw_externs, callees, units)
         rounds = rounds + 1
     pass_result
 
@@ -525,7 +539,10 @@ fn _blc_pass(lines: [CodeLine], externs: [text], callees: [text], units: [text])
         if not _blc_fn_header(header.trimmed):
             i = i + 1
             continue
-        val boundary = _blc_boundary(lines, i)
+        # Owner decision 2 (2026-11-16): the generated SFFI facade `fn N` that
+        # receives the foreign value from its own `extern fn __raw_N` is the
+        # origin boundary, so its `raw as Unit` is not a late cast.
+        val boundary = _blc_boundary(lines, i) or callees.contains("__raw_" + _blc_fn_name(header.trimmed))
         val header_indent = _blc_indent(header.raw)
         val header_end = _blc_header_end(lines, i)
         val header_text = _blc_join(lines, i, header_end)

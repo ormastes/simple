@@ -1,0 +1,107 @@
+# Cross-file import graph for the SPL-BOUND rules.
+#
+# Resolves each `use <module>.{...}` of a linted file to its module source on
+# disk, and builds the raw-boundary-return summaries
+# (bound_raw_return_summary_cross) that check_bound_late_casts_cross consumes.
+# Memoized per module within one lint unit, depth-bounded, and cycle-safe.
+
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use compiler.semantics.lint.bound_late_cast.{BoundModuleSummary, bound_raw_return_summary_cross}
+
+val BOUND_IMPORT_MAX_DEPTH: i64 = 3
+
+class BoundGraphMemo:
+    paths: [text]
+    raw: [[text]]
+
+fn _big_dir(path: text) -> text:
+    val p = path.replace("\\", "/")
+    val at = p.rfind("/")
+    if at < 0:
+        return ""
+    p.substring(0, at)
+
+fn _big_try(base: text, rel: text) -> text:
+    val prefix = if base == "": "" else: base + "/"
+    val f = prefix + rel + ".spl"
+    if file_exists(f):
+        return f
+    val init = prefix + rel + "/__init__.spl"
+    if file_exists(init):
+        return init
+    ""
+
+# Module path as written in `use` -> source file, searching the importer's
+# directory and its ancestors (and `<ancestor>/src/lib` for `std.`).
+pub fn bound_resolve_module(module: text, importer_path: text) -> text:
+    if module == "" or module.starts_with("."):
+        return ""
+    val rel = module.replace(".", "/")
+    val std_rel = if module.starts_with("std."): module.substring(4, module.byte_len()).replace(".", "/") else: ""
+    var dir = _big_dir(importer_path)
+    var steps = 0
+    while steps < 32:
+        if std_rel != "":
+            val lib_base = if dir == "": "src/lib" else: dir + "/src/lib"
+            val s = _big_try(lib_base, std_rel)
+            if s != "":
+                return s
+        val r = _big_try(dir, rel)
+        if r != "":
+            return r
+        if dir == "" or dir == "." or dir.ends_with(":"):
+            break
+        dir = _big_dir(dir)
+        steps = steps + 1
+    ""
+
+fn _big_use_modules(source: text) -> [text]:
+    var mods: [text] = []
+    for raw in source.split("\n"):
+        val t = raw.trim()
+        if not t.starts_with("use "):
+            continue
+        val open = t.find(".{{")
+        if open <= 4:
+            continue
+        val m = t.substring(4, open).trim()
+        if m != "" and not mods.contains(m):
+            mods.push(m)
+    mods
+
+fn _big_summaries(source: text, path: text, depth: i64, visiting: [text], memo: BoundGraphMemo) -> [BoundModuleSummary]:
+    var out: [BoundModuleSummary] = []
+    if depth >= BOUND_IMPORT_MAX_DEPTH:
+        return out
+    for m in _big_use_modules(source):
+        val dep_path = bound_resolve_module(m, path)
+        if dep_path == "" or visiting.contains(dep_path):
+            continue
+        var raw: [text] = []
+        var hit = false
+        var i = 0
+        while i < memo.paths.len():
+            if memo.paths[i] == dep_path:
+                raw = memo.raw[i]
+                hit = true
+                break
+            i = i + 1
+        if not hit:
+            val dep_src = file_read(dep_path)
+            var next_visiting = [v for v in visiting]
+            next_visiting.push(dep_path)
+            val sub = _big_summaries(dep_src, dep_path, depth + 1, next_visiting, memo)
+            raw = bound_raw_return_summary_cross(dep_src, dep_path, sub)
+            memo.paths.push(dep_path)
+            memo.raw.push(raw)
+        if raw.len() > 0:
+            out.push(BoundModuleSummary(module: m, raw_fns: raw))
+    out
+
+# Summaries of the modules `source` (at `path`) imports, for
+# check_bound_late_casts_cross.
+pub fn bound_import_summaries(source: text, path: text) -> [BoundModuleSummary]:
+    if not source.contains("use "):
+        return []
+    val memo = BoundGraphMemo(paths: [], raw: [])
+    _big_summaries(source, path, 0, [path], memo)
