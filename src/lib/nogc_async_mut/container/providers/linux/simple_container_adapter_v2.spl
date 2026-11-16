@@ -1,4 +1,6 @@
 use std.nogc_async_mut.container.providers.linux.fresh_epoch_workload_v2.*
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{MachineFreshProbeCallV3,
+    MachineFreshProbeReplyV3, machine_fresh_probe_rejected_v3}
 use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.LinuxWorkspaceSourceLoanV3
 use std.nogc_async_mut.container.shared.logs_capture_v1.*
 # Linux leaf adapter for the common container API. Its callers serialize access
@@ -133,6 +135,16 @@ impl LinuxSimpleContainerAdapterV2:
         val actual = self._fresh.unwrap().workspace_primary_observe_v3(request)
         retained._fresh = Some(actual.owner)
         LinuxWorkspacePrimaryObserveTurnV3(retained, actual.observation, actual.pending, actual.error)
+
+    pub fn probe_v3(request: ContainerExecutionRequestV2,
+            call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        var retained = self
+        if self._fresh.is_none():
+            return machine_fresh_probe_rejected_v3(call, "machine-probe-original-owner-required")
+        val fresh = self._fresh.unwrap()
+        val result = fresh.probe_v3(request, call)
+        retained._fresh = Some(fresh)
+        result
 
     pub fn workspace_begin_v3(action: ContainerWorkspaceActionV3, request: ContainerExecutionRequestV2,
             deadline: Option<ContainerEffectDeadlineV1> = nil) -> LinuxWorkspaceActionTurnV3:
@@ -374,6 +386,10 @@ impl LinuxSimpleContainerAdapterV2:
         LinuxOciEngineExecOwnerV3.inspect(self.provider.state_dir, parent, installed, admission)
 
     pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+        if val actual = self._fresh:
+            match actual.probe_v3(request, MachineFreshProbeCallV3.Projection):
+                case MachineFreshProbeReplyV3.Projection(projected): return projected
+                case _: return Err("machine-probe-projection-turn-mismatch")
         val checked = self._checked_request_v2(request)?
         val decoded = checked.0
         val valid = self.provider.validate(decoded)

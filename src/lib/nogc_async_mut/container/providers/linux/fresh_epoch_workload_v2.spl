@@ -1,6 +1,8 @@
 # Actual retained fresh-domain consumer for the common Container API. Ordinary
 # request/operation DTOs cannot construct the sealed transfer held here.
 use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{MachineFreshProbeCallV3,
+    MachineFreshProbeReplyV3, machine_fresh_probe_rejected_v3}
 use std.nogc_async_mut.container.workspace_primary_retirement_v3.{ContainerPrimaryTransportRetirementV3, container_primary_transport_retirement_v3, ContainerPrimarySessionBindingV3, container_primary_session_binding_v3}
 use std.nogc_sync_mut.container.machine_fresh_workspace_primary_v3.{MachineWorkspacePrimaryCallV3, MachineWorkspacePrimaryReplyV3}
 use std.common.contracts.container.primary_attach_v1.ContainerPrimaryAttachPlanV1
@@ -8,6 +10,8 @@ use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, Contain
 use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2}
 use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_probe_custody_v3.machine_fresh_probe_request_validate_v3
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
 use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.MachineFreshWorkloadActionResultV2
 use std.nogc_sync_mut.io.machine_local_process_principal_v1.MachineLocalProcessPrincipalV1
 use std.nogc_sync_mut.io.linux_container_containment_v1.LinuxContainerContainmentPopulationV1
@@ -225,6 +229,25 @@ pub class LinuxFreshWorkloadOwnerV2:
         val actual = self.transfer.observe_workspace_primary_v3()
         val observed = if actual.observation.is_some(): Some(ContainerWorkspacePrimaryObservationV3(owner: self)) else: nil
         LinuxFreshWorkspacePrimaryObserveTurnV3(self, observed, actual.pending, actual.error)
+
+    # V3 probes are CPU-workload-only. The canonical transfer validates the
+    # request before its live gate, preserving cleanup after uncertain effects.
+    pub fn probe_v3(request: ContainerExecutionRequestV2, call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        match call:
+            case MachineFreshProbeCallV3.Select(embedded, provider, index):
+                if embedded != request: return machine_fresh_probe_rejected_v3(call, "machine-probe-original-request-mismatch")
+                val actual = self.prepare_probe_request_v3(request, provider, index)
+                if actual.is_err(): return machine_fresh_probe_rejected_v3(call, actual.unwrap_err())
+            case _: pass
+        self.transfer.probe_v3(request, call)
+
+    fn prepare_probe_request_v3(request: ContainerExecutionRequestV2, provider: ProviderCliProviderV1, index: i64) -> Result<(), text>:
+        val valid = machine_fresh_probe_request_validate_v3(self.scope_v2()?, request, provider, index)?
+        if self.principal.is_some():
+            val reserved = self.transfer.reserve_v2(self.principal.unwrap(), request, self.template)?
+        else:
+            val reserved = self.transfer.reserve_owned_v3(request, self.template)?
+        Ok(())
 
     pub fn workspace_begin_v3(action: ContainerWorkspaceActionV3, request: ContainerExecutionRequestV2,
             deadline: Option<ContainerEffectDeadlineV1> = nil) -> LinuxFreshWorkspaceActionTurnV3:
