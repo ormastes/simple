@@ -5,7 +5,7 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.{CSS_P
 use std.gc_async_mut.gpu.browser_engine.simple_web_box_geometry_provenance.{
     web_box_geometry_capture_tokens, web_box_geometry_tokens_reason,
     web_fractional_capture_authored_decls}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille}
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -430,15 +430,20 @@ fn _parse_background_shorthand(raw: text) -> BackgroundShorthand:
         val norm = token.trim().lower()
         if norm == "":
             continue
+        # The size group after `/` is one or two sizes; the first other token
+        # ends it and is parsed as any other layer component.
+        if after_slash:
+            if _background_size_token(norm) and sizes.len() < 2:
+                sizes.push(norm)
+                continue
+            if sizes.len() == 0:
+                return empty
+            after_slash = false
         if norm == "/":
             if slash_seen or positions.len() == 0:
                 return empty
             slash_seen = true
             after_slash = true
-        elif after_slash:
-            if not _background_size_token(norm) or sizes.len() >= 2:
-                return empty
-            sizes.push(norm)
         elif norm == "fixed" or norm == "local":
             return empty
         elif norm == "scroll":
@@ -460,6 +465,10 @@ fn _parse_background_shorthand(raw: text) -> BackgroundShorthand:
                 clip = norm
             box_count = box_count + 1
         elif _background_position_token(norm):
+            # The position group sits before `/`; another one after the size
+            # (`center / 1px 2px 3px`) is invalid.
+            if slash_seen:
+                return empty
             if positions.len() >= 2:
                 return empty
             positions.push(norm)
@@ -802,12 +811,19 @@ fn _apply_decls_dispatch(
             if basis_v >= 0:
                 st.flex_basis_px = basis_v
                 st.flex_basis_zero = basis_v == 0
+                st.flex_basis_permille = -1
             elif flex_basis_decl.trim() == "0%":
                 st.flex_basis_px = 0
                 st.flex_basis_zero = true
+                st.flex_basis_permille = -1
             elif flex_basis_decl.trim() == "auto":
                 st.flex_basis_px = 0
                 st.flex_basis_zero = false
+                st.flex_basis_permille = -1
+            elif parse_percent_permille(flex_basis_decl.trim()) > 0:
+                st.flex_basis_px = 0
+                st.flex_basis_zero = false
+                st.flex_basis_permille = parse_percent_permille(flex_basis_decl.trim())
     if css_prop_mask_has(mask, CSS_PROP_TEXT_ALIGN):
         css_probe_note()
         val ta = decl_tbl_get(decl_tbl, "text-align")

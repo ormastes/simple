@@ -199,6 +199,16 @@ a plugin path answers `PLUG-E-UNSUPPORTED` (no provider exports `simple_backend_
 NOT done: the P-static backends are not yet built as dynlib plugins (PR2-3 above); the
 native Phase 3 module count / memory measurement awaits a Stage 2 built from this change.
 
+Phase 3 script alignment (`2026-11-16`): `p3-entry-groups.shs`, `p3-selfbuild-stage3.shs`,
+`p3-targeted-stage2-build.shs`, and `src/app/cli/p3_groups/group_{5,6,7}.spl` now default to
+the four essential roots (`kernel_llvm_cranelift`, `compiler`, `app`, `lib` — omitting
+`cuda_static` and `src/plugins`) and strip non-essential backend imports (`byl_backend`,
+`gpu_*`, `hwir_to_vhdl`, `irtc_codegen_adapter`, `native.mod`, `verification_codegen_types`,
+`wasm_codegen_adapter`, `driver_compile_vhdl_util`, `plugins.backend_*`) from the divided-lib
+groups unless `P3G_FULL_BACKENDS=1` / `P3_SELFBUILD_FULL_BACKENDS=1` / `P3_FULL_BACKENDS=1` is set.
+`p3-entry-groups.shs` also defaults `P3G_MEASURE` empty (built-in PowerShell process-tree RSS/limit
+monitor) and `P3G_GO_TO_END_GROUPS=1` to collect all group failures in a single sweep.
+
 ## 6. Non-backend families in the full-CLI closure (owner: "link non-essential as dynload, load on first use")
 
 Counts from the full-CLI HIR order (3,155 modules); edge = the CLI import that pulls the family in.

@@ -3888,7 +3888,14 @@ impl MirLowering:
                             if self.local_needs_erased_decode(result.id, result_hir):
                                 result = self.decode_runtime_value(result, self.lower_type(found_return))
                     case _:
-                        ()
+                        # `return opt` with `opt: T?` from a declared record /
+                        # text / collection `-> T`: the same narrow as the
+                        # implicit tail (function_lowering.spl), so None traps
+                        # instead of the handle escaping as `T`.
+                        if hir_type_is_plain_payload_sink_v1(found_return) and self.native_trait_owner_for_type(found_return) == "":
+                            if val result_hir = self.find_local_hir_type(result.id):
+                                if val narrowed_result = self.option_payload_for_plain_sink(result, result_hir):
+                                    result = narrowed_result
             br = self.builder
             self.emit_pending_finally_for_transfer()
             br = self.builder
@@ -7869,12 +7876,16 @@ impl MirLowering:
                 self.lower_inline_asm(asm_expr)
 
             # Target-neutral @cfg select: MIR picks the arm for this target
+            # Both arms coalesce to LocalId: a bare `LocalId?` arm joined this
+            # whole `-> LocalId` match to `LocalId?`, and a Stage 2 build
+            # returned the Some handle (every Stage 3 LLVM operand `%l4`).
+            # doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md
             case CfgSelect(cs_conds, cs_arms, cs_else):
-                self.lower_cfg_select(cs_conds, cs_arms, cs_else)
+                self.lower_cfg_select(cs_conds, cs_arms, cs_else) ?? self.builder.new_temp(MirType.unit())
 
             # Target-qualified inline assembly
             case InlineAsmMatch(arms):
-                self.lower_inline_asm_match(arms)
+                self.lower_inline_asm_match(arms) ?? self.builder.new_temp(MirType.unit())
 
             # Field access: obj.field_name
             case Field(base, field_name, resolved):

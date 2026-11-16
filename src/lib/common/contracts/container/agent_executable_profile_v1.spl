@@ -1,0 +1,58 @@
+# Approved executable resource/ISA DATA, not a measured qualification or grant.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct AgentExecutableProfileV1:
+    architecture: text
+    image_size_bytes: i64
+    max_image_bytes: i64
+    bootstrap_memory_bytes: i64
+    agent_memory_bytes: i64
+
+pub fn agent_executable_profile_minimum_memory_v1(value: AgentExecutableProfileV1) -> Result<i64, text>:
+    if not ["linux-x86_64", "linux-aarch64"].contains(value.architecture): return Err("agent-executable-architecture")
+    if value.image_size_bytes < 1 or value.max_image_bytes < value.image_size_bytes or value.max_image_bytes > 536870912:
+        return Err("agent-executable-image-bound")
+    if value.bootstrap_memory_bytes < 1 or value.agent_memory_bytes < 1: return Err("agent-executable-working-memory")
+    var minimum = value.image_size_bytes
+    for part in [value.bootstrap_memory_bytes, value.agent_memory_bytes, 65536]:
+        if minimum > 9223372036854775807 - part: return Err("agent-executable-minimum-memory-overflow")
+        minimum = minimum + part
+    Ok(minimum)
+
+pub fn agent_executable_profile_encode_v1(value: AgentExecutableProfileV1) -> Result<text, text>:
+    val minimum = agent_executable_profile_minimum_memory_v1(value)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("agent-executable-profile"), "version": SdnValue.Int(1),
+        "architecture": SdnValue.String(value.architecture), "imageSizeBytes": SdnValue.Int(value.image_size_bytes),
+        "maxImageBytes": SdnValue.Int(value.max_image_bytes), "bootstrapMemoryBytes": SdnValue.Int(value.bootstrap_memory_bytes),
+        "agentMemoryBytes": SdnValue.Int(value.agent_memory_bytes)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn executable_number_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("agent-executable-missing:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("agent-executable-number:" + key)
+
+pub fn agent_executable_profile_decode_v1(source: text) -> Result<AgentExecutableProfileV1, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+            max_depth: 2, max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value.value
+        case Err(_): return Err("agent-executable-syntax")
+    val fields = match parsed:
+        case SdnValue.Dict(value): value
+        case _: return Err("agent-executable-object")
+    if fields.len() != 7 or not fields.contains_key("kind") or not fields.contains_key("version") or not fields.contains_key("architecture"):
+        return Err("agent-executable-fields")
+    if fields["kind"] != SdnValue.String("agent-executable-profile") or fields["version"] != SdnValue.Int(1):
+        return Err("agent-executable-kind-version")
+    val architecture = match fields["architecture"]:
+        case SdnValue.String(value): value
+        case _: return Err("agent-executable-architecture-type")
+    val value = AgentExecutableProfileV1(architecture: architecture,
+        image_size_bytes: executable_number_v1(fields, "imageSizeBytes")?, max_image_bytes: executable_number_v1(fields, "maxImageBytes")?,
+        bootstrap_memory_bytes: executable_number_v1(fields, "bootstrapMemoryBytes")?, agent_memory_bytes: executable_number_v1(fields, "agentMemoryBytes")?)
+    if agent_executable_profile_encode_v1(value)? != source: return Err("agent-executable-noncanonical")
+    Ok(value)

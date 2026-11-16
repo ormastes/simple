@@ -1,0 +1,139 @@
+# Pure bounded parsing of actual fixed cgroup2 counter files, never authority.
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.execution_stats_v1.{ContainerStatsCounterV1, ContainerStatsIoV1, ContainerStatsIoCountersV1}
+
+pub struct LinuxFreshWorkloadStatsCountersV1:
+    subject_identity_digest: text
+    sample_started_monotonic_ns: i64
+    sample_finished_monotonic_ns: i64
+    cpu_usage_usec: ContainerStatsCounterV1
+    memory_current_bytes: ContainerStatsCounterV1
+    pids_current: ContainerStatsCounterV1
+    io: ContainerStatsIoV1
+
+fn cgroup_stats_unsigned_v1(source: text, maximum_bytes: i64 = 19, terminal_newline: bool = false) -> Result<i64, text>:
+    var count = source.byte_len()
+    if terminal_newline:
+        if not source.ends_with("\n"): return Err("container-stats-number-newline")
+        count = count - 1
+    if count < 1 or count > maximum_bytes: return Err("container-stats-number-size")
+    if count > 1 and source.byte_at(0) == 48: return Err("container-stats-number-canonical")
+    var value: i64 = 0
+    var index: i64 = 0
+    while index < count:
+        val byte = source.byte_at(index)
+        if byte < 48 or byte > 57: return Err("container-stats-number-digit")
+        val digit = byte - 48
+        if value > (9223372036854775807 - digit) / 10: return Err("container-stats-number-overflow")
+        value = value * 10 + digit
+        index = index + 1
+    Ok(value)
+
+fn cgroup_stats_key_v1(key: text) -> bool:
+    if key.byte_len() < 1 or key.byte_len() > 64: return false
+    var index: i64 = 0
+    while index < key.byte_len():
+        val byte = key.byte_at(index)
+        if not ((byte >= 97 and byte <= 122) or (index > 0 and
+                ((byte >= 48 and byte <= 57) or byte == 95 or byte == 46))):
+            return false
+        index = index + 1
+    true
+
+pub fn linux_cgroup_stats_scalar_parse_v1(source: text) -> Result<i64, text>:
+    if source.byte_len() < 2 or source.byte_len() > 64 or not source.ends_with("\n"):
+        return Err("container-stats-scalar-shape")
+    cgroup_stats_unsigned_v1(source, 19, true)
+
+pub fn linux_cgroup_stats_cpu_usage_parse_v1(source: text) -> Result<ContainerStatsCounterV1, text>:
+    if source.byte_len() < 1 or source.byte_len() > 8192 or not source.ends_with("\n"):
+        return Err("container-stats-cpu-shape")
+    val lines = source.split("\n")
+    if lines.len() > 65: return Err("container-stats-cpu-field-bound")
+    var seen: [text] = []
+    var usage: Option<i64> = nil
+    for at in 0..(lines.len() - 1):
+        val fields = lines[at].split(" ")
+        if fields.len() != 2 or not cgroup_stats_key_v1(fields[0]): return Err("container-stats-cpu-field")
+        val key = fields[0]
+        if seen.contains(key): return Err("container-stats-cpu-duplicate")
+        seen.push(key)
+        val value = cgroup_stats_unsigned_v1(fields[1])?
+        if key == "usage_usec": usage = Some(value)
+    match usage:
+        case Some(value): Ok(ContainerStatsCounterV1.Observed(value))
+        case None: Ok(ContainerStatsCounterV1.Unsupported("linux-cgroup2-usage-not-exposed"))
+
+fn cgroup_stats_device_v1(source: text) -> Result<(), text>:
+    val fields = source.split(":")
+    if fields.len() != 2: return Err("container-stats-io-device")
+    val major = cgroup_stats_unsigned_v1(fields[0], 10)?
+    val minor = cgroup_stats_unsigned_v1(fields[1], 10)?
+    if major > 4294967295 or minor > 4294967295: return Err("container-stats-io-device-range")
+    Ok(())
+
+fn cgroup_stats_sum_v1(left: i64, right: i64) -> Result<i64, text>:
+    if left < 0 or right < 0 or left > 9223372036854775807 - right:
+        return Err("container-stats-io-sum-overflow")
+    Ok(left + right)
+
+pub fn linux_cgroup_stats_io_parse_v1(source: text) -> Result<ContainerStatsIoCountersV1, text>:
+    if source.byte_len() > 32768: return Err("container-stats-io-size")
+    var devices: [text] = []
+    var rbytes: i64 = 0
+    var wbytes: i64 = 0
+    var rios: i64 = 0
+    var wios: i64 = 0
+    if source != "":
+        if not source.ends_with("\n"): return Err("container-stats-io-shape")
+        val lines = source.split("\n")
+        if lines.len() > 129: return Err("container-stats-io-device-bound")
+        for at in 0..(lines.len() - 1):
+            val fields = lines[at].split(" ")
+            if fields.len() < 5 or fields.len() > 17: return Err("container-stats-io-field-bound")
+            cgroup_stats_device_v1(fields[0])?
+            if devices.contains(fields[0]): return Err("container-stats-io-duplicate-device")
+            devices.push(fields[0])
+            var seen: [text] = []
+            for index in 1..fields.len():
+                val pair = fields[index].split("=")
+                if pair.len() != 2 or not cgroup_stats_key_v1(pair[0]): return Err("container-stats-io-field")
+                val key = pair[0]
+                if seen.contains(key): return Err("container-stats-io-duplicate-key")
+                seen.push(key)
+                val value = cgroup_stats_unsigned_v1(pair[1])?
+                if key == "rbytes": rbytes = cgroup_stats_sum_v1(rbytes, value)?
+                elif key == "wbytes": wbytes = cgroup_stats_sum_v1(wbytes, value)?
+                elif key == "rios": rios = cgroup_stats_sum_v1(rios, value)?
+                elif key == "wios": wios = cgroup_stats_sum_v1(wios, value)?
+            for required in ["rbytes", "wbytes", "rios", "wios"]:
+                if not seen.contains(required): return Err("container-stats-io-missing-counter")
+    Ok(ContainerStatsIoCountersV1(read_bytes: rbytes, write_bytes: wbytes,
+        read_operations: rios, write_operations: wios, device_count: devices.len()))
+
+# Mechanical extraction of native Stats DATA decoding. No native IO/authority.
+pub fn linux_cgroup_stats_counters_parse_v1(cpu_raw: Option<text>, memory_raw: Option<text>,
+        pids_raw: Option<text>, io_raw: Option<text>) -> Result<(ContainerStatsCounterV1, ContainerStatsCounterV1, ContainerStatsCounterV1, ContainerStatsIoV1), text>:
+    val cpu = match cpu_raw:
+        case Some(raw): linux_cgroup_stats_cpu_usage_parse_v1(raw)?
+        case None: ContainerStatsCounterV1.Unsupported("linux-cgroup2-counter-not-exposed")
+    val memory = match memory_raw:
+        case Some(raw): ContainerStatsCounterV1.Observed(linux_cgroup_stats_scalar_parse_v1(raw)?)
+        case None: ContainerStatsCounterV1.Unsupported("linux-cgroup2-counter-not-exposed")
+    val pids = match pids_raw:
+        case Some(raw): ContainerStatsCounterV1.Observed(linux_cgroup_stats_scalar_parse_v1(raw)?)
+        case None: ContainerStatsCounterV1.Unsupported("linux-cgroup2-counter-not-exposed")
+    val io = match io_raw:
+        case Some(raw): ContainerStatsIoV1.Observed(linux_cgroup_stats_io_parse_v1(raw)?)
+        case None: ContainerStatsIoV1.Unsupported("linux-cgroup2-io-not-exposed")
+    Ok((cpu, memory, pids, io))
+
+# Pure DATA assembly extracted at the same post-bracket call position. The
+# public counters record is not native custody, Running or retirement proof.
+pub fn linux_cgroup_stats_sample_data_v1(request_key: text, container_identity: text, snapshot_key: text,
+        started: i64, finished: i64, cpu: ContainerStatsCounterV1, memory: ContainerStatsCounterV1,
+        pids: ContainerStatsCounterV1, io: ContainerStatsIoV1) -> LinuxFreshWorkloadStatsCountersV1:
+    val identity = sha256_text("CONTAINER-STATS-ORIGINAL-V1\n" + request_key + "\n" +
+        container_identity + "\n" + snapshot_key)
+    LinuxFreshWorkloadStatsCountersV1(subject_identity_digest: identity, sample_started_monotonic_ns: started,
+        sample_finished_monotonic_ns: finished, cpu_usage_usec: cpu, memory_current_bytes: memory, pids_current: pids, io: io)

@@ -1,0 +1,60 @@
+# `simple build sources [<lib dir>]` — print a library unit's source
+# inventory: one path per line, relative to <lib dir>, sorted, deduplicated.
+# Selection goes through source_inventory_resolve_unit_v1 so this command and
+# the library-unit build agree on membership. Seam: the include set is the
+# default `**/*.spl` until the simple.sdn unit parser lands.
+
+use app.io.mod.{dir_walk, is_dir}
+use compiler.driver.driver_build.source_inventory_glob_v1.{source_inventory_resolve_unit_v1}
+
+# Returns the lib dir, or "" on a usage error.
+fn _sources_parse_dir(args: [text]) -> text:
+    var dir = ""
+    for a in args:
+        if a.starts_with("-"):
+            return ""
+        if dir != "":
+            return ""
+        dir = a
+    if dir == "":
+        return "."
+    while dir.len() > 1 and dir.ends_with("/"):
+        dir = dir[0:dir.len() - 1]
+    dir
+
+fn _sources_relative_paths(dir: text, walked: [text]) -> [text]:
+    val prefix = if dir == ".": "" else: dir + "/"
+    var rel: [text] = []
+    for p in walked:
+        var q = p
+        if q.starts_with("./"):
+            q = q[2:]
+        if prefix == "" or q.starts_with(prefix):
+            rel.push(q[prefix.len():])
+    source_inventory_resolve_unit_v1(["**/*.spl"], [], rel)
+
+# Pure core: argv + walked paths -> printed inventory ("" on usage error or
+# empty inventory; run_build_sources distinguishes the two).
+@allow(primitive_api)  # CLI argv boundary: raw argv and walked fs paths
+pub fn build_sources_output(args: [text], walked: [text]) -> text:
+    val dir = _sources_parse_dir(args)
+    if dir == "":
+        return ""
+    var out = ""
+    for p in _sources_relative_paths(dir, walked):
+        out = out + p + "\n"
+    out
+
+@allow(primitive_api)  # CLI argv boundary: argv in, process exit code out
+pub fn run_build_sources(args: [text]) -> i64:
+    val dir = _sources_parse_dir(args)
+    if dir == "":
+        print("usage: simple build sources [<lib dir>]")
+        return 2
+    if not is_dir(dir):
+        print("build-sources-error: not a directory: {dir}")
+        return 2
+    val text_out = build_sources_output(args, dir_walk(dir))
+    if text_out.len() > 0:
+        print(text_out[0:text_out.len() - 1])
+    0

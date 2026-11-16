@@ -1,0 +1,241 @@
+# Explicit workspace ledger DATA. Only the original sealed transfer can pair
+# these bytes with the genuine borrowed source binding and same machine writer.
+# Existing CPU-only V2 validation and serialization are not widened.
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.*
+use std.common.contracts.container.linux_fresh_workspace_v3.LinuxFreshWorkspaceBindingSnapshotV3
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workspace_v3.LinuxFreshWorkspaceCommandV3
+use std.common.contracts.distributed_operation_state_v2.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.machine_fresh_workload_read_prior_v2
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct MachineFreshWorkspaceRecordV3:
+    epoch_digest: text
+    initial_commit: text
+    scope: ContainerHostScopeV2
+    request: ContainerExecutionRequestV2
+    principal_digest: text
+    principal_id: text
+    cpu_millis: i64
+    memory_bytes: i64
+    helper_cpu_millis: i64
+    helper_memory_bytes: i64
+    remaining_cpu_millis: i64
+    remaining_memory_bytes: i64
+    binding: LinuxFreshWorkspaceBindingSnapshotV3
+
+pub fn machine_fresh_workspace_binding_bytes_v3(binding: LinuxFreshWorkspaceBindingSnapshotV3) -> Result<text, text>:
+    for digest in [binding.binding_digest, binding.machine_policy_digest, binding.provider_policy_digest,
+            binding.workspace_profile_digest, binding.agent_profile_digest, binding.request_digest,
+            binding.manifest_digest, binding.invocation_digest, binding.lease_binding_digest,
+            binding.workspace_identity_digest, binding.directory_binding_digest, binding.source_manifest_digest,
+            binding.bootstrap_digest, binding.git_digest, binding.agent_digest]:
+        if not builder_digest_valid_v1(digest): return Err("machine-fresh-workspace-binding-digest")
+    var image_id = binding.image_config_id
+    if image_id.starts_with("sha256:"): image_id = image_id.substring(7, image_id.byte_len())
+    if not builder_digest_valid_v1(image_id) or binding.service_uid <= 0 or binding.service_gid < 0:
+        return Err("machine-fresh-workspace-binding-principal-image")
+    val fields: Dict<text, SdnValue> = {
+        "bindingDigest": SdnValue.String(binding.binding_digest),
+        "machinePolicyDigest": SdnValue.String(binding.machine_policy_digest),
+        "providerPolicyDigest": SdnValue.String(binding.provider_policy_digest),
+        "workspaceProfileDigest": SdnValue.String(binding.workspace_profile_digest),
+        "agentProfileDigest": SdnValue.String(binding.agent_profile_digest),
+        "requestDigest": SdnValue.String(binding.request_digest),
+        "manifestDigest": SdnValue.String(binding.manifest_digest),
+        "invocationDigest": SdnValue.String(binding.invocation_digest),
+        "leaseBindingDigest": SdnValue.String(binding.lease_binding_digest),
+        "workspaceIdentityDigest": SdnValue.String(binding.workspace_identity_digest),
+        "directoryBindingDigest": SdnValue.String(binding.directory_binding_digest),
+        "sourceManifestDigest": SdnValue.String(binding.source_manifest_digest),
+        "bootstrapDigest": SdnValue.String(binding.bootstrap_digest),
+        "gitDigest": SdnValue.String(binding.git_digest), "agentDigest": SdnValue.String(binding.agent_digest),
+        "imageConfigId": SdnValue.String(binding.image_config_id),
+        "serviceUid": SdnValue.Int(binding.service_uid), "serviceGid": SdnValue.Int(binding.service_gid)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn machine_fresh_workspace_request_v3(scope: ContainerHostScopeV2, request: ContainerExecutionRequestV2,
+        binding: LinuxFreshWorkspaceBindingSnapshotV3) -> Result<LinuxOciRequestV1, text>:
+    val bound = machine_fresh_workspace_binding_bytes_v3(binding)?
+    if request.request_bytes.byte_len() > 65536: return Err("machine-fresh-workspace-request-bound")
+    val encoded = container_execution_request_encode_v2(request)?
+    val plan = request.plan
+    val supplied = ContainerHostScopeV2(physical_host_id: plan.physical_host_id,
+        service_scope_id: plan.service_scope_id, boot_id: plan.boot_id,
+        provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    if plan.backend != "linux-podman" or container_host_scope_bytes_v2(supplied)? != container_host_scope_bytes_v2(scope)?:
+        return Err("machine-fresh-workspace-scope")
+    val decoded = linux_oci_retained_request_decode_v1(request.request_bytes)?
+    if (linux_oci_retained_request_encode_v1(decoded)? != request.request_bytes or
+            linux_oci_request_digest_v1(decoded)? != plan.request_digest or binding.request_digest != plan.request_digest or
+            decoded.pod_uid != plan.workload_uid or decoded.attempt != plan.attempt or decoded.operation_id != plan.operation_id):
+        return Err("machine-fresh-workspace-request-binding")
+    # The actual binding separately pins every mounted source/profile object.
+    # These finite DATA checks never substitute for that current native custody.
+    if (decoded.mounts.len() != 1 or decoded.bundle_path != "" or decoded.build_input_root != "" or
+            decoded.build_output_root != "" or decoded.environment.len() != 0 or
+            decoded.mounts[0].read_only or decoded.working_directory != decoded.mounts[0].guest_root or decoded.terminal_mode != "tty" or
+            decoded.user_uid != binding.service_uid or decoded.user_gid != binding.service_gid or
+            decoded.user_namespace_mode != "keep-id" or not decoded.replace_entrypoint or
+            decoded.command.len() != 1 or decoded.args != ["--invocation-manifest-sha256", binding.invocation_digest] or
+            decoded.network_policy != "none" or decoded.filesystem_policy != "read-only"):
+        return Err("machine-fresh-workspace-profile-unsupported")
+    if (decoded.cpu_limit_millis < 1 or decoded.cpu_limit_millis > 64000 or decoded.memory_limit_bytes < 1 or
+            decoded.memory_limit_bytes > 1125899906842624 or decoded.pid_limit < 1 or decoded.pid_limit > 4096 or
+            decoded.timeout_ms < 1 or decoded.timeout_ms > 30000):
+        return Err("machine-fresh-workspace-bounds")
+    val registry = linux_fresh_workload_registry_image_v2(decoded.image)?
+    for value in [decoded.image] + decoded.command + decoded.args:
+        if value.byte_len() > 4096 or value.contains("\0"): return Err("machine-fresh-workspace-argument")
+    Ok(decoded)
+
+pub fn machine_fresh_workspace_record_v3(epoch: MachineFreshEpochRecordV1, initial: text,
+        scope: ContainerHostScopeV2, request: ContainerExecutionRequestV2, principal_id: text,
+        principal_digest: text, helper_cpu: i64, helper_memory: i64,
+        binding: LinuxFreshWorkspaceBindingSnapshotV3) -> Result<MachineFreshWorkspaceRecordV3, text>:
+    val checked = machine_fresh_epoch_record_validate_v1(epoch)?
+    val decoded = machine_fresh_workspace_request_v3(scope, request, binding)?
+    if (not builder_digest_valid_v1(initial) or not builder_digest_valid_v1(principal_digest) or
+            principal_id != epoch.principal_id or scope.physical_host_id != epoch.physical_host_id or
+            scope.native_machine_id != epoch.native_machine_id or scope.provider_generation <= 0 or
+            binding.machine_policy_digest != epoch.machine_policy_digest or
+            binding.provider_policy_digest != epoch.provider_policy_digest or binding.service_uid != epoch.service_uid or
+            binding.service_gid != epoch.service_gid or
+            helper_cpu <= 0 or helper_memory <= 0 or helper_cpu > epoch.usable_cpu_millis or
+            helper_memory > epoch.usable_memory_bytes): return Err("machine-fresh-workspace-principal-budget")
+    if (decoded.cpu_limit_millis > epoch.usable_cpu_millis - helper_cpu or
+            decoded.memory_limit_bytes > epoch.usable_memory_bytes - helper_memory):
+        return Err("machine-fresh-workspace-capacity")
+    Ok(MachineFreshWorkspaceRecordV3(epoch_digest: sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?),
+        initial_commit: initial, scope: scope, request: request, principal_digest: principal_digest,
+        principal_id: principal_id, cpu_millis: decoded.cpu_limit_millis, memory_bytes: decoded.memory_limit_bytes,
+        helper_cpu_millis: helper_cpu, helper_memory_bytes: helper_memory,
+        remaining_cpu_millis: epoch.usable_cpu_millis - helper_cpu - decoded.cpu_limit_millis,
+        remaining_memory_bytes: epoch.usable_memory_bytes - helper_memory - decoded.memory_limit_bytes,
+        binding: binding))
+
+pub fn machine_fresh_workspace_record_validate_v3(record: MachineFreshWorkspaceRecordV3) -> Result<(), text>:
+    if (not builder_digest_valid_v1(record.epoch_digest) or not builder_digest_valid_v1(record.initial_commit) or
+            not builder_digest_valid_v1(record.principal_digest) or record.principal_id == "" or
+            record.principal_id.byte_len() > 256 or record.cpu_millis < 1 or record.helper_cpu_millis < 1 or
+            record.remaining_cpu_millis < 0 or record.memory_bytes < 1 or record.helper_memory_bytes < 1 or
+            record.remaining_memory_bytes < 0 or record.cpu_millis > 64000 or record.helper_cpu_millis > 64000 or
+            record.remaining_cpu_millis > 64000 or record.memory_bytes > 1125899906842624 or
+            record.helper_memory_bytes > 1125899906842624 or record.remaining_memory_bytes > 1125899906842624):
+        return Err("machine-fresh-workspace-record-fields")
+    if (record.cpu_millis + record.helper_cpu_millis > 64000 - record.remaining_cpu_millis or
+            record.memory_bytes + record.helper_memory_bytes > 1125899906842624 - record.remaining_memory_bytes):
+        return Err("machine-fresh-workspace-record-overflow")
+    val request = machine_fresh_workspace_request_v3(record.scope, record.request, record.binding)?
+    if request.cpu_limit_millis != record.cpu_millis or request.memory_limit_bytes != record.memory_bytes:
+        return Err("machine-fresh-workspace-record-request-budget")
+    Ok(())
+
+pub fn machine_fresh_workspace_bytes_v3(record: MachineFreshWorkspaceRecordV3) -> Result<text, text>:
+    val checked = machine_fresh_workspace_record_validate_v3(record)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("machine-fresh-workspace"), "version": SdnValue.Int(3),
+        "epochDigest": SdnValue.String(record.epoch_digest), "initialCommit": SdnValue.String(record.initial_commit),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(record.scope)?),
+        "request": SdnValue.String(container_execution_request_encode_v2(record.request)?),
+        "principalDigest": SdnValue.String(record.principal_digest), "principalId": SdnValue.String(record.principal_id),
+        "cpuMillis": SdnValue.Int(record.cpu_millis), "memoryBytes": SdnValue.Int(record.memory_bytes),
+        "helperCpuMillis": SdnValue.Int(record.helper_cpu_millis), "helperMemoryBytes": SdnValue.Int(record.helper_memory_bytes),
+        "remainingCpuMillis": SdnValue.Int(record.remaining_cpu_millis), "remainingMemoryBytes": SdnValue.Int(record.remaining_memory_bytes),
+        "workspaceBinding": SdnValue.String(machine_fresh_workspace_binding_bytes_v3(record.binding)?)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn machine_fresh_workspace_id_v3(record: MachineFreshWorkspaceRecordV3) -> Result<text, text>:
+    Ok(sha256_text(machine_fresh_workspace_bytes_v3(record)?))
+
+fn fresh_workspace_charge_v3(record: MachineFreshWorkspaceRecordV3, kind: text, state: text,
+        cpu: i64, memory: i64) -> Result<text, text>:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(kind), "version": SdnValue.Int(3),
+        "workloadDigest": SdnValue.String(machine_fresh_workspace_id_v3(record)?), "state": SdnValue.String(state),
+        "cpuMillis": SdnValue.Int(cpu), "memoryBytes": SdnValue.Int(memory), "exclusiveDevices": SdnValue.Array([])}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# allow(primitive_api): WAL row timestamp in unix ms, same as the CPU V2 reserve-entry builder
+pub fn machine_fresh_workspace_reserve_entries_v3(record: MachineFreshWorkspaceRecordV3, at: i64) -> Result<[WalEntry], text>:
+    if at <= 0: return Err("machine-fresh-workspace-clock")
+    val id = machine_fresh_workspace_id_v3(record)?
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-fresh-workspaces-v3", id, machine_fresh_workspace_bytes_v3(record)?, at),
+        WalEntry(0, WalEntryType.Update, "machine-container-reservations-v1", "partition-" + record.epoch_digest,
+            fresh_workspace_charge_v3(record, "machine-fresh-partition-remainder", "uncertain",
+                record.remaining_cpu_millis, record.remaining_memory_bytes)?, at),
+        WalEntry(0, WalEntryType.Insert, "machine-container-reservations-v1", "workspace-" + id,
+            fresh_workspace_charge_v3(record, "machine-fresh-workspace-charge", "uncertain",
+                record.cpu_millis + record.helper_cpu_millis, record.memory_bytes + record.helper_memory_bytes)?, at)])
+
+pub fn machine_fresh_workspace_action_initial_v3(record: MachineFreshWorkspaceRecordV3,
+        action: text, generation: i64) -> Result<DistributedOperationStateV2, text>:
+    if not ["pull-image", "create", "inspect-created", "start", "inspect", "inspect-confirm", "stop", "remove", "absence", "primary-attach"].contains(action):
+        val read = machine_fresh_workload_read_prior_v2(action)?
+    val id = machine_fresh_workspace_id_v3(record)?
+    # V2 here is a transition oracle, not a remote grant or policy revision
+    # authority. Immutable policy/profile/request binding lives in payload/id.
+    val envelope = OperationEnvelopeV2(version: 2, id: "workspace-" + id + "-" + action,
+        payload_digest: id, principal: "local-" + record.principal_digest, project: "fresh-epoch",
+        host_id: record.scope.physical_host_id, operation: action, environment_digest: record.epoch_digest,
+        policy_revision: 3, revocation_epoch: 0, session_generation: generation,
+        memory_bytes: record.memory_bytes + record.helper_memory_bytes, duration_ms: 30000)
+    distributed_operation_initial_v2(distributed_encode_operation_v2(envelope)?)
+
+pub fn machine_fresh_workspace_action_entries_v3(record: MachineFreshWorkspaceRecordV3,
+        state: DistributedOperationStateV2, native_id: text, evidence: text, at: i64) -> Result<[WalEntry], text>:
+    val id = machine_fresh_workspace_id_v3(record)?
+    if at <= 0 or (native_id != "" and not builder_digest_valid_v1(native_id)) or evidence.byte_len() > 65536:
+        return Err("machine-fresh-workspace-action-result")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("machine-fresh-workspace-action"), "version": SdnValue.Int(3),
+        "workloadDigest": SdnValue.String(id), "envelope": SdnValue.String(state.envelope),
+        "state": SdnValue.String(state.state), "outcomeDigest": SdnValue.String(state.outcome_digest),
+        "nativeId": SdnValue.String(native_id), "evidence": SdnValue.String(evidence)}
+    Ok([WalEntry(0, if state.state == "admitted": WalEntryType.Insert else: WalEntryType.Update, "machine-fresh-workspace-actions-v3", state.operation_id,
+        sdn_encode_canonical(SdnValue.Dict(fields)), at)])
+
+pub fn machine_fresh_workspace_settle_entries_v3(record: MachineFreshWorkspaceRecordV3,
+        terminal: DistributedOperationStateV2, at: i64) -> Result<[WalEntry], text>:
+    if terminal.state != "completed": return Err("machine-fresh-workspace-not-settled")
+    val id = machine_fresh_workspace_id_v3(record)?
+    val restored_cpu = record.remaining_cpu_millis + record.cpu_millis + record.helper_cpu_millis
+    val restored_memory = record.remaining_memory_bytes + record.memory_bytes + record.helper_memory_bytes
+    val rows = machine_fresh_workspace_action_entries_v3(record, terminal, "", terminal.outcome_digest, at)?
+    Ok(rows + [WalEntry(0, WalEntryType.Update, "machine-container-reservations-v1", "workspace-" + id,
+        fresh_workspace_charge_v3(record, "machine-fresh-workspace-charge", "released", 0, 0)?, at),
+        WalEntry(0, WalEntryType.Update, "machine-container-reservations-v1", "partition-" + record.epoch_digest,
+            fresh_workspace_charge_v3(record, "machine-fresh-partition-remainder", "uncertain", restored_cpu, restored_memory)?, at)])
+
+pub fn machine_fresh_workspace_command_v3(record: MachineFreshWorkspaceRecordV3,
+        action: LinuxFreshWorkloadActionV2, native_id: text, observed_image_id: text = "") -> Result<LinuxFreshWorkspaceCommandV3, text>:
+    val decoded = machine_fresh_workspace_request_v3(record.scope, record.request, record.binding)?
+    val command = LinuxFreshWorkloadCommandV2(request: record.request, scope: record.scope, action: action, native_id: native_id,
+        image: decoded.image, entrypoint: decoded.command, args: decoded.args, cpu_millis: record.cpu_millis,
+        memory_bytes: record.memory_bytes, pid_limit: decoded.pid_limit, timeout_ms: decoded.timeout_ms,
+        helper_cpu_millis: record.helper_cpu_millis, helper_memory_bytes: record.helper_memory_bytes, observed_image_id: observed_image_id)
+    Ok(LinuxFreshWorkspaceCommandV3(command: command))
+
+pub fn machine_fresh_workspace_association_entries_v3(record: MachineFreshWorkspaceRecordV3,
+        native_id: text, evidence_digest: text, at: i64) -> Result<[WalEntry], text>:
+    if not builder_digest_valid_v1(native_id) or not builder_digest_valid_v1(evidence_digest) or at <= 0:
+        return Err("machine-fresh-workspace-association-fields")
+    val id = machine_fresh_workspace_id_v3(record)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("machine-fresh-workspace-native-association"), "version": SdnValue.Int(3),
+        "workloadDigest": SdnValue.String(id), "nativeId": SdnValue.String(native_id), "evidenceDigest": SdnValue.String(evidence_digest)}
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-fresh-workspace-evidence-v3", id, sdn_encode_canonical(SdnValue.Dict(fields)), at)])
+
+pub fn machine_fresh_workspace_action_batch_entries_v3(record: MachineFreshWorkspaceRecordV3,
+        states: [DistributedOperationStateV2], native_id: text, evidence: text, at: i64) -> Result<[WalEntry], text>:
+    if states.len() < 2 or states.len() > 3: return Err("machine-fresh-workspace-action-batch")
+    var rows: [WalEntry] = []
+    for state in states:
+        rows = rows + machine_fresh_workspace_action_entries_v3(record, state, native_id, evidence, at)?
+    Ok(rows)

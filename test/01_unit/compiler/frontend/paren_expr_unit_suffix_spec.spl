@@ -1,0 +1,67 @@
+# @cover src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl 5%
+"""
+## Purpose and audience
+Regression contract for a unit suffix glued to a parenthesized expression,
+`(n)_fbytes` / `(n + 1)_fbytes`, the conversion idiom documented in
+doc/07_guide/language/type_system.md. Both parsers desugar it to
+`expr * 1_sfx`. Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+## Operator workflow
+bin/simple test test/01_unit/compiler/frontend/paren_expr_unit_suffix_spec.spl
+## Compatibility and limitations
+Runtime examples run on the seed; the parse examples drive the pure-Simple
+parser directly. Asserts use to_equal, not `==` (unit `==` currently yields a
+unit-wrapped bool, tracked separately in the bug record).
+## Verification guidance and troubleshooting
+"function `n` not found" means the group collapsed and `_fbytes` became a
+no-paren call argument again.
+"""
+
+use std.spec
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{
+    EXPR_IDENT, EXPR_CALL, EXPR_BINARY,
+    expr_count, expr_owner_tag, expr_owner_str, expr_owner_left
+}
+use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+
+unit FreeBytes: i64 as fbytes
+
+fn spec_parse_shape(source: text) -> text:
+    ast_reset()
+    if not core_frontend_parse_reset(source, "paren_unit_suffix.spl"):
+        return "parse-error"
+    var calls_n = 0
+    var binaries = 0
+    var eid = 0
+    while eid < expr_count():
+        if expr_owner_tag(eid) == EXPR_CALL:
+            val callee_eid = expr_owner_left(eid)
+            if callee_eid >= 0 and expr_owner_tag(callee_eid) == EXPR_IDENT and expr_owner_str(callee_eid) == "n":
+                calls_n = calls_n + 1
+        if expr_owner_tag(eid) == EXPR_BINARY:
+            binaries = binaries + 1
+        eid = eid + 1
+    "calls_n={calls_n} binaries={binaries}"
+
+describe "Unit suffix on a parenthesized expression":
+    it "(n)_fbytes equals 5_fbytes":
+        val n = 5
+        expect((n)_fbytes).to_equal(5_fbytes)
+
+    it "(n + 1)_fbytes equals 6_fbytes":
+        val n = 5
+        expect((n + 1)_fbytes).to_equal(6_fbytes)
+
+    it "nested group ((n))_fbytes equals 5_fbytes":
+        val n = 5
+        expect(((n))_fbytes).to_equal(5_fbytes)
+
+    it "placeholder lambdas are untouched":
+        val xs = [1, 2]
+        expect(xs.map(_1 * 2)).to_equal([2, 4])
+
+    it "pure-Simple parser lowers (n)_fbytes to a multiply, not a call of n":
+        expect(spec_parse_shape("val n = 5\nval a = (n)_fbytes\n")).to_equal("calls_n=0 binaries=1")
+
+    it "pure-Simple parser lowers (n + 1)_fbytes to two binaries":
+        expect(spec_parse_shape("val n = 5\nval b = (n + 1)_fbytes\n")).to_equal("calls_n=0 binaries=2")

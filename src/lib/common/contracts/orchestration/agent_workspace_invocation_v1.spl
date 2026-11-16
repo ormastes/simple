@@ -1,0 +1,166 @@
+# Full immutable invocation DATA. Neither parsing nor a digest grants effects.
+use std.common.contracts.orchestration.agent_task_use_v1.*
+use std.common.contracts.orchestration.agent_task_object_v1.*
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.orchestration.desired_input_v1.*
+use std.common.contracts.container.agent_workspace_manifest_v1.agent_workspace_manifest_decode_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+pub struct AgentWorkspaceInvocationManifestV1:
+    operation_id: text
+    task_use: AgentTaskUseBindingV1
+    desired: ControllerDesiredInputV1
+    desired_source: text
+    catalog: text
+    task: AgentTaskInputV1
+    workspace_manifest: text
+    selection_binding_digest: text
+    interactive_intent_digest: text
+    image_config_id: text
+    inner_argv: [text]
+    credential_refs: [text]
+    not_after: i64
+    preparation_budget_ms: i64
+    workload_duration_ms: i64
+
+# Shared strict DATA helpers, not a workspace owner or permission constructor.
+# allow(primitive_api): reviewed DATA predicate/bound/umask word (milestone_0012 groupC)
+pub fn agent_workspace_fields_v1(source: text, maximum: i64, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() == 0 or source.byte_len() > maximum: return Err("agent-workspace-source-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: maximum, max_depth: 3,
+        max_nodes: 1024, max_rows: 0, max_cells: 0, max_columns: 64)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("agent-workspace-syntax:" + issue.code)
+    if sdn_encode_canonical(parsed.value) + "\n" != source: return Err("agent-workspace-noncanonical")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("agent-workspace-object-required")
+    for key in fields.keys():
+        if not names.contains(key): return Err("agent-workspace-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("agent-workspace-missing-field:" + key)
+    Ok(fields)
+
+pub fn agent_workspace_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("agent-workspace-text-required:" + key)
+
+# allow(primitive_api): reviewed DATA predicate/bound/umask word (milestone_0012 groupC)
+pub fn agent_workspace_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("agent-workspace-integer-required:" + key)
+
+pub fn agent_workspace_invocation_manifest_encode_v1(value: AgentWorkspaceInvocationManifestV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(value.operation_id): return Err("agent-workspace-operation-invalid")
+    val use_bytes = agent_task_use_encode_v1(value.task_use)?
+    val desired_bytes = controller_desired_input_encode_v1(value.desired)?
+    val task_bytes = agent_task_object_encode_v1(value.task)?
+    if value.desired_source.byte_len() > 65536 or value.catalog.byte_len() > 65536:
+        return Err("agent-workspace-source-catalog-size")
+    val desired_match = controller_desired_input_matches_v1(value.desired, value.desired_source)?
+    if (value.task_use.controller_id != value.desired.controller_id or value.task_use.session_uid != value.desired.workload_uid or
+            value.task_use.source_digest != value.desired.source_digest or value.task_use.catalog_digest != sha256_text(value.catalog) or
+            value.task_use.ns != value.task.ns or value.task_use.task_ref != value.task.reference or
+            value.task_use.task_digest != value.task.content_digest): return Err("agent-workspace-task-use-mismatch")
+    for digest in [value.selection_binding_digest, value.interactive_intent_digest]:
+        if not builder_digest_valid_v1(digest): return Err("agent-workspace-invocation-digest-invalid")
+    val image_digest = if value.image_config_id.starts_with("sha256:"): value.image_config_id.substring(7) else: value.image_config_id
+    if not builder_digest_valid_v1(image_digest): return Err("agent-workspace-image-config-invalid")
+    if (value.not_after <= 0 or value.preparation_budget_ms <= 0 or value.workload_duration_ms <= 0 or
+            value.preparation_budget_ms > value.workload_duration_ms or value.workload_duration_ms > 86400000):
+        return Err("agent-workspace-invocation-budget-invalid")
+    if value.workspace_manifest.byte_len() == 0 or value.workspace_manifest.byte_len() > 131072:
+        return Err("agent-workspace-manifest-size")
+    # Reuse the single stage/source schema; decoding DATA grants no custody.
+    val embedded = agent_workspace_manifest_decode_v1(value.workspace_manifest)?
+    if value.inner_argv.len() < 2 or value.inner_argv.len() > 16: return Err("agent-workspace-inner-argv-count")
+    var argv_bytes: i64 = 0
+    var argv: [SdnValue] = []
+    for argument in value.inner_argv:
+        if argument.contains("\0"): return Err("agent-workspace-inner-argv-nul")
+        argv_bytes = argv_bytes + argument.byte_len()
+        if argv_bytes > 8192: return Err("agent-workspace-inner-argv-size")
+        argv.push(SdnValue.String(argument))
+    if value.credential_refs.len() > 8: return Err("agent-workspace-credential-reference-bound")
+    var credentials: [SdnValue] = []
+    var seen_credentials: [text] = []
+    for reference in value.credential_refs:
+        if not agent_task_reference_valid_v1(reference) or seen_credentials.contains(reference):
+            return Err("agent-workspace-credential-reference-invalid")
+        seen_credentials.push(reference)
+        credentials.push(SdnValue.String(reference))
+    val actions = [SdnValue.String("stage-approved-loose-objects"), SdnValue.String("create-detached-worktree"),
+        SdnValue.String("verify-worktree"), SdnValue.String("replace-with-exact-agent")]
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("agent-workspace-invocation"), "intent": SdnValue.String("interactive-start"),
+        "innerExecAuthority": SdnValue.String("bounded-invocation-continuation-v1"),
+        "clockPolicy": SdnValue.String("trusted-wall-no-time-namespace-v1"),
+        "terminalPolicy": SdnValue.String("tty-open-stdin-current-input-geometry-v1"),
+        "preparationActions": SdnValue.Array(actions), "credentialRefs": SdnValue.Array(credentials),
+        "operationId": SdnValue.String(value.operation_id), "taskUse": SdnValue.String(use_bytes),
+        "desiredInput": SdnValue.String(desired_bytes), "desiredSource": SdnValue.String(value.desired_source),
+        "catalog": SdnValue.String(value.catalog), "taskObject": SdnValue.String(task_bytes),
+        "workspaceManifest": SdnValue.String(value.workspace_manifest),
+        "selectionBindingDigest": SdnValue.String(value.selection_binding_digest),
+        "interactiveIntentDigest": SdnValue.String(value.interactive_intent_digest),
+        "imageConfigId": SdnValue.String(value.image_config_id), "innerArgv": SdnValue.Array(argv),
+        "notAfter": SdnValue.Int(value.not_after), "preparationBudgetMs": SdnValue.Int(value.preparation_budget_ms),
+        "workloadDurationMs": SdnValue.Int(value.workload_duration_ms)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > 524288: return Err("agent-workspace-invocation-size")
+    Ok(bytes)
+
+pub fn agent_workspace_invocation_manifest_digest_v1(value: AgentWorkspaceInvocationManifestV1) -> Result<text, text>:
+    Ok(sha256_text(agent_workspace_invocation_manifest_encode_v1(value)?))
+
+pub fn agent_workspace_invocation_manifest_decode_v1(source: text) -> Result<AgentWorkspaceInvocationManifestV1, text>:
+    val names = ["version", "kind", "intent", "innerExecAuthority", "clockPolicy", "terminalPolicy", "preparationActions", "credentialRefs", "operationId", "taskUse", "desiredInput", "desiredSource", "catalog", "taskObject",
+        "workspaceManifest", "selectionBindingDigest", "interactiveIntentDigest", "imageConfigId", "innerArgv", "notAfter", "preparationBudgetMs", "workloadDurationMs"]
+    val fields = agent_workspace_fields_v1(source, 524288, names)?
+    if agent_workspace_int_v1(fields, "version")? != 1 or agent_workspace_text_v1(fields, "kind")? != "agent-workspace-invocation":
+        return Err("agent-workspace-invocation-version")
+    if (agent_workspace_text_v1(fields, "intent")? != "interactive-start" or
+            agent_workspace_text_v1(fields, "innerExecAuthority")? != "bounded-invocation-continuation-v1" or
+            agent_workspace_text_v1(fields, "clockPolicy")? != "trusted-wall-no-time-namespace-v1" or
+            agent_workspace_text_v1(fields, "terminalPolicy")? != "tty-open-stdin-current-input-geometry-v1"):
+        return Err("agent-workspace-invocation-authority-profile-unsupported")
+    val expected_actions = SdnValue.Array([SdnValue.String("stage-approved-loose-objects"), SdnValue.String("create-detached-worktree"),
+        SdnValue.String("verify-worktree"), SdnValue.String("replace-with-exact-agent")])
+    if sdn_encode_canonical(fields["preparationActions"]) != sdn_encode_canonical(expected_actions):
+        return Err("agent-workspace-preparation-actions-unsupported")
+    val raw_argv = match fields["innerArgv"]:
+        case SdnValue.Array(values): values
+        case _: return Err("agent-workspace-inner-argv-array")
+    var argv: [text] = []
+    for item in raw_argv:
+        match item:
+            case SdnValue.String(value): argv.push(value)
+            case _: return Err("agent-workspace-inner-argv-text")
+    val raw_credentials = match fields["credentialRefs"]:
+        case SdnValue.Array(values): values
+        case _: return Err("agent-workspace-credential-refs-array")
+    var credentials: [text] = []
+    for item in raw_credentials:
+        match item:
+            case SdnValue.String(value): credentials.push(value)
+            case _: return Err("agent-workspace-credential-refs-text")
+    val value = AgentWorkspaceInvocationManifestV1(operation_id: agent_workspace_text_v1(fields, "operationId")?,
+        task_use: agent_task_use_decode_v1(agent_workspace_text_v1(fields, "taskUse")?)?,
+        desired: controller_desired_input_decode_v1(agent_workspace_text_v1(fields, "desiredInput")?)?,
+        desired_source: agent_workspace_text_v1(fields, "desiredSource")?, catalog: agent_workspace_text_v1(fields, "catalog")?,
+        task: agent_task_object_decode_v1(agent_workspace_text_v1(fields, "taskObject")?)?,
+        workspace_manifest: agent_workspace_text_v1(fields, "workspaceManifest")?,
+        selection_binding_digest: agent_workspace_text_v1(fields, "selectionBindingDigest")?,
+        interactive_intent_digest: agent_workspace_text_v1(fields, "interactiveIntentDigest")?, image_config_id: agent_workspace_text_v1(fields, "imageConfigId")?,
+        inner_argv: argv, credential_refs: credentials, not_after: agent_workspace_int_v1(fields, "notAfter")?,
+        preparation_budget_ms: agent_workspace_int_v1(fields, "preparationBudgetMs")?, workload_duration_ms: agent_workspace_int_v1(fields, "workloadDurationMs")?)
+    if agent_workspace_invocation_manifest_encode_v1(value)? != source: return Err("agent-workspace-invocation-noncanonical")
+    Ok(value)

@@ -120,7 +120,8 @@ use compiler.driver.driver_source_parse_support.{
 }
 
 use compiler.driver.driver_unit_order_index_v1.{unit_admitted_graph_v1, unit_order_index_enabled_v1,
-    UNIT_ORDER_INDEX_ENV_V1}
+    UNIT_ORDER_INDEX_ENV_V1, UNIT_ORDER_SKIP_FRESH_ENV_V1, unit_order_skip_fresh_enabled_v1,
+    unit_order_fresh_flags_v1, unit_order_skip_fresh_order_v1}
 
 var _worker_readiness_edges_reported_v1: bool = false
 
@@ -190,6 +191,12 @@ impl CompilerDriver:
             return false
         var admitted_graph = WorkerAdmittedGraphV1(edges: [], errors: [])
         if worker_unit:
+            # Skip-fresh reads the PREVIOUS index, so it runs before the
+            # graph step below republishes it.
+            val unit_fresh = unit_order_fresh_flags_v1(
+                unit_order_skip_fresh_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_SKIP_FRESH_ENV_V1) ?? "",
+                    driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "", source_paths, source_contents)
             val edge_result = unit_admitted_graph_v1(
                 unit_order_index_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
                 driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
@@ -201,7 +208,7 @@ impl CompilerDriver:
             admitted_graph = edge_result.unwrap()
             val pick_result = worker_unit_pick_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
                 driver_parse_env_get_v1("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
-                worker_admitted_order_v1(admitted_graph.edges),
+                unit_order_skip_fresh_order_v1(worker_admitted_order_v1(admitted_graph.edges), unit_fresh),
                 native_file_worker_batch_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? ""))
             if pick_result.is_err():
                 self.ctx.add_error("file-worker unit pick failed: {pick_result.unwrap_err()}")
