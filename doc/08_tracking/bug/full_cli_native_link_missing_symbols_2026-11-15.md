@@ -59,3 +59,9 @@ registered (no seed rebuild in this lane), so the interpreted spec
 seed; (2) the native CLI's `test` command fails every spec with
 `function 'describe' not found` (std.spec not resolved in the native interpreter).
 Status: verification-pending.
+
+Update 2026-11-16: `rt_win_compare_object_handles` needs no separate codegen
+table entry. Other `rt_win_*` externs are not listed in `runtime_sffi.rs` either;
+a native-built probe resolves the symbol from the C runtime and links with no
+stub. Pinned by `test/03_system/runtime/win_compare_object_handles_native_spec.spl`
+(same handle -> true, different -> false). Interpreter twin landed in #9664.
