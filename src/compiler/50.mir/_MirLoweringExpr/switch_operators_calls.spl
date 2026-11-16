@@ -968,6 +968,33 @@ impl MirLowering:
             self.static_scalar_locals[payload_local.id] = true
         payload_local
 
+    me is_plain_payload_return_v1(declared: HirType) -> bool:
+        """The one gate for narrowing a `T?` into a declared `-> T`, shared by
+        the implicit tail and `lower_return_expr`: a plain sink that is not a
+        native trait (a `-> Trait` return is coerced to a (data, table) object)."""
+        hir_type_is_plain_payload_sink_v1(declared) and self.native_trait_owner_for_type(declared) == ""
+
+    me is_plain_tuple_payload_slot_v1(declared: HirType) -> bool:
+        """A declared plain tuple `-> (A, B)`: the one sink whose `T?` arms
+        must be narrowed per arm, before the join. A native tuple is a
+        headerless N-word allocation, so the join cannot normalise a raw
+        tuple arm into `T?` at runtime (rt_enum_id would read element 0)."""
+        match declared.kind:
+            case HirTypeKind.Tuple(_): self.is_plain_payload_return_v1(declared)
+            case _: false
+
+    me is_plain_tuple_conditional_return_v1(declared: HirType, value: HirExpr) -> bool:
+        """The one gate, shared by the implicit tail and lower_return_expr,
+        for lowering a conditional value against a declared plain tuple
+        return, so each `(A, B)?` arm is narrowed (lower_block_expected)."""
+        if not self.is_plain_tuple_payload_slot_v1(declared):
+            return false
+        match value.kind:
+            case HirExprKind.If(_, _, else_): else_ != None
+            case HirExprKind.IfChain(_, else_): else_ != None
+            case HirExprKind.MatchCase(_, _): true
+            case _: false
+
     me option_payload_for_plain_sink(local: LocalId, value_type: HirType) -> LocalId?:
         """A `T?` value flowing into a declared plain `T` slot (a function tail
         whose conditional joined to `T?`): unwrap with rt_unwrap_or_trap so
@@ -986,6 +1013,11 @@ impl MirLowering:
                 val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
                 self.builder = b
                 val word = unwrapped ?? local
+                # A tuple payload is a tuple pointer word: recover it the way
+                # `.unwrap()` does, never decode it as an i64.
+                match inner.kind:
+                    case HirTypeKind.Tuple(_): return Some(self.recover_optional_tuple_payload(word, inner))
+                    case _: ()
                 Some(self.decode_declared_enum_payload_slot(word, inner))
             case _: None
 
@@ -5085,7 +5117,7 @@ impl MirLowering:
                     if effective_payload_type == None:
                         if val option_inner = self.option_inner_hir_type_for_local(scrutinee, scrut_local):
                             effective_payload_type = Some(option_inner)
-                    val bound_payload = if exact_optional_record:
+                    var bound_payload = if exact_optional_record:
                         match optional_record_type.kind:
                             case HirTypeKind.Error: pl
                             case _: self.materialize_optional_record_payload(pl, scrutinee_payload_struct, optional_record_type)
@@ -5126,32 +5158,10 @@ impl MirLowering:
                             # stage2_poll_payload_typeparam_match_2026-11-01).
                             # Metadata only: decoding above keeps the declared
                             # slot type.
-                            val payload_arm: HirMatchArm = arms[enum_arm_srcidx[ci]]
-                            var payload_instance: HirType? = scrutinee_enum_type
-                            match payload_arm.pattern.kind:
-                                case Enum(payload_arm_type, _, _):
-                                    match payload_arm_type.kind:
-                                        case HirTypeKind.Named(_, payload_arm_args):
-                                            if payload_arm_args.len() > 0:
-                                                payload_instance = Some(payload_arm_type)
-                                        case _: ()
-                                case _: ()
+                            val payload_instance = self.enum_arm_payload_instance_v1(arms[enum_arm_srcidx[ci]], scrutinee_enum_type)
                             val instantiated_payload_type = self.substitute_enum_payload_type_params_v1(payload_owner_key, enum_name, bound_payload_type, payload_instance)
                             self.remember_local_hir_type(bound_payload.id, instantiated_payload_type, 0, 0)
-                            # A `T` slot instantiated to a record (`Box<Lid>`):
-                            # field access resolves its owner through
-                            # struct_value_syms, which the `T` decode never set,
-                            # so `item.id` lowered to a Unit GetField and the arm
-                            # returned an uninitialised slot. A record payload
-                            # word is the same pointer either way; this only tags.
-                            # doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md
-                            match bound_payload_type.kind:
-                                case HirTypeKind.TypeParam(_, _):
-                                    match instantiated_payload_type.kind:
-                                        case HirTypeKind.Named(_, _):
-                                            self.decode_declared_enum_payload_slot(bound_payload, instantiated_payload_type)
-                                        case _: ()
-                                case _: ()
+                            bound_payload = self.decode_instantiated_enum_payload_slot_v1(bound_payload, bound_payload_type, instantiated_payload_type)
                     if enum_name == "Result" and enum_variants[ci] == "Err" and (mir_lower_env_get("SIMPLE_ENUM_PAYLOAD_PATH_TRACE") ?? "") == "1":
                         # Scalar diagnostic evidence only: do not interpolate
                         # optional type payloads through value-position unwraps.
@@ -5341,6 +5351,18 @@ impl MirLowering:
                                     # resolves the receiver instead of lowering a const-0
                                     # placeholder (bug mir_unresolved_method_on_enum_payload_binding).
                                     self.remember_local_hir_type(bound_slot.id, slot_types[slot_index], 0, 0)
+                        elif self.enum_variant_payload_types.has(tuple_payload_key):
+                            # Generic owner: the declared-slot decode above is
+                            # withheld, so a `Two<P, i64>` binder `a` stayed an
+                            # untyped `A` and `a.id` read field 0 into a Unit
+                            # dest. Tag an instantiated record slot, exactly as
+                            # the single-binder path does.
+                            val generic_slots: [HirType] = self.enum_variant_payload_types[tuple_payload_key]
+                            if slot_index >= 0 and slot_index < generic_slots.len():
+                                val generic_slot: HirType = generic_slots[slot_index]
+                                val slot_instance = self.enum_arm_payload_instance_v1(arms[enum_arm_srcidx[ci]], scrutinee_enum_type)
+                                val instantiated_slot = self.substitute_enum_payload_type_params_v1(tuple_owner_key, enum_name, generic_slot, slot_instance)
+                                bound_slot = self.decode_instantiated_enum_payload_slot_v1(gl, generic_slot, instantiated_slot)
                         # Text retag: mirror the single-field path — if this
                         # slot was observed TEXT at the construction site,
                         # rt_interp_cstr(gl) produces a genuinely
