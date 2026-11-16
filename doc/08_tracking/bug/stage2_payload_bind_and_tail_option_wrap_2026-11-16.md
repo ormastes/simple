@@ -213,6 +213,24 @@ seed already printed the right answer.
 `rt_unwrap_or_trap`, so None aborts and nil is never widened. Seed spec goes
 from 3/4 to 4/4.
 
+## Review follow-ups (after integ3 snapshot `67f01c764dc`)
+
+Red specs are in `a434369aa85`. The B spec now uses a two-field struct and
+asserts `"field":1`.
+
+- `38621441aa4`: the multi-binder path `case Both(a, b): a.id` over
+  `Two<P, i64>` had the same gap as B. `enum_payload_key_uses_declared_slots`
+  is false for generic owners, so `a` stayed an untyped `A` and lowered to
+  `field=0` into a Unit dest. That path now instantiates the slot and tags it
+  like the single-binder path. The single-binder path also now uses the
+  decode's returned local instead of discarding it. Seed: 1/3 -> 3/3.
+- `721a6a2f853`: Tuple was a plain sink, but the declared-slot decode has no
+  Tuple arm. `-> (i64, text): return pick_pair(n)` returned an I64 local. The
+  fix narrows through `recover_optional_tuple_payload`, which fails closed on
+  unsupported element types. Slice already decodes. Seed: tail 4/5 -> 5/5.
+- `f8f1a4adf61`: the tail and explicit-return paths now share one trait guard,
+  `is_plain_payload_return_v1`.
+
 ## Census of compiler source (2026-11-16, awk heuristic)
 
 | class | hits |
