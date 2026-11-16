@@ -2076,3 +2076,7 @@ never cache an answer computed while exhausted) —
 ## 2026-11-16 — background-image longhand witness
 
 - `bg_layers_raw` does double duty: it is the fail-closed witness (css-cascade spec), and Draw IR treats any non-empty value as "not lowerable". A lone exact `url()` longhand keeps its text there and must still lower: `_html_draw_ir_single_url_witness`. When adding a raw witness to a new branch in decl_apply, check `_html_draw_ir_background_layers` and the material gate (`raw_layers_empty`) in paint_layout.
+
+## 2026-11-16 — raster-only paint is invisible
+
+- The pixel API (`simple_web_render_html_to_pixels`) renders Draw IR through Engine2D. Anything painted only in `paint_raster.spl`'s `paint` never reaches it: the widget-image placeholder (now ported) and the widget panel, button and chrome-text fills (still open). When a pixel row shows only the page background, grep `paint_raster.spl` for the feature before debugging layout.
