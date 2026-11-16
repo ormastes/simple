@@ -2096,3 +2096,12 @@ never cache an answer computed while exhausted) —
 - An overflowing value ignores `text-align` (CSS Text 3 §6.1): LTR starts at `content_x`, RTL ends at the content right edge. Buttons (`type=button/submit/reset`) still centre an overflowing label. That is a known divergence: Chrome 159 start-aligns it (a 40px submit with 2px padding and 12 Arial-8px `M`s paints ink from x=3 to x=41, past the content box, so it is clipped at the border box, not the content box). It is open for the owner.
 - Chrome 159 gives `<input>` a default `box-sizing:border-box`, but the engine uses content-box. Author `box-sizing` explicitly in input oracle pages, or the content box differs before paint is even reached.
 - Oracle: test/01_unit/browser_engine/input_text_overflow_clip_chrome159_spec.spl.
+
+## 2026-11-16 — catalog gate `--device-scale K` (384-dpi lane)
+
+- `sh scripts/check/check-chrome-catalog-pixel-diff.shs --device-scale 4` (integer >= 1, default 1 = old behaviour byte-for-byte). Chrome gets `--force-device-scale-factor=K` on both the viewport probe and the capture; `--window-size`/`innerHeight`/deficit stay CSS px (Chrome 159 fresh profile: deficit 200 at K=1 and K=4); differ crop is `--ref-viewport-rows H*K`; frames are 3600x3040 at K=4.
+- Simple side: `examples/06_io/ui/web_render_page_ppm.spl` reads `PAGE_DEVICE_SCALE`; K=1 keeps the old entry, K>1 calls `simple_web_layout_render_html_pixels_engine2d_at_device_scale` with the backend resolved at DEVICE px (the public `simple_web_render_html_to_pixels_at_device_scale` hardcodes "auto", which would defeat `SIMPLE_2D_BACKEND_STRICT`). An empty frame at K>1 prints `error: device_scale=K render returned 0 px (skipped commands ...)` (the stroke-width>1 gap).
+- Pipeline attribution: the at_device_scale path at K=1 is byte-identical (`cmp`) to the gate's K=1 PPM on tab-bar, so a K=1 vs K=4 delta is the dpi change, not a pipeline change.
+- Fonts (Chrome canvas measureText, 40px probe): `sans-serif` = `Arial` = `"Liberation Sans"` (1133.926) != `"DejaVu Sans"` (1286.992); `monospace` = `"DejaVu Sans Mono"` (1444.922). Simple's font_provider uses the same two files. Do NOT use `fc-match sans-serif` (says DejaVu Sans) — Chrome resolves the generic via its Arial pref.
+- Baseline: own file per scale, `chrome_catalog_pixel_diff_baseline.<host>[.<w>x<h>.<backend>].dprK.txt`; the 1x file is untouched.
+- Cost (cpu_simd, interpreter, 2 lanes in parallel on a shared box): 15-37 min per page at K=4 vs 0.4-5.4 min at K=1.
