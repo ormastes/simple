@@ -1,7 +1,7 @@
 # One graph resolver for CLI, reports and viewer; all effects stay in adapters.
 # @req REQ-TRC-002 REQ-TRC-004 REQ-TRC-005 REQ-TRC-006 REQ-TRC-019
 use std.common.traceability.model.*
-use std.common.traceability.trace_ids_v1.{TraceEdgeIdV1, TraceOriginIdV1, TraceTestRoleMarkV1}
+use std.common.traceability.trace_ids_v1.{TraceEdgeIdV1, TraceOverridePermissionV1, TraceOriginIdV1, TraceTestRoleMarkV1}
 use std.common.traceability.schema.*
 use std.common.traceability.conventions.*
 
@@ -11,12 +11,12 @@ fn graph_from_facts(facts: TraceFacts, edges: [TraceEdge], bindings: [TraceEdgeO
 fn claim_authorized(claim: TraceClaim, origin: TraceOrigin, policy: TracePolicy, snapshot_id: text) -> bool:
     var matches = 0
     for authority in policy.authorities:
-        if authority.origin_id != claim.origin_id or authority.owner_path != origin.owner_path or authority.relation != claim.relation or authority.scope_id != claim.scope_id:
+        if authority.origin_id.value != claim.origin_id or authority.owner_path.value != origin.owner_path.value or authority.relation != claim.relation or authority.scope_id.value != claim.scope_id:
             continue
-        if authority.expires_snapshot_id != "" and authority.expires_snapshot_id != snapshot_id:
+        if authority.expires_snapshot_id.is_some() and authority.expires_snapshot_id.unwrap().value != snapshot_id:
             continue
         if claim.operation != TraceClaimOperation.Add:
-            if not authority.allow_override or authority.review_id == "" or authority.reason == "":
+            if authority.override_permission == TraceOverridePermissionV1.Denied or authority.review_id.is_none() or authority.reason == "":
                 continue
         matches = matches + 1
     matches == 1
@@ -76,9 +76,9 @@ pub fn resolve_trace_graph(input: TraceFacts, policy: TracePolicy) -> TraceGraph
     for node in input.nodes:
         node_map[node.id] = node.kind
     for origin in input.origins:
-        origin_map[origin.id] = origin
+        origin_map[origin.id.value] = origin
         if origin.kind == TraceOriginKind.Convention:
-            diagnostics.push(trace_diagnostic("TRACE-AUTHORITY-CONFLICT", input.subject.snapshot_id, policy.id, origin.id, origin.id, "authored facts cannot impersonate a derived convention origin"))
+            diagnostics.push(trace_diagnostic("TRACE-AUTHORITY-CONFLICT", input.subject.snapshot_id, policy.id, origin.id.value, origin.id.value, "authored facts cannot impersonate a derived convention origin"))
             return graph_from_facts(input, [], [], diagnostics, false)
     var admitted: Dict<text, bool> = {}
     var overrides: Dict<text, [text]> = {}
@@ -93,7 +93,7 @@ pub fn resolve_trace_graph(input: TraceFacts, policy: TracePolicy) -> TraceGraph
         if claim.operation != TraceClaimOperation.Add:
             var matched = 0
             for rule in policy.conventions:
-                if rule.id == claim.rule_id and rule.relation == claim.relation and convention_scope_applies(input, rule, claim.scope_id) == TraceConventionScopeV1.Applies:
+                if rule.id.value == claim.rule_id and rule.relation == claim.relation and convention_scope_applies(input, rule, claim.scope_id) == TraceConventionScopeV1.Applies:
                     matched = matched + 1
             if matched != 1:
                 diagnostics.push(trace_diagnostic("TRACE-STALE-OVERRIDE", input.subject.snapshot_id, claim.rule_id, claim.id, claim.origin_id, "override must match exactly one current mapping rule and source scope"))
@@ -123,7 +123,7 @@ pub fn resolve_trace_graph(input: TraceFacts, policy: TracePolicy) -> TraceGraph
             diagnostics.push(issue)
         return graph_from_facts(derived, [], [], diagnostics, false)
     for origin in derived.origins:
-        origin_map[origin.id] = origin
+        origin_map[origin.id.value] = origin
     var active_overrides: Dict<text, bool> = {}
     for claim in input.claims:
         if claim.operation != TraceClaimOperation.Add and admitted.contains_key(claim.id) and admitted[claim.id]:
