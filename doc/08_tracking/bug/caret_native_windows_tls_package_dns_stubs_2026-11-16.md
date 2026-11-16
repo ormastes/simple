@@ -1,6 +1,6 @@
 # Native llm_caret (Windows) links abort-on-call stubs for rt_tls_* / rt_package_* / rt_dns_lookup
 
-Status: verification-pending (package + dns slice); TLS slice open
+Status: verification-pending (package + dns slice, incl. deadline and tarball); TLS slice open
 Date: 2026-11-16
 
 ## Census
@@ -21,7 +21,7 @@ This is NOT the #9653 class, where a C file existed but was missing from the cor
   - `rt_file_exists`
   - `rt_dir_exists`
   - `CreateSymbolicLinkW` or `symlink`
-- The tarball pair answers the way the Rust twin does without its `packaging-compression` feature: a diagnostic and `-1`. They fail closed.
+- (superseded, see "DNS deadline + tarball codec" below) the tarball pair first failed closed with -1.
 - `runtime_native.c` now defines `rt_dns_lookup` in its winsock section, using `getaddrinfo` and `inet_ntop`. The result is de-duplicated and comma-joined, and is empty on failure.
 - No seed rebuild is needed. The runtime C is compiled from the worktree source at native-build time.
 
@@ -31,5 +31,14 @@ This is NOT the #9653 class, where a C file existed but was missing from the cor
     1. Route the caret callers (`infra_mail.spl`, `multimodal_provider.spl`) through a pure-Simple client facade over the noalloc client.
     2. Then do the server side for the STLS/implicit paths (#9110).
   - Until then the stubs abort only if a TLS path is actually called natively.
-- **Native DNS has no resolve timeout.** It blocks in `getaddrinfo`, while the Rust twin bounds the lookup.
-- **Tarball create/extract has no codec in C.**
+
+## DNS deadline + tarball codec (2026-11-16, verification-pending)
+- `rt_dns_lookup` now mirrors the Rust twin's bounded lookup: the resolve runs on a worker thread, the caller waits at most 5000 ms, at most 8 lookups are in flight, and a missed deadline returns empty text (the worker is abandoned, not cancelled). Windows waits on the thread handle; POSIX polls an atomic done flag at 1 ms. Hand-off is lockless: an atomic done flag plus an atomic refcount, freed by the last side to drop it. `rt_dns_lookup_timeout_ms(host, ms)` is the new explicit-budget entry; `ms <= 0` answers empty without resolving, like the twin's zero-timeout path.
+- `rt_package_create_tarball` / `rt_package_extract_tarball` are real `.tar.gz` in C with no external library. Create writes ustar inside a valid gzip stream of stored deflate blocks (CRC32 trailer), so it is larger than flate2's output but readable by any gunzip/tar. Extract has a full inflate (stored, fixed, dynamic Huffman) plus GNU `L` long names, ustar prefix, and pax headers skipped; absolute, drive, backslash and `..` entry names are refused. Unsupported entry types (symlinks, hardlinks) fail closed with `-1` and a diagnostic.
+- Evidence: `scripts/check/native_probes/c_dns_tarball_probe.spl` (native-build with the tip seed, llvm-mingw). RED before the change: `fatal: called unresolved symbol rt_dns_lookup_timeout_ms`.
+
+### Still open
+- A real resolver stall is not reproduced in the probe (no slow resolver on the host); the deadline is proven only through the zero-budget path and the resolving path. The wait/abandon branch is code-reviewed, not exercised.
+- POSIX branch compiled only by inspection; no Linux clang run on this host.
+- Create does not compress; extract reads the whole decompressed archive in memory.
+- Extracting archives that carry symlinks (the Rust `tar` unpack would create them) is refused rather than reproduced.
