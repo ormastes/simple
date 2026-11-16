@@ -1,0 +1,139 @@
+#!/bin/sh
+# check-nil-outside-unsafe-added.shs — diff-scoped ratchet: a change must not
+# ADD `nil` literals outside `unsafe` blocks (lint nil_outside_unsafe,
+# NIL-UNSAFE-001; safe code spells absence `None`).
+#
+# Fast sh/awk twin of src/compiler/90.tools/lint/rules/nil_outside_unsafe_rule.spl
+# (no binary needed, so it runs in the required fast-gates job). Per touched
+# src/**.spl file it counts word-bounded `nil` tokens at the base and at the
+# head of the range; head > base FAILs, existing debt is grandfathered.
+# Skipped like the lint: comments, strings, docstrings, `.nil`/`xnil` names,
+# presence tests (`== nil`, `!= nil`, `case nil`, `| nil`), and anything inside
+# an `unsafe:`/`danger:` block (or after a one-line `unsafe:`). Not mirrored:
+# the `-> Nil` unit-value exemption (counts both sides alike, so a delta is
+# unaffected unless a PR adds such a nil, in which case use `()`).
+#
+# Usage: sh scripts/check/check-nil-outside-unsafe-added.shs --changed BASE..HEAD
+#        sh scripts/check/check-nil-outside-unsafe-added.shs --rank FILE...   (count per file)
+#        sh scripts/check/check-nil-outside-unsafe-added.shs --selftest
+# Verdict (last stdout line): PASS — <n> file(s) checked, 0 added
+#                             FAIL — ... / ERROR — nothing was checked
+set -u
+
+# Reads files named on argv (or stdin when none); prints "<count> <file>" per file.
+AWK_PROG='
+function indent(s,   n) { match(s, /^[ \t]*/); return RLENGTH }
+function strip(line,   out, i, ch, q, n) {
+  out = ""; q = ""; n = length(line)
+  for (i = 1; i <= n; i++) {
+    ch = substr(line, i, 1)
+    if (q != "") {
+      if (ch == "\\") { out = out "  "; i++ }
+      else if (ch == q) { q = ""; out = out ch }
+      else out = out " "
+    } else if (ch == "\"" || ch == "\x27") { q = ch; out = out ch }
+    else if (ch == "#") break
+    else out = out ch
+  }
+  return out
+}
+function flush() { if (cur != "") print total + 0, cur; total = 0; indoc = 0; uind = -1 }
+FNR == 1 { flush(); cur = FILENAME; uind = -1 }
+{
+  sub(/\r$/, "")
+  line = $0
+  tq = gsub(/"""/, "&", line)
+  if (indoc) { if (tq % 2 == 1) indoc = 0; next }
+  if (tq % 2 == 1) { indoc = 1; next }
+  if (tq > 0) { gsub(/"""[^"]*"""/, "   ", line) }
+  code = strip(line)
+  t = code; gsub(/^[ \t]+|[ \t]+$/, "", t)
+  if (t == "") next
+  ind = indent(code)
+  if (uind >= 0 && ind <= uind) uind = -1
+  if (uind < 0 && (t ~ /(^|[^A-Za-z0-9_])(unsafe|danger):$/ || (t ~ /\):$/ && t ~ /(^|[ ])(unsafe|danger)\(/))) { uind = ind; next }
+  if (uind >= 0) next
+  if (code !~ /nil/) next
+  cut = length(code) + 1
+  if (match(code, /(^|[^A-Za-z0-9_])(unsafe|danger):/)) cut = RSTART
+  rest = code; off = 0
+  while (match(rest, /nil/)) {
+    at = off + RSTART
+    pre = (at == 1) ? "" : substr(code, at - 1, 1)
+    post = substr(code, at + 3, 1)
+    ok = (pre == "" || (pre !~ /[A-Za-z0-9_.]/)) && (post == "" || post !~ /[A-Za-z0-9_]/)
+    if (ok && at < cut) {
+      b = substr(code, 1, at - 1); a = substr(code, at + 3)
+      gsub(/[ \t]+$/, "", b); gsub(/^[ \t]+/, "", a)
+      if (b ~ /(==|!=|\|)$/ || b ~ /(^|[^A-Za-z0-9_])case$/ || a ~ /^(==|!=)/) ok = 0
+      if (ok) total++
+    }
+    off = at + 2; rest = substr(code, at + 3); off = at + 2
+  }
+}
+END { flush() }
+'
+
+count_files() { awk "$AWK_PROG" "$@"; }
+
+selftest() {
+  d=$(mktemp -d) || return 1
+  cat > "$d/a.spl" <<'EOT'
+fn f() -> i64?:
+    var x = nil
+    val s = "nil here"  # nil comment
+    if x == nil:
+        pass
+    val nilly = 1
+    unsafe:
+        val p = nil
+    val q = nil
+    return nil
+fn g():
+    val r = a.nil
+    val t = unsafe: nil
+    """
+    nil in doc
+    """
+    val u = nil
+EOT
+  got=$(count_files "$d/a.spl" | awk '{print $1}')
+  rm -rf "$d"
+  [ "$got" = 4 ] || { echo "selftest FAIL: expected 4 got $got"; return 1; }
+  return 0
+}
+
+[ "${1:-}" = "--selftest" ] && { selftest && echo "PASS — selftest ok" && exit 0; exit 1; }
+[ "${1:-}" = "--rank" ] && { shift; count_files "$@"; exit 0; }
+[ "${1:-}" = "--changed" ] && [ -n "${2:-}" ] || { echo "ERROR — nothing was checked (usage: --changed BASE..HEAD | --rank FILE... | --selftest)"; exit 2; }
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+range=$2
+base=${range%%..*}
+head=${range##*..}
+root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$root" || exit 2
+git rev-parse -q --verify "$head^{commit}" >/dev/null || { echo "ERROR — nothing was checked (bad head $head)"; exit 2; }
+git rev-parse -q --verify "$base^{commit}" >/dev/null || { echo "ERROR — nothing was checked (bad base $base)"; exit 2; }
+
+files=$(git diff --name-only --diff-filter=AM "$base" "$head" -- 'src/*.spl' |
+  grep -v '/vendor/\|/test/\|_spec\.spl$\|_test\.spl$')
+n=0; bad=0; added=0
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT
+for f in $files; do
+  n=$((n + 1))
+  mkdir -p "$tmp/new" "$tmp/old"
+  git show "$head:$f" > "$tmp/new/f.spl"
+  if git show "$base:$f" > "$tmp/old/f.spl" 2>/dev/null; then :; else : > "$tmp/old/f.spl"; fi
+  new=$(count_files "$tmp/new/f.spl" | awk '{print $1}')
+  old=$(count_files "$tmp/old/f.spl" | awk '{print $1}')
+  [ -n "$old" ] || old=0
+  if [ "$new" -gt "$old" ]; then
+    echo "FAIL $f: $new nil outside unsafe > base $old (use None / T? ; nil only inside unsafe)"
+    bad=$((bad + 1)); added=$((added + new - old))
+  fi
+done
+if [ "$n" = 0 ]; then echo "PASS — 0 src .spl file(s) touched in $range, nothing to check (selftest ok)"; exit 0; fi
+if [ "$bad" -gt 0 ]; then echo "FAIL — $n file(s) checked, $bad file(s) add $added nil(s) outside unsafe"; exit 1; fi
+echo "PASS — $n file(s) checked, 0 nil added outside unsafe"
