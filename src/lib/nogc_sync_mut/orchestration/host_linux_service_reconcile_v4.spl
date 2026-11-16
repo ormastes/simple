@@ -1,0 +1,296 @@
+# Service 40 fail-closed reconcile of the quarantined Linux service capacity
+# journal and its continuity flip (milestone_0018 DESIGN.md "Reconcile" and
+# section F; DECISION H2-P2-3). SOURCE_AUTHORED / NOT_RUN.
+#
+# The ONLY public flip is host_linux_service_reconcile_flip_v4(owner, native,
+# inventory). It reconciles and flips in one call, so the reconcile proof is a
+# module-private local value that never crosses a module boundary: Simple does
+# not enforce field or type privacy (E1040/E1046 are declared but never
+# emitted), so an exported proof value would be forgeable. No caller boolean,
+# snapshot or proof is accepted.
+#
+# Inputs are authenticated OWNERS: the held capacity journal writer and its
+# quarantine projection, the native identity borrow (re-observed before and
+# after) and the fresh-epoch store-inventory borrow lent by the SAME admission
+# owner over the same reader and successor custody (milestone_0019 M1/M2).
+# TWO offline inventories are read here, AFTER the journal writer lease is
+# held: one before and one after classification, which must be identical.
+# The provider stays masked for the whole fresh epoch, so a successful read
+# means NO provider object exists in this epoch's store (a non-empty store
+# refuses). Releases therefore rest on receipts or on that absence only.
+#
+# Read-only over the journal: every quarantined row belongs to a previous
+# service incarnation whose fence the fresh capacity refuses for replay, begin
+# and expiry, so no append is needed and the journal identity is unchanged up
+# to the flip. The flip is in memory only; every reopen is quarantined again.
+#
+# Absence is accountable for a begun row only when it retained a plan for this
+# boot and provider generation with an epoch scope ("epoch-" + 64 hex). The
+# graph and run roots are fixed by the installed profile, so the authenticated
+# empty read covers objects of EVERY epoch of this install; each start admits
+# a new epoch, so the scope is not required to be this epoch (that would
+# quarantine every restart). Liveness limit (kept strict): a begun row whose
+# plan names another boot stays quarantined. Released, admitted and
+# abort-receipt rows need no plan check: receipts or never-begun absence.
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_lookup_v2, distributed_operation_journal_read_required_v3,
+    distributed_operation_journal_read_v3}
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.common.contracts.orchestration.host_capacity_v1.{HostCapacityV1, HostCapacityLedgerV1, HostReservationStateV1,
+    host_available_capacity_v1}
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_decode_intent_v1,
+    host_reservation_encode_intent_v1, host_reservation_abort_outcome_v1, host_helper_reservation_abort_outcome_v1}
+use std.common.contracts.orchestration.host_execution_association_v3.host_execution_association_decode_v3
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_linux_current_v3}
+use std.nogc_sync_mut.orchestration.host_runtime_exec_cleanup_guard_v3.host_runtime_exec_cleanup_index_v3
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.{LinuxServiceNativeIdentityBorrowV3, LinuxServiceNativeIdentitySnapshotV3}
+use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.{LinuxFreshEpochStoreInventoryBorrowV1,
+    LinuxFreshEpochStoreInventoryV1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+# Journal-derived facts for one projected ledger row. Built only from the held
+# journal by linux_service_row_facts_v4; DATA for the pure match and drain.
+pub struct HostLinuxServiceRowFactV4:
+    operation_id: text
+    payload_digest: text
+    action: text
+    journal_state: text
+    projected_released: bool
+    abort_receipt: bool
+    child_barrier: bool
+    plan_bound: bool = false
+    plan_boot_id: text = ""
+    plan_generation: i64 = 0
+    plan_scope: text = ""
+
+# Why one row may stop being charged (DATA; grants nothing by itself).
+pub struct HostLinuxServiceReleaseV4:
+    operation_id: text
+    payload_digest: text
+    reason: text
+
+# Module-private reconcile proof: not pub, not exported, never returned by a
+# pub fn. It binds the journal identity and the exact projected row set.
+struct HostLinuxServiceReconcileProofV4:
+    journal_identity: text
+    row_set_digest: text
+    releases: [HostLinuxServiceReleaseV4]
+
+# Canonical identity of one held journal and its projection. Any append, a
+# reopened writer or another capacity fence changes it.
+fn linux_service_journal_identity_v4(journal: DistributedOperationJournalV2,
+        ledger: HostCapacityLedgerV1) -> Result<text, text>:
+    if ledger.revision != journal.sequence + 1: return Err("linux-service-reconcile-projection-stale")
+    val capacity = ledger.capacity
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-service-journal-identity-v4"),
+        "root": SdnValue.String(journal.root), "authority": SdnValue.String(journal.authority_digest),
+        "revision": SdnValue.String(journal.revision), "sequence": SdnValue.Int(journal.sequence),
+        "lease": SdnValue.String(journal.lease_digest), "ledgerRevision": SdnValue.Int(ledger.revision),
+        "physicalHost": SdnValue.String(capacity.physical_host_id), "authorityId": SdnValue.String(capacity.authority_id),
+        "bootFence": SdnValue.String(capacity.boot_id), "providerGeneration": SdnValue.Int(capacity.provider_generation),
+        "cpuMillis": SdnValue.Int(capacity.cpu_millis), "memoryBytes": SdnValue.Int(capacity.memory_bytes)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+# Digest of the projected rows WITHOUT their state: the flip sets states from
+# the proof, so a caller-edited row state can neither help nor hide a row.
+fn linux_service_row_set_digest_v4(ledger: HostCapacityLedgerV1) -> text:
+    var rows: [SdnValue] = []
+    for row in ledger.reservations:
+        var devices: [SdnValue] = []
+        for device in row.exclusive_devices: devices.push(SdnValue.String(device))
+        val fields: Dict<text, SdnValue> = {"id": SdnValue.String(row.id), "operationId": SdnValue.String(row.operation_id),
+            "payloadDigest": SdnValue.String(row.payload_digest), "serviceScope": SdnValue.String(row.service_scope_id),
+            "assignment": SdnValue.Int(row.assignment_generation), "nonce": SdnValue.String(row.nonce),
+            "cpuMillis": SdnValue.Int(row.cpu_millis), "memoryBytes": SdnValue.Int(row.memory_bytes),
+            "devices": SdnValue.Array(devices)}
+        rows.push(SdnValue.Dict(fields))
+    sha256_text(sdn_encode_canonical(SdnValue.Array(rows)))
+
+# Facts for every projected row, read from the SAME held journal. The retained
+# association path is the one host_linux_service_prepare_v4 published:
+# sha256(<incarnation fence> + "\n" + operation id), where the fence is the
+# row's own intent.fence.boot_id (the capacity boot of its incarnation).
+fn linux_service_row_facts_v4(journal: DistributedOperationJournalV2,
+        ledger: HostCapacityLedgerV1) -> Result<[HostLinuxServiceRowFactV4], text>:
+    val barriers = host_runtime_exec_cleanup_index_v3(journal, ledger.capacity)?
+    var facts: [HostLinuxServiceRowFactV4] = []
+    var seen: Dict<text, bool> = {}
+    for row in ledger.reservations:
+        if seen.contains_key(row.operation_id): return Err("linux-service-reconcile-row-duplicate")
+        seen[row.operation_id] = true
+        val state = distributed_operation_journal_lookup_v2(journal, row.operation_id)?
+        val operation = distributed_decode_operation_v2(state.envelope)?
+        if operation.id != row.operation_id or operation.payload_digest != row.payload_digest:
+            return Err("linux-service-reconcile-row-journal-mismatch")
+        val helper = operation.operation == "host_helper_reservation_v1"
+        if not helper and operation.operation != "host_reservation_v1": return Err("linux-service-reconcile-row-action")
+        val bytes = distributed_operation_journal_read_required_v3(journal, "reservation-payloads/" + operation.payload_digest + ".sdn", 65536)?
+        val intent = host_reservation_decode_intent_v1(bytes)?
+        if intent.reservation.operation_id != row.operation_id: return Err("linux-service-reconcile-row-journal-mismatch")
+        var abort = ""
+        if helper: abort = host_helper_reservation_abort_outcome_v1(intent, operation)?
+        else: abort = host_reservation_abort_outcome_v1(intent, operation)?
+        var fact = HostLinuxServiceRowFactV4(operation_id: operation.id, payload_digest: operation.payload_digest,
+            action: operation.operation, journal_state: state.state,
+            projected_released: row.state == HostReservationStateV1.Released,
+            abort_receipt: state.state == "cancelled" and state.outcome_digest == sha256_text(abort),
+            child_barrier: barriers.contains_key(operation.id))
+        if not helper:
+            val relative = "host-execution-associations/" + sha256_text(intent.fence.boot_id + "\n" + operation.id) + ".sdn"
+            val stored = distributed_operation_journal_read_v3(journal, relative, 2097152)?
+            if stored.is_some():
+                val association = host_execution_association_decode_v3(stored.unwrap())?
+                val plan = association.execution.plan
+                if (association.intent_digest != sha256_text(host_reservation_encode_intent_v1(intent)?) or
+                        plan.operation_id != operation.id):
+                    return Err("linux-service-reconcile-association-foreign")
+                fact.plan_bound = true
+                fact.plan_boot_id = plan.boot_id
+                fact.plan_generation = plan.provider_generation
+                fact.plan_scope = plan.service_scope_id
+        facts.push(fact)
+    Ok(facts)
+
+fn linux_service_reconcile_native_key_v4(native: LinuxServiceNativeIdentitySnapshotV3) -> text:
+    native.native_machine_id + "\n" + native.native_boot_id + "\n" + native.architecture + "\n" +
+        native.owner_generation.to_text() + "\n" + native.process_identity_digest + "\n" +
+        native.process_generation.to_text() + "\n" + native.authority_namespace_id
+
+# Canonical digest of one offline read. Two reads around classification
+# must agree.
+fn linux_service_inventory_digest_v4(inventory: LinuxFreshEpochStoreInventoryV1) -> text:
+    val fields: Dict<text, SdnValue> = {"epoch": SdnValue.String(inventory.epoch_digest),
+        "boot": SdnValue.String(inventory.native_boot_id), "generation": SdnValue.Int(inventory.owner_generation),
+        "process": SdnValue.String(inventory.process_identity_digest), "store": SdnValue.String(inventory.store_identity_digest),
+        "partition": SdnValue.String(inventory.partition_identity_digest)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# Checks an authenticated empty-store observation against the actual native
+# identity and the ledger, and every row's retained plan against this boot,
+# generation and epoch. Refusals:
+#   boot        inventory boot or a retained plan boot differs;
+#   generation  inventory, ledger or retained plan generation differs;
+#   process     inventory read by another process identity;
+#   store       inventory not bound to a store, partition or epoch;
+#   scope       a begun row's retained plan without an epoch scope;
+#   absent      a begun row with no retained plan.
+pub fn host_linux_service_inventory_match_v4(rows: [HostLinuxServiceRowFactV4],
+        inventory: LinuxFreshEpochStoreInventoryV1, native: LinuxServiceNativeIdentitySnapshotV3,
+        capacity: HostCapacityV1) -> Result<(), text>:
+    if inventory.native_boot_id == "" or native.native_boot_id == "" or inventory.native_boot_id != native.native_boot_id:
+        return Err("linux-service-inventory-boot-mismatch")
+    if (native.owner_generation < 1 or capacity.provider_generation != native.owner_generation or
+            inventory.owner_generation != native.owner_generation):
+        return Err("linux-service-inventory-generation-mismatch")
+    if inventory.process_identity_digest == "" or inventory.process_identity_digest != native.process_identity_digest:
+        return Err("linux-service-inventory-process-mismatch")
+    if (inventory.store_identity_digest == "" or inventory.partition_identity_digest == "" or
+            inventory.epoch_digest.byte_len() != 64):
+        return Err("linux-service-inventory-store-unbound")
+    var seen: Dict<text, bool> = {}
+    for row in rows:
+        if seen.contains_key(row.operation_id): return Err("linux-service-inventory-row-duplicate")
+        seen[row.operation_id] = true
+        # Absence is accountable for a never-begun row (admitted, or a verified
+        # abort receipt) and a released row by its receipt; a begun row needs
+        # a retained plan for THIS boot and generation with an epoch scope.
+        val begun = row.journal_state != "admitted" and not row.abort_receipt
+        if row.projected_released or not begun: continue
+        if not row.plan_bound: return Err("linux-service-inventory-row-absent-unverified:" + row.operation_id)
+        if row.plan_boot_id != native.native_boot_id: return Err("linux-service-inventory-boot-mismatch")
+        if row.plan_generation != native.owner_generation: return Err("linux-service-inventory-generation-mismatch")
+        if not row.plan_scope.starts_with("epoch-") or row.plan_scope.byte_len() != 70:
+            return Err("linux-service-inventory-plan-scope")
+    Ok(())
+
+# Drain proof over a matched empty store: one release reason per row, or the
+# row stays charged and the journal stays quarantined. Helper rows are
+# processes, not provider objects, so a store absence says nothing about them:
+# only their abort receipt releases them. A child runtime-exec barrier always
+# keeps its parent charged.
+fn linux_service_drain_reason_v4(row: HostLinuxServiceRowFactV4) -> text:
+    if row.projected_released: return "completion-receipt"
+    if row.child_barrier: return ""
+    if row.action == "host_helper_reservation_v1":
+        if row.abort_receipt: return "abort-receipt"
+        return ""
+    if row.journal_state == "admitted": return "no-begin-absent"
+    if row.abort_receipt: return "abort-receipt-absent"
+    if not row.plan_bound: return ""
+    "begun-absent"
+
+pub fn host_linux_service_drain_v4(rows: [HostLinuxServiceRowFactV4]) -> Result<[HostLinuxServiceReleaseV4], text>:
+    var releases: [HostLinuxServiceReleaseV4] = []
+    for row in rows:
+        val reason = linux_service_drain_reason_v4(row)
+        if reason == "": return Err("linux-service-drain-quarantined:" + row.operation_id)
+        releases.push(HostLinuxServiceReleaseV4(operation_id: row.operation_id, payload_digest: row.payload_digest, reason: reason))
+    Ok(releases)
+
+# The reconcile. Called only after the journal writer is held (the owner is the
+# held writer), so both collections postdate the lease. Returns the private proof.
+fn linux_service_reconcile_v4(owner: HostCapacityOwnerV1, native: LinuxServiceNativeIdentityBorrowV3,
+        inventory: LinuxFreshEpochStoreInventoryBorrowV1) -> Result<HostLinuxServiceReconcileProofV4, text>:
+    if owner.ledger.continuity_proven: return Err("linux-service-reconcile-already-proven")
+    # The inventory must read the SAME reader and successor custody the native
+    # identity (and so the ledger's provider generation) was bound with.
+    if (inventory.reader.slot != native.reader.slot or inventory.reader.generation != native.reader.generation or
+            inventory.successor.slot != native.successor.slot or inventory.successor.generation != native.successor.generation):
+        return Err("linux-service-reconcile-inventory-foreign")
+    host_capacity_owner_linux_current_v3(owner)?
+    val identity = linux_service_journal_identity_v4(owner.journal, owner.ledger)?
+    val before = native.current_v3()?
+    val observed = inventory.current_v1()?
+    val rows = linux_service_row_facts_v4(owner.journal, owner.ledger)?
+    host_linux_service_inventory_match_v4(rows, observed, before, owner.ledger.capacity)?
+    val releases = host_linux_service_drain_v4(rows)?
+    # A second, fresh offline read after classification must be identical.
+    val again = inventory.current_v1()?
+    if linux_service_inventory_digest_v4(again) != linux_service_inventory_digest_v4(observed):
+        return Err("linux-service-reconcile-inventory-changed")
+    val after = native.current_v3()?
+    if linux_service_reconcile_native_key_v4(after) != linux_service_reconcile_native_key_v4(before):
+        return Err("linux-service-reconcile-native-changed")
+    host_capacity_owner_linux_current_v3(owner)?
+    if linux_service_journal_identity_v4(owner.journal, owner.ledger)? != identity:
+        return Err("linux-service-reconcile-journal-changed")
+    Ok(HostLinuxServiceReconcileProofV4(journal_identity: identity, row_set_digest: linux_service_row_set_digest_v4(owner.ledger),
+        releases: releases))
+
+# Applies a proof to THIS owner: it must bind this journal identity and the
+# exact projected row set, and cover every row once, in order. Row states are
+# set from the proof (caller-edited states are ignored); continuity is set in
+# memory only.
+fn linux_service_continuity_apply_v4(original: HostCapacityOwnerV1,
+        proof: HostLinuxServiceReconcileProofV4) -> Result<HostCapacityOwnerV1, text>:
+    if original.ledger.continuity_proven: return Err("host-continuity-already-proven")
+    if proof.journal_identity != linux_service_journal_identity_v4(original.journal, original.ledger)?:
+        return Err("host-continuity-proof-journal-mismatch")
+    if proof.row_set_digest != linux_service_row_set_digest_v4(original.ledger):
+        return Err("host-continuity-proof-row-set-mismatch")
+    if proof.releases.len() != original.ledger.reservations.len(): return Err("host-continuity-proof-coverage")
+    var owner = original
+    for index in 0..owner.ledger.reservations.len():
+        var row = owner.ledger.reservations[index]
+        val release = proof.releases[index]
+        if release.operation_id != row.operation_id or release.payload_digest != row.payload_digest or release.reason == "":
+            return Err("host-continuity-proof-coverage")
+        row.state = HostReservationStateV1.Released
+        owner.ledger.reservations[index] = row
+    owner.ledger.continuity_proven = true
+    host_available_capacity_v1(owner.ledger)?
+    Ok(owner)
+
+# DECISION H2-P2-3: the ONLY continuity flip for a quarantined Linux-protected
+# service journal. Reconcile + flip in one call; on any refusal the owner is
+# unchanged and stays quarantined (the caller keeps its original owner).
+pub fn host_linux_service_reconcile_flip_v4(owner: HostCapacityOwnerV1, native: LinuxServiceNativeIdentityBorrowV3,
+        inventory: LinuxFreshEpochStoreInventoryBorrowV1) -> Result<HostCapacityOwnerV1, text>:
+    val proof = linux_service_reconcile_v4(owner, native, inventory)?
+    host_capacity_owner_linux_current_v3(owner)?
+    linux_service_continuity_apply_v4(owner, proof)
+
+export HostLinuxServiceRowFactV4, HostLinuxServiceReleaseV4
+export host_linux_service_inventory_match_v4, host_linux_service_drain_v4, host_linux_service_reconcile_flip_v4

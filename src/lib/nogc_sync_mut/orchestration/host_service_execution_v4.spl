@@ -4,9 +4,11 @@ use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartCons
 # Same-thread cooperative service execution. The continuation owns stage/native
 # cleanup only; the caller retains and returns the SAME canonical Host domain.
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, HostServiceTurnV3}
-use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_request_error_v2, host_service_error_payload_v2}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_request_error_v2, host_service_error_payload_v2,
+    HOST_SERVICE_MAX_RESPONSE_BYTES_V2}
 use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
 use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.HostWindowsLocalRootV3
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, host_linux_service_dispatch_installed_v4}
 use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.{HostExecutionContinuationV4,
     HostExecutionProgressTurnV4, host_authorized_execution_begin_constrained_v4, host_authorized_execution_begin_input_constrained_v4, host_authorized_execution_step_v4}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
@@ -46,6 +48,22 @@ fn retained(original: HostWindowsLocalRootV3, request: HostServiceRequestV2,
         Some(host_service_error_payload_v2(request, error, turn.recovery_required or accepted.is_err())),
         if turn.recovery_required or accepted.is_err(): 2 else: 1, error)
 
+# Admission-only (#9754): the reply is final (no continuation); a same-ID
+# replay is answered from the service journal. The returned owner is put back
+# into the domain on every path.
+fn service_linux_execute_v4(local: HostLinuxServiceCurrentV4, request: HostServiceRequestV2) -> HostServiceExecutionTurnV4:
+    val reply = host_linux_service_dispatch_installed_v4(local, "host_execute_associated_v3", request.payload)
+    val domain = HostServiceDomainV3(HostLocalRootV3.LinuxService(reply.owner))
+    if reply.error != "":
+        return HostServiceExecutionTurnV4(domain, None,
+            Some(host_service_error_payload_v2(request, reply.error, reply.effect_attempted)),
+            if reply.effect_attempted: 2 else: 1, reply.error)
+    # Same bound and refusal as the prepare reply (host_service_domain_v3).
+    if reply.response.byte_len() > HOST_SERVICE_MAX_RESPONSE_BYTES_V2:
+        return HostServiceExecutionTurnV4(domain, None,
+            Some(host_service_error_payload_v2(request, "host-service-response-size", true)), 2, "host-service-response-size")
+    HostServiceExecutionTurnV4(domain, None, Some(reply.response), 0, "")
+
 pub fn host_service_execution_begin_v4(domain: HostServiceDomainV3,
         request: HostServiceRequestV2) -> HostServiceExecutionTurnV4:
     host_service_execution_begin_constrained_v4(domain, request, nil)
@@ -66,7 +84,9 @@ fn host_service_execution_begin_restricted_v4(domain: HostServiceDomainV3,
     if request.action != "host-execute": return refused(domain, request, "host-service-execution-action")
     match domain.local:
         case HostLocalRootV3.Linux(_): return refused(domain, request, "host-cooperative-backend-unavailable")
-        case HostLocalRootV3.LinuxService(_): return refused(domain, request, "host-linux-service-execution-route")
+        case HostLocalRootV3.LinuxService(local):
+            if constraint.is_some() or input.is_some(): return refused(domain, request, "host-linux-service-execution-constraint")
+            return service_linux_execute_v4(local, request)
         case HostLocalRootV3.Windows(local):
             val metadata = local.current_v3()
             if metadata.is_err(): return refused(domain, request, metadata.unwrap_err())
