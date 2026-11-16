@@ -1,0 +1,119 @@
+# Private bounded mechanisms. Call only after actual origin + supported ABI guard.
+# x86_64/AArch64 LP64 kernel action: handler/flags/restorer/mask, four u64s.
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_process_replace_abi_v1.*
+use std.nogc_sync_mut.io.linux_process_replace_target_v1.*
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.fstatfs
+use std.nogc_sync_mut.io.linux_process_replace_contract_v1.{linux_process_replace_signal_handler_v1, linux_process_replace_seals_valid_v1}
+use std.nogc_sync_mut.io.anchored_io_linux_v1.anchored_linux_metadata_v1
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u64,
+    volatile_write_u8, volatile_write_u64}
+
+@unsafe(reason: "writes bounded owned NUL terminated text into reserved native storage", capabilities: [ffi, raw_ptr])
+pub(package) fn linux_replace_name_v1(arena: i64, value: text) -> i64:
+    val pointer = arena + 2304
+    for at in 0..value.byte_len(): volatile_write_u8(pointer + at, value.byte_at(at) as i64)
+    volatile_write_u8(pointer + value.byte_len(), 0)
+    pointer
+
+@unsafe(reason: "blocks catchable kernel signals, saves original mask before any disposition mutation", capabilities: [ffi, raw_ptr])
+pub(package) fn linux_replace_block_v1(arena: i64, save: bool) -> bool:
+    volatile_write_u64(arena, -1)
+    # rt_sigprocmask(SIG_BLOCK, all, saved-or-null, kernel_sigsetsize=8).
+    syscall(linux_replace_sigmask_number_v1(), 0, arena, if save: arena + 8 else: 0, 8, 0, 0) == 0
+
+@unsafe(reason: "restores exact saved kernel signal mask", capabilities: [ffi, raw_ptr])
+pub(package) fn linux_replace_mask_restore_v1(arena: i64) -> bool:
+    syscall(linux_replace_sigmask_number_v1(), 2, arena + 8, 0, 8, 0, 0) == 0
+
+@unsafe(reason: "queries exact kernel dispositions including libc reserved signals", capabilities: [ffi, raw_ptr])
+pub(package) fn linux_replace_signal_save_v1(arena: i64) -> bool:
+    for signal_number in 1..65:
+        if signal_number == 9 or signal_number == 19: continue
+        val saved = arena + 64 + signal_number * 32
+        for at in 0..32: volatile_write_u8(saved + at, 0)
+        if syscall(linux_replace_sigaction_number_v1(), signal_number, 0, saved, 8, 0, 0) != 0: return false
+    true
+
+@unsafe(reason: "resets caught dispositions while preserving SIG_IGN under blocked signals", capabilities: [ffi, raw_ptr])
+pub(package) fn linux_replace_signal_reset_v1(arena: i64) -> bool:
+    for at in 16..48: volatile_write_u8(arena + at, 0)
+    for signal_number in 1..65:
+        if signal_number == 9 or signal_number == 19: continue
+        val handler = volatile_read_u64(arena + 64 + signal_number * 32)
+        if handler != linux_process_replace_signal_handler_v1(handler):
+            if syscall(linux_replace_sigaction_number_v1(), signal_number, arena + 16, 0, 8, 0, 0) != 0: return false
+    true
+
+@unsafe(reason: "restores all saved original dispositions, attempts each even after a failed restoration", capabilities: [ffi, raw_ptr])
+pub(package) fn linux_replace_signal_restore_v1(arena: i64) -> bool:
+    var restored = true
+    for signal_number in 1..65:
+        if signal_number == 9 or signal_number == 19: continue
+        if syscall(linux_replace_sigaction_number_v1(), signal_number, arena + 64 + signal_number * 32, 0, 8, 0, 0) != 0:
+            restored = false
+    restored
+
+@unsafe(reason: "bounded genuine proc task enumeration with strict getdents64 record checks", capabilities: [ffi, raw_ptr])
+pub(package) fn linux_replace_single_task_v1(task_fd: i64, arena: i64, expected_pid: i64) -> bool:
+    # A substituted ordinary directory must never serve as sole-task proof.
+    for at in 0..256: volatile_write_u8(arena + 2560 + at, 0)
+    if fstatfs(task_fd as i32, arena + 2560) != 0 or volatile_read_u64(arena + 2560) != 40864:
+        return false
+    val buffer = arena + 4096
+    val count = syscall(linux_replace_getdents_number_v1(), task_fd, buffer, 65536, 0, 0, 0)
+    if count <= 0 or count > 65536: return false
+    var offset = 0i64
+    var tasks = 0i64
+    while offset < count:
+        if count - offset < 20: return false
+        val size = volatile_read_u16(buffer + offset + 16) as i64
+        if size < 20 or size > count - offset: return false
+        var name = ""
+        var cursor = 19i64
+        var terminated = false
+        var numeric = true
+        var dots_only = true
+        var pid = 0i64
+        while cursor < size:
+            val byte = volatile_read_u8(buffer + offset + cursor)
+            if byte == 0:
+                terminated = true
+                break
+            if byte < 48 or byte > 57:
+                numeric = false
+            else:
+                if pid > 214748364: return false
+                pid = pid * 10 + byte - 48
+            if byte == 46: name = name + "."
+            else: dots_only = false
+            cursor = cursor + 1
+        if not terminated: return false
+        if numeric and cursor > 19:
+            if pid != expected_pid: return false
+            tasks = tasks + 1
+        elif not dots_only or (name != "." and name != ".."):
+            return false
+        offset = offset + size
+    # No truncation/second page accepted; observed one task plus actual EOF.
+    tasks == 1 and syscall(linux_replace_getdents_number_v1(), task_fd, buffer, 65536, 0, 0, 0) == 0
+# Shared finite mechanism for genuine IO owners, not a public fd->receipt factory.
+# The borrowing parent retains exact fd custody and canonical hash progress.
+# nlink0 is allowed ONLY for actual all-four-seal regular memfd image here.
+@unsafe(reason: "reads one <=64KiB chunk from actual retained sealed nlink0 image", capabilities: [ffi, raw_ptr])
+pub(package) fn linux_replace_sealed_hash_read_v1(fd: i64, buffer: i64,
+        offset: i64, expected_size: i64) -> Result<[u8], text>:
+    if offset < 0 or offset >= expected_size or expected_size < 64 or expected_size > 536870912:
+        return Err("linux-replace-sealed-read-bound")
+    val seals = fcntl(fd as i32, 1034, 0)
+    if not linux_process_replace_seals_valid_v1(seals): return Err("linux-replace-image-unsealed")
+    val metadata = anchored_linux_metadata_v1(fd, "", true)?
+    if ((metadata.mode & 61440u32) != 32768u32 or (metadata.mode & 4095u32) != 320u32 or
+            metadata.links != 0 or metadata.size != expected_size):
+        return Err("linux-replace-sealed-image-metadata")
+    val count = pread(fd as i32, buffer, min(65536, expected_size - offset) as u64, offset)
+    if count <= 0 or count > min(65536, expected_size - offset): return Err("linux-replace-pin-read")
+    var bytes: [u8] = []
+    for at in 0..count: bytes.push(volatile_read_u8(buffer + at) as u8)
+    Ok(bytes)
+@end

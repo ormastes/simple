@@ -1,6 +1,9 @@
 # Read-only workload custody component. It owns only duplicate/child FDs and
 # borrows installed profile/containment owners. No spawn, admission or writer.
 use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_cgroup_stats_v1.LinuxFreshWorkloadStatsCountersV1
+use std.common.contracts.container.linux_fresh_workspace_v3.*
+use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
 use std.nogc_sync_mut.io.linux_installed_fresh_epoch_profile_v1.*
 use std.nogc_sync_mut.io.linux_container_containment_v1.*
 use std.nogc_sync_mut.io.linux_fresh_workload_subject_v2.*
@@ -15,6 +18,25 @@ pub class LinuxFreshWorkloadNativeV2:
         workload_associate_v2(self.slot, self.generation, owner, command)
     pub fn closure_v2(command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>:
         workload_closure_v2(self.slot, self.generation, command)
+    pub fn associate_workspace_v3(binding: LinuxFreshWorkspaceBindingV3, owner: LinuxContainerContainmentOwnerV1,
+            command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+        workload_workspace_associate_v3(self.slot, self.generation, binding, owner, command)
+    pub fn closure_workspace_v3(binding: LinuxFreshWorkspaceBindingV3, command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkloadClosureV2, text>:
+        workload_workspace_closure_v3(self.slot, self.generation, binding, command)
+    pub fn retire_workspace_native_v3(binding: LinuxFreshWorkspaceBindingV3,
+            command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkspaceNativeRetirementV3, text>:
+        workload_workspace_retire_v3(self.slot, self.generation, binding, command)
+    pub fn validate_workspace_primary_effect_v3(binding: LinuxFreshWorkspaceBindingV3, command: LinuxFreshWorkspaceCommandV3) -> Result<(), text>:
+        workload_workspace_primary_effect_v3(self.slot, self.generation, binding, command)
+    pub fn primary_workspace_v3(binding: LinuxFreshWorkspaceBindingV3, owner: LinuxContainerContainmentOwnerV1,
+            command: LinuxFreshWorkspaceCommandV3, invocation_source: text, deadline_monotonic_ns: i64) -> LinuxFreshWorkspacePrimaryObservationTurnV3:
+        match workload_workspace_primary_v3(self.slot, self.generation, binding, owner, command, invocation_source, deadline_monotonic_ns):
+            case Ok(turn): turn
+            case Err(reason): LinuxFreshWorkspacePrimaryObservationTurnV3(nil, false, reason)
+    pub fn stats_v1(owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadStatsCountersV1, text>:
+        workload_stats_v1(self.slot, self.generation, owner, command)
+    pub fn workspace_stats_v3(binding: LinuxFreshWorkspaceBindingV3, owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkloadStatsCountersV1, text>:
+        workload_workspace_stats_v3(self.slot, self.generation, binding, owner, command)
     pub fn close_v2() -> (bool, text): workload_close_v2(self.slot, self.generation)
 pub enum LinuxFreshWorkloadNativeOpenV2:
     Rejected(reason: text)
@@ -151,6 +173,140 @@ fn workload_closure_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCo
     val after = workload_context_v2(slot, generation)?
     Ok(result)
 
+fn workload_workspace_guard_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3,
+        command: LinuxFreshWorkspaceCommandV3) -> Result<text, text>:
+    val context = workload_context_v2(slot, generation)?
+    val state = workload_native_slots_v2[slot]
+    state.profile.validate_workload_scope_v2(command.command.scope)?
+    binding.validate_command_v3(command)?
+    val observed = binding.current_v3()?
+    val installed = state.profile.current_v1()?
+    if (observed.machine_policy_digest != installed.profile.text_v1("machinePolicyDigest")? or
+            observed.provider_policy_digest != installed.profile.text_v1("providerPolicyDigest")? or
+            observed.service_uid != installed.profile.number_v1("serviceUid")? or observed.service_gid != installed.profile.number_v1("serviceGid")? or
+            command.command.scope.native_machine_id != context.native_machine_id or command.command.scope.boot_id != context.native_boot_id):
+        return Err("fresh-workspace-native-installed-epoch-mismatch")
+    Ok(observed.binding_digest)
+
+fn workload_workspace_associate_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3,
+        owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxContainerContainmentSnapshotV1, text>:
+    val before_binding = workload_workspace_guard_v3(slot, generation, binding, command)?
+    val state = workload_native_slots_v2[slot]
+    val before = linux_container_containment_observe_v1(owner)
+    if before.snapshot.is_none(): return Err("fresh-workspace-native-containment-unavailable:" + before.error)
+    val snapshot = before.snapshot.unwrap()
+    var index = -1
+    for at in 0..state.bindings.len():
+        if state.bindings[at] == snapshot.binding_digest: index = at
+    if index < 0:
+        if state.subjects.len() >= 16: return Err("fresh-workspace-native-subject-bound")
+        match linux_fresh_workspace_subject_open_v3(state.profile, state.handles[1].fd, state.handles[3].fd, owner, command, binding):
+            case LinuxFreshWorkloadSubjectOpenV2.Rejected(reason): return Err(reason)
+            case LinuxFreshWorkloadSubjectOpenV2.CleanupRequired(subject, reason):
+                workload_native_slots_v2[slot].subjects.push(subject)
+                workload_native_slots_v2[slot].bindings.push(snapshot.binding_digest)
+                return Err(reason)
+            case LinuxFreshWorkloadSubjectOpenV2.Ready(subject):
+                index = state.subjects.len()
+                workload_native_slots_v2[slot].subjects.push(subject)
+                workload_native_slots_v2[slot].bindings.push(snapshot.binding_digest)
+    val observed = workload_native_slots_v2[slot].subjects[index].current_workspace_v3(owner, command)?
+    if workload_workspace_guard_v3(slot, generation, binding, command)? != before_binding:
+        return Err("fresh-workspace-native-association-custody-changed")
+    Ok(observed)
+
+fn workload_stats_v1(slot: i64, generation: i64, owner: LinuxContainerContainmentOwnerV1,
+        command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadStatsCountersV1, text>:
+    val before = workload_context_v2(slot, generation)?
+    val state = workload_native_slots_v2[slot]
+    state.profile.validate_workload_scope_v2(command.scope)?
+    var index: i64 = -1
+    for at in 0..state.subjects.len():
+        if state.subjects[at].matches_v2(command)?:
+            if index >= 0: return Err("container-stats-subject-ambiguous")
+            index = at
+    if index < 0: return Err("container-stats-no-existing-subject")
+    val result = state.subjects[index].stats_v1(owner, command)?
+    if workload_context_v2(slot, generation)? != before: return Err("container-stats-native-context-changed")
+    Ok(result)
+
+fn workload_workspace_stats_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3,
+        owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkloadStatsCountersV1, text>:
+    val before = workload_workspace_guard_v3(slot, generation, binding, command)?
+    val state = workload_native_slots_v2[slot]
+    var index: i64 = -1
+    for at in 0..state.subjects.len():
+        if state.subjects[at].matches_workspace_v3(binding, command)?:
+            if index >= 0: return Err("container-stats-workspace-subject-ambiguous")
+            index = at
+    if index < 0: return Err("container-stats-no-existing-workspace-subject")
+    val result = state.subjects[index].workspace_stats_v3(owner, command)?
+    if workload_workspace_guard_v3(slot, generation, binding, command)? != before:
+        return Err("container-stats-workspace-context-changed")
+    Ok(result)
+
+fn workload_workspace_closure_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3,
+        command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkloadClosureV2, text>:
+    val before_binding = workload_workspace_guard_v3(slot, generation, binding, command)?
+    val state = workload_native_slots_v2[slot]
+    var index = -1
+    for at in 0..state.subjects.len():
+        if state.subjects[at].matches_workspace_v3(binding, command)?:
+            if index >= 0: return Err("fresh-workspace-native-closure-ambiguous")
+            index = at
+    if index < 0: return Err("fresh-workspace-native-closure-unconfirmed")
+    val result = state.subjects[index].closure_workspace_v3(command)?
+    if workload_workspace_guard_v3(slot, generation, binding, command)? != before_binding:
+        return Err("fresh-workspace-native-closure-custody-changed")
+    Ok(result)
+
+fn workload_workspace_retire_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3,
+        command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkspaceNativeRetirementV3, text>:
+    val before_binding = workload_workspace_guard_v3(slot, generation, binding, command)?
+    val state = workload_native_slots_v2[slot]
+    var index = -1
+    for at in 0..state.subjects.len():
+        if state.subjects[at].matches_workspace_v3(binding, command)?:
+            if index >= 0: return Err("fresh-workspace-native-retirement-ambiguous")
+            index = at
+    if index < 0: return Err("fresh-workspace-native-retirement-no-original-subject")
+    val token = state.subjects[index].retire_workspace_native_v3(command)?
+    if workload_workspace_guard_v3(slot, generation, binding, command)? != before_binding:
+        return Err("fresh-workspace-native-retirement-custody-changed")
+    val current = token.current_v3()?
+    Ok(token)
+
+fn workload_workspace_primary_effect_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3,
+        command: LinuxFreshWorkspaceCommandV3) -> Result<(), text>:
+    val before = workload_workspace_guard_v3(slot, generation, binding, command)?
+    val state = workload_native_slots_v2[slot]
+    var found = false
+    for subject in state.subjects:
+        if subject.matches_workspace_v3(binding, command)?:
+            subject.validate_workspace_primary_effect_v3(command)?
+            found = true
+    if not found: return Err("fresh-workspace-primary-previously-associated-subject-required")
+    if workload_workspace_guard_v3(slot, generation, binding, command)? != before:
+        return Err("fresh-workspace-primary-native-custody-changed")
+    Ok(())
+
+fn workload_workspace_primary_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3,
+        owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkspaceCommandV3,
+        invocation_source: text, deadline_monotonic_ns: i64) -> Result<LinuxFreshWorkspacePrimaryObservationTurnV3, text>:
+    val before_binding = workload_workspace_guard_v3(slot, generation, binding, command)?
+    val state = workload_native_slots_v2[slot]
+    val capture = linux_container_containment_observe_v1(owner)
+    if capture.snapshot.is_none(): return Err("fresh-workspace-primary-native-observation-unavailable:" + capture.error)
+    val actual = capture.snapshot.unwrap()
+    var index = -1
+    for at in 0..state.bindings.len():
+        if state.bindings[at] == actual.binding_digest: index = at
+    if index < 0: return Err("fresh-workspace-primary-previously-associated-subject-required")
+    val result = state.subjects[index].primary_workspace_v3(owner, command, invocation_source, deadline_monotonic_ns)
+    if workload_workspace_guard_v3(slot, generation, binding, command)? != before_binding:
+        return Err("fresh-workspace-primary-native-custody-changed")
+    Ok(result)
+
 @unsafe(reason: "actual zero-caller-identity profile plus duplicated internally borrowed roots", capabilities: [ffi, raw_ptr])
 fn workload_open_v2(profile: LinuxInstalledFreshEpochProfileV1, borrowed: [i64]) -> LinuxFreshWorkloadNativeOpenV2:
     val origin = linux_machine_process_origin_check_v1()
@@ -207,6 +363,13 @@ fn workload_close_v2(slot: i64, generation: i64) -> (bool, text):
     workload_native_slots_v2[slot].phase = "closed"
     (true, workload_native_slots_v2[slot].error)
 @else:
+fn workload_workspace_primary_effect_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3, command: LinuxFreshWorkspaceCommandV3) -> Result<(), text>: Err("fresh-workspace-linux-required")
+fn workload_workspace_retire_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3, command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkspaceNativeRetirementV3, text>: Err("fresh-workspace-linux-required")
+fn workload_workspace_primary_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3, owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkspaceCommandV3, invocation_source: text, deadline_monotonic_ns: i64) -> Result<LinuxFreshWorkspacePrimaryObservationTurnV3, text>: Err("fresh-workspace-linux-required")
+fn workload_stats_v1(slot: i64, generation: i64, owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadStatsCountersV1, text>: Err("container-stats-linux-required")
+fn workload_workspace_stats_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3, owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkloadStatsCountersV1, text>: Err("container-stats-linux-required")
+fn workload_workspace_associate_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3, owner: LinuxContainerContainmentOwnerV1, command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxContainerContainmentSnapshotV1, text>: Err("fresh-workspace-linux-required")
+fn workload_workspace_closure_v3(slot: i64, generation: i64, binding: LinuxFreshWorkspaceBindingV3, command: LinuxFreshWorkspaceCommandV3) -> Result<LinuxFreshWorkloadClosureV2, text>: Err("fresh-workspace-linux-required")
 fn workload_closure_v2(slot: i64, generation: i64, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxFreshWorkloadClosureV2, text>: Err("fresh-workload-linux-required")
 fn workload_roots_v2(slot: i64, generation: i64) -> Result<[text], text>: Err("fresh-workload-linux-required")
 fn workload_context_v2(slot: i64, generation: i64) -> Result<LinuxFreshHostContextV2, text>: Err("fresh-workload-linux-required")

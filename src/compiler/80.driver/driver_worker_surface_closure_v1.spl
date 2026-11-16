@@ -57,6 +57,10 @@ use compiler.driver.driver_source_loading.{_driver_entry_import_dirname, _driver
 extern fn rt_process_start_identity(pid: i64) -> i64
 extern fn rt_heap_live_bytes() -> i64
 extern fn rt_heap_aux_live_bytes() -> i64
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_transient_array_scope_end() -> bool
 
 val WORKER_SURFACE_SIDECAR_HEADER_V1: text = "simple-worker-surface v2"
 
@@ -208,6 +212,10 @@ pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names:
         i = queue[head]
         head = head + 1
         _wa_sources_scanned = _wa_sources_scanned + 1
+        # Preprocessing, import-ID extraction and candidate resolution allocate
+        # per-source scratch in the no-GC runtime. Reclaim it at this boundary;
+        # only the dependency row and diagnostic escape into the frozen graph.
+        val scope_owned = rt_transient_array_scope_begin()
         val required = driver_closure_import_specs_from_source_v1(paths[i], contents[i])
         var candidates: [text] = []
         for candidate in required:
@@ -243,6 +251,15 @@ pub fn worker_admitted_edges_selected_v1(paths: [text], contents: [text], names:
             if not queued[dep]:
                 queued[dep] = true
                 queue.push(dep)
+        if scope_owned:
+            if not rt_transient_array_scope_pause():
+                val _scope_abandoned = rt_transient_array_scope_end()
+                return Err("worker admitted graph scope pause failed for {paths[i]}")
+            val deps_retained = rt_transient_heap_promote(deps)
+            val error_retained = rt_transient_heap_promote(error)
+            val scope_ended = rt_transient_array_scope_end()
+            if not (deps_retained and error_retained and scope_ended):
+                return Err("worker admitted graph retention failed for {paths[i]}")
         graph[i] = deps
         errors[i] = error
         if driver_phase_trace_enabled() and head % 128 == 0:

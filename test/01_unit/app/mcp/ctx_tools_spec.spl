@@ -38,6 +38,8 @@ use std.spec
 use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_exists, file_write, time_now_unix_micros}
 use app.mcp.main_lazy_ctx_tools.{ctx_escape_cell, ctx_unescape_cell, ctx_chunk_text, ctx_tokenize, ctx_query_terms, ctx_parse_string_array, ctx_unescape_json, ctx_index_text, ctx_html_to_text, ctx_cap_bytes, ctx_fetch_allowed_url, ctx_stats_text, ctx_store_dir}
 use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_index, handle_simple_ctx_search, handle_simple_ctx_execute, handle_simple_ctx_execute_file, handle_simple_ctx_batch_execute, handle_simple_ctx_fetch_and_index, handle_simple_ctx_stats, handle_simple_ctx_doctor, handle_simple_ctx_upgrade, ctx_doctor_text, ctx_upgrade_store, ctx_schema_version}
+use app.mcp.main_lazy_ctx_tools.{CtxUrlVerdict, CtxCapVerdict}
+use app.mcp.ctx_retention.{CtxByteCount}
 use app.mcp.main_dispatch.{dispatch_tool}
 
 fn _fresh_store() -> text:
@@ -67,7 +69,7 @@ describe "ctx store cell escaping and chunking":
         while i < 40:
             lines.push("line number " + str(i) + " padding padding padding")
             i = i + 1
-        val chunks = ctx_chunk_text(lines.join("\n"), 200)
+        val chunks = ctx_chunk_text(lines.join("\n"), CtxByteCount(bytes: 200))
         assert_true(chunks.len() > 3)
         for c in chunks:
             assert_true(c.len() <= 200)
@@ -107,8 +109,8 @@ describe "simple_ctx_index -> simple_ctx_search":
 
     it "survives a second store open (persistent across process boundaries)":
         val dir = _fresh_store()
-        assert_equal(ctx_index_text("alpha bravo charlie", "s1"), 1)
-        assert_equal(ctx_index_text("delta echo foxtrot", "s2"), 1)
+        assert_equal(ctx_index_text("alpha bravo charlie", "s1").count, 1)
+        assert_equal(ctx_index_text("delta echo foxtrot", "s2").count, 1)
         # A fresh handler call re-reads the SDN file from disk.
         val s = handle_simple_ctx_search("4", "{\"query\":\"foxtrot\",\"source\":\"s2\"}")
         assert_contains(s, "source=s2")
@@ -182,18 +184,18 @@ describe "simple_ctx_execute / simple_ctx_execute_file":
 
 describe "simple_ctx_fetch_and_index":
     it "caps bytes and strips tags without network":
-        val (capped, was_capped) = ctx_cap_bytes("0123456789", 4)
-        assert_equal(capped, "0123")
-        assert_true(was_capped)
-        val (same, not_capped) = ctx_cap_bytes("abc", 10)
-        assert_equal(same, "abc")
-        assert_false(not_capped)
+        val capped = ctx_cap_bytes("0123456789", CtxByteCount(bytes: 4))
+        assert_equal(capped.body, "0123")
+        assert_equal(capped.verdict, CtxCapVerdict.Cut)
+        val same = ctx_cap_bytes("abc", CtxByteCount(bytes: 10))
+        assert_equal(same.body, "abc")
+        assert_equal(same.verdict, CtxCapVerdict.Whole)
         val plain = ctx_html_to_text("<html><body><h1>Title</h1>\n\n\n<p>Body &amp; more</p><script>alert(1)</script></body></html>")
         assert_contains(plain, "Title")
         assert_contains(plain, "Body & more")
         assert_false(plain.contains("<p>"))
-        assert_true(ctx_fetch_allowed_url("https://example.org/x"))
-        assert_false(ctx_fetch_allowed_url("file:///etc/passwd"))
+        assert_equal(ctx_fetch_allowed_url("https://example.org/x"), CtxUrlVerdict.Allowed)
+        assert_equal(ctx_fetch_allowed_url("file:///etc/passwd"), CtxUrlVerdict.Denied)
 
     it "refuses non-http URLs and reports an unreachable host as a tool error":
         _fresh_store()
@@ -219,7 +221,7 @@ describe "simple_ctx_doctor":
     it "flags a store written before the schema stamp existed":
         val dir = _fresh_store()
         file_write(dir + "/chunks.sdn", "ctx_chunks | id, source, ts, bytes, text |\n    1, legacy, 1, 5, hello\n")
-        assert_equal(ctx_schema_version(), 0)
+        assert_equal(ctx_schema_version().version, 0)
         val r = handle_simple_ctx_doctor("16", "{}")
         assert_contains(r, "[FAIL] chunk store schema is current")
 
@@ -227,12 +229,12 @@ describe "simple_ctx_upgrade":
     it "re-stamps the schema and reports before/after counts, dropping orphans":
         val dir = _fresh_store()
         file_write(dir + "/chunks.sdn", "ctx_chunks | id, source, ts, bytes, text |\n    1, legacy, 1, 5, hello\n    2, legacy, 1, 0, \n")
-        assert_equal(ctx_schema_version(), 0)
+        assert_equal(ctx_schema_version().version, 0)
         val r = handle_simple_ctx_upgrade("17", "{}")
         assert_contains(r, "schema v0 -> v1")
         assert_contains(r, "chunks 2 -> 1")
         assert_contains(r, "1 orphan/empty chunk(s) dropped")
-        assert_equal(ctx_schema_version(), 1)
+        assert_equal(ctx_schema_version().version, 1)
         # Idempotent: a second run on an already-upgraded store changes nothing.
         val r2 = handle_simple_ctx_upgrade("18", "{}")
         assert_contains(r2, "schema v1 -> v1")
@@ -278,8 +280,8 @@ describe "execute return cap (parity: context-mode 100 KB smart truncation)":
 describe "search quality (parity: stopwords, code-token fallback)":
     it "ignores stopwords in the query but still answers a stopword-only query":
         _fresh_store()
-        assert_equal(ctx_index_text("the cat sat on the mat", "doc:a"), 1)
-        assert_equal(ctx_index_text("a dog in the park", "doc:b"), 1)
+        assert_equal(ctx_index_text("the cat sat on the mat", "doc:a").count, 1)
+        assert_equal(ctx_index_text("a dog in the park", "doc:b").count, 1)
         val s = handle_simple_ctx_search("34", "{\"queries\":[\"the mat\"]}")
         assert_contains(s, "the mat (1 hit(s))")
         assert_contains(s, "source=doc:a")
@@ -288,8 +290,8 @@ describe "search quality (parity: stopwords, code-token fallback)":
 
     it "falls back to substring matching for a partial code token with no BM25 hit":
         _fresh_store()
-        assert_equal(ctx_index_text("val n = rt_string_len(s)\nreturn n", "code:len"), 1)
-        assert_equal(ctx_index_text("unrelated words only", "code:other"), 1)
+        assert_equal(ctx_index_text("val n = rt_string_len(s)\nreturn n", "code:len").count, 1)
+        assert_equal(ctx_index_text("unrelated words only", "code:other").count, 1)
         val s = handle_simple_ctx_search("36", "{\"queries\":[\"string_len\"]}")
         assert_contains(s, "string_len (1 hit(s))")
         assert_contains(s, "source=code:len")
@@ -304,8 +306,8 @@ describe "search quality (parity: stopwords, code-token fallback)":
             filler.push("filler" + str(i))
             i = i + 1
         # A >1,200-char single line splits into several fixed-width chunks.
-        assert_true(ctx_index_text("alpha " + filler.join(" "), "doc:long") >= 1)
-        assert_equal(ctx_index_text("alpha beta", "doc:short"), 1)
+        assert_true(ctx_index_text("alpha " + filler.join(" "), "doc:long").count >= 1)
+        assert_equal(ctx_index_text("alpha beta", "doc:short").count, 1)
         val s = handle_simple_ctx_search("37", "{\"queries\":[\"alpha\"]}")
         assert_contains(s, "alpha (2 hit(s))")
         assert_contains(s, "match=bm25")
@@ -327,12 +329,12 @@ describe "search quality (parity: stopwords, code-token fallback)":
 
     it "ranks the chunk naming the query's most discriminating term first, not a doc that merely repeats a shared term":
         _fresh_store()
-        assert_equal(ctx_index_text("The quick brown fox bootstrap stage2 LLVM-C link fix landed as PR 1490.", "ctx-selftest"), 1)
+        assert_equal(ctx_index_text("The quick brown fox bootstrap stage2 LLVM-C link fix landed as PR 1490.", "ctx-selftest").count, 1)
         var padding: [text] = ["llvm-official-llvm-config is a tool used for llvm configuration and llvm builds across llvm projects with llvm mentioned many many times to pad length"]
         var i = 0
         while i < 15:
             padding.push("llvm")
             i = i + 1
-        assert_equal(ctx_index_text(padding.join(" "), "llvm-official-llvm-config"), 1)
+        assert_equal(ctx_index_text(padding.join(" "), "llvm-official-llvm-config").count, 1)
         val s = handle_simple_ctx_search("38", "{\"queries\":[\"LLVM-C link fix\"]}")
         assert_true(_idx(s, "source=ctx-selftest") < _idx(s, "source=llvm-official-llvm-config"))

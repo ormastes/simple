@@ -170,19 +170,44 @@ Wasm/Byl/IrTc/hwir-to-VHDL adapters 4. About 63 modules are removable by this
 composition (`compiler.backend.*` total 215; LLVM 21 and Cranelift stay). The seam is
 `app.cli.bootstrap_backend_installer`, imported only by `bootstrap_main.spl` and
 `compile_targets.spl`; the full variant names `plugins.backend_registry.full_static_backend_registry`,
-the essential variant (`src/compositions/backends_essential/app/cli/bootstrap_backend_installer.spl`)
-does not.
+the essential variant (`src/app/cli/bootstrap_essential_backend_installer.spl`) does not.
 
-Build: list the composition roots ahead of `src/app` (first root wins), e.g.
-`--source src/compositions/kernel_llvm_cranelift --source src/compositions/backends_essential --source src/app ...`
-(LLVM-only: `kernel_llvm` instead of `kernel_llvm_cranelift`). The default build is unchanged.
+Wiring (2026-11-15, no script change): the Stage 2/3 command passes exactly six
+`--source` roots and the focused native-build path refuses a seventh
+(`doc/08_tracking/bug/focused_bootstrap_six_source_roots_2026-10-24.md`), so there is no
+separate essential root. Each kernel root re-exports the essential installer at
+`src/compositions/kernel_llvm{,_cranelift}/app/cli/bootstrap_backend_installer.spl`; the
+kernel root precedes `src/app` (first root wins). `bootstrap-from-scratch.sh` Stage 4
+passes no kernel root and keeps the full variant; the managed Phase 4 lanes
+(`build-phase4-direct-product.shs`, `bootstrap-phase4-grouped.shs`) pass one, so the
+essential request policy returns no restriction once a full static table is installed
+(`full_static_backend_table_installed_v1`; the full CLI installs it before dispatch).
+
+VHDL is not a `BackendPort` (it lowers HIR -> HWIR inside the driver), so it has its own
+install-once slot `compiler.driver.driver_vhdl_lane` (modelled on `static_jit_lane.spl`):
+`driver_aot_pipeline` (`--backend=vhdl`), `compile_vhdl_only` and the public `aot_vhdl_file`
+dispatch through it; `driver.spl` no longer re-exports `driver_riscv_gen2_product` (its only
+callers, `vhdl_compile_entry.spl` and one spec, import it directly). The full registry and
+`vhdl_compile_entry.spl` install the lane via
+`plugins.backend_vhdl.driver.driver_vhdl_lane_install`. Static import-graph estimate for
+`bootstrap_main.spl` under the Stage 3 roots: 1,703 -> ~1,555 modules, no `plugins.*` and no
+`compiler.mir.hwir` left (about 20 MB of 147.5 MB Stage 3 objects).
+
 A request for a non-linked backend answers `PLUG-E-NOTFOUND: backend 'X' not linked ...`;
 a plugin path answers `PLUG-E-UNSUPPORTED` (no provider exports `simple_backend_plugin_v1`).
 
-NOT done: the full CLI (`_CliMain/main_and_help.spl`, `p3_groups/group_7.spl` ->
-`selected_cuda_backend`) still imports the full registry directly, so only the bootstrap
-entry shrinks; the P-static backends are not yet built as static libs / dynlib plugins
-(PR2-3 above); no native Phase 3 rebuild or memory measurement was run for this change.
+NOT done: the P-static backends are not yet built as dynlib plugins (PR2-3 above); the
+native Phase 3 module count / memory measurement awaits a Stage 2 built from this change.
+
+Phase 3 script alignment (`2026-11-16`): `p3-entry-groups.shs`, `p3-selfbuild-stage3.shs`,
+`p3-targeted-stage2-build.shs`, and `src/app/cli/p3_groups/group_{5,6,7}.spl` now default to
+the four essential roots (`kernel_llvm_cranelift`, `compiler`, `app`, `lib` — omitting
+`cuda_static` and `src/plugins`) and strip non-essential backend imports (`byl_backend`,
+`gpu_*`, `hwir_to_vhdl`, `irtc_codegen_adapter`, `native.mod`, `verification_codegen_types`,
+`wasm_codegen_adapter`, `driver_compile_vhdl_util`, `plugins.backend_*`) from the divided-lib
+groups unless `P3G_FULL_BACKENDS=1` / `P3_SELFBUILD_FULL_BACKENDS=1` / `P3_FULL_BACKENDS=1` is set.
+`p3-entry-groups.shs` also defaults `P3G_MEASURE` empty (built-in PowerShell process-tree RSS/limit
+monitor) and `P3G_GO_TO_END_GROUPS=1` to collect all group failures in a single sweep.
 
 ## 6. Non-backend families in the full-CLI closure (owner: "link non-essential as dynload, load on first use")
 
@@ -208,3 +233,26 @@ build memory; (b) no provider yet exports `simple_backend_plugin_v1`, so no fami
 lazily loaded today; (c) non-backend apps are not covered by the plugin ABI and need
 separate binaries via `library_unit_link_v1` (planning only, unwired). The lazy-load seam
 is therefore blocked on PR2-3 (first provider), which this change does not attempt.
+
+## 7. Status audit (2026-11-16, origin/release/1.0.0 `00a5a1d3401`)
+
+Owner directive: "simple compiler should link non-essential as dynload, not loaded until needed."
+
+| Item | State | Evidence |
+|---|---|---|
+| Static/dynamic split design | done (this doc); no separate `backends_essential` root exists, "essential" = kernel roots re-exporting the essential installer (sec 5) | `src/compositions/kernel_llvm_cranelift/app/cli/bootstrap_backend_installer.spl:1-7` |
+| Essential static set | LLVM + Cranelift + Interpreter (`KernelLinked`), Cranelift JIT lane | `src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl:26-36,45-48` |
+| Bootstrap entry pulls plugins | no: static import closure of `app.cli.bootstrap_main` contains 0 `plugins.*` modules (approx. 1,230 modules by import grep; the real 1,542 also counts grouped/transitive roots) | scratch import-graph walk, see below |
+| Load trigger | lazy by construction: dynamic load only runs when a request carries `plugin_path` | `backend_plugin/loader.spl:40-47` (`load_dynamic_backend_plugin_lease`) |
+| Load actually reachable | no: essential composition refuses a plugin path (`PLUG-E-UNSUPPORTED`) because no provider exports `simple_backend_plugin_v1` | `src/app/cli/bootstrap_essential_backend_request.spl:24-27` |
+| Provider shim / provider entries (PR2) | not started: no `provider_shim.spl`, no `abi/provider_entry_v1.c`, no `src/plugins/backend_*/provider_entry.spl` | `git ls-files` |
+| Descriptor v2, `plugin_search.spl`, `libver` call site (PR3/4) | not started | `git grep plugin_search` = 0 in `src/compiler` |
+| Build groups (PR1), stdlib static group | done: `include:`/`group`, `config/build/backends_{c,cuda,rocm,vhdl,vulkan}.sdn`, `stdlib_static.sdn` | `targets.sdn:23-33` |
+| `backends_dynamic` composition, `placement: dynamic` (PR7) | not started; `simple.sdn` still `placement: static` | `src/compiler/simple.sdn:8` |
+| Full CLI | still links the full registry eagerly: `install_full_static_backends_for_k1_policy_v1` | `src/app/cli/_CliMain/main_and_help.spl:65,324`; `p3_groups/group_7.spl:20` |
+
+Closure composition of `bootstrap_main` (approx. import-graph count, 1,234 modules): `compiler.driver` 245 (of which `cache` 78, `driver_build` 30, `smf` 14), `compiler.backend` 113 (`linker` 22, `backend_plugin` 10), `compiler.mir` 102, `compiler.common` 90, frontend 79, semantics 71, hir 67, `std.nogc_sync_mut.io` 47, `mir_opt` 45, `std.scv` 25. Non-essential-but-static candidates, largest first: driver cache/incremental/SMF publication (about 120), `std.scv` (25), `compiler.backend.linker` alternates (up to 22), VHDL driver lane slot, wasm shim contract (3).
+
+Why no code step in this change: the only lazy seam (PR2-3, first provider exporting the v1 entry) needs a native-built dylib to validate, and wiring `plugin_search` (PR4/7) would add a caller to the bootstrap closure with nothing loadable behind it. Both are refused here rather than forced.
+
+Next, in order: (1) PR2 provider shim + `backend_c` entry, validated by one native `--emit-shared` build; (2) PR3 descriptor v2 + e2e `backend_c_dynamic_provider_spec`; (3) PR7 `backends_dynamic` composition and `plugin_search` fallback, after which the full CLI stops installing the 12 static ports eagerly. Then split `compiler.driver.cache` / SMF publication behind the same lazy seam.
