@@ -37,13 +37,28 @@ verification-pending: none has been verified natively yet (tagged **[U]**).
 |---|---|---|
 | Windows mingw x86_64/aarch64 | llvm-mingw UCRT 20260922, Linux-hosted build | [V] smoke link |
 | FreeBSD amd64/aarch64 | FreeBSD 14.5 base.txz sysroots + clang `--target` | [V] smoke link |
-| Linux riscv64/i686/armv7 | Debian `libc6-dev-*-cross` packages | [V] smoke link |
+| Linux riscv64/i686/armv7 | Debian `libc6-dev-*-cross` libc + LLVM compiler-rt/libunwind (`scripts/setup/build-linux-cross-compiler-rt.shs`); cc line from `scripts/setup/linux-cross-cc.shs` | [V] C hello link + qemu-user run |
 
 Gaps:
 - The repo installer only fetches the Windows-hosted llvm-mingw zip; there is
   no Linux-hosted fetch. **[V]**
-- Linux cross currently also uses `libgcc-13-dev-*-cross` runtime files. This
-  conflicts with the no-GCC policy (use compiler-rt). **Open.**
+- Linux riscv64/i686/armv7 no longer use GCC runtime files (2026-11-16, was
+  `libgcc-13-dev-*-cross` via `--gcc-install-dir`). Now: `--rtlib=compiler-rt
+  --unwindlib=libunwind`, `clang_rt.crtbegin/crtend`, static LLVM libunwind
+  (also served as `libgcc_s.a` = `INPUT(libunwind.a)` because Rust
+  `*-linux-gnu` std asks for `-lgcc_s`), `ld.lld`. Built from LLVM 18.1.3
+  release tarballs into `~/.simple/toolchains/llvm-cross-rt-18` (nothing in
+  git). No `--sysroot`: Debian's `libc.so` script uses absolute paths that lld
+  would re-prefix; `-B/-L/-isystem /usr/<gnu-triple>` instead. Gate:
+  `sh scripts/check/check-linux-cross-no-libgcc.shs --run` (resolved inputs via
+  `-Wl,--trace`, NEEDED, qemu-user) — [V] FAIL on the old config, PASS 3/3 on
+  the new. **Closed for C links.** Open: i686/armv7 have no cross
+  `libsimple_native_all.a` yet, so no Simple link evidence for them; a C++
+  (`clang++`) link would still need libc++ instead of gcc-cross libstdc++.
+  Simple rv64 hello (`simple-p2 native-build`, 2026-11-16) compiles and reaches
+  `ld.lld` with this cc line, then fails: `cannot link object files with
+  different floating-point ABI` — the Simple AOT `.o` is not `lp64d`. That is a
+  codegen float-ABI defect, unrelated to libgcc. **Open.**
 - **[U]** Rust target `aarch64-unknown-freebsd` may need `rustup target add` or
   `-Zbuild-std`.
 - Seed `-lsqlite3` is an allowed seed exception; deferred.
@@ -58,9 +73,9 @@ Gaps:
 | freebsd aarch64 | base.txz 14.5 + clang | ELF [V] | none | none | Rust target std [U] |
 | linux x86_64 | host clang/lld | n/a | none | none | phase-2 rebuild, llc-18 defect |
 | linux aarch64 | clang + `ld.lld` | not recorded | none | none | #9391 verification-pending |
-| linux riscv64 | Debian cross libc | ELF RISC-V [V] | none | none | libgcc policy conflict |
-| linux i686 | Debian cross libc | ELF 80386 [V] | none | none | libgcc policy conflict |
-| linux armv7 | Debian cross libc | ELF ARM [V] | none | none | libgcc policy conflict |
+| linux riscv64 | Debian cross libc | ELF RISC-V [V] | none | none | none (compiler-rt, see Gaps) |
+| linux i686 | Debian cross libc | ELF 80386 [V] | none | none | none (compiler-rt, see Gaps) |
+| linux armv7 | Debian cross libc | ELF ARM [V] | none | none | none (compiler-rt, see Gaps) |
 | linux riscv32 | none | none | none | none | Ubuntu has no glibc, no sysroot |
 | simpleos x86_64/aarch64/riscv64 | `scripts/os/build-simpleos-*.shs` | not recorded | none | none | SimpleOS lane investigating |
 | simpleos 32-bit | none | none | none | none | no triples (only `scripts/check/check-simpleos-x86-32-user-elf.shs`) |

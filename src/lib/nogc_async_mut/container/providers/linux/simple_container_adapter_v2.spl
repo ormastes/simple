@@ -1,10 +1,14 @@
 use std.nogc_async_mut.container.providers.linux.fresh_epoch_workload_v2.*
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{MachineFreshProbeCallV3,
+    MachineFreshProbeReplyV3, machine_fresh_probe_rejected_v3}
+use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.LinuxWorkspaceSourceLoanV3
 use std.nogc_async_mut.container.shared.logs_capture_v1.*
 # Linux leaf adapter for the common container API. Its callers serialize access
 # to the retained provider; this module is not another scheduler or grant verifier.
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerActionProjectionV2, ContainerMountProjectionV2,
     ContainerExecutionRequestV2, ContainerRequestProjectionV2, ContainerHostObservationV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
 use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RuntimeIntentV1, RuntimeIdentityV1,
     RUNTIME_STATUS_REJECTED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_RUNNING,
@@ -31,7 +35,9 @@ use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, Contain
     ContainerStreamPolicyV2, ContainerOutputPlanV2, ContainerHelperAdmissionV2,
     container_stream_policy_digest_v2, container_output_plan_digest_v2, container_output_admission_validate_v2}
 use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_launch_template_v2
-use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2}
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
+use std.nogc_async_mut.container.workspace_primary_retirement_v3.{ContainerPrimaryTransportRetirementV3, ContainerPrimarySessionBindingV3}
 use std.common.contracts.container.output_capabilities_v2.ContainerOutputCapabilitiesV2
 use std.nogc_sync_mut.io.linux_process_owner.linux_process_stream_template_admit_v3
 use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_command_v2
@@ -100,6 +106,67 @@ impl LinuxSimpleContainerAdapterV2:
         val provider = LinuxOciRuntimeProviderV1.new("linux", "podman", "", fence, scope.provider_generation, false, 30000)
         Ok(LinuxSimpleContainerAdapterV2(scope: scope, provider: provider, _observed_host: observed,
             _duration_cap_ms: 30000, _fresh: Some(owner)))
+
+    pub fn workspace_source_open_installed_v3(request: ContainerExecutionRequestV2) -> LinuxWorkspaceSourceTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceSourceTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val opened = self._fresh.unwrap().workspace_source_open_installed_v3(request)
+        retained._fresh = Some(opened.owner)
+        LinuxWorkspaceSourceTurnV3(retained, opened.source, opened.pending, opened.error)
+
+    pub fn cleanup_workspace_source_v3() -> LinuxWorkspaceSourceCleanupTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceSourceCleanupTurnV3(retained, false, false, "linux-workspace-fresh-root-required")
+        val closed = self._fresh.unwrap().cleanup_workspace_source_v3()
+        retained._fresh = Some(closed.owner)
+        LinuxWorkspaceSourceCleanupTurnV3(retained, closed.source_returned, closed.pending, closed.error)
+
+    pub fn enable_workspace_v3(request: ContainerExecutionRequestV2, manifest_bytes: text,
+            invocation_digest: text, full_invocation_source: text) -> LinuxWorkspaceEnableTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceEnableTurnV3(retained, "linux-workspace-fresh-root-required")
+        val enabled = self._fresh.unwrap().enable_workspace_v3(request, manifest_bytes, invocation_digest, full_invocation_source)
+        retained._fresh = Some(enabled.owner)
+        LinuxWorkspaceEnableTurnV3(retained, enabled.error)
+
+    pub fn workspace_primary_observe_v3(request: ContainerExecutionRequestV2) -> LinuxWorkspacePrimaryObserveTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspacePrimaryObserveTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val actual = self._fresh.unwrap().workspace_primary_observe_v3(request)
+        retained._fresh = Some(actual.owner)
+        LinuxWorkspacePrimaryObserveTurnV3(retained, actual.observation, actual.pending, actual.error)
+
+    pub fn probe_v3(request: ContainerExecutionRequestV2,
+            call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        var retained = self
+        if self._fresh.is_none():
+            return machine_fresh_probe_rejected_v3(call, "machine-probe-original-owner-required")
+        val fresh = self._fresh.unwrap()
+        val result = fresh.probe_v3(request, call)
+        retained._fresh = Some(fresh)
+        result
+
+    pub fn workspace_begin_v3(action: ContainerWorkspaceActionV3, request: ContainerExecutionRequestV2,
+            deadline: Option<ContainerEffectDeadlineV1> = nil) -> LinuxWorkspaceActionTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceActionTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val begun = self._fresh.unwrap().workspace_begin_v3(action, request, deadline)
+        retained._fresh = Some(begun.owner)
+        LinuxWorkspaceActionTurnV3(retained, begun.operation, begun.pending, begun.error)
+
+    pub fn workspace_step_v3(request: ContainerExecutionRequestV2) -> LinuxWorkspaceActionTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceActionTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val stepped = self._fresh.unwrap().workspace_step_v3(request)
+        retained._fresh = Some(stepped.owner)
+        LinuxWorkspaceActionTurnV3(retained, stepped.operation, stepped.pending, stepped.error)
+
+    pub fn workspace_cancel_pending_v3(request: ContainerExecutionRequestV2) -> LinuxWorkspaceActionTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxWorkspaceActionTurnV3(retained, nil, false, "linux-workspace-fresh-root-required")
+        val cancelled = self._fresh.unwrap().workspace_cancel_pending_v3(request)
+        retained._fresh = Some(cancelled.owner)
+        LinuxWorkspaceActionTurnV3(retained, cancelled.operation, cancelled.pending, cancelled.error)
 
     pub fn close_fresh_v2() -> LinuxFreshAdapterCloseV2:
         if self._fresh.is_none(): return LinuxFreshAdapterCloseV2(Some(self), false, "container-adapter-lifecycle-retained")
@@ -319,6 +386,10 @@ impl LinuxSimpleContainerAdapterV2:
         LinuxOciEngineExecOwnerV3.inspect(self.provider.state_dir, parent, installed, admission)
 
     pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+        if val actual = self._fresh:
+            match actual.probe_v3(request, MachineFreshProbeCallV3.Projection):
+                case MachineFreshProbeReplyV3.Projection(projected): return projected
+                case _: return Err("machine-probe-projection-turn-mismatch")
         val checked = self._checked_request_v2(request)?
         val decoded = checked.0
         val valid = self.provider.validate(decoded)
@@ -456,6 +527,7 @@ impl LinuxSimpleContainerAdapterV2:
     pub me primary_attach_plan_v1(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
             identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,
             resources: ContainerOutputResourcesV2, terminal_mode: text) -> Result<ContainerPrimaryAttachPlanV1, text>:
+        if val actual = self._fresh: return actual.primary_attach_plan_v3(request, expected, identity, policy, resources, terminal_mode)
         val checked = self._checked_request_v2(request)?
         if checked.0.containment_profile_digest != "": return Err("primary-attach-containment-not-admitted")
         val policy_digest = container_stream_policy_digest_v2(policy)?
@@ -474,6 +546,7 @@ impl LinuxSimpleContainerAdapterV2:
     pub me open_primary_attach_v1(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
             plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
             policy: ContainerStreamPolicyV2) -> PipedProcessOwnedSpawnV2:
+        if val actual = self._fresh: return actual.open_primary_attach_v3(request, expected, plan, helper, policy)
         if plan.containment_profile_digest != "" or plan.containment_identity_digest != "":
             return PipedProcessOwnedSpawnV2.Rejected("primary-attach-containment-not-admitted")
         val original = match container_primary_attach_plan_encode_v1(plan):
@@ -499,6 +572,30 @@ impl LinuxSimpleContainerAdapterV2:
         launch.request = child
         self.provider.open_primary_attach_v1(checked.0, expected, current.provider_identity_digest,
             current.terminal_mode, launch)
+
+    pub fn primary_session_handoff_v3(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+        if val actual = self._fresh: return actual.primary_session_handoff_v3(session)
+        Ok(())
+
+    pub fn primary_construction_failed_v3(transfer: PipedProcessOwnedTransferV2) -> Result<(), text>:
+        if val actual = self._fresh: return actual.primary_construction_failed_v3(transfer)
+        Ok(())
+
+    pub fn primary_session_return_v3(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+        if val actual = self._fresh: return actual.primary_session_return_v3(session)
+        Err("container-primary-workspace-owner-required")
+
+    pub fn primary_session_binding_v3(session: ContainerPrimaryAttachSessionV1) -> Result<ContainerPrimarySessionBindingV3, text>:
+        if val actual = self._fresh: return actual.primary_session_binding_v3(session)
+        Err("container-primary-workspace-owner-required")
+
+    pub fn primary_retirement_v3() -> Result<ContainerPrimaryTransportRetirementV3, text>:
+        if val actual = self._fresh: return actual.primary_retirement_v3()
+        Err("container-primary-workspace-owner-required")
+
+    pub fn primary_attach_cleanup_v3() -> Result<(), text>:
+        if val actual = self._fresh: return actual.primary_attach_cleanup_v3()
+        Err("container-primary-workspace-owner-required")
 
     pub fn output_plan(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
             identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,
@@ -620,4 +717,32 @@ impl LinuxSimpleContainerAdapterV2:
 pub struct LinuxFreshAdapterCloseV2:
     owner: Option<LinuxSimpleContainerAdapterV2>
     closed: bool
+    error: text
+
+pub struct LinuxWorkspaceSourceTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    source: Option<LinuxWorkspaceSourceLoanV3>
+    pending: bool
+    error: text
+
+pub struct LinuxWorkspaceEnableTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    error: text
+
+pub struct LinuxWorkspaceSourceCleanupTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    source_returned: bool
+    pending: bool
+    error: text
+
+pub struct LinuxWorkspaceActionTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    operation: Option<RuntimeOperationV1>
+    pending: bool
+    error: text
+
+pub struct LinuxWorkspacePrimaryObserveTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    observation: Option<ContainerWorkspacePrimaryObservationV3>
+    pending: bool
     error: text

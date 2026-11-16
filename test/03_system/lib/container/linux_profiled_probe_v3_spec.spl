@@ -1,0 +1,282 @@
+# AUTHORED_NOT_RUN: requires an administrator-installed Linux fresh workspace,
+# Podman/image fixture, real provider CLI image and bounded native profile.
+# This is a CPU-only host fixture; no GPU, mount, grant, or native fault claim.
+# @req REQ-LINUX-FRESH-PROFILED-PROBE-001
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_async_mut.container.workspace_root_v3.{
+    SimpleContainerWorkspaceOpenV3, simple_container_open_workspace_installed_v3,
+    simple_container_workspace_startup_cleanup_v3}
+use std.nogc_async_mut.container.probe_api_v3.simple_container_probe_v3
+use std.nogc_async_mut.llm.provider_cli_profiled_probe_v2.{
+    ProviderCliContainedProbeReceiptV2, ProviderCliContainedProbeTurnV2,
+    provider_cli_profiled_probe_begin_v2,
+    provider_cli_profiled_probe_step_v2}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2}
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{
+    MachineFreshProbeCallV3, MachineFreshProbeReplyV3}
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.linux_fresh_workload_probe_v3.LinuxFreshWorkloadProbeActionV3
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
+use std.common.contracts.provider_cli.adapter_v1.{decode_provider_cli_provider_v1,
+    provider_cli_probe_count_v1}
+use std.common.build_manager.group_process_stream_protocol_v2.{
+    GroupProcessStreamLaunchV2, group_process_stream_template_decode_v3}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.*
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure,
+    time_sample_monotonic_nanos_or_failure, sleep_ms}
+
+var linux_profiled_probe_open_v3: Option<SimpleContainerWorkspaceOpenV3> = nil
+var linux_profiled_probe_cursor_v3: Option<ProviderCliContainedProbeTurnV2> = nil
+var linux_profiled_probe_deadline_v3: i64 = 0
+
+fn linux_probe_budget_end_v3() -> Result<i64, text>:
+    val now = time_sample_monotonic_nanos_or_failure()
+    if now <= 0 or now > 9223372036854775807 - 60000000000:
+        return Err("actual monotonic operation deadline unavailable")
+    Ok(now + 60000000000)
+
+fn linux_probe_yield_v3(original_deadline_ns: i64) -> Result<(), text>:
+    val before = time_sample_monotonic_nanos_or_failure()
+    if before <= 0 or before >= original_deadline_ns:
+        return Err("original monotonic operation deadline reached")
+    sleep_ms(1)
+    val after = time_sample_monotonic_nanos_or_failure()
+    if after <= 0 or after >= original_deadline_ns:
+        return Err("original monotonic operation deadline reached")
+    Ok(())
+
+fn linux_probe_fixture_source_v3(name: text, maximum: i64) -> Result<text, text>:
+    val path = env_get(name)
+    if path == "": return Err("genuine administrator fixture required: " + name)
+    file_read_regular_no_follow_bounded(path, maximum)
+
+fn linux_probe_fixture_request_v3(scope: ContainerHostScopeV2,
+        source: text) -> Result<ContainerExecutionRequestV2, text>:
+    val decoded = linux_oci_retained_request_decode_v1(source)?
+    val digest = linux_oci_request_digest_v1(decoded)?
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: decoded.pod_uid,
+        attempt: decoded.attempt, operation_id: decoded.operation_id, request_digest: digest,
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode,
+        continuity_id: scope.continuity_id)
+    Ok(ContainerExecutionRequestV2(plan, source))
+
+fn linux_probe_keep_owner_v3(owner: SimpleContainerOwnerV2):
+    var opened = linux_profiled_probe_open_v3.unwrap()
+    opened.owner = Some(owner)
+    linux_profiled_probe_open_v3 = Some(opened)
+
+fn linux_probe_call_v3(request: ContainerExecutionRequestV2,
+        call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+    val opened = linux_profiled_probe_open_v3.unwrap()
+    val turn = simple_container_probe_v3(opened.owner.unwrap(), request, call)
+    # Capture the actual returned common owner before looking at the reply.
+    linux_probe_keep_owner_v3(turn.owner)
+    turn.result
+
+fn linux_probe_completion_v3(reply: MachineFreshProbeReplyV3) -> Result<(), text>:
+    match reply:
+        case MachineFreshProbeReplyV3.Completion(actual): actual
+        case _: Err("linux-profiled-probe-completion-turn-mismatch")
+
+fn linux_probe_profiled_action_v3(request: ContainerExecutionRequestV2,
+        action: ContainerWorkspaceActionV3, deadline: ContainerEffectDeadlineV1) -> Result<(), text>:
+    val original_deadline_ns = linux_probe_budget_end_v3()?
+    val begun = linux_probe_call_v3(request, MachineFreshProbeCallV3.WorkflowBegin(action, Some(deadline)))
+    val accepted = linux_probe_completion_v3(begun)?
+    var finished = false
+    var turns = 0
+    while not finished and turns < 65536:
+        val stepped = linux_probe_call_v3(request, MachineFreshProbeCallV3.WorkflowStep)
+        match stepped:
+            case MachineFreshProbeReplyV3.Operation(result):
+                val operation = result?
+                if operation.is_some():
+                    val actual = operation.unwrap()
+                    if actual.status != "ok": return Err("profiled workflow failed: " + actual.reason)
+                    finished = true
+            case _: return Err("profiled workflow operation-turn-mismatch")
+        turns = turns + 1
+        if not finished: linux_probe_yield_v3(original_deadline_ns)?
+    if not finished: return Err("profiled workflow bounded-step limit")
+    Ok(())
+
+fn linux_probe_start_helper_v3(request: ContainerExecutionRequestV2,
+        deadline: ContainerEffectDeadlineV1) -> Result<(), text>:
+    val original_deadline_ns = linux_probe_budget_end_v3()?
+    val begun = linux_probe_call_v3(request, MachineFreshProbeCallV3.Start(Some(deadline)))
+    linux_probe_completion_v3(begun)?
+    var finished = false
+    var turns = 0
+    while not finished and turns < 65536:
+        val stepped = linux_probe_call_v3(request, MachineFreshProbeCallV3.StartStep(false))
+        match stepped:
+            case MachineFreshProbeReplyV3.Progress(result):
+                finished = result?
+            case _: return Err("profiled start-step turn mismatch")
+        turns = turns + 1
+        if not finished: linux_probe_yield_v3(original_deadline_ns)?
+    if not finished: return Err("profiled start helper bounded-step limit")
+    # Completion here is helper completion only; it is not a Running receipt.
+    Ok(())
+
+fn linux_probe_cleanup_action_v3(request: ContainerExecutionRequestV2,
+        action: LinuxFreshWorkloadActionV2) -> Result<(), text>:
+    val original_deadline_ns = linux_probe_budget_end_v3()?
+    val begun = linux_probe_call_v3(request, MachineFreshProbeCallV3.CleanupBegin(action))
+    linux_probe_completion_v3(begun)?
+    var finished = false
+    var turns = 0
+    while not finished and turns < 65536:
+        val stepped = linux_probe_call_v3(request, MachineFreshProbeCallV3.CleanupStep(action, false))
+        match stepped:
+            case MachineFreshProbeReplyV3.Progress(result):
+                finished = result?
+            case _: return Err("profiled cleanup-step turn mismatch")
+        turns = turns + 1
+        if not finished: linux_probe_yield_v3(original_deadline_ns)?
+    if not finished: return Err("profiled cleanup bounded-step limit")
+    Ok(())
+
+fn linux_probe_cleanup_owner_v3() -> Result<(), text>:
+    val opened = linux_profiled_probe_open_v3.unwrap()
+    val closed = simple_container_workspace_startup_cleanup_v3(opened)
+    linux_profiled_probe_open_v3 = closed.retained
+    if not closed.closed or closed.retained.is_some() or closed.error != "":
+        return Err("actual probe owner cleanup retained: " + closed.error)
+    Ok(())
+
+fn linux_probe_advance_collector_v3(cancel: bool = false) -> Result<bool, text>:
+    if linux_profiled_probe_deadline_v3 <= 0:
+        return Err("original collector deadline is unavailable")
+    val before = time_sample_monotonic_nanos_or_failure()
+    if not cancel and (before <= 0 or before >= linux_profiled_probe_deadline_v3):
+        return Err("original collector deadline reached; owner and cursor retained")
+    if linux_profiled_probe_cursor_v3.is_none():
+        return Err("retained profiled collector cursor is unavailable")
+    val current = linux_profiled_probe_cursor_v3.unwrap()
+    if current.probe.is_none(): return Err("retained collector has no resumable probe phase")
+    val moved = provider_cli_profiled_probe_step_v2(current.probe.unwrap(), cancel)
+    # Preserve both independent returned owners before inspecting error/status.
+    linux_profiled_probe_cursor_v3 = Some(moved)
+    linux_probe_keep_owner_v3(moved.owner)
+    if moved.error != "": return Err(moved.error)
+    Ok(moved.receipt.is_some())
+
+describe "Actual installed Linux CPU profiled probe through the common owner":
+    it "should capture actual combined output once, reject replay, and settle after native absence":
+        step("Read explicit administrator fixture paths and decode the actual request, template, and provider")
+        val template_text = linux_probe_fixture_source_v3("SIMPLE_LINUX_FRESH_WORKLOAD_TEMPLATE", 65536).unwrap()
+        val template: GroupProcessStreamLaunchV2 = group_process_stream_template_decode_v3(template_text).unwrap()
+        val request_text = linux_probe_fixture_source_v3("SIMPLE_LINUX_FRESH_WORKLOAD_REQUEST", 1048576).unwrap()
+        val provider_text = env_get("SIMPLE_LINUX_FRESH_PROBE_PROVIDER")
+        if provider_text == "":
+            fail("explicit actual CLI provider fixture required: SIMPLE_LINUX_FRESH_PROBE_PROVIDER")
+            return
+        val provider = decode_provider_cli_provider_v1(provider_text).unwrap()
+        if provider_cli_probe_count_v1(provider) <= 0:
+            fail("provider has no actual bounded profile entries")
+            return
+
+        step("Open the installed workspace root with its real retained principal, policy, and original writer")
+        val opened = simple_container_open_workspace_installed_v3(template)
+        linux_profiled_probe_open_v3 = Some(opened)
+        if opened.error != "" or opened.owner.is_none():
+            fail("installed Linux workspace prerequisite unavailable: " + opened.error)
+            return
+        val request = linux_probe_fixture_request_v3(simple_container_scope_v2(opened.owner.unwrap()), request_text).unwrap()
+        val now = time_sample_unix_micros_or_failure() / 1000
+        if now <= 0 or now > 9223372036854745807:
+            fail("actual bounded launch clock unavailable")
+            return
+        val deadline = container_effect_deadline_v1(request.plan.request_digest,
+            request.plan.operation_id, ["create", "start"], now + 30000).unwrap()
+
+        step("Select provider profile zero against the exact canonical request before effects")
+        val selected = linux_probe_call_v3(request, MachineFreshProbeCallV3.Select(request, provider, 0))
+        if linux_probe_completion_v3(selected).is_err():
+            fail("actual request/provider profile selection refused: " + linux_probe_completion_v3(selected).unwrap_err())
+            return
+        step("Create through the existing bounded workflow and complete the actual start helper")
+        val created = linux_probe_profiled_action_v3(request, ContainerWorkspaceActionV3.Create, deadline)
+        if created.is_err():
+            fail("actual bounded Create required: " + created.unwrap_err())
+            return
+        val started = linux_probe_start_helper_v3(request, deadline)
+        if started.is_err():
+            fail("actual bounded Start helper required: " + started.unwrap_err())
+            return
+
+        step("Collect the real provider profile, Wait, Logs EOF, combined evidence, and post-configuration")
+        val monotonic = time_sample_monotonic_nanos_or_failure()
+        if monotonic <= 0 or monotonic > 9223372036854775807 - 60000000000:
+            fail("actual monotonic probe deadline unavailable")
+            return
+        linux_profiled_probe_deadline_v3 = monotonic + 60000000000
+        var probe = provider_cli_profiled_probe_begin_v2(linux_profiled_probe_open_v3.unwrap().owner.unwrap(),
+            request, provider, 0, linux_profiled_probe_deadline_v3)
+        linux_profiled_probe_cursor_v3 = Some(probe)
+        linux_probe_keep_owner_v3(probe.owner)
+        if probe.error != "":
+            fail("actual provider profile begin failed: " + probe.error)
+            return
+        var complete = probe.receipt.is_some()
+        var turns = 0
+        while not complete and probe.error == "" and turns < 65536:
+            val advanced = linux_probe_advance_collector_v3(false)
+            if advanced.is_err():
+                fail("collector stopped with actual owner/cursor retained: " + advanced.unwrap_err())
+                return
+            complete = advanced.unwrap()
+            probe = linux_profiled_probe_cursor_v3.unwrap()
+            turns = turns + 1
+            if not complete:
+                val yielded = linux_probe_yield_v3(linux_profiled_probe_deadline_v3)
+                if yielded.is_err():
+                    fail("collector deadline reached with actual owner/cursor retained: " + yielded.unwrap_err())
+                    return
+        if probe.error != "" or probe.receipt.is_none():
+            fail("real finite provider capture/evidence required; actual owner/cursor retained: " + probe.error)
+            return
+        val receipt: ProviderCliContainedProbeReceiptV2 = probe.receipt.unwrap()
+        val snapshot = receipt.snapshot_v2().unwrap()
+        expect(snapshot.layout).to_equal("combined-profiled-v1")
+        expect(snapshot.source_identity.byte_len() > 0).to_equal(true)
+        expect(snapshot.source_launch_digest.byte_len() > 0).to_equal(true)
+
+        step("Prove completed Wait and Logs cannot be replayed into another capture")
+        val duplicate_wait = linux_probe_call_v3(request,
+            MachineFreshProbeCallV3.Begin(LinuxFreshWorkloadProbeActionV3.Wait))
+        expect(linux_probe_completion_v3(duplicate_wait).is_err()).to_equal(true)
+        val duplicate_logs = linux_probe_call_v3(request,
+            MachineFreshProbeCallV3.Begin(LinuxFreshWorkloadProbeActionV3.Logs))
+        expect(linux_probe_completion_v3(duplicate_logs).is_err()).to_equal(true)
+
+        step("Run actual Stop, Remove, whole-cohort Absence, and same-writer settlement")
+        val stopped = linux_probe_cleanup_action_v3(request, LinuxFreshWorkloadActionV2.Stop)
+        if stopped.is_err():
+            fail("actual probe Stop remains retained: " + stopped.unwrap_err())
+            return
+        val removed = linux_probe_cleanup_action_v3(request, LinuxFreshWorkloadActionV2.Remove)
+        if removed.is_err():
+            fail("actual probe Remove remains retained: " + removed.unwrap_err())
+            return
+        val absent = linux_probe_cleanup_action_v3(request, LinuxFreshWorkloadActionV2.Absence)
+        if absent.is_err():
+            fail("actual whole-cohort absence remains retained: " + absent.unwrap_err())
+            return
+        val settled = linux_probe_call_v3(request, MachineFreshProbeCallV3.Settle)
+        if linux_probe_completion_v3(settled).is_err():
+            fail("actual settlement remains retained: " + linux_probe_completion_v3(settled).unwrap_err())
+            return
+        expect(linux_probe_cleanup_owner_v3().is_ok()).to_equal(true)
+
+    it "should reject an unknown provider name before any workspace or native operation":
+        step("Decode a deliberately unsupported provider label with the production provider decoder")
+        expect(decode_provider_cli_provider_v1("not-a-provider").is_err()).to_equal(true)

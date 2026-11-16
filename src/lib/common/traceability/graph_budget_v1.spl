@@ -1,22 +1,24 @@
 """Resource preflight before graph indexes, table rows or escaped sort keys."""
 use std.common.sdn.strict_v1.{sdn_strict_limits_valid_v1}
 use std.common.traceability.codec_text_budget_v1.{TraceCodecTextBudgetV1}
-use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, trace_codec_issue_v1}
+use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, TraceCodecValidityV1, TraceGraphByteCountV1, TraceGraphValidationModeV1, trace_codec_issue_v1}
 use std.common.traceability.graph_types_v1.*
 use std.common.traceability.graph_wire_v1.{trace_graph_output_size_v1}
 
-pub fn trace_graph_limits_valid_v1(limits: TraceGraphCodecLimitsV1) -> bool:
-    (sdn_strict_limits_valid_v1(limits.sdn) and
+pub fn trace_graph_limits_valid_v1(limits: TraceGraphCodecLimitsV1) -> TraceCodecValidityV1:
+    val within_bounds = (sdn_strict_limits_valid_v1(limits.sdn) and
         limits.max_records >= 0 and limits.max_records <= 1000000 and
         limits.max_text_bytes >= 0 and limits.max_text_bytes <= 16777216 and
         limits.max_field_bytes >= 0 and limits.max_field_bytes <= 1048576 and
         limits.max_output_bytes >= 0 and limits.max_output_bytes <= 16777216)
+    if within_bounds: TraceCodecValidityV1.Valid else: TraceCodecValidityV1.Invalid
 
-pub fn trace_graph_output_cap_v1(limits: TraceGraphCodecLimitsV1) -> i64:
-    if limits.max_output_bytes < limits.sdn.max_source_bytes: limits.max_output_bytes else: limits.sdn.max_source_bytes
+pub fn trace_graph_output_cap_v1(limits: TraceGraphCodecLimitsV1) -> TraceGraphByteCountV1:
+    val cap = if limits.max_output_bytes < limits.sdn.max_source_bytes: limits.max_output_bytes else: limits.sdn.max_source_bytes
+    TraceGraphByteCountV1(value: cap)
 
-pub fn trace_graph_preflight_v1(document: TraceGraphV1, limits: TraceGraphCodecLimitsV1, for_encoding: bool = false) -> Result<bool, TraceCodecIssueV1>:
-    if not trace_graph_limits_valid_v1(limits):
+pub fn trace_graph_preflight_v1(document: TraceGraphV1, limits: TraceGraphCodecLimitsV1, mode: TraceGraphValidationModeV1 = TraceGraphValidationModeV1.Decoding) -> Result<(), TraceCodecIssueV1>:
+    if trace_graph_limits_valid_v1(limits) == TraceCodecValidityV1.Invalid:
         return Err(trace_codec_issue_v1("invalid_limits", "", "Codec limits are outside hard bounds"))
     val counts = [document.inputs.len(), document.nodes.len(), document.test_definitions.len(),
         document.edges.len(), document.edge_origins.len(), document.locators.len()]
@@ -50,8 +52,8 @@ pub fn trace_graph_preflight_v1(document: TraceGraphV1, limits: TraceGraphCodecL
     for item in document.edge_origins:
         budget.charge([item.edge_id, item.origin_kind, item.origin_id, item.declaration_path, item.extractor_version], "edge_origins")?
     for item in document.locators: budget.charge([item.entity_id, item.path, item.locator_kind, item.locator], "locators")?
-    if for_encoding and trace_graph_output_size_v1(document) > trace_graph_output_cap_v1(limits):
+    if mode == TraceGraphValidationModeV1.Encoding and trace_graph_output_size_v1(document).value > trace_graph_output_cap_v1(limits).value:
         return Err(trace_codec_issue_v1("output_limit", "", "Exact graph output exceeds byte budget before indexes or rows"))
-    Ok(true)
+    Ok(())
 
 export trace_graph_limits_valid_v1, trace_graph_output_cap_v1, trace_graph_preflight_v1

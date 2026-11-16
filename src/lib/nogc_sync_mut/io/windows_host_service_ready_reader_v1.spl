@@ -11,7 +11,9 @@ use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v
 use std.common.contracts.orchestration.host_service_auth_v6.HostServiceAuthContextV6
 use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
 use std.common.crypto.sha256.sha256_text
-use std.common.text_bytes.bytes_to_text
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+use std.nogc_sync_mut.io.linux_protected_storage_v1.{LinuxProtectedStorageResourcesV1, linux_protected_storage_resources_v1}
 
 pub class WindowsHostServiceReadyReaderV1:
     slot: i64
@@ -49,6 +51,9 @@ struct ReadyReaderStateV1:
     closing: bool = false
     closed: bool = false
     error: text = ""
+    linux_setup: Option<LinuxProtectedStorageResourcesV1> = nil
+    linux_journal: Option<LinuxProtectedStorageResourcesV1> = nil
+    linux_setup_leaf: text = ""
 
 var ready_readers_v1: [ReadyReaderStateV1] = []
 var ready_readers_active_v1: i64 = 0
@@ -57,7 +62,11 @@ var ready_readers_active_v1: i64 = 0
 # entry, including known closed tombstones. No raw token/handle can be supplied.
 fn ready_reader_entry_v1() -> Result<(), text>:
     process_capture_native_mode_check_v1()?
+    @when(os="linux"):
+    unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    @else:
     windows_command_thread_check_v2()
+    @end
 
 fn ready_reader_load_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<ReadyReaderStateV1, text>:
     ready_reader_entry_v1()?
@@ -80,6 +89,17 @@ fn ready_reader_result_v1(owner: WindowsHostServiceReadyReaderV1) -> WindowsHost
 
 fn ready_reader_read_files_v1(slot: i64) -> Result<([u8], [u8]), text>:
     var state = ready_readers_v1[slot]
+    @when(os="linux"):
+    if state.linux_setup.is_none() or state.linux_journal.is_none(): return Err("host-ready-protected-files-unavailable")
+    var setup_root = state.linux_setup.unwrap()
+    var journal = state.linux_journal.unwrap()
+    val setup = setup_root.read_v1(state.linux_setup_leaf, 512, true)?
+    val ready = journal.read_v1("host-service-ready-v6/" + state.selected_lease + ".sdn", 512, true)?
+    if setup.is_none() or ready.is_none(): return Err("host-ready-protected-record-absent")
+    setup_root.current_v1()?
+    journal.current_v1()?
+    return Ok((text_to_utf8_bytes(ready.unwrap()), text_to_utf8_bytes(setup.unwrap())))
+    @end
     if state.root.is_none() or state.ready_file.is_none() or state.setup_file.is_none():
         return Err("host-ready-files-unavailable")
     if (not state.root.unwrap().security_current() or not state.ready_file.unwrap().security_current() or
@@ -105,6 +125,15 @@ fn ready_reader_read_files_v1(slot: i64) -> Result<([u8], [u8]), text>:
 # no deny-delete lease handle is carried over network/MAC work.
 fn ready_reader_lease_v1(slot: i64) -> Result<HostServiceAuthLeaseV1, text>:
     var state = ready_readers_v1[slot]
+    @when(os="linux"):
+    if state.linux_journal.is_none(): return Err("host-ready-protected-journal-unavailable")
+    var journal = state.linux_journal.unwrap()
+    # Selector is a fresh bounded transient read, not a retained old inode.
+    val bytes = journal.read_v1("parent.lease", 512)?
+    if bytes.is_none(): return Err("host-ready-selector-absent")
+    journal.current_v1()?
+    return host_service_auth_lease_validate_v1(text_to_utf8_bytes(bytes.unwrap()), state.expected_authority)
+    @end
     if state.journal_root.is_none() or state.lease_file.is_some(): return Err("host-ready-selector-cleanup-required")
     if not state.journal_root.unwrap().security_current(): return Err("host-ready-journal-root-changed")
     val opened = state.journal_root.unwrap().open_file("parent.lease", 512u64)
@@ -131,6 +160,9 @@ fn ready_reader_lease_v1(slot: i64) -> Result<HostServiceAuthLeaseV1, text>:
 
 fn ready_reader_admit_v1(owner: WindowsHostServiceReadyReaderV1, setup_path: text,
         deployment_root: text) -> Result<(), text>:
+    @when(os="linux"):
+    return ready_reader_admit_linux_v1(owner, setup_path, deployment_root)
+    @end
     val names = host_service_auth_setup_path_v1(setup_path)?
     val root = windows_private_read_root_open_v2(names.parent)
     var state = ready_readers_v1[owner.slot]
@@ -213,6 +245,10 @@ pub fn windows_host_service_ready_reader_open_v1(setup_path: text, expected_setu
         return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, "host-ready-pin-or-uid-shape")
     val names = host_service_auth_setup_path_v1(setup_path)
     if names.is_err(): return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, names.unwrap_err())
+    @when(os="linux"):
+    if names.unwrap().parent + "/" + names.unwrap().setup_leaf != setup_path:
+        return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, "host-auth-linux-setup-path-spelling")
+    @end
     if host_deployment_root == "" or host_deployment_root.byte_len() > 32000 or host_deployment_root.contains("\0"):
         return WindowsHostServiceReadyReaderOpenTurnV1(nil, false, "host-ready-deployment-root-shape")
     if ready_readers_active_v1 >= 32 or ready_readers_v1.len() >= 100000:
@@ -299,9 +335,17 @@ pub fn windows_host_service_ready_reader_close_v1(owner: WindowsHostServiceReady
     val loaded = ready_reader_load_v1(owner)
     if loaded.is_err(): return WindowsHostServiceReadyReaderCloseTurnV1(Some(owner), false, loaded.unwrap_err())
     var state = loaded.unwrap()
-    if state.closed: return WindowsHostServiceReadyReaderCloseTurnV1(nil, true, state.error)
+    if state.closed:
+        @when(os="linux"):
+        return WindowsHostServiceReadyReaderCloseTurnV1(nil, state.error == "", state.error)
+        @else:
+        return WindowsHostServiceReadyReaderCloseTurnV1(nil, true, state.error)
+        @end
     state.usable = false
     state.closing = true
+    @when(os="linux"):
+    return ready_reader_close_linux_v1(owner, state)
+    @end
     var consumed = false
     var release_failed = false
     if state.lease_file.is_some():
@@ -390,3 +434,61 @@ pub fn windows_host_service_ready_reader_ready_digest_v1(owner: WindowsHostServi
 pub fn windows_host_service_ready_reader_host_lease_digest_v1(owner: WindowsHostServiceReadyReaderV1) -> Result<text, text>:
     windows_host_service_ready_reader_current_v1(owner)?
     Ok(ready_readers_v1[owner.slot].selected_lease)
+
+# No Linux registry is introduced: exact resources are attached to the same
+# canonical reader slot before any open/read can fail.
+fn ready_reader_admit_linux_v1(owner: WindowsHostServiceReadyReaderV1,
+        setup_path: text, deployment_root: text) -> Result<(), text>:
+    val names = host_service_auth_setup_path_v1(setup_path)?
+    var state = ready_readers_v1[owner.slot]
+    state.linux_setup_leaf = names.setup_leaf
+    var setup = linux_protected_storage_resources_v1(names.parent)
+    state.linux_setup = Some(setup)
+    ready_readers_v1[owner.slot] = state
+    setup.open_v1(false)?
+    var journal = linux_protected_storage_resources_v1(deployment_root + "/journal")
+    state.linux_journal = Some(journal)
+    ready_readers_v1[owner.slot] = state
+    journal.open_v1(false)?
+    val selected = ready_reader_lease_v1(owner.slot)?
+    state.selected_lease = selected.lease_digest
+    ready_readers_v1[owner.slot] = state
+    val actual = ready_reader_read_files_v1(owner.slot)?
+    val metadata = host_service_ready_validate_v1(actual.0, actual.1, state.expected_digest,
+        selected.lease_digest, state.expected_authority, state.expected_uid)?
+    if ready_reader_lease_v1(owner.slot)?.lease_digest != selected.lease_digest:
+        return Err("host-ready-selector-changed-during-open")
+    state.ready_bytes = actual.0
+    state.setup_bytes = actual.1
+    state.metadata = Some(metadata)
+    state.usable = true
+    ready_readers_v1[owner.slot] = state
+    Ok(())
+
+fn ready_reader_close_linux_v1(owner: WindowsHostServiceReadyReaderV1,
+        before: ReadyReaderStateV1) -> WindowsHostServiceReadyReaderCloseTurnV1:
+    var state = before
+    # Never gate cleanup on current root/lease bytes. Every raw descriptor is
+    # consumed in its stable resource cell before close(2), including errors.
+    val setup_first = state.linux_setup.is_some()
+    val actual = if setup_first: state.linux_setup else: state.linux_journal
+    if val stored = actual:
+        var resources = stored
+        val closed = resources.close_step_v1()
+        if closed.is_err() and state.error == "": state.error = closed.unwrap_err()
+        if closed.is_ok() and closed.unwrap():
+            if setup_first: state.linux_setup = nil
+            else: state.linux_journal = nil
+            ready_readers_v1[owner.slot] = state
+            val disposed = resources.dispose_closed_v1()
+            if disposed.is_err() and state.error == "": state.error = disposed.unwrap_err()
+    else:
+        state.closed = true
+        state.ready_bytes = []
+        state.setup_bytes = []
+        state.metadata = nil
+        state.linux_setup_leaf = ""
+        ready_readers_active_v1 = ready_readers_active_v1 - 1
+    ready_readers_v1[owner.slot] = state
+    WindowsHostServiceReadyReaderCloseTurnV1(if state.closed: nil else: Some(owner),
+        state.closed and state.error == "", state.error)

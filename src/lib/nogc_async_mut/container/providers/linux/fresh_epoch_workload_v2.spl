@@ -1,25 +1,50 @@
 # Actual retained fresh-domain consumer for the common Container API. Ordinary
 # request/operation DTOs cannot construct the sealed transfer held here.
 use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{MachineFreshProbeCallV3,
+    MachineFreshProbeReplyV3, machine_fresh_probe_rejected_v3}
+use std.nogc_async_mut.container.workspace_primary_retirement_v3.{ContainerPrimaryTransportRetirementV3, container_primary_transport_retirement_v3, ContainerPrimarySessionBindingV3, container_primary_session_binding_v3}
+use std.nogc_sync_mut.container.machine_fresh_workspace_primary_v3.{MachineWorkspacePrimaryCallV3, MachineWorkspacePrimaryReplyV3}
+use std.common.contracts.container.primary_attach_v1.ContainerPrimaryAttachPlanV1
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerStreamPolicyV2, ContainerOutputResourcesV2, ContainerHelperAdmissionV2}
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2}
 use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_probe_custody_v3.machine_fresh_probe_request_validate_v3
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
 use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.MachineFreshWorkloadActionResultV2
 use std.nogc_sync_mut.io.machine_local_process_principal_v1.MachineLocalProcessPrincipalV1
 use std.nogc_sync_mut.io.linux_container_containment_v1.LinuxContainerContainmentPopulationV1
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
 use std.common.contracts.container.runtime_v1.*
 use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
 use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.*
+use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.*
+use std.nogc_async_mut.container.providers.linux.workspace_mount_owner_v1.*
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.WorkspaceStorageLeaseV1
+use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.agent_workspace_invocation_manifest_decode_v2
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.*
+use std.nogc_sync_mut.io.machine_storage_owner_v1.machine_storage_from_linux_v3
 
 pub class LinuxFreshWorkloadOwnerV2:
     transfer: MachineFreshWorkloadTransferV2
     # Scoped loan: caller retains ownership/cleanup of this genuine principal.
     # Its actual native handle is retained and rechecked before each admission.
-    principal: MachineLocalProcessPrincipalV1
+    principal: Option<MachineLocalProcessPrincipalV1>
     template: GroupProcessStreamLaunchV2
+    workspace_root: Option<LinuxWorkspaceRootBorrowV3> = nil
 
     pub fn scope_v2() -> Result<ContainerHostScopeV2, text>:
-        val authenticated = self.principal.current_v1()?
+        if val principal = self.principal:
+            val authenticated = principal.current_v1()?
+        else:
+            val authenticated = self.transfer.validate_owned_principal_v3()?
         self.transfer.scope_v2()
 
     pub fn observation_v2() -> Result<ContainerHostObservationV2, text>:
@@ -32,6 +57,7 @@ pub class LinuxFreshWorkloadOwnerV2:
             continuity_assurance: "native-boot-incarnation-v1", boot_observation: ""))
 
     pub fn project_v2(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+        if self.workspace_root.is_some(): return self.transfer.project_workspace_request_v3(request)
         val decoded = machine_fresh_workload_request_v2(self.scope_v2()?, request)?
         val retained = self.transfer.request_v2()
         if retained.is_ok() and retained.unwrap().request != request: return Err("machine-fresh-workload-request-changed")
@@ -71,7 +97,8 @@ pub class LinuxFreshWorkloadOwnerV2:
             deadline: Option<ContainerEffectDeadlineV1>) -> Result<RuntimeOperationV1, text>:
         val projected = self.project_v2(request)?
         if action == "prepare" or action == "create":
-            val reserved = self.transfer.reserve_v2(self.principal, request, self.template)?
+            if self.principal.is_none(): return Err("linux-fresh-workspace-typed-action-required")
+            val reserved = self.transfer.reserve_v2(self.principal.unwrap(), request, self.template)?
             if action == "prepare": return self.reply_v2(request, action, RUNTIME_PHASE_PREPARED,
                 MachineFreshWorkloadActionResultV2(true, "", 0, ""))
             if not self.done_v2(LinuxFreshWorkloadActionV2.PullImage):
@@ -170,7 +197,124 @@ pub class LinuxFreshWorkloadOwnerV2:
         # No new preparation, second writer, adoption by label or retry spawn.
         self.read_v2("inspect", request)
 
+    # Admission of the real installed lease happens here, never in wire DTOs.
+    # Canonical source phase is latched BEFORE quota/source effects; copied
+    # startup aliases therefore cannot admit a second lease or close its writer.
+    pub fn workspace_source_open_installed_v3(request: ContainerExecutionRequestV2) -> LinuxFreshWorkspaceSourceTurnV3:
+        var retained = self
+        if self.workspace_root.is_none():
+            return LinuxFreshWorkspaceSourceTurnV3(retained, nil, false, "linux-workspace-installed-root-required")
+        val authenticated = self.scope_v2()
+        if authenticated.is_err(): return LinuxFreshWorkspaceSourceTurnV3(retained, nil, false, authenticated.unwrap_err())
+        val opened = self.transfer.open_workspace_source_installed_v3(self.workspace_root.unwrap(), request)
+        LinuxFreshWorkspaceSourceTurnV3(retained, opened.source, false, opened.error)
+
+    pub fn cleanup_workspace_source_v3() -> LinuxFreshWorkspaceSourceCleanupTurnV3:
+        val closed = self.transfer.cleanup_workspace_source_v3()
+        if closed.is_err(): return LinuxFreshWorkspaceSourceCleanupTurnV3(self, false, true, closed.unwrap_err())
+        val diagnostic = self.transfer.workspace_cleanup_diagnostic_v3()
+        LinuxFreshWorkspaceSourceCleanupTurnV3(self, closed.unwrap(), not closed.unwrap(),
+            if diagnostic.is_ok(): diagnostic.unwrap() else: diagnostic.unwrap_err())
+
+    pub fn enable_workspace_v3(request: ContainerExecutionRequestV2, manifest_bytes: text,
+            invocation_digest: text, full_invocation_source: text) -> LinuxFreshWorkspaceEnableTurnV3:
+        val enabled = self.transfer.enable_workspace_source_v3(request, manifest_bytes, invocation_digest,
+            full_invocation_source, self.template)
+        LinuxFreshWorkspaceEnableTurnV3(self, if enabled.is_err(): enabled.unwrap_err() else: "")
+
+    pub fn workspace_primary_observe_v3(request: ContainerExecutionRequestV2) -> LinuxFreshWorkspacePrimaryObserveTurnV3:
+        val original = self.transfer.request_projection_v3()
+        if original.is_err(): return LinuxFreshWorkspacePrimaryObserveTurnV3(self, nil, false, original.unwrap_err())
+        if original.unwrap() != request: return LinuxFreshWorkspacePrimaryObserveTurnV3(self, nil, false, "machine-fresh-workspace-request-changed")
+        val actual = self.transfer.observe_workspace_primary_v3()
+        val observed = if actual.observation.is_some(): Some(ContainerWorkspacePrimaryObservationV3(owner: self)) else: nil
+        LinuxFreshWorkspacePrimaryObserveTurnV3(self, observed, actual.pending, actual.error)
+
+    # V3 probes are CPU-workload-only. The canonical transfer validates the
+    # request before its live gate, preserving cleanup after uncertain effects.
+    pub fn probe_v3(request: ContainerExecutionRequestV2, call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        match call:
+            case MachineFreshProbeCallV3.Select(embedded, provider, index):
+                if embedded != request: return machine_fresh_probe_rejected_v3(call, "machine-probe-original-request-mismatch")
+                val actual = self.prepare_probe_request_v3(request, provider, index)
+                if actual.is_err(): return machine_fresh_probe_rejected_v3(call, actual.unwrap_err())
+            case _: pass
+        self.transfer.probe_v3(request, call)
+
+    fn prepare_probe_request_v3(request: ContainerExecutionRequestV2, provider: ProviderCliProviderV1, index: i64) -> Result<(), text>:
+        val valid = machine_fresh_probe_request_validate_v3(self.scope_v2()?, request, provider, index)?
+        if self.principal.is_some():
+            val reserved = self.transfer.reserve_v2(self.principal.unwrap(), request, self.template)?
+        else:
+            val reserved = self.transfer.reserve_owned_v3(request, self.template)?
+        Ok(())
+
+    pub fn workspace_begin_v3(action: ContainerWorkspaceActionV3, request: ContainerExecutionRequestV2,
+            deadline: Option<ContainerEffectDeadlineV1> = nil) -> LinuxFreshWorkspaceActionTurnV3:
+        val begun = self.transfer.begin_workspace_action_v3(action, request, deadline)
+        if begun.is_err(): return LinuxFreshWorkspaceActionTurnV3(self, nil, false, begun.unwrap_err())
+        # Publishing this cursor is not process/runtime completion. The next
+        # bounded step performs at most one admitted helper spawn or read/poll.
+        LinuxFreshWorkspaceActionTurnV3(self, nil, true, "")
+
+    pub fn workspace_step_v3(request: ContainerExecutionRequestV2) -> LinuxFreshWorkspaceActionTurnV3:
+        val stepped = self.transfer.step_workspace_action_v3(request)
+        if stepped.is_err(): return LinuxFreshWorkspaceActionTurnV3(self, nil, false, stepped.unwrap_err())
+        LinuxFreshWorkspaceActionTurnV3(self, stepped.unwrap(), stepped.unwrap().is_none(), "")
+
+    pub fn workspace_cancel_pending_v3(request: ContainerExecutionRequestV2) -> LinuxFreshWorkspaceActionTurnV3:
+        val cancelled = self.transfer.cancel_workspace_pending_v3(request)
+        if cancelled.is_err(): return LinuxFreshWorkspaceActionTurnV3(self, nil, true, cancelled.unwrap_err())
+        LinuxFreshWorkspaceActionTurnV3(self, nil, not cancelled.unwrap(), "")
+
+    pub fn primary_attach_plan_v3(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,
+            resources: ContainerOutputResourcesV2, terminal_mode: text) -> Result<ContainerPrimaryAttachPlanV1, text>:
+        if self.workspace_root.is_none(): return Err("linux-fresh-workload-legacy-operation-unavailable")
+        match self.transfer.primary_v3(MachineWorkspacePrimaryCallV3.Plan(request, expected, identity, policy, resources, terminal_mode)):
+            case MachineWorkspacePrimaryReplyV3.Plan(actual): actual
+            case _: Err("workspace-primary-plan-turn-mismatch")
+
+    pub fn open_primary_attach_v3(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
+            policy: ContainerStreamPolicyV2) -> PipedProcessOwnedSpawnV2:
+        if self.workspace_root.is_none(): return PipedProcessOwnedSpawnV2.Rejected("linux-fresh-workload-legacy-operation-unavailable")
+        match self.transfer.primary_v3(MachineWorkspacePrimaryCallV3.Open(request, expected, plan, helper, policy)):
+            case MachineWorkspacePrimaryReplyV3.Spawn(actual): actual
+            case _: PipedProcessOwnedSpawnV2.Rejected("workspace-primary-spawn-turn-mismatch")
+
+    pub fn primary_session_handoff_v3(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+        match self.transfer.primary_v3(MachineWorkspacePrimaryCallV3.SessionLoaned(session)):
+            case MachineWorkspacePrimaryReplyV3.Completion(actual): actual
+            case _: Err("workspace-primary-handoff-turn-mismatch")
+
+    pub fn primary_construction_failed_v3(actual: PipedProcessOwnedTransferV2) -> Result<(), text>:
+        match self.transfer.primary_v3(MachineWorkspacePrimaryCallV3.ConstructionFailed(actual)):
+            case MachineWorkspacePrimaryReplyV3.Completion(result): result
+            case _: Err("workspace-primary-construction-turn-mismatch")
+
+    pub fn primary_session_return_v3(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
+        match self.transfer.primary_v3(MachineWorkspacePrimaryCallV3.SessionReturn(session)):
+            case MachineWorkspacePrimaryReplyV3.Completion(actual): actual
+            case _: Err("workspace-primary-return-turn-mismatch")
+
+    pub fn primary_session_binding_v3(session: ContainerPrimaryAttachSessionV1) -> Result<ContainerPrimarySessionBindingV3, text>:
+        container_primary_session_binding_v3(self.transfer, session)
+
+    pub fn primary_retirement_v3() -> Result<ContainerPrimaryTransportRetirementV3, text>:
+        container_primary_transport_retirement_v3(self.transfer)
+
+    pub fn primary_attach_cleanup_v3() -> Result<(), text>:
+        match self.transfer.primary_v3(MachineWorkspacePrimaryCallV3.FallbackCleanup):
+            case MachineWorkspacePrimaryReplyV3.Completion(actual): actual
+            case _: Err("workspace-primary-cleanup-turn-mismatch")
+
     pub fn close_v2() -> LinuxFreshWorkloadCloseTurnV2:
+        if self.workspace_root.is_some():
+            # Resolve the canonical acquisition obligation, including one
+            # created by another value-copy. This cannot clear staged/runtime
+            # source custody or refund a quota whose absence is unproven.
+            val source_cleanup = self.transfer.cleanup_workspace_source_v3()
         val closed = self.transfer.close_v2()
         var retained = self
         if val actual = closed.owner: retained.transfer = actual
@@ -185,4 +329,155 @@ pub struct LinuxFreshWorkloadCloseTurnV2:
 # Only a genuine sealed transfer is accepted; no DATA factory or raw writer.
 pub fn linux_fresh_workload_owner_v2(transfer: MachineFreshWorkloadTransferV2,
         principal: MachineLocalProcessPrincipalV1, template: GroupProcessStreamLaunchV2) -> LinuxFreshWorkloadOwnerV2:
-    LinuxFreshWorkloadOwnerV2(transfer, principal, template)
+    LinuxFreshWorkloadOwnerV2(transfer: transfer, principal: Some(principal), template: template)
+
+pub struct LinuxFreshWorkspaceSourceTurnV3:
+    owner: LinuxFreshWorkloadOwnerV2
+    source: Option<LinuxWorkspaceSourceLoanV3>
+    pending: bool
+    error: text
+
+pub struct LinuxFreshWorkspaceEnableTurnV3:
+    owner: LinuxFreshWorkloadOwnerV2
+    error: text
+
+# Acquisition is closed over installed native owners. The only raw storage
+# value is a private borrowed alias of the ONE writer wrapped below.
+pub struct LinuxWorkspaceRootOpenV3:
+    owner: Option<LinuxFreshWorkloadOwnerV2> = nil
+    fresh_cleanup: Option<LinuxFreshWorkloadOwnerV2> = nil
+    admission_cleanup: Option<MachineFreshEpochAdmissionTurnV1> = nil
+    reader_cleanup: Option<LinuxMachinePolicyOwnerV1> = nil
+    error: text = ""
+
+pub fn linux_workspace_root_open_installed_v3(template: GroupProcessStreamLaunchV2) -> LinuxWorkspaceRootOpenV3:
+    var retained = LinuxWorkspaceRootOpenV3()
+    var acquisition = MachineFreshEpochAdmissionTurnV1()
+    val epoch = match linux_installed_fresh_epoch_open_v1():
+        case LinuxFreshEpochOpenV1.Rejected(reason):
+            retained.error = reason
+            return retained
+        case LinuxFreshEpochOpenV1.CleanupRequired(owner, reason):
+            acquisition.preparation = Some(owner)
+            acquisition.error = reason
+            retained.admission_cleanup = Some(acquisition)
+            retained.error = reason
+            return retained
+        case LinuxFreshEpochOpenV1.Ready(owner): owner
+    acquisition.preparation = Some(epoch)
+    retained.admission_cleanup = Some(acquisition)
+    val reader = match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Rejected(reason):
+            retained.error = reason
+            return retained
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            acquisition.cleanup = Some(MachineContainerAuthorityCleanupV1.LinuxReaderV3(owner))
+            retained.admission_cleanup = Some(acquisition)
+            retained.error = reason
+            return retained
+        case LinuxMachinePolicyOpenV1.Ready(owner): owner
+    acquisition.cleanup = Some(MachineContainerAuthorityCleanupV1.LinuxReaderV3(reader))
+    retained.admission_cleanup = Some(acquisition)
+    val storage = match reader.open_storage_v1():
+        case LinuxMachineStorageOpenV1.Rejected(reason):
+            retained.error = reason
+            return retained
+        case LinuxMachineStorageOpenV1.CleanupRequired(owner, reason):
+            acquisition.cleanup = Some(MachineContainerAuthorityCleanupV1.LinuxStorageV3(owner))
+            retained.admission_cleanup = Some(acquisition)
+            retained.error = reason
+            return retained
+        case LinuxMachineStorageOpenV1.Ready(owner): owner
+    # Successful native storage acquisition transfers the first reader.
+    acquisition.cleanup = Some(MachineContainerAuthorityCleanupV1.LinuxStorageV3(storage))
+    retained.admission_cleanup = Some(acquisition)
+    val source_reader = match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Rejected(reason):
+            retained.error = reason
+            return retained
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            retained.reader_cleanup = Some(owner)
+            retained.error = reason
+            return retained
+        case LinuxMachinePolicyOpenV1.Ready(owner): owner
+    retained.reader_cleanup = Some(source_reader)
+    val borrowed = linux_workspace_root_borrow_v3(source_reader, storage)
+    # Protected opt-in V2 profiles are checked BEFORE the first machine write.
+    val profiles = borrowed.validate_profiles_v3()
+    if profiles.is_err():
+        retained.error = profiles.unwrap_err()
+        return retained
+    val wrapped = machine_storage_from_linux_v3(storage)
+    if wrapped.owner.is_none():
+        if val actual = wrapped.retained:
+            acquisition.cleanup = Some(MachineContainerAuthorityCleanupV1.LinuxStorageV3(actual))
+        retained.admission_cleanup = Some(acquisition)
+        retained.error = wrapped.error
+        return retained
+    # From this point only the facade owns cleanup. Borrowed retains no close.
+    acquisition.cleanup = nil
+    val admitted = machine_container_authority_open_prepared_workspace_v3(wrapped.owner.unwrap(), epoch)
+    retained.admission_cleanup = Some(admitted)
+    if admitted.owner.is_none() or admitted.error != "":
+        retained.error = admitted.error
+        return retained
+    val transferred = admitted.owner.unwrap().transfer_workload_v2()
+    if transferred.owner.is_none():
+        var pending = admitted
+        pending.owner = transferred.retained
+        retained.admission_cleanup = Some(pending)
+        retained.error = transferred.error
+        return retained
+    var actual = LinuxFreshWorkloadOwnerV2(transfer: transferred.owner.unwrap(), principal: nil,
+        template: template, workspace_root: Some(borrowed))
+    # The transfer canonically invalidated startup aliases. Cleanup now belongs
+    # only to this genuine transfer, never the old admission value-copy.
+    retained.admission_cleanup = nil
+    retained.fresh_cleanup = Some(actual)
+    if transferred.error != "":
+        retained.error = transferred.error
+        return retained
+    val adopted = actual.transfer.adopt_workspace_reader_v3(source_reader)
+    actual.transfer = adopted.owner
+    retained.reader_cleanup = adopted.retained_reader
+    retained.fresh_cleanup = Some(actual)
+    if adopted.error != "":
+        retained.error = adopted.error
+        return retained
+    val authenticated = actual.scope_v2()
+    if authenticated.is_err():
+        val blocked = actual.transfer.restrict_workspace_startup_v3(authenticated.unwrap_err())
+        retained.error = authenticated.unwrap_err()
+        return retained
+    retained.owner = Some(actual)
+    retained.fresh_cleanup = nil
+    retained
+
+pub struct LinuxFreshWorkspaceSourceCleanupTurnV3:
+    owner: LinuxFreshWorkloadOwnerV2
+    source_returned: bool
+    pending: bool
+    error: text
+
+pub struct LinuxFreshWorkspaceActionTurnV3:
+    owner: LinuxFreshWorkloadOwnerV2
+    operation: Option<RuntimeOperationV1>
+    pending: bool
+    error: text
+
+# Borrowed real-owner observation. No snapshot constructor grants AgentObserved;
+# each current call reobserves the original canonical native subject/custody.
+pub class ContainerWorkspacePrimaryObservationV3:
+    owner: LinuxFreshWorkloadOwnerV2
+
+    pub fn current_v3() -> Result<LinuxFreshWorkspacePrimaryObservationV3, text>:
+        val actual = self.owner.transfer.observe_workspace_primary_v3()
+        if actual.error != "": return Err(actual.error)
+        if actual.pending or actual.observation.is_none(): return Err("linux-workspace-primary-observation-pending")
+        Ok(actual.observation.unwrap())
+
+pub struct LinuxFreshWorkspacePrimaryObserveTurnV3:
+    owner: LinuxFreshWorkloadOwnerV2
+    observation: Option<ContainerWorkspacePrimaryObservationV3>
+    pending: bool
+    error: text

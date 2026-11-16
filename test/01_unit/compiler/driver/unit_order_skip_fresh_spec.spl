@@ -1,0 +1,113 @@
+# Phase 1 skip-fresh over the per-file unit order index (follow-up to #9479).
+#
+# With SIMPLE_UNIT_ORDER_SKIP_FRESH=1 (requires SIMPLE_UNIT_ORDER_INDEX=1) a
+# unit child drops from its pick order every source whose content hash matches
+# the previous build's index row AND whose HIR ledger terminal is a cached
+# PASS. Any header mismatch or missing artifact rebuilds (fail closed).
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_write, file_delete, dir_create_all}
+use compiler.driver.driver_worker_surface_closure_v1.{WorkerAdmittedGraphV1}
+use compiler.driver.driver_unit_order_index_v1.{unit_order_index_encode_v1, unit_order_index_path_v1,
+    unit_order_skip_fresh_enabled_v1, unit_order_fresh_flags_v1, unit_order_skip_fresh_order_v1,
+    unit_order_content_hashes_v1}
+
+fn sf_paths(n: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < n:
+        out.push("C:/uosf/src/m{i}.spl")
+        i = i + 1
+    out
+
+fn sf_contents(n: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < n:
+        out.push("fn f{i}() -> i64: {i}\n")
+        i = i + 1
+    out
+
+fn sf_graph(n: i64) -> WorkerAdmittedGraphV1:
+    var edges: [[i64]] = []
+    var errors: [text] = []
+    var i = 0
+    while i < n:
+        edges.push([])
+        errors.push("")
+        i = i + 1
+    WorkerAdmittedGraphV1(edges: edges, errors: errors)
+
+fn sf_queue(tag: text, paths: [text], contents: [text]) -> text:
+    val q = "build/test_tmp/unit_order_skip_fresh_{tag}"
+    val _made = dir_create_all(q)
+    val _w = file_write(unit_order_index_path_v1(q),
+        unit_order_index_encode_v1(paths, "old-stamp", sf_graph(paths.len()), unit_order_content_hashes_v1(contents)))
+    for p in paths:
+        val _t = file_write("{q}/{sha256_text(p)}.terminal", "PASS\nowner\n{p}\nkey\nCACHE_STORED\n")
+    q
+
+describe "phase 1 skip-fresh":
+    """
+    # @req UOSF-001: an unchanged source with a cached HIR terminal is skipped
+    """
+    it "skips a fresh file and keeps it out of the pick order":
+        val paths = sf_paths(3)
+        val contents = sf_contents(3)
+        val q = sf_queue("fresh", paths, contents)
+        val fresh = unit_order_fresh_flags_v1(true, q, paths, contents)
+        expect(fresh).to_equal([true, true, true])
+        expect(unit_order_skip_fresh_order_v1([2, 0, 1], fresh)).to_equal([])
+
+    """
+    # @req UOSF-002: a changed source is rebuilt, the rest stay skipped
+    """
+    it "rebuilds a changed file":
+        val paths = sf_paths(3)
+        val q = sf_queue("changed", paths, sf_contents(3))
+        var now = sf_contents(3)
+        now[1] = "fn f1() -> i64: 99\n"
+        val fresh = unit_order_fresh_flags_v1(true, q, paths, now)
+        expect(fresh).to_equal([true, false, true])
+        expect(unit_order_skip_fresh_order_v1([0, 1, 2], fresh)).to_equal([1])
+
+    """
+    # @req UOSF-003: a stale header (other inventory) or garbage rebuilds everything
+    """
+    it "rebuilds everything on a stale header":
+        val paths = sf_paths(3)
+        val contents = sf_contents(3)
+        val q = sf_queue("stale", paths, contents)
+        var other = sf_paths(3)
+        other[2] = "C:/uosf/src/renamed.spl"
+        expect(unit_order_fresh_flags_v1(true, q, other, contents)).to_equal([false, false, false])
+        expect(unit_order_fresh_flags_v1(true, q, sf_paths(4), sf_contents(4))).to_equal([false, false, false, false])
+        val _g = file_write(unit_order_index_path_v1(q), "garbage")
+        expect(unit_order_fresh_flags_v1(true, q, paths, contents)).to_equal([false, false, false])
+
+    """
+    # @req UOSF-004: a missing or non-cached HIR artifact rebuilds that file
+    """
+    it "rebuilds a file whose HIR artifact is missing or not a cached PASS":
+        val paths = sf_paths(3)
+        val contents = sf_contents(3)
+        val q = sf_queue("artifact", paths, contents)
+        val _d = file_delete("{q}/{sha256_text(paths[0])}.terminal")
+        val _u = file_write("{q}/{sha256_text(paths[2])}.terminal", "PASS\nowner\n{paths[2]}\nkey\nUNCACHED\n")
+        expect(unit_order_fresh_flags_v1(true, q, paths, contents)).to_equal([false, true, false])
+
+    """
+    # @req UOSF-005: off is identical to today (nothing skipped, order unchanged)
+    """
+    it "with the switch off nothing is skipped":
+        val paths = sf_paths(3)
+        val contents = sf_contents(3)
+        val q = sf_queue("off", paths, contents)
+        val fresh = unit_order_fresh_flags_v1(false, q, paths, contents)
+        expect(fresh).to_equal([false, false, false])
+        expect(unit_order_skip_fresh_order_v1([2, 0, 1], fresh)).to_equal([2, 0, 1])
+        step("the switch needs both flags exactly 1")
+        assert_true(unit_order_skip_fresh_enabled_v1("1", "1"))
+        assert_true(not unit_order_skip_fresh_enabled_v1("1", ""))
+        assert_true(not unit_order_skip_fresh_enabled_v1("", "1"))
+        assert_true(not unit_order_skip_fresh_enabled_v1("true", "1"))

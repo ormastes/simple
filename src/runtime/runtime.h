@@ -718,6 +718,12 @@ int64_t  spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value,
                                     int64_t nargs);
 int64_t  spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
                                     int64_t nargs, int64_t* out_value);
+int64_t  spl_wffi_call_i64_with_bytes_checked(int64_t fptr, int64_t prefix_args,
+                                              int64_t bytes, int64_t offset,
+                                              int64_t length, int64_t suffix_args);
+int64_t  spl_wffi_call_i64_with_bytes(int64_t fptr, int64_t prefix_args,
+                                      int64_t bytes, int64_t offset,
+                                      int64_t length, int64_t suffix_args);
 int64_t  spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value);
 int64_t  spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0,
                                      int8_t* out_value);

@@ -29,7 +29,7 @@ use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use compiler.driver.driver_build.native_staged_codegen.{
     NativeStagedCodegenStateV1, NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1,
     native_staged_codegen_batch_parse_v1, native_staged_codegen_flush_due_v1,
-    native_staged_codegen_recovery_flush_due_v1}
+    native_staged_codegen_recovery_flush_due_v1, native_staged_withheld_count_v1}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 
@@ -106,3 +106,37 @@ describe "the frozen storage registry under staging":
         assert_equal(ctx.freeze_storage_registry(), identity)
         assert_true(ctx.frozen_storage_module_snapshot("batch2.mod").ok)
         assert_false(ctx.frozen_storage_module_snapshot("not.scheduled").ok)
+
+describe "the native_staged progress failure count":
+    # Bug: doc/08_tracking/bug/native_staged_progress_failed_zero_2026-11-16.md
+    # The progress line hard-coded failed=0 while batches holding a failed MIR
+    # module emitted no object (cycle 9: 704 lowered, 110 failed, 208 flushed,
+    # still `failed=0`).
+    it "counts every module of a batch that emitted nothing":
+        # @req REQ-SSPEC-COMPILER
+        step("counts every module of a batch that emitted nothing")
+        assert_equal(native_staged_withheld_count_v1(8, 0), 8)
+        assert_equal(native_staged_withheld_count_v1(8, -1), 8)
+
+    it "counts nothing for a batch that emitted all of its modules":
+        # @req REQ-SSPEC-COMPILER
+        step("counts nothing for a batch that emitted all of its modules")
+        assert_equal(native_staged_withheld_count_v1(8, 8), 0)
+        assert_equal(native_staged_withheld_count_v1(8, 9), 0)
+        assert_equal(native_staged_withheld_count_v1(0, 0), 0)
+
+    it "counts only the missing modules of a partially emitted batch":
+        # @req REQ-SSPEC-COMPILER
+        step("counts only the missing modules of a partially emitted batch")
+        assert_equal(native_staged_withheld_count_v1(8, 5), 3)
+
+    it "accumulates withheld modules across batches on the state":
+        # @req REQ-SSPEC-COMPILER
+        step("accumulates withheld modules across batches on the state")
+        var state = NativeStagedCodegenStateV1.begin(8)
+        assert_equal(state.modules_withheld, 0)
+        state.record_batch_withheld_v1(8, 8)
+        assert_equal(state.modules_withheld, 0)
+        state.record_batch_withheld_v1(8, 0)
+        state.record_batch_withheld_v1(3, 0)
+        assert_equal(state.modules_withheld, 11)

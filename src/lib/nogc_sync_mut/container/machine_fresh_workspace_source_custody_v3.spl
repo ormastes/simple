@@ -1,0 +1,132 @@
+# Actual acquisition custody, stored ONLY in the original lifecycle slot. This
+# capsule has no writer, registry, launch permit or raw source/lease getter.
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.{LinuxWorkspaceSourceLoanV3, linux_workspace_source_loan_v3}
+use std.nogc_async_mut.container.providers.linux.workspace_mount_owner_v1.*
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.*
+use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.storage.workspace_storage_v1.WorkspaceStorageReceiptV1
+
+pub(package) class MachineFreshWorkspaceSourceCustodyV3:
+    root: LinuxWorkspaceRootBorrowV3
+    request: ContainerExecutionRequestV2
+    lease: Option<WorkspaceStorageLeaseV1> = nil
+    source: Option<LinuxWorkspaceSourceOwnerV1> = nil
+    release: Option<WorkspaceStorageReceiptV1> = nil
+    phase: text = "opening"
+    full_invocation: text = ""
+    preparation_deadline_ns: i64 = 0
+    signed_not_after_unix_ms: i64 = 0
+    error: text = ""
+
+    pub(package) fn admit_v3() -> MachineFreshWorkspaceSourceCustodyTurnV3:
+        var retained = self
+        if self.phase != "opening" or self.lease.is_some(): return MachineFreshWorkspaceSourceCustodyTurnV3(retained, "workspace-source-lease-already-attempted")
+        val admitted = self.root.admit_lease_v3()
+        if admitted.is_err(): return MachineFreshWorkspaceSourceCustodyTurnV3(retained, admitted.unwrap_err())
+        retained.lease = Some(admitted.unwrap())
+        retained.phase = "lease-retained"
+        MachineFreshWorkspaceSourceCustodyTurnV3(retained, "")
+
+    pub(package) fn open_v3() -> MachineFreshWorkspaceSourceCustodyTurnV3:
+        var retained = self
+        if self.phase != "lease-retained" or self.lease.is_none(): return MachineFreshWorkspaceSourceCustodyTurnV3(retained, "workspace-source-lease-required")
+        # Every native return is captured into the returned custody BEFORE flags.
+        match self.root.open_source_v3(self.lease.unwrap(), self.request.request_bytes):
+            case LinuxWorkspaceSourceOpenV1.Rejected(_, _, actual_lease, reason):
+                retained.lease = Some(actual_lease)
+                retained.phase = "source-rejected"
+                MachineFreshWorkspaceSourceCustodyTurnV3(retained, reason)
+            case LinuxWorkspaceSourceOpenV1.CleanupRequired(source, reason):
+                retained.source = Some(source)
+                retained.phase = "source-cleanup-required"
+                MachineFreshWorkspaceSourceCustodyTurnV3(retained, reason)
+            case LinuxWorkspaceSourceOpenV1.Observed(source):
+                retained.source = Some(source)
+                retained.phase = "observed"
+                MachineFreshWorkspaceSourceCustodyTurnV3(retained, "")
+
+    pub(package) fn loan_v3() -> Result<LinuxWorkspaceSourceLoanV3, text>:
+        if self.phase != "observed" or self.source.is_none(): return Err("workspace-source-observed-owner-required")
+        Ok(linux_workspace_source_loan_v3(self.source.unwrap()))
+
+    pub(package) fn binding_v3(request: ContainerExecutionRequestV2, manifest: text,
+            digest: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:
+        if self.request != request or self.phase != "observed" or self.source.is_none(): return Err("workspace-source-binding-owner-required")
+        self.source.unwrap().begin_binding_v3(request, manifest, digest)
+
+    pub(package) fn context_v3() -> Result<(text, i64), text>:
+        if self.full_invocation == "" or self.preparation_deadline_ns <= 0: return Err("workspace-source-invocation-context-required")
+        Ok((self.full_invocation, self.preparation_deadline_ns))
+
+    pub(package) fn retain_context_v3(full_invocation: text, original_deadline_ns: i64, signed_not_after_unix_ms: i64) -> Result<MachineFreshWorkspaceSourceCustodyV3, text>:
+        if self.phase != "observed" or self.source.is_none() or original_deadline_ns <= 0 or signed_not_after_unix_ms <= 0: return Err("workspace-source-invocation-phase")
+        if self.full_invocation != "" and (self.full_invocation != full_invocation or self.preparation_deadline_ns != original_deadline_ns or self.signed_not_after_unix_ms != signed_not_after_unix_ms):
+            return Err("workspace-source-invocation-context-changed")
+        var retained = self
+        retained.full_invocation = full_invocation
+        retained.preparation_deadline_ns = original_deadline_ns
+        retained.signed_not_after_unix_ms = signed_not_after_unix_ms
+        Ok(retained)
+
+    pub(package) fn launch_window_v3() -> Result<(i64, i64), text>:
+        val original = self.context_v3()?
+        if self.signed_not_after_unix_ms <= 0: return Err("workspace-source-signed-expiry-required")
+        Ok((original.1, self.signed_not_after_unix_ms))
+
+    # This is acquisition cleanup only. Source6 itself refuses after staging;
+    # no force close, deletion, copied receipt, or raw borrowed-parent close.
+    pub(package) fn cleanup_v3() -> MachineFreshWorkspaceSourceCustodyTurnV3:
+        var retained = self
+        if self.phase == "returned" or self.phase == "native-absent": return MachineFreshWorkspaceSourceCustodyTurnV3(retained, "")
+        if val source = self.source:
+            val closed = source.close_v1()
+            retained.source = closed.owner
+            if not closed.closed and retained.source.is_none(): retained.source = Some(source)
+            if retained.error == "" and closed.error != "": retained.error = closed.error
+            if not closed.closed or retained.source.is_some(): return MachineFreshWorkspaceSourceCustodyTurnV3(retained, closed.error)
+        if self.lease.is_none():
+            retained.phase = "returned"
+            return MachineFreshWorkspaceSourceCustodyTurnV3(retained, "")
+        if self.phase == "release-published":
+            val forgotten = workspace_storage_forget_released_v1(self.lease.unwrap())
+            if forgotten.is_err(): return MachineFreshWorkspaceSourceCustodyTurnV3(retained, forgotten.unwrap_err())
+            retained.lease = nil
+            retained.phase = "returned"
+            return MachineFreshWorkspaceSourceCustodyTurnV3(retained, "")
+        val released = workspace_storage_release_if_absent_v1(self.lease.unwrap())
+        if released.is_err(): return MachineFreshWorkspaceSourceCustodyTurnV3(retained, released.unwrap_err())
+        if released.unwrap().state != "released": return MachineFreshWorkspaceSourceCustodyTurnV3(retained, "workspace-source-native-absence-unproven")
+        retained.release = Some(released.unwrap())
+        retained.phase = "native-absent"
+        MachineFreshWorkspaceSourceCustodyTurnV3(retained, "")
+
+    pub(package) fn release_receipt_v3() -> Result<WorkspaceStorageReceiptV1, text>:
+        if self.phase != "native-absent" or self.release.is_none() or self.source.is_some(): return Err("workspace-source-release-evidence-required")
+        Ok(self.release.unwrap())
+
+    # Only the sealed original authority calls this after its actual same-WAL
+    # commit and exact readback. Native token forgetting follows publication.
+    pub(package) fn published_v3() -> Result<MachineFreshWorkspaceSourceCustodyV3, text>:
+        val actual = self.release_receipt_v3()?
+        var retained = self
+        retained.phase = "release-published"
+        Ok(retained)
+
+    pub(package) fn returned_v3() -> bool: self.phase == "returned" and self.source.is_none() and self.lease.is_none()
+    pub(package) fn has_lease_v3() -> bool: self.lease.is_some()
+    pub(package) fn request_digest_v3() -> text: self.request.plan.request_digest
+    pub(package) fn diagnostic_v3() -> text: self.error
+    pub(package) fn retain_diagnostic_v3(reason: text) -> MachineFreshWorkspaceSourceCustodyV3:
+        var retained = self
+        if retained.error == "" and reason != "": retained.error = reason
+        retained
+
+pub(package) struct MachineFreshWorkspaceSourceCustodyTurnV3:
+    owner: MachineFreshWorkspaceSourceCustodyV3
+    error: text
+
+pub(package) fn machine_fresh_workspace_source_custody_v3(root: LinuxWorkspaceRootBorrowV3,
+        request: ContainerExecutionRequestV2) -> MachineFreshWorkspaceSourceCustodyV3:
+    MachineFreshWorkspaceSourceCustodyV3(root: root, request: request)

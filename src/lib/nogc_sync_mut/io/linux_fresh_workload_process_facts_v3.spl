@@ -1,0 +1,141 @@
+# Stateless restrictive DATA validators, moved without semantic changes.
+# Only the genuine subject reads its own retained FDs before invoking these.
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_fresh_workload_abi_v2.linux_workload_integer_v2
+
+pub fn linux_fresh_workload_status_validate_v3(status: text, p: LinuxFreshEpochProfileV1) -> Result<(), text>:
+    var seen: [text] = []
+    for line in status.split("\n"):
+        val fields = line.split(":")
+        if fields.len() != 2: continue
+        val key = fields[0]
+        val value = fields[1].trim()
+        if ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"].contains(key):
+            if value.byte_len() != 16: return Err("fresh-workload-subject-capability-shape")
+            for byte in value.bytes():
+                if byte != 48: return Err("fresh-workload-subject-capabilities-not-zero")
+            seen.push(key)
+        elif key == "NoNewPrivs" or key == "Seccomp" or key == "TracerPid":
+            val expected = if key == "NoNewPrivs": "1" else: (if key == "Seccomp": "2" else: "0")
+            if value != expected: return Err("fresh-workload-subject-kernel-security")
+            seen.push(key)
+        elif key == "Uid" or key == "Gid":
+            var ids: [text] = []
+            for cell in value.replace("\t", " ").split(" "):
+                if cell != "": ids.push(cell)
+            if ids.len() != 4: return Err("fresh-workload-subject-credential-shape")
+            val own = p.number_v1(if key == "Uid": "serviceUid" else: "serviceGid")?
+            val start = p.number_v1(if key == "Uid": "subuidStart" else: "subgidStart")?
+            val count = p.number_v1(if key == "Uid": "subuidCount" else: "subgidCount")?
+            for id in ids:
+                val actual = linux_workload_integer_v2(id, 4294967295)?
+                if actual == 0 or (actual != own and not (actual >= start and actual - start < count)):
+                    return Err("fresh-workload-subject-credential-range")
+            seen.push(key)
+    if seen.len() != 10: return Err("fresh-workload-subject-security-fields-missing")
+    Ok(())
+
+# allow(primitive_api): reviewed kernel open-flag word / proc mount-id / tick DATA predicate (milestone_0012 groupD)
+pub fn linux_fresh_workload_start_ticks_v3(source: text, pid: i64) -> Result<i64, text>:
+    if not source.starts_with(str(pid) + " ("): return Err("fresh-workload-subject-stat-pid")
+    var end = -1
+    for at in 0..source.byte_len():
+        if source.byte_at(at) == 41: end = at
+    if end < 0 or end + 2 >= source.byte_len(): return Err("fresh-workload-subject-stat")
+    val fields = source.substring(end + 2, source.byte_len()).trim().split(" ")
+    if fields.len() < 20: return Err("fresh-workload-subject-stat")
+    linux_workload_integer_v2(fields[19], 9223372036854775807)
+
+# allow(primitive_api): reviewed kernel open-flag word / proc mount-id / tick DATA predicate (milestone_0012 groupD)
+pub fn linux_fresh_workload_mounts_validate_v3(host: text, target: text, mount_id: i64) -> Result<(), text>:
+    var delegated = false
+    for line in host.split("\n"):
+        val halves = line.split(" - ")
+        if halves.len() != 2: continue
+        val left = halves[0].split(" ")
+        val right = halves[1].split(" ")
+        if left.len() < 6 or right.len() < 3: return Err("fresh-workload-host-mount-shape")
+        if left[4] == "/sys/fs/cgroup":
+            if (left[3] != "/" or right[0] != "cgroup2" or linux_workload_integer_v2(left[0])? != mount_id or
+                    not right[2].split(",").contains("nsdelegate")):
+                return Err("fresh-workload-cgroup-namespace-delegation-unavailable")
+            delegated = true
+    if not delegated: return Err("fresh-workload-cgroup-mount-unavailable")
+    var readonly = false
+    for line in target.split("\n"):
+        val halves = line.split(" - ")
+        if halves.len() != 2: continue
+        val left = halves[0].split(" ")
+        if left.len() < 6: return Err("fresh-workload-target-mount-shape")
+        if left[4] == "/": readonly = left[5].split(",").contains("ro")
+    if not readonly: return Err("fresh-workload-target-root-not-readonly")
+    Ok(())
+
+# allow(primitive_api): reviewed kernel open-flag word / proc mount-id / tick DATA predicate (milestone_0012 groupD)
+pub fn linux_fresh_workspace_mountinfo_validate_v3(source: text, guest: text, mount_id: i64) -> Result<(), text>:
+    var found = false
+    for line in source.split("\n"):
+        val halves = line.split(" - ")
+        if halves.len() != 2: continue
+        val left = halves[0].split(" ")
+        val right = halves[1].split(" ")
+        if left.len() < 6 or right.len() < 3: return Err("fresh-workspace-mountinfo-shape")
+        if left[4].replace("""\040""", " ") == guest:
+            if found or right[0] != "xfs" or not left[5].split(",").contains("rw"):
+                return Err("fresh-workspace-guest-writable-xfs-view-required")
+            if not left[5].split(",").contains("nosuid") or not left[5].split(",").contains("nodev"):
+                return Err("fresh-workspace-guest-nosuid-nodev-required")
+            if linux_workload_integer_v2(left[0])? != mount_id: return Err("fresh-workspace-guest-mount-id-changed")
+            found = true
+    if not found: return Err("fresh-workspace-guest-mount-view-missing")
+    Ok(())
+
+# Actual original proc status/map bytes are supplied only by the subject.
+# Podman inspect calls keep-id namespaces 'private'; identity mapping is a
+# separate kernel fact and must never be inferred from that display string.
+pub fn linux_fresh_workspace_keep_id_validate_v3(status: text, uid_map: text, gid_map: text,
+        profile: LinuxFreshEpochProfileV1) -> Result<(), text>:
+    for pair in [("Uid", "serviceUid"), ("Gid", "serviceGid")]:
+        var found = false
+        for line in status.split("\n"):
+            if not line.starts_with(pair.0 + ":"): continue
+            if found: return Err("fresh-workspace-credential-duplicate")
+            val expected = profile.number_v1(pair.1)?
+            var count = 0
+            for cell in line.substring(pair.0.byte_len() + 1, line.byte_len()).trim().replace("\t", " ").split(" "):
+                if cell == "": continue
+                if linux_workload_integer_v2(cell, 4294967295)? != expected: return Err("fresh-workspace-not-actual-service-identity")
+                count = count + 1
+            if count != 4: return Err("fresh-workspace-credential-shape")
+            found = true
+        if not found: return Err("fresh-workspace-credential-missing")
+    for pair in [(uid_map, "uid"), (gid_map, "gid")]:
+        val own = profile.number_v1(if pair.1 == "uid": "serviceUid" else: "serviceGid")?
+        val start = profile.number_v1(if pair.1 == "uid": "subuidStart" else: "subgidStart")?
+        val span = profile.number_v1(if pair.1 == "uid": "subuidCount" else: "subgidCount")?
+        var rows = 0
+        var total = 0
+        var identity = false
+        for line in pair.0.trim().split("\n"):
+            var fields: [text] = []
+            for cell in line.trim().replace("\t", " ").split(" "):
+                if cell != "": fields.push(cell)
+            if fields.len() != 3: return Err("fresh-workspace-map-shape")
+            val inside = linux_workload_integer_v2(fields[0], 4294967295)?
+            val outside = linux_workload_integer_v2(fields[1], 4294967295)?
+            val count = linux_workload_integer_v2(fields[2], 4294967295)?
+            if count < 1 or inside > 4294967295 - count or outside > 4294967295 - count:
+                return Err("fresh-workspace-map-range")
+            if inside == own and outside == own and count == 1:
+                if identity: return Err("fresh-workspace-map-identity-duplicate")
+                identity = true
+            elif outside < start or outside - start > span or count > span - (outside - start):
+                return Err("fresh-workspace-map-outside-installed-assignment")
+            rows = rows + 1
+            total = total + count
+            if rows > 3: return Err("fresh-workspace-map-row-bound")
+        if not identity or total != span + 1: return Err("fresh-workspace-keep-id-map-required")
+    Ok(())
+
+@end

@@ -1,0 +1,200 @@
+"""
+Actual private writer kernel custody supporting Host acceptance.
+
+AUTHORED_NOT_RUN. Linux native private-file writer-serialization SUBSET of
+AT-HOST-02 and AT-HOST-05 only. Not memory/GPU reservation, multi-user,
+installed authority or live-engine proof.
+"""
+# @platform: linux
+# doc-path: doc/06_spec/03_system/app/orchestrator/feature/host_owned_writer_kernel_acceptance_v1_spec.md
+# Lifecycle: doc/01_research/os/container/simple_orchestrator_and_container_2026-09-06.md
+# @manual_section: host-writer-serialization
+use std.spec.{describe, it, expect, step, fail, after_each}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.nogc_sync_mut.io.file_lock_owned_v2.{FileLockOwnerV2, FileLockOpenV2,
+    FileLockReleaseStateV2, file_lock_open_owned_v2, file_lock_release_owned_v2,
+    file_lock_owner_state_v2}
+
+# One fixture's real cleanup carriers, not a token registry or owner factory.
+var acceptance_writer_root_v1: text = ""
+var acceptance_writer_other_root_v1: text = ""
+var acceptance_writer_first_v1: Option<FileLockOwnerV2> = nil
+var acceptance_writer_second_v1: Option<FileLockOwnerV2> = nil
+var acceptance_writer_extra_v1: Option<FileLockOwnerV2> = nil
+var acceptance_writer_cleanup_error_v1: text = ""
+
+fn acceptance_owned_writer_begin_v1() -> Result<(), text>:
+    if acceptance_writer_cleanup_error_v1 != "": return Err(acceptance_writer_cleanup_error_v1)
+    if (acceptance_writer_root_v1 != "" or acceptance_writer_other_root_v1 != "" or
+            acceptance_writer_first_v1.is_some() or acceptance_writer_second_v1.is_some() or
+            acceptance_writer_extra_v1.is_some()):
+        return Err("acceptance-writer-prior-cleanup-retained")
+    @when(os="linux"):
+    val root = secure_temp_dir("/tmp", "acceptance-owned-writer")
+    if root.is_err(): return Err(root.unwrap_err())
+    acceptance_writer_root_v1 = root.unwrap()
+    match file_lock_open_owned_v2(acceptance_writer_root_v1 + "/writer.lock", 0):
+        case FileLockOpenV2.Ready(owner):
+            acceptance_writer_first_v1 = Some(owner)
+            Ok(())
+        case FileLockOpenV2.CleanupRequired(owner, reason):
+            acceptance_writer_first_v1 = Some(owner)
+            Err("acceptance-writer-open-cleanup:" + reason)
+        case FileLockOpenV2.Rejected(reason): Err("acceptance-writer-open:" + reason)
+    @else:
+    Err("acceptance-writer-genuine-linux-native-fixture-required")
+    @end
+
+fn acceptance_owned_writer_expect_blocked_v1(path: text) -> Result<(), text>:
+    if acceptance_writer_cleanup_error_v1 != "": return Err(acceptance_writer_cleanup_error_v1)
+    if acceptance_writer_extra_v1.is_some(): return Err("acceptance-writer-unexpected-owner-already-retained")
+    match file_lock_open_owned_v2(path, 0):
+        case FileLockOpenV2.Rejected(reason):
+            if reason != "FILE_LOCK_ACQUISITION_REJECTED": return Err("acceptance-writer-not-contention:" + reason)
+            Ok(())
+        case FileLockOpenV2.Ready(owner):
+            acceptance_writer_extra_v1 = Some(owner)
+            Err("acceptance-writer-contender-unexpectedly-acquired")
+        case FileLockOpenV2.CleanupRequired(owner, reason):
+            acceptance_writer_extra_v1 = Some(owner)
+            Err("acceptance-writer-contender-cleanup:" + reason)
+
+fn acceptance_owned_writer_finish_v1() -> Result<(), text>:
+    # An unresolved cleanup is not retried or hidden by a new fixture/open/delete.
+    if acceptance_writer_cleanup_error_v1 != "": return Err(acceptance_writer_cleanup_error_v1)
+    if val owner = acceptance_writer_extra_v1:
+        val turn = file_lock_release_owned_v2(owner)
+        acceptance_writer_extra_v1 = turn.owner
+        if not turn.closed or turn.owner.is_some() or turn.error != "":
+            acceptance_writer_cleanup_error_v1 = "acceptance-writer-extra-release:" + turn.error
+            return Err(acceptance_writer_cleanup_error_v1)
+    if val owner = acceptance_writer_second_v1:
+        val turn = file_lock_release_owned_v2(owner)
+        acceptance_writer_second_v1 = turn.owner
+        if not turn.closed or turn.owner.is_some() or turn.error != "":
+            acceptance_writer_cleanup_error_v1 = "acceptance-writer-second-release:" + turn.error
+            return Err(acceptance_writer_cleanup_error_v1)
+    if val owner = acceptance_writer_first_v1:
+        val turn = file_lock_release_owned_v2(owner)
+        acceptance_writer_first_v1 = turn.owner
+        if not turn.closed or turn.owner.is_some() or turn.error != "":
+            acceptance_writer_cleanup_error_v1 = "acceptance-writer-first-release:" + turn.error
+            return Err(acceptance_writer_cleanup_error_v1)
+    if acceptance_writer_other_root_v1 != "":
+        if not dir_remove(acceptance_writer_other_root_v1, true):
+            acceptance_writer_cleanup_error_v1 = "acceptance-writer-other-root-cleanup"
+            return Err(acceptance_writer_cleanup_error_v1)
+        acceptance_writer_other_root_v1 = ""
+    if acceptance_writer_root_v1 != "":
+        if not dir_remove(acceptance_writer_root_v1, true):
+            acceptance_writer_cleanup_error_v1 = "acceptance-writer-root-cleanup"
+            return Err(acceptance_writer_cleanup_error_v1)
+        acceptance_writer_root_v1 = ""
+    Ok(())
+
+describe "Actual private writer kernel custody supporting Host acceptance":
+    after_each:
+        step("Close the exact returned cleanup owners")
+        expect(acceptance_owned_writer_finish_v1().is_ok()).to_equal(true)
+
+    it "should keep the replacement kernel lease held after an old generation release":
+        # @req AT-HOST-05
+        step("Open a genuine private writer lease")
+        val opened = acceptance_owned_writer_begin_v1()
+        if opened.is_err():
+            fail(opened.unwrap_err())
+            return
+        val old = acceptance_writer_first_v1.unwrap()
+        step("Rotate the exact native generation")
+        val released = file_lock_release_owned_v2(old)
+        acceptance_writer_first_v1 = released.owner
+        if not released.closed or released.owner.is_some() or released.error != "":
+            acceptance_writer_cleanup_error_v1 = "acceptance-writer-rotation-release:" + released.error
+            fail(acceptance_writer_cleanup_error_v1)
+            return
+        match file_lock_open_owned_v2(acceptance_writer_root_v1 + "/writer.lock", 0):
+            case FileLockOpenV2.Ready(owner): acceptance_writer_second_v1 = Some(owner)
+            case FileLockOpenV2.CleanupRequired(owner, reason):
+                acceptance_writer_second_v1 = Some(owner)
+                fail("replacement native writer requires cleanup:" + reason)
+                return
+            case FileLockOpenV2.Rejected(reason):
+                fail("replacement native writer unavailable:" + reason)
+                return
+        val stale = file_lock_release_owned_v2(old)
+        if stale.owner.is_some(): acceptance_writer_extra_v1 = stale.owner
+        if stale.state != FileLockReleaseStateV2.Stale or stale.owner.is_some() or stale.closed:
+            fail("old generation did not produce an owner-free stale refusal")
+            return
+        expect(stale.closed).to_equal(false)
+        # @capture(action_trace): stale-release state, the competing acquire's refusal and the replacement owner state
+        step("Probe kernel contention after stale release")
+        val blocked = acceptance_owned_writer_expect_blocked_v1(acceptance_writer_root_v1 + "/writer.lock")
+        if blocked.is_err():
+            fail(blocked.unwrap_err())
+            return
+        expect(file_lock_owner_state_v2(acceptance_writer_second_v1.unwrap())).to_equal("held")
+
+    it "should preserve an unrelated private writer while another root is released":
+        # @req AT-HOST-02
+        step("Open a genuine private writer lease")
+        val opened = acceptance_owned_writer_begin_v1()
+        if opened.is_err():
+            fail(opened.unwrap_err())
+            return
+        val other = secure_temp_dir("/tmp", "acceptance-other-writer")
+        if other.is_err():
+            fail(other.unwrap_err())
+            return
+        acceptance_writer_other_root_v1 = other.unwrap()
+        match file_lock_open_owned_v2(acceptance_writer_other_root_v1 + "/writer.lock", 0):
+            case FileLockOpenV2.Ready(owner): acceptance_writer_second_v1 = Some(owner)
+            case FileLockOpenV2.CleanupRequired(owner, reason):
+                acceptance_writer_second_v1 = Some(owner)
+                fail("other private writer requires cleanup:" + reason)
+                return
+            case FileLockOpenV2.Rejected(reason):
+                fail("other private writer unavailable:" + reason)
+                return
+        # @capture(action_trace): first-root release turn, second-root contention refusal and held state
+        step("Preserve unrelated private writer custody")
+        val released = file_lock_release_owned_v2(acceptance_writer_first_v1.unwrap())
+        acceptance_writer_first_v1 = released.owner
+        if not released.closed or released.owner.is_some() or released.error != "":
+            acceptance_writer_cleanup_error_v1 = "acceptance-writer-independent-release:" + released.error
+            fail(acceptance_writer_cleanup_error_v1)
+            return
+        val blocked = acceptance_owned_writer_expect_blocked_v1(acceptance_writer_other_root_v1 + "/writer.lock")
+        if blocked.is_err():
+            fail(blocked.unwrap_err())
+            return
+        expect(file_lock_owner_state_v2(acceptance_writer_second_v1.unwrap())).to_equal("held")
+
+    it "should refuse invalid acquisition metadata without releasing the current kernel writer":
+        # @req AT-HOST-05
+        step("Open a genuine private writer lease")
+        val opened = acceptance_owned_writer_begin_v1()
+        if opened.is_err():
+            fail(opened.unwrap_err())
+            return
+        # @capture(action_trace): invalid-timeout refusal code, valid contender refusal and held state
+        step("Reject an invalid acquisition timeout while the current writer stays held")
+        match file_lock_open_owned_v2(acceptance_writer_root_v1 + "/writer.lock", -1):
+            case FileLockOpenV2.Rejected(reason):
+                if reason != "FILE_LOCK_CONFIGURATION_INVALID":
+                    fail("invalid timeout returned a different refusal:" + reason)
+                    return
+            case FileLockOpenV2.Ready(owner):
+                acceptance_writer_extra_v1 = Some(owner)
+                fail("invalid timeout unexpectedly acquired a real owner")
+                return
+            case FileLockOpenV2.CleanupRequired(owner, reason):
+                acceptance_writer_extra_v1 = Some(owner)
+                fail("invalid timeout unexpectedly acquired cleanup:" + reason)
+                return
+        val blocked = acceptance_owned_writer_expect_blocked_v1(acceptance_writer_root_v1 + "/writer.lock")
+        if blocked.is_err():
+            fail(blocked.unwrap_err())
+            return
+        expect(file_lock_owner_state_v2(acceptance_writer_first_v1.unwrap())).to_equal("held")
