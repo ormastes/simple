@@ -731,13 +731,13 @@ pub(super) fn eval_op_expr(
                         (Some(l), Some(r)) if l != r => {
                             Some(format!("`{} {} {}`: distinct units never mix implicitly", l, op_sym, r))
                         }
-                        (Some(l), None) if is_scalar(&right_val) && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod) => {
+                        (Some(l), None) if is_scalar(&right_val) && (cmp || matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod)) => {
                             Some(format!(
                                 "`{} {} <scalar>`: no implicit arithmetic between a unit and a raw scalar; convert explicitly",
                                 l, op_sym
                             ))
                         }
-                        (None, Some(r)) if is_scalar(&left_val) && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod) => {
+                        (None, Some(r)) if is_scalar(&left_val) && (cmp || matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mod)) => {
                             Some(format!(
                                 "`<scalar> {} {}`: no implicit arithmetic between a unit and a raw scalar; convert explicitly",
                                 op_sym, r
@@ -833,6 +833,18 @@ pub(super) fn eval_op_expr(
                         Ok(result_family) => {
                             // Operation allowed - perform it on inner values
                             let result_val = evaluate_unit_binary_inner(lv, rv, *op)?;
+                            // Comparisons yield a plain bool, and U * U / U / U on a
+                            // nominal `unit Name: T` yield the underlying scalar
+                            // (pure-Simple `unit_op_verdict`), never a unit.
+                            if matches!(
+                                op,
+                                BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+                            ) || (matches!(op, BinOp::Mul | BinOp::Div)
+                                && left_family == right_family
+                                && crate::interpreter_unit::is_record_unit_class(left_family))
+                            {
+                                return Ok(Some(result_val));
+                            }
                             // Return unit with result family (or left family if same-family operation).
                             //
                             // The result SUFFIX is the left operand's suffix whenever the
@@ -861,6 +873,29 @@ pub(super) fn eval_op_expr(
                             ));
                         }
                     }
+                }
+                // Scaling needs a numeric scalar: `text * 1_sfx` (the `(expr)_sfx`
+                // desugar) used to repeat the text and wrap it as a numeric unit.
+                // Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+                (Value::Unit { suffix, .. }, other) | (other, Value::Unit { suffix, .. })
+                    if matches!(op, BinOp::Mul | BinOp::Div)
+                        && !matches!(
+                            other,
+                            Value::Int(_) | Value::UInt { .. } | Value::Float(_) | Value::Float32(_)
+                        ) =>
+                {
+                    let ctx = ErrorContext::new().with_code(codes::INVALID_OPERATION).with_help(format!(
+                        "for a text-based unit use the literal form \"...\"_{}",
+                        suffix
+                    ));
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "unit suffix `_{}` needs a numeric value (got {})",
+                            suffix,
+                            other.type_name()
+                        ),
+                        ctx,
+                    ));
                 }
                 // Mixed unit/non-unit operations: allow scaling (mul/div)
                 (Value::Unit { value, suffix, family }, other) | (other, Value::Unit { value, suffix, family })

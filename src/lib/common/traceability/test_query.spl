@@ -2,6 +2,9 @@
 # Rows describe unverified framework observations; only a Passed status can
 # qualify, and every absent identity is an explicit Missing variant.
 use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
 
 val TEST_QUERY_MAX_LIMIT: i64 = 1000
 
@@ -56,8 +59,10 @@ pub enum TestEvidenceProvenance:
 pub struct TestQueryLimit:
     value: i64
 
+# Opaque continuation token `tq1:<digest>:<offset>`. The digest binds it to the
+# query identity (case, run, limit) and to the row snapshot it was issued over.
 pub struct TestQueryCursor:
-    offset: i64
+    token: text
 
 pub struct TestQuery:
     case_key: TestCaseKey
@@ -164,19 +169,71 @@ fn _row_is_partial(row: TestQueryRow) -> bool:
                 case TestAttemptIdentity.Missing: true
                 case TestAttemptIdentity.StreamOrder(_): false
 
+fn _status_label(status: TestQueryStatus) -> text:
+    match status:
+        case TestQueryStatus.Passed: "passed"
+        case TestQueryStatus.Failed: "failed"
+        case TestQueryStatus.Skipped: "skipped"
+        case TestQueryStatus.Ignored: "ignored"
+        case TestQueryStatus.QualifiedIgnore: "qualifiedignore"
+        case TestQueryStatus.Pending: "pending"
+        case TestQueryStatus.InDevelopment: "in_development"
+        case TestQueryStatus.FeatureGated: "feature_gated"
+        case TestQueryStatus.Blocked: "blocked"
+        case TestQueryStatus.NotFinished: "not_finished"
+        case TestQueryStatus.Cached: "cached"
+        case TestQueryStatus.Unknown(raw): "unknown:" + raw
+
+fn _row_label(row: TestQueryRow) -> text:
+    val planned = match row.planned_case:
+        case TestPlannedCaseIdentity.Recorded(id): id.value
+        case TestPlannedCaseIdentity.Missing: "-"
+    val attempt = match row.attempt:
+        case TestAttemptIdentity.StreamOrder(ordinal): ordinal.value.to_text()
+        case TestAttemptIdentity.Missing: "-"
+    row.run_id.value + "|" + planned + "|" + attempt + "|" + _status_label(row.status)
+
+fn _cursor_prefix(rows: [TestQueryRow], query: TestQuery) -> text:
+    var labels: [text] = []
+    for row in rows:
+        labels.push(_row_label(row))
+    val run = match query.run_id:
+        case Some(id): id.value
+        case None: ""
+    val shape = SdnValue.Dict({
+        "schema": SdnValue.String("simple.test.query-cursor/v1"),
+        "path": SdnValue.String(query.case_key.path.value),
+        "name": SdnValue.String(query.case_key.name.value),
+        "run": SdnValue.String(run), "limit": SdnValue.Int(query.limit.value),
+        "rows": SdnValue.String(sha256_text(labels.join(";")))})
+    "tq1:" + sha256_text(sdn_encode_canonical(shape)) + ":"
+
+fn _cursor_offset(cursor: TestQueryCursor, prefix: text, rows: [TestQueryRow], limit: i64) -> Result<i64, TestQueryError>:
+    if not cursor.token.starts_with(prefix):
+        return Err(_test_query_invalid("cursor is not a token for this query and result snapshot; restart without --cursor"))
+    val digits = cursor.token.substring(prefix.byte_len(), cursor.token.byte_len())
+    if digits == "" or digits.len() > 9:
+        return Err(_test_query_invalid("cursor offset is malformed"))
+    for ch in digits.chars():
+        if not "0123456789".contains(ch):
+            return Err(_test_query_invalid("cursor offset is malformed"))
+    val offset = digits.to_int()
+    if digits != offset.to_text() or offset == 0 or offset >= rows.len() or offset % limit != 0:
+        return Err(_test_query_invalid("cursor is not a continuation page"))
+    Ok(offset)
+
 pub fn paginate_test_query_rows(rows: [TestQueryRow], query: TestQuery) -> Result<TestQueryPage, TestQueryError>:
     val limit = query.limit.value
     if limit < 1 or limit > TEST_QUERY_MAX_LIMIT:
         return Err(_test_query_invalid("limit must be between 1 and 1000"))
+    val prefix = _cursor_prefix(rows, query)
     val start = match query.cursor:
-        case Some(cursor): cursor.offset
+        case Some(cursor): _cursor_offset(cursor, prefix, rows, limit)?
         case None: 0
-    if start < 0 or start > rows.len():
-        return Err(_test_query_invalid("cursor is outside the result rows"))
     var end = start + limit
     var truncation = TestQueryTruncation.Complete
     if end < rows.len():
-        truncation = TestQueryTruncation.Truncated(next: TestQueryCursor(offset: end))
+        truncation = TestQueryTruncation.Truncated(next: TestQueryCursor(token: prefix + end.to_text()))
     else:
         end = rows.len()
     var page: [TestQueryRow] = []

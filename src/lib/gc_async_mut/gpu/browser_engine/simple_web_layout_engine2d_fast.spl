@@ -50,6 +50,7 @@ use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_draw_census_line, vulkan_draw_census_reset, vulkan_readback_census_line, vulkan_readback_census_reset, vulkan_timing_table, vulkan_timing_reset}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
+use common.ui.draw_ir_device_scale.{draw_ir_composition_at_device_scale}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 
 # Shared clock for the perf-instrumentation start/end pairs below (phase
@@ -1332,6 +1333,44 @@ pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, hei
         return []
     execution.render.pixels
 
+# Device-pixel-ratio twin of simple_web_layout_render_html_pixels_engine2d.
+# Layout (and the document cache key) stay in CSS px; the composed Draw IR is
+# scaled by the integer factor k (draw_ir_composition_at_device_scale) and
+# painted into a (css_width*k)x(css_height*k) target, so text is re-rasterized
+# at k x font-size. Used by the >=300-dpi Chrome-parity lane
+# (Chrome --force-device-scale-factor=k).
+pub fn simple_web_layout_render_html_pixels_engine2d_at_device_scale(
+    html: text, css_width: i32, css_height: i32, device_scale: i32, backend_name: text
+) -> [u32]:
+    if css_width <= 0 or css_height <= 0 or device_scale < 1:
+        return []
+    val _phase_on = (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
+    val layout_result = _simple_web_layout_draw_ir_cached(
+        html, css_width, css_height, -1, [], [], true)
+    if _phase_on:
+        print "[web-phase] phase=document elapsed_ms={web_document_pipeline_ms()} cache_hit={web_document_cache_hit()}"
+    val _phase_scale_start_us = _fast_clock.now_micros()
+    val composition = draw_ir_composition_at_device_scale(
+        layout_result.composition, device_scale)
+    if _phase_on:
+        print "[web-phase] phase=device_scale k={device_scale} elapsed_ms={(_fast_clock.now_micros() - _phase_scale_start_us) / 1000}"
+    val width = css_width * device_scale
+    val height = css_height * device_scale
+    if (
+        web_gpu_paint_enabled() and
+        web_gpu_paint_backend_verdict(backend_name) == "gpu-paint-candidate"
+    ):
+        return _web_draw_ir_choose_route(composition, width, height, backend_name)
+    val _phase_paint_start_us = _fast_clock.now_micros()
+    val execution = _simple_web_layout_execute_draw_ir_composition(
+        composition, layout_result.material_witness,
+        width, height, backend_name, [])
+    if _phase_on:
+        print "[web-phase] phase=paint elapsed_ms={(_fast_clock.now_micros() - _phase_paint_start_us) / 1000}"
+    if execution.render.skipped_command_count != 0:
+        return []
+    execution.render.pixels
+
 pub fn simple_web_layout_render_html_pixels_engine2d_with_images(
     html: text, width: i32, height: i32, backend_name: text,
     images: [SimpleOsHostGpuImageResource]
@@ -1547,7 +1586,7 @@ pub fn engine2d_fast_metal_available() -> bool:
     val probe = Engine2D.probe_backend(1, 1, "metal")
     probe.status == BackendStatus.Initialized
 
-export simple_web_layout_render_html_pixels_engine2d
+export simple_web_layout_render_html_pixels_engine2d, simple_web_layout_render_html_pixels_engine2d_at_device_scale
 export simple_web_layout_render_html_readback_engine2d
 export simple_web_layout_render_html_readback_engine2d_result
 export simple_web_layout_render_html_engine2d_result

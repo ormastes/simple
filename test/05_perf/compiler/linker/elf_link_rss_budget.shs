@@ -1,0 +1,64 @@
+#!/bin/sh
+# elf_link_rss_budget.shs — pins peak RSS of the internal ELF linker (jobs=1).
+#
+# Runs a native build of elf_link_bench_driver.spl over a directory of ET_REL
+# objects with SIMPLE_ELF_LINK_TRACE=1 and fails when the largest traced
+# hwm_kib exceeds the budget. Native only: the interpreter does not show the
+# native copy/Result leaks this budget guards.
+#
+#   sh test/05_perf/compiler/linker/elf_link_rss_budget.shs --selftest
+#   ELF_BENCH_DRIVER=ld.exe ELF_BENCH_INPUTS=<dir of *.o> \
+#     sh test/05_perf/compiler/linker/elf_link_rss_budget.shs [budget_kib]
+#
+# Budget default 850000 KiB is a ratchet: measured 820 MB on the 200-object /
+# 120k-relocation set (doc/08_tracking/bug/internal_elf_linker_perf_200obj_2026-11-16.md).
+# Target is 500 MB; lower the default as fixes land.
+# Verdict is the last line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+
+BUDGET_DEFAULT=850000
+
+# peak_kib <trace file>: largest hwm_kib=<n> value, or empty when none.
+peak_kib() {
+    sed -n 's/.*hwm_kib=\([0-9][0-9]*\).*/\1/p' "$1" | sort -n | tail -1
+}
+
+# verdict <trace file> <budget_kib>
+verdict() {
+    p=$(peak_kib "$1")
+    if [ -z "$p" ]; then echo "ERROR — nothing was checked (no hwm_kib in trace)"; return 2; fi
+    if ! grep -q "LINK-OK" "$1"; then echo "ERROR — nothing was checked (link did not succeed)"; return 2; fi
+    if [ "$p" -gt "$2" ]; then echo "FAIL — peak RSS ${p} KiB exceeds budget ${2} KiB"; return 1; fi
+    echo "PASS — peak RSS ${p} KiB within budget ${2} KiB"
+    return 0
+}
+
+selftest() {
+    d=$(mktemp -d)
+    printf '[elf-link] 1 ms parsed hwm_kib=1000\n[elf-link] 2 ms relocated hwm_kib=5000\nLINK-OK x86_64\n' > "$d/ok"
+    printf '[elf-link] 1 ms parsed hwm_kib=9000\nLINK-OK x86_64\n' > "$d/big"
+    printf 'LINK-OK x86_64\n' > "$d/none"
+    printf '[elf-link] 1 ms parsed hwm_kib=10\nLINK-ERR x86_64: boom\n' > "$d/err"
+    fails=0
+    verdict "$d/ok" 6000 >/dev/null; [ $? -eq 0 ] || { echo "selftest: under-budget trace must PASS"; fails=1; }
+    verdict "$d/big" 6000 >/dev/null; [ $? -eq 1 ] || { echo "selftest: over-budget trace must FAIL"; fails=1; }
+    verdict "$d/none" 6000 >/dev/null; [ $? -eq 2 ] || { echo "selftest: trace without hwm must ERROR"; fails=1; }
+    verdict "$d/err" 6000 >/dev/null; [ $? -eq 2 ] || { echo "selftest: failed link must ERROR"; fails=1; }
+    rm -rf "$d"
+    return $fails
+}
+
+if ! selftest; then echo "ERROR — nothing was checked (selftest failed)"; exit 2; fi
+if [ "$1" = "--selftest" ]; then echo "PASS — selftest 4 fixtures"; exit 0; fi
+
+budget=${1:-$BUDGET_DEFAULT}
+if [ -z "$ELF_BENCH_DRIVER" ] || [ ! -x "$ELF_BENCH_DRIVER" ]; then
+    echo "ERROR — nothing was checked (set ELF_BENCH_DRIVER to a native build of elf_link_bench_driver.spl)"; exit 2
+fi
+inputs=$(ls "$ELF_BENCH_INPUTS"/*.o 2>/dev/null | sort -V | paste -sd, -)
+if [ -z "$inputs" ]; then echo "ERROR — nothing was checked (no *.o under ELF_BENCH_INPUTS)"; exit 2; fi
+out=$(mktemp -d)
+SIMPLE_ELF_LINK_TRACE=1 LARCHS=x86_64 LINPUTS="$inputs" LOUT="$out" LJOBS=1 "$ELF_BENCH_DRIVER" > "$out/trace" 2>&1
+verdict "$out/trace" "$budget"
+rc=$?
+rm -rf "$out"
+exit $rc

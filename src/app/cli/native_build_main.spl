@@ -30,7 +30,7 @@ use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_selected_snapshot_source_roots_v1}
-use app.bug.workaround_store.{refresh_workarounds}
+use app.bug.workaround_store.{refresh_workarounds, WorkaroundScanV1}
 # Unambiguous, non-builtin stderr write for the worker-failure relay path
 # (eprint_bounded / native_build_print_failure_hints / the `code != 0` branch
 # below). `eprint` is a compiler builtin that a co-compiled `fn eprint` in
@@ -81,7 +81,7 @@ use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_closure_walk_check_v1}
 use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_pool_parallel_v1}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1, hir_shard_recovery_blocked_reason_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
     hir_shard_recovery_failed_rows_v1, hir_shard_recovery_replacements_dispatchable}
 use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_from_inputs_v1,
@@ -2204,7 +2204,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     val shard_child = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
         (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
     if native_build_workarounds_refresh_needed_v1(env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "", shard_child):
-        match refresh_workarounds(false, []):
+        match refresh_workarounds(WorkaroundScanV1.Incremental, []):
             case Ok(index):
                 if not index.complete:
                     stderr_write("workarounds: incomplete coverage; run simple check-dbs --fullscan bugs\n")
@@ -2485,7 +2485,9 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
             # and write the manifest this route never had. Still exit 1.
             if mir_ledger != "" and (args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1"):
                 native_build_go_to_end_trial_after_mir_pool_v1(mir_ledger, args)
-            eprint "error: MIR shard aggregate failure; link and artifact publication blocked"
+            val mir_blocked_why = hir_shard_recovery_blocked_reason_v1(mir_ledger)
+            val mir_blocked_note = if mir_blocked_why == "": "" else: " (first blocked: " + mir_blocked_why + ")"
+            eprint "error: MIR shard aggregate failure{mir_blocked_note}; link and artifact publication blocked"
             return 1
     # Publish the candidate path only for the real worker. Parse-shard_main
     # computes its closure before setting SIMPLE_PARSE_SHARD, so inheriting this

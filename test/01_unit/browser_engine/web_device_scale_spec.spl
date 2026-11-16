@@ -1,0 +1,195 @@
+"""
+## Purpose and audience
+Purpose: Pin the integer device-scale path of the web renderer. Layout stays in
+CSS px; `draw_ir_composition_at_device_scale` multiplies every geometry field
+and every length style prop Engine2D consumes by an integer factor k, and
+`simple_web_render_html_to_pixels_at_device_scale` renders a (css_w*k)x(css_h*k)
+framebuffer from it. Text is re-rasterized at k x font-size (real vector
+glyphs), never upscaled pixels.
+Audience: browser-engine and Engine2D maintainers; the 300-dpi Chrome-parity
+gate (Chrome `--force-device-scale-factor=4`) depends on this path.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-DEVICE-SCALE-001 — integer device-scale render path for >=300 dpi Chrome parity.
+"""
+# @cover src/lib/common/ui/draw_ir_device_scale.spl 60%
+use std.spec.*
+use std.common.ui.draw_ir.{
+    DrawIrComposition, DrawIrStyleProp,
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
+    draw_ir_glyph_run_payload, draw_ir_rect_bounds, draw_ir_style_prop,
+    draw_ir_text_shaped_font, draw_ir_box_with_style
+}
+use std.common.ui.draw_ir_device_scale.{draw_ir_composition_at_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels,
+    simple_web_render_html_to_pixels_at_device_scale
+}
+
+fn style_value(style: [DrawIrStyleProp], key: text) -> text:
+    for prop in style:
+        if prop.key == key:
+            return prop.value
+    "<absent>"
+
+fn box_fixture() -> DrawIrComposition:
+    val style = [
+        draw_ir_style_prop("background-color", "4278190335"),
+        draw_ir_style_prop("border-top-width", "1"),
+        draw_ir_style_prop("border-left-width", "1"),
+        draw_ir_style_prop("border-top-color", "4278190080"),
+        draw_ir_style_prop("border-top-left-radius", "2"),
+        draw_ir_style_prop("box-shadow", "2px -3px 4278190080"),
+        draw_ir_style_prop("box-shadow-blur-radius", "5"),
+        draw_ir_style_prop("box-shadow-layer-0-offset-x", "-2"),
+        draw_ir_style_prop("box-shadow-layer-0-spread-radius", "1"),
+        draw_ir_style_prop("box-shadow-layer-0-color", "4278190080"),
+        draw_ir_style_prop("background-gradient-stops", "4278190080,4294967295,0,1000"),
+        draw_ir_style_prop("background-gradient-angle-deg", "90"),
+        draw_ir_style_prop("background-tile-width", "7"),
+        draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "4"),
+        draw_ir_style_prop("z-index", "3")
+    ]
+    val box = draw_ir_box_with_style(
+        "box", 2, 3, 10, 6, 4278190335u32,
+        draw_ir_rect_bounds(2, 3, 10, 6), draw_ir_rect_bounds(3, 4, 8, 4),
+        draw_ir_rect_bounds(2, 3, 10, 6), draw_ir_rect_bounds(0, 0, 20, 12),
+        style)
+    val run = draw_ir_glyph_run_payload([36u32, 72u32], [0, 8], [12, 12], [0, 1], true)
+    val label = draw_ir_text_shaped_font(
+        "label", 1, 2, "AB", 4278190080u32, "DejaVu Sans",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", [8, 9], 17, 18, 16, run)
+    draw_ir_composition("c", "scene", "cpu", [
+        draw_ir_batch("b", "cpu", draw_ir_embedding_config("s", "root", 0, 0, 20, 12, 0, 1000, true),
+            [box, label])
+    ])
+
+describe "draw_ir_composition_at_device_scale":
+    it "scales command, rect and embedding geometry by k":
+        val scaled = draw_ir_composition_at_device_scale(box_fixture(), 4)
+        val batch = scaled.batches[0]
+        expect(batch.embedding.width).to_equal(80)
+        expect(batch.embedding.height).to_equal(48)
+        val box = batch.commands[0]
+        expect(box.x).to_equal(8)
+        expect(box.y).to_equal(12)
+        expect(box.width).to_equal(40)
+        expect(box.height).to_equal(24)
+        expect(box.content_rect.x).to_equal(12)
+        expect(box.content_rect.width).to_equal(32)
+        expect(box.clip_rect.width).to_equal(80)
+        expect(box.clip_rect.height).to_equal(48)
+        expect(box.color).to_equal(4278190335u32)
+
+    it "scales length style props and leaves non-length props untouched":
+        val box = draw_ir_composition_at_device_scale(box_fixture(), 4).batches[0].commands[0]
+        val style = box.computed_style
+        expect(style_value(style, "border-top-width")).to_equal("4")
+        expect(style_value(style, "border-left-width")).to_equal("4")
+        expect(style_value(style, "border-top-left-radius")).to_equal("8")
+        expect(style_value(style, "box-shadow")).to_equal("8px -12px 4278190080")
+        expect(style_value(style, "box-shadow-blur-radius")).to_equal("20")
+        expect(style_value(style, "box-shadow-layer-0-offset-x")).to_equal("-8")
+        expect(style_value(style, "box-shadow-layer-0-spread-radius")).to_equal("4")
+        expect(style_value(style, "background-tile-width")).to_equal("28")
+        expect(style_value(style, "backdrop-filter-realized-blur-radius-px")).to_equal("16")
+        # Colors, permille gradient positions, angles and indices are not lengths.
+        expect(style_value(style, "background-color")).to_equal("4278190335")
+        expect(style_value(style, "border-top-color")).to_equal("4278190080")
+        expect(style_value(style, "box-shadow-layer-0-color")).to_equal("4278190080")
+        expect(style_value(style, "background-gradient-stops")).to_equal("4278190080,4294967295,0,1000")
+        expect(style_value(style, "background-gradient-angle-deg")).to_equal("90")
+        expect(style_value(style, "z-index")).to_equal("3")
+
+    it "scales text font-size, line-height, advances and glyph positions":
+        val label = draw_ir_composition_at_device_scale(box_fixture(), 4).batches[0].commands[1]
+        expect(style_value(label.computed_style, "font-size")).to_equal("64")
+        expect(style_value(label.computed_style, "line-height")).to_equal("72")
+        expect(style_value(label.computed_style, "font-identity")).to_equal("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        expect(label.advance_widths).to_equal([32, 36])
+        expect(label.width).to_equal(68)
+        expect(label.glyph_run.xs).to_equal([0, 32])
+        expect(label.glyph_run.ys).to_equal([48, 48])
+        expect(label.glyph_run.glyph_ids).to_equal([36u32, 72u32])
+
+    it "is the identity at k=1":
+        val base = box_fixture()
+        val same = draw_ir_composition_at_device_scale(base, 1)
+        expect(same.batches).to_equal(base.batches)
+
+val BOX_PAGE = (
+    "<html><body style=\"margin:0;padding:0;background:#ffffff\">" +
+    "<div style=\"width:8px;height:4px;background:#0000ff;border:1px solid #000000\"></div>" +
+    "</body></html>"
+)
+
+val TEXT_PAGE = (
+    "<html><body style=\"margin:0;padding:0;background:#ffffff;font-family:'DejaVu Sans';font-size:16px\">" +
+    "<p style=\"margin:0\">Hg</p></body></html>"
+)
+
+fn device_rgb(pixel: u32) -> u32:
+    pixel & 0x00FFFFFFu32
+
+fn ink_count(pixels: [u32]) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if device_rgb(pixel) != 0x00FFFFFFu32:
+            count = count + 1
+    count
+
+describe "simple_web_render_html_to_pixels_at_device_scale":
+    it "covers exactly 40x24 device px with a 4px border for a 10x6 CSS box at k=4":
+        val w = 80
+        val pixels = simple_web_render_html_to_pixels_at_device_scale(BOX_PAGE, 20, 12, 4)
+        expect(pixels.len()).to_equal(80 * 48)
+        expect(ink_count(pixels)).to_equal(40 * 24)
+        expect(device_rgb(pixels[0])).to_equal(0x000000u32)
+        expect(device_rgb(pixels[3 * w + 3])).to_equal(0x000000u32)
+        expect(device_rgb(pixels[4 * w + 4])).to_equal(0x0000FFu32)
+        expect(device_rgb(pixels[19 * w + 35])).to_equal(0x0000FFu32)
+        expect(device_rgb(pixels[20 * w + 36])).to_equal(0x000000u32)
+        expect(device_rgb(pixels[23 * w + 39])).to_equal(0x000000u32)
+        expect(device_rgb(pixels[24 * w + 40])).to_equal(0xFFFFFFu32)
+
+    it "is byte-identical to the CSS-px pixel API at k=1":
+        expect(simple_web_render_html_to_pixels_at_device_scale(BOX_PAGE, 20, 12, 1))
+            .to_equal(simple_web_render_html_to_pixels(BOX_PAGE, 20, 12))
+        expect(simple_web_render_html_to_pixels_at_device_scale(TEXT_PAGE, 40, 24, 1))
+            .to_equal(simple_web_render_html_to_pixels(TEXT_PAGE, 40, 24))
+
+    it "re-rasterizes text at k x font-size instead of upscaling pixels":
+        val small = simple_web_render_html_to_pixels(TEXT_PAGE, 40, 24)
+        val big = simple_web_render_html_to_pixels_at_device_scale(TEXT_PAGE, 40, 24, 4)
+        expect(big.len()).to_equal(160 * 96)
+        val small_ink = ink_count(small)
+        val big_ink = ink_count(big)
+        # Re-pinned 2026-11-17 for LCD subpixel text (owner: same as Chrome).
+        # 16 px text is LCD at 1x (<= 48 device px): FIR fringes widen the 1x
+        # ink. At 4x it is 64 device px, which is grayscale. So 4x ink is 8.6x
+        # the 1x ink here, not the old > 10x bound. Chrome 159 on this HTML:
+        # 199 px at 1x, 1640 px at 4x, i.e. 8.2x.
+        expect(small_ink).to_equal(190)
+        expect(big_ink).to_equal(1629)
+        # A nearest-neighbour upscale makes every aligned 4x4 block uniform.
+        var nonuniform_blocks = 0
+        var by = 0
+        while by < 24:
+            var bx = 0
+            while bx < 40:
+                val first = big[(by * 4) * 160 + bx * 4]
+                var differs = false
+                var dy = 0
+                while dy < 4:
+                    var dx = 0
+                    while dx < 4:
+                        if big[(by * 4 + dy) * 160 + bx * 4 + dx] != first:
+                            differs = true
+                        dx = dx + 1
+                    dy = dy + 1
+                if differs:
+                    nonuniform_blocks = nonuniform_blocks + 1
+                bx = bx + 1
+            by = by + 1
+        expect(nonuniform_blocks > 0).to_equal(true)

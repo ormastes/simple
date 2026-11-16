@@ -1,0 +1,219 @@
+# Trusted same-Host composition mechanisms. No public check result is authority.
+# The actual Host entry verifies/adopts original capacity before calling stage.
+use std.common.contracts.orchestration.agent_workspace_invocation_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_packet_v1.*
+use std.common.contracts.orchestration.agent_policy_resolution_v1.{AgentPolicyResolutionV1, resolve_agent_policy_v1}
+use std.common.contracts.orchestration.resource_set_v1.{ResourceSetItemV1, decode_resource_set, resource_set_item_identity}
+use std.common.contracts.orchestration.host_capacity_v1.{HostReservationStateV1, host_available_capacity_v1}
+use std.common.contracts.container.agent_workspace_manifest_v1.agent_workspace_manifest_decode_v1
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerRequestProjectionV2, container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.provider_cli.codex_interactive_v1.ProviderCliCodexInteractiveRequestDataV1
+use std.nogc_async_mut.llm.provider_cli_container_probe_v1.{ProviderCliContainedSelectionV1, ProviderCliContainedProbeReceiptV1}
+use std.nogc_async_mut.llm.provider_cli_interactive_intent_v1.build_provider_cli_interactive_intent_data_v1
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2, simple_container_backend_v2, simple_container_observation_v2}
+use std.nogc_async_mut.container.providers.linux.workspace_mount_owner_v1.LinuxWorkspaceSourceOwnerV1
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, HostReservationAuthorizationContextV1}
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.host_execution_archive_v3.{host_execution_archive_publish_v3, host_execution_archive_relative_v3}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_read_required_v3
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct HostAgentWorkspaceValidationV1:
+    projection: ContainerRequestProjectionV2
+    invocation: OperationEnvelopeV2
+    grant: ExecutionGrantV2
+
+pub struct HostAgentWorkspaceTurnV1:
+    owner: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    source: LinuxWorkspaceSourceOwnerV1
+    staging_complete: bool
+    effect_attempted: bool
+    recovery_required: bool
+    error: text
+
+pub fn host_agent_workspace_turn_v1(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        source: LinuxWorkspaceSourceOwnerV1, staged: bool, attempted: bool,
+        recovery: bool, error: text) -> HostAgentWorkspaceTurnV1:
+    HostAgentWorkspaceTurnV1(owner: owner, container: container, source: source,
+        staging_complete: staged, effect_attempted: attempted, recovery_required: recovery, error: error)
+
+fn host_agent_workspace_policy_v1(manifest: AgentWorkspaceInvocationManifestV1) -> Result<AgentPolicyResolutionV1, text>:
+    val decoded = match decode_resource_set(manifest.desired_source):
+        case Ok(value): value
+        case Err(_): return Err("agent-workspace-desired-schema")
+    for item in decoded.items:
+        if resource_set_item_identity(item) != manifest.desired.resource_identity: continue
+        match item:
+            case ResourceSetItemV1.AgentSession(session):
+                return resolve_agent_policy_v1(manifest.desired_source, manifest.catalog, session.meta.ns, session.meta.name)
+            case _: return Err("agent-workspace-desired-not-session")
+    Err("agent-workspace-desired-session-missing")
+
+# Actual installed context and actual Host scope bind the independent action.
+# The request binds manifest digest in fixed bootstrap argv; the manifest does
+# not recursively include final request bytes/digest.
+pub fn host_agent_workspace_invocation_operation_v1(manifest: AgentWorkspaceInvocationManifestV1,
+        host: OperationEnvelopeV2, policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        context: HostReservationAuthorizationContextV1) -> Result<OperationEnvelopeV2, text>:
+    val digest = agent_workspace_invocation_manifest_digest_v1(manifest)?
+    val scope_bytes = container_host_scope_bytes_v2(scope)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-agent-workspace-authority"),
+        "installedPolicyDigest": SdnValue.String(policy.source_digest), "hostScopeDigest": SdnValue.String(sha256_text(scope_bytes)),
+        "hostOperationDigest": SdnValue.String(sha256_text(distributed_encode_operation_v2(host)?)),
+        "invocationManifestDigest": SdnValue.String(digest)}
+    Ok(OperationEnvelopeV2(version: 2, id: "agent-invoke-" + sha256_text(host.id), payload_digest: digest,
+        principal: host.principal, project: host.project, host_id: host.host_id, operation: "agent_session_invoke_v1",
+        environment_digest: sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"),
+        policy_revision: context.policy_revision, revocation_epoch: context.revocation_epoch,
+        session_generation: context.session_generation, memory_bytes: host.memory_bytes, duration_ms: host.duration_ms))
+
+# Read-only validation always rederives from the actual opaque selection/index0
+# receipt and original retained source owner. Returned DATA is never a grant.
+pub fn host_agent_workspace_validate_v1(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        source: LinuxWorkspaceSourceOwnerV1, packet: AgentWorkspaceInvocationPacketV1,
+        selection: ProviderCliContainedSelectionV1, receipt: ProviderCliContainedProbeReceiptV1,
+        policy: LocalAuthorityPolicyV1, expected_provider: text, service_scope: text,
+        context: HostReservationAuthorizationContextV1, required_state: text) -> Result<HostAgentWorkspaceValidationV1, text>:
+    if required_state != "admitted" and required_state != "executing": return Err("agent-workspace-state-invalid")
+    val packet_bytes = agent_workspace_invocation_packet_encode_v1(packet)?
+    val manifest = packet.manifest
+    if manifest.credential_refs.len() != 0: return Err("agent-workspace-credential-projection-unavailable")
+    if not builder_digest_valid_v1(policy.source_digest) or not builder_digest_valid_v1(expected_provider):
+        return Err("agent-workspace-installed-digest-invalid")
+    if (context.grant_clock <= 0 or context.monotonic_ms < 0 or context.policy_revision != policy.snapshot.policy_revision or
+            context.revocation_epoch != policy.snapshot.revocation_epoch or context.session_generation != policy.session_generation):
+        return Err("agent-workspace-installed-context-stale")
+    if not owner.ledger.continuity_proven: return Err("agent-workspace-reconciliation-required")
+    val retained = daemon_operation_exact_v2(owner.journal, packet.host.operation)?
+    if retained.state != required_state: return Err("agent-workspace-operation-recovery-required")
+    val available = host_available_capacity_v1(owner.ledger)?
+    if owner.ledger.revision != owner.journal.sequence + 1: return Err("agent-workspace-capacity-projection-stale")
+    val expected_row = packet.host.intent.reservation
+    var matching_rows: i64 = 0
+    for row in owner.ledger.reservations:
+        if row.id != expected_row.id: continue
+        matching_rows = matching_rows + 1
+        val expected_state = if required_state == "admitted": HostReservationStateV1.Prepared else: HostReservationStateV1.Executing
+        if (row.operation_id != expected_row.operation_id or row.payload_digest != expected_row.payload_digest or
+                row.service_scope_id != expected_row.service_scope_id or row.assignment_generation != expected_row.assignment_generation or
+                row.nonce != expected_row.nonce or row.cpu_millis != expected_row.cpu_millis or row.memory_bytes != expected_row.memory_bytes or
+                row.prepare_deadline_ms != expected_row.prepare_deadline_ms or row.exclusive_devices.len() != 0 or row.state != expected_state):
+            return Err("agent-workspace-retained-capacity-mismatch")
+    if matching_rows != 1: return Err("agent-workspace-retained-capacity-missing")
+    if simple_container_backend_v2(container) != "linux-podman" or packet.host.execution.plan.backend != "linux-podman":
+        return Err("agent-workspace-platform-unsupported")
+    val scope = simple_container_scope_v2(container)
+    val scope_digest = sha256_text(container_host_scope_bytes_v2(scope)?)
+    val plan = packet.host.execution.plan
+    val capacity = owner.ledger.capacity
+    val observed = simple_container_observation_v2(container)
+    val fence = container_scope_fence_id_v2(scope)?
+    if (plan.physical_host_id != scope.physical_host_id or plan.service_scope_id != scope.service_scope_id or
+            scope.service_scope_id != service_scope or plan.boot_id != scope.boot_id or plan.provider_generation != scope.provider_generation or
+            plan.native_machine_id != scope.native_machine_id or plan.continuity_mode != scope.continuity_mode or plan.continuity_id != scope.continuity_id or
+            capacity.physical_host_id != scope.physical_host_id or capacity.boot_id != fence or capacity.provider_generation != scope.provider_generation or
+            observed.provider_identity_digest != expected_provider or observed.native_machine_id != scope.native_machine_id or
+            observed.native_boot_id != scope.boot_id or observed.backend != "linux-podman" or manifest.task_use.host_scope_digest != scope_digest):
+        return Err("agent-workspace-actual-host-scope-mismatch")
+    val resolved = host_agent_workspace_policy_v1(manifest)?
+    if (resolved.source_digest != manifest.task_use.source_digest or resolved.catalog_digest != manifest.task_use.catalog_digest or
+            resolved.session.meta.ns != manifest.task_use.ns or resolved.session.agent.task_ref != manifest.task_use.task_ref or
+            resolved.session.agent.provider != manifest.task_use.provider or resolved.runtime.execution_os != "linux"):
+        return Err("agent-workspace-policy-task-use-mismatch")
+    val intent = build_provider_cli_interactive_intent_data_v1(selection, receipt, manifest.desired, resolved, manifest.task,
+        ProviderCliCodexInteractiveRequestDataV1(prompt: manifest.task.content, model: manifest.task_use.model))?
+    if (intent.binding_digest != manifest.interactive_intent_digest or intent.program_binding_digest != manifest.selection_binding_digest or
+            intent.image_config_id != manifest.image_config_id or sha256_text(intent.scope_bytes) != scope_digest or intent.argv != manifest.inner_argv):
+        return Err("agent-workspace-actual-selection-invocation-mismatch")
+    val workspace = agent_workspace_manifest_decode_v1(manifest.workspace_manifest)?
+    if workspace.repository_ref != resolved.session.workspace.repository_ref or resolved.session.workspace.isolation != "worktree":
+        return Err("agent-workspace-repository-policy-mismatch")
+    # Logical revision references require an installed mapping. This initial
+    # slice accepts only an explicit full commit OID in the signed desired spec.
+    if workspace.revision_oid != resolved.session.workspace.revision_ref: return Err("agent-workspace-exact-revision-required")
+    val digest = agent_workspace_invocation_manifest_digest_v1(manifest)?
+    val projection = source.agent_invocation_projection_v1(packet.host.execution.request_bytes, manifest.workspace_manifest, digest)?
+    val native = linux_oci_retained_request_decode_v1(packet.host.execution.request_bytes)?
+    if native.image != intent.requested_image_ref: return Err("agent-workspace-selected-image-mismatch")
+    val program_match = source.agent_invocation_program_match_v1(packet.host.execution.request_bytes, manifest.workspace_manifest,
+        digest, intent.argv[0], intent.image_config_id)?
+    if not program_match: return Err("agent-workspace-installed-program-mismatch")
+    if (not projection.has_workspace or projection.has_devices or projection.operation_id != plan.operation_id or
+            projection.workload_uid != plan.workload_uid or projection.attempt != plan.attempt or projection.request_digest != plan.request_digest or
+            projection.cpu_millis != packet.host.intent.reservation.cpu_millis or projection.memory_bytes != packet.host.intent.reservation.memory_bytes or
+            projection.timeout_ms <= 0 or projection.timeout_ms > packet.host.operation.duration_ms):
+        return Err("agent-workspace-source-projection-mismatch")
+    var execution = packet.host.operation
+    execution.operation = "host_execute_v1"
+    val host_grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.host.signed, packet.host.approval,
+        execution, context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)?
+    val invocation = host_agent_workspace_invocation_operation_v1(manifest, packet.host.operation, policy, scope, context)?
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, packet.signed, packet.approval,
+        invocation, context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch, context.session_generation)?
+    if (manifest.not_after <= context.grant_clock or manifest.not_after > grant.expires_at or manifest.not_after > packet.approval.expires_at or
+            manifest.not_after > host_grant.expires_at or manifest.not_after > packet.host.approval.expires_at):
+        return Err("agent-workspace-inner-exec-deadline-invalid")
+    Ok(HostAgentWorkspaceValidationV1(projection: projection, invocation: invocation, grant: grant))
+
+pub fn host_agent_workspace_archive_v1(owner: HostCapacityOwnerV1, packet: AgentWorkspaceInvocationPacketV1) -> Result<bool, text>:
+    val suffix = sha256_text(packet.host.operation.id)
+    val packet_bytes = agent_workspace_invocation_packet_encode_v1(packet)?
+    val manifest = agent_workspace_invocation_manifest_encode_v1(packet.manifest)?
+    val packet_saved = host_execution_archive_publish_v3(owner.journal, "host-execute-packets", "agent-invoke-" + suffix, packet_bytes, 2097152)?
+    val manifest_saved = host_execution_archive_publish_v3(owner.journal, "host-execute-packets", "agent-manifest-" + suffix, manifest, 524288)?
+    Ok(true)
+
+# Internal effect continuation: no caller bool, opaque proof or alternate
+# registry. Direct callers still need the exact actual executing journal row,
+# both independent installed signatures, original source custody and archives.
+pub fn host_agent_workspace_stage_begun_v1(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        source: LinuxWorkspaceSourceOwnerV1, packet: AgentWorkspaceInvocationPacketV1,
+        selection: ProviderCliContainedSelectionV1, receipt: ProviderCliContainedProbeReceiptV1,
+        policy: LocalAuthorityPolicyV1, expected_provider: text, service_scope: text,
+        before: HostReservationAuthorizationContextV1, refresh_context: fn() -> HostReservationAuthorizationContextV1) -> HostAgentWorkspaceTurnV1:
+    val context = refresh_context()
+    if context.grant_clock < before.grant_clock or context.monotonic_ms < before.monotonic_ms:
+        return host_agent_workspace_turn_v1(owner, container, source, false, true, true, "agent-workspace-clock-regressed")
+    val checked = host_agent_workspace_validate_v1(owner, container, source, packet, selection, receipt, policy,
+        expected_provider, service_scope, context, "executing")
+    if checked.is_err(): return host_agent_workspace_turn_v1(owner, container, source, false, true, true, checked.unwrap_err())
+    val suffix = sha256_text(packet.host.operation.id)
+    val packet_path = match host_execution_archive_relative_v3("host-execute-packets", "agent-invoke-" + suffix):
+        case Ok(value): value
+        case Err(reason): return host_agent_workspace_turn_v1(owner, container, source, false, true, true, reason)
+    val stored = distributed_operation_journal_read_required_v3(owner.journal, packet_path, 2097152)
+    val canonical = agent_workspace_invocation_packet_encode_v1(packet)
+    if stored.is_err() or canonical.is_err():
+        return host_agent_workspace_turn_v1(owner, container, source, false, true, true, "agent-workspace-archive-unavailable")
+    if stored.unwrap() != canonical.unwrap():
+        return host_agent_workspace_turn_v1(owner, container, source, false, true, true, "agent-workspace-retained-packet-mismatch")
+    val digest = match agent_workspace_invocation_manifest_digest_v1(packet.manifest):
+        case Ok(value): value
+        case Err(reason): return host_agent_workspace_turn_v1(owner, container, source, false, true, true, reason)
+    val invocation_bytes = match agent_workspace_invocation_manifest_encode_v1(packet.manifest):
+        case Ok(value): value
+        case Err(reason): return host_agent_workspace_turn_v1(owner, container, source, false, true, true, reason)
+    val stage_context = refresh_context()
+    if stage_context.grant_clock < context.grant_clock or stage_context.monotonic_ms < context.monotonic_ms:
+        return host_agent_workspace_turn_v1(owner, container, source, false, true, true, "agent-workspace-clock-regressed")
+    val stage_checked = host_agent_workspace_validate_v1(owner, container, source, packet, selection, receipt, policy,
+        expected_provider, service_scope, stage_context, "executing")
+    if stage_checked.is_err(): return host_agent_workspace_turn_v1(owner, container, source, false, true, true, stage_checked.unwrap_err())
+    val staged = source.stage_agent_invocation_v1(packet.host.execution.request_bytes, packet.manifest.workspace_manifest, digest, invocation_bytes)
+    # Always adopt the actual returned source before inspecting any result.
+    val current_source = staged.owner
+    if staged.error != "" or not staged.ready:
+        val error = if staged.error != "": staged.error else: "agent-workspace-staging-incomplete"
+        return host_agent_workspace_turn_v1(owner, container, current_source, false, true, true, error)
+    # No workspace-enabled create/start/exec/observation port is inferred here.
+    # Staging completion retains the same charged Host/source custody.
+    host_agent_workspace_turn_v1(owner, container, current_source, true, true, true, "agent-workspace-provider-launch-not-integrated")

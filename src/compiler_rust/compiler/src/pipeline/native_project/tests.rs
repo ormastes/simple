@@ -676,6 +676,7 @@ fn enum_runtime_identity_qualification_preserves_builtins_and_custom_shadows() {
         dest: unit,
         enum_name: "Result".to_string(),
         variant_name: "Same".to_string(),
+        discriminant: simple_runtime::value::hash_variant_discriminant("Same"),
     });
     block.instructions.push(MirInst::PatternTest {
         dest: matched,
@@ -683,6 +684,7 @@ fn enum_runtime_identity_qualification_preserves_builtins_and_custom_shadows() {
         pattern: MirPattern::Variant {
             enum_name: "Option".to_string(),
             variant_name: "None".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("None"),
             payload: None,
         },
     });
@@ -726,6 +728,7 @@ fn enum_runtime_identity_uses_unique_global_enum_suffix() {
             dest,
             enum_name: "FixConfidence".to_string(),
             variant_name: "Safe".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("Safe"),
         });
     mir.functions.push(function);
 
@@ -766,6 +769,7 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
             dest,
             enum_name: "ByteOrder".to_string(),
             variant_name: "LittleEndian".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("LittleEndian"),
         });
     mir.functions.push(function);
 
@@ -1022,6 +1026,7 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7024,6 +7029,7 @@ int main(void) { app_call(); return 0; }
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7141,6 +7147,7 @@ void __module_init_security_registry(void) {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7423,6 +7430,7 @@ int main(int argc, char** argv) {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7563,6 +7571,7 @@ int main(void) {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7638,6 +7647,7 @@ int main(void) {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7707,6 +7717,7 @@ int main(void) { return (int)run_check(); }
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -8493,6 +8504,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -9381,6 +9393,7 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         duplicate_struct_defs: std::collections::HashMap::new(),
         struct_field_defaults: std::collections::HashMap::new(),
         enum_defs: std::collections::HashMap::new(),
+        duplicate_enum_names: std::collections::HashSet::new(),
         enum_runtime_names: std::collections::HashMap::new(),
         enum_runtime_collision: None,
         data_exports: std::collections::HashSet::new(),
@@ -9646,6 +9659,7 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -10349,4 +10363,24 @@ fn text_opt_rewritten_when_source_unparseable() {
     let out = super::compiler::normalize_text_opt_if_unparseable(src);
     assert_eq!(out, src.replace("text?", "text"));
     assert!(!out.contains("text?"));
+}
+
+#[test]
+fn file_phase_timing_line_names_phase_seconds_and_file() {
+    let line = super::compiler::phase_line("hir", 1.234, Path::new("a/b.spl"));
+    assert_eq!(line, "[native-file-phase] hir=1.23s a/b.spl");
+}
+
+#[test]
+fn file_phase_timer_only_advances_when_enabled() {
+    let file = Path::new("a/b.spl");
+    let mut off = super::compiler::FilePhaseTimer::with_enabled(file, false);
+    let off_start = off.last_for_tests();
+    off.mark("parse");
+    assert_eq!(off.last_for_tests(), off_start);
+    let mut on = super::compiler::FilePhaseTimer::with_enabled(file, true);
+    let on_start = on.last_for_tests();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    on.mark("parse");
+    assert!(on.last_for_tests() > on_start);
 }

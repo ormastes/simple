@@ -1,4 +1,11 @@
 use std.nogc_async_mut.container.providers.linux.fresh_epoch_workload_v2.*
+use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.common.contracts.container.execution_stats_v1.ContainerExecutionStatsObservationV1
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{MachineFreshProbeCallV3,
+    MachineFreshProbeReplyV3, machine_fresh_probe_rejected_v3}
 use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.LinuxWorkspaceSourceLoanV3
 use std.nogc_async_mut.container.shared.logs_capture_v1.*
 # Linux leaf adapter for the common container API. Its callers serialize access
@@ -134,6 +141,16 @@ impl LinuxSimpleContainerAdapterV2:
         retained._fresh = Some(actual.owner)
         LinuxWorkspacePrimaryObserveTurnV3(retained, actual.observation, actual.pending, actual.error)
 
+    pub fn probe_v3(request: ContainerExecutionRequestV2,
+            call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        var retained = self
+        if self._fresh.is_none():
+            return machine_fresh_probe_rejected_v3(call, "machine-probe-original-owner-required")
+        val fresh = self._fresh.unwrap()
+        val result = fresh.probe_v3(request, call)
+        retained._fresh = Some(fresh)
+        result
+
     pub fn workspace_begin_v3(action: ContainerWorkspaceActionV3, request: ContainerExecutionRequestV2,
             deadline: Option<ContainerEffectDeadlineV1> = nil) -> LinuxWorkspaceActionTurnV3:
         var retained = self
@@ -155,6 +172,48 @@ impl LinuxSimpleContainerAdapterV2:
         val cancelled = self._fresh.unwrap().workspace_cancel_pending_v3(request)
         retained._fresh = Some(cancelled.owner)
         LinuxWorkspaceActionTurnV3(retained, cancelled.operation, cancelled.pending, cancelled.error)
+
+    # ---- milestone_0021 V4 agent forwards (3.3): each delegates to the fresh owner's twin and retains it. ----
+    pub fn epoch_current_v3() -> Result<MachineFreshEpochRecordV1, text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().epoch_current_v3()
+
+    pub fn helper_dirs_v3() -> Result<[text], text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().helper_dirs_v3()
+
+    pub fn validate_helper_template_v3(template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().validate_helper_template_v3(template)
+
+    pub fn settle_workspace_v3() -> Result<(), text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().settle_workspace_v3()
+
+    pub fn return_settled_workspace_source_v3() -> Result<bool, text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().return_settled_workspace_source_v3()
+
+    pub fn close_workload_v3() -> Result<(), text>:
+        if self._fresh.is_none(): return Err("linux-workspace-fresh-root-required")
+        self._fresh.unwrap().close_workload_v3()
+
+    # `kind` selects one owner-changing twin; root/native/text are its only inputs. One switch keeps the
+    # retain-before-result discipline of the forwards above in a single place.
+    pub fn agent_step_v3(kind: text, root: Option<LinuxWorkspaceRootBorrowV3> = None,
+            native: Option<LinuxServiceNativeIdentityBorrowV3> = None, value: text = "") -> LinuxAdapterAgentTurnV3:
+        var retained = self
+        if self._fresh.is_none(): return LinuxAdapterAgentTurnV3(owner: retained, root: root, native: native, error: "linux-workspace-fresh-root-required")
+        val fresh = self._fresh.unwrap()
+        var turn = LinuxFreshAgentTurnV3(owner: fresh, root: root, native: native, error: "linux-agent-step-unknown")
+        if kind == "take-root": turn = fresh.take_workspace_root_v3()
+        elif kind == "end-root" and root.is_some(): turn = fresh.end_workspace_root_loan_v3(root.unwrap())
+        elif kind == "end-service" and native.is_some(): turn = fresh.end_service_loan_v3(native.unwrap())
+        elif kind == "adopt-reader": turn = fresh.adopt_lent_workspace_reader_v3()
+        elif kind == "advance": turn = fresh.advance_workload_v3()
+        elif kind == "lifecycle-root": turn = fresh.set_lifecycle_root_v3(value)
+        retained._fresh = Some(turn.owner)
+        LinuxAdapterAgentTurnV3(owner: retained, root: turn.root, native: turn.native, error: turn.error)
 
     pub fn close_fresh_v2() -> LinuxFreshAdapterCloseV2:
         if self._fresh.is_none(): return LinuxFreshAdapterCloseV2(Some(self), false, "container-adapter-lifecycle-retained")
@@ -374,6 +433,10 @@ impl LinuxSimpleContainerAdapterV2:
         LinuxOciEngineExecOwnerV3.inspect(self.provider.state_dir, parent, installed, admission)
 
     pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+        if val actual = self._fresh:
+            match actual.probe_v3(request, MachineFreshProbeCallV3.Projection):
+                case MachineFreshProbeReplyV3.Projection(projected): return projected
+                case _: return Err("machine-probe-projection-turn-mismatch")
         val checked = self._checked_request_v2(request)?
         val decoded = checked.0
         val valid = self.provider.validate(decoded)
@@ -404,6 +467,10 @@ impl LinuxSimpleContainerAdapterV2:
             case Ok(value): value.0
             case Err(reason): return container_runtime_logs_capture_refused_v1(reason)
         self.provider.logs_capture_begin_v1(decoded)
+
+    pub fn stats_v1(request: ContainerExecutionRequestV2) -> Result<ContainerExecutionStatsObservationV1, text>:
+        if val fresh = self._fresh: return fresh.stats_v1(request)
+        Err("container-stats-retained-subject-required")
 
     pub me read(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
         if val fresh = self._fresh: return fresh.read_v2(action, request)
@@ -698,6 +765,12 @@ impl LinuxSimpleContainerAdapterV2:
         self.provider.recover(decoded)
 
 # An actual fresh close may remain pending; callers retain this exact adapter.
+pub struct LinuxAdapterAgentTurnV3:
+    owner: LinuxSimpleContainerAdapterV2
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    native: Option<LinuxServiceNativeIdentityBorrowV3> = None
+    error: text = ""
+
 pub struct LinuxFreshAdapterCloseV2:
     owner: Option<LinuxSimpleContainerAdapterV2>
     closed: bool

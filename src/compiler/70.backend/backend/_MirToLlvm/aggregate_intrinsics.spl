@@ -526,6 +526,19 @@ impl MirToLlvm:
             self.builder.emit("  {dest_name} = inttoptr {src_ty} {operand_val} to ptr")
         elif src_ty == "ptr" and (is_integer_type(target_ty) or target_ty == "i1"):
             self.builder.emit("  {dest_name} = ptrtoint ptr {operand_val} to {target_ty}")
+        elif src_ty == "ptr" and is_float_type(target_ty):
+            # A float word read from an untyped slot (rt_tuple_get / rt_enum_payload
+            # emitted as `call ptr`) holds raw IEEE bits; `bitcast ptr to double`
+            # is invalid IR (llc: "invalid cast opcode"). Go through the same-width int.
+            val float_bits = self.builder.fresh_local()
+            val bits_ty = self.float_int_equiv(target_ty)
+            self.builder.emit("  {float_bits} = ptrtoint ptr {operand_val} to {bits_ty}")
+            self.builder.emit("  {dest_name} = bitcast {bits_ty} {float_bits} to {target_ty}")
+        elif is_float_type(src_ty) and target_ty == "ptr":
+            val float_bits = self.builder.fresh_local()
+            val bits_ty = self.float_int_equiv(src_ty)
+            self.builder.emit("  {float_bits} = bitcast {src_ty} {operand_val} to {bits_ty}")
+            self.builder.emit("  {dest_name} = inttoptr {bits_ty} {float_bits} to ptr")
         elif src_ty == "i1" and is_integer_type(target_ty):
             # LLVM `bitcast` needs equal bit widths: `bitcast i1 to i64` is
             # rejected by llc ("invalid cast opcode"). A bool widens by zext.

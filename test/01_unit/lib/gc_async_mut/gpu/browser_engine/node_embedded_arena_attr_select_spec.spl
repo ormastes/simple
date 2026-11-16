@@ -1,0 +1,511 @@
+# Purpose and audience: executable specification for Three-Tier Hybrid Node Storage
+# (embedded hot slots + compact inline / CSR attribute arena + host hash sidecar)
+# and bitmask-filtered tree node attribute selection across BeDomNode, HNode,
+# selector_matcher, and GPU-compatible DomArena.
+# @req REQ-SSPEC-UNIT
+# @cover src/lib/gc_async_mut/gpu/browser_engine/dom.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/selector_matcher.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/gpu_web/dom/dom_attr_select.spl
+
+use std.spec.{describe, context, it, expect, step}
+
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode,
+    StyleProps,
+    DOM_INLINE_ATTR_CAP,
+    DOM_ATTR_ID_BIT,
+    DOM_ATTR_CLASS_BIT,
+    DOM_ATTR_STYLE_BIT,
+    DOM_ATTR_HIDDEN_BIT,
+    DOM_ATTR_DISABLED_BIT,
+    DOM_ATTR_CHECKED_BIT,
+    DOM_ATTR_ROLE_BIT,
+    DOM_ATTR_SRC_BIT,
+    DOM_ATTR_DATA_BIT,
+    DOM_ATTR_OVERFLOW_BIT,
+    dom_attr_bloom_bit,
+    DOM_CSS_DECL_COLOR,
+    DOM_CSS_DECL_DISPLAY,
+    apply_style_inheritance,
+    be_dom_find_by_id,
+    be_dom_query_selector,
+    be_dom_query_selector_all
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_flat_projection
+}
+use std.gc_async_mut.gpu.browser_engine.selector_matcher.{
+    br_selector_list_contains_not_self,
+    br_selector_list_contains_attr_self
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    HNode,
+    mk_node,
+    mk_element_node,
+    HNODE_ATTR_ID_BIT,
+    HNODE_ATTR_CLASS_BIT,
+    HNODE_ATTR_STYLE_BIT,
+    HNODE_ATTR_HIDDEN_BIT,
+    HNODE_ATTR_DISABLED_BIT,
+    HNODE_ATTR_CHECKED_BIT,
+    HNODE_ATTR_SELECTED_BIT,
+    HNODE_ATTR_ROLE_BIT,
+    HNODE_ATTR_TYPE_BIT,
+    HNODE_ATTR_LANG_BIT,
+    HNODE_ATTR_ARIA_BIT,
+    HNODE_ATTR_DATA_BIT,
+    hnode_attr_bloom_bit
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_types.{
+    Rules,
+    RuleBuckets
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_css_rules.{
+    extract_css
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_selectors.{
+    ATTR_OP_PRESENT,
+    ATTR_OP_EXACT,
+    build_rule_buckets,
+    style_rule_candidates,
+    parsed_attr_matches_node,
+    attr_selector_matches_node,
+    _parse_attr_test,
+    _element_is_checked_node,
+    _is_interaction_state_pseudo_node
+}
+use std.common.ui.gpu_web_capacity_manifest.{
+    GpuWebCapacityManifest,
+    gpu_web_capacity_manifest_compile_time_default
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.dom.dom_arena_types.{
+    DOM_NO_ID,
+    DOM_NODE_KIND_DOCUMENT,
+    DOM_NODE_KIND_ELEMENT,
+    DOM_NODE_KIND_TEXT,
+    dom_arena_node_count,
+    dom_arena_kind
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.dom.dom_arena_build.{
+    dom_builder_new,
+    dom_builder_open_document,
+    dom_builder_open_element,
+    dom_builder_attribute,
+    dom_builder_text,
+    dom_builder_close,
+    dom_builder_finish
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.dom.dom_attr_select.{
+    DomAttrSelectOp,
+    DOM_ATTR_OP_PRESENT,
+    DOM_ATTR_OP_EXACT,
+    DOM_ATTR_OP_WORD,
+    DOM_ATTR_OP_DASH_PREFIX,
+    DOM_ATTR_OP_PREFIX,
+    DOM_ATTR_OP_SUFFIX,
+    DOM_ATTR_OP_SUBSTRING,
+    DOM_ARENA_ATTR_ID_BIT,
+    DOM_ARENA_ATTR_CLASS_BIT,
+    DOM_ARENA_ATTR_ROLE_BIT,
+    DOM_ARENA_ATTR_LANG_BIT,
+    DOM_ARENA_ATTR_ARIA_BIT,
+    DOM_ARENA_ATTR_DATA_BIT,
+    DOM_ARENA_ATTR_HREF_BIT,
+    DomAttrBitmaskColumn,
+    DomHostIdSidecar,
+    dom_attr_select_op_code,
+    dom_arena_attr_mask_bit,
+    dom_build_attr_bitmask_column,
+    dom_arena_node_matches_attr,
+    dom_arena_select_attr,
+    dom_build_host_id_sidecar,
+    dom_host_sidecar_find_id
+}
+
+fn _manifest_ok() -> GpuWebCapacityManifest:
+    gpu_web_capacity_manifest_compile_time_default()
+
+fn _build_sample_dom_tree() -> BeDomNode:
+    var doc = BeDomNode.document()
+    var body = BeDomNode.element_with_id(1, "body")
+
+    var nav = BeDomNode.element_with_id(2, "nav")
+    nav.set_attr("id", "main-nav")
+    nav.set_attr("class", "bar primary")
+
+    var link_a = BeDomNode.element_with_id(3, "a")
+    link_a.set_attr("href", "https://example.org/docs/intro")
+    link_a.set_attr("lang", "en-US")
+    nav.add_child(link_a)
+
+    var tabs = BeDomNode.element_with_id(4, "div")
+    tabs.set_attr("id", "tabs")
+    tabs.set_attr("class", "panel-wrap")
+
+    var card1 = BeDomNode.element_with_id(5, "div")
+    card1.set_attr("id", "tab-1")
+    card1.set_attr("class", "card active")
+    card1.set_attr("role", "tabpanel")
+    card1.set_attr("aria-selected", "true")
+    card1.set_attr("data-state", "Ready")
+
+    var card2 = BeDomNode.element_with_id(6, "div")
+    card2.set_attr("id", "tab-2")
+    card2.set_attr("class", "card")
+    card2.set_attr("role", "tabpanel")
+    card2.set_attr("aria-selected", "false")
+    card2.set_attr("hidden", "")
+    card2.set_attr("data-state", "closed")
+
+    tabs.add_child(card1)
+    tabs.add_child(card2)
+    body.add_child(nav)
+    body.add_child(tabs)
+    doc.add_child(body)
+    doc
+
+fn _build_sample_arena() -> DomArena:
+    # Node indices:
+    # 0: #document
+    # 1: html (lang="en-GB")
+    # 2: body (class="shell main")
+    # 3: div (id="hero", class="card primary", role="tabpanel", aria-selected="true", data-state="OpenNow")
+    # 4: #text ("hello")
+    # 5: a (id="docs", href="https://simple-lang.org/guide.html", data-kind="ext link")
+    # 6: button (id="hero", disabled="", data-state="closed")  -- intentionally duplicates id="hero"
+    var b = dom_builder_new()
+    b = dom_builder_open_document(b)
+    b = dom_builder_open_element(b, "html", "")
+    b = dom_builder_attribute(b, "lang", "en-GB", "")
+    b = dom_builder_open_element(b, "body", "")
+    b = dom_builder_attribute(b, "class", "shell main", "")
+    b = dom_builder_open_element(b, "div", "")
+    b = dom_builder_attribute(b, "id", "hero", "")
+    b = dom_builder_attribute(b, "class", "card primary", "")
+    b = dom_builder_attribute(b, "role", "tabpanel", "")
+    b = dom_builder_attribute(b, "aria-selected", "true", "")
+    b = dom_builder_attribute(b, "data-state", "OpenNow", "")
+    b = dom_builder_text(b, "hello")
+    b = dom_builder_close(b)
+    b = dom_builder_open_element(b, "a", "")
+    b = dom_builder_attribute(b, "id", "docs", "")
+    b = dom_builder_attribute(b, "href", "https://simple-lang.org/guide.html", "")
+    b = dom_builder_attribute(b, "data-kind", "ext link", "")
+    b = dom_builder_close(b)
+    b = dom_builder_open_element(b, "button", "")
+    b = dom_builder_attribute(b, "id", "hero", "")
+    b = dom_builder_attribute(b, "disabled", "", "")
+    b = dom_builder_attribute(b, "data-state", "closed", "")
+    b = dom_builder_close(b)
+    b = dom_builder_close(b)
+    b = dom_builder_close(b)
+    b = dom_builder_close(b)
+    val res = dom_builder_finish(b, _manifest_ok())
+    res.arena
+
+describe "Three-tier hybrid node storage (BeDomNode)":
+    it "allocates zero attribute containers on text/document and promotes Tier 1 hot slots":
+        step("Verify #document, #text, and promoted Tier 1 slots keep Dict empty")
+        val doc = BeDomNode.document()
+        val txt = BeDomNode.text_node(2, "hello")
+        expect(doc.attr_mask).to_equal(0u32)
+        expect(doc.attributes.len()).to_equal(0)
+        expect(txt.attr_mask).to_equal(0u32)
+        expect(txt.attributes.len()).to_equal(0)
+
+        var el = BeDomNode.element_with_id(3, "img")
+        el.set_attr("id", "avatar")
+        el.set_attr("class", "thumb rounded")
+        el.set_attr("style", "width: 32px;")
+        el.set_attr("src", "/a.png")
+        el.set_attr("role", "img")
+
+        expect(el.id_attr).to_equal("avatar")
+        expect(el.class_attr).to_equal("thumb rounded")
+        expect(el.style_attr).to_equal("width: 32px;")
+        expect(el.src_attr).to_equal("/a.png")
+        expect(el.role_attr).to_equal("img")
+        expect(el.attributes.len()).to_equal(0)
+        expect(el.attr_keys.len()).to_equal(0)
+        expect((el.attr_mask & DOM_ATTR_ID_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & DOM_ATTR_CLASS_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & DOM_ATTR_STYLE_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & DOM_ATTR_SRC_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & DOM_ATTR_ROLE_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & DOM_ATTR_OVERFLOW_BIT) == 0u32).to_equal(true)
+
+        el.remove_attr("role")
+        expect(el.has_attr("role")).to_equal(false)
+        expect((el.attr_mask & DOM_ATTR_ROLE_BIT) == 0u32).to_equal(true)
+
+    it "stores up to 8 cold attributes in Tier 2 arrays without overflow Dict":
+        step("Verify <= 8 cold attrs remain in Tier 2 compact parallel arrays")
+        expect(DOM_INLINE_ATTR_CAP).to_equal(8)
+        var el = BeDomNode.element_with_id(10, "input")
+        var k = 0
+        while k < 8:
+            el.set_attr("data-k" + k.to_text(), "v" + k.to_text())
+            k = k + 1
+        expect(el.attr_keys.len()).to_equal(8)
+        expect(el.attr_vals.len()).to_equal(8)
+        expect(el.attributes.len()).to_equal(0)
+        expect((el.attr_mask & DOM_ATTR_DATA_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & DOM_ATTR_OVERFLOW_BIT) == 0u32).to_equal(true)
+
+        el.set_attr("data-k3", "updated-3")
+        expect(el.get_attr("data-k3")).to_equal("updated-3")
+        expect(el.attr_keys.len()).to_equal(8)
+
+        el.remove_attr("data-k2")
+        expect(el.has_attr("data-k2")).to_equal(false)
+        expect(el.attr_keys.len()).to_equal(7)
+
+    it "spills > 8 cold attributes to Tier 3 overflow Dict and hides internal keys from attr_names":
+        step("Verify Tier 3 overflow bit, attr_names round-trip, and internal key exclusion")
+        var el = BeDomNode.element_with_id(11, "div")
+        el.set_attr("id", "big")
+        var k = 0
+        while k < 10:
+            el.set_attr("data-x" + k.to_text(), "val" + k.to_text())
+            k = k + 1
+        el.set_attr("\u0000simple-render-image-poster", "poster.png")
+
+        expect((el.attr_mask & DOM_ATTR_OVERFLOW_BIT) != 0u32).to_equal(true)
+        expect(el.attr_keys.len()).to_equal(8)
+        expect(el.attributes.len()).to_equal(3)
+        expect(el.get_attr("data-x8")).to_equal("val8")
+        expect(el.get_attr("data-x9")).to_equal("val9")
+        expect(el.get_attr("\u0000simple-render-image-poster")).to_equal("poster.png")
+
+        val names = el.attr_names()
+        expect(names.len()).to_equal(11)
+        var saw_internal = false
+        var ni = 0
+        while ni < names.len():
+            if names[ni].starts_with("\u0000"):
+                saw_internal = true
+            ni = ni + 1
+        expect(saw_internal).to_equal(false)
+
+        el.remove_attr("data-x9")
+        el.remove_attr("data-x8")
+        expect(el.has_attr("data-x8")).to_equal(false)
+        expect((el.attr_mask & DOM_ATTR_OVERFLOW_BIT) == 0u32).to_equal(true)
+
+    it "tracks CSS declarations in css_declared_mask without Dict markers":
+        step("Verify mark_css_declared uses bitmask + extra list and drives inheritance")
+        var parent = BeDomNode.element_with_id(1, "div")
+        parent.style.color = "#112233"
+        parent.style.font_size = 20.0
+        parent.mark_css_declared("color")
+        parent.mark_css_declared("font-size")
+        parent.mark_css_declared("--custom-theme")
+
+        expect(parent.attributes.len()).to_equal(0)
+        expect((parent.css_declared_mask & DOM_CSS_DECL_COLOR) != 0u32).to_equal(true)
+        expect(parent.css_declared("color")).to_equal(true)
+        expect(parent.css_declared("font-size")).to_equal(true)
+        expect(parent.css_declared("--custom-theme")).to_equal(true)
+        expect(parent.css_declared("display")).to_equal(false)
+
+        var child = BeDomNode.element_with_id(2, "span")
+        child.style.color = "#990000"
+        child.mark_css_declared("color")
+        parent.add_child(child)
+
+        val inherited_tree = apply_style_inheritance(parent)
+        val out_child = inherited_tree.children[0]
+        expect(out_child.style.color).to_equal("#990000")
+        expect(out_child.style.font_size).to_equal(20.0)
+
+    it "projects attributes across Tier 1/2/3 in html_tree_builder_flat_projection":
+        step("Verify flat projection serializes sorted attributes faithfully")
+        val html = "<html><body><div id=\"box\" class=\"card\" role=\"tabpanel\" data-a=\"1\" data-b=\"2\" data-c=\"3\" data-d=\"4\" data-e=\"5\" data-f=\"6\" data-g=\"7\" data-h=\"8\" data-i=\"9\" data-j=\"10\">hi</div></body></html>"
+        val flat = html_tree_builder_flat_projection(html)
+        var found_div = false
+        var i = 0
+        while i < flat.nodes.len():
+            val fn_node = flat.nodes[i]
+            if fn_node.tag == "div":
+                found_div = true
+                expect(fn_node.normalized_attrs).to_contain("id=\"box\"")
+                expect(fn_node.normalized_attrs).to_contain("class=\"card\"")
+                expect(fn_node.normalized_attrs).to_contain("role=\"tabpanel\"")
+                expect(fn_node.normalized_attrs).to_contain("data-a=\"1\"")
+                expect(fn_node.normalized_attrs).to_contain("data-i=\"9\"")
+                expect(fn_node.normalized_attrs).to_contain("data-j=\"10\"")
+            i = i + 1
+        expect(found_div).to_equal(true)
+
+    it "evaluates be_dom_query_selector and be_dom_query_selector_all with CSS attr operators":
+        step("Verify ID, class, tag, compound, combinator, and 7 CSS attribute operators")
+        val doc = _build_sample_dom_tree()
+        val by_id = be_dom_find_by_id(doc, "tab-1")
+        expect(by_id != nil).to_equal(true)
+        if by_id != nil:
+            expect(by_id.node_id).to_equal(5)
+
+        val q1 = be_dom_query_selector(doc, "div.card[role=\"tabpanel\"][aria-selected=\"true\"]")
+        expect(q1 != nil).to_equal(true)
+        if q1 != nil:
+            expect(q1.get_attr("id")).to_equal("tab-1")
+
+        expect(be_dom_query_selector_all(doc, "[role=\"tabpanel\"]").len()).to_equal(2)
+        expect(be_dom_query_selector_all(doc, "[hidden]").len()).to_equal(1)
+        expect(be_dom_query_selector_all(doc, "[class~=\"active\"]").len()).to_equal(1)
+        expect(be_dom_query_selector_all(doc, "[lang|=\"en\"]").len()).to_equal(1)
+        expect(be_dom_query_selector_all(doc, "a[href^=\"https://\"]").len()).to_equal(1)
+        expect(be_dom_query_selector_all(doc, "a[href$=\"/intro\"]").len()).to_equal(1)
+        expect(be_dom_query_selector_all(doc, "a[href*=\"example.org\"]").len()).to_equal(1)
+        expect(be_dom_query_selector_all(doc, "[data-state=\"ready\" i]").len()).to_equal(1)
+        expect(be_dom_query_selector_all(doc, "[data-state=\"ready\" s]").len()).to_equal(0)
+        expect(be_dom_query_selector_all(doc, "#tabs > div[hidden], #main-nav a").len()).to_equal(2)
+
+describe "Bitmask-filtered tree node attribute selection (HNode, RuleBuckets, selector_matcher)":
+    it "evaluates all CSS attribute operators and flags in selector_matcher":
+        step("Verify br_selector_list_contains_attr_self and :not with compound/attr ops")
+        val card_tag = "div id=\"t1\" class=\"card primary\" role=\"tabpanel\" lang=\"en-US\" data-url=\"https://example.org/app.wasm\" data-tag=\"Alpha\""
+        expect(br_selector_list_contains_attr_self("div.card[role=\"tabpanel\"]", "div", card_tag)).to_equal(true)
+        expect(br_selector_list_contains_attr_self("[class~=\"primary\"]", "div", card_tag)).to_equal(true)
+        expect(br_selector_list_contains_attr_self("[lang|=\"en\"]", "div", card_tag)).to_equal(true)
+        expect(br_selector_list_contains_attr_self("[data-url^=\"https://\"]", "div", card_tag)).to_equal(true)
+        expect(br_selector_list_contains_attr_self("[data-url$=\".wasm\"]", "div", card_tag)).to_equal(true)
+        expect(br_selector_list_contains_attr_self("[data-url*=\"example.org\"]", "div", card_tag)).to_equal(true)
+        expect(br_selector_list_contains_attr_self("[data-tag=\"alpha\" i]", "div", card_tag)).to_equal(true)
+        expect(br_selector_list_contains_attr_self("[data-tag=\"alpha\" s]", "div", card_tag)).to_equal(false)
+        expect(br_selector_list_contains_not_self("div.card:not([disabled])", "div", card_tag)).to_equal(true)
+
+    it "builds HNode attr_mask + promoted slots in one pass and filters RuleBuckets":
+        step("Verify HNode bitmask, RuleBuckets attr_keys/attr_rules indexing, and pseudo fast paths")
+        val text_node = mk_node("#text", 0)
+        expect(text_node.attr_mask).to_equal(0u32)
+
+        val el = mk_element_node(
+            "input",
+            1,
+            "id=\"cb1\" class=\"chk\" style=\"margin:0\" role=\"checkbox\" type=\"checkbox\" lang=\"en\" aria-checked=\"true\" data-k=\"v\" checked hidden"
+        )
+        expect(el.role_attr).to_equal("checkbox")
+        expect(el.type_attr).to_equal("checkbox")
+        expect((el.attr_mask & HNODE_ATTR_ID_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_CLASS_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_STYLE_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_ROLE_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_TYPE_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_LANG_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_ARIA_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_DATA_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_CHECKED_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & HNODE_ATTR_HIDDEN_BIT) != 0u32).to_equal(true)
+        expect((el.attr_mask & hnode_attr_bloom_bit("aria-checked")) != 0u32).to_equal(true)
+
+        expect(parsed_attr_matches_node(el, _parse_attr_test("role=\"checkbox\""))).to_equal(true)
+        expect(parsed_attr_matches_node(el, _parse_attr_test("hidden"))).to_equal(true)
+        expect(parsed_attr_matches_node(el, _parse_attr_test("disabled"))).to_equal(false)
+        expect(attr_selector_matches_node(el, "data-k=\"v\"")).to_equal(true)
+        expect(_element_is_checked_node(el)).to_equal(true)
+        expect(_is_interaction_state_pseudo_node("disabled", el)).to_equal(true)
+
+        val css_html = "<style>[hidden] {{ display: none; }} [role=\"tabpanel\"] {{ color: red; }} :not([disabled]) {{ color: green; }}</style>"
+        val rules = extract_css(css_html)
+        val buckets = build_rule_buckets(rules, false)
+        expect(buckets.attr_keys.len()).to_equal(2)
+        expect(buckets.attr_key_dict.contains_key("hidden")).to_equal(true)
+        expect(buckets.attr_key_dict.contains_key("role")).to_equal(true)
+        # `:not([disabled])` must stay in fallback_rules so nodes lacking `disabled` still evaluate it.
+        expect(buckets.fallback_rules.len()).to_be_greater_than(0)
+
+        val plain = mk_element_node("span", 1, "id=\"plain\"")
+        val tab = mk_element_node("div", 1, "role=\"tabpanel\"")
+        val plain_cands = style_rule_candidates(plain, buckets)
+        val tab_cands = style_rule_candidates(tab, buckets)
+        expect(tab_cands.len()).to_be_greater_than(plain_cands.len())
+
+describe "GPU-compatible DomArena attribute selection (dom_attr_select.spl)":
+    it "builds Pod/SoA DomAttrBitmaskColumn with zero masks on #document and #text":
+        step("Verify bitmask column spans all nodes with hot + Bloom bits only on elements")
+        val arena = _build_sample_arena()
+        val col = dom_build_attr_bitmask_column(arena)
+        expect(col.node_count).to_equal(arena.node_count)
+        expect(col.masks.len()).to_equal(dom_arena_node_count(arena))
+
+        # Node 0 is #document, Node 4 is #text
+        expect(dom_arena_kind(arena, 0)).to_equal(DOM_NODE_KIND_DOCUMENT)
+        expect(col.masks[0]).to_equal(0u32)
+        expect(dom_arena_kind(arena, 4)).to_equal(DOM_NODE_KIND_TEXT)
+        expect(col.masks[4]).to_equal(0u32)
+
+        # Node 3 is div#hero
+        expect(dom_arena_kind(arena, 3)).to_equal(DOM_NODE_KIND_ELEMENT)
+        val m3 = col.masks[3]
+        expect((m3 & DOM_ARENA_ATTR_ID_BIT) != 0u32).to_equal(true)
+        expect((m3 & DOM_ARENA_ATTR_CLASS_BIT) != 0u32).to_equal(true)
+        expect((m3 & DOM_ARENA_ATTR_ROLE_BIT) != 0u32).to_equal(true)
+        expect((m3 & DOM_ARENA_ATTR_ARIA_BIT) != 0u32).to_equal(true)
+        expect((m3 & DOM_ARENA_ATTR_DATA_BIT) != 0u32).to_equal(true)
+        expect((m3 & dom_arena_attr_mask_bit("aria-selected")) == dom_arena_attr_mask_bit("aria-selected")).to_equal(true)
+        expect((m3 & DOM_ARENA_ATTR_HREF_BIT) == 0u32).to_equal(true)
+
+    it "selects arena nodes across all 7 DomAttrSelectOp operators and i/s case flags":
+        step("Verify Stage 1 bitmask filter + Stage 3 StringId/CSR evaluation")
+        expect(dom_attr_select_op_code(DomAttrSelectOp.Present)).to_equal(DOM_ATTR_OP_PRESENT)
+        expect(dom_attr_select_op_code(DomAttrSelectOp.Exact)).to_equal(DOM_ATTR_OP_EXACT)
+        expect(dom_attr_select_op_code(DomAttrSelectOp.Word)).to_equal(DOM_ATTR_OP_WORD)
+        expect(dom_attr_select_op_code(DomAttrSelectOp.DashPrefix)).to_equal(DOM_ATTR_OP_DASH_PREFIX)
+        expect(dom_attr_select_op_code(DomAttrSelectOp.Prefix)).to_equal(DOM_ATTR_OP_PREFIX)
+        expect(dom_attr_select_op_code(DomAttrSelectOp.Suffix)).to_equal(DOM_ATTR_OP_SUFFIX)
+        expect(dom_attr_select_op_code(DomAttrSelectOp.Substring)).to_equal(DOM_ATTR_OP_SUBSTRING)
+
+        val arena = _build_sample_arena()
+        val col = dom_build_attr_bitmask_column(arena)
+
+        val p_res = dom_arena_select_attr(arena, col, "data-state", DomAttrSelectOp.Present, "", false)
+        expect(p_res.len()).to_equal(2)
+        expect(p_res[0]).to_equal(3u32)
+        expect(p_res[1]).to_equal(6u32)
+
+        val e_res = dom_arena_select_attr(arena, col, "role", DomAttrSelectOp.Exact, "tabpanel", false)
+        expect(e_res.len()).to_equal(1)
+        expect(e_res[0]).to_equal(3u32)
+
+        val w_res = dom_arena_select_attr(arena, col, "class", DomAttrSelectOp.Word, "primary", false)
+        expect(w_res.len()).to_equal(1)
+        expect(w_res[0]).to_equal(3u32)
+
+        val d_res = dom_arena_select_attr(arena, col, "lang", DomAttrSelectOp.DashPrefix, "en", false)
+        expect(d_res.len()).to_equal(1)
+        expect(d_res[0]).to_equal(1u32)
+
+        val pre_res = dom_arena_select_attr(arena, col, "href", DomAttrSelectOp.Prefix, "https://", false)
+        expect(pre_res.len()).to_equal(1)
+        expect(pre_res[0]).to_equal(5u32)
+
+        val suf_res = dom_arena_select_attr(arena, col, "href", DomAttrSelectOp.Suffix, ".html", false)
+        expect(suf_res.len()).to_equal(1)
+        expect(suf_res[0]).to_equal(5u32)
+
+        val sub_res = dom_arena_select_attr(arena, col, "href", DomAttrSelectOp.Substring, "simple-lang", false)
+        expect(sub_res.len()).to_equal(1)
+        expect(sub_res[0]).to_equal(5u32)
+
+        val ci_miss = dom_arena_select_attr(arena, col, "data-state", DomAttrSelectOp.Exact, "opennow", false)
+        expect(ci_miss.len()).to_equal(0)
+        val ci_hit = dom_arena_select_attr(arena, col, "data-state", DomAttrSelectOp.Exact, "opennow", true)
+        expect(ci_hit.len()).to_equal(1)
+        expect(ci_hit[0]).to_equal(3u32)
+
+        expect(dom_arena_node_matches_attr(arena, col, 4, "id", DomAttrSelectOp.Present, "", false)).to_equal(false)
+        expect(dom_arena_node_matches_attr(arena, col, 6, "disabled", DomAttrSelectOp.Exact, "", false)).to_equal(true)
+
+    it "builds host-only DomHostIdSidecar keeping Dict off DomArena and resolving first ID":
+        step("Verify DomHostIdSidecar maps IDs in document order and returns DOM_NO_ID on miss")
+        val arena = _build_sample_arena()
+        val sidecar = dom_build_host_id_sidecar(arena)
+        expect(sidecar.node_count).to_equal(arena.node_count)
+        expect(dom_host_sidecar_find_id(sidecar, "hero")).to_equal(3u32)
+        expect(dom_host_sidecar_find_id(sidecar, "docs")).to_equal(5u32)
+        expect(dom_host_sidecar_find_id(sidecar, "missing")).to_equal(DOM_NO_ID)
+        expect(dom_host_sidecar_find_id(sidecar, "")).to_equal(DOM_NO_ID)

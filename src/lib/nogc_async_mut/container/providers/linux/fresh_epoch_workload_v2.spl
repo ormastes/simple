@@ -1,6 +1,10 @@
 # Actual retained fresh-domain consumer for the common Container API. Ordinary
 # request/operation DTOs cannot construct the sealed transfer held here.
 use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.common.contracts.container.execution_stats_v1.*
+use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+use std.nogc_sync_mut.container.machine_fresh_probe_owner_v3.{MachineFreshProbeCallV3,
+    MachineFreshProbeReplyV3, machine_fresh_probe_rejected_v3}
 use std.nogc_async_mut.container.workspace_primary_retirement_v3.{ContainerPrimaryTransportRetirementV3, container_primary_transport_retirement_v3, ContainerPrimarySessionBindingV3, container_primary_session_binding_v3}
 use std.nogc_sync_mut.container.machine_fresh_workspace_primary_v3.{MachineWorkspacePrimaryCallV3, MachineWorkspacePrimaryReplyV3}
 use std.common.contracts.container.primary_attach_v1.ContainerPrimaryAttachPlanV1
@@ -8,6 +12,8 @@ use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, Contain
 use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2}
 use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_probe_custody_v3.machine_fresh_probe_request_validate_v3
+use std.common.contracts.provider_cli.adapter_types_v1.ProviderCliProviderV1
 use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.MachineFreshWorkloadActionResultV2
 use std.nogc_sync_mut.io.machine_local_process_principal_v1.MachineLocalProcessPrincipalV1
 use std.nogc_sync_mut.io.linux_container_containment_v1.LinuxContainerContainmentPopulationV1
@@ -27,6 +33,8 @@ use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
 use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.*
 use std.nogc_sync_mut.io.machine_storage_owner_v1.machine_storage_from_linux_v3
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
 
 pub class LinuxFreshWorkloadOwnerV2:
     transfer: MachineFreshWorkloadTransferV2
@@ -154,6 +162,33 @@ pub class LinuxFreshWorkloadOwnerV2:
         self.reply_v2(request, action, retained.phase,
             MachineFreshWorkloadActionResultV2(true, observation, 0, "", after.program, after.arguments))
 
+    # Caller-principal workloads re-authenticate that caller; installed owners
+    # (principal None) revalidate the transfer's own installed local principal.
+    fn stats_principal_v1() -> Result<Option<MachineLocalPrincipalSnapshotV1>, text>:
+        if val principal = self.principal: return Ok(Some(principal.current_v1()?))
+        val owned = self.transfer.validate_owned_principal_v3()?
+        Ok(None)
+
+    pub fn stats_v1(request: ContainerExecutionRequestV2) -> Result<ContainerExecutionStatsObservationV1, text>:
+        val principal = self.stats_principal_v1()?
+        if self.transfer.request_projection_v3()? != request: return Err("container-stats-original-request-changed")
+        val scope = self.scope_v2()?
+        val counters = self.transfer.stats_v1()?
+        val actual = RuntimeIdentityV1(pod_uid: request.plan.workload_uid, attempt: request.plan.attempt,
+            provider_generation: scope.provider_generation, operation_id: request.plan.operation_id, engine: "podman",
+            native_id: self.transfer.native_id_v2()?, node_boot_id: container_scope_fence_id_v2(scope)?)
+        if self.stats_principal_v1()? != principal or self.transfer.request_projection_v3()? != request:
+            return Err("container-stats-caller-or-request-changed")
+        val observation = ContainerExecutionStatsObservationV1(scope: scope, runtime: actual,
+            request_digest: request.plan.request_digest, source: "linux-cgroup2-original-container-root-and-descendants-v1",
+            subject_identity_digest: counters.subject_identity_digest,
+            sample_started_monotonic_ns: counters.sample_started_monotonic_ns,
+            sample_finished_monotonic_ns: counters.sample_finished_monotonic_ns,
+            cpu_usage_usec: counters.cpu_usage_usec, memory_current_bytes: counters.memory_current_bytes,
+            pids_current: counters.pids_current, io: counters.io)
+        container_execution_stats_observation_validate_v1(observation)?
+        Ok(observation)
+
     pub fn read_v2(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
         if action == "configuration" or action == "input-configuration":
             val observed = self.configuration_v2(action, request)
@@ -226,6 +261,25 @@ pub class LinuxFreshWorkloadOwnerV2:
         val observed = if actual.observation.is_some(): Some(ContainerWorkspacePrimaryObservationV3(owner: self)) else: nil
         LinuxFreshWorkspacePrimaryObserveTurnV3(self, observed, actual.pending, actual.error)
 
+    # V3 probes are CPU-workload-only. The canonical transfer validates the
+    # request before its live gate, preserving cleanup after uncertain effects.
+    pub fn probe_v3(request: ContainerExecutionRequestV2, call: MachineFreshProbeCallV3) -> MachineFreshProbeReplyV3:
+        match call:
+            case MachineFreshProbeCallV3.Select(embedded, provider, index):
+                if embedded != request: return machine_fresh_probe_rejected_v3(call, "machine-probe-original-request-mismatch")
+                val actual = self.prepare_probe_request_v3(request, provider, index)
+                if actual.is_err(): return machine_fresh_probe_rejected_v3(call, actual.unwrap_err())
+            case _: pass
+        self.transfer.probe_v3(request, call)
+
+    fn prepare_probe_request_v3(request: ContainerExecutionRequestV2, provider: ProviderCliProviderV1, index: i64) -> Result<(), text>:
+        val valid = machine_fresh_probe_request_validate_v3(self.scope_v2()?, request, provider, index)?
+        if self.principal.is_some():
+            val reserved = self.transfer.reserve_v2(self.principal.unwrap(), request, self.template)?
+        else:
+            val reserved = self.transfer.reserve_owned_v3(request, self.template)?
+        Ok(())
+
     pub fn workspace_begin_v3(action: ContainerWorkspaceActionV3, request: ContainerExecutionRequestV2,
             deadline: Option<ContainerEffectDeadlineV1> = nil) -> LinuxFreshWorkspaceActionTurnV3:
         val begun = self.transfer.begin_workspace_action_v3(action, request, deadline)
@@ -286,6 +340,58 @@ pub class LinuxFreshWorkloadOwnerV2:
             case MachineWorkspacePrimaryReplyV3.Completion(actual): actual
             case _: Err("workspace-primary-cleanup-turn-mismatch")
 
+    # ---- milestone_0021 V4 twins (3.3): each delegates to the same transfer method; values are returned. ----
+    pub fn epoch_current_v3() -> Result<MachineFreshEpochRecordV1, text>: self.transfer.epoch_current_v3()
+    pub fn helper_dirs_v3() -> Result<[text], text>: self.transfer.helper_dirs_v3()
+    pub fn validate_helper_template_v3(template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+        self.transfer.validate_helper_template_v3(template)
+
+    # 3.7 step 2: the workspace-root loan leaves the owner before the workload close (the close retires the R3
+    # the borrow aliases). After this the V7 close_v2 source cleanup branch no longer runs for this owner.
+    pub fn take_workspace_root_v3() -> LinuxFreshAgentTurnV3:
+        var retained = self
+        val root = retained.workspace_root
+        retained.workspace_root = None
+        if root.is_none(): return LinuxFreshAgentTurnV3(owner: retained, error: "linux-workspace-installed-root-required")
+        LinuxFreshAgentTurnV3(owner: retained, root: root)
+
+    pub fn end_workspace_root_loan_v3(root: LinuxWorkspaceRootBorrowV3) -> LinuxFreshAgentTurnV3:
+        var retained = self
+        val ended = retained.transfer.end_workspace_root_loan_v3(root)
+        retained.transfer = ended.owner
+        LinuxFreshAgentTurnV3(owner: retained, root: ended.root, error: ended.error)
+
+    pub fn end_service_loan_v3(native: LinuxServiceNativeIdentityBorrowV3) -> LinuxFreshAgentTurnV3:
+        var retained = self
+        val ended = retained.transfer.end_service_loan_v3(native)
+        retained.transfer = ended.owner
+        LinuxFreshAgentTurnV3(owner: retained, native: ended.native, error: ended.error)
+
+    pub fn adopt_lent_workspace_reader_v3() -> LinuxFreshAgentTurnV3:
+        var retained = self
+        val adopted = retained.transfer.adopt_lent_workspace_reader_v3()
+        retained.transfer = adopted.owner
+        LinuxFreshAgentTurnV3(owner: retained, error: adopted.error)
+
+    pub fn advance_workload_v3() -> LinuxFreshAgentTurnV3:
+        var retained = self
+        val advanced = retained.transfer.advance_workload_v3()
+        retained.transfer = advanced.owner
+        LinuxFreshAgentTurnV3(owner: retained, error: advanced.error)
+
+    pub fn settle_workspace_v3() -> Result<(), text>: self.transfer.settle_workspace_v3()
+    pub fn return_settled_workspace_source_v3() -> Result<bool, text>: self.transfer.return_settled_workspace_source_v3()
+    pub fn close_workload_v3() -> Result<(), text>: self.transfer.close_workload_v3()
+
+    # 3.4 step 4: the per-lifecycle helper root (pinned prefix + nonce + workload index), allowed only while the
+    # current lifecycle holds no record. Only `root` changes; the record bytes do not include it.
+    pub fn set_lifecycle_root_v3(root: text) -> LinuxFreshAgentTurnV3:
+        var retained = self
+        val checked = retained.transfer.lifecycle_root_check_v3(root)
+        if checked.is_err(): return LinuxFreshAgentTurnV3(owner: retained, error: checked.unwrap_err())
+        retained.template.root = root
+        LinuxFreshAgentTurnV3(owner: retained)
+
     pub fn close_v2() -> LinuxFreshWorkloadCloseTurnV2:
         if self.workspace_root.is_some():
             # Resolve the canonical acquisition obligation, including one
@@ -297,6 +403,55 @@ pub class LinuxFreshWorkloadOwnerV2:
         if val actual = closed.owner: retained.transfer = actual
         if not closed.closed or closed.owner.is_some(): return LinuxFreshWorkloadCloseTurnV2(Some(retained), false, closed.error)
         LinuxFreshWorkloadCloseTurnV2(nil, true, closed.error)
+
+pub struct LinuxFreshAgentTurnV3:
+    owner: LinuxFreshWorkloadOwnerV2
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    native: Option<LinuxServiceNativeIdentityBorrowV3> = None
+    error: text = ""
+
+# milestone_0021 3.3, steps 1-3 of the V4 lent factory. It opens NO epoch, reader, storage or admission: it
+# borrows the V4 service's ONE admission. Step 4 (adapter + tagged owner) is simple_container_open_lent_v4 in
+# api_v2 because the adapter imports this module. Every failure returns the actual owner: the admission before
+# the transfer, the fresh owner after it; the root loan (and a never-adopted R3) is ended before returning, and a
+# refused end hands the root back in `root`.
+pub struct LinuxWorkspaceRootOpenV4:
+    fresh: Option<LinuxFreshWorkloadOwnerV2> = None
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    admission_cleanup: Option<MachineFreshEpochAdmissionOwnerV1> = None
+    error: text = ""
+
+pub fn linux_workspace_root_open_lent_v4(admission: MachineFreshEpochAdmissionOwnerV1,
+        native: LinuxServiceNativeIdentityBorrowV3, template: GroupProcessStreamLaunchV2) -> LinuxWorkspaceRootOpenV4:
+    val lent = admission.lend_workspace_root_v1()
+    if lent.error != "" or lent.root.is_none():
+        return LinuxWorkspaceRootOpenV4(admission_cleanup: Some(lent.owner), error: lent.error)
+    val root = lent.root.unwrap()
+    val transferred = lent.owner.transfer_workload_lent_v3(native)
+    if transferred.owner.is_none():
+        # P2R1-F6: unreachable today (transfer_workload_lent_v3 returns Some(retained) on every refusal). If it is
+        # ever reached the admission is lost; the root is kept for the caller's loan end and the error is never empty.
+        if transferred.retained.is_none():
+            return LinuxWorkspaceRootOpenV4(root: Some(root),
+                error: if transferred.error != "": transferred.error else: "machine-fresh-lent-transfer-admission-lost")
+        val retained = transferred.retained.unwrap()
+        val ended = retained.end_workspace_root_loan_v1(root)
+        val kept = if ended.error != "": ended.root else: None
+        return LinuxWorkspaceRootOpenV4(root: kept, admission_cleanup: Some(ended.owner), error: transferred.error)
+    # R3 stays in transfer.admission.workspace_reader until stage `source` adopts it into the AGENT lifecycle.
+    val fresh = LinuxFreshWorkloadOwnerV2(transfer: transferred.owner.unwrap(), principal: None, template: template,
+        workspace_root: Some(root))
+    if transferred.error != "":
+        return linux_workspace_root_open_fresh_failed_v4(fresh, transferred.error)
+    LinuxWorkspaceRootOpenV4(fresh: Some(fresh))
+
+# Post-transfer failure (T-06): the root leaves the fresh owner and its loan ends on the transfer; the fresh owner
+# is the cleanup holder (`agent.fresh`), closed later through close_workload_v3's never-reserved branch.
+pub fn linux_workspace_root_open_fresh_failed_v4(fresh: LinuxFreshWorkloadOwnerV2, reason: text) -> LinuxWorkspaceRootOpenV4:
+    val taken = fresh.take_workspace_root_v3()
+    if taken.root.is_none(): return LinuxWorkspaceRootOpenV4(fresh: Some(taken.owner), error: reason)
+    val ended = taken.owner.end_workspace_root_loan_v3(taken.root.unwrap())
+    LinuxWorkspaceRootOpenV4(fresh: Some(ended.owner), root: if ended.error != "": ended.root else: None, error: reason)
 
 pub struct LinuxFreshWorkloadCloseTurnV2:
     owner: Option<LinuxFreshWorkloadOwnerV2>

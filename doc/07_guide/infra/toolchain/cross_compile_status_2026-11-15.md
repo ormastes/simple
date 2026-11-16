@@ -21,15 +21,73 @@ verification-pending: none has been verified natively yet (tagged **[U]**).
    (`scripts/bootstrap/bootstrap-from-scratch.sh` ~2589-2611). Only the reserve
    variable above survives.
 3. **[U]** After a seed rebuild, rebuild with `--invalidate-cache=stage2`.
-4. Helper scripts (`xc.sh`, `xc2.sh`) are not in the repo; the method is:
-   - `xc.sh`: runs `native-build` for linux-x86_64 and linux-aarch64.
-   - `xc2.sh`: builds the per-target Rust runtime with cargo, then runs
-     `native-build` for the target.
+4. Use the repo matrix script (replaces the ad-hoc `xc.sh`/`xc2.sh`/
+   `sosxc_nb.sh`/`matrix.sh` helpers); see "Matrix script" below.
 5. **[U]** Workaround `SIMPLE_HIR_SHARDING=0`
    (`src/app/cli/native_build_main.spl:969`) is unconfirmed and should be
    unneeded after #9427.
 6. Push gates need `MUST_CHECK_PUSH_BUDGET_S=600` on loaded hosts and still run
    every gate. Never use `--no-verify`.
+
+## Matrix script
+
+`scripts/check/check-cross-compile-matrix.shs` (Linux host, e.g. WSL
+Ubuntu-24.04). For each target x artifact (`lint` = `src/app/cli/lint_entry.spl`,
+`test` = `src/app/test_runner_new/main.spl`) it runs preflight, a free-memory
+gate, one `native-build` at a time with `SIMPLE_CACHE_SCOPE=xc-<target>`, then
+checks the artifact with `file` + `llvm-readelf -h` / `llvm-readobj
+--file-headers` (class and machine) and rejects an ELF with `NEEDED libgcc*`.
+
+```sh
+sh scripts/check/check-cross-compile-matrix.shs --selftest       # 22 fixtures, fatal
+sh scripts/check/check-cross-compile-matrix.shs --dry-run         # plan + preflight, builds nothing
+sh scripts/check/check-cross-compile-matrix.shs --list
+sh scripts/check/check-cross-compile-matrix.shs --targets linux-x86_64 --artifacts lint
+sh scripts/check/check-cross-compile-matrix.shs --targets linux-riscv64,linux-armv7 --run
+```
+
+Options: `--targets a,b|all` (default all), `--artifacts lint,test`,
+`--builder PATH` (default `~/xc/simple-p2`, else
+`bin/release/x86_64-unknown-linux-gnu/simple`), `--min-free-gb N` (default 8;
+waits up to `XC_MEM_WAIT_S`=1800 s, then ERROR), `--run` (`<artifact> --help`
+under qemu-user; wine is never used, so Windows/FreeBSD/SimpleOS rows are not
+run), `--out DIR` (default `build/cross-matrix`). Env: `XC_TOOLCHAINS`
+(default `~/toolchains`), `XC_LLVM_BIN` (default `/usr/lib/llvm-18/bin`),
+`SIMPLE_LLVM_MINGW`, `SIMPLE_CROSS_RT_PREFIX`, `XC_THREADS`, `XC_TIMEOUT`.
+
+Output: `<out>/results.tsv`, a markdown table, logs under `<out>/logs/`, and the
+verdict last. Row status PASS / FAIL / ERROR (missing tool, with a fix hint) /
+BLOCKED (known gap). Verdict FAIL if any row failed, else ERROR if any row could
+not be checked or no row passed, else PASS (exit 0/1/2).
+
+Hook for more targets (e.g. the NVMe FW bare-metal lane):
+`XC_MATRIX_EXTRA_TARGETS=<file>`, TAB-separated rows
+`name triple kind(rust|simpleos|baremetal) class(ELF32|ELF64|PE32+) arch-regex qemu extra-native-build-args`.
+Extra rows join `--targets all` and are not BLOCKED.
+
+Per-target status of the script (2026-11-16, WSL Ubuntu-24.04):
+
+| target | preflight | lint/test build | why |
+|---|---|---|---|
+| linux-x86_64, linux-aarch64 | ok [V] | not run yet | box busy with other lanes' builds |
+| linux-riscv64 | ok [V] | blocked | Simple AOT `.o` float ABI is not `lp64d` (see Gaps) |
+| linux-i686, linux-armv7 | ok [V] | blocked | `simple-runtime` does not cargo-build for 32-bit (18-19 errors) |
+| windows-x86_64, windows-aarch64 | ok [V] | not run yet | llc-18 defect / #9373 verification-pending |
+| freebsd-x86_64, freebsd-aarch64 | ok [V] | not run yet | phase-2 rebuild |
+| simpleos-x86_64/aarch64/riscv64gc | ok [V] | not run yet | SimpleOS lane |
+| baremetal-x86/x86_64/arm/aarch64/riscv32/riscv64 | - | BLOCKED | no hosted runtime for lint/test-runner; `XC_BAREMETAL_ENABLE=1` tries a simple-core build |
+
+## Toolchain setup
+
+- LLVM 18: `apt install clang-18 lld-18 llvm-18 file` (mold optional; noted if absent).
+- Rust: rustup + `rustup target add <triple>` per target (preflight names it).
+- Linux riscv64/i686/armv7: `apt install libc6-dev-{riscv64,i386,armhf}-cross`,
+  then `sh scripts/setup/build-linux-cross-compiler-rt.shs`; the cc line comes
+  from `scripts/setup/linux-cross-cc.shs`. Linux aarch64: `libc6-dev-arm64-cross`.
+- Windows: extract mstorsjo/llvm-mingw `<ver>-ucrt-ubuntu-22.04-x86_64` into
+  `~/toolchains/` (or set `SIMPLE_LLVM_MINGW`).
+- FreeBSD: extract FreeBSD 14.x `base.txz` into `~/toolchains/freebsd/{amd64,aarch64}`.
+- `--run`: `apt install qemu-user`.
 
 ## Toolchains
 
@@ -79,6 +137,25 @@ Gaps:
 | linux riscv32 | none | none | none | none | Ubuntu has no glibc, no sysroot |
 | simpleos x86_64/aarch64/riscv64 | `scripts/os/build-simpleos-*.shs` | not recorded | none | none | SimpleOS lane investigating |
 | simpleos 32-bit | none | none | none | none | no triples (only `scripts/check/check-simpleos-x86-32-user-elf.shs`) |
+
+### Bare-metal NVMe FW slice (`fw_xc`, 2026-11-16)
+
+Built with `simple-p2 native-build --emit-object`, a clang crt0 and `ld.lld -T`.
+No GCC. ELF headers are pinned by `scripts/check/check-nvme-fw-xc-elf.shs`.
+Details are in `doc/00_llm_process/feature_expert/nvme_firmware/skill.md`.
+
+| target | linked ELF | readelf -h | boot |
+|---|---|---|---|
+| i686-unknown-none-elf | [V] | ELF32 80386 0x0 [V] | build-only; no IA32 OVMF (bug `baremetal_i686_no_real_firmware_boot_lane_2026_11_16`) |
+| x86_64-unknown-none-elf | [V] | ELF64 X86-64 0x0 [V] | OVMF -> EFI app, serial PASS [V] |
+| thumbv7em-none-eabihf | [V] | ELF32 ARM 0x5000400 [V] | mps2-an386 reset vector, serial PASS [V] |
+| aarch64-unknown-none-elf | [V] | ELF64 AArch64 0x0 [V] | AAVMF -> EFI app, serial PASS [V] |
+| riscv32imac-unknown-none-elf | [V] | ELF32 RISC-V 0x1 [V] | virt `-bios <elf>` M-mode, serial PASS [V] |
+| riscv64gc-unknown-none-elf | [V] (lp64 workaround) | 0x1, pinned 0x5: RED [V] | virt `-bios <elf>` M-mode, serial PASS [V] |
+
+Open: Simple bare-metal RISC-V objects are base ISA (`rv32i`/`rv64i`, soft-float),
+tracked as bug `baremetal_riscv_target_contract_not_applied_2026_11_16`. thumbv7em needs the
+TODO env workaround from bug `native_build_target_flag_not_propagated_to_env_target_2026_11_16`. No board run.
 
 ## Landed fixes (all verification-pending [U])
 

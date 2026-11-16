@@ -53,7 +53,7 @@ use .main_lazy_telemetry.{tok_record, tok_rollup, tok_load_events, TOK_FEATURE_C
 use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plugins_text, LOG_OPT_FEATURE}
 
 use .ctx_index_cache.{CtxStorePath, CtxStoreLength, CtxStoreDigest, CtxGenerationKey, CtxCacheDecision, CtxCacheRebuildCount, ctx_generation_key_missing, ctx_generation_key_present, ctx_cache_decide, ctx_cache_rebuild_count_next}
-use .ctx_postings.{CtxPostings, CtxTerm, CtxNormBodies, CtxBodyLengths, CtxAvgLength, CtxScoreBoard, ctx_postings_build, ctx_scores_by_scan, ctx_scores_by_postings, CtxGenerationHits, CtxPostingsBuildCount, CtxPostingsDecision, ctx_generation_hits_zero, ctx_generation_hits_next, ctx_postings_build_count_next, ctx_postings_decide}
+use .ctx_postings.{CtxPostings, CtxTerm, CtxNormBodies, CtxBodyLengths, CtxAvgLength, CtxScoreBoard, ctx_postings_build, ctx_postings_append, ctx_scores_by_scan, ctx_scores_by_postings, CtxGenerationHits, CtxPostingsBuildCount, CtxPostingsDecision, ctx_generation_hits_zero, ctx_generation_hits_next, ctx_postings_build_count_next, ctx_postings_decide}
 use .ctx_redaction.{CtxRawContent, ctx_redact}
 use .ctx_retention.{CtxChunkId, CtxSourceLabel, CtxUnixSecs, CtxAgeLimit, CtxByteCount, CtxRetentionRow, CtxRetentionPolicy, CtxPolicyCheck, CtxPurgeMode, CtxRetentionPlan, ctx_retention_row, ctx_retention_policy, ctx_retention_check, ctx_retention_decide, ctx_policy_check_label}
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, dir_create, time_now_unix_micros, file_size_signed, file_hash_sha256_or_empty}
@@ -372,8 +372,10 @@ pub fn ctx_index_text(raw_content: text, source: text) -> CtxChunkCount:
     for piece in pieces:
         rows.push(CtxChunk(id: next, source: source, ts: now, bytes: piece.len(), body: piece))
         next = next + 1
+    val pre_append = _ctx_cache_key_before_append()
     if not _ctx_append_chunks(rows):
         return CtxChunkCount(count: -1)
+    _ctx_cache_extend_after_append(pre_append, rows)
     _ctx_stats_bump("bytes_indexed", content.len())
     _ctx_stats_bump("index_calls", 1)
     CtxChunkCount(count: rows.len())
@@ -604,6 +606,75 @@ fn _ctx_index_with_postings_when_due(idx: CtxIndex) -> CtxIndex:
 # Postings builds performed by this process (spec / perf probe).
 pub fn ctx_index_postings_builds() -> CtxPostingsBuildCount:
     _CTX_POSTINGS_BUILDS
+
+# Incremental postings update on append. When this process holds a cached
+# index WITH postings for the current generation, an append it performs itself
+# is merged into that index (new chunks' terms added to the postings) and the
+# cached generation key is advanced, so the next search neither re-reads the
+# store nor rebuilds postings. Only a verified own append qualifies: the key
+# before the append must equal the cached key, and the store must have grown by
+# exactly the bytes written. Anything else (another process appended too, no
+# postings yet, digest unavailable) leaves the cache alone and the next search
+# rebuilds, as before.
+var _CTX_POSTINGS_INCREMENTS: CtxPostingsBuildCount = CtxPostingsBuildCount(count: 0)
+
+# Appends merged into live postings by this process (spec / perf probe).
+pub fn ctx_index_postings_increments() -> CtxPostingsBuildCount:
+    _CTX_POSTINGS_INCREMENTS
+
+fn _ctx_cache_key_before_append() -> CtxGenerationKey?:
+    if not _CTX_CACHE_KEY.?:
+        return None
+    if not _CTX_CACHE_INDEX.?:
+        return None
+    val idx = _CTX_CACHE_INDEX.unwrap()
+    if not idx.postings.?:
+        return None
+    val key = _ctx_store_generation_key()
+    match ctx_cache_decide(_CTX_CACHE_KEY, key):
+        case CtxCacheDecision.Hit:
+            Some(key)
+        case _:
+            None
+
+fn _ctx_cache_extend_after_append(before: CtxGenerationKey?, rows: [CtxChunk]):
+    if not before.?:
+        return
+    val old_key = before.unwrap()
+    var added_bytes: i64 = 0
+    for c in rows:
+        added_bytes = added_bytes + _ctx_chunk_line(c).byte_len()
+    val after = _ctx_store_generation_key()
+    if after.length.bytes != old_key.length.bytes + added_bytes:
+        return
+    if after.digest.sha256.len() == 0:
+        return
+    val idx = _CTX_CACHE_INDEX.unwrap()
+    var docs = idx.docs
+    var norm = idx.norm
+    var added_norm: [text] = []
+    for c in rows:
+        if _CTX_CACHE_PREFIX == "" or c.source.starts_with(_CTX_CACHE_PREFIX):
+            docs.push(c)
+            val nb = ctx_normalize(c.body)
+            norm.push(nb)
+            added_norm.push(nb)
+    var total_bytes: i64 = 0
+    for d in docs:
+        total_bytes = total_bytes + d.body.len()
+    var avg = 1.0
+    if docs.len() > 0:
+        avg = total_bytes.to_float() / docs.len().to_float()
+    if avg < 1.0:
+        avg = 1.0
+    val grown = ctx_postings_append(idx.postings.unwrap(), CtxNormBodies(bodies: added_norm))
+    var chunks = _CTX_CACHE_CHUNKS
+    for c in rows:
+        chunks.push(c)
+    _CTX_CACHE_CHUNKS = chunks
+    _CTX_CACHE_INDEX = Some(CtxIndex(docs: docs, norm: norm, avg_bytes: avg, postings: Some(grown)))
+    _CTX_CACHE_KEY = Some(after)
+    _CTX_POSTINGS_INCREMENTS = ctx_postings_build_count_next(_CTX_POSTINGS_INCREMENTS)
 
 fn _ctx_cached_index(source_prefix: text) -> CtxIndex:
     val key = _ctx_store_generation_key()
@@ -1457,6 +1528,24 @@ struct CtxPurgeReport:
     mode: CtxPurgeMode
     plan: CtxRetentionPlan
     rewritten: bool
+    contended: bool   # an append moved the store under every attempt; nothing was deleted
+
+# Everything one purge attempt read: the chunks, the generation key they were
+# read under, and the plan decided from them.
+pub struct CtxPurgeSnapshot:
+    chunks: [CtxChunk]
+    key: CtxGenerationKey
+    plan: CtxRetentionPlan
+    check: CtxPolicyCheck
+
+pub enum CtxPurgeCommit:
+    Committed
+    NothingToDrop
+    StoreMoved       # the store changed since the snapshot; nothing written
+    WriteFailed
+
+# Attempts before a purge gives up and fails closed under sustained appends.
+const _CTX_PURGE_MAX_ATTEMPTS: i64 = 4
 
 fn _ctx_retention_rows(chunks: [CtxChunk]) -> [CtxRetentionRow]:
     var rows: [CtxRetentionRow] = []
@@ -1468,25 +1557,65 @@ fn _ctx_retention_rows(chunks: [CtxChunk]) -> [CtxRetentionRow]:
 # store atomically with only the kept chunks; the next search sees a new
 # generation key and rebuilds its index. Chunk ids are never reused (the
 # next_id high-water mark lives in stats.sdn).
-pub fn ctx_purge_store(policy: CtxRetentionPolicy, mode: CtxPurgeMode) -> CtxPurgeReport:
+#
+# Lock-free against concurrent appends: the purge is a compare-and-swap on the
+# store generation key. It reads the key BEFORE the chunks (so a racing append
+# can only make the chunks newer than the key), decides from that snapshot, and
+# re-reads the key immediately before the atomic rename; only an unchanged key
+# commits. A moved store is re-snapshotted (an append that completed before the
+# commit is therefore always included in what is kept); after
+# `_CTX_PURGE_MAX_ATTEMPTS` moved attempts the purge fails closed with nothing
+# deleted. Residual window: an append that lands between the final key check and
+# the rename still targets the replaced file (a few microseconds; the store has
+# no OS-level compare-and-rename). See doc/07_guide/app/mcp/mcp.md.
+pub fn ctx_purge_snapshot(policy: CtxRetentionPolicy) -> CtxPurgeSnapshot:
+    val key = _ctx_store_generation_key()
     val chunks = _ctx_load_chunks()
     val plan = ctx_retention_decide(_ctx_retention_rows(chunks), policy, CtxUnixSecs(secs: _ctx_now_secs()))
-    val check = ctx_retention_check(policy)
-    var rewritten = false
+    CtxPurgeSnapshot(chunks: chunks, key: key, plan: plan, check: ctx_retention_check(policy))
+
+# Commit a snapshot's plan iff the store is still exactly the generation the
+# snapshot was read under.
+pub fn ctx_purge_commit(snap: CtxPurgeSnapshot) -> CtxPurgeCommit:
+    if snap.plan.drop.len() == 0:
+        return CtxPurgeCommit.NothingToDrop
+    match ctx_cache_decide(Some(snap.key), _ctx_store_generation_key()):
+        case CtxCacheDecision.Hit:
+            pass
+        case _:
+            return CtxPurgeCommit.StoreMoved
+    var dropped_ids: Dict<i64, bool> = {}
+    for d in snap.plan.drop:
+        dropped_ids[d.value] = true
+    var lines: [text] = [_ctx_store_header()]
+    for c in snap.chunks:
+        if not dropped_ids.contains_key(c.id):
+            lines.push(_ctx_chunk_line(c))
+    if _ctx_write_atomic(_ctx_chunks_path(), lines.join("")):
+        return CtxPurgeCommit.Committed
+    CtxPurgeCommit.WriteFailed
+
+pub fn ctx_purge_store(policy: CtxRetentionPolicy, mode: CtxPurgeMode) -> CtxPurgeReport:
+    var snap = ctx_purge_snapshot(policy)
     match mode:
         case CtxPurgeMode.DryRun:
-            rewritten = false
+            return CtxPurgeReport(check: snap.check, mode: mode, plan: snap.plan, rewritten: false, contended: false)
         case CtxPurgeMode.Apply:
-            if plan.drop.len() > 0:
-                var dropped_ids: Dict<i64, bool> = {}
-                for d in plan.drop:
-                    dropped_ids[d.value] = true
-                var lines: [text] = [_ctx_store_header()]
-                for c in chunks:
-                    if not dropped_ids.contains_key(c.id):
-                        lines.push(_ctx_chunk_line(c))
-                rewritten = _ctx_write_atomic(_ctx_chunks_path(), lines.join(""))
-    CtxPurgeReport(check: check, mode: mode, plan: plan, rewritten: rewritten)
+            var attempt = 1
+            while true:
+                match ctx_purge_commit(snap):
+                    case CtxPurgeCommit.Committed:
+                        return CtxPurgeReport(check: snap.check, mode: mode, plan: snap.plan, rewritten: true, contended: false)
+                    case CtxPurgeCommit.NothingToDrop:
+                        return CtxPurgeReport(check: snap.check, mode: mode, plan: snap.plan, rewritten: false, contended: false)
+                    case CtxPurgeCommit.WriteFailed:
+                        return CtxPurgeReport(check: snap.check, mode: mode, plan: snap.plan, rewritten: false, contended: false)
+                    case CtxPurgeCommit.StoreMoved:
+                        if attempt >= _CTX_PURGE_MAX_ATTEMPTS:
+                            return CtxPurgeReport(check: snap.check, mode: mode, plan: snap.plan, rewritten: false, contended: true)
+                        attempt = attempt + 1
+                        snap = ctx_purge_snapshot(policy)
+    CtxPurgeReport(check: snap.check, mode: mode, plan: snap.plan, rewritten: false, contended: false)
 
 fn _ctx_opt_int(body: text, key: text) -> i64?:
     val raw = extract_field(body, key)
@@ -1527,6 +1656,8 @@ pub fn handle_simple_ctx_purge(id: text, body: text) -> text:
             elif report.rewritten:
                 msg = "ctx purge: dropped " + str(n_drop) + " chunk(s) (" + str(report.plan.dropped.bytes) + " bytes), kept " + str(report.plan.keep.len())
                 _ctx_stats_bump("purge_calls", 1)
+            elif report.contended:
+                return make_tool_error(id, -32603, "simple_ctx_purge: the store kept changing under concurrent appends; nothing was deleted. Retry.")
             else:
                 return make_tool_error(id, -32603, "simple_ctx_purge: cannot rewrite " + _ctx_chunks_path() + "; nothing was deleted")
     make_tool_result(id, msg)
