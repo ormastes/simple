@@ -1,0 +1,125 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Class-typed let from an existing local gets its own slot (MIR early-Let)
+
+Owning bug: doc/08_tracking/bug/stage2_class_var_place_alias_clobbers_source_2026-11-16.md
+
+The early-Let arm in `mir_lowering_stmts.spl` bound a new name straight to
+the initializer's MIR local whenever that local carried a record
+(`struct_value_syms`) or bitfield owner. `maybe_copy_struct_value` copies a
+STRUCT place read, but it returns nil for a CLASS (reference semantics), so a
+class place read fell through to the alias. The two names then shared one
+local, and assigning either one overwrote the other:
+
+    var trait_module = imported_mod       # same local as imported_mod
+    trait_module = surfaces[i]            # also rebinds imported_mod
+
+Measured on the integ2 Stage 2 (typed path, llvm):
+`test/fixtures/compiler/native_class_var_place_alias/main.spl` printed
+`param a=tm`, `loop a=llvm,tm,tm len=4`, `reverse a=tm t=tm`. In Stage 3 it
+broke HIR lowering of every module importing `LlvmTypeMapper`
+("stale surface index [impls] ... live_len=0").
+
+The alias stays only for a FRESH aggregate (not a place read). A place read
+that reaches that point gets a new local, a copy of the handle, and keeps the
+record and bitfield owner, so field reads still resolve.
+
+The interpreter never aliased, so the behaviour block below is the oracle and
+passes either way. The lowering-shape block is the red/green check. A native
+proof needs a Stage 2 rebuilt with this change, or a Stage 3 relinked with a
+recompiled `mir_lowering_stmts` object.
+"""
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+class AliasSurf:
+    impls: [i64]
+    name: text
+
+fn alias_param_case(a: AliasSurf, all: [AliasSurf]) -> text:
+    var t = a
+    t = all[1]
+    "{a.name}/{t.name}"
+
+fn alias_reverse_case(all: [AliasSurf]) -> text:
+    var a = all[0]
+    val t = a
+    a = all[1]
+    "{a.name}/{t.name}"
+
+class AliasBox<T>:
+    value: T
+
+fn alias_mutate_case(a: AliasSurf) -> text:
+    var t = a
+    t.name = "mut"
+    "{a.name}/{t.name}"
+
+fn alias_generic_case(a: AliasBox<text>, b: AliasBox<text>) -> text:
+    var t = a
+    t = b
+    "{a.value}/{t.value}/{t.value.len()}"
+
+describe "class-typed let from an existing local":
+    it "keeps the source binding when the new var is reassigned (oracle)":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the source binding when the new var is reassigned")
+        val s0 = AliasSurf(impls: [1, 2, 3, 4], name: "llvm")
+        val s1 = AliasSurf(impls: [], name: "tm")
+        val all = [s0, s1]
+        expect(alias_param_case(s0, all)).to_equal("llvm/tm")
+        expect(alias_reverse_case(all)).to_equal("tm/llvm")
+        # Reference semantics are kept: a field write through t is seen by a.
+        expect(alias_mutate_case(AliasSurf(impls: [], name: "orig"))).to_equal("mut/mut")
+        expect(alias_generic_case(AliasBox(value: "alpha"), AliasBox(value: "beta"))).to_equal("alpha/beta/4")
+
+    it "aliases only fresh aggregates in the early-Let arm":
+        # @req REQ-SSPEC-COMPILER
+        step("aliases only fresh aggregates in the early-Let arm")
+        val stmts = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+        val types = rt_file_read_text("src/compiler/50.mir/mir_lowering_types.spl") ?? ""
+        expect(stmts.len() > 0).to_equal(true)
+        # Not syntactic: a block initializer (`var t = do: ... a`) returns a's
+        # OWN local from lower_block, so "already bound to a symbol" decides.
+        expect(types).to_contain("fn local_is_symbol_bound(local: LocalId) -> bool:")
+        expect(stmts).to_contain("val alias_reads_existing_record = struct_sym != None and (mir_expr_kind_is_place(let_init.kind) or self.local_is_symbol_bound(init_local))")
+        expect(stmts).to_contain("elif (bf_sym != None or struct_sym != None) and not initializer_is_short and not alias_reads_existing_record:")
+        expect(stmts).to_contain("val alias2_reads_existing_record = struct_sym != None and (init_is_place or (has_init and self.local_is_symbol_bound(init_local)))")
+        expect(stmts).to_contain("elif (bf_sym != None or struct_sym != None) and not alias2_reads_existing_record:")
+        # The old alias arms are gone (early-Let and its twin).
+        expect(stmts).to_not_contain("elif (bf_sym != None or struct_sym != None) and not initializer_is_short:\n")
+        expect(stmts).to_not_contain("elif bf_sym != None or struct_sym != None:\n")
+        expect(stmts).to_not_contain("and not initializer_is_short and not mir_expr_kind_is_place(let_init.kind):")
+
+    it "keeps the record, bitfield and generic-instance owner on the fresh local":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the record, bitfield and generic-instance owner on the fresh local")
+        val stmts = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+        expect(stmts).to_not_contain("if initializer_is_short and struct_sym != None:")
+        expect(stmts).to_not_contain("if initializer_is_short and bf_sym != None:")
+        # Box<T> field types travel with the copy, as copy_struct_value_recursive does.
+        expect(stmts.split("self.generic_instance_field_types[local.id] = self.generic_instance_field_types[init_local.id]").len() - 1).to_equal(2)  # oracle: 2 — early-Let arm and its twin
+        expect(stmts.split("self.generic_instance_field_struct_names[local.id] = self.generic_instance_field_struct_names[init_local.id]").len() - 1).to_equal(2)  # oracle: 2 — early-Let arm and its twin
+
+    it "keeps the executable native fixtures":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the executable native fixtures")
+        val entry = rt_file_read_text("test/fixtures/compiler/native_class_var_place_alias/main.spl") ?? ""
+        val block = rt_file_read_text("test/fixtures/compiler/native_class_var_place_alias/do_block.spl") ?? ""
+        expect(entry.len() > 0).to_equal(true)
+        expect(entry).to_contain("    var t = a\n    t = all[1]")
+        expect(entry).to_contain("    val t = a\n    a = all[1]")
+        expect(entry).to_contain("#   loop a=llvm,llvm,llvm len=12")
+        expect(entry).to_contain("#   mutate a=mut t=mut")
+        expect(entry).to_contain("#   generic a=alpha before=alpha t=beta len=4")
+        expect(entry).to_contain("#   generic-struct a=4 before=4 t=8")
+        val bits = rt_file_read_text("test/fixtures/compiler/native_class_var_place_alias/bitfield_alias.spl") ?? ""
+        expect(bits).to_contain("    var g = f\n    g.hi = 5")
+        expect(bits).to_contain("# Native r16 and the fix both print f=3,5")
+        expect(block).to_contain("    var t = do:\n")
+        expect(block).to_contain("#   block a=llvm t=tm")

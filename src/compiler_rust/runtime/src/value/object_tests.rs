@@ -218,6 +218,45 @@ fn test_result_unwrap_returns_payload() {
     }
 }
 
+/// #6953: a user enum's declared index is 0/1 for its first two variants
+/// (`MirConstValue.Int` = 0, `.Float` = 1). Unwrapping it — `rt_tuple_get<T>(..)
+/// .unwrap()` over a user-enum slot — must return the enum itself, not treat it
+/// as Result.Ok/Err (payload swap / "called unwrap on Err" abort).
+#[test]
+fn test_user_enum_with_ordinal_zero_or_one_is_not_a_result() {
+    let user_enum_id = 851_885_673;
+    for disc in [0, 1] {
+        let value = rt_enum_new(user_enum_id, disc, RuntimeValue::from_int(40));
+        assert_eq!(rt_enum_id(super::rt_unwrap_or_trap(value)), i64::from(user_enum_id));
+        assert_eq!(rt_enum_id(super::rt_expect_or_trap(value, RuntimeValue::NIL)), i64::from(user_enum_id));
+    }
+}
+
+/// #6953 round 3: an erased `?` passes expected id 0 and Err index 1. Only a
+/// real Result (id 0 or 2) is absent there; a user enum's index-1 variant
+/// (`MirConstValue.Float`) is a present value, not an early return.
+#[test]
+fn test_erased_try_treats_only_result_ids_as_err() {
+    let user = rt_enum_new(851_885_673, 1, RuntimeValue::from_int(40));
+    assert!(!super::rt_try_is_absent(user, 0, 1));
+    for result_id in [super::RESULT_ENUM_ID, 2] {
+        assert!(super::rt_try_is_absent(rt_enum_new(result_id, 1, RuntimeValue::NIL), 0, 1));
+        assert!(!super::rt_try_is_absent(rt_enum_new(result_id, 0, RuntimeValue::NIL), 0, 1));
+    }
+}
+
+/// The C runtime builds Result with id 2; the id-0-only readers mis-handled
+/// its Err (`.unwrap_or(d)` returned the enum, `.?` said present).
+#[test]
+fn test_result_readers_accept_the_c_result_id() {
+    let err = rt_enum_new(2, 1, RuntimeValue::from_int(9));
+    let ok = rt_enum_new(2, 0, RuntimeValue::from_int(42));
+    assert_eq!(super::rt_unwrap_or_value(err, RuntimeValue::from_int(7)).as_int(), 7);
+    assert_eq!(super::rt_unwrap_or_value(ok, RuntimeValue::from_int(7)).as_int(), 42);
+    assert!(!super::rt_is_present(err));
+    assert_eq!(super::rt_option_map(err, RuntimeValue::NIL), err);
+}
+
 #[test]
 fn test_option_unwrap_returns_positional_payload() {
     let result = rt_enum_new(super::OPTION_ENUM_ID, 0, RuntimeValue::from_int(42));
@@ -609,7 +648,9 @@ fn arr_with_one() -> RuntimeValue {
 }
 
 /// `rt_try_is_absent` must be exactly `rt_is_none || rt_enum_check_variant`
-/// for every value shape `?` can see (falsy-present payloads included).
+/// for every value shape `?` can see (falsy-present payloads included) -- except
+/// that an erased `?` (expected id 0) only counts a real Result's Err (#6953:
+/// `rt_enum_check_variant` keeps its id-0 wildcard for erased user case arms).
 #[test]
 fn try_is_absent_equals_is_none_or_err_check() {
     use super::{hash_variant_discriminant, rt_enum_new, rt_is_none, rt_try_is_absent};
@@ -632,7 +673,9 @@ fn try_is_absent_equals_is_none_or_err_check() {
         for expected_id in [0i64, 1, 7] {
             assert_eq!(
                 rt_try_is_absent(v, expected_id, err),
-                rt_is_none(v) || rt_enum_check_variant(v, expected_id, err),
+                rt_is_none(v)
+                    || (rt_enum_check_variant(v, expected_id, err)
+                        && (expected_id != 0 || super::is_result_enum_id(super::rt_enum_id(v) as u32))),
                 "value {:#x} expected_id {expected_id}",
                 v.0
             );

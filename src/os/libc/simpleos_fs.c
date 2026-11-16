@@ -420,6 +420,33 @@ int link(const char *oldpath, const char *newpath) {
     return -1;
 }
 
+/* mkstemp(): replace the trailing "XXXXXX" and create the file exclusively
+ * (O_CREAT|O_EXCL, 0600), retrying on EEXIST. runtime_native.c uses it for
+ * process_run stderr capture. The name sequence mixes a per-process counter
+ * with the template address; uniqueness is enforced by O_EXCL, not by it. */
+int mkstemp(char *tmpl) {
+    static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    static uint64_t seq = 0;
+    size_t len = tmpl ? strlen(tmpl) : 0;
+    if (len < 6) { errno = EINVAL; return -1; }
+    char *x = tmpl + len - 6;
+    for (int i = 0; i < 6; i++) {
+        if (x[i] != 'X') { errno = EINVAL; return -1; }
+    }
+    for (int attempt = 0; attempt < 256; attempt++) {
+        uint64_t v = (uint64_t)(uintptr_t)tmpl * 2654435761u + (++seq) * 0x9E3779B97F4A7C15ull;
+        for (int i = 0; i < 6; i++) {
+            x[i] = alphabet[v % 36];
+            v /= 36;
+        }
+        int fd = open(tmpl, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) return fd;
+        if (errno != EEXIST) return -1;
+    }
+    errno = EEXIST;
+    return -1;
+}
+
 /* ====================================================================
  * 5. Low-level POSIX file operations
  * ==================================================================== */

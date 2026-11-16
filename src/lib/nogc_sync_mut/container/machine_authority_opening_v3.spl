@@ -1,0 +1,117 @@
+# Mechanical implementation extraction of the existing zero-argument opener.
+# No caller policy/root/observation is accepted. Original opaque resources and
+# ordering are retained; this package-internal carrier is not an authority.
+use std.nogc_sync_mut.io.machine_storage_owner_v1.*
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxInstalledFreshEpochOwnerV1
+use std.nogc_sync_mut.container.machine_authority_cleanup_v1.*
+use std.nogc_sync_mut.container.machine_authority_projection_v1.*
+use std.common.contracts.container.machine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_decode_v1
+use std.common.crypto.sha256.sha256_text
+
+pub(package) enum MachineAuthorityOpeningV3:
+    Rejected(reason: text)
+    CleanupRequired(owner: MachineContainerAuthorityCleanupV1, reason: text)
+    Prepared(storage: MachineStorageOwnerV1, policy_digest: text, backend: text,
+        provider_digest: text, linux_uid: i64, principal: Option<MachineAuthorityLocalProcessV1>)
+
+fn opening_reader_failure_v3(reader: MachinePolicyOwnerV1,
+        reason: text, principal: Option<MachineAuthorityLocalProcessV1> = nil) -> MachineAuthorityOpeningV3:
+    if val owner = principal:
+        return MachineAuthorityOpeningV3.CleanupRequired(MachineContainerAuthorityCleanupV1.ReaderPrincipal(reader, owner), reason)
+    MachineAuthorityOpeningV3.CleanupRequired(MachineContainerAuthorityCleanupV1.Reader(reader), reason)
+
+fn opening_storage_failure_v3(storage: MachineStorageOwnerV1,
+        reason: text, principal: Option<MachineAuthorityLocalProcessV1> = nil) -> MachineAuthorityOpeningV3:
+    if val owner = principal:
+        return MachineAuthorityOpeningV3.CleanupRequired(MachineContainerAuthorityCleanupV1.StoragePrincipal(storage, owner), reason)
+    MachineAuthorityOpeningV3.CleanupRequired(MachineContainerAuthorityCleanupV1.Storage(storage), reason)
+
+pub(package) fn machine_authority_opening_v3(standalone_only: bool,
+        fresh: Option<LinuxInstalledFreshEpochOwnerV1>) -> MachineAuthorityOpeningV3:
+    # The library selects the actual installed OS owner. No app/request picks
+    # the backend, policy path, service UID or machine-state root.
+    val reader = match machine_policy_open_v1():
+        case MachinePolicyOpenV1.Rejected(reason):
+            return MachineAuthorityOpeningV3.Rejected(reason)
+        case MachinePolicyOpenV1.CleanupRequired(owner, reason):
+            return opening_reader_failure_v3(owner, reason)
+        case MachinePolicyOpenV1.Ready(owner): owner
+    val bytes = reader.read_policy_v1()
+    if bytes.is_err(): return opening_reader_failure_v3(reader, bytes.unwrap_err())
+    val text_result = machine_authority_policy_text_v1(bytes.unwrap())
+    if text_result.is_err(): return opening_reader_failure_v3(reader, text_result.unwrap_err())
+    val source = text_result.unwrap()
+    val decoded = machine_container_policy_decode_v1(source)
+    if decoded.is_err(): return opening_reader_failure_v3(reader, decoded.unwrap_err())
+    val policy = decoded.unwrap()
+    if standalone_only and policy.mode != "standalone":
+        return opening_reader_failure_v3(reader, "local-container-managed-authority-required")
+    # Platform selection belongs here in the library, never in the app request.
+    val backend = reader.selected_backend_v1()
+    val selected = machine_policy_provider_v1(policy, backend)
+    if selected.is_err(): return opening_reader_failure_v3(reader, selected.unwrap_err())
+    val provider = selected.unwrap()
+    var selected_linux_uid: i64 = -1
+    if backend == "linux-podman":
+        val context = reader.actual_linux_process_context_v1()
+        if context.is_err(): return opening_reader_failure_v3(reader, context.unwrap_err())
+        val engine = linux_oci_engine_policy_decode_v1(provider.policy_bytes)
+        if engine.is_err(): return opening_reader_failure_v3(reader, engine.unwrap_err())
+        val actual = context.unwrap()
+        val configured = engine.unwrap()
+        if actual.real_uid != actual.effective_uid or actual.effective_uid <= 0 or configured.expected_uid != actual.effective_uid:
+            return opening_reader_failure_v3(reader, "machine-container-authority-linux-service-uid-mismatch")
+        selected_linux_uid = actual.effective_uid
+    var principal: Option<MachineAuthorityLocalProcessV1> = None
+    if policy.mode == "standalone":
+        val paired = machine_authority_pair_open_v1()
+        if paired.is_err(): return opening_reader_failure_v3(reader, paired.unwrap_err())
+        val cleanup = paired.unwrap()
+        match machine_local_process_principal_open_v1():
+            case MachineLocalProcessPrincipalOpenV1.Rejected(reason): return opening_reader_failure_v3(reader, reason)
+            case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+                return opening_reader_failure_v3(reader, reason, Some(machine_authority_local_pair_bind_v1(owner, cleanup)))
+            case MachineLocalProcessPrincipalOpenV1.Ready(owner):
+                principal = Some(machine_authority_local_pair_bind_v1(owner, cleanup))
+        # Native membership is established before any provider observer runs.
+        val local = principal.unwrap()
+        val member = machine_policy_local_principal_v1(policy, backend, local.principal_capability_v1())
+        if member.is_err(): return opening_reader_failure_v3(reader, member.unwrap_err(), principal)
+    # The generic path retains its engine observation. Fresh opening must not
+    # initialize the new provider store before its actual durable admission.
+    if fresh.is_none():
+        val observed = machine_policy_observe_v1(policy, provider)
+        if observed.is_err(): return opening_reader_failure_v3(reader, observed.unwrap_err(), principal)
+    else:
+        val epoch = fresh.unwrap()
+        val observed = epoch.current_v1()
+        if observed.is_err(): return opening_reader_failure_v3(reader, observed.unwrap_err(), principal)
+        if backend != "linux-podman": return opening_reader_failure_v3(reader, "machine-fresh-epoch-linux-required", principal)
+    val storage = match reader.open_storage_v1():
+        case MachineStorageOpenV1.Rejected(reason):
+            return opening_reader_failure_v3(reader, reason, principal)
+        case MachineStorageOpenV1.CleanupRequired(owner, reason):
+            return opening_storage_failure_v3(owner, reason, principal)
+        case MachineStorageOpenV1.Ready(owner): owner
+    if val owner = principal:
+        val member = machine_policy_local_principal_v1(policy, backend, owner.principal_capability_v1())
+        if member.is_err(): return opening_storage_failure_v3(storage, member.unwrap_err(), principal)
+    # Observe again after acquiring the shared writer. A pre-lock observation
+    # never authorizes state publication or a later provider effect by itself.
+    if fresh.is_none():
+        val current = machine_policy_observe_v1(policy, provider)
+        if current.is_err(): return opening_storage_failure_v3(storage, current.unwrap_err(), principal)
+    val capacity = storage.physical_capacity_v1()
+    if capacity.is_err(): return opening_storage_failure_v3(storage, capacity.unwrap_err(), principal)
+    if policy.cpu_millis > capacity.unwrap().0 or policy.memory_bytes > capacity.unwrap().1:
+        return opening_storage_failure_v3(storage, "machine-container-authority-physical-capacity-exceeded", principal)
+    # Bind exact actual protected policy under the actual exclusive writer.
+    # Existing different mode/policy wins; no automatic reset discards charges.
+    val bound = storage.bind_policy_v1(source)
+    if bound.is_err(): return opening_storage_failure_v3(storage, bound.unwrap_err(), principal)
+    if bound.unwrap() != sha256_text(source):
+        return opening_storage_failure_v3(storage, "machine-container-authority-policy-binding-mismatch", principal)
+    MachineAuthorityOpeningV3.Prepared(storage, bound.unwrap(), provider.backend,
+        provider.identity_digest, selected_linux_uid, principal)

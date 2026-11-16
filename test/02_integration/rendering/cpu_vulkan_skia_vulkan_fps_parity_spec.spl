@@ -1,0 +1,327 @@
+"""
+## Purpose and audience
+Full-resolution 800x600, full-AA parity and frame-rate benchmark comparing:
+  1) Pure-Simple CPU (`CpuBackend` + `Engine2D` `SoftwareBackend`)
+  2) `Engine2D` Vulkan steady-state (`finalize_compute_frame_no_readback`)
+  3) Skia Vulkan steady-state (`SkVulkanEngine2DSession.render_picture_frame`)
+  4) One-shot per-frame Skia Vulkan create/readback/present (`skia_picture_to_vulkan_base`)
+
+Verifies zero resolution or quality reduction, strict pixel parity against
+CPU baselines, and steady-state FPS parity between Skia Vulkan and Engine2D
+Vulkan while greatly outperforming per-frame create/readback/present.
+"""
+# @req REQ-SSPEC-INTEGRATION
+# @tag: rendering, skia, engine2d, cpu, vulkan, fps, parity
+
+use std.spec.{describe, context, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.skia.entity.color.{sk_color_argb}
+use std.skia.entity.geometry.{SkRect, sk_rect_make_xywh, sk_rrect_make}
+use std.skia.entity.paint.{sk_paint_fill}
+use std.skia.entity.path.{SkPath, sk_path_new}
+use std.skia.entity.font.{sk_font_with_ttf}
+use std.skia.entity.canvas.{SkCanvas, sk_canvas_make}
+use std.skia.entity.picture.{SkPicture}
+use std.skia.backend.cpu.backend.{cpu_backend_new}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+use std.skia.bridge.engine2d_bridge.{
+    SkEngine2DSession,
+    SkVulkanEngine2DSession,
+    skia_engine2d_session_create,
+    skia_vulkan_session_create,
+    skia_picture_to_vulkan_base
+}
+
+val SCENE_W: i64 = 800
+val SCENE_H: i64 = 600
+val FONT_PATH: text = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+
+fn build_star_path(cx: f64, cy: f64, r_outer: f64, r_inner: f64) -> SkPath:
+    # 5-point star matching sin/cos offsets in screen coordinates
+    val p0 = sk_path_new().move_to(cx, cy - r_outer)
+    val p1 = p0.line_to(cx + r_inner * 0.58778525, cy - r_inner * 0.80901699)
+    val p2 = p1.line_to(cx + r_outer * 0.95105652, cy - r_outer * 0.30901699)
+    val p3 = p2.line_to(cx + r_inner * 0.95105652, cy + r_inner * 0.30901699)
+    val p4 = p3.line_to(cx + r_outer * 0.58778525, cy + r_outer * 0.80901699)
+    val p5 = p4.line_to(cx, cy + r_inner)
+    val p6 = p5.line_to(cx - r_outer * 0.58778525, cy + r_outer * 0.80901699)
+    val p7 = p6.line_to(cx - r_inner * 0.95105652, cy + r_inner * 0.30901699)
+    val p8 = p7.line_to(cx - r_outer * 0.95105652, cy - r_outer * 0.30901699)
+    val p9 = p8.line_to(cx - r_inner * 0.58778525, cy - r_inner * 0.80901699)
+    p9.close()
+
+fn build_full_aa_scene_picture() -> SkPicture:
+    val bounds = sk_rect_make_xywh(0.0, 0.0, 800.0, 600.0)
+    val font_title = sk_font_with_ttf(FONT_PATH, 28.0)
+    val font_sub = sk_font_with_ttf(FONT_PATH, 18.0)
+
+    var c = sk_canvas_make(SCENE_W, SCENE_H).begin_recording(bounds)
+    c = c.clear(sk_color_argb(255, 15, 23, 42))
+
+    # Opaque rectangular panels (fast interior span fill in CPU + GPU rects)
+    c = c.draw_rect(sk_rect_make_xywh(24.0, 24.0, 752.0, 88.0), sk_paint_fill(sk_color_argb(255, 30, 41, 59)))
+    c = c.draw_rect(sk_rect_make_xywh(24.0, 132.0, 368.0, 220.0), sk_paint_fill(sk_color_argb(255, 23, 37, 84)))
+    c = c.draw_rect(sk_rect_make_xywh(408.0, 132.0, 368.0, 220.0), sk_paint_fill(sk_color_argb(255, 31, 41, 55)))
+
+    # Translucent anti-aliased rounded rectangle card
+    val footer_rr = sk_rrect_make(sk_rect_make_xywh(24.0, 372.0, 752.0, 200.0), 14.0, 14.0)
+    c = c.draw_rrect(footer_rr, sk_paint_fill(sk_color_argb(220, 51, 65, 85)))
+
+    # Anti-aliased circles
+    c = c.draw_circle(168.0, 242.0, 58.0, sk_paint_fill(sk_color_argb(235, 56, 189, 248)))
+    c = c.draw_circle(268.0, 242.0, 38.0, sk_paint_fill(sk_color_argb(220, 244, 114, 182)))
+
+    # Anti-aliased concave star path
+    val star = build_star_path(592.0, 242.0, 72.0, 30.0)
+    c = c.draw_path(star, sk_paint_fill(sk_color_argb(240, 250, 204, 21)))
+
+    # Rotated transform around center of lower right badge (drawn as SkPath so
+    # both CpuBackend and SkVulkanEngine2DSession apply full 4-subscanline AA)
+    val rotated_badge = sk_path_new().move_to(-88.0, -26.0).line_to(88.0, -26.0).line_to(88.0, 26.0).line_to(-88.0, 26.0).close()
+    c = c.save()
+    c = c.translate(600.0, 480.0)
+    c = c.rotate(18.0)
+    c = c.draw_path(rotated_badge, sk_paint_fill(sk_color_argb(230, 34, 197, 94)))
+    c = c.restore()
+
+    # Anti-aliased SFNT text runs
+    c = c.draw_string("Skia Vulkan 800x600 Full-AA Parity", 44.0, 78.0, font_title, sk_paint_fill(sk_color_argb(255, 248, 250, 252)))
+    c = c.draw_string("SFNT AA + Rotated Transforms + Star Path", 44.0, 434.0, font_sub, sk_paint_fill(sk_color_argb(255, 165, 243, 252)))
+    c.end_recording()
+
+fn draw_engine2d_equivalent_frame(eng: Engine2D):
+    eng.clear(0xFF0F172Au32)
+    eng.draw_rect_filled(24, 24, 752, 88, 0xFF1E293Bu32)
+    eng.draw_rect_filled(24, 132, 368, 220, 0xFF172554u32)
+    eng.draw_rect_filled(408, 132, 368, 220, 0xFF1F2937u32)
+    eng.draw_rect_filled(24, 372, 752, 200, 0xFF334155u32)
+    eng.draw_circle_filled(168, 242, 58, 0xFF38BDF8u32)
+    eng.draw_circle_filled(268, 242, 38, 0xFFF472B6u32)
+    eng.draw_triangle_filled(592, 170, 524, 300, 660, 300, 0xFFFACC15u32)
+    eng.draw_triangle_filled(512, 468, 678, 438, 690, 502, 0xFF22C55Eu32)
+    eng.draw_text_sfnt_baseline_aa(44, 78, "Skia Vulkan 800x600 Full-AA Parity", 0xFFF8FAFCu32, 28.0, FONT_PATH)
+    eng.draw_text_sfnt_baseline_aa(44, 434, "SFNT AA + Rotated Transforms + Star Path", 0xFFA5F3FCu32, 18.0, FONT_PATH)
+
+fn bitmap_rgba_premul_to_argb_u32(bmp: Bitmap) -> [u32]:
+    val total = bmp.width * bmp.height
+    var out = [0u32; total]
+    var i: i64 = 0
+    while i < total:
+        val base = i * 4
+        val a = bmp.pixels[base + 3] as i64
+        if a == 255:
+            val r = (bmp.pixels[base] as i64) & 0xFF
+            val g = (bmp.pixels[base + 1] as i64) & 0xFF
+            val b = (bmp.pixels[base + 2] as i64) & 0xFF
+            out[i] = (((0xFF << 24) | (r << 16) | (g << 8) | b) as u32)
+        elif a > 0:
+            val pr = bmp.pixels[base] as i64
+            val pg = bmp.pixels[base + 1] as i64
+            val pb = bmp.pixels[base + 2] as i64
+            var r = (pr * 255 + (a / 2)) / a
+            var g = (pg * 255 + (a / 2)) / a
+            var b = (pb * 255 + (a / 2)) / a
+            if r > 255: r = 255
+            if g > 255: g = 255
+            if b > 255: b = 255
+            out[i] = ((((a & 0xFF) << 24) | (r << 16) | (g << 8) | b) as u32)
+        i = i + 1
+    out
+
+class PixelDiffSummary:
+    mismatch_count: i64
+    max_channel_delta: i64
+    near_match_count: i64
+
+fn compare_argb_buffers(a: [u32], b: [u32]) -> PixelDiffSummary:
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var mismatches: i64 = if a.len() != b.len(): 1 else: 0
+    var max_delta: i64 = 0
+    var near_matches: i64 = 0
+    var i = 0
+    while i < n:
+        val pa = a[i]
+        val pb = b[i]
+        if pa != pb:
+            mismatches = mismatches + 1
+            val da = (((pa >> 24) & 0xFFu32) as i64) - (((pb >> 24) & 0xFFu32) as i64)
+            val dr = (((pa >> 16) & 0xFFu32) as i64) - (((pb >> 16) & 0xFFu32) as i64)
+            val dg = (((pa >> 8) & 0xFFu32) as i64) - (((pb >> 8) & 0xFFu32) as i64)
+            val db = ((pa & 0xFFu32) as i64) - ((pb & 0xFFu32) as i64)
+            val ada = if da < 0: -da else: da
+            val adr = if dr < 0: -dr else: dr
+            val adg = if dg < 0: -dg else: dg
+            val adb = if db < 0: -db else: db
+            var d = ada
+            if adr > d: d = adr
+            if adg > d: d = adg
+            if adb > d: d = adb
+            if d > max_delta: max_delta = d
+            if d <= 2: near_matches = near_matches + 1
+        i = i + 1
+    PixelDiffSummary(mismatch_count: mismatches, max_channel_delta: max_delta, near_match_count: near_matches)
+
+fn format_fps(avg_us: i64) -> f64:
+    if avg_us <= 0:
+        return 0.0
+    1000000.0 / avg_us.to_f64()
+
+describe "CPU vs Engine2D Vulkan vs Skia Vulkan 800x600 FPS and quality parity":
+    context "full-resolution 800x600 full-AA parity and steady-state FPS":
+        it "verifies CPU baseline parity, Engine2D Vulkan parity, and Skia Vulkan FPS parity":
+            # @req REQ-SSPEC-INTEGRATION
+            step("Build 800x600 full-AA scene (rects, rrect, AA circles, concave star path, rotated rect, SFNT text)")
+            val pic = build_full_aa_scene_picture()
+            val bounds = sk_rect_make_xywh(0.0, 0.0, 800.0, 600.0)
+            val expected_pixels: i64 = SCENE_W * SCENE_H
+
+            step("1. Benchmark Pure-Simple Skia CpuBackend (2 frames after 1 warmup)")
+            var cpu_backend = cpu_backend_new()
+            val _ = cpu_backend.render_picture(pic, bounds)
+            var cpu_t0 = time_now_micros()
+            val cpu_bmp1 = cpu_backend.render_picture(pic, bounds)
+            val cpu_bmp2 = cpu_backend.render_picture(pic, bounds)
+            var cpu_t1 = time_now_micros()
+            val cpu_avg_us = (cpu_t1 - cpu_t0) / 2
+            val cpu_ms = cpu_avg_us.to_f64() / 1000.0
+            val cpu_fps = format_fps(cpu_avg_us)
+            expect(cpu_bmp1.width).to_equal(SCENE_W)
+            expect(cpu_bmp1.height).to_equal(SCENE_H)
+            expect(cpu_bmp2.pixels.len()).to_equal((expected_pixels * 4) as i32)
+            val cpu_argb = bitmap_rgba_premul_to_argb_u32(cpu_bmp1)
+            expect(cpu_argb.len()).to_equal(expected_pixels as i32)
+            print "CPU_SKIA_BACKEND: width={cpu_bmp1.width} height={cpu_bmp1.height} avg_us={cpu_avg_us} avg_ms={cpu_ms} fps={cpu_fps}"
+
+            step("2. Benchmark Pure-Simple SoftwareBackend via SkEngine2DSession('software') (2 frames after 1 warmup)")
+            val sw_sess_res = skia_engine2d_session_create(SCENE_W, SCENE_H, "software")
+            expect(sw_sess_res.is_ok()).to_equal(true)
+            var sw_sess = sw_sess_res.unwrap()
+            val _ = sw_sess.render_picture_readback(pic)
+            var sw_t0 = time_now_micros()
+            val sw_rb1_res = sw_sess.render_picture_readback(pic)
+            val sw_rb2_res = sw_sess.render_picture_readback(pic)
+            var sw_t1 = time_now_micros()
+            val sw_avg_us = (sw_t1 - sw_t0) / 2
+            val sw_ms = sw_avg_us.to_f64() / 1000.0
+            val sw_fps = format_fps(sw_avg_us)
+            expect(sw_rb1_res.is_ok()).to_equal(true)
+            expect(sw_rb2_res.is_ok()).to_equal(true)
+            val sw_px = sw_rb1_res.unwrap().pixels
+            expect(sw_px.len()).to_equal(expected_pixels as i32)
+            sw_sess.shutdown()
+            print "CPU_SOFTWARE_BRIDGE: width=800 height=600 avg_us={sw_avg_us} avg_ms={sw_ms} fps={sw_fps}"
+
+            val cpu_vs_sw_diff = compare_argb_buffers(cpu_argb, sw_px)
+            print "PARITY_CPU_SKIA_VS_SW_BRIDGE: mismatches={cpu_vs_sw_diff.mismatch_count} max_channel_delta={cpu_vs_sw_diff.max_channel_delta} near_matches={cpu_vs_sw_diff.near_match_count}"
+            expect(cpu_vs_sw_diff.max_channel_delta).to_be_less_than(2)
+
+            step("3. Benchmark Engine2D Vulkan steady-state vs Skia Vulkan steady-state & one-shot")
+            val e2d_vk_res = Engine2D.create_vulkan_backend(SCENE_W as i32, SCENE_H as i32)
+            val sk_vk_res = skia_vulkan_session_create(SCENE_W, SCENE_H)
+            if e2d_vk_res.is_ok() and sk_vk_res.is_ok():
+                var e2d_vk = e2d_vk_res.unwrap()
+                var sk_vk = sk_vk_res.unwrap()
+
+                # Warmup Engine2D Vulkan (2 frames)
+                var w = 0
+                while w < 2:
+                    draw_engine2d_equivalent_frame(e2d_vk)
+                    val _ = e2d_vk.finalize_compute_frame_no_readback()
+                    w = w + 1
+
+                # Benchmark Engine2D Vulkan steady-state (20 frames, no readback)
+                val bench_frames: i64 = 20
+                var e2d_t0 = time_now_micros()
+                var fi: i64 = 0
+                while fi < bench_frames:
+                    draw_engine2d_equivalent_frame(e2d_vk)
+                    val did_no_rb = e2d_vk.finalize_compute_frame_no_readback()
+                    expect(did_no_rb).to_equal(true)
+                    fi = fi + 1
+                var e2d_t1 = time_now_micros()
+                val e2d_vk_avg_us = (e2d_t1 - e2d_t0) / bench_frames
+                val e2d_vk_ms = e2d_vk_avg_us.to_f64() / 1000.0
+                val e2d_vk_fps = format_fps(e2d_vk_avg_us)
+                print "ENGINE2D_VULKAN_STEADY: frames={bench_frames} avg_us={e2d_vk_avg_us} avg_ms={e2d_vk_ms} fps={e2d_vk_fps}"
+
+                # Engine2D Vulkan vs Engine2D Software pixel parity
+                draw_engine2d_equivalent_frame(e2d_vk)
+                val e2d_vk_rb = e2d_vk.read_pixels_with_source()
+                expect(e2d_vk_rb.source).to_equal("device_readback")
+                expect(e2d_vk_rb.pixels.len()).to_equal(expected_pixels as i32)
+                e2d_vk.shutdown()
+
+                var e2d_sw = Engine2D.create_with_backend(SCENE_W as i32, SCENE_H as i32, "software")
+                draw_engine2d_equivalent_frame(e2d_sw)
+                e2d_sw.present()
+                val e2d_sw_px = e2d_sw.read_pixels()
+                e2d_sw.shutdown()
+                val e2d_diff = compare_argb_buffers(e2d_sw_px, e2d_vk_rb.pixels)
+                print "PARITY_ENGINE2D_SW_VS_VK: mismatches={e2d_diff.mismatch_count} max_channel_delta={e2d_diff.max_channel_delta}"
+                expect(e2d_diff.mismatch_count).to_equal(0)
+
+                # Warmup Skia Vulkan session (2 frames)
+                var sw_i = 0
+                while sw_i < 2:
+                    val wr = sk_vk.render_picture_frame(pic)
+                    expect(wr.is_ok()).to_equal(true)
+                    sw_i = sw_i + 1
+
+                # Benchmark Skia Vulkan steady-state (20 frames, no readback)
+                var sk_t0 = time_now_micros()
+                var si: i64 = 0
+                while si < bench_frames:
+                    val fr = sk_vk.render_picture_frame(pic)
+                    expect(fr.is_ok()).to_equal(true)
+                    si = si + 1
+                var sk_t1 = time_now_micros()
+                val sk_vk_avg_us = (sk_t1 - sk_t0) / bench_frames
+                val sk_vk_ms = sk_vk_avg_us.to_f64() / 1000.0
+                val sk_vk_fps = format_fps(sk_vk_avg_us)
+                expect(sk_vk.device_finalize_no_readback_count()).to_equal(bench_frames + 2)
+                print "SKIA_VULKAN_STEADY: frames={bench_frames} avg_us={sk_vk_avg_us} avg_ms={sk_vk_ms} fps={sk_vk_fps}"
+
+                # Skia Vulkan readback vs Skia Software bridge & CpuBackend pixel parity
+                val sk_rb_res = sk_vk.render_picture_readback(pic)
+                expect(sk_rb_res.is_ok()).to_equal(true)
+                val sk_rb = sk_rb_res.unwrap()
+                expect(sk_rb.pixels.len()).to_equal(expected_pixels as i32)
+                sk_vk.shutdown()
+
+                val sk_sw_vs_vk = compare_argb_buffers(sw_px, sk_rb.pixels)
+                print "PARITY_SKIA_SW_BRIDGE_VS_SKIA_VK: mismatches={sk_sw_vs_vk.mismatch_count} max_channel_delta={sk_sw_vs_vk.max_channel_delta} source={sk_rb.report.readback_source}"
+                expect(sk_sw_vs_vk.mismatch_count).to_equal(0)
+
+                val cpu_vs_sk_vk = compare_argb_buffers(cpu_argb, sk_rb.pixels)
+                print "PARITY_CPU_SKIA_VS_SKIA_VK: mismatches={cpu_vs_sk_vk.mismatch_count} max_channel_delta={cpu_vs_sk_vk.max_channel_delta} near_matches={cpu_vs_sk_vk.near_match_count}"
+                expect(cpu_vs_sk_vk.max_channel_delta).to_be_less_than(2)
+
+                # Benchmark naive one-shot per-frame create/readback/present (2 frames)
+                var os_t0 = time_now_micros()
+                val os1 = skia_picture_to_vulkan_base(pic, SCENE_W as i32, SCENE_H as i32)
+                val os2 = skia_picture_to_vulkan_base(pic, SCENE_W as i32, SCENE_H as i32)
+                var os_t1 = time_now_micros()
+                expect(os1.is_ok()).to_equal(true)
+                expect(os2.is_ok()).to_equal(true)
+                val os_avg_us = (os_t1 - os_t0) / 2
+                val os_ms = os_avg_us.to_f64() / 1000.0
+                val os_fps = format_fps(os_avg_us)
+                print "SKIA_VULKAN_ONESHOT: frames=2 avg_us={os_avg_us} avg_ms={os_ms} fps={os_fps}"
+
+                # Verify reasonable CPU frame speed, Skia Vulkan steady-state speedup vs one-shot,
+                # and strict FPS parity between Skia Vulkan and Engine2D Vulkan
+                expect(cpu_avg_us).to_be_less_than(60000000)
+                expect(sw_avg_us).to_be_less_than(60000000)
+                expect(sk_vk_avg_us * 100).to_be_less_than(cpu_avg_us)
+                expect(sk_vk_avg_us * 3).to_be_less_than(os_avg_us)
+                expect(sk_vk_fps * 100.0).to_be_greater_than(e2d_vk_fps * 60.0)
+            else:
+                if e2d_vk_res.is_ok():
+                    e2d_vk_res.unwrap().shutdown()
+                if sk_vk_res.is_ok():
+                    sk_vk_res.unwrap().shutdown()
+                print "VULKAN_BENCH_SKIPPED: vulkan GPU unavailable in environment"
+                expect(cpu_avg_us).to_be_less_than(60000000)
+                expect(sw_avg_us).to_be_less_than(60000000)

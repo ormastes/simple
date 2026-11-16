@@ -1,0 +1,96 @@
+# Stateless read mechanism only. SAME subject owns/retains every supplied FD
+# and arena. No caller FD/digest here can create an observation owner or grant.
+use std.common.contracts.container.agent_executable_profile_v1.*
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new}
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+
+pub struct LinuxFreshPrimaryChunkV3:
+    executable_identity: text
+    bytes: [u8]
+    argv: [text]
+
+# Pure cursor arithmetic/hash state only; it cannot set an observed-agent
+# latch. The genuine subject feeds only its actual owned FD chunk and stores
+# the result in its existing canonical slot before returning Pending.
+pub struct LinuxFreshPrimaryHashStepV3:
+    stream: Option<Sha256StreamV1>
+    offset: i64
+    digest: Option<text>
+
+pub fn linux_fresh_primary_hash_step_v3(previous: Option<Sha256StreamV1>, offset: i64,
+        bytes: [u8], expected_size: i64) -> Result<LinuxFreshPrimaryHashStepV3, text>:
+    if (expected_size < 64 or expected_size > 536870912 or offset < 0 or offset >= expected_size or
+            bytes.len() < 1 or bytes.len() > 65536 or bytes.len() > expected_size - offset or
+            (offset > 0 and previous.is_none())): return Err("fresh-workspace-primary-hash-progress-invalid")
+    var hash = if previous.is_some(): previous.unwrap() else: sha256_stream_v1_new()
+    if not hash.update(bytes): return Err("fresh-workspace-primary-executable-hash")
+    val next = offset + bytes.len()
+    if next < expected_size: return Ok(LinuxFreshPrimaryHashStepV3(Some(hash), next, nil))
+    val digest = hash.finish_hex()
+    if digest.is_none(): return Err("fresh-workspace-primary-executable-hash")
+    Ok(LinuxFreshPrimaryHashStepV3(nil, next, digest))
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_fresh_workload_abi_v2.*
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.pread
+use std.nogc_sync_mut.io.volatile_ops.volatile_read_u8
+use std.nogc_sync_mut.io.linux_process_replace_native_v1.linux_replace_sealed_hash_read_v1
+use std.nogc_sync_mut.io.linux_process_replace_contract_v1.linux_process_replace_elf_header_v1
+@unsafe(reason: "bounded pread on the subject's original retained executable/proc FD and private arena", capabilities: [ffi, raw_ptr])
+fn primary_bytes_v3(arena: i64, fd: i64, offset: i64, maximum: i64) -> Result<[u8], text>:
+    if maximum < 1 or maximum > 65536 or offset < 0: return Err("fresh-workspace-primary-read-bound")
+    val count = pread(fd as i32, arena + 8192, maximum as u64, offset)
+    if count < 0 or count > maximum: return Err("fresh-workspace-primary-read")
+    var bytes: [u8] = []
+    for at in 0..count: bytes.push(volatile_read_u8(arena + 8192 + at) as u8)
+    Ok(bytes)
+
+fn primary_argv_v3(bytes: [u8]) -> Result<[text], text>:
+    if bytes.len() < 1 or bytes.len() > 8208 or bytes[bytes.len() - 1] != 0:
+        return Err("fresh-workspace-primary-cmdline-truncated")
+    var args: [text] = []
+    var current: [u8] = []
+    for byte in bytes:
+        if byte == 0:
+            if not utf8_bytes_valid(current): return Err("fresh-workspace-primary-cmdline-utf8")
+            args.push(bytes_to_text(current))
+            if args.len() > 16: return Err("fresh-workspace-primary-argv-bound")
+            current = []
+        else: current.push(byte)
+    if current.len() != 0 or args.len() < 2: return Err("fresh-workspace-primary-cmdline-shape")
+    Ok(args)
+
+@unsafe(reason: "bounded pread/statx into the caller subject's private arena on its own retained executable/cmdline FDs; caller must own arena and FDs", capabilities: [ffi, raw_ptr])
+pub fn linux_fresh_primary_chunk_v3(arena: i64, executable_fd: i64, cmdline_fd: i64, offset: i64,
+        profile: AgentExecutableProfileV1, expected_identity: text = "") -> Result<LinuxFreshPrimaryChunkV3, text>:
+    val minimum = agent_executable_profile_minimum_memory_v1(profile)?
+    val executable = linux_workload_metadata_v2(arena, executable_fd, "", true)?
+    if (executable.mode & 61440) != 32768 or executable.size != profile.image_size_bytes:
+        return Err("fresh-workspace-primary-exact-size-required")
+    if offset < 0 or offset >= executable.size: return Err("fresh-workspace-primary-hash-offset")
+    if expected_identity != "" and executable.identity != expected_identity: return Err("fresh-workspace-primary-original-executable-changed")
+    linux_workload_filesystem_v2(arena, cmdline_fd, 40864)?
+    val first = primary_bytes_v3(arena, cmdline_fd, 0, 8209)?
+    val argv = primary_argv_v3(first)?
+    # Reuse the actual accepted pin producer's complete seal/0500/nlink0/size
+    # checks. Ordinary unlinked files cannot enter this path. One <=64KiB read.
+    val bytes = if executable.links == 0:
+        linux_replace_sealed_hash_read_v1(executable_fd, arena + 8192, offset, executable.size)?
+    else:
+        primary_bytes_v3(arena, executable_fd, offset, if executable.size - offset > 65536: 65536 else: executable.size - offset)?
+    if bytes.len() == 0: return Err("fresh-workspace-primary-hash-read-empty")
+    if offset == 0:
+        if bytes.len() < 64: return Err("fresh-workspace-primary-short-elf-header")
+        val actual = linux_workload_architecture_v2(arena)?
+        if profile.architecture != "linux-" + actual: return Err("fresh-workspace-primary-host-isa-mismatch")
+        linux_process_replace_elf_header_v1(bytes[0:64], executable.size, if actual == "x86_64": 62 else: 183)?
+    val after = linux_workload_metadata_v2(arena, executable_fd, "", true)?
+    if after.identity != executable.identity or after.links != executable.links: return Err("fresh-workspace-primary-executable-revision-changed")
+    if primary_bytes_v3(arena, cmdline_fd, 0, 8209)? != first: return Err("fresh-workspace-primary-cmdline-changed")
+    Ok(LinuxFreshPrimaryChunkV3(executable_identity: executable.identity, bytes: bytes, argv: argv))
+@else:
+@unsafe(reason: "bounded pread/statx into the caller subject's private arena on its own retained executable/cmdline FDs; caller must own arena and FDs", capabilities: [ffi, raw_ptr])
+pub fn linux_fresh_primary_chunk_v3(arena: i64, executable_fd: i64, cmdline_fd: i64, offset: i64,
+        profile: AgentExecutableProfileV1, expected_identity: text = "") -> Result<LinuxFreshPrimaryChunkV3, text>:
+    Err("fresh-workspace-linux-required")
+@end

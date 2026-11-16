@@ -1,0 +1,76 @@
+# AUTHORED_NOT_RUN. Exercises the production-used DATA arithmetic only; no
+# native clock, signed invocation, source custody or launch grant is fabricated.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.workspace_preparation_window_v3.{container_workspace_preparation_deadline_v3, container_workspace_launch_expiry_v3}
+
+describe "Original workspace preparation window cannot be renewed by stepping":
+    it "keeps the original deadline across later samples":
+        step("Use the same original clock and signed budget used by the source continuation")
+        val initial = container_workspace_preparation_deadline_v3(1000, 2, 1000, 5000, 1000)
+        val later = container_workspace_preparation_deadline_v3(1000, 2, 1500000, 5000, 1001)
+        expect(initial.unwrap()).to_equal(2001000)
+        expect(later.unwrap()).to_equal(initial.unwrap())
+
+    it "refuses the exact boundary and later attempts without moving the origin":
+        step("A later step does not obtain a fresh now-plus-budget window")
+        val boundary = container_workspace_preparation_deadline_v3(1000, 2, 2001000, 5000, 1002)
+        val late = container_workspace_preparation_deadline_v3(1000, 2, 9000000, 5000, 1003)
+        expect(boundary.unwrap_err()).to_equal("linux-workspace-original-preparation-expired")
+        expect(late.unwrap_err()).to_equal("linux-workspace-original-preparation-expired")
+
+    it "refuses clock rollback, zero samples and an expired signed wall-clock window":
+        step("Both independent original clocks restrict the real producer")
+        expect(container_workspace_preparation_deadline_v3(1000, 2, 999, 5000, 1000).is_err()).to_equal(true)
+        expect(container_workspace_preparation_deadline_v3(1000, 2, 1000, 5000, 0).is_err()).to_equal(true)
+        expect(container_workspace_preparation_deadline_v3(1000, 2, 1000, 5000, 5000).is_err()).to_equal(true)
+
+    it "rejects overflow and unsupported budgets before addition":
+        step("Use actual production integer bounds; this supplies no native authority")
+        expect(container_workspace_preparation_deadline_v3(9223372036854775800, 1, 9223372036854775800, 5000, 1000).unwrap_err()).to_equal("linux-workspace-preparation-budget")
+        expect(container_workspace_preparation_deadline_v3(1000, 86400001, 1000, 5000, 1000).is_err()).to_equal(true)
+        expect(container_workspace_preparation_deadline_v3(1000, 0, 1000, 5000, 1000).is_err()).to_equal(true)
+
+describe "Final owned launch window restricts the already-published intent":
+    it "refuses a deadline crossed during binding or WAL publication":
+        step("Exercise the production final-admission helper with delayed clock samples")
+        val actual = container_workspace_launch_expiry_v3(6000, 100000000, 5000, 98000000, 1000, 100000000)
+        expect(actual.unwrap_err()).to_equal("linux-workspace-original-launch-window-expired")
+
+    it "caps native expiry to a shorter signed wall deadline":
+        step("Keep requested effect expiry, signed wall expiry and monotonic allowance distinct")
+        val actual = container_workspace_launch_expiry_v3(6000, 100000000, 1050, 20000000, 1000, 21000000)
+        expect(actual.unwrap()).to_equal(1050)
+
+    it "uses the after-sample remaining time and conservative millisecond rounding":
+        step("The sampled wall value cannot renew the original monotonic window")
+        val actual = container_workspace_launch_expiry_v3(6000, 100000000, 5000, 20000000, 1000, 21000000)
+        expect(actual.unwrap()).to_equal(1078)
+        val later = container_workspace_launch_expiry_v3(6000, 100000000, 5000, 80000000, 1060, 81000000)
+        expect(later.unwrap()).to_equal(1078)
+
+    it "rejects expired wall/effect windows, clock reversal and unsafe addition":
+        step("No invalid sample can produce native launch permission")
+        expect(container_workspace_launch_expiry_v3(6000, 100000000, 1000, 20000000, 1000, 21000000).is_err()).to_equal(true)
+        expect(container_workspace_launch_expiry_v3(1000, 100000000, 5000, 20000000, 1000, 21000000).is_err()).to_equal(true)
+        expect(container_workspace_launch_expiry_v3(6000, 100000000, 5000, 22000000, 1000, 21000000).is_err()).to_equal(true)
+        expect(container_workspace_launch_expiry_v3(9223372036854775807, 100000000, 9223372036854775807, 1, 9223372036854775800, 2).is_err()).to_equal(true)
+
+describe "Attach repeats the original window after its own intent publication":
+    it "refuses a post-WAL monotonic expiry while both wall expiries remain valid":
+        step("Use the same production helper called by both Attach boundaries")
+        val planned = container_workspace_launch_expiry_v3(1050, 100000000, 5000, 20000000, 1000, 21000000)
+        expect(planned.unwrap()).to_equal(1050)
+        val delayed = container_workspace_launch_expiry_v3(1050, 100000000, 5000, 99000000, 1040, 100000000)
+        expect(delayed.unwrap_err()).to_equal("linux-workspace-original-launch-window-expired")
+
+    it "exposes the narrower final cap instead of renewing a prepared helper window":
+        step("Actual Attach refuses this mismatch because its existing Session binds exact helper expiry")
+        val prepared_expiry = 1050
+        val capped = container_workspace_launch_expiry_v3(prepared_expiry, 100000000, 5000, 90000000, 1040, 91000000)
+        expect(capped.unwrap()).to_equal(1048)
+        expect(capped.unwrap()).to_be_less_than(prepared_expiry)
+
+    it "preserves an already prepared expiry within both original bounds":
+        step("A valid shorter helper admission is neither broadened nor rewritten")
+        val actual = container_workspace_launch_expiry_v3(1045, 100000000, 5000, 90000000, 1040, 91000000)
+        expect(actual.unwrap()).to_equal(1045)

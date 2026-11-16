@@ -1,0 +1,7 @@
+# CPU profiled probe V3 evidence plan
+
+AUTHORED_NOT_RUN. Root owns the actual in-repo self-hosted verification slot; no seed, compiler/test/native launch occurred in this source lane. Preserve inherited cycle count and existing green evidence.
+
+Production DATA regressions: selection staging/unknown refusal, exact wait payload result versus helper result, combined transcript preservation/diagnostic/control refusal. Genuine fixture: original installed root/template/request, canonical compiled selection, actual Create/config/Start helper, Wait/log EOF+terminal+retirement, before/after configuration, real Stop/Remove/OCI absence, actual whole-cohort observation and original-WAL settlement. Capture returned owners before flags; missing external installed fixture fails explicitly. Partial-prefix cancel, duplicate/copy actions and foreign/occupied cohort must retain native/accounting and refuse respawn/refund. Native injected delayed-CAS/close-consumed faults remain NOT_COVERED without a real fault producer.
+
+Planned root self-hosted production checks include new probe owner/effects/custody/record, actual lower13, original staging codec plus unique preparation window, refactored lifecycle observation closure, common public forwards and V2 collector. These are planned, not passing assertions. Final source review and current-base three-way assembly must preserve accepted Source6/native26+stats/retirement7/session-binding7/namespace8.

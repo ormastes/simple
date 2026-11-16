@@ -926,7 +926,9 @@ impl Lowerer {
     }
 
     fn build_result_projection(&self, recv_hir: &HirExpr, variant: &str, payload_ty: TypeId) -> HirExpr {
-        let expected_disc = self.enum_variant_discriminant(variant);
+        // `.ok`/`.err` projection: the receiver's own owner, else the builtin
+        // Result (#6953).
+        let expected_disc = self.owner_variant_discriminant(recv_hir.ty, Some("Result"), variant, "hir result projection");
         let subject_for_check = recv_hir.clone();
         let subject_for_payload = recv_hir.clone();
         HirExpr {
@@ -980,18 +982,6 @@ impl Lowerer {
         }
     }
 
-    fn enum_variant_discriminant(&self, variant: &str) -> i64 {
-        // Step (d), 2026-08-02: delegate to the SINGLE authoritative definition
-        // in the runtime crate. This value is a RUNTIME ABI, not a
-        // compiler-internal convention: `rt_option_some`/`rt_option_none`
-        // (runtime/src/value/objects.rs) build Option values with it, the
-        // bytecode compiler emits it into the instruction stream, and the
-        // interpreter SFFI reads it back. A second copy here that drifted by
-        // one character would desynchronize compiled code from the runtime
-        // silently. See
-        // doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
-        simple_runtime::value::hash_variant_discriminant(variant) as i64
-    }
 
     /// Lower thread_group field access to GPU intrinsics
     ///

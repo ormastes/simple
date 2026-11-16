@@ -46,6 +46,12 @@ FRAMES=${VK2D_FRAMES:-300}
 WARMUPS=5
 SIMPLE_BIN=${SIMPLE_BIN:-"$ROOT/bin/simple"}
 ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
+# Vulkan headers and loader for the C leg. Defaults are the macOS Homebrew
+# layout; on Linux point them at any Khronos Vulkan-Headers include dir and
+# the loader, e.g. VK2D_VULKAN_LINK=/usr/lib/aarch64-linux-gnu/libvulkan.so.1
+# (no unversioned libvulkan.so without the -dev package).
+VK_INCLUDE_DIR=${VK2D_VULKAN_INCLUDE_DIR:-/opt/homebrew/include}
+VK_LINK=${VK2D_VULKAN_LINK:-"-L/opt/homebrew/lib -lvulkan"}
 
 fail() { echo "check-vulkan-2d-c-compare: $*" >&2; exit 1; }
 
@@ -594,7 +600,7 @@ if ! command -v clang >/dev/null 2>&1; then
     c_reason=no-clang
 elif ! command -v glslangValidator >/dev/null 2>&1; then
     c_reason=no-glslangValidator
-elif [ ! -f /opt/homebrew/include/vulkan/vulkan.h ]; then
+elif [ ! -f "$VK_INCLUDE_DIR/vulkan/vulkan.h" ]; then
     c_reason=no-vulkan-headers
 elif [ ! -f "$ICD" ]; then
     c_reason=no-vulkan-icd
@@ -612,7 +618,7 @@ else
         echo "c_compiler_path=$c_compiler"
         echo "c_compiler_sha256=$c_compiler_sha"
         echo "c_compiler_version=$("$c_compiler" --version | sed -n '1p')"
-        echo "c_compiler_flags=-std=c99 -O2 -I/opt/homebrew/include -L/opt/homebrew/lib -lvulkan"
+        echo "c_compiler_flags=-std=c99 -O2 -I$VK_INCLUDE_DIR $VK_LINK"
         echo "shader_compiler_path=$shader_compiler"
         echo "shader_compiler_sha256=$shader_compiler_sha"
         echo "shader_compiler_version=$("$shader_compiler" --version | sed -n '1p')"
@@ -620,7 +626,7 @@ else
     } >"$c_toolchain"
     (cd "$OUT_DIR" && "$shader_compiler" -V "$BENCH_DIR/rect.comp.glsl" -o rect.spv) &&
     "$c_compiler" -std=c99 -O2 "$BENCH_DIR/vk2d_bench.c" \
-        -I/opt/homebrew/include -L/opt/homebrew/lib -lvulkan -o "$c_bin" ||
+        -I"$VK_INCLUDE_DIR" $VK_LINK -o "$c_bin" ||
         fail "C reference build failed (toolchain present but compile broke)"
     rm -f "$c_artifact" "$c_stdout_raw" "$c_stderr_raw"
     if [ "$(uname -s)" = Darwin ] && [ -x /usr/bin/time ]; then
@@ -630,6 +636,17 @@ else
             ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 "$WARMUPS" \
             >"$c_stdout_raw" 2>"$c_stderr_raw") || fail "C reference run failed"
         c_max_rss_bytes=$(LC_ALL=C awk '/maximum resident set size/ { print $1; exit }' "$c_stderr_raw")
+        case "$c_max_rss_bytes" in
+            ''|*[!0-9]*|0) c_max_rss_bytes=unavailable ;;
+        esac
+    elif [ -x /usr/bin/time ] && /usr/bin/time -v true >/dev/null 2>&1; then
+        # GNU time (Linux): `-v` reports "Maximum resident set size (kbytes): N".
+        (cd "$OUT_DIR" && /usr/bin/time -v env \
+            VK_ICD_FILENAMES="$ICD" VK2D_SCENES="$BENCH_DIR/scenes.txt" \
+            VK2D_DUMP_FB="$c_artifact" \
+            ./vk2d_bench "$W" "$H" "$RECTS" "$FRAMES" 1 "$WARMUPS" \
+            >"$c_stdout_raw" 2>"$c_stderr_raw") || fail "C reference run failed"
+        c_max_rss_bytes=$(LC_ALL=C awk -F': ' '/Maximum resident set size \(kbytes\)/ { print $2 * 1024; exit }' "$c_stderr_raw")
         case "$c_max_rss_bytes" in
             ''|*[!0-9]*|0) c_max_rss_bytes=unavailable ;;
         esac
