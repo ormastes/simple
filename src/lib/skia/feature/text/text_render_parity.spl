@@ -221,7 +221,67 @@ class _SfntFaceMetrics:
     hmtx_offset: i64
     hmtx_length: i64
 
+val _SK_FACE_CACHE_CAP: i64 = 4
+
+class _SkFaceCacheSlot:
+    blob_len: i64
+    blob_h1: i64
+    blob_h2: i64
+    face: _SfntFaceMetrics
+
+var _sk_face_cache: [_SkFaceCacheSlot] = []
+var _sk_face_cache_next: i64 = 0
+
+fn _sk_mix_i64(hash: i64, value: i64) -> i64:
+    (hash ^ value) * 1099511628211
+
+fn _sk_blob_sig(blob: [u8]) -> (i64, i64, i64):
+    val n = blob.len()
+    if n == 0:
+        return (0, 0, 0)
+    var h1: i64 = 1469598103934665603
+    var h2: i64 = -3750763034362895579
+    val head_end = if n < 128: n else: 128
+    var i: i64 = 0
+    while i < head_end:
+        h1 = _sk_mix_i64(h1, blob[i] as i64)
+        i = i + 1
+    val tail_start = if n > 16: n - 16 else: 0
+    i = tail_start
+    while i < n:
+        h2 = _sk_mix_i64(h2, blob[i] as i64)
+        i = i + 1
+    val mid = n / 2
+    val mid_end = if mid + 16 <= n: mid + 16 else: n
+    i = mid
+    while i < mid_end:
+        h2 = _sk_mix_i64(h2, blob[i] as i64)
+        i = i + 1
+    (n, h1, h2)
+
 fn _sfnt_read_face_metrics(font_blob: [u8]) -> _SfntFaceMetrics:
+    val sig = _sk_blob_sig(font_blob)
+    val blen = sig.0
+    val bh1 = sig.1
+    val bh2 = sig.2
+    if blen > 0:
+        var fi: i64 = 0
+        while fi < _sk_face_cache.len():
+            val slot = _sk_face_cache[fi]
+            if slot.blob_len == blen and slot.blob_h1 == bh1 and slot.blob_h2 == bh2:
+                return slot.face
+            fi = fi + 1
+    val face = _sfnt_read_face_metrics_uncached(font_blob)
+    if blen > 0:
+        val entry = _SkFaceCacheSlot(blob_len: blen, blob_h1: bh1, blob_h2: bh2, face: face)
+        if _sk_face_cache.len() < _SK_FACE_CACHE_CAP:
+            _sk_face_cache.push(entry)
+        else:
+            _sk_face_cache[_sk_face_cache_next] = entry
+            _sk_face_cache_next = (_sk_face_cache_next + 1) % _SK_FACE_CACHE_CAP
+    face
+
+fn _sfnt_read_face_metrics_uncached(font_blob: [u8]) -> _SfntFaceMetrics:
     val empty_font = OtFont(blob: [], tables: [])
     val maybe_font = sfnt_glyf_parse_offset_table(font_blob)
     val font = match maybe_font:
@@ -480,7 +540,92 @@ fn _src_argb_with_cov(fg: u32, cov: u8) -> u32:
         return 0u32
     (eff_a << 24) | (fg & 0x00FFFFFFu32)
 
+val _SK_LAYOUT_CACHE_CAP: i64 = 64
+
+class _SkLayoutCacheSlot:
+    hash: i64
+    blob_len: i64
+    blob_h1: i64
+    blob_h2: i64
+    content: text
+    origin_x: f64
+    origin_y: f64
+    font_size: f64
+    baseline_origin: bool
+    result: _SkLayoutResult
+
+var _sk_layout_cache: [_SkLayoutCacheSlot] = []
+var _sk_layout_cache_next: i64 = 0
+
+val _SK_RUN_ARGB_CACHE_CAP: i64 = 64
+
+class _SkRunArgbCacheSlot:
+    hash: i64
+    blob_len: i64
+    blob_h1: i64
+    blob_h2: i64
+    content: text
+    font_size: f64
+    baseline_origin: bool
+    fg: u32
+    bg: u32
+    ox: i32
+    oy: i32
+    buf: SkParityBitmapBuffer
+
+var _sk_run_argb_cache: [_SkRunArgbCacheSlot] = []
+var _sk_run_argb_cache_next: i64 = 0
+
+fn _sk_text_run_hash(blen: i64, bh1: i64, bh2: i64, content: text, font_size: f64, baseline_origin: bool, a: i64, b: i64) -> i64:
+    var h: i64 = 1469598103934665603
+    h = _sk_mix_i64(h, blen)
+    h = _sk_mix_i64(h, bh1)
+    h = _sk_mix_i64(h, bh2)
+    h = _sk_mix_i64(h, content.len())
+    for ch in content.chars():
+        h = _sk_mix_i64(h, ch.to_i64())
+    h = _sk_mix_i64(h, (font_size * 10000.0) as i64)
+    h = _sk_mix_i64(h, if baseline_origin: 1 else: 0)
+    h = _sk_mix_i64(h, a)
+    h = _sk_mix_i64(h, b)
+    if h == 0: 1 else: h
+
 fn _layout_sfnt_glyphs(font_blob: [u8], content: text, origin_x: f64, origin_y: f64, font_size: f64, baseline_origin: bool) -> _SkLayoutResult:
+    val sig = _sk_blob_sig(font_blob)
+    val blen = sig.0
+    val bh1 = sig.1
+    val bh2 = sig.2
+    val h = _sk_text_run_hash(blen, bh1, bh2, content, font_size, baseline_origin, (origin_x * 10000.0) as i64, (origin_y * 10000.0) as i64)
+    var ci: i64 = 0
+    val clen = _sk_layout_cache.len()
+    while ci < clen:
+        val slot = _sk_layout_cache[ci]
+        if (slot.hash == h and slot.blob_len == blen and slot.blob_h1 == bh1 and slot.blob_h2 == bh2 and
+            slot.font_size == font_size and slot.baseline_origin == baseline_origin and
+            slot.origin_x == origin_x and slot.origin_y == origin_y and slot.content == content):
+            return slot.result
+        ci = ci + 1
+    val res = _layout_sfnt_glyphs_uncached(font_blob, content, origin_x, origin_y, font_size, baseline_origin)
+    val entry = _SkLayoutCacheSlot(
+        hash: h,
+        blob_len: blen,
+        blob_h1: bh1,
+        blob_h2: bh2,
+        content: content,
+        origin_x: origin_x,
+        origin_y: origin_y,
+        font_size: font_size,
+        baseline_origin: baseline_origin,
+        result: res
+    )
+    if _sk_layout_cache.len() < _SK_LAYOUT_CACHE_CAP:
+        _sk_layout_cache.push(entry)
+    else:
+        _sk_layout_cache[_sk_layout_cache_next] = entry
+        _sk_layout_cache_next = (_sk_layout_cache_next + 1) % _SK_LAYOUT_CACHE_CAP
+    res
+
+fn _layout_sfnt_glyphs_uncached(font_blob: [u8], content: text, origin_x: f64, origin_y: f64, font_size: f64, baseline_origin: bool) -> _SkLayoutResult:
     val cps = text_codepoints(content)
     val sz = if font_size > 0.0: font_size else: 12.0
     val face = _sfnt_read_face_metrics(font_blob)
@@ -627,6 +772,45 @@ fn _blend_placed_glyphs_onto(mut out: [u32], buf_x0: i64, buf_y0: i64, buf_w: i6
 # reason: low-level ARGB glyph-run rasterizer returns pixel origin (i32, i32) and buffer
 # @allow(primitive_api)
 pub fn skia_sfnt_rasterize_run_with_origin_argb(font_blob: [u8], content: text, font_size: f64, baseline_origin: bool, fg: u32, bg: u32) -> (i32, i32, SkParityBitmapBuffer):
+    if content.len() == 0:
+        return (0i32, 0i32, SkParityBitmapBuffer(width: 0i32, height: 0i32, pixels: []))
+    val sig = _sk_blob_sig(font_blob)
+    val blen = sig.0
+    val bh1 = sig.1
+    val bh2 = sig.2
+    val h = _sk_text_run_hash(blen, bh1, bh2, content, font_size, baseline_origin, fg.to_i64(), bg.to_i64())
+    var ci: i64 = 0
+    val clen = _sk_run_argb_cache.len()
+    while ci < clen:
+        val slot = _sk_run_argb_cache[ci]
+        if (slot.hash == h and slot.blob_len == blen and slot.blob_h1 == bh1 and slot.blob_h2 == bh2 and
+            slot.font_size == font_size and slot.baseline_origin == baseline_origin and
+            slot.fg == fg and slot.bg == bg and slot.content == content):
+            return (slot.ox, slot.oy, slot.buf)
+        ci = ci + 1
+    val res = _skia_sfnt_rasterize_run_with_origin_argb_uncached(font_blob, content, font_size, baseline_origin, fg, bg)
+    val entry = _SkRunArgbCacheSlot(
+        hash: h,
+        blob_len: blen,
+        blob_h1: bh1,
+        blob_h2: bh2,
+        content: content,
+        font_size: font_size,
+        baseline_origin: baseline_origin,
+        fg: fg,
+        bg: bg,
+        ox: res.0,
+        oy: res.1,
+        buf: res.2
+    )
+    if _sk_run_argb_cache.len() < _SK_RUN_ARGB_CACHE_CAP:
+        _sk_run_argb_cache.push(entry)
+    else:
+        _sk_run_argb_cache[_sk_run_argb_cache_next] = entry
+        _sk_run_argb_cache_next = (_sk_run_argb_cache_next + 1) % _SK_RUN_ARGB_CACHE_CAP
+    res
+
+fn _skia_sfnt_rasterize_run_with_origin_argb_uncached(font_blob: [u8], content: text, font_size: f64, baseline_origin: bool, fg: u32, bg: u32) -> (i32, i32, SkParityBitmapBuffer):
     val cps = text_codepoints(content)
     if cps.len() == 0:
         return (0i32, 0i32, SkParityBitmapBuffer(width: 0i32, height: 0i32, pixels: []))

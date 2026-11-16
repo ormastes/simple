@@ -365,6 +365,67 @@ pub class SfntRasterBitmap:
 var _e2d_sfnt_cache: [_E2dSfntSlot] = []
 var _e2d_sfnt_cache_next: i64 = 0
 
+val _E2D_SFNT_RUN_CACHE_CAP: i64 = 64
+
+class _E2dSfntRunSlot:
+    hash: i64
+    text_val: text
+    color: u32
+    font_size: f64
+    font_path: text
+    use_ctm: bool
+    axis_unit_exact: bool
+    x: f64
+    baseline_y: f64
+    origin_x: f64
+    baseline_y_i: i32
+    m00: f64
+    m01: f64
+    m02: f64
+    m10: f64
+    m11: f64
+    m12: f64
+    bitmap: SfntRasterBitmap
+    image_key: i64
+
+var _e2d_sfnt_run_cache: [_E2dSfntRunSlot] = []
+var _e2d_sfnt_run_cache_next: i64 = 0
+var _e2d_sfnt_run_next_image_key: i64 = 0x53464E5400000001
+var _e2d_sfnt_last_run_key: i64 = 0
+
+fn _e2d_fnv_mix_i64(hash: i64, value: i64) -> i64:
+    ((hash ^ value) * 1099511628211)
+
+fn _e2d_sfnt_run_hash(text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, axis_unit_exact: bool, x: f64, baseline_y: f64, origin_x: f64, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> i64:
+    var h: i64 = 1469598103934665603
+    h = _e2d_fnv_mix_i64(h, text_val.len())
+    for ch in text_val.chars():
+        h = _e2d_fnv_mix_i64(h, ch.to_i64())
+    h = _e2d_fnv_mix_i64(h, color.to_i64())
+    h = _e2d_fnv_mix_i64(h, (font_size * 10000.0) as i64)
+    h = _e2d_fnv_mix_i64(h, font_path.len())
+    for ch in font_path.chars():
+        h = _e2d_fnv_mix_i64(h, ch.to_i64())
+    h = _e2d_fnv_mix_i64(h, if use_ctm: 1 else: 0)
+    h = _e2d_fnv_mix_i64(h, if axis_unit_exact: 1 else: 0)
+    if axis_unit_exact:
+        h = _e2d_fnv_mix_i64(h, (origin_x * 10000.0) as i64)
+    else:
+        h = _e2d_fnv_mix_i64(h, (x * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (baseline_y * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m00 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m01 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m02 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m10 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m11 * 10000.0) as i64)
+        h = _e2d_fnv_mix_i64(h, (m12 * 10000.0) as i64)
+    if h == 0: 1 else: h
+
+# reason: returns monotonic GPU image key for last SFNT rasterized run
+# @allow(primitive_api)
+pub fn engine2d_sfnt_last_run_image_key() -> i64:
+    _e2d_sfnt_last_run_key
+
 fn _e2d_floor_i32(v: f64) -> i32:
     val iv = v as i64
     val r = if (iv as f64) > v: iv - 1 else: iv
@@ -574,6 +635,89 @@ fn _e2d_sfnt_rasterize_edges_cov(ex0: [f64], ey0: [f64], ex1: [f64], ey1: [f64],
 # reason: low-level SFNT 4x4 supersampled text rasterizer takes affine matrix/color/size scalars
 # @allow(primitive_api)
 pub fn engine2d_sfnt_rasterize_run(x: f64, baseline_y: f64, text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> SfntRasterBitmap:
+    if text_val.len() == 0 or font_size <= 0.0:
+        _e2d_sfnt_last_run_key = 0
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    if color_a(color) <= 0:
+        _e2d_sfnt_last_run_key = 0
+        return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
+    val axis_unit_exact = (not use_ctm) or (m00 == 1.0 and m01 == 0.0 and m10 == 0.0 and m11 == 1.0)
+    val origin_x = if axis_unit_exact: (if use_ctm: x + m02 else: x) else: x
+    val origin_y = if axis_unit_exact: (if use_ctm: baseline_y + m12 else: baseline_y) else: baseline_y
+    val baseline_y_i = _e2d_floor_i32(origin_y + 0.5)
+    val h = _e2d_sfnt_run_hash(
+        text_val, color, font_size, font_path, use_ctm, axis_unit_exact,
+        x, baseline_y, origin_x, m00, m01, m02, m10, m11, m12
+    )
+    var ci: i64 = 0
+    val clen = _e2d_sfnt_run_cache.len()
+    while ci < clen:
+        val slot = _e2d_sfnt_run_cache[ci]
+        if (slot.hash == h and slot.axis_unit_exact == axis_unit_exact and
+            slot.color == color and slot.font_size == font_size and
+            slot.text_val == text_val and slot.font_path == font_path):
+            if axis_unit_exact:
+                if slot.origin_x == origin_x:
+                    _e2d_sfnt_last_run_key = slot.image_key
+                    if slot.bitmap.width <= 0 or slot.bitmap.height <= 0 or baseline_y_i == slot.baseline_y_i:
+                        return slot.bitmap
+                    val dy = baseline_y_i - slot.baseline_y_i
+                    return SfntRasterBitmap(
+                        x: slot.bitmap.x,
+                        y: slot.bitmap.y + dy,
+                        width: slot.bitmap.width,
+                        height: slot.bitmap.height,
+                        pixels: slot.bitmap.pixels
+                    )
+            else:
+                if (slot.use_ctm == use_ctm and slot.x == x and slot.baseline_y == baseline_y and
+                    slot.m00 == m00 and slot.m01 == m01 and slot.m02 == m02 and
+                    slot.m10 == m10 and slot.m11 == m11 and slot.m12 == m12):
+                    _e2d_sfnt_last_run_key = slot.image_key
+                    return slot.bitmap
+        ci = ci + 1
+
+    val rb = _engine2d_sfnt_rasterize_run_uncached(
+        x, baseline_y, text_val, color, font_size, font_path,
+        use_ctm, m00, m01, m02, m10, m11, m12
+    )
+    var img_key: i64 = 0
+    if rb.width > 0 and rb.height > 0:
+        img_key = _e2d_sfnt_run_next_image_key
+        _e2d_sfnt_run_next_image_key = _e2d_sfnt_run_next_image_key + 1
+        if _e2d_sfnt_run_next_image_key == 0:
+            _e2d_sfnt_run_next_image_key = 1
+    _e2d_sfnt_last_run_key = img_key
+    val new_slot = _E2dSfntRunSlot(
+        hash: h,
+        text_val: text_val,
+        color: color,
+        font_size: font_size,
+        font_path: font_path,
+        use_ctm: use_ctm,
+        axis_unit_exact: axis_unit_exact,
+        x: x,
+        baseline_y: baseline_y,
+        origin_x: origin_x,
+        baseline_y_i: baseline_y_i,
+        m00: m00,
+        m01: m01,
+        m02: m02,
+        m10: m10,
+        m11: m11,
+        m12: m12,
+        bitmap: rb,
+        image_key: img_key
+    )
+    if _e2d_sfnt_run_cache.len() < _E2D_SFNT_RUN_CACHE_CAP:
+        _e2d_sfnt_run_cache.push(new_slot)
+    else:
+        val dst = _e2d_sfnt_run_cache_next
+        _e2d_sfnt_run_cache[dst] = new_slot
+        _e2d_sfnt_run_cache_next = (_e2d_sfnt_run_cache_next + 1) % _E2D_SFNT_RUN_CACHE_CAP
+    rb
+
+fn _engine2d_sfnt_rasterize_run_uncached(x: f64, baseline_y: f64, text_val: text, color: u32, font_size: f64, font_path: text, use_ctm: bool, m00: f64, m01: f64, m02: f64, m10: f64, m11: f64, m12: f64) -> SfntRasterBitmap:
     if text_val.len() == 0 or font_size <= 0.0:
         return SfntRasterBitmap(x: 0, y: 0, width: 0, height: 0, pixels: [])
     val cr = color_r(color)
@@ -3615,6 +3759,16 @@ class Engine2D with DrawIrRenderTarget:
             # bare 28-candidate ambiguity (2026-07-18).
             emu_draw_image_blend(self.backend, x, y, w, h, pixels)
 
+    me hint_image_key(key: i64):
+        """Attach a producer-supplied cache key to the next draw_image_blend."""
+        if key == 0:
+            return
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            var vulkan_typed: VulkanBackend = vulkan
+            vulkan_typed.hint_image_key(key)
+            self.vulkan_backend = Some(vulkan_typed)
+            self.backend = vulkan_typed
+
     me draw_engine(dst_x: i32, dst_y: i32, src: Engine2D):
         """Composite an embedded render target (typically an offscreen Engine2D
         from create_offscreen()) into self at (dst_x, dst_y).
@@ -4304,6 +4458,9 @@ class Engine2D with DrawIrRenderTarget:
             false, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0
         )
         if rb.width > 0 and rb.height > 0:
+            val img_key = engine2d_sfnt_last_run_image_key()
+            if img_key != 0:
+                self.hint_image_key(img_key)
             self.draw_image_blend(rb.x, rb.y, rb.width, rb.height, rb.pixels)
 
     me draw_text_sfnt_aa(x: i32, y: i32, text_val: text, color: u32, font_size: f64, font_path: text):
