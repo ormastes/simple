@@ -1,6 +1,6 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{
     BeDomNode, BeDomEvent, BeDomEventDispatch, StyleProps,
-    normalize_dom_event_type
+    normalize_dom_event_type, be_dom_query_selector, be_dom_query_selector_all
 }
 use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
     DomIdentityIndex, DomNodeRoute, DomRadioGroupKey
@@ -73,7 +73,7 @@ fn be_dom_set_attr(mut node: BeDomNode, name: text, value: text):
 
 fn be_dom_get_attr(node: BeDomNode, name: text) -> text:
     """Get an attribute value, returning "" if absent."""
-    node.attributes.get(name) ?? ""
+    node.get_attr(name)
 
 fn be_dom_event_identity(node: BeDomNode) -> text:
     val author_id = be_dom_get_attr(node, "id")
@@ -312,21 +312,24 @@ fn _be_dom_open_html_node(
     if not state.can_push_length(open_tag_length):
         return false
     state.push_known_length("<" + node.tag_name, open_tag_length)
-    for name in node.attributes.keys():
+    for name in node.attr_names():
         if not name.starts_with("\u0000"):
             val authored_value = be_dom_get_attr(node, name)
             val render_value = if render_only and name == "src":
-                node.attributes.get(
-                    "\u0000simple-render-image-src"
-                ) ?? authored_value
+                if node.has_attr("\u0000simple-render-image-src"):
+                    node.get_attr("\u0000simple-render-image-src")
+                else:
+                    authored_value
             elif render_only and name == "poster":
-                node.attributes.get(
-                    "\u0000simple-render-image-poster"
-                ) ?? authored_value
+                if node.has_attr("\u0000simple-render-image-poster"):
+                    node.get_attr("\u0000simple-render-image-poster")
+                else:
+                    authored_value
             elif render_only and name == "style":
-                node.attributes.get(
-                    "\u0000simple-render-image-style"
-                ) ?? authored_value
+                if node.has_attr("\u0000simple-render-image-style"):
+                    node.get_attr("\u0000simple-render-image-style")
+                else:
+                    authored_value
             else:
                 authored_value
             _be_dom_push_html_attribute(state, name, render_value)
@@ -531,7 +534,7 @@ fn be_dom_get_tag(node: BeDomNode) -> text:
     node.tag_name
 
 fn be_dom_get_id(node: BeDomNode) -> text:
-    node.attributes.get("id") ?? ""
+    node.get_attr("id")
 
 fn be_dom_get_display(node: BeDomNode) -> text:
     if node.style.display == "":
@@ -539,13 +542,13 @@ fn be_dom_get_display(node: BeDomNode) -> text:
     node.style.display
 
 fn be_dom_get_classes(node: BeDomNode) -> [text]:
-    val class_text = node.attributes.get("class") ?? ""
+    val class_text = node.get_attr("class")
     if class_text == "":
         return []
     class_text.split(" ")
 
 fn be_dom_has_attr(node: BeDomNode, name: text) -> bool:
-    node.attributes.has(name)
+    node.has_attr(name)
 
 fn be_dom_get_visibility(node: BeDomNode) -> text:
     "visible"
@@ -603,17 +606,6 @@ fn be_dom_get_font_size(node: BeDomNode) -> f64:
 
 fn be_dom_get_text_decoration(node: BeDomNode) -> text:
     "none"
-
-fn be_dom_query_selector(node: BeDomNode, selector: text) -> BeDomNode?:
-    if selector.starts_with("#") and be_dom_get_id(node) == selector.substring(1, selector.byte_len()):
-        return Some(node)
-    if node.tag_name == selector:
-        return Some(node)
-    for child in node.children:
-        val found = be_dom_query_selector(child, selector)
-        if found.?:
-            return found
-    nil
 
 fn be_dom_dispatch_event_actions(node: BeDomNode, event_type: text) -> [text]:
     val normalized = normalize_dom_event_type(event_type)
@@ -1510,6 +1502,16 @@ fn be_dom_set_children(node: BeDomNode, children: [BeDomNode]) -> BeDomNode:
     BeDomNode(
         node_id: node.node_id,
         tag_name: node.tag_name,
+        attr_mask: node.attr_mask,
+        css_declared_mask: node.css_declared_mask,
+        id_attr: node.id_attr,
+        class_attr: node.class_attr,
+        style_attr: node.style_attr,
+        src_attr: node.src_attr,
+        role_attr: node.role_attr,
+        attr_keys: node.attr_keys,
+        attr_vals: node.attr_vals,
+        css_declared_extra: node.css_declared_extra,
         attributes: node.attributes,
         style: node.style,
         children: children,
@@ -2214,7 +2216,7 @@ export be_dom_get_box_shadows, be_dom_get_backdrop_blur
 export be_dom_get_has_gradient, be_dom_get_gradient_c1, be_dom_get_gradient_c2
 export be_dom_get_border_width, be_dom_get_border_color, be_dom_get_border_style
 export be_dom_get_color, be_dom_get_font_size, be_dom_get_text_decoration
-export be_dom_query_selector, be_dom_dispatch_event_actions
+export be_dom_query_selector, be_dom_query_selector_all, be_dom_dispatch_event_actions
 export be_dom_get_event_listener_count
 export be_dom_input_blocks_implicit_submission
 export be_dom_apply_default_action

@@ -1,0 +1,276 @@
+# mingw CRT link regressions (llvm-mingw UCRT hello, 2026-11-16).
+#
+# Linking real llvm-mingw `crt2.o` + `libmingw32.a` + ucrt import libs with
+# the internal COFF engine surfaced five defects, each pinned here:
+#  1. zero-size `.data`/`.bss` output sections shared the next section's RVA;
+#     Windows refused the image ("%1 is not a valid Win32 application").
+#  2. DWARF `.debug_*` input sections (long names) aborted the link.
+#  3. `__CTOR_LIST__`/`__DTOR_LIST__`/`__RUNTIME_PSEUDO_RELOC_LIST__` (GNU
+#     linker-defined) were unresolved.
+#  4. a relocation naming an external symbol whose own COMDAT copy lost
+#     selection (mingw `.refptr.*`) failed instead of using the winner.
+#  5. ARM64 TLS `add xN, xN, :secrel_hi12:sym, lsl #12` was rejected.
+
+use std.spec.*
+use compiler.backend.linker.coff.coff_link.{
+    CoffLinkRequest, coff_link_amd64}
+use compiler.backend.linker.coff.coff_object.{
+    COFF_REL_ARM64_SECREL_HIGH12A, COFF_REL_ARM64_SECREL_LOW12A,
+    coff_apply_arm64_section_relocation}
+
+struct MgSection:
+    name: text
+    data: [u8]
+    characteristics: i64
+    relocations: [[i64]]
+
+struct MgSymbol:
+    name: text
+    value: i64
+    section_number: i64
+    storage_class: i64
+    aux: [u8]
+
+fn _mg_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _mg_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = _mg_u16(bytes, value & 0xffff)
+    _mg_u16(result, (value >> 16) & 0xffff)
+
+fn _mg_text(bytes: [u8], value: text, width: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < width:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _mg_read(bytes: [u8], offset: i64, width: i64) -> i64:
+    var value: i64 = 0
+    var i = width - 1
+    while i >= 0:
+        value = (value << 8) | (bytes[offset + i] as i64)
+        i = i - 1
+    value
+
+fn _mg_object(sections: [MgSection], symbols: [MgSymbol]) -> [u8]:
+    """Serialize an AMD64 COFF object; long names go to the string table."""
+    var strings: [u8] = []
+    var section_names: [text] = []
+    for section in sections:
+        if section.name.len() > 8:
+            section_names = section_names.push("/{strings.len() + 4}")
+            strings = _mg_text(strings, section.name, section.name.len()).push(0)
+        else:
+            section_names = section_names.push(section.name)
+    var symbol_offsets: [i64] = []
+    var symbol_count: i64 = 0
+    for symbol in symbols:
+        if symbol.name.len() > 8:
+            symbol_offsets = symbol_offsets.push(strings.len() + 4)
+            strings = _mg_text(strings, symbol.name, symbol.name.len()).push(0)
+        else:
+            symbol_offsets = symbol_offsets.push(0)
+        symbol_count = symbol_count + 1 + (if symbol.aux.len() > 0: 1 else: 0)
+    var cursor = 20 + 40 * sections.len()
+    var data_offsets: [i64] = []
+    var reloc_offsets: [i64] = []
+    for section in sections:
+        data_offsets = data_offsets.push(cursor)
+        cursor = cursor + section.data.len()
+        reloc_offsets = reloc_offsets.push(cursor)
+        cursor = cursor + 10 * section.relocations.len()
+    var bytes: [u8] = []
+    bytes = _mg_u16(bytes, 0x8664)
+    bytes = _mg_u16(bytes, sections.len())
+    bytes = _mg_u32(bytes, 0)
+    bytes = _mg_u32(bytes, cursor)
+    bytes = _mg_u32(bytes, symbol_count)
+    bytes = _mg_u32(bytes, 0)
+    var index: i64 = 0
+    for section in sections:
+        bytes = _mg_text(bytes, section_names[index], 8)
+        bytes = _mg_u32(bytes, 0)
+        bytes = _mg_u32(bytes, 0)
+        bytes = _mg_u32(bytes, section.data.len())
+        bytes = _mg_u32(bytes, if section.data.len() > 0: data_offsets[index] else: 0)
+        bytes = _mg_u32(bytes, if section.relocations.len() > 0: reloc_offsets[index] else: 0)
+        bytes = _mg_u32(bytes, 0)
+        bytes = _mg_u16(bytes, section.relocations.len())
+        bytes = _mg_u16(bytes, 0)
+        bytes = _mg_u32(bytes, section.characteristics)
+        index = index + 1
+    for section in sections:
+        for byte in section.data: bytes = bytes.push(byte)
+        for relocation in section.relocations:
+            bytes = _mg_u32(bytes, relocation[0])
+            bytes = _mg_u32(bytes, relocation[1])
+            bytes = _mg_u16(bytes, relocation[2])
+    index = 0
+    for symbol in symbols:
+        if symbol_offsets[index] > 0:
+            bytes = _mg_u32(bytes, 0)
+            bytes = _mg_u32(bytes, symbol_offsets[index])
+        else:
+            bytes = _mg_text(bytes, symbol.name, 8)
+        bytes = _mg_u32(bytes, symbol.value)
+        bytes = _mg_u16(bytes, symbol.section_number & 0xffff)
+        bytes = _mg_u16(bytes, 0)
+        bytes = bytes.push(symbol.storage_class as u8)
+        bytes = bytes.push((if symbol.aux.len() > 0: 1 else: 0) as u8)
+        for byte in symbol.aux: bytes = bytes.push(byte)
+        index = index + 1
+    bytes = _mg_u32(bytes, strings.len() + 4)
+    for byte in strings: bytes = bytes.push(byte)
+    bytes
+
+fn _mg_comdat_aux(length: i64, selection: i64) -> [u8]:
+    var aux: [u8] = []
+    aux = _mg_u32(aux, length)
+    aux = _mg_u32(aux, 0)
+    aux = _mg_u32(aux, 0)
+    aux = _mg_u16(aux, 0)
+    aux = aux.push(selection as u8)
+    aux.push(0).push(0).push(0)
+
+fn _mg_section_names(image: [u8]) -> [text]:
+    val pe = _mg_read(image, 0x3c, 4)
+    val count = _mg_read(image, pe + 6, 2)
+    val optional_size = _mg_read(image, pe + 20, 2)
+    var names: [text] = []
+    var i: i64 = 0
+    while i < count:
+        val header = pe + 24 + optional_size + 40 * i
+        var name = ""
+        var k: i64 = 0
+        while k < 8 and image[header + k] != 0:
+            name = name + (image[header + k] as i64).to_char().to_text()
+            k = k + 1
+        names = names.push(name)
+        i = i + 1
+    names
+
+fn _mg_section_bytes(image: [u8], wanted: text) -> [u8]:
+    val pe = _mg_read(image, 0x3c, 4)
+    val count = _mg_read(image, pe + 6, 2)
+    val optional_size = _mg_read(image, pe + 20, 2)
+    val names = _mg_section_names(image)
+    var i: i64 = 0
+    while i < count:
+        if names[i] == wanted:
+            val header = pe + 24 + optional_size + 40 * i
+            val size = _mg_read(image, header + 8, 4)
+            val raw = _mg_read(image, header + 20, 4)
+            return image.slice(raw, raw + size)
+        i = i + 1
+    []
+
+# `_start: ret` in `.text`, the shape every case below starts from.
+val MG_TEXT = 0x60500020
+val MG_DATA = 0xc0300040
+val MG_RDATA_COMDAT = 0x40301040
+val MG_EXTERNAL = 2
+val MG_STATIC = 3
+
+fn _mg_start(extra: [MgSection], extra_symbols: [MgSymbol]) -> [u8]:
+    var sections = [MgSection(name: ".text", data: [0xc3], characteristics: MG_TEXT, relocations: [])]
+    for section in extra: sections = sections.push(section)
+    var symbols = [MgSymbol(name: "_start", value: 0, section_number: 1,
+        storage_class: MG_EXTERNAL, aux: [])]
+    for symbol in extra_symbols: symbols = symbols.push(symbol)
+    _mg_object(sections, symbols)
+
+describe "COFF mingw CRT link":
+    it "omits an empty output section instead of aliasing the next RVA":
+        val object = _mg_start([MgSection(name: ".data", data: [],
+            characteristics: MG_DATA, relocations: [])], [])
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [object], archives: [], entry: "_start"))
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)
+        expect(_mg_section_names(linked.unwrap()).contains(".data")).to_equal(false)
+
+    it "drops DWARF .debug_* input sections with long names":
+        val object = _mg_start([MgSection(name: ".debug_info", data: [1, 2, 3, 4],
+            characteristics: 0x42100040, relocations: [])], [])
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [object], archives: [], entry: "_start"))
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)
+
+    it "synthesizes the mingw -1 ... 0 constructor table around .ctors input":
+        # `.ctors` holds one 8-byte constructor pointer; `.data` refers to
+        # __CTOR_LIST__ (symbol 2) and __RUNTIME_PSEUDO_RELOC_LIST__ (symbol 3).
+        val ctor: [u8] = [0x11, 0, 0, 0, 0, 0, 0, 0]
+        val object = _mg_start([
+            MgSection(name: ".ctors", data: ctor, characteristics: 0xc0400040, relocations: []),
+            MgSection(name: ".data", data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                characteristics: 0xc0400040, relocations: [[0, 1, 1], [8, 2, 1]])],
+            [MgSymbol(name: "__CTOR_LIST__", value: 0, section_number: 0, storage_class: MG_EXTERNAL, aux: []),
+             MgSymbol(name: "__RUNTIME_PSEUDO_RELOC_LIST__", value: 0, section_number: 0,
+                storage_class: MG_EXTERNAL, aux: [])])
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [object], archives: [], entry: "_start"))
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)
+        val table = _mg_section_bytes(linked.unwrap(), ".ctors")
+        expect(table.len() >= 24).to_equal(true)
+        expect(table[0]).to_equal(0xff)
+        expect(table[7]).to_equal(0xff)
+        expect(table[8]).to_equal(0x11)
+        expect(table[16]).to_equal(0)
+        expect(table[23]).to_equal(0)
+
+    it "resolves a reference into a losing COMDAT copy to the winning definition":
+        # Both objects define external `.refptr.x` in a SELECT_ANY COMDAT and
+        # load it from `.text` with REL32 (type 4).
+        val text_with_ref: [u8] = [0x48, 0x8b, 0x05, 0, 0, 0, 0, 0xc3]
+        val comdat_symbols = [
+            MgSymbol(name: ".rdata$r", value: 0, section_number: 2, storage_class: MG_STATIC,
+                aux: _mg_comdat_aux(8, 2)),
+            MgSymbol(name: ".refptr.x", value: 0, section_number: 2, storage_class: MG_EXTERNAL, aux: [])]
+        var first_symbols = [MgSymbol(name: "_start", value: 0, section_number: 1,
+            storage_class: MG_EXTERNAL, aux: [])]
+        for symbol in comdat_symbols: first_symbols = first_symbols.push(symbol)
+        val rdata = MgSection(name: ".rdata$r", data: [0, 0, 0, 0, 0, 0, 0, 0],
+            characteristics: MG_RDATA_COMDAT, relocations: [])
+        # Symbol table indices: _start=0, section sym=1, aux=2, .refptr.x=3.
+        val first = _mg_object([
+            MgSection(name: ".text", data: text_with_ref, characteristics: MG_TEXT,
+                relocations: [[3, 3, 4]]), rdata], first_symbols)
+        var second_symbols = [MgSymbol(name: "other", value: 0, section_number: 1,
+            storage_class: MG_EXTERNAL, aux: [])]
+        for symbol in comdat_symbols: second_symbols = second_symbols.push(symbol)
+        val second = _mg_object([
+            MgSection(name: ".text", data: text_with_ref, characteristics: MG_TEXT,
+                relocations: [[3, 3, 4]]), rdata], second_symbols)
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [first, second], archives: [],
+            entry: "_start"))
+        if linked.is_err(): print("link error: {linked.unwrap_err()}")
+        expect(linked.is_ok()).to_equal(true)
+
+describe "ARM64 TLS SECREL ADD relocations":
+    it "accepts the lsl #12 form for SECREL_HIGH12A":
+        # add x8, x8, #0, lsl #12
+        val value = coff_apply_arm64_section_relocation(
+            COFF_REL_ARM64_SECREL_HIGH12A, 0x91400108, 0x3010, 0)
+        expect(value.success).to_equal(true)
+        expect(value.value).to_equal(0x91400108 | (3 << 10))
+
+    it "still rejects a shifted ADD for SECREL_LOW12A":
+        val value = coff_apply_arm64_section_relocation(
+            COFF_REL_ARM64_SECREL_LOW12A, 0x91400108, 0x3010, 0)
+        expect(value.success).to_equal(false)
+        expect(value.error.contains("SECREL_LOW12A")).to_equal(true)
+
+    it "names HIGH12A when a non-ADD instruction carries it":
+        # ldr x8, [x8] is not an ADD immediate.
+        val value = coff_apply_arm64_section_relocation(
+            COFF_REL_ARM64_SECREL_HIGH12A, 0xf9400108, 0x3010, 0)
+        expect(value.success).to_equal(false)
+        expect(value.error.contains("SECREL_HIGH12A")).to_equal(true)
+
+    it "patches the unshifted LOW12A ADD with the low 12 bits":
+        val value = coff_apply_arm64_section_relocation(
+            COFF_REL_ARM64_SECREL_LOW12A, 0x91000108, 0x3010, 0)
+        expect(value.success).to_equal(true)
+        expect(value.value).to_equal(0x91000108 | (0x10 << 10))

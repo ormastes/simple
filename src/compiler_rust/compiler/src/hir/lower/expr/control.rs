@@ -785,7 +785,7 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            Pattern::Enum { name: _, variant, .. } => {
+            Pattern::Enum { name: pattern_enum, variant, .. } => {
                 // Warn-only, DEFAULT OFF. Expression-form twin of the statement
                 // check in hir/lower/stmt_lowering.rs; reached for
                 // `val x = match subj: case Some(v)`. See
@@ -886,10 +886,10 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Validate the stable enum identity and hashed variant tag.
-                let expected_disc: i64 = {
-                    simple_runtime::value::hash_variant_discriminant(variant) as i64
-                };
+                // Validate the stable enum identity and the OWNING enum's
+                // declared variant index (#6953).
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(subject_ty, Some(pattern_enum.as_str()), variant, "hir match arm");
 
                 let expected_val = HirExpr {
                     kind: HirExprKind::Integer(expected_disc),
@@ -1219,21 +1219,10 @@ impl Lowerer {
     /// `case C(L2.S(L3.X(n)), tag)` select on `L2.S` alone, so an `L3.Y`
     /// subject took the `L3.X` arm.
     ///
-    /// The slot's static type is unknown here; see
-    /// [`Self::subpattern_condition_typed`] for the typed walk.
-    pub(crate) fn subpattern_condition(
-        &mut self,
-        slot: &HirExpr,
-        pattern: &Pattern,
-        ctx: &mut FunctionContext,
-    ) -> Option<HirExpr> {
-        self.subpattern_condition_typed(slot, TypeId::ANY, pattern, ctx)
-    }
-
-    /// [`Self::subpattern_condition`] with the slot's DECLARED static type
-    /// (`TypeId::ANY` when unknown). The slot expression itself stays
-    /// ANY-typed; `slot_ty` only decides whether a bare identifier is a
-    /// variant test.
+    /// `slot_ty` is the slot's DECLARED static type (`TypeId::ANY` when
+    /// unknown). The slot expression itself stays ANY-typed; `slot_ty`
+    /// decides whether a bare identifier is a variant test and which enum
+    /// owns a variant's discriminant (#6953).
     ///
     /// A bare `Red` in a tuple element / array element / enum payload slot
     /// whose declared type is an enum owning a variant `Red` is a VARIANT
@@ -1281,7 +1270,12 @@ impl Lowerer {
                             ty: TypeId::I64,
                         },
                         HirExpr {
-                            kind: HirExprKind::Integer(simple_runtime::value::hash_variant_discriminant(name) as i64),
+                            kind: HirExprKind::Integer(self.owner_variant_discriminant(
+                                slot_ty,
+                                None,
+                                name,
+                                "hir nested bare variant",
+                            )),
                             ty: TypeId::I64,
                         },
                     ],
@@ -1430,9 +1424,8 @@ impl Lowerer {
                     let positional: Vec<(usize, &Pattern)> = fields.iter().enumerate().collect();
                     return self.struct_fields_condition(slot, variant, &positional, ctx);
                 }
-                let expected_disc: i64 = {
-                    simple_runtime::value::hash_variant_discriminant(variant) as i64
-                };
+                let expected_disc: i64 =
+                    self.owner_variant_discriminant(slot_ty, Some(name.as_str()), variant, "hir nested variant");
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
                         name: "rt_enum_check_variant".to_string(),
@@ -1736,7 +1729,7 @@ impl Lowerer {
     ///
     /// Only the TOP-LEVEL position was wrong. A struct pattern nested in an enum
     /// payload, an array element or a tuple element routes through
-    /// [`Self::subpattern_condition`], which has tested struct fields since
+    /// [`Self::subpattern_condition_typed`], which has tested struct fields since
     /// `5ce2f653a49`. Recursion (depth 3+, literal fields, array/tuple field
     /// sub-patterns) is likewise [`Self::struct_fields_condition`]'s; this is
     /// only the entry point.
@@ -1766,7 +1759,7 @@ impl Lowerer {
     ///
     /// A field name that does not resolve leaves the pattern irrefutable rather
     /// than inventing an index — the same under-report rule
-    /// [`Self::subpattern_condition`] already applies to this spelling.
+    /// [`Self::subpattern_condition_typed`] already applies to this spelling.
     pub(crate) fn named_struct_pattern_condition(
         &mut self,
         subject_ref: &HirExpr,
@@ -2826,9 +2819,7 @@ impl Lowerer {
             }
         };
         let condition = if result_like {
-            let err_disc: i64 = {
-                simple_runtime::value::hash_variant_discriminant("Err") as i64
-            };
+            let err_disc: i64 = self.owner_variant_discriminant(subject_ty, None, "Err", "hir result-like presence");
             let is_err = HirExpr {
                 kind: HirExprKind::BuiltinCall {
                     name: "rt_enum_check_variant".to_string(),
@@ -3792,10 +3783,9 @@ impl Lowerer {
             });
         }
 
-        // Hashed "Err" discriminant — same convention as match lowering.
-        let err_disc: i64 = {
-            simple_runtime::value::hash_variant_discriminant("Err") as i64
-        };
+        // The subject's own `Err` index (#6953): a typed user enum may declare
+        // `Err` anywhere; an unresolved subject is the builtin Result (1).
+        let err_disc: i64 = self.owner_variant_discriminant(subject_ty, None, "Err", "hir ? operator");
 
         let is_err = HirExpr {
             kind: HirExprKind::BuiltinCall {

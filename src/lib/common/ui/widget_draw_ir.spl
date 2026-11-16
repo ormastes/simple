@@ -54,6 +54,7 @@ use common.ui.draw_ir.{
     draw_ir_text_shaped_font
 }
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char}
+use std.common.encoding.utf8.{text_codepoints, text_from_codepoints}
 use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 
@@ -169,6 +170,48 @@ fn _prop_int(node: WidgetNode, key: text) -> i32:
     if raw == "":
         return 0
     raw.to_int() ?? 0
+
+fn _prop_int_or(node: WidgetNode, key: text, fallback: i32) -> i32:
+    val raw = node.get_prop(key)
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+fn _clamp_i32(v: i32, lo: i32, hi: i32) -> i32:
+    if hi < lo:
+        return lo
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    v
+
+fn _clamp_opacity_milli(v: i32) -> i32:
+    if v <= 0:
+        return 880
+    if v > 1000:
+        return 1000
+    v
+
+fn _translucent_color(color: u32, alpha: u32) -> u32:
+    val rgb = color & 0x00FFFFFFu32
+    val a = (alpha & 0xFFu32) << 24
+    rgb | a
+
+fn _text_caret_prefix(value: text, caret: i32) -> text:
+    """Slice `value` by Unicode codepoint count so multi-byte UTF-8 glyphs stay intact."""
+    if caret <= 0:
+        return ""
+    val cps = text_codepoints(value)
+    val count = cps.len() as i32
+    if caret >= count:
+        return value
+    var out: [i64] = []
+    var i: i32 = 0
+    while i < caret:
+        out.push(cps[i])
+        i = i + 1
+    text_from_codepoints(out)
 
 fn _label_text(node: WidgetNode) -> text:
     val lbl = node.get_prop("label")
@@ -341,7 +384,11 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
         if lbl != "":
             result.push(_default_text_centered(node, "{rect.id}-label", x + box + 6, mid_y, y, rect.h, lbl, theme.text_primary))
     elif kind == "input" or kind == "textfield":
-        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.border))
+        val focused = node.get_prop("ui_focus") == "true"
+        val border_color = if focused: theme.accent else: theme.border
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, border_color))
+        if focused and rect.w > 4 and rect.h > 4:
+            result.push(draw_ir_rect("{rect.id}-focus-border", x + 1, y + 1, rect.w - 2, rect.h - 2, theme.accent))
         result.push(draw_ir_rect("{rect.id}-field", x + 2, y + 2, rect.w - 4, rect.h - 4, theme.field))
         val value = node.get_prop("value")
         if value != "":
@@ -353,9 +400,9 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
             val placeholder = node.get_prop("placeholder")
             if placeholder != "":
                 result.push(_default_text_centered(node, "{rect.id}-placeholder", x + 5, mid_y, y, rect.h, placeholder, theme.text_secondary))
-        if node.get_prop("ui_focus") == "true":
+        if focused:
             val caret = _prop_int(node, "caret")
-            val prefix = if caret > 0 and caret < value.len(): value.slice(0, caret) elif caret >= value.len(): value else: ""
+            val prefix = _text_caret_prefix(value, caret)
             val prefix_command = _default_text(node, "{rect.id}-caret-metrics", 0, 0, prefix, theme.text_primary)
             val caret_x = x + 5 + (if prefix_command.computed_style.len() > 0: prefix_command.width else: caret * GLYPH_ADVANCE)
             result.push(draw_ir_rect("{rect.id}-caret", caret_x, y + 3, 2, rect.h - 6, theme.accent))
@@ -514,6 +561,21 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
     elif kind == "divider":
         val line_y = y + rect.h / 2
         result.push(draw_ir_rect(rect.id, x, line_y, rect.w, 1, theme.border))
+    elif kind == "dialog":
+        val focused = node.get_prop("ui_focus") == "true"
+        val border_color = if focused: theme.accent else: theme.border
+        val title_h: i32 = if rect.h >= 28: 22 else: rect.h
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, border_color))
+        if rect.w > 2 and rect.h > 2:
+            result.push(draw_ir_rect("{rect.id}-body", x + 1, y + 1, rect.w - 2, rect.h - 2, _translucent_color(theme.surface, 224)))
+            result.push(draw_ir_rect("{rect.id}-titlebar", x + 1, y + 1, rect.w - 2, title_h, if focused: theme.accent else: theme.control_normal))
+        if rect.w >= 64 and title_h >= 12:
+            result.push(draw_ir_rect("{rect.id}-dot-close", x + 8, y + 7, 8, 8, 0xFFFF5F56u32))
+            result.push(draw_ir_rect("{rect.id}-dot-min", x + 20, y + 7, 8, 8, 0xFFFFBD2Eu32))
+            result.push(draw_ir_rect("{rect.id}-dot-max", x + 32, y + 7, 8, 8, 0xFF27C93Fu32))
+        val title_text = node.get_prop("title")
+        if title_text != "" and title_h >= 10:
+            result.push(_default_text_centered(node, "{rect.id}-title", x + 48, y + 1 + title_h / 2, y + 1, title_h, title_text, theme.text_primary))
     else:
         # container / panel / unknown -> background surface
         result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.surface))
@@ -525,12 +587,25 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
             ))
 
 # =========================================================================
-# Main-batch walk (absolute coords). Scroll subtrees are handled separately,
-# so the walk draws the scroll frame but does not recurse into it.
+# Main-batch walk (absolute coords). Scroll subtrees, layered internal windows,
+# draggable positioned cards, and closed/open context menus are omitted here
+# (or emitted in overlay batches below).
 # =========================================================================
+
+fn _is_layered_floating_node(node: WidgetNode) -> bool:
+    val kind = node.kind_name()
+    if kind == "dialog" and node.get_prop("internal_window") == "true":
+        return true
+    if kind != "dialog" and node.get_prop("draggable") == "true" and node.get_prop("x") != "":
+        return true
+    false
 
 fn _walk_main(node: WidgetNode, rects: [WidgetRect], mut result: [DrawIrCommand], theme: WidgetDrawIrTheme):
     if not node.is_visible():
+        return
+    if _is_layered_floating_node(node):
+        return
+    if node.kind_name() == "context_menu":
         return
     val rect_index = find_rect_index(rects, node.id)
     if rect_index < 0:
@@ -541,7 +616,7 @@ fn _walk_main(node: WidgetNode, rects: [WidgetRect], mut result: [DrawIrCommand]
     if node.kind_name() == "dropdown":
         # A closed dropdown's items are its option list, not visible content:
         # the emitter draws the current value, and the items only belong on
-        # screen while the popup is open (not modeled here yet).
+        # screen in an overlay batch when `"open" == "true"`.
         return
     for child in node.children():
         _walk_main(child, rects, result, theme)
@@ -583,6 +658,203 @@ fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text,
             ))
     for child in node.children():
         _collect_scroll_batches(child, rects, backend, result, theme)
+
+# =========================================================================
+# Layered overlay batches: internal windows, draggable cards, open dropdown
+# popups, and open context menus (emitted in ascending layer order).
+# =========================================================================
+
+fn _walk_floating_children(node: WidgetNode, rects: [WidgetRect], ox: i32, oy: i32, mut result: [DrawIrCommand], theme: WidgetDrawIrTheme):
+    if not node.is_visible():
+        return
+    if _is_layered_floating_node(node) or node.kind_name() == "context_menu":
+        return
+    val rect_index = find_rect_index(rects, node.id)
+    if rect_index >= 0:
+        _emit_widget(node, rects, rect_index, ox, oy, result, theme)
+    if node.kind_name() == "scroll" or node.kind_name() == "dropdown":
+        return
+    for child in node.children():
+        _walk_floating_children(child, rects, ox, oy, result, theme)
+
+fn _collect_floating_nodes(node: WidgetNode, mut out: [WidgetNode]):
+    if not node.is_visible():
+        return
+    if _is_layered_floating_node(node):
+        out.push(node)
+        return
+    for child in node.children():
+        _collect_floating_nodes(child, out)
+
+fn _sort_nodes_by_z(mut nodes: [WidgetNode]):
+    var i: i32 = 1
+    while i < nodes.len() as i32:
+        val key = nodes[i]
+        val key_z = _prop_int_or(key, "z_order", 10)
+        var j: i32 = i - 1
+        while j >= 0 and _prop_int_or(nodes[j], "z_order", 10) > key_z:
+            nodes[j + 1] = nodes[j]
+            j = j - 1
+        nodes[j + 1] = key
+        i = i + 1
+
+fn _build_floating_node_batch(node: WidgetNode, rects: [WidgetRect], canvas_w: i32, canvas_h: i32, backend: text, theme: WidgetDrawIrTheme) -> DrawIrBatch:
+    val rect_index = find_rect_index(rects, node.id)
+    val base_w = if rect_index >= 0: rects[rect_index].w else: 220
+    val base_h = if rect_index >= 0: rects[rect_index].h else: 140
+    val fw = _clamp_i32(_prop_int_or(node, "width", base_w), 48, canvas_w)
+    val fh = _clamp_i32(_prop_int_or(node, "height", base_h), 28, canvas_h)
+    val base_x = if rect_index >= 0: rects[rect_index].x else: 0
+    val base_y = if rect_index >= 0: rects[rect_index].y else: 0
+    val fx = _clamp_i32(_prop_int_or(node, "x", base_x), 0, canvas_w - fw)
+    val fy = _clamp_i32(_prop_int_or(node, "y", base_y), 0, canvas_h - fh)
+    val z_order = _prop_int_or(node, "z_order", 10)
+    val opacity_milli = _clamp_opacity_milli(_prop_int_or(node, "opacity_milli", 880))
+    val focused = node.get_prop("ui_focus") == "true"
+    val pressed = node.get_prop("ui_pressed") == "true"
+    val border_color = if focused or pressed: theme.accent else: theme.border
+    val is_win = node.kind_name() == "dialog" and node.get_prop("internal_window") == "true"
+    var cmds: [DrawIrCommand] = []
+    cmds.push(draw_ir_rect(node.id, 0, 0, fw, fh, border_color))
+    cmds.push(draw_ir_rect("{node.id}-body", 2, 2, fw - 4, fh - 4, _translucent_color(theme.surface, 224)))
+    val title_h: i32 = if is_win: (if fh >= 32: 24 else: fh - 4) else: 0
+    if is_win:
+        val bar_color = if focused: theme.accent else: theme.control_normal
+        cmds.push(draw_ir_rect("{node.id}-titlebar", 2, 2, fw - 4, title_h, bar_color))
+        if fw >= 64 and title_h >= 12:
+            cmds.push(draw_ir_rect("{node.id}-dot-close", 10, 9, 8, 8, 0xFFFF5F56u32))
+            cmds.push(draw_ir_rect("{node.id}-dot-min", 22, 9, 8, 8, 0xFFFFBD2Eu32))
+            cmds.push(draw_ir_rect("{node.id}-dot-max", 34, 9, 8, 8, 0xFF27C93Fu32))
+        val title_text = node.get_prop("title")
+        if title_text != "" and title_h >= 10:
+            cmds.push(_default_text_centered(node, "{node.id}-title", 50, 2 + title_h / 2, 2, title_h, title_text, theme.text_primary))
+    else:
+        val title_text = node.get_prop("title")
+        if title_text != "" and fh >= 24:
+            cmds.push(_default_text_centered(node, "{node.id}-title", 10, 14, 2, 24, title_text, theme.text_primary))
+    if rect_index >= 0:
+        val oy_shift = if is_win: base_y - (title_h + 4) else: base_y
+        for child in node.children():
+            _walk_floating_children(child, rects, base_x, oy_shift, cmds, theme)
+    val batch_id = "layer-{node.id}"
+    val embedding = draw_ir_embedding_config(batch_id, node.id, fx, fy, fw, fh, z_order, opacity_milli, false)
+    val source = draw_ir_source_gui_ast(node.id, "widget-floating", "1")
+    draw_ir_batch_with_source(batch_id, backend, embedding, cmds, source)
+
+fn _build_dropdown_popup_batch(node: WidgetNode, rects: [WidgetRect], ox_delta: i32, oy_delta: i32, canvas_w: i32, canvas_h: i32, backend: text, theme: WidgetDrawIrTheme) -> DrawIrBatch:
+    val rect_index = find_rect_index(rects, node.id)
+    val trig_x = if rect_index >= 0: rects[rect_index].x + ox_delta else: _prop_int(node, "x")
+    val trig_y = if rect_index >= 0: rects[rect_index].y + oy_delta else: _prop_int(node, "y")
+    val trig_w = if rect_index >= 0: rects[rect_index].w else: _prop_int_or(node, "width", 140)
+    val trig_h = if rect_index >= 0: rects[rect_index].h else: _prop_int_or(node, "height", 28)
+    val items = node.children()
+    val row_h: i32 = 24
+    val raw_h: i32 = if items.len() > 0: (items.len() as i32) * row_h + 8 else: 32
+    val pop_w = _clamp_i32(if trig_w > 120: trig_w else: 120, 48, canvas_w)
+    val pop_h = _clamp_i32(raw_h, 24, canvas_h)
+    val below_y = trig_y + trig_h + 2
+    val raw_y = if below_y + pop_h <= canvas_h: below_y else: (if trig_y - pop_h - 2 >= 0: trig_y - pop_h - 2 else: canvas_h - pop_h)
+    val pop_x = _clamp_i32(trig_x, 0, canvas_w - pop_w)
+    val pop_y = _clamp_i32(raw_y, 0, canvas_h - pop_h)
+    val hovered_idx = _prop_int_or(node, "hovered_index", -1)
+    val selected_idx = _prop_int_or(node, "selected_index", -1)
+    val opacity_milli = _clamp_opacity_milli(_prop_int_or(node, "opacity_milli", 920))
+    val z_layer = 100 + _prop_int_or(node, "z_order", 0)
+    var cmds: [DrawIrCommand] = []
+    cmds.push(draw_ir_rect("{node.id}-popup-border", 0, 0, pop_w, pop_h, theme.accent))
+    cmds.push(draw_ir_rect("{node.id}-popup", 1, 1, pop_w - 2, pop_h - 2, _translucent_color(theme.surface, 232)))
+    var i: i32 = 0
+    for item in items:
+        val row_y = 4 + i * row_h
+        if row_y + row_h <= pop_h:
+            val active = (i == hovered_idx) or (i == selected_idx)
+            val row_bg = if active: theme.accent else: _translucent_color(theme.field, 224)
+            cmds.push(draw_ir_rect("{node.id}-opt-{i}-bg", 3, row_y, pop_w - 6, row_h - 2, row_bg))
+            val lbl = _label_text(item)
+            if lbl != "":
+                cmds.push(_default_text_centered(item, "{node.id}-opt-{i}-label", 8, row_y + row_h / 2, row_y, row_h, lbl, theme.text_primary))
+        i = i + 1
+    val batch_id = "dropdown-popup-{node.id}"
+    val embedding = draw_ir_embedding_config(batch_id, node.id, pop_x, pop_y, pop_w, pop_h, z_layer, opacity_milli, false)
+    val source = draw_ir_source_gui_ast(node.id, "widget-dropdown-popup", "1")
+    draw_ir_batch_with_source(batch_id, backend, embedding, cmds, source)
+
+fn _build_context_menu_batch(node: WidgetNode, rects: [WidgetRect], canvas_w: i32, canvas_h: i32, backend: text, theme: WidgetDrawIrTheme) -> DrawIrBatch:
+    val rect_index = find_rect_index(rects, node.id)
+    val raw_x = if node.get_prop("anchor_x") != "": _prop_int(node, "anchor_x") elif rect_index >= 0: rects[rect_index].x else: 0
+    val raw_y = if node.get_prop("anchor_y") != "": _prop_int(node, "anchor_y") elif rect_index >= 0: rects[rect_index].y else: 0
+    val items = node.children()
+    val row_h: i32 = 24
+    val req_w = _prop_int_or(node, "width", 160)
+    val menu_w = _clamp_i32(if req_w > 120: req_w else: 160, 48, canvas_w)
+    val raw_h: i32 = if items.len() > 0: (items.len() as i32) * row_h + 8 else: 32
+    val menu_h = _clamp_i32(raw_h, 24, canvas_h)
+    val menu_x = _clamp_i32(raw_x, 0, canvas_w - menu_w)
+    val menu_y = _clamp_i32(raw_y, 0, canvas_h - menu_h)
+    val hovered_idx = _prop_int_or(node, "hovered_index", -1)
+    val selected_idx = _prop_int_or(node, "selected_index", -1)
+    val opacity_milli = _clamp_opacity_milli(_prop_int_or(node, "opacity_milli", 920))
+    val z_layer = 200 + _prop_int_or(node, "z_order", 0)
+    var cmds: [DrawIrCommand] = []
+    cmds.push(draw_ir_rect("{node.id}-popup-border", 0, 0, menu_w, menu_h, theme.accent))
+    cmds.push(draw_ir_rect("{node.id}-popup", 1, 1, menu_w - 2, menu_h - 2, _translucent_color(theme.surface, 236)))
+    var i: i32 = 0
+    for item in items:
+        val row_y = 4 + i * row_h
+        if row_y + row_h <= menu_h:
+            val active = (i == hovered_idx) or (i == selected_idx)
+            val row_bg = if active: theme.accent else: _translucent_color(theme.field, 224)
+            cmds.push(draw_ir_rect("{node.id}-item-{i}-bg", 3, row_y, menu_w - 6, row_h - 2, row_bg))
+            val lbl = _label_text(item)
+            if lbl != "":
+                cmds.push(_default_text_centered(item, "{node.id}-item-{i}-label", 10, row_y + row_h / 2, row_y, row_h, lbl, theme.text_primary))
+        i = i + 1
+    val batch_id = "context-menu-{node.id}"
+    val embedding = draw_ir_embedding_config(batch_id, node.id, menu_x, menu_y, menu_w, menu_h, z_layer, opacity_milli, false)
+    val source = draw_ir_source_gui_ast(node.id, "widget-context-menu", "1")
+    draw_ir_batch_with_source(batch_id, backend, embedding, cmds, source)
+
+fn _collect_dropdown_popups(node: WidgetNode, rects: [WidgetRect], ox_delta: i32, oy_delta: i32, canvas_w: i32, canvas_h: i32, backend: text, mut result: [DrawIrBatch], theme: WidgetDrawIrTheme):
+    if not node.is_visible():
+        return
+    var cur_ox = ox_delta
+    var cur_oy = oy_delta
+    if _is_layered_floating_node(node):
+        val rect_index = find_rect_index(rects, node.id)
+        if rect_index >= 0:
+            val base_x = rects[rect_index].x
+            val base_y = rects[rect_index].y
+            val fx = _prop_int_or(node, "x", base_x)
+            val fy = _prop_int_or(node, "y", base_y)
+            val is_win = node.kind_name() == "dialog" and node.get_prop("internal_window") == "true"
+            val title_shift: i32 = if is_win: 28 else: 0
+            cur_ox = fx - base_x
+            cur_oy = fy - base_y + title_shift
+    if node.kind_name() == "dropdown" and node.get_prop("open") == "true":
+        result.push(_build_dropdown_popup_batch(node, rects, cur_ox, cur_oy, canvas_w, canvas_h, backend, theme))
+        return
+    for child in node.children():
+        _collect_dropdown_popups(child, rects, cur_ox, cur_oy, canvas_w, canvas_h, backend, result, theme)
+
+fn _collect_context_menus(node: WidgetNode, rects: [WidgetRect], canvas_w: i32, canvas_h: i32, backend: text, mut result: [DrawIrBatch], theme: WidgetDrawIrTheme):
+    if not node.is_visible():
+        return
+    if node.kind_name() == "context_menu" and node.get_prop("open") == "true":
+        result.push(_build_context_menu_batch(node, rects, canvas_w, canvas_h, backend, theme))
+        return
+    for child in node.children():
+        _collect_context_menus(child, rects, canvas_w, canvas_h, backend, result, theme)
+
+fn _collect_overlay_batches(root: WidgetNode, rects: [WidgetRect], canvas_w: i32, canvas_h: i32, backend: text, mut result: [DrawIrBatch], theme: WidgetDrawIrTheme):
+    if canvas_w <= 0 or canvas_h <= 0:
+        return
+    var floating: [WidgetNode] = []
+    _collect_floating_nodes(root, floating)
+    _sort_nodes_by_z(floating)
+    for fnode in floating:
+        result.push(_build_floating_node_batch(fnode, rects, canvas_w, canvas_h, backend, theme))
+    _collect_dropdown_popups(root, rects, 0, 0, canvas_w, canvas_h, backend, result, theme)
+    _collect_context_menus(root, rects, canvas_w, canvas_h, backend, result, theme)
 
 # =========================================================================
 # Root surface projection
@@ -664,6 +936,7 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
     val main_batch = draw_ir_batch_with_source("widget-main", backend, embedding, main_cmds, source)
     var batches: [DrawIrBatch] = [main_batch]
     _collect_scroll_batches(root, rects, backend, batches, theme)
+    _collect_overlay_batches(root, rects, w, h, backend, batches, theme)
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
 
 fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
@@ -676,6 +949,7 @@ fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> Dr
     val main_batch = draw_ir_batch_with_source("widget-main", backend, embedding, main_cmds, source)
     var batches: [DrawIrBatch] = [main_batch]
     _collect_scroll_batches(root, rects, backend, batches, theme)
+    _collect_overlay_batches(root, rects, w, h, backend, batches, theme)
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
 
 fn widget_tree_to_draw_ir_cpu(root: WidgetNode, w: i32, h: i32) -> DrawIrComposition:

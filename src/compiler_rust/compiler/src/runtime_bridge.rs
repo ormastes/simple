@@ -105,13 +105,14 @@ fn value_to_runtime_inner(v: &Value) -> RuntimeValue {
         // RuntimeEnum ABI used by native constructors and match checks. Type
         // IDs come from the shared helper: Option and Result have reserved IDs,
         // while user enum names retain the established hash-based identity.
+        // The discriminant is the owning enum's declared index (#6953).
         Value::Enum {
             enum_name,
             variant,
             payload,
         } => simple_runtime::value::rt_enum_new(
             enum_runtime_type_id(enum_name),
-            simple_runtime::value::hash_variant_discriminant(variant),
+            crate::interpreter::interpreter_extern::enum_sffi::interpreter_enum_discriminant(enum_name, variant),
             payload.as_deref().map_or(RuntimeValue::NIL, value_to_runtime),
         ),
         // A Dict must marshal to a real native `RuntimeDict` heap object (not

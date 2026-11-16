@@ -580,6 +580,48 @@ impl MirLowering:
             return self.box_u64_runtime_value(local)
         self.bitcast_float_enum_payload(local)
 
+    me enum_arm_payload_instance_v1(arm: HirMatchArm, subject_type: HirType?) -> HirType?:
+        """The `E<A..>` a generic payload slot instantiates against: the arm
+        pattern's own type when it carries arguments, else the subject's."""
+        match arm.pattern.kind:
+            case Enum(arm_type, _, _):
+                match arm_type.kind:
+                    case HirTypeKind.Named(_, arm_args):
+                        if arm_args.len() > 0:
+                            return Some(arm_type)
+                    case _: ()
+            case _: ()
+        subject_type
+
+    me decode_instantiated_enum_payload_slot_v1(slot: LocalId, declared: HirType, instantiated: HirType) -> LocalId:
+        """A `T` slot instantiated to a record (`Box<Lid>`, `Two<Lid, i64>`):
+        field access resolves its owner through struct_value_syms, which the
+        `T` decode never set, so `item.id` lowered to a Unit GetField and the
+        arm returned an uninitialised slot. Re-decode as the instantiated
+        Named type. Scalar instantiations keep the `T` decode.
+        A slot declared as a concrete record inside a generic owner
+        (`M(a: T, l: Lid)` in `Mix<T>`) gets the same tagging: the generic
+        owner withholds the declared-slot decode, so `l.id` read field 0.
+        Concrete enum / text / collection slots are left as they were.
+        doc/08_tracking/bug/stage2_payload_bind_and_tail_option_wrap_2026-11-16.md"""
+        match declared.kind:
+            case HirTypeKind.TypeParam(_, _):
+                match instantiated.kind:
+                    case HirTypeKind.Named(_, _):
+                        return self.decode_declared_enum_payload_slot(slot, instantiated)
+                    case _: ()
+            case HirTypeKind.Named(declared_symbol, _):
+                if val declared_record = self.symbols.get_symbol_raw(declared_symbol.id):
+                    val record_symbol: HirSymbol = declared_record
+                    match record_symbol.kind:
+                        case Struct:
+                            return self.decode_declared_enum_payload_slot(slot, instantiated)
+                        case Class:
+                            return self.decode_declared_enum_payload_slot(slot, instantiated)
+                        case _: ()
+            case _: ()
+        slot
+
     me decode_declared_enum_payload_slot(raw: LocalId, expected: HirType) -> LocalId:
         val target = self.lower_type(expected)
         var value = self.enum_payload_value(raw, target)

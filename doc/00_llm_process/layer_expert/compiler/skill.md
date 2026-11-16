@@ -169,3 +169,12 @@ When you add a field to `HirLowering`, either reset it in
 `promote_phase_memo_transient_owners`. Order-dependent HIR failures reproduce in
 a few seconds with two modules and `native-build --threads 1`.
 Record: `doc/08_tracking/bug/hir_lambda_param_hint_outlives_module_scope_2026-11-14.md`.
+
+### Frontend node attribute layouts (2026-11-16)
+In `10.frontend/core/_AstExpr/nodes.spl`, `expr_attr_apply_config` accepts
+`extra|s_val|op=<direct|column|array_index|sparse_hash>` and `layout=<aos|soa>`.
+Mode ints are fixed: 0 direct, 1 column, 2 sparse_hash, 3 array_index.
+`array_ptr` / `hash_ptr` are rejected, which resets everything to off.
+Placement to enum goes through `expr_attr_placement_of` only.
+Store API: `00.common/data/attribute_schema_v1.spl`.
+Spec: `doc/07_guide/language/attributes/node_attribute_layouts.md`.

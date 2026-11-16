@@ -411,6 +411,50 @@ pub fn default_group_targets(ts: TargetSet) -> [text]:
         g = g + 1
     out
 
+# --- Opt-in backend group provider admission (plan §6) ---------------------
+#
+# An opt-in backend group (config/build/backends_*.sdn) is selected only when a
+# provider descriptor is presented and admitted. This is a gate, not a claim
+# that any backend provider is production-ready. Default selection
+# (`default_group_targets`) never consults it, so the host build is unaffected.
+
+pub val BACKEND_PROVIDER_ABI_VERSION: i64 = 1
+
+pub struct BackendProviderDescriptor:
+    group: text
+    abi_version: i64
+    host_triple: text
+    capabilities: [text]
+
+pub fn admit_backend_provider(d: BackendProviderDescriptor, host_triple: text, required_caps: [text]) -> text:
+    """Empty text = admitted; otherwise the first stable refusal code."""
+    if d.abi_version != BACKEND_PROVIDER_ABI_VERSION:
+        return "backend-admission: abi-mismatch: " + d.group + ": " + d.abi_version.to_string() + " != " + BACKEND_PROVIDER_ABI_VERSION.to_string()
+    if d.host_triple != host_triple:
+        return "backend-admission: triple-mismatch: " + d.group + ": " + d.host_triple + " != " + host_triple
+    var i = 0
+    while i < required_caps.len():
+        var found = false
+        var j = 0
+        while j < d.capabilities.len():
+            if d.capabilities[j] == required_caps[i]:
+                found = true
+            j = j + 1
+        if not found:
+            return "backend-admission: missing-capability: " + d.group + ": " + required_caps[i]
+        i = i + 1
+    ""
+
+pub fn select_backend_group(ts: TargetSet, group: text, d: BackendProviderDescriptor, host_triple: text, required_caps: [text]) -> [text]:
+    """Members of an opt-in backend group, or empty when the descriptor is for
+    another group or is refused by `admit_backend_provider`."""
+    var none: [text] = []
+    if d.group != group:
+        return none
+    if admit_backend_provider(d, host_triple, required_caps).len() > 0:
+        return none
+    group_targets(ts, group)
+
 pub fn normalize_include_path(p: text) -> text:
     """Use `/` on every host so one config reads the same everywhere."""
     p.replace("\\", "/")

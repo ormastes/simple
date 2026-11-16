@@ -12,6 +12,8 @@ use std.skia.entity.paint.{SkPaint}
 use std.skia.entity.enums.{SkPaintStyle, SkBlendMode, SkPathDirection}
 use std.skia.entity.color.{SkColor4f, sk_color_alpha, sk_color_red, sk_color_green, sk_color_blue}
 use std.skia.entity.path.{sk_path_new, sk_path_mapped}
+use std.skia.entity.textblob.{SkTextBlob, sk_unpack_text_blob_from_image, sk_text_blob_run_text}
+use std.skia.feature.text.{skia_default_vector_font_path, skia_load_cached_font_bytes, skia_sfnt_rasterize_run_with_origin_argb, skia_sfnt_blend_run_argb, skia_blend_transformed_argb_onto}
 use std.skia.backend.cpu.raster_prims.{Bitmap, fill_rect, fill_rrect, fill_path_aa, stroke_path}
 use std.skia.backend.cpu.shaders.{sample_image_bilinear, apply_blend}
 use std.viz.feature.damage.{intersect_rect}
@@ -28,7 +30,7 @@ class SkCpuSurface:
 fn sk_cpu_surface_make(width: i64, height: i64) -> SkCpuSurface:
     val info = sk_image_info_n32_premul(width, height)
     val pixel_count = width * height * 4
-    val pixels: [i64] = [0 for _ in 0..pixel_count]
+    val pixels: [i64] = if pixel_count > 0: [0i64; pixel_count] else: []
     val canvas = sk_canvas_make(width, height)
     SkCpuSurface(info: info, pixels: pixels, canvas: canvas)
 
@@ -210,14 +212,18 @@ impl CpuBackend:
                         None:
                             state_stack[0]
                     val layer_color = _paint_color4f(op.paint)
-                    val new_state = CanvasState(
-                        alpha: top.alpha * layer_color.a,
-                        clip: SkRect(
+                    val layer_clip = if _rect_is_empty(op.rect):
+                        SkRect(
                             left: top.clip.left,
                             top: top.clip.top,
                             right: top.clip.right,
                             bottom: top.clip.bottom
-                        ),
+                        )
+                    else:
+                        intersect_rect(top.clip, _transformed_rect_bounds(op.rect, top.transform))
+                    val new_state = CanvasState(
+                        alpha: top.alpha * layer_color.a,
+                        clip: layer_clip,
                         transform: top.transform,
                         mode: op.paint.blend_mode
                     )
@@ -238,7 +244,8 @@ impl CpuBackend:
                                 None:
                                     i = i + 1
                                     continue
-                            val new_clip = intersect_rect(cur.clip, op.rect)
+                            val dev_clip = _transformed_rect_bounds(op.rect, cur.transform)
+                            val new_clip = intersect_rect(cur.clip, dev_clip)
                             val replaced = CanvasState(
                                 alpha: cur.alpha,
                                 clip: new_clip,
@@ -255,21 +262,21 @@ impl CpuBackend:
                                         i = i + 1
                                         continue
                                 # rect slots: left=tx, top=ty, right=sx, bottom=sy;
-                                # rx carries rotation degrees (canvas.rotate packs
-                                # it; concat/set_matrix leave it 0.0 until the op
-                                # encoding grows a full matrix).
+                                # rx carries rotation degrees; ry < 0 encodes mirrored orientation (det < 0).
                                 val tx = op.rect.left
                                 val ty = op.rect.top
                                 val sx = op.rect.right
-                                val sy = op.rect.bottom
-                                val base_xform = if (sx == 0.0) or (sy == 0.0):
+                                val sy_raw = op.rect.bottom
+                                val sy = if op.ry < 0.0: -sy_raw else: sy_raw
+                                val new_xform = if (sx == 0.0) or (sy == 0.0):
                                     Matrix3x3.identity()
                                 else:
-                                    Matrix3x3.translate(tx, ty).mul(Matrix3x3.scale(sx, sy))
-                                val new_xform = if op.rx != 0.0:
-                                    base_xform.mul(Matrix3x3.rotate_degrees(op.rx))
-                                else:
-                                    base_xform
+                                    val t_mat = Matrix3x3.translate(tx, ty)
+                                    val tr_mat = if op.rx != 0.0:
+                                        t_mat.mul(Matrix3x3.rotate_degrees(op.rx))
+                                    else:
+                                        t_mat
+                                    tr_mat.mul(Matrix3x3.scale(sx, sy))
                                 val replaced = CanvasState(
                                     alpha: cur.alpha,
                                     clip: cur.clip,
@@ -286,92 +293,143 @@ impl CpuBackend:
                                         state_stack[0]
 
                                 if op.kind == SkPictureOpKind.DrawRect:
-                                    val visible = intersect_rect(cur.clip, op.rect)
+                                    val stroke_w = _effective_stroke_width(op.paint.stroke_width)
+                                    val dev_bounds = _transformed_rect_bounds(op.rect, cur.transform)
+                                    val cull_bounds = if op.paint.style == SkPaintStyle.Stroke:
+                                        _pad_rect(dev_bounds, stroke_w * 0.5)
+                                    else:
+                                        dev_bounds
+                                    val visible = intersect_rect(cur.clip, cull_bounds)
                                     if _rect_is_empty(visible):
                                         pass_do_nothing
                                     else:
                                         val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                        val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
                                         val mode = if op.paint.blend_mode != SkBlendMode.SrcOver: op.paint.blend_mode else: cur.mode
-                                        if mode != SkBlendMode.SrcOver and cur.transform.is_identity():
+                                        if op.paint.style == SkPaintStyle.Stroke:
+                                            val raw_rect = sk_path_new().add_rect(op.rect, SkPathDirection.Cw)
+                                            val draw_rect_path = if cur.transform.is_identity():
+                                                raw_rect
+                                            else:
+                                                sk_path_mapped(raw_rect, cur.transform)
+                                            stroke_path(bitmap, draw_rect_path, color, stroke_w)
+                                        elif mode != SkBlendMode.SrcOver and cur.transform.is_identity():
                                             _fill_rect_mode(bitmap, visible, color, mode)
-                                        elif cur.transform.is_identity():
-                                            fill_rect(bitmap, op.rect, color)
                                         else:
-                                            _fill_transformed_rect(bitmap, op.rect, cur.transform, cur.clip, color)
+                                            if cur.transform.is_identity():
+                                                fill_rect(bitmap, visible, color)
+                                            else:
+                                                _fill_transformed_rect(bitmap, op.rect, cur.transform, cur.clip, color)
                                 else:
                                     if op.kind == SkPictureOpKind.DrawRRect:
-                                        val visible = intersect_rect(cur.clip, op.rect)
+                                        val stroke_w = _effective_stroke_width(op.paint.stroke_width)
+                                        val dev_bounds = _transformed_rect_bounds(op.rect, cur.transform)
+                                        val cull_bounds = if op.paint.style == SkPaintStyle.Stroke:
+                                            _pad_rect(dev_bounds, stroke_w * 0.5)
+                                        else:
+                                            dev_bounds
+                                        val visible = intersect_rect(cur.clip, cull_bounds)
                                         if _rect_is_empty(visible):
                                             pass_do_nothing
                                         else:
                                             val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                            if cur.transform.is_identity():
-                                                fill_rrect(bitmap, op.rect, op.rx, op.ry, color)
+                                            if op.paint.style == SkPaintStyle.Fill and cur.transform.is_identity():
+                                                if op.rx <= 0.0 and op.ry <= 0.0:
+                                                    fill_rect(bitmap, visible, color)
+                                                else:
+                                                    fill_rrect(bitmap, op.rect, op.rx, op.ry, color)
                                             else:
-                                                # Transformed rounded rect goes through the path
-                                                # pipeline so rotation/shear rasterize exactly.
-                                                val rrect_path = sk_path_mapped(sk_path_new().add_rrect(
+                                                val raw_rrect = sk_path_new().add_rrect(
                                                     sk_rrect_make(op.rect, op.rx, op.ry),
                                                     SkPathDirection.Cw
-                                                ), cur.transform)
-                                                if op.paint.style == SkPaintStyle.Fill:
+                                                )
+                                                val rrect_path = if cur.transform.is_identity():
+                                                    raw_rrect
+                                                else:
+                                                    sk_path_mapped(raw_rrect, cur.transform)
+                                                if op.paint.style == SkPaintStyle.Stroke:
+                                                    stroke_path(bitmap, rrect_path, color, stroke_w)
+                                                else:
                                                     fill_path_aa(bitmap, rrect_path, color)
-                                                else:
-                                                    stroke_path(bitmap, rrect_path, color, op.paint.stroke_width)
                                     else:
-                                        if op.kind == SkPictureOpKind.DrawPath:
-                                            if val p = op.path:
-                                                val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                                val draw_path = if cur.transform.is_identity():
-                                                    p
-                                                else:
-                                                    sk_path_mapped(p, cur.transform)
-                                                if op.paint.style == SkPaintStyle.Fill:
-                                                    fill_path_aa(bitmap, draw_path, color)
-                                                else:
-                                                    stroke_path(bitmap, draw_path, color, op.paint.stroke_width)
-                                        else:
-                                            if op.kind == SkPictureOpKind.DrawImage:
-                                                if val img = op.image:
-                                                    val img_w = img.info.width
-                                                    val img_h = img.info.height
-                                                    if cur.transform.is_identity():
-                                                        var py = 0 as i64
-                                                        while py < img_h:
-                                                            var px = 0 as i64
-                                                            while px < img_w:
-                                                                val u = px.to_f64()
-                                                                val v = py.to_f64()
-                                                                val sampled = sample_image_bilinear(img, u, v)
-                                                                val dst_x = (op.x.to_i64()) + px
-                                                                val dst_y = (op.y.to_i64()) + py
-                                                                val blended = apply_blend(sampled, SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0), op.paint.blend_mode)
-                                                                bitmap.blend_pixel(dst_x, dst_y, blended, cur.alpha)
-                                                                px = px + 1
-                                                            py = py + 1
-                                                    else:
-                                                        # Skia semantics: drawImage(x, y) places the image
-                                                        # corner at (x, y) in LOCAL space, so the local
-                                                        # offset composes under the current transform.
-                                                        val img_xform = cur.transform.mul(Matrix3x3.translate(op.x, op.y))
-                                                        _draw_image_transformed(bitmap, img, img_xform, cur.clip, op.paint.blend_mode, cur.alpha)
+                                        if op.kind == SkPictureOpKind.DrawOval:
+                                            val stroke_w = _effective_stroke_width(op.paint.stroke_width)
+                                            val dev_bounds = _transformed_rect_bounds(op.rect, cur.transform)
+                                            val cull_bounds = if op.paint.style == SkPaintStyle.Stroke:
+                                                _pad_rect(dev_bounds, stroke_w * 0.5)
                                             else:
-                                                if op.kind == SkPictureOpKind.DrawPaint:
-                                                    val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                                    val fill_target = SkRect(
-                                                        left: cur.clip.left,
-                                                        top: cur.clip.top,
-                                                        right: cur.clip.right,
-                                                        bottom: cur.clip.bottom
-                                                    )
-                                                    if _rect_is_empty(fill_target):
-                                                        pass_do_nothing
-                                                    else:
-                                                        fill_rect(bitmap, fill_target, color)
+                                                dev_bounds
+                                            val visible = intersect_rect(cur.clip, cull_bounds)
+                                            if _rect_is_empty(visible) or _rect_is_empty(op.rect):
+                                                pass_do_nothing
+                                            else:
+                                                val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                                val raw_oval = sk_path_new().add_oval(op.rect, SkPathDirection.Cw)
+                                                val oval_path = if cur.transform.is_identity():
+                                                    raw_oval
                                                 else:
-                                                    # DrawText / DrawOval / DrawPoints / DrawTextBlob:
-                                                    # not yet implemented
-                                                    pass_do_nothing
+                                                    sk_path_mapped(raw_oval, cur.transform)
+                                                if op.paint.style == SkPaintStyle.Stroke:
+                                                    stroke_path(bitmap, oval_path, color, stroke_w)
+                                                else:
+                                                    fill_path_aa(bitmap, oval_path, color)
+                                        else:
+                                            if op.kind == SkPictureOpKind.DrawPath:
+                                                if val p = op.path:
+                                                    val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                                    val draw_path = if cur.transform.is_identity():
+                                                        p
+                                                    else:
+                                                        sk_path_mapped(p, cur.transform)
+                                                    if op.paint.style == SkPaintStyle.Fill:
+                                                        fill_path_aa(bitmap, draw_path, color)
+                                                    else:
+                                                        stroke_path(bitmap, draw_path, color, _effective_stroke_width(op.paint.stroke_width))
+                                            else:
+                                                if op.kind == SkPictureOpKind.DrawImage:
+                                                    if val img = op.image:
+                                                        val img_w = img.info.width
+                                                        val img_h = img.info.height
+                                                        if cur.transform.is_identity():
+                                                            var py = 0 as i64
+                                                            while py < img_h:
+                                                                var px = 0 as i64
+                                                                while px < img_w:
+                                                                    val u = px.to_f64()
+                                                                    val v = py.to_f64()
+                                                                    val sampled = sample_image_bilinear(img, u, v)
+                                                                    val dst_x = (op.x.to_i64()) + px
+                                                                    val dst_y = (op.y.to_i64()) + py
+                                                                    val blended = apply_blend(sampled, SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0), op.paint.blend_mode)
+                                                                    bitmap.blend_pixel(dst_x, dst_y, blended, cur.alpha)
+                                                                    px = px + 1
+                                                                py = py + 1
+                                                        else:
+                                                            # Skia semantics: drawImage(x, y) places the image
+                                                            # corner at (x, y) in LOCAL space, so the local
+                                                            # offset composes under the current transform.
+                                                            val img_xform = cur.transform.mul(Matrix3x3.translate(op.x, op.y))
+                                                            _draw_image_transformed(bitmap, img, img_xform, cur.clip, op.paint.blend_mode, cur.alpha)
+                                                else:
+                                                    if op.kind == SkPictureOpKind.DrawPaint:
+                                                        val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                                        val fill_target = SkRect(
+                                                            left: cur.clip.left,
+                                                            top: cur.clip.top,
+                                                            right: cur.clip.right,
+                                                            bottom: cur.clip.bottom
+                                                        )
+                                                        if _rect_is_empty(fill_target):
+                                                            pass_do_nothing
+                                                        else:
+                                                            fill_rect(bitmap, fill_target, color)
+                                                    else:
+                                                        if (op.kind == SkPictureOpKind.DrawTextBlob) or (op.kind == SkPictureOpKind.DrawText):
+                                                            val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
+                                                            _draw_text_op(bitmap, op, cur, color)
+                                                        else:
+                                                            # DrawPoints: nothing to rasterize here
+                                                            pass_do_nothing
             i = i + 1
         bitmap
 
@@ -386,6 +444,25 @@ fn _min_f64(a: f64, b: f64) -> f64:
 
 fn _max_f64(a: f64, b: f64) -> f64:
     if a > b: a else: b
+
+fn _effective_stroke_width(w: f64) -> f64:
+    if w > 0.0: w else: 1.0
+
+fn _pad_rect(r: SkRect, pad: f64) -> SkRect:
+    SkRect(left: r.left - pad, top: r.top - pad, right: r.right + pad, bottom: r.bottom + pad)
+
+fn _transformed_rect_bounds(rect: SkRect, xform: Matrix3x3) -> SkRect:
+    if xform.is_identity():
+        return rect
+    val p0 = xform.map_point(rect.left, rect.top)
+    val p1 = xform.map_point(rect.right, rect.top)
+    val p2 = xform.map_point(rect.right, rect.bottom)
+    val p3 = xform.map_point(rect.left, rect.bottom)
+    val x_min = _min_f64(_min_f64(p0.x, p1.x), _min_f64(p2.x, p3.x))
+    val x_max = _max_f64(_max_f64(p0.x, p1.x), _max_f64(p2.x, p3.x))
+    val y_min = _min_f64(_min_f64(p0.y, p1.y), _min_f64(p2.y, p3.y))
+    val y_max = _max_f64(_max_f64(p0.y, p1.y), _max_f64(p2.y, p3.y))
+    SkRect(left: x_min, top: y_min, right: x_max, bottom: y_max)
 
 fn _floor_i64(v: f64) -> i64:
     val iv = v as i64
@@ -501,3 +578,95 @@ fn _draw_image_transformed(bitmap: Bitmap, img: SkImage, xform: Matrix3x3, clip:
                         bitmap.blend_pixel(px, py, blended, alpha)
                     px = px + 1
                 py = py + 1
+
+fn _blend_cov_buffer(bitmap: Bitmap, cov_buf: [u32], bx0: i64, by0: i64, bw: i64, bh: i64, color: SkColor4f):
+    var ly: i64 = 0
+    while ly < bh:
+        val row_off = ly * bw
+        var lx: i64 = 0
+        while lx < bw:
+            val px = cov_buf[row_off + lx]
+            val a = (px >> 24) & 0xFFu32
+            if a > 0u32:
+                val cov = (a as f64) / 255.0
+                bitmap.blend_pixel(bx0 + lx, by0 + ly, color, cov)
+            lx = lx + 1
+        ly = ly + 1
+
+fn _draw_text_op(bitmap: Bitmap, op: SkPictureOp, cur: CanvasState, color: SkColor4f):
+    if _rect_is_empty(cur.clip) or color.a <= 0.0:
+        return
+    val blob = match sk_unpack_text_blob_from_image(op.image):
+        Some(b): b
+        None: return
+    var ri: i64 = 0
+    while ri < blob.runs.len():
+        val run = blob.runs[ri]
+        val content = sk_text_blob_run_text(run)
+        if content != "":
+            val font = run.font
+            val font_size = if font.size > 0.0: font.size else if op.ry > 0.0: op.ry else: 12.0
+            var font_path = font.effective_font_path()
+            if font_path == "":
+                font_path = skia_default_vector_font_path()
+            val font_blob = skia_load_cached_font_bytes(font_path)
+            val run_ox = if run.positions.len() > 0: run.positions[0].x else: 0.0
+            val run_oy = if run.positions.len() > 0: run.positions[0].y else: 0.0
+            val base_x = op.x + run_ox
+            val base_y = op.y + run_oy
+            val stamped = skia_sfnt_rasterize_run_with_origin_argb(font_blob, content, font_size, true, 0xFFFFFFFFu32, 0u32)
+            val local_ox = stamped.0
+            val local_oy = stamped.1
+            val src_buf = stamped.2
+            if src_buf.width > 0i32 and src_buf.height > 0i32:
+                val sw = src_buf.width as i64
+                val sh = src_buf.height as i64
+                var xform = cur.transform.mul(Matrix3x3.translate(base_x, base_y))
+                if font.scale_x != 1.0 and font.scale_x != 0.0:
+                    xform = xform.mul(Matrix3x3.scale(font.scale_x, 1.0))
+                val is_simple_translate = cur.transform.is_identity() and (font.scale_x == 1.0)
+                val local_rect = SkRect(
+                    left: local_ox as f64,
+                    top: local_oy as f64,
+                    right: (local_ox + src_buf.width) as f64,
+                    bottom: (local_oy + src_buf.height) as f64
+                )
+                val dev_bounds = if is_simple_translate:
+                    SkRect(
+                        left: base_x + local_rect.left - 1.0,
+                        top: base_y + local_rect.top - 1.0,
+                        right: base_x + local_rect.right + 1.0,
+                        bottom: base_y + local_rect.bottom + 1.0
+                    )
+                else:
+                    _transformed_rect_bounds(local_rect, xform)
+                val vis = intersect_rect(cur.clip, dev_bounds)
+                val pad = if is_simple_translate: 0 else: 1
+                var bx0 = _floor_i64(vis.left) - pad
+                var by0 = _floor_i64(vis.top) - pad
+                var bx1 = _ceil_i64(vis.right) + pad
+                var by1 = _ceil_i64(vis.bottom) + pad
+                if bx0 < 0: bx0 = 0
+                if by0 < 0: by0 = 0
+                if bx1 > bitmap.width: bx1 = bitmap.width
+                if by1 > bitmap.height: by1 = bitmap.height
+                val bw = bx1 - bx0
+                val bh = by1 - by0
+                if bw > 0 and bh > 0:
+                    var cov_buf: [u32] = [0u32; bw * bh]
+                    if is_simple_translate:
+                        cov_buf = skia_sfnt_blend_run_argb(
+                            cov_buf, bw as i32, bh as i32,
+                            base_x - (bx0 as f64), base_y - (by0 as f64),
+                            true, font_blob, content, font_size, 0xFFFFFFFFu32
+                        )
+                    else:
+                        val shifted_xform = Matrix3x3.translate(-(bx0 as f64), -(by0 as f64)).mul(xform)
+                        val box_clip = SkRect(left: 0.0, top: 0.0, right: bw as f64, bottom: bh as f64)
+                        cov_buf = skia_blend_transformed_argb_onto(
+                            cov_buf, bw as i32, bh as i32,
+                            src_buf, local_ox as f64, local_oy as f64,
+                            shifted_xform, box_clip
+                        )
+                    _blend_cov_buffer(bitmap, cov_buf, bx0, by0, bw, bh, color)
+        ri = ri + 1

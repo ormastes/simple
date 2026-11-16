@@ -811,6 +811,20 @@ export run_in_owned_test_resource_scope, run_in_owned_execution_resource_scope
 
 var _windows_scope_sequence: i64 = 0
 
+fn owned_capture_text_v1(content: text, cap: i64) -> text:
+    """Bound a redirected capture to head + marker + tail.
+
+    A failing producer prints its verdict LAST, so an over-cap stream keeps
+    its tail instead of being dropped (the old behaviour returned "", which
+    the test runner reported as an empty stderr). Length is cap + marker,
+    so `len() > cap` still identifies truncation, matching the bounded facade.
+    """
+    if cap <= 0 or content.len() <= cap: return content
+    val head_len = cap / 2
+    val tail_len = cap - head_len
+    val omitted = content.len() - cap
+    content[0:head_len] + "\n[... {omitted} bytes omitted from the middle ...]\n" + content[content.len() - tail_len:content.len()]
+
 fn _run_windows_owned_scope(scope: ExecutionResourceScope, cmd: text,
         args: [text]) -> ObservedProcessResult:
     # Avoid the historical raw tuple ABI. Memory/deadline are enforced by the
@@ -850,8 +864,8 @@ fn _run_windows_owned_scope(scope: ExecutionResourceScope, cmd: text,
     proc_slot_release()
     val stdout_size = file_size(output)
     val stderr_size = file_size(error)
-    val stdout = if stdout_size >= 0 and stdout_size <= scope.max_output_bytes: file_read_text(output) else: ""
-    val stderr = if stderr_size >= 0 and stderr_size <= scope.max_output_bytes: file_read_text(error) else: ""
+    val stdout = owned_capture_text_v1(if stdout_size >= 0: file_read_text(output) else: "", scope.max_output_bytes)
+    val stderr = owned_capture_text_v1(if stderr_size >= 0: file_read_text(error) else: "", scope.max_output_bytes)
     val completed = windows_redirected_completion(token)
     val wall_ms = (time_now_unix_micros() - started) / 1000
     var result = ObservedProcessResult(stdout, stderr, _unavailable_usage(wall_ms, raw_exit),

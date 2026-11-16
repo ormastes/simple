@@ -28,5 +28,53 @@ describe "restricted workspace source loan boundary":
                 "-> LinuxWorkspaceSourceOwnerV1", "pub fn close", "pub fn begin_binding", "pub fn retire_native", "pub fn retained_metadata"]:
             expect(source.contains(forbidden)).to_equal(false)
 
-    # The Host V2 consumer cases (raw-owner absence in host_agent_workspace_execution_v2)
-    # land with that Host file in the HostV1_8/Host21 unit, not here.
+    it "does not expose a raw SourceOwner through the Host V2 state or return":
+        step("Carry only the restricted loan through the invocation boundary")
+        val leaf = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_agent_workspace_execution_v2.spl")
+        expect(leaf.contains("source: LinuxWorkspaceSourceLoanV3")).to_equal(true)
+        expect(leaf.contains("source: Option<LinuxWorkspaceSourceLoanV3>")).to_equal(true)
+        expect(leaf.contains("LinuxWorkspaceSourceOwnerV1")).to_equal(false)
+        val shared = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl")
+        val sections = shared.split("# V2 uses the SAME existing canonical progress registry")
+        expect(sections.len()).to_equal(2)
+        expect(sections[1].contains("source: Option<LinuxWorkspaceSourceLoanV3>")).to_equal(true)
+        expect(sections[1].contains("source: Option<LinuxWorkspaceSourceOwnerV1>")).to_equal(false)
+
+    it "captures the actual stage-returned loan before reading failure or readiness":
+        step("Preserve returned loan custody on every stage outcome")
+        val source = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_agent_workspace_execution_v2.spl")
+        val after_stage = source.split("val staged = state.source.stage_agent_invocation_v2(")
+        expect(after_stage.len()).to_equal(2)
+        val before_outcome = after_stage[1].split("if staged.error")
+        expect(before_outcome.len()).to_be_greater_than(1)
+        expect(before_outcome[0].contains("state.source = staged.loan")).to_equal(true)
+        expect(before_outcome[0].contains("staged.owner")).to_equal(false)
+
+    it "keeps external Host V2 consumers away from raw lifecycle and parent getters":
+        step("Use the closed container owner for runtime and retirement")
+        val source = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_agent_workspace_execution_v2.spl")
+        for forbidden in ["state.source.close", "state.source.reader", "state.source.storage", "state.source.lease",
+                "state.source.begin_binding", "state.source.retire_native", "state.source.retained_metadata", "state.source.owner"]:
+            expect(source.contains(forbidden)).to_equal(false)
+
+    it "returns acquired custody when host request encoding fails after acquisition":
+        step("Fail closed with the acquired source loan instead of panicking (#9749 review H2-P2-2)")
+        val shared = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl")
+        expect(shared.contains("host_execute_request_encode_v2(native.packet.host).unwrap()")).to_equal(false)
+        val after_acquire = shared.split("var native = acquired.state.unwrap()")
+        expect(after_acquire.len()).to_equal(2)
+        val split_prepare = after_acquire[1].split("val prepared = host_execution_prepare_projected_v3(")
+        expect(split_prepare.len()).to_be_greater_than(1)
+        val before_prepare = split_prepare[0]
+        expect(before_prepare.contains("val encoded = host_execute_request_encode_v2(native.packet.host)")).to_equal(true)
+        expect(before_prepare.contains("if encoded.is_err(): return host_agent_native_reply_v2(owner, current, Some(native), None, None, true, encoded.unwrap_err())")).to_equal(true)
+
+    it "reads the scripted flag before the capacity begin commits":
+        step("No fallible call may follow a committed begin (#9749 follow-up A-P3-2)")
+        val shared = workspace_loan_source_v3("src/lib/nogc_sync_mut/orchestration/host_authorized_execution_v2.spl")
+        expect(shared.contains("simple_container_execution_scripted_v4(container).unwrap()")).to_equal(false)
+        val restricted = shared.split("fn host_execution_restricted_begin_v4(")
+        expect(restricted.len()).to_equal(2)
+        val before_begin = restricted[1].split("val begun = host_capacity_owner_begin_v1(owner, prepared.envelope.intent")
+        expect(before_begin.len()).to_equal(2)
+        expect(before_begin[0].contains("val scripted = simple_container_execution_scripted_v4(container)")).to_equal(true)
