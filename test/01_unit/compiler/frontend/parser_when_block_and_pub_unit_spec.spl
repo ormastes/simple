@@ -1,0 +1,52 @@
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl 5%
+# @cover src/compiler/10.frontend/core/parser_preprocessor.spl 5%
+"""
+## Purpose and audience
+Regression contract for two forms the Rust seed accepts and the pure-Simple
+parser rejected during phase-3 (stage2c) parsing of src/lib:
+`@when(os="..."):` blocks (top level, `@else` followed by a nested `@when`,
+and indented inside a function body) and `pub unit Name: T as suffix`.
+## Operator workflow
+bin/simple test test/01_unit/compiler/frontend/parser_when_block_and_pub_unit_spec.spl
+## Compatibility and limitations
+Feeds source TEXT to the pure-Simple parser (parser_init_with_path +
+parse_module_body); the spec file itself never contains the forms literally.
+## Verification guidance and troubleshooting
+"expected declaration after visibility modifier" = the `pub unit` arm
+regressed; "unexpected token in expression: ':'" = a directive line reached
+the parser without conditional preprocessing.
+See doc/08_tracking/bug/pure_simple_parser_when_block_and_pub_unit_2026-11-17.md
+"""
+
+use std.spec
+use compiler.core.types.{reset_all_pools, unit_decl_find, named_type_find}
+use compiler.core.parser.{parser_has_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+
+fn spec_parse(source: text, path: text):
+    reset_all_pools()
+    parser_init_with_path(source, path)
+    parse_module_body()
+
+describe "pure-Simple parser: seed-accepted forms":
+    it "parses a top-level @when/@else block with a nested @when after @else":
+        val src = "@when(os=\"windows\"):\nfn pick_a() -> i64: 1\n@else:\n@when(os=\"freebsd\"):\nfn pick_a() -> i64: 2\n@else:\nfn pick_a() -> i64: 3\n@end\n@end\nfn after() -> i64: 4\n"
+        spec_parse(src, "when_top_level.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "parses an indented @when block inside a function body":
+        val src = "fn f(n: i64) -> i64:\n    if n < 0: return 0\n    @when(os=\"windows\"):\n    return 1\n    @else:\n    return 2\n    @end\n"
+        spec_parse(src, "when_in_fn.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "parses pub unit Name: T as suffix and registers the unit":
+        spec_parse("pub unit FreeBytes: i64 as fbytes\nfn g() -> i64: 0\n", "pub_unit.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_decl_find("FreeBytes") >= 0).to_equal(true)
+        expect(named_type_find("FreeBytes") >= 0).to_equal(true)
+
+    it "parses pub(package) unit without a suffix and pub derived unit":
+        spec_parse("pub(package) unit Meter: f64\npub unit Second: f64 as sec\npub unit Speed = Meter / Second\n", "pub_unit_variants.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_decl_find("Meter") >= 0).to_equal(true)
+        expect(unit_decl_find("Speed") >= 0).to_equal(true)
