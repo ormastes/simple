@@ -1,0 +1,208 @@
+"""
+## Purpose and audience
+Pins the controller-signed agent cancel of milestone_0021 PR3a (review r1 finding
+P3R1-F1: the first `host-agent-cancel` authorized only on caller-supplied strings).
+A cancel is now a signed packet verified the way the associated prepare and execute
+are: issuer == the configured controller, issuer and approver signatures under the
+installed authority snapshot, the operation derived from the ARCHIVED signed
+execute (same principal, project, host, environment and budget; its own operation
+kind and payload digest), bound to the agent's association digest, and archived
+no-replace. Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Every case is DATA over the pure authorization core
+`host_linux_service_agent_cancel_authorize_v4`; signatures are real ed25519
+signatures from deterministic test seeds (no service trust root). The live
+owner glue (`host_linux_service_agent_cancel_v4`) needs an admitted epoch and is
+covered by structural pins plus the env-gated chain spec, which is NOT authored.
+"Replayed" here means: a cancel whose derived operation is not the one the
+live context and the held run expect (older session generation, other
+association, other incarnation), and a second, different packet for an archived
+cancel. An exact-bytes retry is ACCEPTED idempotently, never refused.
+## Verification guidance and troubleshooting
+Each refusal names its exact error. If a refusal case reports Ok, the cancel
+lost a gate and any caller of the service connection can stop another run.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_authority_snapshot_create_v2}
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, host_service_domain_turn_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.HostLinuxServiceCurrentV4
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentCancelRequestV4,
+    host_agent_cancel_operation_v4, host_agent_cancel_request_encode_v4, host_agent_cancel_request_decode_v4,
+    host_agent_cancel_archive_check_v4, host_linux_service_agent_cancel_authorize_v4}
+
+fn c4_seed(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn c4_bytes(message: text) -> [u8]:
+    var out: [u8] = []
+    for i in 0..message.len(): out.push(message.byte_at(i) as u8)
+    out
+
+fn c4_key(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1, public_key: public_key,
+        principal: "user_1", project: "project_1", host_id: "worker_1", operations: ["host_agent_cancel_v4"],
+        maximum_memory_bytes: 2048, maximum_duration_ms: 2000, policy_revision: 4, revocation_epoch: 2,
+        expires_at: 300, revoked: false)
+
+# The archived signed execute's envelope (the operation the run was admitted under).
+fn c4_execute_operation(id: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: id, payload_digest: "b".repeat(64), principal: "user_1", project: "project_1",
+        host_id: "worker_1", operation: "host_execute_associated_v3", environment_digest: "a".repeat(64),
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3, memory_bytes: 512, duration_ms: 500)
+
+fn c4_context(clock: i64, session: i64) -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: clock, monotonic_ms: 0, policy_revision: 4, revocation_epoch: 2,
+        session_generation: session)
+
+fn c4_association(tag: text) -> text:
+    sha256_text("association-" + tag)
+
+# Signed cancel built exactly as a controller would: derive the operation, sign the grant with `issuer_seed`
+# (the registered issuer key is seed 1) and the approval with the approver seed 65.
+fn c4_signed_cancel(execute: OperationEnvelopeV2, association: text, session: i64, issuer_seed: i64,
+        issuer_id: text) -> HostAgentCancelRequestV4:
+    val operation = host_agent_cancel_operation_v4(execute, association, c4_context(100, session)).unwrap()
+    val grant = ExecutionGrantV2(id: "grant_cancel_1", principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: ["host_agent_cancel_v4"], environment_digest: "a".repeat(64), policy_revision: 4, revocation_epoch: 2,
+        expires_at: 200, maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: issuer_id, key_revision: 1, signature: [])
+    signed.signature = pure_ed25519_sign_from_seed_v1(c4_seed(issuer_seed), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = DistributedSignedApprovalV2(approver_id: "approver_1", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(), request_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()),
+        policy_revision: 4, session_generation: session, expires_at: 190, signature: [])
+    approval.signature = pure_ed25519_sign_from_seed_v1(c4_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    HostAgentCancelRequestV4(operation_id: execute.id, association_digest: association, operation: operation,
+        signed: signed, approval: approval)
+
+# Per-process memo: each pure Ed25519 sign costs ~0.9 s interpreted, and the key pair is a constant.
+var C4_SNAPSHOT: [DistributedAuthoritySnapshotV2] = []
+
+fn c4_snapshot() -> DistributedAuthoritySnapshotV2:
+    if C4_SNAPSHOT.len() == 0:
+        val issuer = pure_ed25519_sign_from_seed_v1(c4_seed(1), c4_bytes("k")).public_key
+        val approver = pure_ed25519_sign_from_seed_v1(c4_seed(65), c4_bytes("k")).public_key
+        C4_SNAPSHOT = [distributed_authority_snapshot_create_v2([c4_key("issuer_1", "grant-issuer", issuer),
+            c4_key("approver_1", "human-approver", approver)], 1, 4, 2).unwrap()]
+    C4_SNAPSHOT[0]
+
+# The held run is `held_operation` under `held_association`; the configured controller is `issuer_1`.
+fn c4_error(request: HostAgentCancelRequestV4, execute: OperationEnvelopeV2, association: text, held_operation: text,
+        held_association: text, clock: i64, session: i64) -> text:
+    match host_linux_service_agent_cancel_authorize_v4(c4_snapshot(), "issuer_1", request, execute, association,
+            held_operation, held_association, c4_context(clock, session)):
+        case Ok(grant): ""
+        case Err(reason): reason
+
+describe "V4 agent owner PR3a: the controller-signed host-agent-cancel":
+    it "accepts a correctly signed cancel bound to the held run":
+        # @req S40-AGENT-13 (P3R1-F1)
+        val execute = c4_execute_operation("operation_1")
+        val a = c4_association("a")
+        val request = c4_signed_cancel(execute, a, 3, 1, "issuer_1")
+        expect(c4_error(request, execute, a, "operation_1", a, 100, 3)).to_equal("")
+        step("the cancel is its own operation kind, never the execute's or the invoke's")
+        expect(request.operation.operation).to_equal("host_agent_cancel_v4")
+        expect(request.operation.id).to_equal("cancel-operation_1")
+        step("the wire round trips canonically and decodes to the same packet")
+        val wire = host_agent_cancel_request_encode_v4(request).unwrap()
+        expect(host_agent_cancel_request_encode_v4(host_agent_cancel_request_decode_v4(wire).unwrap()).unwrap()).to_equal(wire)
+
+    it "refuses an unsigned cancel":
+        # @req S40-AGENT-13 (P3R1-F1: unsigned)
+        val execute = c4_execute_operation("operation_1")
+        val a = c4_association("a")
+        var request = c4_signed_cancel(execute, a, 3, 1, "issuer_1")
+        request.signed.signature = []
+        request.approval.signature = []
+        expect(c4_error(request, execute, a, "operation_1", a, 100, 3)).to_equal("SIGNATURE_INVALID")
+        step("bare caller strings are not a cancel packet")
+        expect(host_agent_cancel_request_decode_v4("{\"operationId\":\"operation_1\"}").is_err()).to_equal(true)
+
+    it "refuses a cancel signed by the wrong key":
+        # @req S40-AGENT-13 (P3R1-F1: foreign key)
+        val execute = c4_execute_operation("operation_1")
+        val a = c4_association("a")
+        val forged = c4_signed_cancel(execute, a, 3, 7, "issuer_1")
+        expect(c4_error(forged, execute, a, "operation_1", a, 100, 3)).to_equal("ISSUER_SIGNATURE_INVALID")
+        step("a foreign issuer id is refused before any signature work")
+        val foreign = c4_signed_cancel(execute, a, 3, 1, "issuer_2")
+        expect(c4_error(foreign, execute, a, "operation_1", a, 100, 3)).to_equal("linux-host-service-controller-mismatch")
+
+    it "refuses a cancel for another agent's operation or association":
+        # @req S40-AGENT-13 (P3R1-F1: foreign operation)
+        val execute_a = c4_execute_operation("operation_1")
+        val execute_b = c4_execute_operation("operation_2")
+        val a = c4_association("a")
+        val b = c4_association("b")
+        step("a validly signed cancel for operation_2 against the run holding operation_1")
+        val for_b = c4_signed_cancel(execute_b, b, 3, 1, "issuer_1")
+        expect(c4_error(for_b, execute_b, b, "operation_1", a, 100, 3)).to_equal("linux-host-agent-incarnation-consumed")
+        step("a signed cancel naming the held operation but another incarnation's association")
+        val other_incarnation = c4_signed_cancel(execute_a, b, 3, 1, "issuer_1")
+        expect(c4_error(other_incarnation, execute_a, a, "operation_1", a, 100, 3)).to_equal("linux-host-agent-cancel-association")
+        step("the same operation id under a later incarnation, archived execute and held run both on association b, is accepted")
+        expect(c4_error(other_incarnation, execute_a, b, "operation_1", b, 100, 3)).to_equal("")
+
+    it "refuses a stale or replayed cancel":
+        # @req S40-AGENT-13 (P3R1-F1: stale/replayed)
+        val execute = c4_execute_operation("operation_1")
+        val a = c4_association("a")
+        val request = c4_signed_cancel(execute, a, 3, 1, "issuer_1")
+        step("an expired grant window is refused")
+        expect(c4_error(request, execute, a, "operation_1", a, 200, 3)).to_equal("GRANT_EXPIRED")
+        step("a cancel signed under an older session generation does not match the live context")
+        expect(c4_error(request, execute, a, "operation_1", a, 100, 4)).to_equal("linux-host-agent-cancel-operation-mismatch")
+        step("a second, different packet for an archived cancel is a conflict; the exact bytes are an idempotent retry")
+        val wire = host_agent_cancel_request_encode_v4(request).unwrap()
+        expect(host_agent_cancel_archive_check_v4(None, wire).unwrap()).to_equal(false)
+        expect(host_agent_cancel_archive_check_v4(Some(wire), wire).unwrap()).to_equal(true)
+        expect(host_agent_cancel_archive_check_v4(Some(wire + " "), wire).unwrap_err()).to_equal("linux-host-agent-cancel-packet-conflict")
+
+fn c4_unpublished_domain() -> HostServiceDomainV3:
+    HostServiceDomainV3(HostLocalRootV3.LinuxService(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")))
+
+describe "V4 agent owner PR3a: the host-agent-cancel route over a signed packet":
+    it "validates the packet's operation id before any effect and needs recovery over a non-current owner":
+        # @req S40-AGENT-13 (route; P3R1-F1)
+        val execute = c4_execute_operation("op_1")
+        val packet = host_agent_cancel_request_encode_v4(c4_signed_cancel(execute, c4_association("a"), 3, 1, "issuer_1")).unwrap()
+        val foreign = host_service_domain_turn_v3(c4_unpublished_domain(), HostServiceRequestV2("host-agent-cancel", "op_2", packet))
+        expect(foreign.exit_code).to_equal(1)
+        expect(foreign.response.contains("host-service-agent-cancel-operation-mismatch")).to_equal(true)
+        step("a well-formed signed packet over an owner that is not current needs recovery (2) and returns the same owner")
+        val unpublished = host_service_domain_turn_v3(c4_unpublished_domain(), HostServiceRequestV2("host-agent-cancel", "op_1", packet))
+        expect(unpublished.exit_code).to_equal(2)
+        expect(unpublished.response.contains("linux-host-service-current-unpublished")).to_equal(true)
+        match unpublished.owner.local:
+            case HostLocalRootV3.LinuxService(owner): expect(owner.agent.is_none()).to_equal(true)
+            case _: expect("other-arm").to_equal("linux-service")
+
+describe "V4 agent owner PR3a: the cancel glue gate order":
+    it "verifies before it archives and archives before it transitions":
+        # @req S40-AGENT-13 (P3R1-F1/F6, structural)
+        val cv4 = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        val start = cv4.index_of("pub fn host_linux_service_agent_cancel_v4(")
+        expect(start >= 0).to_equal(true)
+        val body = cv4.substring(start, cv4.byte_len())
+        val reconcile = body.index_of("linux-host-agent-before-reconcile")
+        val authorize = body.index_of("host_linux_service_agent_cancel_authorize_v4(")
+        val publish = body.index_of("distributed_operation_journal_publish_v3(")
+        val transition = body.index_of("owner.agent = Some(cancelled.agent)")
+        expect(reconcile > 0 and authorize > reconcile and publish > authorize and transition > publish).to_equal(true)
