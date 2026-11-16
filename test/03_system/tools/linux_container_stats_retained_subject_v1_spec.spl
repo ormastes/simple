@@ -1,0 +1,149 @@
+# AUTHORED_NOT_RUN. Disposable genuine installed Linux epoch/container fixture.
+# This invokes actual public factories and lifecycle effects only when qualified
+# execution is separately authorized. No owner, native PID/FD or WAL is invented.
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_async_mut.container.api_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.execution_stats_v1.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_decode_v3
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+
+var stats_native_principal_v1: Option<MachineLocalProcessPrincipalV1> = nil
+var stats_native_open_v1: Option<SimpleContainerFreshOpenV2> = nil
+var stats_native_window_v1: Option<ContainerEffectDeadlineV1> = nil
+
+# This Result gate precedes every new fixture admission and its DATA-file reads.
+# Reporting through fail/expect alone would not terminate the effectful path.
+fn stats_native_admission_guard_v1() -> Result<(), text>:
+    if stats_native_open_v1.is_some() or stats_native_principal_v1.is_some():
+        return Err("stats-fixture-prior-cleanup-retained")
+    Ok(())
+
+fn stats_native_owner_v1() -> Result<SimpleContainerOwnerV2, text>:
+    if stats_native_open_v1.is_none() or stats_native_open_v1.unwrap().owner.is_none():
+        return Err("stats-fixture-owner-unavailable")
+    Ok(stats_native_open_v1.unwrap().owner.unwrap())
+
+fn stats_native_keep_v1(owner: SimpleContainerOwnerV2):
+    var original = stats_native_open_v1.unwrap()
+    original.owner = Some(owner)
+    stats_native_open_v1 = Some(original)
+
+fn stats_native_apply_v1(action: text, request: ContainerExecutionRequestV2) -> Result<(), text>:
+    val turn = simple_container_apply_v2(stats_native_owner_v1()?, action, request, stats_native_window_v1.unwrap())
+    stats_native_keep_v1(turn.owner)
+    if turn.operation.status != "ok" or turn.operation.exit_code != 0:
+        return Err("stats-fixture-lifecycle:" + action + ":" + turn.operation.reason)
+    Ok(())
+
+fn stats_native_sample_v1(request: ContainerExecutionRequestV2) -> Result<ContainerExecutionStatsObservationV1, text>:
+    val turn = simple_container_stats_observe_v1(stats_native_owner_v1()?, request)
+    stats_native_keep_v1(turn.owner)
+    if turn.error != "" or turn.observation.is_none(): return Err("stats-fixture-observation:" + turn.error)
+    Ok(turn.observation.unwrap())
+
+fn stats_native_run_v1(request: ContainerExecutionRequestV2, template_source: text) -> Result<(ContainerExecutionStatsObservationV1, ContainerExecutionStatsObservationV1, bool), text>:
+    stats_native_admission_guard_v1()?
+    val template = group_process_stream_template_decode_v3(template_source)?
+    val principal = match machine_local_process_principal_open_v1():
+        case MachineLocalProcessPrincipalOpenV1.Ready(owner):
+            stats_native_principal_v1 = Some(owner)
+            owner
+        case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+            stats_native_principal_v1 = Some(owner)
+            return Err("stats-fixture-principal:" + reason)
+        case MachineLocalProcessPrincipalOpenV1.Rejected(reason): return Err("stats-fixture-principal:" + reason)
+    val opened = simple_container_open_fresh_v2(principal, template)
+    stats_native_open_v1 = Some(opened)
+    if opened.error != "" or opened.owner.is_none(): return Err("stats-fixture-open:" + opened.error)
+    val now = time_sample_unix_micros_or_failure() / 1000
+    if now <= 0 or now > 9223372036854715807: return Err("stats-fixture-clock")
+    # Constraint DATA for this administrator-authorized direct local fixture,
+    # not a fabricated signature, policy pin, principal or launch capability.
+    stats_native_window_v1 = Some(container_effect_deadline_v1(request.plan.request_digest,
+        request.plan.operation_id, ["create", "start"], now + 60000)?)
+    stats_native_apply_v1("prepare", request)?
+    stats_native_apply_v1("create", request)?
+    stats_native_apply_v1("start", request)?
+    val first = stats_native_sample_v1(request)?
+    var last = first
+    var count: i64 = 0
+    while count < 12:
+        last = stats_native_sample_v1(request)?
+        count = count + 1
+    var changed = request
+    changed.plan.attempt = if changed.plan.attempt == 1: 2 else: 1
+    val refused = simple_container_stats_observe_v1(stats_native_owner_v1()?, changed)
+    stats_native_keep_v1(refused.owner)
+    Ok((first, last, refused.observation.is_none() and refused.error != ""))
+
+fn stats_native_finish_v1(request: ContainerExecutionRequestV2) -> text:
+    var first_error = ""
+    if stats_native_open_v1.is_some():
+        if stats_native_owner_v1().is_ok() and stats_native_window_v1.is_some():
+            val removed = stats_native_apply_v1("destroy", request)
+            if removed.is_err(): first_error = removed.unwrap_err()
+        val closed = simple_container_fresh_cleanup_v2(stats_native_open_v1.unwrap())
+        stats_native_open_v1 = closed.retained
+        if closed.retained.is_some() or not closed.closed:
+            return "stats-fixture-cleanup-retained:" + closed.error
+        if first_error == "" and closed.error != "": first_error = closed.error
+    if val principal = stats_native_principal_v1:
+        val closed = principal.close_v1()
+        if closed == "released" or closed == "consumed-error": stats_native_principal_v1 = nil
+        if closed != "released" and first_error == "": first_error = "stats-fixture-principal-close:" + closed
+    first_error
+
+describe "actual retained Linux Podman subject produces container API stats":
+    it "reads the original admitted root repeatedly and rejects changed request attribution":
+        val available = stats_native_admission_guard_v1()
+        if available.is_err():
+            fail(available.unwrap_err())
+            return
+        step("Read fixture request/template DATA; require actual administrator-installed native policy")
+        val request_path = env_get("SIMPLE_LINUX_CONTAINER_STATS_REQUEST")
+        val template_path = env_get("SIMPLE_LINUX_CONTAINER_STATS_TEMPLATE")
+        if request_path == "" or template_path == "":
+            fail("disposable administrator-prepared container stats fixture required")
+            return
+        val request = container_execution_request_decode_v2(file_read_regular_no_follow_bounded(request_path, 1048576).unwrap()).unwrap()
+        val template = file_read_regular_no_follow_bounded(template_path, 65536).unwrap()
+        step("Acquire genuine local principal, same-writer admission, created/start proof and original associated subject")
+        val result = stats_native_run_v1(request, template)
+        step("Destroy/settle the actual workload and collect retained owner cleanup before asserting")
+        val alias = stats_native_owner_v1()
+        val cleanup = stats_native_finish_v1(request)
+        if cleanup != "":
+            fail("stats fixture requires retained cleanup or has a diagnostic:" + cleanup)
+            return
+        if result.is_err():
+            fail("actual stats fixture failed:" + result.unwrap_err())
+            return
+        val observed = result.unwrap()
+        val first = observed.0
+        val last = observed.1
+        step("Check real snapshot attribution, cumulative units and monotonic read brackets")
+        expect(container_execution_stats_observation_validate_v1(first).is_ok()).to_equal(true)
+        expect(container_execution_stats_observation_validate_v1(last).is_ok()).to_equal(true)
+        expect(last.scope).to_equal(first.scope)
+        expect(last.runtime).to_equal(first.runtime)
+        expect(last.subject_identity_digest).to_equal(first.subject_identity_digest)
+        expect(last.request_digest).to_equal(request.plan.request_digest)
+        expect(last.sample_started_monotonic_ns >= first.sample_finished_monotonic_ns).to_equal(true)
+        expect(observed.2).to_equal(true)
+        if alias.is_ok():
+            val closed = simple_container_stats_observe_v1(alias.unwrap(), request)
+            expect(closed.observation.is_none()).to_equal(true)
+            expect(closed.error != "").to_equal(true)
+        else:
+            fail("actual successful fixture must retain an owner before close")
+        match first.cpu_usage_usec:
+            case ContainerStatsCounterV1.Observed(before):
+                match last.cpu_usage_usec:
+                    case ContainerStatsCounterV1.Observed(after): expect(after >= before).to_equal(true)
+                    case _: fail("CPU controller fixture lost actual cumulative usage")
+            case _: fail("CPU controller fixture must expose actual cumulative usage")

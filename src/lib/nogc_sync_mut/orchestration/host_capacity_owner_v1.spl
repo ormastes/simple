@@ -1,3 +1,4 @@
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.host_linux_completion_evidence_v3
 use std.nogc_sync_mut.orchestration.host_primary_connection_receipt_v2.host_primary_connection_completion_evidence_v2
 use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
 use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_windows_v3, distributed_operation_journal_read_required_v3, distributed_operation_journal_read_v3, distributed_operation_journal_publish_v3}
@@ -24,7 +25,8 @@ use std.nogc_sync_mut.orchestration.host_helper_settlement_domain_v1.host_helper
 
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenV2,
     DistributedOperationJournalOpenCleanupV2, DistributedOperationJournalCleanupTurnV2,
-    distributed_operation_journal_open_owned_v2, distributed_operation_journal_close_owned_v2}
+    distributed_operation_journal_open_owned_v2, distributed_operation_journal_close_owned_v2,
+    distributed_operation_journal_open_linux_v3, distributed_operation_journal_linux_current_v3}
 use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
 
 pub struct HostCapacityOwnerV1:
@@ -99,8 +101,10 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
             return Err("retained-reservation-host-fence-mismatch")
         var row = intent.reservation
         val abort_outcome = host_capacity_abort_outcome_v1(intent, operation, helper)?
-        val completion = if state.state == "completed" and journal.windows_store.is_none(): host_capacity_completion_from_children_v2(journal.root, operation, child_barriers)
-            else: Err("host-settlement-not-completed")
+        var completion: Result<text, text> = Err("host-settlement-not-completed")
+        if state.state == "completed":
+            if journal.linux_storage.is_some(): completion = host_capacity_completion_linux_v3(journal, operation, child_barriers)
+            elif journal.windows_store.is_none(): completion = host_capacity_completion_from_children_v2(journal.root, operation, child_barriers)
         if completion.is_ok() and state.outcome_digest == sha256_text(completion.unwrap()):
             row.state = HostReservationStateV1.Released
         elif quarantine_previous:
@@ -425,6 +429,8 @@ fn host_capacity_completion_from_children_v2(root: text, operation: OperationEnv
 pub fn host_capacity_completion_evidence_owned_v2(journal: DistributedOperationJournalV2,
         capacity: HostCapacityV1, operation: OperationEnvelopeV2) -> Result<text, text>:
     val exact = daemon_operation_exact_v2(journal, operation)?
+    if journal.linux_storage.is_some():
+        return host_capacity_completion_linux_v3(journal, operation, host_runtime_exec_cleanup_index_v3(journal, capacity)?)
     if journal.windows_store.is_some():
         if operation.operation != "host_helper_reservation_v1": return Err("host-windows-completion-evidence-required")
         return host_primary_connection_completion_evidence_v2(journal, operation)
@@ -453,10 +459,10 @@ pub fn host_capacity_completion_batch_v3(journal: DistributedOperationJournalV2,
         if row.state != "completed": continue
         val operation = distributed_decode_operation_v2(row.envelope)?
         if not ["host_reservation_v1", "host_helper_reservation_v1"].contains(operation.operation): continue
-        val evidence = if journal.windows_store.is_some():
-            host_capacity_completion_evidence_owned_v2(journal, capacity, operation)
-        else:
-            host_capacity_completion_from_children_v2(journal.root, operation, barriers)
+        var evidence: Result<text, text> = Err("host-settlement-not-completed")
+        if journal.linux_storage.is_some(): evidence = host_capacity_completion_linux_v3(journal, operation, barriers)
+        elif journal.windows_store.is_some(): evidence = host_capacity_completion_evidence_owned_v2(journal, capacity, operation)
+        else: evidence = host_capacity_completion_from_children_v2(journal.root, operation, barriers)
         if evidence.is_err(): continue
         val digest = sha256_text(evidence.unwrap())
         if digest != row.outcome_digest: continue
@@ -549,7 +555,7 @@ fn host_capacity_reject_owned_v2(journal: DistributedOperationJournalV2,
 
 fn host_capacity_open_owned_internal_v2(root: text, capacity: HostCapacityV1, nonce: text,
         maximum_events: i64, continuity_proven: bool, quarantine_previous: bool,
-        windows_store: Option<WindowsJournalStoreV1> = nil) -> HostCapacityOpenV2:
+        windows_store: Option<WindowsJournalStoreV1> = None, linux_protected: bool = false) -> HostCapacityOpenV2:
     val empty = HostCapacityLedgerV1(capacity: capacity, revision: 1, continuity_proven: false, reservations: [])
     val valid = host_available_capacity_v1(empty)
     if valid.is_err():
@@ -559,6 +565,8 @@ fn host_capacity_open_owned_internal_v2(root: text, capacity: HostCapacityV1, no
         return HostCapacityOpenV2.Rejected(valid.unwrap_err())
     val opened = if windows_store.is_some(): distributed_operation_journal_open_windows_v3(root,
         windows_store.unwrap(), host_capacity_authority_digest_v1(capacity), nonce, maximum_events)
+        elif linux_protected: distributed_operation_journal_open_linux_v3(root,
+            host_capacity_authority_digest_v1(capacity), nonce, maximum_events)
         else: distributed_operation_journal_open_owned_v2(root,
             host_capacity_authority_digest_v1(capacity), nonce, maximum_events)
     var retained: Option<DistributedOperationJournalV2> = nil
@@ -592,3 +600,22 @@ pub fn host_capacity_owner_close_owned_v2(owner: HostCapacityOwnerV1) -> Distrib
 pub fn host_capacity_owner_open_windows_v3(root: text, store: WindowsJournalStoreV1,
         capacity: HostCapacityV1, nonce: text, maximum_events: i64) -> HostCapacityOpenV2:
     host_capacity_open_owned_internal_v2(root, capacity, nonce, maximum_events, false, true, Some(store))
+
+# Protected Linux acquisition uses the SAME projection/recovery and writer;
+# no caller boolean or pathname-backed fallback can select this public entry.
+pub fn host_capacity_owner_open_linux_v3(root: text, capacity: HostCapacityV1,
+        nonce: text, maximum_events: i64) -> HostCapacityOpenV2:
+    host_capacity_open_owned_internal_v2(root, capacity, nonce, maximum_events, false, true, None, true)
+
+pub fn host_capacity_owner_linux_current_v3(owner: HostCapacityOwnerV1) -> Result<(), text>:
+    distributed_operation_journal_linux_current_v3(owner.journal)?
+    if (owner.ledger.revision != owner.journal.sequence + 1 or
+            owner.journal.authority_digest != host_capacity_authority_digest_v1(owner.ledger.capacity)):
+        return Err("host-protected-owner-projection-mismatch")
+    Ok(())
+
+fn host_capacity_completion_linux_v3(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, barriers: Dict<text, text>) -> Result<text, text>:
+    if operation.operation == "host_reservation_v1" and barriers.contains_key(operation.id):
+        return Err("host-child-cleanup-unsettled:" + barriers[operation.id])
+    host_linux_completion_evidence_v3(journal, operation)
