@@ -80,6 +80,7 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
 use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_engine2d_resolved_backend_name_with_reason}
 use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
+use std.io_runtime.{env_get, file_exists}
 
 # Host-dependent: a requested GPU backend keeps its canonical name only when
 # this host can initialize it; otherwise the honest fallback is "software"
@@ -94,6 +95,25 @@ fn _backend_resolution_is_honest(requested: text, canonical: text) -> bool:
 
 fn _backend_name_kept_or_software(name: text, canonical: text) -> bool:
     name == canonical or name == "software"
+
+# Where the CPU llvmpipe Vulkan ICD is installed and selected
+# (VK_DRIVER_FILES names it), Vulkan cannot race the shared GPU or be
+# absent, so the vulkan rows must keep "vulkan" exactly.
+val LLVMPIPE_ICD: text = "/usr/share/vulkan/icd.d/lvp_icd.json"
+
+fn _llvmpipe_vulkan_selected() -> bool:
+    env_get("VK_DRIVER_FILES") == LLVMPIPE_ICD and file_exists(LLVMPIPE_ICD)
+
+fn _vulkan_name_ok(name: text) -> bool:
+    if _llvmpipe_vulkan_selected():
+        return name == "vulkan"
+    _backend_name_kept_or_software(name, "vulkan")
+
+fn _vulkan_resolution_ok() -> bool:
+    if _llvmpipe_vulkan_selected():
+        val (name, why) = simple_web_engine2d_resolved_backend_name_with_reason(96, 64, "vulkan")
+        return name == "vulkan" and why == ""
+    _backend_resolution_is_honest("vulkan", "vulkan")
 
 fn _count_non_bg(pixels: [u32], bg: u32) -> i32:
     var count: i32 = 0
@@ -148,6 +168,13 @@ fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
             return command.computed_style[idx].value
         idx = idx + 1
     ""
+
+# Small-text ink vs Chrome 159: Chrome AA and our raster cover glyph edges
+# differently, so ink pixel counts differ (measured 2026-11-15: ours 155 /
+# 203 / 323 vs Chrome 244 / 226 / 453, i.e. 64-90%). Half to one and a half
+# times Chrome rejects a blank band (0) and a solid-filled band (whole rect).
+fn _ink_near_chrome(count: i32, chrome: i32) -> bool:
+    count * 2 >= chrome and count * 2 <= chrome * 3
 
 fn _count_non_color_rect(
     pixels: [u32], stride: i32,
@@ -995,9 +1022,10 @@ describe "SimpleWebRenderer":
         val html = "<html><head><style>html,body{margin:0;padding:0;width:2px;height:2px;background:#ffffff}#aetheric{display:block;width:2px;height:2px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80)}</style></head><body><section id='aetheric'></section></body></html>"
         val pixels = simple_web_layout_render_html_software_pixels(html, 2, 2)
 
-        # The centered first-row sample interpolates alpha 20 -> 6 to 17, then
-        # source-over blends that 7% white over the painted translucent base.
-        expect(pixels[0]).to_equal(0xFF595959u32)
+        # Chrome 159 paints (0,0) #575758 (re-measured 2026-11-15; the old
+        # #595959 pin was never a Chrome value): the row-centre sample blends
+        # ~6.6% white over the translucent base composited on white.
+        expect(pixels[0]).to_equal(0xFF575758u32)
 
     it "rejects malformed or noncanonical exact-mode backdrop grammar":
         # @req REQ-WEB-RENDER-001
@@ -1269,7 +1297,7 @@ describe "SimpleWebRenderer":
         # Chrome 159 paints 8px Liberation text with AA ink only: 0 exact #111827
         # pixels, 244 ink pixels (measured 2026-11-15). The old exact-colour pin
         # described the upscaled 5x7 bitmap face, so ink is what is asserted.
-        expect(_count_non_color_rect(right_pixels, 80, 0, 0, 80, 48, 0xFFFFFFFFu32)).to_be_greater_than(0)
+        expect(_ink_near_chrome(_count_non_color_rect(right_pixels, 80, 0, 0, 80, 48, 0xFFFFFFFFu32), 244)).to_equal(true)
         expect(_pixels_equal(left_pixels, right_pixels)).to_equal(false)
 
     it "renders font shorthand through size style weight and line height":
@@ -1402,7 +1430,7 @@ describe "SimpleWebRenderer":
         val upper = simple_web_render_html_to_pixels(upper_html, 96, 32)
         expect(lower.len()).to_equal(96 * 32)
         # Chrome 159: 0 exact #111827 pixels, 226 ink pixels at 8px (2026-11-15).
-        expect(_count_non_color_rect(lower, 96, 0, 0, 96, 32, 0xFFFFFFFFu32)).to_be_greater_than(0)
+        expect(_ink_near_chrome(_count_non_color_rect(lower, 96, 0, 0, 96, 32, 0xFFFFFFFFu32), 226)).to_equal(true)
         expect(_pixels_equal(lower, upper)).to_equal(false)
 
     it "renders the text-raster fixture with genuine glyph ink (no memorized Chrome overlay)":
@@ -1425,7 +1453,8 @@ describe "SimpleWebRenderer":
         # Chrome 159 paints the 8px subtitle with 0 exact #475569 pixels
         # (2026-11-15; the 16px title has 15 exact #0f172a). Assert its ink in
         # the subtitle band, below the title, instead.
-        expect(_count_non_color_rect(pixels, 96, 5, 26, 91, 44, 0xFFF8FAFCu32)).to_be_greater_than(0)
+        # Chrome 159: 453 non-panel pixels in this band (2026-11-15).
+        expect(_ink_near_chrome(_count_non_color_rect(pixels, 96, 5, 26, 91, 44, 0xFFF8FAFCu32), 453)).to_equal(true)
         expect(_count_color(pixels, 0xFFFFFFFFu32)).to_equal(0)  # oracle: 0 is the pinned authoritative contract value
 
     it "uses explicit line-height for wrapped text layout":
@@ -1954,7 +1983,7 @@ describe "SimpleWebRenderer":
         expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name, "cuda")).to_equal(true)
         expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name, "rocm")).to_equal(true)
         expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name, "opencl")).to_equal(true)
-        expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name, "vulkan")).to_equal(true)
+        expect(_vulkan_name_ok(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name)).to_equal(true)
         expect(_backend_name_kept_or_software(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name, "metal")).to_equal(true)
         expect(SimpleWebRenderer.create_with_backend(96, 64, "cpu_simd").backend_name).to_equal("cpu_simd")
         expect(SimpleWebRenderer.create_with_backend(96, 64, "simd_cpu").backend_name).to_equal("cpu_simd")
@@ -1963,7 +1992,7 @@ describe "SimpleWebRenderer":
         expect(_backend_resolution_is_honest("cuda", "cuda")).to_equal(true)
         expect(_backend_resolution_is_honest("hip", "rocm")).to_equal(true)
         expect(_backend_resolution_is_honest("opencl", "opencl")).to_equal(true)
-        expect(_backend_resolution_is_honest("vulkan", "vulkan")).to_equal(true)
+        expect(_vulkan_resolution_ok()).to_equal(true)
         expect(_backend_resolution_is_honest("metal", "metal")).to_equal(true)
         expect(simple_web_resolved_engine2d_backend_name(96, 64, "cpu_simd")).to_equal("cpu_simd")
 

@@ -3250,6 +3250,9 @@ mod private_call_visibility_tests {
 
     #[test]
     fn private_call_caller_names_module_top_level_owner_or_entry_file() {
+        // Owner keys keep the platform's separators (backslashes on Windows);
+        // compare them in '/' form so the expectations hold on every host.
+        let slashes = |s: &str| s.replace('\\', "/");
         // private_call_gate_skips_import_bound_and_entry_calls_2026-11-14.
         let set_owner = |o: Option<&str>| {
             crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = o.map(Arc::from));
@@ -3259,49 +3262,49 @@ mod private_call_visibility_tests {
         };
         set_file(Some("/zz_fx_caller/src/app/main.spl"));
         set_owner(None);
-        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/main.spl", "entry top level");
+        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/main.spl", "entry top level");
         set_owner(Some("<entry>"));
-        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/main.spl", "entry fn");
+        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/main.spl", "entry fn");
         set_owner(Some("/zz_fx_caller/src/app/runner/run.spl"));
-        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl", "owned fn");
+        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl", "owned fn");
         {
             // A module's top level wins over an inherited `<entry>` owner (a
             // block-scoped `use` inside an entry fn) ...
             set_owner(Some("<entry>"));
             let _top = ClosureOriginGuard::enter_module_top_level(Some("/zz_fx_caller/src/app/other/topglob.spl"));
-            assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/other/topglob.spl");
+            assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/other/topglob.spl");
             {
                 // ... until a named frame runs: that frame is its owner's code.
                 set_owner(Some("/zz_fx_caller/src/app/runner/run.spl"));
                 let _named = ClosureOriginGuard::enter(None);
-                assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl");
+                assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl");
                 {
                     // An unstamped closure body run there keeps the inherited caller.
                     let _closure = ClosureOriginGuard::enter_closure(&Env::new());
-                    assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl");
+                    assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl");
                 }
                 {
                     // A stamped closure body runs as the module that wrote it ...
                     let mut written = Env::new();
                     written.set_closure_caller(Some(Arc::from("/zz_fx_caller/src/app/sub/lamlib.spl")));
                     let _closure = ClosureOriginGuard::enter_closure(&written);
-                    assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/sub/lamlib.spl", "closure writer");
+                    assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/sub/lamlib.spl", "closure writer");
                     {
                         // ... and a named fn it calls is that fn's owner again.
                         let _named = ClosureOriginGuard::enter(None);
-                        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl", "no leak");
+                        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl", "no leak");
                     }
                     let _owned = ClosureOriginGuard::enter_owned("/zz_fx_caller/src/app/sub/deco.spl");
-                    assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/sub/deco.spl", "decorator owner");
+                    assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/sub/deco.spl", "decorator owner");
                 }
-                assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/runner/run.spl", "closure restored");
+                assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/runner/run.spl", "closure restored");
             }
             set_owner(Some("<entry>"));
-            assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/other/topglob.spl", "restored");
+            assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/other/topglob.spl", "restored");
         }
-        assert_eq!(&*private_call_caller(), "/zz_fx_caller/src/app/main.spl", "top level restored");
+        assert_eq!(slashes(&private_call_caller()), "/zz_fx_caller/src/app/main.spl", "top level restored");
         set_file(None);
-        assert_eq!(&*private_call_caller(), "<entry>", "unknown entry file keeps the old exemption");
+        assert_eq!(slashes(&private_call_caller()), "<entry>", "unknown entry file keeps the old exemption");
         set_owner(None);
     }
 

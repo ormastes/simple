@@ -46,26 +46,39 @@ first=${3:-1}
 last=${4:-7}
 here=$(cd "$(dirname "$0")" && pwd)
 stage2=${P3G_STAGE2:-C:/dev/p3new/stage2.exe}
-measure=${P3G_MEASURE:-C:/dev/p3new/tools/measure.ps1}
+measure=${P3G_MEASURE:-}
 cache=${P3G_CACHE_DIR:-$out/cache}
 cap=${P3G_CAP_GB:-28}
 limit=${P3G_LIMIT_S:-7200}
 threads=${P3G_THREADS:-26}
-ptree=${P3G_PTREE_SHADOW:-C:/dev/p3new/r11/ptree_shadow}
+ptree=${P3G_PTREE_SHADOW:-none}
+go_to_end_groups=${P3G_GO_TO_END_GROUPS:-1}
+full_backends=${P3G_FULL_BACKENDS:-0}
 lm=${SIMPLE_LLVM_MINGW_ROOT:-C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64}
 ar="$lm/bin/llvm-ar.exe"; [ -x "$ar" ] || ar="$lm/bin/llvm-ar"
 nm="$lm/bin/llvm-nm.exe"; [ -x "$nm" ] || nm="$lm/bin/llvm-nm"
 ps=$(command -v pwsh || command -v powershell || true)
 [ -n "$ps" ] || { echo "error: pwsh/powershell not found" >&2; exit 1; }
 [ -f "$stage2" ] || { echo "error: stage2 missing: $stage2" >&2; exit 1; }
-[ -f "$measure" ] || { echo "error: measure wrapper missing: $measure" >&2; exit 1; }
 mkdir -p "$out" "$cache"
+
+if [ "$full_backends" = "1" ]; then
+    ps_sources="'--source','src/compositions/cuda_static','--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib','--source','src/plugins'"
+else
+    ps_sources="'--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib'"
+fi
+
+ptree_env_line="Remove-Item Env:SIMPLE_PROJECT_ROOT -EA SilentlyContinue"
+if [ -n "$ptree" ] && [ "$ptree" != "none" ] && [ -d "$ptree" ]; then
+    ptree_env_line="\$env:SIMPLE_PROJECT_ROOT=\"$ptree\"; \$env:SIMPLE_RT_OBJ_CACHE_DIR=\"$ptree.rtcache\""
+fi
 
 # One stage2 run under the RSS-capped wrapper. $1=name $2=entry $3=emit flag $4=output
 run_stage2() {
     name=$1; entry=$2; emit=$3; o=$4
     git -C "$checkout" ls-files --error-unmatch "$entry" >/dev/null 2>&1 ||
         { echo "error: $entry is not tracked in $checkout (SCV needs a tracked entry)" >&2; return 1; }
+    rm -f "$o" "$out/$name.result.txt"
     ps1="$out/$name.run.ps1"
     cat > "$ps1" <<EOF
 \$env:SIMPLE_P3_RUN="P3-GROUPS-$name"
@@ -73,24 +86,83 @@ run_stage2() {
 \$env:PATH="C:\\msys64\\clang64\\bin;"+\$env:PATH
 # per-invocation override for this generated launcher only: p3 entry groups
 # use the two-pass shard route; the global default stays file-based src->obj.
-\$env:SIMPLE_FILE_WORKERS="0"; \$env:SIMPLE_FILE_FIBERS="0"; \$env:SIMPLE_COMPILE_FAIL_FAST="0"; \$env:SIMPLE_NATIVE_BUILD_THREADS="$threads"
+\$env:SIMPLE_FILE_WORKERS="${P3G_FILE_WORKERS:-0}"; \$env:SIMPLE_FILE_FIBERS="0"; \$env:SIMPLE_COMPILE_FAIL_FAST="0"; \$env:SIMPLE_NATIVE_BUILD_THREADS="$threads"
 \$env:SIMPLE_NATIVE_INCREMENTAL="1"; \$env:SIMPLE_COMPILER_TRACE="1"
 \$env:SIMPLE_SCV_INVENTORY_COLD_INIT="1"; \$env:SIMPLE_SCV_FREEZE_FALLBACK="1"
 Remove-Item Env:LIB -EA SilentlyContinue
+Remove-Item Env:INCLUDE -EA SilentlyContinue
+Remove-Item Env:LIBPATH -EA SilentlyContinue
 \$lm="$lm"
 \$env:PATH=\$env:PATH+";\$lm\\bin"; \$env:CC="\$lm\\bin\\clang.exe"; \$env:SIMPLE_LLVM_MINGW_ROOT=\$lm
 # @workaround bug=stage2_runtime_list_missing_process_tree (#5760)
-\$env:SIMPLE_PROJECT_ROOT="$ptree"; \$env:SIMPLE_RT_OBJ_CACHE_DIR="$ptree.rtcache"
+$ptree_env_line
 Set-Location "$checkout"
-& "$measure" -Exe "$stage2" -Cache "$cache" -Log "$out/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap','--source','src/compositions/cuda_static','--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib','--source','src/plugins','--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache','$emit','-o','$o') | Tee-Object "$out/$name.result.txt"
 EOF
+    if [ -n "$measure" ] && [ -f "$measure" ]; then
+        cat >> "$ps1" <<EOF
+& "$measure" -Exe "$stage2" -Cache "$cache" -Log "$out/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache','$emit','-o','$o') | Tee-Object "$out/$name.result.txt"
+EOF
+    else
+        cat >> "$ps1" <<EOF
+\$pOut = "$out/$name.build.log"
+\$pErr = "$out/$name.build.err"
+\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache','$emit','-o','$o')
+\$proc = Start-Process -FilePath "$stage2" -ArgumentList \$stageArgs -NoNewWindow -PassThru -RedirectStandardOutput \$pOut -RedirectStandardError \$pErr
+\$null = \$proc.Handle
+\$sw = [System.Diagnostics.Stopwatch]::StartNew()
+\$capBytes = [int64]$cap * 1073741824
+\$peakBytes = [int64]0
+\$killed = 0
+while (-not \$proc.HasExited) {
+    for (\$i = 0; \$i -lt 10 -and -not \$proc.HasExited; \$i++) { Start-Sleep -Seconds 1 }
+    if (\$proc.HasExited) { break }
+    try {
+        \$all = Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,WorkingSetSize -EA SilentlyContinue
+        \$ids = @([int]\$proc.Id)
+        \$k = 0
+        while (\$k -lt \$ids.Count) {
+            \$cur = \$ids[\$k]
+            foreach (\$p in \$all) {
+                if ([int]\$p.ParentProcessId -eq \$cur -and (\$ids -notcontains [int]\$p.ProcessId)) {
+                    \$ids += [int]\$p.ProcessId
+                }
+            }
+            \$k++
+        }
+        \$sum = [int64]0
+        foreach (\$p in \$all) {
+            if (\$ids -contains [int]\$p.ProcessId) { \$sum += [int64]\$p.WorkingSetSize }
+        }
+        if (\$sum -gt \$peakBytes) { \$peakBytes = \$sum }
+        if (\$sum -gt \$capBytes -or \$sw.Elapsed.TotalSeconds -gt $limit) {
+            \$killed = 1
+            & taskkill /T /F /PID \$proc.Id *> \$null
+            break
+        }
+    } catch {}
+}
+\$proc.WaitForExit()
+if (Test-Path \$pErr) {
+    \$errContent = Get-Content -Path \$pErr -Raw -EA SilentlyContinue
+    if (\$errContent) { Add-Content -Path \$pOut -Value \$errContent }
+}
+\$rc = if (\$killed -eq 1 -and \$null -eq \$proc.ExitCode) { 137 } elseif (\$null -eq \$proc.ExitCode) { 1 } else { [int]\$proc.ExitCode }
+\$peakGb = [math]::Floor(\$peakBytes / 1073741824)
+"peak_tree_GB=\$peakGb killed=\$killed rc=\$rc" | Tee-Object -FilePath "$out/$name.result.txt"
+exit \$rc
+EOF
+    fi
     echo "[p3g] start $name ($entry $emit) $(date +%H:%M:%S)"
     "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ps1" > "$out/$name.wrapper.log" 2>&1 || true
     echo "[p3g] done  $name: $(tail -n 1 "$out/$name.result.txt" 2>/dev/null)"
-    [ -s "$o" ] || { echo "error: $name produced no $o" >&2; return 1; }
+    [ -s "$o" ] && grep -qE '(^| )rc=0($| )' "$out/$name.result.txt" 2>/dev/null || {
+        echo "error: $name failed or produced incomplete $o" >&2
+        return 1
+    }
 }
 
 # ---- groups -----------------------------------------------------------------
+failed_groups=""
 waves=${P3G_WAVES:-}
 if [ -z "$waves" ]; then
     waves=$(seq "$first" "$last" | tr '\n' '|' | sed 's/|$//')
@@ -101,19 +173,38 @@ for wave in $waves; do
     pids=""
     for g in $wave; do
         a="$out/group_$g.a"
-        if [ -s "$a" ] && [ "${P3G_REBUILD:-0}" != 1 ]; then echo "[p3g] reuse $a"; continue; fi
+        if [ -s "$a" ] && grep -qE '(^| )rc=0($| )' "$out/group_$g.result.txt" 2>/dev/null && [ "${P3G_REBUILD:-0}" != 1 ]; then
+            echo "[p3g] reuse $a"
+            continue
+        fi
         run_stage2 "group_$g" "src/app/cli/p3_groups/group_$g.spl" --emit-archive "$a" &
         pids="$pids $!"
     done
-    for p in $pids; do wait "$p" || { echo "error: wave '$wave' failed" >&2; exit 1; }; done
+    wave_failed=0
+    for p in $pids; do wait "$p" || wave_failed=1; done
+    if [ "$wave_failed" -ne 0 ]; then
+        failed_groups="$failed_groups wave($wave)"
+        if [ "$go_to_end_groups" != "1" ]; then
+            echo "error: wave '$wave' failed" >&2
+            exit 1
+        fi
+        echo "warning: wave '$wave' had failures; continuing remaining waves (P3G_GO_TO_END_GROUPS=1)" >&2
+    fi
     IFS='|'
 done
 IFS=$old_ifs
 
 # ---- bootstrap_main entry object (all deps are cache hits by now) -----------
 entry_o="$out/bootstrap_main_entry.o"
-if [ ! -s "$entry_o" ] || [ "${P3G_REBUILD:-0}" = 1 ]; then
-    run_stage2 entry src/app/cli/bootstrap_main.spl --emit-entry-object "$entry_o"
+if [ ! -s "$entry_o" ] || ! grep -qE '(^| )rc=0($| )' "$out/entry.result.txt" 2>/dev/null || [ "${P3G_REBUILD:-0}" = 1 ]; then
+    if ! run_stage2 entry src/app/cli/bootstrap_main.spl --emit-entry-object "$entry_o"; then
+        failed_groups="$failed_groups entry"
+    fi
+fi
+
+if [ -n "$failed_groups" ]; then
+    echo "error: go-to-end group sweep completed with failures:$failed_groups (inspect $out/*.build.log)" >&2
+    exit 1
 fi
 
 # ---- merge + dedupe ---------------------------------------------------------

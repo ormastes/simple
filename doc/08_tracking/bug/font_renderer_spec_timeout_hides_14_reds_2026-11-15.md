@@ -1,6 +1,6 @@
 # font_renderer_spec: a 900 s timeout hid 15 failing rows
 
-Status: OPEN, triaged 2026-11-15 on `work/engine2d-parity-4-20261115`. The
+Status: RESOLVED 2026-11-15 on `work/font-spec-green-20261115` (all 14 rows; see "Resolution"). Triaged on `work/engine2d-parity-4-20261115`. The
 slow row and a stale lock contract are fixed; 14 real reds remain.
 
 ## What the timeout hid
@@ -75,3 +75,31 @@ stale copies of an API that has since moved:
   `cache_identity()` (`53b99dbed07`).
 
 Updated with the same assertions; 6/6.
+
+## Resolution (2026-11-15, `work/font-spec-green-20261115`)
+
+The 6 unverified rows were re-run on the pre-#9491 tree `766838d20de`, and
+all 6 fail there too. #9491 introduced none of the 14 rows.
+
+Each row got its introducing commit. Rows marked "stale" had an oracle the
+product had deliberately moved past. Rows marked "defect" were product bugs,
+fixed TDD (red row first).
+
+| row | class | introducing commit | change |
+|---|---|---|---|
+| renders a selected face from owned bytes | stale pin | a03073da786 (07-20, 4x4 supersampled coverage; it re-pinned sfnt_glyf_spec only) | re-pinned to `00a67785...`. Proof: restoring only the old `_glyf_edge_coverage` reproduces the old pin `65f5480a...` exactly |
+| ignores forged vector glyph environment | stale body | c318743c34b (07-15) set the "ignore" contract; by 88aac2ffe28 (09-29 transplant) the body had reverted to the old accept-payload assertions | restored the c318743c34b body (batch equals the batch without the forged env) |
+| maps multibyte Draw IR advances by UTF-8 byte offset | defect | fallback LayoutGlyph producers counted codepoints, and the requad mirror used the loop index | the producers in `font_renderer.spl` now emit UTF-8 byte offsets (owner decision 2026-11-13). `font_batch_apply_advances` already accepted either index space |
+| resets and repacks the atlas (generation; identity) | stale oracle | atlas park/restore (present by bb3f6ab8ab2): a switch restores the incoming owner's park | the rows mark the whole atlas, including `atlas_active_park_key`, as another owner's. Asserts reset + 1 dirty rect + exactly one park under the stale key |
+| renders bitmap glyph fallback with exact mask | defect (order-dependent) | T12 cross-instance raster cache (2026-08-07) keyed `"";cp;fs` for every renderer without a rasterizer | the key now carries the fallback tier (`fallback=vector/bitmap/ttf/none`). New row: "keeps vector and bitmap fallback tiers apart" (red 7 vs 8, then green). The bisect showed the identity-reset row leaking the vector 'A' into the bitmap row |
+| sans/mono candidates, CSS family lanes, local font-face, materialization | stale oracle | 571e316f856 (07-11, bundled faces moved to the registry assets) plus the Chrome 159 per-name resolver | exact Linux pins on the measured host (Liberation Sans, DejaVu Sans Mono), composition pins elsewhere |
+| Arabic handle-free shaped cluster | stale copy | `gbm_*` field rename; bbb98e957a8 (07-27) took the selected-face ascent from the outline | `gbm_*` fields; ascent from `sfnt_measure_glyph_into` meta[17], pinned to 44 |
+| shaped-run cache STRESS; repeated hit | stale oracle | resolved-metric front memo (present by bb3f6ab8ab2) answers repeats before the deep cache | asserts front-memo hits, and adds a case-folded variant (`Sans-Serif`) that must be a deep-cache hit |
+| shapes registered-only Arabic and Devanagari | defect | f119f8b7120 (07-28, canonical OT layout) gated layout on a live host handle and dropped the handle-free acceptance from 83e55dfe6d7 | `shaper_with_registered_ot_font(shaper, font, pinned_hex)`, accepted only for a handle-free run font whose registry identity carries that digest. New negatives in `test/01_unit/lib/skia/shaper_spec.spl`: plain binding, wrong digest, unpinned path |
+
+Only the hosted registered-only lane was exercised. There was no SimpleOS or
+baremetal run.
+
+Full-file verification, 2026-11-15, seed `cargo-target-webrender-vk/release/simple`,
+load average 10.25: `Results: 49 total, 49 passed, 0 failed`. Wall time was
+342 s against a 900 s budget. Outer maxrss was 245,356 KB.

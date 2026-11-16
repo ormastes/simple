@@ -1,0 +1,79 @@
+# Read-only loader for `simple trace --evidence=testdb`: turns the TestDB's frozen
+# run plans and recorded attempts into passing evidence. It never saves, seals,
+# migrates or creates the database; an unreadable store is a typed error.
+# @req REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1}
+use std.common.traceability.query_missing_v1.{TraceSnapshotIdV1}
+use std.common.traceability.query_status_v1.{TracePassingEvidenceV1}
+use std.common.traceability.passing_evidence_v1.{TraceRunOrderV1, TraceAttemptObservationV1,
+    trace_passing_evidence_from_attempts_v1}
+use std.common.traceability.test_query.{TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit,
+    TestQuery, TestQueryTruncation, TestQueryError, TestQueryErrorKind}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use app.test_runner_new.test_query_cli.{TestDbFilePath, open_test_db_read_only}
+
+struct RunKeyV1:
+    start_time: text
+    run_id: text
+
+fn _before(a: RunKeyV1, b: RunKeyV1) -> bool:
+    if a.start_time != b.start_time:
+        return a.start_time < b.start_time
+    a.run_id < b.run_id
+
+fn _runs_in_start_order(owner: RunnerTestDb) -> [RunKeyV1]:
+    var sorted: [RunKeyV1] = []
+    for run in owner.list_runs(""):
+        val key = RunKeyV1(start_time: run.start_time, run_id: run.run_id)
+        var at = sorted.len()
+        for i in 0..sorted.len():
+            if _before(key, sorted[i]):
+                at = i
+                break
+        var next: [RunKeyV1] = []
+        for i in 0..at:
+            next.push(sorted[i])
+        next.push(key)
+        for i in at..sorted.len():
+            next.push(sorted[i])
+        sorted = next
+    sorted
+
+fn _store_error(detail: text) -> TestQueryError:
+    TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: detail)
+
+# One observation per attempt row of every planned case of every run that has a
+# frozen plan. Runs without a plan have no snapshot and contribute nothing.
+pub fn trace_testdb_observations_v1(owner: RunnerTestDb) -> Result<[TraceAttemptObservationV1], TestQueryError>:
+    var out: [TraceAttemptObservationV1] = []
+    val runs = _runs_in_start_order(owner)
+    for rank in 0..runs.len():
+        val run_id = runs[rank].run_id
+        val plan = match owner.db.get_trace_run_plan(run_id):
+            case Ok(found): found
+            case Err(reason): return Err(_store_error(reason))
+        if plan.is_none():
+            continue
+        val frozen = plan.unwrap()
+        for item in frozen.cases:
+            val query = TestQuery(case_key: TestCaseKey(path: TestCasePath(value: item.test_path),
+                name: TestCaseName(value: item.case_name)), run_id: Some(TestRunId(value: run_id)),
+                limit: TestQueryLimit(value: 1000), cursor: None)
+            val page = match owner.query_case_attempts(query):
+                case Ok(found): found
+                case Err(error): return Err(error)
+            match page.truncation:
+                case TestQueryTruncation.Truncated(_):
+                    return Err(_store_error("attempt rows truncated for " + item.test_path + " in run " + run_id))
+                case TestQueryTruncation.Complete: pass
+            for row in page.rows:
+                out.push(TraceAttemptObservationV1(snapshot: TraceSnapshotIdV1(value: frozen.subject_id),
+                    run_order: TraceRunOrderV1(value: rank), row: row))
+    Ok(out)
+
+pub fn trace_testdb_passing_evidence_v1(path: TestDbFilePath, graph: TraceGraph,
+    sidecar: [TraceSidecarReferenceV1]) -> Result<[TracePassingEvidenceV1], TestQueryError>:
+    val owner = open_test_db_read_only(path)?
+    val observations = trace_testdb_observations_v1(owner)?
+    Ok(trace_passing_evidence_from_attempts_v1(graph, sidecar, observations))

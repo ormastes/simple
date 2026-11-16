@@ -1,0 +1,114 @@
+#!/bin/sh
+# check-primitive-api-added.shs — diff-scoped ratchet: a change must not ADD
+# public-API bare primitives (primitive_api, deny by default).
+#
+# WHY: the full `simple lint` primitive_api checker needs a built binary and
+# costs seconds per file, so it cannot run in the required `fast-gates` job
+# (runner has no bin/simple); check-primitive-api-semantic-ratchet.shs covers
+# only a 6-file sample and is not in the push tier. This is the fast twin of
+# the QUICK scanner (lint_primitive_api.spl `primitive_api_findings`): per
+# touched src/**.spl file it counts bare-primitive params/returns on
+# `pub fn|pub me|pub static fn` lines at the base and at the head of the
+# range; head > base FAILs. Existing debt is grandfathered (base count);
+# fixing debt only lowers it. Same exemptions as the lint: bare text,
+# `@allow(primitive_api)` / `#[allow(primitive_api)]` on the lines above,
+# file-scope `#![allow(primitive_api)]`, and the all-same-primitive
+# pure-math signature. Primitive set = compiler.semantics.lint.primitive_types.
+#
+# Usage: sh scripts/check/check-primitive-api-added.shs --changed BASE..HEAD
+#        sh scripts/check/check-primitive-api-added.shs --selftest
+# Verdict (last stdout line): PASS — <n> file(s) checked, 0 added
+#                             FAIL — ... / ERROR — nothing was checked
+set -u
+
+count_stdin() {
+  awk '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function prim(t) { return t ~ /^(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool)$/ }
+    { sub(/\r$/, "") }
+    /^[ \t]*#!\[allow\(primitive_api\)\]/ { filewide = 1 }
+    {
+      t = trim($0)
+      if (t == "") next
+      if (t ~ /^[#@]/) { if (t ~ /allow\(primitive_api\)/) allowed = 1; next }
+      isfn = (t ~ /^pub (fn|me) / || t ~ /^pub static fn /)
+      was_allowed = allowed; allowed = 0
+      if (!isfn || was_allowed) next
+      p = index(t, "("); q = index(t, ")")
+      n = 0; cnt = 0
+      if (p > 0 && q > p) {
+        ps = trim(substr(t, p + 1, q - p - 1))
+        if (ps != "") {
+          m = split(ps, parts, ",")
+          for (i = 1; i <= m; i++) {
+            c = index(parts[i], ":")
+            if (c > 0) { n++; ty[n] = trim(substr(parts[i], c + 1)) }
+          }
+        }
+      }
+      a = index(t, "->")
+      if (a > 0) {
+        r = trim(substr(t, a + 2)); c = index(r, ":")
+        if (c > 0) r = trim(substr(r, 1, c - 1))
+        if (r != "") { n++; ty[n] = r }
+      }
+      same = (n >= 2 && prim(ty[1]))
+      for (i = 2; i <= n && same; i++) if (ty[i] != ty[1]) same = 0
+      if (same) next
+      for (i = 1; i <= n; i++) if (prim(ty[i])) cnt++
+      total += cnt
+    }
+    END { print (filewide ? 0 : total + 0) }
+  '
+}
+
+selftest() {
+  fx='pub fn a(x: i64) -> text:
+    x
+pub fn b(x: i64, y: i64) -> i64:
+    x
+@allow(primitive_api)
+pub fn c(x: u32) -> bool:
+    x
+pub fn d(n: text, k: u8) -> text:
+    n
+fn private(x: i64) -> i64:
+    x
+pub me e(flag: bool):
+    pass
+'
+  got=$(printf '%s' "$fx" | count_stdin)
+  [ "$got" = 3 ] || { echo "selftest FAIL: expected 3 got $got"; return 1; }
+  got=$(printf '#![allow(primitive_api)]\n%s' "$fx" | count_stdin)
+  [ "$got" = 0 ] || { echo "selftest FAIL: file-scope allow expected 0 got $got"; return 1; }
+  return 0
+}
+
+[ "${1:-}" = "--selftest" ] && { selftest && echo "PASS — selftest ok" && exit 0; exit 1; }
+[ "${1:-}" = "--changed" ] && [ -n "${2:-}" ] || { echo "ERROR — nothing was checked (usage: --changed BASE..HEAD | --selftest)"; exit 2; }
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+range=$2
+base=${range%%..*}
+head=${range##*..}
+root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$root" || exit 2
+git rev-parse -q --verify "$head^{commit}" >/dev/null || { echo "ERROR — nothing was checked (bad head $head)"; exit 2; }
+git rev-parse -q --verify "$base^{commit}" >/dev/null || { echo "ERROR — nothing was checked (bad base $base)"; exit 2; }
+
+files=$(git diff --name-only --diff-filter=AM "$base" "$head" -- 'src/*.spl' |
+  grep -v '/vendor/\|/test/\|_spec\.spl$\|_test\.spl$')
+n=0; bad=0; added=0
+for f in $files; do
+  n=$((n + 1))
+  new=$(git show "$head:$f" | count_stdin)
+  old=$(git show "$base:$f" 2>/dev/null | count_stdin)
+  [ -n "$old" ] || old=0
+  if [ "$new" -gt "$old" ]; then
+    echo "FAIL $f: $new public bare-primitive finding(s) > base $old (use a domain type from std.common.types, or @allow(primitive_api) with a reason)"
+    bad=$((bad + 1)); added=$((added + new - old))
+  fi
+done
+if [ "$n" = 0 ]; then echo "PASS — 0 src .spl file(s) touched in $range, nothing to check (selftest ok)"; exit 0; fi
+if [ "$bad" -gt 0 ]; then echo "FAIL — $n file(s) checked, $bad file(s) add $added public primitive(s)"; exit 1; fi
+echo "PASS — $n file(s) checked, 0 public primitives added"

@@ -6,17 +6,6 @@ Plan: `simple_traceability_spipe_bug_mcp_skills_improvement_plan_2026-11-14.md`.
 This record collects the open items that have no other bug record. Items that
 already have their own record are listed at the end by path only.
 
-## 1. `trace missing` exits 1 on an incomplete graph; the plan says 2
-
-- `src/app/traceability/query_main.spl:35` documents
-  `0 rendered, 1 incomplete or not found, 2 invalid`.
-- Plan §6.4 and the newer subcommands (`matrix`, `links`, `explain`, `diff`,
-  `report`, via `trace_command_verdict_v1` in
-  `src/lib/common/traceability/query_status_v1.spl`) and the MCP
-  `simple_trace` tool all report an incomplete graph as exit 2.
-- Unblock: route `trace missing` through `trace_command_verdict_v1`, update
-  `trace_node_query_spec` expectations, and check CLI callers that test for 1.
-
 ## 2. Public primitives still left in the traceability model
 
 The `primitive_api` lint checks `pub fn` signatures only, so these are not

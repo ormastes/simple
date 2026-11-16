@@ -10,6 +10,7 @@ use compiler.common.attributes.{FunctionAttr}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir.mir_instruction_support.{MirCallOrigin}
 use compiler.mir._MirLowering.module_lowering.*
+use std.io_runtime.{env_get_opt}
 
 fn mir_class_identity_raw(symbols: SymbolTable, raw: i64) -> text:
     """mir_class_identity read through the scalar accessors: no HirSymbol
@@ -116,7 +117,45 @@ fn mir_provider_function_name_fields_v1(owner: text, symbols: SymbolTable, symbo
     # Linkage attributes are an ABI boundary, including runtime push helpers.
     if is_extern or has_export_attr or attr.is_global or attr.is_entry or (is_entry_module and name == "main"):
         return name
-    mir_provider_callable_identity(owner, symbols.symbol_display_name(symbol, name))
+    mir_provider_callable_identity_for_mode(owner, symbols.symbol_display_name(symbol, name),
+        mir_no_mangle_requested())
+
+fn mir_no_mangle_requested() -> bool:
+    (env_get_opt("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
+
+# `--no-mangle` (SIMPLE_NATIVE_BUILD_NO_MANGLE=1) is a C-ABI provider build:
+# the emitted symbol must be the declared leaf name (`rt_string_replace`,
+# `Type.method`), not `<module>.<leaf>`. Both the definition and every call
+# site name come from mir_provider_function_name_fields_v1, so stripping the
+# owner here keeps them linkable together. Only the exact `<owner>.` prefix is
+# removed, so `Type.method` stays intact.
+# See doc/08_tracking/bug/no_mangle_emits_module_qualified_symbols_2026-11-16.md
+fn mir_provider_callable_identity_for_mode(owner: text, source_name: text, no_mangle: bool) -> text:
+    if not no_mangle:
+        return mir_provider_callable_identity(owner, source_name)
+    val name = source_name.replace("::", ".")
+    val module_name = _hir_symbol_owner_module(owner)
+    if module_name != "" and name.starts_with(module_name + "."):
+        return name.substring(module_name.len() + 1)
+    name
+
+# Leaf -> defining module for this process's --no-mangle definitions. Two
+# modules defining one leaf would silently produce duplicate (or, in an
+# archive, first-wins) C symbols, so the second definition fails closed.
+var _mir_no_mangle_leaf_owners: Dict<text, text> = {}
+
+fn mir_no_mangle_leaf_claims_reset():
+    _mir_no_mangle_leaf_owners = {}
+
+fn mir_no_mangle_claim_leaf(leaf: text, owner: text) -> text:
+    val module_name = _hir_symbol_owner_module(owner)
+    if _mir_no_mangle_leaf_owners.has(leaf):
+        val prior = _mir_no_mangle_leaf_owners[leaf]
+        if prior != module_name:
+            return "--no-mangle symbol collision: '{leaf}' is defined by both {prior} and {module_name}; rename one definition or build without --no-mangle"
+        return ""
+    _mir_no_mangle_leaf_owners[leaf] = module_name
+    ""
 
 fn mir_provider_default_is_error(expr: HirExpr) -> bool:
     val expr_kind: HirExprKind = expr.kind

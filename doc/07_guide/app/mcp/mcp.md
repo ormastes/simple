@@ -632,6 +632,19 @@ bin/simple query sem-query 'FIND fn WHERE return_type = "i64"'
 bin/simple query sem-query 'FIND fn WHERE name starts_with "parse_" AND param_count > 2'
 ```
 
+
+### Progressive hints (3 tools)
+
+Logic: `src/app/mcp/main_lazy_hint_tools.spl`. State is one hint record per
+session and capability, held in process memory (no file I/O).
+
+| Tool | Description | Params |
+|------|-------------|--------|
+| `simple_help` | Always returns full guidance for a capability topic (default: quickstart); read-only | topic?, session_id? |
+| `simple_capabilities` | Without `topic`: lists capabilities and records nothing. With `topic`: counts as a capability use; first call full guidance, then brief, then quiet | topic?, session_id? |
+| `simple_hint_status` | Reports stored state (`seen_count`, `success_count`, `last_hint`); never mutates | topic?, session_id? |
+
+An unknown topic is a tool error. `session_id` defaults to `default`.
 ---
 
 ## Resources (URIs)
