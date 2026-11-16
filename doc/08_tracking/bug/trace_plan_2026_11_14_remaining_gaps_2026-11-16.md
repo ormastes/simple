@@ -12,10 +12,13 @@ The `primitive_api` lint checks `pub fn` signatures only, so these are not
 flagged, but they break the "no primitive in public API" requirement:
 
 - `src/lib/common/traceability/model.spl` struct id/count fields still bare
-  `text`/`i64`: `TraceQuery`, `TraceLocator`, `TraceClaim`, `TracePolicy`,
-  `TraceEdge`, `SnapshotSubject`, `TraceDiagnostic`, `TraceNode`
-  (converted so far: `TraceEdgeOrigin`, `TraceQueryResult`, `TraceAuthority`,
-  `TraceDocument`, `TraceConventionRule`, `TraceOrigin`).
+  `text`/`i64`: `TraceLocator` (about 110 field-use sites in src+test, measured
+  2026-11-17, over the per-struct ceiling), `TraceClaim`, `TraceEdge`,
+  `SnapshotSubject`, `TraceDiagnostic`, `TraceNode`. Needs new wrappers for
+  blob ids and locator kinds (closed set: file, line, sdn-node, ...).
+  Converted so far: `TraceEdgeOrigin`, `TraceQueryResult`, `TraceAuthority`,
+  `TraceDocument`, `TraceConventionRule`, `TraceOrigin`, `TraceQuery`,
+  `TracePolicy`.
 - `TraceReverseIndexV1.by_key` is `Dict<text, [TraceEntityIdV1]>`.
 - Unblock: convert one struct per change, smallest use-site count first,
   unwrap at use sites, keep the SDN wire format byte-identical (codec specs).
