@@ -1,0 +1,93 @@
+# `val (n, note, k) = f()?` where f returns Result<(i64, text?, i64?), E>.
+# The destructure temp was typed with the whole tuple, but every bound name
+# was Infer (lower_tuple_destructure only typed elements for a bare Var or a
+# bare Call initializer, never `f()?`). Natively, `if val s = note` then bound
+# the undecoded payload word (`note=218313411616753` instead of `note=note`)
+# and `note.unwrap()` / `k.unwrap()` were unresolved method calls.
+# Fixture: test/fixtures/native_result_try_tuple_optional_slot/main.spl
+
+use std.spec.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val TD_SOURCE = "fn direct(present: bool) -> Result<(i64, Option<text>, Option<i64>), text>:\n    if present: return Ok((1, Some(\"note\"), Some(9)))\n    Ok((2, nil, nil))\n\nfn destructured() -> Result<text, text>:\n    val (n, note, k) = direct(true)?\n    var out = \"\"\n    if val s = note:\n        out = \"note=\" + s\n    Ok(out)\n\nfn projected() -> Result<text, text>:\n    val t = direct(true)?\n    var out = \"\"\n    if val p = t.1:\n        out = \"note=\" + p\n    Ok(out)\n\nfn unwrapped() -> Result<i64, text>:\n    val (m, label, count) = direct(true)?\n    Ok(count.unwrap() + label.unwrap().len())\n"
+
+class TdLowered:
+    hir: HirModule
+    mir: MirModule
+    errors: text
+
+fn td_lower() -> TdLowered:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(TD_SOURCE, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: TD_SOURCE, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["main_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "main_hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    TdLowered(hir: hir, mir: mir, errors: out)
+
+fn td_symbol_kind(hir: HirModule, name: text) -> text:
+    for sid in hir.symbols.symbols.keys():
+        val sym = hir.symbols.symbols[sid]
+        if sym.name == name:
+            if val t = sym.type_:
+                return match t.kind:
+                    case HirTypeKind.Optional(inner):
+                        match inner.kind:
+                            case HirTypeKind.Str: "text?"
+                            case HirTypeKind.Int(_, _): "int?"
+                            case _: "other?"
+                    case HirTypeKind.Str: "text"
+                    case HirTypeKind.Int(_, _): "int"
+                    case HirTypeKind.Infer(_, _): "infer"
+                    case _: "other"
+            return "nil"
+    "missing"
+
+fn td_function_text(mir: MirModule, name: text) -> text:
+    for fid in mir.functions.keys():
+        val f = mir.functions[fid]
+        if f.name == name or f.name.ends_with("." + name):
+            return "{f.blocks}"
+    ""
+
+describe "Result tuple destructure Optional slots":
+    it "types each destructured name from the `f()?` tuple":
+        step("note: text?, k: i64?, if-val binder s: text")
+        val lowered = td_lower()
+        expect(td_symbol_kind(lowered.hir, "note")).to_equal("text?")
+        expect(td_symbol_kind(lowered.hir, "k")).to_equal("int?")
+        expect(td_symbol_kind(lowered.hir, "s")).to_equal("text")
+
+    it "decodes a projected t.1 text? slot on the if-val present edge (control)":
+        val lowered = td_lower()
+        expect(td_function_text(lowered.mir, "projected").contains("rt_interp_cstr")).to_equal(true)
+
+    it "decodes a destructured text? slot on the if-val present edge":
+        step("Same rt_interp_cstr decode as the t.1 projection")
+        val lowered = td_lower()
+        expect(td_function_text(lowered.mir, "destructured").contains("rt_interp_cstr")).to_equal(true)
+
+    it "resolves unwrap on destructured Option slots":
+        val lowered = td_lower()
+        expect(lowered.errors.contains("unresolved method call")).to_equal(false)

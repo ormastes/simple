@@ -881,3 +881,13 @@ plain parameters still accept the same value silently. Red/green in about 30 s o
   `test/01_unit/compiler/mir/result_payload_shape_gaps_spec.spl`,
   `test/fixtures/native_result_try_tuple_optional_slot/`). The `case Ok((a, b, c))`
   match-binding route (`wrapper_native_tuple_field_type`) still has no Optional arm.
+- A destructured slot (`val (n, note) = f()?`) gets its MIR decode only if HIR typed the
+  NAME: `lower_tuple_destructure` (`20.hir/hir_lowering/statements.spl`) typed elements
+  from `local_tuple_types` (bare Var) or `fn_tuple_returns` (bare Call) only, so a `f()?`
+  initializer left every name `Infer` although the temp was the full tuple. Then `if val s
+  = note` on a `text?` slot skipped the present-edge `rt_interp_cstr` decode (native printed
+  the raw word, e.g. `note=218313411616753`) and `note.unwrap()` was "unresolved method
+  call"; `t.1` worked because MIR types the Index receiver from the base tuple. Fixed
+  2026-11-18 by `hir_binding_tuple_elements` (binding_types.spl): settled elements of the
+  temp's own tuple type (also used by `lower_hir_tuple_destructure_assign`).
+  `test/01_unit/compiler/mir/result_tuple_destructure_optional_slot_spec.spl`.
