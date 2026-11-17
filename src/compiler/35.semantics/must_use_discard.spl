@@ -1,0 +1,139 @@
+# ROB-USE-01/02/03: typed-HIR discard check -- the single authority for
+# `must_use` enforcement (doc/03_plan/release/1.0.0/robustness_completion_plan_2026-11-17.md P0-1).
+#
+# An expression statement whose callee returns Result/Option (declared return
+# type of a function in the compilation), or whose callee is in the caller
+# supplied `@must_use` name set, and whose value is dropped, is a finding with
+# a stable code. Consumption forms are not findings because they are not bare
+# expression statements: `val x = f()`, `return f()`, `f()?`, `match f():`,
+# and the explicit discard `_ = f()` (lowered to a unit `Block` expression
+# statement, which this walk deliberately does not enter).
+#
+# Severity projection mirrors SPL-UNIT-002: error in compiled code, warning in
+# script mode (see `unit_profile_apply`'s `script_mode`).
+#
+# NOT covered yet (tracked in the plan's Implementation log): method-call
+# return types (only `@must_use` method NAMES are matched), imported callees
+# (only functions in the scanned modules are resolved), the interpreter
+# consumer (`eval_stmt_expr` still emits its own R9 strings), and TLDR/SMF
+# metadata carrying the obligation.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+val MUST_USE_CODE_RESULT: text = "SPL-USE-001"
+val MUST_USE_CODE_MARKED: text = "SPL-USE-002"
+
+struct MustUseFinding:
+    code: text
+    function: text
+    callee: text
+
+# `script_mode` true only for interpreted script execution.
+# @allow(primitive_api) severity word is the diagnostic wire format shared with eval_warnings
+pub fn must_use_finding_severity(code: text, script_mode: bool) -> text:
+    if script_mode:
+        return "warning"
+    "error"
+
+fn must_use_is_result_like(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Result(_, _): true
+        case HirTypeKind.Optional(_): true
+        case _: false
+
+fn must_use_callee_name(callee: HirExpr, names: Dict<i64, text>) -> text:
+    match callee.kind:
+        case HirExprKind.NamedVar(_, name): name
+        case HirExprKind.Var(symbol):
+            if names.contains_key(symbol.id):
+                return names[symbol.id]
+            ""
+        case _: ""
+
+fn must_use_classify(e: HirExpr, owner: text, names: Dict<i64, text>, result_like: Dict<text, bool>, marked: [text]) -> [MustUseFinding]:
+    var name = ""
+    var is_call = false
+    match e.kind:
+        case HirExprKind.Call(callee, _, _):
+            is_call = true
+            name = must_use_callee_name(callee, names)
+        case HirExprKind.MethodCall(_, method, _, _):
+            if marked.contains(method):
+                return [MustUseFinding(code: MUST_USE_CODE_MARKED, function: owner, callee: method)]
+            return []
+        case HirExprKind.If(_, then_, else_):
+            var out = must_use_nested(then_, owner, names, result_like, marked)
+            match else_:
+                Some(eb):
+                    for f in must_use_nested(eb, owner, names, result_like, marked): out = out.push(f)
+                nil:
+                    pass_do_nothing("no else block")
+            return out
+        case HirExprKind.IfChain(arms, else_):
+            var out: [MustUseFinding] = []
+            for arm in arms:
+                val a: HirIfArm = arm
+                for f in must_use_nested(a.then_, owner, names, result_like, marked): out = out.push(f)
+            match else_:
+                Some(eb):
+                    for f in must_use_nested(eb, owner, names, result_like, marked): out = out.push(f)
+                nil:
+                    pass_do_nothing("no else block")
+            return out
+        case HirExprKind.While(_, body, _): return must_use_nested(body, owner, names, result_like, marked)
+        case HirExprKind.Loop(body, _): return must_use_nested(body, owner, names, result_like, marked)
+        case HirExprKind.For(_, _, body, _): return must_use_nested(body, owner, names, result_like, marked)
+        case HirExprKind.UnsafeBlock(body): return must_use_nested(body, owner, names, result_like, marked)
+        case HirExprKind.MatchCase(_, arms):
+            var out: [MustUseFinding] = []
+            for arm in arms:
+                val a: HirMatchArm = arm
+                for f in must_use_nested(a.body, owner, names, result_like, marked): out = out.push(f)
+            return out
+        case _:
+            return []
+    if not is_call or name == "":
+        return []
+    if marked.contains(name):
+        return [MustUseFinding(code: MUST_USE_CODE_MARKED, function: owner, callee: name)]
+    if result_like.contains_key(name):
+        return [MustUseFinding(code: MUST_USE_CODE_RESULT, function: owner, callee: name)]
+    []
+
+fn must_use_block(block: HirBlock, owner: text, names: Dict<i64, text>, result_like: Dict<text, bool>, marked: [text]) -> [MustUseFinding]:
+    var out: [MustUseFinding] = []
+    for st in block.stmts:
+        val s: HirStmt = st
+        match s.kind:
+            case HirStmtKind.Expr(e):
+                for f in must_use_classify(e, owner, names, result_like, marked): out = out.push(f)
+            case HirStmtKind.Block(inner):
+                for f in must_use_nested(inner, owner, names, result_like, marked): out = out.push(f)
+            case _:
+                pass_do_nothing("statement kind cannot discard a call result")
+    out
+
+# Scans every function body in `modules`. `marked` is the `@must_use` name set.
+pub fn must_use_discard_scan(modules: Dict<text, HirModule>, marked: [text]) -> [MustUseFinding]:
+    var names: Dict<i64, text> = {}
+    var result_like: Dict<text, bool> = {}
+    for key in modules.keys():
+        val module: HirModule = modules[key]
+        for func in module.functions.values():
+            names[func.symbol.id] = func.name
+            if must_use_is_result_like(func.return_type):
+                result_like[func.name] = true
+    var out: [MustUseFinding] = []
+    for key in modules.keys():
+        val module: HirModule = modules[key]
+        for func in module.functions.values():
+            for f in must_use_block(func.body, func.name, names, result_like, marked): out = out.push(f)
+    out
+
+# A block in statement position: its tail value is discarded too.
+fn must_use_nested(block: HirBlock, owner: text, names: Dict<i64, text>, result_like: Dict<text, bool>, marked: [text]) -> [MustUseFinding]:
+    var out = must_use_block(block, owner, names, result_like, marked)
+    if block.has:
+        for f in must_use_classify(block.value, owner, names, result_like, marked): out = out.push(f)
+    out

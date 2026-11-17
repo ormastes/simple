@@ -160,3 +160,17 @@ A feature is complete only when parser/type/HIR/MIR/runtime requirements,
 negative tests, imported/generated-code behaviour, native/interpreter parity,
 diagnostic severity, documentation and the performance gate agree. A registry
 entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
+
+## Implementation log
+
+- 2026-11-18 P0-1 slice (verification-pending): `35.semantics/must_use_discard.spl`
+  is the typed-HIR discard authority (SPL-USE-001 Result/Option discard,
+  SPL-USE-002 `@must_use` name; `must_use_finding_severity` = error compiled /
+  warning script). Spec `test/01_unit/compiler/semantics/must_use_discard_spec.spl`
+  10/10 (was 0 executed, module missing). Existing specs unchanged:
+  must_use_spec 4/5 (1 pre-existing failure), ignored_return_warning 4/4,
+  must_use_streaming_scan 4/4.
+  TODO (open): interpreter `eval_stmt_expr` still emits its own `error[R9]`
+  strings and does not consume this check; method-call return types and
+  imported callees are not resolved (only `@must_use` method names match);
+  `80.driver` admission projection and TLDR/SMF obligation metadata not wired.
