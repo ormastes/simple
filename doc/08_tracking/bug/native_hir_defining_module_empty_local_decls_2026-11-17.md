@@ -59,3 +59,8 @@ errors, with the diagnostic fields. Spec:
 `test/01_unit/compiler/hir/declaration_origin_snapshot_skip_spec.spl`.
 The empty-defining_module workaround guard landed by the separate lane is
 removable once a native bootstrap-mode Stage 2 run passes without it.
+
+## Native evidence (2026-11-17, WSL lane)
+At 41701cb5361, a cached stage2 rebuild passed and the bootstrap-mode p2_add
+smoke passed (rc=0, 259s). Before the patch, the same smoke failed (rc=1,
+31 errors). A full p2 rebuild is pending.
