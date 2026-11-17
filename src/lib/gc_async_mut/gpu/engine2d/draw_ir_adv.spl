@@ -32,6 +32,7 @@ use std.common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.common.numeric_round.{ceil_f64}
 use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
 use std.gc_async_mut.gpu.engine2d.backend_emu.{radial_gradient_pixels, linear_gradient_pixels}
 use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface, css_opacity_group_surface_id}
@@ -1820,6 +1821,33 @@ fn _engine2d_draw_ir_strict_vulkan_box_bounded(command: DrawIrCommand, width: i3
         command.x >= 0 and command.y >= 0 and
         right <= width.to_i64() and bottom <= height.to_i64()
 
+# Rasterize the authoritative f64 rectangle, rather than converting its
+# geometry to integer DrawIR. A non-AA pixel is covered exactly when its
+# center lies in [x, x + width) x [y, y + height). The returned box is only
+# the set of covered pixel indices for Engine2D's integer fill primitive.
+# Reject nonfinite, unbounded, and subpixel-empty rectangles before any GPU
+# work. These checks also bound every f64-to-i32 conversion below.
+fn _engine2d_draw_ir_strict_vulkan_fractional_pixels(command: DrawIrCommand, width: i32, height: i32) -> DrawIrRect:
+    if draw_ir_command_has_unsupported_v4_state(command):
+        return draw_ir_no_rect()
+    if val Some(geometry) = command.fractional_geometry:
+        val right = geometry.x + geometry.width
+        val bottom = geometry.y + geometry.height
+        if not (geometry.x >= 0.0 and geometry.y >= 0.0 and
+            geometry.width > 0.0 and geometry.height > 0.0 and
+            right <= width.to_f64() and bottom <= height.to_f64()):
+            return draw_ir_no_rect()
+        val left_pixel = ceil_f64(geometry.x - 0.5).to_i32()
+        val top_pixel = ceil_f64(geometry.y - 0.5).to_i32()
+        val right_pixel = ceil_f64(right - 0.5).to_i32()
+        val bottom_pixel = ceil_f64(bottom - 0.5).to_i32()
+        if right_pixel <= left_pixel or bottom_pixel <= top_pixel:
+            return draw_ir_no_rect()
+        return draw_ir_rect_bounds(
+            left_pixel, top_pixel,
+            right_pixel - left_pixel, bottom_pixel - top_pixel)
+    draw_ir_no_rect()
+
 fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> text:
     if engine.selected_backend_name != "vulkan" or engine.vulkan_font_poisoned():
         return "strict-vulkan-engine-required"
@@ -1835,15 +1863,24 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
         for command in batch.commands:
             if command.? == None or command.clip_rect.present:
                 return "strict-vulkan-command-preflight-required"
-            if command.fractional_geometry != nil:
-                return "fractional-geometry-unsupported"
+            # Affine commands carry fractional local geometry too, so the v4
+            # state test runs before the plain fractional rectangle branch.
             if draw_ir_command_has_unsupported_v4_state(command):
                 return "affine-or-raster-policy-unsupported"
+            if command.fractional_geometry != nil:
+                if first:
+                    return "strict-vulkan-clear-first-required"
+                if command.kind != DRAW_IR_COMMAND_RECT:
+                    return "fractional-geometry-unsupported"
+                if not _engine2d_draw_ir_strict_vulkan_fractional_pixels(
+                    command, engine.width(), engine.height()).present:
+                    return "strict-vulkan-fractional-rect-coverage-required"
             if first and command.kind != DRAW_IR_COMMAND_RECT:
                 return "strict-vulkan-clear-first-required"
             if command.kind == DRAW_IR_COMMAND_RECT:
-                if not _engine2d_draw_ir_strict_vulkan_box_bounded(
-                    command, engine.width(), engine.height()):
+                if (command.fractional_geometry == nil and
+                    not _engine2d_draw_ir_strict_vulkan_box_bounded(
+                        command, engine.width(), engine.height())):
                     return "strict-vulkan-command-bounds-required"
                 if (command.computed_style.len() != 0 or
                     ((command.color >> 24) & 0xFFu32) != 0xFFu32):
@@ -3618,6 +3655,12 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
             if command.kind == DRAW_IR_COMMAND_RECT:
                 if first:
                     eng.clear(command.color)
+                elif command.fractional_geometry != nil:
+                    val pixels = _engine2d_draw_ir_strict_vulkan_fractional_pixels(
+                        command, eng.width(), eng.height())
+                    eng.draw_rect_filled(
+                        pixels.x, pixels.y, pixels.width, pixels.height,
+                        command.color)
                 else:
                     eng.draw_rect_filled(
                         command.x, command.y, command.width, command.height,
