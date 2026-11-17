@@ -22,10 +22,10 @@
 #   - no backend built -> 503, naming the library that is absent
 #   - will not fit     -> 503, naming the arithmetic that refused it
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage, chat_message_media_count, parse_chat_request, openai_error_response, openai_chat_completion_response, chat_messages_from_body, chat_messages_parse}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage, ChatRequest, chat_message_media_count, parse_chat_request, openai_error_response, openai_chat_completion_response, openai_chat_completion_response_finish, chat_messages_from_body, chat_messages_parse}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{SlangModelEntry, discover_models, find_model}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
-use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat, engine_complete_chat_media, engine_media_caps_for, engine_lib_path}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat_stops, engine_complete_chat_media, engine_media_caps_for, engine_lib_path}
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind, select_runner}
 use std.gc_async_mut.slang.model_executor.backend.{MediaBlob}
 use std.common.base_encoding.base64.{base64_decode_bytes}
@@ -177,47 +177,70 @@ fn chat_plain_prompt_from_body(body: text) -> text:
             parts.push(message.content)
     parts.join("\n")
 
-fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
+# A chat request that passed every check that does not need the engine: parsed,
+# readable, addressed to a model that exists on disk and can take its media.
+struct ChatPlan:
+    request: ChatRequest
+    messages: [ChatMessage]
+    framed: text
+    model: NativeModel
+
+fn chat_prepare(model_root: text, body: text) -> Result<ChatPlan, ApiResponse>:
     match parse_chat_request(body):
         Err(reason):
-            openai_error_response(400, reason, "invalid_request_error", "invalid_request", "")
+            Err(openai_error_response(400, reason, "invalid_request_error", "invalid_request", ""))
         Ok(request):
             var messages: [ChatMessage] = []
             match chat_messages_parse(body):
                 Err(error):
-                    return openai_error_response(400, error.message, "invalid_request_error", error.code, "")
+                    return Err(openai_error_response(400, error.message, "invalid_request_error", error.code, ""))
                 Ok(parsed):
                     messages = parsed
             val framed = chat_frames_from_messages(messages)
             if framed == "":
-                return openai_error_response(400, "no readable message content in the request", "invalid_request_error", "invalid_request", "")
+                return Err(openai_error_response(400, "no readable message content in the request", "invalid_request_error", "invalid_request", ""))
             # A native slang pack is answered by the pack-aware refusal, which
             # can report tensor and chunk counts the generic path cannot.
             val pack = find_model(discover_models(model_root), request.model)
             if pack != nil:
-                return model_not_runnable_response(pack!)
+                return Err(model_not_runnable_response(pack!))
             var found: NativeModel? = nil
             for m in scan_model_root(model_root, engine_backend_available()):
                 if m.id == request.model:
                     found = m
             if found == nil:
-                return model_not_found_response(request.model)
+                return Err(model_not_found_response(request.model))
             match media_refusal(request.model, messages, found!.mmproj_path):
                 Err(refusal):
-                    return refusal
+                    return Err(refusal)
                 Ok(_): ()
-            if media_part_count(messages) > 0:
-                match select_runner(found!):
+            Ok(ChatPlan(request: request, messages: messages, framed: framed, model: found!))
+
+fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
+    match parse_chat_request(body):
+        Err(reason):
+            return openai_error_response(400, reason, "invalid_request_error", "invalid_request", "")
+        Ok(early):
+            if early.stream:
+                return openai_error_response(400, "stream=true needs the streaming transport (serving_stream.spl); this dispatcher returns whole bodies only", "invalid_request_error", "invalid_request", "")
+    match chat_prepare(model_root, body):
+        Err(refusal):
+            refusal
+        Ok(plan):
+            val request = plan.request
+            if media_part_count(plan.messages) > 0:
+                match select_runner(plan.model):
                     Ok(RunnerKind.Pure):
                         return _unsupported_modality("model '" + request.model + "' is served by the pure runner, which is text only; the request carries image/audio part(s) and slang will not route them to another runner or answer as if they were absent")
                     _: ()
-                return serve_media_chat(model_root, request.model, framed, messages, request.max_tokens)
-            match engine_complete_chat(model_root, request.model, framed, chat_plain_prompt_from_body(body), request.max_tokens):
+                return serve_media_chat(model_root, request.model, plan.framed, plan.messages, request.max_tokens)
+            match engine_complete_chat_stops(model_root, request.model, plan.framed, chat_plain_prompt_from_body(body), request.max_tokens, request.stop):
                 Err(reason):
                     engine_refusal_response(request.model, reason)
                 Ok(done):
-                    openai_chat_completion_response(request.model, done.content, done.prompt_tokens, done.completion_tokens)
+                    openai_chat_completion_response_finish(request.model, done.content, done.prompt_tokens, done.completion_tokens, done.finish_reason)
 
 export slang_implemented_phase, slang_missing_inference_phases
 export model_not_runnable_response, model_not_found_response, engine_refusal_response
 export serve_chat_completions, chat_frames_from_body, chat_frames_from_messages, chat_plain_prompt_from_body, media_refusal
+export ChatPlan, chat_prepare, media_part_count

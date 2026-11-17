@@ -16,8 +16,8 @@ Audience: maintainers of `src/app/slang_server/` and the OpenAI entrypoints.
 Non-stream chat envelope, temperature 0 determinism, a system message, GET
 /v1/models, error shapes (400 malformed / missing messages, 404 unknown model and
 route, 405 wrong method), POST /v1/completions, GET /health and two concurrent
-requests. Cases that the server does not implement yet (max_tokens
-finish_reason, stop sequences, SSE streaming) live in slang_openai_conformance_in_development_spec.spl.
+requests. Also: max_tokens finish_reason "length", `stop` sequences (string and array) and
+SSE streaming (`stream:true` on both routes, first content frame before the last token).
 Token usage counts are NOT asserted (doc/08_tracking/bug/slang_openai_usage_counts_always_zero_2026-11-15.md).
 
 ## Compatibility and limitations
@@ -275,6 +275,146 @@ describe "slang OpenAI-compatible surface over loopback HTTP":
             expect(pb.status).to_equal(200)
             expect(json_string_field(pa.body, "content")).to_contain("Paris")
             expect(json_string_field(pb.body, "content")).to_contain("Tokyo")
+
+    it "2. max_tokens 1 gives finish_reason length and a short completion":
+        val gate = _missing()
+        if gate != "":
+            skip("2. max_tokens 1 gives finish_reason length and a short completion", gate)
+        else:
+            _ensure_server()
+            val r = _chat("\"max_tokens\":1,", _user("Write a long essay about the ocean."))
+            print "SLANG_OPENAI case2 status=" + r.status.to_text() + " body=" + r.body
+            expect(r.status).to_equal(200)
+            expect(json_string_field(r.body, "finish_reason")).to_equal("length")
+            expect(json_string_field(r.body, "content").len() < 12).to_equal(true)
+
+    it "3. a stop sequence truncates the completion and finish_reason is stop":
+        val gate = _missing()
+        if gate != "":
+            skip("3. a stop sequence truncates the completion and finish_reason is stop", gate)
+        else:
+            _ensure_server()
+            val r = _chat("\"temperature\":0,\"max_tokens\":40,\"stop\":[\",\"],", _user("Count from 1 to 5 separated by commas, nothing else."))
+            print "SLANG_OPENAI case3 status=" + r.status.to_text() + " body=" + r.body
+            expect(r.status).to_equal(200)
+            expect(json_string_field(r.body, "content").contains(",")).to_equal(false)
+            expect(json_string_field(r.body, "finish_reason")).to_equal("stop")
+
+    it "5. stream true returns SSE chunks ending in [DONE], arriving before generation ends":
+        val gate = _missing()
+        if gate != "":
+            skip("5. stream true returns SSE chunks ending in [DONE], arriving before generation ends", gate)
+        else:
+            _ensure_server()
+            val conn = TcpStream.connect(ADDR)
+            expect(conn.is_ok()).to_equal(true)
+            var s = conn.unwrap()
+            val body = _chat_body("\"stream\":true,\"temperature\":0,\"max_tokens\":24,", _user("Count from 1 to 10."))
+            val t0 = time_now_monotonic_ms()
+            val w = s.write_text(_request("POST", "/v1/chat/completions", body))
+            expect(w.is_ok()).to_equal(true)
+            var head = ""
+            var chunks = 0
+            var deltas = ""
+            var finish = ""
+            var done = false
+            var first_ms: i64 = -1
+            var first_content_ms: i64 = -1
+            var guard = 0
+            while guard < 400:
+                guard = guard + 1
+                val line = s.read_line_nullable()
+                if line == nil:
+                    break
+                val l = line!.trim()
+                if head == "" and l.starts_with("HTTP/"):
+                    head = l
+                if l.starts_with("data:"):
+                    val payload = l.slice(5, l.len()).trim()
+                    if payload == "[DONE]":
+                        done = true
+                        break
+                    if first_ms < 0:
+                        first_ms = time_now_monotonic_ms() - t0
+                    chunks = chunks + 1
+                    expect(payload).to_contain("\"object\":\"chat.completion.chunk\"")
+                    expect(payload).to_contain("\"delta\"")
+                    deltas = deltas + json_string_field(payload, "content")
+                    if first_content_ms < 0 and json_string_field(payload, "content") != "":
+                        first_content_ms = time_now_monotonic_ms() - t0
+                    val fr = json_string_field(payload, "finish_reason")
+                    if fr != "":
+                        finish = fr
+                elif head == "":
+                    pass
+            val total_ms = time_now_monotonic_ms() - t0
+            val _c = s.close()
+            print "SLANG_OPENAI case5 head=" + head + " chunks=" + chunks.to_text() + " first_ms=" + first_ms.to_text() + " first_content_ms=" + first_content_ms.to_text() + " total_ms=" + total_ms.to_text() + " text=" + deltas
+            expect(head).to_contain("200")
+            expect(chunks > 1).to_equal(true)
+            expect(deltas != "").to_equal(true)
+            expect(finish == "stop" or finish == "length").to_equal(true)
+            expect(done).to_equal(true)
+            expect(first_content_ms > 0).to_equal(true)
+            expect(first_content_ms < total_ms).to_equal(true)
+            val tn = time_now_monotonic_ms()
+            val whole = _chat("\"temperature\":0,\"max_tokens\":24,", _user("Count from 1 to 10."))
+            print "SLANG_OPENAI case5 non_stream_total_ms=" + (time_now_monotonic_ms() - tn).to_text() + " status=" + whole.status.to_text()
+
+    it "3b. stop given as a plain string truncates, and /v1/completions honours stop and max_tokens":
+        val gate = _missing()
+        if gate != "":
+            skip("3b. stop given as a plain string truncates, and /v1/completions honours stop and max_tokens", gate)
+        else:
+            _ensure_server()
+            val r = _chat("\"temperature\":0,\"max_tokens\":40,\"stop\":\",\",", _user("Count from 1 to 5 separated by commas, nothing else."))
+            expect(r.status).to_equal(200)
+            expect(json_string_field(r.body, "content").contains(",")).to_equal(false)
+            expect(json_string_field(r.body, "finish_reason")).to_equal("stop")
+            val c = _http("POST", "/v1/completions", "{\"model\":\"" + _model() + "\",\"prompt\":\"Write a long essay about the ocean.\",\"max_tokens\":1}")
+            expect(c.status).to_equal(200)
+            expect(json_string_field(c.body, "finish_reason")).to_equal("length")
+
+    it "5b. stream true on /v1/completions returns text_completion SSE chunks ending in [DONE]":
+        val gate = _missing()
+        if gate != "":
+            skip("5b. stream true on /v1/completions returns text_completion SSE chunks ending in [DONE]", gate)
+        else:
+            _ensure_server()
+            val conn = TcpStream.connect(ADDR)
+            expect(conn.is_ok()).to_equal(true)
+            var s = conn.unwrap()
+            val body = "{\"model\":\"" + _model() + "\",\"stream\":true,\"temperature\":0,\"max_tokens\":12,\"prompt\":\"Count from 1 to 10: 1, 2,\"}"
+            val w = s.write_text(_request("POST", "/v1/completions", body))
+            expect(w.is_ok()).to_equal(true)
+            var head = ""
+            var chunks = 0
+            var finish = ""
+            var done = false
+            var guard = 0
+            while guard < 400:
+                guard = guard + 1
+                val line = s.read_line_nullable()
+                if line == nil:
+                    break
+                val l = line!.trim()
+                if head == "" and l.starts_with("HTTP/"):
+                    head = l
+                if l.starts_with("data:"):
+                    val payload = l.slice(5, l.len()).trim()
+                    if payload == "[DONE]":
+                        done = true
+                        break
+                    chunks = chunks + 1
+                    expect(payload).to_contain("\"object\":\"text_completion\"")
+                    val fr = json_string_field(payload, "finish_reason")
+                    if fr != "":
+                        finish = fr
+            val _c = s.close()
+            expect(head).to_contain("200")
+            expect(chunks > 1).to_equal(true)
+            expect(finish).to_equal("length")
+            expect(done).to_equal(true)
 
     it "shuts the server child down":
         if SERVER_PID >= 0:

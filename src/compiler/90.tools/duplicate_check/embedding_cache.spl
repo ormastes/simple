@@ -1,8 +1,9 @@
 # Content-hash-based embedding cache on disk
 # Follows the incremental.spl pipe-delimited pattern
 
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_atomic_write}
-use compiler.tools.duplicate_check.math_utils.{parse_float_safe}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use compiler.tools.duplicate_check.math_utils.{parse_float_safe, find_substr}
+use compiler.tools.duplicate_check.storage.{read_text_if_exists}
 
 struct EmbeddingCacheEntry:
     item_key: text
@@ -29,10 +30,7 @@ fn load_embedding_cache(path: text, model: text) -> EmbeddingCacheManager:
         misses: 0
     )
 
-    if not file_exists(path):
-        return manager
-
-    val content = file_read(path) ?? ""
+    val content = read_text_if_exists(path)
     if content.len() == 0:
         return manager
 
@@ -50,11 +48,11 @@ fn load_embedding_cache(path: text, model: text) -> EmbeddingCacheManager:
             continue
         else:
             # Parse entry: key|hash|csv_floats
-            val first_pipe = find_pipe(line, 0)
+            val first_pipe = find_substr(line, "|")
             if first_pipe > 0:
                 val key = line[0:first_pipe]
                 val rest = line[first_pipe+1:]
-                val second_pipe = find_pipe(rest, 0)
+                val second_pipe = find_substr(rest, "|")
                 if second_pipe > 0:
                     val hash = rest[0:second_pipe]
                     val csv = rest[second_pipe+1:]
@@ -127,11 +125,3 @@ fn floats_to_csv(values: [f64]) -> text:
     for f in values:
         parts.push("{f}")
     parts.join(",")
-
-fn find_pipe(s: text, start: i64) -> i64:
-    var i = start
-    while i < s.len():
-        if s[i:i+1] == "|":
-            return i
-        i = i + 1
-    -1

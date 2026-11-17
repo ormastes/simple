@@ -1009,6 +1009,11 @@ pub fn rt_process_last_child_peak_rss_kib(_args: &[Value]) -> Result<Value, Comp
     Ok(Value::Int(simple_runtime::child_peak_rss::rt_process_last_child_peak_rss_kib()))
 }
 
+/// User+system CPU ms of the same child, or -1 when it was not measured.
+pub fn rt_process_last_child_cpu_ms(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::child_peak_rss::rt_process_last_child_cpu_ms()))
+}
+
 fn snapshot_monotonic_ms() -> i64 {
     #[cfg(unix)]
     unsafe {

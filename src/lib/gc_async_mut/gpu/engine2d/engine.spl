@@ -17,6 +17,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_region, css_opacity_group_alpha8_milli}
 use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
@@ -25,7 +26,8 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_polygon_filled, emu_draw_polyline,
     emu_draw_rect_thick, emu_draw_circle_thick, emu_draw_rounded_rect_outline,
     emu_draw_gradient_rect_h, emu_draw_radial_gradient,
-    emu_draw_linear_gradient_stops, emu_draw_radial_gradient_stops,
+    emu_draw_linear_gradient_stops, emu_draw_radial_gradient_stops, radial_gradient_pixels,
+    linear_gradient_pixels,
     emu_draw_rect_blend, emu_draw_image_blend,
     emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
@@ -3827,6 +3829,46 @@ class Engine2D with DrawIrRenderTarget:
         else:
             emu_draw_radial_gradient_stops(self.backend, cx, cy, r, stop_colors, stop_positions)
 
+    # CSS radial gradient (Q10 px geometry) composited src-over the paint
+    # rect. The colours come from the shared host evaluator
+    # (`radial_gradient_pixels`, also used by the browser-engine raster);
+    # `draw_image_blend` then routes the composite to the selected backend
+    # (Vulkan: the device SRC_OVER image composite).
+    me draw_radial_gradient_ellipse(ax: i32, ay: i32, aw: i32, ah: i32, cx_q: i64, cy_q: i64, rx_q: i64, ry_q: i64, stop_colors: [u32], stop_positions: [i32]):
+        var x0 = ax
+        var y0 = ay
+        var x1 = ax + aw
+        var y1 = ay + ah
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > self.w: x1 = self.w
+        if y1 > self.h: y1 = self.h
+        if x1 <= x0 or y1 <= y0:
+            return
+        val pixels = radial_gradient_pixels(x0, y0, x1 - x0, y1 - y0, cx_q, cy_q, rx_q, ry_q, stop_colors, stop_positions)
+        if pixels.len() > 0:
+            self.draw_image_blend(x0, y0, x1 - x0, y1 - y0, pixels)
+
+    # CSS linear gradient along the line (sx, sy) -> (ex, ey) (Q10 px)
+    # composited src-over the paint rect: the radial twin above, with colours
+    # from the shared host evaluator `linear_gradient_pixels` (also used by
+    # the browser-engine raster) and the composite routed by `draw_image_blend`
+    # (Vulkan: the device SRC_OVER image composite).
+    me draw_linear_gradient_line(ax: i32, ay: i32, aw: i32, ah: i32, sx_q: i64, sy_q: i64, ex_q: i64, ey_q: i64, stop_colors: [u32], stop_positions: [i32]):
+        var x0 = ax
+        var y0 = ay
+        var x1 = ax + aw
+        var y1 = ay + ah
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > self.w: x1 = self.w
+        if y1 > self.h: y1 = self.h
+        if x1 <= x0 or y1 <= y0:
+            return
+        val pixels = linear_gradient_pixels(x0, y0, x1 - x0, y1 - y0, sx_q, sy_q, ex_q, ey_q, stop_colors, stop_positions)
+        if pixels.len() > 0:
+            self.draw_image_blend(x0, y0, x1 - x0, y1 - y0, pixels)
+
     me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
         if val Some(vg) = self.virtio_gpu_backend:
             emu_draw_rect_blend(self.backend, x, y, w, h, color)
@@ -4019,6 +4061,59 @@ class Engine2D with DrawIrRenderTarget:
             self.draw_image(dst_x, dst_y, width, height, pixels)
             return true
         self.draw_image_blend(dst_x, dst_y, width, height, pixels)
+        true
+
+    me draw_ir_composite_device_css_group(layer: Engine2D, dst_x: i32, dst_y: i32, width: i32, height: i32, opacity_milli: i32) -> bool:
+        """Vulkan twin of `draw_ir_composite_readback_css_group`: restore the
+        group layer rendered into the shared offscreen `layer` straight from
+        its device buffer (`css_group_restore.comp`), with no readback and no
+        upload. False leaves the framebuffer untouched; the caller then takes
+        the readback path, which paints the same pixels."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        if self.backend_name() != "vulkan" or layer.backend_name() != "vulkan":
+            return false
+        if self.vulkan_font_state_unknown or layer.vulkan_font_state_unknown:
+            return false
+        if val Some(lvk) = layer._vulkan_primitive_target():
+            if lvk.w != width or lvk.h != height or lvk.completion_unknown:
+                return false
+            # The layer's recorded draws must have landed before the kernel
+            # reads its buffer; a host-side fallback means the device buffer
+            # is not the layer.
+            val flushed = lvk._flush_pending_compute_at("css-group-layer")
+            if flushed < 0:
+                lvk.mark_completion_unknown()
+            if flushed != 1 or lvk.cpu_fallback_used:
+                return false
+            if val Some(vk) = self._vulkan_primitive_target():
+                val restored = vk.draw_css_group_restore_device(
+                    lvk.d_framebuffer, dst_x, dst_y, width, height,
+                    css_opacity_group_alpha8_milli(opacity_milli))
+                self.vulkan_backend = Some(vk)
+                self.backend = vk
+                return restored
+        false
+
+    me draw_ir_composite_readback_css_group(dst_x: i32, dst_y: i32, width: i32, height: i32, readback: Engine2DReadback, opacity_milli: i32) -> bool:
+        """Restore a CSS opacity group layer as Chrome 159 does
+        (`css_opacity_group.spl`): read the destination region back, run the
+        SkBlendARGB32 restore in .spl, write the result as an opaque copy. Every
+        backend, Vulkan and Metal included, takes this one path, so a device
+        lane is pixel-identical to cpu_simd; the native image-blend shaders
+        implement the embedded-surface milli rule, not this one."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        val total = width.to_i64() * height.to_i64()
+        if readback.pixels.len() != total:
+            return false
+        val fb = self.read_pixels_region(dst_x, dst_y, width, height)
+        if fb.pixels.len() != total:
+            return false
+        val pixels = css_opacity_group_composite_region(
+            readback.pixels, fb.pixels, width, height,
+            css_opacity_group_alpha8_milli(opacity_milli))
+        self.draw_image(dst_x, dst_y, width, height, pixels)
         true
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):

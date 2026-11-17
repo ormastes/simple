@@ -16,7 +16,7 @@
 
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
-use std.test_runner.test_runner_config.{resolve_edition, resolve_edition_from_sdn, resolve_edition_from_value, edition_unknown_warn_count, EDITION_DEFAULT}
+use std.test_runner.test_runner_config.{resolve_edition, resolve_edition_from_sdn, resolve_edition_from_value, edition_unknown_warn_count, edition_values_from_policy, EDITION_DEFAULT}
 
 describe "resolve_edition() -- decision-free manifest slice (no semantics gated)":
     # @manual scenario evidence
@@ -73,9 +73,35 @@ describe "resolve_edition_from_value() -- policy editions (5C)":
         expect(resolve_edition_from_value("2099.9")).to_equal(EDITION_DEFAULT)
         expect(edition_unknown_warn_count("2099.9")).to_equal(1)
 
-    it "reads [package] edition from an explicit simple.sdn path":
+    it "reads project: edition from an explicit simple.sdn path":
         val dir = secure_temp_dir(".", "edition-resolve-spec").unwrap()
         val path = dir + "/simple.sdn"
-        file_write(path, "[package]\nedition = \"2027.2\"\n")
+        file_write(path, "project:\n  name: demo\n  edition: \"2027.2\"\n")
         expect(resolve_edition_from_sdn(path)).to_equal("2027.2")
         dir_remove_all(dir)
+
+    it "ignores edition outside the project: block and TOML [package] form":
+        val dir = secure_temp_dir(".", "edition-resolve-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        file_write(path, "project:\n  name: demo\nlints:\n  edition: 2027.2\n")
+        expect(resolve_edition_from_sdn(path)).to_equal(EDITION_DEFAULT)
+        file_write(path, "[package]\nedition = \"2027.2\"\n")
+        expect(resolve_edition_from_sdn(path)).to_equal(EDITION_DEFAULT)
+        file_write(path, "project:\n  name: demo\n  edition: 2026.11\n")
+        expect(resolve_edition_from_sdn(path)).to_equal("2026.11")
+        dir_remove_all(dir)
+
+    it "no edition key resolves to the default":
+        val dir = secure_temp_dir(".", "edition-resolve-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        file_write(path, "project:\n  name: demo\n  version: 1.0.0\n")
+        expect(resolve_edition_from_sdn(path)).to_equal(EDITION_DEFAULT)
+        dir_remove_all(dir)
+
+describe "edition_values_from_policy() -- only promotion keys":
+    it "collects warn_since/error_since but not remove_since":
+        val pol = "rules:\n  r1:\n    warn_since_lang_version: \"2026.11\"\n    error_since_lang_version: \"2027.2\"\n    remove_since_lang_version: \"2028.5\"\n"
+        val eds = edition_values_from_policy(pol)
+        expect(eds.contains("2026.11")).to_equal(true)
+        expect(eds.contains("2027.2")).to_equal(true)
+        expect(eds.contains("2028.5")).to_equal(false)

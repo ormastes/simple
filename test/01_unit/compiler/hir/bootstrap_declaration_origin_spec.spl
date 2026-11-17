@@ -1,0 +1,172 @@
+"""
+## Purpose and audience
+Regression contract for HIR bootstrap function pre-declaration and
+`bind_source_declaration_origin_v1` / `bind_declaration_origin_v1` ownership
+invariants.
+
+Pre-declaring local functions under `SIMPLE_BOOTSTRAP=1` (both whole-program
+and entry-closure builds) and `lower_function` fallback definitions must carry
+the module's `defining_module` when `module_filename` is set, so source
+declaration origin binding succeeds without `SIMPLE_SCV_INVENTORY_COLD_INIT=1`,
+while real foreign-module and empty-owner mismatches still fail closed.
+"""
+use std.spec.{describe, expect, it, step}
+use std.env.variables.{env_get, env_has, env_set, env_unset}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+
+fn restore_env(name: text, had: bool, previous: text) -> bool:
+    if had:
+        return env_set(name, previous)
+    env_unset(name)
+
+fn lower_in_bootstrap_mode(source: text, path: text, closure_mode: text, entry_path: text) -> (bool, [text], HirModule):
+    val had_bootstrap = env_has("SIMPLE_BOOTSTRAP")
+    val prev_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    val had_closure = env_has("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    val prev_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    val had_entry = env_has("SIMPLE_NATIVE_BUILD_ENTRY")
+    val prev_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+    val had_cold = env_has("SIMPLE_SCV_INVENTORY_COLD_INIT")
+    val prev_cold = env_get("SIMPLE_SCV_INVENTORY_COLD_INIT")
+
+    var ok = env_set("SIMPLE_BOOTSTRAP", "1")
+    ok = ok and env_unset("SIMPLE_SCV_INVENTORY_COLD_INIT")
+    if closure_mode != "":
+        ok = ok and env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", closure_mode)
+    else:
+        ok = ok and env_unset("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    if entry_path != "":
+        ok = ok and env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_path)
+    else:
+        ok = ok and env_unset("SIMPLE_NATIVE_BUILD_ENTRY")
+
+    val parsed = parse_and_build_module(source, path)
+    var lowering = HirLowering.with_filename(path)
+    val bootstrap_active = lowering.ambient_bootstrap_enabled()
+    val lowered = lowering.lower_module(parsed)
+
+    var error_messages: [text] = []
+    for err in lowering.errors:
+        error_messages.push(err.message)
+
+    val restored = (
+        restore_env("SIMPLE_BOOTSTRAP", had_bootstrap, prev_bootstrap) and
+        restore_env("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", had_closure, prev_closure) and
+        restore_env("SIMPLE_NATIVE_BUILD_ENTRY", had_entry, prev_entry) and
+        restore_env("SIMPLE_SCV_INVENTORY_COLD_INIT", had_cold, prev_cold)
+    )
+    expect(ok).to_equal(true)
+    expect(restored).to_equal(true)
+    (bootstrap_active, error_messages, lowered)
+
+describe "bootstrap pre-declaration declaration origin":
+    it "retains defining_module and binds origin in bootstrap mode without cold init":
+        step("Lower a non-SCV module under SIMPLE_BOOTSTRAP=1 with SIMPLE_SCV_INVENTORY_COLD_INIT unset")
+        val path = "/private/tmp/phase2_gate3/hello/hello.spl"
+        val source = "fn main():\n    0\npri fn helper() -> i64:\n    1\npub fn api() -> i64:\n    2\n"
+        val res = lower_in_bootstrap_mode(source, path, "", path)
+        val bootstrap_active = res.0
+        val errors = res.1
+        val hir = res.2
+
+        expect(bootstrap_active).to_equal(true)
+        expect(errors.len()).to_equal(0)
+
+        val expected_mods = {"main": "omitted", "helper": "pri", "api": "public"}
+        var checked = 0
+        for fn_key in hir.functions.keys():
+            val hir_fn = hir.functions[fn_key]
+            if expected_mods.contains_key(hir_fn.name):
+                val sym = hir.symbols.get_symbol(hir_fn.symbol).unwrap()
+                expect(sym.defining_module ?? "").to_equal(path)
+                expect(sym.declaration_modifier_v1).to_equal(expected_mods[hir_fn.name])
+                expect(sym.declaration_projection_key_v1).to_equal("function:" + hir_fn.name)
+                expect(sym.declaration_owner_v1).to_equal(".private.tmp.phase2_gate3.hello.hello")
+                checked = checked + 1
+        expect(checked).to_equal(3)
+
+    it "retains defining_module and origin in bootstrap closure mode for both entry and helper modules":
+        step("Lower entry and qualified non-entry modules with SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 and cold init unset")
+        val entry_path = "/private/tmp/phase2_gate3/closure/entry_app.spl"
+        val helper_path = "/private/tmp/phase2_gate3/closure/helper_mod.spl"
+        val source = "fn local_entry() -> i64:\n    1\npub fn exported_fn() -> i64:\n    2\n"
+
+        val entry_res = lower_in_bootstrap_mode(source, entry_path, "1", entry_path)
+        expect(entry_res.0).to_equal(true)
+        expect(entry_res.1.len()).to_equal(0)
+        for fn_key in entry_res.2.functions.keys():
+            val hir_fn = entry_res.2.functions[fn_key]
+            val sym = entry_res.2.symbols.get_symbol(hir_fn.symbol).unwrap()
+            expect(sym.defining_module ?? "").to_equal(entry_path)
+            expect(sym.declaration_owner_v1).to_equal(".private.tmp.phase2_gate3.closure.entry_app")
+            expect(sym.declaration_modifier_v1 != "").to_equal(true)
+
+        val helper_res = lower_in_bootstrap_mode(source, helper_path, "1", entry_path)
+        expect(helper_res.0).to_equal(true)
+        expect(helper_res.1.len()).to_equal(0)
+        var helper_checked = 0
+        for fn_key in helper_res.2.functions.keys():
+            val hir_fn = helper_res.2.functions[fn_key]
+            val sym = helper_res.2.symbols.get_symbol(hir_fn.symbol).unwrap()
+            expect(sym.name).to_equal(".private.tmp.phase2_gate3.closure.helper_mod." + hir_fn.name)
+            expect(sym.defining_module ?? "").to_equal(helper_path)
+            expect(sym.declaration_owner_v1).to_equal(".private.tmp.phase2_gate3.closure.helper_mod")
+            expect(sym.declaration_modifier_v1 != "").to_equal(true)
+            helper_checked = helper_checked + 1
+        expect(helper_checked).to_equal(2)
+
+    it "assigns defining_module on lower_function fallback when no prior symbol exists":
+        step("Lower a function directly via lower_function without pre-declaration")
+        val had_cold = env_has("SIMPLE_SCV_INVENTORY_COLD_INIT")
+        val prev_cold = env_get("SIMPLE_SCV_INVENTORY_COLD_INIT")
+        val cleared = env_unset("SIMPLE_SCV_INVENTORY_COLD_INIT")
+
+        val path = "/private/tmp/phase2_gate3/fallback_mod.spl"
+        val parsed = parse_and_build_module("pri fn direct_only() -> i64:\n    7\n", path)
+        var lowering = HirLowering.with_filename(path)
+        val hir_fn = lowering.lower_function(parsed.functions["direct_only"])
+        lowering.bind_source_declaration_origin_v1({"function:direct_only": "pri"}, hir_fn.symbol, "function", "direct_only")
+
+        val restored = restore_env("SIMPLE_SCV_INVENTORY_COLD_INIT", had_cold, prev_cold)
+        expect(cleared).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        val sym = lowering.symbols.get_symbol(hir_fn.symbol).unwrap()
+        expect(sym.defining_module ?? "").to_equal(path)
+        expect(sym.declaration_modifier_v1).to_equal("pri")
+
+    it "still rejects foreign-module and empty-owner declaration origin mismatches when cold init is unset":
+        step("Verify bind_source_declaration_origin_v1 fails closed on foreign and nil-owner symbols")
+        val had_bootstrap = env_has("SIMPLE_BOOTSTRAP")
+        val prev_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+        val had_cold = env_has("SIMPLE_SCV_INVENTORY_COLD_INIT")
+        val prev_cold = env_get("SIMPLE_SCV_INVENTORY_COLD_INIT")
+        val set_boot = env_set("SIMPLE_BOOTSTRAP", "1")
+        val cleared_cold = env_unset("SIMPLE_SCV_INVENTORY_COLD_INIT")
+
+        var lowering = HirLowering.with_filename("/private/tmp/phase2_gate3/local_owner.spl")
+        val foreign_id = lowering.symbols.define("foreign_fn", SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, Some("foreign.owner"))
+        lowering.bind_source_declaration_origin_v1({"function:foreign_fn": "pri"}, foreign_id, "function", "foreign_fn")
+
+        val nil_owner_id = lowering.symbols.define("empty_owner_fn", SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, None)
+        lowering.bind_source_declaration_origin_v1({"function:empty_owner_fn": "omitted"}, nil_owner_id, "function", "empty_owner_fn")
+
+        val restored = (
+            restore_env("SIMPLE_BOOTSTRAP", had_bootstrap, prev_bootstrap) and
+            restore_env("SIMPLE_SCV_INVENTORY_COLD_INIT", had_cold, prev_cold)
+        )
+        expect(set_boot).to_equal(true)
+        expect(cleared_cold).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(lowering.errors.len()).to_equal(2)
+        expect(lowering.errors[0].message).to_contain("source declaration origin mismatches the symbol owner")
+        expect(lowering.errors[0].message).to_contain("defining_module=foreign.owner")
+        expect(lowering.errors[1].message).to_contain("source declaration origin mismatches the symbol owner")
+        expect(lowering.errors[1].message).to_contain("defining_module= ")
