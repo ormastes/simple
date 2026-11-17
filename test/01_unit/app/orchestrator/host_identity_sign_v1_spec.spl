@@ -1,0 +1,91 @@
+# Sign-only use of an OpenSSH Ed25519 private file (milestone_0030 D2/D3). AUTHORED_NOT_RUN.
+# The seed is RFC 8032 test-1: published, deliberately public fixture material.
+use std.spec.{describe, it, expect}
+use app.orchestrator.host_identity_key_v1.{host_identity_private_encode_v1, host_identity_private_public_v1,
+    host_identity_private_sign_grant_v1, host_identity_private_sign_approval_v1}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign_from_seed_v1, pure_ed25519_verify}
+
+fn sign_fixture_seed_v1() -> [u8]:
+    [157, 97, 177, 157, 239, 253, 90, 96, 186, 132, 74, 244, 146, 236, 44, 196, 68, 73, 197, 105, 123, 50, 105, 25, 112, 59, 172, 3, 28, 174, 127, 96]
+
+fn sign_grant_message_v1(rest: text) -> [u8]:
+    ("DBC_GRANT_SIGNATURE_V2\n" + rest).bytes()
+
+fn sign_fixture_file_v1() -> [u8]:
+    val seed = sign_fixture_seed_v1()
+    host_identity_private_encode_v1(seed, pure_ed25519_keypair_from_seed(seed).1, [1, 2, 3, 4],
+        "public-rfc8032-fixture").unwrap()
+
+describe "Host identity sign-only capability V1":
+    it "signs a grant message that verifies under the public key derived from the file":
+        val public_key = pure_ed25519_keypair_from_seed(sign_fixture_seed_v1()).1
+        val message = sign_grant_message_v1("issuer_1\n")
+        val signed = host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key, message)
+        expect(signed.is_ok()).to_equal(true)
+        expect(signed.unwrap().len()).to_equal(64)
+        expect(pure_ed25519_verify(public_key, message, signed.unwrap())).to_equal(true)
+
+    it "produces the same deterministic signature as the independent seed signer":
+        val seed = sign_fixture_seed_v1()
+        val message = sign_grant_message_v1("independent comparison message\n")
+        val expected = pure_ed25519_sign_from_seed_v1(seed, message)
+        val signed = host_identity_private_sign_grant_v1(sign_fixture_file_v1(), expected.public_key, message)
+        expect(signed).to_equal(Ok(expected.signature))
+
+    it "does not verify for a different message":
+        val public_key = pure_ed25519_keypair_from_seed(sign_fixture_seed_v1()).1
+        val signed = host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key, sign_grant_message_v1("first\n"))
+        expect(pure_ed25519_verify(public_key, sign_grant_message_v1("second\n"), signed.unwrap())).to_equal(false)
+
+    it "refuses to sign when the required public key is another key":
+        var other_seed = sign_fixture_seed_v1()
+        other_seed[0] = 158
+        val other_public = pure_ed25519_keypair_from_seed(other_seed).1
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), other_public,
+            sign_grant_message_v1("message\n"))).to_equal(Err("host-identity-sign-key-differs"))
+
+    it "refuses a required public key of the wrong size":
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), [1, 2, 3],
+            sign_grant_message_v1("message\n"))).to_equal(Err("host-identity-sign-key-size"))
+
+    it "refuses empty and oversized messages and accepts exactly 65536 bytes":
+        val public_key = pure_ed25519_keypair_from_seed(sign_fixture_seed_v1()).1
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key, [])).to_equal(
+            Err("host-identity-sign-message-size"))
+        var large = sign_grant_message_v1("")
+        while large.len() < 65537: large.push(65)
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key, large)).to_equal(
+            Err("host-identity-sign-message-size"))
+        var exact = sign_grant_message_v1("")
+        while exact.len() < 65536: exact.push(65)
+        val signed = host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key, exact)
+        expect(pure_ed25519_verify(public_key, exact, signed.unwrap())).to_equal(true)
+
+    it "pins each entry point to its own domain":
+        val public_key = pure_ed25519_keypair_from_seed(sign_fixture_seed_v1()).1
+        val approval = "DBC_APPROVAL_SIGNATURE_V2\napprover_1\n".bytes()
+        val signed_approval = host_identity_private_sign_approval_v1(sign_fixture_file_v1(), public_key, approval)
+        expect(pure_ed25519_verify(public_key, approval, signed_approval.unwrap())).to_equal(true)
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key, approval)).to_equal(
+            Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_approval_v1(sign_fixture_file_v1(), public_key,
+            sign_grant_message_v1("x\n"))).to_equal(Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key, "message\n".bytes())).to_equal(
+            Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key,
+            "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V2\nx\n".bytes())).to_equal(Err("host-identity-sign-domain"))
+        # The domain line alone, or the tag without its terminator, is not a grant payload.
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key, sign_grant_message_v1(""))).to_equal(
+            Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_grant_v1(sign_fixture_file_v1(), public_key,
+            "DBC_GRANT_SIGNATURE_V2x\n".bytes())).to_equal(Err("host-identity-sign-domain"))
+
+    it "reports a malformed private file with the parser's fixed code and no signature":
+        val public_key = pure_ed25519_keypair_from_seed(sign_fixture_seed_v1()).1
+        expect(host_identity_private_sign_grant_v1("-----BEGIN OPENSSH PRIVATE KEY-----".bytes(), public_key,
+            sign_grant_message_v1("message\n"))).to_equal(Err("host-identity-private-size"))
+
+    it "keeps deriving the same public identity after the shared-parser refactor":
+        val parsed = host_identity_private_public_v1(sign_fixture_file_v1())
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().public_key.starts_with("ssh-ed25519 ")).to_equal(true)
