@@ -109,7 +109,7 @@ use compiler.frontend.trace_policy.{frontend_trace_suppressed, frontend_compiler
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Import expression parsing
-use compiler.frontend.core.parser_expr.{parse_expr, parse_or, parse_postfix_on, parse_binary_from}
+use compiler.frontend.core.parser_expr.{parse_expr, parse_or, parse_postfix_on, parse_binary_from, arrow_suppress_set, arrow_note_val, arrow_note_var, arrow_val_names_reset}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
 use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.ast.{expr_assign, expr_compound_assign}
@@ -1588,6 +1588,7 @@ fn parse_val_decl_stmt() -> i64:
 
     # The initializer sees the prior scope, matching HIR declaration order.
     parser_lexical_bind_value(name)
+    arrow_note_val(name)
     stmt_val_decl(name, type_tag, init, 0)
 
 fn parse_lazy_val_decl_stmt() -> i64:
@@ -1689,11 +1690,13 @@ fn parse_var_decl_stmt() -> i64:
     val at_stmt_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
     if has_type_annotation and at_stmt_end:
         parser_lexical_bind_value(name)
+        arrow_note_var(name)
         return stmt_var_decl(name, type_tag, var_no_init_default_expr(type_tag, type_looks_named, fixed_array_elem, fixed_array_size), 0)
 
     parser_expect(100)
     val init = parse_expr()
     parser_lexical_bind_value(name)
+    arrow_note_var(name)
     stmt_var_decl(name, type_tag, init, 0)
 
 # Synthesizes the default-value initializer for a `var name: Type` declared
@@ -2287,6 +2290,7 @@ fn parse_match_arms_common() -> (i64, [i64]):
             #   match_arm_underscore_subpattern_becomes_lambda_2026-08-01.md
             var patterns: [i64] = []
             val ph_prev = set_placeholder_transform_suppressed(true)
+            val case_arrow_prev = arrow_suppress_set(true)
             # `case complete b:` / `case dyn b:` region arms (§2 of
             # doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md).
             # Patterns are parsed with the general EXPRESSION parser (see
@@ -2359,6 +2363,8 @@ fn parse_match_arms_common() -> (i64, [i64]):
                 parser_advance()
                 guard_expr_idx = parse_expr()
 
+            arrow_suppress_set(case_arrow_prev)
+
             # Check for pattern binding: case X as binding_name:
             var pattern_binding = ""
             if par_kind_get() == TOK_KW_AS:
@@ -2389,6 +2395,7 @@ fn parse_match_arms_common() -> (i64, [i64]):
             # `_` here is the wildcard pattern, not the lambda shorthand.
             var patterns: [i64] = []
             val cl_ph_prev = set_placeholder_transform_suppressed(true)
+            val cl_arrow_prev = arrow_suppress_set(true)
             # `| Pat -> body`: a leading `|` opens an arm (README.md "preferred
             # arrow syntax"; owner decision 2026-11-09). Equivalent to
             # `case Pat: body` — the `|` is only the arm marker.
@@ -2405,6 +2412,8 @@ fn parse_match_arms_common() -> (i64, [i64]):
             if par_kind_get() == 40:
                 parser_advance()
                 guard_expr_idx = parse_expr()
+
+            arrow_suppress_set(cl_arrow_prev)
 
             # Check for pattern binding: pattern as binding_name:
             var pattern_binding = ""

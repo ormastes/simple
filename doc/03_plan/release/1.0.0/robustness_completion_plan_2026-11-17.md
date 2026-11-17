@@ -160,3 +160,7 @@ A feature is complete only when parser/type/HIR/MIR/runtime requirements,
 negative tests, imported/generated-code behaviour, native/interpreter parity,
 diagnostic severity, documentation and the performance gate agree. A registry
 entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
+
+## 8. Implementation log
+
+- 2026-11-18 P0-4 (ROB-ARR-01/03/04 slice): self-hosted parser now parses postfix `x->m(args)` and desugars it to `x = x.m(args)` (`parser_expr.spl` `parse_arrow_update`); match patterns/guards parse with the arrow suppressed so arm and return-type arrows are unchanged; `val` and temporary targets are named parser errors. Spec `arrow_functional_update_spec.spl` 8/8; `functional_update_spec.spl` titles corrected. Open: index/field targets re-evaluate the base (single-evaluation, ROB-ARR-05), `->f()?` ordering, type-mismatch error, `a->b()->c()` chains, native MIR parity evidence.

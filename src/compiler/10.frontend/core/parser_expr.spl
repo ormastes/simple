@@ -1094,6 +1094,84 @@ fn pe_is_typed_empty_array_ctor(base: i64, argc: i64) -> bool:
         return false
     pe_is_array_element_type_expr(pe_tc_elems[0])
 
+# ===== Arrow functional update: `x->m(args)` == `x = x.m(args)` (ROB-ARR-01..07) =====
+# Seed parity: postfix.rs TokenKind::Arrow. The match-arm separator and guard
+# arrow share the token, so match patterns/guards parse with the arrow
+# suppressed (arrow_suppress_set); return-type arrows never reach postfix.
+# @allow(primitive_api) parser-internal flag/identifier-name hook, same raw-scalar parser API surface as the sibling parser_* helpers
+pub fn arrow_suppress_set(on: bool) -> bool:
+    val prev = expr_nest_state.g_arrow_suppressed
+    expr_nest_state.g_arrow_suppressed = on
+    prev
+
+# Per-function `val` registry so `v->m()` on an immutable binding is a named error.
+pub fn arrow_val_names_reset():
+    expr_nest_state.g_arrow_val_names = []
+
+# @allow(primitive_api) parser-internal flag/identifier-name hook, same raw-scalar parser API surface as the sibling parser_* helpers
+pub fn arrow_note_val(name: text):
+    expr_nest_state.g_arrow_val_names.push(name)
+
+# @allow(primitive_api) parser-internal flag/identifier-name hook, same raw-scalar parser API surface as the sibling parser_* helpers
+pub fn arrow_note_var(name: text):
+    var kept: [text] = []
+    for n in expr_nest_state.g_arrow_val_names:
+        if n != name:
+            kept.push(n)
+    expr_nest_state.g_arrow_val_names = kept
+
+fn arrow_is_val(name: text) -> bool:
+    for n in expr_nest_state.g_arrow_val_names:
+        if n == name:
+            return true
+    false
+
+fn arrow_update_active() -> bool:
+    par_kind_get() == TOK_ARROW and not expr_nest_state.g_arrow_suppressed
+
+fn parse_arrow_update(base: i64) -> i64:
+    val start = lex_token_start_get()
+    val line = par_line_get()
+    val col = par_col_get()
+    parser_advance()
+    val name = declaration_identifier_text(par_kind_get(), par_text_get())
+    if name == "":
+        parser_error("expected method name after '->'")
+        return base
+    parser_advance()
+    if par_kind_get() != 140:
+        parser_error("arrow update `x->{name}(...)` requires an argument list")
+        return base
+    parser_advance()
+    var args: [i64] = []
+    var arg_names: [text] = []
+    var k = par_kind_get()
+    if k != 141:
+        val first_arg = parse_call_arg(placeholder_callee_name_is_higher_order(name))
+        args.push(first_arg.0)
+        arg_names.push(first_arg.1)
+        k = par_kind_get()
+        while k == 160:
+            parser_advance()
+            k = par_kind_get()
+            if k == 141:
+                break
+            val next_arg = parse_call_arg(placeholder_callee_name_is_higher_order(name))
+            args.push(next_arg.0)
+            arg_names.push(next_arg.1)
+            k = par_kind_get()
+    parser_expect(141)
+    val tag = expr_get_tag(base)
+    if tag != EXPR_IDENT and tag != EXPR_FIELD_ACCESS and tag != EXPR_INDEX:
+        parser_error("arrow update `->{name}(...)` target must be an assignable place (var, field or index), not a temporary")
+        return base
+    if tag == EXPR_IDENT and arrow_is_val(expr_get_str(base)):
+        parser_error("arrow update `{expr_get_str(base)}->{name}(...)` rebinds `{expr_get_str(base)}`, which is an immutable `val`; declare it with `var`")
+        return base
+    val span = flat_span_new(start, lex_token_start_get(), line, col)
+    val call = expr_method_call_named(base, name, args, arg_names, span)
+    expr_assign(base, call, 0)
+
 fn parser_postfix_span_from(base: i64) -> i64:
     """Span for a postfix node (`base.field`, `base[i]`): from the base's own
     start to the current token. Field-access and index nodes used to be
@@ -1296,6 +1374,8 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 base = expr_call_named(base, call_args, call_arg_names, ppo_call_span)
                 expr_set_call_type_args(base, explicit_call_types)
             explicit_call_types = []
+        elif kind == 167 and arrow_update_active():
+            base = parse_arrow_update(base)
         elif kind == 131:
             parser_advance()
             val field_name = par_text_get()
@@ -1564,6 +1644,8 @@ fn parse_postfix() -> i64:
             explicit_call_types = []
             if parser_expr_trace_line_enabled():
                 eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
+        elif kind == 167 and arrow_update_active():
+            base = parse_arrow_update(base)
         elif kind == 131:
             # Optional chaining (safe navigation): x?.field / x?.method(args).
             # Try-then-access is spelled (x?).field / (x?).method(args).
@@ -1603,9 +1685,11 @@ export parse_int_text
 # owners; install makes a taken snapshot active again.
 pub struct ExprNestState:
     g_expr_nest_depth: i64
+    g_arrow_suppressed: bool
+    g_arrow_val_names: [text]
 
 fn expr_nest_state_fresh() -> ExprNestState:
-    ExprNestState(g_expr_nest_depth: 0)
+    ExprNestState(g_expr_nest_depth: 0, g_arrow_suppressed: false, g_arrow_val_names: [])
 
 var expr_nest_state: ExprNestState = expr_nest_state_fresh()
 
@@ -1617,4 +1701,4 @@ pub fn expr_nest_state_take() -> ExprNestState:
 pub fn expr_nest_state_install(s: ExprNestState):
     expr_nest_state = s
 
-export ExprNestState, expr_nest_state_take, expr_nest_state_install
+export ExprNestState, expr_nest_state_take, expr_nest_state_install, arrow_suppress_set, arrow_val_names_reset, arrow_note_val, arrow_note_var
