@@ -1639,7 +1639,11 @@ fn background_gradient_box_rects(st: Style, x: i32, y: i32, w: i32, h: i32) -> [
 # clockwise; `to <corner>` depends on the box) and is |w sin| + |h cos| long,
 # so the far corners land on the 0% and 100% points.
 fn linear_gradient_line_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
-    val angle = parse_gradient_angle_deg(layer)
+    linear_gradient_line_q10_at_angle(parse_gradient_angle_deg(layer), ax, ay, aw, ah)
+
+# The same line for a parsed angle (`parse_gradient_angle_deg`: degrees, or
+# >= 1000 for a `to <corner>` direction).
+fn linear_gradient_line_q10_at_angle(angle: i32, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
     val sc = if angle >= 1000: gradient_corner_dir_q16(angle, aw, ah) else: gradient_angle_sin_cos_q16(angle)
     val s = sc[0]
     val c = sc[1]
@@ -1817,6 +1821,64 @@ fn canvas_background_extent(nodes: [HNode], bx: [i32], by: [i32], bw: [i32], bh:
             break
         i = i + 1
     [w, h]
+
+# The root node whose gradient layer list is the canvas background outside
+# widget mode (CSS Backgrounds 3 §2.11.2): `<html>` when it has a background,
+# else `<body>`. -1 when that node's background is not a paintable gradient
+# list (a plain colour already reaches the canvas as its base colour).
+fn canvas_gradient_source(nodes: [HNode], styles: [Style]) -> i32:
+    var hi = -1
+    var bi = -1
+    var i = 0
+    while i < nodes.len() and i < styles.len() and (hi < 0 or bi < 0):
+        if nodes[i].tag == "html" and hi < 0:
+            hi = i
+        elif nodes[i].tag == "body" and bi < 0:
+            bi = i
+        i = i + 1
+    if hi < 0:
+        return -1
+    val hs = styles[hi]
+    val html_has_bg = hs.bg != 0u32 or hs.bg_layers_raw != "" or hs.background_image_uri != "" or hs.background_gradient_stop_colors.len() > 0 or (hs.background_gradient_from != 0u32 and hs.background_gradient_to != 0u32)
+    if html_has_bg:
+        return if _canvas_gradient_paintable(hs): hi else: -1
+    if bi >= 0 and _canvas_gradient_paintable(styles[bi]):
+        return bi
+    -1
+
+# A gradient list, a typed radial (its raw list is kept) or a typed linear
+# layer with the default size and position.
+fn _canvas_gradient_paintable(st: Style) -> bool:
+    if background_gradient_layers_paintable(st) or (radial_gradient_box_paintable(st) and st.bg_layers_raw != ""):
+        return true
+    val n = st.background_gradient_stop_colors.len()
+    (
+        st.bg_layers_raw == "" and not st.background_gradient_is_radial and n >= 2 and
+        st.background_gradient_stop_positions.len() == n and
+        st.background_size_w_px == 0 and st.background_size_h_px == 0 and
+        _gradient_layers_default_position(st.background_position_x_px) and
+        _gradient_layers_default_position(st.background_position_y_px) and
+        st.background_repeat == "repeat"
+    )
+
+# The canvas gradient layers of `src` (see canvas_gradient_source): Chrome
+# positions the propagated root background on the root (`<html>`) box, so a
+# default `repeat` tiles it past that box over the whole canvas.
+fn canvas_gradient_layers(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], src: i32) -> [BackgroundGradientLayer]:
+    var i = 0
+    while i < nodes.len() and i < bx.len():
+        if nodes[i].tag == "html":
+            val st = styles[src]
+            if st.bg_layers_raw != "":
+                return background_gradient_layers(st.bg_layers_raw, bx[i], by[i], bw[i], bh[i], st.font_size)
+            # A typed linear layer: its parsed stops on the html box, repeating.
+            val tile: [i64] = [(bx[i] as i64) * 1024, (by[i] as i64) * 1024, (bw[i] as i64) * 1024, (bh[i] as i64) * 1024]
+            if bw[i] <= 0 or bh[i] <= 0:
+                return []
+            val geom = linear_gradient_line_q10_at_angle(st.background_gradient_angle_deg, bx[i], by[i], bw[i], bh[i])
+            return [BackgroundGradientLayer(radial: false, geom: geom, colors: st.background_gradient_stop_colors, positions: st.background_gradient_stop_positions, tile: tile, repeat_x: true, repeat_y: true)]
+        i = i + 1
+    []
 
 # Paint the radial-gradient layers of a multi-layer `background` stack over
 # the rect (x, y, w, h), which is both the gradient box and the painting
