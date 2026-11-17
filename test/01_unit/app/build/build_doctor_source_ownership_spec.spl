@@ -1,0 +1,35 @@
+# `simple build doctor --source-ownership` (plan section 4.2 / 7, SPL-BUILD-SRC-001).
+# @cover src/app/build/doctor_cli.spl
+use std.spec
+use app.build.doctor_cli.{doctor_source_ownership_report, doctor_source_ownership_exit, run_build_doctor}
+use compiler.driver.driver_build.source_inventory_v1.{SourceInventoryUnitV1, SourceInventoryFileV1}
+
+fn unit(name: text, paths: [text]) -> SourceInventoryUnitV1:
+    var files: [SourceInventoryFileV1] = []
+    for p in paths:
+        files.push(SourceInventoryFileV1(path: p, digest: ""))
+    SourceInventoryUnitV1(name: name, files: files)
+
+describe "build doctor --source-ownership":
+    it "reports orphans as warnings and exits 0 under the default profile":
+        val r = doctor_source_ownership_report([unit("a", ["x.spl"])], ["x.spl", "y.spl"], "warn")
+        expect(r).to_contain("warning[SPL-BUILD-SRC-001] y.spl")
+        expect(doctor_source_ownership_exit([unit("a", ["x.spl"])], ["x.spl", "y.spl"], "warn")).to_equal(0)
+
+    it "reports duplicate owners as errors and exits 1 under deny":
+        val units = [unit("a", ["x.spl"]), unit("b", ["x.spl"])]
+        expect(doctor_source_ownership_report(units, ["x.spl"], "deny")).to_contain("error[SPL-BUILD-SRC-001] x.spl")
+        expect(doctor_source_ownership_exit(units, ["x.spl"], "deny")).to_equal(1)
+
+    it "passes cleanly with a verdict line":
+        val r = doctor_source_ownership_report([unit("a", ["x.spl"])], ["x.spl"], "deny")
+        expect(r).to_contain("PASS")
+        expect(doctor_source_ownership_exit([unit("a", ["x.spl"])], ["x.spl"], "deny")).to_equal(0)
+
+    it "is ERROR (exit 2) when nothing was scanned":
+        expect(doctor_source_ownership_exit([], [], "deny")).to_equal(2)
+        expect(doctor_source_ownership_report([], [], "deny")).to_contain("ERROR")
+
+    it "rejects a missing mode and a missing dir with exit 2":
+        expect(run_build_doctor([])).to_equal(2)
+        expect(run_build_doctor(["--source-ownership", "no/such/dir_polrows"])).to_equal(2)
