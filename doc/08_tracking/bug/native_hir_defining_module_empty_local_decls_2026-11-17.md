@@ -1,6 +1,6 @@
 # native_hir_defining_module_empty_local_decls_2026-11-17 (P1)
 
-Status: fix-implemented-verification-pending (native Stage 2 re-run pending)
+Status: open (root cause NOT confirmed; see Update)
 
 ## Bug
 Stage 2 bootstrap (native-built compiler lowering
@@ -30,3 +30,14 @@ A separate lane is landing a tagged guard in `bind_declaration_origin_v1`
 (`src/compiler/20.hir/hir_symbol_table_methods.spl`) that fills an empty
 defining_module from owner; it is not in this commit's tree. That guard is REMOVABLE once a native Stage 2 run shows
 non-empty defining_module for p2_add's local declarations without it.
+
+## Update 2026-11-17: the typed-option change did NOT fix it
+Native boot at 8366d2c319e still fails with 31 "typed declaration did not
+retain its source identity" errors (module_build.spl) for p2_add's local fns.
+The `text?`/None change stays as hygiene only. `bind_declaration_origin_v1`
+returns Ok(false) on three paths: empty modifier, projection_key/name
+mismatch, and the SCV-snapshot skip. The caller treats every Ok(false) as this
+error, so the snapshot skip, which returns Ok(false) on an owner mismatch, is
+a live candidate. The error message now carries symbol.name, category,
+defining_module, owner, modifier and source_path, so the next native boot can
+name the real path.
