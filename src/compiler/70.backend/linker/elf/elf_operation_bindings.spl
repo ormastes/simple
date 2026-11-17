@@ -9,7 +9,7 @@ use std.mdsocpp.model.{CapsuleDescriptorV1, MdsocppFacetOfferV1, MdsocppFacetReq
     MdsocppClosure, MdsocppSealPolicyV1, MdsocppGenerationReceiptV1, MdsocppProfile}
 use std.mdsocpp.seal.{mdsocpp_seal_v1}
 use std.io_runtime.{file_read_bytes_result}
-use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
+use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_value}
 use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan, elf_exec_plan,
     elf_write_image_bytes, SHT_NOBITS_E, PT_LOAD}
 
@@ -60,6 +60,15 @@ fn _elf_builtin_relocate(arch: RelocArch, bytes: [i64], offset: i64,
     val checked = reloc_apply(arch, bytes, offset, kind, symbol, addend, place)
     if not checked.success: return Err(checked.error)
     Ok(reloc_patch_bytes(arch, bytes, offset, kind, symbol, addend, place))
+
+# workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md
+# _elf_builtin_relocate without Result: one reloc_apply, patched window or []
+# on reject.
+fn _elf_builtin_relocate_fast(arch: RelocArch, bytes: [i64], offset: i64,
+        kind: i64, symbol: i64, addend: i64, place: i64) -> [i64]:
+    val checked = reloc_apply(arch, bytes, offset, kind, symbol, addend, place)
+    if not checked.success: return []
+    reloc_patch_value(arch, bytes, offset, kind, symbol, addend, place, checked.value)
 
 fn _elf_builtin_write(kind: i64, machine: i64, entry: i64,
         plan: ElfExecPlan, contents: [[u8]]) -> Result<[u8], text>:
@@ -193,8 +202,19 @@ pub class ElfSealedOperationsV1:
     writer_operation: fn(i64, i64, i64, ElfExecPlan, [[u8]]) -> Result<[u8], text>
     receipt: MdsocppGenerationReceiptV1
     read_operation: Option<fn(text) -> Result<[u8], text>> = nil
+    # Set only by elf_builtin_*operations_v1 after sealing the unmodified
+    # builtin providers, so relocate_fast never bypasses a caller's callback.
+    builtin_relocate: bool = false
 
     pub fn has_byte_source() -> bool: self.read_operation != nil
+
+    # workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md
+    pub fn relocate_fast(arch: RelocArch, bytes: [i64], offset: i64, kind: i64,
+            symbol: i64, addend: i64, place: i64) -> [i64]:
+        """Patched window like relocate(), or [] when the caller must use
+        relocate() (non-builtin relocation operation, or a reject)."""
+        if not self.builtin_relocate or bytes.len() == 0: return []
+        _elf_builtin_relocate_fast(arch, bytes, offset, kind, symbol, addend, place)
 
     pub fn read_bytes(path: text) -> Result<[u8], text>:
         if self.read_operation == nil: return Err("ELF byte-source operation is not bound")
@@ -288,8 +308,14 @@ fn _elf_seal_operations_v1(providers: [ElfOperationProviderV1],
         writer_operation: providers[writer_slot].write_image.unwrap(), receipt: sealed.receipt,
         read_operation: read_operation))
 
+fn _elf_with_builtin_relocate(sealed: ElfSealedOperationsV1) -> ElfSealedOperationsV1:
+    var ops = sealed
+    ops.builtin_relocate = true
+    ops
+
 pub fn elf_builtin_operations_v1() -> Result<ElfSealedOperationsV1, text>:
-    elf_seal_operations_v1(elf_builtin_operation_providers_v1(), elf_operation_policy_v1())
+    val sealed = elf_seal_operations_v1(elf_builtin_operation_providers_v1(), elf_operation_policy_v1())?
+    Ok(_elf_with_builtin_relocate(sealed))
 
 pub fn elf_builtin_file_operation_providers_v1() -> [ElfOperationProviderV1]:
     var providers = elf_builtin_operation_providers_v1()
@@ -300,7 +326,8 @@ pub fn elf_builtin_file_operation_providers_v1() -> [ElfOperationProviderV1]:
     providers
 
 pub fn elf_builtin_file_operations_v1() -> Result<ElfSealedOperationsV1, text>:
-    elf_seal_file_operations_v1(elf_builtin_file_operation_providers_v1(), elf_operation_policy_v1())
+    val sealed = elf_seal_file_operations_v1(elf_builtin_file_operation_providers_v1(), elf_operation_policy_v1())?
+    Ok(_elf_with_builtin_relocate(sealed))
 
 export ElfOperationProviderV1, ElfSealedOperationsV1, ElfComposedImageV1
 export elf_operation_facet_id_v1, elf_operation_capsule_id_v1, elf_operation_descriptor_v1, elf_operation_policy_v1
