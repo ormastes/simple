@@ -57,24 +57,43 @@ Caret side: providers `slang` (HTTP) and `slang_local` (in-process) in
   ggml-backed path announces itself separately with `"stub":false` and
   `"backend":"ggml"`.
 
-## OpenAI HTTP surface: supported vs not (live-verified 2026-11-15, Windows, Qwen2.5-1.5B)
+## OpenAI HTTP surface: supported vs not (live-verified 2026-11-16, Windows, Qwen2.5-1.5B)
 
-Specs: `test/03_system/lib/slang/feature/slang_openai_conformance_live_spec.spl` (passing),
-`..._in_development_spec.spl` (expected red; bug
-`doc/08_tracking/bug/slang_openai_stop_stream_finish_reason_unimplemented_2026-11-15.md`).
+Spec: `test/03_system/lib/slang/feature/slang_openai_conformance_live_spec.spl` (passing, 14 cases;
+the former `..._in_development_spec.spl` cases 2/3/5 moved into it when they went green; bug
+`doc/08_tracking/bug/slang_openai_stop_stream_finish_reason_unimplemented_2026-11-15.md`, fixed).
 
 | Feature | Status |
 |---|---|
 | `POST /v1/chat/completions` non-stream, system/multi-turn messages | works |
-| `POST /v1/completions` (raw prompt, `text_completion`, no usage) | works |
+| `POST /v1/completions` (raw prompt, `text_completion`) | works |
 | `GET /v1/models`, `GET /health` | works |
 | 400 malformed/missing messages, 404 `model_not_found` / `not_found`, 405 | works (OpenAI error envelope) |
 | temperature 0 repeat identical, two concurrent connections | works |
-| `finish_reason: "length"` on `max_tokens` | no: always `stop` |
-| `stop` sequences | no: ignored |
-| `stream: true` (SSE) | no: 400 |
+| `finish_reason: "length"` on `max_tokens` | works (`stop` for end-of-turn / stop sequence) |
+| `stop` (string or array) | works: cut before the earliest match, partial matches held back |
+| `stream: true` (SSE) chat + completions | works; ggml lane streams per token, pure runner / shared-context backend answer with one content frame |
+| `stream: true` with image/audio parts | 400 `unsupported_modality` (media path is not incremental) |
 | `temperature`/`top_p`/`seed`/`n` | ignored (greedy) |
-| usage token counts | always 0 (own bug) |
+
+### How finish_reason / stop / streaming are built (2026-11-16)
+
+- Decode loop is a step API in `model_executor/backend.spl`: `GenStream` + `gen_stream_step` (one sample, detokenize,
+  eval; `stop_scan` from `pure/stop.spl` applies `stop`; `finish_reason` "stop" = EOG token or stop sequence, "length" =
+  token budget). `_sample_loop` (non-stream) is just that step in a loop, so both paths share one set of semantics.
+  `generate_stream_open` / `gen_stream_close` hold the per-request ggml context across steps; no C shim change was needed.
+- `llm_engine.spl`: `EngineChatResult.finish_reason`, `engine_complete_{chat,text}_stops`, `engine_can_stream`,
+  `engine_stream_open/step/close`. The pure runner applies `stop` to its finished text; "length" when completion tokens hit the cap.
+- `serving_stream.spl` writes SSE straight to the connection (role frame, `choices[].delta` frames, final frame with
+  `finish_reason`, `data: [DONE]`, no Content-Length, then close). `SimpleHttpServer.with_stream_handler` is the hook
+  (called with the parsed request + live `TcpStream` before routing). The transport-free `slang_api_dispatch` still
+  answers `stream:true` with 400 because it cannot stream.
+- Mid-stream failures emit an error event then `[DONE]`; a client disconnect closes the request context.
+- Time-to-first-token (Qwen2.5-1.5B Q4_K_M, CPU, "Count from 1 to 10.", max_tokens 24): first content frame at
+  ~1.8 s (role frame 1.7 s, i.e. after prefill + first token), last frame at 3.65 s; the same request non-stream returns at
+  2.7 s (it ran second, with the prompt prefix already cached, so the totals are not like for like). Streaming wins on
+  perceived latency (first text at ~half the stream total) not on total time. Numbers printed by case 5
+  (`SLANG_OPENAI case5 first_content_ms=... total_ms=... non_stream_total_ms=...`).
 
 ## Current limits
 

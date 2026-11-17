@@ -108,6 +108,21 @@ pub fn decode_ppm_to_argb(data: [u8]) -> Result<PpmImage, text>:
         i = i + 1
     Ok(PpmImage(width: width, height: height, pixels: pixels))
 
+fn _ppm_flat_pattern(rgb: i64, npix: i32) -> [u8]:
+    """`npix` copies of one RGB triple, built by doubling with write_span."""
+    var pat: [u8] = [0; npix * 3]
+    pat[0] = (rgb >> 16) & 0xFF
+    pat[1] = (rgb >> 8) & 0xFF
+    pat[2] = rgb & 0xFF
+    var filled = 1
+    while filled < npix:  # cpu-lane-loop-ok: log2(npix) doublings
+        var step = filled
+        if filled + step > npix:
+            step = npix - filled
+        pat.write_span(pat, (filled * 3) as i64, 0, (step * 3) as i64)
+        filled = filled + step
+    pat
+
 pub fn encode_ppm_p6(width: u32, height: u32, pixels: [u32]) -> [u8]:
     """Encode an ARGB pixel buffer to P6 PPM bytes.
 
@@ -137,13 +152,52 @@ pub fn encode_ppm_p6(width: u32, height: u32, pixels: [u32]) -> [u8]:
     while hi < hlen:
         out[hi] = header.char_at(hi) as i64
         hi = hi + 1
-    var i: i64 = 0
+    # Flat regions dominate real frames, so a row (or a 64-pixel block of a row)
+    # whose pixels are all equal is written as ONE bulk write_span of a
+    # pre-built RGB pattern instead of three element stores per pixel. Mixed
+    # blocks keep the per-pixel stores, so the bytes are identical either way.
+    val w_i = width_i64 as i32
+    val blk = 64
+    var row_rgb: i64 = -1
+    var row_pat: [u8] = []
+    var blk_rgb: i64 = -1
+    var blk_pat: [u8] = []
+    var y = 0
     var o = hlen
-    while i < count:
-        val argb = pixels[i] as i64
-        out[o] = (argb >> 16) & 0xFF
-        out[o + 1] = (argb >> 8) & 0xFF
-        out[o + 2] = argb & 0xFF
-        o = o + 3
-        i = i + 1
+    while y < height_i64 and w_i > 0:  # cpu-lane-loop-ok: one iteration per image row; flat rows and blocks are bulk spans
+        val base = y * w_i
+        val first = pixels[base] as i64
+        val row_seg = pixels.slice(base, base + w_i)
+        if row_seg.min() == row_seg.max():
+            val rgb = first & 0xFFFFFF
+            if rgb != row_rgb:
+                row_pat = _ppm_flat_pattern(rgb, w_i)
+                row_rgb = rgb
+            out.write_span(row_pat, o as i64, 0, (w_i * 3) as i64)
+            o = o + w_i * 3
+        else:
+            var x = 0
+            while x < w_i:  # cpu-lane-loop-ok: one iteration per 64-pixel block
+                var n = blk
+                if x + n > w_i:
+                    n = w_i - x
+                val seg = pixels.slice(base + x, base + x + n)
+                if seg.min() == seg.max():
+                    val rgb = (seg[0] as i64) & 0xFFFFFF
+                    if rgb != blk_rgb:
+                        blk_pat = _ppm_flat_pattern(rgb, blk)
+                        blk_rgb = rgb
+                    out.write_span(blk_pat, o as i64, 0, (n * 3) as i64)
+                    o = o + n * 3
+                else:
+                    var k = 0
+                    while k < n:  # cpu-lane-loop-ok: mixed block, per-pixel stores
+                        val argb = pixels[base + x + k] as i64
+                        out[o] = (argb >> 16) & 0xFF
+                        out[o + 1] = (argb >> 8) & 0xFF
+                        out[o + 2] = argb & 0xFF
+                        o = o + 3
+                        k = k + 1
+                x = x + n
+        y = y + 1
     out
