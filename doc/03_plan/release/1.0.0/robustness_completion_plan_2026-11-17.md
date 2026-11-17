@@ -161,6 +161,7 @@ negative tests, imported/generated-code behaviour, native/interpreter parity,
 diagnostic severity, documentation and the performance gate agree. A registry
 entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
 
+
 ## Implementation log
 
 - 2026-11-18 P0-3 slice: `inference_effects.spl` — non-function callee type and
@@ -188,3 +189,4 @@ entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
   `code` param removed. Spec now 18/18. with/try/lambda walkers have no spec
   case yet (source syntax not confirmed).
 - 2026-11-18 P0-5 slice 1: `90.tools/lint/_LintMain/rule_cost_tier.spl` adds LintCostTier (Low/Medium/High; unlisted = High), registry covering all `all_lint_names()`, LintCompleteness, `lint_rules_for_profile`, `lint_completeness_reduce` (exhausted budget -> incomplete). Spec `rule_cost_tier_registry_spec.spl` 6/6. Remaining: `lint --fast` / `--diagnostic` wiring, timed_out enforcement per rule, warm-build wall/RSS evidence.
+- 2026-11-18 P0-4 (ROB-ARR-01/03/04 slice): self-hosted parser now parses postfix `x->m(args)` and desugars it to `x = x.m(args)` (`parser_expr.spl` `parse_arrow_update`); match patterns/guards parse with the arrow suppressed so arm and return-type arrows are unchanged; `val` and temporary targets are named parser errors. Spec `arrow_functional_update_spec.spl` 16/16 (block-scoped val tracking, nested-fn hide/restore, `val (a, b)`); `functional_update_spec.spl` titles corrected; non-simple field/index bases are a named error until ROB-ARR-05 single-evaluation. Open: module-level `val` not parser-checked, `->f()?` ordering, type-mismatch error, `a->b()->c()` chains, native MIR parity evidence.
