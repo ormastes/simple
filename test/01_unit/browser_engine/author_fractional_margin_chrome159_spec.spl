@@ -1,0 +1,97 @@
+"""
+## Purpose and audience
+Purpose: Pin that AUTHOR vertical margins written in em, rem or fractional px
+carry their sub-pixel part through the block cursor like the UA heading
+margins do (PR #9951): the margin is floored to Chrome's LayoutUnit 1/64 px and
+kept in `Style.margin_t_milli` / `margin_b_milli` instead of being rounded to
+whole pixels at parse time. Heights stay whole pixels; each box's painted top
+is round(true y).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + inline script reading
+getBoundingClientRect().y, 900x2000, `body{margin:0}`, `.w{width:400px;
+padding-top:1px}`, `.a{height:160px}` (so the 13px section starts on a whole pixel: a
+parent box top is still rounded, a separate limit), every block `height:10px`, root font 16px, 2026-11-17):
+
+| id | author margin          | font | Chrome y   | painted |
+|----|------------------------|------|------------|---------|
+| a1 | margin:0.7em 0         | 16   | 12.1875    | 12      |
+| a2 | margin-top:1.3rem      | 16   | 42.984375  | 43      |
+| a3 | margin-top:10.5px      | 16   | 63.484375  | 63      |
+| a4 | margin-block:1.3em     | 16   | 94.28125   | 94      |
+| a5 | margin-bottom:0.7em    | 16   | 125.078125 | 125     |
+| a6 | margin-top:0.3em       | 16   | 146.265625 | 146     |
+| b1 | margin:0.7em 0         | 13   | 171.09375  | 171     |
+| b2 | margin-top:1.3rem      | 13   | 201.890625 | 202     |
+| b3 | margin-top:10.5px      | 13   | 222.390625 | 222     |
+| b4 | margin-block:1.3em     | 13   | 249.28125  | 249     |
+| b5 | margin-bottom:0.7em    | 13   | 276.171875 | 276     |
+| b6 | margin-top:0.3em       | 13   | 295.265625 | 295     |
+
+Percent vertical margins (`margin-block: 2.5%`) are NOT pinned here: they are
+not resolved against the containing-block width at all yet. See
+doc/08_tracking/bug/web_render_css_paint_residual_2026-11-17.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-AUTHOR-FRACTIONAL-MARGIN-001 — author em/rem/fractional-px block margins carry fractions through the block cursor.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .w{{width:400px;padding-top:1px}} .a{{font-size:16px;height:160px}} .b{{font-size:13px}} .w div{{height:10px}}</style></head><body>" +
+    "<div class=\"w a\"><div id=a1 style=\"margin:0.7em 0\"></div><div id=a2 style=\"margin-top:1.3rem\"></div><div id=a3 style=\"margin-top:10.5px\"></div>" +
+    "<div id=a4 style=\"margin-block:1.3em\"></div><div id=a5 style=\"margin-bottom:0.7em\"></div><div id=a6 style=\"margin-top:0.3em\"></div></div>" +
+    "<div class=\"w b\"><div id=b1 style=\"margin:0.7em 0\"></div><div id=b2 style=\"margin-top:1.3rem\"></div><div id=b3 style=\"margin-top:10.5px\"></div>" +
+    "<div id=b4 style=\"margin-block:1.3em\"></div><div id=b5 style=\"margin-bottom:0.7em\"></div><div id=b6 style=\"margin-top:0.3em\"></div></div>" +
+    "</body></html>"
+
+fn _y(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "y")
+
+describe "author fractional margins at 16px":
+    it "AC-1: margin shorthand 0.7em 0":
+        step("Chrome 159: 1 + 11.1875 = 12.1875 -> 12")
+        expect(_y("a1")).to_equal("12")
+
+    it "AC-2: margin-top 1.3rem":
+        step("Chrome 159: 42.984375 -> 43")
+        expect(_y("a2")).to_equal("43")
+
+    it "AC-3: margin-top 10.5px":
+        step("Chrome 159: 63.484375 -> 63 (whole-px rounding gave 64)")
+        expect(_y("a3")).to_equal("63")
+
+    it "AC-4: margin-block 1.3em":
+        step("Chrome 159: 94.28125 -> 94")
+        expect(_y("a4")).to_equal("94")
+
+    it "AC-5: margin-bottom 0.7em then margin-top 0.3em collapse":
+        step("Chrome 159: 125.078125 / 146.265625 -> 125 / 146")
+        expect(_y("a5")).to_equal("125")
+        expect(_y("a6")).to_equal("146")
+
+describe "author fractional margins at 13px":
+    it "AC-6: margin shorthand 0.7em 0":
+        step("Chrome 159: 171.09375 -> 171")
+        expect(_y("b1")).to_equal("171")
+
+    it "AC-7: margin-top 1.3rem (rem ignores the 13px font)":
+        step("Chrome 159: 201.890625 -> 202")
+        expect(_y("b2")).to_equal("202")
+
+    it "AC-8: margin-top 10.5px":
+        step("Chrome 159: 222.390625 -> 222")
+        expect(_y("b3")).to_equal("222")
+
+    it "AC-9: margin-block 1.3em":
+        step("Chrome 159: 249.28125 -> 249")
+        expect(_y("b4")).to_equal("249")
+
+    it "AC-10: margin-bottom 0.7em then margin-top 0.3em collapse":
+        step("Chrome 159: 276.171875 / 295.265625 -> 276 / 295")
+        expect(_y("b5")).to_equal("276")
+        expect(_y("b6")).to_equal("295")
