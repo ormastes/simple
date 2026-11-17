@@ -347,7 +347,13 @@ base 59/77 (18 red) -> head 77/77.
 Fixture corrections (not assertion changes): `layout_box_content_contract_spec`
 and `ui.chromium/css_spec` declared `border-width` with no `border-style`, which
 Chrome 159 resolves to a 0 width; both fixtures now add `border-style:solid`,
-and their asserted values are unchanged.
+and their asserted values are unchanged. The `css_spec` row ("accepts the full
+panel property set without losing values") fails on base and head for an
+unrelated reason, so that correction is not yet observed green. The same
+style-less `border-width:1px` was emitted by 10 widget producers in
+`widget_to_dom.spl`; they now also declare `border-style:solid`, keeping their
+1px borders (otherwise those widgets would lose their borders under the
+Chrome rule).
 
 Still open on this path: per-side border COLOURS (`border-<side>` colour tokens
 and `border-<side>-color` are not stored; `paint_box` paints every side with the
