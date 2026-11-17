@@ -2,6 +2,8 @@
 # Request parsing and handling utilities
 
 use nogc_sync_mut.http.url.{url_encode, url_decode}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 
 # =============================================================================
 # Request Parsing
@@ -299,3 +301,97 @@ fn parse_bearer_token(auth_header: text) -> text:
 fn base64_decode_simple(encoded: text) -> text:
     var result = encoded
     result
+
+# =============================================================================
+# Binary multipart/form-data (raw request bytes)
+# =============================================================================
+
+# One multipart part; `data` is the raw part body (binary-safe).
+pub struct MultipartPart:
+    name: text
+    filename: text
+    content_type: text
+    data: [u8]
+
+fn _multipart_find(hay: [u8], needle: [u8], from: i64) -> i64:
+    val n = needle.len()
+    if n == 0:
+        return -1
+    val first = needle[0]
+    var i = from
+    val last = hay.len() - n
+    while i <= last:
+        if hay[i] == first:
+            var k = 1
+            while k < n and hay[i + k] == needle[k]:
+                k = k + 1
+            if k == n:
+                return i
+        i = i + 1
+    -1
+
+fn _multipart_param(header_line: text, key: text) -> text:
+    val marker = "{key}=\""
+    val start = header_line.index_of(marker)
+    if start < 0:
+        return ""
+    val value_start = start + marker.byte_len()
+    val value_end = header_line.index_of("\"", value_start)
+    if value_end < value_start:
+        return ""
+    header_line.slice(value_start, value_end)
+
+fn _multipart_boundary(content_type: text) -> text:
+    var boundary = parse_multipart_boundary(content_type)
+    val semi = boundary.index_of(";")
+    if semi >= 0:
+        boundary = boundary.slice(0, semi)
+    boundary = boundary.trim()
+    if boundary.starts_with("\"") and boundary.ends_with("\"") and boundary.byte_len() >= 2:
+        boundary = boundary.slice(1, boundary.byte_len() - 1)
+    boundary
+
+# Split a multipart/form-data body (HttpRequest.body_bytes) into parts whose
+# data stays raw bytes, so binary uploads (wav, png) survive unchanged.
+pub fn parse_multipart_bytes(body: [u8], content_type: text) -> Result<[MultipartPart], text>:
+    val boundary = _multipart_boundary(content_type)
+    if boundary == "":
+        return Err("multipart: missing boundary")
+    val delimiter = text_to_utf8_bytes("--{boundary}")
+    val next_delimiter = text_to_utf8_bytes("\r\n--{boundary}")
+    val header_end = text_to_utf8_bytes("\r\n\r\n")
+    var parts: [MultipartPart] = []
+    var cursor = _multipart_find(body, delimiter, 0)
+    if cursor < 0:
+        return Err("multipart: boundary not found")
+    cursor = cursor + delimiter.len()
+    while true:
+        if cursor + 2 <= body.len() and body[cursor] == 45 and body[cursor + 1] == 45:
+            return Ok(parts)
+        if cursor + 2 > body.len() or body[cursor] != 13 or body[cursor + 1] != 10:
+            return Err("multipart: malformed delimiter line")
+        val headers_start = cursor + 2
+        val headers_stop = _multipart_find(body, header_end, headers_start)
+        if headers_stop < 0:
+            return Err("multipart: unterminated part headers")
+        val header_text = match io_legacy_utf8(body.slice(headers_start, headers_stop)):
+            Ok(value): value
+            Err(_): return Err("multipart: part headers are not UTF-8")
+        val data_start = headers_stop + header_end.len()
+        val data_stop = _multipart_find(body, next_delimiter, data_start)
+        if data_stop < 0:
+            return Err("multipart: missing closing boundary")
+        var name = ""
+        var filename = ""
+        var part_type = ""
+        for line in header_text.split("\r\n"):
+            val lower = line.to_lower()
+            if lower.starts_with("content-disposition:"):
+                name = _multipart_param(line, "name")
+                filename = _multipart_param(line, "filename")
+            elif lower.starts_with("content-type:"):
+                part_type = line.slice(13, line.byte_len()).trim()
+        parts.push(MultipartPart(name: name, filename: filename, content_type: part_type,
+            data: body.slice(data_start, data_stop)))
+        cursor = data_stop + next_delimiter.len()
+    Ok(parts)

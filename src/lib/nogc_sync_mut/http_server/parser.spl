@@ -91,7 +91,7 @@ fn _scalar_read_line(stream: TcpStream, ahead: HttpScalarReadAheadV1, max_bytes:
             return _scalar_line(out, "", SCALAR_LINE_TOO_LONG, "{bytes.len()}")
 
 # Exactly `count` body bytes: buffered read-ahead first, then the socket.
-fn _scalar_read_body(stream: TcpStream, ahead: HttpScalarReadAheadV1, count: i64) -> Result<text, text>:
+fn _scalar_read_body(stream: TcpStream, ahead: HttpScalarReadAheadV1, count: i64) -> Result<[u8], text>:
     var body: [u8] = []
     var i = ahead.cursor
     while i < ahead.chunk.len() and body.len() < count:
@@ -100,13 +100,21 @@ fn _scalar_read_body(stream: TcpStream, ahead: HttpScalarReadAheadV1, count: i64
     if body.len() < count:
         match stream.read_exact(count - body.len()):
             Ok(rest):
+                # Nothing buffered ahead: keep the read as is (no per-byte copy).
+                if body.len() == 0:
+                    return Ok(rest)
                 for b in rest:
                     body.push(b)
             Err(_):
                 return Err("400 Failed to read request body")
-    match io_legacy_utf8(body):
-        Ok(value): Ok(value)
-        Err(_): Err("400 Failed to read request body")
+    Ok(body)
+
+# UTF-8 view of a request body; a binary body (not valid UTF-8) is "" and
+# stays available raw as HttpRequest.body_bytes.
+fn request_body_text(bytes: [u8]) -> text:
+    match io_legacy_utf8(bytes):
+        Ok(value): value
+        Err(_): ""
 
 # =============================================================================
 # Public API
@@ -219,9 +227,12 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
     val content_length = decision.1
 
     var body = ""
+    var body_bytes: [u8] = []
     if content_length > 0:
         match _scalar_read_body(stream, ahead, content_length as i64):
-            Ok(data): body = data
+            Ok(data):
+                body_bytes = data
+                body = request_body_text(data)
             Err(error): return Err(error)
 
     return Ok(HttpRequest(
@@ -231,7 +242,8 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
         version: version,
         headers: headers,
         body: body,
-        remote_addr: ""
+        remote_addr: "",
+        body_bytes: body_bytes
     ))
 
 # headers_decision inspects parsed headers and decides how the body must be
@@ -307,5 +319,5 @@ fn to_i32_safe(s: text) -> i32:
 export parse_request, parse_request_with_limits, parse_request_with_policy_limits, parse_request_line
 export request_line_without_terminator
 export to_i32_safe, headers_decision
-export request_host_error
+export request_host_error, request_body_text
 export RUNTIME_READ_LINE_CAP

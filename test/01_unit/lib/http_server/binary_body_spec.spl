@@ -1,0 +1,57 @@
+use std.spec
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpRequest, HttpMethod, HttpStatus}
+use std.nogc_sync_mut.http_server.parser.{request_body_text}
+use std.nogc_sync_mut.http_server.response.{serialize_response_head_for_body_length}
+use std.nogc_sync_mut.http_server.handler.{MultipartPart, parse_multipart_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn _concat(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    for x in a:
+        out.push(x)
+    for x in b:
+        out.push(x)
+    out
+
+describe "HTTP binary bodies":
+    it "a bytes response carries its content type and raw octets":
+        val resp = HttpResponse.bytes(HttpStatus.Ok, "audio/wav", [0u8, 255u8, 128u8])
+        expect(resp.body).to_equal("")
+        expect(resp.body_bytes.len()).to_equal(3)
+        expect(resp.body_bytes[1]).to_equal(255)
+        val head = serialize_response_head_for_body_length(resp, resp.body_bytes.len())
+        expect(head.contains("Content-Length: 3\r\n")).to_equal(true)
+        expect(head.contains("Content-Type: audio/wav\r\n")).to_equal(true)
+
+    it "text responses and requests default to no body bytes":
+        expect(HttpResponse.json("{}").body_bytes.len()).to_equal(0)
+        expect(HttpRequest.new(HttpMethod.Post, "/x").body_bytes.len()).to_equal(0)
+
+    it "a non-UTF-8 request body decodes to empty text":
+        expect(request_body_text([0xFFu8, 0xFEu8, 0u8])).to_equal("")
+        expect(request_body_text(text_to_utf8_bytes("é"))).to_equal("é")
+
+    it "parses a multipart upload and keeps the file part binary":
+        val head = text_to_utf8_bytes("--XyZ\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper\r\n--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n")
+        val payload: [u8] = [82u8, 73u8, 0u8, 255u8, 13u8, 10u8, 45u8, 45u8, 128u8]
+        val tail = text_to_utf8_bytes("\r\n--XyZ--\r\n")
+        val body = _concat(_concat(head, payload), tail)
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=XyZ"):
+            Ok(parts):
+                expect(parts.len()).to_equal(2)
+                expect(parts[0].name).to_equal("model")
+                expect(parts[0].data.len()).to_equal(7)
+                expect(parts[1].name).to_equal("file")
+                expect(parts[1].filename).to_equal("a.wav")
+                expect(parts[1].content_type).to_equal("audio/wav")
+                expect(parts[1].data.len()).to_equal(9)
+                expect(parts[1].data[3]).to_equal(255)
+                expect(parts[1].data[8]).to_equal(128)
+            Err(e):
+                fail("multipart parse failed: {e}")
+
+    it "rejects a multipart body without its closing boundary":
+        val body = text_to_utf8_bytes("--B\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nabc")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=\"B\""):
+            Ok(_): fail("unterminated multipart must not parse")
+            Err(e): expect(e.contains("closing boundary")).to_equal(true)
