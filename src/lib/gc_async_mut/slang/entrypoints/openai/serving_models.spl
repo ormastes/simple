@@ -118,13 +118,26 @@ fn native_model_named(model_root: text, id: text) -> NativeModel?:
             pass
     None
 
+# True when a model with profile `p` can serve a `want` route. A kind serves
+# its own route; a Chat model whose inputs include Audio also serves Asr
+# (design §2: ASR path (a), an audio-LLM with a transcription prompt).
+fn kind_serves(p: KindProfile, want: ModelKind) -> bool:
+    if model_kind_eq(p.kind, want):
+        return true
+    if model_kind_eq(want, ModelKind.Asr) and model_kind_eq(p.kind, ModelKind.Chat):
+        for m in p.inputs:
+            match m:
+                Modality.Audio: return true
+                _: ()
+    false
+
 # 400 wrong_model_kind when the native model `id` resolves to a kind other than
 # `want`; Ok when it matches or is not a native model (the route handler
 # reports a missing model itself).
 fn kind_mismatch(model_root: text, id: text, want: ModelKind, route: text) -> Result<(), ApiResponse>:
     match native_model_named(model_root, id):
         case Some(m):
-            if not model_kind_eq(m.profile.kind, want):
+            if not kind_serves(m.profile, want):
                 return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
         case None:
             pass
@@ -139,7 +152,7 @@ fn model_for_kind(model_root: text, body: text, want: ModelKind, route: text) ->
         return Err(openai_error_response(400, "missing or empty required field: model", "invalid_request_error", "invalid_request", ""))
     match native_model_named(model_root, id):
         case Some(m):
-            if not model_kind_eq(m.profile.kind, want):
+            if not kind_serves(m.profile, want):
                 return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
             return Ok(m)
         case None:
@@ -156,4 +169,4 @@ fn kind_not_implemented_response(model: NativeModel, route: text) -> ApiResponse
             openai_error_response(501, route + " is not implemented in this slang build: the " + model_kind_text(model.profile.kind) + " runner opened but no serving module answers this route yet", "server_error", "not_implemented", "")
 
 export SlangModelEntry, read_model_entry, discover_models, model_ids, find_model
-export pack_profile, models_list_response, native_model_named, kind_mismatch, model_for_kind, kind_not_implemented_response
+export pack_profile, models_list_response, native_model_named, kind_serves, kind_mismatch, model_for_kind, kind_not_implemented_response

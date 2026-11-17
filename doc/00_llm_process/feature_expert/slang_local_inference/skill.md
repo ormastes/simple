@@ -357,7 +357,7 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
 - Route table `api_server.kind_routes`; `entrypoints/openai/serving/` holds one
   stub per family (`serve_transcriptions`, `serve_speech`, `serve_images`,
   `serve_embeddings`, `serve_rerank`): wrong kind = 400 `wrong_model_kind` (chat
-  routes too, by describing only the named directory), right kind = 501 `not_implemented` naming the runner
+  routes too, by describing only the named directory; `kind_serves` also lets a Chat model with Audio input serve Asr), right kind = 501 `not_implemented` naming the runner
   (`engine/kind_dispatch.kind_open`, which loads nothing yet).
 - Spec: `test/01_unit/lib/gc_async_mut/slang/kind_registry_spec.spl`.
 
