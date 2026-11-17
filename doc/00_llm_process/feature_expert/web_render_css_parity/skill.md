@@ -2331,11 +2331,9 @@ Gates and remaining gaps:
   `:right` and `:blank` rejected in style rules (@page-only) and
   `:active-view-transition` missing. A name missing from a table drops valid
   rules on real pages, so add before you remove.
-- **Still permissive (keeps a rule Chrome drops):** any `:-webkit-*`
-  pseudo-class (Chrome rejects `:-webkit-frob`), a pseudo-class after a
-  pseudo-element (`::before:hover` is invalid, `::part(x):hover` valid), a
-  pseudo-element inside `:not()`, and `:nth-of-type(1 of p)` (`of S` is
-  nth-child only).
+- **Was permissive, fixed 2026-11-17 (see "selector rule admission, strict"
+  below):** unknown `:-webkit-*` pseudo-classes, a pseudo-class after a
+  pseudo-element, a pseudo-element inside `:not()`, and `:nth-of-type(1 of p)`.
 - **Gates at the fix (2026-11-17, Chrome 159.0.8154.6, seed `cargo-target-webrender-vk`):**
   matrix 979 cells, 88 mismatching (base 88, no change). Selector structural spec
   base 62/71 -> head 71/71. 25 nearby specs, no new failing names.
@@ -2365,6 +2363,55 @@ Gates and remaining gaps:
   added to the `names` list in
   `simple_web_html_layout_renderer_module_split_spec` (it compares the
   directory walk count to that list).
+## 2026-11-17 — selector rule admission, strict (four Chrome-drop cases)
+
+- **Where:** `_selector_range_has_unknown_pseudo(sel, start, end, element,
+  no_elements)` and `_css_pseudo_class_allowed_after(element, name)` in
+  `simple_web_html_layout_renderer_core_rule_index.spl`. `element` is the
+  pseudo-element the current compound follows ("" for none; reset by a
+  combinator, replaced by the next `::x`); `no_elements` is set for the
+  argument of `:not()` and `:has()` only (Chrome accepts
+  `:nth-child(1 of ::before)`).
+- **Chrome 159.0.8154.6 `<style>` probe table (2026-11-17)** for what may
+  follow a pseudo-element: `::part()`, `::details-content`, `::picker()` take
+  any known pseudo-class except tree-structural, `:has`/`:host`/`:scope` and
+  the scrollbar states (`::part(x):state(x)`, `:checked`, `:open` accepted;
+  `:first-child`, `:empty`, `:has(p)` dropped). `::-webkit-scrollbar*` and
+  `::-webkit-resizer` take hover/active/enabled/disabled/window-inactive and
+  the scrollbar states, not `:focus`. Any other `::-webkit-*`,
+  `::file-selector-button` and bare `::cue` take only user-action classes
+  (hover/active/focus/focus-visible/focus-within); `::cue(p):hover` is
+  dropped. `::scroll-button()` adds enabled/disabled, `::scroll-marker` adds
+  target-current/before/after. `::selection` takes only `:window-inactive`,
+  `::search-text` only `:current`, `::view-transition-*()` only
+  `:only-child`. `::before`, `::after`, `::marker`, `::placeholder`,
+  `::first-line`, `::backdrop`, `::highlight()`, `::slotted()` etc. take
+  none. `:is()`/`:where()` follow anything (their argument is forgiving);
+  `:not()` follows only if its argument passes the same element table. A
+  class, id or attribute after a pseudo-element drops the rule
+  (`::before.a`).
+- **`:-webkit-*` pseudo-classes Chrome accepts:** exactly `-webkit-any`,
+  `-webkit-any-link`, `-webkit-autofill`, `-webkit-drag`,
+  `-webkit-full-page-media`, `-webkit-full-screen`,
+  `-webkit-full-screen-ancestor`. Dropped (probed): `-webkit-frob`,
+  `-webkit-hover`, `-webkit-read-only`, `-webkit-full-screen-document`,
+  `-webkit-animating-full-screen-transition`, `-webkit-autofill-*`, etc.
+- **Trap — legacy single-colon pseudo-elements.** `:before`, `:after`,
+  `:first-line`, `:first-letter` sit in `CSS_KNOWN_PSEUDO_CLASSES`, but
+  Chrome treats them as pseudo-elements: `p:before:hover` and `:not(:before)`
+  are dropped. The scanner promotes them to `element` when no pseudo-element
+  is active.
+- **Trap — the scrollbar states are valid on their own.** `div:horizontal`,
+  `div:window-inactive` are accepted by Chrome, so they are now in
+  `CSS_KNOWN_PSEUDO_CLASSES` (they used to drop the rule).
+- **Still open (measured, not fixed):** `:-internal-*` is accepted wholesale
+  (Chrome accepts `-internal-autofill-selected`, `-autofill-previewed`,
+  `-popover-in-top-layer`, `-dialog-in-top-layer`, drops `-internal-foo`);
+  pseudo-class arity (`:-webkit-any` bare, `:-webkit-autofill(p)` dropped);
+  a combinator after a pseudo-element (`::before > p`); `::marker::before`
+  ordering.
+- **Gates** (seed `cargo-target-webrender-blend`, base `83bb26da9b2` vs head, serial, failing NAMES compared): structural spec 83/97 -> 97/97 (14 fixed); parsed_equivalence 10/10, compound_any_order 9/9, of_type 7/7, selector_helpers 12/12, selector_matching 58/58, attr_select 11/11, nth_child_of_selector 28/28, selector_hardening 42/42, structural_pseudo_class 114/114 on both; simple_web_renderer 106/123, `_coverage_spec` 37/39 and module_split 1/3 fail the same names on both (0 new); combo matrix 979 cells, 88 mismatching on both, identical id set.
+
 ## 2026-11-17 — slight vertical hinting (Chrome FreeType autohinter, y only)
 
 Glyph residual was ~75% of css-paint. Classified on a probe page (16 px sans, 16 px serif, 13 px sans, black on white, 3 lines, 2,791 mismatching px at tolerance 8 before the fix, heuristic split; scripts were scratch .spl, not committed):

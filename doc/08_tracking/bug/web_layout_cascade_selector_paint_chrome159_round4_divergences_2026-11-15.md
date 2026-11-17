@@ -43,14 +43,9 @@ Found while raising unit coverage of `layout_with_style_flow`
 
 ### Selectors (width 77 = match, 10 = no match)
 
-| case | selector | markup | Chrome | actual |
-|---|---|---|---:|---:|
-| webkit_unknown_class | `div, p:-webkit-frob` | `<div id="t"></div>` | 10 | 77 |
-| class_after_element | `div, p::before:hover` | `<div id="t"></div>` | 10 | 77 |
-| element_in_not | `div, :not(::before)` | `<div id="t"></div>` | 10 | 77 |
-| nth_of_type_of_s | `div, b:nth-of-type(1 of p)` | `<div id="t"></div>` | 10 | 77 |
-
-The four open rows above are known-permissive gaps in `selector_list_has_unknown_pseudo` (it keeps a rule Chrome drops). Their Chrome value comes from a Chrome 159.0.8154.6 `<style>` probe: `sheet.cssRules.length` is 0 for each selector (2026-11-17).
+No open rows. The four permissive rule-admission rows (`webkit_unknown_class`,
+`class_after_element`, `element_in_not`, `nth_of_type_of_s`) are fixed; see
+"Fixed" below.
 
 ### Painted pixels (RRGGBB at x:y)
 
@@ -78,6 +73,8 @@ same harnesses where the renderer agrees with Chrome; every row above is
 kept out of them until fixed.
 
 ## Fixed
+
+- `webkit_unknown_class`, `class_after_element`, `element_in_not`, `nth_of_type_of_s` (2026-11-17): `selector_list_has_unknown_pseudo` (`simple_web_html_layout_renderer_core_rule_index.spl`) kept four rules Chrome 159.0.8154.6 drops. (1) Every `:-webkit-*` pseudo-class was accepted; now only the seven Chrome accepts (`-webkit-any`, `-webkit-any-link`, `-webkit-autofill`, `-webkit-drag`, `-webkit-full-page-media`, `-webkit-full-screen`, `-webkit-full-screen-ancestor`) are in `CSS_KNOWN_PSEUDO_CLASSES`. (2) A pseudo-class after a pseudo-element was never checked; now `_css_pseudo_class_allowed_after` encodes the measured per-element table (`::part()`/`::details-content`/`::picker()` take any known non-structural class; `::-webkit-scrollbar*`/`::-webkit-resizer` the scrollbar set; other `::-webkit-*`, `::file-selector-button`, `::cue` the user-action set; `::selection` only `:window-inactive`; `::search-text` only `:current`; `::view-transition-*()` only `:only-child`; `::scroll-button`/`::scroll-marker` user-action plus their states; everything else none; `:is()`/`:where()` after any; `:not()` checks its argument against the same element). Legacy `:before`/`:after`/`:first-line`/`:first-letter` count as pseudo-elements, and a class/id/attribute after a pseudo-element drops the rule. (3) A pseudo-element (`::x` or legacy `:before`) inside `:not()` or `:has()` drops the rule; inside `:nth-child(.. of S)` Chrome accepts it. (4) `of S` on `:nth-of-type()`/`:nth-last-of-type()` drops the rule. Also added: the 11 scrollbar state names (`:horizontal`, `:window-inactive`, ...), which Chrome accepts on their own and the renderer used to DROP. Pinned by 26 new rows in `layout_renderer_selector_structural_chrome159_spec` (71 -> 97; 14 red at base, all green). Still open (measured, not fixed): `:-internal-*` is accepted wholesale (Chrome accepts only some, e.g. `-internal-autofill-selected`, and drops `:-internal-foo`); pseudo-class arity is not checked (`:-webkit-any` without parens, `:-webkit-autofill(p)` are dropped by Chrome); a combinator after a pseudo-element (`::before > p`, `::part(x) p`) is still kept; `::marker::before` (dropped) vs `::before::marker` (accepted) ordering is not checked. Gates (seed `cargo-target-webrender-blend`, base `83bb26da9b2` vs head, serial, failing NAMES compared): structural spec 83/97 -> 97/97 (14 fixed); parsed_equivalence 10/10, compound_any_order 9/9, of_type 7/7, selector_helpers 12/12, selector_matching 58/58, attr_select 11/11, nth_child_of_selector 28/28, selector_hardening 42/42, structural_pseudo_class 114/114 on both; simple_web_renderer 106/123, `_coverage_spec` 37/39 and module_split 1/3 fail the same names on both (0 new); combo matrix 979 cells, 88 mismatching on both, identical id set.
 
 - `block_min_max` (2026-11-16): `constrained_outer_width` applied min-width before max-width, so a smaller max-width won; the auto-margin centring clamp ignored min-width entirely. Both now apply max first, then min (CSS 2.1 10.4). Pinned by `test/01_unit/browser_engine/min_width_beats_max_width_chrome159_spec.spl` (percentage, px and auto width, padding/border, auto margins; Chrome 159 values).
 - `casc_rem_width` (2026-11-16): every `rem` was resolved against a fixed 16px. The cascade now records the `html` element's computed font-size (`css_cascade_root_font_set`, `..._declarations.spl`) and `rem` in width/height, padding, font-size and min/max-width reads it. The `margin-left`/`margin-right` longhands also parsed `em`/`rem` as 0 (bare `parse_int`); they now resolve them. Pinned by `test/01_unit/browser_engine/rem_uses_root_font_size_chrome159_spec.spl` (Chrome 159 values). Still open: the `margin` shorthand, `margin-inline-*`, and vertical margins in `em`/`rem`.
