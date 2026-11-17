@@ -592,8 +592,10 @@ fn _e2d_box_inside_corner(
 ) -> bool:
     if radius <= 0:
         return true
-    val nx = dx.to_f64() / radius.to_f64()
-    val ny = dy.to_f64() / radius.to_f64()
+    # dx/dy index the pixel from the arc centre; test its centre, as Chrome's
+    # coverage does (an index test reaches half a pixel past the arc).
+    val nx = (dx.to_f64() + 0.5) / radius.to_f64()
+    val ny = (dy.to_f64() + 0.5) / radius.to_f64()
     nx * nx + ny * ny <= 1.0
 
 fn _e2d_box_inside_corners(
@@ -643,6 +645,85 @@ fn _e2d_box_gradient_row_color(
         color_a(top_color) +
             (color_a(bottom_color) - color_a(top_color)) * row / denominator
     )
+
+# Inside the padding box of a bordered box with per-corner radii: the inner
+# corner is an ellipse with radii (r - side width) on each axis, tested at
+# the pixel centre.
+fn _e2d_box_inside_inner(
+    px: i32, py: i32, width: i32, height: i32,
+    lw: i32, tw: i32, rw: i32, bw: i32,
+    corners: Engine2dDrawIrCornerRadii
+) -> bool:
+    if px < lw or py < tw or px >= width - rw or py >= height - bw:
+        return false
+    val cx = px.to_f64() + 0.5
+    val cy = py.to_f64() + 0.5
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    if not _e2d_box_inner_corner_ok(cx, cy, tl.to_f64(), tl - lw, tl - tw):
+        return false
+    if not _e2d_box_inner_corner_ok(width.to_f64() - cx, cy, tr.to_f64(), tr - rw, tr - tw):
+        return false
+    if not _e2d_box_inner_corner_ok(width.to_f64() - cx, height.to_f64() - cy, br.to_f64(), br - rw, br - bw):
+        return false
+    _e2d_box_inner_corner_ok(cx, height.to_f64() - cy, bl.to_f64(), bl - lw, bl - bw)
+
+# (ux, uy): pixel centre measured from this corner of the border box. The
+# inner ellipse is centred at (r, r) with radii (rx, ry).
+fn _e2d_box_inner_corner_ok(ux: f64, uy: f64, r: f64, rx: i32, ry: i32) -> bool:
+    if rx <= 0 or ry <= 0 or ux >= r or uy >= r:
+        return true
+    val nx = (r - ux) / rx.to_f64()
+    val ny = (r - uy) / ry.to_f64()
+    nx * nx + ny * ny <= 1.0
+
+# Which side owns a ring pixel: in each quadrant the join runs from the outer
+# box corner to the inner box corner. (ux, uy) is the pixel centre measured
+# from that outer corner; hw / vw are the horizontal / vertical side widths.
+fn _e2d_box_horizontal_side(ux: f64, uy: f64, hw: i32, vw: i32) -> bool:
+    uy * vw.to_f64() < ux * hw.to_f64()
+
+# A border whose corner radii differ (or a rounded border whose sides differ):
+# the ring between the outer per-corner shape -- the same mask as
+# `engine2d_draw_ir_render_typed_background` -- and the inner one, each pixel
+# in its side's colour, composited once. Solid sides only.
+fn engine2d_draw_ir_render_typed_border_ring(
+    engine: Engine2D, x: i32, y: i32, width: i32, height: i32,
+    widths: [i32], colors: [u32], corners: Engine2dDrawIrCornerRadii
+) -> Engine2D:
+    var eng = engine
+    if not engine2d_draw_ir_mask_geometry_safe(x, y, width, height):
+        return eng
+    val tw = widths[0]
+    val rw = widths[1]
+    val bw = widths[2]
+    val lw = widths[3]
+    var pixels: [u32] = [0u32; ((width as i64) * (height as i64)) as i32]
+    var row = 0
+    while row < height:
+        var column = 0
+        while column < width:
+            if _e2d_box_inside_corners(column, row, width, height, corners) and
+                not _e2d_box_inside_inner(column, row, width, height, lw, tw, rw, bw, corners):
+                val cx = column.to_f64() + 0.5
+                val cy = row.to_f64() + 0.5
+                val left_half = column * 2 < width
+                val top_half = row * 2 < height
+                val ux = if left_half: cx else: width.to_f64() - cx
+                val uy = if top_half: cy else: height.to_f64() - cy
+                val hw = if top_half: tw else: bw
+                val vw = if left_half: lw else: rw
+                val horizontal = vw <= 0 or (hw > 0 and _e2d_box_horizontal_side(ux, uy, hw, vw))
+                pixels[row * width + column] = if horizontal:
+                    (if top_half: colors[0] else: colors[2])
+                else:
+                    (if left_half: colors[3] else: colors[1])
+            column = column + 1
+        row = row + 1
+    eng.draw_image_blend(x, y, width, height, pixels)
+    eng
 
 fn engine2d_draw_ir_render_typed_background(
     engine: Engine2D,
@@ -766,6 +847,7 @@ export engine2d_draw_ir_typed_corner_radii
 export engine2d_draw_ir_uniform_corner_radius
 export engine2d_draw_ir_clamp_uniform_radius
 export engine2d_draw_ir_uniform_corners
+export engine2d_draw_ir_render_typed_border_ring
 export engine2d_draw_ir_legacy_uniform_radius
 export engine2d_draw_ir_mask_geometry_safe
 export engine2d_draw_ir_typed_shadow_geometry_safe

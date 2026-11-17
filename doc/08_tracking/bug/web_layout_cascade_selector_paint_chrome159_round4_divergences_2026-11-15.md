@@ -586,3 +586,19 @@ head (13/40 at base).
   - `simd_isa_provider_spec` 24/24: the native kernel matches the oracle at the new hash. `engine2d_color_simd_blend_parity_spec` 5/5.
   - Three pinned random-destination hashes were re-derived by an independent FNV/LCG replica. The replica first reproduces the previous pins under the old rule.
   - Base vs head over 353 specs, run serially: the only new failures were those three hash pins, now updated. `web_draw_ir_engine_reuse` flips between 7 and 9 of 11 on base and head alike.
+
+## 2026-11-18 — Draw IR per-corner-radius borders drawn as a square band (FIXED on cpu_simd / Vulkan)
+
+- **Symptom:** a box with differing corner radii (`border-radius: 8px 0 8px 0`), or a rounded box whose border sides differ, got a square border band on cpu_simd and Vulkan. Outside each arc it painted the border colour where Chrome shows the page; along the arc the ring showed the background. Earlier record: p6, 1705 px.
+- **Cause:** `_engine2d_draw_ir_render_borders` received `radius = 0` for non-uniform corners and fell through to square slivers or the mitred bands.
+- **Fix:** `engine2d_draw_ir_render_typed_border_ring` (`draw_ir_box_effects.spl`) paints the ring between the outer per-corner shape and the inner one.
+  - The outer shape is the same mask as the per-corner background.
+  - Each inner corner is an ellipse with radii `r - side width` per axis. Chrome's ring at (49,6) needs the ellipse.
+  - Each ring pixel takes its side's colour. The join runs from the outer box corner to the inner box corner, with ties going to the vertical side.
+  - It is composited once. The shared corner test now samples pixel centres, not indices; the index test reached half a pixel past the arc.
+  - The uniform-radius, uniform-border case keeps `draw_rounded_rect_outline`.
+- **Evidence:** new `border_per_corner_radius_chrome159_spec`, Chrome 159 k=4, 21 fully covered pixels across two boxes, one with four widths and four colours. cpu_simd and Vulkan were red at base and are now green. Base vs head over 242 border, radius and rounded specs, run serially on the same seed: only these two rows changed. The one other new name, `web_layout_cuda_live`, fails a different row on each rerun with `0 total` (the device child dies) and never reaches the border painter.
+- **Still open:**
+  - The CPU raster misses 6 of the 21 pins. Its corner AA (`_corner_coverage256`) gives partial coverage where Chrome paints full colour, it uses a circular inner corner, and a straight side next to an arc reads `FB0003`. This is the open raster corner-AA item.
+  - The Draw IR ring is not anti-aliased.
+  - Dashed, dotted and double styles on per-corner rings paint solid.
