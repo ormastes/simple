@@ -14,114 +14,13 @@ use compiler.core.interpreter.value.*
 use compiler.core.interpreter.eval.{eval_set_error}
 use std.common.units.engine.unit_expr.{parse_unit_expression}
 use std.common.units.model.world_units.{UnitExpression}
-use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at}
-use std.io_runtime.{dir_list_or_empty, file_exists}
-use compiler.core.interpreter.module_loader_resolve.{unit_library_root_get, unit_library_root_set, module_resolve_cache_reset}
+use compiler.core.unit_scope.{unit_suffix_scope_error, unit_library_set_base}
+
+# Suffix scope rules live in compiler.core.unit_scope (shared with the
+# compiled frontend); re-exported for existing interpreter callers.
+export unit_library_set_base
 
 val UNIT_VALUE_TYPE: text = "__unit__"
-val UNIT_DEFAULT_ORG: text = "simple-lang"
-
-# Suffix scope: a suffix backed by a library unit module
-# (src/unit/<org>[.com]/<family>/<sfx>.spl, any org dir) is usable only after
-# `use unit.[<org>[.com].]<family>[.{sfx}|.*|.<sfx>]` (org omitted =
-# simple-lang, as in resolve_unit_path) or a same-file `unit X: T as sfx`.
-# Families are tracked as "<org>/<family>". Reset per core_interpret run.
-var unit_scope_names: [text] = []
-var unit_scope_families: [text] = []
-var unit_org_dirs: [text] = []
-var unit_org_dirs_loaded: bool = false
-var unit_family_cache_sfx: [text] = []
-var unit_family_cache_fam: [text] = []
-
-pub fn unit_library_set_base(dir: text):
-    """Point the library-unit lookup at another root (tests); drops caches."""
-    unit_library_root_set(dir)
-    module_resolve_cache_reset()
-    unit_org_dirs = []
-    unit_org_dirs_loaded = false
-    unit_family_cache_sfx = []
-    unit_family_cache_fam = []
-
-fn unit_library_orgs() -> [text]:
-    """Org dir names under the unit library root, listed once per base."""
-    if not unit_org_dirs_loaded:
-        unit_org_dirs = dir_list_or_empty(unit_library_root_get()).sort()
-        unit_org_dirs_loaded = true
-    unit_org_dirs
-
-fn unit_org_name(org_dir: text) -> text:
-    if org_dir.ends_with(".com"): return org_dir.substring(0, org_dir.last_index_of("."))
-    org_dir
-# The unit-decl registry is not reset between core_interpret runs; only decls
-# registered after this run's reset count as declared in scope.
-var unit_scope_decl_base: i64 = 0
-
-pub fn unit_scope_reset():
-    unit_scope_names = []
-    unit_scope_families = []
-    unit_scope_decl_base = unit_decl_count()
-
-pub fn unit_scope_record_use(module_path: text, imported_names: [text]):
-    """Record a `use unit.<...>` import. `{a, b}` scopes those suffixes;
-    a bare path or `.*` scopes its last segment as a family and as a suffix."""
-    if not module_path.starts_with("unit."): return
-    var path = module_path
-    if path.ends_with(".*"): path = path.substring(0, path.last_index_of("."))
-    val last = path.substring(path.last_index_of(".") + 1)
-    if imported_names.len() == 0 or imported_names.contains("*"):
-        val segs = path.split(".")
-        var org = UNIT_DEFAULT_ORG
-        val orgs = unit_library_orgs()
-        if segs.len() >= 3 and (orgs.contains(segs[1]) or orgs.contains(segs[1] + ".com")):
-            org = unit_org_name(segs[1])
-        unit_scope_families.push(org + "/" + last)
-        unit_scope_names.push(last)
-        return
-    for name in imported_names:
-        unit_scope_names.push(name)
-
-fn unit_library_families(suffix: text) -> text:
-    """Comma-joined sorted family dirs whose library unit module defines
-    `suffix` (a suffix may live in several, e.g. velocity and composite), or ""."""
-    var i = 0
-    while i < unit_family_cache_sfx.len():
-        if unit_family_cache_sfx[i] == suffix: return unit_family_cache_fam[i]
-        i = i + 1
-    var found: [text] = []
-    for org_dir in unit_library_orgs():
-        val org_root = unit_library_root_get() + "/" + org_dir
-        for fam in dir_list_or_empty(org_root):
-            if file_exists(org_root + "/" + fam + "/" + suffix + ".spl"):
-                val key = unit_org_name(org_dir) + "/" + fam
-                if not found.contains(key): found.push(key)
-    val joined = found.sort().join(",")
-    unit_family_cache_sfx.push(suffix)
-    unit_family_cache_fam.push(joined)
-    joined
-
-fn unit_suffix_declared(suffix: text) -> bool:
-    var i = unit_scope_decl_base
-    while i < unit_decl_count():
-        if unit_decl_short_symbol_at(i) == suffix: return true
-        i = i + 1
-    false
-
-fn unit_suffix_scope_error(suffix: text) -> text:
-    """"" when `suffix` is in scope, else the diagnostic text."""
-    if unit_scope_names.contains(suffix): return ""
-    val joined = unit_library_families(suffix)
-    if joined == "": return ""
-    val families = joined.split(",")
-    for fam in families:
-        if unit_scope_families.contains(fam): return ""
-    if unit_suffix_declared(suffix): return ""
-    var hints: [text] = []
-    for key in families:
-        val org = key.substring(0, key.index_of("/"))
-        val fam = key.substring(key.index_of("/") + 1)
-        val prefix = if org == UNIT_DEFAULT_ORG: "" else: org + "."
-        hints.push("`use unit." + prefix + fam + ".{" + suffix + "}`")
-    "unit suffix '" + suffix + "' is not in scope; add " + hints.join(" or ") + " (or declare `unit X: T as " + suffix + "`)"
 
 fn unit_make(value: i64, suffix: text) -> i64:
     var names: [text] = []
