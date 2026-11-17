@@ -2805,3 +2805,52 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
     - h3 18.72px text, which is rasterised at an integer size;
     - the list disc's AA (about 14 px per bullet);
     - the inline-block control x at 92/99/91, already equal to Chrome since #10113.
+## 2026-11-18 — device-px line metrics at dpr4, stage 1: text sits on Chrome's device strut baseline
+
+- **Chrome rule (Chrome 159, `--force-device-scale-factor=4`):** line metrics are DEVICE px (zoom-for-dsf). The strut ascent and descent come from the face at size x k, each rounded on its own. Blink's subpixel-positioning borrow is on at dsf > 1 and off at 1x (hinted). It applies when the rounded descent is below the raw one and the ascent is at least 1: it moves 1 device px from ascent to descent. The half-leading is floored in device px.
+  - DejaVu Sans 64 device px: 59.41 / 15.09 → 58 / 16.
+  - Liberation Sans 44: 40 / 9 → 39 / 10.
+  - Liberation Sans 56 and 60 take no borrow, because their descent rounds up.
+- **Where k reaches layout:** `layout_device_scale_set(k)`, in `layout_foundation`.
+  - It is set only by `simple_web_layout_render_html_pixels_engine2d_at_device_scale`, around layout + compose, and restored to 1 before paint.
+  - The document cache key carries `;dsf=k`.
+  - At k == 1 nothing is computed or recorded, and every table stays empty.
+- **Strut:** `sfnt_line_metric_units_ascent_descent_device_px` (`sfnt_kern.spl`) and `browser_face_ascent_descent_device_px` (`font_renderer.spl`). k == 1 is the old milli function, with the same memo key.
+- **Per-line delta:** `align_inline_line_device_dy` mirrors the baseline pass of `align_inline_line_baselines` in device px.
+  - Strut items use the device strut. Atomic, bottom-edge and widget baselines use k x their CSS value, because boxes stay CSS-snapped.
+  - The plain-inline recursion and sub/super are mirrored.
+  - A line with a top/bottom/text-top/text-bottom box gets no correction.
+  - `line delta = device ascent - k x CSS ascent`.
+- **Per-text dy:** each `#text` gets `dy = line delta + (k x css ascent - round(device ascent, no borrow))`. The second term is the painter: it adds the face ascent rounded at the device size to the command top.
+  - Lines 2..n of a wrapped run use the max of the line style's strut and the run's own strut.
+  - Tables: `LayoutResult.device_dy` / `device_dy_rest`.
+  - **Trap:** the compose rebuilds `LayoutResult` in `compose_support.spl` twice. A new per-node field must be copied there too, or it never reaches paint.
+- **Wire:** the text command carries the Draw IR prop `device-y-offset` (device px). `draw_ir_composition_at_device_scale` adds it to the scaled y and strips it. It is never scaled.
+- **Not moved:** text-decoration rects. The `<a href>` underline was already 2 device px above Chrome's on base (rows 60-63 vs 62-67 below the line top), so shifting it by the glyph dy would make it worse.
+- **Pin:** `device_px_line_metrics_chrome159_spec`. Base 4/11, head 11/11.
+  - AC-1..7 are red → green at k=4: DejaVu 16/13/12, Liberation Serif 16, Liberation Sans 11, a 24px span line, and a span with `line-height:40px`.
+  - AC-8/9 are guards.
+  - AC-10 holds every case at its Chrome 1x value.
+  - AC-11 checks that a 4x render does not leak into a later 1x render.
+- **Left for stage 2 (line-box geometry):** line-box HEIGHTS are still k x CSS px.
+  - DejaVu 16px: 76 device px vs Chrome 74.
+  - Liberation Sans/Serif 16px: 72 vs 74.
+  - Lines and block tops therefore still drift by about 2 device px per line. Inline-block and replaced baselines are still k x CSS.
+- **Residual not in this lane:** for Liberation Sans 14/15/18/20px and DejaVu 20px, the painter's own baseline sits 1 row above round(device ascent). This comes from glyph raster anchoring (the parked grayhint lane). It shows at 1x 64px Liberation Sans too: glyph ink ends at row 57 vs Chrome's 58, while the box baseline matches.
+- **Catalog, stage 1 (measured 2026-11-18, blend seed, aarch64).**
+  - **1x:** byte-identical code path. Every page is at its baseline row; animation is 3.40 vs its 3.52 row (noisy page).
+  - **dpr4, base 9368a4df112 → head:**
+
+    | Page | Base | Head |
+    |---|---|---|
+    | overview | 0.81 | 0.82 |
+    | html | 2.96 | 2.87 |
+    | css-layout | 4.07 | 4.02 |
+    | css-paint | 4.93 | 4.87 |
+    | forms-media | 5.35 | 5.27 |
+    | animation | 4.16 | 4.09 |
+    | evidence | 0.58 | 0.57 |
+    | tab-bar | 0.30 | 0.30 |
+
+  - css-paint is still above its 4.49 row (the #9951 regression), so stage 1 alone does not close it.
+  - The dpr4 rows lowered are html, forms-media, animation and evidence.
