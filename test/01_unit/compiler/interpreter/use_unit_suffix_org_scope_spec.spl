@@ -1,0 +1,54 @@
+# Pure-Simple core interpreter: library unit suffix scope covers every org dir
+# under the unit library root (src/unit/<org>/<family>/<sfx>.spl), not only
+# `simple-lang`. Fixture orgs live under a temp root (build/ is gitignored).
+# Runtime: src/compiler/10.frontend/core/interpreter/eval_units.spl.
+# Import lists use r"..." so `{rpmx}` is not interpolated by the spec itself.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+use compiler.frontend.core.interpreter.eval.{eval_get_error}
+use compiler.frontend.core.interpreter.eval_units.{unit_library_set_base}
+
+val FIXTURE_ROOT: text = "build/tmp/use_unit_suffix_org_scope_spec/unit"
+
+fn setup_fixture():
+    file_write(FIXTURE_ROOT + "/acme/robotics/rpmx.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/acme/robotics/__init__.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/beta.com/robotics/rpmx.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/beta.com/robotics/__init__.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/simple-lang/robotics/__init__.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/simple-lang/velocity/kmph.spl", "# fixture\n")
+    unit_library_set_base(FIXTURE_ROOT)
+
+fn probe(src: text) -> text:
+    setup_fixture()
+    val result = core_interpret(src + "\n", "use_unit_suffix_org_scope_probe.spl")
+    val err = eval_get_error()
+    unit_library_set_base("src/unit")
+    if err != "": return "ERR:" + err
+    "" + val_get_int(result)
+
+describe "core interpreter unit suffix scope across orgs":
+    it "rejects a non-simple-lang org suffix that is not imported":
+        expect(probe("val r = 3_rpmx\nr.value()")).to_start_with("ERR:unit suffix 'rpmx' is not in scope")
+
+    it "names every org import that would admit the suffix":
+        val out = probe("val r = 3_rpmx\nr.value()")
+        expect(out).to_contain(r"`use unit.acme.robotics.{rpmx}`")
+        expect(out).to_contain(r"`use unit.beta.robotics.{rpmx}`")
+
+    it "keeps the short form for the simple-lang org":
+        expect(probe("val s = 60_kmph\ns.value()")).to_contain(r"`use unit.velocity.{kmph}`")
+
+    it "accepts an org-qualified selective import":
+        expect(probe(r"use unit.acme.robotics.{rpmx}" + "\nval r = 3_rpmx\nr.value()")).to_equal("3")
+
+    it "accepts an org-qualified family glob import":
+        expect(probe("use unit.acme.robotics.*\nval r = 4_rpmx\nr.value()")).to_equal("4")
+
+    it "accepts a .com org-qualified family import":
+        expect(probe("use unit.beta.com.robotics\nval r = 5_rpmx\nr.value()")).to_equal("5")
+
+    it "does not admit an org suffix through a same-named simple-lang family":
+        expect(probe("use unit.robotics.*\nval r = 6_rpmx\nr.value()")).to_start_with("ERR:unit suffix 'rpmx'")
