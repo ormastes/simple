@@ -10,6 +10,7 @@ words that were spoken. Audience: engineers changing slang's ASR path.
 - Phase A: Qwen3-ASR-0.6B (a Chat model with an audio projector) transcribes
   jfk.wav through serve_transcriptions -> engine_complete_chat_media; the
   answer holds "country" and carries no "<asr_text>" metadata prefix.
+- Phase B: ggml-tiny.en through whisper.cpp (slang_whisper.dll, SLANG_WHISPER_LIB) transcribes the same wav; a second call reuses the resident model.
 - a text-only chat model is refused with 400 wrong_model_kind.
 Coarse keywords only: a 0.6B model need not spell every word.
 
@@ -77,3 +78,23 @@ describe "Phase A: an audio chat model transcribes":
         _record("ASR-WRONG-KIND status=" + response.status.to_text() + " " + response.body)
         expect(response.status).to_equal(400)
         expect(json_string_field(response.body, "code")).to_equal("wrong_model_kind")
+
+describe "Phase B: whisper.cpp transcribes":
+    it "transcribes jfk.wav with ggml-tiny.en":
+        val model = "whisper-tiny.en"
+        val lib = env_get("SLANG_WHISPER_LIB") ?? ""
+        if not _live_enabled() or lib == "" or not file_exists(lib) or not is_dir(_model_root() + "/" + model):
+            _record("SKIPPED: phase B -- needs SLANG_LIVE=1, SLANG_WHISPER_LIB, SLANG_MODEL_ROOT with " + model + " and the wav")
+            skip("transcribes jfk.wav with ggml-tiny.en", "needs SLANG_LIVE=1, SLANG_WHISPER_LIB, whisper-tiny.en and the wav")
+            return
+        step("POST the recording as file_b64 to the whisper model")
+        val t0 = time_now_monotonic_ms()
+        val response = serve_transcriptions(_model_root(), _body(model))
+        val t1 = time_now_monotonic_ms()
+        val again = serve_transcriptions(_model_root(), _body(model))
+        val t2 = time_now_monotonic_ms()
+        val answer = json_string_field(response.body, "text")
+        _record("ASR-B " + model + " status=" + response.status.to_text() + " first_ms=" + (t1 - t0).to_text() + " second_ms=" + (t2 - t1).to_text() + " text=" + answer + " body=" + response.body)
+        expect(response.status).to_equal(200)
+        expect(to_lower_ascii(answer).find("country") >= 0).to_equal(true)
+        expect(json_string_field(again.body, "text")).to_equal(answer)

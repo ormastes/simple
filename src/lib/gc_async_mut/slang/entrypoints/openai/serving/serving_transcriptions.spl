@@ -9,13 +9,16 @@
 #   - Chat model with Audio input (Qwen3-ASR): the recording is the only
 #     message content, driven through engine_complete_chat_media; the model's
 #     own "language X<asr_text>" prefix is removed from the answer.
+#   - Asr model (whisper.cpp ggml file): whisper_runner, 16 kHz wav only.
 #   - any other kind is 400 wrong_model_kind, never answered without audio.
 
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, json_string_field, json_int_field, base64_payload_is_strict, openai_error_response}
 use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{model_not_found_response, engine_refusal_response}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat_media, engine_media_caps_for}
-use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, model_kind_eq, model_kind_text}
+use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, KindParams, KindRequest, model_kind_eq, model_kind_text}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatPart}
+use std.gc_async_mut.slang.model_executor.runners.whisper_runner.{whisper_open, whisper_run}
 use std.gc_async_mut.slang.model_executor.backend.{MediaBlob, chat_frame, SLANG_MEDIA_MARKER}
 use std.common.base_encoding.base64.{base64_decode_bytes}
 
@@ -77,6 +80,21 @@ fn _serve_audio_chat(model: NativeModel, model_root: text, file_b64: text, max_t
         Ok(answer):
             transcription_response(strip_asr_prefix(answer))
 
+fn _serve_whisper(model: NativeModel, file_b64: text, format: text) -> ApiResponse:
+    match whisper_open(model):
+        Err(reason):
+            return openai_error_response(503, "model '" + model.id + "' cannot be served: " + reason, "server_error", "model_not_runnable", "")
+        Ok(_): ()
+    val params = KindParams(max_tokens: 0, n: 1, size: "", steps: 0, seed: 0, voice: "", top_n: 0, response_format: "json")
+    val part = ChatPart(kind: "audio", text: "", data: file_b64, format: format)
+    match whisper_run(KindRequest(model_id: model.id, parts: [part], params: params)):
+        Err(reason):
+            if reason.starts_with("invalid audio"):
+                return openai_error_response(400, reason, "invalid_request_error", "invalid_media", "")
+            openai_error_response(503, "model '" + model.id + "' cannot be served: " + reason, "server_error", "model_not_runnable", "")
+        Ok(done):
+            transcription_response(done.parts[0].text)
+
 fn serve_transcriptions(model_root: text, body: text) -> ApiResponse:
     val id = json_string_field(body, "model")
     if id == "":
@@ -100,6 +118,8 @@ fn serve_transcriptions(model_root: text, body: text) -> ApiResponse:
     val max_tokens = if limit > 0: limit else: DEFAULT_ASR_MAX_TOKENS
     if model_kind_eq(model.profile.kind, ModelKind.Chat) and _takes_audio(model):
         return _serve_audio_chat(model, model_root, file_b64, max_tokens)
+    if model_kind_eq(model.profile.kind, ModelKind.Asr):
+        return _serve_whisper(model, file_b64, json_string_field(body, "format"))
     _wrong_kind(model)
 
 export serve_transcriptions, strip_asr_prefix, transcription_response

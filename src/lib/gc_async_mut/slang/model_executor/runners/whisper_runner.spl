@@ -1,0 +1,175 @@
+# @gc — module uses GC runtime
+#
+# Whisper runner — ASR through whisper.cpp (RunnerKind.Whisper), lane L3.
+# Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.3-3.4.
+#
+# Runner surface (FROZEN INTERFACE): whisper_available / whisper_open /
+# whisper_run / whisper_close. The native library (slang_whisper.dll, ggml
+# linked statically so it never shares llama.cpp's ggml) is dlopened ONLY in
+# whisper_open, from SLANG_WHISPER_LIB. whisper_available() merely checks that
+# the configured path exists.
+#
+# The dynamic SFFI is int64-only, so the shim takes the model path and the
+# 16 kHz mono s16le PCM as caller-owned bytes (with_bytes) and returns the
+# transcript through a bounded out buffer (into_bytes). Audio is decoded by the
+# pure common/audio/wav_decode.spl; a rate other than 16 kHz is refused with a
+# reason, never resampled silently.
+
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
+use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
+use std.common.audio.wav_decode.{decode_wav}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatPart}
+use std.gc_async_mut.slang.modality.kinds.{KindRequest, KindResult, OutputPart, Modality}
+use std.io_runtime.{env_get, file_exists}
+
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
+@unsafe(reason: "hands the whisper shim a bounded caller-owned out buffer", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_into_bytes(fptr: i64, prefix_args: [i64], out_bytes: &mut [u8], offset: i64, capacity: i64, out_len: *mut i64, suffix_args: [i64]) -> i64
+
+val WHISPER_LIB_ENV: text = "SLANG_WHISPER_LIB"
+val WHISPER_SAMPLE_RATE: i64 = 16000
+val WHISPER_THREADS: i64 = 4
+val WHISPER_TEXT_CAP: i64 = 65536
+
+var WHISPER_LIB: i64 = 0
+var WHISPER_F_TRANSCRIBE: i64 = 0
+var WHISPER_F_TEXT_INTO: i64 = 0
+var WHISPER_F_FREE: i64 = 0
+var WHISPER_OPEN_ID = ""
+
+fn whisper_lib_path() -> text:
+    env_get(WHISPER_LIB_ENV)
+
+# True when SLANG_WHISPER_LIB names an existing file. Never opens it.
+fn whisper_available() -> bool:
+    val path = whisper_lib_path()
+    path != "" and file_exists(path)
+
+# Windows' loader does not search a DLL's own directory for its imports; the
+# mingw C++ runtime copied next to the shim is loaded first by module name.
+fn _preload_runtime_siblings(lib_path: text):
+    if lib_path.ends_with(".dll"):
+        var cut = -1
+        var i = 0
+        while i < lib_path.len():
+            val ch = lib_path[i:i + 1]
+            if ch == "/" or ch == "\\":
+                cut = i
+            i = i + 1
+        val dir = if cut >= 0: lib_path[0:cut + 1] else: ""
+        for dep in ["libwinpthread-1.dll", "libunwind.dll", "libc++.dll"]:
+            if file_exists(dir + dep):
+                spl_dlopen(dir + dep)
+
+fn whisper_close():
+    if WHISPER_LIB != 0:
+        if WHISPER_F_FREE != 0:
+            spl_wffi_call_i64(WHISPER_F_FREE, [], 0)
+        spl_dlclose(WHISPER_LIB)
+    WHISPER_LIB = 0
+    WHISPER_F_TRANSCRIBE = 0
+    WHISPER_F_TEXT_INTO = 0
+    WHISPER_F_FREE = 0
+    WHISPER_OPEN_ID = ""
+
+# Loads the shim and the model of `model` (a ggml `lmgg` file, entry_path).
+# Reopening the same model is a no-op; another model replaces the resident one.
+fn whisper_open(model: NativeModel) -> Result<(), text>:
+    if WHISPER_LIB != 0 and WHISPER_OPEN_ID == model.id:
+        return Ok(())
+    whisper_close()
+    if not whisper_available():
+        return Err("the whisper library is not available: set " + WHISPER_LIB_ENV + " to slang_whisper.dll (scripts/check/build-slang-whisper-shim.shs)")
+    if model.entry_path == "" or not file_exists(model.entry_path):
+        return Err("model '" + model.id + "' has no ggml whisper file")
+    val lib_path = whisper_lib_path()
+    _preload_runtime_siblings(lib_path)
+    val lib = spl_dlopen(lib_path)
+    if lib == 0:
+        return Err("the whisper library could not be opened: " + lib_path)
+    val f_init = spl_dlsym(lib, "slang_whisper_init")
+    val f_transcribe = spl_dlsym(lib, "slang_whisper_transcribe")
+    val f_text_into = spl_dlsym(lib, "slang_whisper_text_into")
+    val f_free = spl_dlsym(lib, "slang_whisper_free")
+    if f_init == 0 or f_transcribe == 0 or f_text_into == 0 or f_free == 0:
+        spl_dlclose(lib)
+        return Err("the whisper library is missing a required slang_whisper_* symbol")
+    val path_bytes = text_to_utf8_bytes(model.entry_path)
+    val rc = spl_wffi_call_i64_with_bytes(f_init, [], path_bytes, 0, path_bytes.len(), [])
+    if rc != 0:
+        spl_dlclose(lib)
+        return Err("whisper could not load model file " + model.entry_path + " (rc " + rc.to_text() + ")")
+    WHISPER_LIB = lib
+    WHISPER_F_TRANSCRIBE = f_transcribe
+    WHISPER_F_TEXT_INTO = f_text_into
+    WHISPER_F_FREE = f_free
+    WHISPER_OPEN_ID = model.id
+    Ok(())
+
+# 16 kHz mono s16le bytes of a wav file, or the reason it cannot be used.
+fn wav_to_pcm16(wav: [u8]) -> Result<[u8], text>:
+    match decode_wav(wav):
+        Err(reason):
+            Err("invalid audio: not a decodable wav: " + reason)
+        Ok(audio):
+            if audio.sample_rate != WHISPER_SAMPLE_RATE:
+                return Err("invalid audio: whisper needs 16000 Hz audio but the recording is " + audio.sample_rate.to_text() + " Hz; resample it first")
+            val channels = audio.channels
+            var pcm: [u8] = []
+            var i = 0
+            while i + channels <= audio.samples.len():
+                var sum = 0.0
+                var c = 0
+                while c < channels:
+                    sum = sum + (audio.samples[i + c] as f64)
+                    c = c + 1
+                var v = ((sum / (channels as f64)) * 32767.0) as i64
+                if v > 32767:
+                    v = 32767
+                if v < -32768:
+                    v = -32768
+                val u = if v < 0: v + 65536 else: v
+                pcm.push((u & 255) as u8)
+                pcm.push(((u >> 8) & 255) as u8)
+                i = i + channels
+            if pcm.len() < 2:
+                return Err("invalid audio: the recording holds no audio samples")
+            Ok(pcm)
+
+fn _first_audio_part(parts: [ChatPart]) -> Option<ChatPart>:
+    for p in parts:
+        if p.kind == "audio":
+            return Some(p)
+    None
+
+# Transcribes the first audio part of `request`. Ok carries one text part.
+fn whisper_run(request: KindRequest) -> Result<KindResult, text>:
+    if WHISPER_LIB == 0:
+        return Err("the whisper runner is not open")
+    match _first_audio_part(request.parts):
+        None:
+            Err("invalid audio: the request carries no audio part")
+        Some(part):
+            match wav_to_pcm16(base64_decode_bytes(part.data)):
+                Err(reason):
+                    Err(reason)
+                Ok(pcm):
+                    val segments = spl_wffi_call_i64_with_bytes(WHISPER_F_TRANSCRIBE, [], pcm, 0, pcm.len(), [WHISPER_THREADS])
+                    if segments < 0:
+                        return Err("whisper failed to transcribe (rc " + segments.to_text() + ")")
+                    var out: [u8] = []
+                    var k = 0
+                    while k < WHISPER_TEXT_CAP:
+                        out.push(0)
+                        k = k + 1
+                    var written: i64 = 0
+                    val rc = unsafe(capabilities: [ffi, raw_ptr]):
+                        spl_wffi_call_i64_into_bytes(WHISPER_F_TEXT_INTO, [], &mut out, 0, WHISPER_TEXT_CAP, &mut written, [])
+                    if rc != 0 or written < 0 or written > WHISPER_TEXT_CAP:
+                        return Err("whisper transcript did not fit the " + WHISPER_TEXT_CAP.to_text() + " byte buffer (needs " + written.to_text() + ")")
+                    val transcript = bytes_to_text(out[0:written]).trim()
+                    Ok(KindResult(parts: [OutputPart(modality: Modality.Text, text: transcript, bytes: [], mime: "text/plain")], prompt_tokens: 0, completion_tokens: 0))
+
+export whisper_available, whisper_open, whisper_run, whisper_close, whisper_lib_path, wav_to_pcm16
