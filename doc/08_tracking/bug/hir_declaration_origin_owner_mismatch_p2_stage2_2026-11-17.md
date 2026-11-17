@@ -1,6 +1,9 @@
 # HIR declaration origin owner mismatch in p2 Stage 2 (2026-11-17)
 
-Status: open (investigation). The diagnostic has landed. The root cause is not confirmed.
+Status: verification-pending. The diagnostic showed the cause: native Stage 2
+leaves `defining_module` empty on all of p2_add's local declarations, not an
+alias mismatch. A counted workaround fills it in. The native root cause is
+tracked in `native_hir_defining_module_empty_local_decls_2026-11-17.md`.
 
 Related: `stage2_sanity_origin_check_p2_add_2026-11-17.md` landed a tagged
 workaround on `release/1.0.0`. It skips the binding when any side is an SCV

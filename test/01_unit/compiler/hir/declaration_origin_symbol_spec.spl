@@ -41,3 +41,24 @@ describe "canonical symbol declaration origin":
         expect(alias.is_ok()).to_equal(true)
         expect(alias.unwrap()).to_equal(false)
         expect(symbols.get_symbol(id).unwrap().declaration_modifier_v1).to_equal("")
+
+    it "stamps an unstamped local declaration with its declaring owner":
+        step("Bind origin on a symbol defined without a defining module (native Stage 2 p2_add shape)")
+        val symbols = SymbolTable.new()
+        val id = symbols.define("tag_bool", SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, nil)
+        val fills_before = hir_unstamped_defining_module_fill_count()
+        val bound = symbols.bind_declaration_origin_v1(id, "compiler.bootstrap_admission.p2_add", "tag_bool", "omitted", "src/compiler/bootstrap_admission/p2_add.spl", "function:tag_bool")
+        expect(bound.is_ok()).to_equal(true)
+        expect(bound.unwrap()).to_equal(true)
+        val symbol = symbols.get_symbol(id).unwrap()
+        expect(symbol.defining_module ?? "").to_equal("compiler.bootstrap_admission.p2_add")
+        expect(symbol.declaration_owner_v1).to_equal("compiler.bootstrap_admission.p2_add")
+        expect(hir_unstamped_defining_module_fill_count()).to_equal(fills_before + 1)
+
+    it "still rejects a declaration whose stamped owner differs":
+        step("A non-empty different defining module must stay a hard mismatch")
+        val symbols = SymbolTable.new()
+        val id = symbols.define("tag_bool", SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, Some("feature.other"))
+        val bound = symbols.bind_declaration_origin_v1(id, "compiler.bootstrap_admission.p2_add", "tag_bool", "omitted", "src/compiler/bootstrap_admission/p2_add.spl", "function:tag_bool")
+        expect(bound.is_err()).to_equal(true)
+        expect(symbols.get_symbol(id).unwrap().declaration_modifier_v1).to_equal("")
