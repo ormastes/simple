@@ -289,8 +289,10 @@ takes effect can keep the margin inside; `_self_collapses`, `_generates_box`,
 
 Still open:
 - Per-side borders — **fixed 2026-11-17** (`bw-*` rows, next section).
-- Clearance, float avoidance by following content, and the placement of a
-  float/abs box after an empty block are not modelled here.
+- Clearance, float placement and BFC float avoidance — **fixed 2026-11-17**
+  (section "Floats and clearance on `_layout_block_node`" below). The
+  placement of a float/abs box after an empty block already matched Chrome
+  (pinned as `ef-*` guards).
 
 Regression sweep (seed `cargo-target-webrender-vk/release/simple`, serial, base `d155cbad528` vs head): the main spec went 41/57 -> 57/57. The 30 specs below gave identical per-spec counts and the same 63 failing test names at base and head, so 0 new failures:
 `test/01_unit/app/ui.chromium/engine_merge_spec.spl`, `test/01_unit/app/ui.chromium/text_metrics_spec.spl`, `test/01_unit/browser_engine/anonymous_block_spec.spl`, `test/01_unit/browser_engine/ifc_linebox_spec.spl`, `test/01_unit/browser_engine/table_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_hit_test_events_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_box_stored_geometry_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_coverage_closure_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_spec.spl`, `test/01_unit/lib/gpu/browser/hit_bounds_halfopen_spec.spl`, `test/01_unit/browser_engine/html_tree_builder_spec.spl`, `test/01_unit/browser_engine/layout_core_block_flex_chrome159_spec.spl`, `test/01_unit/browser_engine/first_child_top_margin_collapse_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_margin_collapse_negative_spec.spl`, `test/01_unit/browser_engine/browser_renderer_spec.spl`, `test/01_unit/browser_engine/browser_renderer_utils_coverage_closure_spec.spl`, `test/01_unit/browser_engine/simple_web_hidden_text_spec.spl`, `test/01_unit/lib/common/web/simple_browser_page_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_smoke_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_ua_defaults_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_web_gap_close_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_software_no_gpu_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_text_node_sibling_paint_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/display_contents_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/float_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_flat_selector_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/dom_color_alpha_normalization_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
@@ -360,3 +362,83 @@ and `border-<side>-color` are not stored; `paint_box` paints every side with the
 one `border_color`, and only when it is set, so `currentcolor` is not
 modelled), and Chrome's device-pixel snapping of fractional border widths.
 
+
+### Floats and clearance on `_layout_block_node` (2026-11-17)
+
+Chrome for Testing 159 (`chromium-1255`, `--headless --no-sandbox --dump-dom`),
+each case in a `display:flow-root;width:300px` wrapper W, `getBoundingClientRect()`
+relative to W. `FL(w,h)` = `float:left;width:w;height:h`. Pinned in
+`test/01_unit/browser_engine/layout_block_float_clear_chrome159_spec.spl`.
+
+| row | case | Chrome 159 | engine before |
+|-----|------|-----------|---------------|
+| cl-1 | `FL(50,40)` + C `clear:left;h10` | C y=40, W 50 | C y=0, W 40 |
+| cl-3 | `float:right` 50x30 + C `clear:both` | F x=250, C y=30, W 40 | F x=0, C y=0, W 30 |
+| cl-4 | A `h10;mb10` + `FL(50,40)` + C `clear:left;mt20;mb5` + S `h5;mt8` | F y=20, C y=60, S y=78, W 83 | C y=30, S y=48, W 60 |
+| cl-5 | A `h10;mb10` + `FL(50,5)` + C `clear:left;mt-5` | C y=25, W 35 | C y=15, W 25 |
+| cl-8 | P > `FL(50,40)` + C `clear:left;mt10` | P y=0 h50, C y=40, W 50 | P y=10 h10, C y=10, W 20 |
+| cl-10 | P > `FL(50,40)`; sibling C `clear:left` | P h0, C y=40, W 50 | C y=0, W 10 |
+| cl-11 | P > `FL(50,40)` + empty `clear:both`; sibling `h10` | P h40, X y=40, sibling y=40, W 50 | P h0, X y=0, sibling y=0, W 10 |
+| cl-12 | P `mt10` > `FL(50,40)` + C `clear:left;mt20` | P y=10 h50, F y=10, C y=50, W 60 | P y=20 h10, F y=20, C y=20, W 30 |
+| cl-13 | as cl-4, C `mb20`, S `mt5` | C y=60, S y=90, W 95 | C y=30, S y=60, W 65 |
+| cl-d2 | P > `FL(50,5)` + C `clear:left;mt20` | P y=0 h15, C y=5, W 15 | P y=20 h10, C y=20, W 30 |
+| cl-d3 | `FL(50,40)` + P > C `clear:left;mt20` | P y=0 h50, C y=40, W 50 | P y=20 h10, C y=20, W 40 |
+| cl-h2 | `FL(50,40)` + P > empty `clear:both`; sibling `h10` | P h40, sibling y=40, W 50 | P h0, sibling y=0, W 40 |
+| fp-1 | `FL(100,20)` `FL(100,30)` `float:right` 50x10 | x 0/100/250, y 0 | 2nd and 3rd x=0 |
+| fp-2 | `FL(250,20)` `FL(100,10)` `FL(20,10)` | 2nd 0,20; 3rd 100,20; W 30 | 2nd 0,0; 3rd 0,0; W 20 |
+| fp-3 | two right floats 100 wide | x 200, 100 | x 0, 0 |
+| fp-4 | `FL` `mt5;ml5` + `FL` `ml7` | 5,5 and 62,0 | 2nd x=7 |
+| fp-5 | `h10` block + left and right float | both y=10, right x=250 | right x=0 |
+| fp-6 | `FL(200,20)` + right float 150 | 150,20, W 30 | 0,0, W 20 |
+| fp-7 | `FL(100,40)` `FL(150,10)` `FL(100,10)` | 2nd 100,0; 3rd 100,10 | 2nd 0,0; 3rd 0,0 |
+| bfc-1 | `FL(100,40)` + `overflow:hidden;h10` | 100,0,200 | 0,0,300 |
+| bfc-2 | `FL(100,40)` + `flow-root;width:250px` | 0,40, W 50 | 0,0, W 40 |
+| bfc-normal | `FL(100,40)` + `h10` + `overflow:hidden` | normal 0,0,300; BFC 100,10,200 | BFC 0,10,300 |
+| bfc-margin | `overflow:hidden` `ml20` / `ml120` beside `FL(100,40)` | x 100 w200 / x 120 w180 | x 20 w280 |
+| bfc-right | right float 100x40 + `overflow:hidden` | 0,0,200 | 0,0,300 |
+| bfc-drop | `FL(100,20)` + `overflow:hidden;width:250px` + `h5` | 0,20; next y=30, W 35 | 0,0; next y=10, W 20 |
+| bfc-tall / bfc-fits | BFC h50 beside `FL(100,20)`; `flow-root;width:150px` | 100,0,200 / 100,0,150 | 0,0,300 / x=0 |
+
+"Engine before" is measured: the spec was run once against base `layout.spl`
+(`77fd6530d57`), 13/40 passing; the values are the failing `expected` lines.
+
+Guards that already passed: cl-2 (`clear:right` ignores a left float), cl-6,
+cl-7, cl-d4 (the hypothetical position is already past the float, so no
+clearance), cl-9 and cl-d1 (no float, so a `clear` child still collapses
+through its parent), cl-h1 and cl-h3 (a `display:none` float is not a float:
+P > [hidden `FL`, C `clear:left;mt20`] gives P y=20; an empty `clear:both;mt10`
+after a hidden float still self-collapses, everything at y=10, W 20), and
+ef-1..ef-5: a float or abs box after an empty block sits at `cursor +
+collapsed set` (A `h10;mb10` + E `mt20;mb5` gives y=30, E `mt5;mb30` gives
+y=40). cl-h1/cl-h3 were red on the first head of this lane (a hidden float set
+the "preceding float" flag) and are kept as guards for that.
+
+Chrome rule, parent/child: a `clear` first child has clearance, so its margin
+does not collapse through the parent, when it clears a float that precedes it
+in the same parent (cl-8, cl-12, cl-d2 — even a 5px float with a 20px margin
+gives the child y=5) or when its hypothetical edge with the margin collapsed
+through is above an earlier float (cl-d3). An empty `clear:both` after a float
+has clearance, so its parent is not self-collapsing (cl-11, the clearfix; and
+cl-h2 when the float is outside the parent).
+
+Fix (`layout.spl`): `BlockFloats` holds margin-box rects per BFC (a fresh one
+per BFC root, shared by reference down other boxes); `_float_place`,
+`_bfc_place`, `_floats_bottom`; `_top_margin_set` takes the float context and
+hypothetical base; `_self_collapses` sees clearance after a box-generating
+sibling float; a child that took height in layout is never treated as
+self-collapsing (cl-h2).
+
+Still open on this path: floats are not shrink-to-fit (an auto-width float
+fills the line); a BFC root tests the float band at its top edge only; no
+inline layout, so line boxes beside floats are not shortened (only the HTML
+renderer path has `compute_style_wrap_ranges_float_band`); floats inside flex
+or grid containers are not placed; auto margins on an explicit-width BFC root
+beside a float are not pinned; a cleared self-collapsing LAST child and its
+parent's bottom margin (CSS 2.2 §8.3.1) are not pinned; the layout root's own
+margins.
+
+Regression sweep (seed `cargo-target-webrender-blend/release/simple`, serial,
+base `77fd6530d57` vs head): the 37 specs of the per-side border sweep
+(including `float_layout_spec`) gave identical per-spec counts and the same 98
+failing test names at base and head (0 new, 0 fixed); the new spec is 40/40 at
+head (13/40 at base).
