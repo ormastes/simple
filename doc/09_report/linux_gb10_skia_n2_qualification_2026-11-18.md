@@ -177,7 +177,7 @@ any worktree, under `/home/yoon/skia-n2/artifacts/`:
 | Pinned Skia checkout + 45 attested deps | PASS |
 | Provider build, `affine_v3=1`, receipt + digests | PASS (build-only) |
 | Failing-assertion control (seed) | PASS |
-| Native qualification executable | BLOCKED (see above) |
+| Native qualification executable | BLOCKED. A `SIMPLE_BOOTSTRAP=1` retry on 2026-11-18 reached worker `surface_build` (76/506) after 2 h 47 min, then was stopped by the disk guard (other sessions); no binary was produced. Phase timings are in the bug doc, Blocker 1 |
 | `01-solid-boxes` Engine2D/Skia exact RGBA on GB10 | not-run: Engine2D BLOCKED after a passing strict submit, generation-linked readback and frame receipt, at the device-identity gate (the seed interpreter cannot attest UUIDs by design; bug doc Blocker 6); Skia BLOCKED (Blocker 5); 0 pixels compared |
 | `06-rectangular-clip` Engine2D/Skia exact RGBA on GB10 | not-run (case 01 has no readback; Blockers 1, 5) |
 | `02-fractional-edges` vs declared tolerance on GB10 | not-run (case 01 has no readback; Blockers 1, 5. The Engine2D fractional and affine strict-Vulkan wiring of Blocker 4 is restored, and its specs pass on the GB10) |
