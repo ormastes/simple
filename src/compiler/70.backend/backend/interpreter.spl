@@ -252,41 +252,45 @@ impl InterpreterBackendImpl:
         # a Function fallback, and every spec died ("env_get requires string
         # name"). A provider whose initializer fails is retried from the
         # failing constant after the others bind, until no pass makes progress.
+        # A failing constant is skipped within a pass so later ones (which it
+        # may reference, `val A = B + 1; val B = 41`) bind first. The main
+        # module takes part last-in-order, evaluated in its own ctx.
+        var pending: [HirModule] = []
+        var pending_left: [[i64]] = []
         if has_providers:
-            var pending: [HirModule] = []
-            var pending_from: [i64] = []
             for pm2_ in providers.values():
                 val pm2: HirModule = pm2_
                 if pm2.name != module.name:
                     pending = pending.push(pm2)
-                    pending_from = pending_from.push(0)
-            var progress = true
-            while pending.len() > 0 and progress:
-                progress = false
-                var next: [HirModule] = []
-                var next_from: [i64] = []
-                var pi = 0
-                while pi < pending.len():
-                    val pm3: HirModule = pending[pi]
-                    val start: i64 = pending_from[pi]
-                    # Evaluate in the provider's own scope: its initializers
-                    # name the provider's structs and functions.
-                    val bound: i64 = self.bind_module_constants_from(pm3, self.module_context(pm3, ctx), ctx, start)
-                    if bound < 0:
-                        progress = true
-                    else:
-                        if bound > start:
-                            progress = true
-                        next = next.push(pm3)
-                        next_from = next_from.push(bound)
-                    pi = pi + 1
-                pending = next
-                pending_from = next_from
-            if pending.len() > 0:
-                # No progress: surface the first remaining failure.
-                val stuck: HirModule = pending[0]
-                self.bind_module_constants_at(stuck, self.module_context(stuck, ctx), ctx, pending_from[0])?
-        self.bind_module_constants(module, ctx, ctx)?
+                    pending_left = pending_left.push(interp_const_indexes(pm2))
+        pending = pending.push(module)
+        pending_left = pending_left.push(interp_const_indexes(module))
+        var progress = true
+        while pending.len() > 0 and progress:
+            progress = false
+            var next: [HirModule] = []
+            var next_left: [[i64]] = []
+            var pi = 0
+            while pi < pending.len():
+                val pm3: HirModule = pending[pi]
+                val left: [i64] = pending_left[pi]
+                # Evaluate in the module's own scope: its initializers name
+                # its structs and functions.
+                val ectx = if pm3.name == module.name: ctx else: self.module_context(pm3, ctx)
+                val still: [i64] = self.bind_module_constants_pass(pm3, ectx, ctx, left)
+                if still.len() < left.len():
+                    progress = true
+                if still.len() > 0:
+                    next = next.push(pm3)
+                    next_left = next_left.push(still)
+                pi = pi + 1
+            pending = next
+            pending_left = next_left
+        if pending.len() > 0:
+            # No progress: surface the first remaining failure.
+            val stuck: HirModule = pending[0]
+            val sctx = if stuck.name == module.name: ctx else: self.module_context(stuck, ctx)
+            self.bind_module_constants_at(stuck, sctx, ctx, pending_left[0][0])?
 
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
@@ -298,28 +302,19 @@ impl InterpreterBackendImpl:
                 return Ok(BackendResult.Value(result))
         Err(BackendError.runtime_error("module has no main function", nil))
 
-    fn bind_module_constants(m: HirModule, eval_ctx: EvalContext, ctx: EvalContext) -> Result<(), BackendError>:
-        """Bind `m`'s module-level val/var: evaluate in `eval_ctx` (the scope of
-        `m`, which names its own structs/functions), define in `ctx`'s env
-        (EvalContext.env is a value, so a copied context cannot define)."""
-        for c_ in m.constants.values():
-            val c: HirConst = c_
-            val cv: Value = self.eval_expr(c.value, eval_ctx)?
-            ctx.env.define_global(c.name, cv)
-        Ok(())
-
-    fn bind_module_constants_from(m: HirModule, eval_ctx: EvalContext, ctx: EvalContext, start: i64) -> i64:
-        """Bind `m`'s constants from index `start`; -1 when all bound, else the
-        index of the first constant whose initializer failed (retry later)."""
+    fn bind_module_constants_pass(m: HirModule, eval_ctx: EvalContext, ctx: EvalContext, left: [i64]) -> [i64]:
+        """Try to bind each constant of `m` whose index is in `left`; returns
+        the indexes whose initializer failed this pass (retry later)."""
+        var still: [i64] = []
         var idx: i64 = 0
         for c_ in m.constants.values():
-            if idx >= start:
+            if left.contains(idx):
                 val c: HirConst = c_
                 match self.eval_expr(c.value, eval_ctx):
                     case Ok(cv): ctx.env.define_global(c.name, cv)
-                    case Err(_): return idx
+                    case Err(_): still = still.push(idx)
             idx = idx + 1
-        -1
+        still
 
     fn bind_module_constants_at(m: HirModule, eval_ctx: EvalContext, ctx: EvalContext, at: i64) -> Result<(), BackendError>:
         """Re-evaluate constant `at` of `m` to surface its error."""
@@ -482,7 +477,7 @@ impl InterpreterBackendImpl:
         """Write `value` to an assignable place: a variable, or a field of a
         class instance / value-type struct (nested struct fields are rebuilt
         outward until a variable or a class instance owns them)."""
-        if interp_enum_discriminant_raw(place.kind) == 21232742:  # hash("Field")
+        if interp_enum_discriminant_raw(place.kind) == 21232742 or interp_enum_discriminant_raw(place.kind) == 14:  # hash("Field") | native index
             match place.kind:
                 case HirExprKind.Field(pbase, pfield, _):
                     val pb: HirExpr = pbase
@@ -565,7 +560,7 @@ impl InterpreterBackendImpl:
                 # mirroring the eval_expr Field pre-dispatch. The mutation goes
                 # through the shared store so every holder of the handle sees it.
                 val tgt_disc_c: i64 = interp_enum_discriminant_raw(target.kind)
-                if tgt_disc_c == 21232742:  # hash("Field")
+                if tgt_disc_c == 21232742 or tgt_disc_c == 14:  # hash("Field") | native index
                     match target.kind:
                         case HirExprKind.Field(fbase, ffield, _):
                             val ab: HirExpr = fbase
