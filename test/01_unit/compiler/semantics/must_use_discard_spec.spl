@@ -31,6 +31,20 @@ fn scan(body: text, marked: [text]) -> [text]:
         out = out.push(f.code + ":" + f.function + ":" + f.callee)
     out
 
+fn scan_mods(srcs: [text]) -> [text]:
+    var modules: Dict<text, HirModule> = {}
+    var i = 0
+    for src in srcs:
+        val mname = "m{i}"
+        val parsed = parse_full_frontend(src, mname + ".spl", mname, Logger(level: 0))
+        var lowering = HirLowering.with_filename(mname + ".spl")
+        modules[mname] = lowering.lower_module(parsed)
+        i = i + 1
+    var out: [text] = []
+    for f in must_use_discard_scan(modules, []):
+        out = out.push(f.code + ":" + f.function + ":" + f.callee)
+    out
+
 describe "ROB-USE must_use discard check":
     it "a discarded Result is flagged":
         expect(scan("    risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
@@ -60,5 +74,33 @@ describe "ROB-USE must_use discard check":
         expect(scan("    if true:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
 
     it "severity is error compiled and warning in script mode":
-        expect(must_use_finding_severity(MUST_USE_CODE_RESULT, false)).to_equal("error")
-        expect(must_use_finding_severity(MUST_USE_CODE_MARKED, true)).to_equal("warning")
+        expect(must_use_finding_severity(false)).to_equal("error")
+        expect(must_use_finding_severity(true)).to_equal("warning")
+
+    it "an else branch discard is flagged":
+        expect(scan("    if false:\n        quiet()\n    else:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a while body discard is flagged":
+        expect(scan("    while false:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a for body discard is flagged":
+        expect(scan("    for i in 0..2:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a match arm discard is flagged":
+        expect(scan("    val k = 1\n    match k:\n        case 1:\n            risky()\n        case _:\n            quiet()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a nested block discard is flagged":
+        expect(scan("    if true:\n        while false:\n            if true:\n                risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a discard inside an unsafe block is flagged":
+        expect(scan("    unsafe:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "an impl method discard is flagged":
+        val src = PRELUDE + "struct S:\n    a: i64\nimpl S:\n    fn go(self):\n        risky()\n"
+        expect(scan_mods([src])).to_equal(["SPL-USE-001:go:risky"])
+
+    it "a unit f is not flagged because another module's f returns Result":
+        val a = "fn f():\n    val q = 1\nfn caller():\n    f()\n"
+        val b = "fn f() -> Result<i64, text>:\n    Ok(1)\n"
+        expect(scan_mods([a, b]).len()).to_equal(0)
+        expect(scan_mods([b, a]).len()).to_equal(0)

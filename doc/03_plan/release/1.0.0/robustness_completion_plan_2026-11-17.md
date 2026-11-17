@@ -174,3 +174,10 @@ entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
   strings and does not consume this check; method-call return types and
   imported callees are not resolved (only `@must_use` method names match);
   `80.driver` admission projection and TLDR/SMF obligation metadata not wired.
+- 2026-11-18 P0-1 review fixes: only the exact `_ = f()` shape (unit Block, one
+  Expr stmt, NilLit tail) is skipped; other blocks are scanned; with/try/lambda
+  block bodies walked; callees resolve per module (no cross-module name match;
+  unresolved calls are not flagged, TODO in source for import-table
+  resolution); `MUST_USE_CODE_*`/`MustUseFinding` are `pub`; unused severity
+  `code` param removed. Spec now 18/18. with/try/lambda walkers have no spec
+  case yet (source syntax not confirmed).
