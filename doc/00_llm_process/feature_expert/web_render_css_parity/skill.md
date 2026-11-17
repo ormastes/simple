@@ -2855,3 +2855,6 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
   - css-paint is still above its 4.49 row (the #9951 regression), so stage 1 alone does not close it.
   - Re-measured after rebasing onto 84ebb6ebf1b, base and head are the same numbers. The dpr4 rows lowered are html, forms-media and animation (to the worse of the two head runs). evidence (-0.01) is not a clear margin, so it is left alone.
   - The two bands that got worse are the bold h1 (overview) and the bold h3 (css-paint): their block tops are still CSS px x 4 (h1 top 66.44 CSS px lands at device row 264; Chrome puts it at 266), so the correct borrow moves the glyph 1 px further from Chrome there. Stage 2 (fractional block y and line-box height in device px) is the follow-up.
+
+
+- Group layers (2026-11-18): Chrome keeps an opacity-group layer premultiplied in 8 bits. Engine2D stores it straight, so its translucent-destination blend must compute the premultiplied value first (`_blend_premul_over`), then store it straight. The round trip is exact. The rule has 8 twins (C, Rust runtime, seed interpreter, oracle, scalar fallback, Metal, Vulkan GLSL+SPIR-V); change all of them together and rebuild the seed.
