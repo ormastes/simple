@@ -14,114 +14,17 @@ use compiler.core.interpreter.value.*
 use compiler.core.interpreter.eval.{eval_set_error}
 use std.common.units.engine.unit_expr.{parse_unit_expression}
 use std.common.units.model.world_units.{UnitExpression}
-use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at}
-use std.io_runtime.{dir_list_or_empty, file_exists}
-use compiler.core.interpreter.module_loader_resolve.{unit_library_root_get, unit_library_root_set, module_resolve_cache_reset}
+use compiler.core.unit_scope.{unit_suffix_scope_error, unit_library_set_base}
+use compiler.core.types.{unit_decl_short_symbol_at, unit_decl_find, unit_decl_find_by_suffix, unit_decl_name_at}
+use compiler.core.unit_constraint.{unit_constraint_find, unit_constraint_predicate, unit_constraint_eval}
+use compiler.core.unit_constraint.{unit_constraint_violation_message, unit_constraint_min_text, unit_constraint_max_text}
+use compiler.core.interpreter.eval.{eval_expr, eval_had_error}
+
+# Suffix scope rules live in compiler.core.unit_scope (shared with the
+# compiled frontend); re-exported for existing interpreter callers.
+export unit_library_set_base
 
 val UNIT_VALUE_TYPE: text = "__unit__"
-val UNIT_DEFAULT_ORG: text = "simple-lang"
-
-# Suffix scope: a suffix backed by a library unit module
-# (src/unit/<org>[.com]/<family>/<sfx>.spl, any org dir) is usable only after
-# `use unit.[<org>[.com].]<family>[.{sfx}|.*|.<sfx>]` (org omitted =
-# simple-lang, as in resolve_unit_path) or a same-file `unit X: T as sfx`.
-# Families are tracked as "<org>/<family>". Reset per core_interpret run.
-var unit_scope_names: [text] = []
-var unit_scope_families: [text] = []
-var unit_org_dirs: [text] = []
-var unit_org_dirs_loaded: bool = false
-var unit_family_cache_sfx: [text] = []
-var unit_family_cache_fam: [text] = []
-
-pub fn unit_library_set_base(dir: text):
-    """Point the library-unit lookup at another root (tests); drops caches."""
-    unit_library_root_set(dir)
-    module_resolve_cache_reset()
-    unit_org_dirs = []
-    unit_org_dirs_loaded = false
-    unit_family_cache_sfx = []
-    unit_family_cache_fam = []
-
-fn unit_library_orgs() -> [text]:
-    """Org dir names under the unit library root, listed once per base."""
-    if not unit_org_dirs_loaded:
-        unit_org_dirs = dir_list_or_empty(unit_library_root_get()).sort()
-        unit_org_dirs_loaded = true
-    unit_org_dirs
-
-fn unit_org_name(org_dir: text) -> text:
-    if org_dir.ends_with(".com"): return org_dir.substring(0, org_dir.last_index_of("."))
-    org_dir
-# The unit-decl registry is not reset between core_interpret runs; only decls
-# registered after this run's reset count as declared in scope.
-var unit_scope_decl_base: i64 = 0
-
-pub fn unit_scope_reset():
-    unit_scope_names = []
-    unit_scope_families = []
-    unit_scope_decl_base = unit_decl_count()
-
-pub fn unit_scope_record_use(module_path: text, imported_names: [text]):
-    """Record a `use unit.<...>` import. `{a, b}` scopes those suffixes;
-    a bare path or `.*` scopes its last segment as a family and as a suffix."""
-    if not module_path.starts_with("unit."): return
-    var path = module_path
-    if path.ends_with(".*"): path = path.substring(0, path.last_index_of("."))
-    val last = path.substring(path.last_index_of(".") + 1)
-    if imported_names.len() == 0 or imported_names.contains("*"):
-        val segs = path.split(".")
-        var org = UNIT_DEFAULT_ORG
-        val orgs = unit_library_orgs()
-        if segs.len() >= 3 and (orgs.contains(segs[1]) or orgs.contains(segs[1] + ".com")):
-            org = unit_org_name(segs[1])
-        unit_scope_families.push(org + "/" + last)
-        unit_scope_names.push(last)
-        return
-    for name in imported_names:
-        unit_scope_names.push(name)
-
-fn unit_library_families(suffix: text) -> text:
-    """Comma-joined sorted family dirs whose library unit module defines
-    `suffix` (a suffix may live in several, e.g. velocity and composite), or ""."""
-    var i = 0
-    while i < unit_family_cache_sfx.len():
-        if unit_family_cache_sfx[i] == suffix: return unit_family_cache_fam[i]
-        i = i + 1
-    var found: [text] = []
-    for org_dir in unit_library_orgs():
-        val org_root = unit_library_root_get() + "/" + org_dir
-        for fam in dir_list_or_empty(org_root):
-            if file_exists(org_root + "/" + fam + "/" + suffix + ".spl"):
-                val key = unit_org_name(org_dir) + "/" + fam
-                if not found.contains(key): found.push(key)
-    val joined = found.sort().join(",")
-    unit_family_cache_sfx.push(suffix)
-    unit_family_cache_fam.push(joined)
-    joined
-
-fn unit_suffix_declared(suffix: text) -> bool:
-    var i = unit_scope_decl_base
-    while i < unit_decl_count():
-        if unit_decl_short_symbol_at(i) == suffix: return true
-        i = i + 1
-    false
-
-fn unit_suffix_scope_error(suffix: text) -> text:
-    """"" when `suffix` is in scope, else the diagnostic text."""
-    if unit_scope_names.contains(suffix): return ""
-    val joined = unit_library_families(suffix)
-    if joined == "": return ""
-    val families = joined.split(",")
-    for fam in families:
-        if unit_scope_families.contains(fam): return ""
-    if unit_suffix_declared(suffix): return ""
-    var hints: [text] = []
-    for key in families:
-        val org = key.substring(0, key.index_of("/"))
-        val fam = key.substring(key.index_of("/") + 1)
-        val prefix = if org == UNIT_DEFAULT_ORG: "" else: org + "."
-        hints.push("`use unit." + prefix + fam + ".{" + suffix + "}`")
-    "unit suffix '" + suffix + "' is not in scope; add " + hints.join(" or ") + " (or declare `unit X: T as " + suffix + "`)"
 
 fn unit_make(value: i64, suffix: text) -> i64:
     var names: [text] = []
@@ -144,9 +47,88 @@ pub fn eval_suffixed_lit(eid: i64, float_value: f64) -> i64:
         return -1
     if node.extra == 1:
         return unit_make(val_make_bool(node.i_val != 0), node.s_val)
+    val sfx_unit = unit_decl_find_by_suffix(node.s_val)
+    if sfx_unit >= 0 and unit_constraint_find(unit_decl_name_at(sfx_unit)) >= 0:
+        val lit_payload = if node.f_val != "": val_make_float(float_value) else: val_make_int(node.i_val)
+        val lit_err = unit_constraint_check_message(unit_decl_name_at(sfx_unit), lit_payload)
+        if lit_err != "":
+            eval_set_error(lit_err)
+            return -1
     if node.f_val != "":
         return unit_make(val_make_float(float_value), node.s_val)
     unit_make(val_make_int(node.i_val), node.s_val)
+
+# ===== Constrained units (unit X: T where <pred> / in lo..hi) =====
+# The boundary check shared by `X(raw)`, `raw as X` and a suffixed literal.
+
+fn unit_payload_number(payload: i64) -> f64:
+    if val_get_kind(payload) == VAL_FLOAT: return val_get_float(payload)
+    if val_get_kind(payload) == VAL_INT: return val_get_int(payload) * 1.0
+    if val_is_unit(payload): return unit_payload_number(val_struct_get_field(payload, "value"))
+    0.0
+
+# "" when `payload` satisfies the unit's predicate, else the SPL-UNIT-005 text.
+# @allow(primitive_api) core-interpreter value-arena handle: values are raw i64 ids across the whole core interpreter
+pub fn unit_constraint_check_message(unit_name: text, payload: i64) -> text:
+    val pred = unit_constraint_predicate(unit_name)
+    if pred == "": return ""
+    val kind = val_get_kind(payload)
+    if kind != VAL_INT and kind != VAL_FLOAT and not val_is_unit(payload):
+        return "SPL-UNIT-005: unit `" + unit_name + "` expects a numeric value, got " + val_to_text(payload)
+    val verdict = unit_constraint_eval(pred, unit_payload_number(payload))
+    if verdict == 1: return ""
+    unit_constraint_violation_message(unit_name, val_to_text(payload), pred)
+
+fn unit_decl_suffix_or_name(unit_name: text) -> text:
+    val idx = unit_decl_find(unit_name)
+    if idx < 0: return unit_name
+    val sfx = unit_decl_short_symbol_at(idx)
+    if sfx == "": unit_name else: sfx
+
+fn unit_result_make(tag: text, payload: i64) -> i64:
+    var names: [text] = []
+    names.push("__tag")
+    names.push("__payload")
+    var values: [i64] = []
+    values.push(val_make_text(tag))
+    values.push(payload)
+    val_make_struct("Result::" + tag, names, values)
+
+fn unit_constraint_error_make(unit_name: text, payload: i64, message: text) -> i64:
+    # Same field shape as std.common.constraint_error.ConstraintError.
+    var names: [text] = []
+    names.push("unit_name")
+    names.push("value")
+    names.push("min_text")
+    names.push("max_text")
+    names.push("message")
+    var values: [i64] = []
+    values.push(val_make_text(unit_name))
+    values.push(payload)
+    values.push(val_make_text(unit_constraint_min_text(unit_name)))
+    values.push(val_make_text(unit_constraint_max_text(unit_name)))
+    values.push(val_make_text(message))
+    val_make_struct("ConstraintError", names, values)
+
+# `X(raw)` for a constrained unit: Ok(unit) / Err(ConstraintError), never a panic.
+# @allow(primitive_api) core-interpreter value-arena handle: values are raw i64 ids across the whole core interpreter
+pub fn eval_unit_checked_construct(unit_name: text, arg_eid: i64) -> i64:
+    val payload = eval_expr(arg_eid)
+    if eval_had_error: return -1
+    val msg = unit_constraint_check_message(unit_name, payload)
+    if msg != "":
+        return unit_result_make("Err", unit_constraint_error_make(unit_name, payload, msg))
+    unit_result_make("Ok", unit_make(payload, unit_decl_suffix_or_name(unit_name)))
+
+# `raw as X` for a constrained unit: the unit in range, an SPL-UNIT-005 error out of range.
+# @allow(primitive_api) core-interpreter value-arena handle: values are raw i64 ids across the whole core interpreter
+pub fn eval_unit_checked_cast(unit_name: text, payload: i64) -> i64:
+    if val_is_unit(payload): return payload
+    val msg = unit_constraint_check_message(unit_name, payload)
+    if msg != "":
+        eval_set_error(msg)
+        return -1
+    unit_make(payload, unit_decl_suffix_or_name(unit_name))
 
 # @allow(primitive_api) core-interpreter value-arena handle: values are raw i64 ids across the whole core interpreter
 pub fn val_is_unit(vid: i64) -> bool:

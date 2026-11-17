@@ -54,8 +54,10 @@
  * Independent scalar references (the "spec"). Do NOT use the kernel helpers.
  * ------------------------------------------------------------------------- */
 
-/* src-over blend reference, truncating floor formula. s/d are packed
- * 0xAARRGGBB in the low 32 bits of an int64_t. */
+/* src-over blend reference, Chrome 159 image rule over an opaque dst
+ * (rounded straight-alpha src-over when dst alpha < 255):
+ * round(s*a/255) + round(d*(255-a)/255). s/d are packed 0xAARRGGBB in the
+ * low 32 bits of an int64_t. */
 static int64_t ref_blend_pixel(int64_t s, int64_t d) {
     uint32_t sp = (uint32_t)(uint64_t)s;
     uint32_t dp = (uint32_t)(uint64_t)d;
@@ -65,10 +67,20 @@ static int64_t ref_blend_pixel(int64_t s, int64_t d) {
     uint32_t inv = 255u - sa;
     uint32_t sr = (sp >> 16) & 0xFFu, sg = (sp >> 8) & 0xFFu, sb = sp & 0xFFu;
     uint32_t dr = (dp >> 16) & 0xFFu, dg = (dp >> 8) & 0xFFu, db = dp & 0xFFu;
-    uint32_t r = (sr * sa + dr * inv) / 255u;
-    uint32_t g = (sg * sa + dg * inv) / 255u;
-    uint32_t b = (sb * sa + db * inv) / 255u;
-    uint32_t out = (255u << 24) | (r << 16) | (g << 8) | b; /* alpha forced 255 */
+    uint32_t da = (dp >> 24) & 0xFFu;
+    if (da != 255u) {
+        /* translucent dst: rounded straight-alpha src-over */
+        uint32_t dw = (da * inv + 127u) / 255u;
+        uint32_t oa = sa + dw;
+        uint32_t tr = (sr * sa + dr * dw + oa / 2u) / oa;
+        uint32_t tg = (sg * sa + dg * dw + oa / 2u) / oa;
+        uint32_t tb = (sb * sa + db * dw + oa / 2u) / oa;
+        return (int64_t)(uint64_t)((oa << 24) | (tr << 16) | (tg << 8) | tb);
+    }
+    uint32_t r = (sr * sa + 127u) / 255u + (dr * inv + 127u) / 255u;
+    uint32_t g = (sg * sa + 127u) / 255u + (dg * inv + 127u) / 255u;
+    uint32_t b = (sb * sa + 127u) / 255u + (db * inv + 127u) / 255u;
+    uint32_t out = (255u << 24) | (r << 16) | (g << 8) | b; /* opaque dst */
     return (int64_t)(uint64_t)out;
 }
 
@@ -167,7 +179,7 @@ static void test_blend_into(void) {
 }
 
 /* Exhaustive scalar math: for every sa in 0..255 and every (s_ch, d_ch) pair
- * in one channel, assert engine2d_blend_pixel matches the floor formula.
+ * in one channel, assert engine2d_blend_pixel matches the Chrome image rule.
  * 256 * 256 * 256 = 16.7M combinations. We drive the blue channel (lowest)
  * with R=G=0 so the per-channel math is isolated. */
 static void test_blend_exhaustive(void) {
@@ -187,7 +199,7 @@ static void test_blend_exhaustive(void) {
                     want = (int64_t)(uint64_t)dp;
                 } else {
                     uint32_t inv = 255u - (uint32_t)sa;
-                    uint32_t b = ((uint32_t)sch * (uint32_t)sa + (uint32_t)dch * inv) / 255u;
+                    uint32_t b = ((uint32_t)sch * (uint32_t)sa + 127u) / 255u + ((uint32_t)dch * inv + 127u) / 255u;
                     want = (int64_t)(uint64_t)((0xFFu << 24) | b);
                 }
                 if (got != want) {

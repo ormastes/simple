@@ -2,7 +2,7 @@
 # No capacity owner, session decoder, cancellation, or implicit archive repair.
 use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.*
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{host_helper_stream_path_v1,
-    HostHelperAdmissionContextV1}
+    HostHelperAdmissionContextV1, HostHelperStoreV1, host_helper_store_legacy_v1}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.build_manager.grouped_execution_contract.GroupedActionLeaseV1
@@ -29,9 +29,15 @@ pub fn host_primary_attach_grouped_lease_v1(consumed: HostPrimaryAttachConsumedV
 # actual broker proof and exact lease; missing evidence cannot become success.
 pub fn host_primary_attach_settlement_expected_v1(root: text,
         operation: OperationEnvelopeV2) -> Result<text, text>:
-    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
-    val context = host_primary_attach_validate_record_v1(root, operation, consumed)?
-    val native = host_primary_attach_native_load_v1(root, operation)?
+    host_primary_attach_settlement_expected_core_v1(host_helper_store_legacy_v1(root), operation)
+
+# Store-aware body (milestone_0022 N1). The tree receipt stays the native group
+# file under the consumed launch root: a native artifact, not a store record.
+pub fn host_primary_attach_settlement_expected_core_v1(store: HostHelperStoreV1,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val consumed = host_primary_attach_consumed_load_core_v1(store, operation)?
+    val context = host_primary_attach_validate_record_core_v1(store, operation, consumed)?
+    val native = host_primary_attach_native_load_core_v1(store, operation)?
     val lease = host_primary_attach_grouped_lease_v1(consumed, context, native)?
     val stored = file_read_regular_no_follow_bounded(native.launch.root + "/tree-reaped.sdn", 16384)?
     val reap = group_process_stream_collect_reap_v2(native, lease)?
@@ -46,8 +52,12 @@ pub fn host_primary_attach_settlement_expected_v1(root: text,
 
 pub fn host_primary_attach_settlement_evidence_v1(root: text,
         operation: OperationEnvelopeV2) -> Result<text, text>:
-    val expected = host_primary_attach_settlement_expected_v1(root, operation)?
+    host_primary_attach_settlement_evidence_core_v1(host_helper_store_legacy_v1(root), operation)
+
+pub fn host_primary_attach_settlement_evidence_core_v1(store: HostHelperStoreV1,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val expected = host_primary_attach_settlement_expected_core_v1(store, operation)?
     val actual = file_read_regular_no_follow_bounded(
-        host_helper_stream_path_v1(root, operation.id, "primary-settlement"), 8388608)?
+        host_helper_stream_path_v1(store.root, operation.id, "primary-settlement"), 8388608)?
     if actual != expected: return Err("host-primary-settlement-retained-mismatch")
     Ok(expected)

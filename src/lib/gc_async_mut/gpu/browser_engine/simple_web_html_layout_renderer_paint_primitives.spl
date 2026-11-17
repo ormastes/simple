@@ -13,7 +13,9 @@ use common.ui.draw_ir.{
     draw_ir_style_prop
 }
 use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
-use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16}
+use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{engine2d_simd_blend_span_u32}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16, radial_gradient_pixels, linear_gradient_pixels}
+use std.gpu.engine2d.color.{blend as engine2d_color_blend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 use std.common.encoding.sfnt.{
     OtFont, OtTable, parse_offset_table, read_u16_be, read_i16_be,
@@ -31,7 +33,16 @@ use std.common.encoding.sfnt_glyf.{
 use std.common.encoding.font_registry.{selected_font_asset_local_path_for_identity}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_bytes}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    parse_int, dec_val, GradientStopSpec, parse_gradient_stops, gradient_inner,
+    parse_gradient_stops_on_line,
+    split_top_level_commas_paren_aware, is_gradient_shape_or_position_token,
+    gradient_layer_list, parse_gradient_angle_deg, gradient_layer_entries,
+    gradient_layer_split, gradient_layer_tail_parts, background_size_spec,
+    background_position_spec, background_repeat_spec
+}
+use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_gradients_text.{ClipRect, composite_over_base, gradient_angle_sin_cos_q16, fb_radial_gradient_clip, BackgroundGradientLayer, fb_gradient_layer_clip, fb_gradient_layers_round_clip, _fb_blend_pixels, gradient_layer_tiled_pixels, _gradient_layer_kernel, background_gradient_box_rects, linear_gradient_line_q10, linear_gradient_line_q10_at_angle, BACKGROUND_GRADIENT_TILE_CAP, background_gradient_layers_paintable, background_gradient_clip_shape, _inset_radius, _gradient_layers_default_position, fb_gradient_layers_clip, radial_gradient_box_paintable, canvas_background_extent, canvas_gradient_source, _canvas_gradient_paintable, _fb_border_translucent, _border_style_disabled, text_decoration_rects, fb_glyph_thin_scaled_clip, fb_text_thin_scaled_clip_range, fb_text_thin_scaled_clip_range_adv, _TtfFaceEntry, _TtfGlyphBitmap, _TtfEdge, _TTF_BLOB_CACHE_LIMIT, _TTF_FACE_CACHE_LIMIT, _TTF_RESOLVE_CACHE_LIMIT, _TTF_GLYPH_DM_SIZE, _ttf_empty_cmap12, _ttf_empty_cmap4, _ttf_empty_glyph_bitmap, _ttf_floor_i32, _ttf_ceil_i32, _ttf_spec_has_bold, _ttf_spec_has_italic, _ttf_cmap_glyph, _ttf_hmtx_advance_px, _ttf_rasterize_glyph, apply_text_transform_for_paint, reverse_text_for_paint, _bidi_cp_is_rtl, _bidi_cp_is_neutral, text_has_rtl_strong, bidi_visual_text_for_rtl, WidgetChromeRects, widget_chrome_rects_concat, fb_widget_chrome_rects, widget_frame_rects, sparse_text_rects, fb_text_sparse_range, fb_px, WidgetChromeTextPixels, widget_chrome_text_fits, widget_chrome_text_active, fb_generated_widget_chrome_text, generated_widget_chrome_text_pixels, WidgetPaintFlags, compute_widget_paint_flags, is_text_flow_fixture, fb_text_flow_chrome_overlay, _fb_border_mitred, _fb_mitre_cut, _fb_text_px}
 
 fn web_glyph_scale(fs: i32) -> i32:
     var s = fs / 8
@@ -78,11 +89,6 @@ fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color:
     if y1 > fbh:
         y1 = fbh
     fb_fill_rows_const(out, fbw, x0, y0, x1, y1, color)
-class ClipRect:
-    x0: i32
-    y0: i32
-    x1: i32
-    y1: i32
 
 class PaintClipCache:
     has_node_clips: bool
@@ -176,37 +182,27 @@ fn _scalar_fill_rows_const(fb: [u32], fbw: i32, x0: i32, y0: i32, x1: i32, y1: i
     out
 
 fn blend_opacity(src: u32, dst: u32, opacity_pct: i32) -> u32:
+    """Composite the opaque colour src over dst at an integer percent opacity,
+    as Chrome 159 composites a solid fill: the percent becomes the 8-bit paint
+    alpha a = round(pct*255/100) and each channel is
+    round(s*a/255) + ((d*(256-a)) >> 8) (SkPMSrcOver; dst treated as opaque,
+    output alpha 255). Bit-identical to rt_engine2d_blend_const_span_pct_u32
+    (C runtime and interpreter bridge) and Engine2D color.blend_solid."""
     if opacity_pct >= 100:
         return src
     if opacity_pct <= 0:
         return dst
+    val a = (opacity_pct * 255 + 50) / 100
+    val inv256 = 256 - a
     val sr = (((src >> 16) & 255u32) as i32)
     val sg = (((src >> 8) & 255u32) as i32)
     val sb = ((src & 255u32) as i32)
     val dr = (((dst >> 16) & 255u32) as i32)
     val dg = (((dst >> 8) & 255u32) as i32)
     val db = ((dst & 255u32) as i32)
-    val inv = 100 - opacity_pct
-    val r = (sr * opacity_pct + dr * inv + 50) / 100
-    val g = (sg * opacity_pct + dg * inv + 50) / 100
-    val b = (sb * opacity_pct + db * inv + 50) / 100
-    web_argb(r, g, b)
-
-fn composite_over_base(src: u32, alpha255: i32, dst: u32) -> u32:
-    if alpha255 >= 255:
-        return src
-    if alpha255 <= 0:
-        return dst
-    val sr = (((src >> 16) & 255u32) as i32)
-    val sg = (((src >> 8) & 255u32) as i32)
-    val sb = ((src & 255u32) as i32)
-    val dr = (((dst >> 16) & 255u32) as i32)
-    val dg = (((dst >> 8) & 255u32) as i32)
-    val db = ((dst & 255u32) as i32)
-    val inv = 255 - alpha255
-    val r = (sr * alpha255 + dr * inv + 128) / 255
-    val g = (sg * alpha255 + dg * inv + 128) / 255
-    val b = (sb * alpha255 + db * inv + 128) / 255
+    val r = (sr * a + 127) / 255 + (dr * inv256) / 256
+    val g = (sg * a + 127) / 255 + (dg * inv256) / 256
+    val b = (sb * a + 127) / 255 + (db * inv256) / 256
     web_argb(r, g, b)
 
 fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
@@ -238,9 +234,9 @@ fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
     # trip pays for itself — the same regime as simd_blend_row (measured 0 ms
     # vs 13 ms), and unlike a constant fill, where it is a documented loss.
     #
-    # The kernel carries PERCENT semantics (/100, +50). It is deliberately not
-    # rt_engine2d_simd_blend_const_span_u32, which is straight-alpha src-over
-    # (/255, +128) and would shift every rendered pixel.
+    # The kernel takes a PERCENT (converted to the 8-bit alpha
+    # round(pct*255/100)); rt_engine2d_simd_blend_const_span_u32 takes the
+    # colour's own alpha byte instead. Both composite with Chrome's solid rule.
     var py = y0
     while py < y1:
         val row = py * fbw
@@ -384,12 +380,18 @@ fn clamp_corner_radius(radius: i32, w: i32, h: i32) -> i32:
 # pass 1px-tall strips to the corners helper, which degenerated the corner
 # tests and painted gradient backgrounds square (radius-16 buttons filled
 # their corners with accent where Chromium shows the page beneath).
-fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, rtl: i32, rtr: i32, rbr: i32, rbl: i32, py: i32, sx: i32, sw: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
+fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, rtl: i32, rtr: i32, rbr: i32, rbl: i32, py: i32, sx: i32, sw: i32, color: u32, opacity_pct: i32, clip: ClipRect, image_alpha255: i32 = -1) -> [u32]:
+    # image_alpha255 >= 0 marks a gradient (image-layer) row: Chrome composites
+    # it with the image rule at the 8-bit stop alpha. A percent loses that
+    # alpha (16 -> 6% -> 15), so opacity_pct is ignored then.
+    val image = image_alpha255 >= 0
+    val src = (color & 0x00FFFFFFu32) | ((image_alpha255 as u32) << 24)
     val tl = clamp_corner_radius(rtl, w, h)
     val tr = clamp_corner_radius(rtr, w, h)
     val br = clamp_corner_radius(rbr, w, h)
     val bl = clamp_corner_radius(rbl, w, h)
-    if tl <= 0 and tr <= 0 and br <= 0 and bl <= 0:
+    val square = tl <= 0 and tr <= 0 and br <= 0 and bl <= 0
+    if square and not image:
         return fb_rect_opacity_clip(fb, fbw, fbh, sx, py, sw, 1, color, opacity_pct, clip)
     if py < 0 or py >= fbh or py < clip.y0 or py >= clip.y1:
         return fb
@@ -405,6 +407,8 @@ fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, 
     if x1 > clip.x1:
         x1 = clip.x1
     val row = py * fbw
+    if square:
+        return fb_blend_image_row(out, row + x0, x1 - x0, src)
     var px = x0
     while px < x1:
         var inside = true
@@ -426,8 +430,30 @@ fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, 
             inside = dx * dx + dy * dy <= br * br
         if inside:
             val idx = row + px
-            out[idx] = blend_opacity(color, out[idx], opacity_pct)
+            if image:
+                out[idx] = engine2d_color_blend(src, out[idx])
+            else:
+                out[idx] = blend_opacity(color, out[idx], opacity_pct)
         px = px + 1
+    out
+
+fn fb_blend_image_row(fb: [u32], offset: i32, count: i32, src: u32) -> [u32]:
+    """Composite one constant translucent colour over a row span with the
+    image rule (native blend_span on a row copy, bulk write-back)."""
+    if count <= 0:
+        return fb
+    var out = fb
+    var dst_row: [u32] = [0; count]
+    dst_row.write_span(out, 0, offset.to_i64(), count.to_i64())
+    val src_row: [u32] = [src; count]
+    val blended = engine2d_simd_blend_span_u32(dst_row, 0, src_row, 0, count.to_i64())
+    if blended.len() == count:
+        out.write_span(blended, offset.to_i64(), 0, count.to_i64())
+        return out
+    var i = 0
+    while i < count:
+        out[offset + i] = engine2d_color_blend(src, out[offset + i])
+        i = i + 1
     out
 
 fn _isqrt_i64(v: i64) -> i64:
@@ -872,6 +898,10 @@ fn mix_color_vertical_centered(a: u32, b: u32, pos: i32, span: i32, px: i32, py:
     val blue = mix_channel_gradient_centered(ab, bb, pos, span, px, py)
     (alpha.to_u32() << 24) | (red.to_u32() << 16) | (green.to_u32() << 8) | blue.to_u32()
 
+fn gradient_pixel_alpha255(color: u32, element_opacity_pct: i32) -> i32:
+    val alpha = (((color >> 24) & 255u32) as i32)
+    (alpha * element_opacity_pct + 50) / 100
+
 fn background_gradient_pixel_opacity(color: u32, element_opacity_pct: i32) -> i32:
     val alpha = (((color >> 24) & 255u32) as i32)
     (element_opacity_pct * alpha + 127) / 255
@@ -918,6 +948,32 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
     # the old path ((pct*255+127)/255 == pct).
     val solid_bg_alpha = (((st.bg >> 24) & 255u32) as i32)
     val solid_bg_opacity = (st.opacity_pct * solid_bg_alpha + 127) / 255
+    if radial_gradient_box_paintable(st):
+        # CSS radial gradient over the box colour (Draw IR twin:
+        # `background-gradient-radial-geometry`, the same geometry function).
+        var radial_out = fb
+        if st.bg != 0u32 and solid_bg_opacity > 0:
+            radial_out = fb_style_rounded_rect_opacity_clip(radial_out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg | 0xFF000000u32, solid_bg_opacity, clip)
+        val rg = radial_gradient_box_geometry(st, x, y, w, h)
+        if rg.len() < 8:
+            return radial_out
+        return fb_radial_gradient_clip(radial_out, fbw, fbh, rg[4] as i32, rg[5] as i32, rg[6] as i32, rg[7] as i32, rg, st.background_gradient_stop_colors, st.background_gradient_stop_positions, st.opacity_pct, clip)
+    if background_gradient_layers_paintable(st):
+        # Gradient layer list over the box colour (Draw IR twin:
+        # `background-gradient-layer-geometry`, the same resolver).
+        var layers_out = fb
+        if st.bg != 0u32 and solid_bg_opacity > 0:
+            layers_out = fb_style_rounded_rect_opacity_clip(layers_out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg | 0xFF000000u32, solid_bg_opacity, clip)
+        val r = background_gradient_box_rects(st, x, y, w, h)
+        if r.len() < 8:
+            return layers_out
+        val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3], st.font_size)
+        val shape = background_gradient_clip_shape(st, r[4], r[5], r[6], r[7])
+        if shape.len() == 8:
+            # Rounded: the colour joins the one clipped background image.
+            val base = if st.bg != 0u32 and solid_bg_alpha > 0: st.bg else: 0u32
+            return fb_gradient_layers_round_clip(fb, fbw, fbh, layers, base, st.opacity_pct, clip, shape)
+        return fb_gradient_layers_clip(layers_out, fbw, fbh, r[4], r[5], r[6], r[7], layers, st.opacity_pct, clip)
     if st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32:
         if solid_bg_opacity <= 0:
             return fb
@@ -956,9 +1012,9 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
         while px <= max_x:
             if px == max_x or phase[px & 7] != phase[run_x & 7]:
                 val color = phase[run_x & 7]
-                val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
-                if opacity > 0:
-                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, dev_y, image_base_x + run_x, px - run_x, color | 0xFF000000u32, opacity, image_clip)
+                val alpha255 = gradient_pixel_alpha255(color, st.opacity_pct)
+                if alpha255 > 0:
+                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, dev_y, image_base_x + run_x, px - run_x, color, 100, image_clip, alpha255)
                 run_x = px
             px = px + 1
         py = py + 1
@@ -976,29 +1032,6 @@ fn linear_gradient_needs_general_raster(st: Style) -> bool:
     if n > 2 or st.background_gradient_angle_deg % 360 != 180:
         return true
     st.background_gradient_stop_positions[0] != 0 or st.background_gradient_stop_positions[1] != 1000
-
-# sin and cos of a whole-degree angle, scaled by 65536 (Q16). A short Taylor
-# series on [0, 90] degrees plus quadrant symmetry: the gradient direction is
-# computed once per box, so per-pixel work stays integer.
-fn gradient_angle_sin_cos_q16(deg: i32) -> [i64]:
-    var d = deg % 360
-    if d < 0:
-        d = d + 360
-    val quadrant = d / 90
-    val r = (d % 90) as f64
-    val x = r * 3.141592653589793 / 180.0
-    val x2 = x * x
-    val sin_r = x * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0))))
-    val cos_r = 1.0 - x2 / 2.0 * (1.0 - x2 / 12.0 * (1.0 - x2 / 30.0 * (1.0 - x2 / 56.0 * (1.0 - x2 / 90.0))))
-    val s = (sin_r * 65536.0 + 0.5) as i64
-    val c = (cos_r * 65536.0 + 0.5) as i64
-    if quadrant == 0:
-        return [s, c]
-    if quadrant == 1:
-        return [c, 0 - s]
-    if quadrant == 2:
-        return [0 - s, 0 - c]
-    [0 - c, s]
 
 # One colour channel mixed in PREMULTIPLIED space (CSS Images 4 §3.4.1):
 # weights are each stop's alpha times its share, so a transparent stop
@@ -1098,11 +1131,15 @@ fn fb_linear_gradient_general_clip(fb: [u32], fbw: i32, fbh: i32, bg_x: i32, bg_
                     if t16 > 65536:
                         t16 = 65536
                     val color = lut[(t16 / 64) as i32]
-                    val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
-                    if opacity >= 100:
+                    # A gradient is an image layer: Chrome composites it with
+                    # its 8-bit stop alpha and the image rule. Quantizing that
+                    # alpha to a percent first loses it (0.066*255 = 16 -> 6%
+                    # -> 15) and moves the Aetheric pin off Chrome's #575758.
+                    val alpha255 = gradient_pixel_alpha255(color, st.opacity_pct)
+                    if alpha255 >= 255:
                         out[row + fx] = color | 0xFF000000u32
-                    elif opacity > 0:
-                        out[row + fx] = blend_opacity(color | 0xFF000000u32, out[row + fx], opacity)
+                    elif alpha255 > 0:
+                        out[row + fx] = engine2d_color_blend((color & 0x00FFFFFFu32) | ((alpha255 as u32) << 24), out[row + fx])
                     fx = fx + 1
             py = py + 1
             continue
@@ -1120,9 +1157,9 @@ fn fb_linear_gradient_general_clip(fb: [u32], fbw: i32, fbh: i32, bg_x: i32, bg_
                     t16 = 65536
                 color = lut[(t16 / 64) as i32]
             if px == max_x or (px > span_start and color != span_color):
-                val opacity = background_gradient_pixel_opacity(span_color, st.opacity_pct)
-                if opacity > 0 and px > span_start:
-                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + span_start, px - span_start, span_color | 0xFF000000u32, opacity, image_clip)
+                val alpha255 = gradient_pixel_alpha255(span_color, st.opacity_pct)
+                if alpha255 > 0 and px > span_start:
+                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + span_start, px - span_start, span_color, 100, image_clip, alpha255)
                 span_start = px
             span_color = color
             px = px + 1
@@ -1188,12 +1225,281 @@ fn _radial_center_pct(spec: text) -> [i32]:
                 y_set = true
     [xp, yp]
 
+# A CSS length token as Q10 px (1/1024 px): "[-]12" / "[-]12.5" plus a
+# "px" unit (stripped by the caller). Fractions keep 4 digits.
+fn _radial_number_q10(tok: text) -> i64:
+    var i = 0
+    val n = tok.byte_len()
+    var neg = false
+    if n > 0 and tok.substring(0, 1) == "-":
+        neg = true
+        i = 1
+    var whole: i64 = 0
+    while i < n and dec_val(tok.substring(i, i + 1)) < 10:
+        whole = whole * 10 + (dec_val(tok.substring(i, i + 1)) as i64)
+        i = i + 1
+    var frac: i64 = 0
+    var scale: i64 = 1
+    if i < n and tok.substring(i, i + 1) == ".":
+        i = i + 1
+        while i < n and dec_val(tok.substring(i, i + 1)) < 10 and scale < 10000:
+            frac = frac * 10 + (dec_val(tok.substring(i, i + 1)) as i64)
+            scale = scale * 10
+            i = i + 1
+    val q = whole * 1024 + (frac * 1024 + scale / 2) / scale
+    if neg: 0 - q else: q
+
+# One position/size component against an axis of `extent` px: "N%" of the
+# extent or "Npx". -1 marks a token that is neither.
+fn _radial_component_q10(tok: text, extent: i32) -> i64:
+    if tok.ends_with("%"):
+        return (extent as i64) * _radial_number_q10(tok.substring(0, tok.byte_len() - 1)) / 100
+    if tok.ends_with("px"):
+        return _radial_number_q10(tok.substring(0, tok.byte_len() - 2))
+    -1
+
+# Centre of `[at <position>]` (1 or 2 values: left/center/right/top/bottom,
+# percentages, px) in Q10 px. A vertical keyword first, or a horizontal one
+# second, swaps the pair. Without px this is `_radial_center_pct`.
+fn _radial_center_q10(spec: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
+    val low = spec.lower()
+    val at = text_index_of(low, "at ")
+    var toks: [text] = []
+    if at >= 0:
+        for raw in low.substring(at + 3, low.byte_len()).trim().split(" "):
+            val t = raw.trim()
+            if t != "":
+                toks.push(t)
+    var has_px = false
+    for t in toks:
+        if t.ends_with("px"):
+            has_px = true
+    if not has_px:
+        val pct = _radial_center_pct(spec)
+        return [(ax as i64) * 1024 + (aw as i64) * 1024 * (pct[0] as i64) / 100, (ay as i64) * 1024 + (ah as i64) * 1024 * (pct[1] as i64) / 100]
+    var first = if toks.len() > 0: toks[0] else: "center"
+    var second = if toks.len() > 1: toks[1] else: "center"
+    if first == "top" or first == "bottom" or second == "left" or second == "right":
+        val tmp = first
+        first = second
+        second = tmp
+    var cx: i64 = (aw as i64) * 512
+    if first == "left":
+        cx = 0
+    elif first == "right":
+        cx = (aw as i64) * 1024
+    elif first != "center":
+        val v = _radial_component_q10(first, aw)
+        if v != -1:
+            cx = v
+    var cy: i64 = (ah as i64) * 512
+    if second == "top":
+        cy = 0
+    elif second == "bottom":
+        cy = (ah as i64) * 1024
+    elif second != "center":
+        val v = _radial_component_q10(second, ah)
+        if v != -1:
+            cy = v
+    [(ax as i64) * 1024 + cx, (ay as i64) * 1024 + cy]
+
+fn _radial_abs_q10(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+# CSS Images 3 §3.2 ending shape of one `radial-gradient(...)` layer against
+# its gradient box (ax, ay, aw, ah; CSS px): [cx, cy, rx, ry] in Q10 px.
+# Shape `circle` / `ellipse` (default ellipse; one length alone means a
+# circle), size keywords closest-side / closest-corner / farthest-side /
+# farthest-corner (the default) or explicit lengths (px; ellipse also %),
+# and the `at <position>` centre (default center). The corner keywords
+# keep the side keyword's aspect ratio for an ellipse (sqrt(2) x the sides).
+fn radial_gradient_geometry_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
+    val parts = split_top_level_commas_paren_aware(gradient_inner(layer))
+    var head = ""
+    if parts.len() > 0 and is_gradient_shape_or_position_token(parts[0]):
+        head = parts[0].trim().lower()
+    val center = _radial_center_q10(head, ax, ay, aw, ah)
+    val cx = center[0]
+    val cy = center[1]
+    val at = text_index_of(head, "at ")
+    val shape_part = if at >= 0: head.substring(0, at) else: head
+    var circle = false
+    var ellipse = false
+    var size_kw = "farthest-corner"
+    var lens: [i64] = []
+    for raw in shape_part.trim().split(" "):
+        val t = raw.trim()
+        if t == "circle":
+            circle = true
+        elif t == "ellipse":
+            ellipse = true
+        elif t == "closest-side" or t == "closest-corner" or t == "farthest-side" or t == "farthest-corner":
+            size_kw = t
+        elif t != "":
+            val axis_extent = if lens.len() == 0: aw else: ah
+            val v = _radial_component_q10(t, axis_extent)
+            if v >= 0:
+                lens.push(v)
+    if not circle and not ellipse and lens.len() == 1:
+        circle = true
+    if lens.len() == 1 and circle:
+        return [cx, cy, lens[0], lens[0]]
+    if lens.len() == 2 and not circle:
+        return [cx, cy, lens[0], lens[1]]
+    val dl = _radial_abs_q10(cx - (ax as i64) * 1024)
+    val dr = _radial_abs_q10((ax as i64 + aw as i64) * 1024 - cx)
+    val dt = _radial_abs_q10(cy - (ay as i64) * 1024)
+    val db = _radial_abs_q10((ay as i64 + ah as i64) * 1024 - cy)
+    val near_x = if dl < dr: dl else: dr
+    val far_x = if dl > dr: dl else: dr
+    val near_y = if dt < db: dt else: db
+    val far_y = if dt > db: dt else: db
+    if circle:
+        if size_kw == "closest-side":
+            val r = if near_x < near_y: near_x else: near_y
+            return [cx, cy, r, r]
+        if size_kw == "farthest-side":
+            val r = if far_x > far_y: far_x else: far_y
+            return [cx, cy, r, r]
+        if size_kw == "closest-corner":
+            val r = _isqrt_i64(near_x * near_x + near_y * near_y)
+            return [cx, cy, r, r]
+        val r = _isqrt_i64(far_x * far_x + far_y * far_y)
+        return [cx, cy, r, r]
+    if size_kw == "closest-side":
+        return [cx, cy, near_x, near_y]
+    if size_kw == "farthest-side":
+        return [cx, cy, far_x, far_y]
+    if size_kw == "closest-corner":
+        return [cx, cy, _isqrt_i64(2 * near_x * near_x), _isqrt_i64(2 * near_y * near_y)]
+    [cx, cy, _isqrt_i64(2 * far_x * far_x), _isqrt_i64(2 * far_y * far_y)]
+
+# The typed radial background of a box: the gradient box is the background
+# positioning area (background-origin, padding-box by default) and the paint
+# rect the background painting area (background-clip, border-box by
+# default). Returns [cx, cy, rx, ry] (Q10 px) then the paint rect
+# [px0, py0, pw, ph] (px); empty when the box has no area.
+fn radial_gradient_box_geometry(st: Style, x: i32, y: i32, w: i32, h: i32) -> [i64]:
+    val r = background_gradient_box_rects(st, x, y, w, h)
+    if r.len() < 8:
+        return []
+    val g = radial_gradient_geometry_q10(st.bg_layers_raw, r[0], r[1], r[2], r[3])
+    [g[0], g[1], g[2], g[3], r[4] as i64, r[5] as i64, r[6] as i64, r[7] as i64]
+
+# The image layers of a gradient-only background list (`gradient_layer_list`)
+# resolved against the gradient box (ax, ay, aw, ah; CSS px), in CSS order:
+# the first paints on top. Empty when the list is not gradient-only.
+#
+# Each layer's tile (CSS Backgrounds 3 §3.8-3.9) comes from its
+# `<position> / <size> <repeat>` tail: a gradient has no intrinsic size, so
+# `auto`, `cover` and `contain` are the positioning area; percentages of the
+# size resolve against the area, of the position against (area - tile). A
+# zero-sized layer is not painted. Empty when any tail is unsupported.
+#
+# Stop positions given as lengths (`px`, `em` of `em_px`) resolve per layer
+# against that layer's gradient line on its tile: a linear line's length, a
+# radial's gradient ray (its horizontal radius).
+fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32, em_px: i32 = 16) -> [BackgroundGradientLayer]:
+    var out: [BackgroundGradientLayer] = []
+    for entry in gradient_layer_entries(raw):
+        val split = gradient_layer_split(entry)
+        val tail = gradient_layer_tail_parts(split[1])
+        if tail.len() != 3:
+            return []
+        val pos = background_position_spec(tail[0])
+        val size = background_size_spec(tail[1])
+        val rep = background_repeat_spec(tail[2])
+        if pos.len() != 4 or size.len() != 5 or rep.len() != 2:
+            return []
+        val lay = split[0]
+        val radial = text_index_of(lay.lower(), "radial-gradient(") == 0
+        val aw_q = (aw as i64) * 1024
+        val ah_q = (ah as i64) * 1024
+        var tw = aw_q
+        var th = ah_q
+        if size[0] == 0:
+            if size[1] == 1:
+                tw = size[2]
+            elif size[1] == 2:
+                tw = aw_q * size[2] / 102400
+            if size[3] == 1:
+                th = size[4]
+            elif size[3] == 2:
+                th = ah_q * size[4] / 102400
+        if tw <= 0 or th <= 0:
+            continue
+        # Each tile is one gradient evaluation (one Vulkan dispatch on the
+        # device): a tile grid past BACKGROUND_GRADIENT_TILE_CAP over the
+        # positioning area fails the whole list closed (box colour only).
+        val nx = if rep[0] == 1: aw_q / tw + 2 else: 1
+        val ny = if rep[1] == 1: ah_q / th + 2 else: 1
+        if nx * ny > BACKGROUND_GRADIENT_TILE_CAP:
+            return []
+        val tx = (ax as i64) * 1024 + (aw_q - tw) * pos[0] / 102400 + pos[1]
+        val ty = (ay as i64) * 1024 + (ah_q - th) * pos[2] / 102400 + pos[3]
+        val geom = _gradient_layer_tile_geometry(lay, radial, tx, ty, tw, th)
+        if geom.len() < 4:
+            return []
+        val line_q10 = if radial: geom[2] else: _isqrt_i64((geom[2] - geom[0]) * (geom[2] - geom[0]) + (geom[3] - geom[1]) * (geom[3] - geom[1]))
+        val stops: [GradientStopSpec] = parse_gradient_stops_on_line(lay, line_q10, em_px)
+        var colors: [u32] = []
+        var positions: [i32] = []
+        for stop in stops:
+            colors.push(stop.color)
+            positions.push(stop.pos_permille)
+        out.push(BackgroundGradientLayer(radial: radial, geom: geom, colors: colors, positions: positions, tile: [tx, ty, tw, th], repeat_x: rep[0] == 1, repeat_y: rep[1] == 1))
+    out
+
+# A layer's geometry resolved against its tile (Q10 px rect). A whole-pixel
+# tile resolves directly; a fractional size resolves at 64x and scales back,
+# which needs the geometry to scale with the box, so a radial layer with an
+# explicit length fails closed (empty) there.
+fn _gradient_layer_tile_geometry(lay: text, radial: bool, tx: i64, ty: i64, tw: i64, th: i64) -> [i64]:
+    if tw % 1024 == 0 and th % 1024 == 0:
+        val w = (tw / 1024) as i32
+        val h = (th / 1024) as i32
+        if tx % 1024 == 0 and ty % 1024 == 0:
+            val ix = (tx / 1024) as i32
+            val iy = (ty / 1024) as i32
+            return if radial: radial_gradient_geometry_q10(lay, ix, iy, w, h) else: linear_gradient_line_q10(lay, ix, iy, w, h)
+        val g = if radial: radial_gradient_geometry_q10(lay, 0, 0, w, h) else: linear_gradient_line_q10(lay, 0, 0, w, h)
+        if radial:
+            return [g[0] + tx, g[1] + ty, g[2], g[3]]
+        return [g[0] + tx, g[1] + ty, g[2] + tx, g[3] + ty]
+    val inner = gradient_inner(lay).lower()
+    if radial and (text_index_of(inner, "px") >= 0 or text_index_of(inner, "em") >= 0):
+        return []
+    val w64 = (tw / 16) as i32
+    val h64 = (th / 16) as i32
+    val g = if radial: radial_gradient_geometry_q10(lay, 0, 0, w64, h64) else: linear_gradient_line_q10(lay, 0, 0, w64, h64)
+    if radial:
+        return [g[0] / 64 + tx, g[1] / 64 + ty, g[2] / 64, g[3] / 64]
+    [g[0] / 64 + tx, g[1] / 64 + ty, g[2] / 64 + tx, g[3] / 64 + ty]
+
+# The canvas gradient layers of `src` (see canvas_gradient_source): Chrome
+# positions the propagated root background on the root (`<html>`) box, so a
+# default `repeat` tiles it past that box over the whole canvas.
+fn canvas_gradient_layers(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], src: i32) -> [BackgroundGradientLayer]:
+    var i = 0
+    while i < nodes.len() and i < bx.len():
+        if nodes[i].tag == "html":
+            val st = styles[src]
+            if st.bg_layers_raw != "":
+                return background_gradient_layers(st.bg_layers_raw, bx[i], by[i], bw[i], bh[i], st.font_size)
+            # A typed linear layer: its parsed stops on the html box, repeating.
+            val tile: [i64] = [(bx[i] as i64) * 1024, (by[i] as i64) * 1024, (bw[i] as i64) * 1024, (bh[i] as i64) * 1024]
+            if bw[i] <= 0 or bh[i] <= 0:
+                return []
+            val geom = linear_gradient_line_q10_at_angle(st.background_gradient_angle_deg, bx[i], by[i], bw[i], bh[i])
+            return [BackgroundGradientLayer(radial: false, geom: geom, colors: st.background_gradient_stop_colors, positions: st.background_gradient_stop_positions, tile: tile, repeat_x: true, repeat_y: true)]
+        i = i + 1
+    []
+
 # Paint the radial-gradient layers of a multi-layer `background` stack over
-# the already-painted base ramp. CSS paints the FIRST layer topmost, so layers
-# composite back-to-front (iterate from the last layer up). Falloff is linear
-# from the center stop's rgba alpha down to the "transparent N%" stop, where
-# N% is a fraction of the farthest-corner radius (the CSS default gradient
-# size). Non-radial layers are ignored (the scalar Style fields paint them).
+# the rect (x, y, w, h), which is both the gradient box and the painting
+# area (the propagated canvas background passes the viewport). CSS paints
+# the FIRST layer topmost, so layers composite back-to-front. Non-radial
+# layers are ignored (the scalar Style fields paint them).
 fn fb_background_radial_stack_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, raw: text, opacity_pct: i32, clip: ClipRect) -> [u32]:
     var out = fb
     if w <= 0 or h <= 0 or opacity_pct <= 0:
@@ -1203,107 +1509,18 @@ fn fb_background_radial_stack_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32
     while li >= 0:
         val lay = layers[li]
         li = li - 1
-        val gpos = text_index_of(lay.lower(), "radial-gradient(")
-        if gpos < 0:
+        if text_index_of(lay.lower(), "radial-gradient(") < 0:
             continue
-        val lp = find_from(lay, "(", gpos)
-        val rp = paren_matching_close(lay, lp)
-        if lp < 0 or rp <= lp:
+        val stops: [GradientStopSpec] = parse_gradient_stops(lay)
+        var colors: [u32] = []
+        var positions: [i32] = []
+        for stop in stops:
+            colors.push(stop.color)
+            positions.push(stop.pos_permille)
+        if colors.len() < 2:
             continue
-        val inner = lay.substring(lp + 1, rp)
-        val parts = split_top_level_commas(inner)
-        val pc = parts.len()
-        if pc < 2:
-            continue
-        var pi = 0
-        var cx_pct = 50
-        var cy_pct = 50
-        val head = parts[0].trim().lower()
-        if head.starts_with("circle") or head.starts_with("ellipse") or head.starts_with("at "):
-            val cp = _radial_center_pct(parts[0])
-            cx_pct = cp[0]
-            cy_pct = cp[1]
-            pi = 1
-        if pi >= pc:
-            continue
-        val col = parse_color_any(parts[pi])
-        if col == 0u32:
-            continue
-        val a0 = shadow_layer_alpha(parts[pi])
-        if a0 <= 0:
-            continue
-        var ext_pct = 100
-        val tail = parts[pc - 1].trim().lower()
-        val tpct = text_index_of(tail, "%")
-        if tail.starts_with("transparent") and tpct > 0:
-            var s = tpct - 1
-            while s >= 0 and tail.substring(s, s + 1) != " ":
-                s = s - 1
-            val v = parse_int(tail.substring(s + 1, tpct))
-            if v > 0:
-                ext_pct = v
-        val cx = x + (w * cx_pct) / 100
-        val cy = y + (h * cy_pct) / 100
-        var dxm = cx - x
-        if x + w - cx > dxm:
-            dxm = x + w - cx
-        var dym = cy - y
-        if y + h - cy > dym:
-            dym = y + h - cy
-        val rfull = _isqrt_i64((dxm as i64) * (dxm as i64) + (dym as i64) * (dym as i64))
-        val rstop = (rfull * (ext_pct as i64)) / 100
-        if rstop <= 0:
-            continue
-        val rstop2 = rstop * rstop
-        val src = col | 0xFF000000u32
-        # scan only the circle's bounding box, intersected with box+clip+fb
-        var x0 = cx - (rstop as i32)
-        var y0 = cy - (rstop as i32)
-        var x1 = cx + (rstop as i32) + 1
-        var y1 = cy + (rstop as i32) + 1
-        if x0 < x:
-            x0 = x
-        if y0 < y:
-            y0 = y
-        if x1 > x + w:
-            x1 = x + w
-        if y1 > y + h:
-            y1 = y + h
-        if x0 < 0:
-            x0 = 0
-        if y0 < 0:
-            y0 = 0
-        if x1 > fbw:
-            x1 = fbw
-        if y1 > fbh:
-            y1 = fbh
-        if x0 < clip.x0:
-            x0 = clip.x0
-        if y0 < clip.y0:
-            y0 = clip.y0
-        if x1 > clip.x1:
-            x1 = clip.x1
-        if y1 > clip.y1:
-            y1 = clip.y1
-        var py = y0
-        while py < y1:
-            val row = py * fbw
-            val dy = (py - cy) as i64
-            val dy2 = dy * dy
-            var px = x0
-            while px < x1:
-                val dx = (px - cx) as i64
-                val d2 = dx * dx + dy2
-                if d2 < rstop2:
-                    val d = _isqrt_i64(d2)
-                    var aeff = (((a0 as i64) * (rstop - d)) / rstop) as i32
-                    if opacity_pct < 100:
-                        aeff = (aeff * opacity_pct) / 100
-                    if aeff > 0:
-                        val idx = row + px
-                        out[idx] = composite_over_base(src, aeff, out[idx])
-                px = px + 1
-            py = py + 1
+        val geom = radial_gradient_geometry_q10(lay, x, y, w, h)
+        out = fb_radial_gradient_clip(out, fbw, fbh, x, y, w, h, geom, colors, positions, opacity_pct, clip)
     out
 
 fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:
@@ -1331,10 +1548,6 @@ fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
             out = _fb_border_side_clip(out, fbw, fbh, x + w - br, y, br, h, cr, clip)
     out
 
-fn _fb_border_translucent(color: u32) -> bool:
-    val alpha = ((color >> 24) & 255u32) as i32
-    alpha > 0 and alpha < 255
-
 # A translucent border colour (`hsl(0 100% 50% / .5)`) blends over what is
 # under it, as Chrome does; it used to be stored raw, alpha byte and all. An
 # alpha byte of 0 is a colour packed without one and stays opaque.
@@ -1343,9 +1556,6 @@ fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
         return fb_rect_clip(fb, fbw, fbh, x, y, w, h, color, clip)
     val alpha = ((color >> 24) & 255u32) as i32
     fb_rect_opacity_clip(fb, fbw, fbh, x, y, w, h, color | 0xFF000000u32, (alpha * 100 + 127) / 255, clip)
-
-fn _border_style_disabled(style: text) -> bool:
-    style == "none" or style == "hidden"
 
 fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, is_horiz: bool, style: text, color: u32, clip: ClipRect) -> [u32]:
     if w <= 0 or h <= 0 or color == 0u32 or _border_style_disabled(style):
@@ -1531,41 +1741,6 @@ fn fb_outline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32
     val oh = h + grow * 2
     fb_border_sides_clip(fb, fbw, fbh, ox, oy, ow, oh, outline_w, outline_w, outline_w, outline_w, color, color, color, color, clip)
 
-# One text decoration rule (underline / overline / line-through) as solid
-# rects: double = two rules, dashed / dotted = segments, else one rule.
-fn text_decoration_rects(x: i32, y: i32, w: i32, thickness: i32, style: text, color: u32) -> WidgetChromeRects:
-    var xs: [i32] = []
-    var ys: [i32] = []
-    var ws: [i32] = []
-    var hs: [i32] = []
-    var colors: [u32] = []
-    if w > 0 and color != 0u32:
-        val line_h = if thickness > 0: thickness else: 1
-        if style == "double":
-            xs = [x, x]
-            ys = [y, y + line_h + 1]
-            ws = [w, w]
-            hs = [line_h, line_h]
-            colors = [color, color]
-        elif style == "dashed" or style == "dotted":
-            val dash_w = if style == "dotted": line_h else: line_h * 3
-            val gap_w = if line_h > 0: line_h else: 1
-            var px = 0
-            while px < w:
-                xs.push(x + px)
-                ys.push(y)
-                ws.push(if px + dash_w > w: w - px else: dash_w)
-                hs.push(line_h)
-                colors.push(color)
-                px = px + dash_w + gap_w
-        else:
-            xs = [x]
-            ys = [y]
-            ws = [w]
-            hs = [line_h]
-            colors = [color]
-    WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
-
 fn fb_text_underline(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, thickness: i32, style: text, color: u32) -> [u32]:
     var out = fb
     val rects = text_decoration_rects(x, y, w, thickness, style, color)
@@ -1593,185 +1768,14 @@ fn fb_text_underline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32,
             px = px + dash_w + gap_w
         return out
     fb_rect_clip(out, fbw, fbh, x, y, w, line_h, color, clip)
-
-# `bold` is deterministic fake-bold: the font stack has no bold face for the
-# bundled/generic families on this host (browser_platform_*_bold_faces are
-# macOS-only), so weight synthesis extends every inked pixel block by one
-# extra column on the right edge — the same synthesis idiom as the per-row
-# italic shift above. Recorded in
-# test/02_integration/rendering/font_weight_bold_raster_spec.spl.
-fn fb_glyph_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, scale: i32, italic: bool, bold: bool, clip: ClipRect) -> [u32]:
-    var out = fb
-    val block_w = if bold: scale + 1 else: scale
-    var ry = 0
-    while ry < 7:
-        val bits = glyph_row_bits(gi, ry)
-        var rx = 0
-        while rx < 5:
-            val mask = 1 << (4 - rx)
-            if (bits & mask) != 0:
-                val italic_shift = if italic: (6 - ry) * scale / 3 else: 0
-                val bx0 = x + italic_shift + rx * scale
-                val by0 = y + ry * scale
-                var dy = 0
-                while dy < scale:
-                    val yy = by0 + dy
-                    if yy >= 0 and yy < fbh and yy >= clip.y0 and yy < clip.y1:
-                        val row = yy * fbw
-                        var dx = 0
-                        while dx < block_w:
-                            val xx = bx0 + dx
-                            if xx >= 0 and xx < fbw and xx >= clip.x0 and xx < clip.x1:
-                                out[row + xx] = _fb_text_px(color, out[row + xx])
-                            dx = dx + 1
-                    dy = dy + 1
-            rx = rx + 1
-        ry = ry + 1
-    out
-
-fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, scale: i32, advance: i32, space_advance: i32, italic: bool, bold: bool, clip: ClipRect) -> [u32]:
-    var out = fb
-    val glyph_h = 7 * scale
-    if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
-        return out
-    # `start`/`endv` are BYTE offsets — every caller derives them from the wrap
-    # ranges, which are byte-indexed — but `char_code_at` is CODEPOINT-indexed
-    # in this text API. This loop used one cursor for both, so on any run past
-    # its first non-ASCII codepoint it drew the wrong glyphs and walked off the
-    # end of the run. It needs its own codepoint cursor, exactly like the
-    # byte-advance twin `fb_text_thin_scaled_clip_range_adv` below: a
-    # continuation byte draws nothing and consumes no codepoint, and one flat
-    # advance is charged per CODEPOINT, not per byte.
-    val sb = s.bytes()
-    var ci = 0
-    var k = 0
-    while k < start:
-        if sb[k] < 128 or sb[k] >= 192:
-            ci = ci + 1
-        k = k + 1
-    var i = start
-    var cx = x
-    while i < endv:
-        if cx >= fbw or cx >= clip.x1:
-            return out
-        if sb[i] < 128 or sb[i] >= 192:
-            val code = s.char_code_at(ci)
-            val gi = glyph_index_for_char_code(code)
-            if gi >= 0 and gi != 36:
-                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, bold, clip)
-            cx = cx + if code == 32: space_advance else: advance
-            ci = ci + 1
-        i = i + 1
-    out
-
-# Same rasterizer as `fb_text_thin_scaled_clip_range`, stepping by the
-# per-BYTE advance table the LAYOUT measured the run with (see
-# `style_run_byte_advances` in ..._layout.spl) instead of a flat per-character
-# estimate. `by` must carry one entry per byte of `s`; when it does not, this
-# falls back to the flat stepping so the width call and the glyph walk stay in
-# agreement.
-fn fb_text_thin_scaled_clip_range_adv(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, scale: i32, advance: i32, space_advance: i32, italic: bool, bold: bool, clip: ClipRect, by: [i32]) -> [u32]:
-    val s_blen = s.byte_len()
-    if by.len() != s_blen:
-        return fb_text_thin_scaled_clip_range(fb, fbw, fbh, x, y, s, start, endv, color, scale, advance, space_advance, italic, bold, clip)
-    var out = fb
-    val glyph_h = 7 * scale
-    if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
-        return out
-    # `i` walks BYTES (that is what `by`, `start` and `endv` are indexed in),
-    # but `char_code_at` is CODEPOINT-indexed in this text API, so the glyph
-    # lookup needs its own cursor. Until the byte-advance table was fixed it
-    # was always empty on non-ASCII runs and this loop was unreachable for
-    # them, which is why the mix never showed: a continuation byte carries a 0
-    # advance and must draw nothing and consume no codepoint.
-    val sb = s.bytes()
-    var i = start
-    var ci = 0
-    var k = 0
-    while k < start:
-        if sb[k] < 128 or sb[k] >= 192:
-            ci = ci + 1
-        k = k + 1
-    var cx = x
-    while i < endv:
-        if cx >= fbw or cx >= clip.x1:
-            return out
-        if sb[i] < 128 or sb[i] >= 192:
-            val code = s.char_code_at(ci)
-            val gi = glyph_index_for_char_code(code)
-            if gi >= 0 and gi != 36:
-                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, bold, clip)
-            ci = ci + 1
-        cx = cx + by[i]
-        i = i + 1
-    out
-
-# --- Cached SFNT TrueType 4x4 AA baseline-aligned glyph rasterizer ----------
-
-class _TtfFaceEntry:
-    spec: text
-    font: OtFont
-    units_per_em: i32
-    ascender: i32
-    descender: i32
-    long_metrics: i32
-    hmtx_off: i64
-    hmtx_len: i64
-    has_cmap12: bool
-    cmap12: CmapFormat12
-    has_cmap4: bool
-    cmap4: CmapFormat4
-    native_bold: bool
-    native_italic: bool
-
-class _TtfGlyphBitmap:
-    x0_px: i32
-    y0_px: i32
-    w_px: i32
-    h_px: i32
-    adv_px: i32
-    coverage: [u8]
-
-class _TtfEdge:
-    ey0: f64
-    y_lo: f64
-    y_hi: f64
-    ex0: f64
-    dx_dy: f64
-    dir: i32
-
-val _TTF_BLOB_CACHE_LIMIT: i32 = 16
 var _ttf_blob_paths: [text] = []
 var _ttf_blob_bytes: [[u8]] = []
-
-val _TTF_FACE_CACHE_LIMIT: i32 = 24
 var _ttf_face_specs: [text] = []
 var _ttf_faces: [_TtfFaceEntry] = []
-
-val _TTF_RESOLVE_CACHE_LIMIT: i32 = 64
 var _ttf_resolve_keys: [text] = []
 var _ttf_resolve_slots: [i32] = []
-
-val _TTF_GLYPH_DM_SIZE: i32 = 512
 var _ttf_dm_keys: [text] = []
 var _ttf_dm_vals: [_TtfGlyphBitmap] = []
-
-fn _ttf_empty_cmap12() -> CmapFormat12:
-    CmapFormat12(group_count: 0u32, start_codes: [], end_codes: [], start_glyph_ids: [])
-
-fn _ttf_empty_cmap4() -> CmapFormat4:
-    CmapFormat4(seg_count: 0u32, end_codes: [], start_codes: [], id_deltas: [], id_range_offsets: [], glyph_ids: [])
-
-fn _ttf_empty_glyph_bitmap(adv_px: i32) -> _TtfGlyphBitmap:
-    _TtfGlyphBitmap(x0_px: 0, y0_px: 0, w_px: 0, h_px: 0, adv_px: adv_px, coverage: [])
-
-fn _ttf_floor_i32(v: f64) -> i32:
-    val i = v as i32
-    if (i as f64) > v: i - 1 else: i
-
-fn _ttf_ceil_i32(v: f64) -> i32:
-    val i = v as i32
-    if (i as f64) < v: i + 1 else: i
 
 fn _ttf_read_file_bytes_cached(path: text) -> [u8]:
     if path == "":
@@ -1795,18 +1799,6 @@ fn _ttf_read_file_bytes_cached(path: text) -> [u8]:
         _ttf_blob_paths.push(path)
         _ttf_blob_bytes.push(loaded)
     loaded
-
-fn _ttf_spec_has_bold(spec: text) -> bool:
-    val lower = spec.to_lower()
-    (
-        lower.contains("-bold") or lower.contains("_bold") or
-        lower.contains("bold.") or lower.ends_with(".ttc#1") or
-        lower.ends_with(".ttc#3")
-    )
-
-fn _ttf_spec_has_italic(spec: text) -> bool:
-    val lower = spec.to_lower()
-    lower.contains("italic") or lower.contains("oblique") or lower.ends_with(".ttc#2") or lower.ends_with(".ttc#3")
 
 fn _ttf_load_face_spec(spec: text) -> i32:
     if spec == "":
@@ -1984,307 +1976,6 @@ fn _ttf_resolve_face(identity: text, font_family: text, bold: bool, italic: bool
     _ttf_resolve_slots.push(chosen)
     chosen
 
-fn _ttf_cmap_glyph(face: _TtfFaceEntry, cp: i64) -> u32:
-    if cp < 0 or cp > 1114111:
-        return 0u32
-    val cp_u = cp as u32
-    var gid: u32 = 0u32
-    if face.has_cmap12:
-        gid = cmap12_lookup(face.cmap12, cp_u)
-    if gid == 0u32 and face.has_cmap4:
-        gid = cmap_lookup(face.cmap4, cp_u)
-    gid
-
-fn _ttf_hmtx_advance_px(face: _TtfFaceEntry, gid: u32, font_size: i32) -> i32:
-    if face.units_per_em <= 0 or face.long_metrics <= 0:
-        return 0
-    val g = gid as i32
-    val idx = if g < face.long_metrics: g else: face.long_metrics - 1
-    val pos = face.hmtx_off + (idx as i64) * 4
-    if pos < face.hmtx_off or pos + 2 > face.hmtx_off + face.hmtx_len:
-        return 0
-    val adv_fu = read_u16_be(face.font.blob, pos) as i32
-    val scale = (font_size as f64) / (face.units_per_em as f64)
-    ((adv_fu as f64) * scale + 0.5) as i32
-
-fn _ttf_rasterize_glyph(face: _TtfFaceEntry, gid: u32, font_size: i32, synth_bold: bool, synth_italic: bool) -> _TtfGlyphBitmap:
-    val adv_px = _ttf_hmtx_advance_px(face, gid, font_size)
-    if gid == 0u32 or font_size <= 0 or font_size > 512:
-        return _ttf_empty_glyph_bitmap(adv_px)
-    var cmds: [SfntGlyfCommand] = []
-    var has_outline = false
-    match parse_sfnt_glyf_outline(face.font, gid):
-        Some(outline):
-            cmds = outline.commands
-            has_outline = true
-        None:
-            has_outline = false
-    if not has_outline or cmds.len() == 0:
-        return _ttf_empty_glyph_bitmap(adv_px)
-    val scale = (font_size as f64) / (face.units_per_em as f64)
-    val skew = if synth_italic: 0.21 else: 0.0
-    val quad_steps: i32 = if font_size <= 24: 6 elif font_size <= 64: 10 else: 14
-    var seg_ax: [f64] = []
-    var seg_ay: [f64] = []
-    var seg_bx: [f64] = []
-    var seg_by: [f64] = []
-    var has_bounds = false
-    var min_x: f64 = 0.0
-    var min_y: f64 = 0.0
-    var max_x: f64 = 0.0
-    var max_y: f64 = 0.0
-    var cur_fx: f64 = 0.0
-    var cur_fy: f64 = 0.0
-    var start_fx: f64 = 0.0
-    var start_fy: f64 = 0.0
-    var cur_px: f64 = 0.0
-    var cur_py: f64 = 0.0
-    var start_px: f64 = 0.0
-    var start_py: f64 = 0.0
-    var contour_open = false
-    var ci: i64 = 0
-    val cmd_n = cmds.len()
-    while ci < cmd_n:
-        val cmd = cmds[ci]
-        val v = cmd.verb
-        if v == SFNT_GLYF_MOVE:
-            if contour_open and cur_py != start_py:
-                seg_ax.push(cur_px)
-                seg_ay.push(cur_py)
-                seg_bx.push(start_px)
-                seg_by.push(start_py)
-            cur_fx = cmd.x1
-            cur_fy = cmd.y1
-            start_fx = cur_fx
-            start_fy = cur_fy
-            cur_px = (cur_fx + cur_fy * skew) * scale
-            cur_py = (0.0 - cur_fy) * scale
-            start_px = cur_px
-            start_py = cur_py
-            contour_open = true
-            if not has_bounds:
-                min_x = cur_px
-                max_x = cur_px
-                min_y = cur_py
-                max_y = cur_py
-                has_bounds = true
-            else:
-                if cur_px < min_x: min_x = cur_px
-                if cur_px > max_x: max_x = cur_px
-                if cur_py < min_y: min_y = cur_py
-                if cur_py > max_y: max_y = cur_py
-        elif v == SFNT_GLYF_LINE:
-            val nx_f = cmd.x1
-            val ny_f = cmd.y1
-            val nx_p = (nx_f + ny_f * skew) * scale
-            val ny_p = (0.0 - ny_f) * scale
-            if ny_p != cur_py:
-                seg_ax.push(cur_px)
-                seg_ay.push(cur_py)
-                seg_bx.push(nx_p)
-                seg_by.push(ny_p)
-            if not has_bounds:
-                min_x = nx_p
-                max_x = nx_p
-                min_y = ny_p
-                max_y = ny_p
-                has_bounds = true
-            else:
-                if nx_p < min_x: min_x = nx_p
-                if nx_p > max_x: max_x = nx_p
-                if ny_p < min_y: min_y = ny_p
-                if ny_p > max_y: max_y = ny_p
-            cur_fx = nx_f
-            cur_fy = ny_f
-            cur_px = nx_p
-            cur_py = ny_p
-        elif v == SFNT_GLYF_QUAD:
-            val ctrl_x = cmd.x1
-            val ctrl_y = cmd.y1
-            val end_x = cmd.x2
-            val end_y = cmd.y2
-            var prev_p_x = cur_px
-            var prev_p_y = cur_py
-            var si: i32 = 1
-            while si <= quad_steps:
-                val t = (si as f64) / (quad_steps as f64)
-                val mt = 1.0 - t
-                val qfx = mt * mt * cur_fx + 2.0 * mt * t * ctrl_x + t * t * end_x
-                val qfy = mt * mt * cur_fy + 2.0 * mt * t * ctrl_y + t * t * end_y
-                val qpx = (qfx + qfy * skew) * scale
-                val qpy = (0.0 - qfy) * scale
-                if qpy != prev_p_y:
-                    seg_ax.push(prev_p_x)
-                    seg_ay.push(prev_p_y)
-                    seg_bx.push(qpx)
-                    seg_by.push(qpy)
-                if not has_bounds:
-                    min_x = qpx
-                    max_x = qpx
-                    min_y = qpy
-                    max_y = qpy
-                    has_bounds = true
-                else:
-                    if qpx < min_x: min_x = qpx
-                    if qpx > max_x: max_x = qpx
-                    if qpy < min_y: min_y = qpy
-                    if qpy > max_y: max_y = qpy
-                prev_p_x = qpx
-                prev_p_y = qpy
-                si = si + 1
-            cur_fx = end_x
-            cur_fy = end_y
-            cur_px = prev_p_x
-            cur_py = prev_p_y
-        elif v == SFNT_GLYF_CLOSE:
-            if contour_open and cur_py != start_py:
-                seg_ax.push(cur_px)
-                seg_ay.push(cur_py)
-                seg_bx.push(start_px)
-                seg_by.push(start_py)
-            cur_fx = start_fx
-            cur_fy = start_fy
-            cur_px = start_px
-            cur_py = start_py
-            contour_open = false
-        ci = ci + 1
-    if contour_open and cur_py != start_py:
-        seg_ax.push(cur_px)
-        seg_ay.push(cur_py)
-        seg_bx.push(start_px)
-        seg_by.push(start_py)
-    if not has_bounds or seg_ax.len() == 0:
-        return _ttf_empty_glyph_bitmap(adv_px)
-    val bold_extra = if synth_bold: (if font_size >= 36: 2 else: 1) else: 0
-    val x0_px = _ttf_floor_i32(min_x)
-    val y0_px = _ttf_floor_i32(min_y)
-    val x1_px = _ttf_ceil_i32(max_x) + bold_extra
-    val y1_px = _ttf_ceil_i32(max_y)
-    val w_px = if x1_px - x0_px > 0: x1_px - x0_px else: 1
-    val h_px = if y1_px - y0_px > 0: y1_px - y0_px else: 1
-    if w_px > 1024 or h_px > 1024:
-        return _ttf_empty_glyph_bitmap(adv_px)
-    val ox = x0_px as f64
-    val oy = y0_px as f64
-    var edges: [_TtfEdge] = []
-    var ei: i64 = 0
-    val seg_n = seg_ax.len()
-    while ei < seg_n:
-        val ay = seg_ay[ei] - oy
-        val by = seg_by[ei] - oy
-        if ay != by:
-            val ax = seg_ax[ei] - ox
-            val bx = seg_bx[ei] - ox
-            val dx_dy = (bx - ax) / (by - ay)
-            if ay < by:
-                edges.push(_TtfEdge(ey0: ay, y_lo: ay, y_hi: by, ex0: ax, dx_dy: dx_dy, dir: 1))
-            else:
-                edges.push(_TtfEdge(ey0: by, y_lo: by, y_hi: ay, ex0: bx, dx_dy: dx_dy, dir: -1))
-        ei = ei + 1
-    val edge_n = edges.len()
-    if edge_n == 0:
-        return _ttf_empty_glyph_bitmap(adv_px)
-    val total_px = w_px * h_px
-    var hits: [i32] = []
-    var hi: i32 = 0
-    while hi < total_px:
-        hits.push(0)
-        hi = hi + 1
-    var py: i32 = 0
-    while py < h_px:
-        val row_off = py * w_px
-        var sub_y: i32 = 0
-        while sub_y < 4:
-            val sy = (py as f64) + ((sub_y as f64) + 0.5) * 0.25
-            var act_x: [f64] = []
-            var act_dir: [i32] = []
-            var k: i64 = 0
-            while k < edge_n:
-                val e = edges[k]
-                if e.y_lo <= sy and sy < e.y_hi:
-                    val ix = e.ex0 + (sy - e.ey0) * e.dx_dy
-                    act_x.push(ix)
-                    act_dir.push(e.dir)
-                k = k + 1
-            val n_act = act_x.len() as i32
-            if n_act > 0:
-                var si: i32 = 1
-                while si < n_act:
-                    val kx = act_x[si]
-                    val kd = act_dir[si]
-                    var sj = si - 1
-                    while sj >= 0 and act_x[sj] > kx:
-                        act_x[sj + 1] = act_x[sj]
-                        act_dir[sj + 1] = act_dir[sj]
-                        sj = sj - 1
-                    act_x[sj + 1] = kx
-                    act_dir[sj + 1] = kd
-                    si = si + 1
-                var start_px = _ttf_floor_i32(act_x[0])
-                if start_px < 0:
-                    start_px = 0
-                var ai: i32 = 0
-                var winding: i32 = 0
-                val start_xf = start_px as f64
-                while ai < n_act and act_x[ai] < start_xf:
-                    winding = winding + act_dir[ai]
-                    ai = ai + 1
-                var px = start_px
-                while px < w_px:
-                    if winding == 0 and ai >= n_act:
-                        break
-                    val pxf = px as f64
-                    var col_hits: i32 = 0
-                    var sub_x: i32 = 0
-                    while sub_x < 4:
-                        val sx = pxf + ((sub_x as f64) + 0.5) * 0.25
-                        while ai < n_act and act_x[ai] < sx:
-                            winding = winding + act_dir[ai]
-                            ai = ai + 1
-                        if winding != 0:
-                            col_hits = col_hits + 1
-                        sub_x = sub_x + 1
-                    if col_hits > 0:
-                        hits[row_off + px] = hits[row_off + px] + col_hits
-                    px = px + 1
-            sub_y = sub_y + 1
-        py = py + 1
-    var cov: [u8] = []
-    var pi: i32 = 0
-    while pi < total_px:
-        val h = hits[pi]
-        if h > 0:
-            val c = (h * 255) / 16
-            cov.push((if c > 255: 255 else: c) as u8)
-        else:
-            cov.push(0u8)
-        pi = pi + 1
-    if bold_extra > 0:
-        var by_row: i32 = 0
-        while by_row < h_px:
-            val r_base = by_row * w_px
-            var bx = w_px - 1
-            while bx >= 1:
-                var best = cov[r_base + bx]
-                val prev1 = cov[r_base + bx - 1]
-                if prev1 > best:
-                    best = prev1
-                if bold_extra >= 2 and bx >= 2:
-                    val prev2 = cov[r_base + bx - 2]
-                    if prev2 > best:
-                        best = prev2
-                cov[r_base + bx] = best
-                bx = bx - 1
-            by_row = by_row + 1
-    _TtfGlyphBitmap(
-        x0_px: x0_px,
-        y0_px: y0_px,
-        w_px: w_px,
-        h_px: h_px,
-        adv_px: adv_px,
-        coverage: cov
-    )
-
 fn _ttf_glyph_cached(face_slot: i32, font_size: i32, synth_bold: bool, synth_italic: bool, gid: u32) -> _TtfGlyphBitmap:
     if _ttf_dm_keys.len() == 0:
         var init_i: i32 = 0
@@ -2460,614 +2151,6 @@ pub fn fb_text_ttf_aa_clip_range(
         resolved_font_identity, font_family, italic, bold, clip, []
     )
 
-fn apply_text_transform_for_paint(value: text, transform: text) -> text:
-    if transform == "uppercase":
-        return value.upper()
-    if transform == "lowercase":
-        return value.lower()
-    if transform == "capitalize":
-        var out = ""
-        var new_word = true
-        for ch in value.chars():
-            if ch == " " or ch == "\n" or ch == "\t":
-                out = out + ch
-                new_word = true
-            else:
-                out = out + if new_word: ch.upper() else: ch
-                new_word = false
-        return out
-    value
-
-# Reverse by CODEPOINT. `value.len()` is a BYTE count while `char_at` is
-# CODEPOINT-indexed, so counting down from the byte length read past the end of
-# any non-ASCII string and dropped its real characters. Walk forward over the
-# bytes, prepending one whole codepoint at a time — which also guarantees no
-# multi-byte sequence is emitted back-to-front.
-pub fn reverse_text_for_paint(value: text) -> text:
-    val vb = value.bytes()
-    val n = value.byte_len()
-    var out = ""
-    var i = 0
-    while i < n:
-        var j = i + 1
-        while j < n and vb[j] >= 128 and vb[j] < 192:
-            j = j + 1
-        out = value.substring(i, j) + out
-        i = j
-    out
-
-# Strong right-to-left codepoints (UAX #9 bidi class R / AL): Hebrew, Arabic,
-# Syriac, Thaana, NKo, Samaritan, Mandaic, their presentation forms, and the
-# supplementary RTL blocks.
-fn _bidi_cp_is_rtl(cp: i64) -> bool:
-    (cp >= 0x0590 and cp <= 0x08FF) or (cp >= 0xFB1D and cp <= 0xFDFF) or
-        (cp >= 0xFE70 and cp <= 0xFEFF) or (cp >= 0x10800 and cp <= 0x10FFF) or
-        (cp >= 0x1E800 and cp <= 0x1EFFF)
-
-# No strong direction: ASCII spaces and punctuation, Latin-1 punctuation and
-# signs, General Punctuation (incl. U+2022). Letters and digits are strong.
-fn _bidi_cp_is_neutral(cp: i64) -> bool:
-    if cp < 0x80:
-        val alnum = (cp >= 48 and cp <= 57) or (cp >= 65 and cp <= 90) or (cp >= 97 and cp <= 122)
-        return not alnum
-    (cp >= 0xA0 and cp <= 0xBF) or cp == 0xD7 or cp == 0xF7 or (cp >= 0x2000 and cp <= 0x206F)
-
-# reason: plain text in, bool out — a predicate over arbitrary UTF-8 text, no domain unit
-# @allow(primitive_api)
-pub fn text_has_rtl_strong(value: text) -> bool:
-    for cp in text_codepoints(value):
-        if _bidi_cp_is_rtl(cp):
-            return true
-    false
-
-# Visual order of `value` in a `direction:rtl` paragraph — a reduced UAX #9:
-# one embedding level, no explicit controls, no mirroring. A left-to-right
-# run (letters and digits, plus the neutrals BETWEEN two of them) keeps its
-# logical order. Runs, right-to-left characters and neutrals at a run edge
-# are laid out right to left. Chrome 159: `ABC` under direction:rtl paints
-# A, B, C left to right (the same ink as `ABC`, end-aligned), not `CBA`.
-# reason: text in, text out — a visual reordering of arbitrary UTF-8 text, no domain unit
-# @allow(primitive_api)
-pub fn bidi_visual_text_for_rtl(value: text) -> text:
-    val cps = text_codepoints(value)
-    val n = cps.len()
-    if n == 0:
-        return value
-    if not text_has_rtl_strong(value) and not _bidi_cp_is_neutral(cps[0]) and
-            not _bidi_cp_is_neutral(cps[n - 1]):
-        return value
-    # Byte span of each codepoint, as in reverse_text_for_paint.
-    val vb = value.bytes()
-    val nb = value.byte_len()
-    var starts: [i64] = []
-    var ends: [i64] = []
-    var span_count: i64 = 0
-    var i: i64 = 0
-    while i < nb:
-        var j = i + 1
-        while j < nb and vb[j] >= 128 and vb[j] < 192:
-            j = j + 1
-        starts.push(i)
-        ends.push(j)
-        span_count = span_count + 1
-        i = j
-    if span_count != n:
-        return reverse_text_for_paint(value)
-    # prev_l[k] / next_l[k]: the nearest strong class before / after k is L.
-    var prev_l: [bool] = []
-    var last_strong_l = false
-    var k: i64 = 0
-    while k < n:
-        prev_l.push(last_strong_l)
-        if not _bidi_cp_is_neutral(cps[k]):
-            last_strong_l = not _bidi_cp_is_rtl(cps[k])
-        k = k + 1
-    var next_l: [bool] = [false; n]
-    var following_l = false
-    k = n - 1
-    while k >= 0:
-        next_l[k] = following_l
-        if not _bidi_cp_is_neutral(cps[k]):
-            following_l = not _bidi_cp_is_rtl(cps[k])
-        k = k - 1
-    var ltr: [bool] = []
-    k = 0
-    while k < n:
-        val cp = cps[k]
-        if _bidi_cp_is_neutral(cp):
-            ltr.push(prev_l[k] and next_l[k])
-        else:
-            ltr.push(not _bidi_cp_is_rtl(cp))
-        k = k + 1
-    var out = ""
-    k = n - 1
-    while k >= 0:
-        if ltr[k]:
-            var s = k
-            while s > 0 and ltr[s - 1]:
-                s = s - 1
-            out = out + value.substring(starts[s], ends[k])
-            k = s - 1
-        else:
-            out = out + value.substring(starts[k], ends[k])
-            k = k - 1
-    out
-
-# Legacy widget chrome geometry: one ordered list of solid rects. ONE source
-# for both paint paths -- the CPU raster `paint` writes it with
-# fb_widget_chrome_rects and the Draw IR producer lowers each entry to a rect
-# command (_html_draw_ir_widget_rect_commands in paint_layout.spl). Later
-# entries paint over earlier ones.
-class WidgetChromeRects:
-    xs: [i32]
-    ys: [i32]
-    ws: [i32]
-    hs: [i32]
-    colors: [u32]
-
-fn widget_chrome_rects_concat(a: WidgetChromeRects, b: WidgetChromeRects) -> WidgetChromeRects:
-    var xs = a.xs
-    var ys = a.ys
-    var ws = a.ws
-    var hs = a.hs
-    var colors = a.colors
-    var k = 0
-    # cpu-lane-loop-ok: appends one already-built widget rect list; bound is b's entry count
-    while k < b.xs.len():
-        xs.push(b.xs[k])
-        ys.push(b.ys[k])
-        ws.push(b.ws[k])
-        hs.push(b.hs[k])
-        colors.push(b.colors[k])
-        k = k + 1
-    WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
-
-# Raster consumer: each rect clipped to the frame, each pixel written exactly
-# as a text pixel (_fb_text_px: an opaque colour replaces, a translucent one
-# composites over what is there).
-fn fb_widget_chrome_rects(fb: [u32], fbw: i32, fbh: i32, rects: WidgetChromeRects) -> [u32]:
-    var out = fb
-    var k = 0
-    # cpu-lane-loop-ok: one fill per entry of a fixed-size widget rect list; bound is its entry count
-    while k < rects.xs.len():
-        val x0 = if rects.xs[k] < 0: 0 else: rects.xs[k]
-        val y0 = if rects.ys[k] < 0: 0 else: rects.ys[k]
-        val x1 = if rects.xs[k] + rects.ws[k] > fbw: fbw else: rects.xs[k] + rects.ws[k]
-        val y1 = if rects.ys[k] + rects.hs[k] > fbh: fbh else: rects.ys[k] + rects.hs[k]
-        var yy = y0
-        while yy < y1:
-            var xx = x0
-            while xx < x1:
-                out[yy * fbw + xx] = _fb_text_px(rects.colors[k], out[yy * fbw + xx])
-                xx = xx + 1
-            yy = yy + 1
-        k = k + 1
-    out
-
-# The legacy widget frame: focus border, image swatch with two chips, and the
-# button frame / face / icon; at fbh <= 66 two bottom-corner patches restore
-# the page base. Painted after every box and before any text.
-fn widget_frame_rects(fbw: i32, fbh: i32) -> WidgetChromeRects:
-    val border = web_argb(0, 102, 204)
-    val button_w = if fbw > 10: fbw - 10 else: fbw
-    val button_inner_w = if fbw > 12: fbw - 12 else: button_w
-    var xs = [0, 0, 0, fbw - 1, 5, 8, 18, 5, 6, 10]
-    var ys = [0, fbh - 1, 0, 0, 32, 36, 37, 50, 51, 55]
-    var ws = [fbw, fbw, 1, 1, 24, 8, 8, button_w, button_inner_w, 6]
-    var hs = [1, 1, fbh, fbh, 16, 7, 6, 16, 14, 6]
-    var colors = [
-        border, border, border, border,
-        web_argb(37, 99, 235), web_argb(245, 158, 11), web_argb(34, 197, 94),
-        web_argb(100, 116, 139), web_argb(203, 213, 225), web_argb(37, 99, 235)
-    ]
-    if fbh <= 66:
-        xs.push(1)
-        ys.push(fbh - 1)
-        ws.push(4)
-        hs.push(1)
-        colors.push(web_argb(245, 245, 245))
-        xs.push(fbw - 5)
-        ys.push(fbh - 1)
-        ws.push(4)
-        hs.push(1)
-        colors.push(web_argb(245, 245, 245))
-    WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
-
-# Sparse 5x7 glyph text: every other set bit of each glyph as a 1x1 rect, in
-# frame bounds only. Byte range, codepoint glyph lookup -- the same mix as
-# `fb_text_thin_scaled_clip_range`, and fixed the same way: a separate
-# codepoint cursor, one glyph and one advance per CODEPOINT, nothing at all on
-# a UTF-8 continuation byte.
-fn sparse_text_rects(fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, advance: i32, space_advance: i32, italic: bool) -> WidgetChromeRects:
-    var xs: [i32] = []
-    var ys: [i32] = []
-    var ws: [i32] = []
-    var hs: [i32] = []
-    var colors: [u32] = []
-    if y >= fbh or y + 7 <= 0:
-        return WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
-    val sb = s.bytes()
-    var ci = 0
-    var k = 0
-    while k < start:
-        if sb[k] < 128 or sb[k] >= 192:
-            ci = ci + 1
-        k = k + 1
-    var i = start
-    var cx = x
-    while i < endv and cx < fbw:
-        if sb[i] < 128 or sb[i] >= 192:
-            val code = s.char_code_at(ci)
-            val gi = glyph_index_for_char_code(code)
-            if gi >= 0 and gi != 36:
-                var ry = 0
-                while ry < 7:
-                    val bits = glyph_row_bits(gi, ry)
-                    var rx = 0
-                    while rx < 5:
-                        val mask = 1 << (4 - rx)
-                        if (bits & mask) != 0 and ((rx + ry) % 2) == 0:
-                            val italic_shift = if italic: (6 - ry) / 3 else: 0
-                            val xx = cx + italic_shift + rx
-                            val yy = y + ry
-                            if xx >= 0 and xx < fbw and yy >= 0 and yy < fbh:
-                                xs.push(xx)
-                                ys.push(yy)
-                                ws.push(1)
-                                hs.push(1)
-                                colors.push(color)
-                        rx = rx + 1
-                    ry = ry + 1
-            cx = cx + if code == 32: space_advance else: advance
-            ci = ci + 1
-        i = i + 1
-    WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
-
-fn fb_text_sparse_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, advance: i32, space_advance: i32, italic: bool) -> [u32]:
-    fb_widget_chrome_rects(fb, fbw, fbh, sparse_text_rects(fbw, fbh, x, y, s, start, endv, color, advance, space_advance, italic))
-
-fn fb_px(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, color: u32) -> [u32]:
-    var out = fb
-    if x >= 0 and x < fbw and y >= 0 and y < fbh:
-        out[y * fbw + x] = color
-    out
-
-# Legacy widget chrome text: one fixed pixel table, painted last over the whole
-# frame. ONE source for both paint paths -- the CPU raster `paint` writes it
-# with fb_px (fb_generated_widget_chrome_text below) and the Draw IR producer
-# lowers each point to a 1x1 rect (_html_draw_ir_widget_chrome_text_commands in
-# paint_layout.spl), so the pixel API (Draw IR -> Engine2D) and the raster agree.
-class WidgetChromeTextPixels:
-    xs: [i32]
-    ys: [i32]
-    colors: [u32]
-
-# The table spans x 7..37 and y 7..61, so a smaller frame paints none of it.
-fn widget_chrome_text_fits(fbw: i32, fbh: i32) -> bool:
-    fbw >= 38 and fbh >= 62
-
-# Gate shared by both paint paths: legacy widget mode, a frame the table fits
-# in, and non-empty text under a widget ancestor. When it holds, the generated
-# table replaces every #text node's own glyphs.
-fn widget_chrome_text_active(nodes: [HNode], widget_mode: bool, fbw: i32, fbh: i32) -> bool:
-    val need_text = widget_mode and widget_chrome_text_fits(fbw, fbh)
-    need_text and compute_widget_paint_flags(nodes, widget_mode, need_text).has_nonempty_widget_text
-
-fn fb_generated_widget_chrome_text(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
-    if not widget_chrome_text_fits(fbw, fbh):
-        return fb
-    var out = fb
-    val pixels = generated_widget_chrome_text_pixels()
-    var i = 0
-    val point_count = pixels.xs.len()
-    while i < point_count:
-        out = fb_px(out, fbw, fbh, pixels.xs[i], pixels.ys[i], pixels.colors[i])
-        i = i + 1
-    out
-
-fn generated_widget_chrome_text_pixels() -> WidgetChromeTextPixels:
-    val xs = [
-        9, 10, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 27, 28, 29, 30,
-        8, 9, 10, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 27, 28, 29,
-        30, 31, 8, 9, 10, 11, 13, 14, 15, 16, 17, 21, 22, 24, 25, 27,
-        30, 31, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 20, 21, 27, 30,
-        31, 7, 8, 9, 10, 11, 13, 14, 16, 17, 21, 22, 24, 25, 27, 30,
-        31, 7, 8, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 27,
-        28, 29, 30, 31, 23, 24, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-        7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 7, 8, 9, 10, 12, 13,
-        7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 8, 12, 13, 7, 8, 9,
-        10, 11, 12, 13, 20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 36, 37,
-        20, 21, 22, 23, 24, 26, 29, 30, 32, 33, 34, 36, 37, 20, 21, 23,
-        24, 26, 29, 30, 32, 33, 34, 35, 36, 37, 20, 21, 22, 23, 24, 26,
-        29, 30, 32, 33, 34, 35, 36, 37, 20, 21, 22, 23, 24, 26, 27, 29,
-        30, 32, 33, 34, 35, 36, 37, 20, 21, 23, 24, 26, 27, 28, 29, 30,
-        32, 33, 35, 36, 37, 27, 28
-    ]
-    val ys = [
-        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-        8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
-        9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
-        10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
-        11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
-        12, 12, 12, 12, 13, 13, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21,
-        22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23,
-        24, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 26, 26, 26,
-        26, 26, 26, 26, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55,
-        56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 56, 57, 57, 57,
-        57, 57, 57, 57, 57, 57, 57, 57, 57, 57, 58, 58, 58, 58, 58, 58,
-        58, 58, 58, 58, 58, 58, 58, 58, 59, 59, 59, 59, 59, 59, 59, 59,
-        59, 59, 59, 59, 59, 59, 59, 60, 60, 60, 60, 60, 60, 60, 60, 60,
-        60, 60, 60, 60, 60, 61, 61
-    ]
-    val colors = [
-        0xff48484bu32, 0xffd5d5d6u32, 0xff79797cu32, 0xff2d2d30u32, 0xff5a5a5cu32, 0xff8e8e90u32, 0xfff3f3f3u32, 0xffefefefu32, 0xff777779u32, 0xff434346u32, 0xff777779u32, 0xffeeeeeeu32, 0xff757577u32, 0xff58585bu32, 0xff69696bu32, 0xffaeaeafu32,
-        0xffd6d6d7u32, 0xff141418u32, 0xff848486u32, 0xff78787au32, 0xffb7b7b8u32, 0xffd6d6d7u32, 0xff48484bu32, 0xffc6c6c7u32, 0xff88888au32, 0xff808082u32, 0xffebebebu32, 0xff838385u32, 0xff868688u32, 0xff454549u32, 0xffe0e0e0u32, 0xffc2c2c3u32,
-        0xff434346u32, 0xffc0c0c1u32, 0xff88888au32, 0xffaaaaabu32, 0xff404043u32, 0xfff2f2f2u32, 0xff7b7b7du32, 0xffc4c4c5u32, 0xffe6e6e6u32, 0xff636366u32, 0xffccccccu32, 0xff404043u32, 0xfff1f1f1u32, 0xffeeeeeeu32, 0xffb5b5b6u32, 0xff48484bu32,
-        0xffcfcfd0u32, 0xff656568u32, 0xfff4f4f4u32, 0xff2d2d30u32, 0xffd7d7d8u32, 0xff5f5f62u32, 0xffbbbbbcu32, 0xff5a5a5cu32, 0xff3d3d40u32, 0xff707072u32, 0xff535356u32, 0xffd1d1d1u32, 0xfff2f2f2u32, 0xff434346u32, 0xff48484bu32, 0xfff1f1f1u32,
-        0xff454549u32, 0xffc1c1c2u32, 0xff141418u32, 0xff8b8b8du32, 0xff5a5a5cu32, 0xff565659u32, 0xff7c7c7eu32, 0xffcacacbu32, 0xffb5b5b6u32, 0xff7d7d7fu32, 0xff4a4a4du32, 0xffdddddeu32, 0xffe4e4e5u32, 0xffa5a5a6u32, 0xff48484bu32, 0xffaeaeafu32,
-        0xff78787au32, 0xff717173u32, 0xffc4c4c5u32, 0xff434346u32, 0xffebebebu32, 0xff58585bu32, 0xff2d2d30u32, 0xff5f5f62u32, 0xff4e4e51u32, 0xffcdcdceu32, 0xffcececfu32, 0xff4c4c4fu32, 0xff6b6b6eu32, 0xff4a4a4du32, 0xffc5c5c6u32, 0xff404043u32,
-        0xff606063u32, 0xff5b5b5eu32, 0xff707072u32, 0xffecececu32, 0xffe5e5e5u32, 0xfff4f4f4u32, 0xffc5c5c6u32, 0xff58585bu32, 0xff58585bu32, 0xff58585bu32, 0xffd0d0d1u32, 0xffc5c5c6u32, 0xff58585bu32, 0xff58585bu32, 0xff58585bu32, 0xffdbdbdbu32,
-        0xffb3b3b4u32, 0xff878789u32, 0xffe0e0e0u32, 0xffe0e0e0u32, 0xfff1f1f1u32, 0xffb3b3b4u32, 0xff878789u32, 0xffe0e0e0u32, 0xffe0e0e0u32, 0xfff1f1f2u32, 0xffb3b3b4u32, 0xff929294u32, 0xfff3f3f3u32, 0xfff3f3f3u32, 0xffb3b3b4u32, 0xff959597u32,
-        0xffb3b3b4u32, 0xff434346u32, 0xff6d6d70u32, 0xff6d6d70u32, 0xffe7e7e7u32, 0xffb3b3b4u32, 0xff434346u32, 0xff6a6a6du32, 0xff717173u32, 0xffb3b3b4u32, 0xff959597u32, 0xffb3b3b4u32, 0xff959597u32, 0xffb3b3b4u32, 0xff3d3d40u32, 0xff606063u32,
-        0xff606063u32, 0xffd2d2d2u32, 0xffb3b3b4u32, 0xff959597u32, 0xffa3adbau32, 0xff485061u32, 0xff485061u32, 0xff626b7bu32, 0xffc2ccd8u32, 0xff656e7eu32, 0xffc4cedau32, 0xff6e7787u32, 0xff838c9bu32, 0xff949dabu32, 0xff677080u32, 0xffcad4e0u32,
-        0xff949dabu32, 0xff707988u32, 0xffb9c2cfu32, 0xff656e7eu32, 0xff6d7685u32, 0xff3a4354u32, 0xffc1cbd8u32, 0xff464f60u32, 0xff666f7fu32, 0xff0f172au32, 0xffb9c3d0u32, 0xff3e4758u32, 0xffc9d3dfu32, 0xff949dabu32, 0xff7b8493u32, 0xffa5afbcu32,
-        0xff586171u32, 0xff3a4354u32, 0xffc1cbd8u32, 0xff464f60u32, 0xff666f7fu32, 0xff67707fu32, 0xff485061u32, 0xffcad4e0u32, 0xff3e4758u32, 0xffc9d3dfu32, 0xff949dabu32, 0xff363e50u32, 0xff545c6du32, 0xff343c4eu32, 0xffa6b0bdu32, 0xff3a4354u32,
-        0xffc1cbd8u32, 0xff464f60u32, 0xff666f7fu32, 0xffa8b2bfu32, 0xff5f6778u32, 0xff838d9bu32, 0xff3e4758u32, 0xffc9d3dfu32, 0xff949dabu32, 0xff7b8493u32, 0xffc5cfdbu32, 0xff363e50u32, 0xffbcc6d3u32, 0xff454d5eu32, 0xffbbc5d1u32, 0xffabb4c1u32,
-        0xff576070u32, 0xff666f7fu32, 0xffa8b2bfu32, 0xffc4cedbu32, 0xff363e50u32, 0xff0f172au32, 0xffc9d3dfu32, 0xff949dabu32, 0xff7b8493u32, 0xff949dabu32, 0xff5a6373u32, 0xffa0aab7u32, 0xff3a4354u32, 0xff586171u32, 0xff3a4354u32, 0xffabb5c2u32,
-        0xff666f7fu32, 0xffa8b2bfu32, 0xffaeb8c5u32, 0xff0f172au32, 0xffc9d3dfu32, 0xffcad4e0u32, 0xffbec8d4u32
-    ]
-    WidgetChromeTextPixels(xs: xs, ys: ys, colors: colors)
-
-class WidgetPaintFlags:
-    has_widget_panel: bool
-    has_nonempty_widget_text: bool
-
-fn compute_widget_paint_flags(nodes: [HNode], widget_mode: bool, need_text: bool) -> WidgetPaintFlags:
-    if not need_text:
-        var has_panel = widget_mode
-        var scan = 0
-        val node_count = nodes.len()
-        while scan < node_count:
-            val nd = nodes[scan]
-            if nd.has_widget_panel_class:
-                has_panel = true
-            scan = scan + 1
-        return WidgetPaintFlags(has_widget_panel: has_panel, has_nonempty_widget_text: false)
-    val node_count = nodes.len()
-    var widget_ancestor_flags: [i32] = [0; node_count]
-    var has_widget_panel = widget_mode
-    var i = 0
-    while i < node_count:
-        val nd = nodes[i]
-        if nd.has_widget_panel_class:
-            has_widget_panel = true
-        var has_widget_parent = 0
-        val p = nd.parent
-        if p >= 0:
-            val parent = nodes[p]
-            if parent.has_widget_class or parent.has_icon_image_class:
-                has_widget_parent = 1
-            elif widget_ancestor_flags[p] == 1:
-                has_widget_parent = 1
-        widget_ancestor_flags[i] = has_widget_parent
-        if need_text and nd.tag == "#text" and nd.text_trimmed != "" and has_widget_parent == 1:
-            return WidgetPaintFlags(has_widget_panel: has_widget_panel, has_nonempty_widget_text: true)
-        i = i + 1
-    WidgetPaintFlags(has_widget_panel: has_widget_panel, has_nonempty_widget_text: false)
-
-fn is_text_flow_fixture(nodes: [HNode], fbw: i32, fbh: i32) -> bool:
-    if fbw != 96 or fbh != 64:
-        return false
-    var has_title = false
-    var has_copy = false
-    var i = 0
-    val node_count = nodes.len()
-    while i < node_count:
-        if nodes[i].tag == "#text":
-            val txt = nodes[i].text_trimmed
-            if txt == "GUI":
-                has_title = true
-            if txt == "taskbar command":
-                has_copy = true
-        i = i + 1
-    has_title and has_copy
-
-fn fb_text_flow_chrome_overlay(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
-    if fbw != 96 or fbh != 64:
-        return fb
-    var out = fb
-    val text_flow_correction_offsets = [
-        1451, 1491, 1546, 1586, 1641, 1681, 1736, 1737, 1738, 1739, 1740, 1741, 1742, 1743, 1744, 1745,
-        1746, 1747, 1748, 1752, 1755, 1756, 1757, 1758, 1759, 1760, 1761, 1762, 1763, 1764, 1765, 1766,
-        1768, 1770, 1771, 1772, 1773, 1774, 1775, 1777, 1778, 1779, 1780, 1781, 1782, 1783, 1785, 1786,
-        1787, 1788, 1789, 1790, 1791, 1830, 1831, 1832, 1833, 1834, 1835, 1836, 1837, 1838, 1839, 1840,
-        1841, 1842, 1843, 1844, 1845, 1846, 1847, 1851, 1852, 1853, 1854, 1855, 1856, 1857, 1858, 1859,
-        1860, 1861, 1862, 1863, 1866, 1867, 1868, 1869, 1870, 1871, 1872, 1873, 1874, 1875, 1876, 1877,
-        1878, 1879, 1880, 1881, 1882, 1883, 1884, 1885, 1886, 1887, 1924, 1925, 1926, 1927, 1928, 1929,
-        1930, 1931, 1932, 1937, 1938, 1939, 1940, 1941, 1942, 1949, 1950, 1951, 1952, 1953, 1954, 1955,
-        1958, 1965, 1966, 1967, 1968, 1974, 1975, 1976, 1977, 1978, 1979, 1980, 2019, 2020, 2021, 2022,
-        2023, 2024, 2025, 2026, 2035, 2036, 2037, 2038, 2045, 2046, 2047, 2048, 2049, 2050, 2051, 2053,
-        2061, 2062, 2063, 2064, 2070, 2071, 2072, 2073, 2074, 2075, 2076, 2114, 2115, 2116, 2117, 2118,
-        2119, 2120, 2121, 2132, 2133, 2134, 2141, 2142, 2143, 2144, 2145, 2146, 2147, 2157, 2158, 2159,
-        2160, 2164, 2166, 2167, 2168, 2169, 2170, 2171, 2172, 2210, 2211, 2212, 2213, 2214, 2215, 2216,
-        2228, 2229, 2230, 2237, 2238, 2239, 2240, 2241, 2242, 2243, 2253, 2254, 2255, 2256, 2259, 2262,
-        2263, 2264, 2265, 2266, 2267, 2268, 2306, 2307, 2308, 2309, 2310, 2311, 2312, 2324, 2325, 2326,
-        2333, 2334, 2335, 2336, 2337, 2338, 2339, 2349, 2350, 2351, 2352, 2354, 2358, 2359, 2360, 2361,
-        2362, 2363, 2364, 2401, 2402, 2403, 2404, 2405, 2406, 2407, 2429, 2430, 2431, 2432, 2433, 2434,
-        2435, 2445, 2446, 2447, 2448, 2449, 2454, 2455, 2456, 2457, 2458, 2459, 2460, 2497, 2498, 2499,
-        2500, 2501, 2502, 2503, 2520, 2525, 2526, 2527, 2528, 2529, 2530, 2531, 2536, 2541, 2542, 2543,
-        2544, 2550, 2551, 2552, 2553, 2554, 2555, 2556, 2593, 2594, 2595, 2596, 2597, 2598, 2599, 2607,
-        2615, 2621, 2622, 2623, 2624, 2625, 2626, 2627, 2631, 2637, 2638, 2639, 2640, 2646, 2647, 2648,
-        2649, 2650, 2651, 2652, 2689, 2690, 2691, 2692, 2693, 2694, 2695, 2702, 2710, 2717, 2718, 2719,
-        2720, 2721, 2722, 2723, 2726, 2733, 2734, 2735, 2736, 2742, 2743, 2744, 2745, 2746, 2747, 2748,
-        2785, 2786, 2787, 2788, 2789, 2790, 2791, 2797, 2805, 2813, 2814, 2815, 2816, 2817, 2818, 2819,
-        2821, 2829, 2830, 2831, 2832, 2838, 2839, 2840, 2841, 2842, 2843, 2844, 2881, 2882, 2883, 2885,
-        2886, 2887, 2892, 2894, 2895, 2896, 2897, 2898, 2899, 2901, 2902, 2903, 2904, 2905, 2909, 2910,
-        2911, 2912, 2913, 2914, 2915, 2925, 2926, 2927, 2928, 2932, 2934, 2935, 2936, 2937, 2938, 2939,
-        2940, 2977, 2978, 2980, 2981, 2982, 2983, 2991, 2992, 2993, 2994, 2996, 2997, 2998, 2999, 3000,
-        3001, 3005, 3006, 3007, 3008, 3009, 3010, 3011, 3021, 3022, 3023, 3024, 3027, 3030, 3031, 3032,
-        3033, 3034, 3035, 3036, 3073, 3074, 3075, 3076, 3077, 3078, 3079, 3089, 3090, 3091, 3092, 3093,
-        3094, 3095, 3101, 3102, 3103, 3104, 3105, 3106, 3107, 3117, 3118, 3119, 3120, 3122, 3126, 3127,
-        3128, 3129, 3130, 3131, 3132, 3169, 3170, 3171, 3172, 3173, 3174, 3175, 3176, 3185, 3186, 3187,
-        3188, 3189, 3190, 3191, 3197, 3198, 3199, 3200, 3201, 3202, 3203, 3213, 3214, 3215, 3217, 3222,
-        3223, 3224, 3225, 3226, 3227, 3228, 3266, 3267, 3268, 3269, 3270, 3271, 3272, 3281, 3282, 3283,
-        3284, 3285, 3286, 3287, 3288, 3293, 3294, 3295, 3296, 3297, 3298, 3299, 3304, 3308, 3309, 3310,
-        3311, 3318, 3319, 3320, 3321, 3322, 3323, 3324, 3362, 3363, 3364, 3365, 3366, 3367, 3368, 3369,
-        3377, 3378, 3379, 3380, 3381, 3382, 3383, 3390, 3391, 3392, 3393, 3394, 3395, 3396, 3399, 3404,
-        3405, 3406, 3407, 3414, 3415, 3416, 3417, 3418, 3419, 3420, 3459, 3460, 3461, 3462, 3463, 3464,
-        3465, 3466, 3473, 3474, 3475, 3476, 3477, 3478, 3479, 3486, 3487, 3488, 3489, 3490, 3491, 3492,
-        3493, 3494, 3499, 3500, 3501, 3502, 3503, 3510, 3511, 3512, 3513, 3514, 3515, 3516, 3556, 3557,
-        3558, 3559, 3560, 3561, 3562, 3563, 3564, 3569, 3570, 3571, 3572, 3574, 3575, 3583, 3584, 3585,
-        3586, 3587, 3588, 3589, 3590, 3591, 3592, 3593, 3594, 3595, 3596, 3597, 3598, 3606, 3607, 3608,
-        3609, 3610, 3611, 3612, 3652, 3653, 3654, 3655, 3656, 3657, 3658, 3659, 3660, 3661, 3662, 3663,
-        3664, 3665, 3666, 3667, 3669, 3670, 3671, 3680, 3681, 3682, 3683, 3684, 3685, 3686, 3687, 3688,
-        3689, 3690, 3691, 3692, 3693, 3699, 3700, 3701, 3702, 3703, 3704, 3705, 3706, 3707, 3708, 3709,
-        3710, 3711, 3752, 3753, 3754, 3755, 3756, 3757, 3758, 3759, 3760, 3761, 3762, 3763, 3764, 3765,
-        3771, 3777, 3778, 3779, 3780, 3781, 3782, 3783, 3784, 3785, 3786, 3787, 3795, 3796, 3797, 3798,
-        3799, 3800, 3801, 3802, 3803, 3804, 3805, 3806, 3807, 3850, 3866, 3874, 3890, 3945, 3961, 3969,
-        3985, 4040, 4048, 4064, 4080, 4088, 5777, 5778, 5779, 5780, 5785, 5786, 5787, 5788, 5874, 5875,
-        5876, 5882, 5883, 5884, 5953, 5954, 5970, 5971, 5972, 5978, 5979, 5980, 6048, 6049, 6050, 6066,
-        6067, 6068, 6074, 6075, 6076
-    ]
-    val text_flow_correction_colors = [
-        0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xfff0dabeu32, 0xffa6987du32,
-        0xff6c5d51u32, 0xff473834u32, 0xff2a221fu32, 0xff1b1b18u32, 0xff14141fu32, 0xff1b2226u32, 0xff2a313cu32, 0xff404e58u32,
-        0xff646c7du32, 0xff90a6b6u32, 0xffc4daf0u32, 0xffffffffu32, 0xffb5641fu32, 0xff141418u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff142a6eu32, 0xffbcffffu32,
-        0xffffffffu32, 0xfff7ae60u32, 0xff1b1418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff14143cu32,
-        0xff82d2ffu32, 0xffffffd3u32, 0xff823818u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32, 0xffe1c499u32, 0xff6c472du32, 0xff1b1418u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff1b2234u32, 0xff404751u32, 0xff4e4e51u32, 0xff474743u32, 0xff382a1fu32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff1b314au32, 0xff649fdau32, 0xffffffffu32, 0xfff0e1ccu32,
-        0xffbcaea1u32, 0xff907351u32, 0xff2a1418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff4e7392u32,
-        0xff9fa6b6u32, 0xffbccbe2u32, 0xfff7ffffu32, 0xffffffffu32, 0xfffff0e2u32, 0xffcbbcb6u32, 0xffa69f92u32, 0xff7a5634u32,
-        0xff141418u32, 0xff143860u32, 0xff8298a8u32, 0xffb5bcd3u32, 0xffe8f7ffu32, 0xfffffff7u32, 0xffe1cbbeu32, 0xffaea699u32,
-        0xff827a58u32, 0xff311418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141426u32, 0xff405d7du32, 0xff9098a8u32,
-        0xffb5bcd3u32, 0xffe8ffffu32, 0xfffff7e2u32, 0xffae7343u32, 0xff221418u32, 0xff141418u32, 0xff141418u32, 0xff14141fu32,
-        0xff385d84u32, 0xffaecbe9u32, 0xfff7ffffu32, 0xfff0e1ccu32, 0xffae9875u32, 0xff563826u32, 0xff141418u32, 0xff141418u32,
-        0xff2a73c5u32, 0xffffe199u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32,
-        0xffffffffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32, 0xfff7ffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffffe2u32, 0xffa65d34u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff14142du32, 0xff5698d3u32, 0xfff7ffffu32, 0xffffffe9u32, 0xffc48251u32, 0xff221418u32, 0xff2a73c5u32,
-        0xffffe199u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32, 0xffffffffu32,
-        0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32, 0xfff7ffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xfffffff7u32, 0xffd28243u32, 0xff1b1418u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff316cbeu32, 0xfff0ffffu32, 0xffffda99u32, 0xff471b18u32, 0xff2a73c5u32, 0xffffe199u32, 0xff471b18u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32,
-        0xfff7ffffu32, 0xffffffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32,
-        0xff7acbffu32, 0xffffe1a1u32, 0xff4e1b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff98e1ffu32,
-        0xfffff7b6u32, 0xff642218u32, 0xff2a73c5u32, 0xffffe199u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32,
-        0xff141b51u32, 0xff9fe8ffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32, 0xfff7ffffu32, 0xffffffffu32, 0xffffffb6u32,
-        0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffcb7a3cu32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff1b4ea1u32, 0xffe8ffffu32, 0xfffffff0u32, 0xffdac4beu32, 0xffbcd2f0u32,
-        0xffffe199u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32, 0xfff0ae60u32,
-        0xff1b1418u32, 0xff1b5dafu32, 0xfff7ffffu32, 0xffffffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffffccu32, 0xff7a3818u32, 0xff141418u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff4090dau32, 0xffffe199u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32,
-        0xff9fe8ffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32, 0xfff7ffffu32, 0xffffffffu32, 0xffffffb6u32, 0xff641b18u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffe8a1u32, 0xff4e1b18u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff64b5f7u32, 0xffffffffu32, 0xffffe199u32, 0xff471b18u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32, 0xffffffffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32,
-        0xfff7ffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32,
-        0xffffc475u32, 0xff311418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffffffu32,
-        0xffffffffu32, 0xffffe199u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32,
-        0xffffffffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32, 0xfff7ffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffb567u32, 0xff221418u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141443u32, 0xff82d2ffu32, 0xffffffffu32, 0xffffffffu32, 0xffffe199u32, 0xff471b18u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32, 0xffffffffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32,
-        0xfff7ffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32,
-        0xfff7b567u32, 0xff1b1418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141443u32, 0xff82d2ffu32, 0xffffffffu32,
-        0xffffffffu32, 0xffffe199u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32,
-        0xffffffffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32, 0xfff7ffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffc46eu32, 0xff2a1418u32, 0xff141418u32, 0xff141418u32,
-        0xff14143cu32, 0xff7acbffu32, 0xffffffffu32, 0xffffffe9u32, 0xff9f4e1fu32, 0xff141418u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff4082d3u32, 0xffffe199u32, 0xff471b18u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32, 0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32,
-        0xfff7ffffu32, 0xffffffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32,
-        0xff7acbffu32, 0xffffda92u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141426u32, 0xff64b5f7u32, 0xfff0daccu32,
-        0xffbcb5a8u32, 0xff9f906eu32, 0xff472218u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff385d92u32, 0xff9faebeu32,
-        0xffd2e8f7u32, 0xffffe199u32, 0xff471b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32, 0xff9fe8ffu32,
-        0xfff0ae60u32, 0xff1b1418u32, 0xff1b5dafu32, 0xfff7ffffu32, 0xffffffffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffffc5u32, 0xff733118u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff14141fu32, 0xff4090dau32, 0xffffffccu32, 0xff7a3118u32, 0xff141418u32, 0xff141418u32, 0xff141418u32,
-        0xff14141fu32, 0xff64b5f7u32, 0xffffe1a1u32, 0xff4e1b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32,
-        0xff9fe8ffu32, 0xfff0a658u32, 0xff1b1418u32, 0xff1b64b6u32, 0xfff7ffffu32, 0xffffffffu32, 0xffffffb6u32, 0xff641b18u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xfffffff7u32, 0xffc47334u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff1b4ea1u32, 0xffe8ffffu32, 0xffffffccu32, 0xff7a3118u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff64b5f7u32, 0xfffff7afu32, 0xff5d1b18u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141443u32, 0xff82d2ffu32, 0xffe1984au32, 0xff1b1418u32, 0xff2a73c5u32, 0xffffffffu32, 0xffffffb6u32,
-        0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffda92u32, 0xff471b18u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b4au32, 0xff98daffu32, 0xffffffccu32, 0xff7a3118u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff64b5f7u32, 0xffffffffu32, 0xffffffdau32, 0xff904018u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff4e9fe9u32, 0xffffffffu32, 0xfffffff0u32, 0xffae5d26u32, 0xff14141fu32,
-        0xff4e9fe2u32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32,
-        0xfffffff7u32, 0xffcb8243u32, 0xff1b1418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff2a5dafu32, 0xffe8ffffu32,
-        0xffffffccu32, 0xff7a3118u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff64b5f7u32, 0xffd29043u32,
-        0xff1b1418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff1b4084u32, 0xffcbf7ffu32, 0xffffffffu32, 0xffffda99u32,
-        0xff4e1b18u32, 0xff141b4au32, 0xff98daffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32,
-        0xff141434u32, 0xff7acbffu32, 0xffffffdau32, 0xffa65d34u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141426u32,
-        0xff4782c5u32, 0xfff0ffffu32, 0xffffffccu32, 0xff7a3118u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff14141fu32,
-        0xff64b5f7u32, 0xfffff0b6u32, 0xff642a18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff315da1u32,
-        0xffd2f7ffu32, 0xffffffffu32, 0xfff7e1afu32, 0xff6c401fu32, 0xff141418u32, 0xff2a64b6u32, 0xfff0ffffu32, 0xffffffb6u32,
-        0xff641b18u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xfffff7e2u32, 0xffae7343u32,
-        0xff221418u32, 0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff315684u32, 0xffaecbe9u32, 0xfff7ffffu32, 0xfff7e1afu32,
-        0xff643118u32, 0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff64b5f7u32, 0xfff0c484u32, 0xff472218u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff1b2a43u32, 0xff5d7392u32, 0xff9fa6afu32, 0xffaeb5afu32, 0xffa69f99u32,
-        0xff7a644au32, 0xff311b18u32, 0xff141418u32, 0xff1b3875u32, 0xffbcf0ffu32, 0xffffffb6u32, 0xff641b18u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141434u32, 0xff7acbffu32, 0xffffffffu32, 0xfffffff7u32, 0xffe8c499u32, 0xff6c472du32,
-        0xff1b1418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff1b2a3cu32, 0xff474e58u32, 0xff565658u32, 0xff4e4743u32,
-        0xff383126u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b26u32, 0xff384e67u32, 0xff9fd2ffu32, 0xfff7d2a8u32,
-        0xff73472du32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff14141fu32, 0xff385d99u32, 0xffc4f0ffu32, 0xfffffff7u32, 0xffe1cbbeu32, 0xffae9f99u32,
-        0xff827a58u32, 0xff311418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141426u32, 0xff405d7du32, 0xff9098a8u32,
-        0xffaebcd3u32, 0xffe8ffffu32, 0xfff0dabeu32, 0xffa6907du32, 0xff645651u32, 0xff40382du32, 0xff22221fu32, 0xff1b1418u32,
-        0xff14141fu32, 0xff22222du32, 0xff313843u32, 0xff475660u32, 0xff64737du32, 0xff909fa8u32, 0xffbccbdau32, 0xffe8f7ffu32,
-        0xffffffffu32, 0xfffffff7u32, 0xffe1c4afu32, 0xff907a67u32, 0xff56473cu32, 0xff312a26u32, 0xff1b1418u32, 0xff14141fu32,
-        0xff1b2234u32, 0xff384758u32, 0xff647a99u32, 0xffb5d2e9u32, 0xffffffd3u32, 0xff823818u32, 0xff141418u32, 0xff141418u32,
-        0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141418u32, 0xff141b51u32,
-        0xff9fe8ffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32,
-        0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffe9u32, 0xffc49f75u32,
-        0xff47221fu32, 0xff4e9fe2u32, 0xffffe8c5u32, 0xff9f734au32, 0xff2a1b4au32, 0xff98e1ffu32, 0xffffffd3u32, 0xff82381fu32,
-        0xff4e9fe2u32, 0xffffda92u32, 0xff401b4au32, 0xff98e1ffu32, 0xffffe8c5u32, 0xffbcd2f7u32, 0xffffffd3u32, 0xff82381fu32,
-        0xff4e9fe2u32, 0xffffda92u32, 0xff401b4au32, 0xff98e1ffu32, 0xfffffff7u32, 0xffc47a3cu32, 0xff569fe9u32, 0xffffffd3u32,
-        0xff82381fu32, 0xff4e9fe2u32, 0xffffda92u32, 0xff401b51u32, 0xff9fe1ffu32
-    ]
-    var i = 0
-    val correction_count = text_flow_correction_offsets.len()
-    while i < correction_count:
-        val idx = text_flow_correction_offsets[i]
-        if idx >= 0 and idx < out.len():
-            out[idx] = text_flow_correction_colors[i]
-        i = i + 1
-    out
-
-# Two adjacent sides of different colours (`transparent` counts) meet on the
-# diagonal from the outer to the inner corner, as Chrome paints them: a CSS
-# triangle (`border:20px solid transparent; border-top-color:red`) is a
-# triangle, not a red rectangle. Same-coloured neighbours keep the plain
-# rectangles of fb_border_sides_clip, so a uniform border is unchanged.
-fn _fb_border_mitred(bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32) -> bool:
-    val tl = bt > 0 and bl > 0 and ct != cl
-    val tr = bt > 0 and br > 0 and ct != cr
-    val bl_corner = bb > 0 and bl > 0 and cb != cl
-    val br_corner = bb > 0 and br > 0 and cb != cr
-    tl or tr or bl_corner or br_corner
-
-# Row `r` (0 at the outer edge) of a side `side_w` thick, against a neighbour
-# `cross_w` thick: the first column (from the outer corner) the side owns
-# whole, times 2, plus 1 when the column before it is cut in half by the
-# diagonal. A pixel belongs to the side when its centre lies past the
-# diagonal, (2c+1) * side_w > (2r+1) * cross_w.
-fn _fb_mitre_cut(r: i32, side_w: i32, cross_w: i32) -> i32:
-    val num = (2 * r + 1) * cross_w
-    var c = 0
-    while (2 * c + 1) * side_w <= num:
-        c = c + 1
-    if c > 0 and (2 * c - 1) * side_w == num:
-        return c * 2 + 1
-    c * 2
-
 # The half-covered diagonal pixel: half of each side, painted ONCE as the
 # 50/50 mix (two sequential half blends weighted the first side 25%). A
 # transparent side (0) contributes nothing.
@@ -3147,12 +2230,3 @@ fn _fb_border_sides_mitred(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32
                             out = _fb_border_side_clip(out, fbw, fbh, ox, py, own, 1, c, clip)
                         r = r + 1
     out
-
-# A glyph pixel: `color: rgba(0,0,0,.5)` blends over what is under it, as
-# Chrome does (the 5x7 lane wrote it opaque). An alpha byte of 0 is a colour
-# packed without one and stays opaque.
-fn _fb_text_px(color: u32, dst: u32) -> u32:
-    val a = ((color >> 24) & 255u32) as i32
-    if a > 0 and a < 255:
-        return composite_over_base(color | 0xFF000000u32, a, dst)
-    color

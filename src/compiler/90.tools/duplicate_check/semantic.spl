@@ -7,9 +7,9 @@ use compiler.tools.duplicate_check.config.{DuplicationConfig}
 use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_directory, build_embedding_key, content_hash}
 use lazy compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_available, get_embedding}
 use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, load_embedding_cache, save_embedding_cache, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
+use compiler.tools.duplicate_check.similarity.{SimilarityEngine, SimilarityInput, similarity_for_mode, similarity_input_text, featurize_all, similar_pairs}
+use compiler.tools.duplicate_check.similarity.{text_similarity}
 use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense}
-use compiler.tools.duplicate_check.features.{build_feature_vector, cosine_similarity, FeatureVec, feature_signature, signatures_share_token}
-use compiler.tools.duplicate_check.lsh_prefilter.{lsh_candidate_pairs_for_streams, sorted_tokens}
 
 struct SemanticMatch:
     entry_a: DocEntry
@@ -136,31 +136,23 @@ fn run_semantic_analysis(target_path: text, config: DuplicationConfig) -> Semant
         used_fallback: false
     )
 
-fn find_similar_pairs(entries: [DocEntry], embeddings: [[f64]], threshold: f64, drift_threshold: f64) -> [SemanticMatch]:
+fn semantic_matches(engine: SimilarityEngine, documented: [DocEntry], inputs: [SimilarityInput], threshold: f64, suffix: text) -> [SemanticMatch]:
+    """Drive one SimilarityAlgorithm over doc entries: featurize -> candidates
+    -> shared threshold scoring; records keep candidate order."""
+    val features = featurize_all(engine, inputs)
+    val scored = similar_pairs(engine, features, [], threshold)
     var matches: [SemanticMatch] = []
+    for p in scored:
+        matches.push(make_semantic_match(documented[p.left], documented[p.right], p.score, suffix))
+    matches
 
+fn find_similar_pairs(entries: [DocEntry], embeddings: [[f64]], threshold: f64, drift_threshold: f64) -> [SemanticMatch]:
+    var inputs: [SimilarityInput] = []
     var i = 0
     while i < entries.len():
-        val vec_a = embeddings[i]
-        if vec_a.len() == 0:
-            i = i + 1
-            continue
-
-        var j = i + 1
-        while j < entries.len():
-            val vec_b = embeddings[j]
-            if vec_b.len() == 0:
-                j = j + 1
-                continue
-
-            val sim = cosine_similarity_dense(vec_a, vec_b)
-
-            if sim >= threshold:
-                matches.push(make_semantic_match(entries[i], entries[j], sim, ""))
-
-            j = j + 1
-
+        inputs.push(SimilarityInput(text_val: "", tokens: [], embedding: embeddings[i]))
         i = i + 1
+    val matches = semantic_matches(similarity_for_mode("semantic-llm", false), entries, inputs, threshold, "")
 
     # Sort by similarity descending (quicksort)
     if matches.len() > 1:
@@ -191,24 +183,10 @@ fn quicksort_matches_by_sim(arr: [SemanticMatch], low: i64, high: i64):
         quicksort_matches_by_sim(arr, i, high)
 
 fn run_text_fallback(entries: [DocEntry], threshold: f64, drift_threshold: f64) -> SemanticReport:
-    var matches: [SemanticMatch] = []
-
-    var i = 0
-    while i < entries.len():
-        var j = i + 1
-        while j < entries.len():
-            val doc_a = entries[i].doc_comment
-            val doc_b = entries[j].doc_comment
-
-            # Skip very short docs
-            val both_long = doc_a.len() >= 10 and doc_b.len() >= 10
-            if both_long:
-                val sim = text_similarity(doc_a, doc_b)
-                if sim >= threshold:
-                    matches.push(make_semantic_match(entries[i], entries[j], sim, " [text-based]"))
-
-            j = j + 1
-        i = i + 1
+    var inputs: [SimilarityInput] = []
+    for entry in entries:
+        inputs.push(similarity_input_text(entry.doc_comment))
+    val matches = semantic_matches(similarity_for_mode("semantic-text", false), entries, inputs, threshold, " [text-based]")
 
     SemanticReport(
         matches: matches,
@@ -220,75 +198,6 @@ fn run_text_fallback(entries: [DocEntry], threshold: f64, drift_threshold: f64) 
         used_fallback: true
     )
 
-fn text_similarity(a: text, b: text) -> f64:
-    if a == b:
-        return 1.0
-    val total_len = a.len() + b.len()
-    if total_len == 0:
-        return 1.0
-    val lcs = longest_common_subsequence_len(a, b)
-    val numerator = (lcs * 2) * 1.0
-    val denominator = total_len * 1.0
-    numerator / denominator
-
-fn longest_common_subsequence_len(a: text, b: text) -> i64:
-    if a.len() == 0 or b.len() == 0:
-        return 0
-
-    var prev: [i64] = []
-    var init_j = 0
-    while init_j <= b.len():
-        prev.push(0)
-        init_j = init_j + 1
-
-    var i = 0
-    while i < a.len():
-        var curr: [i64] = [0]
-        var j = 0
-        while j < b.len():
-            val a_ch = a[i:i+1]
-            val b_ch = b[j:j+1]
-            if a_ch == b_ch:
-                curr.push(prev[j] + 1)
-            else:
-                curr.push(max_i64(curr[j], prev[j + 1]))
-            j = j + 1
-        prev = curr
-        i = i + 1
-
-    prev[b.len()]
-
-fn max_i64(a: i64, b: i64) -> i64:
-    if a >= b:
-        return a
-    b
-
-fn _tokenize_doc(text_val: text) -> {text: i64}:
-    var freq = {}
-    val bytes = text_val.bytes()
-    val len = bytes.len()
-    var word_start = -1
-    var i = 0
-    while i < len:
-        val c = bytes[i]
-        val is_alpha = (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
-        val is_digit = c >= 48 and c <= 57
-        if is_alpha or is_digit:
-            if word_start < 0:
-                word_start = i
-        else:
-            if word_start >= 0 and i - word_start >= 2:
-                val lower = text_val[word_start:i].lower()
-                val existing = freq[lower] ?? 0
-                freq[lower] = existing + 1
-            word_start = -1
-        i = i + 1
-    if word_start >= 0 and len - word_start >= 2:
-        val lower = text_val[word_start:len].lower()
-        val existing = freq[lower] ?? 0
-        freq[lower] = existing + 1
-    freq
-
 fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> SemanticReport:
     val all_entries = extract_docs_from_directory(target_path, config.exclude_patterns)
     if all_entries.len() == 0:
@@ -298,22 +207,14 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
     val documented = partition.documented
     val missing_docs = partition.missing_docs
 
-    var fvecs: [FeatureVec] = []
+    var inputs: [SimilarityInput] = []
     for entry in documented:
-        val text_val = build_embedding_key(entry)
-        val freq = _tokenize_doc(text_val)
-        val fv = build_feature_vector(0, freq)
-        fvecs.push(fv)
+        inputs.push(similarity_input_text(build_embedding_key(entry)))
 
-    var sigs: [text] = []
-    for fv in fvecs:
-        val sig = feature_signature(fv, 5)
-        sigs.push(sig)
-
-    val matches = if config.use_lsh_prefilter:
-        lsh_prefiltered_matches(documented, fvecs, config.semantic_threshold)
-    else:
-        token_bucket_matches(documented, fvecs, sigs, config.semantic_threshold)
+    # use-lsh-prefilter swaps the candidate prefilter (signature buckets ->
+    # MinHash/LSH banding); featurize and scoring are unchanged.
+    val engine = similarity_for_mode("semantic", config.use_lsh_prefilter)
+    val matches = semantic_matches(engine, documented, inputs, config.semantic_threshold, "")
 
     if matches.len() > 1:
         quicksort_matches_by_sim(matches, 0, matches.len() - 1)
@@ -327,87 +228,6 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
         cache_misses: 0,
         used_fallback: false
     )
-
-fn token_bucket_matches(documented: [DocEntry], fvecs: [FeatureVec], sigs: [text], threshold: f64) -> [SemanticMatch]:
-    """Default (flag-off) candidate generation: shared top-5 signature token
-    buckets. Unchanged from the pre-prefilter implementation."""
-    # Bucket by shared signature token (inverted index), NOT by directory —
-    # semantic clones usually live in different directories. Comparing only
-    # inside token buckets keeps this near-linear instead of global O(n²).
-    var token_to_indices: {text: text} = {}
-    var gi = 0
-    while gi < documented.len():
-        if fvecs[gi].magnitude != 0.0:
-            for tok in sigs[gi].split(","):
-                if tok.len() > 0:
-                    if token_to_indices.has(tok):
-                        token_to_indices[tok] = token_to_indices[tok] + "," + "{gi}"
-                    else:
-                        token_to_indices[tok] = "{gi}"
-        gi = gi + 1
-
-    var matches: [SemanticMatch] = []
-    # Dedup: a pair sharing multiple signature tokens lands in multiple buckets.
-    var seen_pairs: {text: bool} = {}
-
-    for tok in token_to_indices.keys():
-        val idx_strs = token_to_indices[tok].split(",")
-        var indices: [i64] = []
-        for s in idx_strs:
-            indices.push(int(s))
-
-        # ponytail: cap giant buckets (a common token like "value"); raise if it
-        # ever drops a real clone — a genuine pair shares 5 tokens, so it also
-        # lands in 4 other, smaller buckets.
-        if indices.len() > 400:
-            continue
-
-        var pi = 0
-        while pi < indices.len():
-            val i = indices[pi]
-            var pj = pi + 1
-            while pj < indices.len():
-                val j = indices[pj]
-                val lo = if i < j: i else: j
-                val hi = if i < j: j else: i
-                val pair_key = "{lo}-{hi}"
-                if seen_pairs.has(pair_key):
-                    pj = pj + 1
-                    continue
-                seen_pairs[pair_key] = true
-                val sim = cosine_similarity(fvecs[i], fvecs[j])
-                if sim >= threshold:
-                    matches.push(make_semantic_match(documented[i], documented[j], sim, ""))
-                pj = pj + 1
-            pi = pi + 1
-    matches
-
-fn lsh_prefiltered_matches(documented: [DocEntry], fvecs: [FeatureVec], threshold: f64) -> [SemanticMatch]:
-    """Opt-in (use-lsh-prefilter) candidate generation: MinHash/LSH banding
-    from std.common.search narrows the comparison set; surviving pairs are
-    still scored with the existing feature-vector cosine, so match records are
-    produced exactly as on the default path."""
-    var streams: [[text]] = []
-    var i = 0
-    while i < fvecs.len():
-        if fvecs[i].magnitude != 0.0:
-            streams.push(sorted_tokens(fvecs[i].features.keys()))
-        else:
-            streams.push([])
-        i = i + 1
-    val candidates = lsh_candidate_pairs_for_streams(streams)
-    var matches: [SemanticMatch] = []
-    var c = 0
-    while c < candidates.len():
-        val a = candidates[c].left
-        val b = candidates[c].right
-        if a < documented.len() and b < documented.len():
-            if fvecs[a].magnitude != 0.0 and fvecs[b].magnitude != 0.0:
-                val sim = cosine_similarity(fvecs[a], fvecs[b])
-                if sim >= threshold:
-                    matches.push(make_semantic_match(documented[a], documented[b], sim, ""))
-        c = c + 1
-    matches
 
 fn empty_report() -> SemanticReport:
     SemanticReport(

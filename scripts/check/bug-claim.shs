@@ -32,26 +32,36 @@
 
 set -u
 
+die() { echo "ERROR: $*" >&2; exit 2; }
+
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 DB="${BUG_CLAIM_DB:-$ROOT/doc/08_tracking/bug/bug_db.sdn}"
 RESEAL="$HERE/reseal-sdn-crc32.shs"
 . "$HERE/sdn-seal-lib.shs"
+LEGACY_DB="$DB"; SHARD_MODE=0; MERGED_DB=""
+REAL_DB="$DB"; LOCKDIR="$LEGACY_DB.lock"; WORK_DB="$REAL_DB.work.$$"
+TABLE_HDR='bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|'
+CLOSED_RE='^(closed|fixed|invalid|resolved-|wontfix|cannot_reproduce|documented)'
+
 # Sharded bug DB (doc/05_design/infra/tracking/bug_db_shards.md): when a db/
 # directory sits next to the legacy file, every command works on the merged
 # view and commit_db publishes one sealed shard per changed bug; the legacy
 # file is frozen. Fixtures without db/ keep the single-file behaviour.
-LEGACY_DB="$DB"; SHARD_MODE=0; MERGED_DB=""
-if [ -f "$DB" ] && [ -d "$(dirname "$DB")/db" ]; then
-    SHARD_MODE=1; MERGED_DB=$(mktemp) || die "mktemp failed"
-    sh "$HERE/bug-db-shard.shs" merged "$LEGACY_DB" > "$MERGED_DB" || die "cannot build the merged bug DB view"
-    DB="$MERGED_DB"
-    trap 'rm -f "$MERGED_DB" "$MERGED_DB.before" 2>/dev/null' EXIT
-fi
-TABLE_HDR='bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|'
-CLOSED_RE='^(closed|fixed|invalid|resolved-|wontfix|cannot_reproduce|documented)'
-
-die() { echo "ERROR: $*" >&2; exit 2; }
+init_db() {
+    LEGACY_DB="$DB"; SHARD_MODE=0; MERGED_DB=""
+    if [ -f "$DB" ] && [ -d "$(dirname "$DB")/db" ]; then
+        SHARD_MODE=1
+        MERGED_DB=$(mktemp) || die "mktemp failed"
+        trap 'rm -f "$MERGED_DB" "$MERGED_DB.before" 2>/dev/null' EXIT
+        sh "$HERE/bug-db-shard.shs" merged "$LEGACY_DB" > "$MERGED_DB" || die "cannot build the merged bug DB view"
+        DB="$MERGED_DB"
+    fi
+    REAL_DB="$DB"
+    LOCKDIR="$LEGACY_DB.lock"
+    WORK_DB="$REAL_DB.work.$$"
+    [ -f "$DB" ] || die "$DB not found"
+}
 
 now_iso() { if [ -n "${BUG_CLAIM_NOW:-}" ]; then echo "$BUG_CLAIM_NOW"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi; }
 
@@ -119,13 +129,14 @@ unindented_row_2026_11_03, P2, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, t
 
 bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
 FX
-    sed -i 's/@CR@$/\r/' "$_fx"
+    awk '{ sub(/@CR@$/, "\r"); print }' "$_fx" > "$_fx.cr" && mv "$_fx.cr" "$_fx"
     sh "$RESEAL" --no-selftest "$_fx" >/dev/null 2>&1
     _fails=0
     # Isolate each CLI operation without spawning another shell per assertion.
     # Git-for-Windows shell startup dominates these small fixtures under load.
     run() { (
-        DB="$_fx"; REAL_DB="$DB"; LOCKDIR="$DB.lock"; WORK_DB="$DB.work.$$"
+        DB="$_fx"; LEGACY_DB="$DB"; SHARD_MODE=0; MERGED_DB=""
+        REAL_DB="$DB"; LOCKDIR="$DB.lock"; WORK_DB="$DB.work.$$"
         BUG_CLAIM_NOW="${BUG_CLAIM_TEST_NOW:-2026-11-03T00:00:00Z}"
         LOCK_RETRIES="${BUG_CLAIM_LOCK_RETRIES:-60}"
         dispatch "$@"
@@ -274,6 +285,46 @@ LAYOUT
         cmp -s "$_fx" "$_d/bad-header-before.sdn" || { echo "selftest FAIL: $_bad_header header changed the database"; _fails=$((_fails+1)); }
         cp "$_d/clean-header.sdn" "$_fx"
     done
+    # Regression: early startup failure (before dispatch) must invoke defined die(),
+    # exit 2 rather than continuing with an empty merged file, and clean up MERGED_DB.
+    _early="$_d/early"; mkdir -p "$_early/db" "$_early/tmp"
+    cp "$HERE/bug-claim.shs" "$_early/bug-claim.shs"
+    cp "$HERE/sdn-seal-lib.shs" "$_early/sdn-seal-lib.shs"
+    printf '#!/bin/sh\necho "stub shard failure" >&2\nexit 2\n' > "$_early/bug-db-shard.shs"
+    printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    E-1, P1, open, "t", f.spl, 1, x, 2026-10-01, 2026-10-01, true\n' > "$_early/bug_db.sdn"
+    _early_rc=0
+    _early_out=$(BUG_CLAIM_DB="$_early/bug_db.sdn" TMPDIR="$_early/tmp" sh "$_early/bug-claim.shs" list-active 2>&1) || _early_rc=$?
+    [ "$_early_rc" -eq 2 ] || { echo "selftest FAIL: early merge fail returned $_early_rc, expected 2 ($_early_out)"; _fails=$((_fails+1)); }
+    chk "early merge fail calls die" "ERROR: cannot build the merged bug DB view" "$_early_out"
+    case "$_early_out" in *"command not found"*) echo "selftest FAIL: early merge fail hit missing die: $_early_out"; _fails=$((_fails+1)) ;; esac
+    [ -z "$(find "$_early/tmp" -mindepth 1 -print -quit)" ] || { echo "selftest FAIL: early merge fail leaked temp files"; _fails=$((_fails+1)); }
+
+    # Regression: sharded list-active across >= 2 shard files (macOS awk -v newline hazard).
+    _shd="$_d/sharded"; mkdir -p "$_shd/db" "$_shd/tmp"
+    cat > "$_shd/bug_db.sdn" <<'SHD'
+strings |id, value|
+
+bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    SHARD-1, P1, open, "one", a.spl, 1, test, 2026-11-01, 2026-11-01, true
+    SHARD-2, P2, open, "two", b.spl, 2, test, 2026-11-01, 2026-11-01, true
+    SHARD-3, P3, open, "three", c.spl, 3, test, 2026-11-01, 2026-11-01, true
+
+bug_fix_claims |bug_id, state, session_id, claimed_at, heartbeat_at, prev_status, note|
+SHD
+    chk "sharded claim 1" "CLAIMED: SHARD-1" "$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:00Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" claim SHARD-1 s1 2>&1)"
+    chk "sharded claim 2" "CLAIMED: SHARD-2" "$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:00Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" claim SHARD-2 s2 2>&1)"
+    _list_rc=0
+    _list_out=$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:00Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" list-active 2>&1) || _list_rc=$?
+    [ "$_list_rc" -eq 0 ] || { echo "selftest FAIL: sharded list-active returned $_list_rc ($_list_out)"; _fails=$((_fails+1)); }
+    chk "sharded list-active has SHARD-1" "SHARD-1 session=s1" "$_list_out"
+    chk "sharded list-active has SHARD-2" "SHARD-2 session=s2" "$_list_out"
+    case "$_list_out" in *SHARD-3*) echo "selftest FAIL: sharded list-active listed unclaimed SHARD-3"; _fails=$((_fails+1)) ;; esac
+    case "$_list_out" in *awk:*) echo "selftest FAIL: sharded list-active emitted awk error: $_list_out"; _fails=$((_fails+1)) ;; esac
+    chk "sharded release 1" "RELEASED: SHARD-1" "$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:01Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" release SHARD-1 s1 2>&1)"
+    _list_out2=$(BUG_CLAIM_DB="$_shd/bug_db.sdn" BUG_CLAIM_NOW=2026-11-03T00:00:01Z TMPDIR="$_shd/tmp" sh "$HERE/bug-claim.shs" list-active 2>&1) || _fails=$((_fails+1))
+    chk "sharded list-active keeps SHARD-2" "SHARD-2 session=s2" "$_list_out2"
+    case "$_list_out2" in *SHARD-1*) echo "selftest FAIL: sharded list-active listed released SHARD-1"; _fails=$((_fails+1)) ;; esac
+    [ -z "$(find "$_shd/tmp" -mindepth 1 -print -quit)" ] || { echo "selftest FAIL: sharded list-active leaked temp files"; _fails=$((_fails+1)); }
     rm -rf "$_d"
     if [ "$_fails" -eq 0 ]; then echo "bug-claim selftest PASS"; exit 0; fi
     echo "bug-claim selftest FAIL ($_fails)"; exit 1
@@ -768,5 +819,5 @@ esac
 }
 
 [ "${1:-}" = "--selftest" ] && selftest
-[ -f "$DB" ] || die "$DB not found"
+init_db
 dispatch "$@"

@@ -8,15 +8,15 @@ is no skip path. Numbers are printed as `CU018 <metric>=<value>` lines so a
 native run's log is the evidence record.
 
 Not covered here (still open for CU-018): frame time and trace-query latency
-need a running caret GUI/TUI session, and per-child CPU time needs the
-lease-based observed-process API; the CPU row below fails until it is wired.
+need a running caret GUI/TUI session. Per-child CPU (user+sys) comes from the
+same reap as peak RSS via process_last_child_cpu_ms.
 """
 # @req CU-018
 
 use std.spec.*
 use std.spec.step
 use std.io_runtime.{file_exists, env_get}
-use std.io.process_ops.{process_run_bounded, process_last_child_peak_rss_kib}
+use std.io.process_ops.{process_run_bounded, process_last_child_peak_rss_kib, process_last_child_cpu_ms}
 use std.io.time_ops.{current_time_ms}
 
 val CU018_TIMEOUT_MS: i64 = 60000
@@ -75,11 +75,13 @@ describe "CU-018 native CPU/RSS/startup measurement":
 
     it "records CPU time of the launched child":
         # @req CU-018
-        # Per-child user/system CPU is only exposed through the lease-based
-        # observed-process API (ObservedProcessRusageV1); this harness does not
-        # wire it yet, so the row fails explicitly instead of inventing a value.
-        val cpu_ms: i64 = -1
-        print "CU018 cpu_ms={cpu_ms} (unavailable: observed-process rusage not wired)"
+        val bin = cu018_binary()
+        expect(file_exists(bin)).to_equal(true)
+        val run = cu018_launch(bin, ["--version"])
+        expect(run.0).to_equal(0)
+        # -1 means the runtime did not measure the child: an explicit failure.
+        val cpu_ms = process_last_child_cpu_ms()
+        print "CU018 cpu_ms={cpu_ms} wall_ms={run.1}"
         expect(cpu_ms >= 0).to_equal(true)
 
     it "measures under failure injection (bad argument) without hanging":

@@ -1,0 +1,39 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4 / milestone_0021 14B: pane binding field rules.
+use std.spec.*
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_validate_v4}
+
+fn binding_with(uid: text, incarnation: text, session: text, window: text, pane: text) -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: uid, service_incarnation: incarnation, session_id: session,
+        window_id: window, pane_id: pane, service_epoch: 3)
+
+fn error_of(binding: HostAgentPaneBindingV4) -> text:
+    val checked = host_agent_pane_binding_validate_v4(binding)
+    if checked.is_ok(): return ""
+    checked.unwrap_err()
+
+describe "Host agent pane binding field bounds":
+    it "accepts a well-formed binding":
+        step("Every field inside its rule validates")
+        expect(error_of(binding_with("binding-a", "a".repeat(32), "session-a", "window-a", "pane-a"))).to_equal("")
+
+    it "refuses an empty or overlong binding uid":
+        step("binding_uid follows builder identifier rules (1..128 of [A-Za-z0-9_-])")
+        expect(error_of(binding_with("", "a".repeat(32), "s", "w", "p"))).to_equal("host-agent-pane-binding-uid-invalid")
+        expect(error_of(binding_with("b".repeat(129), "a".repeat(32), "s", "w", "p"))).to_equal("host-agent-pane-binding-uid-invalid")
+        expect(error_of(binding_with("bad uid", "a".repeat(32), "s", "w", "p"))).to_equal("host-agent-pane-binding-uid-invalid")
+
+    it "refuses a service incarnation that is not 32 lowercase hex":
+        step("Empty, short, long and upper-case incarnations are refused")
+        expect(error_of(binding_with("b", "", "s", "w", "p"))).to_equal("host-agent-pane-binding-incarnation-invalid")
+        expect(error_of(binding_with("b", "a".repeat(31), "s", "w", "p"))).to_equal("host-agent-pane-binding-incarnation-invalid")
+        expect(error_of(binding_with("b", "a".repeat(33), "s", "w", "p"))).to_equal("host-agent-pane-binding-incarnation-invalid")
+        expect(error_of(binding_with("b", "A".repeat(32), "s", "w", "p"))).to_equal("host-agent-pane-binding-incarnation-invalid")
+
+    it "refuses empty, overlong or control-character pane names":
+        step("session/window/pane follow the bounded clean mux name rule (1..256 bytes)")
+        val inc = "a".repeat(32)
+        expect(error_of(binding_with("b", inc, "", "w", "p"))).to_equal("host-agent-pane-binding-pane-name-invalid")
+        expect(error_of(binding_with("b", inc, "s", "", "p"))).to_equal("host-agent-pane-binding-pane-name-invalid")
+        expect(error_of(binding_with("b", inc, "s", "w", ""))).to_equal("host-agent-pane-binding-pane-name-invalid")
+        expect(error_of(binding_with("b", inc, "s", "w", "p".repeat(257)))).to_equal("host-agent-pane-binding-pane-name-invalid")
+        expect(error_of(binding_with("b", inc, "s\nx", "w", "p"))).to_equal("host-agent-pane-binding-pane-name-invalid")

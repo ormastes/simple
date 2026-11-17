@@ -11,6 +11,8 @@
 //!   those three; serving only `statx` left every retained-file open that
 //!   walks beneath a directory descriptor dead with "unknown extern
 //!   function: openat")
+//! * `src/lib/nogc_sync_mut/io/darwin_image_owner.spl` (macOS branch):
+//!   `_NSGetExecutablePath`
 //!
 //! This is the POSIX twin of `windows_abi.rs`: the native link path resolves
 //! these names against libc, but the seed interpreter had no implementation
@@ -61,6 +63,15 @@ const COMMON_NAMES: &[&str] = &[
 /// them keeps the explicit unknown-extern error.
 pub const LINUX_NAMES: &[&str] = &["statx", "openat", "geteuid"];
 
+/// Externs `darwin_image_owner.spl` declares only in its macOS branch. They
+/// are claimed only there, so non-macOS hosts keep the explicit unknown-extern error.
+pub const MACOS_NAMES: &[&str] = &["_NSGetExecutablePath"];
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn _NSGetExecutablePath(buf: *mut libc::c_char, bufsize: *mut u32) -> libc::c_int;
+}
+
 /// The libc errno-address function of this host, or `None` on a Unix host
 /// with no known spelling.
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "dragonfly"))]
@@ -102,6 +113,7 @@ pub fn is_supported_name(name: &str) -> bool {
     COMMON_NAMES.contains(&name)
         || ERRNO_ADDRESS_NAME == Some(name)
         || (cfg!(target_os = "linux") && LINUX_NAMES.contains(&name))
+        || (cfg!(target_os = "macos") && MACOS_NAMES.contains(&name))
 }
 
 fn check_arity(name: &str, args: &[Value], allowed: &[usize]) -> Result<(), CompileError> {
@@ -212,6 +224,23 @@ fn readlink_fn(path: i64, buffer: i64, capacity: i64) -> Value {
     Value::Int(observed as i64)
 }
 
+/// `_NSGetExecutablePath(buf, bufsize) -> i32`: macOS dyld image path query.
+/// Null, negative, or unaligned pointers fail closed with -1 and EINVAL without calling dyld.
+#[cfg(target_os = "macos")]
+fn ns_get_executable_path_fn(buf: i64, bufsize: i64) -> Value {
+    let (Ok(buf), Ok(bufsize)) = (usize::try_from(buf), usize::try_from(bufsize)) else {
+        ERRNO_CELL.with(|cell| cell.set(libc::EINVAL));
+        return Value::Int(-1);
+    };
+    if buf == 0 || bufsize == 0 || bufsize % std::mem::align_of::<u32>() != 0 {
+        ERRNO_CELL.with(|cell| cell.set(libc::EINVAL));
+        return Value::Int(-1);
+    }
+    let result = unsafe { _NSGetExecutablePath(buf as *mut libc::c_char, bufsize as *mut u32) } as i64;
+    capture_errno();
+    Value::Int(result)
+}
+
 fn ptr<T>(value: i64) -> *mut T {
     value as usize as *mut T
 }
@@ -233,6 +262,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         // Fixed four-argument form: the declaration always passes `mode`.
         "openat" if cfg!(target_os = "linux") => &[4],
         "geteuid" if cfg!(target_os = "linux") => &[0],
+        "_NSGetExecutablePath" if cfg!(target_os = "macos") => &[2],
         _ => return Err(super::common::unknown_function(name)),
     };
     check_arity(name, args, arity)?;
@@ -244,6 +274,8 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "free" => return free_fn(a[0]),
         "realpath" => return Ok(realpath_fn(a[0], a[1])),
         "readlink" => return Ok(readlink_fn(a[0], a[1], a[2])),
+        #[cfg(target_os = "macos")]
+        "_NSGetExecutablePath" => return Ok(ns_get_executable_path_fn(a[0], a[1])),
         _ => {}
     }
     // SAFETY: these are the exact libc entry points the declaring `.spl`
@@ -317,6 +349,51 @@ mod tests {
         for name in LINUX_NAMES {
             assert_eq!(is_supported_name(name), cfg!(target_os = "linux"), "{name}");
         }
+        for name in MACOS_NAMES {
+            assert_eq!(is_supported_name(name), cfg!(target_os = "macos"), "{name}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ns_get_executable_path_returns_executable_and_reports_truncation() {
+        let buffer = int_of(dispatch("malloc", &[Value::Int(4096)]));
+        let size_cell = int_of(dispatch("malloc", &[Value::Int(4)]));
+        assert_ne!(buffer, 0);
+        assert_ne!(size_cell, 0);
+
+        unsafe { *(size_cell as *mut u32) = 4096 };
+        let rc = int_of(dispatch(
+            "_NSGetExecutablePath",
+            &[Value::Int(buffer), Value::Int(size_cell)],
+        ));
+        assert_eq!(rc, 0);
+        let path = unsafe { std::ffi::CStr::from_ptr(buffer as *const libc::c_char) }
+            .to_str()
+            .unwrap();
+        assert!(!path.is_empty());
+        assert!(path.starts_with('/'));
+
+        unsafe { *(size_cell as *mut u32) = 1 };
+        let trunc_rc = int_of(dispatch(
+            "_NSGetExecutablePath",
+            &[Value::Int(buffer), Value::Int(size_cell)],
+        ));
+        assert_eq!(trunc_rc, -1);
+        assert!(unsafe { *(size_cell as *const u32) } > 1);
+
+        assert_eq!(
+            int_of(dispatch("_NSGetExecutablePath", &[Value::Int(0), Value::Int(size_cell)])),
+            -1
+        );
+        assert_eq!(
+            int_of(dispatch("_NSGetExecutablePath", &[Value::Int(buffer), Value::Int(0)])),
+            -1
+        );
+        assert!(dispatch("_NSGetExecutablePath", &[Value::Int(buffer)]).is_err());
+
+        dispatch("free", &[Value::Int(size_cell)]).unwrap();
+        dispatch("free", &[Value::Int(buffer)]).unwrap();
     }
 
     /// `retained_file_abi.spl` opens a no-follow child beneath an owned

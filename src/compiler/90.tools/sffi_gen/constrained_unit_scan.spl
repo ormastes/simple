@@ -1,13 +1,20 @@
 # SFFI Wrapper Generator - Constrained Unit Declaration Scanner
 #
 # Line-based feed for constrained_unit_gen. Recognised lines:
+#   unit Port: i32 as Pt in 1..=65535     constrained unit (range sugar)
+#   unit Port: i32 as Pt in 1..65535      exclusive upper bound (max = hi - 1)
+#   unit Port: i32 as Pt where 1 <= self <= 65535
+#   unit Port: i32 as Pt where 1 <= self and self <= 65535
 #   unit Port: i32 as Pt                  unit declaration (name, ABI type)
-#   # @unit_range Port 1..65535           inclusive range; either side may be empty
+#   # @unit_range Port 1..65535           DEPRECATED alias of `in lo..=hi`;
+#                                         still honoured (inclusive, either
+#                                         side may be empty)
 #   extern fn rt_net_port(fd: i32) -> Port
 # Each extern returning a declared unit becomes a facade (checked when the unit
 # has a range, a direct projection otherwise). Externs returning anything else
-# are ignored. There is no range syntax in the `unit` declaration itself yet,
-# so the range rides in the annotation comment.
+# are ignored. The range comes from the declaration itself since 2026-11-17
+# (same `where` predicate the compiler registers); the annotation comment is
+# kept only as a deprecated alias.
 
 use compiler.tools.sffi_gen.constrained_unit_gen.{ConstrainedUnitReturn, UnitReturnFacade, generate_unit_return_facade}
 
@@ -25,6 +32,44 @@ fn _find_unit(units: [_UnitDecl], name: text) -> i64:
         i = i + 1
     -1
 
+fn _is_int_text(t: text) -> bool:
+    if t == "": return false
+    var i = 0
+    if t[0:1] == "-": i = 1
+    if i >= t.len(): return false
+    while i < t.len():
+        val c = t[i:i+1]
+        if c < "0" or c > "9": return false
+        i = i + 1
+    true
+
+# `lo <= self <= hi` / `lo <= self and self <= hi` / `self <= hi` / `lo <= self`
+# -> (lo, hi) texts; any other predicate shape yields ("", "") (the facade is
+# then a direct projection -- a non-range predicate has no inclusive bounds).
+fn _bounds_from_where(pred: text) -> (text, text):
+    var toks: [text] = []
+    for t in pred.split(" "):
+        if t != "": toks.push(t)
+    var lo = ""
+    var hi = ""
+    var i = 0
+    while i < toks.len():
+        if toks[i] == "self":
+            if i >= 2 and toks[i - 1] == "<=" and _is_int_text(toks[i - 2]): lo = toks[i - 2]
+            if i + 2 < toks.len() and toks[i + 1] == "<=" and _is_int_text(toks[i + 2]): hi = toks[i + 2]
+        i = i + 1
+    (lo, hi)
+
+# `lo..=hi` / `lo..hi` -> inclusive (lo, hi) texts (exclusive integer hi -> hi-1).
+fn _bounds_from_range(range: text) -> (text, text):
+    val inclusive = range.contains("..=")
+    val bounds = if inclusive: range.split("..=") else: range.split("..")
+    val lo = bounds[0].trim()
+    var hi = if bounds.len() > 1: bounds[1].trim() else: ""
+    if not inclusive and _is_int_text(hi):
+        hi = "{int(hi) - 1}"
+    (lo, hi)
+
 fn _scan_units(lines: [text]) -> [_UnitDecl]:
     var units: [_UnitDecl] = []
     for raw in lines:
@@ -32,8 +77,19 @@ fn _scan_units(lines: [text]) -> [_UnitDecl]:
         if line.starts_with("unit ") and line.contains(":") and line.contains(" as "):
             val head = line.split(":")
             val name = head[0].replace("unit ", "").trim()
-            val abi = head[1].split(" as ")[0].trim()
-            units.push(_UnitDecl(name: name, abi_type: abi, range_min: "", range_max: ""))
+            val rest = head[1]
+            val abi = rest.split(" as ")[0].trim()
+            var lo = ""
+            var hi = ""
+            if rest.contains(" in "):
+                val b = _bounds_from_range(rest.split(" in ")[1].trim())
+                lo = b.0
+                hi = b.1
+            elif rest.contains(" where "):
+                val b = _bounds_from_where(rest.split(" where ")[1].trim())
+                lo = b.0
+                hi = b.1
+            units.push(_UnitDecl(name: name, abi_type: abi, range_min: lo, range_max: hi))
     for raw in lines:
         val line = raw.trim()
         if line.starts_with("# @unit_range "):

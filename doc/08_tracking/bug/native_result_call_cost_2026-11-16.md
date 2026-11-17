@@ -1,7 +1,7 @@
 # Native codegen: a Result-returning call costs ~5 us and leaks per call
 
 - Date: 2026-11-16
-- Status: open (codegen). The linker works around it; the codegen is not fixed.
+- Status: open (codegen, not fixed). Linker workaround round 3 (2026-11-17): verification-pending.
 - Area: native codegen of `Result<T, E>` returns, `.unwrap()` and `?`
 - Found by: `internal_elf_linker_perf_200obj_2026-11-16.md` (round 2)
 
@@ -41,7 +41,11 @@ each returned Result. They cost about 4 s of a 7.9 s link of 120k relocations.
 `elf_static_link.spl`: `elf_symref` returns `ElfScanRef` with kind
 `SYMREF_ERR` and the message in `key`; `elf_ref_value_fast` /
 `elf_in_vaddr_fast` return `ELF_ADDR_SLOW` and the caller falls back to the
-Result resolver only for rare cases. Tagged
+Result resolver only for rare cases. Since 2026-11-17 the apply loops use
+`ElfSealedOperationsV1.relocate_fast` (builtin operations only; `[]` means
+fall back to `relocate`), and symtab uses `elf_entry_addr_fast`
+(apply 1.47 s -> 0.68 s, symtab 1.55 s -> 0.97 s; linker fixes are
+verification-pending, this codegen bug stays open). Tagged
 `# workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md`.
 
 ## Fix direction

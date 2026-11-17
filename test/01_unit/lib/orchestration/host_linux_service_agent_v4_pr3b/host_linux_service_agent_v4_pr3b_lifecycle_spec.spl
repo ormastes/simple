@@ -1,0 +1,504 @@
+"""
+## Purpose and audience
+Pins the stop ordering, release bound and pane io of milestone_0021 PR3b (DESIGN 13.1, 13.3, 13.4, 13.5, 14.1
+D3/D5/D6/D9, 14A F1-F4): every stop trigger goes through begin_stop (live attachment -> `detach`, else
+`stopping`); the first stop cause wins; a pending Inspect drains first; the release bound is progress-based
+and ends in the typed non-retryable `release-blocked` wedge, never a Destroy; the pane lease is issued once and
+any revoke invalidates it without a pane ack. Written for owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Pure, with FAKE release and pane io ports. The production ports need a live session, container and capacity
+owner (no pure fixture); only their pure charged-forever classifier is driven here.
+GAP (H-36): a Resize while a geometry owner is held (`attach-geometry-busy`) is not driven here, because
+ContainerPrimaryGeometryOwnerV1 wraps a native LinuxPrimaryGeometryOwnerV1 that a pure spec cannot build; the
+ResizePoll-without-geometry refusal (D9) is.
+## Verification guidance and troubleshooting
+A `stopping` agent that still holds a live attachment, or a refusal that wedges before the bound, is a defect.
+"""
+use std.spec.{step}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1, SessionRuntimeControlLeaseV1,
+    SessionRuntimeControlKindV1}
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneOpV4, HostAgentPaneIoResultV4,
+    HostAgentPaneWriteV4, host_agent_pane_lease_v4, host_agent_pane_write_check_v4,
+    HostAgentPaneWriteRecordV4, HostAgentPaneWriteLedgerV4}
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentReleaseOutcomeV4,
+    HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, HostAgentPaneIoCallV4, HostAgentPaneIoPortTurnV4,
+    host_agent_attachment_arm_bound_v4, host_agent_release_charged_v4}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, host_agent_begin_stop_v4,
+    host_agent_attachment_step_v4, host_linux_service_agent_request_cancel_v4, host_agent_attachment_close_v4,
+    host_agent_attachment_close_verdict_v4, host_linux_service_agent_attachment_lease_v4, host_agent_pane_io_core_v4}
+
+fn l_agent(attach_stage: text) -> HostLinuxServiceAgentV4:
+    var agent = HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "a".repeat(64), payload_digest: "b".repeat(64),
+        stage: "running", reserved: true, observed: true, clock_ms: 1000, attachment_consumed: true)
+    agent.attachment = Some(HostAgentAttachmentV4(attach_stage: attach_stage, not_after: 1000000,
+        attach_digest: "c".repeat(64), ready_deadline_ms: 31000, io_deadline_ms: 61000))
+    agent
+
+fn l_answer(call: HostAgentAttachmentPortCallV4, outcome: HostAgentReleaseOutcomeV4) -> HostAgentAttachmentReleaseStepV4:
+    HostAgentAttachmentReleaseStepV4(attachment: call.attachment, outcome: outcome, error: "helper-settle-busy")
+
+fn l_refuse(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    l_answer(call, HostAgentReleaseOutcomeV4.Refused)
+
+fn l_block(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    l_answer(call, HostAgentReleaseOutcomeV4.Blocked)
+
+fn l_advance(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    if att.attach_stage == "revoked": att.attach_stage = "cleaned"
+    elif att.attach_stage == "cleaned": att.attach_stage = "settling"
+    HostAgentAttachmentReleaseStepV4(attachment: att, outcome: HostAgentReleaseOutcomeV4.Progress, error: "")
+
+fn l_io(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(chunks: [], eof: true))
+
+# A later read whose native answer no longer reports eof (eof must stay sticky on the agent side).
+fn l_io_open(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(chunks: [], eof: false))
+
+# A native Write leaf that accepts only 2 bytes of whatever it is offered (partial accept, H-37).
+fn l_io_partial(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(disposition: "partial",
+        accepted_bytes: 2))
+
+fn l_wait(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    l_answer(call, HostAgentReleaseOutcomeV4.Wait)
+
+# A d2 cleanup that keeps answering Progress without leaving its sub-step (P2-1).
+fn l_same(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    l_answer(call, HostAgentReleaseOutcomeV4.Progress)
+
+# 14A F2 window-end marker, recomputed here (the agent's digest helper is private).
+fn l_window_end(not_after: i64, clock_ms: i64) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-agent-window-end"),
+        "notAfter": SdnValue.Int(not_after), "clockMs": SdnValue.Int(clock_ms)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# A pane Write shape (H-37); the control lease/target are data only (the shape check never reads them).
+fn l_write(attempt: i64, offset: i64, maximum: i64, data: text, principal: text) -> HostAgentPaneWriteV4:
+    val scope = ContainerHostScopeV2(physical_host_id: "host", service_scope_id: "service", boot_id: "boot",
+        provider_generation: 7, native_machine_id: "machine", continuity_mode: "native-boot-incarnation-v1",
+        continuity_id: "boot")
+    val runtime = RuntimeIdentityV1(pod_uid: "workload", attempt: 1, provider_generation: 7, operation_id: "op_1",
+        engine: "podman", native_id: "b".repeat(64), node_boot_id: "boot")
+    val target = SessionRuntimeControlTargetV1(scope: scope, runtime: runtime, workload_request_digest: "a".repeat(64),
+        binding_uid: "binding-a", binding_digest: "f".repeat(64), service_incarnation: "a".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: "pane-a", service_epoch: 3, child_incarnation: 1,
+        client_id: "client-a", attachment_generation: 1, execution_kind: "primary", native_exec_id: "",
+        exec_request_digest: "")
+    val lease = SessionRuntimeControlLeaseV1(target: target, kind: SessionRuntimeControlKindV1.Input,
+        principal_id: "pane-owner", nonce_digest: sha256_text("nonce"), revision: 1, issued_monotonic_ms: 1,
+        expires_monotonic_ms: 1000)
+    HostAgentPaneWriteV4(lease: lease, target: target, principal: principal, nonce: "nonce-1", attempt: attempt, write_id: 1,
+        offset: offset, maximum: maximum, data: data)
+
+fn l_write_id(write_id: i64, maximum: i64, data: text) -> HostAgentPaneWriteV4:
+    var write = l_write(1, 0, maximum, data, "pane-owner")
+    write.write_id = write_id
+    write
+
+# A native Write leaf that REPORTS an attempted write whose receipt is unavailable (the Unknown outcome), accepting 2.
+fn l_io_unknown(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(disposition: "unknown",
+        accepted_bytes: 2, write_attempted: true))
+
+# A leaf that would answer differently (99 bytes): seeing 2 after a retry proves no second native write happened.
+fn l_io_second(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(disposition: "completed",
+        accepted_bytes: 99, write_attempted: true))
+
+# A leaf that refuses before any native write (install refusal): nothing attempted, nothing to record.
+fn l_io_install_refused(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(error: "attach-pane-input-unresolved"))
+
+fn l_write_error(write: HostAgentPaneWriteV4) -> text:
+    match host_agent_pane_write_check_v4(write):
+        case Ok(_): ""
+        case Err(reason): reason
+
+describe "V4 agent PR3b: stop ordering":
+    it "sends every stop trigger through begin_stop and keeps the first cause":
+        # @req H-08, H-20, 14A F2
+        val stopped = host_linux_service_agent_request_cancel_v4(l_agent("adopted"), sha256_text("signed-cancel"))
+        expect(stopped.agent.stage).to_equal("detach")
+        expect(stopped.agent.attachment.unwrap().detach_bound).to_equal(true)
+        expect(stopped.agent.attachment.unwrap().detach_deadline_ms).to_equal(1000 + 120000)
+        step("the window end after the cancel does not replace the first cause")
+        val refuse = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_refuse(call)
+        val later = host_agent_attachment_step_v4(stopped.agent, 1000000, 1000000, refuse)
+        expect(later.agent.exit_digest).to_equal(stopped.agent.exit_digest)
+        step("no live attachment: straight to stopping")
+        expect(host_agent_begin_stop_v4(HostLinuxServiceAgentV4(operation_id: "op_1", stage: "running"), 1).stage).to_equal("stopping")
+
+    it "drains a pending Inspect first: begin_stop is a no-op, the window end only records the request":
+        # @req H-40, H-42, D3, D9
+        var pending = l_agent("adopted")
+        pending.pending = true
+        expect(host_agent_begin_stop_v4(pending, 2000).stage).to_equal("running")
+        val refuse = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_refuse(call)
+        val pre = host_agent_attachment_step_v4(pending, 1000000, 1000000, refuse)
+        expect(pre.native).to_equal(true)
+        expect(pre.agent.stage).to_equal("running")
+        expect(pre.agent.stop_requested).to_equal(true)
+        step("once the Inspect answers, the next step enters detach")
+        var drained = pre.agent
+        drained.pending = false
+        expect(host_agent_attachment_step_v4(drained, 1000001, 1000000, refuse).agent.stage).to_equal("detach")
+
+    it "keeps the later deadline when the bound was already armed":
+        # @req H-45, D5
+        val att = host_agent_attachment_arm_bound_v4(HostAgentAttachmentV4(attach_stage: "revoked"), 500000)
+        expect(host_agent_attachment_arm_bound_v4(att, 200000).detach_deadline_ms).to_equal(500000)
+        expect(host_agent_attachment_arm_bound_v4(att, 900000).detach_deadline_ms).to_equal(900000)
+
+describe "V4 agent PR3b: the release bound (D5/D6)":
+    it "wedges with release-blocked after 64 refusals without progress, never before":
+        # @req H-29, H-43, H-46
+        val refuse = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_refuse(call)
+        var state = host_agent_begin_stop_v4(l_agent("revoked"), 1000)
+        for i in 0..63:
+            state = host_agent_attachment_step_v4(state, 1000, 1000000, refuse).agent
+        expect(state.stage).to_equal("detach")
+        expect(state.attachment.unwrap().detach_refusals).to_equal(63)
+        state = host_agent_attachment_step_v4(state, 1000, 1000000, refuse).agent
+        expect(state.stage).to_equal("wedged")
+        expect(state.attachment.unwrap().attach_stage).to_equal("release-blocked")
+        step("close answers release-blocked without any retry")
+        expect(host_agent_attachment_close_verdict_v4(state)).to_equal("linux-host-agent-attachment-release-blocked")
+
+    it "wedges past the deadline, and progress resets the count and re-arms the deadline":
+        # @req H-44, H-47, D5 (progress = a later sub-step)
+        val refuse = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_refuse(call)
+        val advance = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_advance(call)
+        var state = host_agent_begin_stop_v4(l_agent("revoked"), 1000)
+        state = host_agent_attachment_step_v4(state, 2000, 1000000, refuse).agent
+        state = host_agent_attachment_step_v4(state, 3000, 1000000, advance).agent
+        expect(state.attachment.unwrap().attach_stage).to_equal("cleaned")
+        expect(state.attachment.unwrap().detach_refusals).to_equal(0)
+        expect(state.attachment.unwrap().detach_deadline_ms).to_equal(3000 + 120000)
+        val late = host_agent_attachment_step_v4(state, 3000 + 120001, 1000000, refuse).agent
+        expect(late.stage).to_equal("wedged")
+
+    it "wedges at once on a typed non-retryable answer, but only counts it while a native step is pending":
+        # @req H-33, H-35, D6, I2
+        val block = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_block(call)
+        val state = host_agent_begin_stop_v4(l_agent("revoked"), 1000)
+        expect(host_agent_attachment_step_v4(state, 2000, 1000000, block).agent.stage).to_equal("wedged")
+        step("with a native Inspect in flight (close at running) the same answer is only counted: no wedge, no RB")
+        var pending = l_agent("revoked")
+        pending.pending = true
+        val closed = host_agent_attachment_close_v4(pending, block)
+        expect(closed.agent.stage).to_equal("running")
+        expect(closed.agent.attachment.unwrap().attach_stage).to_equal("revoked")
+        expect(closed.agent.attachment.unwrap().detach_refusals).to_equal(1)
+        expect(closed.error).to_equal("linux-host-agent-attachment-release-pending")
+        step("the production port classifies begin-without-lease as charged forever before any native or journal call")
+        val store = HostHelperStoreV1(root: "/trusted/helper-store", journal: None)
+        expect(host_agent_release_charged_v4(HostAgentAttachmentV4(attach_stage: "revoked", begin_attempted: true), store))
+            .to_equal("linux-host-agent-attach-begin-without-lease")
+
+    it "runs one forced release step from close and reports pending until returned":
+        # @req H-31, 13.5 C2
+        val advance = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_advance(call)
+        val closed = host_agent_attachment_close_v4(l_agent("revoked"), advance)
+        expect(closed.error).to_equal("linux-host-agent-attachment-release-pending")
+        expect(closed.agent.attachment.unwrap().attach_stage).to_equal("cleaned")
+        val none = HostLinuxServiceAgentV4(operation_id: "op_1", stage: "running")
+        expect(host_agent_attachment_close_v4(none, advance).error).to_equal("")
+
+describe "V4 agent PR3b: pane lease and io":
+    it "issues the lease once and only for a ready or adopted attachment":
+        # @req H-16, H-30
+        expect(host_linux_service_agent_attachment_lease_v4(l_agent("opening")).error).to_equal("attach-not-ready")
+        val first = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        expect(first.error).to_equal("")
+        expect(host_linux_service_agent_attachment_lease_v4(first.agent).error).to_equal("attach-lease-held")
+
+    it "adopts on the first accepted op, keeps eof sticky, and refuses a revoked lease without a pane ack":
+        # @req H-38, H-48, 13.1
+        val io = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        val turn = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Read, 2000, io)
+        expect(turn.result.error).to_equal("")
+        expect(turn.agent.attachment.unwrap().attach_stage).to_equal("adopted")
+        expect(turn.agent.attachment.unwrap().io_deadline_ms).to_equal(2000 + 60000)
+        expect(turn.agent.attachment.unwrap().eof).to_equal(true)
+        step("a lease minted for another attach digest or epoch is refused")
+        val forged = host_agent_pane_lease_v4("op_1", 0, "d".repeat(64))
+        expect(host_agent_pane_io_core_v4(turn.agent, forged, HostAgentPaneOpV4.Read, 2000, io).result.error).to_equal("attach-lease-revoked")
+        val stale = host_agent_pane_lease_v4("op_1", 1, "c".repeat(64))
+        expect(host_agent_pane_io_core_v4(turn.agent, stale, HostAgentPaneOpV4.Read, 2000, io).result.error).to_equal("attach-lease-revoked")
+        step("a stale lease with a clock past the window leaves the agent unchanged (P3-1, 13.1)")
+        val late = host_agent_pane_io_core_v4(turn.agent, stale, HostAgentPaneOpV4.Read, 1000000, io)
+        expect(late.result.error).to_equal("attach-lease-revoked")
+        expect(late.agent.clock_ms).to_equal(turn.agent.clock_ms)
+        expect(late.agent.stop_requested).to_equal(false)
+        step("eof stays sticky on a second read whose native answer no longer reports it (H-38)")
+        val open_io = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_open(call)
+        val second = host_agent_pane_io_core_v4(turn.agent, lease, HostAgentPaneOpV4.Read, 3000, open_io)
+        expect(second.result.error).to_equal("")
+        expect(second.result.eof).to_equal(true)
+        expect(second.agent.attachment.unwrap().eof).to_equal(true)
+
+    it "refuses pane io at the window end and once a stop is requested":
+        # @req 14A F3, F8
+        val io = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val late = host_agent_pane_io_core_v4(issued.agent, issued.lease.unwrap(), HostAgentPaneOpV4.Read, 1000000, io)
+        expect(late.result.error).to_equal("attach-stopping")
+        expect(late.agent.stop_requested).to_equal(true)
+        step("ResizePoll without a geometry owner is refused")
+        val poll = host_agent_pane_io_core_v4(issued.agent, issued.lease.unwrap(), HostAgentPaneOpV4.ResizePoll, 2000, io)
+        expect(poll.result.error).to_equal("attach-no-geometry")
+
+    it "bounds a pane Write by shape before the native leaf and passes a partial accept through":
+        # @req H-37
+        expect(l_write_error(l_write(1, 0, 4096, "abcd", "pane-owner"))).to_equal("")
+        expect(l_write_error(l_write(1, 0, 0, "abcd", "pane-owner"))).to_equal("attach-pane-write-maximum")
+        expect(l_write_error(l_write(1, 0, 4097, "abcd", "pane-owner"))).to_equal("attach-pane-write-maximum")
+        expect(l_write_error(l_write(1, -1, 4, "abcd", "pane-owner"))).to_equal("attach-pane-write-offset")
+        expect(l_write_error(l_write(1, 4, 4, "abcd", "pane-owner"))).to_equal("attach-pane-write-offset")
+        expect(l_write_error(l_write(0, 0, 4, "abcd", "pane-owner"))).to_equal("attach-pane-write-attempt")
+        expect(l_write_error(l_write(1, 0, 4, "abcd", ""))).to_equal("attach-pane-write-principal")
+        step("through pane io: an out-of-bounds Write is refused before the leaf; a partial accept is reported as is")
+        val partial = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_partial(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val refused = host_agent_pane_io_core_v4(issued.agent, issued.lease.unwrap(),
+            HostAgentPaneOpV4.Write(l_write(1, 0, 4097, "abcd", "pane-owner")), 2000, partial)
+        expect(refused.result.error).to_equal("attach-pane-write-maximum")
+        expect(refused.agent.attachment.unwrap().attach_stage).to_equal("ready")
+        val accepted = host_agent_pane_io_core_v4(issued.agent, issued.lease.unwrap(),
+            HostAgentPaneOpV4.Write(l_write(1, 0, 4, "abcd", "pane-owner")), 2000, partial)
+        expect(accepted.result.accepted_bytes).to_equal(2)
+        expect(accepted.agent.attachment.unwrap().attach_stage).to_equal("adopted")
+
+describe "V4 agent PR3b: deadlines the step driver enforces at running":
+    it "revokes a ready attachment past its ready deadline and an adopted one past its io deadline":
+        # @req H-30, T-A/T-B RD/AD E3 (REL d1)
+        val refuse = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_refuse(call)
+        step("not lapsed: the native step runs")
+        expect(host_agent_attachment_step_v4(l_agent("ready"), 31000, 1000000, refuse).native).to_equal(true)
+        val ready = host_agent_attachment_step_v4(l_agent("ready"), 31001, 1000000, refuse)
+        expect(ready.native).to_equal(false)
+        expect(ready.agent.stage).to_equal("running")
+        expect(ready.agent.attachment.unwrap().attach_stage).to_equal("revoked")
+        expect(ready.agent.attachment.unwrap().lease_epoch).to_equal(1)
+        expect(host_agent_attachment_step_v4(l_agent("adopted"), 61000, 1000000, refuse).native).to_equal(true)
+        val adopted = host_agent_attachment_step_v4(l_agent("adopted"), 61001, 1000000, refuse)
+        expect(adopted.agent.attachment.unwrap().attach_stage).to_equal("revoked")
+        expect(adopted.agent.stage).to_equal("running")
+
+    it "fixes the window-end cause with its marker digest, and gives a run with no attachment its final Inspect first":
+        # @req 14A F2 (outcome failed + window-end digest); m23 item 2 (no attachment: Inspect before the stop)
+        val refuse = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_refuse(call)
+        val legacy = HostLinuxServiceAgentV4(operation_id: "op_1", stage: "running", clock_ms: 1000)
+        val ended = host_agent_attachment_step_v4(legacy, 1000000, 1000000, refuse)
+        expect(ended.native).to_equal(true)
+        expect(ended.agent.stage).to_equal("running")
+        expect(ended.agent.stop_requested).to_equal(false)
+        step("a pending Inspect also drains first, and the window end is then recorded by the native Inspect step")
+        var pending = legacy
+        pending.pending = true
+        val drained = host_agent_attachment_step_v4(pending, 1000000, 1000000, refuse)
+        expect(drained.native).to_equal(true)
+        expect(drained.agent.stop_requested).to_equal(false)
+        step("with a live attachment the same cause is fixed and the agent detaches first")
+        val attached = host_agent_attachment_step_v4(l_agent("adopted"), 1000000, 1000000, refuse)
+        expect(attached.agent.stage).to_equal("detach")
+        expect(attached.agent.outcome).to_equal("failed")
+        expect(attached.agent.exit_digest).to_equal(l_window_end(1000000, 1000000))
+
+describe "V4 agent PR3b: every port answer is finite (P2-1, F4)":
+    it "takes an open core that never completes to release-blocked after 64 non-advancing answers":
+        # @req P2-1 (OP Wait is counted)
+        val waiting = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_wait(call)
+        var state = l_agent("opening")
+        var att = state.attachment.unwrap()
+        att.attach_pending = true
+        state.attachment = Some(att)
+        for i in 0..63:
+            state = host_agent_attachment_step_v4(state, 1000, 1000000, waiting).agent
+        expect(state.stage).to_equal("running")
+        expect(state.attachment.unwrap().attach_stage).to_equal("opening")
+        expect(state.attachment.unwrap().non_advancing).to_equal(63)
+        state = host_agent_attachment_step_v4(state, 1000, 1000000, waiting).agent
+        expect(state.stage).to_equal("wedged")
+        expect(state.attachment.unwrap().attach_stage).to_equal("release-blocked")
+        expect(state.attachment.unwrap().first_error).to_equal("linux-host-agent-attachment-no-progress")
+
+    it "takes a cleanup that keeps answering Progress at the same sub-step to release-blocked":
+        # @req P2-1 (same-rank Progress is non-advancing), F4
+        val same = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_same(call)
+        var state = host_agent_begin_stop_v4(l_agent("revoked"), 1000)
+        for i in 0..63:
+            state = host_agent_attachment_step_v4(state, 1000, 1000000, same).agent
+        expect(state.stage).to_equal("detach")
+        expect(state.attachment.unwrap().non_advancing).to_equal(63)
+        expect(state.attachment.unwrap().detach_refusals).to_equal(0)
+        state = host_agent_attachment_step_v4(state, 1000, 1000000, same).agent
+        expect(state.stage).to_equal("wedged")
+        expect(state.attachment.unwrap().attach_stage).to_equal("release-blocked")
+        step("a real later sub-step resets the count")
+        val advance = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_advance(call)
+        var resumed = host_agent_begin_stop_v4(l_agent("revoked"), 1000)
+        for i in 0..10:
+            resumed = host_agent_attachment_step_v4(resumed, 1000, 1000000, same).agent
+        resumed = host_agent_attachment_step_v4(resumed, 1000, 1000000, advance).agent
+        expect(resumed.attachment.unwrap().attach_stage).to_equal("cleaned")
+        expect(resumed.attachment.unwrap().non_advancing).to_equal(0)
+
+    it "leaves the RP expire wait uncounted until the prepare deadline plus slack, then blocks":
+        # @req D2b, D2c (uncounted, deadline-bounded), P2-1
+        val waiting = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_wait(call)
+        var state = l_agent("refused-expire-pending")
+        var att = state.attachment.unwrap()
+        att.prepared_receipt_digest = "d".repeat(64)
+        att.prepare_deadline_ms = 30000
+        state.attachment = Some(att)
+        for i in 0..70:
+            state = host_agent_attachment_step_v4(state, 1000 + i, 1000000, waiting).agent
+        expect(state.attachment.unwrap().attach_stage).to_equal("refused-expire-pending")
+        expect(state.attachment.unwrap().non_advancing).to_equal(0)
+        state = host_agent_attachment_step_v4(state, 30000 + 5000, 1000000, waiting).agent
+        expect(state.stage).to_equal("running")
+        state = host_agent_attachment_step_v4(state, 30000 + 5001, 1000000, waiting).agent
+        expect(state.stage).to_equal("wedged")
+        expect(state.attachment.unwrap().first_error).to_equal("linux-host-agent-attachment-expire-overdue")
+
+    it "takes a charged-forever failed attachment to release-blocked in the same call, at running too":
+        # @req 14A F4, P3-2 (the machine asks the port to classify FL before d1)
+        val block = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_block(call)
+        var state = l_agent("failed")
+        var att = state.attachment.unwrap()
+        att.begin_attempted = true
+        state.attachment = Some(att)
+        state = host_agent_attachment_step_v4(state, 1000, 1000000, block).agent
+        expect(state.stage).to_equal("wedged")
+        expect(state.attachment.unwrap().attach_stage).to_equal("release-blocked")
+
+describe "V4 agent pane Write replay ledger":
+    it "answers an exact retry after an Unknown outcome from the record, without a second native write":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        val first = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2000, unknown)
+        expect(first.result.disposition).to_equal("unknown")
+        expect(first.result.replayed).to_equal(false)
+        expect(first.agent.attachment.unwrap().pane_writes.unwrap().records.len()).to_equal(1)
+        step("the retry (same id, same bytes) is the recorded outcome and the leaf is not reached")
+        val retry = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2001, second)
+        expect(retry.result.error).to_equal("")
+        expect(retry.result.disposition).to_equal("unknown")
+        expect(retry.result.accepted_bytes).to_equal(2)
+        expect(retry.result.replayed).to_equal(true)
+        expect(retry.agent.attachment.unwrap().pane_writes.unwrap().records.len()).to_equal(1)
+        step("a new id is a new write and reaches the leaf")
+        val fresh = host_agent_pane_io_core_v4(retry.agent, lease, HostAgentPaneOpV4.Write(l_write_id(8, 4, "abcd")), 2002, second)
+        expect(fresh.result.accepted_bytes).to_equal(99)
+        expect(fresh.result.replayed).to_equal(false)
+
+    it "refuses a reused id with different bytes or window, and never lets the leaf run":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        val first = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2000, unknown)
+        val other_bytes = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abce")), 2001, second)
+        expect(other_bytes.result.error).to_equal("attach-pane-write-id-reused")
+        val other_window = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 3, "abcd")), 2001, second)
+        expect(other_window.result.error).to_equal("attach-pane-write-id-reused")
+        expect(other_window.agent.attachment.unwrap().pane_writes.unwrap().records.len()).to_equal(1)
+
+    it "does not record a Write that never reached the native write, so its retry may proceed":
+        # @req agent-pane-write-unknown-replay
+        val refused = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_install_refused(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        val first = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(3, 4, "abcd")), 2000, refused)
+        expect(first.result.error).to_equal("attach-pane-input-unresolved")
+        expect(first.agent.attachment.unwrap().pane_writes.is_none()).to_equal(true)
+        val retry = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(3, 4, "abcd")), 2001, second)
+        expect(retry.result.accepted_bytes).to_equal(99)
+
+    it "refuses an invalid id and a ledger it cannot consult instead of guessing":
+        # @req agent-pane-write-unknown-replay
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        expect(l_write_error(l_write_id(0, 4, "abcd"))).to_equal("attach-pane-write-id")
+        val bad = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(-5, 4, "abcd")), 2000, second)
+        expect(bad.result.error).to_equal("attach-pane-write-id")
+        step("a malformed ledger (duplicate ids) cannot be consulted: refuse, the leaf is not reached")
+        var agent = issued.agent
+        var att = agent.attachment.unwrap()
+        val row = HostAgentPaneWriteRecordV4(write_id: 2, digest: "d", disposition: "completed", accepted_bytes: 1,
+            error: "", gate_error: "")
+        att.pane_writes = Some(HostAgentPaneWriteLedgerV4(records: [row, row], floor: 0))
+        agent.attachment = Some(att)
+        val unreadable = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(9, 4, "abcd")), 2000, second)
+        expect(unreadable.result.error).to_equal("attach-pane-write-record-unavailable")
+        step("a ledger past its bound is unreadable too")
+        var many: [HostAgentPaneWriteRecordV4] = []
+        var id = 1
+        while id <= 17:
+            many.push(HostAgentPaneWriteRecordV4(write_id: id, digest: "d", disposition: "completed", accepted_bytes: 1,
+                error: "", gate_error: ""))
+            id = id + 1
+        att.pane_writes = Some(HostAgentPaneWriteLedgerV4(records: many, floor: 0))
+        agent.attachment = Some(att)
+        val overfull = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(30, 4, "abcd")), 2000, second)
+        expect(overfull.result.error).to_equal("attach-pane-write-record-unavailable")
+
+    it "bounds the record: an evicted id is stale, never treated as new":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        var agent = issued.agent
+        var id = 1
+        while id <= 17:
+            agent = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(id, 4, "abcd")), 2000 + id, unknown).agent
+            id = id + 1
+        val ledger = agent.attachment.unwrap().pane_writes.unwrap()
+        expect(ledger.records.len()).to_equal(16)
+        expect(ledger.floor).to_equal(1)
+        val stale = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(1, 4, "abcd")), 3000, second)
+        expect(stale.result.error).to_equal("attach-pane-write-id-stale")
+        val kept = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(2, 4, "abcd")), 3001, second)
+        expect(kept.result.replayed).to_equal(true)
+        expect(kept.result.accepted_bytes).to_equal(2)
+
+    it "keeps the ledger consultable when ids arrive out of order (eviction takes the smallest id)":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        var agent = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(20, 4, "abcd")), 2000, unknown).agent
+        var id = 1
+        while id <= 16:
+            agent = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(id, 4, "abcd")), 2000 + id, unknown).agent
+            id = id + 1
+        val ledger = agent.attachment.unwrap().pane_writes.unwrap()
+        expect(ledger.records.len()).to_equal(16)
+        expect(ledger.floor).to_equal(1)
+        val next = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(21, 4, "abcd")), 3000, second)
+        expect(next.result.error).to_equal("")
+        expect(next.result.accepted_bytes).to_equal(99)
+        val kept20 = host_agent_pane_io_core_v4(next.agent, lease, HostAgentPaneOpV4.Write(l_write_id(20, 4, "abcd")), 3001, second)
+        expect(kept20.result.replayed).to_equal(true)

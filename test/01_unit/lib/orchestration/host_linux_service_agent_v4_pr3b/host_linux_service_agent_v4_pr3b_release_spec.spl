@@ -1,0 +1,146 @@
+"""
+## Purpose and audience
+Pins milestone_0021 PR3b part 2 (DESIGN 13.1, 13.4, 13.5, 14A F4, 14C): the production release port's order
+(RP expire on the monotonic clock, geometry cancel-then-drain before any native cleanup, charged-forever
+classification before U'/S, S as cleanup -> settle -> session_return with a WAIT while pending), the F/B and
+attach-effect fail-closed refusals, the production pane io port reading output only through
+container_primary_output_read_v1, and the V4 service wiring (store-carrying step/close, live-attachment close
+skip, attach/detach/inspect arms). Written for owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+INFEASIBLE here, pinned structurally instead: the S/U'/RP/geometry arms need a live
+ContainerPrimaryAttachSessionV1, a SimpleContainerOwnerV2, a native ContainerPrimaryGeometryOwnerV1, a
+HostHelperLeaseV1 and a Linux HostCapacityOwnerV1 with a journal refusal R; no pure or journal fixture builds
+them (H-24..H-27, H-32, H-36..H-39 behavioural cases stay NOT_AUTHORED). The pure classifier and the pane io
+`attach-no-session` refusal are driven as DATA.
+## Verification guidance and troubleshooting
+A structural failure names the rule; a changed error string is a contract change.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.common.contracts.orchestration.host_agent_pane_v4.HostAgentPaneOpV4
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentPaneIoCallV4,
+    host_agent_pane_io_port_v4, host_agent_release_charged_v4}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
+
+val RL_DIR = "src/lib/nogc_sync_mut/orchestration/"
+
+fn rl_body(source: text, name: text) -> text:
+    val start = source.index_of("fn " + name + "(")
+    if start < 0: return ""
+    val rest = source.substring(start + 3, source.byte_len())
+    val next = rest.index_of("\nfn ")
+    val next_pub = rest.index_of("\npub fn ")
+    var stop = rest.byte_len()
+    if next >= 0 and next < stop: stop = next
+    if next_pub >= 0 and next_pub < stop: stop = next_pub
+    rest.substring(0, stop)
+
+fn rl_count(source: text, token: text) -> i64:
+    source.split(token).len() - 1
+
+describe "PR3b part 2: production release port":
+    it "classifies a begin without a lease as charged forever before touching the journal":
+        # @req 14A F4/F6, P3-2
+        val store = HostHelperStoreV1(root: "/trusted/helper-store", journal: None)
+        val att = HostAgentAttachmentV4(attach_stage: "failed", begin_attempted: true)
+        expect(host_agent_release_charged_v4(att, store)).to_equal("linux-host-agent-attach-begin-without-lease")
+
+    it "orders the RV arm: geometry drain, classification, then U' or S d2":
+        # @req H-27, H-36, 13.4 (cancel and drain first), P3-2
+        val att = file_read_text(RL_DIR + "host_agent_attachment_v4.spl")
+        val port = rl_body(att, "host_agent_attachment_release_step_v4")
+        val geometry = port.index_of("att.geometry.is_some(): return host_agent_release_geometry_v4(call, context)")
+        val charged = port.index_of("val charged = host_agent_release_charged_v4(att, context.store)")
+        val cancel = port.index_of("if att.session.is_none(): return host_agent_release_cancel_v4(call, context)")
+        val cleanup = port.index_of("return host_agent_release_cleanup_v4(call, context)")
+        expect(geometry > 0 and charged > geometry and cancel > charged and cleanup > cancel).to_equal(true)
+        step("FL is classified read-only: no native call at failed")
+        val failed = port.index_of("if stage == HOST_AGENT_ATTACH_FAILED_V4:\n            return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait")
+        expect(failed > charged and failed < cancel).to_equal(true)
+
+    it "fails a rejected spawn carrier closed and never starts the attach effects through the release port":
+        # @req 13.4 F/B (cores bound in milestone_0026), 13.2 effects (part B: only the step-driver port runs them)
+        val att = file_read_text(RL_DIR + "host_agent_attachment_v4.spl")
+        expect(rl_body(att, "host_agent_release_charged_v4")).to_contain("linux-host-agent-attach-native-absence-unproven")
+        expect(rl_body(att, "host_agent_release_open_v4")).to_contain("host_agent_open_failed_v4(call, call.attachment, HOST_AGENT_ATTACH_OPEN_ABANDONED_V4,")
+        val release = rl_body(att, "host_agent_attachment_release_step_v4")
+        for effect in ["host_helper_prepare_v1", "host_helper_begin_v1", "host_primary_attach_open_core_v1"]:
+            expect(rl_count(release, effect)).to_equal(0)
+            expect(rl_count(rl_body(att, "host_agent_release_open_v4"), effect)).to_equal(0)
+
+    it "runs the open core's read-only half before helper begin, so a plan refusal holds only the receipt":
+        # @req milestone_0031 item 2: the entry guard, parent executing and the provider's plan reproduction need no lease
+        val att = file_read_text(RL_DIR + "host_agent_attachment_v4.spl")
+        val begin = rl_body(att, "host_agent_open_begin_v4")
+        val precheck = begin.index_of("host_primary_attach_open_precheck_v1(")
+        val refused = begin.index_of("if checked.error != \"\":\n        return host_agent_open_failed_v4(call, att, checked.error, false,")
+        val begun = begin.index_of("host_helper_begin_v1(")
+        expect(precheck > 0 and refused > precheck and begun > refused).to_equal(true)
+        step("the precheck and the open core share ONE reproduction body, so they cannot disagree")
+        val owner = file_read_text(RL_DIR + "host_primary_attach_owner_v1.spl")
+        expect(rl_count(owner, "simple_container_primary_attach_plan_v1(")).to_equal(1)
+        expect(rl_body(owner, "host_primary_attach_open_core_v1")).to_contain("primary_reproduced_v1(turn, input.parent, plan, policy, execution, runtime)")
+        expect(rl_body(owner, "host_primary_attach_open_precheck_v1")).to_contain("primary_reproduced_v1(turn, input.parent, plan, policy, execution, runtime)")
+        step("the precheck publishes nothing")
+        expect(rl_count(rl_body(owner, "host_primary_attach_open_precheck_v1"), "publish_v")).to_equal(0)
+        expect(rl_count(rl_body(owner, "primary_reproduced_v1"), "publish_v")).to_equal(0)
+
+    it "waits at d4 while a native step is pending and returns the session through the agent container":
+        # @req H-29, D8, I5
+        val att = file_read_text(RL_DIR + "host_agent_attachment_v4.spl")
+        val ret = rl_body(att, "host_agent_release_return_v4")
+        val wait = ret.index_of("if call.pending: return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait")
+        val native = ret.index_of("simple_container_primary_session_return_v3(call.container.unwrap(), att.session.unwrap())")
+        expect(wait > 0 and native > wait).to_equal(true)
+        step("RP expires on the monotonic clock, prepare-not-expired is the uncounted wait")
+        val expire = rl_body(att, "host_agent_release_expire_v4")
+        expect(expire).to_contain("context.monotonic_ms)")
+        expect(expire.index_of("if expired.error == \"prepare-not-expired\":") > 0).to_equal(true)
+
+describe "PR3b part 2: production pane io port":
+    it "refuses every op without a session":
+        # @req 13.1
+        val turn = host_agent_pane_io_port_v4(HostAgentPaneIoCallV4(attachment: HostAgentAttachmentV4(attach_stage: "adopted"),
+            op: HostAgentPaneOpV4.Read, now: 1))
+        expect(turn.result.error).to_equal("attach-no-session")
+
+    it "reads output only through container_primary_output_read_v1, with sticky eof":
+        # @req 14C
+        for name in ["host_agent_attachment_v4.spl", "host_linux_service_agent_v4.spl"]:
+            val source = file_read_text(RL_DIR + name)
+            expect(rl_count(source, "container_terminal_read_v2")).to_equal(0)
+        val port = rl_body(file_read_text(RL_DIR + "host_agent_attachment_v4.spl"), "host_agent_pane_io_port_v4")
+        val eof = port.index_of("if att.eof: return host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(eof: true))")
+        val read = port.index_of("val read = container_primary_output_read_v1(session)")
+        expect(eof > 0 and read > eof).to_equal(true)
+
+describe "PR3b part 2: V4 service wiring":
+    it "keeps the capacity owner and journal open while an attachment is live":
+        # @req 13.5
+        val cv4 = rl_body(file_read_text(RL_DIR + "host_linux_service_current_v4.spl"), "host_linux_service_close_v4")
+        val agent = cv4.index_of("host_linux_service_agent_close_v4(agent, owner.capacity, linux_service_helper_store_v4(owner),")
+        val live = cv4.index_of("attachment_live = host_agent_attachment_live_v4(agent.attachment)")
+        val cleanup = cv4.index_of("elif owner.journal_cleanup.is_some():")
+        val close = cv4.index_of("if not attachment_live and owner.capacity.is_some() and owner.journal_cleanup.is_none():")
+        expect(agent > 0 and live > agent and cleanup > live and close > cleanup).to_equal(true)
+
+    it "runs the C2 release in agent close before the wedged return":
+        # @req 13.5 C1..C7
+        val close = rl_body(file_read_text(RL_DIR + "host_linux_service_agent_v4.spl"), "host_linux_service_agent_close_v4")
+        val c2 = close.index_of("val released = host_agent_attachment_close_v4(state, port)")
+        val wedged = close.index_of("if state.stage == \"wedged\": return")
+        expect(c2 > 0 and wedged > c2).to_equal(true)
+
+    it "dispatches attach, detach and inspect, and routes them before the V2 validator":
+        # @req 13.2 routes
+        val cv4 = file_read_text(RL_DIR + "host_linux_service_current_v4.spl")
+        for action in ["host_agent_attach_v4", "host_agent_detach_v4", "host_agent_inspect_v4"]:
+            expect(cv4).to_contain("if action == \"" + action + "\": return ")
+        expect(rl_body(cv4, "host_linux_service_agent_attach_v4")).to_contain("val applied = host_agent_attach_apply_v4(agent, source, authority.unwrap(), service, admit)")
+        val v3 = file_read_text(RL_DIR + "host_service_domain_v3.spl")
+        val arm = v3.index_of("if request.action == \"host-agent-attach\" or request.action == \"host-agent-detach\"")
+        val v2 = v3.index_of("val invalid = host_service_request_error_v2(request)")
+        expect(arm > 0 and v2 > arm).to_equal(true)

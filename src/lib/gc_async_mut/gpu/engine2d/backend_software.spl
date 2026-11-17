@@ -14,7 +14,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity, ReadbackSource, readback_source_label}
 use std.gc_async_mut.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_software}
-use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend}
+use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend, blend_solid}
 use std.gpu.engine2d.backend_emu_math.{_emu_overlay_ch}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
@@ -583,7 +583,7 @@ impl RenderBackend for SoftwareBackend:
                     inside = w1 <= 0 and w2 <= 0 and w3 <= 0
                 if inside:
                     if has_alpha:
-                        self.sw_set_pixel_blend(px, py, color)
+                        self.sw_set_pixel_blend(px, py, color, true)
                     else:
                         self.sw_set_pixel(px, py, color)
                 px = px + 1
@@ -654,7 +654,7 @@ impl RenderBackend for SoftwareBackend:
                                 var sx = 0
                                 while sx < scale:
                                     if translucent:
-                                        self.sw_set_pixel_blend(run_x + sx, py, color)
+                                        self.sw_set_pixel_blend(run_x + sx, py, color, true)
                                     else:
                                         self.sw_set_pixel(run_x + sx, py, color)
                                     sx = sx + 1
@@ -946,7 +946,7 @@ impl RenderBackend for SoftwareBackend:
                     if slow_checked:
                         # cpu-lane-loop-ok: clipped/masked slow path only (slow_checked): per-pixel sw_set_pixel_blend is required because clip and mask tests are per-pixel predicates
                         while col < count:
-                            self.sw_set_pixel_blend(start_x + col, py, pixels[src_row_base + src_x + col])
+                            self.sw_set_pixel_blend(start_x + col, py, pixels[src_row_base + src_x + col], false)
                             col = col + 1
                     else:
                         val dst_off = py * self.w + start_x
@@ -1529,7 +1529,7 @@ impl SoftwareBackend:
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_blend_const_raw_span when SIMD spans are unavailable; this IS the bulk span primitive
         while i < safe_count:
-            self.buf[offset + i] = blend(color, self.buf[offset + i])
+            self.buf[offset + i] = blend_solid(color, self.buf[offset + i])
             i = i + 1
 
     me mark_dirty(tx: i32, ty: i32):
@@ -1898,7 +1898,9 @@ impl SoftwareBackend:
         self.buf[idx] = color
         self.mark_pixel_dirty(x, y)
 
-    me sw_set_pixel_blend(x: i32, y: i32, color: u32):
+    me sw_set_pixel_blend(x: i32, y: i32, color: u32, solid: bool):
+        # `solid`: a solid colour fill (Chrome's SkPMSrcOver rule,
+        # color.blend_solid); otherwise an image pixel (color.blend).
         if x < 0 or y < 0 or x >= self.w or y >= self.h:
             return
         if self.clip_enabled:
@@ -1908,7 +1910,7 @@ impl SoftwareBackend:
         if _sw_mask_blocks(self, x, y):
             return
         val idx = y * self.w + x
-        self.buf[idx] = blend(color, self.buf[idx])
+        self.buf[idx] = if solid: blend_solid(color, self.buf[idx]) else: blend(color, self.buf[idx])
         self.mark_pixel_dirty(x, y)
 
     me sw_hline(x: i32, y: i32, length: i32, color: u32):
@@ -1936,7 +1938,7 @@ impl SoftwareBackend:
         if mask_active:
             var xoff = 0
             while xoff < count:
-                self.sw_set_pixel_blend(clipped.0 + xoff, y, color)
+                self.sw_set_pixel_blend(clipped.0 + xoff, y, color, true)
                 xoff = xoff + 1
             return
         val off = y * self.w + clipped.0

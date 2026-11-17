@@ -1,8 +1,8 @@
 # Duplicate-check — token interner + progress/verbose logging
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
-use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, tokenize, token_to_string}
-use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
+use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, tokenize, tokenize_for_path, token_to_string}
+use compiler.tools.duplicate_check.similarity.{SimilarityFeatures}
 use compiler.tools.duplicate_check.debug.{debug_log, debug_log_progress}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens, set_cached_tokens_with_content, get_cached_content}
 use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
@@ -118,7 +118,7 @@ struct TokenWindowCandidate:
 
 struct SimilarityPrep:
     blocks: [DuplicateBlock]
-    features: [FeatureVec]
+    features: [SimilarityFeatures]
     low_signal_flags: [bool]
     file_count: i64
 
@@ -467,7 +467,7 @@ fn load_tokens_for_file(file_path: text, config: DuplicationConfig, cache_manage
         return cached
 
     val content = read_detector_source(file_path)
-    val tokens = tokenize(content, config)
+    val tokens = tokenize_for_path(file_path, content, config)
     set_cached_tokens_with_content(cache_manager, file_path, tokens, content)
     tokens
 
@@ -638,10 +638,18 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
 
     var blocks = []
     val candidates = collect_token_window_candidates(tokens, config, interner)
+    var last_start_line = -1
     for candidate in candidates:
         val hash_key = "{candidate.hash_value}"
         if filter_enabled and not repeated_hashes.has(hash_key):
             continue
+        # Unfiltered (cosine) extraction: one window per start line. Emitting a
+        # block (with its own snippet copy) for every token offset made memory
+        # O(tokens * window) -- 6.2 GB peak on src/compiler/90.tools.
+        if not filter_enabled:
+            if candidate.line_start == last_start_line:
+                continue
+            last_start_line = candidate.line_start
         val snippet_start = tokens[candidate.index].start_offset
         val snippet_end = tokens[candidate.end_index - 1].end_offset
         val snippet = if snippet_start >= 0 and snippet_end >= snippet_start and snippet_end <= source.len():

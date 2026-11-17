@@ -1,0 +1,49 @@
+"""Editor trace view ref-file path (CU-011 gap): the ref-file renderer shows the
+canonical reference page for the exact snapshot through the same rows as refs,
+and never renders a page captured against another snapshot."""
+# @req REQ-CARET-TRC-001 REQ-CARET-TRC-002 REQ-CARET-CU-011
+use std.spec.*
+use std.common.traceability.model.*
+use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1, query_trace_references_v1}
+use app.traceability.ide_view_render.{refs_view_lines, file_refs_view_lines}
+
+fn graph(snap: text) -> TraceGraph:
+    val subject = SnapshotSubject(repository_id: "simple", snapshot_id: snap, kind: "git_tree", revision_id: "commit:r", tree_id: "tree:r", object_format: "sha256")
+    val nodes = [TraceNode(id: "feature:f", kind: TraceNodeKind.Feature, title: "F"),
+        TraceNode(id: "req:R-1", kind: TraceNodeKind.Requirement, title: "R one"),
+        TraceNode(id: "req:R-2", kind: TraceNodeKind.Requirement, title: "R two")]
+    val edges = [TraceEdge(id: "edge:e-1", from_id: "feature:f", relation: TraceRelation.Specifies, to_id: "req:R-1"),
+        TraceEdge(id: "edge:e-2", from_id: "req:R-1", relation: TraceRelation.DecomposesTo, to_id: "req:R-2")]
+    TraceGraph(subject: subject, input_manifest_id: "inputs:r", nodes: nodes, test_definitions: [], claims: [],
+        edges: edges, edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation:r", complete: false)
+
+fn rq(snap: text) -> TraceReferenceQueryV1:
+    TraceReferenceQueryV1(snapshot_id: snap, kind: "requirements", selected_id: "req:R-1", limit: 10)
+
+fn has(lines: [text], needle: text) -> bool:
+    for l in lines:
+        if l.contains(needle): return true
+    false
+
+describe "editor trace view ref-file parity (CU-011)":
+    it "ref-file lines equal refs lines for the same canonical page and snapshot":
+        step("canonical page for snapshot:r")
+        val page = query_trace_references_v1(graph("snapshot:r"), rq("snapshot:r"))
+        val lines = file_refs_view_lines(page, [], "snapshot:r")
+        expect(lines).to_equal(refs_view_lines(graph("snapshot:r"), rq("snapshot:r"), [], "snapshot:r"))
+        expect(lines[0]).to_equal("snapshot: snapshot:r")
+        for r in page.unwrap().references:
+            expect(has(lines, r.other_id)).to_equal(true)
+
+    it "a ref-file page from another snapshot renders stale and no rows":
+        step("page captured on snapshot:old, view on snapshot:r")
+        val page = query_trace_references_v1(graph("snapshot:old"), rq("snapshot:old"))
+        val lines = file_refs_view_lines(page, [], "snapshot:r")
+        expect(lines[0].starts_with("stale:")).to_equal(true)
+        expect(has(lines, "req:R-2")).to_equal(false)
+
+    it "a failed ref-file query reports unavailable and no rows":
+        step("service error")
+        val failed: Result<TraceReferencePageV1, text> = Err("TRACE-FILE-NOT-IN-SNAPSHOT: x.spl")
+        val lines = file_refs_view_lines(failed, [], "snapshot:r")
+        expect(lines).to_equal(["snapshot: snapshot:r", "unavailable: TRACE-FILE-NOT-IN-SNAPSHOT: x.spl"])

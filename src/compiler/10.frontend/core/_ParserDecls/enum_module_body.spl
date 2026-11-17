@@ -42,6 +42,9 @@ use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_
 use compiler.core.types.{int_to_str, type_tag_name, flat_span_new}
 use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register, named_generic_instance_register}
 use compiler.core.types.{newunit_register, unit_decl_register_origin, unit_decl_find, unit_decl_underlying_tag_at}
+use compiler.core.types.{refinement_type_register}
+use compiler.core.unit_constraint.{unit_constraint_register, unit_constraint_eval, unit_range_predicate}
+use compiler.core.tokens.{TOK_KW_WHERE, TOK_KW_IN, TOK_DOTDOT, TOK_DOTDOT_EQ, TOK_NEWLINE, TOK_EOF, TOK_DEDENT, TOK_INT_LIT, TOK_FLOAT_LIT}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_has_errors}
@@ -356,6 +359,11 @@ fn unit_decl_inner_is_numeric(inner_type: i64) -> bool:
 
 # Struct decl id produced by the most recent parser_lower_unit_decl call.
 var PARSER_LAST_UNIT_DECL_ID_V1: i64 = -1
+
+# Set by the `pub unit` arm of parse_module_decl_with_visibility so the module
+# dispatcher can bind the visibility observation row (the arm itself returns -1
+# because the unit lowering already added the decl to the module).
+var PARSER_VISIBLE_UNIT_DECL_ID_V1: i64 = -1
 
 # One lowering for `unit`, `newunit`, and numeric `newtype`: a single-field
 # struct (`value`) plus a canonical UnitDecl row. `legacy_origin` is "" for the
@@ -840,6 +848,11 @@ fn record_top_level_visibility_intent_v1(source_start: i64, explicit_pri: bool, 
 # the generic module_add_decl must never infer which declaration owns a row.
 fn module_add_source_decl_v1(source_id: i64, observation_row: i64):
     module_add_decl(source_id)
+    module_bind_source_decl_row_v1(source_id, observation_row)
+
+# Binds an observation row to a decl that is ALREADY in the module (the unit
+# lowering adds its own struct decl, so adding it again would duplicate it).
+fn module_bind_source_decl_row_v1(source_id: i64, observation_row: i64):
     if observation_row < 0: return
     if observation_row >= TOP_LEVEL_VISIBILITY_DECL_IDS_V1.len() or
             source_id < 0 or source_id >= decl_count():
@@ -973,15 +986,17 @@ fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
         val unit_decl_id = parse_unit_decl_after_keyword_v1()
         if unit_decl_id >= 0:
             decl_set_visibility_text(unit_decl_id, visibility)
+            PARSER_VISIBLE_UNIT_DECL_ID_V1 = unit_decl_id
         return -1
     parser_error("expected declaration after visibility modifier")
     -1
 
 # unit ByteCount: u64 as Bc -- canonical nominal unit declaration. Called at the
 # `unit` soft keyword. `as suffix` is optional; a suffix-less unit is
-# full-name-only in the registry. Returns the lowered struct decl id, or -1 for
-# a derived unit.
+# full-name-only in the registry. Returns the lowered struct decl id (also
+# for a derived unit), or -1 when lowering failed.
 fn parse_unit_decl_after_keyword_v1() -> i64:
+    PARSER_LAST_UNIT_DECL_ID_V1 = -1
     parser_advance()
     val u_name = par_text_get()
     parser_expect(6)
@@ -1003,7 +1018,7 @@ fn parse_unit_decl_after_keyword_v1() -> i64:
         val d_rhs = par_text_get()
         parser_expect(6)
         parser_lower_derived_unit_decl(u_name, d_lhs, d_lhs + d_op + d_rhs)
-        return -1
+        return PARSER_LAST_UNIT_DECL_ID_V1
     parser_expect(161)
     val u_inner = parser_parse_type()
     var u_suffix = ""
@@ -1011,8 +1026,85 @@ fn parse_unit_decl_after_keyword_v1() -> i64:
         parser_advance()
         u_suffix = par_text_get()
         parser_expect(6)
+    # Constrained unit (owner decision 2026-11-17, keyword `unit` only):
+    #   unit Port: u16 where 1 <= self <= 65535   -- any predicate on `self`
+    #   unit Port: u16 in 1..=65535               -- sugar for the same `where`
+    # Both register ONE predicate (unit_constraint.spl) through the refinement
+    # registry, so there is a single constraint system.
+    var u_pred = ""
+    var u_min = ""
+    var u_max = ""
+    if par_kind_get() == TOK_KW_WHERE:
+        u_pred = parse_unit_where_predicate_text()
+    elif par_kind_get() == TOK_KW_IN:
+        parser_advance()
+        u_min = parse_unit_range_bound_text()
+        var inclusive = false
+        if par_kind_get() == TOK_DOTDOT_EQ:
+            inclusive = true
+            parser_advance()
+        elif par_kind_get() == TOK_DOTDOT:
+            parser_advance()
+        else:
+            parser_error("expected `..` or `..=` in `unit " + u_name + ": T in lo..hi`")
+        val u_hi = parse_unit_range_bound_text()
+        u_pred = unit_range_predicate(u_min, u_hi, inclusive)
+        # ConstraintError bounds are inclusive texts: `lo..hi` on an integer
+        # bound reports hi-1 as max_text; the predicate itself keeps `<`.
+        u_max = if inclusive or u_hi == "": u_hi else: unit_exclusive_max_text(u_hi)
+        if u_min == "" and u_hi == "":
+            parser_error("`unit " + u_name + "` range needs at least one bound")
     parser_lower_unit_decl(u_name, u_inner, u_suffix, "")
+    if u_pred != "":
+        if unit_constraint_eval(u_pred, 0.0) < 0:
+            parser_error("unsupported constraint predicate for unit `" + u_name + "`: `" + u_pred + "` (numbers, self, + - * / %, comparisons, and/or/not)")
+        else:
+            val u_ref = refinement_type_register(u_inner, u_pred)
+            unit_constraint_register(u_name, u_pred, u_ref, u_min, u_max)
     PARSER_LAST_UNIT_DECL_ID_V1
+
+# `where <predicate>` on a unit declaration: the predicate is the raw source
+# text from after `where` to the end of the line (comment stripped), so any
+# expression shape reaches the evaluator verbatim. Tokens are then skipped to
+# the line end.
+fn parse_unit_where_predicate_text() -> text:
+    val start = lex_token_end_get()
+    var end = start
+    val n = lex_source_len()
+    while end < n:
+        val ch = lex_source_char_at(end)
+        if ch == "\n" or ch == "\r" or ch == "#":
+            break
+        end = end + 1
+    val pred = lex_source_slice(start, end).trim()
+    parser_advance()
+    while par_kind_get() != TOK_NEWLINE and par_kind_get() != TOK_EOF and par_kind_get() != TOK_DEDENT:
+        parser_advance()
+    pred
+
+# One bound of `in lo..hi`: optional `-`, then an int/float literal; "" when
+# the side is open (`..=hi`, `lo..`).
+fn parse_unit_range_bound_text() -> text:
+    var sign = ""
+    if par_kind_get() == TOK_MINUS:
+        sign = "-"
+        parser_advance()
+    if par_kind_get() == TOK_INT_LIT or par_kind_get() == TOK_FLOAT_LIT:
+        val t = par_text_get()
+        parser_advance()
+        return sign + t
+    if sign != "":
+        parser_error("expected a numeric bound after `-` in unit range")
+    ""
+
+fn unit_exclusive_max_text(hi: text) -> text:
+    var i = 0
+    while i < hi.len():
+        val c = hi[i:i+1]
+        if c < "0" or c > "9":
+            return hi + " - 1"
+        i = i + 1
+    int_to_str(int(hi) - 1)
 
 fn parser_decorator_arg_text(raw: text) -> text:
     if raw.len() >= 2:
@@ -1516,7 +1608,11 @@ pub fn parse_module_body():
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
             lock_level_reject_non_function(par_kind_get())
+            PARSER_VISIBLE_UNIT_DECL_ID_V1 = -1
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
+            if visible_decl < 0 and PARSER_VISIBLE_UNIT_DECL_ID_V1 >= 0:
+                module_bind_source_decl_row_v1(PARSER_VISIBLE_UNIT_DECL_ID_V1, visibility_observation_row)
+                PARSER_VISIBLE_UNIT_DECL_ID_V1 = -1
             if visible_decl >= 0:
                 decl_set_asm_placement(visible_decl, parser_pending_asm_placement())
                 parser_apply_pending_kernel_attrs(visible_decl)
@@ -2318,6 +2414,10 @@ pub fn parse_module_body():
             val suffix_name = par_text_get()
             parser_expect(6)
             parser_lower_unit_decl(nt_name, inner_type, suffix_name, "newunit")
+            # The constraint syntax belongs to `unit` only (owner decision
+            # 2026-11-17): the deprecated spelling never grows new syntax.
+            if par_kind_get() == TOK_KW_WHERE or par_kind_get() == TOK_KW_IN:
+                parser_error("`newunit` does not accept a constraint; declare `unit " + nt_name + ": " + type_tag_name(inner_type) + " as " + suffix_name + " " + par_text_get() + " ...` instead")
         elif par_kind_get() == 198:
             # newtype Meters = i64 -- wrapper struct with single 'value' field
             # For numeric inner types, auto-derives __add__, __sub__, __mul__, __div__, __eq__, __lt__, __gt__

@@ -9,7 +9,9 @@
 # :nth-child / :nth-last-child / :nth-of-type / :nth-last-of-type with
 # odd / even / An+B / -n+B, :empty, :first-child / :last-child /
 # :only-child, compounds, an unclosed attribute selector and an unknown
-# pseudo-class.
+# pseudo-class, plus rule admission (unknown `:-webkit-*` names, pseudo-classes
+# after a pseudo-element, pseudo-elements inside `:not()`/`:has()`, `of S` on
+# of-type).
 #
 # Oracle: Chrome 159.0.8154.6 headless shell, 900x2000. Page:
 # `body{margin:0} section,div,p,span,b,i,h1,ul,li,a,em{display:block;
@@ -148,3 +150,239 @@ describe "Selector matching":
 
     it "class desc miss":
         expect(_w(".o b", "<section><b id=\"t\"></b></section>", "t")).to_equal("10")
+
+    # Round-4 rows. Chrome 159.0.8154.6 width per row, re-measured 2026-11-17
+    # with the oracle page above (one iframe per row, --dump-dom).
+    # Chrome 159: 77.
+    it ":is list then class":
+        expect(_w(":is(p, div).k", "<div id=\"t\" class=\"k\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "first-of-type":
+        expect(_w("b:first-of-type", "<section><i></i><b id=\"t\"></b><b></b></section>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "last-of-type":
+        expect(_w("b:last-of-type", "<section><b></b><b id=\"t\"></b><i></i></section>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "only-of-type":
+        expect(_w("b:only-of-type", "<section><i></i><b id=\"t\"></b><i></i></section>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "compound tag class class id":
+        expect(_w("div.a.b#t", "<div id=\"t\" class=\"b a\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10.
+    it "invalid selector invalidates the whole list":
+        # Selectors 4 section 3.1: one invalid selector drops the rule.
+        expect(_w("div, p:frobnicate", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "known but unsatisfied pseudo keeps the list":
+        # :hover is valid and merely false in a static render.
+        expect(_w("div, p:hover", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10.
+    it "first-of-type miss":
+        expect(_w("b:first-of-type", "<section><b></b><b id=\"t\"></b></section>", "t")).to_equal("10")
+
+    # Chrome 159: 10.
+    it "last-of-type miss":
+        expect(_w("b:last-of-type", "<section><b id=\"t\"></b><b></b><i></i></section>", "t")).to_equal("10")
+
+    # Chrome 159: 10.
+    it "only-of-type miss":
+        expect(_w("b:only-of-type", "<section><b id=\"t\"></b><i></i><b></b></section>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "nth-of-type skips other tags":
+        expect(_w("b:nth-of-type(2)", "<section><b></b><i></i><b id=\"t\"></b></section>", "t")).to_equal("77")
+
+    # Chrome 159: 10.
+    it "nth-of-type miss":
+        expect(_w("b:nth-of-type(2)", "<section><b id=\"t\"></b><i></i><b></b></section>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "not first-of-type":
+        expect(_w("b:not(:first-of-type)", "<section><b></b><i></i><b id=\"t\"></b></section>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "class id compound then descendant":
+        expect(_w(".a#b div", "<div class=\"a\" id=\"b\"><div id=\"t\"></div></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10.
+    it "class id compound then descendant miss":
+        expect(_w(".a#b div", "<div class=\"a\"><div id=\"t\"></div></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "id class compound then child":
+        expect(_w("#b.a > div", "<div class=\"a\" id=\"b\"><div id=\"t\"></div></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "class then is list":
+        expect(_w(".k:is(p, div)", "<div id=\"t\" class=\"k\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "tag pseudo class compound":
+        expect(_w("div:first-of-type.k", "<section><div id=\"t\" class=\"k\"></div></section>", "t")).to_equal("77")
+
+    # Chrome 159: 10.
+    it "invalid selector first in the list":
+        expect(_w("p:frobnicate, div", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77. :is() is forgiving.
+    it "unknown pseudo inside is keeps the list":
+        expect(_w("div, :is(p:frobnicate)", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77. :where() is forgiving.
+    it "unknown pseudo inside where keeps the list":
+        expect(_w("div, :where(p:frobnicate)", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10. :not() is not forgiving.
+    it "unknown pseudo inside not drops the list":
+        expect(_w("div, :not(p:frobnicate)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "unknown pseudo inside is inside not keeps the list":
+        expect(_w("div, :not(:is(p:frobnicate))", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10.
+    it "unknown pseudo inside has drops the list":
+        expect(_w("div, p:has(:frobnicate)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 10.
+    it "unknown pseudo in nth-child of S drops the list":
+        expect(_w("div, p:nth-child(1 of :frobnicate)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 10.
+    it "unknown pseudo-element drops the list":
+        expect(_w("div, p::frobnicate", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "known pseudo-element keeps the list":
+        expect(_w("div, p::selection", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77. Chrome accepts any ::-webkit- pseudo-element.
+    it "webkit pseudo-element keeps the list":
+        expect(_w("div, p::-webkit-scrollbar", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10. :left is an @page selector, not a style-rule one.
+    it "page pseudo drops the list":
+        expect(_w("div, p:left", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "webkit pseudo-class keeps the list":
+        expect(_w("div, p:-webkit-autofill", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77. Pseudo-class names are ASCII case-insensitive.
+    it "upper-case pseudo keeps the list":
+        expect(_w("div, p:HOVER", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Rows below: Chrome for Testing 159.0.8154.6, same page, widths pinned
+    # 2026-11-17 with an iframe --dump-dom page; acceptance cross-checked
+    # with a `<style>` probe (`st.sheet.cssRules.length` after `SEL{}`).
+
+    # Chrome 159: 10. Only seven `:-webkit-*` pseudo-classes are known.
+    it "unknown webkit pseudo-class drops the list":
+        expect(_w("div, p:-webkit-frob", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "webkit any-link keeps the list":
+        expect(_w("div, p:-webkit-any-link", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10. No pseudo-class may follow ::before.
+    it "pseudo-class after before drops the list":
+        expect(_w("div, p::before:hover", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 10. Legacy single-colon :before is a pseudo-element too.
+    it "pseudo-class after legacy before drops the list":
+        expect(_w("div, p:before:hover", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 10. ::selection allows only :window-inactive.
+    it "hover after selection drops the list":
+        expect(_w("div, p::selection:hover", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "window-inactive after selection keeps the list":
+        expect(_w("div, p::selection:window-inactive", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10. Scrollbar pseudo-elements take no :focus.
+    it "focus after webkit scrollbar drops the list":
+        expect(_w("div, p::-webkit-scrollbar:focus", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "hover after webkit scrollbar keeps the list":
+        expect(_w("div, p::-webkit-scrollbar:hover", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10. :not() after a pseudo-element obeys the same limits.
+    it "class in not after webkit scrollbar drops the list":
+        expect(_w("div, p::-webkit-scrollbar:not(.a)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "hover after part keeps the list":
+        expect(_w("div, ::part(x):hover", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "not hover after part keeps the list":
+        expect(_w("div, ::part(x):not(:hover)", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10. Tree-structural pseudo-classes may not follow ::part().
+    it "first-child after part drops the list":
+        expect(_w("div, ::part(x):first-child", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "focus after file-selector-button keeps the list":
+        expect(_w("div, p::file-selector-button:focus", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77. :is() is accepted after any pseudo-element.
+    it "is after before keeps the list":
+        expect(_w("div, p::before:is(.a)", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10. Nothing but pseudo-classes may follow a pseudo-element.
+    it "class after before drops the list":
+        expect(_w("div, p::before.a", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77. Scrollbar state pseudo-classes are valid on their own.
+    it "scrollbar state pseudo-class keeps the list":
+        expect(_w("div, p:horizontal", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10.
+    it "pseudo-element inside not drops the list":
+        expect(_w("div, :not(::before)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 10.
+    it "legacy pseudo-element inside not drops the list":
+        expect(_w("div, :not(:before)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 10.
+    it "pseudo-element inside has drops the list":
+        expect(_w("div, :has(::before)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "class inside not keeps the rule":
+        expect(_w("div:not(.a)", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 10. `of S` is for :nth-child / :nth-last-child only.
+    it "nth-of-type of S drops the list":
+        expect(_w("div, b:nth-of-type(1 of p)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 10.
+    it "nth-last-of-type of S drops the list":
+        expect(_w("div, b:nth-last-of-type(1 of p)", "<div id=\"t\"></div>", "t")).to_equal("10")
+
+    # Chrome 159: 77.
+    it "nth-child of S keeps the list":
+        expect(_w("div, b:nth-child(1 of p)", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77. :is() is forgiving, so its unknown name is just dropped.
+    it "unknown webkit pseudo-class inside is keeps the list":
+        expect(_w("div, :is(p:-webkit-frob)", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77. Non-structural pseudo-classes may follow ::part().
+    it "state after part keeps the list":
+        expect(_w("div, ::part(x):state(x)", "<div id=\"t\"></div>", "t")).to_equal("77")
+
+    # Chrome 159: 77.
+    it "window-inactive after webkit scrollbar thumb keeps the list":
+        expect(_w("div, p::-webkit-scrollbar-thumb:window-inactive", "<div id=\"t\"></div>", "t")).to_equal("77")

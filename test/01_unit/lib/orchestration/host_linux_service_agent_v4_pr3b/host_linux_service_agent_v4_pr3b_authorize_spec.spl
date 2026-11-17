@@ -1,0 +1,203 @@
+"""
+## Purpose and audience
+Pins the controller-signed attach and detach of milestone_0021 PR3b (DESIGN 13.2, 14B): both are verified by
+the SAME gates as the PR3a cancel through `host_linux_service_agent_action_authorize_v4(kind, ...)` (the cancel
+authorize is now a wrapper over it). The attach payload digest covers the operation id, the association, the
+primary plan, the signed helper request and the controller-signed pane binding, so swapping any of them after
+signing is refused. Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+DATA over the pure authorization core with real ed25519 signatures from deterministic seeds (issuer seed 1,
+approver seed 65). The payload digest is recomputed by the caller from the packet's OWN decoded contents
+(`host_agent_attach_request_parts_v4`); here it is recomputed from stand-in digests, which is what the core
+consumes. The live glue (archive + route) is part 2.
+## Verification guidance and troubleshooting
+Each refusal names its exact error. A refusal case that reports Ok means a forged or swapped packet would open
+a primary attach on the agent's container.
+"""
+use std.spec.{step}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_authority_snapshot_create_v2}
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_action_operation_v4,
+    host_linux_service_agent_action_authorize_v4, host_agent_attach_payload_digest_v4, host_agent_detach_payload_digest_v4,
+    host_agent_action_tag_v4, HostAgentDetachRequestV4, host_agent_detach_request_encode_v4,
+    host_agent_detach_request_decode_v4}
+
+fn a4_seed(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn a4_bytes(message: text) -> [u8]:
+    var out: [u8] = []
+    for i in 0..message.len(): out.push(message.byte_at(i) as u8)
+    out
+
+fn a4_key(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1, public_key: public_key,
+        principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: ["host_agent_attach_v4", "host_agent_detach_v4", "host_agent_cancel_v4"],
+        maximum_memory_bytes: 2048, maximum_duration_ms: 2000, policy_revision: 4, revocation_epoch: 2,
+        expires_at: 300, revoked: false)
+
+fn a4_execute(id: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: id, payload_digest: "b".repeat(64), principal: "user_1", project: "project_1",
+        host_id: "worker_1", operation: "host_execute_associated_v3", environment_digest: "a".repeat(64),
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3, memory_bytes: 512, duration_ms: 500)
+
+fn a4_context(clock: i64, session: i64) -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: clock, monotonic_ms: 0, policy_revision: 4, revocation_epoch: 2,
+        session_generation: session)
+
+fn a4_association(tag: text) -> text:
+    sha256_text("association-" + tag)
+
+# The attach payload digest over stand-in plan/helper/binding digests (the packet decoder computes the real ones).
+fn a4_attach_payload(operation_id: text, association: text, helper: text) -> text:
+    host_agent_attach_payload_digest_v4(operation_id, association, sha256_text("plan-1"), sha256_text(helper),
+        sha256_text("binding-1"), sha256_text("execute-1"), sha256_text("stream-1"))
+
+struct A4Signed:
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+fn a4_sign(kind: text, execute: OperationEnvelopeV2, payload: text, issuer_seed: i64, issuer_id: text) -> A4Signed:
+    val operation = host_agent_action_operation_v4(kind, execute, payload, a4_context(100, 3)).unwrap()
+    val grant = ExecutionGrantV2(id: "grant_" + kind, principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: [kind], environment_digest: "a".repeat(64), policy_revision: 4, revocation_epoch: 2,
+        expires_at: 200, maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: issuer_id, key_revision: 1, signature: [])
+    signed.signature = pure_ed25519_sign_from_seed_v1(a4_seed(issuer_seed), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = DistributedSignedApprovalV2(approver_id: "approver_1", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(), request_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()),
+        policy_revision: 4, session_generation: 3, expires_at: 190, signature: [])
+    approval.signature = pure_ed25519_sign_from_seed_v1(a4_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    A4Signed(operation: operation, signed: signed, approval: approval)
+
+var A4_SNAPSHOT: [DistributedAuthoritySnapshotV2] = []
+
+fn a4_snapshot() -> DistributedAuthoritySnapshotV2:
+    if A4_SNAPSHOT.len() == 0:
+        val issuer = pure_ed25519_sign_from_seed_v1(a4_seed(1), a4_bytes("k")).public_key
+        val approver = pure_ed25519_sign_from_seed_v1(a4_seed(65), a4_bytes("k")).public_key
+        A4_SNAPSHOT = [distributed_authority_snapshot_create_v2([a4_key("issuer_1", "grant-issuer", issuer),
+            a4_key("approver_1", "human-approver", approver)], 1, 4, 2).unwrap()]
+    A4_SNAPSHOT[0]
+
+# The held run is `held` under association `a`; `payload` is what the verifier recomputes from the packet.
+fn a4_error(kind: text, packet: A4Signed, request_operation_id: text, payload: text, execute: OperationEnvelopeV2,
+        held: text) -> text:
+    val a = a4_association("a")
+    match host_linux_service_agent_action_authorize_v4(kind, a4_snapshot(), "issuer_1", request_operation_id, a,
+            packet.operation, packet.signed, packet.approval, payload, execute, a, held, a, a4_context(100, 3)):
+        case Ok(grant): ""
+        case Err(reason): reason
+
+describe "V4 agent PR3b: the controller-signed host-agent-attach":
+    it "accepts a correctly signed attach bound to the held run, its plan, helper request and pane binding":
+        # @req H-01 (positive control), 14B
+        val execute = a4_execute("operation_1")
+        val payload = a4_attach_payload("operation_1", a4_association("a"), "helper-1")
+        val packet = a4_sign("host_agent_attach_v4", execute, payload, 1, "issuer_1")
+        expect(a4_error("host_agent_attach_v4", packet, "operation_1", payload, execute, "operation_1")).to_equal("")
+        step("the attach is its own operation kind and id, derived from the archived execute")
+        expect(packet.operation.operation).to_equal("host_agent_attach_v4")
+        expect(packet.operation.id).to_equal("attach-operation_1")
+
+    it "refuses an unsigned attach":
+        # @req H-01
+        val execute = a4_execute("operation_1")
+        val payload = a4_attach_payload("operation_1", a4_association("a"), "helper-1")
+        var packet = a4_sign("host_agent_attach_v4", execute, payload, 1, "issuer_1")
+        packet.signed.signature = []
+        packet.approval.signature = []
+        expect(a4_error("host_agent_attach_v4", packet, "operation_1", payload, execute, "operation_1")).to_equal("SIGNATURE_INVALID")
+
+    it "refuses a foreign issuer, by id before any signature work and by key":
+        # @req H-02
+        val execute = a4_execute("operation_1")
+        val payload = a4_attach_payload("operation_1", a4_association("a"), "helper-1")
+        val foreign = a4_sign("host_agent_attach_v4", execute, payload, 1, "issuer_2")
+        expect(a4_error("host_agent_attach_v4", foreign, "operation_1", payload, execute, "operation_1")).to_equal("linux-host-service-controller-mismatch")
+        val forged = a4_sign("host_agent_attach_v4", execute, payload, 7, "issuer_1")
+        expect(a4_error("host_agent_attach_v4", forged, "operation_1", payload, execute, "operation_1")).to_equal("ISSUER_SIGNATURE_INVALID")
+
+    it "refuses an attach for another operation id or another incarnation's association":
+        # @req H-03
+        val execute_b = a4_execute("operation_2")
+        val payload_b = a4_attach_payload("operation_2", a4_association("a"), "helper-1")
+        val for_b = a4_sign("host_agent_attach_v4", execute_b, payload_b, 1, "issuer_1")
+        expect(a4_error("host_agent_attach_v4", for_b, "operation_2", payload_b, execute_b, "operation_1")).to_equal("linux-host-agent-incarnation-consumed")
+        step("the association gate carries the attach tag")
+        val execute = a4_execute("operation_1")
+        val payload = a4_attach_payload("operation_1", a4_association("a"), "helper-1")
+        val packet = a4_sign("host_agent_attach_v4", execute, payload, 1, "issuer_1")
+        val b = a4_association("b")
+        val refused = host_linux_service_agent_action_authorize_v4("host_agent_attach_v4", a4_snapshot(), "issuer_1",
+            "operation_1", b, packet.operation, packet.signed, packet.approval, payload, execute, a4_association("a"),
+            "operation_1", a4_association("a"), a4_context(100, 3))
+        expect(refused.unwrap_err()).to_equal("linux-host-agent-attach-association")
+
+    it "refuses a helper request, plan or pane binding swapped after signing":
+        # @req H-04, 14B (paneBindingDigest is covered)
+        val execute = a4_execute("operation_1")
+        val a = a4_association("a")
+        val signed_payload = a4_attach_payload("operation_1", a, "helper-1")
+        val packet = a4_sign("host_agent_attach_v4", execute, signed_payload, 1, "issuer_1")
+        step("the verifier recomputes the payload from the packet's own (swapped) helper request")
+        val swapped_helper = a4_attach_payload("operation_1", a, "helper-2")
+        expect(a4_error("host_agent_attach_v4", packet, "operation_1", swapped_helper, execute, "operation_1")).to_equal("linux-host-agent-attach-operation-mismatch")
+        step("a swapped plan or pane binding changes the payload the same way")
+        val swapped_plan = host_agent_attach_payload_digest_v4("operation_1", a, sha256_text("plan-2"), sha256_text("helper-1"),
+            sha256_text("binding-1"), sha256_text("execute-1"), sha256_text("stream-1"))
+        expect(a4_error("host_agent_attach_v4", packet, "operation_1", swapped_plan, execute, "operation_1")).to_equal("linux-host-agent-attach-operation-mismatch")
+        val swapped_binding = host_agent_attach_payload_digest_v4("operation_1", a, sha256_text("plan-1"), sha256_text("helper-1"),
+            sha256_text("binding-2"), sha256_text("execute-1"), sha256_text("stream-1"))
+        expect(a4_error("host_agent_attach_v4", packet, "operation_1", swapped_binding, execute, "operation_1")).to_equal("linux-host-agent-attach-operation-mismatch")
+        step("a swapped helper execute grant or stream policy changes the payload the same way (part B)")
+        val swapped_execute = host_agent_attach_payload_digest_v4("operation_1", a, sha256_text("plan-1"), sha256_text("helper-1"),
+            sha256_text("binding-1"), sha256_text("execute-2"), sha256_text("stream-1"))
+        expect(a4_error("host_agent_attach_v4", packet, "operation_1", swapped_execute, execute, "operation_1")).to_equal("linux-host-agent-attach-operation-mismatch")
+        val swapped_stream = host_agent_attach_payload_digest_v4("operation_1", a, sha256_text("plan-1"), sha256_text("helper-1"),
+            sha256_text("binding-1"), sha256_text("execute-1"), sha256_text("stream-2"))
+        expect(a4_error("host_agent_attach_v4", packet, "operation_1", swapped_stream, execute, "operation_1")).to_equal("linux-host-agent-attach-operation-mismatch")
+
+    it "refuses a packet signed for one action kind presented as another":
+        # @req H-04 (cross-kind), 13.2
+        val execute = a4_execute("operation_1")
+        val a = a4_association("a")
+        val detach_payload = host_agent_detach_payload_digest_v4("operation_1", a, sha256_text("attach-packet"))
+        val detach = a4_sign("host_agent_detach_v4", execute, detach_payload, 1, "issuer_1")
+        expect(a4_error("host_agent_attach_v4", detach, "operation_1", detach_payload, execute, "operation_1")).to_equal("linux-host-agent-attach-operation-mismatch")
+        expect(a4_error("host_agent_detach_v4", detach, "operation_1", detach_payload, execute, "operation_1")).to_equal("")
+        step("an unknown kind is refused before any gate")
+        expect(host_agent_action_tag_v4("host_agent_destroy_v4").unwrap_err()).to_equal("linux-host-agent-action-kind")
+
+describe "V4 agent PR3b: the controller-signed host-agent-detach":
+    it "binds the detach to the attachment it releases":
+        # @req H-03 (detach), 13.2 (detach digest names the attach digest)
+        val execute = a4_execute("operation_1")
+        val a = a4_association("a")
+        val payload = host_agent_detach_payload_digest_v4("operation_1", a, sha256_text("attach-packet"))
+        val packet = a4_sign("host_agent_detach_v4", execute, payload, 1, "issuer_1")
+        expect(a4_error("host_agent_detach_v4", packet, "operation_1", payload, execute, "operation_1")).to_equal("")
+        step("the held agent's attach digest differs: the recomputed payload does not match the signed one")
+        val other = host_agent_detach_payload_digest_v4("operation_1", a, sha256_text("another-attach-packet"))
+        expect(a4_error("host_agent_detach_v4", packet, "operation_1", other, execute, "operation_1")).to_equal("linux-host-agent-detach-operation-mismatch")
+        step("the wire round trips canonically")
+        val request = HostAgentDetachRequestV4(operation_id: "operation_1", association_digest: a,
+            attach_digest: sha256_text("attach-packet"), operation: packet.operation, signed: packet.signed, approval: packet.approval)
+        val wire = host_agent_detach_request_encode_v4(request).unwrap()
+        expect(host_agent_detach_request_encode_v4(host_agent_detach_request_decode_v4(wire).unwrap()).unwrap()).to_equal(wire)
+        expect(host_agent_detach_request_decode_v4(wire + " ").is_err()).to_equal(true)

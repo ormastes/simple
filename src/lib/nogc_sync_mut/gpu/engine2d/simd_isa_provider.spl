@@ -36,7 +36,6 @@ use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{
     engine2d_simd_blend_const_span_u32,
 }
 use common.gpu.engine2d.scalar_oracle.{
-    oracle_modulate_alpha,
     oracle_fill_const,
     oracle_copy_span,
     oracle_src_over_const,
@@ -135,30 +134,14 @@ fn simd_isa_src_over_image(mut dst: [u32], dst_offset: i64, src: [u32],
 
 fn simd_isa_mask_src_over(mut dst: [u32], dst_offset: i64, colour: i64,
                           mask: [u32], mask_offset: i64, count: i64):
-    """mask_src_over via the native blend-row kernel: pre-modulate the
-    constant colour's alpha by each pixel's coverage (oracle_modulate_alpha,
-    pure Simple — coverage scales alpha only, RGB rides through untouched)
-    into a per-pixel src row, then blend. A coverage of 0 modulates alpha to
-    0, and the blend kernel's sa==0 path leaves dst untouched — matching the
-    oracle's explicit `if m > 0` skip without a separate branch here."""
-    if count <= 0:
-        return
-    val n = count.to_i32()
-    var dst_row: [u32] = [0; n]
-    var src_row: [u32] = [0; n]
-    var i: i64 = 0
-    while i < count:
-        val m = mask[(mask_offset + i).to_i32()] as i64
-        dst_row[i.to_i32()] = dst[(dst_offset + i).to_i32()]
-        src_row[i.to_i32()] = oracle_modulate_alpha(colour, m) as u32
-        i = i + 1
-    val blended = engine2d_simd_blend_row_u32(dst_row, src_row)
-    if blended.len() != n:
-        return
-    var j: i64 = 0
-    while j < count:
-        dst[(dst_offset + j).to_i32()] = blended[j.to_i32()]
-        j = j + 1
+    """mask_src_over keeps the legacy coverage rule (oracle_mask_src_over):
+    no Chrome measurement exists for grayscale coverage blending, while the
+    native blend-row kernel now carries Chrome's IMAGE rule, so routing the
+    mask through it would change text pixels without evidence. No native
+    kernel implements the legacy rule any more, so this provider computes it
+    in Simple; the honest gate (exact AND faster) then keeps the mask op on
+    the scalar oracle rather than registering a provider that is not faster."""
+    oracle_mask_src_over(dst, dst_offset, colour, mask, mask_offset, count)
 
 # --- blend_span / blend_const_span (in-place, no malloc) ---------------------
 #

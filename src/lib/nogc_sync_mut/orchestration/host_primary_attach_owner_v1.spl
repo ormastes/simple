@@ -5,10 +5,16 @@
 use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
 use std.nogc_sync_mut.orchestration.host_local_command_v1.{host_local_resolve_execution_v2,
     host_local_retained_execution_v2}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
 use std.nogc_sync_mut.orchestration.host_helper_owner_v1.HostHelperLeaseV1
-use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_load_v1,
-    host_helper_request_encode_v1, host_helper_execution_proof_load_v1}
-use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.host_helper_stream_publish_v1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_encode_v1
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperStoreV1, host_helper_store_legacy_v1,
+    host_helper_store_rebind_v1, host_helper_store_request_load_v1, host_helper_store_execution_proof_load_v1,
+    host_helper_stream_publish_v1}
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.*
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.nogc_async_mut.container.primary_attach_v1.{simple_container_primary_attach_plan_v1,
@@ -23,6 +29,9 @@ use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_res
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.nogc_sync_mut.io.group_process_owner.group_process_stream_recover_v2
 use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helper_store_bound_v1,
+    host_linux_helper_markers_v1, host_primary_open_entry_allowed_v1, host_linux_helper_refusal_publish_v1}
+use std.common.contracts.container.primary_open_refusal_v1.container_primary_open_refusal_authorizes_v1
 use std.common.crypto.sha256.sha256_text
 
 # Retain this entire turn, including when error is nonempty. Successful native
@@ -44,12 +53,60 @@ fn primary_failed_v1(turn: HostPrimaryAttachTurnV1, reason: text) -> HostPrimary
     retained.recovery_required = true
     retained
 
-fn primary_consumption_v1(local: HostLocalRootV1, plan: ContainerPrimaryAttachPlanV1,
+# milestone_0022 N1 (DESIGN 14.1, 15.1): the open core takes a store, the current
+# capacity owner and container owner, and the parent operation; it never calls
+# host_local_* (which read the pathname journal root). The V4 agent supplies the
+# parent execution request and runtime from its own archived execute and inspect.
+pub struct HostPrimaryAttachCoreInputV1:
+    store: HostHelperStoreV1
+    capacity: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    parent: OperationEnvelopeV2
+
+# Retain this entire turn, including when error is nonempty (same contract as the
+# legacy turn). capacity/container return to their owners; session and spawn stay
+# with the attachment.
+pub struct HostPrimaryAttachCoreTurnV1:
+    capacity: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    session: Option<ContainerPrimaryAttachSessionV1>
+    cleanup_spawn: Option<PipedProcessOwnedSpawnV2>
+    consumption_attempted: bool
+    error: text
+
+fn primary_core_failed_v1(turn: HostPrimaryAttachCoreTurnV1, reason: text) -> HostPrimaryAttachCoreTurnV1:
+    var retained = turn
+    retained.error = reason
+    retained
+
+# milestone_0022 N3 (13.3, 14.3): a pre-spawn refusal. V4 world: persist R (journal
+# first, mirror second) BEFORE returning; a publish failure keeps the turn's error
+# and leaves the markers as they were (no authorization -> no cancel). Legacy world:
+# exactly primary_core_failed_v1 (byte-identical).
+fn primary_core_refused_v1(turn: HostPrimaryAttachCoreTurnV1, store: HostHelperStoreV1, helper: HostHelperLeaseV1,
+        consumed: text, reason: text) -> HostPrimaryAttachCoreTurnV1:
+    if store.journal.is_some():
+        val recorded = host_linux_helper_refusal_publish_v1(store, helper.operation, helper.receipt.receipt_digest,
+            consumed, reason)
+    primary_core_failed_v1(turn, reason)
+
+# Open-core ENTRY guard (15.3), V4 world only, before ANY publish: the store must be
+# the derived Valid store of this journal and none of PA, N, R, X (nor any foreign
+# marker) may exist. A refusal here writes nothing. Read-only, so the V4 service also
+# runs it before its attach archive (milestone_0031).
+pub fn host_primary_attach_open_entry_check_v1(store: HostHelperStoreV1, operation_id: text) -> Result<(), text>:
+    match store.journal:
+        case None: Ok(())
+        case Some(journal):
+            val state = host_linux_helper_store_bound_v1(journal, store.root)?
+            host_primary_open_entry_allowed_v1(host_linux_helper_markers_v1(journal, state, operation_id)?)
+
+fn primary_consumption_v1(store: HostHelperStoreV1, capacity: HostCapacityOwnerV1, plan: ContainerPrimaryAttachPlanV1,
         helper: HostHelperLeaseV1) -> Result<HostPrimaryAttachConsumedV1, text>:
-    val state = daemon_operation_exact_v2(local.capacity.journal, helper.operation)?
+    val state = daemon_operation_exact_v2(capacity.journal, helper.operation)?
     if state.state != "executing": return Err("host-primary-helper-executing-required")
-    val root = local.capacity.journal.root
-    val request = host_helper_request_load_v1(root, helper.operation.id)?
+    val current = host_helper_store_rebind_v1(store, capacity.journal)
+    val request = host_helper_store_request_load_v1(current, helper.operation.id)?
     if (host_helper_plan_bytes_v1(request.plan)? != host_helper_plan_bytes_v1(helper.plan)? or
             distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(helper.operation)?):
         return Err("host-primary-retained-helper-mismatch")
@@ -57,10 +114,10 @@ fn primary_consumption_v1(local: HostLocalRootV1, plan: ContainerPrimaryAttachPl
     val consumed = HostPrimaryAttachConsumedV1(operation_id: helper.operation.id,
         operation_digest: sha256_text(distributed_encode_operation_v2(helper.operation)?),
         packet_digest: sha256_text(host_helper_request_encode_v1(request)?),
-        execution_proof_digest: sha256_text(host_helper_execution_proof_load_v1(root, helper.operation.id)?),
+        execution_proof_digest: sha256_text(host_helper_store_execution_proof_load_v1(current, helper.operation.id)?),
         prepared_receipt_digest: helper.receipt.receipt_digest,
         deadline_unix_ms: helper.deadline.expires_at_unix_ms, primary_plan: plan)
-    val context = host_primary_attach_validate_record_v1(root, helper.operation, consumed)?
+    val context = host_primary_attach_validate_record_core_v1(current, helper.operation, consumed)?
     if (helper.grant_id != context.admission.grant_id or helper.issuer_id != context.admission.issuer_id or
             helper.approver_id != context.admission.approver_id):
         return Err("host-primary-helper-proof-mismatch")
@@ -74,21 +131,25 @@ fn primary_consumption_v1(local: HostLocalRootV1, plan: ContainerPrimaryAttachPl
 # Session identity supplies correlation only. Canonical broker recovery validates
 # its actual retained native owner before publication; no PID becomes workload
 # identity and no transfer/session is reconstructed from persisted metadata.
-fn primary_session_archive_v1(turn: HostPrimaryAttachTurnV1,
+fn primary_session_archive_v1(store: HostHelperStoreV1, helper: HostHelperLeaseV1,
         session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
     val reference = container_terminal_reference_v1(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))?
     val native = group_process_stream_recover_v2(reference.group_root, reference.group_identity)?
     if native.launch.transport_generation != reference.generation:
         return Err("host-primary-native-reference-mismatch")
-    host_primary_attach_native_store_v1(turn.local.capacity.journal.root, turn.helper.operation, native)
+    host_primary_attach_native_store_core_v1(store, helper.operation, native)
 
 # The caller obtains plan metadata first and uses the existing signed helper
 # prepare/begin flow. Here, resolve the parent again, reproduce that exact plan
 # with the actual provider, then consume the admitted helper once before spawn.
+# Legacy wrapper: the pre-core sequence (consumption, retained parent, parent
+# executing, resolve) is unchanged and runs BEFORE the core, so every refusal and
+# every owner update is byte-identical; the core rechecks consumption and parent.
 pub fn host_primary_attach_open_v1(local: HostLocalRootV1, plan: ContainerPrimaryAttachPlanV1,
         helper: HostHelperLeaseV1, policy: ContainerStreamPolicyV2) -> HostPrimaryAttachTurnV1:
     var turn = HostPrimaryAttachTurnV1(local: local, helper: helper, plan: plan)
-    val validated = primary_consumption_v1(local, plan, helper)
+    val store = host_helper_store_legacy_v1(local.capacity.journal.root)
+    val validated = primary_consumption_v1(store, local.capacity, plan, helper)
     if validated.is_err(): return primary_failed_v1(turn, validated.unwrap_err())
     val parent = host_local_retained_execution_v2(local, plan.identity.parent_operation_id)
     if parent.is_err(): return primary_failed_v1(turn, parent.unwrap_err())
@@ -99,46 +160,112 @@ pub fn host_primary_attach_open_v1(local: HostLocalRootV1, plan: ContainerPrimar
     val resolved = host_local_resolve_execution_v2(local, plan.identity.parent_operation_id)
     turn.local = resolved.local
     if resolved.error != "": return primary_failed_v1(turn, resolved.error)
-    if resolved.execution == nil or resolved.observation == nil:
+    if resolved.execution.is_none() or resolved.observation.is_none():
         return primary_failed_v1(turn, "host-primary-parent-observation-required")
-    val planned = simple_container_primary_attach_plan_v1(turn.local.container, resolved.execution.unwrap(),
-        resolved.observation.unwrap().runtime, plan.identity, policy, plan.resources, plan.terminal_mode)
-    turn.local.container = planned.owner
-    if planned.error != "": return primary_failed_v1(turn, planned.error)
-    if planned.plan == nil: return primary_failed_v1(turn, "host-primary-plan-required")
+    val input = HostPrimaryAttachCoreInputV1(store: host_helper_store_legacy_v1(turn.local.capacity.journal.root),
+        capacity: turn.local.capacity, container: turn.local.container, parent: parent.unwrap().operation)
+    val opened = host_primary_attach_open_core_v1(input, plan, helper, policy, resolved.execution.unwrap(),
+        resolved.observation.unwrap().runtime)
+    turn.local.capacity = opened.capacity
+    turn.local.container = opened.container
+    turn.session = opened.session
+    turn.cleanup_spawn = opened.cleanup_spawn
+    turn.consumption_attempted = opened.consumption_attempted
+    turn.error = opened.error
+    turn.recovery_required = opened.error != ""
+    turn
+
+# The plan-reproduction half of the open core, shared with the read-only precheck below so the two can never
+# disagree: the parent row is executing and is the plan's parent, and the provider reproduces the signed plan byte
+# for byte from the live workload. Reads the journal and asks the provider for a plan; publishes nothing and
+# consumes nothing. The container owner the provider returned is in the turn on every path; `error` is the refusal.
+fn primary_reproduced_v1(turn: HostPrimaryAttachCoreTurnV1, parent: OperationEnvelopeV2, plan: ContainerPrimaryAttachPlanV1,
+        policy: ContainerStreamPolicyV2, execution: ContainerExecutionRequestV2,
+        runtime: RuntimeIdentityV1) -> HostPrimaryAttachCoreTurnV1:
+    var current = turn
+    val parent_state = daemon_operation_exact_v2(current.capacity.journal, parent)
+    if parent_state.is_err(): return primary_core_failed_v1(current, parent_state.unwrap_err())
+    if parent_state.unwrap().state != "executing":
+        return primary_core_failed_v1(current, "host-primary-parent-executing-required")
+    if parent.id != plan.identity.parent_operation_id:
+        return primary_core_failed_v1(current, "host-primary-parent-operation-mismatch")
+    val planned = simple_container_primary_attach_plan_v1(current.container, execution, runtime, plan.identity, policy,
+        plan.resources, plan.terminal_mode)
+    current.container = planned.owner
+    if planned.error != "": return primary_core_failed_v1(current, planned.error)
+    if planned.plan.is_none(): return primary_core_failed_v1(current, "host-primary-plan-required")
     val expected_bytes = container_primary_attach_plan_encode_v1(plan)
     val actual_bytes = container_primary_attach_plan_encode_v1(planned.plan.unwrap())
     if (expected_bytes.is_err() or actual_bytes.is_err() or expected_bytes.unwrap() != actual_bytes.unwrap()):
-        return primary_failed_v1(turn, "host-primary-observed-plan-changed")
+        return primary_core_failed_v1(current, "host-primary-observed-plan-changed")
+    current
+
+# One body for both worlds. Writes only `store.root` stream records; the parent
+# executing check reads the capacity journal. V4 world (N3): the entry guard runs
+# first; every refusal before the consume publish persists a pre-consume R; after
+# the consume publish only a typed NoCustody/SpawnRejectedRetired open with no
+# native owner persists a post-consume R. A consume-publish error writes no R.
+pub fn host_primary_attach_open_core_v1(input: HostPrimaryAttachCoreInputV1, plan: ContainerPrimaryAttachPlanV1,
+        helper: HostHelperLeaseV1, policy: ContainerStreamPolicyV2, execution: ContainerExecutionRequestV2,
+        runtime: RuntimeIdentityV1) -> HostPrimaryAttachCoreTurnV1:
+    var turn = HostPrimaryAttachCoreTurnV1(capacity: input.capacity, container: input.container, session: None,
+        cleanup_spawn: None, consumption_attempted: false, error: "")
+    val store = host_helper_store_rebind_v1(input.store, input.capacity.journal)
+    val guard = host_primary_attach_open_entry_check_v1(store, helper.operation.id)
+    if guard.is_err(): return primary_core_failed_v1(turn, guard.unwrap_err())
+    val validated = primary_consumption_v1(store, input.capacity, plan, helper)
+    if validated.is_err(): return primary_core_refused_v1(turn, store, helper, "", validated.unwrap_err())
+    val reproduced = primary_reproduced_v1(turn, input.parent, plan, policy, execution, runtime)
+    turn.container = reproduced.container
+    if reproduced.error != "": return primary_core_refused_v1(turn, store, helper, "", reproduced.error)
     # Recheck the same writer and all archived correlations after provider IO.
-    val refreshed = primary_consumption_v1(turn.local, plan, helper)
-    if refreshed.is_err(): return primary_failed_v1(turn, refreshed.unwrap_err())
-    val context = host_primary_attach_validate_record_v1(turn.local.capacity.journal.root,
-        helper.operation, refreshed.unwrap())
-    if context.is_err(): return primary_failed_v1(turn, context.unwrap_err())
+    val refreshed = primary_consumption_v1(store, turn.capacity, plan, helper)
+    if refreshed.is_err(): return primary_core_refused_v1(turn, store, helper, "", refreshed.unwrap_err())
+    val context = host_primary_attach_validate_record_core_v1(store, helper.operation, refreshed.unwrap())
+    if context.is_err(): return primary_core_refused_v1(turn, store, helper, "", context.unwrap_err())
     val encoded = host_primary_attach_consumed_encode_v1(refreshed.unwrap())
-    if encoded.is_err(): return primary_failed_v1(turn, encoded.unwrap_err())
+    if encoded.is_err(): return primary_core_refused_v1(turn, store, helper, "", encoded.unwrap_err())
     turn.consumption_attempted = true
-    val consumed = host_helper_stream_publish_v1(turn.local.capacity.journal.root, helper.operation.id,
+    val consumed = host_helper_stream_publish_v1(store.root, helper.operation.id,
         "primary-consumed", encoded.unwrap(), true)
-    if consumed.is_err(): return primary_failed_v1(turn, consumed.unwrap_err())
+    # Uncertain/failed consume publish (14.3 P2-F): PA may exist, so NO R is written.
+    if consumed.is_err(): return primary_core_failed_v1(turn, consumed.unwrap_err())
     # No fallible propagation may discard native owners beyond this boundary.
-    val opened = simple_container_open_primary_attach_v1(turn.local.container, resolved.execution.unwrap(),
-        resolved.observation.unwrap().runtime, plan, context.unwrap().admission, policy)
-    turn.local.container = opened.owner
+    val opened = simple_container_open_primary_attach_v1(turn.container, execution, runtime, plan,
+        context.unwrap().admission, policy)
+    turn.container = opened.owner
     turn.session = opened.session
     turn.cleanup_spawn = opened.cleanup_spawn
     turn.error = opened.error
-    turn.recovery_required = opened.error != ""
+    # Post-consume R (15.2, 16): ONLY a typed NoCustody/SpawnRejectedRetired refusal
+    # with no native owner; CustodyAdvanced and untyped refusals never authorize R.
+    if (opened.session.is_none() and opened.cleanup_spawn.is_none() and
+            container_primary_open_refusal_authorizes_v1(opened.refusal)):
+        return primary_core_refused_v1(turn, store, helper, encoded.unwrap(),
+            if opened.error == "": "host-primary-session-unconfirmed" else: opened.error)
     match opened.session:
         case Some(session):
-            val archived = primary_session_archive_v1(turn, session)
-            if archived.is_err(): return primary_failed_v1(turn, archived.unwrap_err())
-        case nil:
+            val archived = primary_session_archive_v1(store, helper, session)
+            if archived.is_err(): return primary_core_failed_v1(turn, archived.unwrap_err())
+        case None:
             match opened.cleanup_spawn:
                 case Some(PipedProcessOwnedSpawnV2.CleanupRequired(native, _, _)):
-                    val archived = host_primary_attach_native_store_v1(turn.local.capacity.journal.root, helper.operation, native)
-                    if archived.is_err(): return primary_failed_v1(turn, archived.unwrap_err())
+                    val archived = host_primary_attach_native_store_core_v1(store, helper.operation, native)
+                    if archived.is_err(): return primary_core_failed_v1(turn, archived.unwrap_err())
                 case _:
-                    return primary_failed_v1(turn, if opened.error == "": "host-primary-session-unconfirmed" else: opened.error)
+                    return primary_core_failed_v1(turn, if opened.error == "": "host-primary-session-unconfirmed" else: opened.error)
     turn
+
+# milestone_0031: everything of the open core that needs neither the helper lease nor a write, in the core's own
+# order: the entry guard, then the plan reproduction. A caller that has not begun its helper yet (the V4 agent,
+# between helper prepare and helper begin) runs it first, so a signed plan this host would not reproduce is
+# refused while only a prepared receipt is held. Passing is no admission: the open core runs every check again.
+pub fn host_primary_attach_open_precheck_v1(input: HostPrimaryAttachCoreInputV1, plan: ContainerPrimaryAttachPlanV1,
+        operation_id: text, policy: ContainerStreamPolicyV2, execution: ContainerExecutionRequestV2,
+        runtime: RuntimeIdentityV1) -> HostPrimaryAttachCoreTurnV1:
+    val turn = HostPrimaryAttachCoreTurnV1(capacity: input.capacity, container: input.container, session: None,
+        cleanup_spawn: None, consumption_attempted: false, error: "")
+    val guard = host_primary_attach_open_entry_check_v1(host_helper_store_rebind_v1(input.store, input.capacity.journal),
+        operation_id)
+    if guard.is_err(): return primary_core_failed_v1(turn, guard.unwrap_err())
+    primary_reproduced_v1(turn, input.parent, plan, policy, execution, runtime)

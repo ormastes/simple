@@ -14,7 +14,7 @@
 # summaries remain a gap. B2 step 2: exported per-module raw-return summaries
 # (BoundModuleSummary) seed importers via check_bound_late_casts_cross.
 
-use compiler.semantics.lint.lint_text.{code_line_snapshot, CodeLine}
+use compiler.semantics.lint.lint_text.{code_line_snapshot, CodeLine, lint_is_vendor_path}
 
 pub struct BoundLateCastFinding:
     code: text
@@ -387,6 +387,21 @@ fn _blc_return_primitive(header: text, units: [text]) -> bool:
         rt = rt.substring(0, rt.byte_len() - 1).trim()
     rt != "" and rt != "Nil" and rt != "()" and rt != "nil" and not units.contains(rt)
 
+fn _blc_unit_typed(rt: text, units: [text]) -> bool:
+    # Declared return already carries unit semantics: `U`, `U?`, `Option<U>`,
+    # `Result<U, E>`. Such a value is not a raw foreign origin.
+    var t = rt.trim()
+    if t.ends_with("?"):
+        t = t.substring(0, t.byte_len() - 1).trim()
+    for wrap in ["Option<", "Result<"]:
+        if t.starts_with(wrap) and t.ends_with(">"):
+            t = t.substring(wrap.byte_len(), t.byte_len() - 1)
+            val comma = t.find(",")
+            if comma >= 0:
+                t = t.substring(0, comma)
+            t = t.trim()
+    t != "" and units.contains(t)
+
 fn _blc_foreign(expr: text, externs: [text], tainted: [text]) -> bool:
     for name in externs:
         if _blc_calls(expr, name):
@@ -487,22 +502,33 @@ pub fn bound_raw_return_summary_cross(source: text, file_path: text, deps: [Boun
 
 fn _blc_run(source: text, file_path: text, deps: [BoundModuleSummary]) -> BlcPass:
     var findings: [BoundLateCastFinding] = []
-    if file_path.contains("/vendor/") or file_path.contains("sffi_gen"):
+    if lint_is_vendor_path(file_path) or file_path.contains("sffi_gen"):
         return BlcPass(findings: findings, foreign_fns: [])
     val lines = code_line_snapshot(source).lines
     var externs: [text] = []
     var raw_externs: [text] = []
     var units: [text] = []
+    var extern_rts: [text] = []
     for line in lines:
         val e = _blc_extern_name(line.trimmed)
         if e != "" and not externs.contains(e):
             externs.push(e)
+            extern_rts.push(_blc_return_type(line.trimmed))
             if _blc_raw_primitive_return(line.trimmed):
                 raw_externs.push(e)
         val u = _blc_unit_decl_name(line.trimmed)
         if u != "" and not units.contains(u):
             units.push(u)
         units = _blc_unit_imports(line.trimmed, units)
+    # Typed origin: an extern whose declared return is already a unit yields a
+    # unit-semantic value, so it does not seed SPL-BOUND-002 foreign origin.
+    var typed: [text] = []
+    var ei = 0
+    while ei < externs.len():
+        if not _blc_unit_typed(extern_rts[ei], units):
+            typed.push(externs[ei])
+        ei = ei + 1
+    externs = typed
     val imported = _blc_imported_raw(lines, deps)
     if externs.len() == 0 and imported.len() == 0:
         return BlcPass(findings: findings, foreign_fns: [])
@@ -626,7 +652,7 @@ fn _blc_pass(lines: [CodeLine], externs: [text], callees: [text], units: [text])
                 if _blc_binding(lines[k].trimmed) == "" and not lines[k].trimmed.starts_with("return ") and _blc_raw_value(lines[k].trimmed, externs, raw_vals):
                     findings.push(_blc_escape_finding(lines[k].line_num))
         val fn_name = _blc_fn_name(header.trimmed)
-        if not boundary and returns_foreign and fn_name != "" and not units.contains(_blc_return_type(header.trimmed)) and not foreign_fns.contains(fn_name):
+        if not boundary and returns_foreign and fn_name != "" and not _blc_unit_typed(_blc_return_type(header_text), units) and not foreign_fns.contains(fn_name):
             foreign_fns.push(fn_name)
         i = j
     BlcPass(findings: findings, foreign_fns: foreign_fns)

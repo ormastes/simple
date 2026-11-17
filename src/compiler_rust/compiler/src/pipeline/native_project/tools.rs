@@ -409,7 +409,10 @@ pub(crate) fn windows_gnu_target_flag(
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu)
         .then_some(())
         .filter(|_| compiler.to_ascii_lowercase().contains("clang"))
-        .map(|_| "--target=x86_64-w64-windows-gnu")
+        .map(|_| match target.arch {
+            simple_common::target::TargetArch::Aarch64 => "--target=aarch64-w64-windows-gnu",
+            _ => "--target=x86_64-w64-windows-gnu",
+        })
 }
 
 pub(crate) fn compiler_accepts_target_flag(compiler: &str) -> bool {

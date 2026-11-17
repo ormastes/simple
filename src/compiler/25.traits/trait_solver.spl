@@ -172,13 +172,15 @@ class TraitSolver:
     3. Cache results to avoid duplicate work
     """
     # All known trait definitions
-    traits: Dict<HirSymbol, SolverTraitDef>
+    # Keyed by the symbol's SymbolId: a multi-field HirSymbol is refused as a
+    # native dict key (struct keys are value-keyed only when single-word).
+    traits: Dict<SymbolId, SolverTraitDef>
 
     # All known impl blocks (indexed by trait name)
-    impls: Dict<HirSymbol, [ImplBlock]>
+    impls: Dict<SymbolId, [ImplBlock]>
 
     # All known impl blocks (indexed by target type symbol)
-    impls_by_type: Dict<HirSymbol, [ImplBlock]>
+    impls_by_type: Dict<SymbolId, [ImplBlock]>
 
     # Cache of solved obligations: (type, trait) -> success
     cache: Dict<(HirType, HirSymbol), bool>
@@ -233,7 +235,7 @@ impl TraitSolver:
         # Trait replacement can change supertrait requirements for any cached
         # obligation, including obligations on traits which depend on this one.
         self.cache = {}
-        self.traits[trait_def.name] = trait_def
+        self.traits[trait_def.name.id] = trait_def
 
         var assoc_resolver = self.assoc_resolver
         assoc_resolver.add_trait(trait_def)
@@ -278,12 +280,12 @@ impl TraitSolver:
             "impl:{type_identity}:{impl_block.methods.len()}")
 
         # Index by trait name
-        var impl_list_by_trait: [ImplBlock] = if self.impls[trait_name].?:
-            self.impls[trait_name]
+        var impl_list_by_trait: [ImplBlock] = if self.impls[trait_name.id].?:
+            self.impls[trait_name.id]
         else:
             []
         impl_list_by_trait = impl_list_by_trait.push(impl_block)
-        self.impls[trait_name] = impl_list_by_trait
+        self.impls[trait_name.id] = impl_list_by_trait
 
         # Index by target type (extract symbol from Named type)
         match impl_block.for_type.kind:
@@ -368,8 +370,8 @@ impl TraitSolver:
         # that would erase the candidates on the next solve.
         var candidates: [ImplBlock] = []
         var bindings: Dict<i64, HirType> = {}
-        if self.impls[trait_].?:
-            for impl_block in self.impls[trait_]:
+        if self.impls[trait_.id].?:
+            for impl_block in self.impls[trait_.id]:
                 if val matched = trait_impl_bindings_v1(impl_block, ty, self.reverse_symbols):
                     candidates = candidates.push(impl_block)
                     bindings = matched
@@ -416,10 +418,10 @@ impl TraitSolver:
 
     fn find_impl(ty: HirType, trait_: HirSymbol) -> ImplBlock?:
         """Find impl block for type and trait."""
-        if not self.impls[trait_].?:
+        if not self.impls[trait_.id].?:
             return nil
 
-        val impl_list = self.impls[trait_]
+        val impl_list = self.impls[trait_.id]
         for impl_block in impl_list:
             if impl_block.matches_type(ty):
                 return Some(impl_block)
@@ -442,10 +444,10 @@ impl TraitSolver:
 
     me check_supertraits(ty: HirType, trait_: HirSymbol, span: Span) -> Result<(), TraitError>:
         """Check that type implements all supertraits of the given trait."""
-        if not self.traits[trait_].?:
+        if not self.traits[trait_.id].?:
             return Ok(())
 
-        val trait_def = self.traits[trait_]
+        val trait_def = self.traits[trait_.id]
 
         for supertrait_symbol in trait_def.supertraits:
             val cause = ObligationCause.SolverTraitBound(trait_)
@@ -505,7 +507,7 @@ impl TraitSolver:
 
     fn get_trait(name: HirSymbol) -> SolverTraitDef?:
         """Get trait definition by name."""
-        self.traits[name]
+        self.traits[name.id]
 
     fn find_trait_for_method(method_name: text) -> HirSymbol?:
         """Find the first registered trait that declares method_name."""
@@ -517,15 +519,15 @@ impl TraitSolver:
 
     fn get_impls_for_type(type_symbol: HirSymbol) -> [ImplBlock]:
         """Get all impl blocks for a given type."""
-        if self.impls_by_type[type_symbol].?:
-            self.impls_by_type[type_symbol]
+        if self.impls_by_type[type_symbol.id].?:
+            self.impls_by_type[type_symbol.id]
         else:
             []
 
     fn get_impls_for_trait(trait_name: HirSymbol) -> [ImplBlock]:
         """Get all impl blocks for a given trait."""
-        if self.impls[trait_name].?:
-            self.impls[trait_name]
+        if self.impls[trait_name.id].?:
+            self.impls[trait_name.id]
         else:
             []
 
@@ -544,9 +546,9 @@ impl TraitSolver:
         nil otherwise. Used by method dispatch to fall back to default implementations
         when the impl block doesn't override a method.
         """
-        if not self.traits[trait_name].?:
+        if not self.traits[trait_name.id].?:
             return nil
-        val trait_def = self.traits[trait_name]
+        val trait_def = self.traits[trait_name.id]
         trait_def.get_default_method(method_name)
 
     fn is_method_required(trait_name: HirSymbol, method_name: text) -> bool:
@@ -555,16 +557,16 @@ impl TraitSolver:
         Returns true if the method exists in the trait and has no default body.
         Returns false if the method has a default or doesn't exist in the trait.
         """
-        if not self.traits[trait_name].?:
+        if not self.traits[trait_name.id].?:
             return false
-        val trait_def = self.traits[trait_name]
+        val trait_def = self.traits[trait_name.id]
         trait_def.has_required_method(method_name)
 
     me check_coherence():
         """Check coherence rules (no overlapping impls)."""
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for trait_name in self.impls.keys():
-            val impl_list: [ImplBlock] = self.impls[trait_name]
+        for trait_key in self.impls.keys():
+            val impl_list: [ImplBlock] = self.impls[trait_key]
             for i in 0..impl_list.len():
                 for j in (i + 1)..impl_list.len():
                     # @workaround bug=enum_payload_type_mismatch_dict_elem_untyped_2026-10-24 reason=Dict-erased element read has no static struct type; typed locals so field payloads type-check
@@ -573,7 +575,7 @@ impl TraitSolver:
 
                     if impls_overlap(impl1, impl2):
                         val error = TraitError.Overlapping(
-                            trait_name,
+                            impl1.trait_name,
                             impl1.for_type,
                             impl2.span
                         )

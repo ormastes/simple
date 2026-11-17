@@ -635,14 +635,7 @@ char* spl_str_index_char(const char* s, int64_t idx) {
 }
 
 uint64_t spl_str_hash(const char* s) {
-    /* FNV-1a 64-bit */
-    uint64_t h = 14695981039346656037ULL;
-    if (!s) return h;
-    while (*s) {
-        h ^= (uint64_t)(unsigned char)*s++;
-        h *= 1099511628211ULL;
-    }
-    return h;
+    return rt__shared_str_hash(s); /* FNV-1a 64, NULL -> offset basis */
 }
 
 int64_t rt_str_hash(const char* s) {
@@ -1457,6 +1450,7 @@ void spl_free(void* ptr) {
 }
 #endif
 
+/* Not shared with runtime_legacy_core.c: this one allocates via SPL_STRDUP (memtrack-tagged), the legacy lane via plain malloc (spl_str_new) and may return NULL on OOM. */
 char* spl_strdup(const char* s) {
     return SPL_STRDUP(s ? s : "", "user");
 }
@@ -2977,10 +2971,8 @@ int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, 
  * the Win32 error instead; this runs only on a path that is already failing.
  * Set SIMPLE_QUIET_SECURE_TEMP_DIAG=1 to silence. */
 static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
-    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
-    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
-            stage, (unsigned long)GetLastError(), detail ? detail : "");
-    fflush(stderr);
+    unsigned long err = (unsigned long)GetLastError(); /* before the env probe can clobber it */
+    rt__shared_secure_temp_dir_diag(stage, err, getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG") != NULL, detail);
 }
 #endif
 
@@ -3648,16 +3640,6 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
     return (const char*)result;
 }
 
-const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
-                                const char* plaintext, const char* aad) {
-    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        plaintext, (int64_t)strlen(plaintext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
-}
-
 /* ---- rt_aes_gcm_decrypt_with_len: binary-safe AES-128-GCM decrypt (OpenSSL) ---- */
 const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* iv, int64_t iv_len,
@@ -3721,16 +3703,6 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
     result[dec_len] = '\0';
     if (out_len) *out_len = (int64_t)dec_len;
     return (const char*)result;
-}
-
-const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
-                                const char* ciphertext, const char* aad) {
-    if (!key || !iv || !ciphertext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_decrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        ciphertext, (int64_t)strlen(ciphertext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
 }
 
 #else /* !SPL_HAVE_OPENSSL — from-scratch AES-128-GCM implementation */
@@ -4057,16 +4029,6 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
     return (const char*)ct_buf;
 }
 
-const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
-                                const char* plaintext, const char* aad) {
-    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        plaintext, (int64_t)strlen(plaintext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
-}
-
 /* ---- rt_aes_gcm_decrypt_with_len: binary-safe (from-scratch fallback) ---- */
 const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* iv, int64_t iv_len,
@@ -4099,6 +4061,19 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
     return (const char*)pt_buf;
 }
 
+#endif /* SPL_HAVE_OPENSSL */
+/* ---- shared AES-GCM text wrappers (both backends) ---- */
+
+const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
+                                const char* plaintext, const char* aad) {
+    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
+    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
+                                        iv, (int64_t)strlen(iv),
+                                        plaintext, (int64_t)strlen(plaintext),
+                                        aad, aad ? (int64_t)strlen(aad) : 0,
+                                        NULL);
+}
+
 const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
                                 const char* ciphertext, const char* aad) {
     if (!key || !iv || !ciphertext) return SPL_STRDUP("", "str");
@@ -4109,8 +4084,8 @@ const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
                                         NULL);
 }
 
-#endif /* SPL_HAVE_OPENSSL */
 
+/* ---- end shared AES-GCM text wrappers ---- */
 /* ============================================================================
  * Hex-domain AES-GCM wrappers (binary-safe, NUL-transparent)
  *
@@ -4121,12 +4096,6 @@ const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
  *   extern fn rt_aes_gcm_decrypt_hex(...) -> text
  * ========================================================================= */
 
-static int hex_char_val(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
 
 /* Decode hex string to binary buffer.  Caller must free().  Sets *out_len. */
 static uint8_t* hex_decode(const char* hex, int64_t* out_len) {
@@ -4136,12 +4105,7 @@ static uint8_t* hex_decode(const char* hex, int64_t* out_len) {
     size_t blen = slen / 2;
     uint8_t* buf = (uint8_t*)malloc(blen);
     if (!buf) { *out_len = 0; return NULL; }
-    for (size_t i = 0; i < blen; i++) {
-        int hi = hex_char_val(hex[2*i]);
-        int lo = hex_char_val(hex[2*i+1]);
-        if (hi < 0 || lo < 0) { free(buf); *out_len = 0; return NULL; }
-        buf[i] = (uint8_t)((hi << 4) | lo);
-    }
+    if (rt__shared_hex_decode_into(hex, blen, buf) != 0) { free(buf); *out_len = 0; return NULL; }
     *out_len = (int64_t)blen;
     return buf;
 }
@@ -4155,12 +4119,7 @@ static char* hex_encode(const uint8_t* data, int64_t len) {
     }
     char* hex = (char*)malloc((size_t)(len * 2 + 1));
     if (!hex) return NULL;
-    static const char digits[] = "0123456789abcdef";
-    for (int64_t i = 0; i < len; i++) {
-        hex[2*i]     = digits[(data[i] >> 4) & 0x0F];
-        hex[2*i + 1] = digits[data[i] & 0x0F];
-    }
-    hex[len * 2] = '\0';
+    rt__shared_hex_encode_into(data, (size_t)len, hex);
     return hex;
 }
 

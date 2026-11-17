@@ -220,6 +220,21 @@ static __declspec(thread) int64_t win_last_child_peak_rss_kib = -1;
 #else
 static _Thread_local int64_t win_last_child_peak_rss_kib = -1;
 #endif
+/* User+kernel CPU (ms) of the same child, from GetProcessTimes; -1 = not measured. */
+#if defined(_MSC_VER)
+static __declspec(thread) int64_t win_last_child_cpu_ms = -1;
+#else
+static _Thread_local int64_t win_last_child_cpu_ms = -1;
+#endif
+
+static int64_t win_child_cpu_ms(HANDLE process) {
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) return -1;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime; k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime; u.HighPart = user.dwHighDateTime;
+    return (int64_t)((k.QuadPart + u.QuadPart) / 10000ULL); /* 100ns -> ms */
+}
 
 struct WinCapture {
     char* data;
@@ -483,6 +498,7 @@ static SplArray* win_process_run_capture_environment_v1(const char* cmd, uint64_
     LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
     int attributes_initialized = 0;
     win_last_child_peak_rss_kib = -1;
+    win_last_child_cpu_ms = -1;
     PROCESS_INFORMATION process = {0};
     struct WinCapture stdout_capture = {0};
     struct WinCapture stderr_capture = {0};
@@ -699,6 +715,7 @@ finish:
         if (K32GetProcessMemoryInfo(process.hProcess, &child_counters, child_counters.cb)) {
             win_last_child_peak_rss_kib = (int64_t)(child_counters.PeakWorkingSetSize / 1024);
         }
+        if (process_done) win_last_child_cpu_ms = win_child_cpu_ms(process.hProcess);
     }
     win_close_handle(&process.hThread);
     win_close_handle(&stdout_write);
@@ -870,6 +887,10 @@ int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args
 
 int64_t rt_process_last_child_peak_rss_kib(void) {
     return win_last_child_peak_rss_kib;
+}
+
+int64_t rt_process_last_child_cpu_ms(void) {
+    return win_last_child_cpu_ms;
 }
 
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
@@ -1413,23 +1434,6 @@ bool rt_editor_start_simple_dap(int64_t pid) {
     const char* init = "Content-Length: 84\r\n\r\n{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}";
     const char* launch = "Content-Length: 113\r\n\r\n{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"src/app/dap/simple_dap_main.spl\",\"cwd\":\".\"}}";
     return rt_process_write_stdin(pid, init) && rt_process_write_stdin(pid, launch);
-}
-
-bool rt_editor_poll_simple_dap_stopped(int64_t pid) {
-    static char dap_buf[65536];
-    static size_t dap_len = 0;
-    for (int i = 0; i < 16; i++) {
-        const char* chunk = rt_process_read_stdout(pid);
-        if (!chunk || !*chunk) break;
-        size_t n = strlen(chunk);
-        if (dap_len + n >= sizeof(dap_buf)) {
-            dap_len = 0;
-        }
-        memcpy(dap_buf + dap_len, chunk, n);
-        dap_len += n;
-        dap_buf[dap_len] = '\0';
-    }
-    return strstr(dap_buf, "\"type\":\"event\"") != NULL && strstr(dap_buf, "\"event\":\"stopped\"") != NULL;
 }
 
 bool rt_editor_wait_simple_dap_stopped(int64_t pid) {
@@ -2444,6 +2448,7 @@ int64_t rt_browser_renderer_spawn_sandboxed(
  * ru_maxrss), and whether that reap is newer than the latest run_capture. */
 static _Thread_local int64_t posix_wait_peak_rss_kib = -1;
 static _Thread_local int posix_wait_peak_is_latest = 0;
+static _Thread_local int64_t posix_wait_cpu_ms = -1;
 
 static SplArray* posix_process_run_capture_admission_v1(const char* cmd, uint64_t cmd_len, SplArray* args,
         int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes,
@@ -2646,6 +2651,14 @@ int64_t rt_process_last_child_peak_rss_kib(void) {
     return bytes > 0 ? bytes / 1024 : -1;
 }
 
+/* User+system CPU (ms) of the same reaped child: wait4() ru_utime+ru_stime.
+ * -1 = not measured (the fork capture recorded no rusage). */
+int64_t rt_process_last_child_cpu_ms(void) {
+    if (posix_wait_peak_is_latest) return posix_wait_cpu_ms;
+    if (rt_fork_parent_peak_rss_bytes() <= 0) return -1;
+    return (rt_fork_parent_user_cpu_micros() + rt_fork_parent_system_cpu_micros()) / 1000;
+}
+
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes) {
     if (max_output_bytes < 0 || (uint64_t)max_output_bytes > SIZE_MAX - 97U) {
@@ -2673,23 +2686,6 @@ bool rt_editor_start_simple_dap(int64_t pid) {
     const char* init = "Content-Length: 84\r\n\r\n{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"adapterID\":\"simple\"}}";
     const char* launch = "Content-Length: 113\r\n\r\n{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"src/app/dap/simple_dap_main.spl\",\"cwd\":\".\"}}";
     return rt_process_write_stdin(pid, init) && rt_process_write_stdin(pid, launch);
-}
-
-bool rt_editor_poll_simple_dap_stopped(int64_t pid) {
-    static char dap_buf[65536];
-    static size_t dap_len = 0;
-    for (int i = 0; i < 16; i++) {
-        const char* chunk = rt_process_read_stdout(pid);
-        if (!chunk || !*chunk) break;
-        size_t n = strlen(chunk);
-        if (dap_len + n >= sizeof(dap_buf)) {
-            dap_len = 0;
-        }
-        memcpy(dap_buf + dap_len, chunk, n);
-        dap_len += n;
-        dap_buf[dap_len] = '\0';
-    }
-    return strstr(dap_buf, "\"type\":\"event\"") != NULL && strstr(dap_buf, "\"event\":\"stopped\"") != NULL;
 }
 
 bool rt_editor_wait_simple_dap_stopped(int64_t pid) {
@@ -3864,6 +3860,23 @@ void rt_browser_renderer_preinit_enter(int argc, char** argv, char** envp) {
 
 #endif /* POSIX */
 
+bool rt_editor_poll_simple_dap_stopped(int64_t pid) {
+    static char dap_buf[65536];
+    static size_t dap_len = 0;
+    for (int i = 0; i < 16; i++) {
+        const char* chunk = rt_process_read_stdout(pid);
+        if (!chunk || !*chunk) break;
+        size_t n = strlen(chunk);
+        if (dap_len + n >= sizeof(dap_buf)) {
+            dap_len = 0;
+        }
+        memcpy(dap_buf + dap_len, chunk, n);
+        dap_len += n;
+        dap_buf[dap_len] = '\0';
+    }
+    return strstr(dap_buf, "\"type\":\"event\"") != NULL && strstr(dap_buf, "\"event\":\"stopped\"") != NULL;
+}
+
 /* The MCP CLI delegates to the installed wrapper while preserving protocol
  * stdin/stdout/stderr. The wrapper selection matches the Rust runtime: look
  * two directories above the executable directory, then beside the executable. */
@@ -4271,9 +4284,10 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     bool completed = result == WAIT_OBJECT_0 && GetExitCodeProcess(process, &exit_code);
     /* Handle still open: record the child's own peak working set (R5). */
     win_last_child_peak_rss_kib = -1;
+    win_last_child_cpu_ms = completed ? win_child_cpu_ms(process) : -1;
     PROCESS_MEMORY_COUNTERS child_counters = {0};
     child_counters.cb = (DWORD)sizeof(child_counters);
-    if (completed && K32GetProcessMemoryInfo(process, &child_counters, child_counters.cb)) {
+    if (completed &&K32GetProcessMemoryInfo(process, &child_counters, child_counters.cb)) {
         win_last_child_peak_rss_kib = (int64_t)(child_counters.PeakWorkingSetSize / 1024);
     }
     AcquireSRWLockExclusive(&rt_mcp_children_lock);
@@ -4299,6 +4313,8 @@ static pid_t posix_wait_record_peak(pid_t pid, int* status, int options) {
         kib /= 1024; /* bytes on Darwin */
 #endif
         posix_wait_peak_rss_kib = kib > 0 ? kib : -1;
+        posix_wait_cpu_ms = ((int64_t)usage.ru_utime.tv_sec + (int64_t)usage.ru_stime.tv_sec) * 1000 +
+            ((int64_t)usage.ru_utime.tv_usec + (int64_t)usage.ru_stime.tv_usec) / 1000;
         posix_wait_peak_is_latest = 1;
     }
     return r;

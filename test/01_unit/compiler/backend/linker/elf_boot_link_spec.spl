@@ -657,3 +657,45 @@ describe "elf_boot_link - region cursors and explicit addresses (lld 23 parity)"
         val r = elf_boot_link(objs(), plan_of(script), RelocArch.AArch64)
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err()).to_contain("section .text will not fit in region HI: overflowed by 18446744071562068056 bytes")
+
+# Repro (doc/08_tracking/bug/elf_boot_link_section_content_misplaced_out_of_index_order_2026-11-18.md):
+# output contents were appended in (object, section-index) order, so an input
+# section placed at a LOWER output offset than an earlier-indexed section of the
+# same object (here .data before .text; in the aarch64 EFI hello an empty .text
+# placed after .text.boot) had its bytes pushed at the wrong offset.
+val REVERSED_SCRIPT: text = """ENTRY(_start)
+SECTIONS {
+    . = 0x400000;
+    .all : { *(.data*) *(.text*) }
+    .rodata : { *(.rodata*) }
+    .bss (NOLOAD) : { *(.bss*) }
+}
+"""
+
+val SPLIT_SCRIPT: text = """ENTRY(_start)
+SECTIONS {
+    . = 0x400000;
+    .data : { *(.data*) }
+    .text : { *(.text*) }
+    .rodata : { *(.rodata*) }
+    .bss (NOLOAD) : { *(.bss*) }
+}
+"""
+
+fn bytes_at(im: ElfBootImage, off: i64, n: i64) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        out = out.push(im.bytes[off + i] & 0xff)
+        i = i + 1
+    out
+
+describe "elf_boot_link - output content follows layout offsets, not section index":
+    it "places a lower-index section after a higher-index one in the same output section":
+        val split = elf_boot_link_image(objs(), plan_of(SPLIT_SCRIPT), RelocArch.AArch64).unwrap()
+        val rev = elf_boot_link_image(objs(), plan_of(REVERSED_SCRIPT), RelocArch.AArch64).unwrap()
+        val dsize = sec_size(split, ".data")
+        expect(dsize > 0).to_equal(true)
+        expect(sec_size(rev, ".all")).to_equal(sec_vma(split, ".text") - 0x400000 + sec_size(split, ".text"))
+        expect(bytes_at(rev, sec_file_off(rev, ".all"), dsize)).to_equal(bytes_at(split, sec_file_off(split, ".data"), dsize))
+

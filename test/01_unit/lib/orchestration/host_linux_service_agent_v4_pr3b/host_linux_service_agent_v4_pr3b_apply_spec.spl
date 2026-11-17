@@ -1,0 +1,706 @@
+"""
+## Purpose and audience
+Pins the ONE composed signed attach entry of milestone_0021 PR3b (DESIGN 13.2, 14B, 14C) and its detach
+analogue, end to end over REAL packet bytes: a real `attach-broker` helper request with its controller-signed
+`host_helper_execute_v1` grant, a real primary attach plan, the canonical stream policy that plan names and a
+controller-signed pane binding, signed with real ed25519 keys, archived in a real temporary operation journal
+(milestone_0023 part B: the execute grant and the stream policy are covered by the signed attach payload digest
+and verified before the archive). Order under test: decode -> authorize (payload signed over the packet's NAMED plan/binding digests) ->
+14C `attach-binding-plan` -> pure transition check (replay / conflict) -> archive no-replace + read-back -> only
+then `attachment_consumed` and the `opening` attachment. Written for owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+The agent is DATA (no container), so the transfer holder is passed as "container" through
+`host_agent_attach_apply_core_v4`; the production `host_agent_attach_apply_v4` derives it and answers
+`attach-holder` here. The helper admission check (`admit`) is a closure here; the service's real one
+(host_helper_prepare_check_v1) is exercised by the part B effects spec. GAP: a read-back that differs from what was just published needs a racing writer between
+the publish and the read inside one call and is not driven; a pre-seeded different archive (conflict) and a
+journal that cannot archive (nothing consumed) are.
+## Verification guidance and troubleshooting
+A case that reports `attachment_consumed == true` after any refusal means the slot was burnt without an archive.
+"""
+use std.spec.{step}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.container.stream_v2.{ContainerStreamPolicyV2, ContainerOutputIdentityV2, ContainerOutputResourcesV2,
+    container_stream_policy_encode_v2, container_stream_policy_digest_v2}
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.group_process_stream_profile_v3.group_process_cpu_quota_v3
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use test.fixtures.orchestration.host_execution_envelope_fixture_v2.host_execution_envelope_fixture_v2
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
+use test.fixtures.orchestration.primary_attach_fixture_v1.primary_policy_fixture_v1
+use test.fixtures.orchestration.host_helper_fixture_v1.HostHelperFixtureV1
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, ContainerPrimaryAttachPlanV1,
+    container_primary_attach_plan_encode_v1,
+    container_primary_attach_plan_decode_v1, container_primary_attach_plan_digest_v1, host_agent_pane_binding_encode_v4,
+    host_agent_pane_binding_digest_v4}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_authority_snapshot_create_v2}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_encode_v1
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_open_v2, distributed_operation_journal_read_v3, distributed_operation_journal_publish_v3,
+    distributed_operation_journal_close_v2}
+use test.fixtures.orchestration.host_helper_fixture_v1.{host_helper_fixture_v1, host_helper_sibling_fixture_v1,
+    host_helper_alternate_execution_fixture_v1}
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachRequestV4, HostAgentDetachRequestV4,
+    HostAgentReleaseOutcomeV4, HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4,
+    host_agent_action_operation_v4, host_linux_service_agent_action_authorize_v4, host_agent_attach_payload_digest_v4,
+    host_agent_detach_payload_digest_v4, host_agent_attach_request_encode_v4, host_agent_attach_request_decode_v4,
+    host_agent_attach_request_parts_v4, host_agent_detach_request_encode_v4, host_agent_action_archive_v4,
+    host_agent_attach_helper_execute_digest_v4, host_agent_attach_helper_authorize_v4,
+    host_agent_attach_association_check_v4,
+    host_agent_attach_archive_relative_v4, host_agent_detach_archive_relative_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, HostAgentActionAuthorityV4,
+    HostAgentAttachServiceV4, HostAgentActionApplyV4, host_agent_attach_apply_core_v4, host_agent_attach_apply_v4,
+    host_agent_detach_apply_v4, host_agent_terminal_authority_v4}
+
+# The held run IS the helper fixture's parent operation (the envelope fixture's "operation_1"), so the plan, the
+# helper request and the archived execute name one parent (milestone_0031: the association is checked pre-archive).
+val AP_OP = "operation_1"
+val AP_FENCE = "fence-1"
+
+fn ap_seed(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn ap_text_bytes(message: text) -> [u8]:
+    var out: [u8] = []
+    for i in 0..message.len(): out.push(message.byte_at(i) as u8)
+    out
+
+# The ONE helper fixture of this file: a real `attach-broker` helper request ("helper_attach_1") with its real
+# prepare grant and `host_helper_execute_v1` grant, both issued by "helper_issuer" (the configured controller here).
+var AP_FIXTURE: [HostHelperFixtureV1] = []
+
+fn ap_fixture() -> HostHelperFixtureV1:
+    if AP_FIXTURE.len() == 0:
+        var fixture = host_helper_fixture_v1()
+        fixture.request.plan.helper_kind = "attach-broker"
+        # The helper plan names the primary plan it brokers; the sibling fixture binds and signs it.
+        fixture.request.plan.request_digest = ap_plan(fixture, "helper_attach_1", ap_policy_digest()).request_digest
+        AP_FIXTURE = [host_helper_sibling_fixture_v1(fixture, fixture.owner, "helper_attach_1")]
+    AP_FIXTURE[0]
+
+fn ap_policy_digest() -> text:
+    container_stream_policy_digest_v2(primary_policy_fixture_v1()).unwrap()
+
+# The primary attach plan ASSOCIATED with a helper fixture (container_primary_attach_admission_validate_v1): the
+# helper's parent workload (the envelope fixture's execution plan) and scope, the helper's operation id and parent
+# digests as its identity, the helper reservation as its resources, a lifetime inside the helper operation's
+# duration, and `tty` (the only mode the workspace primary opens).
+fn ap_plan(helper: HostHelperFixtureV1, operation_id: text, policy_digest: text) -> ContainerPrimaryAttachPlanV1:
+    var plan = container_primary_attach_fixture_v1()
+    val parent = helper.request.plan
+    plan.workload = host_execution_envelope_fixture_v2().common.execution.plan
+    plan.runtime.pod_uid = plan.workload.workload_uid
+    plan.runtime.attempt = plan.workload.attempt
+    plan.runtime.operation_id = plan.workload.operation_id
+    plan.runtime.provider_generation = plan.workload.provider_generation
+    plan.runtime.node_boot_id = container_scope_fence_id_v2(helper.scope).unwrap()
+    plan.identity = ContainerOutputIdentityV2(operation_id: operation_id, parent_operation_id: parent.parent_operation_id,
+        parent_operation_digest: parent.parent_operation_digest, parent_assignment_digest: parent.parent_assignment_digest,
+        parent_budget_digest: parent.parent_budget_digest, binding_digest: "f".repeat(64))
+    plan.resources = ContainerOutputResourcesV2(cpu_millis: helper.request.intent.reservation.cpu_millis,
+        memory_bytes: helper.request.intent.reservation.memory_bytes)
+    plan.launch_template.worker_id = operation_id
+    plan.launch_template.generation = plan.workload.provider_generation
+    plan.launch_template.memory_limit_bytes = plan.resources.memory_bytes
+    plan.launch_template.request.timeout_ms = 100
+    var profile = plan.launch_template.profile_v3.unwrap()
+    profile.helper_cpu = group_process_cpu_quota_v3(plan.resources.cpu_millis).unwrap()
+    plan.launch_template.profile_v3 = Some(profile)
+    plan.terminal_mode = "tty"
+    plan.policy_digest = policy_digest
+    plan.request_digest = ""
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+    plan
+
+fn ap_runtime() -> RuntimeIdentityV1:
+    ap_plan(ap_fixture(), "helper_attach_1", ap_policy_digest()).runtime
+
+# The enrollment-pinned agent helper template of this file: the plan fixture's launch template carrying exactly
+# the root, broker, delegated cgroup path and environment that primary_policy_fixture_v1 repeats.
+fn ap_template() -> GroupProcessStreamLaunchV2:
+    val policy = primary_policy_fixture_v1()
+    var template = container_primary_attach_fixture_v1().launch_template
+    template.root = policy.root
+    template.delegated_cgroup_path = policy.delegated_cgroup_path
+    template.request.broker_program = policy.broker_program
+    template.request.broker_digest = policy.broker_digest
+    template.request.environment = policy.environment
+    var profile = template.profile_v3.unwrap()
+    profile.broker = policy.broker_budget
+    template.profile_v3 = Some(profile)
+    template
+
+fn ap_key(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1, public_key: public_key,
+        principal: "user_1", project: "project_1", host_id: ap_fixture().scope.physical_host_id,
+        operations: ["host_agent_attach_v4", "host_agent_detach_v4", "host_helper_reservation_v1", "host_helper_execute_v1"],
+        maximum_memory_bytes: 2048, maximum_duration_ms: 2000, policy_revision: 4, revocation_epoch: 2,
+        expires_at: 300, revoked: false)
+
+# The archived signed execute of the held run: the helper fixture's own principal, project, host and environment
+# (so one key set covers the action grants and the helper grants), with the run's id and kind.
+fn ap_execute() -> OperationEnvelopeV2:
+    var operation = ap_fixture().request.operation
+    operation.id = AP_OP
+    operation.operation = "host_execute_associated_v3"
+    operation.payload_digest = "b".repeat(64)
+    operation.memory_bytes = 512
+    operation.duration_ms = 500
+    operation
+
+fn ap_context() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: 100, monotonic_ms: 0, policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3)
+
+fn ap_association() -> text:
+    sha256_text("association-a")
+
+struct ApSigned:
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+fn ap_sign(kind: text, payload: text) -> ApSigned:
+    val operation = host_agent_action_operation_v4(kind, ap_execute(), payload, ap_context()).unwrap()
+    val grant = ExecutionGrantV2(id: "grant_" + kind, principal: operation.principal, project: operation.project,
+        host_id: operation.host_id, operations: [kind], environment_digest: operation.environment_digest, policy_revision: 4,
+        revocation_epoch: 2, expires_at: 200, maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: "helper_issuer", key_revision: 1, signature: [])
+    signed.signature = pure_ed25519_sign_from_seed_v1(ap_seed(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = DistributedSignedApprovalV2(approver_id: "helper_approver", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(), request_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()),
+        policy_revision: 4, session_generation: 3, expires_at: 190, signature: [])
+    approval.signature = pure_ed25519_sign_from_seed_v1(ap_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    ApSigned(operation: operation, signed: signed, approval: approval)
+
+var AP_SNAPSHOT: [DistributedAuthoritySnapshotV2] = []
+
+fn ap_snapshot() -> DistributedAuthoritySnapshotV2:
+    if AP_SNAPSHOT.len() == 0:
+        val issuer = pure_ed25519_sign_from_seed_v1(ap_seed(1), ap_text_bytes("k")).public_key
+        val approver = pure_ed25519_sign_from_seed_v1(ap_seed(65), ap_text_bytes("k")).public_key
+        AP_SNAPSHOT = [distributed_authority_snapshot_create_v2([ap_key("helper_issuer", "grant-issuer", issuer),
+            ap_key("helper_approver", "human-approver", approver)], 1, 4, 2).unwrap()]
+    AP_SNAPSHOT[0]
+
+fn ap_authority() -> HostAgentActionAuthorityV4:
+    HostAgentActionAuthorityV4(snapshot: ap_snapshot(), controller_ref: "helper_issuer", execute_operation: ap_execute(),
+        execute_association_digest: ap_association(), context: ap_context())
+
+# Real packet ingredients, built once: two `attach-broker` helper requests (siblings with real signatures), the
+# canonical stream policy, and the primary attach plan fixture naming that policy's digest and AP_OP as its parent.
+struct ApBytes:
+    helper: text
+    other_helper: text
+    plan: text
+    other_plan: text
+    stream: text
+
+var AP_BYTES: [ApBytes] = []
+
+fn ap_bytes() -> ApBytes:
+    if AP_BYTES.len() == 0:
+        val first = ap_fixture()
+        val second = host_helper_sibling_fixture_v1(first, first.owner, "helper_attach_2")
+        val policy = primary_policy_fixture_v1()
+        val plan = ap_plan(first, "helper_attach_1", ap_policy_digest())
+        val other = ap_plan(first, "helper_attach_1", "8".repeat(64))
+        AP_BYTES = [ApBytes(helper: host_helper_request_encode_v1(first.request).unwrap(),
+            other_helper: host_helper_request_encode_v1(second.request).unwrap(),
+            plan: container_primary_attach_plan_encode_v1(plan).unwrap(),
+            other_plan: container_primary_attach_plan_encode_v1(other).unwrap(),
+            stream: container_stream_policy_encode_v2(policy).unwrap())]
+    AP_BYTES[0]
+
+fn ap_binding(pane: text) -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "a".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: pane, service_epoch: 3)
+
+fn ap_plan_digest(plan: text) -> text:
+    container_primary_attach_plan_digest_v1(container_primary_attach_plan_decode_v1(plan).unwrap()).unwrap()
+
+# A packet carrying the given bytes, whose NAMED digests (the ones the signature covers) are given separately,
+# with the given execute grant and stream policy bytes (both covered by the signed payload).
+fn ap_packet(helper: text, plan: text, binding: text, plan_digest: text, binding_digest: text,
+        execute_signed: DistributedSignedGrantV2, execute_approval: DistributedSignedApprovalV2, stream: text) -> HostAgentAttachRequestV4:
+    val payload = host_agent_attach_payload_digest_v4(AP_OP, ap_association(), plan_digest, sha256_text(helper), binding_digest,
+        host_agent_attach_helper_execute_digest_v4(execute_signed, execute_approval).unwrap(), sha256_text(stream))
+    val proof = ap_sign("host_agent_attach_v4", payload)
+    HostAgentAttachRequestV4(operation_id: AP_OP, association_digest: ap_association(), operation: proof.operation,
+        signed: proof.signed, approval: proof.approval, helper_request: helper, plan: plan, pane_binding: binding,
+        plan_digest: plan_digest, pane_binding_digest: binding_digest, helper_execute_signed: execute_signed,
+        helper_execute_approval: execute_approval, stream_policy: stream)
+
+fn ap_request(helper: text, plan: text, binding: text, plan_digest: text, binding_digest: text) -> HostAgentAttachRequestV4:
+    ap_packet(helper, plan, binding, plan_digest, binding_digest, ap_fixture().execution_signed,
+        ap_fixture().execution_approval, ap_bytes().stream)
+
+# The honest packet for pane-a with ANOTHER execute grant (same helper operation).
+fn ap_with_execute(execute_signed: DistributedSignedGrantV2, execute_approval: DistributedSignedApprovalV2) -> HostAgentAttachRequestV4:
+    val bytes = ap_bytes()
+    ap_packet(bytes.helper, bytes.plan, host_agent_pane_binding_encode_v4(ap_binding("pane-a")).unwrap(),
+        ap_plan_digest(bytes.plan), host_agent_pane_binding_digest_v4(ap_binding("pane-a")).unwrap(), execute_signed,
+        execute_approval, bytes.stream)
+
+fn ap_admit(helper: HostHelperRequestV1) -> Result<(), text>:
+    Ok(())
+
+fn ap_admit_refused(helper: HostHelperRequestV1) -> Result<(), text>:
+    Err("helper-parent-budget-exhausted")
+
+# The composed entry with the transfer holder given as "container" (the agent is DATA) and an admitting check.
+fn ap_apply(agent: HostLinuxServiceAgentV4, wire: text, authority: HostAgentActionAuthorityV4,
+        service: HostAgentAttachServiceV4) -> HostAgentActionApplyV4:
+    val admit = fn(helper: HostHelperRequestV1) -> Result<(), text>: ap_admit(helper)
+    host_agent_attach_apply_core_v4(agent, "container", wire, authority, service, admit)
+
+# The honest packet for pane `pane`: every named digest is the digest of the bytes it travels with.
+fn ap_good(pane: text) -> HostAgentAttachRequestV4:
+    val bytes = ap_bytes()
+    ap_request(bytes.helper, bytes.plan, host_agent_pane_binding_encode_v4(ap_binding(pane)).unwrap(),
+        ap_plan_digest(bytes.plan), host_agent_pane_binding_digest_v4(ap_binding(pane)).unwrap())
+
+fn ap_agent() -> HostLinuxServiceAgentV4:
+    HostLinuxServiceAgentV4(operation_id: AP_OP, association_digest: ap_association(), payload_digest: "b".repeat(64),
+        stage: "running", reserved: true, observed: true, clock_ms: 500,
+        created: Some(ap_runtime()))
+
+# A fresh journal per case (a root owned by a live journal cannot be opened twice).
+fn ap_journal(tag: text) -> DistributedOperationJournalV2:
+    distributed_operation_journal_open_v2(secure_temp_dir("/tmp", "pr3b-apply-" + tag).unwrap() + "/journal",
+        "a".repeat(64), "b".repeat(64), 32).unwrap()
+
+fn ap_service(journal: DistributedOperationJournalV2) -> HostAgentAttachServiceV4:
+    HostAgentAttachServiceV4(journal: journal, fence: AP_FENCE, live_incarnation: "a".repeat(32), live_epoch: 3,
+        not_after: 1000000, policy_bytes: "policy-bytes", store_root: "/trusted/helper-store", monotonic_ms: 500,
+        template: ap_template())
+
+fn ap_progress(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    if att.attach_stage == "revoked": att.attach_stage = "cleaned"
+    HostAgentAttachmentReleaseStepV4(attachment: att, outcome: HostAgentReleaseOutcomeV4.Progress, error: "")
+
+describe "V4 agent PR3b: the attach packet over real bytes":
+    it "encodes, decodes canonically and recomputes its parts from its own bytes":
+        # @req 13.2 (packet), 14B (paneBindingDigest), 14C (named plan/binding digests)
+        val request = ap_good("pane-a")
+        val wire = host_agent_attach_request_encode_v4(request).unwrap()
+        val decoded = host_agent_attach_request_decode_v4(wire).unwrap()
+        expect(host_agent_attach_request_encode_v4(decoded).unwrap()).to_equal(wire)
+        expect(host_agent_attach_request_decode_v4(wire + " ").is_err()).to_equal(true)
+        val parts = host_agent_attach_request_parts_v4(decoded).unwrap()
+        expect(parts.plan_digest).to_equal(request.plan_digest)
+        expect(parts.binding_digest).to_equal(request.pane_binding_digest)
+        expect(parts.helper_request_digest).to_equal(sha256_text(request.helper_request))
+        expect(parts.payload_digest).to_equal(request.operation.payload_digest)
+        expect(parts.helper.plan.helper_kind).to_equal("attach-broker")
+        expect(parts.plan.identity.parent_operation_id).to_equal(AP_OP)
+
+    it "refuses a helper request, plan or pane binding swapped after signing, with real digests":
+        # @req H-04, 14C (attach-binding-plan before archive)
+        val bytes = ap_bytes()
+        val good = ap_good("pane-a")
+        step("a swapped helper request changes the recomputed payload: the signature no longer covers it")
+        var helper_swap = good
+        helper_swap.helper_request = bytes.other_helper
+        expect(host_agent_attach_request_encode_v4(helper_swap).unwrap_err()).to_equal("linux-host-agent-attach-operation-mismatch")
+        val swapped_parts = host_agent_attach_request_parts_v4(helper_swap).unwrap()
+        val refused = host_linux_service_agent_action_authorize_v4("host_agent_attach_v4", ap_snapshot(), "helper_issuer",
+            AP_OP, ap_association(), good.operation, good.signed, good.approval, swapped_parts.payload_digest, ap_execute(),
+            ap_association(), AP_OP, ap_association(), ap_context())
+        expect(refused.unwrap_err()).to_equal("linux-host-agent-attach-operation-mismatch")
+        step("plan or binding bytes swapped while the signed named digests stay: attach-binding-plan, nothing archived")
+        val journal = ap_journal("swap")
+        for which in ["plan", "binding"]:
+            var swapped = good
+            if which == "plan":
+                swapped.plan = bytes.other_plan
+            else:
+                swapped.pane_binding = host_agent_pane_binding_encode_v4(ap_binding("pane-b")).unwrap()
+            val wire = host_agent_attach_request_encode_v4(swapped).unwrap()
+            val applied = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal))
+            expect(applied.error).to_equal("attach-binding-plan")
+            expect(applied.agent.attachment_consumed).to_equal(false)
+            expect(applied.agent.attachment.is_none()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP),
+            1048576).unwrap().is_none()).to_equal(true)
+        step("naming the swapped digests too breaks the signature instead")
+        var renamed = good
+        renamed.pane_binding = host_agent_pane_binding_encode_v4(ap_binding("pane-b")).unwrap()
+        renamed.pane_binding_digest = host_agent_pane_binding_digest_v4(ap_binding("pane-b")).unwrap()
+        expect(host_agent_attach_request_encode_v4(renamed).unwrap_err()).to_equal("linux-host-agent-attach-operation-mismatch")
+
+describe "V4 agent PR3b: the composed attach entry (13.2 order)":
+    it "archives, reads back, and only then consumes the slot and opens the attachment":
+        # @req 13.2 (authorize -> pure check -> archive + read-back -> consumed -> effects), H-12, H-14
+        val journal = ap_journal("apply")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        val applied = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal))
+        expect(applied.error).to_equal("")
+        expect(applied.replay).to_equal(false)
+        expect(distributed_operation_journal_read_v3(journal, host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP),
+            1048576).unwrap().unwrap()).to_equal(wire)
+        expect(applied.agent.attachment_consumed).to_equal(true)
+        val att = applied.agent.attachment.unwrap()
+        expect(att.attach_stage).to_equal("opening")
+        expect(att.attach_pending).to_equal(true)
+        expect(att.attach_digest).to_equal(sha256_text(wire))
+        expect(att.binding.unwrap().pane_id).to_equal("pane-a")
+        expect(att.store_root).to_equal("/trusted/helper-store")
+        expect(att.not_after).to_equal(1000000)
+        step("the verified execute grant and stream policy are stored for the effects")
+        expect(att.helper_execute_signed.unwrap().grant.id).to_equal("helper_execution_grant")
+        expect(att.helper_execute_approval.unwrap().approver_id).to_equal("helper_approver")
+        expect(att.stream_policy.unwrap().broker_program).to_equal("/trusted/broker")
+        expect(att.prepared_receipt_digest).to_equal("")
+        step("the exact archived bytes are a replay answered from state: nothing changes")
+        val replay = ap_apply(applied.agent, wire, ap_authority(), ap_service(journal))
+        expect(replay.error).to_equal("")
+        expect(replay.replay).to_equal(true)
+        expect(replay.agent.attachment.unwrap().attach_digest).to_equal(sha256_text(wire))
+        step("a different, correctly signed packet after the slot is consumed is refused")
+        val second = host_agent_attach_request_encode_v4(ap_good("pane-b")).unwrap()
+        expect(ap_apply(applied.agent, second, ap_authority(), ap_service(journal)).error).to_equal("attach-consumed")
+
+    it "refuses before the archive and leaves the slot usable":
+        # @req H-07, H-13, H-22, 13.0 (one holder)
+        val journal = ap_journal("refuse")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        var pending = ap_agent()
+        pending.pending = true
+        val busy = ap_apply(pending, wire, ap_authority(), ap_service(journal))
+        expect(busy.error).to_equal("attach-native-pending")
+        expect(busy.agent.attachment_consumed).to_equal(false)
+        step("the production entry derives the holder: a data-only agent holds no container")
+        val admit = fn(helper: HostHelperRequestV1) -> Result<(), text>: ap_admit(helper)
+        expect(host_agent_attach_apply_v4(ap_agent(), wire, ap_authority(), ap_service(journal), admit).error).to_equal("attach-holder")
+        step("a different packet already in the slot is a conflict; nothing is consumed")
+        val relative = host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP)
+        expect(distributed_operation_journal_publish_v3(journal, relative, "racing-writer-bytes\n").unwrap()).to_equal(true)
+        val conflict = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal))
+        expect(conflict.error).to_equal("attach-packet-conflict")
+        expect(conflict.agent.attachment_consumed).to_equal(false)
+        step("an unsigned packet never reaches the archive")
+        var unsigned = ap_good("pane-a")
+        unsigned.signed.signature = []
+        unsigned.approval.signature = []
+        val clean = ap_journal("unsigned")
+        val refused = ap_apply(ap_agent(), host_agent_attach_request_encode_v4(unsigned).unwrap(), ap_authority(), ap_service(clean))
+        expect(refused.error).to_equal("SIGNATURE_INVALID")
+        expect(distributed_operation_journal_read_v3(clean, relative, 1048576).unwrap().is_none()).to_equal(true)
+
+    it "consumes nothing when the journal cannot archive":
+        # @req 13.2 (consumed only after the archive is read back)
+        val journal = ap_journal("closed")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        expect(distributed_operation_journal_close_v2(journal).is_ok()).to_equal(true)
+        val applied = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal))
+        expect(applied.error == "").to_equal(false)
+        expect(applied.agent.attachment_consumed).to_equal(false)
+        expect(applied.agent.attachment.is_none()).to_equal(true)
+
+describe "V4 agent attach part B: execute grant, stream policy and admission are refused before the archive":
+    it "covers the execute grant and the stream policy with the signed payload":
+        # @req part B (a): inside the signed payload, covered by the attach payload digest
+        val bytes = ap_bytes()
+        val good = ap_good("pane-a")
+        val parts = host_agent_attach_request_parts_v4(good).unwrap()
+        expect(parts.stream_policy.broker_program).to_equal("/trusted/broker")
+        step("another execute grant for the same helper changes the signed payload")
+        val alternate = host_helper_alternate_execution_fixture_v1(ap_fixture())
+        var swapped = good
+        swapped.helper_execute_signed = alternate.execution_signed
+        swapped.helper_execute_approval = alternate.execution_approval
+        expect(host_agent_attach_request_encode_v4(swapped).unwrap_err()).to_equal("linux-host-agent-attach-operation-mismatch")
+        step("a stream policy that is not the one the signed plan names is refused while the packet is split")
+        var policy = primary_policy_fixture_v1()
+        policy.timeout_ms = 31000
+        var other_stream = good
+        other_stream.stream_policy = container_stream_policy_encode_v2(policy).unwrap()
+        expect(host_agent_attach_request_parts_v4(other_stream).unwrap_err()).to_equal("attach-stream-policy")
+        var broken_stream = good
+        broken_stream.stream_policy = bytes.stream + " "
+        expect(host_agent_attach_request_parts_v4(broken_stream).is_err()).to_equal(true)
+        step("an execute grant that is not bound to this helper's execute operation cannot be encoded")
+        val second = host_helper_sibling_fixture_v1(ap_fixture(), ap_fixture().owner, "helper_attach_2")
+        val foreign = ap_with_execute(second.execution_signed, second.execution_approval)
+        expect(host_agent_attach_request_encode_v4(foreign).unwrap_err()).to_equal("linux-host-agent-attach-helper-execute-binding")
+
+    it "verifies the execute grant like cancel: controller issuer, signatures, live clock":
+        # @req part B (a): issuer == controller_ref, issuer + approver signatures, clock/generation/revocation
+        val good = ap_good("pane-a")
+        val parts = host_agent_attach_request_parts_v4(good).unwrap()
+        expect(host_agent_attach_helper_authorize_v4(ap_snapshot(), "helper_issuer", good, parts, ap_context()).is_ok()).to_equal(true)
+        expect(host_agent_attach_helper_authorize_v4(ap_snapshot(), "other_issuer", good, parts,
+            ap_context()).unwrap_err()).to_equal("linux-host-service-controller-mismatch")
+        step("a tampered execute signature is refused before the archive and the slot stays usable")
+        var tampered_signed = ap_fixture().execution_signed
+        tampered_signed.signature = []
+        val tampered = ap_with_execute(tampered_signed, ap_fixture().execution_approval)
+        val journal = ap_journal("execute")
+        val refused = ap_apply(ap_agent(), host_agent_attach_request_encode_v4(tampered).unwrap(), ap_authority(), ap_service(journal))
+        expect(refused.error).to_equal("SIGNATURE_INVALID")
+        expect(refused.agent.attachment_consumed).to_equal(false)
+        step("after the approvals expired the same packet is refused, nothing is archived")
+        var late = ap_authority()
+        late.context.grant_clock = 250
+        val wire = host_agent_attach_request_encode_v4(good).unwrap()
+        val expired = ap_apply(ap_agent(), wire, late, ap_service(journal))
+        expect(expired.error == "").to_equal(false)
+        expect(expired.agent.attachment_consumed).to_equal(false)
+        var late_context = ap_context()
+        late_context.grant_clock = 250
+        expect(host_agent_attach_helper_authorize_v4(ap_snapshot(), "helper_issuer", good, parts, late_context).is_err()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP),
+            1048576).unwrap().is_none()).to_equal(true)
+
+    it "refuses an unopened helper store, an unknown runtime and a helper admission refusal before the archive":
+        # @req part B (d): every refusable check before the archive; the one slot is not burnt
+        val journal = ap_journal("admit")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        var unopened = ap_service(journal)
+        unopened.store_root = ""
+        expect(ap_apply(ap_agent(), wire, ap_authority(), unopened).error).to_equal("attach-helper-store")
+        var no_runtime = ap_agent()
+        no_runtime.created = None
+        expect(ap_apply(no_runtime, wire, ap_authority(), ap_service(journal)).error).to_equal("attach-runtime-missing")
+        step("a plan signed for another runtime identity than the one observed at Create")
+        var other_runtime = ap_agent()
+        var runtime = container_primary_attach_fixture_v1().runtime
+        runtime.native_id = "9".repeat(64)
+        other_runtime.created = Some(runtime)
+        expect(ap_apply(other_runtime, wire, ap_authority(), ap_service(journal)).error).to_equal("attach-plan-runtime")
+        val refuse = fn(helper: HostHelperRequestV1) -> Result<(), text>: ap_admit_refused(helper)
+        val refused = host_agent_attach_apply_core_v4(ap_agent(), "container", wire, ap_authority(), ap_service(journal), refuse)
+        expect(refused.error).to_equal("helper-parent-budget-exhausted")
+        expect(refused.agent.attachment_consumed).to_equal(false)
+        expect(refused.agent.attachment.is_none()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP),
+            1048576).unwrap().is_none()).to_equal(true)
+        step("the slot is still usable: the same packet is admitted once the admission check passes")
+        val applied = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal))
+        expect(applied.error).to_equal("")
+        expect(applied.agent.attachment_consumed).to_equal(true)
+
+describe "V4 agent PR3b: the archive helper and the composed detach entry":
+    it "publishes no-replace and reads back: same bytes pass, different bytes are a conflict":
+        # @req 13.2 (archive no-replace + read-back), F5
+        val journal = ap_journal("archive")
+        val relative = host_agent_detach_archive_relative_v4(AP_FENCE, AP_OP)
+        expect(host_agent_action_archive_v4(journal, relative, "packet-1\n", "detach-stage").is_ok()).to_equal(true)
+        expect(host_agent_action_archive_v4(journal, relative, "packet-1\n", "detach-stage").is_ok()).to_equal(true)
+        expect(host_agent_action_archive_v4(journal, relative, "packet-2\n", "detach-stage").unwrap_err()).to_equal("detach-stage")
+        expect(distributed_operation_journal_read_v3(journal, relative, 65536).unwrap().unwrap()).to_equal("packet-1\n")
+
+    it "archives a signed detach bound to this attachment, replays it, and refuses another attachment's digest":
+        # @req H-03 (detach), H-18, 14A F5, P2-2 (detach check compares the packet attach digest)
+        val journal = ap_journal("detach")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        var agent = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal)).agent
+        var att = agent.attachment.unwrap()
+        att.attach_stage = "adopted"
+        att.attach_pending = false
+        agent.attachment = Some(att)
+        val port = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: ap_progress(call)
+        step("a detach naming another attachment's digest is refused before its archive")
+        val foreign_digest = sha256_text("another-attach-packet")
+        val foreign_proof = ap_sign("host_agent_detach_v4", host_agent_detach_payload_digest_v4(AP_OP, ap_association(), foreign_digest))
+        val foreign = host_agent_detach_request_encode_v4(HostAgentDetachRequestV4(operation_id: AP_OP,
+            association_digest: ap_association(), attach_digest: foreign_digest, operation: foreign_proof.operation,
+            signed: foreign_proof.signed, approval: foreign_proof.approval)).unwrap()
+        expect(host_agent_detach_apply_v4(agent, foreign, ap_authority(), journal, AP_FENCE, port).error).to_equal("detach-attach-digest")
+        val relative = host_agent_detach_archive_relative_v4(AP_FENCE, AP_OP)
+        expect(distributed_operation_journal_read_v3(journal, relative, 65536).unwrap().is_none()).to_equal(true)
+        step("the bound detach is archived and runs d1 (revoke)")
+        val proof = ap_sign("host_agent_detach_v4", host_agent_detach_payload_digest_v4(AP_OP, ap_association(), sha256_text(wire)))
+        val detach = host_agent_detach_request_encode_v4(HostAgentDetachRequestV4(operation_id: AP_OP,
+            association_digest: ap_association(), attach_digest: sha256_text(wire), operation: proof.operation,
+            signed: proof.signed, approval: proof.approval)).unwrap()
+        val first = host_agent_detach_apply_v4(agent, detach, ap_authority(), journal, AP_FENCE, port)
+        expect(first.error).to_equal("")
+        expect(first.replay).to_equal(false)
+        expect(first.agent.attachment.unwrap().attach_stage).to_equal("revoked")
+        expect(distributed_operation_journal_read_v3(journal, relative, 65536).unwrap().unwrap()).to_equal(detach)
+        step("the exact replay is idempotent and proceeds with the same release step")
+        val again = host_agent_detach_apply_v4(first.agent, detach, ap_authority(), journal, AP_FENCE, port)
+        expect(again.replay).to_equal(true)
+        expect(again.agent.attachment.unwrap().attach_stage).to_equal("cleaned")
+
+describe "V4 agent attach part B: the controller-signed agent-terminal authority":
+    it "verifies the archived attach packet of a ready attachment and names the controller and binding":
+        # @req part B (f): verified like cancel, bound to the service incarnation/epoch
+        val journal = ap_journal("authority")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        var agent = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal)).agent
+        step("an opening attachment has no terminal authority")
+        expect(host_agent_terminal_authority_v4(agent, Some(wire), ap_authority(), "a".repeat(32), 3).unwrap_err()).to_equal("attach-not-ready")
+        var att = agent.attachment.unwrap()
+        att.attach_stage = "ready"
+        att.attach_pending = false
+        agent.attachment = Some(att)
+        val verified = host_agent_terminal_authority_v4(agent, Some(wire), ap_authority(), "a".repeat(32), 3).unwrap()
+        expect(verified.operation_id).to_equal(AP_OP)
+        expect(verified.attach_digest).to_equal(sha256_text(wire))
+        expect(verified.issuer_id).to_equal("helper_issuer")
+        expect(verified.grant_id).to_equal("grant_host_agent_attach_v4")
+        expect(verified.expires_at).to_equal(190)
+        expect(verified.snapshot_generation).to_equal(1)
+        expect(verified.binding.pane_id).to_equal("pane-a")
+        expect(verified.lease_epoch).to_equal(0)
+
+    it "refuses everything that is not that verified, live, ready attachment":
+        # @req part B (f): Err otherwise; expired approvals are refused
+        val journal = ap_journal("authority-err")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        var agent = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal)).agent
+        var att = agent.attachment.unwrap()
+        att.attach_stage = "adopted"
+        att.attach_pending = false
+        agent.attachment = Some(att)
+        expect(host_agent_terminal_authority_v4(agent, Some(wire), ap_authority(), "a".repeat(32), 3).is_ok()).to_equal(true)
+        expect(host_agent_terminal_authority_v4(agent, None, ap_authority(), "a".repeat(32), 3).unwrap_err()).to_equal("attach-unarchived")
+        val other = host_agent_attach_request_encode_v4(ap_good("pane-b")).unwrap()
+        expect(host_agent_terminal_authority_v4(agent, Some(other), ap_authority(), "a".repeat(32), 3).unwrap_err()).to_equal("attach-packet-conflict")
+        step("another incarnation or epoch of the service is not this binding's")
+        expect(host_agent_terminal_authority_v4(agent, Some(wire), ap_authority(), "b".repeat(32), 3).unwrap_err()).to_equal("attach-binding-mismatch")
+        expect(host_agent_terminal_authority_v4(agent, Some(wire), ap_authority(), "a".repeat(32), 4).unwrap_err()).to_equal("attach-binding-mismatch")
+        step("an expired approval, another controller or a changed session generation is refused")
+        var late = ap_authority()
+        late.context.grant_clock = 250
+        expect(host_agent_terminal_authority_v4(agent, Some(wire), late, "a".repeat(32), 3).is_err()).to_equal(true)
+        var foreign = ap_authority()
+        foreign.controller_ref = "other_issuer"
+        expect(host_agent_terminal_authority_v4(agent, Some(wire), foreign, "a".repeat(32), 3).unwrap_err()).to_equal("linux-host-service-controller-mismatch")
+        var moved = ap_authority()
+        moved.context.session_generation = 4
+        expect(host_agent_terminal_authority_v4(agent, Some(wire), moved, "a".repeat(32), 3).unwrap_err()).to_equal("linux-host-agent-attach-operation-mismatch")
+        step("a stopping or revoked attachment has none")
+        var revoked = agent
+        var gone = att
+        gone.attach_stage = "revoked"
+        revoked.attachment = Some(gone)
+        expect(host_agent_terminal_authority_v4(revoked, Some(wire), ap_authority(), "a".repeat(32), 3).unwrap_err()).to_equal("attach-not-ready")
+        var detaching = agent
+        detaching.stage = "detach"
+        expect(host_agent_terminal_authority_v4(detaching, Some(wire), ap_authority(), "a".repeat(32), 3).unwrap_err()).to_equal("attach-stage")
+
+# milestone_0031 fixtures: a packet whose stream policy is `policy` and whose plan (mode `mode`, parent `parent`) names that policy (so the packet
+# splits and its signatures verify); the helper is the file's fixture helper.
+fn ap_policy_wire(policy: ContainerStreamPolicyV2, mode: text, parent: text) -> text:
+    val stream = container_stream_policy_encode_v2(policy).unwrap()
+    var plan = ap_plan(ap_fixture(), "helper_attach_1", sha256_text(stream))
+    plan.terminal_mode = mode
+    plan.identity.parent_operation_id = parent
+    plan.request_digest = ""
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+    val plan_bytes = container_primary_attach_plan_encode_v1(plan).unwrap()
+    host_agent_attach_request_encode_v4(ap_packet(ap_bytes().helper, plan_bytes,
+        host_agent_pane_binding_encode_v4(ap_binding("pane-a")).unwrap(), plan.request_digest,
+        host_agent_pane_binding_digest_v4(ap_binding("pane-a")).unwrap(), ap_fixture().execution_signed,
+        ap_fixture().execution_approval, stream)).unwrap()
+
+# The refusal of `wire`, after asserting that nothing was consumed and nothing was archived.
+fn ap_refused_clean(wire: text, tag: text) -> text:
+    val journal = ap_journal(tag)
+    val applied = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal))
+    expect(applied.agent.attachment_consumed).to_equal(false)
+    expect(applied.agent.attachment.is_none()).to_equal(true)
+    expect(distributed_operation_journal_read_v3(journal, host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP),
+        1048576).unwrap().is_none()).to_equal(true)
+    applied.error
+
+describe "milestone_0031: the stream policy may only repeat the enrollment-pinned template":
+    it "names one parent for the held run, the helper and the plan in this file's fixtures":
+        # @req fixture precondition of every case below
+        expect(ap_fixture().request.plan.parent_operation_id).to_equal(AP_OP)
+        expect(ap_plan(ap_fixture(), "helper_attach_1", ap_policy_digest()).identity.parent_operation_id).to_equal(AP_OP)
+
+    it "refuses a controller-signed policy that moves the root, the broker or the cgroup, before the archive":
+        # @req item 1 (F15): root, broker program/digest/budget and delegated cgroup equal the pinned template
+        var root = primary_policy_fixture_v1()
+        root.root = "/trusted/elsewhere"
+        expect(ap_refused_clean(ap_policy_wire(root, "tty", AP_OP), "pin-root")).to_equal("container-stream-policy-pin-root")
+        var program = primary_policy_fixture_v1()
+        program.broker_program = "/trusted/other-broker"
+        expect(ap_refused_clean(ap_policy_wire(program, "tty", AP_OP), "pin-program")).to_equal("container-stream-policy-pin-broker")
+        var digest = primary_policy_fixture_v1()
+        digest.broker_digest = "9".repeat(64)
+        expect(ap_refused_clean(ap_policy_wire(digest, "tty", AP_OP), "pin-digest")).to_equal("container-stream-policy-pin-broker")
+        var budget = primary_policy_fixture_v1()
+        budget.broker_budget.cgroup_path = "/delegated/other-broker"
+        expect(ap_refused_clean(ap_policy_wire(budget, "tty", AP_OP), "pin-budget")).to_equal("container-stream-policy-pin-broker")
+        var cgroup = primary_policy_fixture_v1()
+        cgroup.delegated_cgroup_path = "/delegated/other-helpers"
+        expect(ap_refused_clean(ap_policy_wire(cgroup, "tty", AP_OP), "pin-cgroup")).to_equal("container-stream-policy-pin-cgroup")
+
+    it "refuses an environment the template does not pin and accepts the absent one":
+        # @req item 1: environment equal, or absent where the canonical policy allows it
+        var extra = primary_policy_fixture_v1()
+        extra.environment = ["LANG=C", "LD_PRELOAD=/tmp/x.so"]
+        expect(ap_refused_clean(ap_policy_wire(extra, "tty", AP_OP), "pin-env")).to_equal("container-stream-policy-pin-environment")
+        step("an empty environment passes the pin: the next gate (the plan this helper does not name) answers")
+        var absent = primary_policy_fixture_v1()
+        absent.environment = []
+        expect(ap_refused_clean(ap_policy_wire(absent, "tty", AP_OP), "pin-env-absent")).to_equal("container-output-admission-template-mismatch")
+
+    it "still admits the packet that repeats the pinned template":
+        # @req item 1 (no regression of the honest path)
+        val journal = ap_journal("pin-good")
+        val applied = ap_apply(ap_agent(), host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap(), ap_authority(),
+            ap_service(journal))
+        expect(applied.error).to_equal("")
+        expect(applied.agent.attachment_consumed).to_equal(true)
+
+describe "milestone_0031: plan fields the open core would refuse after helper begin are refused before the archive":
+    it "refuses a plan that is not a tty plan":
+        # @req item 2: the workspace primary opens `tty` only (machine_workspace_primary_plan_v3)
+        expect(ap_refused_clean(ap_policy_wire(primary_policy_fixture_v1(), "stdin", AP_OP), "mode")).to_equal("attach-plan-terminal-mode")
+
+    it "accepts the associated plan and helper on the admission helper begin would return":
+        # @req item 2: container_primary_attach_admission_validate_v1 before the archive
+        val good = ap_good("pane-a")
+        val parts = host_agent_attach_request_parts_v4(good).unwrap()
+        expect(host_agent_attach_association_check_v4(good, parts, ap_fixture().execution_signed.grant).is_ok()).to_equal(true)
+
+    it "refuses a helper that brokers another operation than the plan's, with the open core's own reason":
+        # @req item 2: plan<->helper association (was only checked on the lease, after begin)
+        val bytes = ap_bytes()
+        val second = host_helper_sibling_fixture_v1(ap_fixture(), ap_fixture().owner, "helper_attach_2")
+        val wire = host_agent_attach_request_encode_v4(ap_packet(bytes.other_helper, bytes.plan,
+            host_agent_pane_binding_encode_v4(ap_binding("pane-a")).unwrap(), ap_plan_digest(bytes.plan),
+            host_agent_pane_binding_digest_v4(ap_binding("pane-a")).unwrap(), second.execution_signed,
+            second.execution_approval, bytes.stream)).unwrap()
+        expect(ap_refused_clean(wire, "association")).to_equal("container-output-admission-template-mismatch")
+        step("the pure check alone answers the same for a plan with other resources than the helper reservation")
+        val good = ap_good("pane-a")
+        var parts = host_agent_attach_request_parts_v4(good).unwrap()
+        parts.plan.resources.cpu_millis = parts.plan.resources.cpu_millis + 1
+        expect(host_agent_attach_association_check_v4(good, parts, ap_fixture().execution_signed.grant).is_err()).to_equal(true)
+
+    it "refuses a plan whose parent is not this held run, with the open core's own reason":
+        # @req item 2: the open core's parent check (host-primary-parent-operation-mismatch) ran only after begin
+        expect(ap_refused_clean(ap_policy_wire(primary_policy_fixture_v1(), "tty", "operation_other"), "parent")).to_equal("host-primary-parent-operation-mismatch")
+
+    it "derives the deadline action from the helper kind exactly as helper begin does":
+        # @req item 2: a non-attach helper kind gets the `exec` deadline from begin; the pre-archive check must refuse
+        # it with the reason the open core would give on the lease, not admit it on an `attach` deadline
+        val good = ap_good("pane-a")
+        var parts = host_agent_attach_request_parts_v4(good).unwrap()
+        parts.helper.plan.helper_kind = "exec-broker"
+        expect(host_agent_attach_association_check_v4(good, parts, ap_fixture().execution_signed.grant).unwrap_err()).to_equal("container-output-admission-template-mismatch")

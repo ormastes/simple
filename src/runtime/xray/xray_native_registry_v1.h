@@ -18,7 +18,8 @@
  *                                 the site-row shape (len, align, words)
  *   XMAP_RETURN_TO_SLED           bytes from the trampoline's sled return
  *                                 address back to the sled start
- * and, when supported, the ISA leaf
+ * and, when supported, the ISA leaf (x86-64 TUs get it by defining
+ * XMAP_X64_REL32_SLED_LEAF)
  *   static int xray_isa_sled_calls_trampoline(uintptr_t sled, uint32_t site_id);
  * which checks the sled's CURRENT activation word is OFF or ON and that it
  * calls THIS runtime instance's `__simple_xray_trampoline_v1`.
@@ -89,6 +90,27 @@ static inline uint64_t xmap_u64(const uint8_t *p) {
 #ifdef SIMPLE_XRAY_NATIVE_SUPPORTED
 
 extern void __simple_xray_trampoline_v1(void);
+
+/* Shared x86-64 X64Rel32 (13-byte) sled leaf, used by both the SysV
+ * (xray_native_runtime_x86_64.c) and Windows x64 (xray_native_runtime_win64.c)
+ * runtimes; each opts in with XMAP_X64_REL32_SLED_LEAF. */
+#ifdef XMAP_X64_REL32_SLED_LEAF
+/* Registration leaf: activation word OFF or ON, `E8 rel32` at +2 reaching
+ * THIS runtime's trampoline, `EB 04` at +7, imm32 at +9 == the row's id. */
+static int xray_isa_sled_calls_trampoline(uintptr_t sled, uint32_t site_id) {
+    const volatile uint8_t *bytes = (const volatile uint8_t *)sled;
+    uint32_t word = __atomic_load_n((const uint16_t *)sled, __ATOMIC_RELAXED);
+    if (word != XMAP_OFF_WORD && word != XMAP_ON_WORD) return 0;
+    if (bytes[2] != 0xE8 || bytes[7] != 0xEB || bytes[8] != 0x04) return 0;
+    uint32_t rel = (uint32_t)bytes[3] | ((uint32_t)bytes[4] << 8) | ((uint32_t)bytes[5] << 16) |
+                   ((uint32_t)bytes[6] << 24);
+    uint32_t id = (uint32_t)bytes[9] | ((uint32_t)bytes[10] << 8) | ((uint32_t)bytes[11] << 16) |
+                  ((uint32_t)bytes[12] << 24);
+    if (id != site_id) return 0;
+    return sled + 7 + (uintptr_t)(int64_t)(int32_t)rel == (uintptr_t)&__simple_xray_trampoline_v1;
+}
+
+#endif /* XMAP_X64_REL32_SLED_LEAF */
 
 /* Hot path, called only by the trampoline. Never blocks, allocates or calls
  * out. A return address outside every registered module, an out-of-range id,

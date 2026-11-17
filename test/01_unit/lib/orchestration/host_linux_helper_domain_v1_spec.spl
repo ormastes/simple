@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+Pins milestone_0022 N1 (DESIGN 13.2 with the 14.3/15.4 mirror rule): the
+deterministic, fail-closed classifier of a `host_helper_reservation_v1` row on
+the V4 Linux journal. Markers: PC (journal connection), PA/N/O (store), R/X
+(journal) and their store mirrors. Written for owners of the Linux evidence arm.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+DATA only: all 256 marker sets go through the pure table and are compared with
+an oracle that lists the LEGAL sets explicitly, so any set not listed must be an
+Err. R/X are presence-only in N1; the R stage / consumedDigest refinement of the
+{PA,R} row arrives with the R codec in N3. The gather step (journal + store IO)
+is pinned structurally: an Absent store contributes no store marker.
+## Verification guidance and troubleshooting
+A row mismatch prints the 8-bit marker index (bit order PC,PA,N,R,X,O,Rm,Xm).
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperDomainV1, HostLinuxHelperMarkersV1,
+    host_linux_helper_domain_of_v1}
+
+val N1_DOMAIN_PATH = "src/lib/nogc_sync_mut/orchestration/host_linux_helper_store_v1.spl"
+
+fn n1_bit(index: i64, bit: i64) -> bool:
+    var weight = 1
+    var at = 0
+    while at < bit:
+        weight = weight * 2
+        at = at + 1
+    (index / weight) % 2 == 1
+
+fn n1_markers(index: i64) -> HostLinuxHelperMarkersV1:
+    HostLinuxHelperMarkersV1(connection: n1_bit(index, 0), consumed: n1_bit(index, 1), native: n1_bit(index, 2),
+        refusal: n1_bit(index, 3), cancelled: n1_bit(index, 4), output: n1_bit(index, 5),
+        refusal_mirror: n1_bit(index, 6), cancelled_mirror: n1_bit(index, 7))
+
+fn n1_domain_text(result: Result<HostLinuxHelperDomainV1, text>) -> text:
+    match result:
+        case Ok(HostLinuxHelperDomainV1.Unrecorded): "Unrecorded"
+        case Ok(HostLinuxHelperDomainV1.PrimaryConnection): "PrimaryConnection"
+        case Ok(HostLinuxHelperDomainV1.PrimaryAttach): "PrimaryAttach"
+        case Ok(HostLinuxHelperDomainV1.AttachRefusedPreConsume): "AttachRefusedPreConsume"
+        case Ok(HostLinuxHelperDomainV1.AttachRefusedPostConsume): "AttachRefusedPostConsume"
+        case Ok(HostLinuxHelperDomainV1.AttachCancelled): "AttachCancelled"
+        case Err(reason): "Err:" + reason
+
+# Oracle: the legal sets of DESIGN 13.2 over (PC,PA,N,R,X,O), written as sets.
+fn n1_expected(index: i64) -> text:
+    val m = n1_markers(index)
+    if (m.refusal_mirror and not m.refusal) or (m.cancelled_mirror and not m.cancelled):
+        return "Err:helper-settlement-domain-ambiguous"
+    var key = ""
+    if m.connection: key = key + "PC,"
+    if m.consumed: key = key + "PA,"
+    if m.native: key = key + "N,"
+    if m.refusal: key = key + "R,"
+    if m.cancelled: key = key + "X,"
+    if m.output: key = key + "O,"
+    if key == "": return "Unrecorded"
+    if key == "PC,": return "PrimaryConnection"
+    if key == "PA," or key == "PA,N,": return "PrimaryAttach"
+    if key == "R,": return "AttachRefusedPreConsume"
+    if key == "PA,R,": return "AttachRefusedPostConsume"
+    if key == "R,X," or key == "PA,R,X,": return "AttachCancelled"
+    if key == "O,": return "Err:helper-output-follow-unsupported-on-linux-journal"
+    "Err:helper-settlement-domain-ambiguous"
+
+describe "Linux helper domain classifier (milestone_0022 N1)":
+    it "matches the 13.2 table on every one of the 256 marker sets":
+        # @req S40-NATIVE-N1
+        var index = 0
+        while index < 256:
+            val actual = n1_domain_text(host_linux_helper_domain_of_v1(n1_markers(index)))
+            expect("{index}:" + actual).to_equal("{index}:" + n1_expected(index))
+            index = index + 1
+
+    it "rejects the named adverse sets":
+        # @req S40-NATIVE-N1
+        step("X without R, N with R or X, PC or O mixed with anything: ambiguous")
+        for index in [16, 2 + 16, 4 + 8, 2 + 4 + 8, 2 + 4 + 8 + 16, 1 + 2, 1 + 8, 32 + 2, 4]:
+            expect(n1_domain_text(host_linux_helper_domain_of_v1(n1_markers(index)))).to_equal("Err:helper-settlement-domain-ambiguous")
+        step("a mirror without its journal record is never authority")
+        expect(n1_domain_text(host_linux_helper_domain_of_v1(n1_markers(64)))).to_equal("Err:helper-settlement-domain-ambiguous")
+        expect(n1_domain_text(host_linux_helper_domain_of_v1(n1_markers(8 + 128)))).to_equal("Err:helper-settlement-domain-ambiguous")
+        step("a journal record without its mirror is legal (resume regenerates the mirror)")
+        expect(n1_domain_text(host_linux_helper_domain_of_v1(n1_markers(8)))).to_equal("AttachRefusedPreConsume")
+
+    it "gathers no store marker from an Absent store and R/X only from the journal":
+        # @req S40-NATIVE-N1
+        val source = file_read_text(N1_DOMAIN_PATH)
+        val gather = source.substring(source.index_of("pub fn host_linux_helper_markers_v1("),
+            source.index_of("pub fn host_linux_helper_domain_of_v1("))
+        val absent = gather.substring(gather.index_of("case HostLinuxHelperStoreStateV1.Absent:"),
+            gather.index_of("case HostLinuxHelperStoreStateV1.Valid(root):"))
+        expect(absent.contains("consumed: false, native: false")).to_equal(true)
+        expect(absent.contains("output: false, refusal_mirror: false, cancelled_mirror: false")).to_equal(true)
+        expect(absent.contains("host_helper_archive_present_v1")).to_equal(false)
+        step("R and X are journal reads; their store copies are only mirrors")
+        expect(gather.contains("helper_journal_present_v1(journal, \"host-helper-primary-refusal/\" + key")).to_equal(true)
+        expect(gather.contains("helper_journal_present_v1(journal, \"host-helper-primary-cancelled/\" + key")).to_equal(true)

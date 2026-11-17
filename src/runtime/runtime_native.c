@@ -19273,11 +19273,8 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
  * the Win32 error instead; this runs only on a path that is already failing.
  * Set SIMPLE_QUIET_SECURE_TEMP_DIAG=1 to silence. */
 static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
-    DWORD error = GetLastError();
-    if (rt_env_present("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
-    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
-            stage, (unsigned long)error, detail ? detail : "");
-    fflush(stderr);
+    unsigned long err = (unsigned long)GetLastError(); /* before the env probe can clobber it */
+    rt__shared_secure_temp_dir_diag(stage, err, rt_env_present("SIMPLE_QUIET_SECURE_TEMP_DIAG"), detail);
 }
 #endif
 

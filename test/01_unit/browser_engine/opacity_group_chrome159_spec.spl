@@ -1,0 +1,436 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS `opacity` on a box with two or more painted items (true group
+compositing) to Chrome 159 on the CPU raster, cpu_simd and Vulkan lanes.
+Audience: browser-engine and Engine2D maintainers.
+
+Chrome's group pipeline, fitted on 2026-11-17 (Chrome 159, arm64 headless,
+`--force-device-scale-factor=4`; see
+`doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md`):
+- the subtree is rasterised into a transparent premultiplied 8-bit layer;
+- the layer is restored with paint alpha `A = round(opacity*255)` through
+  SkBlendARGB32: `sc = A+1`, `p = 0xFFFF - La*sc`, `ds = (p + (p>>8)) >> 8`,
+  `out = (L*sc + D*ds) >> 8`.
+Only Chrome's raster-tile seams (a few device columns just left of x = 256*k,
+k >= 2) differ, by at most 2 levels; the pinned cells stay inside one
+256-device-px tile and the full-frame row asserts the seam bound.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-OPACITY-GROUP-CHROME159-001 — CSS opacity groups composite as Chrome 159 does.
+"""
+use std.spec.*
+use std.io_runtime.{file_read_bytes_result}
+use std.common.image.png_decode.{PngImage, decode_png_to_argb}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count, vulkan_readback_census_reset, vulkan_readback_census_line, vulkan_device_css_group_restore_count}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_pixel, css_opacity_group_alpha8}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_resolved_engine2d_backend
+}
+
+fn grp_cell(left: i32, top: i32, bg: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:" + "{top}" + "px;width:16px;height:8px;background:" + bg + "\">" + inner + "</div>"
+
+fn grp_box(left: i32, w: i32, bg: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:0;width:" + "{w}" + "px;height:8px;background:" + bg + "\"></div>"
+
+fn grp_group(op: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:0;top:0;width:16px;height:8px;opacity:" + op + "\">" + inner + "</div>"
+
+fn grp_group_bg(op: text, bg: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:0;top:0;width:16px;height:8px;opacity:" + op + ";background:" + bg + "\">" + inner + "</div>"
+
+# One 64x16 block: row 0 holds four two-child groups (A at 0..10, B at 6..16,
+# opaque, overlapping); row 1 holds a group whose own background is one of
+# its two items, and a three-child group.
+fn grp_block(ox: i32) -> text:
+    var body = ""
+    body = body + grp_cell(ox, 0, "rgb(40,90,200)", grp_group("0.5", grp_box(0, 10, "rgb(250,20,30)") + grp_box(6, 10, "rgb(10,200,60)")))
+    body = body + grp_cell(ox + 16, 0, "rgb(7,7,7)", grp_group("0.3", grp_box(0, 10, "rgb(255,255,255)") + grp_box(6, 10, "rgb(128,64,192)")))
+    body = body + grp_cell(ox + 32, 0, "rgb(230,220,10)", grp_group("0.75", grp_box(0, 10, "rgb(17,34,51)") + grp_box(6, 10, "rgb(200,100,0)")))
+    body = body + grp_cell(ox + 48, 0, "rgb(128,128,128)", grp_group("0.9", grp_box(0, 10, "rgb(0,0,255)") + grp_box(6, 10, "rgb(255,0,0)")))
+    body = body + grp_cell(ox, 8, "rgb(60,160,90)", grp_group_bg("0.6", "rgb(200,30,120)", grp_box(4, 8, "rgb(240,240,0)")))
+    body = body + grp_cell(ox + 16, 8, "rgb(255,255,255)", grp_group("0.45", grp_box(0, 8, "rgb(255,0,0)") + grp_box(4, 8, "rgb(0,255,0)") + grp_box(8, 8, "rgb(0,0,255)")))
+    body
+
+fn grp_page(blocks: i32) -> text:
+    var body = ""
+    var k = 0
+    while k < blocks:
+        body = body + grp_block(k * 64)
+        k = k + 1
+    "<html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
+
+# Sample points (CSS px) and Chrome 159 colours, `--force-device-scale-factor=4
+# --window-size=64,16` of grp_page(1), read at device (x*4+2, y*4+2). Each
+# region is one uniform colour in Chrome. Per cell: A-only, overlap, B-only;
+# then group-background cell (bg, child, bg) and three-child cell.
+val GRP_X: [i32] = [3, 8, 13, 19, 24, 29, 35, 40, 45, 51, 56, 61, 2, 8, 14, 18, 22, 26, 30]
+val GRP_Y: [i32] = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12]
+val GRP_CHROME: [u32] = [
+    0xFF913672u32, 0xFF189181u32, 0xFF189181u32,
+    0xFF525252u32, 0xFF2B183Fu32, 0xFF2B183Fu32,
+    0xFF465028u32, 0xFFCF8202u32, 0xFFCF8202u32,
+    0xFF0C0CF2u32, 0xFFF20C0Cu32, 0xFFF20C0Cu32,
+    0xFF90516Cu32, 0xFFA8D023u32, 0xFF90516Cu32,
+    0xFFFF8B8Bu32, 0xFF8BFF8Bu32, 0xFF8B8BFFu32, 0xFF8B8BFFu32
+]
+# Chrome 159 full frame of grp_page(3) at k=4 (`--window-size=192,16`,
+# 768x64 device px). Column 511 is a raster-tile seam (32 px one level off
+# the tile-interior rule).
+val GRP_BG_BORDER_PAGE = "<html><body style=\"margin:0;background:#fff\"><div style=\"position:absolute;left:10px;top:40px;width:24px;height:14px;background:#f00;border:3px solid #00f;opacity:0.5\"></div></body></html>"
+val GRP_WIDE_REF = "test/fixtures/browser_engine/opacity_group_chrome159/group_cells_wide_k4.png"
+
+fn grp_mismatches(px: [u32], fw: i32) -> i32:
+    if px.len() < fw * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < GRP_CHROME.len():
+        val got = px[GRP_Y[n] * fw + GRP_X[n]]
+        if got != GRP_CHROME[n]:
+            print "opacity-group cell {n} ({GRP_X[n]},{GRP_Y[n]}) got {got} want {GRP_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+fn grp_chan_dev(a: u32, b: u32, shift: u32) -> i32:
+    val x = ((a >> shift) & 255u32) as i32
+    val y = ((b >> shift) & 255u32) as i32
+    if x > y: x - y else: y - x
+
+fn grp_frame_max_dev(got: [u32], want: [u32]) -> i32:
+    if got.len() != want.len() or want.len() == 0:
+        return 999
+    var worst = 0
+    var i = 0
+    while i < want.len():
+        for sh in [16u32, 8u32, 0u32]:
+            val d = grp_chan_dev(got[i], want[i], sh)
+            if d > worst:
+                worst = d
+        i = i + 1
+    worst
+
+fn grp_chrome_reference(path: text) -> [u32]:
+    var out: [u32] = []
+    match file_read_bytes_result(path):
+        Ok(bytes):
+            match decode_png_to_argb(bytes):
+                Ok(img):
+                    out = img.pixels
+                Err(msg):
+                    print "decode failed {path}: {msg}"
+        Err(msg):
+            print "read failed {path}: {msg}"
+    out
+
+# Nested groups: one 64x16 block whose groups hold groups (two and three
+# levels, sibling inner groups that overlap inside the outer layer, an outer
+# group whose only item is an inner group, an outer group with its own
+# background). Chrome 159 restores each level into its parent's premultiplied
+# layer with the same SkBlendARGB32 rule; nothing is folded.
+fn ng_block(ox: i32) -> text:
+    var body = ""
+    body = body + grp_cell(ox, 0, "rgb(40,90,200)", grp_group("0.5", grp_box(0, 10, "rgb(250,20,30)") + grp_group("0.6", grp_box(6, 10, "rgb(10,200,60)") + grp_box(12, 4, "rgb(255,255,0)"))))
+    body = body + grp_cell(ox + 16, 0, "rgb(7,7,7)", grp_group_bg("0.7", "rgb(200,30,120)", grp_group("0.4", grp_box(2, 8, "rgb(255,255,255)") + grp_box(6, 8, "rgb(0,0,0)"))))
+    body = body + grp_cell(ox + 32, 0, "rgb(230,220,10)", grp_group("0.8", grp_box(0, 16, "rgb(0,0,255)") + grp_group("0.5", grp_box(4, 12, "rgb(255,0,0)") + grp_group("0.5", grp_box(8, 8, "rgb(0,255,0)") + grp_box(12, 4, "rgb(255,255,255)")))))
+    body = body + grp_cell(ox + 48, 0, "rgb(128,128,128)", grp_group("0.5", grp_group("0.5", grp_box(0, 10, "rgb(255,0,0)") + grp_box(6, 10, "rgb(0,255,0)"))))
+    body = body + grp_cell(ox, 8, "rgb(60,160,90)", grp_group("0.6", grp_group("0.5", grp_box(0, 6, "rgb(255,0,0)") + grp_box(3, 6, "rgb(0,0,255)")) + grp_group("0.5", grp_box(8, 6, "rgb(0,255,0)") + grp_box(11, 5, "rgb(0,0,0)"))))
+    body = body + grp_cell(ox + 16, 8, "rgb(255,255,255)", grp_group("0.9", grp_box(0, 16, "rgb(255,255,255)") + grp_group("0.3", grp_box(2, 6, "rgb(0,0,0)") + grp_box(6, 8, "rgb(255,0,0)"))))
+    # A sibling after an inner group overlaps it: paint order inside the layer.
+    body = body + grp_cell(ox + 32, 8, "rgb(200,200,200)", grp_group("0.5", grp_group("0.5", grp_box(0, 8, "rgb(255,0,0)") + grp_box(4, 8, "rgb(0,0,255)")) + grp_box(6, 10, "rgb(0,255,0)")))
+    body = body + grp_cell(ox + 48, 8, "rgb(20,40,60)", grp_group("0.7", grp_box(0, 8, "rgb(255,255,0)") + grp_group("0.4", grp_box(4, 8, "rgb(0,0,0)") + grp_box(8, 8, "rgb(255,255,255)")) + grp_box(10, 4, "rgb(0,0,255)")))
+    body
+
+fn ng_page(blocks: i32) -> text:
+    var body = ""
+    var k = 0
+    while k < blocks:
+        body = body + ng_block(k * 64)
+        k = k + 1
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
+
+# Chrome 159 colours of ng_page(1) (`--window-size=64,16`, k=4, read at device
+# (x*4+2, y*4+2); every sampled 4x4 device block is uniform).
+val NG_X: [i32] = [3, 8, 11, 14, 17, 20, 23, 28, 31, 34, 38, 42, 46, 51, 56, 61, 1, 5, 7, 8, 10, 13, 15, 17, 20, 23, 28, 31, 34, 37, 40, 46, 50, 54, 57, 59, 62]
+val NG_Y: [i32] = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12]
+val NG_CHROME: [u32] = [
+    0xFF913672u32, 0xFF486D7Bu32, 0xFF1E7B9Du32, 0xFF698C8Bu32,
+    0xFF8E1756u32, 0xFF9E567Cu32, 0xFF550E34u32, 0xFF550E34u32, 0xFF8E1756u32,
+    0xFF2D2BCEu32, 0xFF942B66u32, 0xFF605F66u32, 0xFF945F9Au32,
+    0xFFA06060u32, 0xFF60A060u32, 0xFF60A060u32,
+    0xFF766F3Eu32, 0xFF296F8Bu32, 0xFF296F8Bu32, 0xFF21A557u32, 0xFF29BC3Eu32, 0xFF296F3Eu32, 0xFF296F3Eu32,
+    0xFFFFFFFFu32, 0xFFB8B8B8u32, 0xFFFFB8B8u32, 0xFFFFB8B8u32, 0xFFFFFFFFu32,
+    0xFFD69696u32, 0xFF9696D6u32, 0xFF63E363u32, 0xFF63E363u32,
+    0xFFB9BF11u32, 0xFF707611u32, 0xFF566472u32, 0xFF050BC5u32, 0xFF566472u32
+]
+# Chrome 159 full frame of ng_page(3) at k=4 (`--window-size=192,16`). This
+# page shows no tile-seam deviation (blocks 1 and 2 equal block 0 exactly), so
+# the full frame is pinned exactly.
+val NG_WIDE_REF = "test/fixtures/browser_engine/opacity_group_chrome159/nested_cells_wide_k4.png"
+
+fn ng_mismatches(px: [u32], fw: i32) -> i32:
+    if px.len() < fw * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < NG_CHROME.len():
+        val got = px[NG_Y[n] * fw + NG_X[n]]
+        if got != NG_CHROME[n]:
+            print "nested-group cell {n} ({NG_X[n]},{NG_Y[n]}) got {got} want {NG_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+# Non-opaque members (raster two-pass layer): translucent colours, a hard
+# translucent shadow, a translucent gradient, a translucent image, each over a
+# layer pixel no other non-opaque paint touches. Cells (16x8 each):
+#   row 0: translucent+opaque, opaque+translucent, two translucent overlapping
+#          (declines on the raster), shadow+boxes
+#   row 1: translucent gradient+opaque, image+opaque, opaque gradient+
+#          translucent, image+translucent overlapping (declines on the raster)
+val TG_IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGOUs/mwgIGBgYGJAQoAHMQB7tXVXUgAAAAASUVORK5CYII="
+
+fn tg_box(left: i32, w: i32, h: i32, paint: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:0;width:" + "{w}" + "px;height:" + "{h}" + "px;" + paint + "\"></div>"
+
+fn tg_img(left: i32, w: i32) -> text:
+    "<img src=\"" + TG_IMG + "\" style=\"position:absolute;left:" + "{left}" + "px;top:0;width:" + "{w}" + "px;height:8px\">"
+
+fn tg_page() -> text:
+    var body = ""
+    body = body + grp_cell(0, 0, "rgb(40,90,200)", grp_group("0.5", tg_box(0, 10, 8, "background:rgba(255,0,0,0.5)") + tg_box(6, 10, 8, "background:rgb(0,0,255)")))
+    body = body + grp_cell(16, 0, "rgb(230,220,10)", grp_group("0.6", tg_box(0, 10, 8, "background:rgb(20,20,20)") + tg_box(6, 10, 8, "background:rgba(0,255,128,0.4)")))
+    body = body + grp_cell(32, 0, "rgb(255,255,255)", grp_group("0.7", tg_box(0, 10, 8, "background:rgba(0,128,255,0.4)") + tg_box(6, 10, 8, "background:rgba(255,200,0,0.6)")))
+    body = body + grp_cell(48, 0, "rgb(128,128,128)", grp_group("0.5", tg_box(0, 8, 5, "background:rgb(255,0,0);box-shadow:3px 3px 0 rgba(0,0,0,0.5)") + tg_box(12, 4, 8, "background:rgb(0,255,0)")))
+    body = body + grp_cell(0, 8, "rgb(60,160,90)", grp_group("0.8", tg_box(0, 10, 8, "background:linear-gradient(rgba(0,200,100,0.5),rgba(0,200,100,0.5))") + tg_box(6, 10, 8, "background:rgb(255,255,255)")))
+    body = body + grp_cell(16, 8, "rgb(200,30,120)", grp_group("0.6", tg_img(0, 10) + tg_box(6, 10, 8, "background:rgb(255,255,0)")))
+    body = body + grp_cell(32, 8, "rgb(10,10,10)", grp_group("0.75", tg_box(0, 16, 8, "background:linear-gradient(rgb(250,120,0),rgb(250,120,0))") + tg_box(4, 8, 8, "background:rgba(255,255,255,0.3)")))
+    body = body + grp_cell(48, 8, "rgb(255,255,255)", grp_group("0.5", tg_img(0, 10) + tg_box(6, 10, 8, "background:rgba(0,0,0,0.5)")))
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
+
+# Chrome 159 colours of tg_page() (k=4, `--window-size=64,16`). The raster
+# admits every cell except (34..46, 4) and (50..60, 12), whose two non-opaque
+# paints overlap (Chrome there: B7DBFF E3D994 FFE793 / B8C2FB 9A9FBC BFBFBF).
+# The image pixel (18,12) (Chrome 8829A5) is not pinned: the raster lane does
+# not paint a plain <img> at all, group or not.
+val TG_X: [i32] = [2, 8, 13, 18, 24, 29, 50, 50, 54, 56, 61, 8, 13, 24, 29, 33, 37, 41, 45]
+val TG_Y: [i32] = [4, 4, 4, 4, 4, 4, 2, 6, 6, 6, 4, 12, 12, 12, 12, 12, 12, 12, 12]
+val TG_CHROME: [u32] = [
+    0xFF5E4396u32, 0xFF132CE3u32, 0xFF132CE3u32,
+    0xFF676310u32, 0xFF629C29u32, 0xFFAFE426u32,
+    0xFFBF3F3Fu32, 0xFF808080u32, 0xFF606060u32, 0xFF606060u32, 0xFF3FBF3Fu32,
+    0xFFD8ECDEu32, 0xFFD8ECDEu32,
+    0xFFE9A52Fu32, 0xFFE9A52Fu32,
+    0xFFBE5C02u32, 0xFFBE7A3Cu32, 0xFFBE7A3Cu32, 0xFFBE5C02u32
+]
+
+# `img_counted` false (the lane does not count the unpainted <img> as a group
+# paint item, so its group folds) skips the cells whose Chrome value needs the
+# image group (13, 14: yellow over the image).
+fn tg_mismatches(px: [u32], fw: i32, img_counted: bool) -> i32:
+    if px.len() < fw * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < TG_CHROME.len():
+        val got = px[TG_Y[n] * fw + TG_X[n]]
+        if (img_counted or (n != 13 and n != 14)) and got != TG_CHROME[n]:
+            print "translucent-group cell {n} ({TG_X[n]},{TG_Y[n]}) got {got} want {TG_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    # (2,12): translucent gradient; Chrome dithers this block between
+    # 24B05E and 24B15E, so either observed value is Chrome's.
+    val grad = px[12 * fw + 2]
+    if grad != 0xFF24B05Eu32 and grad != 0xFF24B15Eu32:
+        print "translucent-group gradient cell (2,12) got {grad}"
+        bad = bad + 1
+    bad
+
+# Multi-root page whose roots hold text, an outline and a shadow (halo past
+# the command rect). Each cell 24x16.
+fn mr_cell(left: i32, bg: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:0;width:24px;height:16px;background:" + bg + "\">" + inner + "</div>"
+
+fn mr_group(op: text, extra: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:0;top:0;width:24px;height:16px;opacity:" + op + ";" + extra + "\">" + inner + "</div>"
+
+fn mr_box(left: i32, top: i32, w: i32, h: i32, paint: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:" + "{top}" + "px;width:" + "{w}" + "px;height:" + "{h}" + "px;" + paint + "\"></div>"
+
+fn mr_text_cell() -> text:
+    mr_cell(0, "rgb(40,90,200)", mr_group("0.5", "background:rgb(255,0,0);font:10px sans-serif;color:rgb(0,0,0)", "Hi"))
+
+fn mr_page() -> text:
+    var body = mr_text_cell()
+    body = body + mr_cell(24, "rgb(230,220,10)", mr_group("0.6", "", mr_box(4, 4, 8, 8, "background:rgb(0,128,0);outline:2px solid rgb(0,0,255)") + mr_box(14, 0, 10, 16, "background:rgb(255,255,255)")))
+    body = body + mr_cell(48, "rgb(128,128,128)", mr_group("0.5", "", mr_box(0, 0, 10, 8, "background:rgb(255,0,0);box-shadow:3px 3px 0 rgba(0,0,0,0.5)") + mr_box(16, 0, 8, 16, "background:rgb(0,255,0)")))
+    body = body + mr_cell(72, "rgb(255,255,255)", mr_group("0.7", "", mr_box(0, 0, 14, 16, "background:rgb(0,0,255)") + mr_box(10, 0, 14, 16, "background:rgb(255,128,0)")))
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
+
+# Chrome 159 colours of mr_page() (k=4, `--window-size=96,16`): text-root
+# background away from the glyphs, outlined box / sibling, shadow box /
+# background / sibling, two-box group. Not pinned (open, see the bug record):
+# the outline ring (Chrome 5B579D at (26,13) (30,2) (26,8)) -- no lane paints
+# an outline on a positioned box, opacity or not -- and the shadow-only
+# pixels (Chrome 5F5F5F at (59,9) (52,10) (60,5), 606060 for the same shadow
+# on tg_page's 8x5 box; Simple paints 606060 on both).
+val MR_X: [i32] = [21, 22, 12, 29, 35, 38, 41, 50, 51, 62, 66, 74, 81, 89]
+val MR_Y: [i32] = [13, 2, 13, 5, 8, 13, 13, 2, 6, 12, 8, 8, 8, 8]
+val MR_CHROME: [u32] = [
+    0xFF942C63u32, 0xFF942C63u32, 0xFF942C63u32,
+    0xFF5BA403u32, 0xFF5BA403u32, 0xFFF5F19Du32, 0xFFF5F19Du32,
+    0xFFBF3F3Fu32, 0xFFBF3F3Fu32, 0xFF808080u32, 0xFF3FBF3Fu32,
+    0xFF4B4BFFu32, 0xFF4B4BFFu32, 0xFFFFA54Bu32
+]
+
+fn mr_mismatches(px: [u32], fw: i32) -> i32:
+    if px.len() < fw * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < MR_CHROME.len():
+        val got = px[MR_Y[n] * fw + MR_X[n]]
+        if got != MR_CHROME[n]:
+            print "multi-root cell {n} ({MR_X[n]},{MR_Y[n]}) got {got} want {MR_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+# Chrome colours of tg_page() cells the raster declines: the Engine2D lanes
+# composite layers with real alpha. Open (bug record): (40,4), where two
+# translucent paints overlap (Chrome E3D994, Engine2D +1 green), and every
+# <img> pixel -- no lane paints this <img> (Chrome 8829A5 B8C2FB 9A9FBC at
+# (18,12) (50,12) (54,12)), which also skips tg cells 13 and 14.
+val TG_DEV_X: [i32] = [34, 37, 46, 60]
+val TG_DEV_Y: [i32] = [4, 4, 4, 12]
+val TG_DEV_CHROME: [u32] = [0xFFB7DBFFu32, 0xFFB7DBFFu32, 0xFFFFE793u32, 0xFFBFBFBFu32]
+
+fn tg_dev_mismatches(px: [u32], fw: i32) -> i32:
+    var bad = tg_mismatches(px, fw, false)
+    if px.len() < fw * 16:
+        return 999
+    var n = 0
+    while n < TG_DEV_CHROME.len():
+        val got = px[TG_DEV_Y[n] * fw + TG_DEV_X[n]]
+        if got != TG_DEV_CHROME[n]:
+            print "translucent-group device cell {n} ({TG_DEV_X[n]},{TG_DEV_Y[n]}) got {got} want {TG_DEV_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+describe "CSS opacity groups composite as Chrome 159 does":
+    it "restores an opaque layer pixel with SkBlendARGB32 at alpha round(opacity*255)":
+        expect(css_opacity_group_alpha8(50)).to_equal(128)
+        expect(css_opacity_group_alpha8(30)).to_equal(77)
+        expect(css_opacity_group_composite_pixel(0xFFFA141Eu32, 0xFF285AC8u32, 128)).to_equal(0xFF913672u32)
+        expect(css_opacity_group_composite_pixel(0x00FFFFFFu32, 0xFF285AC8u32, 128)).to_equal(0xFF285AC8u32)
+
+    it "composites two-child, background-plus-child and three-child groups on cpu_simd as Chrome does":
+        val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "cpu_simd")
+        expect(grp_mismatches(px, 64)).to_equal(0)
+
+    it "composites two-child, background-plus-child and three-child groups on the CPU raster as Chrome does":
+        val px = simple_web_layout_render_html_software_pixels(grp_page(1), 64, 16)
+        expect(grp_mismatches(px, 64)).to_equal(0)
+
+    it "composites the same groups on Vulkan as Chrome and cpu_simd do":
+        val before = vulkan_readback_count()
+        val vk = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "vulkan")
+        expect(vulkan_readback_count() > before).to_equal(true)
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "cpu_simd")
+        expect(grp_mismatches(vk, 64)).to_equal(0)
+        expect(grp_frame_max_dev(vk, cpu)).to_equal(0)
+
+    it "matches the Chrome full frame across a raster-tile seam within 2 levels at k=4":
+        val want = grp_chrome_reference(GRP_WIDE_REF)
+        val got = simple_web_layout_render_html_pixels_engine2d_at_device_scale(grp_page(3), 192, 16, 4, "cpu_simd")
+        expect(want.len()).to_equal(768 * 64)
+        expect(grp_frame_max_dev(got, want) <= 2).to_equal(true)
+
+    it "treats one box's background and border as a two-item group on the CPU raster as Chrome does":
+        # Chrome 159 (k=4, window 120x70): red bg + 3px blue border at 0.5 over
+        # white gives ff7e7e / 7e7eff (a group), not the folded ff7f7f.
+        val px = simple_web_layout_render_html_software_pixels(GRP_BG_BORDER_PAGE, 120, 70)
+        expect(px[50 * 120 + 25]).to_equal(0xFFFF7E7Eu32)
+        expect(px[50 * 120 + 11]).to_equal(0xFF7E7EFFu32)
+
+    it "treats one box's background and border as a two-item group on cpu_simd and Vulkan as Chrome does":
+        for lane in ["cpu_simd", "vulkan"]:
+            val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(GRP_BG_BORDER_PAGE, 120, 70, lane)
+            expect(px[50 * 120 + 25]).to_equal(0xFFFF7E7Eu32)
+            expect(px[50 * 120 + 11]).to_equal(0xFF7E7EFFu32)
+
+    it "restores Vulkan groups on the device without reading group pixels back":
+        # Simple-internal: the only readback of the frame is the final one
+        # (64x16 = 1024 px); no per-group layer or destination readback.
+        vulkan_readback_census_reset()
+        val vk = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "vulkan")
+        expect(grp_mismatches(vk, 64)).to_equal(0)
+        expect(vulkan_readback_census_line()).to_equal("readbacks=1 readback_pixels=1024")
+
+    it "composites nested groups on the CPU raster as Chrome does":
+        val px = simple_web_layout_render_html_software_pixels(ng_page(1), 64, 16)
+        expect(ng_mismatches(px, 64)).to_equal(0)
+
+    it "composites nested groups on cpu_simd as Chrome does":
+        val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(ng_page(1), 64, 16, "cpu_simd")
+        expect(ng_mismatches(px, 64)).to_equal(0)
+
+    it "composites nested groups on Vulkan as Chrome and cpu_simd do":
+        val before = vulkan_readback_count()
+        val restores_before = vulkan_device_css_group_restore_count()
+        val vk = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(ng_page(1), 64, 16, "vulkan")
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(ng_page(1), 64, 16, "cpu_simd")
+        expect(vulkan_readback_count() > before).to_equal(true)
+        # Simple-internal: 8 top-level + 10 nested layers, every one restored
+        # on the device (no per-group readback).
+        expect(vulkan_device_css_group_restore_count() - restores_before).to_equal(18)
+        expect(ng_mismatches(vk, 64)).to_equal(0)
+        expect(grp_frame_max_dev(vk, cpu)).to_equal(0)
+
+    it "matches the Chrome nested-group full frame exactly at k=4":
+        val want = grp_chrome_reference(NG_WIDE_REF)
+        expect(want.len()).to_equal(768 * 64)
+        for lane in ["cpu_simd", "vulkan"]:
+            val got = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ng_page(3), 192, 16, 4, lane)
+            expect(grp_frame_max_dev(got, want)).to_equal(0)
+
+    it "composites groups with translucent, shadow, gradient and image members on the CPU raster as Chrome does":
+        val px = simple_web_layout_render_html_software_pixels(tg_page(), 64, 16)
+        expect(tg_mismatches(px, 64, true)).to_equal(0)
+
+    it "composites a multi-root page with shadow, translucent, gradient and image members on cpu_simd and Vulkan as Chrome does":
+        for lane in ["cpu_simd", "vulkan"]:
+            val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(tg_page(), 64, 16, lane)
+            expect(tg_dev_mismatches(px, 64)).to_equal(0)
+
+    it "composites a multi-root page with text, outline and shadow roots on cpu_simd and Vulkan as Chrome does":
+        for lane in ["cpu_simd", "vulkan"]:
+            val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(mr_page(), 96, 16, lane)
+            expect(mr_mismatches(px, 96)).to_equal(0)
+
+    it "paints a text root on a multi-root page exactly as on its own page":
+        # Simple-internal: glyph pixels are not pinned to Chrome (raster
+        # differences); the text root must not change with its neighbours.
+        val alone_page = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + mr_text_cell() + "</body></html>"
+        for lane in ["cpu_simd", "vulkan"]:
+            val multi = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(mr_page(), 96, 16, lane)
+            val alone = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(alone_page, 96, 16, lane)
+            var diff = 0
+            var y = 0
+            while y < 16:
+                var x = 0
+                while x < 24:
+                    if multi[y * 96 + x] != alone[y * 96 + x]:
+                        diff = diff + 1
+                    x = x + 1
+                y = y + 1
+            expect(diff).to_equal(0)

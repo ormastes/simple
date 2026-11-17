@@ -144,7 +144,8 @@ impl InterpreterBackendImpl:
             ctx.env.push_scope()
             var hit = self.pattern_binds(arm_t.pattern, sv, ctx, span)?
             if hit and arm_t.has_guard:
-                hit = self.eval_expr(arm_t.guard, ctx)?.is_truthy()
+                val guard_val: Value = self.eval_expr(arm_t.guard, ctx)?
+                hit = guard_val.is_truthy()
             if hit:
                 val result = self.eval_block(arm_t.body, ctx)?
                 ctx.env.pop_scope()
@@ -169,6 +170,23 @@ impl InterpreterBackendImpl:
                     case "byte_len": return Ok(backend_value_int_v1(s.byte_len()))
                     case "to_upper": return Ok(backend_value_string_v1(s.to_upper()))
                     case "to_lower": return Ok(backend_value_string_v1(s.to_lower()))
+                    case "trim_start": return Ok(backend_value_string_v1(s.trim_start()))
+                    case "trim_end": return Ok(backend_value_string_v1(s.trim_end()))
+                    case "bytes":
+                        var bs: [Value] = []
+                        for byte in s.bytes():
+                            bs = bs.push(backend_value_int_v1(byte as i64))
+                        return Ok(backend_value_array_v1(bs))
+                    case "chars":
+                        var cs: [Value] = []
+                        for ch in s.chars():
+                            cs = cs.push(backend_value_string_v1("{ch}"))
+                        return Ok(backend_value_array_v1(cs))
+                    case "lines":
+                        var ls: [Value] = []
+                        for ln in s.lines():
+                            ls = ls.push(backend_value_string_v1(ln))
+                        return Ok(backend_value_array_v1(ls))
                     case _: ()
                 if a.len() == 2:
                     match a[0]:
@@ -193,12 +211,16 @@ impl InterpreterBackendImpl:
                             match method_name:
                                 case "repeat": return Ok(backend_value_string_v1(s.repeat(n)))
                                 case "substring": return Ok(backend_value_string_v1(s.substring(n, s.len())))
+                                case "byte_at": return Ok(backend_value_int_v1(s.byte_at(n) as i64))
+                                case "char_at": return Ok(backend_value_string_v1(s.substring(n, n + 1)))
                                 case _: ()
                         case Value.String(t):
                             match method_name:
                                 case "contains": return Ok(backend_value_bool_v1(s.contains(t)))
                                 case "starts_with": return Ok(backend_value_bool_v1(s.starts_with(t)))
                                 case "ends_with": return Ok(backend_value_bool_v1(s.ends_with(t)))
+                                case "index_of": return Ok(backend_value_int_v1(s.index_of(t)))
+                                case "last_index_of": return Ok(backend_value_int_v1(s.last_index_of(t)))
                                 case "split":
                                     var parts: [Value] = []
                                     for part in s.split(t):
@@ -254,7 +276,8 @@ impl InterpreterBackendImpl:
                     case "contains":
                         if a.len() == 1:
                             for el in elements:
-                                if self.eval_binop(HirBinOp.Eq, el, a[0], span, false, false)?.is_truthy():
+                                val eq_val: Value = self.eval_binop(HirBinOp.Eq, el, a[0], span, false, false)?
+                                if eq_val.is_truthy():
                                     return Ok(backend_value_bool_v1(true))
                             return Ok(backend_value_bool_v1(false))
                     case _: ()
@@ -274,8 +297,28 @@ impl InterpreterBackendImpl:
                                 case _: ()
                     case _: ()
             case Value.Int(n):
-                if method_name == "to_text":
-                    return Ok(backend_value_string_v1(n.to_text()))
+                # Integers are i64 in the interpreter: same-width casts are identity.
+                match method_name:
+                    case "to_text": return Ok(backend_value_string_v1(n.to_text()))
+                    case "to_string": return Ok(backend_value_string_v1(n.to_text()))
+                    case "to_i64": return Ok(recv)
+                    case "to_int": return Ok(recv)
+                    case "to_u64": return Ok(recv)
+                    case "to_usize": return Ok(recv)
+                    case "to_i32": return Ok(recv)
+                    case "to_u32": return Ok(backend_value_int_v1(n & 4294967295))
+                    case "to_u8": return Ok(backend_value_int_v1(n & 255))
+                    case "to_f64": return Ok(backend_value_float_v1(n as f64))
+                    case "abs": return Ok(backend_value_int_v1(if n < 0: 0 - n else: n))
+                    case _: ()
+                if a.len() == 1:
+                    match a[0]:
+                        case Value.Int(m):
+                            match method_name:
+                                case "min": return Ok(backend_value_int_v1(if n < m: n else: m))
+                                case "max": return Ok(backend_value_int_v1(if n > m: n else: m))
+                                case _: ()
+                        case _: ()
             case Value.Bool(b):
                 if method_name == "to_text":
                     return Ok(backend_value_string_v1(b.to_text()))

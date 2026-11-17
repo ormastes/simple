@@ -3,7 +3,7 @@
 # even with no robust profile; edition 2026.11 stays a warning.
 use std.spec
 use compiler.driver.driver_unit_profile.{unit_profile_policy, unit_profile_strict_for_edition, unit_profile_apply_for_sdn}
-use compiler.types.units.unit_ops.{unit_op_is_strict}
+use compiler.types.units.unit_ops.{unit_op_is_strict, unit_op_is_mixed_strict}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
 
@@ -28,14 +28,46 @@ describe "SPL-UNIT-004 strictness by edition + profile":
         expect(unit_profile_strict_for_edition(p, "", "")).to_equal(false)
         expect(unit_profile_strict_for_edition(p, "", "2026")).to_equal(false)
 
-describe "SPL-UNIT-004 strict via simple.sdn [package] edition (end to end)":
+describe "SPL-UNIT-004 strict via simple.sdn project: edition (end to end)":
     it "edition 2027.2 in simple.sdn makes unit_profile_apply strict":
         val dir = secure_temp_dir(".", "unit-profile-edition-spec").unwrap()
         val path = dir + "/simple.sdn"
-        file_write(path, "[package]\nedition = \"2027.2\"\n")
+        file_write(path, "project:\n  name: demo\n  edition: \"2027.2\"\n")
         unit_profile_apply_for_sdn("", path)
         expect(unit_op_is_strict()).to_equal(true)
-        file_write(path, "[package]\nedition = \"2026.11\"\n")
+        file_write(path, "project:\n  name: demo\n  edition: 2026.11\n")
         unit_profile_apply_for_sdn("", path)
         expect(unit_op_is_strict()).to_equal(false)
+        dir_remove_all(dir)
+
+    it "simple.sdn project: without edition stays non-strict":
+        val dir = secure_temp_dir(".", "unit-profile-edition-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        file_write(path, "project:\n  name: demo\n")
+        unit_profile_apply_for_sdn("", path)
+        expect(unit_op_is_strict()).to_equal(false)
+        dir_remove_all(dir)
+
+describe "SPL-UNIT-002 (distinct-unit product without derived decl): error in compiled code, warning only in script mode":
+    it "is strict for every edition and profile in compiled code (owner decision 2026-11-17, Q1=b)":
+        val dir = secure_temp_dir(".", "unit-mixed-edition-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        for edition in ["2026.11", "2027.2"]:
+            file_write(path, "project:\n  name: demo\n  edition: " + edition + "\n")
+            for profile in ["", "moderate", "robust", "critical", "verified"]:
+                step("edition " + edition + " profile " + profile)
+                unit_profile_apply_for_sdn(profile, path)
+                expect(unit_op_is_mixed_strict()).to_equal(true)
+        dir_remove_all(dir)
+
+    it "script mode is the only relaxation, independent of edition and profile":
+        val dir = secure_temp_dir(".", "unit-mixed-script-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        file_write(path, "project:\n  name: demo\n  edition: 2027.2\n")
+        unit_profile_apply_for_sdn("robust", path, true)
+        expect(unit_op_is_mixed_strict()).to_equal(false)
+        step("SPL-UNIT-004 strictness is untouched by script mode")
+        expect(unit_op_is_strict()).to_equal(true)
+        unit_profile_apply_for_sdn("", path)
+        expect(unit_op_is_mixed_strict()).to_equal(true)
         dir_remove_all(dir)

@@ -862,3 +862,12 @@ plain parameters still accept the same value silently. Red/green in about 30 s o
   literal payload vetoes a `nil` key or value unless the declared entry type is optional or
   `Nil` (`enum_payload_dict_entry_nil_vetoed`). A top-level `E.N(nil)` into an `i64` slot is
   still accepted; see `doc/08_tracking/bug/enum_payload_nil_into_scalar_slot_accepted_2026-11-14.md`.
+- A method call on a receiver that is not a variable (constructor temporary, call result,
+  field, array element) reaches `lower_method_call` as `Unresolved`; its user owner is only
+  known after the receiver is lowered (`struct_value_syms`). Any builtin fallback that gates
+  on the method name and `Unresolved` alone steals a same-named user method. Ask
+  `receiver_local_owns_user_method_v1(local, method)` first and pass the lowered local on as
+  `prelowered_method_receiver`, so the receiver is not lowered twice. `join/1`, `char_at/1`,
+  `index_of|find|find_str/2` and `len|length/0` were stolen until 2026-11-18
+  (`test/01_unit/compiler/mir/user_method_builtin_name_lowering_spec.spl`,
+  `doc/08_tracking/bug/native_user_method_builtin_name_hijacked_2026-11-18.md`).

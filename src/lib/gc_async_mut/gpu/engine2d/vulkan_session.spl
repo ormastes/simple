@@ -31,6 +31,8 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_rect_batch_spirv.{spirv_rect_ba
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_glass_material_spirv.{spirv_glass_material}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_blur_rect_spirv.{spirv_blur_rect}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_shadow_rect_spirv.{spirv_shadow_rect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_css_group_restore_spirv.{spirv_css_group_restore}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_gradient_layer_spirv.{spirv_gradient_layer}
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_last_error,
     vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
@@ -139,6 +141,14 @@ class VulkanSession:
     pipe_shadow_rect: i64
     blur_error: text
     shadow_error: text
+    # Device CSS opacity group restore (css_group_restore.comp).
+    shader_css_group_restore: i64
+    pipe_css_group_restore: i64
+    css_group_restore_error: text
+    # Device CSS gradient layer evaluator + composite (gradient_layer.comp).
+    shader_gradient_layer: i64
+    pipe_gradient_layer: i64
+    gradient_layer_error: text
 
     font_atlas_artifact_mode: text
     font_atlas_artifact_identity: text
@@ -200,6 +210,12 @@ class VulkanSession:
             pipe_shadow_rect: 0,
             blur_error: "not-installed",
             shadow_error: "not-installed",
+            shader_css_group_restore: 0,
+            pipe_css_group_restore: 0,
+            css_group_restore_error: "not-installed",
+            shader_gradient_layer: 0,
+            pipe_gradient_layer: 0,
+            gradient_layer_error: "not-installed",
             font_atlas_artifact_mode: "none",
             font_atlas_artifact_identity: "",
             font_atlas_emission_compile_ns: 0,
@@ -391,6 +407,33 @@ class VulkanSession:
                 self.shadow_error = "shadow-pipeline: {vulkan_sffi_last_error()}"
             else:
                 self.shadow_error = ""
+
+        # Optional device CSS opacity group restore, same swallow-and-record
+        # contract: when it is missing the host readback restore paints the
+        # same pixels.
+        self.shader_css_group_restore = vulkan_sffi_compile_spirv(spirv_css_group_restore())
+        if self.shader_css_group_restore <= 0:
+            self.css_group_restore_error = "css-group-restore-shader: {vulkan_sffi_last_error()}"
+        else:
+            self.pipe_css_group_restore = vulkan_sffi_create_compute_pipeline(
+                self.shader_css_group_restore, "main", _VS_PUSH_CONSTANT_SIZE)
+            if self.pipe_css_group_restore <= 0:
+                self.css_group_restore_error = "css-group-restore-pipeline: {vulkan_sffi_last_error()}"
+            else:
+                self.css_group_restore_error = ""
+
+        # Optional device CSS gradient layer pipeline, same swallow-and-record
+        # contract: when it is missing the host evaluator paints identical t.
+        self.shader_gradient_layer = vulkan_sffi_compile_spirv(spirv_gradient_layer())
+        if self.shader_gradient_layer <= 0:
+            self.gradient_layer_error = "gradient-layer-shader: {vulkan_sffi_last_error()}"
+        else:
+            self.pipe_gradient_layer = vulkan_sffi_create_compute_pipeline(
+                self.shader_gradient_layer, "main", _VS_PUSH_CONSTANT_SIZE)
+            if self.pipe_gradient_layer <= 0:
+                self.gradient_layer_error = "gradient-layer-pipeline: {vulkan_sffi_last_error()}"
+            else:
+                self.gradient_layer_error = ""
 
         self.ref_count = 1
         self.is_initialized = true
@@ -601,12 +644,16 @@ class VulkanSession:
         if self.pipe_blit != 0:           vulkan_sffi_destroy_pipeline(self.pipe_blit)
         if self.pipe_blur_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_blur_rect)
         if self.pipe_shadow_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_shadow_rect)
+        if self.pipe_css_group_restore != 0: vulkan_sffi_destroy_pipeline(self.pipe_css_group_restore)
+        if self.pipe_gradient_layer != 0: vulkan_sffi_destroy_pipeline(self.pipe_gradient_layer)
         if self.pipe_glass_material != 0: vulkan_sffi_destroy_pipeline(self.pipe_glass_material)
         if self.pipe_rect_batch != 0:     vulkan_sffi_destroy_pipeline(self.pipe_rect_batch)
         self.pipe_rect_batch = 0
         self.pipe_glass_material = 0
         self.pipe_blur_rect = 0
         self.pipe_shadow_rect = 0
+        self.pipe_css_group_restore = 0
+        self.pipe_gradient_layer = 0
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
         self.pipe_rect_outline = 0
@@ -631,12 +678,16 @@ class VulkanSession:
         if self.shader_font_atlas != 0:     vulkan_sffi_destroy_shader(self.shader_font_atlas)
         if self.shader_blur_rect != 0: vulkan_sffi_destroy_shader(self.shader_blur_rect)
         if self.shader_shadow_rect != 0: vulkan_sffi_destroy_shader(self.shader_shadow_rect)
+        if self.shader_css_group_restore != 0: vulkan_sffi_destroy_shader(self.shader_css_group_restore)
+        if self.shader_gradient_layer != 0: vulkan_sffi_destroy_shader(self.shader_gradient_layer)
         if self.shader_glass_material != 0: vulkan_sffi_destroy_shader(self.shader_glass_material)
         if self.shader_rect_batch != 0:     vulkan_sffi_destroy_shader(self.shader_rect_batch)
         self.shader_rect_batch = 0
         self.shader_glass_material = 0
         self.shader_blur_rect = 0
         self.shader_shadow_rect = 0
+        self.shader_css_group_restore = 0
+        self.shader_gradient_layer = 0
         self.rect_batch_error = "not-installed"
         self.shader_clear = 0
         self.shader_rect_filled = 0

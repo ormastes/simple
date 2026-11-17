@@ -1,0 +1,247 @@
+"""
+## Purpose and audience
+Pins milestone_0022 N3 (DESIGN 13.3, 14.3, 15.3, 15.4, 16): the refusal record R
+and the cancelled tombstone X of a V4 primary-attach helper, the FULL classifier
+checks of the refused/cancelled rows (R stage and consumedDigest against PA, X
+bound to R, mirrors equal to the journal copy), their bindings to the journal
+request (the digests resume re-derives), the open-core entry guard and the R-write
+precondition. Written for owners of the V4 attach cancel path.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+DATA over the pure functions (codec, `host_linux_helper_attach_records_check_v1`,
+`host_linux_helper_attach_binding_check_v1`, the entry guard, the R precondition)
+plus structural pins on publish ORDER in the open core and the record publisher.
+The journal/store IO wrappers around these pure functions need a Linux journal
+fixture and are pinned only structurally here.
+## Verification guidance and troubleshooting
+A crash-table failure names the 15.4 row. A forged-record case that passes means
+the canonical re-encode check or a binding comparison was dropped.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperDomainV1, HostLinuxHelperMarkersV1,
+    HostPrimaryAttachRefusalV1, HostPrimaryAttachCancelledV1, HostLinuxHelperAttachRecordsV1, HostLinuxHelperAttachExpectedV1,
+    host_primary_attach_refusal_encode_v1, host_primary_attach_refusal_decode_v1, host_primary_attach_cancelled_encode_v1,
+    host_primary_attach_cancelled_decode_v1, host_linux_helper_domain_of_v1, host_linux_helper_attach_records_check_v1,
+    host_linux_helper_attach_binding_check_v1, host_primary_open_entry_allowed_v1, host_linux_helper_refusal_allowed_v1}
+use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_fixture_v1
+
+val N3_DIR = "src/lib/nogc_sync_mut/orchestration/"
+val N3_OP = "attach-op-1"
+val N3_CONSUMED = "consumed-record-bytes\n"
+
+fn n3_digest(c: text) -> text:
+    c.repeat(64)
+
+fn n3_refusal(stage: text, consumed_digest: text) -> HostPrimaryAttachRefusalV1:
+    HostPrimaryAttachRefusalV1(operation_id: N3_OP, operation_digest: n3_digest("a"), prepared_receipt_digest: n3_digest("b"),
+        consumed_digest: consumed_digest, stage: stage, reason_digest: n3_digest("c"))
+
+fn n3_pre_bytes() -> text:
+    host_primary_attach_refusal_encode_v1(n3_refusal("pre-consume", "")).unwrap()
+
+fn n3_post_bytes() -> text:
+    host_primary_attach_refusal_encode_v1(n3_refusal("post-consume", sha256_text(N3_CONSUMED))).unwrap()
+
+fn n3_cancelled(refusal_bytes: text) -> HostPrimaryAttachCancelledV1:
+    HostPrimaryAttachCancelledV1(operation_id: N3_OP, operation_digest: n3_digest("a"), request_digest: n3_digest("e"),
+        prepared_receipt_digest: n3_digest("b"), refusal_digest: sha256_text(refusal_bytes))
+
+fn n3_cancelled_bytes(refusal_bytes: text) -> text:
+    host_primary_attach_cancelled_encode_v1(n3_cancelled(refusal_bytes)).unwrap()
+
+fn n3_records(refusal: Option<text>, refusal_mirror: Option<text>, cancelled: Option<text>,
+        cancelled_mirror: Option<text>, consumed: Option<text>) -> HostLinuxHelperAttachRecordsV1:
+    HostLinuxHelperAttachRecordsV1(refusal: refusal, refusal_mirror: refusal_mirror, cancelled: cancelled,
+        cancelled_mirror: cancelled_mirror, consumed: consumed)
+
+fn n3_markers(pc: bool, pa: bool, n: bool, r: bool, x: bool, o: bool, rm: bool, xm: bool) -> HostLinuxHelperMarkersV1:
+    HostLinuxHelperMarkersV1(connection: pc, consumed: pa, native: n, refusal: r, cancelled: x, output: o,
+        refusal_mirror: rm, cancelled_mirror: xm)
+
+fn n3_domain_text(result: Result<HostLinuxHelperDomainV1, text>) -> text:
+    match result:
+        case Ok(HostLinuxHelperDomainV1.Unrecorded): "Unrecorded"
+        case Ok(HostLinuxHelperDomainV1.PrimaryConnection): "PrimaryConnection"
+        case Ok(HostLinuxHelperDomainV1.PrimaryAttach): "PrimaryAttach"
+        case Ok(HostLinuxHelperDomainV1.AttachRefusedPreConsume): "AttachRefusedPreConsume"
+        case Ok(HostLinuxHelperDomainV1.AttachRefusedPostConsume): "AttachRefusedPostConsume"
+        case Ok(HostLinuxHelperDomainV1.AttachCancelled): "AttachCancelled"
+        case Err(reason): "Err:" + reason
+
+# Marker table, then the record check: the composition host_linux_helper_domain_v1 runs.
+fn n3_classify(markers: HostLinuxHelperMarkersV1, records: HostLinuxHelperAttachRecordsV1) -> text:
+    val domain = host_linux_helper_domain_of_v1(markers)
+    if domain.is_err(): return n3_domain_text(domain)
+    n3_domain_text(host_linux_helper_attach_records_check_v1(domain.unwrap(), records, N3_OP))
+
+fn n3_expected() -> HostLinuxHelperAttachExpectedV1:
+    HostLinuxHelperAttachExpectedV1(plan: host_helper_fixture_v1().request.plan, operation_digest: n3_digest("a"),
+        request_digest: n3_digest("e"), prepared_receipt_digest: n3_digest("b"))
+
+fn n3_unit_text(result: Result<(), text>) -> text:
+    match result:
+        case Ok(_): "Ok"
+        case Err(reason): "Err:" + reason
+
+fn n3_body(file: text, start: text, stop: text) -> text:
+    val source = file_read_text(N3_DIR + file)
+    val rest = source.substring(source.index_of(start), source.len())
+    val to = rest.substring(1, rest.len()).index_of(stop)
+    if to < 0: return rest
+    rest.substring(0, to + 1)
+
+describe "primary attach refusal and cancelled records (milestone_0022 N3)":
+    it "round-trips R and X canonically":
+        # @req S40-NATIVE-N3
+        val pre = host_primary_attach_refusal_decode_v1(n3_pre_bytes()).unwrap()
+        expect(pre.stage).to_equal("pre-consume")
+        expect(pre.consumed_digest).to_equal("")
+        val post = host_primary_attach_refusal_decode_v1(n3_post_bytes()).unwrap()
+        expect(post.consumed_digest).to_equal(sha256_text(N3_CONSUMED))
+        val cancelled = host_primary_attach_cancelled_decode_v1(n3_cancelled_bytes(n3_pre_bytes())).unwrap()
+        expect(cancelled.refusal_digest).to_equal(sha256_text(n3_pre_bytes()))
+        expect(n3_pre_bytes().contains("\"kind\"")).to_equal(true)
+
+    it "refuses forged R and X bytes":
+        # @req S40-NATIVE-N3
+        step("stage and consumedDigest must agree in the codec itself")
+        expect(host_primary_attach_refusal_encode_v1(n3_refusal("pre-consume", n3_digest("d"))).is_err()).to_equal(true)
+        expect(host_primary_attach_refusal_encode_v1(n3_refusal("post-consume", "")).is_err()).to_equal(true)
+        expect(host_primary_attach_refusal_encode_v1(n3_refusal("mid-consume", "")).is_err()).to_equal(true)
+        step("a stage flipped in the bytes no longer decodes")
+        expect(host_primary_attach_refusal_decode_v1(n3_pre_bytes().replace("pre-consume", "post-consume")).is_err()).to_equal(true)
+        step("non-canonical, truncated and cross-kind bytes are refused")
+        expect(host_primary_attach_refusal_decode_v1(n3_pre_bytes() + " ").is_err()).to_equal(true)
+        expect(host_primary_attach_refusal_decode_v1(n3_pre_bytes().substring(0, 20)).is_err()).to_equal(true)
+        expect(host_primary_attach_refusal_decode_v1(n3_cancelled_bytes(n3_pre_bytes())).is_err()).to_equal(true)
+        expect(host_primary_attach_cancelled_decode_v1(n3_pre_bytes()).is_err()).to_equal(true)
+        step("a digest that is not 64 lowercase hex is refused")
+        var bad = n3_cancelled(n3_pre_bytes())
+        bad.refusal_digest = "short"
+        expect(host_primary_attach_cancelled_encode_v1(bad).is_err()).to_equal(true)
+
+    it "confirms the refused rows from R's stage and consumedDigest (14.3 {PA,R} rule)":
+        # @req S40-NATIVE-N3
+        val r_only = n3_markers(false, false, false, true, false, false, false, false)
+        val pa_r = n3_markers(false, true, false, true, false, false, false, false)
+        expect(n3_classify(r_only, n3_records(Some(n3_pre_bytes()), None, None, None, None))).to_equal("AttachRefusedPreConsume")
+        expect(n3_classify(pa_r, n3_records(Some(n3_post_bytes()), None, None, None, Some(N3_CONSUMED)))).to_equal("AttachRefusedPostConsume")
+        step("{PA,R} with a pre-consume R, or a consumedDigest of other bytes, is ambiguous")
+        expect(n3_classify(pa_r, n3_records(Some(n3_pre_bytes()), None, None, None, Some(N3_CONSUMED)))).to_equal("Err:helper-settlement-domain-ambiguous")
+        expect(n3_classify(pa_r, n3_records(Some(n3_post_bytes()), None, None, None, Some("other\n")))).to_equal("Err:helper-settlement-domain-ambiguous")
+        step("{R} with a post-consume R (PA absent) is ambiguous")
+        expect(n3_classify(r_only, n3_records(Some(n3_post_bytes()), None, None, None, None))).to_equal("Err:helper-settlement-domain-ambiguous")
+        step("an R naming another operation is ambiguous")
+        var foreign = n3_refusal("pre-consume", "")
+        foreign.operation_id = "attach-op-2"
+        val foreign_bytes = host_primary_attach_refusal_encode_v1(foreign).unwrap()
+        expect(n3_classify(r_only, n3_records(Some(foreign_bytes), None, None, None, None))).to_equal("Err:helper-settlement-domain-ambiguous")
+
+    it "treats a mirror differing from the journal as a permanent Err":
+        # @req S40-NATIVE-N3
+        val r_only = n3_markers(false, false, false, true, false, false, true, false)
+        expect(n3_classify(r_only, n3_records(Some(n3_pre_bytes()), Some(n3_pre_bytes()), None, None, None))).to_equal("AttachRefusedPreConsume")
+        expect(n3_classify(r_only, n3_records(Some(n3_pre_bytes()), Some(n3_post_bytes()), None, None, None))).to_equal("Err:helper-attach-mirror-mismatch")
+        val rx = n3_markers(false, false, false, true, true, false, true, true)
+        val x = n3_cancelled_bytes(n3_pre_bytes())
+        expect(n3_classify(rx, n3_records(Some(n3_pre_bytes()), Some(n3_pre_bytes()), Some(x), Some(x + "\n"), None))).to_equal("Err:helper-attach-mirror-mismatch")
+
+    it "classifies every row of the 15.4 crash table":
+        # @req S40-NATIVE-N3
+        val pre = n3_pre_bytes()
+        val x = n3_cancelled_bytes(pre)
+        step("none: Unrecorded (not cancellable, no R)")
+        expect(n3_classify(n3_markers(false, false, false, false, false, false, false, false), n3_records(None, None, None, None, None))).to_equal("Unrecorded")
+        step("journal R only: refused (resume regenerates the mirror)")
+        expect(n3_classify(n3_markers(false, false, false, true, false, false, false, false), n3_records(Some(pre), None, None, None, None))).to_equal("AttachRefusedPreConsume")
+        step("journal R + mirror R: refused")
+        expect(n3_classify(n3_markers(false, false, false, true, false, false, true, false), n3_records(Some(pre), Some(pre), None, None, None))).to_equal("AttachRefusedPreConsume")
+        step("+ journal X: cancelled-pending (regenerate mirror X, settle)")
+        expect(n3_classify(n3_markers(false, false, false, true, true, false, true, false), n3_records(Some(pre), Some(pre), Some(x), None, None))).to_equal("AttachCancelled")
+        step("+ mirror X: cancelled-pending (settle)")
+        expect(n3_classify(n3_markers(false, false, false, true, true, false, true, true), n3_records(Some(pre), Some(pre), Some(x), Some(x), None))).to_equal("AttachCancelled")
+        step("post-consume path: {PA,R,X}")
+        val post = n3_post_bytes()
+        val xp = n3_cancelled_bytes(post)
+        expect(n3_classify(n3_markers(false, true, false, true, true, false, true, true), n3_records(Some(post), Some(post), Some(xp), Some(xp), Some(N3_CONSUMED)))).to_equal("AttachCancelled")
+        step("mirror R or X without its journal copy: ambiguous (a mirror is never authority)")
+        expect(n3_classify(n3_markers(false, false, false, false, false, false, true, false), n3_records(None, Some(pre), None, None, None))).to_equal("Err:helper-settlement-domain-ambiguous")
+        expect(n3_classify(n3_markers(false, false, false, true, false, false, true, true), n3_records(Some(pre), Some(pre), None, Some(x), None))).to_equal("Err:helper-settlement-domain-ambiguous")
+        step("PA present with a pre-consume journal R: ambiguous (operator)")
+        expect(n3_classify(n3_markers(false, true, false, true, false, false, true, false), n3_records(Some(pre), Some(pre), None, None, Some(N3_CONSUMED)))).to_equal("Err:helper-settlement-domain-ambiguous")
+
+    it "refuses a forged X":
+        # @req S40-NATIVE-N3
+        val pre = n3_pre_bytes()
+        val rx = n3_markers(false, false, false, true, true, false, false, false)
+        step("X bound to other R bytes")
+        expect(n3_classify(rx, n3_records(Some(pre), None, Some(n3_cancelled_bytes(n3_post_bytes())), None, None))).to_equal("Err:helper-settlement-domain-ambiguous")
+        step("X operation or receipt digest differing from R")
+        var other = n3_cancelled(pre)
+        other.operation_digest = n3_digest("f")
+        expect(n3_classify(rx, n3_records(Some(pre), None, Some(host_primary_attach_cancelled_encode_v1(other).unwrap()), None, None))).to_equal("Err:helper-settlement-domain-ambiguous")
+        var receipt = n3_cancelled(pre)
+        receipt.prepared_receipt_digest = n3_digest("f")
+        expect(n3_classify(rx, n3_records(Some(pre), None, Some(host_primary_attach_cancelled_encode_v1(receipt).unwrap()), None, None))).to_equal("Err:helper-settlement-domain-ambiguous")
+        step("X journal bytes that are not canonical")
+        expect(n3_classify(rx, n3_records(Some(pre), None, Some(n3_cancelled_bytes(pre) + " "), None, None)).starts_with("Err:")).to_equal(true)
+
+    it "binds R and X to the digests re-derived from the journal request (resume mismatch)":
+        # @req S40-NATIVE-N3
+        val r = n3_refusal("pre-consume", "")
+        val x = n3_cancelled(n3_pre_bytes())
+        expect(n3_unit_text(host_linux_helper_attach_binding_check_v1(r, Some(x), n3_expected()))).to_equal("Ok")
+        expect(n3_unit_text(host_linux_helper_attach_binding_check_v1(r, None, n3_expected()))).to_equal("Ok")
+        var operation = n3_expected()
+        operation.operation_digest = n3_digest("f")
+        expect(n3_unit_text(host_linux_helper_attach_binding_check_v1(r, None, operation))).to_equal("Err:helper-attach-refusal-binding-mismatch")
+        var receipt = n3_expected()
+        receipt.prepared_receipt_digest = n3_digest("f")
+        expect(n3_unit_text(host_linux_helper_attach_binding_check_v1(r, None, receipt))).to_equal("Err:helper-attach-refusal-binding-mismatch")
+        var request = n3_expected()
+        request.request_digest = n3_digest("f")
+        expect(n3_unit_text(host_linux_helper_attach_binding_check_v1(r, Some(x), request))).to_equal("Err:helper-attach-cancelled-binding-mismatch")
+
+    it "refuses a second open while any marker exists and gates the R write":
+        # @req S40-NATIVE-N3
+        expect(n3_unit_text(host_primary_open_entry_allowed_v1(n3_markers(false, false, false, false, false, false, false, false)))).to_equal("Ok")
+        for index in 0..8:
+            val m = n3_markers(index == 0, index == 1, index == 2, index == 3, index == 4, index == 5, index == 6, index == 7)
+            expect(n3_unit_text(host_primary_open_entry_allowed_v1(m))).to_equal("Err:host-primary-open-already-attempted")
+        step("R precondition: PA exactly for post-consume, never with N, R, X or a foreign marker")
+        expect(n3_unit_text(host_linux_helper_refusal_allowed_v1(n3_markers(false, false, false, false, false, false, false, false), false))).to_equal("Ok")
+        expect(n3_unit_text(host_linux_helper_refusal_allowed_v1(n3_markers(false, true, false, false, false, false, false, false), true))).to_equal("Ok")
+        expect(n3_unit_text(host_linux_helper_refusal_allowed_v1(n3_markers(false, true, false, false, false, false, false, false), false))).to_equal("Err:host-primary-refusal-precondition")
+        expect(n3_unit_text(host_linux_helper_refusal_allowed_v1(n3_markers(false, false, false, false, false, false, false, false), true))).to_equal("Err:host-primary-refusal-precondition")
+        expect(n3_unit_text(host_linux_helper_refusal_allowed_v1(n3_markers(false, true, true, false, false, false, false, false), true))).to_equal("Err:host-primary-refusal-precondition")
+        expect(n3_unit_text(host_linux_helper_refusal_allowed_v1(n3_markers(false, false, false, true, false, false, false, false), false))).to_equal("Err:host-primary-refusal-precondition")
+
+    it "runs the entry guard before any publish and leaves every marker unchanged on refusal":
+        # @req S40-NATIVE-N3
+        val core = n3_body("host_primary_attach_owner_v1.spl", "pub fn host_primary_attach_open_core_v1(", "\npub fn ")
+        val guard = core.index_of("host_primary_attach_open_entry_check_v1(store, helper.operation.id)")
+        expect(guard >= 0).to_equal(true)
+        expect(guard < core.index_of("primary_consumption_v1(")).to_equal(true)
+        expect(guard < core.index_of("host_helper_stream_publish_v1(")).to_equal(true)
+        expect(guard < core.index_of("primary_core_refused_v1(")).to_equal(true)
+        step("a guard refusal and a consume-publish failure return WITHOUT the R writer")
+        expect(core.contains("if guard.is_err(): return primary_core_failed_v1(turn, guard.unwrap_err())")).to_equal(true)
+        expect(core.contains("if consumed.is_err(): return primary_core_failed_v1(turn, consumed.unwrap_err())")).to_equal(true)
+        step("the post-consume R needs an authorizing typed refusal and no native owner")
+        val post = core.substring(core.index_of("val opened = simple_container_open_primary_attach_v1("), core.len())
+        expect(post.contains("container_primary_open_refusal_authorizes_v1(opened.refusal)")).to_equal(true)
+        expect(post.contains("opened.session.is_none() and opened.cleanup_spawn.is_none()")).to_equal(true)
+        step("the legacy world never publishes R")
+        val refused = n3_body("host_primary_attach_owner_v1.spl", "fn primary_core_refused_v1(", "\nfn ")
+        expect(refused.contains("if store.journal.is_some():")).to_equal(true)
+
+    it "publishes the journal record before its store mirror":
+        # @req S40-NATIVE-N3
+        val publish = n3_body("host_linux_helper_store_v1.spl", "pub fn host_linux_helper_record_publish_v1(", "\n# ")
+        val journal = publish.index_of("host_helper_object_publish_owned_v2(journal, host_linux_helper_journal_relative_v1(category, operation_id), bytes)?")
+        val mirror = publish.index_of("host_helper_stream_publish_v1(store_root, operation_id, category, bytes, false)")
+        expect(journal >= 0 and mirror > journal).to_equal(true)

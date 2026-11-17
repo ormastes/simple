@@ -158,3 +158,140 @@ describe "ownership destination write validation":
         flow.record(2, OwnershipEvent.Revive(indexed))
         flow.record(3, OwnershipEvent.Read(indexed))
         expect(flow.check(0, {0: [0, 1, 2, 3]}, {0: []})[0].message).to_contain("Use of moved value")
+
+# Class 7 (Stage 3 self-build, 2026-11-17): an if-chain whose arms each move
+# one local, then a join and a straight tail. Block ids double as point ids.
+# cond i = 2i, arm i = 2i + 1, join = 2 * arms, tail j = 2 * arms + 1 + j.
+fn ownership_chain_points(arms: i64, tail: i64) -> Dict<i64, [i64]>:
+    var points: Dict<i64, [i64]> = {}
+    var id = 0
+    while id < 2 * arms + 1 + tail:
+        points[id] = [id]
+        id = id + 1
+    points
+
+fn ownership_chain_edges(arms: i64, tail: i64) -> Dict<i64, [i64]>:
+    val join = 2 * arms
+    var edges: Dict<i64, [i64]> = {}
+    var arm = 0
+    while arm < arms:
+        val next = if arm + 1 < arms: 2 * arm + 2 else: join
+        edges[2 * arm] = [2 * arm + 1, next]
+        edges[2 * arm + 1] = [join]
+        arm = arm + 1
+    var id = join
+    while id < join + tail:
+        edges[id] = [id + 1]
+        id = id + 1
+    edges[join + tail] = []
+    edges
+
+fn ownership_chain_flow(arms: i64, tail: i64) -> OwnershipFlow:
+    var flow = OwnershipFlow.create()
+    var arm = 0
+    while arm < arms:
+        flow.record(2 * arm + 1, OwnershipEvent.Move(place_local(arm)))
+        arm = arm + 1
+    var step = 0
+    while step < tail:
+        flow.record(2 * arms + 1 + step, OwnershipEvent.Read(place_local(1000 + step)))
+        step = step + 1
+    flow
+
+fn ownership_move_chain(count: i64) -> ControlFlowGraph:
+    var cfg = ControlFlowGraph.create()
+    var k = 0
+    while k < count:
+        var succs: [i64] = []
+        if k + 1 < count: succs = [k + 1]
+        cfg.add_block(ownership_block(k, [2 * k], 2 * k + 1, succs))
+        k = k + 1
+    cfg.compute_predecessors()
+    cfg
+
+describe "ownership flow on a large function":
+    it "solves a 60-arm if-chain with a 60-block tail in size-proportional work":
+        val flow = ownership_chain_flow(60, 60)
+        val errors = flow.check(0, ownership_chain_points(60, 60), ownership_chain_edges(60, 60), 100000)
+        expect(errors.len()).to_equal(0)
+
+    it "still reports a real use after an arm move below the join":
+        var flow = ownership_chain_flow(60, 60)
+        flow.record(180, OwnershipEvent.Read(place_local(7)))
+        val errors = flow.check(0, ownership_chain_points(60, 60), ownership_chain_edges(60, 60), 100000)
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].point).to_equal(180)
+        expect(errors[0].message).to_equal("Use of moved value: local(7)")
+
+    it "stays fail-closed when the budget is too small for the function":
+        val flow = ownership_chain_flow(60, 60)
+        val errors = flow.check(0, ownership_chain_points(60, 60), ownership_chain_edges(60, 60), 1000)
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].message).to_contain("work budget exhausted")
+
+    it "scales the checker budget with a 900-block function of distinct moves":
+        var checker = NLLChecker.create(ownership_move_chain(900))
+        var k = 0
+        while k < 900:
+            checker.record_move(2 * k, place_local(k))
+            k = k + 1
+        expect(checker.check()).to_equal(true)
+
+    it "reports a use after move at the end of the 900-block function":
+        var checker = NLLChecker.create(ownership_move_chain(900))
+        var k = 0
+        while k < 900:
+            checker.record_move(2 * k, place_local(k))
+            k = k + 1
+        checker.record_use(1799, place_local(3))
+        expect(checker.check()).to_equal(false)
+        expect(checker.errors.len()).to_equal(1)
+        expect(checker.errors[0].primary_span).to_equal(1799)
+
+    it "keeps the floor for small functions and caps the scaled budget":
+        var small = OwnershipFlow.create()
+        small.record(0, OwnershipEvent.Move(place_local(0)))
+        val one_point: Dict<i64, [i64]> = {0: [0]}
+        val no_edges: Dict<i64, [i64]> = {}
+        expect(small.work_budget(one_point, no_edges)).to_equal(1000000)
+        var huge = OwnershipFlow.create()
+        var block_points: [i64] = []
+        var point = 0
+        while point < 12000:
+            huge.record(point, OwnershipEvent.Move(place_local(point)))
+            block_points = block_points.push(point)
+            point = point + 1
+        val huge_points: Dict<i64, [i64]> = {0: block_points}
+        expect(huge.work_budget(huge_points, no_edges)).to_equal(2000000000)
+
+describe "ownership flow on a small function":
+    it "solves an 8-block loop with the FIFO queue at its exact budget":
+        var flow = OwnershipFlow.create()
+        flow.record(1, OwnershipEvent.Move(place_local(0)))
+        flow.record(3, OwnershipEvent.Move(place_local(1)))
+        flow.record(4, OwnershipEvent.Revive(place_local(1)))
+        flow.record(5, OwnershipEvent.Revive(place_local(0)))
+        flow.record(6, OwnershipEvent.Read(place_local(0)))
+        flow.record(7, OwnershipEvent.Read(place_local(1)))
+        val points: Dict<i64, [i64]> = {0: [0], 1: [1], 2: [2], 3: [3], 4: [4], 5: [5], 6: [6], 7: [7]}
+        val edges: Dict<i64, [i64]> = {0: [1], 1: [2, 3], 2: [4], 3: [4], 4: [5], 5: [1, 6], 6: [7], 7: []}
+        val exhausted = flow.check(0, points, edges, 114)
+        expect(exhausted.len()).to_equal(1)
+        expect(exhausted[0].message).to_contain("work budget exhausted")
+        expect(flow.check(0, points, edges, 115).len()).to_equal(0)
+
+    it "reports the same diagnostic on both sides of the queue threshold":
+        # 10 arms and an 11-block tail are 32 blocks (queue); a 12-block tail
+        # makes 33 (reverse postorder).
+        var queued = ownership_chain_flow(10, 11)
+        queued.record(31, OwnershipEvent.Read(place_local(7)))
+        val queued_errors = queued.check(0, ownership_chain_points(10, 11), ownership_chain_edges(10, 11))
+        var swept = ownership_chain_flow(10, 12)
+        swept.record(32, OwnershipEvent.Read(place_local(7)))
+        val swept_errors = swept.check(0, ownership_chain_points(10, 12), ownership_chain_edges(10, 12))
+        expect(queued_errors.len()).to_equal(1)
+        expect(swept_errors.len()).to_equal(1)
+        expect(queued_errors[0].point).to_equal(31)
+        expect(swept_errors[0].point).to_equal(32)
+        expect(queued_errors[0].message).to_equal("Use of moved value: local(7)")
+        expect(swept_errors[0].message).to_equal(queued_errors[0].message)

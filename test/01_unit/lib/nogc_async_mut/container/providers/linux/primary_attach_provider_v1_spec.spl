@@ -11,6 +11,8 @@ use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
 use test.fixtures.orchestration.primary_attach_fixture_v1.*
 
 use std.common.contracts.container.primary_attach_v1.*
+use std.common.contracts.container.primary_open_refusal_v1.{ContainerPrimaryOpenRefusalV1,
+    container_primary_open_refusal_authorizes_v1}
 use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_fixture_v1
 use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_digest_v1
 use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_bind_intent_v1,
@@ -150,6 +152,10 @@ describe "primary attach common provider prevention":
             expect(opened.error == "").to_equal(false)
             expect(opened.session.?).to_equal(false)
             expect(opened.cleanup_spawn.?).to_equal(false)
+            # milestone_0022 N3 (17(B)): adapter pre-provider return -> NoCustody, no pid/slot/group.
+            match opened.refusal:
+                case ContainerPrimaryOpenRefusalV1.NoCustody: pass
+                case _: assert(false, "expected NoCustody for the adapter pre-provider return")
             match opened.owner:
                 case SimpleContainerOwnerV2.Linux(_, adapter):
                     val expected = if kind == "plan": 2 else: 3
@@ -170,6 +176,11 @@ describe "primary attach common provider prevention":
         expect(opened.error).to_equal("primary-attach-scripted-native-spawn-forbidden")
         expect(opened.session.?).to_equal(false)
         expect(opened.cleanup_spawn.?).to_equal(false)
+        # milestone_0022 N3 (16): the legacy OCI provider result is untyped and never authorizes R.
+        match opened.refusal:
+            case ContainerPrimaryOpenRefusalV1.NotRefused: pass
+            case _: assert(false, "expected NotRefused for the legacy provider result")
+        expect(container_primary_open_refusal_authorizes_v1(opened.refusal)).to_equal(false)
         match opened.owner:
             case SimpleContainerOwnerV2.Linux(_, adapter):
                 expect(adapter.provider.scripted_cursor).to_equal(4)

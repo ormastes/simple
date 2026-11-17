@@ -11,6 +11,8 @@
 # it is the password mask glyph, Chrome 159 `-webkit-text-security: disc`).
 # Characters outside the charset resolve to FONT_UNKNOWN_PACKED (a box outline).
 
+use std.common.encoding.utf8.{text_codepoints}
+
 pub val FONT_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>abcdefghijklmnopqrstuvwxyz"
 
 val FONT_ROWS_PACKED: [i64] = [
@@ -73,21 +75,37 @@ fn glyph_index_for_char_code(code: i32) -> i32:
     if code == 8226: return 88
     -1
 
-fn _glyph_charset_index_of(ch: text) -> i32:
-    if ch.len() != 1:
+# The codepoint of a one-codepoint text, else -1. Owner rule (2026-11-13):
+# text offsets and lengths are BYTES (`byte_len()`); the current seed still
+# counts `len()` in chars (doc/08_tracking/bug/
+# seed_text_slice_bytes_len_chars_pure_db_unreopenable_2026-11-16.md). Decoding
+# with `text_codepoints` keeps the 3-byte U+2022 bullet on its own cell under
+# either unit, where a `len() == 1` gate would send it to the unknown box
+# once `len()` counts bytes.
+fn _glyph_single_codepoint(ch: text) -> i64:
+    if ch.byte_len() == 0 or ch.byte_len() > 4:
         return -1
-    val needle = ch.char_code_at(0)
+    val cps = text_codepoints(ch)
+    if cps.len() != 1:
+        return -1
+    cps[0]
+
+fn _glyph_charset_index_of(ch: text) -> i32:
+    val needle = _glyph_single_codepoint(ch)
+    if needle < 0:
+        return -1
     var i = 0
-    val charset_len = FONT_CHARSET.len()
+    val charset_len = FONT_CHARSET.byte_len()
     while i < charset_len:
-        if FONT_CHARSET.char_code_at(i) == needle:
+        if (FONT_CHARSET.char_code_at(i) as i64) == needle:
             return i
         i = i + 1
     -1
 
 fn glyph_index_for_char(ch: text) -> i32:
-    if ch.len() == 1:
-        val direct_code = glyph_index_for_char_code(ch.char_code_at(0))
+    val cp = _glyph_single_codepoint(ch)
+    if cp >= 0:
+        val direct_code = glyph_index_for_char_code(cp as i32)
         if direct_code >= 0:
             return direct_code
     val direct = _glyph_charset_index_of(ch)
@@ -99,7 +117,8 @@ fn glyph_index_for_char(ch: text) -> i32:
 # outside the charset return the unknown box outline. Used by the Engine2D
 # glyph path so it rasterizes identically to the browser's glyph_row_bits.
 fn glyph_rows_for_char(ch: text) -> [i32]:
-    val gi = if ch.len() == 1: glyph_index_for_char_code(ch.char_code_at(0)) else: -1
+    val cp = _glyph_single_codepoint(ch)
+    val gi = if cp >= 0: glyph_index_for_char_code(cp as i32) else: -1
     [
         glyph_row_bits(gi, 0),
         glyph_row_bits(gi, 1),

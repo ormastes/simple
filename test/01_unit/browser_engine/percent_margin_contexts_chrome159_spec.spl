@@ -1,0 +1,68 @@
+"""
+## Purpose and audience
+Purpose: Pin that PERCENT vertical margins resolve against the containing
+block WIDTH (CSS 2.2 8.3) in the layout paths beyond block flow: a flex row
+item, a flex column item, an absolutely positioned box (containing block = the
+positioned ancestor's PADDING box), a float (all four sides) and an
+inline-block.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + getBoundingClientRect(),
+900x2000, `body{margin:0}`, every `.c{width:300px;height:100px;
+margin-bottom:10px}`, 2026-11-17; y is relative to the container top):
+
+| id  | context                                   | margin       | Chrome (x, y rel) |
+|-----|-------------------------------------------|--------------|-------------------|
+| f1  | flex row item, align-items:flex-start     | margin-top:4%| (0, 12)           |
+| r1  | abs in relative w200 + padding 0 20       | margin-top:5%| (0, 12) = 5% of 240 |
+| fl1 | float:left                                | margin:3%    | (9, 9)            |
+| ib1 | inline-block (baseline-aligned)           | margin-top:2%| (0, 6)            |
+| fc1 | flex column item                          | margin-top:4%| (0, 12)           |
+| fc2 | flex column item after fc1                | -            | (0, 22)           |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-PERCENT-VERTICAL-MARGIN-001 — percent margins resolve against the containing block width in flex, absolute, float and inline-block layout.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .c{{width:300px;height:100px;margin-bottom:10px}} #f{{display:flex;align-items:flex-start}} #f div{{width:20px;height:10px}} #r{{position:relative;width:200px;padding:0 20px}} #r div{{position:absolute;top:0;left:0;width:10px;height:10px}} #fl div{{float:left;width:20px;height:10px}} #ib span{{display:inline-block;width:20px;height:10px}}</style></head><body>" +
+    "<div class=c id=f><div id=f1 style=\"margin-top:4%\"></div></div>" +
+    "<div class=c id=r><div id=r1 style=\"margin-top:5%\"></div></div>" +
+    "<div class=c id=fl><div id=fl1 style=\"margin:3%\"></div></div>" +
+    "<div class=c id=ib><span id=ib1 style=\"margin-top:2%\"></span></div>" +
+    "<div class=c id=fc style=\"display:flex;flex-direction:column\"><div id=fc1 style=\"height:10px;margin-top:4%\"></div><div id=fc2 style=\"height:10px;margin-bottom:5%\"></div></div>" +
+    "</body></html>"
+
+fn _g(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, field).to_i32()
+
+fn _rel_y(id: text, container: text) -> i32:
+    _g(id, "y") - _g(container, "y")
+
+describe "percent vertical margins in non-block contexts":
+    it "flex row item margin-top 4% of 300":
+        step("Chrome 159: 12")
+        expect(_rel_y("f1", "f")).to_equal(12)
+
+    it "absolute box margin-top 5% of the 240 px padding box":
+        step("Chrome 159: 12")
+        expect(_rel_y("r1", "r")).to_equal(12)
+
+    it "float margin 3% on every side":
+        step("Chrome 159: x 9, y 9")
+        expect(_g("fl1", "x") - _g("fl", "x")).to_equal(9)
+        expect(_rel_y("fl1", "fl")).to_equal(9)
+
+    it "inline-block margin-top 2% of 300":
+        step("Chrome 159: 6")
+        expect(_rel_y("ib1", "ib")).to_equal(6)
+
+    it "flex column item margin-top 4% then the next item":
+        step("Chrome 159: fc1 12, fc2 22")
+        expect(_rel_y("fc1", "fc")).to_equal(12)
+        expect(_rel_y("fc2", "fc")).to_equal(22)
