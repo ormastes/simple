@@ -6,9 +6,100 @@ use std.nogc_sync_mut.sffi.collection_capture.{
     collection_capture_note_filter, collection_capture_note_loop
 }
 
+use std.nogc_sync_mut.sffi.fs.{io_file_open}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+# Interpreted text has no stable machine address, so `rt_string_data` hands the
+# interpreted `rt_io_file_open_*(ptr, len)` twins an opaque handle (base + index)
+# into this table; the twin resolves it back to the text and opens it through
+# the compiled io_file_open, whose own pointer ABI is real.
+var interp_text_handles: [text] = []
+val INTERP_TEXT_HANDLE_BASE: i64 = 1048576
+
+fn interp_text_handle(s: text) -> i64:
+    var i = 0
+    while i < interp_text_handles.len():
+        if interp_text_handles[i] == s: return INTERP_TEXT_HANDLE_BASE + i
+        i = i + 1
+    interp_text_handles.push(s)
+    INTERP_TEXT_HANDLE_BASE + interp_text_handles.len() - 1
+
+fn interpreter_io_abi(name: text, args: [Value]) -> Result<Value, BackendError>?:
+    if name == "rt_string_data":
+        if args.len() != 1: return Some(Err(BackendError.runtime_error("rt_string_data takes one argument", nil)))
+        match args[0]:
+            case Value.String(s): return Some(Ok(Value.Int(interp_text_handle(s))))
+            case _: return nil
+    if name == "rt_string_len":
+        if args.len() != 1: return Some(Err(BackendError.runtime_error("rt_string_len takes one argument", nil)))
+        match args[0]:
+            case Value.String(s): return Some(Ok(Value.Int(s.len())))
+            case _: return nil
+    var mode = -1
+    if name == "rt_io_file_open_read": mode = 0
+    elif name == "rt_io_file_open_write": mode = 1
+    elif name == "rt_io_file_open_append": mode = 3
+    else: return nil
+    if args.len() != 2:
+        return Some(Err(BackendError.runtime_error("{name} takes (path_ptr, path_len)", nil)))
+    var ptr: i64 = 0
+    var len: i64 = 0
+    match args[0]:
+        case Value.Int(v): ptr = v
+        case _: return Some(Err(BackendError.type_error("{name} path_ptr must be integer", nil)))
+    match args[1]:
+        case Value.Int(v): len = v
+        case _: return Some(Err(BackendError.type_error("{name} path_len must be integer", nil)))
+    val index = ptr - INTERP_TEXT_HANDLE_BASE
+    if index < 0 or index >= interp_text_handles.len(): return Some(Ok(Value.Int(-1)))
+    val path = interp_text_handles[index]
+    if len != path.len(): return Some(Ok(Value.Int(-1)))
+    Some(Ok(Value.Int(io_file_open(path, mode))))
+
+fn interpreter_bytes_value(s: text) -> Value:
+    var out: [Value] = []
+    for b in s.bytes(): out.push(Value.Int(b))
+    Value.Array(out)
+
+# Interpreted rt_process_run_bounded_bytes(cmd, args, timeout_ms, max_bytes):
+# the AOT `_tuple` facade takes cmd split into (ptr, len); the interpreter has
+# no such split, so the four declared arguments run the compiled text capture
+# and the captured text is returned as the declared ([u8], [u8], i64) tuple.
+fn interpreter_process_abi(name: text, args: [Value]) -> Result<Value, BackendError>?:
+    if name != "rt_process_run_bounded_bytes": return nil
+    if args.len() != 4:
+        return Some(Err(BackendError.runtime_error("rt_process_run_bounded_bytes takes (cmd, args, timeout_ms, max_output_bytes)", nil)))
+    var cmd = ""
+    match args[0]:
+        case Value.String(v): cmd = v
+        case _: return Some(Err(BackendError.type_error("rt_process_run_bounded_bytes cmd must be text", nil)))
+    var argv: [text] = []
+    match args[1]:
+        case Value.Array(items):
+            for item in items:
+                match item:
+                    case Value.String(v): argv.push(v)
+                    case _: return Some(Err(BackendError.type_error("rt_process_run_bounded_bytes args must be [text]", nil)))
+        case _: return Some(Err(BackendError.type_error("rt_process_run_bounded_bytes args must be [text]", nil)))
+    var timeout_ms: i64 = 0
+    var max_bytes: i64 = 0
+    match args[2]:
+        case Value.Int(v): timeout_ms = v
+        case _: return Some(Err(BackendError.type_error("rt_process_run_bounded_bytes timeout_ms must be integer", nil)))
+    match args[3]:
+        case Value.Int(v): max_bytes = v
+        case _: return Some(Err(BackendError.type_error("rt_process_run_bounded_bytes max_output_bytes must be integer", nil)))
+    val captured = process_run_bounded(cmd, argv, timeout_ms, max_bytes)
+    Some(Ok(Value.Tuple([interpreter_bytes_value(captured.0), interpreter_bytes_value(captured.1), Value.Int(captured.2)])))
+
 fn interpreter_run_abi(name: text, owner: text, external: bool, args: [Value], program_args: [text]) -> Result<Value, BackendError>?:
     if not external: return nil
     val module_name = if owner.starts_with("std."): "lib." + owner.substring(4) else: owner
+    if name == "rt_process_run_bounded_bytes" or name == "rt_io_file_open_read" or name == "rt_io_file_open_write" or name == "rt_io_file_open_append":
+        if val r = interpreter_process_abi(name, args): return Some(r)
+        return interpreter_io_abi(name, args)
+    if name == "rt_string_data" or name == "rt_string_len":
+        if module_name == "lib.nogc_sync_mut.sffi.fs": return interpreter_io_abi(name, args)
     if name == "rt_get_args" and (module_name == "lib.nogc_sync_mut.sffi.system" or module_name == "lib.nogc_sync_mut.sffi.host" or module_name == "lib.nogc_sync_mut.src.config"):
         if args.len() != 0:
             return Some(Err(BackendError.runtime_error("rt_get_args takes no arguments", nil)))
