@@ -1,0 +1,112 @@
+"""
+## Purpose and audience
+Purpose: Pin fractional computed font sizes. Chrome keeps `font-size` as a
+float: the UA h3 is 1.17em = 18.72 px, `font-size:18.72px` and `1.17em` stay
+fractional, and the run width, the `normal` line height and the strut all scale
+from that float. `Style.font_size` is whole px, so h3 was 19 px (276 px wide
+instead of 271), `font-size:18.72px` was truncated to 18 px (244 px instead of
+254) and `1.17em` of 16 px was 17 px (231 px). `Style.font_size_milli` carries
+the fraction; `font_size` stays the rounded px every raster reader sees.
+Audience: browser-engine style and layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, 900 px wide,
+`body{margin:0;font:16px sans-serif}`, every box `margin:0`, getBoundingClientRect
+of the box and of the inner `<span>` holding "Feature examples and support"):
+
+| case                         | box y   | box h     | span w     |
+|------------------------------|---------|-----------|------------|
+| p font-size:1.17em           | 0       | 22        | 253.6875   |
+| p font-size:117%             | 22      | 22        | 253.6875   |
+| p + <small> (13.333px)       | 44      | 18        | 190.734375 (small run 131.14) |
+| div 1.17em > div 0.9em       | 62      | 20        | 228.25     |
+| h5 (13.28px)                 | 82      | 15        | 192.40625  |
+| h6 (10.72px)                 | 97      | 12        | 155.46875  |
+| h3 line-height:1.5           | 109     | 28.078125 | 271.28125  |
+| p 18.72px line-height:1.5    | 137.08  | 28.078125 | 253.6875   |
+| h3 (sheet 1)                 | 0       | 22        | 271.28125  |
+| p 18.72px (sheet 1)          | 22      | 22        | 253.6875   |
+| p 13.5px (sheet 1)           | 66      | 15        | 183.109375 |
+
+Simple lays out in whole px, so widths are asserted within 1 px of Chrome (its
+own run width is not exactly linear in the size: 13.564 px per px of size at
+14 px, 13.548 at 16.848 px). The line-height 1.5 boxes are 28.078125 in Chrome
+and 28 here; the fractional block cursor is a separate lane.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FRACTIONAL-FONT-SIZE-001 -- computed font sizes keep their fraction in layout width, strut and normal line height.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val HEAD: text = "<html><head><style>body{margin:0;font:16px sans-serif}</style></head><body>"
+val T: text = "Feature examples and support"
+
+fn dim(html: text, id: text, key: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, 900, 600, id, key).to_int()
+
+fn off(actual: i32, chrome: i32) -> i32:
+    if actual > chrome: actual - chrome else: chrome - actual
+
+fn one(open: text, id: text, close: text) -> text:
+    HEAD + open + "<span id=\"" + id + "1\">" + T + "</span>" + close + "</body></html>"
+
+describe "fractional computed font size":
+    it "AC-1: UA h3 is 18.72 px wide and 22 px tall":
+        step("Chrome 159: h3 span 271.28, box 22; the 19 px stand-in was 276")
+        val html = one("<h3 id=\"a\" style=\"margin:0\">", "a", "</h3>")
+        expect(off(dim(html, "a1", "w"), 271)).to_be_less_than(2)
+        expect(dim(html, "a", "h")).to_equal(22)
+
+    it "AC-2: font-size in fractional px keeps the fraction":
+        step("Chrome 159: 18.72px -> 253.69 wide, box 22 (was 244 / 21: 18.72 parsed as 18)")
+        val html = one("<p id=\"a\" style=\"margin:0;font-size:18.72px\">", "a", "</p>")
+        expect(off(dim(html, "a1", "w"), 254)).to_be_less_than(2)
+        expect(dim(html, "a", "h")).to_equal(22)
+        step("Chrome 159: 13.5px -> 183.11 wide, box 15 (was 176: 13.5 parsed as 13)")
+        val small = one("<p id=\"a\" style=\"margin:0;font-size:13.5px\">", "a", "</p>")
+        expect(off(dim(small, "a1", "w"), 183)).to_be_less_than(2)
+        expect(dim(small, "a", "h")).to_equal(15)
+
+    it "AC-3: em and percent are computed from the fractional parent":
+        step("Chrome 159: 1.17em and 117% of 16 px are both 18.72 -> 253.69, box 22")
+        val em = one("<p id=\"a\" style=\"margin:0;font-size:1.17em\">", "a", "</p>")
+        expect(off(dim(em, "a1", "w"), 254)).to_be_less_than(2)
+        expect(dim(em, "a", "h")).to_equal(22)
+        val pct = one("<p id=\"a\" style=\"margin:0;font-size:117%\">", "a", "</p>")
+        expect(off(dim(pct, "a1", "w"), 254)).to_be_less_than(2)
+        step("Chrome 159: 0.9em inside 1.17em is 16.848 -> 228.25 wide, box 20 (was 203 / 17)")
+        val nested = one("<div id=\"d\" style=\"margin:0;font-size:1.17em\"><div id=\"d0\" style=\"font-size:0.9em;margin:0\">", "d", "</div></div>")
+        expect(off(dim(nested, "d1", "w"), 228)).to_be_less_than(2)
+        expect(dim(nested, "d0", "h")).to_equal(20)
+
+    it "AC-4: small and the h5 / h6 UA sizes are fractional":
+        step("Chrome 159: <small> in a 16 px paragraph is 13.333 px -> 131.14 wide")
+        val sm = HEAD + "<p id=\"c\" style=\"margin:0\"><span id=\"c1\">Feature <small id=\"c2\">examples and support</small></span></p></body></html>"
+        expect(off(dim(sm, "c2", "w"), 131)).to_be_less_than(2)
+        expect(off(dim(sm, "c1", "w"), 191)).to_be_less_than(2)
+        step("Chrome 159: h5 13.28 px -> 192.41 wide, box 15; h6 10.72 px -> 155.47, box 12")
+        val h5 = one("<h5 id=\"a\" style=\"margin:0\">", "a", "</h5>")
+        expect(off(dim(h5, "a1", "w"), 192)).to_be_less_than(2)
+        expect(dim(h5, "a", "h")).to_equal(15)
+        val h6 = one("<h6 id=\"a\" style=\"margin:0\">", "a", "</h6>")
+        expect(off(dim(h6, "a1", "w"), 155)).to_be_less_than(2)
+        expect(dim(h6, "a", "h")).to_equal(12)
+
+    it "AC-5: a unitless line-height resolves against the fractional size":
+        step("Chrome 159: 1.5 x 18.72 = 28.08 box; 1.5 x 18 was 27")
+        val html = one("<p id=\"a\" style=\"margin:0;font-size:18.72px;line-height:1.5\">", "a", "</p>")
+        expect(dim(html, "a", "h")).to_equal(28)
+
+    it "AC-6: whole-px sizes are unchanged":
+        step("Chrome 159: 14 px -> 189.89 wide, box 16; 19 px -> 257.72 wide, box 22")
+        val s14 = one("<p id=\"a\" style=\"margin:0;font-size:14px\">", "a", "</p>")
+        expect(off(dim(s14, "a1", "w"), 190)).to_be_less_than(2)
+        expect(dim(s14, "a", "h")).to_equal(16)
+        val s19 = one("<p id=\"a\" style=\"margin:0;font-size:19px\">", "a", "</p>")
+        expect(off(dim(s19, "a1", "w"), 258)).to_be_less_than(2)
+        expect(dim(s19, "a", "h")).to_equal(22)

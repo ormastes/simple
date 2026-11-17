@@ -348,7 +348,7 @@ use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_render_glyph_lcd, SfntLcdGlyph}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
-use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
@@ -3499,10 +3499,19 @@ var _browser_face_ascent_descent_memo: Dict<text, [i32]> = {}
 pub fn browser_face_ascent_descent_px(family: text, bold: bool, italic: bool, font_size: i32) -> [i32]:
     if font_size <= 0 or font_size > 512:
         return []
+    browser_face_ascent_descent_milli_px(family, bold, italic, font_size * 1000)
+
+# Fractional-size twin: `font_size_milli` is the computed size in thousandths
+# of a px (Chrome 159 h3 = 18720). Whole-px sizes answer exactly as above.
+# reason: family name, style flags and milli-px size are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_ascent_descent_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> [i32]:
+    if font_size_milli <= 0 or font_size_milli > 512000:
+        return []
     if not browser_host_has_measured_linux_face_set():
         return []
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
-    val key = family + style_key + font_size.to_string()
+    val key = family + style_key + font_size_milli.to_string()
     val memoisable = browser_bundled_font_path_for_family(family) == ""
     if memoisable and _browser_face_ascent_descent_memo.has(key):
         return _browser_face_ascent_descent_memo[key]
@@ -3512,7 +3521,7 @@ pub fn browser_face_ascent_descent_px(family: text, bold: bool, italic: bool, fo
         if out.len() == 0:
             val path = font_face_spec_path(candidate)
             if file_exists(path):
-                val ad = sfnt_line_metric_units_ascent_descent_px(_browser_face_line_units(path), font_size.to_i64())
+                val ad = sfnt_line_metric_units_ascent_descent_milli_px(_browser_face_line_units(path), font_size_milli.to_i64())
                 if ad.len() == 2:
                     out = [ad[0] as i32, ad[1] as i32]
     if memoisable and out.len() == 2:
@@ -3538,10 +3547,19 @@ fn _browser_face_line_units(path: text) -> [i64]:
 pub fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, font_size: i32) -> i32:
     if font_size <= 0 or font_size > 512:
         return 0
+    browser_normal_line_height_milli_px(family, bold, italic, font_size * 1000)
+
+# Fractional-size twin of `browser_normal_line_height_px` (see the ascent/descent
+# twin above); ascent, descent and gap are each rounded at the float size.
+# reason: family name, style flags and milli-px size are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_normal_line_height_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> i32:
+    if font_size_milli <= 0 or font_size_milli > 512000:
+        return 0
     if not browser_host_has_measured_linux_face_set():
         return 0
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
-    val key = family + style_key + font_size.to_string()
+    val key = family + style_key + font_size_milli.to_string()
     # A bundled family's face path depends on SIMPLE_ASSET_ROOT, which a
     # process can change, so its pixel value is never memoised (the per-path
     # units row still is, and a path is its own identity).
@@ -3555,7 +3573,7 @@ pub fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, fon
             val path = font_face_spec_path(candidate)
             if file_exists(path):
                 val units = _browser_face_line_units(path)
-                px = sfnt_line_metric_units_normal_line_height_px(units, font_size.to_i64()) as i32
+                px = sfnt_line_metric_units_normal_line_height_milli_px(units, font_size_milli.to_i64()) as i32
     # 0 is "no face answered" (a file that was not there yet, a collection):
     # never memoised, so a later call can still succeed.
     if memoisable and px > 0:
@@ -4187,3 +4205,40 @@ fn resolve_font_metrics_configured(config: FontRenderConfig, content: text) -> R
 # Compatibility entry point for producers without language metadata.
 fn resolve_font_metrics(family: text, content: text, font_size: i32) -> ResolvedFontMetrics:
     resolve_font_metrics_with_language(family, content, font_size, "und")
+
+# Fractional-size metrics (`font-size: 18.72px`, UA h3). Chrome 159 lays text
+# out at the float size: the run width scales linearly (Skia, no hinting).
+# The advance and kern caches are keyed on whole-px sizes, so instead of
+# widening those keys the run is resolved at a reference size `ref` (8x the
+# rounded size, at most 512) and the integer pen boundaries are rescaled to
+# `font_size_milli`. Boundaries, not advances, are rescaled, so the run total is
+# round(exact width) exactly as `measure_text_advances` does, and the error of
+# any boundary is at most half a pixel of the reference size shrunk by 1/8.
+# Shaped (complex-script) runs and whole-px sizes take the integer path.
+# reason: family, text, milli-px size and language are the web-style domain.
+# @allow(primitive_api)
+pub fn resolve_font_metrics_with_language_milli(family: text, content: text, font_size_milli: i32, language: text) -> ResolvedFontMetrics:
+    val px = (font_size_milli + 500) / 1000
+    if font_size_milli % 1000 == 0 or font_size_milli <= 0 or font_size_milli > 512000:
+        return resolve_font_metrics_with_language(family, content, px, language)
+    var ref_px = px * 8
+    if ref_px > 512:
+        ref_px = 512
+    val at_ref = resolve_font_metrics_with_language(family, content, ref_px, language)
+    if not at_ref.valid or at_ref.shaping_required:
+        return resolve_font_metrics_with_language(family, content, px, language)
+    val n = at_ref.advances.len()
+    var advances: [i32] = [0; n]
+    var cumulative_ref: i64 = 0
+    var previous: i64 = 0
+    var i = 0
+    while i < n:
+        cumulative_ref = cumulative_ref + (at_ref.advances[i] as i64)
+        val boundary = (cumulative_ref * (font_size_milli as i64) + (ref_px as i64) * 500) / ((ref_px as i64) * 1000)
+        advances[i] = (boundary - previous) as i32
+        previous = boundary
+        i = i + 1
+    val line_height = ((at_ref.line_height as i64) * (font_size_milli as i64) + (ref_px as i64) * 500) / ((ref_px as i64) * 1000)
+    ResolvedFontMetrics(valid: true, family: at_ref.family, identity: at_ref.identity, advances: advances,
+        width: previous as i32, line_height: line_height as i32, reason: at_ref.reason,
+        glyph_run: at_ref.glyph_run, shaping_required: false)
