@@ -105,6 +105,13 @@ impl HmInferContext:
                 # Add effects from the called function
                 match self.synthesize_expr(callee):
                     case Ok(callee_ty):
+                        match self.resolve(callee_ty).kind:
+                            case Function(_, _, _): pass
+                            case _:
+                                # Callback or imported value with no function
+                                # summary: not proven pure (ROB-EFF-01).
+                                effects = self.merge_effects(effects, [Effect(kind: EffectKind.Unknown, span: expr.span)])
+                                self.current_function_effects_complete = false
                         effects = self.merge_effects(effects, self.get_function_effects(callee_ty))
                     case _:
                         # Callee type unavailable (e.g. undefined symbol). The
@@ -148,6 +155,13 @@ impl HmInferContext:
                                 effects = self.merge_effects(effects, declared_effects)
                                 has_declared_effect_row = true
                             case _: pass
+                # A trait method call dispatches dynamically: the signature row
+                # is not a proof for the implementation (ROB-EFF-01).
+                match resolution:
+                    case TraitMethod(_, _):
+                        effects = self.merge_effects(effects, [Effect(kind: EffectKind.Unknown, span: expr.span)])
+                        self.current_function_effects_complete = false
+                    case _: pass
                 if not has_declared_effect_row:
                     # Partial fact only: the IO fallback keeps the analysis
                     # conservative, but the row is not a complete proof.
@@ -195,6 +209,11 @@ impl HmInferContext:
                 if end_opt.?:
                     effects = self.merge_effects(effects, self.infer_expr_effects(end_opt.unwrap()))
                 effects
+
+            case Await(inner):
+                # Explicit arm (ROB-EFF-02): awaiting suspends, so the row is
+                # the operand row plus Async; never the wildcard Unknown.
+                self.merge_effects(self.infer_expr_effects(inner), [Effect(kind: EffectKind.Async, span: expr.span)])
 
             case _:
                 # Unhandled expression kind: fail closed. The Unknown marker
@@ -282,6 +301,7 @@ impl HmInferContext:
             case (Async, Async): true
             case (Mutates, Mutates): true
             case (Allocates, Allocates): true
+            case (Unknown, Unknown): true
             case (Throws(ty1), Throws(ty2)):
                 # Types should match, but for now just check both are Throws
                 true
@@ -340,3 +360,22 @@ impl HmInferContext:
         bounds nor be published as a purity proof.
         """
         self.current_function_effects_complete
+
+# Stable diagnostic code: a restricted region (pure/nogc/nonblocking) contains
+# an effect that inference could not prove (ROB-EFF-03).
+val EFFECT_UNKNOWN_IN_RESTRICTED_REGION: text = "EFF-E0301"
+
+fn effect_region_is_restricted(region: text) -> bool:
+    region == "pure" or region == "nogc" or region == "nonblocking"
+
+fn effect_region_admission(region: text, row: [Effect], complete: bool) -> text:
+    """Return "" when admitted, else EFFECT_UNKNOWN_IN_RESTRICTED_REGION."""
+    if not effect_region_is_restricted(region):
+        return ""
+    if not complete:
+        return EFFECT_UNKNOWN_IN_RESTRICTED_REGION
+    for effect in row:
+        match effect.kind:
+            case Unknown: return EFFECT_UNKNOWN_IN_RESTRICTED_REGION
+            case _: pass
+    ""

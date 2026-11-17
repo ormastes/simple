@@ -1,0 +1,85 @@
+# ROB-EFF-01/02/03 effect admission. A call whose effect row is not proven
+# (non-function callee type, trait method) is Unknown, never pure; Await has an
+# explicit arm; a restricted region (pure/nogc/nonblocking) rejects Unknown.
+use std.spec.step
+
+use std.spec.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.inference_effects.*
+use compiler.types.type_infer.context.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+fn adm_span() -> Span:
+    lex_span_empty()
+
+fn adm_int(value: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: false, type_: nil, span: adm_span())
+
+fn adm_var(symbol_id: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: symbol_id)), has_type_: false, type_: nil, span: adm_span())
+
+fn adm_pure_fn_type() -> HirType:
+    val s = adm_span()
+    HirType(kind: HirTypeKind.Function([], HirType(kind: HirTypeKind.Unit, span: s), []), span: s)
+
+fn adm_has_kind(row: [Effect], want: text) -> bool:
+    for effect in row:
+        match effect.kind:
+            case Unknown:
+                if want == "unknown": return true
+            case Async:
+                if want == "async": return true
+            case _: pass
+    false
+
+describe "effect admission (ROB-EFF-01/02/03)":
+    it "Await has an explicit Async arm and stays complete":
+        step("Await arm")
+        var ctx = HmInferContext.new()
+        val row = ctx.infer_expr_effects(HirExpr(kind: HirExprKind.Await(adm_int(1)), has_type_: false, type_: nil, span: adm_span()))
+        expect(adm_has_kind(row, "async")).to_be(true)
+        expect(adm_has_kind(row, "unknown")).to_be(false)
+        expect(ctx.get_current_function_effects_complete()).to_be(true)
+
+    it "a call through a callee whose type is not a function is Unknown":
+        step("non-function callee")
+        var ctx = HmInferContext.new()
+        ctx.bind_mono("77", HirType(kind: HirTypeKind.Unit, span: adm_span()))
+        val call = HirExpr(kind: HirExprKind.Call(adm_var(77), [], []), has_type_: false, type_: nil, span: adm_span())
+        val row = ctx.infer_expr_effects(call)
+        expect(adm_has_kind(row, "unknown")).to_be(true)
+        expect(ctx.get_current_function_effects_complete()).to_be(false)
+
+    it "a trait method call is Unknown even when its signature row is empty":
+        step("trait method")
+        var ctx = HmInferContext.new()
+        ctx.bind_mono("78", adm_pure_fn_type())
+        val call = HirExpr(
+            kind: HirExprKind.MethodCall(adm_int(1), "m", [], MethodResolution.TraitMethod(SymbolId(id: 5), SymbolId(id: 78))),
+            has_type_: false, type_: nil, span: adm_span())
+        val row = ctx.infer_expr_effects(call)
+        expect(adm_has_kind(row, "unknown")).to_be(true)
+        expect(ctx.get_current_function_effects_complete()).to_be(false)
+
+    it "a proven pure function call stays pure and complete":
+        step("proven pure")
+        var ctx = HmInferContext.new()
+        ctx.bind_mono("79", adm_pure_fn_type())
+        val call = HirExpr(kind: HirExprKind.Call(adm_var(79), [], []), has_type_: false, type_: nil, span: adm_span())
+        val row = ctx.infer_expr_effects(call)
+        expect(row.len()).to_equal(0)
+        expect(ctx.get_current_function_effects_complete()).to_be(true)
+
+    it "restricted regions reject Unknown with a stable code":
+        step("region admission")
+        val unknown_row = [Effect(kind: EffectKind.Unknown, span: adm_span())]
+        expect(effect_region_admission("pure", unknown_row, false)).to_equal(EFFECT_UNKNOWN_IN_RESTRICTED_REGION)
+        expect(effect_region_admission("nogc", unknown_row, false)).to_equal(EFFECT_UNKNOWN_IN_RESTRICTED_REGION)
+        expect(effect_region_admission("nonblocking", [], false)).to_equal(EFFECT_UNKNOWN_IN_RESTRICTED_REGION)
+
+    it "restricted regions admit a proven row and unrestricted regions admit Unknown":
+        step("region admission ok")
+        val unknown_row = [Effect(kind: EffectKind.Unknown, span: adm_span())]
+        expect(effect_region_admission("pure", [], true)).to_equal("")
+        expect(effect_region_admission("", unknown_row, false)).to_equal("")

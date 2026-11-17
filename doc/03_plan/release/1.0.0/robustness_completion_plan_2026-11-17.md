@@ -160,3 +160,12 @@ A feature is complete only when parser/type/HIR/MIR/runtime requirements,
 negative tests, imported/generated-code behaviour, native/interpreter parity,
 diagnostic severity, documentation and the performance gate agree. A registry
 entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
+
+## Implementation log
+
+- 2026-11-18 P0-3 slice: `inference_effects.spl` — non-function callee type and
+  trait-method calls now infer Unknown (incomplete row); `Await` has an explicit
+  Async arm; `effect_region_admission` rejects Unknown in pure/nogc/nonblocking
+  regions with `EFF-E0301`. Spec `effect_admission_spec.spl` 6/6 (was 1/6 red).
+  Remaining: loader/versioned summary + stale-summary rejection, wiring the
+  admission check into the driver region checks, imported-function summaries.
