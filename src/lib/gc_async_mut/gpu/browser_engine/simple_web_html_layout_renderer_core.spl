@@ -7,7 +7,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use common.ui.glyph_bitmap_5x7.{glyph_row_bits, glyph_index_for_char_code}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{decl_get, parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{decl_get, parse_int, HNODE_ATTR_HREF_BIT}
 
 fn form_control_ua_box_decls(node: HNode) -> text:
     """UA-sheet box declarations for a form control (Chrome html.css), or ""
@@ -674,7 +674,15 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         val em_base = if nd.parent >= 0: styles[nd.parent].font_size else: 16
         if trace_stages:
             print "[layout-trace] style_stage=em-base-ready index={i} em={em_base}"
+        val inherited_fg = st.fg
+        val inherited_underline = st.text_decoration_underline
         st = tag_defaults(st, nd.tag)
+        # Chrome's UA link style (`a:-webkit-any-link`: blue + underline) needs an
+        # href; tag_defaults() sees only the tag, so an anchor without one gets
+        # its inherited color / decoration back here (`<a>`, `<a name>`).
+        if nd.tag == "a" and (nd.attr_mask & HNODE_ATTR_HREF_BIT) == 0u32:
+            st.fg = inherited_fg
+            st.text_decoration_underline = inherited_underline
         # Chrome's UA sheet for form controls, the part `tag_defaults` cannot
         # express because it needs the `type` attribute or a border: text
         # `<input>` and `<button>` carry a 2 px border, `<select>` and
@@ -1666,6 +1674,10 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
                 return st.flex_direction
             if field == "font_size":
                 return st.font_size.to_string()
+            if field == "color":
+                return st.fg.to_string()
+            if field == "underline":
+                return if st.text_decoration_underline: "true" else: "false"
             if field == "background_color":
                 return st.bg.to_string()
             if field == "background_gradient_from":
