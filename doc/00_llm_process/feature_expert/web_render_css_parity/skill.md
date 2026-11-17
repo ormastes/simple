@@ -2640,12 +2640,12 @@ Follow-up to the four 2026-11-16 behaviours. Each item has a `*_chrome159_spec.s
 
 ## 2026-11-17 — parser-input file splits (foundation, layout_foundation, webgl_context)
 
-Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap 128 KiB):
+Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap 128 KiB): Sizes are post-#10061 (gradient polish).
 
 | original (before -> after, bytes) | new file (bytes) | what moved |
 |---|---|---|
-| `simple_web_html_layout_renderer_foundation.spl` 156,479 -> 109,834 | `..._foundation_values.spl` 49,661 | position-aware string find, nil-free CSS value parsers (lengths, transforms, line-height, nth-box, margin tokens, object-position), `decl_get`, `ws_tokens` (86 decls) |
-| `simple_web_html_layout_renderer_layout_foundation.spl` 170,077 -> 103,901 | `..._layout_text.spl` 69,933 | text measurement, wrapping, intrinsic widths, replaced / form-control intrinsic boxes (92 decls) |
+| `simple_web_html_layout_renderer_foundation.spl` 172,172 -> 109,515 | `..._foundation_values.spl` 66,197 | position-aware string find, nil-free CSS value parsers (color tokens, lengths, gradient stop pieces, transforms, line-height, nth-box, margin tokens, object-position), declaration-table readers, `decl_get`, `ws_tokens` (107 decls) |
+| `simple_web_html_layout_renderer_layout_foundation.spl` 171,862 -> 105,686 | `..._layout_text.spl` 70,863 | text measurement, wrapping, intrinsic widths, replaced / form-control intrinsic boxes (92 decls) |
 | `webgl_context.spl` 186,715 -> 93,867 | `webgl_context_objects.spl` 49,016 and `webgl_context_pipeline.spl` 50,610 | `WebGLContext` methods moved into `impl WebGLContext:` extension files |
 
 - **Re-export pattern.** The original keeps its name and gains one `export use <new>.{every moved name}`. This binds locally and re-exports, so importers don't change. Re-exporting private (`fn`) names is accepted by the `cargo-target-webrender-blend` seed: verified on specs that import moved private names through the facade, with no new failing names.
