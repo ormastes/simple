@@ -60,3 +60,27 @@ describe "backend provider receipt store":
         file_write(rdir + "/backends_cuda.sdn", "not a receipt")
         val r = admit_provider_with_receipt(_desc(), HOST, ["codegen"], dir + "/provider.bin", rdir)
         expect(r.starts_with("SPL-PROVIDER-ABI-001: receipt-mismatch: unreadable")).to_equal(true)
+
+    it "rejects a group that would escape the receipt dir":
+        val dir = _setup("escape", "provider-v1")
+        val rdir = dir + "/receipts"
+        var rejected = 0
+        for g in ["../evil", "a/b", "a\\b", "..", ""]:
+            val d = BackendProviderDescriptor(group: g, abi_version: BACKEND_PROVIDER_ABI_VERSION, host_triple: HOST, capabilities: ["codegen"])
+            val r = admit_provider_with_receipt(d, HOST, ["codegen"], dir + "/provider.bin", rdir)
+            if r.starts_with("provider-receipt: invalid group"):
+                rejected = rejected + 1
+        expect(rejected).to_equal(5)
+        expect(file_exists(dir + "/evil.sdn")).to_equal(false)
+
+    it "reports a write failure when the receipt dir cannot be created":
+        val dir = _setup("writefail", "provider-v1")
+        # a regular file as the parent makes dir creation and the write fail
+        val r = admit_provider_with_receipt(_desc(), HOST, ["codegen"], dir + "/provider.bin", dir + "/provider.bin/receipts")
+        expect(r.starts_with("provider-receipt: write failed")).to_equal(true)
+
+    it "leaves no temp file after a successful write":
+        val dir = _setup("notmp", "provider-v1")
+        val rdir = dir + "/receipts"
+        expect(admit_provider_with_receipt(_desc(), HOST, ["codegen"], dir + "/provider.bin", rdir)).to_equal("")
+        expect(file_exists(rdir + "/backends_cuda.sdn.tmp")).to_equal(false)
