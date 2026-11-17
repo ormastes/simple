@@ -25,3 +25,10 @@ Page: `simple_web_renderer_spec` "uses explicit line-height for wrapped text lay
 Map the generic default (no `font-family`, and `serif`) to the Liberation Serif face the way
 `sans-serif` maps to Liberation Sans; then re-measure the pins that assume sans text on
 default-family pages (`simple_web_renderer_spec` 8 px darkest ink, currently `0xFF42375F`).
+
+## Resolution (2026-11-18)
+The default `Style.font_family` (style.spl, dom.spl) is now `serif`, as on Chrome 159 / Linux, where `getComputedStyle(body).fontFamily` is "Times New Roman" and fontconfig resolves it to Liberation Serif. The UA overrides survive: input/button/select stay on Liberation Sans, and code/kbd on DejaVu Sans Mono.
+
+- **Pin:** `default_font_family_chrome159_spec` (3 cases). An unstyled span is 148 px wide; Chrome measures 147.69.
+- **Measured effect** on the `simple_web_renderer_spec` 8 px wrapped-text page: the whole image against Chrome goes from 426 to **149** px, and the summed delta from 63,370 to **7,076**.
+- **Gates:** the combo matrix and the 1x catalog are unchanged, because the catalog pages set their own fonts.

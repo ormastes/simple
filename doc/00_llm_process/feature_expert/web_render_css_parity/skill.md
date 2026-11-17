@@ -2662,3 +2662,8 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Chrome 159 matrix** (default serif 16px, 20x10 box after "x"; y, line h): top mt6 6,18 mb6 0,18 6/0 6,22 mt30 30,40; bottom mt6 8,18 mb6 2,18; text-top same as top; text-bottom mt6 7,18 mb6 1,18 6/0 6,23 mt30 30,41. All 24 match.
 - **Spec:** `inline_block_vertical_align_margin_chrome159_spec` (4 cases, 0/4 on base, 4/4 now).
 - **Not done:** `middle` (needs x-height, Chrome lands on fractional y) — `doc/08_tracking/bug/inline_block_vertical_align_middle_ignores_margin_2026-11-18.md`. Plain `display:inline` elements with these keywords are untouched. A top item and a taller bottom item in the same line use `max` for the line and drop the baseline by the bottom growth only; not measured against Chrome.
+## 2026-11-18 — Default font family is serif (Chrome 159)
+- **Rule:** a page with no `font-family` computes "Times New Roman", which fontconfig maps to Liberation Serif. Form controls compute to Arial (Liberation Sans); code, kbd and textarea to monospace.
+- **Change:** the default `Style.font_family` is now `serif`. The UA overrides are unchanged.
+- **Pin:** `default_font_family_chrome159_spec`.
+- **Trap:** any spec page that sets no family was being compared against Chrome's serif glyphs with our sans glyphs. Re-measure such pins against Chrome before reading their whole-image metric. On the 8 px wrapped page, mismatch went from 426 to 149 px.
