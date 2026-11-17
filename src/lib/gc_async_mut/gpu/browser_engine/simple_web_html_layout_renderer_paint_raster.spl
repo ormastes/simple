@@ -38,6 +38,7 @@ use common.ui.draw_ir.{
     draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_text_styled_clipped
 }
 use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_paint}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_into, css_opacity_group_alpha8}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.{layout, web_html_layout_tree, node_contain_layout, nearest_contain_layout_ancestor, layout_contain_boundary, subtree_node_count, layout_contain_boundary_subtree_size, layout_selected, layout_with_style, SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH, simple_web_collapsed_border_style_rank, simple_web_collapsed_left_edge_wins, simple_web_resolve_collapsed_table_borders, LayoutResult, LayoutSelectedResult, PositionOffsetResult, offset_layout_subtree, rtl_row_flex_item_offset, InlineLineAlignment, inline_line_strut_baseline_offset, replaced_media_bottom_edge_tag, bottom_edge_baseline, inline_line_baseline_ascent, inline_line_baseline_offset, inline_line_baseline_descent, align_inline_line_baselines, block_bottom_margin_collapses_through, block_top_margin_collapses_through, node_tag_is_document, relative_layout_result, TextWrapCache, IntrinsicWidthResult, LineWrapRanges, char_w, text_advance, style_char_w, style_text_advance, style_space_advance, line_h, style_line_h, utf8_encoded_len, next_codepoint_start, byte_advances_range_width, style_text_line_advance_width_with, style_font_is_monospace, inline_content_area_height, style_baseline_offset, style_decoration_thickness_px, effective_item_align, grid_item_is_replaced, replaced_default_box_w, replaced_default_box_h, SELECT_ARROW_WIDTH_PX, INPUT_COL_ADVANCE_PX, INPUT_CONTENT_INTERCEPT_PX, TEXTAREA_COL_ADVANCE_PX, TEXTAREA_CONTENT_INTERCEPT_PX, form_control_intrinsic_content_w, form_control_rows, form_control_cols, flex_ordered_children, RowFlexDistribution, row_flex_distribution, row_flex_main_reversed, flex_item_outer_height, style_with_height_without_grid_fields, style_with_height, style_with_width_without_height_metadata, style_with_width, codepoint_is_space, text_starts_with_collapsible_space, resolved_space_advance, text_ink_y_offset, text_ink_x_offset, web_wrap_line_end, text_line_advance_width, style_text_line_advance_width, html_text_paint_fully_transparent, text_line_aligned_x, text_line_needs_paint_width, compute_style_wrap_ranges_float_band, compute_style_wrap_ranges_first_line, g_text_first_line_dx_pending, g_text_first_line_dx, text_first_line_dx_reset, text_first_line_dx_record, text_first_line_dx_at, g_text_line_boxes, g_text_line_boxes_pending, text_line_boxes_reset, text_line_boxes_record, text_line_box_dx, text_line_box_w, text_ends_with_collapsible_space, text_run_aligns_line_left, text_last_line_advance, first_word_advance_width, word_end_byte, compute_preserved_newline_ranges, zero_i32_list, neg_one_i32_list, shifted_i32_list, empty_i32_lists, css_outer_width, css_outer_height, definite_content_height_limit, constrained_outer_width, explicit_auto_table_column_offsets, constrained_outer_height, absolute_outer_width, absolute_outer_height, resolve_horizontal_margin_px, resolve_percent_height_px, resolve_vertical_margin_px, absolute_child_x, absolute_has_positioned_ancestor, absolute_child_y, absolute_child_style, grid_placement_start, grid_placement_span, grid_track_offset, grid_track_span_size, GridAreaRect, grid_template_area_rects, style_run_byte_advances, style_measured_run_advance, inline_text_advance_width, compute_style_wrap_ranges, compute_wrap_ranges, intrinsic_text_width, flex_item_max_content_width, flex_wrap_auto_base_width, table_cell_max_content_width, table_cell_min_content_width, grid_track_sizes, ellipsize_text_for_width, web_glyph_scale, fb_put, fb_clear, browser_layout_framebuffer_filled, browser_layout_framebuffer_filled_serial, fb_rect, ClipRect, PaintClipCache, clip_intersect, fb_rect_clip, fb_fill_rows_const, blend_opacity, composite_over_base, fb_rect_opacity_clip, rt_engine2d_blend_const_span_pct_u32, rt_engine2d_blend_cov_span_u32, fb_blend_const_row_opacity, fb_rounded_rect_opacity_clip, clamp_corner_radius, fb_rounded_rect_row_span_opacity_clip, fb_rounded_rect_corners_opacity_clip, fb_style_rounded_rect_opacity_clip, fb_blend_cov_row, fb_soft_box_shadow, paint_box_shadow, gradient_dither_threshold, mix_channel_gradient_centered, mix_color_vertical_centered, background_gradient_pixel_opacity, fb_style_background_opacity_clip, fb_background_radial_stack_clip, fb_border_sides_clip, fb_outline_clip, fb_text_underline, fb_text_underline_clip, fb_glyph_thin_scaled_clip, fb_text_thin_scaled_clip_range, fb_text_thin_scaled_clip_range_adv, apply_text_transform_for_paint, reverse_text_for_paint, WidgetChromeRects, widget_chrome_rects_concat, fb_widget_chrome_rects, widget_frame_rects, sparse_text_rects, text_decoration_rects, fb_text_sparse_range, fb_px, fb_generated_widget_chrome_text, generated_widget_chrome_text_pixels, WidgetChromeTextPixels, widget_chrome_text_fits, widget_chrome_text_active, WidgetPaintFlags, compute_widget_paint_flags, is_text_flow_fixture, fb_text_flow_chrome_overlay, bidi_visual_text_for_rtl, text_has_rtl_strong}
 
@@ -877,7 +878,227 @@ fn widget_offset_text_node_rects(nodes: [HNode], styles: [Style], bx: [i32], by:
         ly = ly + lh
     out
 
+# ---------------------------------------------------------------------------
+# CSS opacity groups on the raster lane (Chrome 159 saveLayer semantics).
+# A box with 0 < opacity < 1 whose subtree paints two or more items is
+# rasterised into its own transparent layer, bounded to the subtree's clipped
+# bounds, and restored with `css_opacity_group_composite_into`
+# (SkBlendARGB32, engine2d/css_opacity_group.spl). One painted item keeps the
+# per-element fold. Admission is deliberately narrow: a group is composited
+# after the regular passes, which is Chrome's order for a z-index:auto
+# stacking context relative to in-flow content, so a group is admitted only
+# when no positioned box outside it that Chrome would paint ABOVE it (later
+# in tree order, or z-index > 0) overlaps it. Nested groups, iframes and
+# widget pages stay on the per-element path.
+# ---------------------------------------------------------------------------
+
+fn _raster_group_alpha(c: u32) -> u32:
+    (c >> 24) & 255u32
+
+# Paint operations one node contributes to a group, as Chrome counts them
+# (a box with background + border is two ops and already a group: Chrome 159
+# paints ff7e7e, not the folded ff7f7f, for red bg + blue border at 0.5).
+fn _raster_group_node_ops(nd: HNode, st: Style) -> i32:
+    if nd.tag == "#text":
+        return if nd.text_trimmed != "": 1 else: 0
+    var ops = 0
+    if _raster_group_alpha(st.bg) != 0u32:
+        ops = ops + 1
+    if st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0:
+        ops = ops + 1
+    if st.outline_w > 0 and st.outline_color != 0u32:
+        ops = ops + 1
+    ops
+
+# The raster layer starts transparent and the raster blenders treat a
+# transparent destination as opaque black, so only opaque paint is exact in
+# a layer. Shadows, gradients, images, form controls and any translucent
+# colour keep the group on the per-element path (follow-up: layer alpha).
+fn _raster_group_node_layer_safe(nd: HNode, st: Style) -> bool:
+    if nd.tag == "#text":
+        return true
+    if nd.tag == "img" or nd.tag == "input" or nd.tag == "svg" or nd.tag == "select" or nd.tag == "textarea" or nd.tag == "button":
+        return false
+    if st.box_shadow_color != 0u32 or st.box_shadow_raw != "":
+        return false
+    if (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or st.bg_layers_raw != "" or st.background_image_uri != "":
+        return false
+    val bga = _raster_group_alpha(st.bg)
+    if bga != 0u32 and bga != 255u32:
+        return false
+    if st.border_l > 0 and _raster_group_alpha(st.border_color_l) != 255u32: return false
+    if st.border_t > 0 and _raster_group_alpha(st.border_color_t) != 255u32: return false
+    if st.border_r > 0 and _raster_group_alpha(st.border_color_r) != 255u32: return false
+    if st.border_b > 0 and _raster_group_alpha(st.border_color_b) != 255u32: return false
+    if st.outline_w > 0 and st.outline_color != 0u32 and _raster_group_alpha(st.outline_color) != 255u32:
+        return false
+    true
+
+fn _raster_group_visible(nodes: [HNode], styles: [Style], i: i32) -> bool:
+    styles[i].display != "none" and not styles[i].visibility_hidden and
+        not content_paint_hidden_by_ancestor(nodes, styles, i)
+
+fn _raster_group_positioned(st: Style) -> bool:
+    st.position_absolute or st.position_relative or st.position_fixed or st.position_sticky
+
+struct _RasterOpacityGroup:
+    root: i32
+    members: [bool]
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fbw: i32, fbh: i32) -> [_RasterOpacityGroup]:
+    var groups: [_RasterOpacityGroup] = []
+    val n = nodes.len() as i32
+    var claimed: [bool] = [false; n]
+    var g = 0
+    while g < n:  # cpu-lane-loop-ok: one scan for fractional-opacity roots; the per-root member/overlap passes run only for a root that is found, bound is node_count per root
+        val gst = styles[g]
+        val tag = nodes[g].tag
+        if (
+            gst.opacity_pct > 0 and gst.opacity_pct < 100 and not claimed[g] and
+            tag != "html" and tag != "body" and tag != "#root" and
+            _raster_group_visible(nodes, styles, g)
+        ):
+            var members: [bool] = [false; n]
+            members[g] = true
+            var painted = 0
+            var reject = false  # nested group, iframe, or a member the layer cannot hold exactly
+            var x0 = fbw
+            var y0 = fbh
+            var x1 = 0
+            var y1 = 0
+            var j = g
+            while j < n:  # cpu-lane-loop-ok: subtree membership by parent pointer (pre-order DOM, parent index < child index); bound is node_count
+                val parent = nodes[j].parent as i32
+                if j == g or (parent >= g and members[parent]):
+                    members[j] = true
+                    val st = styles[j]
+                    if j != g and st.opacity_pct < 100:
+                        reject = true
+                    if nodes[j].tag == "iframe":
+                        reject = true
+                    val ops = if _raster_group_visible(nodes, styles, j): _raster_group_node_ops(nodes[j], st) else: 0
+                    if ops > 0:
+                        painted = painted + ops
+                        if not _raster_group_node_layer_safe(nodes[j], st):
+                            reject = true
+                        # Antialiased text needs an opaque backdrop inside the
+                        # layer: only a root with an opaque background gives one.
+                        if nodes[j].tag == "#text" and _raster_group_alpha(gst.bg) != 255u32:
+                            reject = true
+                        val pad = if st.outline_w > 0: st.outline_w + _tile_abs_i32(st.outline_offset_px) else: 0
+                        if bx[j] - pad < x0: x0 = bx[j] - pad
+                        if by[j] - pad < y0: y0 = by[j] - pad
+                        if bx[j] + bw[j] + pad > x1: x1 = bx[j] + bw[j] + pad
+                        if by[j] + bh[j] + pad > y1: y1 = by[j] + bh[j] + pad
+                j = j + 1
+            var k = g
+            while k < n:  # cpu-lane-loop-ok: marks the subtree claimed so a descendant root is never a second group; bound is node_count
+                if members[k]:
+                    claimed[k] = true
+                k = k + 1
+            if x0 < 0: x0 = 0
+            if y0 < 0: y0 = 0
+            if x1 > fbw: x1 = fbw
+            if y1 > fbh: y1 = fbh
+            var admitted = painted >= 2 and not reject and x1 > x0 and y1 > y0
+            if admitted:
+                var a = 0
+                while a < n:  # cpu-lane-loop-ok: overlap check against positioned boxes outside the group; bound is node_count
+                    val ast = styles[a]
+                    if (
+                        not members[a] and _raster_group_positioned(ast) and
+                        (a > g or ast.z_index > 0) and
+                        _raster_group_visible(nodes, styles, a) and
+                        bx[a] < x1 and bx[a] + bw[a] > x0 and by[a] < y1 and by[a] + bh[a] > y0
+                    ):
+                        # An ancestor of the group paints under it.
+                        var anc = nodes[g].parent as i32
+                        var is_ancestor = false
+                        while anc >= 0:  # cpu-lane-loop-ok: depth-bounded ancestor walk
+                            if anc == a:
+                                is_ancestor = true
+                            anc = nodes[anc].parent as i32
+                        if not is_ancestor:
+                            admitted = false
+                    a = a + 1
+            if admitted:
+                groups.push(_RasterOpacityGroup(root: g, members: members, x: x0, y: y0, w: x1 - x0, h: y1 - y0))
+        g = g + 1
+    groups
+
+# Runs the regular passes with the `hide` nodes marked visibility:hidden and
+# `full_opacity_root` painted at opacity 100, then restores the styles (Style
+# is shared by reference; same pattern as the tile-cull pass below).
+fn _raster_paint_hiding(nodes: [HNode], styles: [Style], hide: [bool], full_opacity_root: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
+    var work = styles
+    val n = styles.len() as i32
+    var prev_hidden: [bool] = [false; n]
+    var i = 0
+    while i < n:  # cpu-lane-loop-ok: marks the hidden set; single O(node_count) pass paired with the restore below
+        prev_hidden[i] = work[i].visibility_hidden
+        if hide[i]:
+            var st = work[i]
+            st.visibility_hidden = true
+            work[i] = st
+        i = i + 1
+    var prev_opacity = 100
+    if full_opacity_root >= 0:
+        var rst = work[full_opacity_root]
+        prev_opacity = rst.opacity_pct
+        rst.opacity_pct = 100
+        work[full_opacity_root] = rst
+    val out = _paint_passes(nodes, work, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
+    if full_opacity_root >= 0:
+        var rst = work[full_opacity_root]
+        rst.opacity_pct = prev_opacity
+        work[full_opacity_root] = rst
+    i = 0
+    while i < n:  # cpu-lane-loop-ok: restores the visibility_hidden values saved above; single O(node_count) pass
+        if work[i].visibility_hidden != prev_hidden[i]:
+            var st = work[i]
+            st.visibility_hidden = prev_hidden[i]
+            work[i] = st
+        i = i + 1
+    out
+
+fn _raster_shifted(v: [i32], d: i32) -> [i32]:
+    var out: [i32] = []
+    for x in v:  # cpu-lane-loop-ok: per-node coordinate shift into a group layer's local space; bound is node_count
+        out.push(x - d)
+    out
+
 fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
+    if widget_mode:
+        return _paint_passes(nodes, styles, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
+    val groups = _raster_opacity_groups(nodes, styles, bx, by, bw, bh, fbw, fbh)
+    if groups.len() == 0:
+        return _paint_passes(nodes, styles, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
+    val n = nodes.len() as i32
+    var in_group: [bool] = [false; n]
+    for grp in groups:  # cpu-lane-loop-ok: union of the admitted groups' members; bound is group count x node_count
+        var i = 0
+        while i < n:  # cpu-lane-loop-ok: same union, inner node loop
+            if grp.members[i]:
+                in_group[i] = true
+            i = i + 1
+    var out = _raster_paint_hiding(nodes, styles, in_group, -1, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
+    for grp in groups:  # cpu-lane-loop-ok: one bounded layer paint + restore per admitted group
+        var outside: [bool] = [true; n]
+        var i = 0
+        while i < n:  # cpu-lane-loop-ok: complement of the group's members; bound is node_count
+            if grp.members[i]:
+                outside[i] = false
+            i = i + 1
+        val layer_fb: [u32] = [0u32; grp.w * grp.h]
+        val layer = _raster_paint_hiding(nodes, styles, outside, grp.root, _raster_shifted(bx, grp.x), _raster_shifted(by, grp.y), bw, bh, wrap_cache, layer_fb, grp.w, grp.h, widget_mode)
+        out = css_opacity_group_composite_into(out, fbw, fbh, layer, grp.w, grp.h, grp.x, grp.y, css_opacity_group_alpha8(styles[grp.root].opacity_pct))
+    out
+
+fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
     var out = fb
     # Reserve roughly half of whatever time remains in the paint stage for the
     # text pass. Draw order requires backgrounds/structural passes to run

@@ -1,0 +1,72 @@
+#version 450
+// Device CSS opacity group restore — the exact integer twin of
+// css_opacity_group_composite_pixel() in
+// src/lib/gc_async_mut/gpu/engine2d/css_opacity_group.spl (Chrome 159
+// saveLayerAlpha restore, SkBlendARGB32 at paint alpha A).
+//
+// binding 0 = framebuffer uint[], index = y * fb_w + x (read + written in place;
+//             each thread owns exactly one framebuffer word, so no barrier)
+// binding 1 = group layer uint[], w * h straight-alpha words (index = ly * w + lx):
+//             the offscreen surface the group's subtree was rendered into
+//             (READ ONLY here)
+// push constants (28 bytes): x0, y0, w, h, fb_w, fb_h, alpha8
+// dispatch: 2D, ceil(w/16) x ceil(h/16) workgroups of 16x16
+//
+// Same frozen 2-binding descriptor layout as shadow_rect.comp / blur_rect.comp,
+// so the existing compute pipeline factory serves it unchanged.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Framebuffer { uint data[]; } fb;
+layout(set = 0, binding = 1) buffer GroupLayer { uint data[]; } layer;
+
+layout(push_constant) uniform PushConstants {
+    int x0;
+    int y0;
+    int w;
+    int h;
+    int fb_w;
+    int fb_h;
+    int alpha8;
+} pc;
+
+int premul(int c, int a) {
+    if (a >= 255) return c;
+    return (c * a + 127) / 255;
+}
+
+int unpremul(int c, int a) {
+    if (a >= 255) return c;
+    if (a <= 0) return 0;
+    int v = (c * 255 + a / 2) / a;
+    return v > 255 ? 255 : v;
+}
+
+void main() {
+    int lx = int(gl_GlobalInvocationID.x);
+    int ly = int(gl_GlobalInvocationID.y);
+    if (lx >= pc.w || ly >= pc.h) return;
+    int fx = pc.x0 + lx;
+    int fy = pc.y0 + ly;
+    if (fx < 0 || fx >= pc.fb_w || fy < 0 || fy >= pc.fb_h) return;
+
+    uint s = layer.data[uint(ly * pc.w + lx)];
+    int la = int((s >> 24) & 255u);
+    if (la == 0 || pc.alpha8 <= 0) return;
+    uint fi = uint(fy * pc.fb_w + fx);
+    uint d = fb.data[fi];
+    int da = int((d >> 24) & 255u);
+    int sc = pc.alpha8 + 1;
+    int p = 0xFFFF - la * sc;
+    int ds = (p + (p >> 8)) >> 8;
+    // An opaque destination stays opaque (Chrome's backing shows the
+    // premultiplied channels as-is).
+    int oa = da >= 255 ? 255 : ((la * sc + da * ds) >> 8);
+    uint outv = uint(oa) << 24;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        int l = premul(int((s >> uint(shift)) & 255u), la);
+        int dc = premul(int((d >> uint(shift)) & 255u), da);
+        int c = unpremul((l * sc + dc * ds) >> 8, oa);
+        outv |= uint(c) << uint(shift);
+    }
+    fb.data[fi] = outv;
+}
