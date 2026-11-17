@@ -60,6 +60,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
     engine2d_draw_ir_mask_geometry_safe,
     engine2d_draw_ir_render_legacy_shadow,
     engine2d_draw_ir_render_typed_background,
+    engine2d_draw_ir_render_typed_border_ring,
     engine2d_draw_ir_render_typed_inset_shadows,
     engine2d_draw_ir_render_typed_outer_shadows,
     engine2d_draw_ir_typed_box_shadows,
@@ -805,7 +806,7 @@ fn _engine2d_draw_ir_gradient_layer_into(buf: [u32], rx: i32, ry: i32, rw: i32, 
 # otherwise paints per-side slivers with `draw_rect_filled`. Engine2D is
 # value-copied across this free-function boundary, so the caller MUST reassign
 # from the returned engine.
-fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32, radius: i32) -> Engine2D:
+fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32, radius: i32, corners: Engine2dDrawIrCornerRadii, nonuniform_corners: bool) -> Engine2D:
     var eng = engine
     val top_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-width"), 0, 0) as i32
     val right_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-width"), 0, 0) as i32
@@ -819,6 +820,11 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
     if radius > 0 and uniform and _engine2d_draw_ir_has_visible_alpha(top_c):
         eng.draw_rounded_rect_outline(x, y, w, h, radius, top_c, top_w)
         return eng
+    # Per-corner radii, or a rounded box whose sides differ: the ring follows
+    # each corner's arc (Chrome 159, border_per_corner_radius_chrome159_spec).
+    if (nonuniform_corners or radius > 0) and (top_w > 0 or right_w > 0 or bottom_w > 0 or left_w > 0):
+        return engine2d_draw_ir_render_typed_border_ring(eng, x, y, w, h,
+            [top_w, right_w, bottom_w, left_w], [top_c, right_c, bottom_c, left_c], corners)
     val tl = top_w > 0 and left_w > 0 and top_c != left_c
     val tr = top_w > 0 and right_w > 0 and top_c != right_c
     val bl = bottom_w > 0 and left_w > 0 and bottom_c != left_c
@@ -1138,7 +1144,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
             eng = engine2d_draw_ir_render_typed_inset_shadows(
                 eng, typed_shadows.layers, x, y, w, h, effective_corners)
         eng = _engine2d_draw_ir_render_borders(
-            eng, style, x, y, w, h, radius)
+            eng, style, x, y, w, h, radius, effective_corners, typed_nonuniform)
         eng = _engine2d_draw_ir_render_outline(eng, style, x, y, w, h)
         return Engine2dDrawIrBoxOutcome(
             engine: eng, glass_execution: glass.execution)
@@ -1340,7 +1346,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if shadow_admitted:
         eng = engine2d_draw_ir_render_typed_inset_shadows(
             eng, typed_shadows.layers, x, y, w, h, effective_corners)
-    eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius)
+    eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius, effective_corners, typed_nonuniform)
     eng = _engine2d_draw_ir_render_outline(eng, style, x, y, w, h)
     Engine2dDrawIrBoxOutcome(
         engine: eng,
