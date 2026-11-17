@@ -493,29 +493,62 @@ fn _outline_edges(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64) 
             pen_y = move_y
     edges
 
-fn _glyf_edge_coverage(edges: [_SfntEdge], x: f64, y: f64) -> u8:
-    # 4x4 supersample grid (was 4 y-only samples with a single x point test
-    # per scanline): 16 sub-pixel samples -> 17 coverage levels vs 5, and
-    # isotropic (both axes supersampled) instead of anisotropic. This is
-    # rasterize-time only cost — glyph bitmaps are atlas-cached, so per-frame
-    # draw cost is unchanged; only cache-miss rasterize cost rises (~4x more
-    # inner-loop samples), which is acceptable.
-    var hits: i64 = 0
-    var sample_y: i64 = 0
-    while sample_y < 4:
-        val sy = y + (sample_y as f64 * 2.0 + 1.0) / 8.0
-        var sample_x: i64 = 0
-        while sample_x < 4:
-            val sx = x + (sample_x as f64 * 2.0 + 1.0) / 8.0
-            var winding: i64 = 0
+# Whole-bitmap coverage (4x4 supersample, 17 levels). The old per-pixel kernel
+# tested EVERY edge for each of 16 samples (pixels x 16 x edges, and a
+# `push` per pixel). Here each pixel row's 4 sample scanlines gather their edge
+# crossings once, insertion-sort them, and sweep the 4 sample x positions of
+# every pixel left to right with one pointer. A sample is inside when the
+# signed sum of the crossings <= sx is non-zero -- the identical crossing
+# expression, `<=` test, sample positions and integer winding sum as the old
+# kernel, so every coverage byte is unchanged. Returns width*height bytes.
+fn _glyf_raster_alpha(edges: [_SfntEdge], width: i64, height: i64) -> [u8]:
+    var out: [u8] = [0u8; width * height]
+    var hits: [i64] = [0; width]
+    var xs: [f64] = [0.0; edges.len() + 1]
+    var dirs: [i64] = [0; edges.len() + 1]
+    var y: i64 = 0
+    while y < height:
+        var x: i64 = 0
+        while x < width:
+            hits[x] = 0
+            x = x + 1
+        var sample_y: i64 = 0
+        while sample_y < 4:
+            val sy = y as f64 + (sample_y as f64 * 2.0 + 1.0) / 8.0
+            var n: i64 = 0
             for edge in edges:
                 if edge.y_top <= sy and sy < edge.y_bottom:
                     val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
-                    if crossing <= sx: winding = winding + edge.direction
-            if winding != 0: hits = hits + 1
-            sample_x = sample_x + 1
-        sample_y = sample_y + 1
-    (hits * 255 / 16) as u8
+                    var at = n
+                    while at > 0 and xs[at - 1] > crossing:
+                        xs[at] = xs[at - 1]
+                        dirs[at] = dirs[at - 1]
+                        at = at - 1
+                    xs[at] = crossing
+                    dirs[at] = edge.direction
+                    n = n + 1
+            if n > 0:
+                var p: i64 = 0
+                var winding: i64 = 0
+                var px: i64 = 0
+                while px < width:
+                    var sample_x: i64 = 0
+                    while sample_x < 4:
+                        val sx = px as f64 + (sample_x as f64 * 2.0 + 1.0) / 8.0
+                        while p < n and xs[p] <= sx:
+                            winding = winding + dirs[p]
+                            p = p + 1
+                        if winding != 0: hits[px] = hits[px] + 1
+                        sample_x = sample_x + 1
+                    px = px + 1
+            sample_y = sample_y + 1
+        var cx: i64 = 0
+        while cx < width:
+            out[y * width + cx] = (hits[cx] * 255 / 16) as u8
+            cx = cx + 1
+        y = y + 1
+    out
+
 
 fn _hmtx(font: OtFont, long_metrics: i64, glyph_id: u32) -> Option<[i64]>:
     if long_metrics <= 0: return None
@@ -591,14 +624,7 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
     if height > 4096: return None
     if width > 16777216 / height: return None
     val edges = _outline_edges(commands, scale, bounds.left * scale, -bounds.bottom * scale)
-    var pixels: [u8] = []
-    var y: i64 = 0
-    while y < height:
-        var x: i64 = 0
-        while x < width:
-            pixels = pixels.push(_glyf_edge_coverage(edges, x as f64, y as f64))
-            x = x + 1
-        y = y + 1
+    val pixels = _glyf_raster_alpha(edges, width, height)
     Some(SfntGlyfBitmap(
         sgb_width: width,
         sgb_height: height,
@@ -850,17 +876,15 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
     if _round_glyf_metric(horizontal[0] as f64 * scale) != meta[2] or _round_glyf_metric(horizontal[1] as f64 * scale) != meta[3] or _round_glyf_metric(bounds.top * scale) != meta[4]:
         return
     val edges = _outline_edges(commands, scale, bounds.left * scale, -bounds.bottom * scale)
+    val alpha_buf = _glyf_raster_alpha(edges, width, height)
     var nonzero_alpha: i64 = 0
-    var y: i64 = 0
-    while y < height:
-        var x: i64 = 0
-        while x < width:
-            val alpha = _glyf_edge_coverage(edges, x as f64, y as f64)
-            pixels[y * width + x] = alpha
-            if alpha > 0:
-                nonzero_alpha = nonzero_alpha + 1
-            x = x + 1
-        y = y + 1
+    var i: i64 = 0
+    while i < width * height:
+        val alpha = alpha_buf[i]
+        pixels[i] = alpha
+        if alpha > 0:
+            nonzero_alpha = nonzero_alpha + 1
+        i = i + 1
     meta[9] = nonzero_alpha
     meta[8] = 310032
 
@@ -910,7 +934,7 @@ fn _ceil_glyf(value: f64) -> i64:
 
 # Adds the exact horizontal span coverage of one sample row to `acc`, in
 # subpixel units (one full subpixel = 1.0). Crossings are sorted and walked
-# with the same non-zero winding rule as _glyf_edge_coverage.
+# with the same non-zero winding rule as _glyf_raster_alpha.
 fn _lcd_accumulate_row(edges: [_SfntEdge], sy: f64, subpixels: i64, mut acc: [f64]):
     var xs: [f64] = []
     var dirs: [i64] = []
@@ -1689,14 +1713,7 @@ pub fn sfnt_rasterize_glyph_baseline_aligned(font: OtFont, glyph_id: u32, size_p
     if width > 4096 or height > 4096 or width > 16777216 / height:
         return None
     val edges = _outline_edges(commands, scale, (x0_px as f64) - subpixel_x, y0_px as f64)
-    var pixels: [u8] = []
-    var y: i64 = 0
-    while y < height:
-        var x: i64 = 0
-        while x < width:
-            pixels = pixels.push(_glyf_edge_coverage(edges, x as f64, y as f64))
-            x = x + 1
-        y = y + 1
+    val pixels = _glyf_raster_alpha(edges, width, height)
     Some(SfntBaselineGlyph(
         width: width as i32,
         height: height as i32,
