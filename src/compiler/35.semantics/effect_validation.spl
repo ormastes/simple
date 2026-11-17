@@ -126,8 +126,9 @@ fn effect_while_bound(cond: HirExpr, body: HirBlock) -> i64:
             if not is_upper:
                 return LOOP_BOUND_NONE
             val rhs: HirExpr = right
+            # Cap N well below i64 max so `i <= N` cannot be defeated by wraparound.
             val rhs_is_lit = match rhs.kind:
-                case HirExprKind.IntLit(_, _): true
+                case HirExprKind.IntLit(n, _): n < 4611686018427387904
                 case _: false
             if not rhs_is_lit:
                 return LOOP_BOUND_NONE
@@ -166,22 +167,33 @@ fn effect_is_counter_plus_lit(value: HirExpr, counter: i64) -> bool:
             (effect_var_symbol_id(l) == counter and effect_is_positive_int_lit(r)) or (effect_var_symbol_id(r) == counter and effect_is_positive_int_lit(l))
         case _: false
 
-# A direct statement of `body` advances `counter`: `i = i + k` or `i += k`, k > 0.
+# Straight-line body (only Let/Assign statements, no tail value -- so no
+# `continue`, `if`, nested loop or call statement can skip or undo the step)
+# whose ONLY write to `counter` is `i = i + k` / `i += k`, k > 0.
+# ponytail: rejects any control flow in the body; widen with a CFG walk when needed.
 fn effect_block_advances(body: HirBlock, counter: i64) -> bool:
+    if body.has:
+        return false
+    var advances = 0
     for stmt in body.stmts:
         match stmt.kind:
+            case HirStmtKind.Let(_, _, _): ()
             case HirStmtKind.Assign(target, op, value):
                 if effect_var_symbol_id(target) == counter:
+                    var ok = false
                     if val o = op:
                         val is_add = match o:
                             case HirAssignOp.Add: true
                             case _: false
-                        if is_add and effect_is_positive_int_lit(value):
-                            return true
-                    elif effect_is_counter_plus_lit(value, counter):
-                        return true
-            case _: ()
-    false
+                        ok = is_add and effect_is_positive_int_lit(value)
+                    else:
+                        ok = effect_is_counter_plus_lit(value, counter)
+                    if not ok:
+                        return false
+                    advances = advances + 1
+            case _:
+                return false
+    advances == 1
 
 fn effect_for_bound(iter: HirExpr) -> i64:
     """Trip-bound class for a `for` iterable.
