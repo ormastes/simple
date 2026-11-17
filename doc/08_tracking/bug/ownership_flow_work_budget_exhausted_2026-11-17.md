@@ -50,8 +50,20 @@ Evidence (Rust seed built 2026-11-17 19:11 from `b0bc26617cf3`, sha256
 - 120-arm if-chain with a 120-block tail under a 4e9 budget: before 4.4 s and
   2.3 GB RSS; after 0.5 to 1.5 s and 50 MB.
 - 20,000 checks of an 8-block function (diamond inside a loop): user CPU
-  1.15 s before, 1.38 s after, including probe setup. That is about 11
-  microseconds more per function, the cost of the reverse postorder walk.
+  1.15 s before, 1.38 s after the first landing (#10023), including probe
+  setup. See the follow-up below.
+
+Follow-up, small functions (same seed, interleaved runs): the reverse
+postorder walk cost about 11 microseconds per function, more than it saves
+when the function is small. Functions of at most 32 blocks now skip the walk
+and use a FIFO queue; its repeated visits below a join are bounded by that
+size. The queue's visit order is the diagnostic order, so that path needs no
+second walk either. Mean user CPU over six interleaved runs of the 20,000-check
+probe: 1.25 s before any change, 1.48 s after #10023, 1.23 s now (RSS 384,
+455 and 393 MB). The 120-arm chain stays at 0.1 s user and 46 MB. The 400-CFG
+probe and a second one over 150 CFGs of 33 to 62 blocks (571 diagnostics) are
+byte-identical to the pre-fix solver. Still slower than before: a 15-block
+function that reports an error, 0.50 s to 0.55 s mean over 2,666 checks.
 
 Not verified: the two real functions. That needs a Stage 2 and Stage 3
 rebuild; the seed cannot borrow check those files through the pure-Simple
