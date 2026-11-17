@@ -134,6 +134,11 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
   interpreter also lacks `rt_gpu_provider_loaded`. See
   `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`,
   Blockers 4 and 5.
+- The `submission_generation` producer is restored. The seed interpreter
+  never attests `rt_vulkan_selected_device_identity_v1` (by design), so the
+  N2 Engine2D capture always blocks under `simple run`, and physical N2 pixels
+  need the native executable. On lavapipe the capture refuses device type
+  `cpu`; that is also correct.
 - Pinned Skia (`35d5edfa…`) builds on this aarch64 host with
   `tools/upstream-skia-ganesh-vulkan/build-linux.shs` in ~2 min at `-j6`
   (`SIMPLE_UPSTREAM_SKIA_NINJA_JOBS`). The full dependency sync is ~7 GB

@@ -135,4 +135,12 @@ following results:
 
 0 pixels were compared, so cases 06 and 02 were not run.
 
+After that (evidence update only; **STATUS unchanged: FAIL**), the
+`submission_generation` producer lost in merge `e5b290e42a0` was restored
+(bug doc Blocker 4). Case 01 Engine2D was retried on the GB10. Strict submit,
+the generation-linked readback and the frame receipt passed. The capture then
+failed closed at the device-identity gate, because the seed interpreter cannot
+attest Vulkan UUIDs by design (Blocker 6). 0 pixels were compared. Both legs now
+need the native qualification executable (Blocker 1).
+
 **STATUS: FAIL** — release and physical N2 qualification are not admitted.
