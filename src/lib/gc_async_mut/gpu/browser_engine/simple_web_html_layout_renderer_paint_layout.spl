@@ -2172,6 +2172,26 @@ fn _html_draw_ir_commands(
                 nodes, styles, boxes, i, node_clip, vector_fonts
             )
             node_command.parent_id = parent_id
+            # Legacy widget mode box suppression, as the raster `paint`
+            # passes 1-4: the html/body background (skip_widget_page_bg) and
+            # the whole box paint of a widget-* / icon-image node
+            # (skip_widget_node_bg). The command stays, carrying no paint.
+            val widget_node_box_skipped = widget_mode and (
+                nodes[i].has_widget_class or nodes[i].has_icon_image_class
+            )
+            val widget_page_bg_skipped = widget_mode and (
+                nodes[i].tag == "html" or nodes[i].tag == "body"
+            )
+            if widget_node_box_skipped or widget_page_bg_skipped:
+                # A body background stack with layers keeps its gradient
+                # base: the raster paints it under the radial layers.
+                val keep_gradient = (
+                    not widget_node_box_skipped and nodes[i].tag == "body" and
+                    styles[i].bg_layers_raw != ""
+                )
+                node_command = _html_draw_ir_widget_suppressed_box(
+                    node_command, widget_node_box_skipped, keep_gradient
+                )
             commands.push(node_command)
             owner_nodes.push(i)
             var text_runs: [DrawIrCommand] = [node_command]
@@ -2207,7 +2227,8 @@ fn _html_draw_ir_commands(
             ):
                 commands.push(summary_marker)
                 owner_nodes.push(i)
-            if nodes[i].tag == "img" and nodes[i].has_widget_image_class:
+            # The raster paints the placeholder only outside widget mode.
+            if not widget_mode and nodes[i].tag == "img" and nodes[i].has_widget_image_class:
                 val ph = widget_image_placeholder_rects(
                     boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
                     styles[i].object_fit, styles[i].object_position
@@ -2260,14 +2281,18 @@ fn _html_draw_ir_commands(
                     border_overlay.parent_id = component_id
                     commands.push(border_overlay)
                     owner_nodes.push(i)
-            for border_cmd in _html_draw_ir_styled_border_commands(
-                nodes[i], styles[i], boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i], i, node_clip
-            ):
-                var styled_cmd = border_cmd
-                styled_cmd.parent_id = component_id
-                commands.push(styled_cmd)
-                owner_nodes.push(i)
-            if nodes[i].tag == "select":
+            if not widget_node_box_skipped:
+                # cpu-lane-loop-ok: dashed/dotted/double border side commands for one node; bound is its four sides
+                for border_cmd in _html_draw_ir_styled_border_commands(
+                    nodes[i], styles[i], boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i], i, node_clip
+                ):
+                    var styled_cmd = border_cmd
+                    styled_cmd.parent_id = component_id
+                    commands.push(styled_cmd)
+                    owner_nodes.push(i)
+            # The raster paints the select chevron and the checkbox / radio
+            # accent control only outside widget mode.
+            if not widget_mode and nodes[i].tag == "select":
                 for arrow_cmd in _html_draw_ir_select_arrow_commands(
                     nodes[i], styles[i], boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i], i, node_clip
                 ):
@@ -2289,7 +2314,7 @@ fn _html_draw_ir_commands(
                 image.parent_id = component_id
                 commands.push(image)
                 owner_nodes.push(i)
-            if nodes[i].tag == "input" and input_uses_accent_color(nodes[i]):
+            if not widget_mode and nodes[i].tag == "input" and input_uses_accent_color(nodes[i]):
                 # cpu-lane-loop-ok: pushes the checkbox/radio sub-part commands (frame, border edges, checked indicator) for one input; bound is the fixed small command set _html_draw_ir_checkable_commands builds
                 for control_command in _html_draw_ir_checkable_commands(
                     nodes[i], styles[i], i,
@@ -2383,6 +2408,41 @@ fn _html_draw_ir_commands(
             commands.push(chrome_command)
             owner_nodes.push(-1)
     (commands, owner_nodes)
+
+# Legacy widget mode box suppression on a node's Draw IR box command, as the
+# raster `paint` skips it: the background (fill color, background color and,
+# unless `keep_gradient`, the gradient), and for a widget-* / icon-image node
+# (`whole_box`) also the border, outline and box shadow. Every other prop, the
+# command's id, geometry and owner stay as they were.
+fn _html_draw_ir_widget_suppressed_box(command: DrawIrCommand, whole_box: bool, keep_gradient: bool) -> DrawIrCommand:
+    var out = command
+    out.color = 0u32
+    var props: [DrawIrStyleProp] = []
+    # cpu-lane-loop-ok: rewrites one box command's own computed-style list; bound is that prop list
+    for prop in command.computed_style:
+        val key = prop.key
+        if key == "background-color":
+            props.push(draw_ir_style_prop(key, "0"))
+        elif not keep_gradient and key == "background-image":
+            props.push(draw_ir_style_prop(key, "none"))
+        elif not keep_gradient and key == "background-gradient-stop-count":
+            props.push(draw_ir_style_prop(key, "0"))
+        elif not keep_gradient and key == "background-gradient-stops":
+            props.push(draw_ir_style_prop(key, ""))
+        elif whole_box and key == "background-layers-raw":
+            props.push(draw_ir_style_prop(key, ""))
+        elif whole_box and (key == "border-top-width" or key == "border-right-width" or key == "border-bottom-width" or key == "border-left-width" or key == "outline-width" or key == "box-shadow-layer-count" or key == "box-shadow-blur-radius"):
+            props.push(draw_ir_style_prop(key, "0"))
+        elif whole_box and key == "box-shadow":
+            props.push(draw_ir_style_prop(key, "none"))
+        elif whole_box and key == "box-shadow-raw":
+            props.push(draw_ir_style_prop(key, ""))
+        elif not whole_box or not key.starts_with("box-shadow-layer-"):
+            # (a whole-box skip drops the typed shadow layer schema and its
+            # per-layer props)
+            props.push(prop)
+    out.computed_style = props
+    out
 
 # Draw IR lowering of the legacy generated widget chrome text: the SAME point
 # table the raster `paint` writes (generated_widget_chrome_text_pixels), one

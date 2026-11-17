@@ -322,3 +322,28 @@ describe "The Vulkan backdrop blur and glass material run on the device, pixel-f
         val bare_page = "<html><body><div></div><section class='widget-panel'></section></body></html>"
         val device_bare = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(bare_page, 40, 64, "vulkan")
         expect(mismatch_count(device_bare, device_b) > 0).to_equal(true)
+
+    it "suppresses the widget-mode page background, widget-node box paint and image placeholder on the device, as cpu_simd does":
+        # Legacy widget mode paints the page base, not the body / widget-node
+        # background, frame or widget-image placeholder: Draw IR now carries
+        # no paint for them, so the Vulkan device matches cpu_simd and the
+        # raster at the same pixels.
+        val body_page = "<html><body style='background-color:#ff0000'><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        val frame_page = "<html><body><section class='widget-panel' style='background-color:#00ff00;border:2px solid #0000ff;box-shadow:2px 2px 0 #ff0000;outline:2px solid #00ff00'></section></body></html>"
+        val img_page = "<html><body><section class='widget-panel'><img class='widget-image' style='width:20px;height:12px'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_body = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(body_page, 40, 64, "vulkan")
+        val device_frame = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(frame_page, 40, 64, "vulkan")
+        val device_img = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(img_page, 40, 64, "vulkan")
+        val readbacks_after = vulkan_readback_count()
+        val cpu_body = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(body_page, 40, 64, "cpu_simd")
+        val cpu_frame = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(frame_page, 40, 64, "cpu_simd")
+        val cpu_img = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(img_page, 40, 64, "cpu_simd")
+        expect(readbacks_after - readbacks_before >= 3).to_equal(true)
+        expect(device_body[8 * 40 + 11]).to_equal(0xFFF5F5F5u32)
+        expect(device_frame[10 * 40 + 10]).to_equal(0xFFF5F5F5u32)
+        expect(device_img[11 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(device_body[0]).to_equal(0xFF0066CCu32)
+        expect(mismatch_count(cpu_body, device_body)).to_equal(0)
+        expect(mismatch_count(cpu_frame, device_frame)).to_equal(0)
+        expect(mismatch_count(cpu_img, device_img)).to_equal(0)
