@@ -3,12 +3,15 @@
 # SPL-UNIT-004 warnings are drained into typecheck diagnostics.
 use std.spec
 use compiler.core.types.{reset_all_pools}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
 use compiler.core.parser.{parser_init_with_path}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.common.diagnostics.diagnostic_rule_policy.{DiagnosticPolicySnapshot}
 use compiler.types.units.unit_ops.{UnitOpVerdict, unit_op_verdict, unit_op_default_profile, unit_op_take_warnings}
 use compiler.driver.driver_unit_profile.{
-    unit_profile_strict_for, unit_profile_policy, unit_profile_apply, unit_profile_drain_diagnostics
+    unit_profile_strict_for, unit_profile_policy, unit_profile_apply, unit_profile_drain_diagnostics,
+    unit_profile_policy_path_from, unit_rule_strict_for_edition
 }
 
 fn world():
@@ -36,9 +39,25 @@ describe "SPL-UNIT-004 profile wiring":
         expect(unit_profile_strict_for(p, "critical")).to_equal(true)
         expect(unit_profile_strict_for(p, "verified")).to_equal(true)
 
-    it "no policy snapshot keeps the default (warning) mode":
+    # Fable #9845: a missing policy must not silently downgrade an assured
+    # profile (fail closed); default/moderate/strict keep warning mode.
+    it "no policy snapshot fails closed for robust/critical/verified":
         val none: DiagnosticPolicySnapshot? = None
-        expect(unit_profile_strict_for(none, "robust")).to_equal(false)
+        expect(unit_profile_strict_for(none, "robust")).to_equal(true)
+        expect(unit_profile_strict_for(none, "reliable")).to_equal(true)
+        expect(unit_profile_strict_for(none, "critical")).to_equal(true)
+        expect(unit_profile_strict_for(none, "verified")).to_equal(true)
+        expect(unit_profile_strict_for(none, "")).to_equal(false)
+        expect(unit_profile_strict_for(none, "moderate")).to_equal(false)
+        expect(unit_profile_strict_for(none, "strict")).to_equal(false)
+        expect(unit_rule_strict_for_edition(none, "SPL-UNIT-002", "robust", "2027.2")).to_equal(false)
+        expect(unit_rule_strict_for_edition(none, "SPL-UNIT-004", "robust", "2027.2")).to_equal(true)
+
+    it "policy path resolves from a subdirectory of the repo, not only cwd":
+        val root = cwd()
+        val p = unit_profile_policy_path_from(root + "/test/01_unit/compiler")
+        expect(p.ends_with("config/policy/diagnostic_policy.sdn")).to_equal(true)
+        expect(file_exists(p)).to_equal(true)
 
     it "applying the robust profile denies an undeclared quotient":
         world()
