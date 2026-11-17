@@ -26,7 +26,7 @@ pub(super) fn eval_literal_expr(
     if let Expr::TypedInteger(_, NumericSuffix::Unit(unit_name)) | Expr::TypedFloat(_, NumericSuffix::Unit(unit_name)) =
         expr
     {
-        let declared = crate::interpreter::USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().contains_key(unit_name));
+        let declared = crate::interpreter_unit::unit_suffix_declared_in_file(unit_name);
         if let Some(msg) = crate::units::scope::unit_suffix_scope_error(unit_name, declared) {
             return Err(CompileError::semantic(msg));
         }
