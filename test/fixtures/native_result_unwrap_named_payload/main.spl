@@ -1,0 +1,120 @@
+# Payload ownership through `.unwrap()` and `?` for named, Optional and
+# generic payloads. `f()?.m()` lexes as safe navigation (`?.`), which turns an
+# Err into nil; try-then-member is written `(f()?).m()`.
+use provider.*
+
+struct Point:
+    x: i64
+    y: i64
+
+enum Mode:
+    Fast(i64)
+    Slow
+
+struct State:
+    containment: Option<Containment> = nil
+    mode: Option<Mode> = nil
+
+fn make_point(x: i64) -> Result<Point, text>:
+    if x < 0: return Err("negative")
+    Ok(Point(x: x, y: x * 2))
+
+fn read_lease(ok: bool) -> Result<text, i64>:
+    if ok: return Ok("lease-body")
+    Err(7)
+
+# Generic passthrough, as operation_stored_result_v2<T>.
+fn stored<T>(result: Result<T, text>, tag: text) -> Result<T, text>:
+    if result.is_err():
+        print "poison {tag}"
+    result
+
+fn read_optional(present: bool) -> Result<Option<text>, text>:
+    if present: return Ok(Some("bytes"))
+    Ok(nil)
+
+fn describe_point(p: Point) -> text:
+    "point({p.x},{p.y})"
+
+fn describe_mode(m: Mode) -> text:
+    match m:
+        case Mode.Fast(n): "fast {n}"
+        case Mode.Slow: "slow"
+
+fn describe_containment(c: Containment, tail: (text, i64)) -> text:
+    val head = match c:
+        case Containment.Owned(n): "owned {n}"
+        case Containment.Shared: "shared"
+    "{head} {tail.0}/{tail.1}"
+
+fn text_len(t: text) -> i64:
+    t.len()
+
+fn observe(state: State) -> Result<text, text>:
+    if state.containment.is_none(): return Err("missing")
+    # Option<Enum>.unwrap() as a call argument beside try-then-member chains on a
+    # cross-module Result<Class, text>.
+    Ok(describe_containment(state.containment.unwrap(), (custody_ok("src")?).context_v3()?))
+
+fn chained() -> Result<i64, text>:
+    val box = (custody_ok("chain")?).retain_v3(4)?
+    Ok(box.count)
+
+fn optional_bytes(present: bool) -> Result<bool, text>:
+    val bytes = stored(read_optional(present), "opt")?
+    if bytes.is_none() or text_len(bytes.unwrap()) != 5:
+        return Ok(false)
+    Ok(true)
+
+fn guard(present: bool) -> Result<bool, text>:
+    # Result<Option<Class>, text> through `?` then a method on the Option.
+    if (preflight_lookup(present)?).is_some():
+        return Ok(true)
+    Ok(false)
+
+fn nested_option(present: bool) -> Option<Option<i64>>:
+    if present: return Some(Some(11))
+    Some(nil)
+
+fn main():
+    # Result<T?, E>.unwrap() and Option<Option<T>>.unwrap()
+    val opt_res = preflight_lookup(true)
+    print opt_res.unwrap().is_some()
+    print opt_res.unwrap().unwrap().count
+    print preflight_lookup(false).unwrap().is_none()
+    print guard(true).unwrap()
+    print guard(false).unwrap()
+    print nested_option(true).unwrap().unwrap()
+    print nested_option(false).unwrap().is_none()
+    # Result<NamedStruct, text>.unwrap()
+    val p = make_point(4)
+    print describe_point(p.unwrap())
+    print p.unwrap().y
+    # Option<Enum>.unwrap() as a call argument
+    val s = State(containment: Some(Containment.Owned(9)), mode: Some(Mode.Fast(2)))
+    print describe_mode(s.mode.unwrap())
+    print observe(s).unwrap()
+    # Result<text, E>.unwrap() passed into a call
+    val lease = read_lease(true)
+    if lease.is_err():
+        print "lease failed"
+    print text_len(lease.unwrap())
+    # Generic passthrough keeps the payload type
+    val generic = stored(read_lease_text(), "lease")
+    if generic.is_err(): print "generic failed"
+    print text_len(generic.unwrap())
+    val cross = provider_stored(read_lease_text(), "cross")
+    if cross.is_err(): print "cross failed"
+    print text_len(cross.unwrap())
+    print cross_optional().unwrap()
+    print chained().unwrap()
+    print optional_bytes(true).unwrap()
+    print optional_bytes(false).unwrap()
+    print "done"
+
+fn read_lease_text() -> Result<text, text>:
+    Ok("abc")
+
+fn cross_optional() -> Result<bool, text>:
+    val bytes = provider_stored(read_optional(true), "cross-opt")?
+    Ok(bytes.is_some() and text_len(bytes.unwrap()) == 5)
