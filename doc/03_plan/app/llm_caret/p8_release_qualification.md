@@ -12,8 +12,8 @@ completion gate of that plan, applied to the release line.
 
 | Gate | Result | Note |
 |---|---|---|
-| `sh scripts/check/check-llm-caret-full-parity-plan.shs` | FAIL (env) | needs `tmp/claude/claude-code-main/src` (untracked source evidence, 0 files on this host); matrices themselves present: 599 feature / 1902 file / 14119 symbol rows |
-| `sh scripts/check/check-llm-caret-claude-cli-trace.shs` | FAIL | `missing_symbol_trace` rows, e.g. `src/app/llm_caret/main.spl` `_chat_frames`, `_server_policy`, `agent_run_status` — regenerate `doc/09_report/llm_caret_claude_cli_symbols.tsv` |
+| `sh scripts/check/check-llm-caret-full-parity-plan.shs` | BLOCKED (exit 2) | prerequisite: fetch the untracked Claude Code source snapshot into `tmp/claude/claude-code-main/src` (absent on this host); the gate now prints `missing_source_root=` + `STATUS: BLOCKED` instead of a misleading count mismatch. Matrices present: 599 feature / 1902 file / 14119 symbol rows |
+| `sh scripts/check/check-llm-caret-claude-cli-trace.shs` | fixed | inventory `doc/09_report/llm_caret_claude_cli_symbols.tsv` was stale (163 missing, 9 stale rows from moved/renamed symbols; all traced symbols exist in source); regenerated from source with the gate's own extractor |
 | `sh scripts/check/check-caret-suite-bootstrap.shs --self-test` | did not finish in 600 s on this host | re-run with the native binary |
 
 ## P8 runnable checklist (run once the native compiler is deployed)

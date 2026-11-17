@@ -1,0 +1,85 @@
+"""
+## Purpose and audience
+Purpose: Pin the line-box STRUT baseline. Chrome (Blink `FontHeight::AddLeading`)
+takes the face's own ascent and descent, each rounded to whole px, and splits
+the half-leading `(line-height - (ascent + descent)) / 2` with the FLOOR above
+the glyphs and the remainder below. The engine used `font_size * 7 / 8` for the
+ascent and `(line-height - font_size) / 2` for the leading, which put the
+baseline of a 16px / 24px line at 18 where Chrome has 17 (Liberation Serif
+16px: ascent 14, descent 3, gap 1 -> `line-height: normal` is 18).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159, `<!DOCTYPE html>`, `body{margin:0}`, each case an
+absolutely placed 400px `div` at top 0, 16px default serif, getBoundingClientRect,
+2026-11-17). `b` is an inline-block 10x10 whose bottom edge sits on the baseline
+after the text `Hxg`; `H` is the div's height:
+
+| case (div line-height)                  | H  | b top | b h |
+|-----------------------------------------|----|-------|-----|
+| 24px                                    | 24 | 7     | 10  |
+| 20px                                    | 20 | 5     | 10  |
+| 17px                                    | 17 | 4     | 10  |
+| normal                                  | 18 | 4     | 10  |
+| 30px                                    | 30 | 10    | 10  |
+| 40px                                    | 40 | 15    | 10  |
+| 10px (leading -7, floor(-3.5) = -4)     | 10 | 0     | 10  |
+| 12px (leading -5, floor(-2.5) = -3)     | 12 | 1     | 10  |
+| 24px, text then 20x10 `canvas`          | 24 | 7     | 10  |
+| 24px, text then 100x40 `textarea`       | 53 | 0     | 46  |
+| normal, text then 100x40 `textarea`     | 50 | 0     | 46  |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LINE-STRUT-BASELINE-001 — the strut baseline uses the face's rounded ascent and descent with floored half-leading.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val B10: text = "<i id=b style=\"display:inline-block;width:10px;height:10px\"></i>"
+
+fn _page(extra_style: text, inner: text) -> text:
+    "<!DOCTYPE html><html><head><style>body{{margin:0}}</style></head><body>" +
+        "<div id=d style=\"position:absolute;left:0;top:0;width:400px;font-size:16px;" + extra_style + "\">" +
+        inner + "</div></body></html>"
+
+fn _g(page: text, id: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(page, 900, 2000, id, prop)
+
+fn _hb(page: text) -> text:
+    _g(page, "d", "h") + "," + _g(page, "b", "y") + "," + _g(page, "b", "h")
+
+describe "line strut baseline":
+    it "AC-1: line-height 24 puts the baseline at 17":
+        step("Chrome 159: above = floor((24 - 17) / 2) = 3, + ascent 14 = 17")
+        expect(_hb(_page("line-height:24px", "Hxg" + B10))).to_equal("24,7,10")
+
+    it "AC-2: line-height 20 puts the baseline at 15":
+        expect(_hb(_page("line-height:20px", "Hxg" + B10))).to_equal("20,5,10")
+
+    it "AC-3: line-height 17 equals the content area":
+        expect(_hb(_page("line-height:17px", "Hxg" + B10))).to_equal("17,4,10")
+
+    it "AC-4: line-height normal is the face's 18 with the gap below":
+        expect(_hb(_page("", "Hxg" + B10))).to_equal("18,4,10")
+
+    it "AC-5: tall lines split the leading with the floor above":
+        expect(_hb(_page("line-height:30px", "Hxg" + B10))).to_equal("30,10,10")
+        expect(_hb(_page("line-height:40px", "Hxg" + B10))).to_equal("40,15,10")
+
+    it "AC-6: a line shorter than the content area floors a negative half-leading":
+        step("Chrome 159: floor(-7 / 2) = -4 and floor(-5 / 2) = -3")
+        expect(_hb(_page("line-height:10px", "Hxg" + B10))).to_equal("10,0,10")
+        expect(_hb(_page("line-height:12px", "Hxg" + B10))).to_equal("12,1,10")
+
+    it "AC-7: a canvas at the line end keeps the strut descent below it":
+        val page = _page("line-height:24px", "x<canvas id=b width=20 height=10></canvas>")
+        expect(_hb(page)).to_equal("24,7,10")
+
+    it "AC-8: a textarea at the line end adds the 7px strut descent":
+        step("Chrome 159: 46 + 7 = 53 at line-height 24, 46 + 4 = 50 at normal")
+        val ta = "Label <textarea id=b style=\"width:100px;height:40px\"></textarea>"
+        expect(_hb(_page("line-height:24px", ta))).to_equal("53,0,46")
+        expect(_hb(_page("", ta))).to_equal("50,0,46")

@@ -388,3 +388,38 @@ describe "SPL-BOUND-002 origin-boundary cast (owner decision 2, 2026-11-16)":
         val fs = check_bound_late_casts(src, "app/f.spl")
         expect(fs.len()).to_equal(1)
         expect(fs[0].code).to_equal("SPL-BOUND-002")
+
+describe "SPL-BOUND-002 declared-unit-return precision (B2 typed summaries)":
+    """A callee whose DECLARED return type is already a unit yields a
+    unit-semantic value, not a raw foreign one: neither a wrapper fn (single- or
+    multi-line header) nor an extern declared `-> Unit` seeds foreign origin."""
+
+    it "does not treat a multi-line-header wrapper returning a unit as foreign":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a unit-typed wrapper whose header spans lines, then derive another unit")
+        val src = "unit Km: i32 as km\nunit Mi: i32 as mi\nextern fn c_read() -> i32\nfn wrap(\n    fd: i32\n) -> Km:\n    return c_read()\nfn late() -> Mi:\n    val d = wrap(1)\n    Mi(d.value)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "agrees with the single-line header form":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint the same wrapper with a one-line header")
+        val src = "unit Km: i32 as km\nunit Mi: i32 as mi\nextern fn c_read() -> i32\nfn wrap(fd: i32) -> Km:\n    return c_read()\nfn late() -> Mi:\n    val d = wrap(1)\n    Mi(d.value)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "does not treat an extern whose declared return is a unit as foreign":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a derivation from a typed-unit extern result")
+        val src = "unit Km: i32 as km\nunit Mi: i32 as mi\nextern fn c_km() -> Km\nfn late() -> Mi:\n    val d = c_km()\n    Mi(d.value)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "still reports a primitive extern behind a multi-line-header wrapper":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a primitive-returning multi-line wrapper (control)")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn wrap(\n    fd: i32\n) -> i32:\n    c_read()\nfn late() -> Km:\n    Km(wrap(1))\n"
+        expect(_blc_count(check_bound_late_casts(src, "app/km.spl"), "SPL-BOUND-002")).to_equal(1)
+
+    it "does not treat an extern returning an optional or Result unit as foreign":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint derivations from Km? and Result<Km, ConstraintError> externs")
+        val src = "unit Km: i32 as km\nunit Mi: i32 as mi\nextern fn c_a() -> Km?\nextern fn c_b() -> Result<Km, ConstraintError>\nfn late() -> Mi:\n    val a = c_a()\n    val b = c_b()\n    Mi(a.value + b.value)\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)

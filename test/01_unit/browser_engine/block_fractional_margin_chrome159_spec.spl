@@ -1,0 +1,92 @@
+"""
+## Purpose and audience
+Purpose: Pin that block-flow vertical positions carry the sub-pixel part of
+fractional margins like Chrome's LayoutUnit (1/64 px), so a run of heading
+margins (UA `h2 0.83em`, `h3 1em` of 18.72px, ...) does not drift a whole row
+by the time the paragraphs start. Heights stay whole pixels (fixed
+line-heights here); each box's painted top is round(true y).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159, 900x2000, `body{margin:0}`, `.w{width:400px;
+padding-top:1px}`, headings `line-height:30px`, p/li `line-height:20px`,
+getBoundingClientRect, 2026-11-17):
+
+| id | Chrome y   | painted (round) | h   |
+|----|------------|-----------------|-----|
+| h2 | 20.90625   | 21              | 30  |
+| t  | 70.8125    | 71              | 100 |
+| h3 | 189.53125  | 190             | 30  |
+| p  | 238.25     | 238             | 20  |
+| li | 274.25     | 274             | 20  |
+| h1 | 315.6875   | 316             | 30  |
+| h4 | 367.125    | 367             | 30  |
+| h5 | 419.296875 | 419             | 30  |
+| h6 | 474.265625 | 474             | 30  |
+| e  | 529.234375 | 529             | 5   |
+
+h4 alone (body margin 0, h4 line-height 30px between two 10px divs): h4 y 31.265625, second div y 82.53125.
+
+Root cause: `Style.margin_t/margin_b` are i32 and the UA heading margins were
+rounded (h2 20, h3 19, ...), so every block rounded its own margin and the
+error grew +0.09 -> +0.67 px down the page.
+Filed in doc/08_tracking/bug/web_render_css_paint_residual_2026-11-17.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-BLOCK-FRACTIONAL-MARGIN-001 — block-axis margins carry fractions through the block cursor.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .w{{width:400px;padding-top:1px}} h1,h2,h3,h4,h5,h6{{line-height:30px}} p,li{{line-height:20px}}</style></head><body><div class=w>" +
+    "<h2 id=h2>Hd</h2><div id=t style=\"height:100px\"></div><h3 id=h3>Hd</h3><p id=p>Para</p><ul><li id=li>Item</li></ul>" +
+    "<h1 id=h1>H</h1><h4 id=h4>H</h4><h5 id=h5>H</h5><h6 id=h6>H</h6><div id=e style=\"height:5px\"></div>" +
+    "</div></body></html>"
+
+fn _yh(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "y") + "," +
+        simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "h")
+
+describe "block fractional margins":
+    it "AC-1: h2 after a padded parent":
+        step("Chrome 159: 1 + 19.92 = 20.906 -> 21")
+        expect(_yh("h2")).to_equal("21,30")
+
+    it "AC-2: block after an h2 bottom margin":
+        step("Chrome 159: 70.8125 -> 71")
+        expect(_yh("t")).to_equal("71,100")
+
+    it "AC-3: h3 keeps the carried fraction":
+        step("Chrome 159: 189.53 -> 190")
+        expect(_yh("h3")).to_equal("190,30")
+
+    it "AC-4: paragraph does not cross the rounding threshold":
+        step("Chrome 159: 238.25 -> 238 (whole-pixel margins gave 239)")
+        expect(_yh("p")).to_equal("238,20")
+
+    it "AC-5: list item inside a ul":
+        step("Chrome 159: 274.25 -> 274")
+        expect(_yh("li")).to_equal("274,20")
+
+    it "AC-6: h1 h4 h5 h6 chain":
+        step("Chrome 159: 316 / 367 / 419 / 474")
+        expect(_yh("h1")).to_equal("316,30")
+        expect(_yh("h4")).to_equal("367,30")
+        expect(_yh("h5")).to_equal("419,30")
+        expect(_yh("h6")).to_equal("474,30")
+
+    it "AC-7: trailing block":
+        step("Chrome 159: 529.23 -> 529")
+        expect(_yh("e")).to_equal("529,5")
+
+val H4_PAGE: text = "<html><head><style>body{{margin:0}} h4{{line-height:30px}}</style></head><body>" +
+    "<div id=a style=\"height:10px\"></div><h4 id=h4>H</h4><div id=b style=\"height:10px\"></div></body></html>"
+
+describe "block fractional margins: h4 alone":
+    it "AC-8: h4 UA margin is 21.265625":
+        step("Chrome 159 (body margin 0, h4 between two 10px divs): h4 y 31.265625, b y 82.53125 -> 31 / 83")
+        expect(simple_web_layout_debug_layout_by_id(H4_PAGE, 900, 2000, "h4", "y")).to_equal("31")
+        expect(simple_web_layout_debug_layout_by_id(H4_PAGE, 900, 2000, "b", "y")).to_equal("83")
