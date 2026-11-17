@@ -2351,7 +2351,11 @@ Gates and remaining gaps:
   `_core_selectors.spl` (104,598 B) keeps parsing and matching, plus
   `_canonical_compound` (called by `selector_group_parts`) and
   `selector_group_matches_node_parts` (writes the module-level `_sel_*` step
-  budget, so it must stay beside it). Import chain is now
+  budget, so it must stay beside it). Five helpers are used on both sides
+  and are `pub` in `_core_selectors` (the rebuilt seed rejects importing a
+  non-pub name): `_compound_base_tokens`, `_nth_of_offset`,
+  `_comb_code_of_part`, `_parse_attr_test`, `PSEUDO_NTH_LAST_CHILD`.
+  Import chain is now
   `core_types -> core_selectors -> core_rule_index -> core_css_rules -> core`;
   each layer `export use`s the one below with an explicit list, so a symbol
   moved between layers must also leave the lower list. Import
