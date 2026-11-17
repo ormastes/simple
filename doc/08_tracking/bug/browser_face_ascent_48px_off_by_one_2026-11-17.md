@@ -38,3 +38,12 @@ the unrounded ascent units*48/unitsPerEm for Liberation Serif/Sans.
 ## Acceptance
 Add `_check("serif", 48, 55, 44)` and `_check("sans-serif", 48, 55, 44)` to the
 spec above, green, with the 12-32px and monospace rows unchanged.
+
+## Resolution (2026-11-18): not an engine bug
+Liberation Serif/Sans hhea 1825/434-443/67-87 per 2048 em at 48px: ascent 42.77 -> 43,
+descent 10.2-10.4 -> 10, line gap 2 (rounded). Chrome's 44 is the BASELINE: rounded ascent
+43 + floor(gap 2 / 2) = 1. `browser_face_ascent_descent_px` correctly returns 43; the strut
+(`inline_line_strut_baseline_offset`) already yields baseline 44 and line height 55 (marker
+y 34 + h 10). The record conflated face ascent with line baseline. Pinned by
+`test/01_unit/browser_engine/line_strut_baseline_large_chrome159_spec.spl` (48/64/72px, all three
+families, Chrome-measured, green on base with no source change).
