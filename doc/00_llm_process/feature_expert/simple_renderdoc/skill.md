@@ -97,10 +97,34 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
   layer loaded: original program `num_captures=0`). Dropping the warm-up
   engine afterwards is harmless — the shared session keeps the device.
   `renderdoc_web_page_capture.spl` now follows `renderdoc_vulkan_capture.spl`.
-- **NVIDIA GB10 (driver 580.173) rejects `vkCreateDevice` with the RenderDoc
-  layer in the chain** (5 of 5 attempts, `VK_ERROR_INITIALIZATION_FAILED`);
-  llvmpipe accepts it. Capture with `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`.
-  Measured: `overview.simple.rdc` 486756 bytes at 900x760.
+- **NVIDIA GB10 (driver 580.173.02): `vkCreateDevice` under the RenderDoc
+  layer fails INTERMITTENTLY with `VK_ERROR_INITIALIZATION_FAILED` (-3) — it is
+  not a hard rejection** (corrected 2026-11-18; the 2026-11-14 note said 5 of 5).
+  Re-measured with a bare instance+device probe: no layer 6/6 ok; layer via
+  `ENABLE_VULKAN_RENDERDOC_CAPTURE=1` 2/6 ok; under `renderdoccmd capture` 0/6
+  in one batch and 6/6 in the next. Cause not established (two other processes
+  held ~21 GB of GPU memory at the time — a correlation only). The Engine2D
+  capture lane (`rdoc_capture_simple_vulkan`, `renderdoc_vulkan_capture.spl`,
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`) failed all 5
+  Engine2D retries on try 1, then **passed on tries 2 and 3**: `num_captures=1`,
+  `.rdc` 7457/7616 bytes, and the converted XML names vendor 0x10de, device
+  0x2e12, `NVIDIA GB10`, driver `580.173.02`. So GB10 captures ARE possible;
+  rerun on -3. llvmpipe (`lvp_icd.json`) remains the deterministic fallback
+  (`overview.simple.rdc` 486756 bytes at 900x760, 2026-11-14).
+- GB10 identity (2026-11-18): integrated GPU, Vulkan API 1.4.312, deviceUUID
+  `1883ff9c30a91b8abc50ef34ac2f5a89`, driverUUID
+  `6d5e1e1841115cbdae1ec369f9e3c390`. The process loader on this host is
+  `/home/yoon/.local/lib/libvulkan.so.1` (1.4.328, via `LD_LIBRARY_PATH`), not
+  the system one; there is no `libvulkan.so` dev symlink and no
+  `/usr/include/vulkan` — link `-l:libvulkan.so.1` and use Skia's in-tree headers.
+- The N2 qualification runner and `provider.cpp` do not call the RenderDoc
+  in-app start/end API, and the workers never present, so the N2 case workers
+  cannot be captured as-is; only the generic Engine2D capture scene can.
+- Pinned Skia (`35d5edfa…`) builds on this aarch64 host with
+  `tools/upstream-skia-ganesh-vulkan/build-linux.shs` in ~2 min at `-j6`
+  (`SIMPLE_UPSTREAM_SKIA_NINJA_JOBS`). The full dependency sync is ~7 GB
+  (`unicodetools` 3.2 GB, `swiftshader` 1.4 GB, neither used by the provider);
+  `out/.../obj` is ~1 GB and safe to delete once `libskia.a` exists.
 - `RDOC_WEB_CHROME_BIN` was honoured only in `RDOC_WEB_TOOL_SEARCH=isolated`
   mode; fixed. The Chrome side still ends `vulkan-angle-unavailable` on a host
   with no display and no Xvfb.
