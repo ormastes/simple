@@ -77,9 +77,26 @@ remote-control bridge, OAuth, or full agent orchestration.
 | `src/app/llm_caret/tui_io.spl` | 188 | Terminal UI I/O and output |
 | `src/app/llm_caret/types.spl` | 225 | Request/response/event/config record types |
 | `src/app/llm_caret/workspace_cli.spl` | 213 | Workspace CLI parsing and execution |
+| `src/app/llm_caret/agent_change_overlay.spl` | 205 | Agent change overlay from git porcelain/diff |
+| `src/app/llm_caret/agent_overlap.spl` | 85 | Cross-agent file overlap and review export |
+| `src/app/llm_caret/caret_smux_multi_launch.spl` | 431 | Multi-caret team launch via smux |
+| `src/app/llm_caret/cs_container.spl` | 272 | Code-search container lifecycle |
+| `src/app/llm_caret/cs_container_intent_v1.spl` | 50 | Local container launch intent |
+| `src/app/llm_caret/cs_gui.spl` | 468 | Code-search GUI dashboard rendering |
+| `src/app/llm_caret/orchestrator_client.spl` | 188 | Orchestrator CLI client |
+| `src/app/llm_caret/orchestrator_execution_client_v2.spl` | 142 | Orchestrator execution client v2 |
+| `src/app/llm_caret/provider_cli_adapter_types_v1.spl` | 3 | Provider CLI adapter types (re-export) |
+| `src/app/llm_caret/provider_cli_adapter_v1.spl` | 3 | Provider CLI adapter (re-export) |
+| `src/app/llm_caret/provider_cli_codex_interactive_v1.spl` | 3 | Codex interactive provider (re-export) |
+| `src/app/llm_caret/provider_cli_codex_prompt_mode_v1.spl` | 53 | Codex prompt-mode planning |
+| `src/app/llm_caret/provider_cli_contained_argv_task_v1.spl` | 30 | Contained argv provider task |
+| `src/app/llm_caret/provider_cli_contained_task_v1.spl` | 128 | Contained provider task constraints |
+| `src/app/llm_caret/provider_cli_container_probe_v1.spl` | 3 | Provider container probe (re-export) |
+| `src/app/llm_caret/provider_cli_interactive_intent_v1.spl` | 3 | Provider interactive intent (re-export) |
+| `src/app/llm_caret/provider_cli_smux_task_v1.spl` | 48 | Provider smux input task |
 
-Mapped files: 52/52 = 100%, above the required 80%.
-Mapped LOC: 14828/14828 = 100%, above the required 80%.
+Mapped files: 69/69 = 100%, above the required 80%.
+Mapped LOC: 17746/17746 = 100%, above the required 80%.
 
 ## Function Trace
 

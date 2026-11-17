@@ -66,6 +66,42 @@ fn oracle_src_over(s: i64, d: i64) -> i64:
     val out_b = (oracle_blue(s) * sa + oracle_blue(d) * dst_weight) / out_a
     oracle_pack(out_a, out_r, out_g, out_b)
 
+fn oracle_src_over_chrome(s: i64, d: i64, solid: bool) -> i64:
+    """Chrome 159 source-over, the rule the const and image span kernels use
+    (twin of color.spl `_blend_rule` and engine2d_blend_u32 in
+    runtime_simd_dispatch.c). Opaque dst, per channel:
+      solid: round(s*a/255) + ((d*(256-a)) >> 8)
+      image: round(s*a/255) + div255r(d*(255-a))
+    Translucent dst: oracle_src_over with every division rounded.
+    `oracle_src_over` stays the coverage-mask kernel's rule."""
+    val sa = oracle_alpha(s)
+    if sa == 255:
+        return s
+    if sa == 0:
+        return d
+    val da = oracle_alpha(d)
+    val inv_a = 255 - sa
+    if da != 255:
+        val dw = (da * inv_a + 127) / 255
+        val oa = sa + dw
+        val half = oa / 2
+        return oracle_pack(oa,
+            (oracle_red(s) * sa + oracle_red(d) * dw + half) / oa,
+            (oracle_green(s) * sa + oracle_green(d) * dw + half) / oa,
+            (oracle_blue(s) * sa + oracle_blue(d) * dw + half) / oa)
+    if solid:
+        return oracle_pack(255,
+            (oracle_red(s) * sa + 127) / 255 + (oracle_red(d) * (inv_a + 1)) / 256,
+            (oracle_green(s) * sa + 127) / 255 + (oracle_green(d) * (inv_a + 1)) / 256,
+            (oracle_blue(s) * sa + 127) / 255 + (oracle_blue(d) * (inv_a + 1)) / 256)
+    val vr = oracle_red(d) * inv_a + 128
+    val vg = oracle_green(d) * inv_a + 128
+    val vb = oracle_blue(d) * inv_a + 128
+    oracle_pack(255,
+        (oracle_red(s) * sa + 127) / 255 + (vr + vr / 256) / 256,
+        (oracle_green(s) * sa + 127) / 255 + (vg + vg / 256) / 256,
+        (oracle_blue(s) * sa + 127) / 255 + (vb + vb / 256) / 256)
+
 fn oracle_modulate_alpha(colour: i64, coverage: i64) -> i64:
     """Coverage-modulated source colour (contract §7). Coverage scales ALPHA
     only; RGB rides through untouched because alpha is straight, not
@@ -196,7 +232,7 @@ fn oracle_src_over_const(mut dst: [u32], offset: i64, count: i64, colour: i64):
     var i: i64 = 0
     while i < count:
         val idx = (offset + i).to_i32()
-        dst[idx] = oracle_src_over(colour, dst[idx] as i64) as u32
+        dst[idx] = oracle_src_over_chrome(colour, dst[idx] as i64, true) as u32
         i = i + 1
 
 fn oracle_src_over_image(mut dst: [u32], dst_offset: i64, src: [u32],
@@ -208,7 +244,7 @@ fn oracle_src_over_image(mut dst: [u32], dst_offset: i64, src: [u32],
     while i < count:
         val d_idx = (dst_offset + i).to_i32()
         val s_idx = (src_offset + i).to_i32()
-        dst[d_idx] = oracle_src_over(src[s_idx] as i64, dst[d_idx] as i64) as u32
+        dst[d_idx] = oracle_src_over_chrome(src[s_idx] as i64, dst[d_idx] as i64, false) as u32
         i = i + 1
 
 fn oracle_mask_src_over(mut dst: [u32], dst_offset: i64, colour: i64,
@@ -253,7 +289,7 @@ fn oracle_hash_span(buf: [u32], offset: i64, count: i64) -> i64:
     h & 0xFFFFFFFFFFFF
 
 export oracle_alpha, oracle_red, oracle_green, oracle_blue, oracle_pack
-export oracle_src_over, oracle_modulate_alpha
+export oracle_src_over, oracle_src_over_chrome, oracle_modulate_alpha
 export oracle_clip_pack, oracle_clip_offset, oracle_clip_count
 export oracle_clip_span, oracle_clip_span_pair, oracle_clip_paired_src
 export oracle_fill_const, oracle_copy_span, oracle_src_over_const

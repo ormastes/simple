@@ -10,6 +10,7 @@ fn main() {
     // the crate TARGET and are the only valid Windows ABI authority here.
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("target OS not set");
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
 
     let lib_name = if target_os == "macos" {
         "libterm_native.dylib"
@@ -91,12 +92,12 @@ fn main() {
                 .status()
                 .expect("failed to run clang-cl")
         } else if target_env == "gnu" {
-            if compiler_name != "clang" && compiler_name != "clang.exe" {
-                panic!("Windows GNU bootstrap requires clang, got {compiler_name}");
+            if !compiler_name.ends_with("clang") && !compiler_name.ends_with("clang.exe") {
+                panic!("Windows GNU bootstrap requires clang (plain or <triple>-clang), got {compiler_name}");
             }
             tool.to_command()
                 .args([
-                    "--target=x86_64-w64-windows-gnu",
+                    mingw_clang_target(&target_arch),
                     "-shared",
                     src.to_str().expect("path utf8"),
                     "-o",
@@ -126,4 +127,13 @@ fn main() {
     }
 
     println!("cargo:rustc-env=TERM_NATIVE_LIB={}", lib_path.display());
+}
+
+/// llvm-mingw clang driver triple for the Cargo target architecture.
+fn mingw_clang_target(arch: &str) -> &'static str {
+    match arch {
+        "aarch64" => "--target=aarch64-w64-windows-gnu",
+        "x86" => "--target=i686-w64-windows-gnu",
+        _ => "--target=x86_64-w64-windows-gnu",
+    }
 }

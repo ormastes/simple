@@ -1,0 +1,100 @@
+"""
+## Purpose and audience
+Pins milestone_0022 N1 (DESIGN 13.1, 14.2): the V4 Linux service's protected
+PATHNAME helper store. One derivation names it (`<journal root>.helper-store`,
+beside the journal, never inside it); the check never repairs; open is
+create-exclusive-or-adopt and adopts only a store that already passes every
+check. Written for owners of the Linux Host service and its evidence arm.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Linux only (no-follow statx + geteuid). Real directories under a private temp
+root. A store owned by ANOTHER uid cannot be produced without privilege, so the
+owner rule is pinned structurally (the shared `private-dir` predicate) rather
+than with a fixture.
+## Verification guidance and troubleshooting
+A failing adverse case means an invalid store would be adopted (or repaired):
+the service would then attach over a store an attacker could have prepared.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.{dir_create, file_write}
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.file_system.symlink_create
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperStoreStateV1,
+    host_linux_helper_store_root_v1, host_linux_helper_store_check_v1, host_linux_helper_store_open_v1}
+
+val N1_STORE_PATH = "src/lib/nogc_sync_mut/orchestration/host_linux_helper_store_v1.spl"
+
+fn n1_state_root(state: HostLinuxHelperStoreStateV1) -> text:
+    match state:
+        case HostLinuxHelperStoreStateV1.Valid(root): root
+        case HostLinuxHelperStoreStateV1.Absent: ""
+
+describe "Linux helper store (milestone_0022 N1)":
+    it "derives the store beside the journal root":
+        # @req S40-NATIVE-N1
+        expect(host_linux_helper_store_root_v1("/var/lib/simple/journal")).to_equal("/var/lib/simple/journal.helper-store")
+
+    it "refuses journal roots that would move the store or escape":
+        # @req S40-NATIVE-N1
+        for bad in ["", "relative/journal", "/var/lib/journal/", "/var/lib/../journal", "/var//journal", "/var/./journal", "/"]:
+            expect(host_linux_helper_store_check_v1(bad).unwrap_err()).to_equal("linux-helper-store-invalid")
+            expect(host_linux_helper_store_open_v1(bad).unwrap_err()).to_equal("linux-helper-store-invalid")
+
+    it "reports Absent without creating anything, then opens a 0700 store":
+        # @req S40-NATIVE-N1
+        val base = secure_temp_dir("/tmp", "n1-store").unwrap()
+        val journal_root = base + "/journal"
+        step("check is check-only: Absent stays absent")
+        expect(n1_state_root(host_linux_helper_store_check_v1(journal_root).unwrap())).to_equal("")
+        expect(n1_state_root(host_linux_helper_store_check_v1(journal_root).unwrap())).to_equal("")
+        step("open creates the derived directory with mode 0700")
+        val opened = host_linux_helper_store_open_v1(journal_root).unwrap()
+        expect(opened).to_equal(journal_root + ".helper-store")
+        expect(file_mode_bits(opened)).to_equal(0o700)
+        step("a second open adopts the same valid store")
+        expect(host_linux_helper_store_open_v1(journal_root).unwrap()).to_equal(opened)
+        expect(n1_state_root(host_linux_helper_store_check_v1(journal_root).unwrap())).to_equal(opened)
+
+    it "refuses and never repairs a pre-existing store with a wrong mode":
+        # @req S40-NATIVE-N1
+        val base = secure_temp_dir("/tmp", "n1-mode").unwrap()
+        val journal_root = base + "/journal"
+        val store = host_linux_helper_store_root_v1(journal_root)
+        expect(dir_create(store, false)).to_equal(true)
+        expect(file_set_mode(store, 0o755)).to_equal(true)
+        expect(host_linux_helper_store_check_v1(journal_root).unwrap_err()).to_equal("linux-helper-store-invalid")
+        expect(host_linux_helper_store_open_v1(journal_root).unwrap_err()).to_equal("linux-helper-store-invalid")
+        step("the refused store keeps its mode: open never chmods an adopted entry")
+        expect(file_mode_bits(store)).to_equal(0o755)
+
+    it "refuses a symlink and a regular file in the store position":
+        # @req S40-NATIVE-N1
+        val base = secure_temp_dir("/tmp", "n1-link").unwrap()
+        val target = base + "/elsewhere"
+        expect(dir_create(target, false)).to_equal(true)
+        expect(file_set_mode(target, 0o700)).to_equal(true)
+        val linked = base + "/linked"
+        expect(symlink_create(target, host_linux_helper_store_root_v1(linked))).to_equal(true)
+        expect(host_linux_helper_store_check_v1(linked).unwrap_err()).to_equal("linux-helper-store-invalid")
+        expect(host_linux_helper_store_open_v1(linked).unwrap_err()).to_equal("linux-helper-store-invalid")
+        step("a regular file is not a store either")
+        val filed = base + "/filed"
+        expect(file_write(host_linux_helper_store_root_v1(filed), "x")).to_equal(true)
+        expect(host_linux_helper_store_check_v1(filed).unwrap_err()).to_equal("linux-helper-store-invalid")
+
+    it "checks owner == euid through the shared private-dir predicate with a no-follow statx":
+        # @req S40-NATIVE-N1
+        val source = file_read_text(N1_STORE_PATH)
+        expect(source.contains("anchored_linux_metadata_v1(-100, root, false)")).to_equal(true)
+        expect(source.contains("\"private-dir\"")).to_equal(true)
+        expect(source.contains("geteuid() as i64")).to_equal(true)
+        step("open chmods only after its own create, then re-checks")
+        val open_at = source.index_of("pub fn host_linux_helper_store_open_v1(")
+        val open_body = source.substring(open_at, source.index_of("fn helper_journal_present_v1("))
+        expect(open_body.index_of("dir_create(root, false)") < open_body.index_of("file_set_mode(root, 448)")).to_equal(true)
+        expect(open_body.contains("directory_fsync(helper_store_parent_v1(root))")).to_equal(true)

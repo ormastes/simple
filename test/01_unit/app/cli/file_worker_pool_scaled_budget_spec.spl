@@ -1,11 +1,14 @@
 use std.spec
 use app.io.env_ops.{env_set, env_unset}
 use app.io.cli_ops.{cli_kernel_executable_path}
+use std.nogc_sync_mut.host_limits.{host_limit_value}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1,
-    FILE_WORKER_POOL_SCALED_FLOOR_KB_V1, file_worker_pool_usable_kb_v1,
+    FILE_WORKER_POOL_SCALED_FLOOR_KB_V1, FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1,
+    file_worker_pool_usable_kb_v1,
     file_worker_pool_price_explicit_v1, file_worker_pool_scaled_budget_kb_v1,
     file_worker_pool_phase_budget_kb_v1, file_worker_pool_hir_budget_kb_v1,
     file_worker_pool_mir_budget_kb_v1, file_worker_pool_mir_price_kb_v1,
+    file_worker_pool_mir_host_scaled_price_kb_v1,
     file_worker_pool_pointer_bits_from_elf_header_v1,
     file_worker_pool_pointer_bits_from_windows_arch_v1,
     file_worker_pool_host_pointer_bits_for_v1,
@@ -13,6 +16,7 @@ use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1,
     file_worker_pool_live_usable_kb_v1, file_worker_pool_admission_usable_kb_v1,
     file_worker_pool_live_admission_usable_kb_v1}
 use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
+    shard_host_worker_budget_kb,
     shard_threads_cap_for, shard_worker_budget_kb, shard_tree_budget_kb_for, shard_cgroup_memory_max_kb,
     shard_threads_parent_cap_for, shard_effective_tree_budget_kb_v1, shard_pool_workers_v1,
     shard_pool_effective_budget_for_v1, shard_pool_cap_kb_for_v1, shard_tree_headroom_kib_v1}
@@ -104,12 +108,14 @@ describe "file worker pool: scale-to-host per-worker budget":
         val got = file_worker_pool_hir_budget_kb_v1()
         expect(got == unscaled or (got >= floor and got < unscaled)).to_be_true()
 
-    it "live MIR budget: the shard path is never scaled; the pool path may be":
-        val price = file_worker_pool_mir_price_kb_v1(50)
-        val unscaled = shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", price)
-        expect(file_worker_pool_mir_budget_kb_v1(50, false)).to_equal(unscaled)
+    it "live MIR budget: the shard path scales with closure size while the pool path uses the per-file ceiling":
+        val full_price = file_worker_pool_mir_price_kb_v1(1650)
+        val full_unscaled = shard_worker_budget_kb("SIMPLE_MIR_SHARD_WORKER_KB", full_price)
+        expect(file_worker_pool_mir_budget_kb_v1(1650, false)).to_equal(full_unscaled)
+        val host_kb = shard_host_worker_budget_kb(host_limit_value("worker_mem_mib"))
+        expect(file_worker_pool_mir_budget_kb_v1(50, false)).to_equal(file_worker_pool_mir_host_scaled_price_kb_v1(50, host_kb))
         val pooled = file_worker_pool_mir_budget_kb_v1(50, true)
-        expect(pooled == unscaled or (pooled >= floor and pooled < unscaled)).to_be_true()
+        expect(pooled == FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1 or (pooled >= floor and pooled < FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1)).to_be_true()
         val _set = env_set("SIMPLE_MIR_SHARD_WORKER_KB", "2345678")
         val overridden = file_worker_pool_mir_budget_kb_v1(50, true)
         val _unset = env_unset("SIMPLE_MIR_SHARD_WORKER_KB")

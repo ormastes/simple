@@ -433,28 +433,32 @@ fn _gradient_lerp_channel_ref(a: i32, b: i32, t: i32, max_t: i32) -> i32:
         return a
     a + (b - a) * t / max_t
 
-# Independent replica of the MSL `blend_src_over` helper — Porter-Duff
-# src-over, plain truncating integer division, no rounding term (same
-# formula backend_software.spl's core.blend() uses).
+# Independent replica of the MSL `blend_src_over` helper — the Chrome 159
+# solid-fill rule that backend_software.spl's fills use (color.spl blend_solid).
 fn _gradient_blend_src_over_ref(src: u32, dst: u32) -> u32:
+    # MSL blend_src_over = blend_rule(src, dst, solid=true) since 2026-11-17
+    # (Chrome 159 solid-fill rule). Opaque dst: round(s*a/255) +
+    # ((d*(256-a))>>8). Translucent dst: straight-alpha src-over, every
+    # division rounded.
     val sa = _gr_channel(src, 24)
     if sa == 255:
         return src
     if sa == 0:
         return dst
-    val sr = _gr_channel(src, 16)
-    val sg = _gr_channel(src, 8)
-    val sb = _gr_channel(src, 0)
-    val dr = _gr_channel(dst, 16)
-    val dg = _gr_channel(dst, 8)
-    val db = _gr_channel(dst, 0)
     val da = _gr_channel(dst, 24)
     val inv_a = 255 - sa
-    val out_r = (sr * sa + dr * inv_a) / 255
-    val out_g = (sg * sa + dg * inv_a) / 255
-    val out_b = (sb * sa + db * inv_a) / 255
-    val out_a = sa + (da * inv_a) / 255
-    _gr_pack(out_r, out_g, out_b, out_a)
+    if da != 255:
+        val dw = (da * inv_a + 127) / 255
+        val oa = sa + dw
+        val half = oa / 2
+        val tr = (_gr_channel(src, 16) * sa + _gr_channel(dst, 16) * dw + half) / oa
+        val tg = (_gr_channel(src, 8) * sa + _gr_channel(dst, 8) * dw + half) / oa
+        val tb = (_gr_channel(src, 0) * sa + _gr_channel(dst, 0) * dw + half) / oa
+        return _gr_pack(tr, tg, tb, oa)
+    val out_r = (_gr_channel(src, 16) * sa + 127) / 255 + (_gr_channel(dst, 16) * (inv_a + 1)) / 256
+    val out_g = (_gr_channel(src, 8) * sa + 127) / 255 + (_gr_channel(dst, 8) * (inv_a + 1)) / 256
+    val out_b = (_gr_channel(src, 0) * sa + 127) / 255 + (_gr_channel(dst, 0) * (inv_a + 1)) / 256
+    _gr_pack(out_r, out_g, out_b, 255)
 
 # Independent replica of kernel_draw_gradient_rect's whole per-pixel formula:
 # interpolate the row color, then alpha-blend it over the destination pixel.
@@ -696,13 +700,17 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         it "draw_gradient_rect_h matches its emu delegate":
             expect(cmp_gradient_rect_h()).to_equal(0)
 
-        it "draw_rect_blend matches emu and hits the src-over anchor 0x101E2D3C":
+        it "draw_rect_blend matches emu and hits the src-over anchor 0x111E2D3C":
             expect(cmp_rect_blend()).to_equal(0)
-            expect(anchor_rect_blend()).to_equal(0x101E2D3Cu32)
+            # Rounded translucent-dst rule (2026-11-17): dw=(16*254+127)/255=16,
+            # oa=17 -> 0x111E2D3C. Was 0x101E2D3C under the truncating rule.
+            expect(anchor_rect_blend()).to_equal(0x111E2D3Cu32)
 
-        it "draw_image_blend matches emu and hits the src-over anchor 0x101E2D3C":
+        it "draw_image_blend matches emu and hits the src-over anchor 0x111E2D3C":
             expect(cmp_image_blend()).to_equal(0)
-            expect(anchor_image_blend()).to_equal(0x101E2D3Cu32)
+            # Rounded translucent-dst rule (2026-11-17): dw=(16*254+127)/255=16,
+            # oa=17 -> 0x111E2D3C. Was 0x101E2D3C under the truncating rule.
+            expect(anchor_image_blend()).to_equal(0x111E2D3Cu32)
 
     context "Family C — independently written ops that ARE byte-exact":
 

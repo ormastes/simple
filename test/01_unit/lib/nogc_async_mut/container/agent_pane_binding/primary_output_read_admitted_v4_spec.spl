@@ -1,0 +1,52 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4 (review-n4-r1 P2-4): container_primary_output_read_v1
+# data, eof and session write-back on an ADOPTED session with a live child.
+# Scope, stated: the transfer reference is a real /bin/sh child spawned through
+# process_spawn_piped_ref_v1, i.e. an UNOWNED legacy ref (group_root ""), placed in
+# the fixture session's transfer. The wrapper reads only transfer.reference, so the
+# data/eof/write-back path is real; the owned v2 slot binding and the plan's
+# launch owner are NOT exercised (the owner stays the fixture's). A missing
+# /bin/sh is a failure, never a skip.
+use std.spec.*
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.common.text_bytes.bytes_to_text
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, container_primary_attach_adoption_v1}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, process_spawn_piped_ref_v1}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_identity_profiled_v3
+use std.nogc_async_mut.container.terminal_session_v2.{host_agent_attach_adoption_v4, container_primary_output_read_v1}
+use std.io_runtime.thread_sleep
+
+fn admitted_session() -> ContainerPrimaryAttachSessionV1:
+    val plan = container_primary_attach_fixture_v1()
+    val launch = plan.launch_template
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: group_process_stream_identity_profiled_v3(launch))
+    val child = process_spawn_piped_ref_v1("/bin/sh", ["-c", "printf hello"]).unwrap()
+    val binding = HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "f".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: "pane-a", service_epoch: 1)
+    val adoption = host_agent_attach_adoption_v4(plan, binding, "parent-operation", 0).unwrap()
+    ContainerPrimaryAttachSessionV1(plan: plan, transfer: PipedProcessOwnedTransferV2(owner: owner, reference: child),
+        identity_fingerprint: "c".repeat(64), adoption: Some(adoption), native_cleaned: false)
+
+describe "Primary output read on an admitted adopted session":
+    it "returns the child's stdout, then eof, and writes the session back each turn":
+        step("Feed every returned session into the next read until eof")
+        var session = admitted_session()
+        var collected = ""
+        var eof = false
+        var reads = 0
+        while not eof and reads < 20000:
+            val turn = container_primary_output_read_v1(session)
+            expect(turn.error).to_equal("")
+            for chunk in turn.chunks:
+                expect(chunk.stream).to_equal("stdout")
+                collected = collected + bytes_to_text(chunk.bytes)
+            session = turn.session
+            eof = turn.eof
+            if not eof and turn.chunks.len() == 0: thread_sleep(1)
+            reads = reads + 1
+        expect(eof).to_equal(true)
+        expect(collected).to_equal("hello")
+        step("The adoption survives every write-back")
+        expect(container_primary_attach_adoption_v1(session).unwrap().pane_id).to_equal("pane-a")
+        expect(container_primary_attach_adoption_v1(session).unwrap().child_incarnation).to_equal(1)

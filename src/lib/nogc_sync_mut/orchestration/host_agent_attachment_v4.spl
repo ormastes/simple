@@ -1,0 +1,816 @@
+# milestone_0021 PR3b part 1: the V4 agent primary attachment DATA, its signed attach/detach packets, the
+# shared controller-signed action authorization, and the release/pane-io PORT contracts
+# (.spipe/simple_orchestrator/continuation_20261116/milestone_0021_agent_owner_v4/DESIGN.md sections 13, 14,
+# 14A, 14B, 14C; 14C wins over 14B wins over 14A wins over 14 wins over 13). SOURCE_AUTHORED / NOT_RUN.
+#
+# This module never imports the agent owner (the agent imports it). Agent-level transitions (begin_stop, the
+# after-release hook, the step order, pane io, the lease accessor) live in host_linux_service_agent_v4.spl.
+#
+# The step machine calls a release PORT `fn(HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4`
+# for every attachment sub-step that touches native state (OP open, RP expire, FL classification, RV/CL/ST
+# resume). The machine itself does d1 REVOKE, the deadlines, the refusal and non-advancing counters, RB, the
+# RT/RF writes and the hook. PR3b part 2 binds the production port (`host_agent_attachment_release_step_v4`:
+# U', S, RP, geometry drain; F/B and the attach effects stay fail-closed, see the constants below) and the
+# production pane io port (`host_agent_pane_io_port_v4`).
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2,
+    distributed_grant_digest_v2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_decode_signed_grant_v2,
+    distributed_encode_signed_approval_v2, distributed_decode_signed_approval_v2}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_verify_grant_approval_from_snapshot_v2}
+use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlanV1, HostAgentPaneBindingV4,
+    container_primary_attach_plan_decode_v1, container_primary_attach_plan_digest_v1, host_agent_pane_binding_decode_v4,
+    host_agent_pane_binding_digest_v4, host_agent_pane_binding_live_check_v4}
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneOpV4, HostAgentPaneIoResultV4,
+    host_agent_pane_io_refused_v4}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3, distributed_operation_journal_read_required_v3}
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.HostHelperLeaseV1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, host_helper_request_decode_v1}
+use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperSettlementAckV1,
+    host_helper_cancel_unconsumed_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_expire_prepared_owned_v3}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
+use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_v1.{HostPrimaryAttachCoreRetainedV1,
+    host_primary_attach_cleanup_core_v1, host_primary_attach_settle_core_v1}
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helper_journal_relative_v1,
+    host_linux_helper_attach_expected_v1, host_linux_helper_attach_binding_check_v1, host_primary_attach_refusal_decode_v1}
+use std.container.SimpleContainerOwnerV2
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, ContainerOwnedTerminalSessionV1}
+use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2, container_primary_output_read_v1}
+use std.nogc_async_mut.container.terminal_primary_write_v2.{ContainerPrimaryInputRequestV2,
+    ContainerPrimaryInputDispositionV2, container_primary_input_write_v2}
+use std.nogc_async_mut.container.workspace_api_v3.simple_container_primary_session_return_v3
+use std.nogc_async_mut.container.workspace_primary_retirement_v3.ContainerPrimaryTransportRetirementV3
+use std.nogc_async_mut.container.primary_geometry_v1.{ContainerPrimaryGeometryOwnerV1, ContainerPrimaryGeometryTurnV1,
+    simple_container_primary_geometry_begin_v1, simple_container_primary_geometry_cancel_v1,
+    simple_container_primary_geometry_step_v1}
+use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+# 13.3 / 14.1 D2 / 13.1 bounds (ms, on the agent clock `clock_ms`).
+pub const HOST_AGENT_DETACH_GRACE_MS_V4: i64 = 120000
+pub const HOST_AGENT_ATTACH_PREPARE_TTL_MS_V4: i64 = 60000
+pub const HOST_AGENT_EXPIRE_SLACK_MS_V4: i64 = 5000
+pub const HOST_AGENT_ATTACH_READY_MS_V4: i64 = 30000
+pub const HOST_AGENT_PANE_IO_MS_V4: i64 = 60000
+pub const HOST_AGENT_DETACH_REFUSAL_LIMIT_V4: i64 = 64
+# P2-1: the hard cap on consecutive non-advancing port answers (a counted Wait, or Progress without a later
+# sub-step); the same 64 bound semantic as D5, on its own counter.
+pub const HOST_AGENT_NON_ADVANCING_LIMIT_V4: i64 = 64
+pub const HOST_AGENT_ATTACH_MAX_BYTES_V4: i64 = 1048576
+pub const HOST_AGENT_DETACH_MAX_BYTES_V4: i64 = 65536
+
+# attach_stage values (14.0 rows; RT = attachment None + summary, N0 = attachment None, no summary).
+pub const HOST_AGENT_ATTACH_REFUSED_V4 = "refused"
+pub const HOST_AGENT_ATTACH_EXPIRE_PENDING_V4 = "refused-expire-pending"
+pub const HOST_AGENT_ATTACH_OPENING_V4 = "opening"
+pub const HOST_AGENT_ATTACH_READY_V4 = "ready"
+pub const HOST_AGENT_ATTACH_ADOPTED_V4 = "adopted"
+pub const HOST_AGENT_ATTACH_REVOKED_V4 = "revoked"
+pub const HOST_AGENT_ATTACH_CLEANED_V4 = "cleaned"
+pub const HOST_AGENT_ATTACH_SETTLING_V4 = "settling"
+pub const HOST_AGENT_ATTACH_RETURNED_V4 = "returned"
+pub const HOST_AGENT_ATTACH_FAILED_V4 = "failed"
+pub const HOST_AGENT_ATTACH_BLOCKED_V4 = "release-blocked"
+
+# The attachment (13.1 + 14A F6 + D7 stored inputs + 14B binding). NO capacity and NO container inside: the
+# agent's `container` is the one holder and is only borrowed within one call (I5). Never persisted (13.6).
+pub struct HostAgentAttachmentV4:
+    # Native carriers; part 2's port writes each back after every call (one canonical session copy).
+    helper: Option<HostHelperLeaseV1> = None
+    session: Option<ContainerPrimaryAttachSessionV1> = None
+    cleanup_spawn: Option<PipedProcessOwnedSpawnV2> = None
+    native_retirement: Option<ContainerPrimaryTransportRetirementV3> = None
+    settlement: Option<HostHelperSettlementAckV1> = None
+    geometry: Option<ContainerPrimaryGeometryOwnerV1> = None
+    # 13.4: the geometry owner was cancelled by the release and is being drained (one step per call).
+    geometry_cancelled: bool = false
+    consumption_attempted: bool = false
+    # D7: every input a later unsigned call needs (driver, close, pane io). Option only so the shape has a
+    # default; an attachment created by host_agent_attach_apply_v4 always carries them.
+    parent: Option<OperationEnvelopeV2> = None
+    plan: Option<ContainerPrimaryAttachPlanV1> = None
+    binding: Option<HostAgentPaneBindingV4> = None
+    not_after: i64 = 0
+    policy_bytes: text = ""
+    helper_request_bytes: text = ""
+    store_root: text = ""
+    # A prepared-but-not-begun helper receipt (RP until expired, 13.2).
+    prepared_receipt_digest: text = ""
+    prepare_deadline_ms: i64 = 0
+    # F6: helper begin committed an executing owner without returning a lease (recovery required): held.
+    begin_attempted: bool = false
+    # D8: an open/cleanup/settle core step is in flight (not an attach_stage).
+    attach_pending: bool = false
+    eof: bool = false
+    attach_stage: text = "opening"
+    lease_epoch: i64 = 0
+    # The pane lease is handed out once per attachment (13.1 lease-once).
+    lease_issued: bool = false
+    ready_deadline_ms: i64 = 0
+    io_deadline_ms: i64 = 0
+    # D5/F4: the detach bound; `detach_bound` records that the deadline was initialised.
+    detach_bound: bool = false
+    detach_deadline_ms: i64 = 0
+    detach_refusals: i64 = 0
+    # P2-1: consecutive non-advancing port answers since the last later sub-step (cap HOST_AGENT_NON_ADVANCING_LIMIT_V4).
+    non_advancing: i64 = 0
+    attach_digest: text = ""
+    detach_digest: text = ""
+    first_error: text = ""
+
+# Kept on the agent after `returned` (13.1).
+pub struct HostAgentAttachmentSummaryV4:
+    attach_digest: text
+    detach_digest: text
+    final_stage: text
+    error: text
+
+# ---- classification (14.0) ----
+
+# held(att): any native carrier, a prepared receipt, or a committed begin without a lease (F6).
+# allow(primitive_api): reviewed classification predicate (milestone_0021 14.0)
+pub fn host_agent_attachment_held_v4(attachment: HostAgentAttachmentV4) -> bool:
+    (attachment.helper.is_some() or attachment.session.is_some() or attachment.cleanup_spawn.is_some() or
+        attachment.native_retirement.is_some() or attachment.geometry.is_some() or
+        attachment.prepared_receipt_digest != "" or attachment.begin_attempted)
+
+# LIVE = attach_stage not in {RT, RF} (D1); RT is the absent attachment, so only `refused` is non-live here.
+# allow(primitive_api): reviewed classification predicate (milestone_0021 14.0 D1)
+pub fn host_agent_attachment_live_v4(attachment: Option<HostAgentAttachmentV4>) -> bool:
+    if val held = attachment:
+        return held.attach_stage != HOST_AGENT_ATTACH_REFUSED_V4 and held.attach_stage != HOST_AGENT_ATTACH_RETURNED_V4
+    false
+
+# An attach sub-step in flight defers the native Inspect (13.3, D8): opening/revoked/cleaned/settling or a core
+# step pending. ready/adopted never do.
+# allow(primitive_api): reviewed classification predicate (milestone_0021 13.3)
+pub fn host_agent_attachment_in_flight_v4(attachment: HostAgentAttachmentV4) -> bool:
+    attachment.attach_pending or [HOST_AGENT_ATTACH_OPENING_V4, HOST_AGENT_ATTACH_REVOKED_V4, HOST_AGENT_ATTACH_CLEANED_V4,
+        HOST_AGENT_ATTACH_SETTLING_V4].contains(attachment.attach_stage)
+
+# F4 progress order: d1 (revoked) < d2 (cleaned) < d3 (settling) < returned/refused. `failed` ranks WITH revoked,
+# so d1 alone from FL is not progress; release-blocked ranks below everything (terminal).
+# allow(primitive_api): reviewed progress rank (milestone_0021 14A F4)
+pub fn host_agent_attachment_rank_v4(stage: text) -> i64:
+    if stage == HOST_AGENT_ATTACH_BLOCKED_V4: return -1
+    if stage == HOST_AGENT_ATTACH_FAILED_V4 or stage == HOST_AGENT_ATTACH_REVOKED_V4: return 1
+    if stage == HOST_AGENT_ATTACH_CLEANED_V4: return 2
+    if stage == HOST_AGENT_ATTACH_SETTLING_V4: return 3
+    if stage == HOST_AGENT_ATTACH_RETURNED_V4 or stage == HOST_AGENT_ATTACH_REFUSED_V4: return 4
+    0
+
+# Initialise the detach bound once, or keep the LATER deadline (F4, r7 P3-2).
+# allow(primitive_api): reviewed deadline DATA word (milestone_0021 14A F4)
+pub fn host_agent_attachment_arm_bound_v4(attachment: HostAgentAttachmentV4, deadline_ms: i64) -> HostAgentAttachmentV4:
+    var att = attachment
+    if not att.detach_bound:
+        att.detach_bound = true
+        att.detach_deadline_ms = deadline_ms
+        att.detach_refusals = 0
+    elif deadline_ms > att.detach_deadline_ms:
+        att.detach_deadline_ms = deadline_ms
+    att
+
+# The post-archive failure writer rule (14.0 P1-1, D2b, F6): a prepared-not-begun receipt -> RP (deadline per D2b);
+# anything held -> FL (bound initialised); nothing held -> RF before helper begin, else RT (`returned` with the
+# error kept; the agent records summary.final_stage = "failed").
+# allow(primitive_api): reviewed post-begin flag + clock DATA word (milestone_0021 14.0, 14A F6)
+pub fn host_agent_attachment_failure_v4(attachment: HostAgentAttachmentV4, error: text, post_begin: bool, now: i64) -> HostAgentAttachmentV4:
+    var att = attachment
+    if att.first_error == "": att.first_error = error
+    att.attach_pending = false
+    if att.prepared_receipt_digest != "" and att.helper.is_none() and not att.begin_attempted:
+        att.attach_stage = HOST_AGENT_ATTACH_EXPIRE_PENDING_V4
+        var deadline = now + HOST_AGENT_DETACH_GRACE_MS_V4
+        if att.prepare_deadline_ms + HOST_AGENT_EXPIRE_SLACK_MS_V4 > deadline:
+            deadline = att.prepare_deadline_ms + HOST_AGENT_EXPIRE_SLACK_MS_V4
+        return host_agent_attachment_arm_bound_v4(att, deadline)
+    if host_agent_attachment_held_v4(att):
+        att.attach_stage = HOST_AGENT_ATTACH_FAILED_V4
+        return host_agent_attachment_arm_bound_v4(att, now + HOST_AGENT_DETACH_GRACE_MS_V4)
+    att.attach_stage = if post_begin: HOST_AGENT_ATTACH_RETURNED_V4 else: HOST_AGENT_ATTACH_REFUSED_V4
+    att
+
+# ---- release / pane-io PORTS (13.4, 13.5, 14 D8/D9, 14A F4) ----
+
+# Progress = the port reached a later sub-step (the machine re-checks with the rank; OP -> RD counts as one);
+# Wait = nothing to do yet; Refused = a retryable refusal (counted, D5); Blocked = a typed non-retryable error or
+# a charged-forever state (F4) -> RB.
+#
+# PORT OBLIGATIONS (the production port below honours them; the machine enforces the bounds either way):
+# - Finiteness (P2-1). Every answer must eventually be a later sub-step, a refusal or Blocked. The machine counts
+#   consecutive non-advancing answers in `non_advancing` (a Wait, or a Progress that is not a later sub-step,
+#   e.g. a d2 cleanup answering Progress at the same sub-step, or a geometry drain) and takes the attachment to
+#   RB at HOST_AGENT_NON_ADVANCING_LIMIT_V4. Exactly two waits are uncounted because they are bounded elsewhere:
+#   (a) a Wait while `pending` (D8 deferred d4: the step driver drains the native step first); (b) an RP
+#   `prepare-not-expired` Wait (D2c), bounded by `prepare_deadline_ms + HOST_AGENT_EXPIRE_SLACK_MS_V4` (D2b),
+#   past which the machine takes RB. Every OTHER answer while `pending` (Refused, Blocked, a same-rank Progress)
+#   is still counted; it only never wedges until the native step drained (I2).
+# - Classification up front (F4, P3-2). At FL the machine first calls the port as a READ-ONLY classifier: a
+#   charged-forever state answers Blocked (RB in that same call, at `running` as well as `detach`); any other
+#   answer lets the machine take d1. The port must not change anything at FL.
+# - Write-back (13.4, 13.5, I5). The machine lends `agent.container` in the call and adopts `step.container`
+#   when it is Some; the capacity owner the port advanced comes back in `step.capacity` and the caller adopts it
+#   (single journal writer). The session in `step.attachment` is the ONE canonical copy.
+pub enum HostAgentReleaseOutcomeV4:
+    Progress
+    Wait
+    Refused
+    Blocked
+
+pub struct HostAgentAttachmentPortCallV4:
+    attachment: HostAgentAttachmentV4
+    now: i64
+    # agent.pending: d4 session_return needs the container and WAITs while a native step is in flight (D8).
+    pending: bool
+    # The agent's transfer holder, lent for this call only (I5).
+    container: Option<SimpleContainerOwnerV2> = None
+
+pub struct HostAgentAttachmentReleaseStepV4:
+    attachment: HostAgentAttachmentV4
+    outcome: HostAgentReleaseOutcomeV4
+    error: text
+    capacity: Option<HostCapacityOwnerV1> = None
+    container: Option<SimpleContainerOwnerV2> = None
+
+# What the production port needs that is not attachment state (13.5): the service's capacity owner (the journal
+# writer), the helper store `HostHelperStoreV1(helper_store, Some(capacity.journal))`, and the monotonic clock
+# of the prepared-receipt expire (the receipt's deadline is monotonic). The attachment's own `prepare_deadline_ms`
+# is stored on the GRANT clock (host_agent_attach_grant_deadline_v4), the clock every attachment bound runs on.
+# Built by the caller for ONE call, captured by the port closure, never stored.
+pub struct HostAgentReleaseContextV4:
+    capacity: HostCapacityOwnerV1
+    store: HostHelperStoreV1
+    monotonic_ms: i64
+
+# F and B need the fallback-carrier cores milestone_0021 13.4 names (`quiesce_fallback_core_v3`,
+# `settle_retired_core_v3`); they do not exist in the tree, so a spawn carrier is answered Blocked (RB) rather
+# than released by a substitute that would skip the container-side retirement.
+const HOST_AGENT_RELEASE_FALLBACK_UNBOUND_V4 = "linux-host-agent-attachment-fallback-release-unbound"
+# 13.2 effects: helper begin needs its own controller-signed `host_helper_execute_v1` grant, which the 14B attach
+# packet does not carry, and the open core needs a ContainerStreamPolicyV2 the attachment has no decoder for.
+pub const HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4 = "linux-host-agent-attach-helper-begin-grant-unbound"
+# One geometry drain step (the native step budget is 1..25 ms; 1 matches terminal_primary_geometry_v2).
+const HOST_AGENT_GEOMETRY_STEP_MS_V4: i64 = 1
+
+fn host_agent_release_answer_v4(attachment: HostAgentAttachmentV4, outcome: HostAgentReleaseOutcomeV4, error: text,
+        capacity: HostCapacityOwnerV1, container: Option<SimpleContainerOwnerV2>) -> HostAgentAttachmentReleaseStepV4:
+    HostAgentAttachmentReleaseStepV4(attachment: attachment, outcome: outcome, error: error, capacity: Some(capacity),
+        container: container)
+
+# F4 classification, read-only: "" = a release exists (S or U'); otherwise the typed charged-forever reason
+# (milestone_0022 16 P3-2: begin without a lease, a spawn carrier (F/B unbound here), `{}` / `{PA}` alone = no
+# journal refusal R for a helper with no session).
+fn host_agent_release_charged_v4(attachment: HostAgentAttachmentV4, store: HostHelperStoreV1) -> text:
+    if attachment.helper.is_none(): return "linux-host-agent-attach-begin-without-lease"
+    if store.root == "": return "linux-host-agent-attach-store-unopened"
+    if attachment.cleanup_spawn.is_some(): return HOST_AGENT_RELEASE_FALLBACK_UNBOUND_V4
+    if attachment.plan.is_none(): return "linux-host-agent-attach-plan-missing"
+    if attachment.session.is_some(): return ""
+    if store.journal.is_none(): return "linux-host-agent-attach-store-journal-missing"
+    val relative = host_linux_helper_journal_relative_v1("primary-refusal", attachment.helper.unwrap().operation.id)
+    match distributed_operation_journal_read_v3(store.journal.unwrap(), relative, 65536):
+        case Ok(found): if found.is_some(): "" else: "linux-host-agent-attach-unrecorded-helper"
+        case Err(reason): reason
+
+# OP (13.2 effects). The prepare/begin/open chain is NOT bound (HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4), so the
+# open is a FINAL failure per the 14.0 writer rule: nothing held -> RF (rank 4, Progress), a held helper -> FL.
+fn host_agent_release_open_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    val att = host_agent_attachment_failure_v4(call.attachment, HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4,
+        call.attachment.helper.is_some() or call.attachment.begin_attempted, call.now)
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", context.capacity, call.container)
+
+# RP (13.2, D2): expire the prepared receipt on the monotonic clock. `prepare-not-expired` is a WAIT (D2c);
+# a projection that needs a reopen is non-retryable; anything else is a counted refusal. Expired -> RF.
+fn host_agent_release_expire_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    val request = host_helper_request_decode_v1(att.helper_request_bytes)
+    if request.is_err():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, request.unwrap_err(), context.capacity, call.container)
+    val expired = host_capacity_owner_expire_prepared_owned_v3(context.capacity, request.unwrap().operation.id,
+        context.monotonic_ms)
+    if expired.error == "prepare-not-expired":
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", expired.owner, call.container)
+    if expired.error == "host-projection-reopen-required":
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, expired.error, expired.owner, call.container)
+    if expired.error != "" or not expired.settled:
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused,
+            if expired.error != "": expired.error else: "linux-host-agent-attach-expire-unsettled", expired.owner, call.container)
+    att.prepared_receipt_digest = ""
+    att.attach_stage = HOST_AGENT_ATTACH_REFUSED_V4
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", expired.owner, call.container)
+
+# 13.4 "cancel then drain" of the ONE geometry owner, before any native cleanup: cancel once, then one step per
+# call until the native exchange is done with nothing to clean. Non-advancing (Wait) while it drains.
+fn host_agent_release_drained_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4,
+        turn: ContainerPrimaryGeometryTurnV1) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    att.geometry_cancelled = true
+    if turn.owner.is_none() or (turn.phase == "done" and not turn.cleanup_pending):
+        att.geometry = None
+        att.geometry_cancelled = false
+    else:
+        att.geometry = turn.owner
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", context.capacity, call.container)
+
+fn host_agent_release_geometry_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    val att = call.attachment
+    val owner = att.geometry.unwrap()
+    if not att.geometry_cancelled:
+        return host_agent_release_drained_v4(call, context, simple_container_primary_geometry_cancel_v1(owner, "attach-revoked"))
+    if call.container.is_none() or att.session.is_none():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked,
+            "linux-host-agent-attachment-geometry-carrier-missing", context.capacity, call.container)
+    host_agent_release_drained_v4(call, context, simple_container_primary_geometry_step_v1(call.container.unwrap(),
+        att.session.unwrap(), owner, owner.request, HOST_AGENT_GEOMETRY_STEP_MS_V4))
+
+fn host_agent_release_retained_v4(attachment: HostAgentAttachmentV4, context: HostAgentReleaseContextV4) -> HostPrimaryAttachCoreRetainedV1:
+    HostPrimaryAttachCoreRetainedV1(store: context.store, capacity: context.capacity, helper: attachment.helper.unwrap(),
+        plan: attachment.plan.unwrap(), session: attachment.session, cleanup_spawn: attachment.cleanup_spawn)
+
+# U' (13.4): no session and no spawn, journal R present -> the refusal-authorized helper cancel, inputs
+# re-derived from the journal-stored signed request and bound to R (as the restart resume does) -> returned.
+fn host_agent_release_cancel_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    val operation = att.helper.unwrap().operation
+    val journal = context.store.journal.unwrap()
+    val expected = host_linux_helper_attach_expected_v1(journal, operation)
+    if expected.is_err():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused, expected.unwrap_err(), context.capacity, call.container)
+    val bytes = distributed_operation_journal_read_required_v3(journal,
+        host_linux_helper_journal_relative_v1("primary-refusal", operation.id), 65536)
+    if bytes.is_err():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused, bytes.unwrap_err(), context.capacity, call.container)
+    val refusal = host_primary_attach_refusal_decode_v1(bytes.unwrap())
+    if refusal.is_err():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, refusal.unwrap_err(), context.capacity, call.container)
+    val bound = host_linux_helper_attach_binding_check_v1(refusal.unwrap(), None, expected.unwrap())
+    if bound.is_err():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, bound.unwrap_err(), context.capacity, call.container)
+    val cancelled = host_helper_cancel_unconsumed_v1(context.capacity, context.store.root, operation, expected.unwrap().plan,
+        expected.unwrap().request_digest, expected.unwrap().prepared_receipt_digest)
+    if cancelled.error != "":
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused, cancelled.error, cancelled.owner, call.container)
+    att.helper = None
+    att.attach_stage = HOST_AGENT_ATTACH_RETURNED_V4
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", cancelled.owner, call.container)
+
+# S d2 (13.4, D4): the core's adopted-session arm runs container_terminal_cleanup_v1(PrimaryAttach(session)) (the
+# agent is the terminal owner) and returns the cleaned session, written back as the one canonical copy.
+fn host_agent_release_cleanup_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    val cleaned = host_primary_attach_cleanup_core_v1(host_agent_release_retained_v4(att, context))
+    att.session = cleaned.retained.session
+    if cleaned.error != "":
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused, cleaned.error, cleaned.retained.capacity, call.container)
+    if not cleaned.cleaned:
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", cleaned.retained.capacity, call.container)
+    att.attach_stage = HOST_AGENT_ATTACH_CLEANED_V4
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", cleaned.retained.capacity, call.container)
+
+# S d3: the settlement ack (helper charge released through the V4 evidence arm).
+fn host_agent_release_settle_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    val settled = host_primary_attach_settle_core_v1(host_agent_release_retained_v4(att, context))
+    att.session = settled.retained.session
+    if not settled.settled or settled.ack.is_none():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused,
+            if settled.error != "": settled.error else: "linux-host-agent-attach-settle-unacknowledged", settled.retained.capacity,
+            call.container)
+    att.settlement = settled.ack
+    att.attach_stage = HOST_AGENT_ATTACH_SETTLING_V4
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", settled.retained.capacity, call.container)
+
+# S d4 (D8): the session returns to the agent's container; a WAIT while a native step is in flight on it.
+fn host_agent_release_return_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    if call.pending: return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", context.capacity, call.container)
+    if call.container.is_none() or att.session.is_none():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, "linux-host-agent-attachment-return-carrier-missing",
+            context.capacity, call.container)
+    val returned = simple_container_primary_session_return_v3(call.container.unwrap(), att.session.unwrap())
+    if returned.retirement.is_some(): att.native_retirement = returned.retirement
+    if returned.error != "":
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused, returned.error, context.capacity,
+            Some(returned.owner))
+    att.session = None
+    att.attach_stage = HOST_AGENT_ATTACH_RETURNED_V4
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", context.capacity, Some(returned.owner))
+
+# The production release port (13.4): ONE bounded sub-step per call, resuming at the stored sub-step (d1 is the
+# machine's). OP -> the (unbound) open effect; RP -> expire; FL -> read-only classification; RV -> geometry
+# drain, then the charged-forever classification, then U' (cancel) or S d2; CL -> d3; ST -> d4.
+pub fn host_agent_attachment_release_step_v4(call: HostAgentAttachmentPortCallV4,
+        context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    val att = call.attachment
+    val stage = att.attach_stage
+    if stage == HOST_AGENT_ATTACH_OPENING_V4: return host_agent_release_open_v4(call, context)
+    if stage == HOST_AGENT_ATTACH_EXPIRE_PENDING_V4: return host_agent_release_expire_v4(call, context)
+    if stage == HOST_AGENT_ATTACH_FAILED_V4 or stage == HOST_AGENT_ATTACH_REVOKED_V4:
+        if stage == HOST_AGENT_ATTACH_REVOKED_V4 and att.geometry.is_some(): return host_agent_release_geometry_v4(call, context)
+        val charged = host_agent_release_charged_v4(att, context.store)
+        if charged != "":
+            return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, charged, context.capacity, call.container)
+        if stage == HOST_AGENT_ATTACH_FAILED_V4:
+            return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", context.capacity, call.container)
+        if att.session.is_none(): return host_agent_release_cancel_v4(call, context)
+        return host_agent_release_cleanup_v4(call, context)
+    if stage == HOST_AGENT_ATTACH_CLEANED_V4: return host_agent_release_settle_v4(call, context)
+    if stage == HOST_AGENT_ATTACH_SETTLING_V4: return host_agent_release_return_v4(call, context)
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, "linux-host-agent-attachment-release-stage:" + stage,
+        context.capacity, call.container)
+
+pub struct HostAgentPaneIoCallV4:
+    attachment: HostAgentAttachmentV4
+    op: HostAgentPaneOpV4
+    now: i64
+    # The agent's transfer holder, lent for this call only (geometry begin/step need it).
+    container: Option<SimpleContainerOwnerV2> = None
+
+pub struct HostAgentPaneIoPortTurnV4:
+    attachment: HostAgentAttachmentV4
+    result: HostAgentPaneIoResultV4
+
+fn host_agent_pane_io_turn_v4(attachment: HostAgentAttachmentV4, result: HostAgentPaneIoResultV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: attachment, result: result)
+
+fn host_agent_pane_disposition_v4(value: ContainerPrimaryInputDispositionV2) -> text:
+    match value:
+        case ContainerPrimaryInputDispositionV2.Rejected: "rejected"
+        case ContainerPrimaryInputDispositionV2.Queued: "queued"
+        case ContainerPrimaryInputDispositionV2.Completed: "completed"
+        case ContainerPrimaryInputDispositionV2.Unknown: "unknown"
+
+# A geometry turn folded into the attachment (at most one owner, D9): `pending` while the native exchange runs,
+# `done` (owner dropped) once it finished with nothing to clean; a native error ends the owner too.
+fn host_agent_pane_geometry_v4(attachment: HostAgentAttachmentV4, turn: ContainerPrimaryGeometryTurnV1) -> HostAgentPaneIoPortTurnV4:
+    var att = attachment
+    val done = turn.owner.is_none() or (turn.phase == "done" and not turn.cleanup_pending)
+    att.geometry = if done: None else: turn.owner
+    if turn.error != "": return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4(turn.error))
+    host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(geometry: if done: "done" else: "pending"))
+
+# Production pane io port (13.1, 14C): output ONLY through container_primary_output_read_v1 (adoption-gated, one
+# non-blocking read, eof sticky: once seen no further native read happens); Write through the adoption-gated
+# primary input (partial accept is the native answer; the legacy primary ignores `frame_sequence`, which is set
+# to the attempt to satisfy its bounds); Resize begins the ONE geometry owner, ResizePoll steps it. The lease,
+# epoch, window and io deadline are enforced by the machine (host_agent_pane_io_core_v4) before this runs.
+pub fn host_agent_pane_io_port_v4(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    var att = call.attachment
+    if att.session.is_none(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4("attach-no-session"))
+    val session = att.session.unwrap()
+    match call.op:
+        case HostAgentPaneOpV4.Read:
+            if att.eof: return host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(eof: true))
+            val read = container_primary_output_read_v1(session)
+            att.session = Some(read.session)
+            host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(chunks: read.chunks, eof: read.eof, error: read.error))
+        case HostAgentPaneOpV4.Write(write):
+            val request = ContainerPrimaryInputRequestV2(lease: write.lease, target: write.target, principal: write.principal,
+                nonce: write.nonce, attempt: write.attempt, frame_sequence: write.attempt, payload: write.data,
+                offset: write.offset, maximum: write.maximum)
+            val written = container_primary_input_write_v2(ContainerOwnedTerminalSessionV2.Legacy(
+                ContainerOwnedTerminalSessionV1.PrimaryAttach(session)), request)
+            if written.is_err(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4(written.unwrap_err()))
+            host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(
+                disposition: host_agent_pane_disposition_v4(written.unwrap().disposition),
+                accepted_bytes: written.unwrap().accepted_bytes, error: written.unwrap().error))
+        case HostAgentPaneOpV4.Resize(request):
+            if call.container.is_none(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4("attach-container-missing"))
+            host_agent_pane_geometry_v4(att, simple_container_primary_geometry_begin_v1(call.container.unwrap(), session,
+                att.policy_bytes, request))
+        case HostAgentPaneOpV4.ResizePoll:
+            if call.container.is_none(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4("attach-container-missing"))
+            if att.geometry.is_none(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4("attach-no-geometry"))
+            val owner = att.geometry.unwrap()
+            host_agent_pane_geometry_v4(att, simple_container_primary_geometry_step_v1(call.container.unwrap(), session, owner,
+                owner.request, HOST_AGENT_GEOMETRY_STEP_MS_V4))
+
+# ---- controller-signed actions: cancel, attach, detach (13.2) ----
+
+pub fn host_agent_action_tag_v4(kind: text) -> Result<text, text>:
+    if kind == "host_agent_cancel_v4": return Ok("cancel")
+    if kind == "host_agent_attach_v4": return Ok("attach")
+    if kind == "host_agent_detach_v4": return Ok("detach")
+    Err("linux-host-agent-action-kind")
+
+# The action's own operation (precedent: host_agent_cancel_operation_v4): the archived execute's principal,
+# project, host, environment and budget; id `<tag>-<execute id>`; kind; the given payload digest; and the LIVE
+# policy revision, revocation epoch and session generation.
+pub fn host_agent_action_operation_v4(kind: text, execute: OperationEnvelopeV2, payload_digest: text,
+        context: HostReservationAuthorizationContextV1) -> Result<OperationEnvelopeV2, text>:
+    val tag = host_agent_action_tag_v4(kind)?
+    var operation = execute
+    operation.id = tag + "-" + execute.id
+    operation.operation = kind
+    operation.payload_digest = payload_digest
+    operation.policy_revision = context.policy_revision
+    operation.revocation_epoch = context.revocation_epoch
+    operation.session_generation = context.session_generation
+    val encoded = distributed_encode_operation_v2(operation)
+    if encoded.is_err(): return Err(encoded.unwrap_err())
+    Ok(operation)
+
+# One gate order for every controller-signed agent action (the cancel authorize is a wrapper over this): the
+# request names the held run; the archived execute's association equals the request's and the held agent's
+# (and is a digest); the operation is exactly the one derived from the archived execute and `payload_digest`
+# (which the caller recomputes from the packet's OWN contents) under the live context; issuer == controller;
+# issuer and approver signatures verify under the installed snapshot. Errors carry the action tag.
+pub fn host_linux_service_agent_action_authorize_v4(kind: text, snapshot: DistributedAuthoritySnapshotV2,
+        controller_ref: text, request_operation_id: text, request_association_digest: text,
+        request_operation: OperationEnvelopeV2, signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        payload_digest: text, execute_operation: OperationEnvelopeV2, execute_association_digest: text,
+        held_operation_id: text, held_association_digest: text,
+        context: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    val tag = host_agent_action_tag_v4(kind)?
+    if request_operation_id != held_operation_id or execute_operation.id != held_operation_id:
+        return Err("linux-host-agent-incarnation-consumed")
+    if (request_association_digest != execute_association_digest or
+            execute_association_digest != held_association_digest or not builder_digest_valid_v1(execute_association_digest)):
+        return Err("linux-host-agent-" + tag + "-association")
+    val expected = host_agent_action_operation_v4(kind, execute_operation, payload_digest, context)?
+    if distributed_encode_operation_v2(request_operation)? != distributed_encode_operation_v2(expected)?:
+        return Err("linux-host-agent-" + tag + "-operation-mismatch")
+    if signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed, approval, request_operation,
+        context.grant_clock, snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)
+
+# 14B: attach digest = {operationId, associationDigest, planDigest, helperRequestDigest, paneBindingDigest}.
+pub fn host_agent_attach_payload_digest_v4(operation_id: text, association_digest: text, plan_digest: text,
+        helper_request_digest: text, pane_binding_digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-attach"),
+        "operationId": SdnValue.String(operation_id), "associationDigest": SdnValue.String(association_digest),
+        "planDigest": SdnValue.String(plan_digest), "helperRequestDigest": SdnValue.String(helper_request_digest),
+        "paneBindingDigest": SdnValue.String(pane_binding_digest)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# 13.2: detach digest = {operationId, associationDigest, attachDigest}.
+pub fn host_agent_detach_payload_digest_v4(operation_id: text, association_digest: text, attach_digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-detach"),
+        "operationId": SdnValue.String(operation_id), "associationDigest": SdnValue.String(association_digest),
+        "attachDigest": SdnValue.String(attach_digest)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# ---- attach packet (13.2 + 14B) ----
+
+# Canonical {operation_id, association_digest, operation, signed, approval} plus the signed helper request
+# bytes, the primary plan bytes and the controller-signed pane binding bytes. The packet also NAMES the plan and
+# pane binding digests it was signed over (`plan_digest`, `pane_binding_digest`): the signed payload digest is
+# computed from those named digests (and the recomputed helper request digest), and 14C requires a packet whose
+# plan or binding bytes are not the ones those signed digests name to be refused `attach-binding-plan`.
+pub struct HostAgentAttachRequestV4:
+    operation_id: text
+    association_digest: text
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    helper_request: text
+    plan: text
+    pane_binding: text
+    plan_digest: text
+    pane_binding_digest: text
+
+# The packet's decoded contents: `plan_digest`/`binding_digest` are RECOMPUTED from the bytes, and
+# `payload_digest` is the signed payload over the packet's NAMED plan/binding digests and the recomputed helper
+# request digest (never taken from the operation). host_agent_attach_binding_plan_check_v4 compares the two.
+pub struct HostAgentAttachPartsV4:
+    plan: ContainerPrimaryAttachPlanV1
+    helper: HostHelperRequestV1
+    binding: HostAgentPaneBindingV4
+    plan_digest: text
+    helper_request_digest: text
+    binding_digest: text
+    payload_digest: text
+
+pub fn host_agent_attach_request_parts_v4(request: HostAgentAttachRequestV4) -> Result<HostAgentAttachPartsV4, text>:
+    val plan = container_primary_attach_plan_decode_v1(request.plan)?
+    val plan_digest = container_primary_attach_plan_digest_v1(plan)?
+    val helper = host_helper_request_decode_v1(request.helper_request)?
+    val binding = host_agent_pane_binding_decode_v4(request.pane_binding)?
+    val binding_digest = host_agent_pane_binding_digest_v4(binding)?
+    val helper_digest = sha256_text(request.helper_request)
+    Ok(HostAgentAttachPartsV4(plan: plan, helper: helper, binding: binding, plan_digest: plan_digest,
+        helper_request_digest: helper_digest, binding_digest: binding_digest,
+        payload_digest: host_agent_attach_payload_digest_v4(request.operation_id, request.association_digest,
+            request.plan_digest, helper_digest, request.pane_binding_digest)))
+
+# 14C: run AFTER the signature over `parts.payload_digest` verified. The plan<->binding pairing is carried only by
+# the signed digests, so plan or binding bytes that are not the ones the signed payload names are refused before
+# any archive.
+pub fn host_agent_attach_binding_plan_check_v4(request: HostAgentAttachRequestV4, parts: HostAgentAttachPartsV4) -> Result<(), text>:
+    if parts.plan_digest != request.plan_digest or parts.binding_digest != request.pane_binding_digest:
+        return Err("attach-binding-plan")
+    Ok(())
+
+pub fn host_agent_attach_request_encode_v4(value: HostAgentAttachRequestV4) -> Result<text, text>:
+    if not builder_identifier_valid_v1(value.operation_id): return Err("linux-host-agent-attach-operation")
+    if not builder_digest_valid_v1(value.association_digest): return Err("linux-host-agent-attach-association")
+    if not builder_digest_valid_v1(value.plan_digest) or not builder_digest_valid_v1(value.pane_binding_digest):
+        return Err("linux-host-agent-attach-digest")
+    val parts = host_agent_attach_request_parts_v4(value)?
+    if (value.operation.operation != "host_agent_attach_v4" or value.operation.id != "attach-" + value.operation_id or
+            value.operation.payload_digest != parts.payload_digest):
+        return Err("linux-host-agent-attach-operation-mismatch")
+    if (not value.signed.grant.operations.contains("host_agent_attach_v4") or
+            value.approval.request_digest != sha256_text(distributed_encode_operation_v2(value.operation)?) or
+            value.approval.grant_digest != distributed_grant_digest_v2(value.signed.grant)?):
+        return Err("linux-host-agent-attach-proof-binding")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-attach"),
+        "operationId": SdnValue.String(value.operation_id), "associationDigest": SdnValue.String(value.association_digest),
+        "operation": SdnValue.String(distributed_encode_operation_v2(value.operation)?),
+        "signed": SdnValue.String(distributed_encode_signed_grant_v2(value.signed)?),
+        "approval": SdnValue.String(distributed_encode_signed_approval_v2(value.approval)?),
+        "helperRequest": SdnValue.String(value.helper_request), "plan": SdnValue.String(value.plan),
+        "paneBinding": SdnValue.String(value.pane_binding), "planDigest": SdnValue.String(value.plan_digest),
+        "paneBindingDigest": SdnValue.String(value.pane_binding_digest)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > HOST_AGENT_ATTACH_MAX_BYTES_V4: return Err("linux-host-agent-attach-size")
+    Ok(bytes)
+
+fn host_agent_action_text_v4(fields: Dict<text, SdnValue>, name: text, tag: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("linux-host-agent-" + tag + "-field:" + name)
+
+fn host_agent_action_fields_v4(source: text, maximum: i64, tag: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() == 0 or source.byte_len() > maximum: return Err("linux-host-agent-" + tag + "-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: maximum,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(issue): return Err("linux-host-agent-" + tag + "-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("linux-host-agent-" + tag + "-object")
+    if fields.len() != names.len(): return Err("linux-host-agent-" + tag + "-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("linux-host-agent-" + tag + "-fields")
+    Ok(fields)
+
+pub fn host_agent_attach_request_decode_v4(source: text) -> Result<HostAgentAttachRequestV4, text>:
+    val fields = host_agent_action_fields_v4(source, HOST_AGENT_ATTACH_MAX_BYTES_V4, "attach", ["version", "kind",
+        "operationId", "associationDigest", "operation", "signed", "approval", "helperRequest", "plan", "paneBinding",
+        "planDigest", "paneBindingDigest"])?
+    val value = HostAgentAttachRequestV4(operation_id: host_agent_action_text_v4(fields, "operationId", "attach")?,
+        association_digest: host_agent_action_text_v4(fields, "associationDigest", "attach")?,
+        operation: distributed_decode_operation_v2(host_agent_action_text_v4(fields, "operation", "attach")?)?,
+        signed: distributed_decode_signed_grant_v2(host_agent_action_text_v4(fields, "signed", "attach")?)?,
+        approval: distributed_decode_signed_approval_v2(host_agent_action_text_v4(fields, "approval", "attach")?)?,
+        helper_request: host_agent_action_text_v4(fields, "helperRequest", "attach")?,
+        plan: host_agent_action_text_v4(fields, "plan", "attach")?,
+        pane_binding: host_agent_action_text_v4(fields, "paneBinding", "attach")?,
+        plan_digest: host_agent_action_text_v4(fields, "planDigest", "attach")?,
+        pane_binding_digest: host_agent_action_text_v4(fields, "paneBindingDigest", "attach")?)
+    # Canonical bytes only (version and kind included).
+    if host_agent_attach_request_encode_v4(value)? != source: return Err("linux-host-agent-attach-noncanonical")
+    Ok(value)
+
+# ---- detach packet (13.2) ----
+
+pub struct HostAgentDetachRequestV4:
+    operation_id: text
+    association_digest: text
+    attach_digest: text
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub fn host_agent_detach_request_encode_v4(value: HostAgentDetachRequestV4) -> Result<text, text>:
+    if not builder_identifier_valid_v1(value.operation_id): return Err("linux-host-agent-detach-operation")
+    if not builder_digest_valid_v1(value.association_digest) or not builder_digest_valid_v1(value.attach_digest):
+        return Err("linux-host-agent-detach-association")
+    if (value.operation.operation != "host_agent_detach_v4" or value.operation.id != "detach-" + value.operation_id or
+            value.operation.payload_digest != host_agent_detach_payload_digest_v4(value.operation_id, value.association_digest,
+                value.attach_digest)):
+        return Err("linux-host-agent-detach-operation-mismatch")
+    if (not value.signed.grant.operations.contains("host_agent_detach_v4") or
+            value.approval.request_digest != sha256_text(distributed_encode_operation_v2(value.operation)?) or
+            value.approval.grant_digest != distributed_grant_digest_v2(value.signed.grant)?):
+        return Err("linux-host-agent-detach-proof-binding")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-detach"),
+        "operationId": SdnValue.String(value.operation_id), "associationDigest": SdnValue.String(value.association_digest),
+        "attachDigest": SdnValue.String(value.attach_digest),
+        "operation": SdnValue.String(distributed_encode_operation_v2(value.operation)?),
+        "signed": SdnValue.String(distributed_encode_signed_grant_v2(value.signed)?),
+        "approval": SdnValue.String(distributed_encode_signed_approval_v2(value.approval)?)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > HOST_AGENT_DETACH_MAX_BYTES_V4: return Err("linux-host-agent-detach-size")
+    Ok(bytes)
+
+pub fn host_agent_detach_request_decode_v4(source: text) -> Result<HostAgentDetachRequestV4, text>:
+    val fields = host_agent_action_fields_v4(source, HOST_AGENT_DETACH_MAX_BYTES_V4, "detach", ["version", "kind",
+        "operationId", "associationDigest", "attachDigest", "operation", "signed", "approval"])?
+    val value = HostAgentDetachRequestV4(operation_id: host_agent_action_text_v4(fields, "operationId", "detach")?,
+        association_digest: host_agent_action_text_v4(fields, "associationDigest", "detach")?,
+        attach_digest: host_agent_action_text_v4(fields, "attachDigest", "detach")?,
+        operation: distributed_decode_operation_v2(host_agent_action_text_v4(fields, "operation", "detach")?)?,
+        signed: distributed_decode_signed_grant_v2(host_agent_action_text_v4(fields, "signed", "detach")?)?,
+        approval: distributed_decode_signed_approval_v2(host_agent_action_text_v4(fields, "approval", "detach")?)?)
+    if host_agent_detach_request_encode_v4(value)? != source: return Err("linux-host-agent-detach-noncanonical")
+    Ok(value)
+
+# ---- archive (13.2: no-replace + read-back; F5) ----
+
+pub fn host_agent_attach_archive_relative_v4(fence: text, operation_id: text) -> text:
+    "host-agent-attach/" + sha256_text(fence + "\n" + operation_id) + ".sdn"
+
+pub fn host_agent_detach_archive_relative_v4(fence: text, operation_id: text) -> text:
+    "host-agent-detach/" + sha256_text(fence + "\n" + operation_id) + ".sdn"
+
+# Ok(true): the archived bytes are exactly `source` (REPLAY, answered from state); Ok(false): nothing archived;
+# a different packet for the slot is `conflict` (nothing is replaced).
+pub fn host_agent_action_archive_check_v4(archived: Option<text>, source: text, conflict: text) -> Result<bool, text>:
+    if archived.is_none(): return Ok(false)
+    if archived.unwrap() != source: return Err(conflict)
+    Ok(true)
+
+# No-replace publish then read-back: the slot must hold exactly `source` afterwards (an existing slot is never
+# replaced; its bytes are what the read-back compares).
+pub fn host_agent_action_archive_v4(journal: DistributedOperationJournalV2, relative: text, source: text,
+        conflict: text) -> Result<(), text>:
+    val published = distributed_operation_journal_publish_v3(journal, relative, source)
+    if published.is_err(): return Err(published.unwrap_err())
+    if distributed_operation_journal_read_required_v3(journal, relative, HOST_AGENT_ATTACH_MAX_BYTES_V4)? != source:
+        return Err(conflict)
+    Ok(())
+
+# ---- the pure attach facts check (13.2, D2a, F8, 14B, 14C) ----
+
+# Everything the pure check reads that is not agent state. TWO clocks (m23 P2-5): `now` is the grant clock of
+# `not_after`; `monotonic_ms` is the clock of the receipt's `prepare_deadline_ms`. The glue passes both; live incarnation/epoch come from the service's OWN state.
+# 14C: `plan.identity.binding_digest` is the control-target binding digest (primary_input_v1), NOT the pane
+# binding digest, so it is not a fact here; the plan<->binding pairing is the signed digests' job
+# (host_agent_attach_binding_plan_check_v4).
+pub struct HostAgentAttachFactsV4:
+    helper_kind: text
+    plan_parent_operation_id: text
+    binding: HostAgentPaneBindingV4
+    live_incarnation: text
+    live_epoch: i64
+    prepare_deadline_ms: i64
+    not_after: i64
+    now: i64
+    monotonic_ms: i64
+
+# allow(primitive_api): reviewed live epoch + clock DATA words (milestone_0021 14B, D2a)
+pub fn host_agent_attach_facts_v4(parts: HostAgentAttachPartsV4, live_incarnation: text, live_epoch: i64, not_after: i64, now: i64,
+        monotonic_ms: i64) -> HostAgentAttachFactsV4:
+    HostAgentAttachFactsV4(helper_kind: parts.helper.plan.helper_kind,
+        plan_parent_operation_id: parts.plan.identity.parent_operation_id, binding: parts.binding,
+        live_incarnation: live_incarnation, live_epoch: live_epoch,
+        prepare_deadline_ms: parts.helper.intent.reservation.prepare_deadline_ms, not_after: not_after, now: now,
+        monotonic_ms: monotonic_ms)
+
+# The receipt's monotonic prepare deadline expressed on the grant clock the attachment machine runs on (m23 P2-5):
+# the remaining prepare budget added to the grant clock now. Stored once at attach; the expire core still reads the
+# receipt's own monotonic deadline.
+# allow(primitive_api): reviewed clock DATA words (m23 P2-5)
+pub fn host_agent_attach_grant_deadline_v4(prepare_deadline_ms: i64, now: i64, monotonic_ms: i64) -> i64:
+    now + (prepare_deadline_ms - monotonic_ms)
+
+# The facts half of the pure transition check; the agent half (stage, consumed, pending, holder, stop) runs
+# first in host_agent_attach_check_core_v4. A prepare that already expired (P3-3) can only fail after the archive,
+# so it is refused here with the D2a window error; an epoch-0 binding is refused by the binding validation
+# inside the live check (14C, `host-agent-pane-binding-epoch-invalid`).
+pub fn host_agent_attach_facts_check_v4(facts: HostAgentAttachFactsV4, operation_id: text) -> Result<(), text>:
+    if facts.helper_kind != "attach-broker": return Err("attach-helper-kind")
+    if facts.plan_parent_operation_id != operation_id: return Err("attach-plan-parent")
+    if facts.now >= facts.not_after: return Err("attach-stopping")
+    if (facts.prepare_deadline_ms <= facts.monotonic_ms or
+            facts.prepare_deadline_ms - facts.monotonic_ms > HOST_AGENT_ATTACH_PREPARE_TTL_MS_V4):
+        return Err("attach-prepare-window")
+    host_agent_pane_binding_live_check_v4(facts.binding, facts.live_incarnation, facts.live_epoch)
+
+# ---- read-only report (13.2 inspect/progress: never runs release) ----
+
+pub fn host_agent_attachment_report_v4(operation_id: text, attachment: Option<HostAgentAttachmentV4>,
+        summary: Option<HostAgentAttachmentSummaryV4>) -> text:
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-attachment"),
+        "operationId": SdnValue.String(operation_id)}
+    if val att = attachment:
+        fields["attachStage"] = SdnValue.String(att.attach_stage)
+        fields["leaseEpoch"] = SdnValue.Int(att.lease_epoch)
+        fields["readyDeadlineMs"] = SdnValue.Int(att.ready_deadline_ms)
+        fields["ioDeadlineMs"] = SdnValue.Int(att.io_deadline_ms)
+        fields["detachDeadlineMs"] = SdnValue.Int(att.detach_deadline_ms)
+        fields["attachDigest"] = SdnValue.String(att.attach_digest)
+        fields["detachDigest"] = SdnValue.String(att.detach_digest)
+        fields["error"] = SdnValue.String(att.first_error)
+    elif val kept = summary:
+        fields["attachStage"] = SdnValue.String(kept.final_stage)
+        fields["attachDigest"] = SdnValue.String(kept.attach_digest)
+        fields["detachDigest"] = SdnValue.String(kept.detach_digest)
+        fields["error"] = SdnValue.String(kept.error)
+    else:
+        fields["attachStage"] = SdnValue.String("none")
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"

@@ -1,0 +1,138 @@
+"""
+## Purpose and audience
+Pins the signed detach of milestone_0021 PR3b (DESIGN 13.2, 13.4 attachment-only release, 14.2 E2, 14A F1/F5):
+a detach before any attach is refused; a detach at `running` releases the attachment while the workload keeps
+running; a refused release step keeps the agent in `detach` and never runs Destroy; replays are idempotent and
+a different packet for the slot is refused; reaching `returned` at `detach` moves the agent to `stopping` in the
+same call (the F1 hook). Written for owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Pure, with FAKE release ports (13.4 d2-d5 is part 2); the composed signed entry host_agent_detach_apply_v4 is
+exercised in the PR3b apply spec. Here: `progress` advances RV->CL->ST->returned, `refuse` answers
+a retryable refusal. Signature checks of the detach packet are pinned in the authorize spec.
+## Verification guidance and troubleshooting
+A detach that reaches `stopping` with a live attachment, or a refused step that wedges at once, is a defect.
+"""
+use std.spec.{step}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentAttachmentSummaryV4,
+    HostAgentReleaseOutcomeV4, HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, host_agent_detach_check_v4,
+    host_agent_detach_release_v4, host_agent_attachment_step_v4, host_agent_begin_stop_v4,
+    host_linux_service_agent_request_cancel_v4}
+
+fn d_agent(stage: text, attach_stage: text) -> HostLinuxServiceAgentV4:
+    var agent = HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "a".repeat(64), payload_digest: "b".repeat(64),
+        stage: stage, reserved: true, observed: true, clock_ms: 1000, attachment_consumed: true)
+    agent.attachment = Some(HostAgentAttachmentV4(attach_stage: attach_stage, not_after: 1000000,
+        attach_digest: sha256_text("attach-packet-1"), ready_deadline_ms: 31000, io_deadline_ms: 61000))
+    agent
+
+fn d_progress(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    if att.attach_stage == "revoked": att.attach_stage = "cleaned"
+    elif att.attach_stage == "cleaned": att.attach_stage = "settling"
+    elif att.attach_stage == "settling": att.attach_stage = "returned"
+    HostAgentAttachmentReleaseStepV4(attachment: att, outcome: HostAgentReleaseOutcomeV4.Progress, error: "")
+
+fn d_refuse(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    HostAgentAttachmentReleaseStepV4(attachment: call.attachment, outcome: HostAgentReleaseOutcomeV4.Refused,
+        error: "helper-settle-busy")
+
+fn d_stage(agent: HostLinuxServiceAgentV4) -> text:
+    if val att = agent.attachment: return att.attach_stage
+    if agent.attachment_summary.is_some(): return "RT"
+    "none"
+
+# The attach digest every d_agent attachment carries (the signed detach packet must name it).
+fn d_attach() -> text:
+    sha256_text("attach-packet-1")
+
+describe "V4 agent PR3b: signed detach":
+    it "refuses a detach before any attach":
+        # @req H-15
+        val agent = HostLinuxServiceAgentV4(operation_id: "op_1", stage: "running")
+        expect(host_agent_detach_check_v4(agent, None, "detach-packet-1", d_attach()).unwrap_err()).to_equal("detach-unattached")
+
+    it "releases the attachment at running and returns before any stop":
+        # @req H-09, 13.4 (attachment-only release with stage running)
+        val progress = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: d_progress(call)
+        val agent = d_agent("running", "adopted")
+        expect(host_agent_detach_check_v4(agent, None, "detach-packet-1", d_attach()).unwrap()).to_equal(false)
+        var state = host_agent_detach_release_v4(agent, sha256_text("detach-packet-1"), progress).agent
+        step("d1 revokes: the pane lease epoch moves on without a pane ack")
+        expect(d_stage(state)).to_equal("revoked")
+        expect(state.attachment.unwrap().lease_epoch).to_equal(1)
+        step("the step driver resumes the release at running (never re-entering d1)")
+        for expected in ["cleaned", "settling", "RT"]:
+            state = host_agent_attachment_step_v4(state, 1000, 1000000, progress).agent
+            expect(d_stage(state)).to_equal(expected)
+            expect(state.stage).to_equal("running")
+        expect(state.attachment_summary.unwrap().detach_digest).to_equal(sha256_text("detach-packet-1"))
+        expect(state.attachment_summary.unwrap().final_stage).to_equal("returned")
+        step("with the attachment returned a later stop goes straight to stopping")
+        expect(host_agent_begin_stop_v4(state, 2000).stage).to_equal("stopping")
+
+    it "keeps detach on a refused release step and never reaches the native Destroy":
+        # @req H-10, H-39 (a first transient refusal at the window end does not wedge)
+        val refuse = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: d_refuse(call)
+        val stopped = host_agent_begin_stop_v4(d_agent("running", "revoked"), 1000)
+        expect(stopped.stage).to_equal("detach")
+        val pre = host_agent_attachment_step_v4(stopped, 2000, 1000000, refuse)
+        expect(pre.native).to_equal(false)
+        expect(pre.error).to_equal("helper-settle-busy")
+        expect(pre.agent.stage).to_equal("detach")
+        expect(pre.agent.attachment.unwrap().detach_refusals).to_equal(1)
+
+    it "moves detach to stopping in the same call that writes returned (F1 hook)":
+        # @req 14A F1, H-49 (T-C ST E2)
+        val progress = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: d_progress(call)
+        val agent = d_agent("detach", "settling")
+        val applied = host_agent_detach_release_v4(agent, sha256_text("detach-packet-1"), progress)
+        expect(applied.agent.attachment.is_none()).to_equal(true)
+        expect(applied.agent.stage).to_equal("stopping")
+
+describe "V4 agent PR3b: detach replay and conflict (F5)":
+    it "answers an exact replay idempotently and refuses a different packet, at running and at detach":
+        # @req H-18, 14A F5
+        for stage in ["running", "detach"]:
+            step("stage " + stage)
+            val agent = d_agent(stage, "revoked")
+            expect(host_agent_detach_check_v4(agent, Some("detach-packet-1"), "detach-packet-1", d_attach()).unwrap()).to_equal(true)
+            expect(host_agent_detach_check_v4(agent, Some("detach-packet-1"), "detach-packet-2", d_attach()).unwrap_err()).to_equal("detach-stage")
+        step("a signed cancel at detach is a no-op answered with the reply (first cause kept)")
+        val cancelled = host_linux_service_agent_request_cancel_v4(d_agent("detach", "revoked"), sha256_text("signed-cancel"))
+        expect(cancelled.error).to_equal("")
+        expect(cancelled.agent.stage).to_equal("detach")
+
+    it "answers a returned attachment by stage: detach-unattached at running, detach-stage after it":
+        # @req 14A F5 (deliberate difference), H-18
+        var returned = HostLinuxServiceAgentV4(operation_id: "op_1", stage: "running", attachment_consumed: true)
+        returned.attachment_summary = Some(HostAgentAttachmentSummaryV4(attach_digest: sha256_text("attach-packet-1"),
+            detach_digest: sha256_text("detach-packet-1"), final_stage: "returned", error: ""))
+        expect(host_agent_detach_check_v4(returned, None, "detach-packet-1", d_attach()).unwrap_err()).to_equal("detach-unattached")
+        expect(host_agent_detach_check_v4(returned, Some("detach-packet-1"), "detach-packet-1", d_attach()).unwrap()).to_equal(true)
+        var stopping = returned
+        stopping.stage = "stopping"
+        expect(host_agent_detach_check_v4(stopping, Some("detach-packet-1"), "detach-packet-1", d_attach()).unwrap()).to_equal(true)
+        expect(host_agent_detach_check_v4(stopping, Some("detach-packet-1"), "detach-packet-2", d_attach()).unwrap_err()).to_equal("detach-stage")
+        expect(host_agent_detach_check_v4(stopping, None, "detach-packet-2", d_attach()).unwrap_err()).to_equal("detach-stage")
+
+    it "refuses a detach while the attach is still opening or its receipt is still expiring":
+        # @req 14.2 (T-A OP/RP E2), nothing archived
+        expect(host_agent_detach_check_v4(d_agent("running", "opening"), None, "d", d_attach()).unwrap_err()).to_equal("detach-attach-pending")
+        expect(host_agent_detach_check_v4(d_agent("running", "refused-expire-pending"), None, "d", d_attach()).unwrap_err()).to_equal("detach-pending-expire")
+        expect(host_agent_detach_check_v4(d_agent("running", "refused"), None, "d", d_attach()).unwrap_err()).to_equal("detach-unattached")
+
+    it "refuses a detach that names another attachment's digest, before anything is archived":
+        # @req H-03 (detach), 13.2 (detach digest names the attach digest), P2-2 (detach check binds it)
+        val other = sha256_text("attach-packet-2")
+        expect(host_agent_detach_check_v4(d_agent("running", "adopted"), None, "d", other).unwrap_err()).to_equal("detach-attach-digest")
+        expect(host_agent_detach_check_v4(d_agent("detach", "revoked"), Some("d"), "d", other).unwrap_err()).to_equal("detach-attach-digest")
+        step("a returned attachment is bound to its kept summary digest")
+        var returned = HostLinuxServiceAgentV4(operation_id: "op_1", stage: "stopping", attachment_consumed: true)
+        returned.attachment_summary = Some(HostAgentAttachmentSummaryV4(attach_digest: d_attach(), detach_digest: "",
+            final_stage: "returned", error: ""))
+        expect(host_agent_detach_check_v4(returned, Some("d"), "d", other).unwrap_err()).to_equal("detach-attach-digest")

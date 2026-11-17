@@ -2112,6 +2112,48 @@ fn gradient_inner(raw: text) -> text:
         return ""
     raw.substring(lp + 1, rp)
 
+# The image layers of a `background` / `background-image` list when every
+# one is a plain `linear-gradient(...)` or `radial-gradient(...)` with at least
+# two stops, in CSS order (the first paints on top). A trailing colour-only
+# layer (the `background` shorthand's final layer) is not an image and is
+# left out; `gradient_layer_list_color_text` returns it. Anything else
+# (url(), repeating-/conic- gradients, a colour inside an image layer, a
+# malformed layer) returns [] so the whole list stays fail-closed.
+fn gradient_layer_list(raw: text) -> [text]:
+    val parts = split_top_level_commas_paren_aware(raw.trim())
+    var count = parts.len()
+    if count > 1 and gradient_layer_list_color_text(raw) != "":
+        count = count - 1
+    var layers: [text] = []
+    var i = 0
+    while i < count:
+        val layer = parts[i]
+        val lower = layer.lower()
+        var open = -1
+        if text_starts_with_portable(lower, "linear-gradient("):
+            open = "linear-gradient".len()
+        elif text_starts_with_portable(lower, "radial-gradient("):
+            open = "radial-gradient".len()
+        if open < 0 or gradient_matching_close(layer, open) != layer.byte_len() - 1:
+            return []
+        if parse_gradient_stops(layer).len() < 2:
+            return []
+        layers.push(layer)
+        i = i + 1
+    layers
+
+# The final top-level layer of a background list when it is a bare colour
+# (no image or function other than a colour function), else "".
+fn gradient_layer_list_color_text(raw: text) -> text:
+    val parts = split_top_level_commas_paren_aware(raw.trim())
+    val last = parts[parts.len() - 1]
+    val lower = last.lower()
+    if (lower == "" or lower.contains("gradient(") or lower.contains("url(") or
+            lower.contains("image") or lower.contains("element(") or
+            lower.contains("paint(") or lower.contains("var(")):
+        return ""
+    last
+
 fn is_radial_gradient(raw: text) -> bool:
     text_index_of(raw.lower(), "radial-gradient(") >= 0
 

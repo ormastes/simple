@@ -2184,7 +2184,227 @@ fn selector_group_parts(group: text) -> [text]:
         val tail = normalized.substring(token_start, norm_len).trim()
         if tail.len() > 0:
             parts[part_i] = tail
+    var ci = 0
+    while ci < parts.len():  # cpu-lane-loop-ok: canonicalises each part of ONE selector group
+        parts[ci] = _canonical_compound(parts[ci])
+        ci = ci + 1
     parts
+
+# Pseudo-class names Chrome 159 accepts in a style rule (each checked with a
+# Chrome 159 `<style>` probe, 2026-11-17). One unknown pseudo-class drops the
+# whole rule (Selectors 4 section 3.1: an invalid selector in a list
+# invalidates the list), unlike a known-but-unsatisfied one (`a, b:hover`).
+# Legacy single-colon pseudo-elements are listed too. The @page-only names
+# `:first`, `:left`, `:right` and `:blank` are rejected by Chrome here.
+# Vendor-prefixed `-webkit-` / `-internal-` names are accepted.
+val CSS_KNOWN_PSEUDO_CLASSES: [text] = [
+    "active", "active-view-transition", "any-link", "autofill", "buffering",
+    "checked", "current", "default", "defined", "dir", "disabled", "empty",
+    "enabled", "first-child", "first-of-type", "focus", "focus-visible",
+    "focus-within", "fullscreen", "future", "has", "host", "host-context",
+    "hover", "in-range", "indeterminate", "invalid", "is", "lang", "last-child",
+    "last-of-type", "link", "modal", "muted", "not", "nth-child",
+    "nth-last-child", "nth-last-of-type", "nth-of-type", "only-child",
+    "only-of-type", "open", "optional", "out-of-range", "past", "paused",
+    "picture-in-picture", "placeholder-shown", "playing", "popover-open",
+    "read-only", "read-write", "required", "root", "scope", "seeking",
+    "stalled", "state", "target", "user-invalid", "user-valid", "valid",
+    "visited", "volume-locked", "where", "xr-overlay",
+    "before", "after", "first-line", "first-letter"
+]
+
+# `::` pseudo-element names Chrome 159 accepts (same probe). Chrome accepts
+# every `::-webkit-` name.
+val CSS_KNOWN_PSEUDO_ELEMENTS: [text] = [
+    "after", "backdrop", "before", "checkmark", "column", "cue", "cue-region",
+    "details-content", "file-selector-button", "first-letter", "first-line",
+    "grammar-error", "highlight", "marker", "part", "picker", "picker-icon",
+    "placeholder", "scroll-button", "scroll-marker", "scroll-marker-group",
+    "search-text", "selection", "slotted", "spelling-error", "target-text",
+    "view-transition", "view-transition-group", "view-transition-image-pair",
+    "view-transition-new", "view-transition-old"
+]
+
+fn _css_name_in(names: [text], n: text) -> bool:
+    var i = 0
+    while i < names.len():  # cpu-lane-loop-ok: fixed ~70-name table, once per pseudo name at rule parse
+        if names[i] == n:
+            return true
+        i = i + 1
+    false
+
+fn _css_pseudo_class_known(name: text) -> bool:
+    val n = name.lower()
+    if n.starts_with("-webkit-") or n.starts_with("-internal-"):
+        return true
+    _css_name_in(CSS_KNOWN_PSEUDO_CLASSES, n)
+
+fn _css_pseudo_element_known(name: text) -> bool:
+    val n = name.lower()
+    if n.starts_with("-webkit-"):
+        return true
+    _css_name_in(CSS_KNOWN_PSEUDO_ELEMENTS, n)
+
+# Index of the `)` closing the `(` at `open`, before `end`; -1 when unclosed.
+fn _selector_paren_close(sel: text, open: i32, end: i32) -> i32:
+    var depth = 0
+    var quote = ""
+    var i = open
+    while i < end:  # cpu-lane-loop-ok: one functional argument of ONE rule's selector at parse time
+        val ch = sel.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i = i + 1
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    0 - 1
+
+# Does sel[start, end) name an unknown pseudo-class or pseudo-element? The
+# arguments of `:not()`, `:has()` and the `of S` of `:nth-child()` /
+# `:nth-last-child()` are checked too (they are not forgiving); `:is()` and
+# `:where()` are forgiving in Chrome, so their arguments are not. After a
+# pseudo-element, the rest of its compound is not checked
+# (`::-webkit-scrollbar:horizontal` is valid).
+fn _selector_range_has_unknown_pseudo(sel: text, start: i32, end: i32) -> bool:
+    var quote = ""
+    var bracket = 0
+    var after_element = false
+    var i = start
+    while i < end:  # cpu-lane-loop-ok: one pass over ONE rule's selector text at parse time
+        val ch = sel.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i = i + 1
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "[":
+            bracket = bracket + 1
+        elif ch == "]":
+            if bracket > 0:
+                bracket = bracket - 1
+        elif bracket == 0 and " ,>+~\t\n".contains(ch):
+            after_element = false
+        elif bracket == 0 and ch == "(":
+            val skip = _selector_paren_close(sel, i, end)
+            if skip < 0:
+                return false
+            i = skip
+        elif bracket == 0 and ch == ":":
+            val is_element = i + 1 < end and sel.substring(i + 1, i + 2) == ":"
+            val name_start = if is_element: i + 2 else: i + 1
+            var e = name_start
+            while e < end and not "():.#[ ,>+~".contains(sel.substring(e, e + 1)):  # cpu-lane-loop-ok: scans ONE pseudo name
+                if sel.substring(e, e + 1) == "\\":
+                    e = e + 1
+                e = e + 1
+            val name = sel.substring(name_start, e)
+            if is_element:
+                if not _css_pseudo_element_known(name):
+                    return true
+                after_element = true
+            elif not after_element and not _css_pseudo_class_known(name):
+                return true
+            i = e - 1
+            if e < end and sel.substring(e, e + 1) == "(":
+                val close = _selector_paren_close(sel, e, end)
+                if close < 0:
+                    return false
+                val lname = name.lower()
+                if not is_element and (lname == "not" or lname == "has"):
+                    if _selector_range_has_unknown_pseudo(sel, e + 1, close):
+                        return true
+                elif not is_element and (lname == "nth-child" or lname == "nth-last-child"):
+                    val arg = sel.substring(e + 1, close)
+                    val of_at = _nth_of_offset(PSEUDO_NTH_CHILD, arg)
+                    if of_at >= 0 and _selector_range_has_unknown_pseudo(sel, e + 1 + of_at + 4, close):
+                        return true
+                i = close
+        i = i + 1
+    false
+
+# True when a rule's selector list names a pseudo-class or `::` pseudo-element
+# Chrome 159 does not know, so the whole rule must be dropped.
+# reason: CSS rule admission is a yes/no fact about one selector text.
+# @allow(primitive_api)
+fn selector_list_has_unknown_pseudo(sel: text) -> bool:
+    _selector_range_has_unknown_pseudo(sel, 0, sel.byte_len())
+
+# Reorder ONE compound selector into the tag, #id, .class, [attr], :pseudo
+# order both matchers read, so `div.a.b#t` and `:is(p, div).k` match
+# like Chrome. Relative order within each kind is kept; a malformed compound
+# comes back unchanged.
+fn _canonical_compound(part: text) -> text:
+    val n = part.byte_len()
+    if n == 0 or _comb_code_of_part(part) >= 0:
+        return part
+    var i = 0
+    while i < n and not ".#[:".contains(part.substring(i, i + 1)):  # cpu-lane-loop-ok: leading type selector of ONE compound
+        if part.substring(i, i + 1) == "\\":
+            i = i + 1
+        i = i + 1
+    if i >= n:
+        return part
+    val tag = part.substring(0, i)
+    var ids = ""
+    var classes = ""
+    var attrs = ""
+    var pseudos = ""
+    while i < n:  # cpu-lane-loop-ok: walks the simple selectors of ONE compound
+        val start = i
+        val ch = part.substring(i, i + 1)
+        if ch == "[":
+            val close = find_from(part, "]", i + 1)
+            if close < 0:
+                return part
+            i = close + 1
+            attrs = attrs + part.substring(start, i)
+        elif ch == ":":
+            i = i + 1
+            if i < n and part.substring(i, i + 1) == ":":
+                i = i + 1
+            while i < n and not ".#[:(".contains(part.substring(i, i + 1)):  # cpu-lane-loop-ok: ONE pseudo name
+                if part.substring(i, i + 1) == "\\":
+                    i = i + 1
+                i = i + 1
+            if i < n and part.substring(i, i + 1) == "(":
+                var depth = 1
+                i = i + 1
+                while i < n and depth > 0:  # cpu-lane-loop-ok: ONE functional argument
+                    val c = part.substring(i, i + 1)
+                    if c == "(":
+                        depth = depth + 1
+                    elif c == ")":
+                        depth = depth - 1
+                    i = i + 1
+                if depth != 0:
+                    return part
+            pseudos = pseudos + part.substring(start, i)
+        else:
+            i = i + 1
+            while i < n and not ".#[:".contains(part.substring(i, i + 1)):  # cpu-lane-loop-ok: ONE class or id name
+                if part.substring(i, i + 1) == "\\":
+                    i = i + 1
+                i = i + 1
+            if ch == "#":
+                ids = ids + part.substring(start, i)
+            else:
+                classes = classes + part.substring(start, i)
+    tag + ids + classes + attrs + pseudos
 
 fn selector_rightmost_part(parts: [text]) -> text:
     var right = parts.len() - 1

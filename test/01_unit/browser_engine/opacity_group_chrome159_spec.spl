@@ -1,0 +1,182 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS `opacity` on a box with two or more painted items (true group
+compositing) to Chrome 159 on the CPU raster, cpu_simd and Vulkan lanes.
+Audience: browser-engine and Engine2D maintainers.
+
+Chrome's group pipeline, fitted on 2026-11-17 (Chrome 159, arm64 headless,
+`--force-device-scale-factor=4`; see
+`doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md`):
+- the subtree is rasterised into a transparent premultiplied 8-bit layer;
+- the layer is restored with paint alpha `A = round(opacity*255)` through
+  SkBlendARGB32: `sc = A+1`, `p = 0xFFFF - La*sc`, `ds = (p + (p>>8)) >> 8`,
+  `out = (L*sc + D*ds) >> 8`.
+Only Chrome's raster-tile seams (a few device columns just left of x = 256*k,
+k >= 2) differ, by at most 2 levels; the pinned cells stay inside one
+256-device-px tile and the full-frame row asserts the seam bound.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-OPACITY-GROUP-CHROME159-001 — CSS opacity groups composite as Chrome 159 does.
+"""
+use std.spec.*
+use std.io_runtime.{file_read_bytes_result}
+use std.common.image.png_decode.{PngImage, decode_png_to_argb}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count, vulkan_readback_census_reset, vulkan_readback_census_line}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_pixel, css_opacity_group_alpha8}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_resolved_engine2d_backend
+}
+
+fn grp_cell(left: i32, top: i32, bg: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:" + "{top}" + "px;width:16px;height:8px;background:" + bg + "\">" + inner + "</div>"
+
+fn grp_box(left: i32, w: i32, bg: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:0;width:" + "{w}" + "px;height:8px;background:" + bg + "\"></div>"
+
+fn grp_group(op: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:0;top:0;width:16px;height:8px;opacity:" + op + "\">" + inner + "</div>"
+
+fn grp_group_bg(op: text, bg: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:0;top:0;width:16px;height:8px;opacity:" + op + ";background:" + bg + "\">" + inner + "</div>"
+
+# One 64x16 block: row 0 holds four two-child groups (A at 0..10, B at 6..16,
+# opaque, overlapping); row 1 holds a group whose own background is one of
+# its two items, and a three-child group.
+fn grp_block(ox: i32) -> text:
+    var body = ""
+    body = body + grp_cell(ox, 0, "rgb(40,90,200)", grp_group("0.5", grp_box(0, 10, "rgb(250,20,30)") + grp_box(6, 10, "rgb(10,200,60)")))
+    body = body + grp_cell(ox + 16, 0, "rgb(7,7,7)", grp_group("0.3", grp_box(0, 10, "rgb(255,255,255)") + grp_box(6, 10, "rgb(128,64,192)")))
+    body = body + grp_cell(ox + 32, 0, "rgb(230,220,10)", grp_group("0.75", grp_box(0, 10, "rgb(17,34,51)") + grp_box(6, 10, "rgb(200,100,0)")))
+    body = body + grp_cell(ox + 48, 0, "rgb(128,128,128)", grp_group("0.9", grp_box(0, 10, "rgb(0,0,255)") + grp_box(6, 10, "rgb(255,0,0)")))
+    body = body + grp_cell(ox, 8, "rgb(60,160,90)", grp_group_bg("0.6", "rgb(200,30,120)", grp_box(4, 8, "rgb(240,240,0)")))
+    body = body + grp_cell(ox + 16, 8, "rgb(255,255,255)", grp_group("0.45", grp_box(0, 8, "rgb(255,0,0)") + grp_box(4, 8, "rgb(0,255,0)") + grp_box(8, 8, "rgb(0,0,255)")))
+    body
+
+fn grp_page(blocks: i32) -> text:
+    var body = ""
+    var k = 0
+    while k < blocks:
+        body = body + grp_block(k * 64)
+        k = k + 1
+    "<html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
+
+# Sample points (CSS px) and Chrome 159 colours, `--force-device-scale-factor=4
+# --window-size=64,16` of grp_page(1), read at device (x*4+2, y*4+2). Each
+# region is one uniform colour in Chrome. Per cell: A-only, overlap, B-only;
+# then group-background cell (bg, child, bg) and three-child cell.
+val GRP_X: [i32] = [3, 8, 13, 19, 24, 29, 35, 40, 45, 51, 56, 61, 2, 8, 14, 18, 22, 26, 30]
+val GRP_Y: [i32] = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12]
+val GRP_CHROME: [u32] = [
+    0xFF913672u32, 0xFF189181u32, 0xFF189181u32,
+    0xFF525252u32, 0xFF2B183Fu32, 0xFF2B183Fu32,
+    0xFF465028u32, 0xFFCF8202u32, 0xFFCF8202u32,
+    0xFF0C0CF2u32, 0xFFF20C0Cu32, 0xFFF20C0Cu32,
+    0xFF90516Cu32, 0xFFA8D023u32, 0xFF90516Cu32,
+    0xFFFF8B8Bu32, 0xFF8BFF8Bu32, 0xFF8B8BFFu32, 0xFF8B8BFFu32
+]
+# Chrome 159 full frame of grp_page(3) at k=4 (`--window-size=192,16`,
+# 768x64 device px). Column 511 is a raster-tile seam (32 px one level off
+# the tile-interior rule).
+val GRP_BG_BORDER_PAGE = "<html><body style=\"margin:0;background:#fff\"><div style=\"position:absolute;left:10px;top:40px;width:24px;height:14px;background:#f00;border:3px solid #00f;opacity:0.5\"></div></body></html>"
+val GRP_WIDE_REF = "test/fixtures/browser_engine/opacity_group_chrome159/group_cells_wide_k4.png"
+
+fn grp_mismatches(px: [u32], fw: i32) -> i32:
+    if px.len() < fw * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < GRP_CHROME.len():
+        val got = px[GRP_Y[n] * fw + GRP_X[n]]
+        if got != GRP_CHROME[n]:
+            print "opacity-group cell {n} ({GRP_X[n]},{GRP_Y[n]}) got {got} want {GRP_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+fn grp_chan_dev(a: u32, b: u32, shift: u32) -> i32:
+    val x = ((a >> shift) & 255u32) as i32
+    val y = ((b >> shift) & 255u32) as i32
+    if x > y: x - y else: y - x
+
+fn grp_frame_max_dev(got: [u32], want: [u32]) -> i32:
+    if got.len() != want.len() or want.len() == 0:
+        return 999
+    var worst = 0
+    var i = 0
+    while i < want.len():
+        for sh in [16u32, 8u32, 0u32]:
+            val d = grp_chan_dev(got[i], want[i], sh)
+            if d > worst:
+                worst = d
+        i = i + 1
+    worst
+
+fn grp_chrome_reference(path: text) -> [u32]:
+    var out: [u32] = []
+    match file_read_bytes_result(path):
+        Ok(bytes):
+            match decode_png_to_argb(bytes):
+                Ok(img):
+                    out = img.pixels
+                Err(msg):
+                    print "decode failed {path}: {msg}"
+        Err(msg):
+            print "read failed {path}: {msg}"
+    out
+
+describe "CSS opacity groups composite as Chrome 159 does":
+    it "restores an opaque layer pixel with SkBlendARGB32 at alpha round(opacity*255)":
+        expect(css_opacity_group_alpha8(50)).to_equal(128)
+        expect(css_opacity_group_alpha8(30)).to_equal(77)
+        expect(css_opacity_group_composite_pixel(0xFFFA141Eu32, 0xFF285AC8u32, 128)).to_equal(0xFF913672u32)
+        expect(css_opacity_group_composite_pixel(0x00FFFFFFu32, 0xFF285AC8u32, 128)).to_equal(0xFF285AC8u32)
+
+    it "composites two-child, background-plus-child and three-child groups on cpu_simd as Chrome does":
+        val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "cpu_simd")
+        expect(grp_mismatches(px, 64)).to_equal(0)
+
+    it "composites two-child, background-plus-child and three-child groups on the CPU raster as Chrome does":
+        val px = simple_web_layout_render_html_software_pixels(grp_page(1), 64, 16)
+        expect(grp_mismatches(px, 64)).to_equal(0)
+
+    it "composites the same groups on Vulkan as Chrome and cpu_simd do":
+        val before = vulkan_readback_count()
+        val vk = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "vulkan")
+        expect(vulkan_readback_count() > before).to_equal(true)
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "cpu_simd")
+        expect(grp_mismatches(vk, 64)).to_equal(0)
+        expect(grp_frame_max_dev(vk, cpu)).to_equal(0)
+
+    it "matches the Chrome full frame across a raster-tile seam within 2 levels at k=4":
+        val want = grp_chrome_reference(GRP_WIDE_REF)
+        val got = simple_web_layout_render_html_pixels_engine2d_at_device_scale(grp_page(3), 192, 16, 4, "cpu_simd")
+        expect(want.len()).to_equal(768 * 64)
+        expect(grp_frame_max_dev(got, want) <= 2).to_equal(true)
+
+    it "treats one box's background and border as a two-item group on the CPU raster as Chrome does":
+        # Chrome 159 (k=4, window 120x70): red bg + 3px blue border at 0.5 over
+        # white gives ff7e7e / 7e7eff (a group), not the folded ff7f7f.
+        val px = simple_web_layout_render_html_software_pixels(GRP_BG_BORDER_PAGE, 120, 70)
+        expect(px[50 * 120 + 25]).to_equal(0xFFFF7E7Eu32)
+        expect(px[50 * 120 + 11]).to_equal(0xFF7E7EFFu32)
+
+    it "treats one box's background and border as a two-item group on cpu_simd and Vulkan as Chrome does":
+        for lane in ["cpu_simd", "vulkan"]:
+            val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(GRP_BG_BORDER_PAGE, 120, 70, lane)
+            expect(px[50 * 120 + 25]).to_equal(0xFFFF7E7Eu32)
+            expect(px[50 * 120 + 11]).to_equal(0xFF7E7EFFu32)
+
+    it "restores Vulkan groups on the device without reading group pixels back":
+        # Simple-internal: the only readback of the frame is the final one
+        # (64x16 = 1024 px); no per-group layer or destination readback.
+        vulkan_readback_census_reset()
+        val vk = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "vulkan")
+        expect(grp_mismatches(vk, 64)).to_equal(0)
+        expect(vulkan_readback_census_line()).to_equal("readbacks=1 readback_pixels=1024")

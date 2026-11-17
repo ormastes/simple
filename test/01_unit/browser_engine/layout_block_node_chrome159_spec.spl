@@ -28,7 +28,7 @@ Chrome oracle: the same pages and numbers as
 | auto-single | `width:100px;margin:auto;height:30px` | 100,0,100,30 | 30 |
 | auto-overconstrained | `width:400px;margin:0 auto;height:30px` | 0,0,400,30 | 30 |
 | auto-nested | parent `border:5px solid`; child `width:100px;margin-left:auto;margin-right:auto;padding:10px;height:20px` | 95,5,120,40 | 50 |
-| auto-4value | `width:100px;margin:5px auto 0 20px;height:30px` | x=20, w=100 (y not pinned: Chrome collapses the 5px top margin through the parent) | 30 |
+| auto-4value | `width:100px;margin:5px auto 0 20px;height:30px` (inside a flow-root wrapper) | 20,5,100,30 (the 5px top margin collapses through the parent: parent y=5) | 30 (wrapper 35) |
 | none-root | root `display:none;width:300px;height:40px;margin:0 auto` | root 0,0,0,0 | — |
 | c | `height:50px;padding:5px` | 0,0,300,60 | 60 |
 | d | `height:20px;margin-bottom:10px` + `height:30px;margin-top:15px` | d2 at y=35 | 65 |
@@ -53,9 +53,47 @@ auto-right, auto-width, auto-overconstrained and auto-4value already passed,
 because an auto margin that computes to 0 matches the old parse-as-0; they stay
 as regression guards for the new auto path.
 
-Not covered here (open `_layout_block_node` divergences): parent/child margin
-collapse, the layout root's own margins, and `width:0`/percent widths with auto
-margins (width 0 means auto here, so they never centre).
+Parent/child margin collapse (`pc-*` cases, CSS 2.2 §8.3.1) was measured with
+the same Chrome binary on 2026-11-16, each case inside a
+`<div style="display:flow-root">` wrapper (mirrored by `_wrap`: the layout root
+is a BFC root), geometry relative to the wrapper:
+
+| case | parent > child | Chrome parent y,h / child y | wrapper h |
+|------|----------------|-----------------------------|-----------|
+| pc-top | P `width:300px` > C `margin-top:10px;height:20px` | 10,20 / 10 | 30 |
+| pc-top-padding | P `padding-top:4px` > same C | 0,34 / 14 | 34 |
+| pc-top-border | P `border:5px solid` > same C | 0,40 / 15 | 40 |
+| pc-bottom-auto | P > C `height:20px;margin-bottom:10px`; sibling `height:5px` | 0,20; sibling y=30 | 35 |
+| pc-bottom-padding | P `padding-bottom:4px` > same C; sibling | 0,34; sibling y=34 | 39 |
+| pc-bottom-height | P `height:40px` > same C; sibling | 0,40; sibling y=40 | 45 |
+| pc-nested | A `mt:4` > B `mt:12;mb:3` > C `mt:8;mb:6;height:10px` | all y=12, A h=10 | 28 |
+| pc-negative | P `mt:10` > C `mt:-5` > G `mt:3;height:20px` | all y=5 | 25 |
+| pc-negative-sibling | S `height:10px;mb:20` + P `mt:10` > C `mt:-30;height:10px` | P y=0, C y=0 | 10 |
+| pc-flex | P `display:flex` > C `width:100px;mt:10;height:20px` | 0,30 / 10 | 30 |
+| pc-overflow-hidden | P `overflow:hidden` > C `mt:10;height:20px` | 0,30 / 10 | 30 |
+| pc-overflow-clip | P `overflow:clip` > same C | 10,20 / 10 | 30 |
+| pc-flow-root | P `display:flow-root` > same C | 0,30 / 10 | 30 |
+
+pc-top, pc-bottom-auto, pc-nested, pc-negative, pc-negative-sibling,
+pc-overflow-clip and auto-4value were red before the 2026-11-16 fix; the blocked
+cases (padding, border, height, flex, overflow:hidden, flow-root) already
+passed and stay as guards.
+
+Round 2 (`mc-*` rows, 2026-11-17, same Chrome binary and wrapper page; each
+row quotes its Chrome line): collapse through empty blocks (es, en, ef, el,
+ep), explicit `height:0` versus auto (h0, h0e), `min-height` (mh, mhp, mhq,
+mht), per-side padding (pb, pt, ept), floats and abs boxes between or before
+collapsing margins (fl, ab/abm, ff, fa), whitespace-only text (ws) and
+grid/flex-column items (gr, fc). Red before the fix: es, en, ef, el, ep, h0,
+h0e, mh, mhq, mht, fl, abm, ff, fa, ws, gr (16). Guards that already passed:
+mhp, pb, pt, ept, fc. Chrome detail: a min-height only blocks the bottom
+collapse when it raises the height (mhp keeps the collapse, mhq does not).
+
+Not covered here (open `_layout_block_node` divergences): per-side borders
+(`border-top`/`border-bottom` are not parsed; StyleProps has one
+`border_width`), clearance, the layout root's own margins, float avoidance by
+following content, and `width:0`/percent widths with auto margins (width 0
+means auto here, so they never centre).
 """
 
 """
@@ -77,6 +115,22 @@ fn _child(height: text) -> BeDomNode:
 
 fn _lay(parent: BeDomNode) -> BeLayoutBox:
     layout_tree(parent, 900.0, 2000.0)
+
+fn _wrap(parent: BeDomNode) -> BeDomNode:
+    """Style-less layout root around `parent`, mirroring the Chrome page's
+    `display:flow-root` wrapper: the root is a BFC root, so a margin that
+    collapses through `parent` stays inside it and moves `parent` down."""
+    var w = BeDomNode.element("div")
+    w.add_child(parent)
+    w
+
+fn _block(style_pairs: [text]) -> BeDomNode:
+    var d = BeDomNode.element("div")
+    var i = 0
+    while i + 1 < style_pairs.len():
+        d.set_style(style_pairs[i], style_pairs[i + 1])
+        i = i + 2
+    d
 
 describe "layout_tree block box model (Chrome 159)":
     it "case b: width is a content-box width, so padding widens the box to 120px":
@@ -327,9 +381,16 @@ describe "layout_tree block box model (Chrome 159)":
         c.set_style("width", "100px")
         c.set_style("margin", "5px auto 0 20px")
         p.add_child(c)
-        val box_ = _lay(p)
-        expect(box_.children[0].x).to_equal(20.0)
-        expect(box_.children[0].width).to_equal(100.0)
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.children[0].x).to_equal(20.0)
+        expect(pb.children[0].width).to_equal(100.0)
+        # Chrome collapses the 5px top margin through the parent: both boxes
+        # sit at y=5, the parent stays 30 tall, the wrapper grows to 35.
+        expect(pb.y).to_equal(5.0)
+        expect(pb.children[0].y).to_equal(5.0)
+        expect(pb.height).to_equal(30.0)
+        expect(w.height).to_equal(35.0)
 
     it "auto-parse: the margin shorthand and longhands record auto per side":
         var a = BeDomNode.element("div")
@@ -366,3 +427,407 @@ describe "layout_tree block box model (Chrome 159)":
         expect(box_.width).to_equal(0.0)
         expect(box_.height).to_equal(0.0)
         expect(box_.children.len()).to_equal(0)
+
+describe "layout_tree parent/child margin collapse (Chrome 159, CSS 2.2 §8.3.1)":
+    it "pc-top: a first child's top margin collapses through an unpadded, unbordered parent":
+        var p = _block(["width", "300px"])
+        p.add_child(_block(["margin-top", "10px", "height", "20px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(10.0)
+        expect(pb.children[0].y).to_equal(10.0)
+        expect(pb.height).to_equal(20.0)
+        expect(w.height).to_equal(30.0)
+
+    it "pc-top-padding: padding-top keeps the child's top margin inside the parent":
+        var p = _block(["width", "300px", "padding-top", "4px"])
+        p.add_child(_block(["margin-top", "10px", "height", "20px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(0.0)
+        expect(pb.children[0].y).to_equal(14.0)
+        expect(pb.height).to_equal(34.0)
+        expect(w.height).to_equal(34.0)
+
+    it "pc-top-border: a top border keeps the child's top margin inside the parent":
+        var p = _block(["width", "300px", "border", "5px solid"])
+        p.add_child(_block(["margin-top", "10px", "height", "20px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(0.0)
+        expect(pb.children[0].y).to_equal(15.0)
+        expect(pb.height).to_equal(40.0)
+        expect(w.height).to_equal(40.0)
+
+    it "pc-bottom-auto: an auto-height parent passes its last child's bottom margin out":
+        var p = _block(["width", "300px"])
+        p.add_child(_block(["height", "20px", "margin-bottom", "10px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].height).to_equal(20.0)
+        expect(w.children[1].y).to_equal(30.0)
+        expect(w.height).to_equal(35.0)
+
+    it "pc-bottom-padding: padding-bottom keeps the last child's bottom margin inside":
+        var p = _block(["width", "300px", "padding-bottom", "4px"])
+        p.add_child(_block(["height", "20px", "margin-bottom", "10px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].height).to_equal(34.0)
+        expect(w.children[1].y).to_equal(34.0)
+        expect(w.height).to_equal(39.0)
+
+    it "pc-bottom-height: an explicit height blocks the bottom collapse":
+        var p = _block(["width", "300px", "height", "40px"])
+        p.add_child(_block(["height", "20px", "margin-bottom", "10px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].height).to_equal(40.0)
+        expect(w.children[1].y).to_equal(40.0)
+        expect(w.height).to_equal(45.0)
+
+    it "pc-nested: margins collapse through three levels, top and bottom":
+        var a = _block(["margin-top", "4px"])
+        var b = _block(["margin-top", "12px", "margin-bottom", "3px"])
+        b.add_child(_block(["margin-top", "8px", "margin-bottom", "6px", "height", "10px"]))
+        a.add_child(b)
+        val w = _lay(_wrap(a))
+        val ab = w.children[0]
+        expect(ab.y).to_equal(12.0)
+        expect(ab.children[0].y).to_equal(12.0)
+        expect(ab.children[0].children[0].y).to_equal(12.0)
+        expect(ab.height).to_equal(10.0)
+        expect(w.height).to_equal(28.0)
+
+    it "pc-negative: a chain 10/-5/3 resolves to max positive plus most negative (5)":
+        var p = _block(["margin-top", "10px"])
+        var c = _block(["margin-top", "-5px"])
+        c.add_child(_block(["margin-top", "3px", "height", "20px"]))
+        p.add_child(c)
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(5.0)
+        expect(pb.children[0].y).to_equal(5.0)
+        expect(pb.children[0].children[0].y).to_equal(5.0)
+        expect(w.height).to_equal(25.0)
+
+    it "pc-negative-sibling: a sibling bottom margin joins the collapsed set 20/10/-30":
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px", "margin-bottom", "20px"]))
+        var p = _block(["margin-top", "10px"])
+        p.add_child(_block(["margin-top", "-30px", "height", "10px"]))
+        root.add_child(p)
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.children[1].children[0].y).to_equal(0.0)
+        expect(w.height).to_equal(10.0)
+
+    it "pc-flex: a flex container does not collapse with its item's margin":
+        var p = _block(["width", "300px", "display", "flex"])
+        p.add_child(_block(["width", "100px", "margin-top", "10px", "height", "20px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(0.0)
+        expect(pb.children[0].y).to_equal(10.0)
+        expect(pb.height).to_equal(30.0)
+
+    it "pc-overflow-hidden: overflow:hidden makes the parent a BFC root":
+        var p = _block(["width", "300px", "overflow", "hidden"])
+        p.add_child(_block(["margin-top", "10px", "height", "20px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(0.0)
+        expect(pb.children[0].y).to_equal(10.0)
+        expect(pb.height).to_equal(30.0)
+
+    it "pc-overflow-clip: overflow:clip is not a BFC root, so the margin still collapses":
+        var p = _block(["width", "300px", "overflow", "clip"])
+        p.add_child(_block(["margin-top", "10px", "height", "20px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(10.0)
+        expect(pb.children[0].y).to_equal(10.0)
+        expect(pb.height).to_equal(20.0)
+
+    it "pc-flow-root: display:flow-root makes the parent a BFC root":
+        var p = _block(["width", "300px", "display", "flow-root"])
+        p.add_child(_block(["margin-top", "10px", "height", "20px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(0.0)
+        expect(pb.children[0].y).to_equal(10.0)
+        expect(pb.height).to_equal(30.0)
+
+    it "pc-html-root: the html element is a BFC root under a #document layout root":
+        # Chrome 159: html{margin:0} body{margin-top:20px} > div{margin-top:10px;height:10px}
+        # gives html 0,h30, body y=20 h10, div y=20 (the root element keeps
+        # body's collapsed margin inside it).
+        var doc = BeDomNode.document()
+        var html = BeDomNode.element("html")
+        var body = _block(["margin-top", "20px"])
+        body.add_child(_block(["margin-top", "10px", "height", "10px"]))
+        html.add_child(body)
+        doc.add_child(html)
+        val d = _lay(doc)
+        val hb = d.children[0]
+        expect(hb.y).to_equal(0.0)
+        expect(hb.height).to_equal(30.0)
+        expect(hb.children[0].y).to_equal(20.0)
+        expect(hb.children[0].height).to_equal(10.0)
+        expect(hb.children[0].children[0].y).to_equal(20.0)
+
+    # Round 2 (2026-11-17): Chrome 159.0.8154.6, same flow-root wrapper page
+    # (`--window-size=900,2000 --dump-dom`, geometry relative to the wrapper).
+    # Each comment quotes the Chrome line for the case.
+
+    it "mc-empty-sibling: an empty block's margins collapse with both neighbours":
+        # Chrome: es W h=40 | es_a y=0 h=10 | es_e y=30 h=0 | es_b y=30 h=10
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        root.add_child(_block(["margin-top", "20px", "margin-bottom", "5px"]))
+        root.add_child(_block(["height", "10px", "margin-top", "15px"]))
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(30.0)
+        expect(w.children[1].height).to_equal(0.0)
+        expect(w.children[2].y).to_equal(30.0)
+        expect(w.height).to_equal(40.0)
+
+    it "mc-empty-negative: an empty block joins one set (10, -5, 30, 5 gives 25)":
+        # Chrome: en W h=45 | en_a y=0 h=10 | en_e y=15 h=0 | en_b y=35 h=10
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        root.add_child(_block(["margin-top", "-5px", "margin-bottom", "30px"]))
+        root.add_child(_block(["height", "10px", "margin-top", "5px"]))
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(15.0)
+        expect(w.children[2].y).to_equal(35.0)
+        expect(w.height).to_equal(45.0)
+
+    it "mc-empty-first: an empty first child's margins collapse through the parent top":
+        # Chrome: ef W h=30 | ef_p y=20 h=10 | ef_e y=20 h=0 | ef_c y=20 h=10
+        var p = BeDomNode.element("div")
+        p.add_child(_block(["margin-top", "10px", "margin-bottom", "20px"]))
+        p.add_child(_block(["height", "10px", "margin-top", "5px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(20.0)
+        expect(pb.height).to_equal(10.0)
+        expect(pb.children[0].y).to_equal(20.0)
+        expect(pb.children[1].y).to_equal(20.0)
+        expect(w.height).to_equal(30.0)
+
+    it "mc-empty-last: an empty last child's margins collapse through the parent bottom":
+        # Chrome: el W h=45 | el_p y=0 h=10 | el_c y=0 h=10 | el_e y=40 h=0 | el_s y=40 h=5
+        var p = BeDomNode.element("div")
+        p.add_child(_block(["height", "10px", "margin-bottom", "5px"]))
+        p.add_child(_block(["margin-top", "30px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].height).to_equal(10.0)
+        expect(w.children[0].children[1].y).to_equal(40.0)
+        expect(w.children[1].y).to_equal(40.0)
+        expect(w.height).to_equal(45.0)
+
+    it "mc-empty-nested: a parent holding only an empty block collapses through as a whole":
+        # Chrome: ep W h=30 | ep_a y=0 h=10 | ep_p y=25 h=0 | ep_e y=25 h=0 | ep_s y=25 h=5
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px"]))
+        var p = _block(["margin-top", "5px"])
+        p.add_child(_block(["margin-top", "10px", "margin-bottom", "15px"]))
+        root.add_child(p)
+        root.add_child(_block(["height", "5px", "margin-top", "3px"]))
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(25.0)
+        expect(w.children[1].height).to_equal(0.0)
+        expect(w.children[1].children[0].y).to_equal(25.0)
+        expect(w.children[2].y).to_equal(25.0)
+        expect(w.height).to_equal(30.0)
+
+    it "mc-height0-parent: an explicit height:0 blocks the bottom collapse":
+        # Chrome: h0 W h=5 | h0_p y=0 h=0 | h0_c y=0 h=10 | h0_s y=0 h=5
+        var p = _block(["height", "0"])
+        p.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].height).to_equal(0.0)
+        expect(w.children[0].children[0].y).to_equal(0.0)
+        expect(w.children[1].y).to_equal(0.0)
+        expect(w.height).to_equal(5.0)
+
+    it "mc-height0-empty: an empty height:0 block still collapses through itself":
+        # Chrome: h0e W h=45 | h0e_a y=0 h=10 | h0e_e y=30 h=0 | h0e_b y=35 h=10
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        root.add_child(_block(["height", "0", "margin-top", "20px", "margin-bottom", "25px"]))
+        root.add_child(_block(["height", "10px"]))
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(30.0)
+        expect(w.children[2].y).to_equal(35.0)
+        expect(w.height).to_equal(45.0)
+
+    it "mc-min-height-empty: a non-zero min-height stops an empty block self-collapsing":
+        # Chrome: mh W h=61 | mh_a y=0 h=10 | mh_e y=30 h=1 | mh_b y=51 h=10
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        root.add_child(_block(["min-height", "1px", "margin-top", "20px", "margin-bottom", "20px"]))
+        root.add_child(_block(["height", "10px"]))
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(30.0)
+        expect(w.children[1].height).to_equal(1.0)
+        expect(w.children[2].y).to_equal(51.0)
+        expect(w.height).to_equal(61.0)
+
+    it "mc-min-height-unused: a min-height below the content keeps the bottom collapse":
+        # Chrome: mhp W h=25 | mhp_p y=0 h=10 | mhp_c y=0 h=10 | mhp_s y=20 h=5
+        var p = _block(["min-height", "5px"])
+        p.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].height).to_equal(10.0)
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.height).to_equal(25.0)
+
+    it "mc-min-height-used: a min-height that sets the height blocks the bottom collapse":
+        # Chrome: mhq W h=35 | mhq_p y=0 h=30 | mhq_c y=0 h=10 | mhq_s y=30 h=5
+        var p = _block(["min-height", "30px"])
+        p.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].height).to_equal(30.0)
+        expect(w.children[1].y).to_equal(30.0)
+        expect(w.height).to_equal(35.0)
+
+    it "mc-min-height-top: min-height does not block the top collapse":
+        # Chrome: mht W h=40 | mht_p y=10 h=30 | mht_c y=10 h=10
+        var p = _block(["min-height", "30px"])
+        p.add_child(_block(["height", "10px", "margin-top", "10px"]))
+        val w = _lay(_wrap(p))
+        expect(w.children[0].y).to_equal(10.0)
+        expect(w.children[0].height).to_equal(30.0)
+        expect(w.children[0].children[0].y).to_equal(10.0)
+        expect(w.height).to_equal(40.0)
+
+    it "mc-padding-bottom-only: bottom padding leaves the top collapse open (guard)":
+        # Chrome: pb W h=39 | pb_p y=10 h=24 | pb_c y=10 h=10 | pb_s y=34 h=5
+        var p = _block(["padding-bottom", "4px"])
+        p.add_child(_block(["height", "10px", "margin-top", "10px", "margin-bottom", "10px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].y).to_equal(10.0)
+        expect(w.children[0].height).to_equal(24.0)
+        expect(w.children[1].y).to_equal(34.0)
+        expect(w.height).to_equal(39.0)
+
+    it "mc-padding-top-only: top padding leaves the bottom collapse open (guard)":
+        # Chrome: pt W h=39 | pt_p y=0 h=24 | pt_c y=14 h=10 | pt_s y=34 h=5
+        var p = _block(["padding-top", "4px"])
+        p.add_child(_block(["height", "10px", "margin-top", "10px", "margin-bottom", "10px"]))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].y).to_equal(0.0)
+        expect(w.children[0].height).to_equal(24.0)
+        expect(w.children[0].children[0].y).to_equal(14.0)
+        expect(w.children[1].y).to_equal(34.0)
+        expect(w.height).to_equal(39.0)
+
+    it "mc-empty-padded: top padding stops an empty block self-collapsing (guard)":
+        # Chrome: ept W h=51 | ept_a y=0 h=10 | ept_e y=20 h=1 | ept_b y=41 h=10
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px"]))
+        root.add_child(_block(["padding-top", "1px", "margin-top", "10px", "margin-bottom", "20px"]))
+        root.add_child(_block(["height", "10px"]))
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(20.0)
+        expect(w.children[1].height).to_equal(1.0)
+        expect(w.children[2].y).to_equal(41.0)
+        expect(w.height).to_equal(51.0)
+
+    it "mc-float-between: a float does not separate collapsing sibling margins":
+        # Chrome: fl W h=40 | fl_a y=0 h=10 | fl_f y=27 h=5 | fl_b y=30 h=10
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        root.add_child(_block(["float", "left", "width", "50px", "height", "5px", "margin-top", "7px"]))
+        root.add_child(_block(["height", "10px", "margin-top", "20px"]))
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(27.0)
+        expect(w.children[2].y).to_equal(30.0)
+        expect(w.height).to_equal(40.0)
+
+    it "mc-abs-between: an absolute box does not separate collapsing sibling margins":
+        # Chrome: ab W h=40 | ab_a y=0 h=10 | ab_x y=20 h=5 | ab_b y=30 h=10
+        # Chrome: abm W h=40 | abm_a y=0 h=10 | abm_x y=23 h=5 | abm_b y=30 h=10
+        var root = BeDomNode.element("div")
+        root.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        root.add_child(_block(["position", "absolute", "width", "50px", "height", "5px", "margin-top", "3px"]))
+        root.add_child(_block(["height", "10px", "margin-top", "20px"]))
+        val w = _lay(root)
+        expect(w.children[1].y).to_equal(23.0)
+        expect(w.children[2].y).to_equal(30.0)
+        expect(w.height).to_equal(40.0)
+
+    it "mc-float-first: a leading float does not stop the top collapse":
+        # Chrome: ff W h=20 | ff_p y=10 h=10 | ff_f y=10 h=5 | ff_c y=10 h=10
+        var p = BeDomNode.element("div")
+        p.add_child(_block(["float", "left", "width", "50px", "height", "5px"]))
+        p.add_child(_block(["height", "10px", "margin-top", "10px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(10.0)
+        expect(pb.height).to_equal(10.0)
+        expect(pb.children[0].y).to_equal(10.0)
+        expect(pb.children[1].y).to_equal(10.0)
+        expect(w.height).to_equal(20.0)
+
+    it "mc-abs-first: a leading absolute box does not stop the top collapse":
+        # Chrome: fa W h=20 | fa_p y=10 h=10 | fa_x y=10 h=5 | fa_c y=10 h=10
+        var p = BeDomNode.element("div")
+        p.add_child(_block(["position", "absolute", "width", "50px", "height", "5px"]))
+        p.add_child(_block(["height", "10px", "margin-top", "10px"]))
+        val w = _lay(_wrap(p))
+        val pb = w.children[0]
+        expect(pb.y).to_equal(10.0)
+        expect(pb.height).to_equal(10.0)
+        expect(pb.children[0].y).to_equal(10.0)
+        expect(pb.children[1].y).to_equal(10.0)
+        expect(w.height).to_equal(20.0)
+
+    it "mc-whitespace: whitespace-only text does not block parent/child collapse":
+        # Chrome: ws W h=35 | ws_p y=10 h=10 | ws_c y=10 h=10 | ws_s y=30 h=5
+        var p = BeDomNode.element("div")
+        p.add_child(BeDomNode.text("\n   "))
+        p.add_child(_block(["height", "10px", "margin-top", "10px", "margin-bottom", "10px"]))
+        p.add_child(BeDomNode.text("\n   "))
+        var root = _wrap(p)
+        root.add_child(_block(["height", "5px"]))
+        val w = _lay(root)
+        expect(w.children[0].y).to_equal(10.0)
+        expect(w.children[0].height).to_equal(10.0)
+        expect(w.children[1].y).to_equal(30.0)
+        expect(w.height).to_equal(35.0)
+
+    it "mc-grid-items: grid items never collapse their margins with each other":
+        # Chrome: gr W h=40 | gr_p y=0 h=40 | gr_a y=0 h=10 | gr_b y=30 h=10
+        var p = _block(["display", "grid"])
+        p.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        p.add_child(_block(["height", "10px", "margin-top", "10px"]))
+        val w = _lay(_wrap(p))
+        expect(w.children[0].height).to_equal(40.0)
+        expect(w.children[0].children[1].y).to_equal(30.0)
+
+    it "mc-flex-column-items: flex column items never collapse (guard)":
+        # Chrome: fc W h=40 | fc_p y=0 h=40 | fc_a y=0 h=10 | fc_b y=30 h=10
+        var p = _block(["display", "flex", "flex-direction", "column"])
+        p.add_child(_block(["height", "10px", "margin-bottom", "10px"]))
+        p.add_child(_block(["height", "10px", "margin-top", "10px"]))
+        val w = _lay(_wrap(p))
+        expect(w.children[0].height).to_equal(40.0)
+        expect(w.children[0].children[1].y).to_equal(30.0)

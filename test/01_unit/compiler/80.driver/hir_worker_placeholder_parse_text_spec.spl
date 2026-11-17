@@ -1,0 +1,47 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+A HIR shard / per-file unit worker builds an empty PLACEHOLDER surface for every
+module outside its closure slice (`worker_mode == 2` in
+`driver_source_parse_selected.spl`). The placeholder used to parse the text
+`""` together with the module's REAL path. The core lexer treats an empty
+source with a named path as the old "reads every source as empty" failure and
+re-reads the file from disk -- after preprocessing already ran on `""`. So the
+worker parsed the RAW file: every top-level `@when(...):` / `@else:` reached the
+parser and failed with `unexpected token in expression: ':'`
+(doc/08_tracking/bug/native_worker_when_unstripped_2026-11-17.md).
+
+The placeholder text must be a non-empty empty module, so the parse never
+touches the disk and yields zero declarations.
+Audience: compiler engineers maintaining the phase-2 worker surface route.
+"""
+
+# @tag: unit, compiler, driver
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{par_had_error_get}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_worker_placeholder_parse_text_v1}
+
+val WPT_FIXTURE: text = "test/fixtures/worker_placeholder/flat_when_fixture.spl"
+
+describe "HIR worker placeholder parse text":
+    it "is a non-empty empty module":
+        step "Given the placeholder text a worker parses for an out-of-closure module"
+        val placeholder = driver_worker_placeholder_parse_text_v1()
+        step "Then it is not empty, so the lexer never re-reads the module path"
+        expect(placeholder.len() > 0).to_equal(true)
+        expect(placeholder.trim()).to_equal("")
+
+    it "parses with a real @when-bearing path without reading the raw file":
+        step "Given a module path whose file has a top-level @when/@else chain"
+        val placeholder = driver_worker_placeholder_parse_text_v1()
+        step "When the placeholder text is parsed under that path"
+        val parsed = parse_full_frontend(placeholder, WPT_FIXTURE, "wpt.flat_when_fixture", Logger(level: 0))
+        step "Then no parse error is raised and no declaration leaks in from disk"
+        expect(par_had_error_get()).to_equal(false)
+        expect(parsed.functions.len()).to_equal(0)

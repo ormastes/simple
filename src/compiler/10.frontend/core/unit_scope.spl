@@ -1,0 +1,186 @@
+#![allow(primitive_api)]
+# primitive_api: path/suffix/family scope helpers take and return source text
+# (module paths, unit suffixes, diagnostic text) with no domain type.
+
+# Library unit suffix scope, shared by the pure-Simple core interpreter
+# (interpreter/eval_units.spl) and the compiled frontend (flat AST bridge,
+# used by native build and lint).
+#
+# A suffix backed by a library unit module (src/unit/<org>[.com]/<family>/<sfx>.spl,
+# any org dir) is usable only after `use unit.[<org>[.com].]<family>[.{sfx}|.*|.<sfx>]`
+# (org omitted = simple-lang, as in resolve_unit_path) or a same-file
+# `unit X: T as sfx`. Families are tracked as "<org>/<family>".
+# Callers reset scope per file (interpreter: per core_interpret run).
+
+use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at}
+use std.io_runtime.{dir_list_or_empty, file_exists}
+use compiler.core.interpreter.module_loader_resolve.{unit_library_root_get, unit_library_root_set, module_resolve_cache_reset}
+
+val UNIT_DEFAULT_ORG: text = "simple-lang"
+
+var unit_scope_names: [text] = []
+var unit_scope_families: [text] = []
+var unit_scope_ambiguous: [text] = []
+var unit_org_dirs: [text] = []
+var unit_org_dirs_loaded: bool = false
+var unit_family_cache_sfx: [text] = []
+var unit_family_cache_fam: [text] = []
+# Only unit decls registered at or after this index count as declared in scope.
+var unit_scope_decl_base: i64 = 0
+
+pub fn unit_library_set_base(dir: text):
+    """Point the library-unit lookup at another root (tests); drops caches."""
+    unit_library_root_set(dir)
+    module_resolve_cache_reset()
+    unit_org_dirs = []
+    unit_org_dirs_loaded = false
+    unit_family_cache_sfx = []
+    unit_family_cache_fam = []
+
+fn unit_library_orgs() -> [text]:
+    """Org dir names under the unit library root, listed once per base."""
+    if not unit_org_dirs_loaded:
+        unit_org_dirs = dir_list_or_empty(unit_library_root_get()).sort()
+        unit_org_dirs_loaded = true
+    unit_org_dirs
+
+fn unit_org_name(org_dir: text) -> text:
+    if org_dir.ends_with(".com"): return org_dir.substring(0, org_dir.last_index_of("."))
+    org_dir
+
+pub fn unit_scope_reset_from(decl_base: i64):
+    """Start a fresh scope; unit decls from index `decl_base` on are this
+    scope's own declarations."""
+    unit_scope_names = []
+    unit_scope_families = []
+    unit_scope_ambiguous = []
+    unit_scope_decl_base = decl_base
+
+pub struct UnitScopeSnapshot:
+    names: [text]
+    families: [text]
+    ambiguous: [text]
+    decl_base: i64
+
+pub fn unit_scope_save() -> UnitScopeSnapshot:
+    """Capture the current scope so a nested per-file reset (the flat AST
+    bridge called from an interpreted script) can hand it back afterwards."""
+    UnitScopeSnapshot(names: unit_scope_names, families: unit_scope_families, ambiguous: unit_scope_ambiguous, decl_base: unit_scope_decl_base)
+
+pub fn unit_scope_restore(snap: UnitScopeSnapshot):
+    unit_scope_names = snap.names
+    unit_scope_families = snap.families
+    unit_scope_ambiguous = snap.ambiguous
+    unit_scope_decl_base = snap.decl_base
+
+pub fn unit_scope_reset():
+    """Interpreter form: the decl registry is not reset between runs, so only
+    decls registered after this reset count."""
+    unit_scope_reset_from(unit_decl_count())
+
+fn unit_path_exists(org_dir_base: text, rest: [text]) -> bool:
+    """True when `<root>/<org>[.com]/<rest>` exists as a module or directory."""
+    val root = unit_library_root_get()
+    if root == "" or rest.len() == 0: return false
+    val joined = rest.join("/")
+    for dir in [org_dir_base, org_dir_base + ".com"]:
+        val base = root + "/" + dir + "/" + joined
+        if file_exists(base + ".spl") or file_exists(base): return true
+    false
+
+fn unit_import_org(segs: [text], module_path: text) -> text:
+    """Org of a `unit.<...>` import (segs include "unit"), or "" when it is
+    ambiguous. A path segment naming an org dir AND a simple-lang family is
+    routed to whichever path exists on disk; both existing is an ambiguity.
+    Ambiguity is enforced here at scope time, not at load time: the loader
+    still loads the org path, but the import admits no suffix and the note is
+    attached to errors for suffixes of that org family only."""
+    if segs.len() < 3: return UNIT_DEFAULT_ORG
+    val cand = segs[1]
+    if cand == UNIT_DEFAULT_ORG or cand == UNIT_DEFAULT_ORG + ".com": return UNIT_DEFAULT_ORG
+    val orgs = unit_library_orgs()
+    if not (orgs.contains(cand) or orgs.contains(cand + ".com")): return UNIT_DEFAULT_ORG
+    var rest = segs[2..]
+    if rest.len() >= 1 and rest[0] == "com": rest = rest[1..]
+    val org_hit = unit_path_exists(cand, rest)
+    val default_hit = unit_path_exists(UNIT_DEFAULT_ORG, segs[1..])
+    if org_hit and default_hit:
+        unit_scope_ambiguous.push(unit_org_name(cand) + "/" + segs[segs.len() - 1] + "\t`use" + module_path + "` is ambiguous: both org '" + cand + "' and simple-lang family '" + cand + "' provide it")
+        return ""
+    if default_hit and not org_hit: return UNIT_DEFAULT_ORG
+    unit_org_name(cand)
+
+pub fn unit_scope_record_use(module_path: text, imported_names: [text]):
+    """Record a `use unit.<...>` import. `{a, b}` scopes those suffixes of the
+    import's org; a bare path or `.*` scopes its last segment as a family and
+    as a suffix. Scope entries are keyed "<org>/<name>"."""
+    if not module_path.starts_with("unit."): return
+    var path = module_path
+    if path.ends_with(".*"): path = path.substring(0, path.last_index_of("."))
+    val last = path.substring(path.last_index_of(".") + 1)
+    val segs = path.split(".")
+    if imported_names.len() == 0 or imported_names.contains("*"):
+        val org = unit_import_org(segs, module_path)
+        if org == "": return
+        unit_scope_families.push(org + "/" + last)
+        unit_scope_names.push(org + "/" + last)
+        return
+    # Selective `use unit.<org-or-family path>.{names}`: the path is the family.
+    val org = unit_import_org(segs, module_path)
+    if org == "": return
+    for name in imported_names:
+        unit_scope_names.push(org + "/" + name)
+
+fn unit_library_families(suffix: text) -> text:
+    """Comma-joined sorted "<org>/<family>" keys whose library unit module
+    defines `suffix` (a suffix may live in several), "" when none, or "?" when
+    the unit library root cannot be found (status unknown)."""
+    val root = unit_library_root_get()
+    if root == "": return "?"
+    var i = 0
+    while i < unit_family_cache_sfx.len():
+        if unit_family_cache_sfx[i] == suffix: return unit_family_cache_fam[i]
+        i = i + 1
+    var found: [text] = []
+    for org_dir in unit_library_orgs():
+        val org_root = root + "/" + org_dir
+        for fam in dir_list_or_empty(org_root):
+            if file_exists(org_root + "/" + fam + "/" + suffix + ".spl"):
+                val key = unit_org_name(org_dir) + "/" + fam
+                if not found.contains(key): found.push(key)
+    val joined = found.sort().join(",")
+    unit_family_cache_sfx.push(suffix)
+    unit_family_cache_fam.push(joined)
+    joined
+
+fn unit_suffix_declared(suffix: text) -> bool:
+    var i = unit_scope_decl_base
+    while i < unit_decl_count():
+        if unit_decl_short_symbol_at(i) == suffix: return true
+        i = i + 1
+    false
+
+pub fn unit_suffix_scope_error(suffix: text) -> text:
+    """"" when `suffix` is in scope, else the diagnostic text. Fails closed
+    when the unit library root cannot be found."""
+    if unit_suffix_declared(suffix): return ""
+    val joined = unit_library_families(suffix)
+    if joined == "?":
+        return "unit suffix '" + suffix + "' cannot be checked: unit library root not found (looked for src/unit under the working directory and next to $SIMPLE_LIB)"
+    if joined == "": return ""
+    val families = joined.split(",")
+    for key in families:
+        if unit_scope_families.contains(key): return ""
+        val org = key.substring(0, key.index_of("/"))
+        if unit_scope_names.contains(org + "/" + suffix): return ""
+    var hints: [text] = []
+    for key in families:
+        val org = key.substring(0, key.index_of("/"))
+        val fam = key.substring(key.index_of("/") + 1)
+        val prefix = if org == UNIT_DEFAULT_ORG: "" else: org + "."
+        hints.push("`use unit." + prefix + fam + ".{" + suffix + "}`")
+    var msg = "unit suffix '" + suffix + "' is not in scope; add " + hints.join(" or ") + " (or declare `unit X: T as " + suffix + "`)"
+    for entry in unit_scope_ambiguous:
+        val tab = entry.index_of("\t")
+        if families.contains(entry.substring(0, tab)): msg = msg + "; " + entry.substring(tab + 1)
+    msg

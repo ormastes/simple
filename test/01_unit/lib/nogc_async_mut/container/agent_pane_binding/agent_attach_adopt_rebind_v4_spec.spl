@@ -1,0 +1,64 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4 / milestone_0021 14B: applying the agent adoption.
+# pid 71 is never a live admitted child: every scenario refuses before native IO.
+# fixture_session is copy-pasted across six specs; accepted (review-n4-r1 P3-4).
+use std.spec.*
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, ContainerPrimaryAttachAdoptionV1,
+    container_primary_attach_adoption_v1}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessRefV1}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_identity_profiled_v3
+use std.nogc_async_mut.container.terminal_session_v2.{host_agent_attach_adopt_v4, host_agent_attach_adoption_v4}
+
+fn fixture_session(adoption: ContainerPrimaryAttachAdoptionV1?, cleaned: bool) -> ContainerPrimaryAttachSessionV1:
+    val plan = container_primary_attach_fixture_v1()
+    var launch = plan.launch_template
+    launch.transport_generation = 1
+    launch.request.launch_deadline_unix_ms = 1
+    val identity = group_process_stream_identity_profiled_v3(launch)
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
+    val transfer = PipedProcessOwnedTransferV2(owner: owner, reference: PipedProcessRefV1(pid: 71,
+        generation: launch.transport_generation, group_root: launch.root, group_identity: identity))
+    ContainerPrimaryAttachSessionV1(plan: plan, transfer: transfer, identity_fingerprint: "c".repeat(64),
+        adoption: adoption, native_cleaned: cleaned)
+
+fn fixture_binding(pane: text, epoch: i64) -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "f".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: pane, service_epoch: epoch)
+
+describe "Host agent attach adopt":
+    it "refuses rebinding an adopted session to another pane and keeps the first adoption":
+        step("Adopt pane-a from a binding, then apply a binding for pane-b")
+        val first = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 1),
+            "parent-operation", 1).unwrap()
+        val turn = host_agent_attach_adopt_v4(fixture_session(Some(first), false), fixture_binding("pane-b", 1),
+            "parent-operation", 1)
+        expect(turn.error).to_equal("container-terminal-adoption-rebind")
+        expect(container_primary_attach_adoption_v1(turn.session).unwrap().pane_id).to_equal("pane-a")
+
+    it "refuses a later lease epoch as a rebind":
+        step("A new child incarnation is a different adoption, never a silent upgrade")
+        val first = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 1),
+            "parent-operation", 1).unwrap()
+        val turn = host_agent_attach_adopt_v4(fixture_session(Some(first), false), fixture_binding("pane-a", 1),
+            "parent-operation", 2)
+        expect(turn.error).to_equal("container-terminal-adoption-rebind")
+        expect(container_primary_attach_adoption_v1(turn.session).unwrap().child_incarnation).to_equal(2)
+
+    it "returns the session unchanged when the agent operation mismatches":
+        step("A refused adoption build never touches the session")
+        val turn = host_agent_attach_adopt_v4(fixture_session(None, false), fixture_binding("pane-a", 1), "other-operation", 1)
+        expect(turn.error).to_equal("attach-plan-operation-mismatch")
+        expect(container_primary_attach_adoption_v1(turn.session).is_some()).to_equal(false)
+
+    it "refuses service epoch zero at the binding before adoption":
+        step("14C: the binding rule is > 0, so epoch 0 is refused by binding validation, not by adopt_v1")
+        val turn = host_agent_attach_adopt_v4(fixture_session(None, false), fixture_binding("pane-a", 0), "parent-operation", 1)
+        expect(turn.error).to_equal("host-agent-pane-binding-epoch-invalid")
+        expect(container_primary_attach_adoption_v1(turn.session).is_some()).to_equal(false)
+
+    it "refuses adopting a natively cleaned session":
+        step("Native cleanup is checked first")
+        val turn = host_agent_attach_adopt_v4(fixture_session(None, true), fixture_binding("pane-a", 1), "parent-operation", 1)
+        expect(turn.error).to_equal("container-terminal-native-cleaned")

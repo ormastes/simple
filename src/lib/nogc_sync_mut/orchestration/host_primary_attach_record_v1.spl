@@ -7,9 +7,9 @@ use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_digest_v3,
     group_process_stream_launch_encode_profiled_v3, group_process_stream_launch_decode_profiled_v3}
-use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperAdmissionContextV1,
-    host_helper_stream_fields_v1, host_helper_stream_text_v1, host_helper_stream_path_v1,
-    host_helper_stream_publish_v1, host_helper_retained_admission_v1, host_helper_archive_present_v1}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperAdmissionContextV1, HostHelperStoreV1,
+    host_helper_store_legacy_v1, host_helper_stream_fields_v1, host_helper_stream_text_v1, host_helper_stream_path_v1,
+    host_helper_stream_publish_v1, host_helper_retained_admission_core_v1, host_helper_archive_present_v1}
 use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2,
     group_process_stream_recover_v2}
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
@@ -57,10 +57,17 @@ pub fn host_primary_attach_consumed_decode_v1(source: text) -> Result<HostPrimar
     if host_primary_attach_consumed_encode_v1(record)? != source: return Err("host-primary-consumed-noncanonical")
     Ok(record)
 
+# milestone_0022 N1 (DESIGN 14.1): every function below has a `_core_v1` body
+# over HostHelperStoreV1; the text-root names are thin wrappers (journal None).
+# Stream records are read and written under `store.root` only.
 pub fn host_primary_attach_validate_record_v1(root: text, operation: OperationEnvelopeV2,
         consumed: HostPrimaryAttachConsumedV1) -> Result<HostHelperAdmissionContextV1, text>:
+    host_primary_attach_validate_record_core_v1(host_helper_store_legacy_v1(root), operation, consumed)
+
+pub fn host_primary_attach_validate_record_core_v1(store: HostHelperStoreV1, operation: OperationEnvelopeV2,
+        consumed: HostPrimaryAttachConsumedV1) -> Result<HostHelperAdmissionContextV1, text>:
     val encoded = host_primary_attach_consumed_encode_v1(consumed)?
-    val context = host_helper_retained_admission_v1(root, operation, consumed.operation_id,
+    val context = host_helper_retained_admission_core_v1(store, operation, consumed.operation_id,
         consumed.operation_digest, consumed.packet_digest, consumed.execution_proof_digest,
         consumed.prepared_receipt_digest, consumed.deadline_unix_ms)?
     val matching = container_primary_attach_admission_validate_v1(consumed.primary_plan, context.admission)?
@@ -68,10 +75,14 @@ pub fn host_primary_attach_validate_record_v1(root: text, operation: OperationEn
 
 pub fn host_primary_attach_consumed_load_v1(root: text,
         operation: OperationEnvelopeV2) -> Result<HostPrimaryAttachConsumedV1, text>:
+    host_primary_attach_consumed_load_core_v1(host_helper_store_legacy_v1(root), operation)
+
+pub fn host_primary_attach_consumed_load_core_v1(store: HostHelperStoreV1,
+        operation: OperationEnvelopeV2) -> Result<HostPrimaryAttachConsumedV1, text>:
     val source = file_read_regular_no_follow_bounded(
-        host_helper_stream_path_v1(root, operation.id, "primary-consumed"), 8388608)?
+        host_helper_stream_path_v1(store.root, operation.id, "primary-consumed"), 8388608)?
     val consumed = host_primary_attach_consumed_decode_v1(source)?
-    val checked = host_primary_attach_validate_record_v1(root, operation, consumed)?
+    val checked = host_primary_attach_validate_record_core_v1(store, operation, consumed)?
     Ok(consumed)
 
 # Archive only the real broker owner after matching the consumed primary plan.
@@ -90,20 +101,28 @@ pub fn host_primary_attach_native_match_v1(consumed: HostPrimaryAttachConsumedV1
 
 pub fn host_primary_attach_native_store_v1(root: text, operation: OperationEnvelopeV2,
         native: GroupProcessStreamOwnerV2) -> Result<(), text>:
-    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
+    host_primary_attach_native_store_core_v1(host_helper_store_legacy_v1(root), operation, native)
+
+pub fn host_primary_attach_native_store_core_v1(store: HostHelperStoreV1, operation: OperationEnvelopeV2,
+        native: GroupProcessStreamOwnerV2) -> Result<(), text>:
+    val consumed = host_primary_attach_consumed_load_core_v1(store, operation)?
     host_primary_attach_native_match_v1(consumed, native)?
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-attach-native"),
         "operationDigest": SdnValue.String(consumed.operation_digest),
         "consumptionDigest": SdnValue.String(sha256_text(host_primary_attach_consumed_encode_v1(consumed)?)),
         "identityDigest": SdnValue.String(native.identity_digest),
         "launch": SdnValue.String(group_process_stream_launch_encode_profiled_v3(native.launch))}
-    host_helper_stream_publish_v1(root, operation.id, "primary-native", sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", false)
+    host_helper_stream_publish_v1(store.root, operation.id, "primary-native", sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", false)
 
 pub fn host_primary_attach_native_load_v1(root: text,
         operation: OperationEnvelopeV2) -> Result<GroupProcessStreamOwnerV2, text>:
-    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
+    host_primary_attach_native_load_core_v1(host_helper_store_legacy_v1(root), operation)
+
+pub fn host_primary_attach_native_load_core_v1(store: HostHelperStoreV1,
+        operation: OperationEnvelopeV2) -> Result<GroupProcessStreamOwnerV2, text>:
+    val consumed = host_primary_attach_consumed_load_core_v1(store, operation)?
     val source = file_read_regular_no_follow_bounded(
-        host_helper_stream_path_v1(root, operation.id, "primary-native"), 8388608)?
+        host_helper_stream_path_v1(store.root, operation.id, "primary-native"), 8388608)?
     val fields = host_helper_stream_fields_v1(source, "host-primary-attach-native",
         ["version", "kind", "operationDigest", "consumptionDigest", "identityDigest", "launch"])?
     if (host_helper_stream_text_v1(fields, "operationDigest")? != consumed.operation_digest or
@@ -121,12 +140,16 @@ pub fn host_primary_attach_native_load_v1(root: text,
 # Never decode a live session or overwrite a partial/dangling retained entry.
 pub fn host_primary_attach_native_recover_v1(root: text,
         operation: OperationEnvelopeV2) -> Result<GroupProcessStreamOwnerV2, text>:
-    if host_helper_archive_present_v1(root, operation.id, "primary-native")?:
-        return host_primary_attach_native_load_v1(root, operation)
-    val consumed = host_primary_attach_consumed_load_v1(root, operation)?
+    host_primary_attach_native_recover_core_v1(host_helper_store_legacy_v1(root), operation)
+
+pub fn host_primary_attach_native_recover_core_v1(store: HostHelperStoreV1,
+        operation: OperationEnvelopeV2) -> Result<GroupProcessStreamOwnerV2, text>:
+    if host_helper_archive_present_v1(store.root, operation.id, "primary-native")?:
+        return host_primary_attach_native_load_core_v1(store, operation)
+    val consumed = host_primary_attach_consumed_load_core_v1(store, operation)?
     val claimed_root = consumed.primary_plan.launch_template.root
     val identity = file_read_regular_no_follow_bounded(claimed_root + "/broker.claim", 128)?
     val native = group_process_stream_recover_v2(claimed_root, identity)?
     host_primary_attach_native_match_v1(consumed, native)?
-    host_primary_attach_native_store_v1(root, operation, native)?
-    host_primary_attach_native_load_v1(root, operation)
+    host_primary_attach_native_store_core_v1(store, operation, native)?
+    host_primary_attach_native_load_core_v1(store, operation)

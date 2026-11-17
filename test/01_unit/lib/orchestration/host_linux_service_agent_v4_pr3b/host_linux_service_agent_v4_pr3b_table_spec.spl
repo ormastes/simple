@@ -1,0 +1,345 @@
+"""
+## Purpose and audience
+H-49 of milestone_0021 DESIGN 14.3: the TABLE-DRIVEN check of the V4 agent primary attachment state machine.
+One case per non-UNREACH cell of the exhaustive transition tables T-A..T-G (sections 14.2 + 14A), asserting
+the action, the next attachment row and the agent stage; one case per UNREACH cell asserting the
+`linux-host-agent-attachment-invariant` refusal (E1/E2/E4/E5/E6) or wedge (E3, never a Destroy). Written for
+owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+The machine is driven through its pure entry points with a FAKE release port (the native release of 13.4
+d2-d5 is part 2): the fake advances OP->RD, RP->RF, RV->CL->ST->RT, and WAITs at ST while a native step is
+pending (D8 deferred d4). E1 = the pure attach admission (archive is glue), E2 = the detach check then one
+forced release step, E3 = the attachment half of the step driver (`native` means the unchanged native or
+release driver runs next), E4 = pane io with a live lease and a Read, E5 = a signed cancel (or, with a pending
+Inspect, the window end), E6 = the close C2 step and verdict.
+## Verification guidance and troubleshooting
+A failing case lists every mismatching cell as `<stage>/<pending>/<row> E<n>: got <observed> want <expected>`.
+Observed values read
+`<result>/<attachment row>/<agent stage>`; `RT` is a returned attachment (summary kept), `N0` none.
+"""
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneOpV4, HostAgentPaneIoResultV4, host_agent_pane_lease_v4}
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentAttachmentSummaryV4,
+    HostAgentReleaseOutcomeV4, HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, HostAgentPaneIoCallV4,
+    HostAgentPaneIoPortTurnV4, HostAgentAttachFactsV4, host_agent_attachment_arm_bound_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, host_agent_attach_admit_core_v4,
+    host_agent_detach_check_v4, host_agent_detach_release_v4, host_agent_attachment_step_v4, host_agent_pane_io_core_v4,
+    host_linux_service_agent_request_cancel_v4, host_agent_attachment_close_v4}
+
+val T49_INV = "linux-host-agent-attachment-invariant"
+val T49_PENDING = "rej:linux-host-agent-attachment-release-pending"
+val T49_BLOCKED = "rej:linux-host-agent-attachment-release-blocked"
+val T49_STORED = "linux-host-agent-destroy:busy"
+val T49_NOT_AFTER: i64 = 1000000
+val T49_NONE: [text] = []
+
+fn t49_binding() -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "a".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: "pane-a", service_epoch: 3)
+
+fn t49_facts() -> HostAgentAttachFactsV4:
+    HostAgentAttachFactsV4(helper_kind: "attach-broker", plan_parent_operation_id: "op_1",
+        binding: t49_binding(), live_incarnation: "a".repeat(32), live_epoch: 3,
+        prepare_deadline_ms: 30000, not_after: T49_NOT_AFTER, now: 1000,
+        monotonic_ms: 1000)
+
+fn t49_stage_of(row: text) -> text:
+    if row == "RF": return "refused"
+    if row == "RP": return "refused-expire-pending"
+    if row == "OP": return "opening"
+    if row == "RD": return "ready"
+    if row == "AD": return "adopted"
+    if row == "RV": return "revoked"
+    if row == "CL": return "cleaned"
+    if row == "ST": return "settling"
+    if row == "FL": return "failed"
+    "release-blocked"
+
+fn t49_row_of(agent: HostLinuxServiceAgentV4) -> text:
+    if val att = agent.attachment:
+        for row in ["RF", "RP", "OP", "RD", "AD", "RV", "CL", "ST", "FL", "RB"]:
+            if t49_stage_of(row) == att.attach_stage: return row
+        return "??"
+    if agent.attachment_summary.is_some(): return "RT"
+    "N0"
+
+# The row fixture: clock 1000, ready/io deadlines not lapsed, the pane lease issued at epoch 0.
+fn t49_agent(stage: text, pending: bool, row: text) -> HostLinuxServiceAgentV4:
+    var agent = HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "a".repeat(64), payload_digest: "b".repeat(64),
+        stage: stage, pending: pending, reserved: true, observed: true, clock_ms: 1000)
+    if stage == "wedged" or stage == "failed": agent.error = T49_STORED
+    if row == "N0": return agent
+    agent.attachment_consumed = true
+    if row == "RT":
+        agent.attachment_summary = Some(HostAgentAttachmentSummaryV4(attach_digest: "c".repeat(64), detach_digest: "",
+            final_stage: "returned", error: ""))
+        return agent
+    var att = HostAgentAttachmentV4(attach_stage: t49_stage_of(row), not_after: T49_NOT_AFTER, attach_digest: "c".repeat(64),
+        ready_deadline_ms: 31000, io_deadline_ms: 61000, lease_issued: true)
+    if row == "RP":
+        att.prepared_receipt_digest = "d".repeat(64)
+        att.prepare_deadline_ms = 30000
+        att = host_agent_attachment_arm_bound_v4(att, 121000)
+    if row == "OP": att.attach_pending = true
+    if row == "FL":
+        att.begin_attempted = true
+        att = host_agent_attachment_arm_bound_v4(att, 121000)
+    agent.attachment = Some(att)
+    agent
+
+fn t49_answer(att: HostAgentAttachmentV4, outcome: HostAgentReleaseOutcomeV4) -> HostAgentAttachmentReleaseStepV4:
+    HostAgentAttachmentReleaseStepV4(attachment: att, outcome: outcome, error: "")
+
+# The fake release port (see the header).
+fn t49_fake(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    if att.attach_stage == "opening":
+        att.attach_stage = "ready"
+        return t49_answer(att, HostAgentReleaseOutcomeV4.Progress)
+    if att.attach_stage == "refused-expire-pending":
+        att.attach_stage = "refused"
+        att.prepared_receipt_digest = ""
+        return t49_answer(att, HostAgentReleaseOutcomeV4.Progress)
+    if att.attach_stage == "revoked":
+        att.attach_stage = "cleaned"
+        return t49_answer(att, HostAgentReleaseOutcomeV4.Progress)
+    if att.attach_stage == "cleaned":
+        att.attach_stage = "settling"
+        return t49_answer(att, HostAgentReleaseOutcomeV4.Progress)
+    if att.attach_stage == "settling":
+        if call.pending: return t49_answer(att, HostAgentReleaseOutcomeV4.Wait)
+        att.attach_stage = "returned"
+        return t49_answer(att, HostAgentReleaseOutcomeV4.Progress)
+    HostAgentAttachmentReleaseStepV4(attachment: att, outcome: HostAgentReleaseOutcomeV4.Refused, error: "t49-unexpected")
+
+fn t49_io(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4())
+
+fn t49_seen(result: text, agent: HostLinuxServiceAgentV4) -> text:
+    result + "/" + t49_row_of(agent) + "/" + agent.stage
+
+fn t49_pick(flag: bool, yes: text, no: text) -> text:
+    if flag: return yes
+    no
+
+fn t49_outcome(prefix: text, error: text) -> text:
+    if error == "": return "ok"
+    prefix + error
+
+fn t49_event(event: i64, stage: text, pending: bool, row: text) -> text:
+    val agent = t49_agent(stage, pending, row)
+    val port = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: t49_fake(call)
+    if event == 1:
+        match host_agent_attach_admit_core_v4(agent, "container", None, "attach-packet-1", t49_facts()):
+            case Ok(replay): return t49_seen(t49_pick(replay, "replay", "ok"), agent)
+            case Err(error): return t49_seen("rej:" + error, agent)
+    if event == 2:
+        match host_agent_detach_check_v4(agent, None, "detach-packet-1", "c".repeat(64)):
+            case Ok(replay):
+                val applied = host_agent_detach_release_v4(agent, sha256_text("detach-packet-1"), port)
+                return t49_seen(t49_outcome("err:", applied.error), applied.agent)
+            case Err(error): return t49_seen("rej:" + error, agent)
+    if event == 3:
+        val pre = host_agent_attachment_step_v4(agent, 1000, T49_NOT_AFTER, port)
+        if pre.native: return t49_seen("native", pre.agent)
+        if pre.error != "": return t49_seen("err:" + pre.error, pre.agent)
+        return t49_seen("done", pre.agent)
+    if event == 4:
+        val io = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: t49_io(call)
+        val turn = host_agent_pane_io_core_v4(agent, host_agent_pane_lease_v4("op_1", 0, "c".repeat(64)),
+            HostAgentPaneOpV4.Read, 1000, io)
+        return t49_seen(t49_outcome("rej:", turn.result.error), turn.agent)
+    if event == 5:
+        if pending:
+            # The stop trigger during a pending Inspect is the window end (D3): stop_requested, no stage change.
+            val pre = host_agent_attachment_step_v4(agent, T49_NOT_AFTER, T49_NOT_AFTER, port)
+            if pre.native and pre.agent.stop_requested: return t49_seen("stop", pre.agent)
+            if pre.error != "": return t49_seen("err:" + pre.error, pre.agent)
+            return t49_seen("native", pre.agent)
+        val cancel = host_linux_service_agent_request_cancel_v4(agent, sha256_text("signed-cancel-packet"))
+        return t49_seen(t49_outcome("rej:", cancel.error), cancel.agent)
+    val closed = host_agent_attachment_close_v4(agent, port)
+    t49_seen(t49_outcome("rej:", closed.error), closed.agent)
+
+struct T49Row:
+    stage: text
+    pending: bool
+    row: text
+    cells: [text]
+
+fn t49(stage: text, pending: bool, row: text, e1: text, e2: text, e3: text, e4: text, e5: text, e6: text) -> T49Row:
+    T49Row(stage: stage, pending: pending, row: row, cells: [e1, e2, e3, e4, e5, e6])
+
+# Every cell whose observed value differs from the table, as `<stage>/<pending>/<row> E<n>: got <observed> want
+# <expected>`; each `it` asserts the list is empty (the assertion stays in the `it` body).
+fn t49_mismatches(rows: [T49Row]) -> [text]:
+    var out: [text] = []
+    for r in rows:
+        for event in 1..7:
+            val observed = t49_event(event, r.stage, r.pending, r.row)
+            if observed != r.cells[event - 1]:
+                out.push(r.stage + "/" + r.pending.to_text() + "/" + r.row + " E" + event.to_text() + ": got " + observed +
+                    " want " + r.cells[event - 1])
+    out
+
+# Every UNREACH cell of a row: E3 wedges with the invariant (never Destroy), every other event refuses unchanged.
+fn t49_unreach(stage: text, pending: bool, row: text) -> T49Row:
+    val rej = "rej:" + T49_INV + "/" + row + "/" + stage
+    val wedge = "err:" + T49_INV + "/" + row + "/wedged"
+    # With a pending Inspect E5 is the window end, which goes through the step driver and therefore wedges.
+    t49(stage, pending, row, rej, rej, wedge, rej, t49_pick(pending, wedge, rej), rej)
+
+describe "V4 agent attachment H-49: T-A, agent running, no native step pending":
+    it "answers every cell of T-A as the table says":
+        # @req H-49 (T-A), D1, D8, F5
+        val s = "running"
+        expect(t49_mismatches([
+            t49(s, false, "N0", "ok/N0/running", "rej:detach-unattached/N0/running", "native/N0/running",
+                "rej:attach-no-attachment/N0/running", "ok/N0/stopping", "ok/N0/running"),
+            t49(s, false, "RT", "rej:attach-consumed/RT/running", "rej:detach-unattached/RT/running", "native/RT/running",
+                "rej:attach-lease-revoked/RT/running", "ok/RT/stopping", "ok/RT/running"),
+            t49(s, false, "RF", "rej:attach-consumed/RF/running", "rej:detach-unattached/RF/running", "native/RF/running",
+                "rej:attach-no-attachment/RF/running", "ok/RF/stopping", "ok/RF/running"),
+            t49(s, false, "RP", "rej:attach-consumed/RP/running", "rej:detach-pending-expire/RP/running", "done/RF/running",
+                "rej:attach-no-attachment/RP/running", "ok/RP/detach", "ok/RF/running"),
+            t49(s, false, "OP", "rej:attach-consumed/OP/running", "rej:detach-attach-pending/OP/running", "done/RD/running",
+                "rej:attach-not-ready/OP/running", "ok/OP/detach", T49_PENDING + "/RD/running"),
+            t49(s, false, "RD", "rej:attach-consumed/RD/running", "ok/RV/running", "native/RD/running",
+                "ok/AD/running", "ok/RD/detach", T49_PENDING + "/RV/running"),
+            t49(s, false, "AD", "rej:attach-consumed/AD/running", "ok/RV/running", "native/AD/running",
+                "ok/AD/running", "ok/AD/detach", T49_PENDING + "/RV/running"),
+            t49(s, false, "RV", "rej:attach-consumed/RV/running", "ok/CL/running", "done/CL/running",
+                "rej:attach-lease-revoked/RV/running", "ok/RV/detach", T49_PENDING + "/CL/running"),
+            t49(s, false, "CL", "rej:attach-consumed/CL/running", "ok/ST/running", "done/ST/running",
+                "rej:attach-lease-revoked/CL/running", "ok/CL/detach", T49_PENDING + "/ST/running"),
+            t49(s, false, "ST", "rej:attach-consumed/ST/running", "ok/RT/running", "done/RT/running",
+                "rej:attach-lease-revoked/ST/running", "ok/ST/detach", "ok/RT/running"),
+            t49(s, false, "FL", "rej:attach-consumed/FL/running", "ok/RV/running", "done/RV/running",
+                "rej:attach-lease-revoked/FL/running", "ok/FL/detach", T49_PENDING + "/RV/running"),
+            t49_unreach(s, false, "RB")])).to_equal(T49_NONE)
+
+describe "V4 agent attachment H-49: T-B, agent running with a native Inspect in flight":
+    it "answers every cell of T-B as the table says":
+        # @req H-49 (T-B), D3, D8 (d4 waits while pending), D9 (drain first)
+        val s = "running"
+        expect(t49_mismatches([
+            t49(s, true, "N0", "rej:attach-native-pending/N0/running", "rej:detach-unattached/N0/running", "native/N0/running",
+                "rej:attach-no-attachment/N0/running", "native/N0/running", "ok/N0/running"),
+            t49(s, true, "RT", "rej:attach-consumed/RT/running", "rej:detach-unattached/RT/running", "native/RT/running",
+                "rej:attach-lease-revoked/RT/running", "native/RT/running", "ok/RT/running"),
+            t49(s, true, "RF", "rej:attach-consumed/RF/running", "rej:detach-unattached/RF/running", "native/RF/running",
+                "rej:attach-no-attachment/RF/running", "native/RF/running", "ok/RF/running"),
+            t49(s, true, "RP", "rej:attach-consumed/RP/running", "rej:detach-pending-expire/RP/running", "native/RP/running",
+                "rej:attach-no-attachment/RP/running", "stop/RP/running", "ok/RF/running"),
+            t49(s, true, "OP", "rej:attach-consumed/OP/running", "rej:detach-attach-pending/OP/running", "native/OP/running",
+                "rej:attach-not-ready/OP/running", "stop/OP/running", T49_PENDING + "/RD/running"),
+            t49(s, true, "RD", "rej:attach-consumed/RD/running", "ok/RV/running", "native/RD/running",
+                "ok/AD/running", "stop/RD/running", T49_PENDING + "/RV/running"),
+            t49(s, true, "AD", "rej:attach-consumed/AD/running", "ok/RV/running", "native/AD/running",
+                "ok/AD/running", "stop/AD/running", T49_PENDING + "/RV/running"),
+            t49(s, true, "RV", "rej:attach-consumed/RV/running", "ok/CL/running", "native/RV/running",
+                "rej:attach-lease-revoked/RV/running", "stop/RV/running", T49_PENDING + "/CL/running"),
+            t49(s, true, "CL", "rej:attach-consumed/CL/running", "ok/ST/running", "native/CL/running",
+                "rej:attach-lease-revoked/CL/running", "stop/CL/running", T49_PENDING + "/ST/running"),
+            t49(s, true, "ST", "rej:attach-consumed/ST/running", "ok/ST/running", "native/ST/running",
+                "rej:attach-lease-revoked/ST/running", "stop/ST/running", T49_PENDING + "/ST/running"),
+            t49(s, true, "FL", "rej:attach-consumed/FL/running", "ok/RV/running", "native/FL/running",
+                "rej:attach-lease-revoked/FL/running", "stop/FL/running", T49_PENDING + "/RV/running"),
+            t49_unreach(s, true, "RB")])).to_equal(T49_NONE)
+
+describe "V4 agent attachment H-49: T-C, agent detach":
+    it "advances a non-live attachment to stopping through the F1 hook and answers every live cell":
+        # @req H-49 (T-C), 14A F1 (hook on every RT/RF write), I3
+        val s = "detach"
+        expect(t49_mismatches([
+            t49(s, false, "N0", "rej:attach-stage/N0/detach", "rej:detach-unattached/N0/detach", "done/N0/stopping",
+                "rej:attach-no-attachment/N0/detach", "ok/N0/detach", "ok/N0/detach"),
+            t49(s, false, "RT", "rej:attach-stage/RT/detach", "rej:detach-stage/RT/detach", "done/RT/stopping",
+                "rej:attach-lease-revoked/RT/detach", "ok/RT/detach", "ok/RT/detach"),
+            t49(s, false, "RF", "rej:attach-stage/RF/detach", "rej:detach-unattached/RF/detach", "done/RF/stopping",
+                "rej:attach-detaching/RF/detach", "ok/RF/detach", "ok/RF/detach"),
+            t49(s, false, "RP", "rej:attach-stage/RP/detach", "rej:detach-pending-expire/RP/detach", "done/RF/stopping",
+                "rej:attach-detaching/RP/detach", "ok/RP/detach", "ok/RF/stopping"),
+            t49(s, false, "OP", "rej:attach-stage/OP/detach", "rej:detach-attach-pending/OP/detach", "done/RD/detach",
+                "rej:attach-detaching/OP/detach", "ok/OP/detach", T49_PENDING + "/RD/detach"),
+            t49(s, false, "RD", "rej:attach-stage/RD/detach", "ok/RV/detach", "done/RV/detach",
+                "rej:attach-detaching/RD/detach", "ok/RD/detach", T49_PENDING + "/RV/detach"),
+            t49(s, false, "AD", "rej:attach-stage/AD/detach", "ok/RV/detach", "done/RV/detach",
+                "rej:attach-detaching/AD/detach", "ok/AD/detach", T49_PENDING + "/RV/detach"),
+            t49(s, false, "RV", "rej:attach-stage/RV/detach", "ok/CL/detach", "done/CL/detach",
+                "rej:attach-detaching/RV/detach", "ok/RV/detach", T49_PENDING + "/CL/detach"),
+            t49(s, false, "CL", "rej:attach-stage/CL/detach", "ok/ST/detach", "done/ST/detach",
+                "rej:attach-detaching/CL/detach", "ok/CL/detach", T49_PENDING + "/ST/detach"),
+            t49(s, false, "ST", "rej:attach-stage/ST/detach", "ok/RT/stopping", "done/RT/stopping",
+                "rej:attach-detaching/ST/detach", "ok/ST/detach", "ok/RT/stopping"),
+            t49(s, false, "FL", "rej:attach-stage/FL/detach", "ok/RV/detach", "done/RV/detach",
+                "rej:attach-detaching/FL/detach", "ok/FL/detach", T49_PENDING + "/RV/detach"),
+            t49_unreach(s, false, "RB")])).to_equal(T49_NONE)
+
+describe "V4 agent attachment H-49: T-D and T-E, release stages and settled":
+    it "answers N0/RT/RF as the existing release and settled paths and wedges every live row (I1)":
+        # @req H-49 (T-D, T-E), I1, I4
+        var rows: [T49Row] = []
+        for s in ["stopping", "settle", "source-return", "host-settle", "settled"]:
+            rows.push(t49(s, false, "N0", "rej:attach-stage/N0/" + s, "rej:detach-unattached/N0/" + s, "native/N0/" + s,
+                "rej:attach-no-attachment/N0/" + s, "ok/N0/" + s, "ok/N0/" + s))
+            rows.push(t49(s, false, "RT", "rej:attach-stage/RT/" + s, "rej:detach-stage/RT/" + s, "native/RT/" + s,
+                "rej:attach-lease-revoked/RT/" + s, "ok/RT/" + s, "ok/RT/" + s))
+            rows.push(t49(s, false, "RF", "rej:attach-stage/RF/" + s, "rej:detach-unattached/RF/" + s, "native/RF/" + s,
+                "rej:attach-no-attachment/RF/" + s, "ok/RF/" + s, "ok/RF/" + s))
+            for row in ["RP", "OP", "RD", "AD", "RV", "CL", "ST", "FL", "RB"]:
+                rows.push(t49_unreach(s, false, row))
+        expect(t49_mismatches(rows)).to_equal(T49_NONE)
+
+describe "V4 agent attachment H-49: T-F, agent wedged or failed":
+    it "runs one release step for a live attachment, then returns the stored error; RB never retries":
+        # @req H-49 (T-F), H-29, D6
+        var rows: [T49Row] = []
+        for s in ["wedged", "failed"]:
+            val err = "err:" + T49_STORED + "/"
+            val stored = "rej:" + T49_STORED + "/"
+            rows.push(t49(s, false, "N0", "rej:attach-stage/N0/" + s, "rej:detach-unattached/N0/" + s, err + "N0/" + s,
+                "rej:attach-no-attachment/N0/" + s, stored + "N0/" + s, "ok/N0/" + s))
+            rows.push(t49(s, false, "RT", "rej:attach-stage/RT/" + s, "rej:detach-stage/RT/" + s, err + "RT/" + s,
+                "rej:attach-lease-revoked/RT/" + s, stored + "RT/" + s, "ok/RT/" + s))
+            rows.push(t49(s, false, "RF", "rej:attach-stage/RF/" + s, "rej:detach-unattached/RF/" + s, err + "RF/" + s,
+                "rej:attach-no-attachment/RF/" + s, stored + "RF/" + s, "ok/RF/" + s))
+            rows.push(t49(s, false, "RP", "rej:attach-stage/RP/" + s, "rej:detach-pending-expire/RP/" + s, err + "RF/" + s,
+                "rej:attach-no-attachment/RP/" + s, stored + "RP/" + s, "ok/RF/" + s))
+            rows.push(t49(s, false, "OP", "rej:attach-stage/OP/" + s, "rej:detach-attach-pending/OP/" + s, err + "RD/" + s,
+                "rej:attach-agent-wedged/OP/" + s, stored + "OP/" + s, T49_PENDING + "/RD/" + s))
+            rows.push(t49(s, false, "RD", "rej:attach-stage/RD/" + s, "ok/RV/" + s, err + "RV/" + s,
+                "rej:attach-agent-wedged/RD/" + s, stored + "RD/" + s, T49_PENDING + "/RV/" + s))
+            rows.push(t49(s, false, "AD", "rej:attach-stage/AD/" + s, "ok/RV/" + s, err + "RV/" + s,
+                "rej:attach-agent-wedged/AD/" + s, stored + "AD/" + s, T49_PENDING + "/RV/" + s))
+            rows.push(t49(s, false, "RV", "rej:attach-stage/RV/" + s, "ok/CL/" + s, err + "CL/" + s,
+                "rej:attach-agent-wedged/RV/" + s, stored + "RV/" + s, T49_PENDING + "/CL/" + s))
+            rows.push(t49(s, false, "CL", "rej:attach-stage/CL/" + s, "ok/ST/" + s, err + "ST/" + s,
+                "rej:attach-agent-wedged/CL/" + s, stored + "CL/" + s, T49_PENDING + "/ST/" + s))
+            rows.push(t49(s, false, "ST", "rej:attach-stage/ST/" + s, "ok/RT/" + s, err + "RT/" + s,
+                "rej:attach-agent-wedged/ST/" + s, stored + "ST/" + s, "ok/RT/" + s))
+            rows.push(t49(s, false, "FL", "rej:attach-stage/FL/" + s, "ok/RV/" + s, err + "RV/" + s,
+                "rej:attach-agent-wedged/FL/" + s, stored + "FL/" + s, T49_PENDING + "/RV/" + s))
+        rows.push(t49("wedged", false, "RB", "rej:attach-stage/RB/wedged", "rej:detach-stage/RB/wedged",
+            "err:" + T49_STORED + "/RB/wedged", "rej:attach-lease-revoked/RB/wedged", "rej:" + T49_STORED + "/RB/wedged",
+            T49_BLOCKED + "/RB/wedged"))
+        rows.push(t49_unreach("failed", false, "RB"))
+        expect(t49_mismatches(rows)).to_equal(T49_NONE)
+
+describe "V4 agent attachment H-49: T-G, every pre-running stage":
+    it "admits only N0 (existing behaviour) and wedges every other row (I1)":
+        # @req H-49 (T-G), 14A F7 (every pre-running dispatch stage)
+        var rows: [T49Row] = []
+        for s in ["transfer", "probe-reserve", "probe-workflow", "probe-start", "probe-collect", "probe-cleanup",
+                "probe-settle", "probe-close", "advance", "selection", "source", "stage", "enable", "prepare", "create",
+                "configuration", "start", "inspect"]:
+            rows.push(t49(s, false, "N0", "rej:attach-stage/N0/" + s, "rej:detach-unattached/N0/" + s, "native/N0/" + s,
+                "rej:attach-no-attachment/N0/" + s, "rej:linux-host-agent-cancel-stage:" + s + "/N0/" + s, "ok/N0/" + s))
+            # An attach is only admitted at `running`, so ANY attach state (RT/RF included) before it is I1.
+            for row in ["RT", "RF", "RP", "OP", "RD", "AD", "RV", "CL", "ST", "FL", "RB"]:
+                rows.push(t49_unreach(s, false, row))
+        expect(t49_mismatches(rows)).to_equal(T49_NONE)

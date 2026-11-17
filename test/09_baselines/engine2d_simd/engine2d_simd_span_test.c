@@ -14,7 +14,7 @@ typedef struct {
 } TestArray;
 
 static TestArray output_array;
-static int64_t output_pixels[16];
+static int64_t output_pixels[4096];
 
 int64_t rt_array_len(SplArray *array) {
     return ((TestArray *)array)->len;
@@ -25,7 +25,7 @@ int64_t rt_array_data_ptr(SplArray *array) {
 }
 
 SplArray *rt_array_new_uninit(int64_t cap) {
-    if (cap < 0 || cap > 16) return NULL;
+    if (cap < 0 || cap > 4096) return NULL;
     memset(output_pixels, 0, sizeof(output_pixels));
     output_array = (TestArray){0, 0, {0}, 0, cap, output_pixels};
     return (SplArray *)&output_array;
@@ -45,20 +45,38 @@ extern SplArray *rt_engine2d_simd_copy_span_u32(SplArray *, int64_t, SplArray *,
 extern SplArray *rt_engine2d_simd_blend_row_u32(SplArray *, SplArray *);
 extern SplArray *rt_engine2d_simd_blend_span_u32(SplArray *, int64_t, SplArray *, int64_t, int64_t);
 extern SplArray *rt_engine2d_simd_blend_const_span_u32(SplArray *, int64_t, int64_t, int64_t);
+extern SplArray *rt_engine2d_blend_const_span_pct_u32(SplArray *, int64_t, int64_t, int64_t, int64_t);
 extern int64_t rt_simd_engine2d_neon_hits(void);
 extern int64_t rt_simd_engine2d_neon_reset(void);
 
-static uint32_t blend_ref(uint32_t s, uint32_t d) {
+/* Chrome 159 source-over reference (independent of the kernel helpers):
+ * opaque dst -> round(s*a/255) + dst term, where the dst term is
+ * (d*(256-a)) >> 8 for a solid colour and round(d*(255-a)/255) for an image;
+ * translucent dst -> rounded straight-alpha src-over. */
+static uint32_t blend_ref_rule(uint32_t s, uint32_t d, int solid) {
     uint32_t sa = s >> 24;
     if (sa == 255) return s;
     if (sa == 0) return d;
-    uint32_t dw = ((d >> 24) * (255 - sa)) / 255;
-    uint32_t oa = sa + dw;
-    uint32_t r = ((((s >> 16) & 255) * sa) + (((d >> 16) & 255) * dw)) / oa;
-    uint32_t g = ((((s >> 8) & 255) * sa) + (((d >> 8) & 255) * dw)) / oa;
-    uint32_t b = (((s & 255) * sa) + ((d & 255) * dw)) / oa;
-    return (oa << 24) | (r << 16) | (g << 8) | b;
+    uint32_t da = d >> 24;
+    if (da != 255) {
+        uint32_t dw = (da * (255 - sa) + 127) / 255;
+        uint32_t oa = sa + dw;
+        uint32_t r = ((((s >> 16) & 255) * sa) + (((d >> 16) & 255) * dw) + oa / 2) / oa;
+        uint32_t g = ((((s >> 8) & 255) * sa) + (((d >> 8) & 255) * dw) + oa / 2) / oa;
+        uint32_t b = (((s & 255) * sa) + ((d & 255) * dw) + oa / 2) / oa;
+        return (oa << 24) | (r << 16) | (g << 8) | b;
+    }
+    uint32_t out = 0xFF000000u;
+    for (int sh = 16; sh >= 0; sh -= 8) {
+        uint32_t sc = (s >> sh) & 255, dc = (d >> sh) & 255;
+        uint32_t dt = solid ? (dc * (256 - sa)) >> 8 : (dc * (255 - sa) + 127) / 255;
+        out |= ((sc * sa + 127) / 255 + dt) << sh;
+    }
+    return out;
 }
+
+static uint32_t blend_ref(uint32_t s, uint32_t d) { return blend_ref_rule(s, d, 0); }
+static uint32_t blend_ref_solid(uint32_t s, uint32_t d) { return blend_ref_rule(s, d, 1); }
 
 int main(void) {
     int64_t pixels[16] = {0};
@@ -98,7 +116,7 @@ int main(void) {
                                             (SplArray *)&blend_src);
     if (result != (SplArray *)&output_array) return 8;
     if (output_pixels[0] != (int64_t)((uint64_t)0x80ffffff << 3) ||
-        output_pixels[1] != (int64_t)((uint64_t)0xbfaa0054 << 3) ||
+        output_pixels[1] != (int64_t)((uint64_t)0xc0aa0055 << 3) ||
         output_pixels[2] != (int64_t)((uint64_t)0x00112233 << 3)) return 9;
 #if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64) || \
     (defined(__riscv) && defined(__riscv_vector))
@@ -113,7 +131,7 @@ int main(void) {
     result = rt_engine2d_simd_blend_const_span_u32(
         (SplArray *)&blend_dst, 0, 3, 0x804080c0u);
     for (int i = 0; i < 3; i++) {
-        uint32_t want = blend_ref(0x804080c0u, const_dst_values[i]);
+        uint32_t want = blend_ref_solid(0x804080c0u, const_dst_values[i]);
         if (blend_dst_pixels[i] != (int64_t)((uint64_t)want << 3)) return 11;
     }
 
@@ -158,7 +176,60 @@ int main(void) {
     result = rt_engine2d_simd_blend_const_span_u32(
         (SplArray *)&long_dst, 0, 300, 0x804080c0u);
     for (int i = 0; i < 300; i++) {
-        if (long_pixels[i] != (int64_t)((uint64_t)blend_ref(0x804080c0u, 0xff102030u) << 3)) return 14;
+        if (long_pixels[i] != (int64_t)((uint64_t)blend_ref_solid(0x804080c0u, 0xff102030u) << 3)) return 14;
+    }
+    /* Vector-vs-rule sweep: every source alpha 0..255 against 4096 random
+     * destinations (1 in 8 translucent, so the scalar patch lanes run too),
+     * through every blend kernel. Whatever ISA body this host compiled
+     * (NEON / AVX2 / SSE2 / RVV) must equal blend_ref_rule bit for bit. */
+    {
+        enum { N = 4096 };
+        static int64_t sweep_dst[N], sweep_src[N], sweep_row_dst[N], sweep_row_src[N];
+        TestArray sd = {0, 0, {0}, N, N, sweep_dst};
+        TestArray ss = {0, 0, {0}, N, N, sweep_src};
+        TestArray rd = {0, 0, {0}, N, N, sweep_row_dst};
+        TestArray rs = {0, 0, {0}, N, N, sweep_row_src};
+        uint32_t seed = 0x9e3779b9u;
+        long checked = 0;
+        for (uint32_t sa = 0; sa < 256; sa++) {
+            uint32_t dpx[N], spx[N];
+            for (int i = 0; i < N; i++) {
+                seed = seed * 1664525u + 1013904223u;
+                uint32_t da = (seed >> 29) == 0 ? (seed >> 21) & 255u : 255u;
+                dpx[i] = (da << 24) | (seed & 0x00ffffffu);
+                seed = seed * 1664525u + 1013904223u;
+                spx[i] = (sa << 24) | (seed & 0x00ffffffu);
+                sweep_dst[i] = (int64_t)((uint64_t)dpx[i] << 3);
+                sweep_src[i] = (int64_t)((uint64_t)spx[i] << 3);
+                sweep_row_dst[i] = (int64_t)((uint64_t)dpx[i] << 3);
+                sweep_row_src[i] = (int64_t)((uint64_t)spx[i] << 3);
+            }
+            rt_engine2d_simd_blend_span_u32((SplArray *)&sd, 0, (SplArray *)&ss, 0, N);
+            for (int i = 0; i < N; i++, checked++)
+                if (sweep_dst[i] != (int64_t)((uint64_t)blend_ref(spx[i], dpx[i]) << 3)) return 20;
+            SplArray *row = rt_engine2d_simd_blend_row_u32((SplArray *)&rd, (SplArray *)&rs);
+            (void)row;
+            for (int i = 0; i < N; i++, checked++)
+                if (output_pixels[i] != (int64_t)((uint64_t)blend_ref(spx[i], dpx[i]) << 3)) return 21;
+            for (int i = 0; i < N; i++) sweep_dst[i] = (int64_t)((uint64_t)dpx[i] << 3);
+            rt_engine2d_simd_blend_const_span_u32((SplArray *)&sd, 0, N, (int64_t)spx[7]);
+            for (int i = 0; i < N; i++, checked++)
+                if (sweep_dst[i] != (int64_t)((uint64_t)blend_ref_solid(spx[7], dpx[i]) << 3)) return 22;
+            if (sa <= 100) {
+                int64_t pct = (int64_t)sa;
+                for (int i = 0; i < N; i++) sweep_dst[i] = (int64_t)((uint64_t)dpx[i] << 3);
+                rt_engine2d_blend_const_span_pct_u32((SplArray *)&sd, 0, N, (int64_t)spx[9], pct);
+                uint32_t a = ((uint32_t)pct * 255u + 50u) / 100u;
+                uint32_t cs = (a << 24) | (spx[9] & 0x00ffffffu);
+                for (int i = 0; i < N; i++, checked++) {
+                    uint32_t want = pct >= 100 ? spx[9]
+                        : pct <= 0 ? dpx[i]
+                        : blend_ref_solid(cs, dpx[i] | 0xff000000u);
+                    if (sweep_dst[i] != (int64_t)((uint64_t)want << 3)) return 23;
+                }
+            }
+        }
+        printf("ENGINE2D_SIMD_SPAN_TEST: vector sweep %ld pixels equal the rule\n", checked);
     }
     puts("ENGINE2D_SIMD_SPAN_TEST: PASS");
     return 0;

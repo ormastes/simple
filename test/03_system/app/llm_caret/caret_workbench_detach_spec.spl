@@ -10,6 +10,7 @@ Uses the tracked stand-in agent `test/fixtures/caret_workbench/agent_stub.shs`.
 use std.spec.*
 use app.io.mod.{process_is_running}
 use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.agent_runtime.{stop_agent_process}
 use app.llm_caret.multi_caret_manager.{launch_multi_caret_manager,
     poll_multi_caret_manager, stop_multi_caret_manager, list_multi_caret_agents}
 use app.llm_caret.workbench.session_source.{publish_manager_sessions,
@@ -68,3 +69,29 @@ describe "detaching the workbench never stops an agent":
         expect(stopped.status).to_equal("stopped")
         expect(process_is_running(agents[0].pid)).to_equal(false)
         expect(process_is_running(agents[1].pid)).to_equal(false)
+
+
+describe "a targeted stop affects only its target":
+    it "stops exactly the targeted child and leaves its sibling running":
+        # @req REQ-CARET-CU-004
+        step("launch a REAL two-child team")
+        clear_live_sessions()
+        clear_pane_output()
+        val manager = launch_multi_caret_manager("caret-target-stop",
+            [_request("agents/alpha.md"), _request("agents/beta.md")], 4,
+            AGENT_STUB, "", "", "", "")
+        val procs = manager.team.processes
+        expect(procs.len()).to_equal(2)
+        expect(process_is_running(procs[0].pid)).to_equal(true)
+        expect(process_is_running(procs[1].pid)).to_equal(true)
+
+        step("stop only the first child")
+        val stopped = stop_agent_process(procs[0])
+        expect(stopped.status).to_equal("stopped")
+        expect(stopped.pid).to_equal(procs[0].pid)
+        expect(process_is_running(procs[0].pid)).to_equal(false)
+        expect(process_is_running(procs[1].pid)).to_equal(true)
+
+        step("clean up the sibling with the explicit manager stop")
+        val _cleanup = stop_multi_caret_manager(manager)
+        expect(process_is_running(procs[1].pid)).to_equal(false)
