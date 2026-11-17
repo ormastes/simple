@@ -11,7 +11,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarat
     parse_supported_outline_shorthand_width_px, css_cascade_root_font_px
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{BoxShadowAgg, shadow_layer_alpha, shadow_length_prefix}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec, gradient_layer_list, gradient_layer_list_color_text}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec, gradient_layer_entries, gradient_layer_list_color_text, gradient_layer_list_apply_longhands}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{_color_alpha_zero, _decl_transparent_color, _decl_top_level_tokens}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille}
@@ -486,7 +486,7 @@ fn _apply_decls_without_grid_inner(
                     # gradient layer painters; only its final colour layer
                     # (if any) is the background colour. `parse_color_alpha`
                     # over the whole list took the first stop instead.
-                    if gradient_layer_list(bgs).len() > 0:
+                    if gradient_layer_entries(bgs).len() > 0:
                         val list_color = gradient_layer_list_color_text(bgs)
                         bg_v = if list_color != "": parse_color_alpha(list_color) else: 0u32
                     else:
@@ -680,6 +680,32 @@ fn _apply_decls_without_grid_inner(
             background_gradient_angle_deg_v = 180
             background_gradient_is_radial_v = false
             bg_layers_raw_v = two_url_plan
+    # Per-layer background-size / -position / -repeat of a gradient list
+    # (CSS Backgrounds 3 §2.2): each image layer takes its own entry of each
+    # longhand list (cyclically) or its own shorthand tail. The list is
+    # rewritten with a `<position> / <size> <repeat>` tail per layer, the form
+    # the gradient layer painters read, and any typed single-layer projection
+    # is dropped so the layer path paints it. Lists whose every layer keeps the
+    # default geometry are left untouched.
+    val layer_size_list = if bg_size.len() > 0 and bg_size_pos > bgs_pos: bg_size else: ""
+    val layer_position_list = if bg_position.len() > 0 and bg_position_pos > bgs_pos: bg_position else: ""
+    val layer_repeat_list = if bg_repeat.len() > 0 and bg_repeat_pos > bgs_pos: bg_repeat else: ""
+    var layer_src = bg_layers_raw_v
+    if layer_src == "":
+        if bg_image.len() > 0 and bg_image_pos > bgs_pos:
+            layer_src = bg_image
+        elif bgs_pos >= 0 and bgs_pos > bg_pos:
+            layer_src = bgs
+    if layer_src != "":
+        val layer_list = gradient_layer_list_apply_longhands(layer_src, layer_size_list, layer_position_list, layer_repeat_list)
+        if layer_list != "":
+            bg_layers_raw_v = layer_list
+            background_gradient_from_v = 0u32
+            background_gradient_to_v = 0u32
+            background_gradient_stop_colors_v = []
+            background_gradient_stop_positions_v = []
+            background_gradient_angle_deg_v = 180
+            background_gradient_is_radial_v = false
     val col = decl_tbl_get_p(decl_tbl, decl_present, "color")
     if col.len() > 0:
         val cv = parse_color(col)

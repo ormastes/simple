@@ -442,3 +442,54 @@ base `77fd6530d57` vs head): the 37 specs of the per-side border sweep
 (including `float_layout_spec`) gave identical per-spec counts and the same 98
 failing test names at base and head (0 new, 0 fixed); the new spec is 40/40 at
 head (13/40 at base).
+
+## 2026-11-17 — Per-layer `background-size` / `-repeat` / `-position` of gradient lists: fixed
+
+- **Was:** a gradient background list painted each layer once, stretched over the positioning area. A list with any non-default `background-size` or a px `background-position` failed closed to the box colour, by the #9970 gate. The longhands kept only their FIRST value, as scalars. Shorthand layer tails (`linear-gradient(...) 0 0 / 10px 10px repeat`) were rejected outright, and the shorthand colour then fell back to the first gradient stop.
+- **Chrome 159 model (measured at k=4):** each image layer takes entry `i mod n` of each longhand list (CSS Backgrounds 3 §2.2), or its own shorthand tail.
+  - A gradient has no intrinsic size, so `auto`, `cover` and `contain` resolve to the positioning area (padding-box), and one-value `10px` means a height of `auto`, i.e. the area.
+  - Position percentages resolve against `(area - tile)`.
+  - Tiles start at the anchor and repeat both ways. They reach into the border area under the border-box clip.
+  - The gradient is **re-evaluated at every tile origin**: pixel = the model at its centre, local to the tile.
+  - At a fractional tile edge Chrome BLENDS the straddling pixel by coverage: 13.333 px tiles give `ab0054` at device x=53, `5800a7` at x=106.
+- **Fix (CSS parsing + Draw IR geometry; pixel kernels untouched):**
+  - foundation:
+    - `gradient_layer_entries`, `gradient_layer_split` and `gradient_layer_tail_parts` parse the `<position> / <size> <repeat>` tail.
+    - `background_{size,position,repeat}_spec` resolve one entry.
+    - `gradient_layer_list_apply_longhands` rewrites a list with one tail per layer.
+  - `decl_apply` applies that rewrite after every background longhand has resolved, using the current list or this block's image text. It drops a typed single-layer projection, so the layer path paints it. Lists whose every layer keeps the default geometry (size `auto`/`100%`/`cover`/`contain`, no px offset; repeat is ignored because a full-area tile covers the clip either way) are left byte-identical.
+  - One tail-less gradient with a `no-repeat` longhand stays on the typed single-gradient path: it already places one sized tile with Chrome's ordered dither, which the layer path lacks (a first run without this guard turned 3 `browser_renderer_spec` rows red by 1 LSB).
+  - A layer needing more than 1,024 tiles (`BACKGROUND_GRADIENT_TILE_CAP`, counted as `(area/tile+2)` per repeating axis) fails closed to the colour, so a sub-pixel `background-size` cannot issue unbounded per-tile work.
+  - `background_gradient_layers` resolves each layer's tile 0 (Q10 px) and resolves its geometry against that tile.
+  - New `engine2d/gradient_tiles.spl` `gradient_tile_spans` cuts the pixel span of each tile by the pixel-centre rule. Both lanes use it.
+  - Raster `gradient_layer_tiled_pixels` evaluates whole-pixel tiles once and copies them.
+  - Draw IR adds `background-gradient-layer-tiles` (lengths, device-scaled) and `background-gradient-layer-repeat` (unscaled). It emits them only when a tile does not cover the painting area. `draw_ir_adv` then issues one `draw_radial_gradient_ellipse` / `draw_linear_gradient_line` call per tile, so on Vulkan every tile is device-evaluated (#10006) or declines to the host evaluator.
+- **Evidence, red -> green** (`test/01_unit/browser_engine/background_layer_tiling_chrome159_spec.spl`, 9 rows, head 9/9; base: see below):
+  - Six Chrome-pinned pages (`bgl_p1..p6.html`, k=4, +-2) cover:
+    - longhand lists, cyclic;
+    - shorthand tails + `%` size + final colour;
+    - default repeat into a 4 px border;
+    - a typed single linear with one-value size + `center`;
+    - `no-repeat` at `%` positions + `contain`;
+    - the old fail-closed sized list.
+  - Plus a fail-closed `background-repeat: space` row, a fail-closed tile-cap row (0.5 px tiles paint the colour) and a tile-prop scale row.
+  - Whole frame vs the Chrome PNGs, both cpu_simd k=4 and raster 4x: P2-P6 max 1-2 (0 px > 2). P1 (three-layer stack) max 3 at 1 of 20,480 px, the known stack residue.
+  - `web_device_scale_spec`'s "keeps a gradient layer list with a background-size fail-closed to its colour" (a colour-only pin, labelled "not a Chrome match") is REPLACED by "tiles a gradient layer list with a background-size on both lanes as Chrome does". That row is pinned to Chrome's `bgl_p6.png`; the page without a doctype screenshots byte-identically.
+  - Vulkan (`backend_vulkan_device_gradient_spec`, new row): P6 + P1 on lavapipe equal cpu_simd (0 mismatches). Device-gradient count plus host-eval count = 33 = every tile. P6 is +-2 of Chrome.
+- **Base vs head, failing names (blend seed, serial, rebased on `fcf511af755`, which includes #10006):** 28 background / gradient / glass / material / Draw IR specs, 0 new failures.
+  - Fixed at head: the new spec (base 1/9 -> head 9/9), the replaced `web_device_scale` row, and the new Vulkan row.
+  - Unchanged red on both sides: `simple_web_html_layout_renderer_coverage` 2, `linear_gradient_angle_draw_ir` AC-11, `linear_gradient_angle_cpu_raster` AC-4/5/6, decl_apply_coverage_closure 1, `background_gradient_wpt` 3, `draw_ir_adv` 2, `declarations_coverage_closure` 2, `wm_aetheric_web_material` 1, `selector_color_subset` 3, `simple_web_browser_engine_security` 17.
+  - `browser_renderer_spec` 131/131 at head, after the typed-path `no-repeat` guard above.
+- **Still open:**
+  - fractional tile edges (Chrome's coverage-blended seam pixel; Simple assigns the pixel whole);
+  - `space` / `round`, 3/4-value positions, per-layer `background-origin` / `-clip` lists or tail boxes, `fixed`: all fail closed (colour only);
+  - a radial layer with an explicit px/em radius on a fractional-size tile fails closed;
+  - a layer above the 1,024-tile cap paints colour only;
+  - a sized longhand in one declaration block whose image list was TYPED in another block (the typed projection kept no text) paints untiled;
+  - typed single gradients with default geometry still extrapolate into a border instead of repeating (read from the typed paths, not measured);
+  - `url()` layers keep the existing two-url / single-url path: scalar size, no per-layer lists.
+- **Perf (640x480 page, two tiled layers: 40x40 linear + 64x48 radial at 10px 10px = 313 tiles; `simple test` process wall, median of 3, `/usr/bin/time -v` under `systemd-run MemoryMax=8G`, blend seed sha256 119feb0f865390b5... (60799992 2026-11-17 16:01:56.6), host load ~13-15):**
+  - cpu_simd: base 16.0 s (colour only, fail-closed), head 64.2 s; an untiled head twin (same two layers, no size) 52.4 s. Tiling overhead is +11.8 s (+23%): one host LUT plus one evaluation per tile.
+  - Vulkan (lavapipe): base 13.4 s, head 29.4 s, untiled twin 14.5 s. Tiling overhead is +14.9 s (~2x): one device dispatch per tile, ~48 ms each.
+  - Max RSS 0.95-1.0 GB on every lane, base and head (one ~0.24 GB run in most triples).
+  - Follow-up (perf, filed here): evaluate a whole tile grid in ONE Vulkan dispatch (tile-local coordinates in `gradient_layer.comp`), and reuse one host tile on cpu_simd when tiles are pixel-aligned.

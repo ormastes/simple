@@ -31,6 +31,7 @@ use std.common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans}
 use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
@@ -960,6 +961,8 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         val pay = y + (_engine2d_draw_ir_nth_int(layer_geom, 1, 0) / 1024) as i32
         val paw = (_engine2d_draw_ir_nth_int(layer_geom, 2, 0) / 1024) as i32
         val pah = (_engine2d_draw_ir_nth_int(layer_geom, 3, 0) / 1024) as i32
+        val layer_tiles = _engine2d_draw_ir_style_value(style, "background-gradient-layer-tiles")
+        val layer_repeat = _engine2d_draw_ir_style_value(style, "background-gradient-layer-repeat").split(",")
         var li: i32 = layer_stops.len() as i32 - 1
         # cpu-lane-loop-ok: one box's own gradient layer list, bottom layer first; bound is that list
         while li >= 0:
@@ -978,7 +981,43 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
                 val g1 = _engine2d_draw_ir_nth_int(layer_geom, 5 + 4 * li, 0)
                 val g2 = _engine2d_draw_ir_nth_int(layer_geom, 6 + 4 * li, 0)
                 val g3 = _engine2d_draw_ir_nth_int(layer_geom, 7 + 4 * li, 0)
-                if fields[0] == "R":
+                if layer_tiles != "":
+                    # A tiled layer (`background-gradient-layer-tiles`): the
+                    # gradient is painted once per tile over that tile's
+                    # pixel span (`gradient_tile_spans`, the raster's grid),
+                    # moved to the tile origin. Each tile takes the same
+                    # Engine2D gradient call as an untiled layer, so the
+                    # Vulkan device evaluates it or declines to the host.
+                    val tx = lox + _engine2d_draw_ir_nth_int(layer_tiles, 4 * li, 0)
+                    val ty = loy + _engine2d_draw_ir_nth_int(layer_tiles, 1 + 4 * li, 0)
+                    val tw = _engine2d_draw_ir_nth_int(layer_tiles, 2 + 4 * li, 0)
+                    val th = _engine2d_draw_ir_nth_int(layer_tiles, 3 + 4 * li, 0)
+                    val rflags = if li < layer_repeat.len(): layer_repeat[li] else: "11"
+                    val cx0 = if pax < 0: 0 else: pax
+                    val cy0 = if pay < 0: 0 else: pay
+                    val cx1 = if pax + paw > eng.w: eng.w else: pax + paw
+                    val cy1 = if pay + pah > eng.h: eng.h else: pay + pah
+                    val xs = gradient_tile_spans(cx0, cx1 - cx0, tx, tw, rflags.starts_with("1"))
+                    val ys = gradient_tile_spans(cy0, cy1 - cy0, ty, th, rflags.ends_with("1"))
+                    var yi = 0
+                    # cpu-lane-loop-ok: one Engine2D gradient call per tile row of one layer; bound is the painted area over the tile size
+                    while yi < ys.len():
+                        var xi = 0
+                        # cpu-lane-loop-ok: one Engine2D gradient call per tile of one row; bound is the painted width over the tile size
+                        while xi < xs.len():
+                            val dx = xs[xi + 2] * tw
+                            val dy = ys[yi + 2] * th
+                            val sx = xs[xi] as i32
+                            val sy = ys[yi] as i32
+                            val sw = (xs[xi + 1] - xs[xi]) as i32
+                            val sh = (ys[yi + 1] - ys[yi]) as i32
+                            if fields[0] == "R":
+                                eng.draw_radial_gradient_ellipse(sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, g2, g3, lcolors, lpositions)
+                            else:
+                                eng.draw_linear_gradient_line(sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, lox + g2 + dx, loy + g3 + dy, lcolors, lpositions)
+                            xi = xi + 3
+                        yi = yi + 3
+                elif fields[0] == "R":
                     eng.draw_radial_gradient_ellipse(pax, pay, paw, pah, lox + g0, loy + g1, g2, g3, lcolors, lpositions)
                 else:
                     eng.draw_linear_gradient_line(pax, pay, paw, pah, lox + g0, loy + g1, lox + g2, loy + g3, lcolors, lpositions)

@@ -625,10 +625,48 @@ fn _html_draw_ir_gradient_layer_props(layers: [BackgroundGradientLayer], x: i32,
             stops.push("{stop_pos}")
             k = k + 1
         li = li + 1
-    [
+    var props = [
         draw_ir_style_prop("background-gradient-layer-geometry", geom.build()),
         draw_ir_style_prop("background-gradient-layer-stops", stops.build())
     ]
+    # Tiled layers (a sized / offset / no-repeat tile that does not cover
+    # the painting area) add each layer's tile 0 rect, Q10 px relative to
+    # (x, y), and its repeat axes `<x><y>` (1 = repeat). Absent: every layer
+    # paints untiled, as before.
+    if _html_draw_ir_gradient_layers_tiled(layers, px, py, pw, ph):
+        var tiles = StringBuilder.new()
+        var repeat = StringBuilder.new()
+        li = 0
+        # cpu-lane-loop-ok: encodes one box's own gradient layer list; bound is that list
+        while li < layers.len():
+            val t = layers[li].tile
+            val tx = t[0] - ox
+            val ty = t[1] - oy
+            val tw = t[2]
+            val th = t[3]
+            if li > 0:
+                tiles.push(",")
+                repeat.push(",")
+            tiles.push("{tx},{ty},{tw},{th}")
+            repeat.push(if layers[li].repeat_x: "1" else: "0")
+            repeat.push(if layers[li].repeat_y: "1" else: "0")
+            li = li + 1
+        props.push(draw_ir_style_prop("background-gradient-layer-tiles", tiles.build()))
+        props.push(draw_ir_style_prop("background-gradient-layer-repeat", repeat.build()))
+    props
+
+# True when some layer's tile 0 does not cover the painting area (px, py,
+# pw, ph): only then do tile rects change any pixel.
+fn _html_draw_ir_gradient_layers_tiled(layers: [BackgroundGradientLayer], px: i32, py: i32, pw: i32, ph: i32) -> bool:
+    val x0 = (px as i64) * 1024
+    val y0 = (py as i64) * 1024
+    val x1 = ((px + pw) as i64) * 1024
+    val y1 = ((py + ph) as i64) * 1024
+    for layer in layers:
+        val t = layer.tile
+        if t.len() == 4 and (t[0] > x0 or t[1] > y0 or t[0] + t[2] < x1 or t[1] + t[3] < y1):
+            return true
+    false
 
 fn _html_draw_ir_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
@@ -2581,7 +2619,7 @@ fn _html_draw_ir_canvas_gradient_layers(command: DrawIrCommand, st: Style, x: i3
     var props: [DrawIrStyleProp] = []
     # cpu-lane-loop-ok: rewrites one box command's own computed-style list; bound is that prop list
     for prop in command.computed_style:
-        if prop.key != "background-gradient-layer-geometry" and prop.key != "background-gradient-layer-stops":
+        if prop.key != "background-gradient-layer-geometry" and prop.key != "background-gradient-layer-stops" and prop.key != "background-gradient-layer-tiles" and prop.key != "background-gradient-layer-repeat":
             props.push(prop)
     for prop in _html_draw_ir_gradient_layer_props(layers, x, y, 0, 0, width, height):
         props.push(prop)
@@ -2603,7 +2641,7 @@ fn _html_draw_ir_widget_suppressed_box(command: DrawIrCommand, whole_box: bool, 
             props.push(draw_ir_style_prop(key, "0"))
         elif not keep_gradient and key == "background-gradient-stops":
             props.push(draw_ir_style_prop(key, ""))
-        elif not keep_gradient and (key == "background-gradient-layer-geometry" or key == "background-gradient-layer-stops"):
+        elif not keep_gradient and (key == "background-gradient-layer-geometry" or key == "background-gradient-layer-stops" or key == "background-gradient-layer-tiles" or key == "background-gradient-layer-repeat"):
             # (dropped: the suppressed box paints no gradient layers)
             continue
         elif whole_box and key == "background-layers-raw":
