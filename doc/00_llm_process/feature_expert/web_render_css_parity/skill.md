@@ -2603,3 +2603,8 @@ Follow-up to the four 2026-11-16 behaviours. Each item has a `*_chrome159_spec.s
 - **Horizontal percent margins** (`margin-left:5%`) already resolved through `resolve_horizontal_margin_px`; no change.
 - **Still open:** grid items (percent of the grid area width, `grid_margin_t` still reads whole px); `vertical-align:top` inline-block ignores `margin-top` even in px (Chrome offsets by it).
 - Spec: `test/01_unit/browser_engine/percent_margin_contexts_chrome159_spec.spl` (5 cases, red 0/5 on base, green 5/5).
+## 2026-11-17 — Glyph grayscale raster: scanline sweep (perf, byte-identical output)
+- **Was:** `_glyf_edge_coverage` tested every outline edge for each of the 16 samples of every pixel (pixels x 16 x edges) and `rasterize_sfnt_glyf` pushed one byte per pixel. Large glyphs (64 device px on the dpr4 catalog) dominated render time.
+- **Now:** `_glyf_raster_alpha` (`src/lib/common/encoding/sfnt_glyf.spl`) gathers each sample scanline's edge crossings once, insertion-sorts them and sweeps the 4 sample x positions of each pixel with one pointer; the buffer is preallocated. Same crossing expression, `<=` test and integer winding sum, so every coverage byte is unchanged. Used by `rasterize_sfnt_glyf`, `sfnt_render_glyph_into` and `sfnt_rasterize_glyph_baseline_aligned`.
+- **Proof:** Simple PPM sha256 equal on base and head for all 8 catalog pages at 1x and css-layout at 4x. css-layout wall: 1x 62s -> 49s, 4x 324s -> 158s (peak RSS 2.82 GB -> 2.91 GB at 4x).
+- **Not changed:** the LCD path (`_lcd_accumulate_row`) is already a per-row crossing sweep; its extra cost is the 3x subpixel columns plus the FIR, not a per-pixel edge scan.
