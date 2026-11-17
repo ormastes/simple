@@ -1,6 +1,7 @@
 # Enum interpolation prints an object address (id: dupcheck_enum_interpolation_erased_value)
 
 Status: verification-pending (workaround landed; codegen defect open)
+Bug ID: dupcheck_enum_interpolation_erased_value (shard doc/08_tracking/bug/db/dupcheck_enum_interpolation_erased_value.sdn, P2 open)
 
 ## Symptom
 `"{token.kind}:{token.value}"` where `kind` is an enum field renders
