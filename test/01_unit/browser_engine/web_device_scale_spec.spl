@@ -350,6 +350,10 @@ val GSTACK_PTS_32: [i32] = [10, 10, 48, 51, 80, 64, 150, 120, 20, 110, 120, 30]
 # the box colour (an untyped layer: a transparent end stop).
 val GSTACK_L1_BG = "background-color:#ffff00;background-image:linear-gradient(to right, rgba(0,0,255,0.6), transparent)"
 val GSTACK_L1_CHROME: [u32] = [0xFF6E6E90u32, 0xFFB3B34Cu32, 0xFFF6F609u32, 0xFF8D8D72u32, 0xFFD9D925u32, 0xFFC6C639u32]
+# A TYPED linear layer (no zero stop) with translucent stops over the box
+# colour: the typed Draw IR path must paint the colour under it.
+val GSTACK_L1B_BG = "background-color:#ffff00;background-image:linear-gradient(to right, rgba(0,0,255,0.6), rgba(0,0,255,0.1))"
+val GSTACK_L1B_CHROME: [u32] = [0xFF6D6D92u32, 0xFFA6A659u32, 0xFFDDDD21u32, 0xFF868678u32, 0xFFC6C639u32, 0xFFB6B649u32]
 # Linear 45deg, three stops, on a non-square box.
 val GSTACK_L2_BG = "background:linear-gradient(45deg, #ff0000, #00ff00 40%, #0000ff)"
 val GSTACK_L2_CHROME: [u32] = [0xFF0FEF00u32, 0xFF00D42Au32, 0xFF0032CDu32, 0xFF8C7200u32, 0xFF00C737u32, 0xFF00748Au32]
@@ -396,6 +400,22 @@ describe "multi-layer gradient backgrounds match Chrome 159 at device scale 4":
     it "paints a translucent linear layer fading to transparent over the box colour on cpu_simd and the raster as Chrome does":
         expect(radial_max_dev(radial_cpu_simd_k4(40, 24, GSTACK_L1_BG), 160, GSTACK_PTS_24, GSTACK_L1_CHROME)).to_be_less_than(3)
         expect(radial_max_dev(radial_raster_4x(40, 24, GSTACK_L1_BG), 160, GSTACK_PTS_24, GSTACK_L1_CHROME)).to_be_less_than(3)
+
+    it "paints a typed translucent linear layer over the box colour on cpu_simd and the raster as Chrome does":
+        expect(radial_max_dev(radial_cpu_simd_k4(40, 24, GSTACK_L1B_BG), 160, GSTACK_PTS_24, GSTACK_L1B_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(radial_raster_4x(40, 24, GSTACK_L1B_BG), 160, GSTACK_PTS_24, GSTACK_L1B_CHROME)).to_be_less_than(3)
+
+    it "keeps a gradient layer list with a background-size fail-closed to its colour on both lanes":
+        # Per-layer size / tiling is not implemented: a sized list must not
+        # paint one stretched, untiled gradient. It paints the box colour,
+        # as before gradient lists were painted (not a Chrome match).
+        val page = radial_doc(40, 24, "background-color:#ffff00;background-image:linear-gradient(to right, #ff0000, transparent), radial-gradient(#00ff00, #0000ff);background-size:10px 10px")
+        val raster = simple_web_layout_render_html_software_pixels(page, 40, 24)
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(page, 40, 24, "cpu_simd")
+        expect(gstack_mismatches(raster, cpu)).to_equal(0)
+        expect(cpu[5 * 40 + 2]).to_equal(0xFFFFFF00u32)
+        expect(cpu[5 * 40 + 12]).to_equal(0xFFFFFF00u32)
+        expect(cpu[20 * 40 + 30]).to_equal(0xFFFFFF00u32)
 
     it "paints a three-stop 45deg linear layer on cpu_simd and the raster as Chrome does":
         expect(radial_max_dev(radial_cpu_simd_k4(40, 24, GSTACK_L2_BG), 160, GSTACK_PTS_24, GSTACK_L2_CHROME)).to_be_less_than(3)
