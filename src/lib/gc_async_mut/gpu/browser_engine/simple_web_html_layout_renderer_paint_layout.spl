@@ -13,6 +13,10 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
     split_top_level_commas, shadow_length_prefix
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    radial_gradient_box_paintable, radial_gradient_box_geometry,
+    radial_gradient_geometry_q10, canvas_background_extent
+}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use std.common.encoding.utf8.{
     text_codepoint_len, text_is_valid_utf8, utf8_seq_len
@@ -553,6 +557,21 @@ fn _html_draw_ir_resolved_text_command(
     resolved.clip_rect = clip_rect
     resolved
 
+# `background-gradient-radial-geometry`: the resolved CSS radial gradient
+# (centre, radii, paint rect) as Q10 px offsets from the command origin
+# (x, y). Device scale multiplies every field; draw_ir_adv adds the origin
+# back and paints it with the shared Engine2D evaluator.
+fn _html_draw_ir_radial_geometry_prop(rg: [i64], x: i32, y: i32) -> DrawIrStyleProp:
+    val cx = rg[0] - (x as i64) * 1024
+    val cy = rg[1] - (y as i64) * 1024
+    val rx = rg[2]
+    val ry = rg[3]
+    val px = (rg[4] - (x as i64)) * 1024
+    val py = (rg[5] - (y as i64)) * 1024
+    val pw = rg[6] * 1024
+    val ph = rg[7] * 1024
+    draw_ir_style_prop("background-gradient-radial-geometry", "{cx},{cy},{rx},{ry},{px},{py},{pw},{ph}")
+
 fn _html_draw_ir_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
     clip: ClipRect, vector_fonts: bool
@@ -573,7 +592,11 @@ fn _html_draw_ir_command(
     val clip_rect = draw_ir_rect_bounds(
         clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
     )
-    val computed_style = _html_draw_ir_style_props(node, st)
+    var computed_style = _html_draw_ir_style_props(node, st)
+    if radial_gradient_box_paintable(st):
+        val rg = radial_gradient_box_geometry(st, x, y, w, h)
+        if rg.len() == 8:
+            computed_style.push(_html_draw_ir_radial_geometry_prop(rg, x, y))
     # Text-run nodes carry no background of their own; emitting them as a
     # (transparent) box makes the Draw IR executor paint an opaque zero-color
     # fill that reads back as a solid bar over the parent's background. Emit a
@@ -2211,6 +2234,14 @@ fn _html_draw_ir_commands(
                 node_command = _html_draw_ir_widget_suppressed_box(
                     node_command, widget_node_box_skipped, keep_gradient
                 )
+                if keep_gradient and styles[i].background_gradient_is_radial:
+                    # Chrome propagates the body background to the canvas:
+                    # the radial is positioned on, and paints, the canvas
+                    # (the raster's fb_background_radial_stack_clip twin).
+                    val canvas = canvas_background_extent(
+                        nodes, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height)
+                    node_command = _html_draw_ir_canvas_radial(
+                        node_command, styles[i], boxes.bx[i], boxes.by[i], canvas[0], canvas[1])
             commands.push(node_command)
             owner_nodes.push(i)
             var text_runs: [DrawIrCommand] = [node_command]
@@ -2442,6 +2473,21 @@ fn _html_draw_ir_commands(
 # unless `keep_gradient`, the gradient), and for a widget-* / icon-image node
 # (`whole_box`) also the border, outline and box shadow. Every other prop, the
 # command's id, geometry and owner stay as they were.
+# Re-resolve a body radial command's geometry against the canvas
+# (width x height from the origin), keeping it relative to the command origin.
+fn _html_draw_ir_canvas_radial(command: DrawIrCommand, st: Style, x: i32, y: i32, width: i32, height: i32) -> DrawIrCommand:
+    var out = command
+    val g = radial_gradient_geometry_q10(st.bg_layers_raw, 0, 0, width, height)
+    val geom = _html_draw_ir_radial_geometry_prop([g[0], g[1], g[2], g[3], 0, 0, width as i64, height as i64], x, y)
+    var props: [DrawIrStyleProp] = []
+    # cpu-lane-loop-ok: rewrites one box command's own computed-style list; bound is that prop list
+    for prop in command.computed_style:
+        if prop.key != "background-gradient-radial-geometry":
+            props.push(prop)
+    props.push(geom)
+    out.computed_style = props
+    out
+
 fn _html_draw_ir_widget_suppressed_box(command: DrawIrCommand, whole_box: bool, keep_gradient: bool) -> DrawIrCommand:
     var out = command
     out.color = 0u32
