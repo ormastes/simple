@@ -30,11 +30,31 @@ about 30 string-compare sites, including `graph_schema_v1.spl` and
 
 ## 4. Test query and harness
 
-- The plan (sections 3.5, 9.1) lists `TESTDB-001`..`TESTDB-010` as one range and
-  defines no per-id rows. Specs now use the mapping in
-  `test_query_spec.spl` (001 exact query, 002 result variants, 003 provenance and
-  missing identity, 004 pagination/rejected/failed queries); 005..010 and an id
-  for read-only/no-write isolation remain undefined by the plan.
+- The plan (sections 3.5, 9.1) lists `TESTDB-001`..`TESTDB-010` as one range with
+  no per-id rows. The per-id definitions, taken only from what the plan states,
+  now live in the header of `test/01_unit/lib/common/traceability/test_query_spec.spl`:
+  001 exact query, 002 status variants, 003 provenance/missing identity, 004
+  pagination and rejected queries, 005 read-only/no-write isolation, 006 failed
+  authoritative query is a typed error not an empty success, 007 retries stay
+  separate, 008 skipped/cached/expired never PASS, 009 CLI/MCP parity
+  with `RunnerTestDb`, 010 requirement/bug-scoped queries. 001-009 each have a
+  tagged scenario.
+- `TESTDB-010` is only defended fail-closed: `simple test query` has no
+  `--bug`, `--requirement` or `--levels` (unknown-flag usage error,
+  `src/app/test_runner_new/test_query_cli.spl:143`), and `simple_test_query` takes
+  only `path`/`name` (`src/app/mcp/main_lazy_trace_tools.spl:301`). Plan 3.2 and
+  acceptance item 2 (`--bug=<id>` returns case definitions, run attempts,
+  executable/source identity, missing evidence) are not implemented. Unblock: a
+  bug/requirement -> case resolver over the traceability graph feeding
+  `RunnerTestDb.query_case_attempts`.
+- Plan 3.5 return fields beyond the current row (`test_definition_digest`,
+  `binary_digest`, `host/backend`, `started_at`, `duration`, `failure_code`,
+  `artifact_refs`, `level`) are not in `TestQueryRow`; rows carry run, planned
+  case, attempt, status, qualification and provenance only
+  (`std.common.traceability.test_query`). Unblock: the runner must first record
+  those facts per attempt.
+- `expired` has no `TestQueryStatus` variant; it parses as `Unknown` and is
+  never PASS (TESTDB-008), which is safe but not a distinct typed outcome.
 
 ## Already recorded elsewhere
 
