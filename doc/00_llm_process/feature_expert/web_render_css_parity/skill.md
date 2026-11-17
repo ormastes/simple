@@ -2860,3 +2860,29 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - Group layers (2026-11-18): Chrome keeps an opacity-group layer premultiplied in 8 bits. Engine2D stores it straight, so its translucent-destination blend must compute the premultiplied value first (`_blend_premul_over`), then store it straight. The round trip is exact. The rule has 8 twins (C, Rust runtime, seed interpreter, oracle, scalar fallback, Metal, Vulkan GLSL+SPIR-V); change all of them together and rebuild the seed.
 
 - Per-corner borders (2026-11-18): Engine2D paints them with `engine2d_draw_ir_render_typed_border_ring` (outer per-corner mask minus elliptical inner corners, side colour by the outer-to-inner-corner join). The corner mask samples pixel centres. The raster lane keeps its own corner AA; it is unpinned.
+
+## 2026-11-18 — LCD low/mid coverage lift for dark text
+- **Measured:** on forms-media body text (#172033), Simple's LCD mask level per channel against Chrome's, for 76.7k channel samples in rows 476..760 (tool: a per-level histogram of `round((255 - v) * 32 / (255 - L))`).
+  - Chrome is one LCD16 step heavier for engine steps 2..17 of 32 and equal from about step 19 up.
+  - Glyph positions and row offsets already match (see the earlier entry).
+- **Change** (`lcd_s32_tables.spl`): before the colour exponent, `cov + LIFT (1 - L/255) 6.75 c^2 (END - c) / END^3` for c < END.
+  - Two fitted constants: LIFT 7.5 and END 136.
+  - Both are capped by Chrome-exact pins: the 16 px H stem `efbf67` has raw G 65 (< 72), and the 8 px l stem `77bfef` has raw R 133..135 (< 136).
+  - Raw coverage of a pin pixel: `sfnt_render_glyph_lcd(blob, CODEPOINT, cp, size, phase)` `slg_rgb`; the bucket is `raw >> 3`.
+- **Rejected shapes:**
+  - The earlier exponent 0.95 for black: B 149 crosses to bucket 19 and breaks `efbf67`.
+  - A parabola: it inks raw 6..7, so the device-scale 1x ink count went 186 -> 199, away from Chrome's 146.
+  - An unweighted lift: light-on-dark text got worse.
+- **Re-pinned toward Chrome:** in `small_text_vertical_hint_chrome159_spec`, x=4 is now Chrome's exact `CF8F5F` (was `D7975F`), and the H bar is `777777` (was `778787`; Chrome `6F7777`).
+- **Hold-out** (not used to fit LIFT or END, but the `(1 - L/255)` weight was added after its white-on-dark row regressed; serif #000, serif #0f172a, sans/serif #c00000, #ddd on #101820): mismatch 2069/2252/2042/1386/1684 -> 1744/2080/1810/1248/1677.
+- **Catalog 1x:**
+
+  | page | before | after |
+  |---|---|---|
+  | overview | 1.21 | 1.14 |
+  | html | 2.57 | 2.44 |
+  | css-layout | 2.52 | 2.29 |
+  | css-paint | 2.80 | 2.50 |
+  | forms-media | 2.65 | 2.40 |
+  | animation | 2.77 | 2.46 |
+  | evidence | 0.77 | 0.68 |
