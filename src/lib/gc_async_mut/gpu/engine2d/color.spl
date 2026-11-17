@@ -4,7 +4,7 @@
 # Colors are packed as u32 in ARGB layout: 0xAARRGGBB
 #
 # Usage:
-#   use std.gpu.engine2d.color.{rgba, rgb, blend, lerp_color, hex_to_color}
+#   use std.gpu.engine2d.color.{rgba, rgb, blend, blend_solid, lerp_color, hex_to_color}
 
 # ============================================================================
 # Color Construction
@@ -71,52 +71,66 @@ fn color_a(c: u32) -> i32:
 # Color Blending
 # ============================================================================
 
-fn blend(src: u32, dst: u32) -> u32:
-    """Alpha-blend src over dst using standard Porter-Duff src-over on
-    straight (non-premultiplied) alpha.
+fn _blend_rule(src: u32, dst: u32, solid: bool) -> u32:
+    """Chrome 159 (Skia) source-over of straight-alpha src over dst.
 
-    Composites in premultiplied space (srcRGB*srcA over dstRGB*dstA) and then
-    unpremultiplies by the resulting output alpha. This matters when dst is
-    (partly) transparent: e.g. blending 50% straight-alpha white over fully
-    transparent black must yield 0x80FFFFFF (outA=srcA, outRGB=srcRGB), not
-    0x80808080 — the old formula treated dst's RGB as if dst were always
-    opaque and never unpremultiplied the result, darkening any translucent
-    draw over a transparent destination. Opaque destinations (da=255) are
-    unaffected: the formula reduces to the classic `src*sa + dst*(1-sa)`.
+    Fitted exactly against Chrome 159 screenshots (arm64 software raster,
+    2026-11-17; translucent_blend_chrome159_spec). Over an OPAQUE destination,
+    per channel:
+      solid fill   (`solid`):  round(s*a/255) + ((d*(256-a)) >> 8)   SkPMSrcOver
+      image/shader (!`solid`): round(s*a/255) + div255r(d*(255-a))
+    with div255r(v) = (v + 128 + ((v + 128) >> 8)) >> 8 (exact rounding).
+    Over a TRANSLUCENT destination (no Chrome screenshot can observe it):
+    straight-alpha src-over in premultiplied terms, unpremultiplied by the
+    output alpha, every division rounded; 50% white over transparent black
+    stays 0x80FFFFFF.
 
-    Args:
-        src: Source color (foreground)
-        dst: Destination color (background)
-
-    Returns:
-        Blended color
+    Native twins, kept bit-identical: engine2d_blend_u32
+    (src/runtime/runtime_simd_dispatch.c), blend_pixel
+    (runtime/src/value/engine2d_simd_ops.rs) and engine2d_blend_pixel_u32
+    (compiler/src/interpreter_extern/simd.rs).
     """
     val sa = color_a(src)
     if sa == 255:
         return src
     if sa == 0:
         return dst
-
-    val sr = color_r(src)
-    val sg = color_g(src)
-    val sb = color_b(src)
-    val dr = color_r(dst)
-    val dg = color_g(dst)
-    val db = color_b(dst)
     val da = color_a(dst)
+    val inv = 255 - sa
+    if da != 255:
+        val dw = (da * inv + 127) / 255
+        val oa = sa + dw
+        val half = oa / 2
+        return rgba(
+            (color_r(src) * sa + color_r(dst) * dw + half) / oa,
+            (color_g(src) * sa + color_g(dst) * dw + half) / oa,
+            (color_b(src) * sa + color_b(dst) * dw + half) / oa,
+            oa)
+    if solid:
+        val inv256 = inv + 1
+        return rgba(
+            (color_r(src) * sa + 127) / 255 + (color_r(dst) * inv256) / 256,
+            (color_g(src) * sa + 127) / 255 + (color_g(dst) * inv256) / 256,
+            (color_b(src) * sa + 127) / 255 + (color_b(dst) * inv256) / 256,
+            255)
+    val vr = color_r(dst) * inv + 128
+    val vg = color_g(dst) * inv + 128
+    val vb = color_b(dst) * inv + 128
+    rgba(
+        (color_r(src) * sa + 127) / 255 + (vr + vr / 256) / 256,
+        (color_g(src) * sa + 127) / 255 + (vg + vg / 256) / 256,
+        (color_b(src) * sa + 127) / 255 + (vb + vb / 256) / 256,
+        255)
 
-    val inv_a = 255 - sa
-    # dst_weight is dst's premultiplied contribution to the output, already
-    # scaled to the same 0..255 basis as `sa` — reused for both the alpha
-    # accumulation and each unpremultiplied channel below.
-    val dst_weight = (da * inv_a) / 255
-    val out_a = sa + dst_weight
+fn blend(src: u32, dst: u32) -> u32:
+    """Composite an image / gradient / layer pixel src over dst (Chrome's
+    shader-path rule; see `_blend_rule`)."""
+    _blend_rule(src, dst, false)
 
-    val out_r = (sr * sa + dr * dst_weight) / out_a
-    val out_g = (sg * sa + dg * dst_weight) / out_a
-    val out_b = (sb * sa + db * dst_weight) / out_a
-
-    rgba(out_r, out_g, out_b, out_a)
+fn blend_solid(src: u32, dst: u32) -> u32:
+    """Composite a solid colour fill src over dst (Chrome's SkPMSrcOver rule;
+    see `_blend_rule`)."""
+    _blend_rule(src, dst, true)
 
 fn lerp_color(a: u32, b: u32, t: f32) -> u32:
     """Linearly interpolate between two colors.

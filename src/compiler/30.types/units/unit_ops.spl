@@ -89,6 +89,12 @@ fn unit_op_role(name: text) -> text:
 # the default profile (result = the underlying scalar, as before), an error
 # when the robust profile sets strict mode.
 var unit_op_strict: bool = false
+# SPL-UNIT-002 (security): an undeclared product/quotient of two DIFFERENT
+# units is an error in every profile and edition of compiled code (owner
+# decision 2026-11-17, Q1=b, Rust-style). The ONLY relaxation is script mode
+# (`CompileMode.Interpret`, `bin/simple run` / `.shs`), where it is a recorded
+# warning; the driver flips this switch, never a profile or policy row.
+var unit_op_mixed_strict: bool = true
 var unit_op_warnings: [text] = []
 
 pub fn unit_op_robust_profile():
@@ -96,6 +102,14 @@ pub fn unit_op_robust_profile():
 
 pub fn unit_op_default_profile():
     unit_op_strict = false
+
+# @allow(primitive_api) on/off switch: `false` only for script (interpreted) mode
+pub fn unit_op_set_mixed_strict(on: bool):
+    unit_op_mixed_strict = on
+
+# @allow(primitive_api) yes/no strict-mode query for SPL-UNIT-002
+pub fn unit_op_is_mixed_strict() -> bool:
+    unit_op_mixed_strict
 
 # @allow(primitive_api) yes/no strict-mode query paired with the setters above
 pub fn unit_op_is_strict() -> bool:
@@ -217,13 +231,21 @@ pub fn unit_op_verdict(op: text, lhs_in: text, rhs_in: text) -> UnitOpVerdict:
                 return UnitOpVerdict.Allow(rhs)
             return unit_op_deny(op, lhs, rhs, "a delta and a point combine only by +")
         if lrole == "nominal" and rrole == "nominal" and (op == UNIT_OP_MUL or op == UNIT_OP_DIV):
-            # Distinct units were never implicitly combinable, so an undeclared
-            # product stays an error; the message names the missing declaration.
+            # Owner decision 2026-11-17 (Q1=b): an undeclared product/quotient
+            # of two DIFFERENT units is SPL-UNIT-002 — an error in compiled
+            # code (every profile/edition); only script mode records a warning
+            # and yields lhs's underlying scalar.
             val derived = unit_op_find_derived(op, lhs, rhs)
             if derived != "":
                 return UnitOpVerdict.Allow(derived)
             val sym = if op == UNIT_OP_MUL: "*" else: "/"
-            return unit_op_deny(op, lhs, rhs, "no derived-unit declaration; declare `unit <Name> = " + lhs + " " + sym + " " + rhs + "` (SPL-UNIT-004)")
+            val verdict = unit_op_deny(op, lhs, rhs, "no derived-unit declaration; declare `unit <Name> = " + lhs + " " + sym + " " + rhs + "`")
+            if unit_op_mixed_strict:
+                return verdict
+            match verdict:
+                case Deny(msg): unit_op_warnings.push(msg)
+                case _: pass
+            return UnitOpVerdict.Allow(unit_op_scalar_name(lhs))
         return unit_op_deny(op, lhs, rhs, "distinct units never mix implicitly")
 
     # Exactly one unit operand.
@@ -298,6 +320,9 @@ pub fn unit_value_binop(op: text, cmp_kind: text, lhs_type: text, lhs: i64, rhs_
                 elif cmp_kind == "gt": t = lhs > rhs
                 elif cmp_kind == "ge": t = lhs >= rhs
                 return UnitValueResult.Truth(t)
+            # Integer payloads never silently truncate a ratio (1/2 must not become 0).
+            if op == UNIT_OP_DIV and rhs != 0 and lhs % rhs != 0:
+                return UnitValueResult.Error("SPL-UNIT-002: `" + lhs_type + " / " + rhs_type + "` is inexact on integer payloads (" + lhs.to_string() + "/" + rhs.to_string() + "); use an exact ratio")
             match unit_value_checked(op, lhs, rhs):
                 case Some(v): UnitValueResult.Value(result, v)
                 case None: UnitValueResult.Error("SPL-UNIT-002: `" + lhs_type + " " + op + " " + rhs_type + "` overflowed or divided by zero; use a checked helper")

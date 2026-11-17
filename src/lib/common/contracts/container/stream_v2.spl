@@ -92,7 +92,9 @@ pub fn container_output_identity_digest_v2(identity: ContainerOutputIdentityV2) 
         "budgetDigest": SdnValue.String(identity.parent_budget_digest), "bindingDigest": SdnValue.String(identity.binding_digest)}
     Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
 
-pub fn container_stream_policy_digest_v2(policy: ContainerStreamPolicyV2) -> Result<text, text>:
+# The canonical bytes of a stream policy: exactly what container_stream_policy_digest_v2 hashes (no trailing
+# newline), so `sha256_text(encode(policy)) == digest(policy)`. Validation is the digest's own.
+pub fn container_stream_policy_encode_v2(policy: ContainerStreamPolicyV2) -> Result<text, text>:
     for path in [policy.root, policy.broker_program, policy.directory, policy.delegated_cgroup_path]:
         if not container_stream_absolute_path_v2(path): return Err("container-stream-policy-path-invalid")
     if policy.root == "/" or policy.timeout_ms <= 0 or policy.memory_policy != "enforce":
@@ -128,7 +130,74 @@ pub fn container_stream_policy_digest_v2(policy: ContainerStreamPolicyV2) -> Res
         "brokerQuota": SdnValue.Int(broker.cpu_quota_us), "brokerPeriod": SdnValue.Int(broker.cpu_period_us),
         "brokerCpuReserved": SdnValue.Int(broker.reserved_cpu_millis),
         "brokerMemoryLimit": SdnValue.Int(broker.memory_limit_bytes), "brokerMemoryReserved": SdnValue.Int(broker.reserved_memory_bytes)}
-    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn container_stream_policy_digest_v2(policy: ContainerStreamPolicyV2) -> Result<text, text>:
+    Ok(sha256_text(container_stream_policy_encode_v2(policy)?))
+
+val CONTAINER_STREAM_POLICY_MAX_BYTES_V2: i64 = 1114112
+
+fn container_stream_policy_text_v2(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-stream-policy-field:" + name)
+
+fn container_stream_policy_int_v2(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("container-stream-policy-field:" + name)
+
+# Strict canonical decoder (milestone_0023 part B): exactly the 22 fields of the canonical encoding (an unknown or
+# missing field is refused; a duplicate key is refused by the strict parser), typed, and the decoded policy must
+# re-encode to exactly `source` (so the digest of the bytes is the digest of the policy). A decoded policy is DATA:
+# it is no helper lease and no permission to open a stream.
+pub fn container_stream_policy_decode_v2(source: text) -> Result<ContainerStreamPolicyV2, text>:
+    if source.byte_len() == 0 or source.byte_len() > CONTAINER_STREAM_POLICY_MAX_BYTES_V2:
+        return Err("container-stream-policy-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: CONTAINER_STREAM_POLICY_MAX_BYTES_V2,
+            max_depth: 3, max_nodes: 256, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(issue): return Err("container-stream-policy-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-stream-policy-object")
+    val names = ["kind", "root", "snapshot", "cache", "broker", "brokerDigest", "environment", "directory", "delegation",
+        "memoryPolicy", "timeoutMs", "childImageMode", "brokerCgroup", "brokerDevice", "brokerInode", "brokerGeneration",
+        "brokerPolicy", "brokerQuota", "brokerPeriod", "brokerCpuReserved", "brokerMemoryLimit", "brokerMemoryReserved"]
+    if fields.len() != names.len(): return Err("container-stream-policy-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("container-stream-policy-fields")
+    if container_stream_policy_text_v2(fields, "kind")? != "container-stream-policy-v2": return Err("container-stream-policy-kind")
+    var environment: [text] = []
+    match fields["environment"]:
+        case SdnValue.Array(entries):
+            if entries.len() > 64: return Err("container-stream-environment-bound")
+            for entry in entries:
+                match entry:
+                    case SdnValue.String(value): environment.push(value)
+                    case _: return Err("container-stream-policy-field:environment")
+        case _: return Err("container-stream-policy-field:environment")
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: container_stream_policy_text_v2(fields, "brokerCgroup")?,
+        device: container_stream_policy_int_v2(fields, "brokerDevice")?, inode: container_stream_policy_int_v2(fields, "brokerInode")?,
+        generation: container_stream_policy_int_v2(fields, "brokerGeneration")?,
+        policy_digest: container_stream_policy_text_v2(fields, "brokerPolicy")?,
+        cpu_quota_us: container_stream_policy_int_v2(fields, "brokerQuota")?,
+        cpu_period_us: container_stream_policy_int_v2(fields, "brokerPeriod")?,
+        reserved_cpu_millis: container_stream_policy_int_v2(fields, "brokerCpuReserved")?,
+        memory_limit_bytes: container_stream_policy_int_v2(fields, "brokerMemoryLimit")?,
+        reserved_memory_bytes: container_stream_policy_int_v2(fields, "brokerMemoryReserved")?)
+    val policy = ContainerStreamPolicyV2(root: container_stream_policy_text_v2(fields, "root")?,
+        snapshot_digest: container_stream_policy_text_v2(fields, "snapshot")?,
+        cache_identity: container_stream_policy_text_v2(fields, "cache")?,
+        broker_program: container_stream_policy_text_v2(fields, "broker")?,
+        broker_digest: container_stream_policy_text_v2(fields, "brokerDigest")?, environment: environment,
+        directory: container_stream_policy_text_v2(fields, "directory")?,
+        delegated_cgroup_path: container_stream_policy_text_v2(fields, "delegation")?,
+        memory_policy: container_stream_policy_text_v2(fields, "memoryPolicy")?,
+        timeout_ms: container_stream_policy_int_v2(fields, "timeoutMs")?, broker_budget: budget,
+        child_image_mode: container_stream_policy_text_v2(fields, "childImageMode")?)
+    if container_stream_policy_encode_v2(policy)? != source: return Err("container-stream-policy-noncanonical")
+    Ok(policy)
 
 # The outer digest binds the target/pane request and parent budget as well as
 # the daemon's canonical template. Generated transport and grant expiry remain

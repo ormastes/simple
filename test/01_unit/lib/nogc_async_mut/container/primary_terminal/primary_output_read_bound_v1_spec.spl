@@ -1,0 +1,31 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4 read bound. The adoption-gated
+# wrapper adds no max parameter: one call is one non-blocking native read of at
+# most PIPED_RAW_CAP (8192) raw bytes. No admitted primary-session fixture exists,
+# so this pins the bound on the same POSIX slot read the wrapper reaches through
+# container_terminal_read_v2. A missing /bin/sh is a failure, never a skip.
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_spawn_piped_ref_v1, process_read_stdout_ref_v1}
+use std.io_runtime.thread_sleep
+
+describe "Primary output transport read bound":
+    it "returns at most PIPED_RAW_CAP ASCII bytes per read and then eof":
+        step("A child writes 20000 ASCII bytes; every chunk is <= 8192 bytes and the total is exact")
+        val process = process_spawn_piped_ref_v1("/bin/sh", ["-c", "head -c 20000 /dev/zero | tr '\\000' a"]).unwrap()
+        var total: i64 = 0
+        var largest: i64 = 0
+        var eof = false
+        var reads = 0
+        while not eof and reads < 20000:
+            match process_read_stdout_ref_v1(process):
+                case Ok(Some(chunk)):
+                    val size = chunk.byte_len()
+                    total = total + size
+                    if size > largest: largest = size
+                case Ok(None): thread_sleep(1)
+                case Err(reason):
+                    expect(reason).to_equal("process_stdout_eof")
+                    eof = true
+            reads = reads + 1
+        expect(eof).to_equal(true)
+        expect(total).to_equal(20000)
+        expect(largest <= 8192).to_equal(true)

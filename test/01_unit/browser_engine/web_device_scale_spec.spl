@@ -177,7 +177,14 @@ describe "simple_web_render_html_to_pixels_at_device_scale":
         # ink. At 4x it is 64 device px, which is grayscale. So 4x ink is 8.6x
         # the 1x ink here, not the old > 10x bound. Chrome 159 on this HTML:
         # 199 px at 1x, 1640 px at 4x, i.e. 8.2x.
-        expect(small_ink).to_equal(190)
+        # Re-pinned 2026-11-17 for slight vertical hinting (sfnt_glyf.spl blue-zone
+        # fit): 1x ink 190 -> 186. Measured against Chrome 159 on this exact page
+        # (40x24 crop, DejaVu Sans 16 px, same ink definition): Chrome 146 ink px
+        # at 1x and 1230 at 4x (the 199/1640 above were a different crop). 186 is
+        # closer to 146 than 190 was, and the per-pixel mismatch (> 8 per channel)
+        # against Chrome drops 114 -> 77 of 960. The 4x frame is grayscale and
+        # unchanged (1629; hinting is applied to the LCD raster only).
+        expect(small_ink).to_equal(186)
         expect(big_ink).to_equal(1629)
         # A nearest-neighbour upscale makes every aligned 4x4 block uniform.
         var nonuniform_blocks = 0
@@ -405,17 +412,19 @@ describe "multi-layer gradient backgrounds match Chrome 159 at device scale 4":
         expect(radial_max_dev(radial_cpu_simd_k4(40, 24, GSTACK_L1B_BG), 160, GSTACK_PTS_24, GSTACK_L1B_CHROME)).to_be_less_than(3)
         expect(radial_max_dev(radial_raster_4x(40, 24, GSTACK_L1B_BG), 160, GSTACK_PTS_24, GSTACK_L1B_CHROME)).to_be_less_than(3)
 
-    it "keeps a gradient layer list with a background-size fail-closed to its colour on both lanes":
-        # Per-layer size / tiling is not implemented: a sized list must not
-        # paint one stretched, untiled gradient. It paints the box colour,
-        # as before gradient lists were painted (not a Chrome match).
-        val page = radial_doc(40, 24, "background-color:#ffff00;background-image:linear-gradient(to right, #ff0000, transparent), radial-gradient(#00ff00, #0000ff);background-size:10px 10px")
+    it "tiles a gradient layer list with a background-size on both lanes as Chrome does":
+        # Was pinned colour-only (fail-closed) before per-layer tiling. Now
+        # each layer is tiled 10x10 over the box colour. Chrome 159 pixels:
+        # bgl_p6.png of background_layer_tiling_chrome159_spec (this page with
+        # and without a doctype screenshots byte-identically).
+        val bg = "background-color:#ffff00;background-image:linear-gradient(to right, #ff0000, transparent), radial-gradient(#00ff00, #0000ff);background-size:10px 10px"
+        val page = radial_doc(40, 24, bg)
         val raster = simple_web_layout_render_html_software_pixels(page, 40, 24)
         val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(page, 40, 24, "cpu_simd")
         expect(gstack_mismatches(raster, cpu)).to_equal(0)
-        expect(cpu[5 * 40 + 2]).to_equal(0xFFFFFF00u32)
-        expect(cpu[5 * 40 + 12]).to_equal(0xFFFFFF00u32)
-        expect(cpu[20 * 40 + 30]).to_equal(0xFFFFFF00u32)
+        val pts: [i32] = [5, 5, 27, 20, 47, 37, 66, 50, 93, 70, 118, 90, 141, 60, 155, 93, 20, 80, 130, 18]
+        val chrome: [u32] = [0xFFDC0A19u32, 0xFF50812Fu32, 0xFFCF0B25u32, 0xFF566444u32, 0xFFA93126u32, 0xFF0940B4u32, 0xFF768108u32, 0xFF1D5B87u32, 0xFF7C295Au32, 0xFFBC2C17u32]
+        expect(radial_max_dev(radial_cpu_simd_k4(40, 24, bg), 160, pts, chrome)).to_be_less_than(3)
 
     it "paints a three-stop 45deg linear layer on cpu_simd and the raster as Chrome does":
         expect(radial_max_dev(radial_cpu_simd_k4(40, 24, GSTACK_L2_BG), 160, GSTACK_PTS_24, GSTACK_L2_CHROME)).to_be_less_than(3)

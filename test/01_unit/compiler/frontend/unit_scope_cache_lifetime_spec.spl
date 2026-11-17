@@ -1,0 +1,46 @@
+# The unit library lookup caches (org dirs, suffix -> families) must not
+# outlive a scope reset. The driver parses each file inside a transient array
+# scope and reclaims every array/text born in it, so a cache that survived
+# into the next file was freed memory: Stage 2 native-build reported
+# "unit suffix 'u64' is not in scope; add  (or declare ...)" for plain `0u64`
+# and then SEGVed in unit_library_families.
+# Observable here without a native scope: after a reset the library is read
+# again, so a unit module that appeared on disk is seen.
+# Runtime: src/compiler/10.frontend/core/unit_scope.spl
+# Native repro: test/fixtures/native_suffix_literal_multi_file/
+# doc/08_tracking/bug/unit_scope_cache_freed_by_transient_parse_scope_2026-11-17.md
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write, file_delete}
+use compiler.core.unit_scope.{unit_library_set_base, unit_scope_reset_from, unit_scope_save, unit_scope_restore, unit_suffix_scope_error}
+
+val FIXTURE_ROOT: text = "build/tmp/unit_scope_cache_lifetime_spec/unit"
+
+describe "unit library lookup cache lifetime":
+    it "re-reads the library after unit_scope_reset_from":
+        file_write(FIXTURE_ROOT + "/simple-lang/tempo/__init__.spl", "# fixture\n")
+        file_delete(FIXTURE_ROOT + "/simple-lang/tempo/qbpm.spl")
+        unit_library_set_base(FIXTURE_ROOT)
+        unit_scope_reset_from(0)
+        val before = unit_suffix_scope_error("qbpm")
+        file_write(FIXTURE_ROOT + "/simple-lang/tempo/qbpm.spl", "# fixture\n")
+        val cached = unit_suffix_scope_error("qbpm")
+        unit_scope_reset_from(0)
+        val after = unit_suffix_scope_error("qbpm")
+        unit_library_set_base("")
+        expect(before).to_equal("")
+        expect(cached).to_equal("")
+        expect(after).to_contain("unit suffix 'qbpm' is not in scope; add `use unit.tempo.")
+
+    it "re-reads the library after unit_scope_restore":
+        file_write(FIXTURE_ROOT + "/simple-lang/tempo/__init__.spl", "# fixture\n")
+        file_delete(FIXTURE_ROOT + "/simple-lang/tempo/rbpm.spl")
+        unit_library_set_base(FIXTURE_ROOT)
+        unit_scope_reset_from(0)
+        val saved = unit_scope_save()
+        val before = unit_suffix_scope_error("rbpm")
+        file_write(FIXTURE_ROOT + "/simple-lang/tempo/rbpm.spl", "# fixture\n")
+        unit_scope_restore(saved)
+        val after = unit_suffix_scope_error("rbpm")
+        unit_library_set_base("")
+        expect(before).to_equal("")
+        expect(after).to_contain("unit suffix 'rbpm' is not in scope")

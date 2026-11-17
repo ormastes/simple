@@ -24,6 +24,8 @@ struct TargetAction:
     emit_archive: bool
     emit_shared: bool
     action_digest: text
+    triple: text
+    cpu_policy: text
 
 struct TargetExecutionSummary:
     selected_count: i64
@@ -105,8 +107,27 @@ fn target_action(repo_root: text, ts: TargetSet, target: BuildTarget) -> TargetA
         target_cache_dir(repo_root, target),
         target.kind == "library",
         target.kind == "shared",
-        _target_action_digest(repo_root, ts, target)
+        _target_action_digest(repo_root, ts, target),
+        target.triple,
+        target_cpu_policy(target.cpu_tier)
     )
+
+fn target_cpu_policy(tier: text) -> text:
+    """native-build `--cpu` policy for a cpu_tier; empty = none/unsupported.
+
+    native-build honours `--cpu` (SIMPLE_NATIVE_CPU -> codegen target cpu) only
+    for `default`, `native` and `x86-64-v1..v4`; `x86-64` is the v1 baseline."""
+    if tier == "x86-64" or tier == "x86-64-v1":
+        return "x86-64-v1"
+    if tier == "x86-64-v2" or tier == "x86-64-v3" or tier == "x86-64-v4":
+        return tier
+    ""
+
+fn target_action_error(target: BuildTarget) -> text:
+    """Refuse a tier native-build cannot honour rather than build it at baseline."""
+    if target.cpu_tier.len() > 0 and target_cpu_policy(target.cpu_tier).len() == 0:
+        return "target-error: unsupported-cpu_tier: " + target.name + ": " + target.cpu_tier
+    ""
 
 fn target_action_args(repo_root: text, action: TargetAction) -> [text]:
     var args: [text] = [
@@ -120,6 +141,12 @@ fn target_action_args(repo_root: text, action: TargetAction) -> [text]:
     if action.emit_shared:
         args.push("--emit-shared")
         args.push("--no-mangle")
+    if action.triple.len() > 0:
+        args.push("--target")
+        args.push(action.triple)
+    if action.cpu_policy.len() > 0:
+        args.push("--cpu")
+        args.push(action.cpu_policy)
     args
 
 fn target_action_args_with_manifest(
@@ -223,6 +250,11 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
     var preflight = 0
     while preflight < plan.order.len():
         val preflight_index = find_target(ts, plan.order[preflight])
+        if preflight_index >= 0:
+            val field_error = target_action_error(ts.targets[preflight_index])
+            if field_error.len() > 0:
+                return TargetExecutionSummary(plan.order.len(), 0, 0, 0, 0,
+                    ts.targets[preflight_index].name, field_error)
         if preflight_index >= 0 and ts.targets[preflight_index].deps.len() > 0:
             val blocked = ts.targets[preflight_index]
             # The canonical manifest sorts producer names. Link order is
@@ -274,7 +306,9 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
             cache_dir: action.cache_dir,
             emit_archive: action.emit_archive,
             emit_shared: action.emit_shared,
-            action_digest: action.action_digest
+            action_digest: action.action_digest,
+            triple: action.triple,
+            cpu_policy: action.cpu_policy
         )
         val manifest_path = target_dependency_manifest_path(
             repo_root, ts, target, action.cache_dir)

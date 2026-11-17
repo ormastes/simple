@@ -1,0 +1,37 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4 / milestone_0021 14B: plan/agent mismatch refused.
+# Pins the plan gates that exist: parent operation and plan integrity. The 14B
+# binding_digest == pane binding digest clause was DROPPED by milestone_0021 14C;
+# the plan<->binding pairing is the signed attach digest (PR3b authorize path).
+use std.spec.*
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.nogc_async_mut.container.terminal_session_v2.host_agent_attach_adoption_v4
+
+fn fixture_binding(pane: text, epoch: i64) -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "f".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: pane, service_epoch: epoch)
+
+describe "Host agent attach adoption plan mismatch":
+    it "refuses an agent operation that is not the plan's parent operation":
+        step("The plan must belong to this agent's operation")
+        val turn = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 1),
+            "other-operation", 0)
+        expect(turn.unwrap_err()).to_equal("attach-plan-operation-mismatch")
+
+    it "refuses the helper operation id in place of the parent operation":
+        step("identity.operation_id is the helper, never the agent")
+        val turn = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 1),
+            "output-operation", 0)
+        expect(turn.unwrap_err()).to_equal("attach-plan-operation-mismatch")
+
+    it "refuses an empty operation id":
+        step("Operation ids follow the builder identifier rule")
+        val turn = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 1), "", 0)
+        expect(turn.unwrap_err()).to_equal("attach-plan-operation-mismatch")
+
+    it "refuses a plan whose request digest no longer re-derives":
+        step("A tampered plan field changes the derived digest")
+        var plan = container_primary_attach_fixture_v1()
+        plan.policy_digest = "8".repeat(64)
+        val turn = host_agent_attach_adoption_v4(plan, fixture_binding("pane-a", 1), "parent-operation", 0)
+        expect(turn.unwrap_err()).to_equal("attach-plan-digest-mismatch")

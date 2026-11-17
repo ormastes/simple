@@ -16,7 +16,8 @@
 #   val pixels = engine.read_pixels()
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
-use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba, blend}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_region, css_opacity_group_alpha8_milli}
 use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
@@ -26,7 +27,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_rect_thick, emu_draw_circle_thick, emu_draw_rounded_rect_outline,
     emu_draw_gradient_rect_h, emu_draw_radial_gradient,
     emu_draw_linear_gradient_stops, emu_draw_radial_gradient_stops, radial_gradient_pixels,
-    linear_gradient_pixels,
+    linear_gradient_pixels, radial_gradient_device_tables, linear_gradient_device_tables,
     emu_draw_rect_blend, emu_draw_image_blend,
     emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
@@ -215,17 +216,14 @@ pub fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
 pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_height: i32,
                                    dst_x: i32, dst_y: i32, width: i32, height: i32,
                                    opacity_milli: i32) -> [u32]:
-    """Canonical opacity_milli readback composite, per channel:
-        a8  = opacity_milli * 255 / 1000            (floor)
-        ea  = src_alpha * a8 / 255                   (floor; == a8 when opaque)
-        out = (src*ea + dst*(256 - ea)) >> 8        (truncate)
-    This single truncating >>8 contract is what the spec oracles pin
-    (half 500 -> 63, inactive 930 -> 117 for src=127 over dst=0); both the
-    exact-/255 blend and a milli /1000 floor land one HIGH at 930 (118), and
-    the SIMD span's rounding (+128) >>8 also lands one high. Replaces the
-    alpha-scale + draw_image_blend double-blend (see
-    doc/08_tracking/bug/engine2d_parent_sampling_embed_opacity_one_ulp_parity_2026-08-16.md)."""
-    val a8 = (opacity_milli * 255) / 1000
+    """Canonical opacity_milli readback composite: each layer pixel's alpha
+    is scaled with rounding, ea = (src_alpha * opacity_milli + 500) / 1000
+    (an opaque layer at 500 gets 128 = round(0.5*255), the alpha Chrome 159
+    paints `opacity:0.5` with), then composited with color.blend (Chrome's
+    image rule). The Vulkan blit kernel (_glsl_blit, composite mode 1) runs
+    the identical integer steps. Spec oracle pair (src 126 over 0): 500 -> 63,
+    930 -> 117 (doc/08_tracking/bug/
+    engine2d_parent_sampling_embed_opacity_one_ulp_parity_2026-08-16.md)."""
     # i64 product: the i32 multiply wraps past ~46341^2 (same guard as
     # compositor.spl Layer.create). Only w*h entries are ever written here and
     # the sole caller (draw_ir_composite_readback) guarantees
@@ -248,14 +246,8 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
             # transparent child pixel leaves the parent untouched. ece10b378c8
             # dropped this (the replaced alpha-scale path kept it), so a
             # full-viewport opacity layer darkened every uncovered pixel.
-            # An opaque source keeps ea == a8, the pinned oracle values.
-            val ea = (color_a(s) * a8) / 255
-            val inv = 256 - ea
-            val r = (color_r(s) * ea + color_r(d) * inv) >> 8
-            val g = (color_g(s) * ea + color_g(d) * inv) >> 8
-            val b = (color_b(s) * ea + color_b(d) * inv) >> 8
-            val a = (color_a(s) * ea + color_a(d) * inv) >> 8
-            out[idx] = rgba(r, g, b, a)
+            val ea = (color_a(s) * opacity_milli + 500) / 1000
+            out[idx] = blend(rgba(color_r(s), color_g(s), color_b(s), ea), d)
             col = col + 1
         row = row + 1
     out
@@ -404,6 +396,16 @@ var _vec_text_probe_count: i32 = 0
 var _vec_blit_probe_count: i32 = 0
 var _vec_entry_probe_count: i32 = 0
 var _font_batch_receipt_count: i32 = 0
+# CSS gradient layers whose pixels the HOST evaluated (radial_gradient_pixels /
+# linear_gradient_pixels) inside draw_radial_gradient_ellipse /
+# draw_linear_gradient_line. On Vulkan these stay put while
+# vulkan_device_gradient_count() rises: the device evaluated the layer.
+var _e2d_host_gradient_evals: i64 = 0
+
+# reason: process-global instrumentation counter read by specs; a plain count of host gradient evaluations
+# @allow(primitive_api)
+pub fn engine2d_host_gradient_eval_count() -> i64:
+    _e2d_host_gradient_evals
 # Memoized result of Engine2D.detect_best_backend_viable(). Empty = not yet
 # resolved this process. The deep viability probe (init + draw + present +
 # provenance readback) runs at most once per process; per-render cost is a
@@ -3828,11 +3830,41 @@ class Engine2D with DrawIrRenderTarget:
         else:
             emu_draw_radial_gradient_stops(self.backend, cx, cy, r, stop_colors, stop_positions)
 
+    # One CSS gradient layer evaluated AND composited on the Vulkan device
+    # (`gradient_layer.comp`): only `tables` (header, 1025-entry stop ramp,
+    # per-column / per-row geometry terms) are uploaded. False when there is
+    # no Vulkan primitive target or the device declined; nothing was drawn.
+    me _draw_gradient_layer_on_device(x0: i32, y0: i32, w: i32, h: i32, mode: i32, tables: [u32]) -> bool:
+        if tables.len() == 0:
+            return false
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            var vulkan_typed: VulkanBackend = vulkan
+            val done = vulkan_typed.draw_gradient_layer_device(x0, y0, w, h, mode, tables)
+            self.vulkan_backend = Some(vulkan_typed)
+            self.backend = vulkan_typed
+            return done
+        false
+
+    # True when gradient layers should try the Vulkan device kernel: the same
+    # backend precedence as `draw_image_blend` (virtio, baremetal and cuda
+    # keep the host evaluator), and a Vulkan primitive target exists.
+    me _gradient_layer_device_candidate() -> bool:
+        if val Some(vg) = self.virtio_gpu_backend:
+            return false
+        if val Some(bm) = self.baremetal_backend:
+            return false
+        if self.selected_backend_name == "cuda":
+            return false
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return true
+        false
+
     # CSS radial gradient (Q10 px geometry) composited src-over the paint
-    # rect. The colours come from the shared host evaluator
-    # (`radial_gradient_pixels`, also used by the browser-engine raster);
-    # `draw_image_blend` then routes the composite to the selected backend
-    # (Vulkan: the device SRC_OVER image composite).
+    # rect. On Vulkan the device evaluates and composites it
+    # (`_draw_gradient_layer_on_device`); otherwise, or when the device
+    # declines, the colours come from the shared host evaluator
+    # (`radial_gradient_pixels`, also used by the browser-engine raster) and
+    # `draw_image_blend` routes the composite to the selected backend.
     me draw_radial_gradient_ellipse(ax: i32, ay: i32, aw: i32, ah: i32, cx_q: i64, cy_q: i64, rx_q: i64, ry_q: i64, stop_colors: [u32], stop_positions: [i32]):
         var x0 = ax
         var y0 = ay
@@ -3844,15 +3876,20 @@ class Engine2D with DrawIrRenderTarget:
         if y1 > self.h: y1 = self.h
         if x1 <= x0 or y1 <= y0:
             return
+        if self._gradient_layer_device_candidate():
+            val tables = radial_gradient_device_tables(x0, y0, x1 - x0, y1 - y0, cx_q, cy_q, rx_q, ry_q, stop_colors, stop_positions)
+            if self._draw_gradient_layer_on_device(x0, y0, x1 - x0, y1 - y0, 0, tables):
+                return
+        _e2d_host_gradient_evals = _e2d_host_gradient_evals + 1
         val pixels = radial_gradient_pixels(x0, y0, x1 - x0, y1 - y0, cx_q, cy_q, rx_q, ry_q, stop_colors, stop_positions)
         if pixels.len() > 0:
             self.draw_image_blend(x0, y0, x1 - x0, y1 - y0, pixels)
 
     # CSS linear gradient along the line (sx, sy) -> (ex, ey) (Q10 px)
-    # composited src-over the paint rect: the radial twin above, with colours
-    # from the shared host evaluator `linear_gradient_pixels` (also used by
-    # the browser-engine raster) and the composite routed by `draw_image_blend`
-    # (Vulkan: the device SRC_OVER image composite).
+    # composited src-over the paint rect: the radial twin above (Vulkan: the
+    # device kernel; otherwise the shared host evaluator
+    # `linear_gradient_pixels`, also used by the browser-engine raster, with
+    # the composite routed by `draw_image_blend`).
     me draw_linear_gradient_line(ax: i32, ay: i32, aw: i32, ah: i32, sx_q: i64, sy_q: i64, ex_q: i64, ey_q: i64, stop_colors: [u32], stop_positions: [i32]):
         var x0 = ax
         var y0 = ay
@@ -3864,6 +3901,11 @@ class Engine2D with DrawIrRenderTarget:
         if y1 > self.h: y1 = self.h
         if x1 <= x0 or y1 <= y0:
             return
+        if self._gradient_layer_device_candidate():
+            val tables = linear_gradient_device_tables(x0, y0, x1 - x0, y1 - y0, sx_q, sy_q, ex_q, ey_q, stop_colors, stop_positions)
+            if self._draw_gradient_layer_on_device(x0, y0, x1 - x0, y1 - y0, 1, tables):
+                return
+        _e2d_host_gradient_evals = _e2d_host_gradient_evals + 1
         val pixels = linear_gradient_pixels(x0, y0, x1 - x0, y1 - y0, sx_q, sy_q, ex_q, ey_q, stop_colors, stop_positions)
         if pixels.len() > 0:
             self.draw_image_blend(x0, y0, x1 - x0, y1 - y0, pixels)
@@ -4044,9 +4086,9 @@ class Engine2D with DrawIrRenderTarget:
                 dst_x, dst_y, width, height, readback.pixels, opacity_milli)
         var pixels = readback.pixels
         if opacity_milli < 1000:
-            # Milli-exact composite (floor /1000) against the current
-            # framebuffer, then an opaque draw — never the 8-bit alpha-scale
-            # + /255 double-floor, which is one ulp off the milli oracle.
+            # Milli composite (alpha rounded, (a*milli+500)/1000, then the
+            # Chrome image rule) against the current framebuffer, then an
+            # opaque draw.
             # Only the dst rect is read back (D9 region read; backends
             # without a native region read fall back to one whole-frame
             # read + host crop). The region result is indexed locally, so
@@ -4060,6 +4102,59 @@ class Engine2D with DrawIrRenderTarget:
             self.draw_image(dst_x, dst_y, width, height, pixels)
             return true
         self.draw_image_blend(dst_x, dst_y, width, height, pixels)
+        true
+
+    me draw_ir_composite_device_css_group(layer: Engine2D, dst_x: i32, dst_y: i32, width: i32, height: i32, opacity_milli: i32) -> bool:
+        """Vulkan twin of `draw_ir_composite_readback_css_group`: restore the
+        group layer rendered into the shared offscreen `layer` straight from
+        its device buffer (`css_group_restore.comp`), with no readback and no
+        upload. False leaves the framebuffer untouched; the caller then takes
+        the readback path, which paints the same pixels."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        if self.backend_name() != "vulkan" or layer.backend_name() != "vulkan":
+            return false
+        if self.vulkan_font_state_unknown or layer.vulkan_font_state_unknown:
+            return false
+        if val Some(lvk) = layer._vulkan_primitive_target():
+            if lvk.w != width or lvk.h != height or lvk.completion_unknown:
+                return false
+            # The layer's recorded draws must have landed before the kernel
+            # reads its buffer; a host-side fallback means the device buffer
+            # is not the layer.
+            val flushed = lvk._flush_pending_compute_at("css-group-layer")
+            if flushed < 0:
+                lvk.mark_completion_unknown()
+            if flushed != 1 or lvk.cpu_fallback_used:
+                return false
+            if val Some(vk) = self._vulkan_primitive_target():
+                val restored = vk.draw_css_group_restore_device(
+                    lvk.d_framebuffer, dst_x, dst_y, width, height,
+                    css_opacity_group_alpha8_milli(opacity_milli))
+                self.vulkan_backend = Some(vk)
+                self.backend = vk
+                return restored
+        false
+
+    me draw_ir_composite_readback_css_group(dst_x: i32, dst_y: i32, width: i32, height: i32, readback: Engine2DReadback, opacity_milli: i32) -> bool:
+        """Restore a CSS opacity group layer as Chrome 159 does
+        (`css_opacity_group.spl`): read the destination region back, run the
+        SkBlendARGB32 restore in .spl, write the result as an opaque copy. Every
+        backend, Vulkan and Metal included, takes this one path, so a device
+        lane is pixel-identical to cpu_simd; the native image-blend shaders
+        implement the embedded-surface milli rule, not this one."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        val total = width.to_i64() * height.to_i64()
+        if readback.pixels.len() != total:
+            return false
+        val fb = self.read_pixels_region(dst_x, dst_y, width, height)
+        if fb.pixels.len() != total:
+            return false
+        val pixels = css_opacity_group_composite_region(
+            readback.pixels, fb.pixels, width, height,
+            css_opacity_group_alpha8_milli(opacity_milli))
+        self.draw_image(dst_x, dst_y, width, height, pixels)
         true
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):

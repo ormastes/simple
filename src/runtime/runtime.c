@@ -3648,16 +3648,6 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
     return (const char*)result;
 }
 
-const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
-                                const char* plaintext, const char* aad) {
-    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        plaintext, (int64_t)strlen(plaintext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
-}
-
 /* ---- rt_aes_gcm_decrypt_with_len: binary-safe AES-128-GCM decrypt (OpenSSL) ---- */
 const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* iv, int64_t iv_len,
@@ -3721,16 +3711,6 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
     result[dec_len] = '\0';
     if (out_len) *out_len = (int64_t)dec_len;
     return (const char*)result;
-}
-
-const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
-                                const char* ciphertext, const char* aad) {
-    if (!key || !iv || !ciphertext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_decrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        ciphertext, (int64_t)strlen(ciphertext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
 }
 
 #else /* !SPL_HAVE_OPENSSL — from-scratch AES-128-GCM implementation */
@@ -4057,16 +4037,6 @@ const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
     return (const char*)ct_buf;
 }
 
-const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
-                                const char* plaintext, const char* aad) {
-    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
-    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
-                                        iv, (int64_t)strlen(iv),
-                                        plaintext, (int64_t)strlen(plaintext),
-                                        aad, aad ? (int64_t)strlen(aad) : 0,
-                                        NULL);
-}
-
 /* ---- rt_aes_gcm_decrypt_with_len: binary-safe (from-scratch fallback) ---- */
 const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
                                          const char* iv, int64_t iv_len,
@@ -4099,6 +4069,19 @@ const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
     return (const char*)pt_buf;
 }
 
+#endif /* SPL_HAVE_OPENSSL */
+/* ---- shared AES-GCM text wrappers (both backends) ---- */
+
+const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
+                                const char* plaintext, const char* aad) {
+    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
+    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
+                                        iv, (int64_t)strlen(iv),
+                                        plaintext, (int64_t)strlen(plaintext),
+                                        aad, aad ? (int64_t)strlen(aad) : 0,
+                                        NULL);
+}
+
 const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
                                 const char* ciphertext, const char* aad) {
     if (!key || !iv || !ciphertext) return SPL_STRDUP("", "str");
@@ -4109,8 +4092,8 @@ const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
                                         NULL);
 }
 
-#endif /* SPL_HAVE_OPENSSL */
 
+/* ---- end shared AES-GCM text wrappers ---- */
 /* ============================================================================
  * Hex-domain AES-GCM wrappers (binary-safe, NUL-transparent)
  *

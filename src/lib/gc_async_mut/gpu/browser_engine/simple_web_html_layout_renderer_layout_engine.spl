@@ -1146,10 +1146,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # `expected 19 to equal 21` in web_css_table_replaced_forms_spec).
         val input_type = attr_value(node.attrs_raw, "type")
         if node.tag == "input" and (input_type == "checkbox" or input_type == "radio"):
-            # Chrome's UA sizes these two to a fixed 13x13 glyph box and
-            # ignores author padding on them.
-            out_bw[i] = constrained_outer_width(node, st, 13)
-            val check_h = constrained_outer_height(node, st, 13)
+            # Chrome's UA sizes these two to a 13x13 glyph box and ignores
+            # author padding on them; an authored width/height is the border
+            # box (UA `box-sizing: border-box`). Chrome 159:
+            # `width:40px;height:16px;padding:2px` gives 40x16.
+            val check_w = if st.width_px > 0: css_outer_width(node, st, st.width_px) else: 13
+            out_bw[i] = constrained_outer_width(node, st, check_w)
+            val check_auto_h = if st.height_px > 0: css_outer_height(node, st, st.height_px) else: 13
+            val check_h = constrained_outer_height(node, st, check_auto_h)
             out_bh[i] = check_h
             return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, check_h)
         val control_line_h = style_line_h(st)
@@ -3647,13 +3651,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             if child_count > 0:
                 cy = cy + st.gap_px
             val prev_margin_b_before_child = prev_margin_b
-            val resolved_cst_margin_t = block_margin_milli(cst, true, viewport_h)
+            val resolved_cst_margin_t = block_margin_milli(cst, true, viewport_h, iw)
             val collapsed_margin = collapse_margins_signed(prev_margin_b, resolved_cst_margin_t)
             val cy_frac_before_top = cy_frac
             var top_frac_restore = cy_frac_before_top
             var child_top_milli = 0
             if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
-                val resolved_st_margin_t = block_margin_milli(st, true, viewport_h)
+                val resolved_st_margin_t = block_margin_milli(st, true, viewport_h, viewport_w)
                 val collapsed_body_top = collapse_margins_signed(resolved_st_margin_t, resolved_cst_margin_t)
                 child_top_milli = collapsed_body_top - resolved_st_margin_t
             else:
@@ -3828,7 +3832,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var corrected_top_milli = child_top_milli
             if child_leading_margin_t != 0:
                 if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
-                    val body_margin_t = block_margin_milli(st, true, viewport_h)
+                    val body_margin_t = block_margin_milli(st, true, viewport_h, viewport_w)
                     corrected_top_milli = collapse_margins_signed(
                         body_margin_t, effective_cst_margin_t) - body_margin_t
                 else:
@@ -3859,7 +3863,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     child_top_advance = corrected_top_advance
                 child_top_milli = corrected_top_milli
             cy = cy + child_height
-            val resolved_cst_margin_b = block_margin_milli(cst, false, viewport_h)
+            val resolved_cst_margin_b = block_margin_milli(cst, false, viewport_h, iw)
             # CSS 2.2 §8.3.1 self-collapsing block: an in-flow block with no
             # border, padding, height, or content collapses its own top and
             # bottom margins into ONE margin that then collapses with the

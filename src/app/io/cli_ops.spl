@@ -3,6 +3,7 @@
 
 use app.io.env_ops.{cwd}
 use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
+use std.nogc_sync_mut.io.darwin_image_owner.{darwin_image_path}
 use app.io.process_ops.{process_run_direct, process_run_inherit, process_run_bounded}
 
 # Extern fn declarations (runtime resolves at file level)
@@ -182,6 +183,18 @@ fn _cli_resolve_symlink(path: text) -> text:
 # `ps -o comm= -p <our pid>` is safe here in a way `readlink -f /proc/self/exe`
 # is not: the trap those comments warn about is a spawned helper describing
 # ITSELF, and `ps` is asked about a PID we name, not about its own process.
+fn _cli_validated_image_path(result: Result<text, text>) -> text:
+    match result:
+        case Ok(path):
+            if path == "" or path.ends_with(".spl") or not _cli_file_exists_impl(path):
+                return ""
+            val resolved = _cli_resolve_symlink(path)
+            if resolved == "" or resolved.ends_with(".spl") or not _cli_file_exists_impl(resolved):
+                return ""
+            resolved
+        case Err(_):
+            ""
+
 fn _cli_self_exe_via_pid_query(require_absolute: bool = false) -> text:
     val windows = if require_absolute: host_os() == "windows" else: _cli_is_windows_platform()
     if windows:
@@ -195,6 +208,13 @@ fn _cli_self_exe_via_pid_query(require_absolute: bool = false) -> text:
         if win_code != 0 or win_path == "" or win_path.ends_with(".spl") or not _cli_file_exists_impl(win_path):
             return ""
         return win_path
+    if host_os() == "macos":
+        # Prefer in-process dyld `_NSGetExecutablePath`: setuid `/bin/ps` is
+        # denied under macOS Seatbelt sandboxes. Fall through only on Err for
+        # older un-updated seed interpreters.
+        val darwin_path = _cli_validated_image_path(darwin_image_path())
+        if darwin_path != "":
+            return darwin_path
     if host_os() == "freebsd":
         # FreeBSD has no /proc/self/exe and `ps -o comm=` is the bare name;
         # `procstat -b <pid>` prints "PID COMM OSREL PATH" with the full path.
@@ -230,13 +250,9 @@ fn _cli_self_exe_via_pid_query(require_absolute: bool = false) -> text:
 pub fn cli_kernel_executable_path() -> text:
     # Strict bootstrap lineage: query our own process image, never argv or env.
     if host_os() == "windows":
-        match windows_image_path():
-            case Ok(path):
-                if path == "" or not _cli_file_exists_impl(path): return ""
-                val resolved = _cli_resolve_symlink(path)
-                if resolved == "" or not _cli_file_exists_impl(resolved): return ""
-                return resolved
-            case Err(_): return ""
+        return _cli_validated_image_path(windows_image_path())
+    if host_os() == "macos":
+        return _cli_validated_image_path(darwin_image_path())
     if host_os() != "windows":
         val proc_path = _cli_resolve_symlink("/proc/self/exe")
         if proc_path != "" and proc_path != "/proc/self/exe" and _cli_file_exists_impl(proc_path):
@@ -252,6 +268,10 @@ fn _cli_current_exe_path() -> text:
     # lexical and can return a nonexistent path when OS is absent.
     if _cli_is_windows_platform():
         return cli_kernel_executable_path()
+    if host_os() == "macos":
+        val macos_path = cli_kernel_executable_path()
+        if macos_path != "":
+            return macos_path
     # Prefer the kernel's record of the real executable: argv0-based
     # resolution breaks under the bin/simple symlink (relative argv0 +
     # empty cwd in spawned runners yields an empty seed-sibling path, so

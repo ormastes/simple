@@ -1,0 +1,46 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4 / milestone_0021 14B: child_incarnation = 1 + lease_epoch.
+use std.spec.*
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.nogc_async_mut.container.terminal_session_v2.host_agent_attach_adoption_v4
+
+fn fixture_binding(pane: text, epoch: i64) -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "f".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: pane, service_epoch: epoch)
+
+describe "Host agent attach adoption lease epoch":
+    it "builds the adoption from the binding with child_incarnation = 1 + lease_epoch":
+        step("Every pane field comes from the verified binding")
+        val adoption = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 5),
+            "parent-operation", 6).unwrap()
+        expect(adoption.binding_uid).to_equal("binding-a")
+        expect(adoption.service_incarnation).to_equal("f".repeat(32))
+        expect(adoption.session_id).to_equal("session-a")
+        expect(adoption.window_id).to_equal("window-a")
+        expect(adoption.pane_id).to_equal("pane-a")
+        expect(adoption.service_epoch).to_equal(5)
+        expect(adoption.child_incarnation).to_equal(7)
+
+    it "refuses a lease epoch whose successor overflows":
+        step("lease_epoch = i64 max has no 1 + lease_epoch")
+        val turn = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 5),
+            "parent-operation", 9223372036854775807)
+        expect(turn.unwrap_err()).to_equal("attach-lease-epoch-range")
+
+    it "admits the largest non-overflowing lease epoch":
+        step("i64 max - 1 yields child_incarnation = i64 max")
+        val adoption = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 5),
+            "parent-operation", 9223372036854775806).unwrap()
+        expect(adoption.child_incarnation).to_equal(9223372036854775807)
+
+    it "refuses a negative lease epoch":
+        step("Lease epochs start at 0")
+        val turn = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 5),
+            "parent-operation", -1)
+        expect(turn.unwrap_err()).to_equal("attach-lease-epoch-range")
+
+    it "refuses an invalid binding before building anything":
+        step("An empty pane id is refused by binding validation")
+        val turn = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("", 5),
+            "parent-operation", 0)
+        expect(turn.unwrap_err()).to_equal("host-agent-pane-binding-pane-name-invalid")

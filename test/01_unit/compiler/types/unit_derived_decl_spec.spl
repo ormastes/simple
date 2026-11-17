@@ -21,12 +21,14 @@ use compiler.core.types.{reset_all_pools, unit_decl_find, unit_decl_role_at, uni
 use compiler.core.parser.{parser_init_with_path, parser_has_errors}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.types.units.unit_ops.{
-    UnitOpVerdict, unit_op_verdict, unit_op_robust_profile, unit_op_default_profile, unit_op_take_warnings
+    UnitOpVerdict, unit_op_verdict, unit_op_robust_profile, unit_op_default_profile, unit_op_take_warnings,
+    unit_op_set_mixed_strict
 }
 
 fn declare(src: text):
     reset_all_pools()
     unit_op_default_profile()
+    unit_op_set_mixed_strict(true)
     unit_op_take_warnings()
     parser_init_with_path(src, "derived_world.spl")
     parse_module_body()
@@ -65,11 +67,35 @@ describe "Declared derived units (decision 4A)":
         expect(v("cmp", "Speed", "Speed")).to_equal("allow:bool")
         expect(v("add", "Speed", "Meter")).to_equal("deny")
 
-    it "product is commutative; quotient is not; distinct undeclared units stay denied":
+    it "product is commutative; quotient is not; distinct undeclared units are an SPL-UNIT-002 error in compiled code":
+        # owner decision 2026-11-17 (Q1=b): security category, error in every profile
         declare("unit Meter: f64 as m\nunit Newton: f64 as nw\nunit Torque = Newton * Meter\nunit Second: f64 as s\n")
         expect(v("mul", "Meter", "Newton")).to_equal("allow:Torque")
         expect(v("div", "Second", "Meter")).to_equal("deny")
         expect(v("mul", "Second", "Meter")).to_equal("deny")
+        expect(unit_op_take_warnings().len()).to_equal(0)
+        step("robust profile: still an error")
+        unit_op_robust_profile()
+        expect(v("div", "Second", "Meter")).to_equal("deny")
+        unit_op_default_profile()
+        step("distinct units never add")
+        expect(v("add", "Second", "Meter")).to_equal("deny")
+
+    it "script mode (the only relaxation) records the SPL-UNIT-002 warning and yields the lhs scalar":
+        declare("unit Meter: f64 as m\nunit Second: f64 as s\nunit Count: i64 as n\n")
+        unit_op_set_mixed_strict(false)
+        expect(v("div", "Second", "Meter")).to_equal("allow:f64")
+        val w = unit_op_take_warnings()
+        expect(w.len()).to_equal(1)
+        expect(w[0].starts_with("SPL-UNIT-002")).to_equal(true)
+        expect(w[0].contains("unit <Name> = Second / Meter")).to_equal(true)
+        expect(v("mul", "Count", "Meter")).to_equal("allow:i64")
+        expect(unit_op_take_warnings()[0].starts_with("SPL-UNIT-002")).to_equal(true)
+        step("add/sub of distinct units stay errors even in script mode")
+        expect(v("add", "Second", "Meter")).to_equal("deny")
+        expect(v("sub", "Second", "Meter")).to_equal("deny")
+        expect(unit_op_take_warnings().len()).to_equal(0)
+        unit_op_set_mixed_strict(true)
 
     it "an undeclared product/quotient warns naming the missing declaration (default)":
         world()

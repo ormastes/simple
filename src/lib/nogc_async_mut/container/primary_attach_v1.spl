@@ -9,12 +9,17 @@ use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_containe
 use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1,
     container_primary_attach_session_v1}
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2}
+use std.common.contracts.container.primary_open_refusal_v1.ContainerPrimaryOpenRefusalV1
 
 pub struct ContainerPrimaryAttachTurnV1:
     owner: SimpleContainerOwnerV2
     session: ContainerPrimaryAttachSessionV1?
     cleanup_spawn: PipedProcessOwnedSpawnV2?
     error: text
+    # milestone_0022 N3 (15.2, 17(B)): typed refusal. Only a turn with no session and
+    # no cleanup spawn ever carries NoCustody/SpawnRejectedRetired; every other turn
+    # is NotRefused. Passed explicitly at every constructor below.
+    refusal: ContainerPrimaryOpenRefusalV1
 
 pub struct ContainerPrimaryAttachPlanTurnV1:
     owner: SimpleContainerOwnerV2
@@ -49,7 +54,7 @@ pub fn simple_container_open_primary_attach_v1(owner: SimpleContainerOwnerV2,
         plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
         policy: ContainerStreamPolicyV2) -> ContainerPrimaryAttachTurnV1:
     match simple_container_project_v2(owner, request):
-        case Err(reason): return ContainerPrimaryAttachTurnV1(owner, None, None, reason)
+        case Err(reason): return ContainerPrimaryAttachTurnV1(owner, None, None, reason, ContainerPrimaryOpenRefusalV1.NoCustody)
         case Ok(_): pass
     var retained_owner = owner
     val spawned = match owner:
@@ -59,14 +64,17 @@ pub fn simple_container_open_primary_attach_v1(owner: SimpleContainerOwnerV2,
             retained_owner = SimpleContainerOwnerV2.Linux(scope, retained)
             result
         case SimpleContainerOwnerV2.Windows(_, _):
+            # Not a listed site (16): untyped, never authorizes the Host refusal record.
             return ContainerPrimaryAttachTurnV1(owner, None, None,
-                "container-primary-attach-windows-session-unavailable")
-    match spawned:
+                "container-primary-attach-windows-session-unavailable", ContainerPrimaryOpenRefusalV1.NotRefused)
+    match spawned.spawn:
         case PipedProcessOwnedSpawnV2.Rejected(reason):
-            ContainerPrimaryAttachTurnV1(retained_owner, None, None, reason)
+            # Only this arm carries the provider's typed refusal.
+            ContainerPrimaryAttachTurnV1(retained_owner, None, None, reason, spawned.refusal)
         case PipedProcessOwnedSpawnV2.CleanupRequired(native, reference, reason):
             ContainerPrimaryAttachTurnV1(retained_owner, None,
-                Some(PipedProcessOwnedSpawnV2.CleanupRequired(native, reference, reason)), reason)
+                Some(PipedProcessOwnedSpawnV2.CleanupRequired(native, reference, reason)), reason,
+                ContainerPrimaryOpenRefusalV1.NotRefused)
         case PipedProcessOwnedSpawnV2.Ready(native, reference):
             val opened = container_primary_attach_session_v1(plan, helper,
                 PipedProcessOwnedTransferV2(owner: native, reference: reference))
@@ -75,7 +83,7 @@ pub fn simple_container_open_primary_attach_v1(owner: SimpleContainerOwnerV2,
                     # Retain every actual output BEFORE inspecting a callback.
                     var turn = ContainerPrimaryAttachTurnV1(retained_owner, opened.session,
                         Some(PipedProcessOwnedSpawnV2.CleanupRequired(cleanup.owner,
-                            Some(cleanup.reference), opened.error)), opened.error)
+                            Some(cleanup.reference), opened.error)), opened.error, ContainerPrimaryOpenRefusalV1.NotRefused)
                     if opened.session.is_some():
                         turn.error = "container-primary-attach-constructor-ambiguous:{opened.error}"
                         return turn
@@ -87,14 +95,16 @@ pub fn simple_container_open_primary_attach_v1(owner: SimpleContainerOwnerV2,
                 case Some(session):
                     # The opaque session owns the transfer before handoff may
                     # fail. Never replace it with a competing cleanup reader.
-                    var turn = ContainerPrimaryAttachTurnV1(retained_owner, Some(session), None, opened.error)
+                    var turn = ContainerPrimaryAttachTurnV1(retained_owner, Some(session), None, opened.error,
+                        ContainerPrimaryOpenRefusalV1.NotRefused)
                     val loaned = primary_workspace_session_handoff_v3(retained_owner, session)
                     if turn.error == "" and loaned.is_err(): turn.error = loaned.unwrap_err()
                     turn
                 case None:
                     val reason = "container-primary-attach-session-owner-unconfirmed:{opened.error}"
                     var turn = ContainerPrimaryAttachTurnV1(retained_owner, None,
-                        Some(PipedProcessOwnedSpawnV2.CleanupRequired(native, Some(reference), reason)), reason)
+                        Some(PipedProcessOwnedSpawnV2.CleanupRequired(native, Some(reference), reason)), reason,
+                        ContainerPrimaryOpenRefusalV1.NotRefused)
                     val correlated = primary_workspace_construction_failed_v3(retained_owner,
                         PipedProcessOwnedTransferV2(owner: native, reference: reference))
                     if turn.error == "" and correlated.is_err(): turn.error = correlated.unwrap_err()
