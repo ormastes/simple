@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+Purpose: Pin the vertical extent of 8 px Liberation Sans on the web renderer text
+path against Chrome 159. FreeType's light autohinter fits the x-height to a whole
+pixel (`increase-x-height` rounds it up from 6 to 14 ppem), but Chrome refuses the
+round-up once it would stretch the em too much: at 8 px (and 6 px) it fits the
+x-height DOWN instead, so the glyphs are one to two rows shorter than a plain
+round-up gives. Engine before the fix: l / H / x / d = 7 / 6 / 5 / 7 rows.
+Audience: web renderer / font rasteriser maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, 90x32 screenshot):
+`<p style="margin:0;position:absolute;left:4px;top:4px;font-size:8px;line-height:20px;color:#000;white-space:nowrap">l H x d p g</p>`
+on a white `font-family:sans-serif` body. Ink rows (first..last) per glyph:
+
+| glyph | columns | Chrome rows | rows |
+|-------|---------|-------------|------|
+| l     | 3..6    | 11..15      | 5    |
+| H     | 8..14   | 11..15      | 5    |
+| x     | 15..21  | 12..15      | 4    |
+| d     | 22..27  | 11..15      | 5    |
+| p     | 28..34  | 12..17      | 6    |
+
+The `l` stem is Chrome 0xFFCF8F5F / 0xFF77BFEF at x=4 / 5 (rows 11..15); the
+engine's second column is byte-identical, the first is 0x08 lighter in R and G.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-HINT-003 - Small LCD text fits the x-height like Chrome's light autohinter.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 90
+val H: i32 = 32
+
+val PAGE_8: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:4px;top:4px;font-size:8px;line-height:20px;color:#000;white-space:nowrap\">l H x d p g</p></body></html>"
+
+fn _px(px: [u32], x: i32, y: i32) -> u32:
+    px[y * W + x] & 0xFFFFFFu32
+
+# First row (or -1) with a non-white pixel in columns x0..x1.
+fn _first_ink_row(px: [u32], x0: i32, x1: i32) -> i32:
+    var y = 0
+    while y < H:
+        var x = x0
+        while x <= x1:
+            if _px(px, x, y) != 0xFFFFFFu32:
+                return y
+            x = x + 1
+        y = y + 1
+    -1
+
+fn _last_ink_row(px: [u32], x0: i32, x1: i32) -> i32:
+    var y = H - 1
+    while y >= 0:
+        var x = x0
+        while x <= x1:
+            if _px(px, x, y) != 0xFFFFFFu32:
+                return y
+            x = x + 1
+        y = y - 1
+    -1
+
+describe "8 px vertical extent against Chrome 159 (light autohinter, x-height fit down)":
+    it "AC-1: l, H, x, d and p span exactly Chrome's ink rows":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels(PAGE_8, W, H)
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome l cols 3..6 rows 11..15")
+        expect(_first_ink_row(px, 3, 6)).to_equal(11)
+        expect(_last_ink_row(px, 3, 6)).to_equal(15)
+        step("Chrome H cols 8..14 rows 11..15")
+        expect(_first_ink_row(px, 8, 14)).to_equal(11)
+        expect(_last_ink_row(px, 8, 14)).to_equal(15)
+        step("Chrome x cols 15..21 rows 12..15")
+        expect(_first_ink_row(px, 15, 21)).to_equal(12)
+        expect(_last_ink_row(px, 15, 21)).to_equal(15)
+        step("Chrome d cols 22..27 rows 11..15")
+        expect(_first_ink_row(px, 22, 27)).to_equal(11)
+        expect(_last_ink_row(px, 22, 27)).to_equal(15)
+        step("Chrome p cols 28..34 rows 12..17 (descender)")
+        expect(_first_ink_row(px, 28, 34)).to_equal(12)
+        expect(_last_ink_row(px, 28, 34)).to_equal(17)
+
+    it "AC-2: the l stem bytes are pinned on its five rows":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels(PAGE_8, W, H)
+        step("x=5 is Chrome's 0x77BFEF; x=4 is 0xD7975F (Chrome 0xCF8F5F)")
+        var y = 11
+        while y <= 15:
+            expect(_px(px, 4, y)).to_equal(0xD7975Fu32)
+            expect(_px(px, 5, y)).to_equal(0x77BFEFu32)
+            y = y + 1
+        expect(_px(px, 5, 10)).to_equal(0xFFFFFFu32)
+        expect(_px(px, 5, 16)).to_equal(0xFFFFFFu32)
+
+    it "AC-3: the H crossbar sits on row 13 like Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels(PAGE_8, W, H)
+        step("Chrome H bar row 13 reads 0x6F7777 at x=10, the engine 0x778787; rows 12 and 14 are white")
+        expect(_px(px, 10, 13)).to_equal(0x778787u32)
+        expect(_px(px, 10, 12)).to_equal(0xFFFFFFu32)
+        expect(_px(px, 10, 14)).to_equal(0xFFFFFFu32)
