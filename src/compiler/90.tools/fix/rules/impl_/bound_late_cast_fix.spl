@@ -307,10 +307,21 @@ fn _bf_move_site(lines: [text], externs: [text], line_num: i64, unit_name: text,
     val hind = _bf_indent(lines[h])
     var vi = -1
     var uses = 0
+    var in_doc = false
     var i = h + 1
     while i < lines.len():
         val l = lines[i]
-        if l.trim() != "" and _bf_indent(l) <= hind:
+        val lt = l.trim()
+        # Comments and doc-string lines never end the body (a column-0 `#`
+        # must not hide a later raw use); their mentions still count.
+        val doc_line = in_doc or lt.starts_with("\"\"\"")
+        if lt.starts_with("\"\"\""):
+            val rest = lt.substring(3, lt.byte_len())
+            if not (rest.contains("\"\"\"") and not in_doc):
+                in_doc = not in_doc
+        elif in_doc and lt.contains("\"\"\""):
+            in_doc = false
+        if lt != "" and not lt.starts_with("#") and not doc_line and _bf_indent(l) <= hind:
             break
         if l.trim().starts_with("val " + local + " = ") or l.trim().starts_with("var " + local + " "):
             if vi >= 0 or i > ci or l.trim().starts_with("var "):
@@ -350,6 +361,20 @@ fn _bf_move_site(lines: [text], externs: [text], line_num: i64, unit_name: text,
         None:
             return None
 
+# True when line `idx` lies in the body of `fn <name>(` (nearest enclosing
+# less-indented fn header).
+fn _bf_inside_fn(lines: [text], idx: i64, name: text) -> bool:
+    var h = idx - 1
+    while h >= 0:
+        var t = lines[h].trim()
+        for p in ["pub ", "static ", "async ", "unsafe "]:
+            if t.starts_with(p):
+                t = t.substring(p.byte_len(), t.byte_len())
+        if (t.starts_with("fn ") or t.starts_with("me ")) and _bf_indent(lines[h]) < _bf_indent(lines[idx]):
+            return t.starts_with("fn " + name + "(")
+        h = h - 1
+    false
+
 fn _bf_has_adapter(lines: [text], adapter: text) -> bool:
     for line in lines:
         var t = line.trim()
@@ -377,7 +402,9 @@ pub fn bound_late_cast_fix_candidates(source: text, file: text, version: i64) ->
     for f in findings:
         match _bf_site(lines, externs, f):
             Some(s):
-                sites.push(s)
+                # A cast inside the adapter itself would become self-recursive.
+                if not _bf_inside_fn(lines, s.line - 1, s.adapter):
+                    sites.push(s)
             None:
                 pass
     var done: [text] = []

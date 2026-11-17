@@ -122,6 +122,28 @@ describe "SPL-BOUND-002 boundary-return autofix":
         step("The raw value is also logged before the cast")
         val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    print(raw)\n    DistanceKm(raw)\n"
         expect(bound_late_cast_fix_candidates(src, FILE, 1).len()).to_equal(0)
+        step("A column-0 comment does not end the use scan")
+        val c0 = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n# note\n    print(raw)\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(c0, FILE, 1).len()).to_equal(0)
+        step("A var binding is never moved")
+        val v = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    var raw = c_read_distance()\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(v, FILE, 1).len()).to_equal(0)
+        step("Interpolation and closure uses count as raw uses")
+        val ip = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    print(\"{{raw}\")\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(ip, FILE, 1).len()).to_equal(0)
+        val cl = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    val f = \\x: raw + x\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(cl, FILE, 1).len()).to_equal(0)
+        step("A use after the cast, and two casts, both block the move")
+        val after = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    val d = DistanceKm(raw)\n    print(raw)\n    d\n"
+        expect(bound_late_cast_fix_candidates(after, FILE, 1).len()).to_equal(0)
+        val two = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    val a = DistanceKm(raw)\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(two, FILE, 1).len()).to_equal(0)
+
+    it "never rewrites a cast inside the adapter function itself":
+        # @req: REQ-DIAG-POLICY-001
+        step("A hand-written non-@unsafe adapter holds the only late cast")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn c_read_distance_as_DistanceKm() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+        expect(bound_late_cast_fix_candidates(src, FILE, 1).len()).to_equal(0)
 
     it "carries literal extern arguments into the adapter and the call":
         # @req: REQ-DIAG-POLICY-001
