@@ -292,7 +292,7 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
 - **Open:**
   - A root holding a real glyph run (`glyph_run.valid`) still declines surfaces for the whole page. No pinned page produces one.
   - ~~The outline ring on a positioned box is unpainted on every lane~~ FIXED 2026-11-18: the raster lane already painted it; cpu_simd and Vulkan painted NO outline at all (see "Engine2D lanes never painted CSS outlines" below). The ring is now pinned at `5B579D`.
-  - The `<img>` is unpainted on every lane (Chrome `8829A5`, `B8C2FB`, `9A9FBC`). The yellow-over-image cells (24,12) and (29,12) fold on the Engine2D lanes as a result (`e9a530` vs `e9a52f`).
+  - ~~The `<img>` is unpainted on every lane~~ CORRECTED 2026-11-18: an artefact of the direct html->pixels entries, which resolve no resources (see "`<img>` was never a paint defect" below). Fed the resource, the Engine2D lanes match Chrome at `8829A5` and `B8C2FB` and at cells (24,12) and (29,12); (54,12) is the open +1-green overlap.
   - Chrome's shadow-only pixel is `5F5F5F` on a 10x8 box but `606060` on an 8x5 box with the same shadow. Simple gives `606060` on both.
   - Engine2D gives +1 green where two translucent paints overlap (40,4): `e3d995` vs `e3d994`.
 - **Needs:** `sfnt_render_glyph_lcd` must be `pub` (upstream `08486feffd2`), or small text on the Engine2D lanes errors out.
@@ -559,3 +559,14 @@ head (13/40 at base).
 - **Evidence, red -> green (Chrome 159, k=4 window 24x28, sampled at CSS pixel centres):** new `outline_engine2d_chrome159_spec`. Raster was 1/1 at base. cpu_simd, Vulkan and cpu_simd at device scale 4 were red at base; now 4/4. Pinned: 2px red ring with offset 1 (`FF0000` ring, `FFFFFF` offset gap) and a 1px `rgba(0,0,0,.5)` ring over white (`7F7F7F`). `opacity_group_chrome159_spec` now also pins the multi-root ring (26,13) (30,2) (26,8) = `5B579D`. At base those read the cell's `E6DC0A`; the spec is now 16/16.
 - **Base vs head:** 153 specs that reach the Draw IR executor, run serially: 0 new failing names. Fewer failures at head: the opacity row above, plus `web_draw_ir_engine_reuse` (7 -> 9 of 11) and `proc_draw_combo` cuda/vulkan rows (4 -> 8 of 12). Those GPU-probe rows paint no outline, so they are read as flaky device probing, not as fixed by this change.
 - **Open:** outlines paint with the box rather than in Chrome's later outline phase, so a later sibling can cover a ring on every lane. `outline-style` other than solid and outlines following `border-radius` are unpinned.
+
+## 2026-11-18 — `<img>` was never a paint defect on the Engine2D lanes
+
+- **Earlier claim:** "the `<img>` is unpainted on every lane". It was measured through `simple_web_render_html_to_pixels_with_resolved_engine2d_backend`, which passes `images: []`. Resource loading, including `data:` URL decode, belongs to the hosted session (`browser_session_loading.spl` -> `decode_image_to_argb_bounded`). The direct entries never resolve resources by design.
+- **Measured:** through `HostedWebContentSession` the data-URI image paints `7285F6`, which is exact: the PNG is uniform RGBA (30,60,240,160) over white. Through `simple_web_layout_render_html_pixels_engine2d_with_images` with the decoded resource, cpu_simd and Vulkan paint it stretched and composite it in an opacity group as Chrome does.
+- **Pinned:** a new `opacity_group_chrome159_spec` row decodes `TG_IMG` with `base64_decode_bytes` + `decode_png_to_argb` and feeds it to cpu_simd and Vulkan. It checks (18,12)=`8829A5`, (50,12)=`B8C2FB`, the yellow-over-image cells (24,12)/(29,12)=`E9A52F`, and every TG_DEV cell. 17/17.
+- **No filtering question:** the earlier note that Chrome's image values need upscale-filter matching was wrong. A uniform image interpolates to itself, so these values are pure group arithmetic.
+- **Still open:**
+  - (54,12), the image under `rgba(0,0,0,.5)`: Chrome `9A9FBC`, Engine2D `9AA0BC`. This is the same +1-green two-translucent-overlap class as (40,4).
+  - The raster (fb) lane has no image paint at all; `_html_draw_ir_image_command` exists only on the Draw IR path. This matters wherever the raster lane is the ground truth or the fallback.
+  - Scaled non-uniform images are unpinned against Chrome's filtering.

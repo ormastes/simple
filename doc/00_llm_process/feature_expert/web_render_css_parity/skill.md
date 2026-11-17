@@ -2754,3 +2754,8 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 ## Outline (2026-11-18)
 - Engine2D executor paints the outline ring in `_engine2d_draw_ir_render_outline` (`engine2d/draw_ir_adv.spl`); its raster twin is `fb_outline_clip` (`paint_primitives`). Keep them in step. Pinned by `outline_engine2d_chrome159_spec` plus the opacity spec ring points.
 - Trap: a missing paint on the Engine2D lanes often means the executor ignores a Draw IR style prop the producer already emits. Grep `draw_ir_adv.spl` for the prop key before suspecting layout.
+
+
+## Images (2026-11-18)
+- Trap: the direct `html -> pixels` entries pass `images: []` and resolve no `data:` URLs. Resource loading is the hosted session's job. To test image paint, decode the resource and call a `*_with_images` entry (`simple_web_layout_render_html_pixels_engine2d_with_images`). "Image unpainted" through a direct entry is not a renderer bug.
+- The raster (fb) lane has no image paint; only Draw IR has `_html_draw_ir_image_command`.
