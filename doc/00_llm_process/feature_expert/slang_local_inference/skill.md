@@ -317,10 +317,12 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   `unsupported_modality` unless the resident model can take them. Each media part
   becomes `SLANG_MEDIA_MARKER` (`<__media__>`) in the chat frame.
 - **Video:** refused with a clear error (no decoder, no ffmpeg subprocess).
-- **Model dir:** `native_formats.gguf_is_projector` reads GGUF `general.architecture`
-  (first KV, fixed offsets) == `clip`; `mmproj` filename prefix is only the
-  fallback when the first key is another one. `gguf_entry_shard` never returns a
-  projector; `NativeModel.mmproj_path` carries it; two projectors = refused.
+- **Model dir:** `native_formats.gguf_is_projector` walks the GGUF KV block as
+  binary (`modality/kind_registry.gguf_facts`): `general.architecture == clip` or
+  `general.type == mmproj`; the `mmproj` filename prefix is only the fallback when
+  the metadata names neither. `gguf_entry_shard` never returns a projector or a
+  `wavtokenizer-dec` vocoder; `NativeModel.mmproj_path` carries the projector;
+  two projectors = refused.
 - **mtmd path:** shim `mtmd group` block (end of `slang_ggml_shim.c`, bit 128,
   `-DSLANG_WITH_MTMD`, built with `SLANG_SHIM_MTMD=1 LLAMA_BUILD_DIR=<build with
   libmtmd>`): add_encoded (magic-sniffed jpeg/png/gif/bmp/wav/mp3/flac only, so
@@ -332,6 +334,31 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
 - **Runner trap:** `skip(...)` inside an example is counted as PASSED
   (`skipped=0`); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.
 - **Live spec timeout knob:** `SLANG_RUN_TIMEOUT_MS` (default 600000) bounds each child in `caret_slang_local_hello_system_spec.spl`; the 3-model gate (`check-slang-ggml-inference.shs`, 9 dirs) took 34m50s on a loaded Windows host, so set e.g. 3300000 with `SIMPLE_TIMEOUT_SECONDS=3600`.
+
+## Model kinds and modalities (L1 common structure, 2026-11-17)
+
+Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
+- `slang/modality/kinds.spl`: `Modality`, `ModelKind` (Chat Asr Tts ImageGen
+  Embedding Rerank), `KindProfile`, `OutputPart`, `KindParams`, `KindRequest`,
+  `KindResult`. `RunnerKind` (runner_dispatch) gained `Whisper`, `StableDiffusion`.
+- `kind_registry.resolve_kind(dir)` chain: `slang_kind.sdn` (`kind:`, `vocoder:`)
+  -> one projector (inputs from `clip.has_vision_encoder` / `has_audio_encoder`)
+  -> vocoder companion = Tts -> `<arch>.pooling_type` (4 rerank, 1-3 embedding)
+  -> arch table (bert, nomic-bert, jina-bert-v2 = embedding) -> magic (`lmgg` =
+  Asr/whisper, `model.diffusion_model.` safetensors = ImageGen) -> LlamaForCausalLM
+  = Chat/pure. `NativeModel.profile` carries it (default: Chat [text] ggml).
+- **Trap:** the KV walk stops at the first `tokenizer.` key (reading the vocab
+  through `external_file_read_bytes_at` costs ~2 s/MiB on the seed). Keys written
+  after the tokenizer block are not seen; use `slang_kind.sdn`.
+- `/v1/models` entries add `slang_kind`, `input_modalities`, `output_modalities`
+  (3.7 s over C:/dev/model on the seed). `ApiResponse` gained `content_type`
+  (default `application/json`) and `body_bytes` (default empty = text body).
+- Route table `api_server.kind_routes`; `entrypoints/openai/serving/` holds one
+  stub per family (`serve_transcriptions`, `serve_speech`, `serve_images`,
+  `serve_embeddings`, `serve_rerank`): wrong kind = 400 `wrong_model_kind` (chat
+  routes too), right kind = 501 `not_implemented` naming the runner
+  (`engine/kind_dispatch.kind_open`, which loads nothing yet).
+- Spec: `test/01_unit/lib/gc_async_mut/slang/kind_registry_spec.spl`.
 
 ## Model variety live spec (2026-11-15, Windows, llvm-mingw shim)
 

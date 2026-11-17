@@ -1,0 +1,132 @@
+# @gc — module uses GC runtime
+#
+# Model kinds and modalities — the common structure every model kind plugs
+# into. Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.1, §3.3.
+#
+# VLM, audio-LLM and video are NOT kinds: they are a Chat model whose input
+# modality set comes from its projector (vLLM's SupportsMultiModal idea).
+
+use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatPart}
+
+enum Modality:
+    Text
+    Image
+    Audio
+    Video
+
+enum ModelKind:
+    Chat
+    Asr
+    Tts
+    ImageGen
+    Embedding
+    Rerank
+
+# What /v1/models reports and what routing reads. `reason` says why the kind
+# cannot be served by this build, "" when it can.
+struct KindProfile:
+    kind: ModelKind
+    inputs: [Modality]
+    outputs: [Modality]
+    runner: RunnerKind
+    reason: text
+
+# One output piece. `bytes` is packed (wav / png / f32-le vector); `mime` names
+# it ("audio/wav", "image/png", "application/x-f32le"). Text output uses `text`.
+struct OutputPart:
+    modality: Modality
+    text: text
+    bytes: [u8]
+    mime: text
+
+struct KindParams:
+    max_tokens: i64
+    n: i64
+    size: text
+    steps: i64
+    seed: i64
+    voice: text
+    top_n: i64
+    response_format: text
+
+struct KindRequest:
+    model_id: text
+    parts: [ChatPart]
+    params: KindParams
+
+struct KindResult:
+    parts: [OutputPart]
+    prompt_tokens: i64
+    completion_tokens: i64
+
+fn modality_text(m: Modality) -> text:
+    match m:
+        Modality.Text: "text"
+        Modality.Image: "image"
+        Modality.Audio: "audio"
+        Modality.Video: "video"
+
+fn model_kind_text(k: ModelKind) -> text:
+    match k:
+        ModelKind.Chat: "chat"
+        ModelKind.Asr: "asr"
+        ModelKind.Tts: "tts"
+        ModelKind.ImageGen: "image_gen"
+        ModelKind.Embedding: "embedding"
+        ModelKind.Rerank: "rerank"
+
+# The kind named by `name` (the model_kind_text spelling), as written in a
+# slang_kind.sdn override.
+fn model_kind_from_text(name: text) -> Result<ModelKind, text>:
+    val n = name.trim().to_lower()
+    if n == "chat":
+        return Ok(ModelKind.Chat)
+    if n == "asr":
+        return Ok(ModelKind.Asr)
+    if n == "tts":
+        return Ok(ModelKind.Tts)
+    if n == "image_gen":
+        return Ok(ModelKind.ImageGen)
+    if n == "embedding":
+        return Ok(ModelKind.Embedding)
+    if n == "rerank":
+        return Ok(ModelKind.Rerank)
+    Err("unknown model kind '" + name + "'; use chat, asr, tts, image_gen, embedding or rerank")
+
+fn model_kind_eq(a: ModelKind, b: ModelKind) -> bool:
+    model_kind_text(a) == model_kind_text(b)
+
+# Fixed output set of a kind. Chat input varies with its projector; every
+# other kind's sets are fixed by the kind.
+fn kind_outputs(k: ModelKind) -> [Modality]:
+    match k:
+        ModelKind.Tts: [Modality.Audio]
+        ModelKind.ImageGen: [Modality.Image]
+        _: [Modality.Text]
+
+fn kind_default_inputs(k: ModelKind) -> [Modality]:
+    match k:
+        ModelKind.Asr: [Modality.Audio]
+        _: [Modality.Text]
+
+fn kind_profile(k: ModelKind, inputs: [Modality], runner: RunnerKind, reason: text) -> KindProfile:
+    KindProfile(kind: k, inputs: inputs, outputs: kind_outputs(k), runner: runner, reason: reason)
+
+# A text Chat model on the ggml runner: the profile of a NativeModel built
+# without resolving its directory.
+fn default_kind_profile() -> KindProfile:
+    kind_profile(ModelKind.Chat, [Modality.Text], RunnerKind.Ggml, "")
+
+# JSON array of modality names, e.g. ["text","image"].
+fn modalities_json(ms: [Modality]) -> text:
+    var out = ""
+    for m in ms:
+        if out != "":
+            out = out + ","
+        out = out + "\"" + modality_text(m) + "\""
+    "[" + out + "]"
+
+export Modality, ModelKind, KindProfile, OutputPart, KindParams, KindRequest, KindResult
+export modality_text, model_kind_text, model_kind_from_text, model_kind_eq
+export kind_outputs, kind_default_inputs, kind_profile, default_kind_profile, modalities_json

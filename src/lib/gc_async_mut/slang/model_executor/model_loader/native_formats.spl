@@ -21,6 +21,9 @@
 use std.io_runtime.{file_size, is_dir, file_read_text_at_nullable}
 use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list}
 use std.gc_async_mut.slang.model_executor.model_loader.manifest.{parse_manifest}
+use std.gc_async_mut.slang.modality.kinds.{KindProfile, ModelKind, kind_profile, default_kind_profile}
+use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind, pure_runner_unsupported_reason}
+use std.gc_async_mut.slang.modality.kind_registry.{GgufFile, gguf_facts, gguf_files, gguf_file_is_projector, gguf_facts_are_vocoder, ggml_magic_file, resolve_kind}
 
 # What kind of artifact a directory holds, and therefore which loader — if any
 # — can consume it.
@@ -53,6 +56,8 @@ struct NativeModel:
     runnable: bool
     reason: text
     mmproj_path: text
+    # The resolved kind and input/output modalities (modality/kind_registry).
+    profile: KindProfile = default_kind_profile()
 
 fn _join(root: text, name: text) -> text:
     if root.ends_with("/"):
@@ -87,31 +92,26 @@ fn has_safetensors_header(path: text) -> bool:
     (file_read_text_at_nullable(path, 8, 1) ?? "") == "{"
 
 # True when `path` is a multimodal projector (CLIP-style encoder), not a text
-# model. The reliable test is GGUF metadata `general.architecture == "clip"`.
-# llama.cpp's writer emits that key FIRST, so it is read at fixed offsets: the
-# header is magic(4) version(4) tensor_count(8) kv_count(8), then the first KV
-# is key_len(8) "general.architecture"(20) type(4) value_len(8) value. Only the
-# ASCII runs are read as text. A file whose first key is something else cannot
-# be classified from metadata cheaply; for those, and only those, the `mmproj`
-# filename prefix is the fallback hint.
+# model. GGUF metadata decides (`general.architecture == "clip"` or
+# `general.type == "mmproj"`), read by walking the KV block as binary; only a
+# file whose metadata names neither falls back to the `mmproj` filename prefix.
 fn gguf_is_projector(path: text) -> bool:
-    val first_key = file_read_text_at_nullable(path, 32, 20) ?? ""
-    if first_key == "general.architecture":
-        return (file_read_text_at_nullable(path, 64, 4) ?? "") == "clip"
-    _basename(path).starts_with("mmproj")
+    match gguf_facts(path):
+        Ok(facts):
+            gguf_file_is_projector(GgufFile(name: _basename(path), facts: facts))
+        Err(_):
+            _basename(path).starts_with("mmproj")
 
-# `.gguf` files in `dir` that carry the magic, split by role.
+# `.gguf` files in `dir` that carry the magic, split by role. A WavTokenizer
+# vocoder is neither: it is a companion of a TTS model, never its entry.
 fn _gguf_names(dir: text, projectors: bool) -> [text]:
     var out: [text] = []
-    match host_dir_list(dir):
-        case Some(names):
-            for name in names:
-                if name.ends_with(".gguf"):
-                    val p = _join(dir, name)
-                    if has_gguf_magic(p) and gguf_is_projector(p) == projectors:
-                        out.push(name)
-        case nil:
-            pass
+    for f in gguf_files(dir):
+        if gguf_file_is_projector(f):
+            if projectors:
+                out.push(f.name)
+        elif not projectors and not gguf_facts_are_vocoder(f.facts):
+            out.push(f.name)
     out
 
 # The lowest-numbered GGUF shard of the TEXT model in `dir`, which is the one a
@@ -181,7 +181,33 @@ fn unknown_reason(dir: text) -> text:
 # this module's — and a detector that silently reported "not runnable" on a host
 # that simply had not been told where its backend lives would be the same
 # silence-by-omission bug in a new place.
+#
+# Every model also carries its resolved kind profile (modality/kind_registry):
+# a Chat profile's reason is the model's own not-runnable reason; another
+# kind's reason says why that kind is not served yet.
 fn describe_model(dir: text, ggml_available: bool) -> NativeModel:
+    var m = _describe_format(dir, ggml_available)
+    val p = resolve_kind(dir)
+    var reason = p.reason
+    match p.kind:
+        ModelKind.Chat:
+            match p.runner:
+                RunnerKind.Pure:
+                    reason = pure_runner_unsupported_reason(dir)
+                _:
+                    reason = m.reason
+        _:
+            pass
+    m.profile = kind_profile(p.kind, p.inputs, p.runner, reason)
+    if m.format == "unknown":
+        val ggml_file = ggml_magic_file(dir)
+        if ggml_file != "":
+            m.format = "ggml"
+            m.entry_path = ggml_file
+            m.reason = reason
+    m
+
+fn _describe_format(dir: text, ggml_available: bool) -> NativeModel:
     val name = _basename(dir)
     val fmt = detect_format(dir)
     val bytes = dir_byte_size(dir)

@@ -1,0 +1,450 @@
+# @gc — module uses GC runtime
+#
+# Kind resolver — which ModelKind a model directory holds, and what it takes in
+# and gives out. Design: doc/05_design/ml/slang/slang_pluggable_modalities.md
+# §3.2.
+#
+# `general.architecture` alone cannot name the kind (an OuteTTS GGUF is a plain
+# llama decoder; bge embedder and reranker are both `bert`; a VLM's modality
+# lives in its projector), so `resolve_kind` is an ordered chain where the first
+# decisive step wins:
+#   1. a `slang_kind.sdn` override (`kind: tts`, `vocoder: <file>`)
+#   2. a projector companion: Chat, inputs from clip.has_vision_encoder /
+#      clip.has_audio_encoder
+#   3. a WavTokenizer vocoder companion -> Tts
+#   4. `<arch>.pooling_type` (u32: 0 none, 1 mean, 2 cls, 3 last, 4 rank)
+#   5. the architecture table
+#   6. magic sniff: `lmgg` ggml -> Asr; SD UNet safetensors -> ImageGen;
+#      LlamaForCausalLM safetensors -> Chat on the pure runner
+# Ambiguous models are settled with a slang_kind.sdn override, never with a
+# code special case.
+#
+# GGUF metadata is read as BINARY: every key and value length is a u64 read
+# from the bytes, and the walk ends at the first tensor-info entry (after
+# kv_count entries) or at the tokenizer block, whichever is first. Bytes come
+# from a growing ranged read of the prefix, never the whole file.
+
+use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, KindProfile, kind_profile, kind_default_inputs, model_kind_from_text}
+use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
+use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
+use std.common.text_bytes.{bytes_to_text}
+use std.io_runtime.{file_exists, read_file, dir_list_optional, is_dir, file_size}
+
+val KIND_OVERRIDE_FILE = "slang_kind.sdn"
+val GGUF_FIRST_READ = 16384
+val GGUF_MAX_READ = 67108864
+
+# GGUF value type ids (gguf.h).
+val GGUF_T_U8 = 0
+val GGUF_T_I8 = 1
+val GGUF_T_U16 = 2
+val GGUF_T_I16 = 3
+val GGUF_T_U32 = 4
+val GGUF_T_I32 = 5
+val GGUF_T_F32 = 6
+val GGUF_T_BOOL = 7
+val GGUF_T_STRING = 8
+val GGUF_T_ARRAY = 9
+val GGUF_T_U64 = 10
+val GGUF_T_I64 = 11
+val GGUF_T_F64 = 12
+
+# The few metadata facts the resolver reads. `pooling_type` is -1 when the key
+# is absent.
+struct GgufFacts:
+    arch: text
+    general_type: text
+    pooling_type: i64
+    has_vision: bool
+    has_audio: bool
+
+# Why a walk stopped short: the bytes read so far end mid-entry, so a larger
+# read is needed; or the file is not a GGUF this reader understands.
+enum GgufWalkStop:
+    NeedMore
+    Malformed(text)
+
+fn _join(root: text, name: text) -> text:
+    if root.ends_with("/"):
+        return root + name
+    root + "/" + name
+
+fn _u64_at(b: [u8], at: i64) -> i64:
+    var v: i64 = 0
+    var i = 7
+    while i >= 0:
+        v = (v << 8) | (b[at + i] as i64)
+        i = i - 1
+    v
+
+fn _u32_at(b: [u8], at: i64) -> i64:
+    (b[at] as i64) | ((b[at + 1] as i64) << 8) | ((b[at + 2] as i64) << 16) | ((b[at + 3] as i64) << 24)
+
+fn _bytes_text(b: [u8], at: i64, n: i64) -> text:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(b[at + i])
+        i = i + 1
+    bytes_to_text(out)
+
+fn _bytes_are(b: [u8], at: i64, n: i64, want: text) -> bool:
+    val w = want.bytes()
+    if w.len() != n:
+        return false
+    var i = 0
+    while i < n:
+        if b[at + i] != w[i]:
+            return false
+        i = i + 1
+    true
+
+fn _bytes_start(b: [u8], at: i64, n: i64, prefix: text) -> bool:
+    val w = prefix.bytes()
+    if w.len() > n:
+        return false
+    var i = 0
+    while i < w.len():
+        if b[at + i] != w[i]:
+            return false
+        i = i + 1
+    true
+
+# Width in bytes of a fixed-size scalar type; -1 for string and array.
+fn _scalar_width(t: i64) -> i64:
+    if t == GGUF_T_U8 or t == GGUF_T_I8 or t == GGUF_T_BOOL:
+        return 1
+    if t == GGUF_T_U16 or t == GGUF_T_I16:
+        return 2
+    if t == GGUF_T_U32 or t == GGUF_T_I32 or t == GGUF_T_F32:
+        return 4
+    if t == GGUF_T_U64 or t == GGUF_T_I64 or t == GGUF_T_F64:
+        return 8
+    -1
+
+# Offset just past one value of type `t` at `at`, or a stop.
+fn _gguf_skip_value(b: [u8], at: i64, t: i64) -> Result<i64, GgufWalkStop>:
+    val width = _scalar_width(t)
+    if width > 0:
+        if at + width > b.len():
+            return Err(GgufWalkStop.NeedMore)
+        return Ok(at + width)
+    if t == GGUF_T_STRING:
+        if at + 8 > b.len():
+            return Err(GgufWalkStop.NeedMore)
+        val end = at + 8 + _u64_at(b, at)
+        if end > b.len():
+            return Err(GgufWalkStop.NeedMore)
+        return Ok(end)
+    if t == GGUF_T_ARRAY:
+        if at + 12 > b.len():
+            return Err(GgufWalkStop.NeedMore)
+        val elem = _u32_at(b, at)
+        val count = _u64_at(b, at + 4)
+        if count < 0:
+            return Err(GgufWalkStop.Malformed("array count overflows"))
+        val elem_width = _scalar_width(elem)
+        if elem_width > 0:
+            val end = at + 12 + count * elem_width
+            if end > b.len():
+                return Err(GgufWalkStop.NeedMore)
+            return Ok(end)
+        if elem == GGUF_T_STRING:
+            var p = at + 12
+            var i: i64 = 0
+            while i < count:
+                if p + 8 > b.len():
+                    return Err(GgufWalkStop.NeedMore)
+                p = p + 8 + _u64_at(b, p)
+                i = i + 1
+            if p > b.len():
+                return Err(GgufWalkStop.NeedMore)
+            return Ok(p)
+        return Err(GgufWalkStop.Malformed("nested GGUF array type " + elem.to_text()))
+    Err(GgufWalkStop.Malformed("unknown GGUF value type " + t.to_text()))
+
+fn _scalar_int(b: [u8], at: i64, t: i64) -> i64:
+    val width = _scalar_width(t)
+    if width == 8:
+        return _u64_at(b, at)
+    if width == 4:
+        return _u32_at(b, at)
+    if width == 2:
+        return (b[at] as i64) | ((b[at + 1] as i64) << 8)
+    b[at] as i64
+
+# Walk every KV entry of the GGUF bytes `b`, stopping at the first tensor-info
+# entry, and keep the facts the resolver reads.
+fn gguf_facts_from_bytes(b: [u8]) -> Result<GgufFacts, GgufWalkStop>:
+    if b.len() < 24:
+        return Err(GgufWalkStop.NeedMore)
+    if not _bytes_are(b, 0, 4, "GGUF"):
+        return Err(GgufWalkStop.Malformed("no GGUF magic"))
+    val version = _u32_at(b, 4)
+    if version < 2:
+        return Err(GgufWalkStop.Malformed("GGUF version " + version.to_text() + " is not supported (need 2 or 3)"))
+    val kv_count = _u64_at(b, 16)
+    var arch = ""
+    var general_type = ""
+    var pooling: i64 = -1
+    var vision = false
+    var audio = false
+    var p = 24
+    var k: i64 = 0
+    while k < kv_count:
+        if p + 8 > b.len():
+            return Err(GgufWalkStop.NeedMore)
+        val key_len = _u64_at(b, p)
+        val key_at = p + 8
+        if key_len < 0 or key_at + key_len + 4 > b.len():
+            return Err(GgufWalkStop.NeedMore)
+        # The tokenizer block (vocab and merges, megabytes of string arrays) is
+        # written after the general.* / clip.* / <arch>.* keys and holds no
+        # fact the resolver reads; the walk ends there. A file that breaks
+        # that order is settled by a slang_kind.sdn override.
+        if _bytes_start(b, key_at, key_len, "tokenizer."):
+            break
+        val t = _u32_at(b, key_at + key_len)
+        val v = key_at + key_len + 4
+        match _gguf_skip_value(b, v, t):
+            Err(stop):
+                return Err(stop)
+            Ok(next):
+                if t == GGUF_T_STRING and _bytes_are(b, key_at, key_len, "general.architecture"):
+                    arch = _bytes_text(b, v + 8, _u64_at(b, v))
+                elif t == GGUF_T_STRING and _bytes_are(b, key_at, key_len, "general.type"):
+                    general_type = _bytes_text(b, v + 8, _u64_at(b, v))
+                elif t == GGUF_T_BOOL and _bytes_are(b, key_at, key_len, "clip.has_vision_encoder"):
+                    vision = b[v] != 0
+                elif t == GGUF_T_BOOL and _bytes_are(b, key_at, key_len, "clip.has_audio_encoder"):
+                    audio = b[v] != 0
+                elif _scalar_width(t) > 0 and arch != "" and _bytes_are(b, key_at, key_len, arch + ".pooling_type"):
+                    pooling = _scalar_int(b, v, t)
+                p = next
+        k = k + 1
+    Ok(GgufFacts(arch: arch, general_type: general_type, pooling_type: pooling, has_vision: vision, has_audio: audio))
+
+# GGUF facts of the file at `path`. Reads a growing prefix until the KV block
+# fits, never past GGUF_MAX_READ.
+fn gguf_facts(path: text) -> Result<GgufFacts, text>:
+    val size = file_size(path)
+    var want = GGUF_FIRST_READ
+    while true:
+        val n = if want > size: size else: want
+        match external_file_read_bytes_at(path, 0, n):
+            Err(_):
+                return Err("cannot read " + path)
+            Ok(bytes):
+                match gguf_facts_from_bytes(bytes):
+                    Ok(facts):
+                        return Ok(facts)
+                    Err(GgufWalkStop.Malformed(why)):
+                        return Err(path + ": " + why)
+                    Err(GgufWalkStop.NeedMore):
+                        if n >= size:
+                            return Err(path + ": truncated GGUF metadata")
+                        if n >= GGUF_MAX_READ:
+                            return Err(path + ": GGUF metadata is larger than " + GGUF_MAX_READ.to_text() + " bytes")
+                        want = want * 4
+    Err(path + ": unreachable")
+
+# True when `facts` describe a multimodal projector rather than a model.
+fn gguf_facts_are_projector(facts: GgufFacts) -> bool:
+    facts.arch == "clip" or facts.general_type == "mmproj"
+
+# True when `facts` describe a WavTokenizer vocoder (vocoder-only, never served
+# on its own).
+fn gguf_facts_are_vocoder(facts: GgufFacts) -> bool:
+    facts.arch == "wavtokenizer-dec"
+
+# The architecture table: the one place an architecture names a kind. Adding a
+# model family is one row. Architectures not listed are decoders served as Chat.
+fn arch_kind(arch: text) -> ModelKind:
+    for row in [("bert", ModelKind.Embedding), ("nomic-bert", ModelKind.Embedding), ("jina-bert-v2", ModelKind.Embedding)]:
+        if row.0 == arch:
+            return row.1
+    ModelKind.Chat
+
+# Kind from `<arch>.pooling_type`: 4 is rank, 1-3 are pooled embeddings.
+fn pooling_kind(pooling: i64) -> ModelKind?:
+    if pooling == 4:
+        return Some(ModelKind.Rerank)
+    if pooling >= 1 and pooling <= 3:
+        return Some(ModelKind.Embedding)
+    None
+
+# `key: value` from a slang_kind.sdn override, "" when absent.
+fn kind_override_field(dir: text, key: text) -> text:
+    val path = _join(dir, KIND_OVERRIDE_FILE)
+    if not file_exists(path):
+        return ""
+    for line in read_file(path).split("\n"):
+        val t = line.trim()
+        if t.starts_with(key + ":"):
+            return t.slice(key.byte_len() + 1, t.byte_len()).trim()
+    ""
+
+fn _runner_for_kind(k: ModelKind) -> RunnerKind:
+    match k:
+        ModelKind.Asr: RunnerKind.Whisper
+        ModelKind.ImageGen: RunnerKind.StableDiffusion
+        _: RunnerKind.Ggml
+
+# Why a resolved kind cannot be served yet. Chat is served by llm_engine; the
+# other kinds name the lane that owns their serving module.
+fn kind_unserved_reason(k: ModelKind) -> text:
+    match k:
+        ModelKind.Chat: ""
+        ModelKind.Asr: "asr serving (/v1/audio/transcriptions) is not implemented in this build"
+        ModelKind.Tts: "tts serving (/v1/audio/speech) is not implemented in this build"
+        ModelKind.ImageGen: "image generation serving (/v1/images/generations) is not implemented in this build"
+        ModelKind.Embedding: "embedding serving (/v1/embeddings) is not implemented in this build"
+        ModelKind.Rerank: "rerank serving (/v1/rerank) is not implemented in this build"
+
+fn _profile(k: ModelKind, inputs: [Modality], runner: RunnerKind) -> KindProfile:
+    kind_profile(k, inputs, runner, kind_unserved_reason(k))
+
+fn _files(dir: text) -> [text]:
+    var out: [text] = []
+    match dir_list_optional(dir):
+        case Some(names):
+            for name in names:
+                if not is_dir(_join(dir, name)):
+                    out.push(name)
+        case None:
+            pass
+    out
+
+# First 4 bytes of `path` as text ("" when unreadable).
+fn _magic(path: text) -> text:
+    match external_file_read_bytes_at(path, 0, 4):
+        Ok(b):
+            if b.len() == 4:
+                return bytes_to_text(b)
+            ""
+        Err(_):
+            ""
+
+# True when a safetensors file's JSON header names an SD UNet tensor
+# (`model.diffusion_model.` prefix). Only the header is read.
+fn safetensors_is_sd_unet(path: text) -> bool:
+    match external_file_read_bytes_at(path, 0, 8):
+        Err(_):
+            return false
+        Ok(head):
+            if head.len() != 8:
+                return false
+            val header_len = _u64_at(head, 0)
+            if header_len <= 0 or header_len > GGUF_MAX_READ:
+                return false
+            match external_file_read_bytes_at(path, 8, header_len):
+                Ok(json):
+                    bytes_to_text(json).contains("\"model.diffusion_model.")
+                Err(_):
+                    false
+
+# The lowest-named file in `dir` carrying the legacy ggml magic (`lmgg`, the
+# whisper.cpp model format), "" when there is none.
+fn ggml_magic_file(dir: text) -> text:
+    var best = ""
+    for name in _files(dir):
+        if (best == "" or name < best) and _magic(_join(dir, name)) == "lmgg":
+            best = name
+    if best == "":
+        return ""
+    _join(dir, best)
+
+# One GGUF file in a directory, with its facts.
+struct GgufFile:
+    name: text
+    facts: GgufFacts
+
+# Metadata decides; only a file whose metadata names no architecture and no
+# type falls back to the `mmproj` filename prefix.
+fn gguf_file_is_projector(f: GgufFile) -> bool:
+    if f.facts.arch == "" and f.facts.general_type == "":
+        return f.name.starts_with("mmproj")
+    gguf_facts_are_projector(f.facts)
+
+# Every readable GGUF in `dir`, each header walked once.
+fn gguf_files(dir: text) -> [GgufFile]:
+    var out: [GgufFile] = []
+    for name in _files(dir):
+        if name.ends_with(".gguf"):
+            match gguf_facts(_join(dir, name)):
+                Ok(facts):
+                    out.push(GgufFile(name: name, facts: facts))
+                Err(_):
+                    pass
+    out
+
+fn _override_profile(dir: text, kind_name: text) -> KindProfile:
+    match model_kind_from_text(kind_name):
+        Err(why):
+            kind_profile(ModelKind.Chat, [Modality.Text], RunnerKind.Ggml, KIND_OVERRIDE_FILE + ": " + why)
+        Ok(k):
+            val p = _profile(k, kind_default_inputs(k), _runner_for_kind(k))
+            if _is_tts(k):
+                val vocoder = kind_override_field(dir, "vocoder")
+                if vocoder == "" or not file_exists(_join(dir, vocoder)):
+                    return kind_profile(k, p.inputs, p.runner, KIND_OVERRIDE_FILE + " names kind tts but its vocoder file '" + vocoder + "' is missing")
+            p
+
+fn _is_tts(k: ModelKind) -> bool:
+    match k:
+        ModelKind.Tts: true
+        _: false
+
+# The kind profile of the model in `dir`. Never fails: an unrecognised
+# directory resolves to Chat with the reason it cannot be served.
+fn resolve_kind(dir: text) -> KindProfile:
+    val gguf = gguf_files(dir)
+    # 1. manifest override
+    val override_kind = kind_override_field(dir, "kind")
+    if override_kind != "":
+        return _override_profile(dir, override_kind)
+    var projectors: [GgufFacts] = []
+    var vocoders = 0
+    var models: [GgufFacts] = []
+    for f in gguf:
+        if gguf_file_is_projector(f):
+            projectors.push(f.facts)
+        elif gguf_facts_are_vocoder(f.facts):
+            vocoders = vocoders + 1
+        else:
+            models.push(f.facts)
+    # 2. projector companion -> Chat with the projector's input modalities
+    if models.len() > 0 and projectors.len() == 1:
+        var inputs = [Modality.Text]
+        if projectors[0].has_vision:
+            inputs.push(Modality.Image)
+        if projectors[0].has_audio:
+            inputs.push(Modality.Audio)
+        return _profile(ModelKind.Chat, inputs, RunnerKind.Ggml)
+    # 3. vocoder companion -> Tts
+    if models.len() > 0 and vocoders > 0:
+        return _profile(ModelKind.Tts, [Modality.Text], RunnerKind.Ggml)
+    if models.len() > 0:
+        # 4. pooling type, then 5. the architecture table
+        match pooling_kind(models[0].pooling_type):
+            case Some(k):
+                return _profile(k, [Modality.Text], RunnerKind.Ggml)
+            case None:
+                return _profile(arch_kind(models[0].arch), [Modality.Text], RunnerKind.Ggml)
+    if vocoders > 0:
+        return kind_profile(ModelKind.Tts, [Modality.Text], RunnerKind.Ggml, "only a WavTokenizer vocoder (wavtokenizer-dec) was found; it needs a TTS model GGUF beside it")
+    # 6. magic sniff
+    if ggml_magic_file(dir) != "":
+        return _profile(ModelKind.Asr, [Modality.Audio], RunnerKind.Whisper)
+    for name in _files(dir):
+        val path = _join(dir, name)
+        if name.ends_with(".safetensors") and safetensors_is_sd_unet(path):
+            return _profile(ModelKind.ImageGen, [Modality.Text], RunnerKind.StableDiffusion)
+    val cfg = _join(dir, "config.json")
+    if file_exists(cfg) and read_file(cfg).contains("\"LlamaForCausalLM\""):
+        return _profile(ModelKind.Chat, [Modality.Text], RunnerKind.Pure)
+    kind_profile(ModelKind.Chat, [Modality.Text], RunnerKind.Ggml, "no kind could be resolved: no " + KIND_OVERRIDE_FILE + ", no GGUF model, no ggml (lmgg) file and no recognised safetensors")
+
+export GgufFacts, GgufWalkStop, GgufFile
+export gguf_facts_from_bytes, gguf_facts, gguf_facts_are_projector, gguf_file_is_projector, gguf_facts_are_vocoder, gguf_files
+export arch_kind, pooling_kind, kind_override_field, kind_unserved_reason, safetensors_is_sd_unet, ggml_magic_file, resolve_kind
