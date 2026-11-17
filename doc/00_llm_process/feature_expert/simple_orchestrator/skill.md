@@ -330,3 +330,8 @@ available. These source paths and their manuals remain NOT_RUN.
   `stream_v2.spl`), a read-only live epoch derived from the verified epoch record, and the OP prepare->begin->open
   chain with a release context carrying policy, scope and refresh. Binding the attach arm before the OP chain exists
   would archive, consume the one-per-incarnation slot and end refused. Bug record: `doc/08_tracking/bug/v4_attach_helper_charge_held_without_records_2026-11-17.md`.
+
+## Exact cleanup scope — AT-CTR-03 (2026-11-17, specs NOT_RUN)
+- `container/providers/linux/cleanup_scope_v1.spl`: fixture-owned sentinel network/volume commands (`simpleorch-sentinel-` prefix + `io.simpleorch.sentinel` label), `cleanup_destroy_scope_error_v1` (destroy may name ONLY the run's own native id; no network/volume/prune/-v/-a; never a sentinel) and `cleanup_sentinels_intact_v1`.
+- Wired into `oci_runtime_v1` destroy BEFORE `live_enabled`/`_execute`; pinned by a provider-level spec in `cleanup_scope_v1_spec`. Live proof `cleanup_scope_live_v1_spec` records `pending("BLOCKED: <unset vars>")` without `SIMPLE_CTR_CLEANUP_ENGINE/IMAGE/FIXTURE_ID`.
+- Not covered: Windows-engine sentinels (still ENV-BLOCKED).
