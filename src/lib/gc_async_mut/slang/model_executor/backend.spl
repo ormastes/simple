@@ -134,6 +134,11 @@ struct GgmlBackend:
     f_prefix_resident_bytes: i64
     f_prefix_rejected_bytes: i64
     f_prefix_restore_failures: i64
+    f_prefix_mode_configure: i64
+    f_tree_mode: i64
+    f_tree_nodes: i64
+    f_tree_cached_tokens: i64
+    f_tree_shared_tokens: i64
     f_context_profile_configure: i64
     f_gpu_offload_supported: i64
     f_model_offloaded: i64
@@ -336,7 +341,10 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         "slang_ggml_prefix_restore_failures",
         "slang_ggml_context_profile_configure",
         "slang_ggml_request_chat_render",
-        "slang_ggml_gpu_offload_supported", "slang_ggml_model_offloaded"
+        "slang_ggml_gpu_offload_supported", "slang_ggml_model_offloaded",
+        "slang_ggml_prefix_cache_mode_configure", "slang_ggml_tree_mode",
+        "slang_ggml_tree_nodes", "slang_ggml_tree_cached_tokens",
+        "slang_ggml_tree_shared_tokens"
     ]
     var optional: [i64] = []
     for n in optional_names:
@@ -437,6 +445,9 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_context_profile_configure: optional[7],
         f_request_chat_render: optional[8],
         f_gpu_offload_supported: optional[9], f_model_offloaded: optional[10],
+        f_prefix_mode_configure: optional[11], f_tree_mode: optional[12],
+        f_tree_nodes: optional[13], f_tree_cached_tokens: optional[14],
+        f_tree_shared_tokens: optional[15],
         f_request_configure: request_addrs[0], f_request_create: request_addrs[1],
         f_request_close: request_addrs[2], f_request_cancel: request_addrs[3],
         f_request_str_reset: request_addrs[4], f_request_str_push: request_addrs[5],
@@ -925,6 +936,31 @@ fn configure_prefix_cache(b: GgmlBackend, entries: i64, bytes: i64) -> bool:
         return false
     _call2(b.f_prefix_configure, entries, bytes) >= 0
 
+# Prefix-cache mode: 0 = snapshot (default); 1 = radix tree on one persistent
+# multi-sequence context, whole-micro-batch reuse; 2 = same, every matched token;
+# 3 = per-sequence KV streams (not unified). Call before open_context. False when
+# the shim predates the tree lane or refuses.
+fn configure_prefix_cache_mode(b: GgmlBackend, mode: i64, cells: i64) -> bool:
+    if b.f_prefix_mode_configure == 0:
+        return mode == 0
+    _call2(b.f_prefix_mode_configure, mode, cells) >= 0
+
+# Tree-only telemetry; hits, misses, evictions and token counts are the shared
+# prefix_cache_stats counters. All -1 against a shim without the tree lane.
+struct TreeCacheStats:
+    mode: i64
+    nodes: i64
+    cached_tokens: i64
+    shared_tokens: i64
+
+fn tree_cache_stats(b: GgmlBackend) -> TreeCacheStats:
+    TreeCacheStats(
+        mode: _optional_call0(b.f_tree_mode),
+        nodes: _optional_call0(b.f_tree_nodes),
+        cached_tokens: _optional_call0(b.f_tree_cached_tokens),
+        shared_tokens: _optional_call0(b.f_tree_shared_tokens)
+    )
+
 fn physical_page_provider_status(b: GgmlBackend) -> PhysicalPageProviderStatus:
     b.physical_page_status
 
@@ -1143,6 +1179,7 @@ export open_physical_request, prepare_request_tokens, request_token_at
 export request_sample, request_is_eog, request_piece
 export gpu_offload_supported, model_offloaded
 export MediaBlob, BackendMediaGenerationRequest, generate_media_request, load_mmproj, backend_media_caps
+export TreeCacheStats, configure_prefix_cache_mode, tree_cache_stats
 export generate, generate_observed, generate_observed_request, configure_prefix_cache, prefix_cache_stats, configure_matched_cpu_context, close_backend
 export GenStream, generate_stream_open, gen_stream_step, gen_stream_close
 export physical_page_version_probe_is_authorized, physical_page_group_status_from_probe

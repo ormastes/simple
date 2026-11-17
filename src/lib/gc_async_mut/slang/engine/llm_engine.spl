@@ -15,7 +15,7 @@
 # one model and refuses a switch it cannot afford, rather than letting an HTTP
 # handler decide.
 
-use std.gc_async_mut.slang.model_executor.backend.{MediaBlob, BackendMediaGenerationRequest, generate_media_request, load_mmproj, GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, GenStream, generate_stream_open, gen_stream_step, gen_stream_close, configure_prefix_cache, prefix_cache_stats, gpu_offload_supported, model_offloaded, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
+use std.gc_async_mut.slang.model_executor.backend.{MediaBlob, BackendMediaGenerationRequest, generate_media_request, load_mmproj, GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, GenStream, generate_stream_open, gen_stream_step, gen_stream_close, configure_prefix_cache, prefix_cache_stats, configure_prefix_cache_mode, tree_cache_stats, TreeCacheStats, gpu_offload_supported, model_offloaded, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
 use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_bind_backend, paged_executor_clear_pending_backend, paged_executor_activate_config, paged_executor_configuration_text, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
@@ -50,6 +50,8 @@ var ENGINE_MATCHED_CPU_THREADS = -1
 var ENGINE_GPU_LAYERS = -1
 var ENGINE_PREFIX_CACHE_ENTRIES = 4
 var ENGINE_PREFIX_CACHE_BYTES = 2147483648
+var ENGINE_PREFIX_CACHE_MODE = 0
+var ENGINE_PREFIX_CACHE_CELLS = 0
 var ENGINE_PHYSICAL_PAGES_ENABLED = false
 var ENGINE_PHYSICAL_PAGE_TOKENS = 256
 var ENGINE_PHYSICAL_PAGE_CAPACITY = 128
@@ -129,6 +131,23 @@ fn engine_set_prefix_cache_limits(entries: i64, bytes: i64) -> bool:
     if ENGINE_BACKEND == nil:
         return true
     configure_prefix_cache(ENGINE_BACKEND!, entries, bytes)
+
+# Prefix-cache mode (0 snapshot default, 1-3 radix tree; see backend.spl). Applied
+# at the next model load; the shim refuses a switch while a context is open.
+# Requests stay serialised per model; a tree request that overlaps another gets BUSY.
+fn engine_set_prefix_cache_mode(mode: i64, cells: i64) -> bool:
+    if mode < 0 or mode > 3 or cells < 0:
+        return false
+    if ENGINE_BACKEND != nil:
+        return false
+    ENGINE_PREFIX_CACHE_MODE = mode
+    ENGINE_PREFIX_CACHE_CELLS = cells
+    true
+
+fn engine_tree_cache_stats() -> TreeCacheStats?:
+    if ENGINE_BACKEND == nil:
+        return nil
+    tree_cache_stats(ENGINE_BACKEND!)
 
 # One resolver for every reader (advertise, availability, load) so they cannot
 # disagree. Precedence: engine_set_lib_path > SLANG_GGML_LIB > per-OS default
@@ -339,6 +358,7 @@ fn _ensure_ggml_loaded(model: NativeModel) -> Result<(), text>:
                                 ENGINE_BACKEND = b
                                 ENGINE_LOADED_ID = model.id
                                 return Ok(())
+                    configure_prefix_cache_mode(b, ENGINE_PREFIX_CACHE_MODE, ENGINE_PREFIX_CACHE_CELLS)
                     match open_context(b, ENGINE_N_CTX):
                         Err(e):
                             close_backend(b)
@@ -643,7 +663,7 @@ fn engine_pure_stats() -> PureRunnerStats?:
         requests: lane.requests)
 
 export engine_complete_text, EngineChatResult, engine_last_runner, engine_pure_stats, PureRunnerStats
-export engine_set_lib_path, engine_set_gpu_layers_text, engine_gpu_offload_status, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
+export engine_set_lib_path, engine_set_gpu_layers_text, engine_gpu_offload_status, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_set_prefix_cache_mode, engine_tree_cache_stats, engine_lib_path, engine_backend_available
 export engine_preload, engine_complete_chat, engine_complete_chat_observed, engine_complete_chat_media, engine_media_caps, engine_media_caps_for
 export engine_complete_chat_stops, engine_complete_text_stops, engine_can_stream, engine_stream_open, engine_stream_step, engine_stream_close
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
