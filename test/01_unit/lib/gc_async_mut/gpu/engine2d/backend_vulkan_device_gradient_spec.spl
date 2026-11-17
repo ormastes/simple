@@ -1,0 +1,283 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer: CSS radial and linear gradient layers are
+EVALUATED on the device (`shaders/gradient_layer.comp`), not on the host.
+Before this change `Engine2D.draw_radial_gradient_ellipse` /
+`draw_linear_gradient_line` ran the host evaluators
+(`backend_emu.radial_gradient_pixels` / `linear_gradient_pixels`, one seeded
+isqrt or one 64-bit divide per pixel) and uploaded every pixel for a device
+SRC_OVER composite -- ~5 s per 640x480 radial page in the interpreter. Now the
+host uploads only the 1025-entry stop ramp the host evaluator builds plus
+O(w + h) per-column / per-row geometry terms, and one compute pass evaluates t
+per pixel and composites onto the framebuffer.
+
+## Operator workflow
+`VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json <vulkan-capable simple> test \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_device_gradient_spec.spl`
+
+## Compatibility and limitations
+REQUIRES a real Vulkan device and FAILS (never skips) without one: the first
+row asserts `backend_name() == "vulkan"`, and every device row asserts the
+device gradient counter rose while the host evaluator counter stayed put.
+
+The composite is Chrome 159's gradient / image layer rule,
+`round(s*a/255) + div255r(d*(255-a))` with
+`div255r(v) = (v + 128 + ((v + 128) >> 8)) >> 8`, over an OPAQUE destination.
+The oracle below is written from that rule in this file, independently of the
+shader, and the gradient colour comes from the host evaluator itself, so a
+row here proves both bit-exact t evaluation and the composite rule. The
+cpu_simd host composite still truncates (a parallel lane owns color.spl
+blend), so device vs cpu_simd equality is asserted only where the gradient is
+opaque and the composite rule cannot differ.
+
+## Verification guidance and troubleshooting
+Sabotage: make `VulkanBackend.draw_gradient_layer_device` return false. The
+Chrome-point rows still pass through the host fallback, while the counter rows
+fail (device count 0, host count > 0), and the oracle rows fail by one level
+wherever the truncating host composite disagrees with Chrome's rounding.
+"""
+# Lifecycle: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+# @manual_section: vulkan_device_gradient
+# @cover src/lib/gc_async_mut/gpu/engine2d/shaders/gradient_layer.comp 90%
+# @tag: unit, gpu, engine2d, vulkan, gradient
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_host_gradient_eval_count}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{radial_gradient_pixels, linear_gradient_pixels}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_device_gradient_count}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val FB_W: i32 = 160
+val FB_H: i32 = 120
+
+# Chrome 159 gradient / image layer composite over an opaque destination,
+# written from the rule, not from the shader.
+fn div255r(v: i64) -> i64:
+    (v + 128 + ((v + 128) >> 8)) >> 8
+
+fn chrome_channel(sc: i64, dc: i64, a: i64) -> i64:
+    (sc * a + 127) / 255 + div255r(dc * (255 - a))
+
+fn chrome_over_opaque(s: u32, d: u32) -> u32:
+    val a = ((s >> 24u32) & 255u32) as i64
+    val r = chrome_channel(((s >> 16u32) & 255u32) as i64, ((d >> 16u32) & 255u32) as i64, a)
+    val g = chrome_channel(((s >> 8u32) & 255u32) as i64, ((d >> 8u32) & 255u32) as i64, a)
+    val b = chrome_channel((s & 255u32) as i64, (d & 255u32) as i64, a)
+    0xFF000000u32 | ((r as u32) << 16u32) | ((g as u32) << 8u32) | (b as u32)
+
+# An opaque backdrop with hard edges, so a mis-addressed destination read
+# shows up as a wrong colour at an edge.
+fn paint_opaque_backdrop(mut e: Engine2D) -> Engine2D:
+    e.clear(0xFF102030u32)
+    e.draw_rect_filled(0, 0, 80, 120, 0xFFC04020u32)
+    e.draw_rect_filled(40, 20, 30, 30, 0xFF20FF60u32)
+    e.draw_rect_filled(100, 60, 55, 55, 0xFF7F80FFu32)
+    e
+
+# Expected frame: the host evaluator's colours composited with the Chrome
+# rule inside the paint rect, the backdrop untouched outside it.
+fn expected_frame(before: [u32], x0: i32, y0: i32, w: i32, h: i32, grad: [u32]) -> [u32]:
+    var out = before
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            val idx = (y0 + py).to_i64() * FB_W.to_i64() + (x0 + px).to_i64()
+            out[idx] = chrome_over_opaque(grad[py.to_i64() * w.to_i64() + px.to_i64()], before[idx])
+            px = px + 1
+        py = py + 1
+    out
+
+fn mismatch_count(want: [u32], got: [u32]) -> i64:
+    if want.len() != got.len():
+        return -1
+    var wrong: i64 = 0
+    var i: i64 = 0
+    while i < want.len():
+        if want[i] != got[i]:
+            wrong = wrong + 1
+        i = i + 1
+    wrong
+
+# ---------------------------------------------------------------------------
+# Chrome 159 pixels at device scale 4, copied from web_device_scale_spec
+# (same capture command, same +-2 tolerance; see that file for provenance).
+# ---------------------------------------------------------------------------
+fn radial_doc(w: i32, h: i32, bg: text) -> text:
+    "<html><body style=\"margin:0;background:#fff\"><div style=\"width:" + "{w}" + "px;height:" + "{h}" + "px;" + bg + "\"></div></body></html>"
+
+fn radial_channel_dev(got: u32, want: u32) -> i32:
+    var worst = 0
+    var sh = 0u32
+    while sh <= 16u32:
+        val g = ((got >> sh) & 255u32) as i32
+        val w = ((want >> sh) & 255u32) as i32
+        val d = if g > w: g - w else: w - g
+        if d > worst:
+            worst = d
+        sh = sh + 8u32
+    worst
+
+fn radial_max_dev(px: [u32], fw: i32, pts: [i32], want: [u32]) -> i32:
+    var worst = 0
+    var i = 0
+    while i < want.len():
+        val idx = pts[2 * i + 1] * fw + pts[2 * i]
+        if idx < 0 or idx >= px.len():
+            return 999
+        val d = radial_channel_dev(px[idx], want[i])
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst
+
+val RADIAL_A_BG = "background:radial-gradient(#ff0000,#0000ff)"
+val RADIAL_A_PTS: [i32] = [80, 48, 120, 48, 80, 80, 0, 0, 159, 95, 40, 20]
+val RADIAL_A_CHROME: [u32] = [0xFFFC0002u32, 0xFFA3005Bu32, 0xFF84007Au32, 0xFF0200FCu32, 0xFF0200FDu32, 0xFF760088u32]
+val RADIAL_B_BG = "background:radial-gradient(circle closest-side at 25% 75%, #00ff00, #0000ff)"
+val RADIAL_B_PTS: [i32] = [40, 96, 56, 96, 40, 80, 100, 40, 159, 0]
+val RADIAL_B_CHROME: [u32] = [0xFF00F905u32, 0xFF007B83u32, 0xFF00837Bu32, 0xFF0000FFu32, 0xFF0000FFu32]
+val RADIAL_C_BG = "background:radial-gradient(circle, #ff0000 0%, #ffff00 30%, #00ff00 60%, #0000ff 100%)"
+val RADIAL_C_PTS: [i32] = [80, 80, 100, 80, 120, 80, 80, 140, 140, 140, 0, 0]
+val RADIAL_C_CHROME: [u32] = [0xFFFF0500u32, 0xFFFF9A00u32, 0xFFCDFF00u32, 0xFF37FF00u32, 0xFF009B63u32, 0xFF0003FBu32]
+val RADIAL_D_BG = "background-color:#ffff00;background-image:radial-gradient(circle, #0000ff, transparent)"
+val RADIAL_D_PTS: [i32] = [80, 48, 120, 48, 0, 0, 159, 95, 80, 10]
+val RADIAL_D_CHROME: [u32] = [0xFF0202FDu32, 0xFF6F6F90u32, 0xFFFDFD01u32, 0xFFFDFD02u32, 0xFF676798u32]
+val RADIAL_E_PAGE = "<html><body style=\"background-image:radial-gradient(circle,#ff0000 0%,#0000ff 100%)\"><section class=\"widget-panel\"></section></body></html>"
+val RADIAL_E_PTS: [i32] = [42, 122, 82, 122, 122, 194, 62, 98, 42, 74]
+val RADIAL_E_CHROME: [u32] = [0xFFBC0042u32, 0xFFDD0021u32, 0xFF980066u32, 0xFFB3004Bu32, 0xFF84007Au32]
+
+val GSTACK_PTS_24: [i32] = [8, 8, 80, 48, 150, 20, 40, 90, 120, 80, 100, 10]
+val GSTACK_PTS_32: [i32] = [10, 10, 48, 51, 80, 64, 150, 120, 20, 110, 120, 30]
+val GSTACK_L1_BG = "background-color:#ffff00;background-image:linear-gradient(to right, rgba(0,0,255,0.6), transparent)"
+val GSTACK_L1_CHROME: [u32] = [0xFF6E6E90u32, 0xFFB3B34Cu32, 0xFFF6F609u32, 0xFF8D8D72u32, 0xFFD9D925u32, 0xFFC6C639u32]
+val GSTACK_L2_BG = "background:linear-gradient(45deg, #ff0000, #00ff00 40%, #0000ff)"
+val GSTACK_L2_CHROME: [u32] = [0xFF0FEF00u32, 0xFF00D42Au32, 0xFF0032CDu32, 0xFF8C7200u32, 0xFF00C737u32, 0xFF00748Au32]
+val GSTACK_S1_BG = "background:radial-gradient(circle at 30% 40%, #ff0000, transparent 50%), linear-gradient(to bottom, #00ff00, #0000ff)"
+val GSTACK_S1_CHROME: [u32] = [0xFF2FBF10u32, 0xFFFD0101u32, 0xFF7B4142u32, 0xFF000FF0u32, 0xFF0922D4u32, 0xFF00C23Cu32]
+val GSTACK_S2_BG = "background-color:#ffff00;background-image:linear-gradient(90deg, rgba(255,0,0,0.8), transparent 60%), radial-gradient(circle, transparent 20%, #0000ff)"
+val GSTACK_S2_CHROME: [u32] = [0xFFC20D3Cu32, 0xFFE6811Au32, 0xFFFFDE00u32, 0xFF2626D9u32, 0xFFBF1F3Fu32, 0xFF9B9B63u32]
+val GSTACK_S3_PAGE = "<html><body style=\"background-image:radial-gradient(circle at 30% 30%, rgba(255,0,0,0.8), transparent 60%), linear-gradient(#ffffff,#0000ff)\"><section class=\"widget-panel\"></section></body></html>"
+val GSTACK_S3_PTS: [i32] = [42, 122, 82, 122, 122, 194, 62, 98, 42, 74, 136, 160]
+val GSTACK_S3_CHROME: [u32] = [0xFFD23C69u32, 0xFFC9477Du32, 0xFF594FF5u32, 0xFFE3344Fu32, 0xFFEC3446u32, 0xFF8261DDu32]
+
+fn vk_k4(page: text, cw: i32, ch: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, cw, ch, 4, "vulkan")
+
+fn cpu_k4(page: text, cw: i32, ch: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, cw, ch, 4, "cpu_simd")
+
+describe "CSS gradient layers are evaluated and composited on the Vulkan device":
+
+    it "runs on a real Vulkan device, and fails rather than skipping when it cannot":
+        val e = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        val name = e.backend_name()
+        e.shutdown()
+        expect(name).to_equal("vulkan")
+
+    it "evaluates a translucent radial layer on the device bit-exactly and composites it with Chrome's rule":
+        # Off-centre ellipse, last stop past 100% (t_max > 1), a transparent
+        # stop: every branch of the device t evaluation.
+        val colors: [u32] = [0xCCFF0000u32, 0x8000FF00u32, 0x00000000u32, 0xE02040F0u32]
+        val positions: [i32] = [0, 450, 800, 1300]
+        val cx_q: i64 = 70 * 1024 + 300
+        val cy_q: i64 = 50 * 1024 - 77
+        val rx_q: i64 = 60 * 1024 + 77
+        val ry_q: i64 = 35 * 1024
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_opaque_backdrop(dev)
+        val before = dev.read_pixels()
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        dev.draw_radial_gradient_ellipse(10, 8, 140, 100, cx_q, cy_q, rx_q, ry_q, colors, positions)
+        val got = dev.read_pixels()
+        val dev_after = vulkan_device_gradient_count()
+        val host_after = engine2d_host_gradient_eval_count()
+        dev.shutdown()
+        val grad = radial_gradient_pixels(10, 8, 140, 100, cx_q, cy_q, rx_q, ry_q, colors, positions)
+        expect(dev_after - dev_before).to_equal(1)
+        expect(host_after - host_before).to_equal(0)
+        expect(mismatch_count(expected_frame(before, 10, 8, 140, 100, grad), got)).to_equal(0)
+
+    it "evaluates a short translucent linear layer on the device bit-exactly (gradient line under 64 px)":
+        val colors: [u32] = [0x990000FFu32, 0xFFFFEE00u32, 0x00000000u32]
+        val positions: [i32] = [0, 400, 1000]
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_opaque_backdrop(dev)
+        val before = dev.read_pixels()
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        dev.draw_linear_gradient_line(0, 0, FB_W, FB_H, 30 * 1024 + 5, 20 * 1024, 70 * 1024, 50 * 1024 - 3, colors, positions)
+        val got = dev.read_pixels()
+        val dev_after = vulkan_device_gradient_count()
+        val host_after = engine2d_host_gradient_eval_count()
+        dev.shutdown()
+        val grad = linear_gradient_pixels(0, 0, FB_W, FB_H, 30 * 1024 + 5, 20 * 1024, 70 * 1024, 50 * 1024 - 3, colors, positions)
+        expect(dev_after - dev_before).to_equal(1)
+        expect(host_after - host_before).to_equal(0)
+        expect(mismatch_count(expected_frame(before, 0, 0, FB_W, FB_H, grad), got)).to_equal(0)
+
+    it "evaluates a long translucent linear layer on the device bit-exactly (gradient line over 64 px)":
+        val colors: [u32] = [0x80FF00FFu32, 0xFF00FFFFu32, 0x40102030u32]
+        val positions: [i32] = [100, 550, 1200]
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_opaque_backdrop(dev)
+        val before = dev.read_pixels()
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        dev.draw_linear_gradient_line(5, 6, 150, 110, 150 * 1024 + 9, 0 - 2048, 3 * 1024, 117 * 1024 + 511, colors, positions)
+        val got = dev.read_pixels()
+        val dev_after = vulkan_device_gradient_count()
+        val host_after = engine2d_host_gradient_eval_count()
+        dev.shutdown()
+        val grad = linear_gradient_pixels(5, 6, 150, 110, 150 * 1024 + 9, 0 - 2048, 3 * 1024, 117 * 1024 + 511, colors, positions)
+        expect(dev_after - dev_before).to_equal(1)
+        expect(host_after - host_before).to_equal(0)
+        expect(mismatch_count(expected_frame(before, 5, 6, 150, 110, grad), got)).to_equal(0)
+
+    it "paints an opaque radial layer byte-identically to cpu_simd":
+        # Opaque stops: the composite reduces to a copy, so the two lanes'
+        # composite rules cannot differ and any mismatch is a t mismatch.
+        val colors: [u32] = [0xFFFFFFFFu32, 0xFF66CCFFu32, 0xFF005588u32, 0xFF331144u32]
+        val positions: [i32] = [0, 180, 480, 800]
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_opaque_backdrop(dev)
+        dev.draw_radial_gradient_ellipse(3, 2, 150, 110, 55 * 1024 + 512, 78 * 1024, 120 * 1024 + 3, 90 * 1024 + 700, colors, positions)
+        val got = dev.read_pixels()
+        dev.shutdown()
+        var cpu = Engine2D.create_with_backend_fast(FB_W, FB_H, "cpu_simd")
+        cpu = paint_opaque_backdrop(cpu)
+        cpu.draw_radial_gradient_ellipse(3, 2, 150, 110, 55 * 1024 + 512, 78 * 1024, 120 * 1024 + 3, 90 * 1024 + 700, colors, positions)
+        val want = cpu.read_pixels()
+        cpu.shutdown()
+        expect(mismatch_count(want, got)).to_equal(0)
+
+    it "paints the Chrome-oracled radial pages A-E on the device within +-2 of Chrome 159":
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        expect(radial_max_dev(vk_k4(radial_doc(40, 24, RADIAL_A_BG), 40, 24), 160, RADIAL_A_PTS, RADIAL_A_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(vk_k4(radial_doc(40, 32, RADIAL_B_BG), 40, 32), 160, RADIAL_B_PTS, RADIAL_B_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(vk_k4(radial_doc(40, 40, RADIAL_C_BG), 40, 40), 160, RADIAL_C_PTS, RADIAL_C_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(vk_k4(radial_doc(40, 24, RADIAL_D_BG), 40, 24), 160, RADIAL_D_PTS, RADIAL_D_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(vk_k4(RADIAL_E_PAGE, 40, 64), 160, RADIAL_E_PTS, RADIAL_E_CHROME)).to_be_less_than(3)
+        expect(vulkan_device_gradient_count() - dev_before >= 5).to_equal(true)
+        expect(engine2d_host_gradient_eval_count() - host_before).to_equal(0)
+
+    it "paints the Chrome-oracled gradient stack pages on the device within +-2 of Chrome 159":
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        expect(radial_max_dev(vk_k4(radial_doc(40, 24, GSTACK_L1_BG), 40, 24), 160, GSTACK_PTS_24, GSTACK_L1_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(vk_k4(radial_doc(40, 24, GSTACK_L2_BG), 40, 24), 160, GSTACK_PTS_24, GSTACK_L2_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(vk_k4(radial_doc(40, 32, GSTACK_S1_BG), 40, 32), 160, GSTACK_PTS_32, GSTACK_S1_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(vk_k4(radial_doc(40, 32, GSTACK_S2_BG), 40, 32), 160, GSTACK_PTS_32, GSTACK_S2_CHROME)).to_be_less_than(3)
+        expect(radial_max_dev(vk_k4(GSTACK_S3_PAGE, 40, 64), 160, GSTACK_S3_PTS, GSTACK_S3_CHROME)).to_be_less_than(3)
+        # L1, L2: one layer each; S1, S2, S3: two layers each.
+        expect(vulkan_device_gradient_count() - dev_before >= 8).to_equal(true)
+        expect(engine2d_host_gradient_eval_count() - host_before).to_equal(0)
+
+    it "paints the opaque Chrome-oracled pages byte-identically to cpu_simd":
+        expect(mismatch_count(cpu_k4(radial_doc(40, 24, RADIAL_A_BG), 40, 24), vk_k4(radial_doc(40, 24, RADIAL_A_BG), 40, 24))).to_equal(0)
+        expect(mismatch_count(cpu_k4(radial_doc(40, 32, RADIAL_B_BG), 40, 32), vk_k4(radial_doc(40, 32, RADIAL_B_BG), 40, 32))).to_equal(0)
+        expect(mismatch_count(cpu_k4(radial_doc(40, 40, RADIAL_C_BG), 40, 40), vk_k4(radial_doc(40, 40, RADIAL_C_BG), 40, 40))).to_equal(0)
+        expect(mismatch_count(cpu_k4(radial_doc(40, 24, GSTACK_L2_BG), 40, 24), vk_k4(radial_doc(40, 24, GSTACK_L2_BG), 40, 24))).to_equal(0)
