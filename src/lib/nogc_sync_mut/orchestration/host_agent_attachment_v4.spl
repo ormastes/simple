@@ -703,10 +703,21 @@ fn host_agent_pane_input_install_v4(session: ContainerPrimaryAttachSessionV1, wr
     val revoked = container_primary_input_revoke_v2(owned)
     if revoked.is_err(): return revoked.unwrap_err()
     val installed = container_primary_input_install_v2(owned, write.lease, write.target, write.principal, write.nonce)
-    if installed.is_err(): return installed.unwrap_err()
+    if installed.is_err():
+        host_agent_pane_input_close_v4(session)
+        return installed.unwrap_err()
     val gate = installed.unwrap()
     if (not gate.controlled or not gate.active or gate.pending or gate.unknown or gate.revision != write.lease.revision):
+        host_agent_pane_input_close_v4(session)
         return "attach-pane-input-install-not-current"
+    ""
+
+# The native input gate lives exactly as long as one Write: closed on return and on every error path after the
+# install, so it never outlives the per-Write control lease. "" when closed (or nothing was active).
+fn host_agent_pane_input_close_v4(session: ContainerPrimaryAttachSessionV1) -> text:
+    val closed = container_primary_input_revoke_v2(ContainerOwnedTerminalSessionV2.Legacy(
+        ContainerOwnedTerminalSessionV1.PrimaryAttach(session)))
+    if closed.is_err(): return "attach-pane-input-gate-revoke:" + closed.unwrap_err()
     ""
 
 # milestone_0025 PR4: the control target of the agent's own pane, built ONLY from the verified terminal-authority
@@ -766,10 +777,12 @@ pub fn host_agent_pane_io_port_v4(call: HostAgentPaneIoCallV4) -> HostAgentPaneI
             if installed != "": return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4(installed))
             val written = container_primary_input_write_v2(ContainerOwnedTerminalSessionV2.Legacy(
                 ContainerOwnedTerminalSessionV1.PrimaryAttach(session)), request)
-            if written.is_err(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4(written.unwrap_err()))
+            val gate_error = host_agent_pane_input_close_v4(session)
+            if written.is_err():
+                return host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(error: written.unwrap_err(), gate_error: gate_error))
             host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(
                 disposition: host_agent_pane_disposition_v4(written.unwrap().disposition),
-                accepted_bytes: written.unwrap().accepted_bytes, error: written.unwrap().error))
+                accepted_bytes: written.unwrap().accepted_bytes, error: written.unwrap().error, gate_error: gate_error))
         case HostAgentPaneOpV4.Resize(request):
             if call.container.is_none(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4("attach-container-missing"))
             host_agent_pane_geometry_v4(att, simple_container_primary_geometry_begin_v1(call.container.unwrap(), session,
