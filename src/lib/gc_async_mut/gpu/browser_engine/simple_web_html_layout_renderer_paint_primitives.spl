@@ -1531,24 +1531,49 @@ fn fb_outline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32
     val oh = h + grow * 2
     fb_border_sides_clip(fb, fbw, fbh, ox, oy, ow, oh, outline_w, outline_w, outline_w, outline_w, color, color, color, color, clip)
 
+# One text decoration rule (underline / overline / line-through) as solid
+# rects: double = two rules, dashed / dotted = segments, else one rule.
+fn text_decoration_rects(x: i32, y: i32, w: i32, thickness: i32, style: text, color: u32) -> WidgetChromeRects:
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var ws: [i32] = []
+    var hs: [i32] = []
+    var colors: [u32] = []
+    if w > 0 and color != 0u32:
+        val line_h = if thickness > 0: thickness else: 1
+        if style == "double":
+            xs = [x, x]
+            ys = [y, y + line_h + 1]
+            ws = [w, w]
+            hs = [line_h, line_h]
+            colors = [color, color]
+        elif style == "dashed" or style == "dotted":
+            val dash_w = if style == "dotted": line_h else: line_h * 3
+            val gap_w = if line_h > 0: line_h else: 1
+            var px = 0
+            while px < w:
+                xs.push(x + px)
+                ys.push(y)
+                ws.push(if px + dash_w > w: w - px else: dash_w)
+                hs.push(line_h)
+                colors.push(color)
+                px = px + dash_w + gap_w
+        else:
+            xs = [x]
+            ys = [y]
+            ws = [w]
+            hs = [line_h]
+            colors = [color]
+    WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
+
 fn fb_text_underline(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, thickness: i32, style: text, color: u32) -> [u32]:
     var out = fb
-    if w <= 0 or color == 0u32:
-        return out
-    val line_h = if thickness > 0: thickness else: 1
-    if style == "double":
-        out = fb_rect(out, fbw, fbh, x, y, w, line_h, color)
-        return fb_rect(out, fbw, fbh, x, y + line_h + 1, w, line_h, color)
-    if style == "dashed" or style == "dotted":
-        val dash_w = if style == "dotted": line_h else: line_h * 3
-        val gap_w = if line_h > 0: line_h else: 1
-        var px = 0
-        while px < w:
-            val seg_w = if px + dash_w > w: w - px else: dash_w
-            out = fb_rect(out, fbw, fbh, x + px, y, seg_w, line_h, color)
-            px = px + dash_w + gap_w
-        return out
-    fb_rect(out, fbw, fbh, x, y, w, line_h, color)
+    val rects = text_decoration_rects(x, y, w, thickness, style, color)
+    var k = 0
+    while k < rects.xs.len():
+        out = fb_rect(out, fbw, fbh, rects.xs[k], rects.ys[k], rects.ws[k], rects.hs[k], rects.colors[k])
+        k = k + 1
+    out
 
 fn fb_text_underline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, thickness: i32, style: text, color: u32, clip: ClipRect) -> [u32]:
     var out = fb
@@ -2568,32 +2593,99 @@ pub fn bidi_visual_text_for_rtl(value: text) -> text:
             k = k - 1
     out
 
-fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, italic: bool) -> [u32]:
+# Legacy widget chrome geometry: one ordered list of solid rects. ONE source
+# for both paint paths -- the CPU raster `paint` writes it with
+# fb_widget_chrome_rects and the Draw IR producer lowers each entry to a rect
+# command (_html_draw_ir_widget_rect_commands in paint_layout.spl). Later
+# entries paint over earlier ones.
+class WidgetChromeRects:
+    xs: [i32]
+    ys: [i32]
+    ws: [i32]
+    hs: [i32]
+    colors: [u32]
+
+fn widget_chrome_rects_concat(a: WidgetChromeRects, b: WidgetChromeRects) -> WidgetChromeRects:
+    var xs = a.xs
+    var ys = a.ys
+    var ws = a.ws
+    var hs = a.hs
+    var colors = a.colors
+    var k = 0
+    # cpu-lane-loop-ok: appends one already-built widget rect list; bound is b's entry count
+    while k < b.xs.len():
+        xs.push(b.xs[k])
+        ys.push(b.ys[k])
+        ws.push(b.ws[k])
+        hs.push(b.hs[k])
+        colors.push(b.colors[k])
+        k = k + 1
+    WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
+
+# Raster consumer: each rect clipped to the frame, each pixel written exactly
+# as a text pixel (_fb_text_px: an opaque colour replaces, a translucent one
+# composites over what is there).
+fn fb_widget_chrome_rects(fb: [u32], fbw: i32, fbh: i32, rects: WidgetChromeRects) -> [u32]:
     var out = fb
-    var ry = 0
-    while ry < 7:
-        val bits = glyph_row_bits(gi, ry)
-        var rx = 0
-        while rx < 5:
-            val mask = 1 << (4 - rx)
-            if (bits & mask) != 0 and ((rx + ry) % 2) == 0:
-                val italic_shift = if italic: (6 - ry) / 3 else: 0
-                val xx = x + italic_shift + rx
-                val yy = y + ry
-                if xx >= 0 and xx < fbw and yy >= 0 and yy < fbh:
-                    out[yy * fbw + xx] = _fb_text_px(color, out[yy * fbw + xx])
-            rx = rx + 1
-        ry = ry + 1
+    var k = 0
+    # cpu-lane-loop-ok: one fill per entry of a fixed-size widget rect list; bound is its entry count
+    while k < rects.xs.len():
+        val x0 = if rects.xs[k] < 0: 0 else: rects.xs[k]
+        val y0 = if rects.ys[k] < 0: 0 else: rects.ys[k]
+        val x1 = if rects.xs[k] + rects.ws[k] > fbw: fbw else: rects.xs[k] + rects.ws[k]
+        val y1 = if rects.ys[k] + rects.hs[k] > fbh: fbh else: rects.ys[k] + rects.hs[k]
+        var yy = y0
+        while yy < y1:
+            var xx = x0
+            while xx < x1:
+                out[yy * fbw + xx] = _fb_text_px(rects.colors[k], out[yy * fbw + xx])
+                xx = xx + 1
+            yy = yy + 1
+        k = k + 1
     out
 
-fn fb_text_sparse_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, advance: i32, space_advance: i32, italic: bool) -> [u32]:
-    var out = fb
+# The legacy widget frame: focus border, image swatch with two chips, and the
+# button frame / face / icon; at fbh <= 66 two bottom-corner patches restore
+# the page base. Painted after every box and before any text.
+fn widget_frame_rects(fbw: i32, fbh: i32) -> WidgetChromeRects:
+    val border = web_argb(0, 102, 204)
+    val button_w = if fbw > 10: fbw - 10 else: fbw
+    val button_inner_w = if fbw > 12: fbw - 12 else: button_w
+    var xs = [0, 0, 0, fbw - 1, 5, 8, 18, 5, 6, 10]
+    var ys = [0, fbh - 1, 0, 0, 32, 36, 37, 50, 51, 55]
+    var ws = [fbw, fbw, 1, 1, 24, 8, 8, button_w, button_inner_w, 6]
+    var hs = [1, 1, fbh, fbh, 16, 7, 6, 16, 14, 6]
+    var colors = [
+        border, border, border, border,
+        web_argb(37, 99, 235), web_argb(245, 158, 11), web_argb(34, 197, 94),
+        web_argb(100, 116, 139), web_argb(203, 213, 225), web_argb(37, 99, 235)
+    ]
+    if fbh <= 66:
+        xs.push(1)
+        ys.push(fbh - 1)
+        ws.push(4)
+        hs.push(1)
+        colors.push(web_argb(245, 245, 245))
+        xs.push(fbw - 5)
+        ys.push(fbh - 1)
+        ws.push(4)
+        hs.push(1)
+        colors.push(web_argb(245, 245, 245))
+    WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
+
+# Sparse 5x7 glyph text: every other set bit of each glyph as a 1x1 rect, in
+# frame bounds only. Byte range, codepoint glyph lookup -- the same mix as
+# `fb_text_thin_scaled_clip_range`, and fixed the same way: a separate
+# codepoint cursor, one glyph and one advance per CODEPOINT, nothing at all on
+# a UTF-8 continuation byte.
+fn sparse_text_rects(fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, advance: i32, space_advance: i32, italic: bool) -> WidgetChromeRects:
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var ws: [i32] = []
+    var hs: [i32] = []
+    var colors: [u32] = []
     if y >= fbh or y + 7 <= 0:
-        return out
-    # Byte range, codepoint glyph lookup — the same mix as
-    # `fb_text_thin_scaled_clip_range`, and fixed the same way: a separate
-    # codepoint cursor, one glyph and one advance per CODEPOINT, nothing at all
-    # on a UTF-8 continuation byte.
+        return WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
     val sb = s.bytes()
     var ci = 0
     var k = 0
@@ -2603,18 +2695,36 @@ fn fb_text_sparse_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, 
         k = k + 1
     var i = start
     var cx = x
-    while i < endv:
-        if cx >= fbw:
-            return out
+    while i < endv and cx < fbw:
         if sb[i] < 128 or sb[i] >= 192:
             val code = s.char_code_at(ci)
             val gi = glyph_index_for_char_code(code)
             if gi >= 0 and gi != 36:
-                out = fb_glyph_sparse(out, fbw, fbh, cx, y, gi, color, italic)
+                var ry = 0
+                while ry < 7:
+                    val bits = glyph_row_bits(gi, ry)
+                    var rx = 0
+                    while rx < 5:
+                        val mask = 1 << (4 - rx)
+                        if (bits & mask) != 0 and ((rx + ry) % 2) == 0:
+                            val italic_shift = if italic: (6 - ry) / 3 else: 0
+                            val xx = cx + italic_shift + rx
+                            val yy = y + ry
+                            if xx >= 0 and xx < fbw and yy >= 0 and yy < fbh:
+                                xs.push(xx)
+                                ys.push(yy)
+                                ws.push(1)
+                                hs.push(1)
+                                colors.push(color)
+                        rx = rx + 1
+                    ry = ry + 1
             cx = cx + if code == 32: space_advance else: advance
             ci = ci + 1
         i = i + 1
-    out
+    WidgetChromeRects(xs: xs, ys: ys, ws: ws, hs: hs, colors: colors)
+
+fn fb_text_sparse_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, advance: i32, space_advance: i32, italic: bool) -> [u32]:
+    fb_widget_chrome_rects(fb, fbw, fbh, sparse_text_rects(fbw, fbh, x, y, s, start, endv, color, advance, space_advance, italic))
 
 fn fb_px(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, color: u32) -> [u32]:
     var out = fb

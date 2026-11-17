@@ -59,6 +59,9 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
     vulkan_device_material_census_reset, vulkan_device_glass_material_count}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_engine2d_result_with_images}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_image_resource}
 
 # The WM Web material fixture's own surface (simple_web_renderer_spec):
 # rgba(31,31,33,0.80) projects "wm-material-surface-alpha-milli" 800 and
@@ -287,3 +290,102 @@ describe "The Vulkan backdrop blur and glass material run on the device, pixel-f
         expect(device_glass).to_equal(1)
         expect(device[2 * 32 + 2]).to_equal(0xFF4B4B4Du32)
         expect(mismatch_count(cpu, device)).to_equal(0)
+
+    it "renders the legacy widget frame and offset text through Draw IR on the device, as cpu_simd does":
+        # Legacy widget chrome (widget-panel, no <style>) lowers its frame
+        # rects and its sparse offset text to Draw IR rect commands, so the
+        # Vulkan device paints them exactly as cpu_simd. Page A takes the
+        # generated chrome text, page B the x+8 / y+7 offset text.
+        val chrome_page = "<html><body><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        val offset_page = "<html><body><div>Menu</div><section class='widget-panel'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_a = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(chrome_page, 40, 64, "vulkan")
+        val device_b = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(offset_page, 40, 64, "vulkan")
+        val readbacks_after = vulkan_readback_count()
+        val cpu_a = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(chrome_page, 40, 64, "cpu_simd")
+        val cpu_b = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(offset_page, 40, 64, "cpu_simd")
+        # Both frames were read back from the device, not a CPU fallback.
+        expect(readbacks_after - readbacks_before >= 2).to_equal(true)
+        # Frame: focus border, image swatch and chips, button frame / face / icon,
+        # and the bottom-corner page-base patch.
+        expect(device_a[0]).to_equal(0xFF0066CCu32)
+        expect(device_a[63 * 40 + 39]).to_equal(0xFF0066CCu32)
+        expect(device_a[34 * 40 + 6]).to_equal(0xFF2563EBu32)
+        expect(device_a[38 * 40 + 10]).to_equal(0xFFF59E0Bu32)
+        expect(device_a[39 * 40 + 20]).to_equal(0xFF22C55Eu32)
+        expect(device_a[50 * 40 + 5]).to_equal(0xFF64748Bu32)
+        expect(device_a[52 * 40 + 7]).to_equal(0xFFCBD5E1u32)
+        expect(device_a[57 * 40 + 12]).to_equal(0xFF2563EBu32)
+        expect(device_a[63 * 40 + 2]).to_equal(0xFFF5F5F5u32)
+        expect(device_b[0]).to_equal(0xFF0066CCu32)
+        expect(mismatch_count(cpu_a, device_a)).to_equal(0)
+        expect(mismatch_count(cpu_b, device_b)).to_equal(0)
+        # The offset text really paints on the device: page B differs from
+        # the same page without its text.
+        val bare_page = "<html><body><div></div><section class='widget-panel'></section></body></html>"
+        val device_bare = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(bare_page, 40, 64, "vulkan")
+        expect(mismatch_count(device_bare, device_b) > 0).to_equal(true)
+
+    it "suppresses the widget-mode page background, widget-node box paint and image placeholder on the device, as cpu_simd does":
+        # Legacy widget mode paints the page base, not the body / widget-node
+        # background, frame or widget-image placeholder: Draw IR now carries
+        # no paint for them, so the Vulkan device matches cpu_simd and the
+        # raster at the same pixels.
+        val body_page = "<html><body style='background-color:#ff0000'><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        val frame_page = "<html><body><section class='widget-panel' style='background-color:#00ff00;border:2px solid #0000ff;box-shadow:2px 2px 0 #ff0000;outline:2px solid #00ff00'></section></body></html>"
+        val img_page = "<html><body><section class='widget-panel'><img class='widget-image' style='width:20px;height:12px'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_body = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(body_page, 40, 64, "vulkan")
+        val device_frame = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(frame_page, 40, 64, "vulkan")
+        val device_img = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(img_page, 40, 64, "vulkan")
+        val readbacks_after = vulkan_readback_count()
+        val cpu_body = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(body_page, 40, 64, "cpu_simd")
+        val cpu_frame = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(frame_page, 40, 64, "cpu_simd")
+        val cpu_img = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(img_page, 40, 64, "cpu_simd")
+        expect(readbacks_after - readbacks_before >= 3).to_equal(true)
+        expect(device_body[8 * 40 + 11]).to_equal(0xFFF5F5F5u32)
+        expect(device_frame[10 * 40 + 10]).to_equal(0xFFF5F5F5u32)
+        expect(device_img[11 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(device_body[0]).to_equal(0xFF0066CCu32)
+        expect(mismatch_count(cpu_body, device_body)).to_equal(0)
+        expect(mismatch_count(cpu_frame, device_frame)).to_equal(0)
+        expect(mismatch_count(cpu_img, device_img)).to_equal(0)
+
+    it "paints no widget-mode inline svg, input text or scrollbar on the device, as cpu_simd does":
+        # Legacy widget mode paints the page base where an inline svg, an
+        # input value and an overflow-y:scroll scrollbar sit: Draw IR now
+        # emits none of them, so the Vulkan device matches cpu_simd and the
+        # raster at the same pixels.
+        val svg_page = "<html><body><section class='widget-panel'><svg width='20' height='10'><rect width='20' height='10' fill='#ff0000'></rect></svg></section></body></html>"
+        val input_page = "<html><body><section class='widget-panel'><input type='text' value='ABCD'></section></body></html>"
+        val scroll_page = "<html><body><div style='overflow-y:scroll;height:20px;width:30px'></div><section class='widget-panel'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_svg = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(svg_page, 40, 64, "vulkan")
+        val device_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(input_page, 40, 64, "vulkan")
+        val device_scroll = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(scroll_page, 40, 64, "vulkan")
+        val readbacks_after = vulkan_readback_count()
+        val cpu_svg = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(svg_page, 40, 64, "cpu_simd")
+        val cpu_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(input_page, 40, 64, "cpu_simd")
+        val cpu_scroll = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(scroll_page, 40, 64, "cpu_simd")
+        expect(readbacks_after - readbacks_before >= 3).to_equal(true)
+        expect(device_svg[13 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(device_input[15 * 40 + 13]).to_equal(0xFFF5F5F5u32)
+        expect(device_scroll[8 * 40 + 23]).to_equal(0xFFF5F5F5u32)
+        expect(mismatch_count(cpu_svg, device_svg)).to_equal(0)
+        expect(mismatch_count(cpu_input, device_input)).to_equal(0)
+        expect(mismatch_count(cpu_scroll, device_scroll)).to_equal(0)
+
+    it "paints no widget-node URL background or its border overlay on the device in widget mode, as cpu_simd does":
+        # A box-suppressed widget node lowers no URL background image and no
+        # border overlay, so the device paints the page base where the
+        # node's border and tile sat, as cpu_simd and the raster do.
+        val tile = simpleos_host_gpu_image_resource("image://tile", 4, 2, [0xFFFF0000u32; 8])
+        val url_page = "<html><body><section class='widget-panel' style='width:20px;height:12px;border:2px solid #0000ff;background-image:url(image://tile);background-repeat:no-repeat'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_url = simple_web_layout_render_html_engine2d_result_with_images(url_page, 40, 64, "vulkan", [tile]).pixels
+        val readbacks_after = vulkan_readback_count()
+        val cpu_url = simple_web_layout_render_html_engine2d_result_with_images(url_page, 40, 64, "cpu_simd", [tile]).pixels
+        expect(readbacks_after - readbacks_before >= 1).to_equal(true)
+        expect(device_url[10 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(device_url[10 * 40 + 11]).to_equal(0xFFF5F5F5u32)
+        expect(mismatch_count(cpu_url, device_url)).to_equal(0)

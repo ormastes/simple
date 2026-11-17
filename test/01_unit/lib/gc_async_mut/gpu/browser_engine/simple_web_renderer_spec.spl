@@ -67,7 +67,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
     simple_web_layout_debug_style_by_id}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
-    simple_web_layout_render_html_readback_engine2d_result}
+    simple_web_layout_render_html_readback_engine2d_result,
+    simple_web_layout_render_html_engine2d_result_with_images}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
     simple_web_render_html_to_pixels_with_cpu_draw_ir_backend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
@@ -145,6 +146,25 @@ fn _pixels_equal(a: [u32], b: [u32]) -> bool:
             return false
         idx = idx + 1
     true
+
+fn _pixel_mismatches(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var wrong: i32 = 0
+    var idx: i32 = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            wrong = wrong + 1
+        idx = idx + 1
+    wrong
+
+fn _draw_ir_component_count(html: text, width: i32, height: i32, prefix: text) -> i32:
+    var count: i32 = 0
+    for batch in simple_web_layout_render_html_draw_ir(html, width, height).batches:
+        for command in batch.commands:
+            if command.component_id.starts_with(prefix):
+                count = count + 1
+    count
 
 fn _simple_scene_has_fill_color(html: text, color: u32) -> bool:
     val scene = simple_web_render_html_to_scene(html, 140, 90)
@@ -1512,18 +1532,24 @@ describe "SimpleWebRenderer":
                     text_runs = text_runs + 1
         var chrome_points_without = 0
         var text_runs_without = 0
+        var offset_text_without = 0
         for batch in without_text.batches:
             for command in batch.commands:
                 if command.component_id.starts_with("widget-chrome-text-"):
                     chrome_points_without = chrome_points_without + 1
+                if command.component_id.starts_with("widget-offset-text-"):
+                    offset_text_without = offset_text_without + 1
                 if command.text_value != "":
                     text_runs_without = text_runs_without + 1
         # Every table point once; the generated text replaces the node glyphs.
         expect(chrome_points).to_equal(table.xs.len())
         expect(text_runs).to_equal(0)
-        # No widget-ancestor text: the node text paints and no table point does.
+        # No widget-ancestor text: the node text paints and no table point
+        # does. As in the raster it paints as legacy sparse offset text, not
+        # as a text run.
         expect(chrome_points_without).to_equal(0)
-        expect(text_runs_without > 0).to_equal(true)
+        expect(offset_text_without > 0).to_equal(true)
+        expect(text_runs_without).to_equal(0)
         # Pixel API (Draw IR -> Engine2D) paints every table point exactly.
         val pixels = simple_web_render_html_to_pixels(html_with_widget_text, 40, 64)
         var wrong = 0
@@ -1541,6 +1567,201 @@ describe "SimpleWebRenderer":
                 if command.component_id.starts_with("widget-chrome-text-"):
                     small_points = small_points + 1
         expect(small_points).to_equal(0)
+
+    it "lowers the legacy widget frame rects into Draw IR, so cpu_simd paints the raster's frame":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "lowers the legacy widget frame rects into Draw IR, so cpu_simd paints the raster's frame"
+        step("Verify: lowers the legacy widget frame rects into Draw IR, so cpu_simd paints the raster's frame")
+        val html = "<html><body><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        val raster = simple_web_layout_render_html_software_pixels(html, 40, 64)
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(html, 40, 64, "cpu_simd")
+        expect(_draw_ir_component_count(html, 40, 64, "widget-frame-") > 0).to_equal(true)
+        # The 1px focus border, the image swatch with its two chips, and the
+        # button frame / face / icon, at points the chrome text does not cover.
+        expect(cpu[0]).to_equal(0xFF0066CCu32)
+        expect(cpu[63 * 40 + 39]).to_equal(0xFF0066CCu32)
+        expect(cpu[34 * 40 + 6]).to_equal(0xFF2563EBu32)
+        expect(cpu[38 * 40 + 10]).to_equal(0xFFF59E0Bu32)
+        expect(cpu[39 * 40 + 20]).to_equal(0xFF22C55Eu32)
+        expect(cpu[50 * 40 + 5]).to_equal(0xFF64748Bu32)
+        expect(cpu[52 * 40 + 7]).to_equal(0xFFCBD5E1u32)
+        expect(cpu[57 * 40 + 12]).to_equal(0xFF2563EBu32)
+        # fbh <= 66: the two bottom-corner patches restore the page base.
+        expect(cpu[63 * 40 + 2]).to_equal(0xFFF5F5F5u32)
+        # The whole frame, chrome text included, is the raster's.
+        expect(_pixel_mismatches(raster, cpu)).to_equal(0)
+        # A non-legacy page carries no widget frame.
+        val styled = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}</style></head><body><section class='widget-panel'>Menu</section></body></html>"
+        expect(_draw_ir_component_count(styled, 40, 64, "widget-frame-")).to_equal(0)
+
+    it "paints legacy widget offset text through Draw IR exactly as the raster does":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "paints legacy widget offset text through Draw IR exactly as the raster does"
+        step("Verify: paints legacy widget offset text through Draw IR exactly as the raster does")
+        # Widget mode without the chrome text gate: text under no widget
+        # ancestor, and a frame too narrow for the generated table. Both take
+        # the sparse x+8 / y+7 offset text path instead of a normal text run.
+        val no_widget_text = "<html><body><div>Menu</div><section class='widget-panel'></section></body></html>"
+        val narrow = "<html><body><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        expect(_draw_ir_component_count(no_widget_text, 40, 64, "widget-offset-text-") > 0).to_equal(true)
+        expect(_draw_ir_component_count(narrow, 37, 64, "widget-offset-text-") > 0).to_equal(true)
+        val raster_a = simple_web_layout_render_html_software_pixels(no_widget_text, 40, 64)
+        val cpu_a = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(no_widget_text, 40, 64, "cpu_simd")
+        val raster_b = simple_web_layout_render_html_software_pixels(narrow, 37, 64)
+        val cpu_b = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(narrow, 37, 64, "cpu_simd")
+        # The sparse glyphs really paint: the same page without the text
+        # differs from it on cpu_simd.
+        val bare = "<html><body><div></div><section class='widget-panel'></section></body></html>"
+        val cpu_bare = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(bare, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(cpu_bare, cpu_a) > 0).to_equal(true)
+        expect(_pixel_mismatches(raster_a, cpu_a)).to_equal(0)
+        expect(_pixel_mismatches(raster_b, cpu_b)).to_equal(0)
+
+    it "suppresses the page and widget-node box paint on Draw IR in legacy widget mode, as the raster does":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "suppresses the page and widget-node box paint on Draw IR in legacy widget mode, as the raster does"
+        step("Verify: suppresses the page and widget-node box paint on Draw IR in legacy widget mode, as the raster does")
+        # Legacy widget mode (widget-panel, no <style>) paints the page base
+        # instead of the html/body background, and paints no background,
+        # border, outline or shadow for a widget-* / icon-image node. Draw IR
+        # used to paint them all (549 / 549 / 752 mismatching pixels).
+        val body_bg = "<html><body style='background-color:#ff0000'><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        val panel_bg = "<html><body><section class='widget-panel' style='background-color:#00ff00'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        val panel_frame = "<html><body><section class='widget-panel' style='border:2px solid #0000ff;box-shadow:2px 2px 0 #ff0000;outline:2px solid #00ff00'></section></body></html>"
+        val raster_body = simple_web_layout_render_html_software_pixels(body_bg, 40, 64)
+        val cpu_body = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(body_bg, 40, 64, "cpu_simd")
+        val raster_panel = simple_web_layout_render_html_software_pixels(panel_bg, 40, 64)
+        val cpu_panel = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(panel_bg, 40, 64, "cpu_simd")
+        val raster_frame = simple_web_layout_render_html_software_pixels(panel_frame, 40, 64)
+        val cpu_frame = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(panel_frame, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(raster_body, cpu_body)).to_equal(0)
+        expect(_pixel_mismatches(raster_panel, cpu_panel)).to_equal(0)
+        expect(_pixel_mismatches(raster_frame, cpu_frame)).to_equal(0)
+        expect(cpu_body[8 * 40 + 11]).to_equal(0xFFF5F5F5u32)
+        expect(cpu_panel[8 * 40 + 11]).to_equal(0xFFF5F5F5u32)
+        expect(_count_color(cpu_body, 0xFFFF0000u32)).to_equal(0)
+        expect(_count_color(cpu_panel, 0xFF00FF00u32)).to_equal(0)
+        expect(_count_color(cpu_frame, 0xFF0000FFu32)).to_equal(0)
+        # A non-widget node keeps its inline background in widget mode.
+        val plain_div = "<html><body><div style='background-color:#ff00ff;height:4px'></div><section class='widget-panel'></section></body></html>"
+        val raster_plain = simple_web_layout_render_html_software_pixels(plain_div, 40, 64)
+        val cpu_plain = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(plain_div, 40, 64, "cpu_simd")
+        expect(_count_color(cpu_plain, 0xFFFF00FFu32) > 0).to_equal(true)
+        expect(_pixel_mismatches(raster_plain, cpu_plain)).to_equal(0)
+        # Outside widget mode (a <style> element) the same markup paints them.
+        val styled_body = "<html><head><style></style></head><body style='background-color:#ff0000'><div></div></body></html>"
+        val styled_panel = "<html><head><style></style></head><body><section class='widget-panel' style='background-color:#00ff00;border:2px solid #0000ff'></section></body></html>"
+        val cpu_styled_body = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_body, 40, 64, "cpu_simd")
+        val cpu_styled_panel = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_panel, 40, 64, "cpu_simd")
+        expect(_count_color(cpu_styled_body, 0xFFFF0000u32) > 0).to_equal(true)
+        expect(_count_color(cpu_styled_panel, 0xFF00FF00u32) > 0).to_equal(true)
+        expect(_count_color(cpu_styled_panel, 0xFF0000FFu32) > 0).to_equal(true)
+
+    it "paints no widget-image placeholder or form-control chrome on Draw IR in legacy widget mode, as the raster does":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "paints no widget-image placeholder or form-control chrome on Draw IR in legacy widget mode, as the raster does"
+        step("Verify: paints no widget-image placeholder or form-control chrome on Draw IR in legacy widget mode, as the raster does")
+        # The raster paints the widget-image placeholder, the checkbox accent
+        # control and the select chevron only outside widget mode; Draw IR
+        # used to paint them always (240 / 169 / 16 mismatching pixels).
+        val img_page = "<html><body><section class='widget-panel'><img class='widget-image' style='width:20px;height:12px'></section></body></html>"
+        val checkbox_page = "<html><body><section class='widget-panel'><input type='checkbox' checked style='accent-color:#ff0000'></section></body></html>"
+        val select_page = "<html><body><section class='widget-panel'><select><option>A</option></select></section></body></html>"
+        var placeholders = 0
+        for batch in simple_web_layout_render_html_draw_ir(img_page, 40, 64).batches:
+            for command in batch.commands:
+                if command.component_id.contains("::placeholder-"):
+                    placeholders = placeholders + 1
+        expect(placeholders).to_equal(0)
+        val raster_img = simple_web_layout_render_html_software_pixels(img_page, 40, 64)
+        val cpu_img = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(img_page, 40, 64, "cpu_simd")
+        val raster_checkbox = simple_web_layout_render_html_software_pixels(checkbox_page, 40, 64)
+        val cpu_checkbox = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(checkbox_page, 40, 64, "cpu_simd")
+        val raster_select = simple_web_layout_render_html_software_pixels(select_page, 40, 64)
+        val cpu_select = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(select_page, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(raster_img, cpu_img)).to_equal(0)
+        expect(_pixel_mismatches(raster_checkbox, cpu_checkbox)).to_equal(0)
+        expect(_pixel_mismatches(raster_select, cpu_select)).to_equal(0)
+        expect(cpu_img[11 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        # Outside widget mode the placeholder paints, on the raster and Draw IR.
+        val styled_img = "<html><head><style></style></head><body><section class='widget-panel'><img class='widget-image' style='width:20px;height:12px'></section></body></html>"
+        val raster_styled_img = simple_web_layout_render_html_software_pixels(styled_img, 40, 64)
+        val cpu_styled_img = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_img, 40, 64, "cpu_simd")
+        expect(_count_color(raster_styled_img, 0xFF2563EBu32) > 0).to_equal(true)
+        expect(_count_color(cpu_styled_img, 0xFF2563EBu32) > 0).to_equal(true)
+
+    it "paints no inline svg, input text or scrollbar on Draw IR in legacy widget mode, as the raster does":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "paints no inline svg, input text or scrollbar on Draw IR in legacy widget mode, as the raster does"
+        step("Verify: paints no inline svg, input text or scrollbar on Draw IR in legacy widget mode, as the raster does")
+        # The raster paints inline svg shapes, input value text and the
+        # vertical scrollbar only outside widget mode; Draw IR used to paint
+        # them always (200 / 69 / 300 mismatching pixels at 40x64).
+        val svg_page = "<html><body><section class='widget-panel'><svg width='20' height='10'><rect width='20' height='10' fill='#ff0000'></rect></svg></section></body></html>"
+        val input_page = "<html><body><section class='widget-panel'><input type='text' value='ABCD'></section></body></html>"
+        val scroll_page = "<html><body><div style='overflow-y:scroll;height:20px;width:30px'></div><section class='widget-panel'></section></body></html>"
+        val raster_svg = simple_web_layout_render_html_software_pixels(svg_page, 40, 64)
+        val cpu_svg = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(svg_page, 40, 64, "cpu_simd")
+        val raster_input = simple_web_layout_render_html_software_pixels(input_page, 40, 64)
+        val cpu_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(input_page, 40, 64, "cpu_simd")
+        val raster_scroll = simple_web_layout_render_html_software_pixels(scroll_page, 40, 64)
+        val cpu_scroll = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(scroll_page, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(raster_svg, cpu_svg)).to_equal(0)
+        expect(_pixel_mismatches(raster_input, cpu_input)).to_equal(0)
+        expect(_pixel_mismatches(raster_scroll, cpu_scroll)).to_equal(0)
+        expect(cpu_svg[13 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(cpu_input[15 * 40 + 13]).to_equal(0xFFF5F5F5u32)
+        expect(cpu_scroll[8 * 40 + 23]).to_equal(0xFFF5F5F5u32)
+        expect(_count_color(cpu_svg, 0xFFFF0000u32)).to_equal(0)
+        # Outside widget mode (a <style> element) Draw IR paints all three.
+        val styled_svg = "<html><head><style></style></head><body><section class='widget-panel'><svg width='20' height='10'><rect width='20' height='10' fill='#ff0000'></rect></svg></section></body></html>"
+        val styled_input = "<html><head><style></style></head><body><section class='widget-panel'><input type='text' value='ABCD'></section></body></html>"
+        val styled_scroll = "<html><head><style></style></head><body><div style='overflow-y:scroll;height:20px;width:30px'></div><section class='widget-panel'></section></body></html>"
+        val cpu_styled_svg = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_svg, 40, 64, "cpu_simd")
+        val cpu_styled_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_input, 40, 64, "cpu_simd")
+        val cpu_styled_scroll = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_scroll, 40, 64, "cpu_simd")
+        val raster_styled_svg = simple_web_layout_render_html_software_pixels(styled_svg, 40, 64)
+        expect(_count_color(cpu_styled_svg, 0xFFFF0000u32) > 0).to_equal(true)
+        expect(_count_color(raster_styled_svg, 0xFFFF0000u32) > 0).to_equal(true)
+        # The value text itself paints: more ink than the same empty input.
+        val styled_empty_input = "<html><head><style></style></head><body><section class='widget-panel'><input type='text' value=''></section></body></html>"
+        val cpu_styled_empty_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_empty_input, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(cpu_styled_input, cpu_styled_empty_input) > 0).to_equal(true)
+        expect(_count_color(cpu_styled_input, 0xFF000000u32) > _count_color(cpu_styled_empty_input, 0xFF000000u32)).to_equal(true)
+        expect(_count_color(cpu_styled_scroll, 0xFF6B7280u32) > 0).to_equal(true)
+
+    it "paints no URL background layer or its border overlay for a widget node on Draw IR in legacy widget mode":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "paints no URL background layer or its border overlay for a widget node on Draw IR in legacy widget mode"
+        step("Verify: paints no URL background layer or its border overlay for a widget node on Draw IR in legacy widget mode")
+        # The raster skips the whole box paint of a widget-* node in widget
+        # mode. Draw IR still emitted the node's URL background image and the
+        # background border overlay, which rebuilds the border from the raw
+        # style and so repainted the suppressed border.
+        val tile = simpleos_host_gpu_image_resource("image://tile", 4, 2, [0xFFFF0000u32; 8])
+        val widget_page = "<html><body><section class='widget-panel' style='width:20px;height:12px;border:2px solid #0000ff;background-image:url(image://tile);background-repeat:no-repeat'></section></body></html>"
+        val styled_page = "<html><head><style></style></head><body><section class='widget-panel' style='width:20px;height:12px;border:2px solid #0000ff;background-image:url(image://tile);background-repeat:no-repeat'></section></body></html>"
+        var widget_background_commands = 0
+        for batch in simple_web_layout_render_html_draw_ir_with_images(widget_page, 40, 64, [tile]).batches:
+            for command in batch.commands:
+                if command.component_id.contains("_background_image") or command.component_id.contains("_background_border_overlay"):
+                    widget_background_commands = widget_background_commands + 1
+        expect(widget_background_commands).to_equal(0)
+        val raster_widget = simple_web_layout_render_html_software_pixels(widget_page, 40, 64)
+        val cpu_widget = simple_web_layout_render_html_engine2d_result_with_images(widget_page, 40, 64, "cpu_simd", [tile]).pixels
+        expect(_pixel_mismatches(raster_widget, cpu_widget)).to_equal(0)
+        expect(_count_color(cpu_widget, 0xFF0000FFu32)).to_equal(0)
+        expect(_count_color(cpu_widget, 0xFFFF0000u32)).to_equal(0)
+        # Outside widget mode the same markup lowers the image and overlay.
+        var styled_background_commands = 0
+        for batch in simple_web_layout_render_html_draw_ir_with_images(styled_page, 40, 64, [tile]).batches:
+            for command in batch.commands:
+                if command.component_id.contains("_background_image") or command.component_id.contains("_background_border_overlay"):
+                    styled_background_commands = styled_background_commands + 1
+        expect(styled_background_commands).to_equal(2)
+        val cpu_styled = simple_web_layout_render_html_engine2d_result_with_images(styled_page, 40, 64, "cpu_simd", [tile]).pixels
+        expect(_count_color(cpu_styled, 0xFF0000FFu32) > 0).to_equal(true)
+        expect(_count_color(cpu_styled, 0xFFFF0000u32) > 0).to_equal(true)
 
     it "keeps lowercase browser text glyphs distinct from uppercase glyphs":
         # @req REQ-WEB-RENDER-001
