@@ -25,16 +25,23 @@ The composite is Chrome 159's gradient / image layer rule,
 `div255r(v) = (v + 128 + ((v + 128) >> 8)) >> 8`, over an OPAQUE destination.
 The oracle below is written from that rule in this file, independently of the
 shader, and the gradient colour comes from the host evaluator itself, so a
-row here proves both bit-exact t evaluation and the composite rule. The
-cpu_simd host composite still truncates (a parallel lane owns color.spl
-blend), so device vs cpu_simd equality is asserted only where the gradient is
-opaque and the composite rule cannot differ.
+row here proves both bit-exact t evaluation and the composite rule. Since
+#9993 the cpu_simd host composite (`color.spl` `blend`, image rule) uses the
+same rule; device vs cpu_simd rows still use opaque stops where they compare
+the two lanes, so they do not depend on the seed's blend kernels.
+
+Decline rows: a set mask (the kernel has no mask input) and a linear gradient
+line past the 32-bit kernel's range (len2 >= 2^48, projection >= 2^46) must
+leave the device counter put, run the host evaluator once, and paint
+cpu_simd's pixels. A clip is NOT a decline: the device composite honours it.
 
 ## Verification guidance and troubleshooting
 Sabotage: make `VulkanBackend.draw_gradient_layer_device` return false. The
 Chrome-point rows still pass through the host fallback, while the counter rows
-fail (device count 0, host count > 0), and the oracle rows fail by one level
-wherever the truncating host composite disagrees with Chrome's rounding.
+fail (device count 0, host count > 0). Removing the mask early-return there
+fails the masked row (8246 masked-off pixels painted); removing the len2 and
+projection range checks in `linear_gradient_device_tables` fails the range
+row (14000 pixels differ from cpu_simd).
 """
 # Lifecycle: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
 # @manual_section: vulkan_device_gradient
@@ -390,3 +397,32 @@ describe "CSS gradient layers are evaluated and composited on the Vulkan device"
         expect(dev_after - dev_before).to_equal(1)
         expect(host_after - host_before).to_equal(0)
         expect(mismatch_count(clip_frame(before, full, 30, 20, 70, 50), got)).to_equal(0)
+
+    it "declines a linear layer whose gradient line is outside the kernel's range and still paints cpu_simd's pixels":
+        # A 20,000 px gradient line gives len2 = (20000 * 1024)^2 >= 2^48 and a
+        # projection term >= 2^46, both past `linear_gradient_device_tables`'
+        # range for the 32-bit kernel: no tables, so
+        # the device declines and the host evaluator paints the layer.
+        val colors: [u32] = [0xFFFF0000u32, 0xFF00FF00u32, 0xFF0000FFu32]
+        val positions: [i32] = [0, 500, 1000]
+        val sx_q: i64 = 0 - 10000 * 1024
+        val ex_q: i64 = 10000 * 1024
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_opaque_backdrop(dev)
+        val before = dev.read_pixels()
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        dev.draw_linear_gradient_line(10, 8, 140, 100, sx_q, 60 * 1024, ex_q, 60 * 1024, colors, positions)
+        val dev_after = vulkan_device_gradient_count()
+        val host_after = engine2d_host_gradient_eval_count()
+        val got = dev.read_pixels()
+        dev.shutdown()
+        var cpu = Engine2D.create_with_backend_fast(FB_W, FB_H, "cpu_simd")
+        cpu = paint_opaque_backdrop(cpu)
+        cpu.draw_linear_gradient_line(10, 8, 140, 100, sx_q, 60 * 1024, ex_q, 60 * 1024, colors, positions)
+        val want = cpu.read_pixels()
+        cpu.shutdown()
+        expect(dev_after - dev_before).to_equal(0)
+        expect(host_after - host_before).to_equal(1)
+        expect(changed_count(before, got)).to_be_greater_than(1000)
+        expect(mismatch_count(want, got)).to_equal(0)
