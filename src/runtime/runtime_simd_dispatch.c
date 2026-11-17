@@ -1165,16 +1165,11 @@ SplArray* rt_mlkem_ntt_simd_batch(SplArray* coefficients, bool inverse) {
 
 #if SIMD_HAS_SSE2
 static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color);
-static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
-                                     const int64_t* src, int64_t n);
 #endif
 
 #if SIMD_CAN_AVX2
 SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
-SIMPLE_RUNTIME_TARGET_AVX2
-static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
-                                     const int64_t* src, int64_t n);
 #endif
 
 #if defined(__riscv) && defined(__riscv_vector)
@@ -1240,238 +1235,408 @@ static void engine2d_copy_into(int64_t* out, const int64_t* src, int64_t n) {
     }
 }
 
-/* src-over blend of a single packed pixel, exact integer floor formula. */
-static inline int64_t engine2d_blend_pixel(int64_t s, int64_t d) {
-    uint32_t sp = (uint32_t)(uint64_t)s;
-    uint32_t dp = (uint32_t)(uint64_t)d;
-    uint32_t sa = (sp >> 24) & 0xFFu;
-    if (sa == 255u) return (int64_t)(uint64_t)sp;
-    if (sa == 0u) return (int64_t)(uint64_t)dp;
-    uint32_t da = (dp >> 24) & 0xFFu;
-    uint32_t inv = 255u - sa;
-    uint32_t dst_weight = (da * inv) / 255u;
-    uint32_t out_a = sa + dst_weight;
-    uint32_t r = (((sp >> 16) & 0xFFu) * sa + ((dp >> 16) & 0xFFu) * dst_weight) / out_a;
-    uint32_t g = (((sp >> 8) & 0xFFu) * sa + ((dp >> 8) & 0xFFu) * dst_weight) / out_a;
-    uint32_t b = ((sp & 0xFFu) * sa + (dp & 0xFFu) * dst_weight) / out_a;
-    uint32_t out = (out_a << 24) | (r << 16) | (g << 8) | b;
-    return (int64_t)(uint64_t)out;
+/* Chrome 159 (Skia) source-over of one straight-alpha 0xAARRGGBB pixel.
+ * Opaque destination (the case a Chrome screenshot observes, fitted exactly):
+ *   solid fill   : round(s*a/255) + ((d*(256-a)) >> 8)        (SkPMSrcOver)
+ *   image/shader : round(s*a/255) + div255r(d*(255-a))          (lowp pipeline)
+ * Translucent destination (no Chrome equivalent observed): straight-alpha
+ * src-over, rounded. Twins: engine2d_simd_ops.rs / interpreter_extern/simd.rs
+ * (`engine2d_blend_u32`) and color.spl (`blend` / `blend_solid`). */
+static inline uint32_t engine2d_div255r(uint32_t v) {
+    v += 128u;
+    return (v + (v >> 8)) >> 8;
 }
 
-#if SIMD_HAS_SSE2
-static uint32_t engine2d_blend_sse2_pixel(uint32_t s, uint32_t d) {
+static inline uint32_t engine2d_blend_u32(uint32_t s, uint32_t d, int solid) {
     uint32_t sa = (s >> 24) & 0xFFu;
-    uint32_t da = (d >> 24) & 0xFFu;
-    uint32_t dw = (da * (255u - sa)) / 255u;
-    uint32_t oa = sa + dw;
-    uint32_t denom = oa == 0u ? 1u : oa;
-    __m128i channels = _mm_set_epi16(0, 0,
-        (short)(d & 0xFFu), (short)(s & 0xFFu),
-        (short)((d >> 8) & 0xFFu), (short)((s >> 8) & 0xFFu),
-        (short)((d >> 16) & 0xFFu), (short)((s >> 16) & 0xFFu));
-    __m128i weights = _mm_set_epi16(0, 0,
-        (short)dw, (short)sa, (short)dw, (short)sa, (short)dw, (short)sa);
-    uint32_t acc[4];
-    _mm_storeu_si128((__m128i*)(void*)acc, _mm_madd_epi16(channels, weights));
-    uint32_t out = (oa << 24) | ((acc[0] / denom) << 16) |
-        ((acc[1] / denom) << 8) | (acc[2] / denom);
     if (sa == 255u) return s;
     if (sa == 0u) return d;
+    uint32_t da = (d >> 24) & 0xFFu;
+    uint32_t inv = 255u - sa;
+    if (da != 255u) {
+        uint32_t dw = (da * inv + 127u) / 255u;
+        uint32_t oa = sa + dw;
+        uint32_t half = oa >> 1;
+        uint32_t r = (((s >> 16) & 0xFFu) * sa + ((d >> 16) & 0xFFu) * dw + half) / oa;
+        uint32_t g = (((s >> 8) & 0xFFu) * sa + ((d >> 8) & 0xFFu) * dw + half) / oa;
+        uint32_t b = ((s & 0xFFu) * sa + (d & 0xFFu) * dw + half) / oa;
+        return (oa << 24) | (r << 16) | (g << 8) | b;
+    }
+    uint32_t out = 0xFF000000u;
+    for (int shift = 16; shift >= 0; shift -= 8) {
+        uint32_t sc = (s >> shift) & 0xFFu;
+        uint32_t dc = (d >> shift) & 0xFFu;
+        uint32_t dterm = solid ? (dc * (inv + 1u)) >> 8 : engine2d_div255r(dc * inv);
+        out |= ((sc * sa + 127u) / 255u + dterm) << shift;
+    }
     return out;
 }
 
-static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
-                                     const int64_t* src, int64_t n) {
-    if (n > 0) engine2d_record_simd_row_hit();
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t s = (uint32_t)(uint64_t)src[i];
-        uint32_t d = (uint32_t)(uint64_t)dst[i];
-        out[i] = (int64_t)(uint64_t)engine2d_blend_sse2_pixel(s, d);
+/* Image-rule src-over (blend_row / blend_span composite source images). */
+static inline int64_t engine2d_blend_pixel(int64_t s, int64_t d) {
+    return (int64_t)(uint64_t)engine2d_blend_u32(
+        (uint32_t)(uint64_t)s, (uint32_t)(uint64_t)d, 0);
+}
+
+/* ----------------------------------------------------------------------
+ * Vector src-over. Every ISA body computes the OPAQUE-destination rule of
+ * engine2d_blend_u32 on 16-bit lanes:
+ *   src term   round(s*a/255) = div255r(s*a)
+ *   image dst  div255r(d*(255-a))          div255r(v) = (v+128 + ((v+128)>>8)) >> 8
+ *   solid dst  (d*(256-a)) >> 8
+ * (each product <= 65280 and each sum <= 255, so u16 lanes are exact), then
+ * patches sa==255 -> s and sa==0 -> d with lane selects, and hands the rare
+ * translucent-destination lanes to the scalar engine2d_blend_u32. Bit
+ * equality with the scalar rule is pinned by the per-ISA check in
+ * test/09_baselines/engine2d_simd/engine2d_simd_span_test.c.
+ *
+ * Lanes are int64 words: `shift` 0 = raw packed pixel, 3 = boxed Simple
+ * pixel (engine2d_box_pixel). `dst_or` is ORed into every destination pixel
+ * first (0xFF000000 for the percent kernel, which treats dst as opaque).
+ * -------------------------------------------------------------------- */
+static inline int engine2d_blend_lane_needs_scalar(uint32_t s, uint32_t d) {
+    uint32_t sa = s >> 24;
+    return sa != 0u && sa != 255u && (d >> 24) != 255u;
+}
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+static inline uint8x8_t engine2d_div255r_n_neon(uint16x8_t v) {
+    uint16x8_t t = vaddq_u16(v, vdupq_n_u16(128));
+    return vshrn_n_u16(vsraq_n_u16(t, t, 8), 8);
+}
+
+static inline uint32x4_t engine2d_blend4_neon(uint32x4_t s, uint32x4_t d, int solid) {
+    static const uint8_t alpha_idx[16] = {3, 3, 3, 3, 7, 7, 7, 7,
+                                          11, 11, 11, 11, 15, 15, 15, 15};
+    uint8x16_t sb = vreinterpretq_u8_u32(s);
+    uint8x16_t db = vreinterpretq_u8_u32(d);
+    uint8x16_t ab = vqtbl1q_u8(sb, vld1q_u8(alpha_idx));
+    uint8x16_t ib = vmvnq_u8(ab);
+    uint8x8_t src_lo = engine2d_div255r_n_neon(vmull_u8(vget_low_u8(sb), vget_low_u8(ab)));
+    uint8x8_t src_hi = engine2d_div255r_n_neon(vmull_high_u8(sb, ab));
+    uint16x8_t dp_lo = vmull_u8(vget_low_u8(db), vget_low_u8(ib));
+    uint16x8_t dp_hi = vmull_high_u8(db, ib);
+    uint8x8_t dst_lo, dst_hi;
+    if (solid) {
+        dst_lo = vshrn_n_u16(vaddw_u8(dp_lo, vget_low_u8(db)), 8);
+        dst_hi = vshrn_n_u16(vaddw_high_u8(dp_hi, db), 8);
+    } else {
+        dst_lo = engine2d_div255r_n_neon(dp_lo);
+        dst_hi = engine2d_div255r_n_neon(dp_hi);
     }
+    uint32x4_t r = vorrq_u32(
+        vreinterpretq_u32_u8(vaddq_u8(vcombine_u8(src_lo, src_hi), vcombine_u8(dst_lo, dst_hi))),
+        vdupq_n_u32(0xFF000000u));
+    uint32x4_t sa = vshrq_n_u32(s, 24);
+    r = vbslq_u32(vceqq_u32(sa, vdupq_n_u32(255u)), s, r);
+    return vbslq_u32(vceqq_u32(sa, vdupq_n_u32(0u)), d, r);
+}
+
+static inline uint32x4_t engine2d_load4_neon(const int64_t* p, int shift) {
+    uint64x2_t a = vld1q_u64((const uint64_t*)(const void*)p);
+    uint64x2_t b = vld1q_u64((const uint64_t*)(const void*)(p + 2));
+    if (shift) return vcombine_u32(vshrn_n_u64(a, 3), vshrn_n_u64(b, 3));
+    return vcombine_u32(vmovn_u64(a), vmovn_u64(b));
+}
+
+static inline void engine2d_store4_neon(int64_t* p, uint32x4_t v, int shift) {
+    uint64x2_t a = shift ? vshll_n_u32(vget_low_u32(v), 3) : vmovl_u32(vget_low_u32(v));
+    uint64x2_t b = shift ? vshll_high_n_u32(v, 3) : vmovl_high_u32(v);
+    vst1q_u64((uint64_t*)(void*)p, a);
+    vst1q_u64((uint64_t*)(void*)(p + 2), b);
+}
+
+static int64_t engine2d_blend_lanes_neon(int64_t* out, const int64_t* dst,
+                                         const int64_t* src, int64_t n,
+                                         uint32_t const_src, int use_const,
+                                         int solid, int shift, uint32_t dst_or) {
+    int64_t i = 0;
+    uint32x4_t cs = vdupq_n_u32(const_src);
+    uint32x4_t dor = vdupq_n_u32(dst_or);
+    for (; i + 4 <= n; i += 4) {
+        uint32x4_t s = use_const ? cs : engine2d_load4_neon(src + i, shift);
+        uint32x4_t d = vorrq_u32(engine2d_load4_neon(dst + i, shift), dor);
+        uint32x4_t r = engine2d_blend4_neon(s, d, solid);
+        uint32x4_t sa = vshrq_n_u32(s, 24);
+        uint32x4_t odd = vandq_u32(
+            vmvnq_u32(vceqq_u32(vshrq_n_u32(d, 24), vdupq_n_u32(255u))),
+            vandq_u32(vmvnq_u32(vceqq_u32(sa, vdupq_n_u32(0u))),
+                      vmvnq_u32(vceqq_u32(sa, vdupq_n_u32(255u)))));
+        if (vmaxvq_u32(odd)) {
+            uint32_t sw[4], dw[4], rw[4];
+            vst1q_u32(sw, s);
+            vst1q_u32(dw, d);
+            vst1q_u32(rw, r);
+            for (int k = 0; k < 4; k++)
+                if (engine2d_blend_lane_needs_scalar(sw[k], dw[k]))
+                    rw[k] = engine2d_blend_u32(sw[k], dw[k], solid);
+            r = vld1q_u32(rw);
+        }
+        engine2d_store4_neon(out + i, r, shift);
+    }
+    return i;
+}
+#endif
+
+#if SIMD_HAS_SSE2
+static inline __m128i engine2d_div255r_epu16_sse2(__m128i v) {
+    __m128i t = _mm_add_epi16(v, _mm_set1_epi16(128));
+    return _mm_srli_epi16(_mm_add_epi16(t, _mm_srli_epi16(t, 8)), 8);
+}
+
+static inline __m128i engine2d_blend_half_sse2(__m128i s16, __m128i d16, int solid) {
+    __m128i a16 = _mm_shufflehi_epi16(_mm_shufflelo_epi16(s16, 0xFF), 0xFF);
+    __m128i inv = _mm_sub_epi16(_mm_set1_epi16(255), a16);
+    __m128i src = engine2d_div255r_epu16_sse2(_mm_mullo_epi16(s16, a16));
+    __m128i dst = solid
+        ? _mm_srli_epi16(_mm_mullo_epi16(d16, _mm_add_epi16(inv, _mm_set1_epi16(1))), 8)
+        : engine2d_div255r_epu16_sse2(_mm_mullo_epi16(d16, inv));
+    return _mm_add_epi16(src, dst);
+}
+
+/* 4 pixels; *odd gets the movemask of translucent-destination lanes. */
+static inline __m128i engine2d_blend4_sse2(__m128i s, __m128i d, int solid, int* odd) {
+    __m128i z = _mm_setzero_si128();
+    __m128i lo = engine2d_blend_half_sse2(_mm_unpacklo_epi8(s, z), _mm_unpacklo_epi8(d, z), solid);
+    __m128i hi = engine2d_blend_half_sse2(_mm_unpackhi_epi8(s, z), _mm_unpackhi_epi8(d, z), solid);
+    __m128i r = _mm_or_si128(_mm_packus_epi16(lo, hi), _mm_set1_epi32((int)0xFF000000u));
+    __m128i sa = _mm_srli_epi32(s, 24);
+    __m128i m255 = _mm_cmpeq_epi32(sa, _mm_set1_epi32(255));
+    __m128i m0 = _mm_cmpeq_epi32(sa, z);
+    __m128i dop = _mm_cmpeq_epi32(_mm_srli_epi32(d, 24), _mm_set1_epi32(255));
+    r = _mm_or_si128(_mm_and_si128(m255, s), _mm_andnot_si128(m255, r));
+    r = _mm_or_si128(_mm_and_si128(m0, d), _mm_andnot_si128(m0, r));
+    *odd = 0xF & ~_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_or_si128(m255, m0), dop)));
+    return r;
+}
+
+static inline __m128i engine2d_load4_sse2(const int64_t* p, int shift) {
+    __m128i a = _mm_loadu_si128((const __m128i*)(const void*)p);
+    __m128i b = _mm_loadu_si128((const __m128i*)(const void*)(p + 2));
+    if (shift) {
+        a = _mm_srli_epi64(a, 3);
+        b = _mm_srli_epi64(b, 3);
+    }
+    return _mm_unpacklo_epi64(_mm_shuffle_epi32(a, _MM_SHUFFLE(2, 0, 2, 0)),
+                              _mm_shuffle_epi32(b, _MM_SHUFFLE(2, 0, 2, 0)));
+}
+
+static inline void engine2d_store4_sse2(int64_t* p, __m128i v, int shift) {
+    __m128i z = _mm_setzero_si128();
+    __m128i a = _mm_unpacklo_epi32(v, z);
+    __m128i b = _mm_unpackhi_epi32(v, z);
+    if (shift) {
+        a = _mm_slli_epi64(a, 3);
+        b = _mm_slli_epi64(b, 3);
+    }
+    _mm_storeu_si128((__m128i*)(void*)p, a);
+    _mm_storeu_si128((__m128i*)(void*)(p + 2), b);
+}
+
+static int64_t engine2d_blend_lanes_sse2(int64_t* out, const int64_t* dst,
+                                         const int64_t* src, int64_t n,
+                                         uint32_t const_src, int use_const,
+                                         int solid, int shift, uint32_t dst_or) {
+    int64_t i = 0;
+    __m128i cs = _mm_set1_epi32((int)const_src);
+    __m128i dor = _mm_set1_epi32((int)dst_or);
+    for (; i + 4 <= n; i += 4) {
+        __m128i s = use_const ? cs : engine2d_load4_sse2(src + i, shift);
+        __m128i d = _mm_or_si128(engine2d_load4_sse2(dst + i, shift), dor);
+        int odd = 0;
+        __m128i r = engine2d_blend4_sse2(s, d, solid, &odd);
+        if (odd) {
+            uint32_t sw[4], dw[4], rw[4];
+            _mm_storeu_si128((__m128i*)(void*)sw, s);
+            _mm_storeu_si128((__m128i*)(void*)dw, d);
+            _mm_storeu_si128((__m128i*)(void*)rw, r);
+            for (int k = 0; k < 4; k++)
+                if (odd & (1 << k)) rw[k] = engine2d_blend_u32(sw[k], dw[k], solid);
+            r = _mm_loadu_si128((const __m128i*)(const void*)rw);
+        }
+        engine2d_store4_sse2(out + i, r, shift);
+    }
+    return i;
 }
 #endif
 
 #if SIMD_CAN_AVX2
 SIMPLE_RUNTIME_TARGET_AVX2
-static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
-                                     const int64_t* src, int64_t n) {
+static inline __m256i engine2d_div255r_epu16_avx2(__m256i v) {
+    __m256i t = _mm256_add_epi16(v, _mm256_set1_epi16(128));
+    return _mm256_srli_epi16(_mm256_add_epi16(t, _mm256_srli_epi16(t, 8)), 8);
+}
+
+SIMPLE_RUNTIME_TARGET_AVX2
+static inline __m256i engine2d_blend_half_avx2(__m256i s16, __m256i d16, int solid) {
+    __m256i a16 = _mm256_shufflehi_epi16(_mm256_shufflelo_epi16(s16, 0xFF), 0xFF);
+    __m256i inv = _mm256_sub_epi16(_mm256_set1_epi16(255), a16);
+    __m256i src = engine2d_div255r_epu16_avx2(_mm256_mullo_epi16(s16, a16));
+    __m256i dst = solid
+        ? _mm256_srli_epi16(_mm256_mullo_epi16(d16, _mm256_add_epi16(inv, _mm256_set1_epi16(1))), 8)
+        : engine2d_div255r_epu16_avx2(_mm256_mullo_epi16(d16, inv));
+    return _mm256_add_epi16(src, dst);
+}
+
+SIMPLE_RUNTIME_TARGET_AVX2
+static inline __m256i engine2d_load8_avx2(const int64_t* p, int shift) {
+    const __m256i even = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6);
+    __m256i a = _mm256_loadu_si256((const __m256i*)(const void*)p);
+    __m256i b = _mm256_loadu_si256((const __m256i*)(const void*)(p + 4));
+    if (shift) {
+        a = _mm256_srli_epi64(a, 3);
+        b = _mm256_srli_epi64(b, 3);
+    }
+    __m128i lo = _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(a, even));
+    __m128i hi = _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(b, even));
+    return _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
+}
+
+SIMPLE_RUNTIME_TARGET_AVX2
+static inline void engine2d_store8_avx2(int64_t* p, __m256i v, int shift) {
+    __m256i a = _mm256_cvtepu32_epi64(_mm256_castsi256_si128(v));
+    __m256i b = _mm256_cvtepu32_epi64(_mm256_extracti128_si256(v, 1));
+    if (shift) {
+        a = _mm256_slli_epi64(a, 3);
+        b = _mm256_slli_epi64(b, 3);
+    }
+    _mm256_storeu_si256((__m256i*)(void*)p, a);
+    _mm256_storeu_si256((__m256i*)(void*)(p + 4), b);
+}
+
+SIMPLE_RUNTIME_TARGET_AVX2
+static int64_t engine2d_blend_lanes_avx2(int64_t* out, const int64_t* dst,
+                                         const int64_t* src, int64_t n,
+                                         uint32_t const_src, int use_const,
+                                         int solid, int shift, uint32_t dst_or) {
     int64_t i = 0;
-    if (n > 0) engine2d_record_simd_row_hit();
-    for (; i + 2 <= n; i += 2) {
-        uint32_t s0 = (uint32_t)(uint64_t)src[i];
-        uint32_t d0 = (uint32_t)(uint64_t)dst[i];
-        uint32_t s1 = (uint32_t)(uint64_t)src[i + 1];
-        uint32_t d1 = (uint32_t)(uint64_t)dst[i + 1];
-        uint32_t sa0 = (s0 >> 24) & 0xFFu;
-        uint32_t sa1 = (s1 >> 24) & 0xFFu;
-        uint32_t dw0 = (((d0 >> 24) & 0xFFu) * (255u - sa0)) / 255u;
-        uint32_t dw1 = (((d1 >> 24) & 0xFFu) * (255u - sa1)) / 255u;
-        uint32_t oa0 = sa0 + dw0;
-        uint32_t oa1 = sa1 + dw1;
-        uint32_t denom0 = oa0 == 0u ? 1u : oa0;
-        uint32_t denom1 = oa1 == 0u ? 1u : oa1;
-        __m256i channels = _mm256_set_epi16(0, 0,
-            (short)(d1 & 0xFFu), (short)(s1 & 0xFFu),
-            (short)((d1 >> 8) & 0xFFu), (short)((s1 >> 8) & 0xFFu),
-            (short)((d1 >> 16) & 0xFFu), (short)((s1 >> 16) & 0xFFu),
-            0, 0,
-            (short)(d0 & 0xFFu), (short)(s0 & 0xFFu),
-            (short)((d0 >> 8) & 0xFFu), (short)((s0 >> 8) & 0xFFu),
-            (short)((d0 >> 16) & 0xFFu), (short)((s0 >> 16) & 0xFFu));
-        __m256i weights = _mm256_set_epi16(0, 0,
-            (short)dw1, (short)sa1, (short)dw1, (short)sa1, (short)dw1, (short)sa1,
-            0, 0,
-            (short)dw0, (short)sa0, (short)dw0, (short)sa0, (short)dw0, (short)sa0);
-        uint32_t acc[8];
-        _mm256_storeu_si256((__m256i*)(void*)acc, _mm256_madd_epi16(channels, weights));
-        uint32_t o0 = (oa0 << 24) | ((acc[0] / denom0) << 16) |
-            ((acc[1] / denom0) << 8) | (acc[2] / denom0);
-        uint32_t o1 = (oa1 << 24) | ((acc[4] / denom1) << 16) |
-            ((acc[5] / denom1) << 8) | (acc[6] / denom1);
-        out[i] = (int64_t)(uint64_t)(sa0 == 255u ? s0 : (sa0 == 0u ? d0 : o0));
-        out[i + 1] = (int64_t)(uint64_t)(sa1 == 255u ? s1 : (sa1 == 0u ? d1 : o1));
+    const __m256i z = _mm256_setzero_si256();
+    const __m256i ff = _mm256_set1_epi32(255);
+    __m256i cs = _mm256_set1_epi32((int)const_src);
+    __m256i dor = _mm256_set1_epi32((int)dst_or);
+    for (; i + 8 <= n; i += 8) {
+        __m256i s = use_const ? cs : engine2d_load8_avx2(src + i, shift);
+        __m256i d = _mm256_or_si256(engine2d_load8_avx2(dst + i, shift), dor);
+        __m256i lo = engine2d_blend_half_avx2(_mm256_unpacklo_epi8(s, z), _mm256_unpacklo_epi8(d, z), solid);
+        __m256i hi = engine2d_blend_half_avx2(_mm256_unpackhi_epi8(s, z), _mm256_unpackhi_epi8(d, z), solid);
+        __m256i r = _mm256_or_si256(_mm256_packus_epi16(lo, hi), _mm256_set1_epi32((int)0xFF000000u));
+        __m256i sa = _mm256_srli_epi32(s, 24);
+        __m256i m255 = _mm256_cmpeq_epi32(sa, ff);
+        __m256i m0 = _mm256_cmpeq_epi32(sa, z);
+        __m256i dop = _mm256_cmpeq_epi32(_mm256_srli_epi32(d, 24), ff);
+        r = _mm256_blendv_epi8(r, s, m255);
+        r = _mm256_blendv_epi8(r, d, m0);
+        int odd = 0xFF & ~_mm256_movemask_ps(_mm256_castsi256_ps(
+            _mm256_or_si256(_mm256_or_si256(m255, m0), dop)));
+        if (odd) {
+            uint32_t sw[8], dw[8], rw[8];
+            _mm256_storeu_si256((__m256i*)(void*)sw, s);
+            _mm256_storeu_si256((__m256i*)(void*)dw, d);
+            _mm256_storeu_si256((__m256i*)(void*)rw, r);
+            for (int k = 0; k < 8; k++)
+                if (odd & (1 << k)) rw[k] = engine2d_blend_u32(sw[k], dw[k], solid);
+            r = _mm256_loadu_si256((const __m256i*)(const void*)rw);
+        }
+        engine2d_store8_avx2(out + i, r, shift);
     }
-    for (; i < n; i++) {
-        uint32_t s = (uint32_t)(uint64_t)src[i];
-        uint32_t d = (uint32_t)(uint64_t)dst[i];
-        out[i] = (int64_t)(uint64_t)engine2d_blend_sse2_pixel(s, d);
-    }
+    return i;
 }
 #endif
 
-static void engine2d_blend_into(int64_t* out, const int64_t* dst,
-                                const int64_t* src, int64_t n) {
-#if defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__riscv) && defined(__riscv_vector)
+static inline vuint32m1_t engine2d_div255r_rvv(vuint32m1_t v, size_t vl) {
+    vuint32m1_t t = __riscv_vadd_vx_u32m1(v, 128u, vl);
+    return __riscv_vsrl_vx_u32m1(
+        __riscv_vadd_vv_u32m1(t, __riscv_vsrl_vx_u32m1(t, 8, vl), vl), 8, vl);
+}
+
+static int64_t engine2d_blend_lanes_rvv(int64_t* out, const int64_t* dst,
+                                        const int64_t* src, int64_t n,
+                                        uint32_t const_src, int use_const,
+                                        int solid, int shift, uint32_t dst_or) {
     int64_t i = 0;
-    if (n >= 2) engine2d_record_simd_row_hit();
-    for (; i + 2 <= n; i += 2) {
-        /* Vectorize the per-channel multiply-accumulate for both pixels.
-           u32 lanes suffice: max accumulator is 255*255*2 = 130050 < 2^32.
-           The destination-alpha weight and final unpremultiply are scalar to
-           stay bit-exact with C truncating division. The sa==0 / sa==255 lanes are patched
-           afterward (sa==0 must return dst's FULL pixel incl. its alpha). */
-        uint32_t s0 = (uint32_t)(uint64_t)src[i];
-        uint32_t d0 = (uint32_t)(uint64_t)dst[i];
-        uint32_t s1 = (uint32_t)(uint64_t)src[i + 1];
-        uint32_t d1 = (uint32_t)(uint64_t)dst[i + 1];
-        uint32_t sa0 = (s0 >> 24) & 0xFFu;
-        uint32_t sa1 = (s1 >> 24) & 0xFFu;
-        uint32_t da0 = (d0 >> 24) & 0xFFu;
-        uint32_t da1 = (d1 >> 24) & 0xFFu;
-        uint32_t dw0 = (da0 * (255u - sa0)) / 255u;
-        uint32_t dw1 = (da1 * (255u - sa1)) / 255u;
-        uint32_t oa0 = sa0 + dw0;
-        uint32_t oa1 = sa1 + dw1;
-        uint32_t denom0 = oa0 == 0u ? 1u : oa0;
-        uint32_t denom1 = oa1 == 0u ? 1u : oa1;
-
-        /* lane-0 channels in low half, lane-1 in high half: [r0 g0 b0 r1 g1 b1] */
-        /* src channels (R,G,B) for both pixels */
-        uint32x4_t src_rgb0 = { (s0 >> 16) & 0xFFu, (s0 >> 8) & 0xFFu, s0 & 0xFFu, 0 };
-        uint32x4_t dst_rgb0 = { (d0 >> 16) & 0xFFu, (d0 >> 8) & 0xFFu, d0 & 0xFFu, 0 };
-        uint32x4_t src_rgb1 = { (s1 >> 16) & 0xFFu, (s1 >> 8) & 0xFFu, s1 & 0xFFu, 0 };
-        uint32x4_t dst_rgb1 = { (d1 >> 16) & 0xFFu, (d1 >> 8) & 0xFFu, d1 & 0xFFu, 0 };
-
-        uint32x4_t sav0 = vdupq_n_u32(sa0);
-        uint32x4_t invv0 = vdupq_n_u32(dw0);
-        uint32x4_t sav1 = vdupq_n_u32(sa1);
-        uint32x4_t invv1 = vdupq_n_u32(dw1);
-
-        uint32x4_t acc0 = vmlaq_u32(vmulq_u32(src_rgb0, sav0), dst_rgb0, invv0);
-        uint32x4_t acc1 = vmlaq_u32(vmulq_u32(src_rgb1, sav1), dst_rgb1, invv1);
-
-        uint32_t a0[4], a1[4];
-        vst1q_u32(a0, acc0);
-        vst1q_u32(a1, acc1);
-
-        uint32_t r0 = a0[0] / denom0, g0 = a0[1] / denom0, b0 = a0[2] / denom0;
-        uint32_t r1 = a1[0] / denom1, g1 = a1[1] / denom1, b1 = a1[2] / denom1;
-        uint32_t o0 = (oa0 << 24) | (r0 << 16) | (g0 << 8) | b0;
-        uint32_t o1 = (oa1 << 24) | (r1 << 16) | (g1 << 8) | b1;
-        if (sa0 == 255u) o0 = s0; else if (sa0 == 0u) o0 = d0;
-        if (sa1 == 255u) o1 = s1; else if (sa1 == 0u) o1 = d1;
-        out[i] = (int64_t)(uint64_t)o0;
-        out[i + 1] = (int64_t)(uint64_t)o1;
-    }
-    for (; i < n; i++) {
-        out[i] = engine2d_blend_pixel(src[i], dst[i]);
-    }
-#elif SIMD_CAN_AVX2
-    if (simd_detect_avx2()) {
-        engine2d_blend_into_avx2(out, dst, src, n);
-        return;
-    }
-    engine2d_blend_into_sse2(out, dst, src, n);
-    return;
-#elif SIMD_HAS_SSE2
-    engine2d_blend_into_sse2(out, dst, src, n);
-    return;
-#elif defined(__riscv) && defined(__riscv_vector)
-    int64_t i = 0;
-    if (n > 0) engine2d_record_simd_row_hit();
     while (i < n) {
-        size_t request = (size_t)(n - i);
-        if (request > 64) request = 64;
-        size_t vl = __riscv_vsetvl_e32m1(request);
-        /* Packed pixels occupy the low word of each 64-bit raw lane.  Strided
-           loads keep the arithmetic in e32 lanes without a temporary unpack. */
-        vuint32m1_t sv = __riscv_vlse32_v_u32m1(
-            (const uint32_t*)(const void*)(src + i), (ptrdiff_t)sizeof(int64_t), vl);
-        vuint32m1_t dv = __riscv_vlse32_v_u32m1(
-            (const uint32_t*)(const void*)(dst + i), (ptrdiff_t)sizeof(int64_t), vl);
-        vuint32m1_t sav = __riscv_vand_vx_u32m1(
-            __riscv_vsrl_vx_u32m1(sv, 24, vl), 255u, vl);
-        vuint32m1_t dav = __riscv_vand_vx_u32m1(
-            __riscv_vsrl_vx_u32m1(dv, 24, vl), 255u, vl);
-        vuint32m1_t inv = __riscv_vrsub_vx_u32m1(sav, 255u, vl);
-        vuint32m1_t dw_num = __riscv_vmul_vv_u32m1(dav, inv, vl);
-        uint32_t s_words[64], d_words[64], sa[64], dw[64], dw_numerators[64];
-        uint32_t r_numerators[64], g_numerators[64], b_numerators[64];
-        __riscv_vse32_v_u32m1(s_words, sv, vl);
-        __riscv_vse32_v_u32m1(d_words, dv, vl);
-        __riscv_vse32_v_u32m1(sa, sav, vl);
-        __riscv_vse32_v_u32m1(dw_numerators, dw_num, vl);
-        for (size_t lane = 0; lane < vl; lane++)
-            dw[lane] = dw_numerators[lane] / 255u;
-        vuint32m1_t dwv = __riscv_vle32_v_u32m1(dw, vl);
-#define ENGINE2D_RVV_CHANNEL_NUMERATOR(shift) \
-        __riscv_vadd_vv_u32m1( \
-            __riscv_vmul_vv_u32m1( \
-                __riscv_vand_vx_u32m1(__riscv_vsrl_vx_u32m1(sv, shift, vl), 255u, vl), \
-                sav, vl), \
-            __riscv_vmul_vv_u32m1( \
-                __riscv_vand_vx_u32m1(__riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
-                dwv, vl), vl)
-        __riscv_vse32_v_u32m1(r_numerators, ENGINE2D_RVV_CHANNEL_NUMERATOR(16), vl);
-        __riscv_vse32_v_u32m1(g_numerators, ENGINE2D_RVV_CHANNEL_NUMERATOR(8), vl);
-        __riscv_vse32_v_u32m1(b_numerators, ENGINE2D_RVV_CHANNEL_NUMERATOR(0), vl);
-#undef ENGINE2D_RVV_CHANNEL_NUMERATOR
-        for (size_t lane = 0; lane < vl; lane++) {
-            uint32_t s = s_words[lane], d = d_words[lane];
-            uint32_t source_alpha = sa[lane];
-            if (source_alpha == 255u) {
-                out[i + (int64_t)lane] = (int64_t)(uint64_t)s;
-                continue;
+        size_t vl = __riscv_vsetvl_e32m1((size_t)(n - i));
+        vuint32m1_t s = use_const
+            ? __riscv_vmv_v_x_u32m1(const_src, vl)
+            : __riscv_vnsrl_wx_u32m1(
+                  __riscv_vle64_v_u64m2((const uint64_t*)(const void*)(src + i), vl),
+                  (size_t)shift, vl);
+        vuint32m1_t d = __riscv_vor_vx_u32m1(
+            __riscv_vnsrl_wx_u32m1(
+                __riscv_vle64_v_u64m2((const uint64_t*)(const void*)(dst + i), vl),
+                (size_t)shift, vl),
+            dst_or, vl);
+        vuint32m1_t sa = __riscv_vsrl_vx_u32m1(s, 24, vl);
+        vuint32m1_t inv = __riscv_vrsub_vx_u32m1(sa, 255u, vl);
+        vuint32m1_t r = __riscv_vmv_v_x_u32m1(0xFF000000u, vl);
+        for (int sh = 0; sh <= 16; sh += 8) {
+            vuint32m1_t sc = __riscv_vand_vx_u32m1(__riscv_vsrl_vx_u32m1(s, (size_t)sh, vl), 255u, vl);
+            vuint32m1_t dc = __riscv_vand_vx_u32m1(__riscv_vsrl_vx_u32m1(d, (size_t)sh, vl), 255u, vl);
+            vuint32m1_t st = engine2d_div255r_rvv(__riscv_vmul_vv_u32m1(sc, sa, vl), vl);
+            vuint32m1_t dt = solid
+                ? __riscv_vsrl_vx_u32m1(__riscv_vmul_vv_u32m1(
+                      dc, __riscv_vadd_vx_u32m1(inv, 1u, vl), vl), 8, vl)
+                : engine2d_div255r_rvv(__riscv_vmul_vv_u32m1(dc, inv, vl), vl);
+            r = __riscv_vor_vv_u32m1(r, __riscv_vsll_vx_u32m1(
+                __riscv_vadd_vv_u32m1(st, dt, vl), (size_t)sh, vl), vl);
+        }
+        r = __riscv_vmerge_vvm_u32m1(r, s, __riscv_vmseq_vx_u32m1_b32(sa, 255u, vl), vl);
+        r = __riscv_vmerge_vvm_u32m1(r, d, __riscv_vmseq_vx_u32m1_b32(sa, 0u, vl), vl);
+        vbool32_t odd = __riscv_vmand_mm_b32(
+            __riscv_vmsne_vx_u32m1_b32(__riscv_vsrl_vx_u32m1(d, 24, vl), 255u, vl),
+            __riscv_vmand_mm_b32(__riscv_vmsne_vx_u32m1_b32(sa, 0u, vl),
+                                 __riscv_vmsne_vx_u32m1_b32(sa, 255u, vl), vl), vl);
+        vuint64m2_t wide = __riscv_vsll_vx_u64m2(
+            __riscv_vwaddu_vx_u64m2(r, 0u, vl), (size_t)shift, vl);
+        __riscv_vse64_v_u64m2((uint64_t*)(void*)(out + i), wide, vl);
+        if (__riscv_vcpop_m_b32(odd, vl) != 0) {
+            for (size_t k = 0; k < vl; k++) {
+                int64_t j = i + (int64_t)k;
+                uint32_t sw = use_const ? const_src
+                    : (uint32_t)((uint64_t)src[j] >> shift);
+                uint32_t dw = (uint32_t)((uint64_t)dst[j] >> shift) | dst_or;
+                if (engine2d_blend_lane_needs_scalar(sw, dw))
+                    out[j] = (int64_t)((uint64_t)engine2d_blend_u32(sw, dw, solid) << shift);
             }
-            if (source_alpha == 0u) {
-                out[i + (int64_t)lane] = (int64_t)(uint64_t)d;
-                continue;
-            }
-            uint32_t oa = source_alpha + dw[lane];
-            uint32_t r = r_numerators[lane] / oa;
-            uint32_t g = g_numerators[lane] / oa;
-            uint32_t b = b_numerators[lane] / oa;
-            out[i + (int64_t)lane] = (int64_t)(uint64_t)
-                ((oa << 24) | (r << 16) | (g << 8) | b);
         }
         i += (int64_t)vl;
     }
-    return;
-#else
-    for (int64_t i = 0; i < n; i++) {
-        out[i] = engine2d_blend_pixel(src[i], dst[i]);
-    }
+    return i;
+}
 #endif
+
+/* Blend n lanes: vector body for the widest compiled/detected ISA, then a
+ * scalar tail with the same rule. Records a SIMD row hit when n >= 2. */
+static void engine2d_blend_lanes(int64_t* out, const int64_t* dst,
+                                 const int64_t* src, int64_t n,
+                                 uint32_t const_src, int use_const, int solid,
+                                 int shift, uint32_t dst_or) {
+    int64_t i = 0;
+    if (n >= 2) engine2d_record_simd_row_hit();
+#if defined(__aarch64__) || defined(_M_ARM64)
+    i = shift ? engine2d_blend_lanes_neon(out, dst, src, n, const_src, use_const, solid, 3, dst_or)
+              : engine2d_blend_lanes_neon(out, dst, src, n, const_src, use_const, solid, 0, dst_or);
+#elif SIMD_CAN_AVX2
+    if (simd_detect_avx2())
+        i = engine2d_blend_lanes_avx2(out, dst, src, n, const_src, use_const, solid, shift, dst_or);
+    else
+        i = engine2d_blend_lanes_sse2(out, dst, src, n, const_src, use_const, solid, shift, dst_or);
+#elif SIMD_HAS_SSE2
+    i = engine2d_blend_lanes_sse2(out, dst, src, n, const_src, use_const, solid, shift, dst_or);
+#elif defined(__riscv) && defined(__riscv_vector)
+    i = engine2d_blend_lanes_rvv(out, dst, src, n, const_src, use_const, solid, shift, dst_or);
+#endif
+    for (; i < n; i++) {
+        uint32_t s = use_const ? const_src : (uint32_t)((uint64_t)src[i] >> shift);
+        uint32_t d = (uint32_t)((uint64_t)dst[i] >> shift) | dst_or;
+        out[i] = (int64_t)((uint64_t)engine2d_blend_u32(s, d, solid) << shift);
+    }
+}
+
+static void engine2d_blend_into(int64_t* out, const int64_t* dst,
+                                const int64_t* src, int64_t n) {
+    engine2d_blend_lanes(out, dst, src, n, 0u, 0, 0, 0, 0u);
 }
 
 static SplArray* engine2d_new_pixel_array(int64_t n) {
@@ -1782,370 +1947,16 @@ SplArray* rt_engine2d_simd_copy_span_u32(SplArray* dst, int64_t dst_off,
     return dst;
 }
 
-#if SIMD_CAN_AVX2
-/* Blend boxed Simple pixels in place. Opaque destinations are the dominant
- * framebuffer case and admit exact /255 channel math; mixed-alpha chunks stay
- * on engine2d_blend_pixel so straight-alpha semantics never approximate. */
-SIMPLE_RUNTIME_TARGET_AVX2
-static void engine2d_blend_boxed_avx2(int64_t* dst, const int64_t* src,
-                                      int64_t n, uint32_t const_src,
-                                      int use_const) {
-    int64_t i = 0;
-    if (n >= 8) engine2d_record_simd_row_hit();
-    for (; i + 8 <= n; i += 8) {
-        uint32_t s[8], d[8];
-        int opaque_dst = 1;
-        for (int lane = 0; lane < 8; lane++) {
-            s[lane] = use_const ? const_src : engine2d_unbox_pixel(src[i + lane]);
-            d[lane] = engine2d_unbox_pixel(dst[i + lane]);
-            opaque_dst &= ((d[lane] >> 24) == 255u);
-        }
-        if (!opaque_dst) {
-            for (int lane = 0; lane < 8; lane++) {
-                dst[i + lane] = engine2d_box_pixel((uint32_t)
-                    engine2d_blend_pixel((int64_t)(uint64_t)s[lane],
-                                         (int64_t)(uint64_t)d[lane]));
-            }
-            continue;
-        }
-        __m256i sv = _mm256_set_epi32(
-            (int)s[7], (int)s[6], (int)s[5], (int)s[4],
-            (int)s[3], (int)s[2], (int)s[1], (int)s[0]);
-        __m256i dv = _mm256_set_epi32(
-            (int)d[7], (int)d[6], (int)d[5], (int)d[4],
-            (int)d[3], (int)d[2], (int)d[1], (int)d[0]);
-        const __m256i mask = _mm256_set1_epi32(255);
-        __m256i sa = _mm256_srli_epi32(sv, 24);
-        __m256i inv = _mm256_sub_epi32(mask, sa);
-#define ENGINE2D_BLEND_CHANNEL_AVX2(shift) \
-        _mm256_add_epi32( \
-            _mm256_mullo_epi32(_mm256_and_si256( \
-                _mm256_srli_epi32(sv, shift), mask), sa), \
-            _mm256_mullo_epi32(_mm256_and_si256( \
-                _mm256_srli_epi32(dv, shift), mask), inv))
-        __m256i racc = ENGINE2D_BLEND_CHANNEL_AVX2(16);
-        __m256i gacc = ENGINE2D_BLEND_CHANNEL_AVX2(8);
-        __m256i bacc = ENGINE2D_BLEND_CHANNEL_AVX2(0);
-#undef ENGINE2D_BLEND_CHANNEL_AVX2
-#define ENGINE2D_DIV255_AVX2(value) \
-        _mm256_srli_epi32( \
-            _mm256_add_epi32( \
-                _mm256_add_epi32((value), _mm256_set1_epi32(1)), \
-                _mm256_srli_epi32((value), 8)), 8)
-        __m256i rv = ENGINE2D_DIV255_AVX2(racc);
-        __m256i gv = ENGINE2D_DIV255_AVX2(gacc);
-        __m256i bv = ENGINE2D_DIV255_AVX2(bacc);
-#undef ENGINE2D_DIV255_AVX2
-        __m256i out = _mm256_or_si256(
-            _mm256_or_si256(_mm256_slli_epi32(rv, 16),
-                            _mm256_slli_epi32(gv, 8)),
-            _mm256_or_si256(bv, _mm256_set1_epi32((int)0xff000000u)));
-        __m128i out_lo = _mm256_castsi256_si128(out);
-        __m128i out_hi = _mm256_extracti128_si256(out, 1);
-        __m256i boxed_lo = _mm256_slli_epi64(
-            _mm256_cvtepu32_epi64(out_lo), 3);
-        __m256i boxed_hi = _mm256_slli_epi64(
-            _mm256_cvtepu32_epi64(out_hi), 3);
-        _mm256_storeu_si256((__m256i*)(void*)(dst + i), boxed_lo);
-        _mm256_storeu_si256((__m256i*)(void*)(dst + i + 4), boxed_hi);
-    }
-    for (; i < n; i++) {
-        uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);
-        uint32_t d = engine2d_unbox_pixel(dst[i]);
-        dst[i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel(
-            (int64_t)(uint64_t)s, (int64_t)(uint64_t)d));
-    }
+/* Blend boxed Simple pixels in place: a source span, or one constant colour
+ * (use_const). `solid` selects the solid-fill rule (constant colour) over the
+ * image rule; see engine2d_blend_u32. */
+static void engine2d_blend_boxed(int64_t* dst, const int64_t* src, int64_t n,
+                                 uint32_t const_src, int use_const, int solid) {
+    engine2d_blend_lanes(dst, dst, src, n, const_src, use_const, solid, 3, 0u);
 }
-#endif
-
-#if SIMD_HAS_SSE2
-static void engine2d_blend_boxed_sse2(int64_t* dst, const int64_t* src,
-                                      int64_t n, uint32_t const_src,
-                                      int use_const) {
-    int64_t i = 0;
-    if (n >= 4) engine2d_record_simd_row_hit();
-    for (; i + 4 <= n; i += 4) {
-        uint32_t s[4], d[4];
-        int opaque_dst = 1;
-        for (int lane = 0; lane < 4; lane++) {
-            s[lane] = use_const ? const_src : engine2d_unbox_pixel(src[i + lane]);
-            d[lane] = engine2d_unbox_pixel(dst[i + lane]);
-            opaque_dst &= ((d[lane] >> 24) == 255u);
-        }
-        if (!opaque_dst) {
-            for (int lane = 0; lane < 4; lane++) {
-                dst[i + lane] = engine2d_box_pixel((uint32_t)
-                    engine2d_blend_pixel((int64_t)(uint64_t)s[lane],
-                                         (int64_t)(uint64_t)d[lane]));
-            }
-            continue;
-        }
-        __m128i sv = _mm_set_epi32((int)s[3], (int)s[2],
-                                   (int)s[1], (int)s[0]);
-        __m128i dv = _mm_set_epi32((int)d[3], (int)d[2],
-                                   (int)d[1], (int)d[0]);
-        const __m128i zero = _mm_setzero_si128();
-        const __m128i one = _mm_set1_epi16(1);
-        const __m128i alpha_mask = _mm_set_epi16(
-            255, 0, 0, 0, 255, 0, 0, 0);
-        __m128i packed_halves[2];
-        for (int half = 0; half < 2; half++) {
-            int lane0 = half * 2;
-            uint16_t sa0 = (uint16_t)(s[lane0] >> 24);
-            uint16_t sa1 = (uint16_t)(s[lane0 + 1] >> 24);
-            __m128i sch = half == 0 ? _mm_unpacklo_epi8(sv, zero) :
-                                       _mm_unpackhi_epi8(sv, zero);
-            __m128i dch = half == 0 ? _mm_unpacklo_epi8(dv, zero) :
-                                       _mm_unpackhi_epi8(dv, zero);
-            __m128i saw = _mm_set_epi16(sa1, sa1, sa1, sa1,
-                                        sa0, sa0, sa0, sa0);
-            __m128i invw = _mm_set_epi16(255 - sa1, 255 - sa1,
-                                         255 - sa1, 255 - sa1,
-                                         255 - sa0, 255 - sa0,
-                                         255 - sa0, 255 - sa0);
-            __m128i acc = _mm_add_epi16(_mm_mullo_epi16(sch, saw),
-                                        _mm_mullo_epi16(dch, invw));
-            __m128i q = _mm_srli_epi16(
-                _mm_add_epi16(_mm_add_epi16(acc, one),
-                              _mm_srli_epi16(acc, 8)), 8);
-            q = _mm_or_si128(q, alpha_mask);
-            packed_halves[half] = _mm_slli_epi64(
-                _mm_unpacklo_epi32(_mm_packus_epi16(q, zero), zero), 3);
-        }
-        _mm_storeu_si128((__m128i*)(void*)(dst + i), packed_halves[0]);
-        _mm_storeu_si128((__m128i*)(void*)(dst + i + 2), packed_halves[1]);
-    }
-    for (; i < n; i++) {
-        uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);
-        uint32_t d = engine2d_unbox_pixel(dst[i]);
-        dst[i] = engine2d_box_pixel(engine2d_blend_sse2_pixel(s, d));
-    }
-}
-#endif
-
-#if defined(__aarch64__) || defined(_M_ARM64)
-static void engine2d_blend_boxed_neon(int64_t* dst, const int64_t* src,
-                                      int64_t n, uint32_t const_src,
-                                      int use_const) {
-    int64_t i = 0;
-    if (n >= 4) engine2d_record_simd_row_hit();
-    for (; i + 4 <= n; i += 4) {
-        uint32_t s[4], d[4];
-        int opaque_dst = 1;
-        for (int lane = 0; lane < 4; lane++) {
-            s[lane] = use_const ? const_src : engine2d_unbox_pixel(src[i + lane]);
-            d[lane] = engine2d_unbox_pixel(dst[i + lane]);
-            opaque_dst &= ((d[lane] >> 24) == 255u);
-        }
-        if (!opaque_dst) {
-            for (int lane = 0; lane < 4; lane++) {
-                dst[i + lane] = engine2d_box_pixel((uint32_t)
-                    engine2d_blend_pixel((int64_t)(uint64_t)s[lane],
-                                         (int64_t)(uint64_t)d[lane]));
-            }
-            continue;
-        }
-        uint32x4_t sv = vld1q_u32(s);
-        uint32x4_t dv = vld1q_u32(d);
-        uint32x4_t mask = vdupq_n_u32(255u);
-        uint32x4_t sa = vshrq_n_u32(sv, 24);
-        uint32x4_t inv = vsubq_u32(mask, sa);
-#define ENGINE2D_BLEND_CHANNEL_NEON(shift) \
-        vmlaq_u32(vmulq_u32(vandq_u32(vshrq_n_u32(sv, shift), mask), sa), \
-                   vandq_u32(vshrq_n_u32(dv, shift), mask), inv)
-        uint32x4_t racc = ENGINE2D_BLEND_CHANNEL_NEON(16);
-        uint32x4_t gacc = ENGINE2D_BLEND_CHANNEL_NEON(8);
-        /* ARM's immediate right-shift intrinsic rejects a zero count.  Blue is
-         * already in the low byte, so mask it directly instead of expressing
-         * the identity operation as vshrq_n_u32(..., 0). */
-        uint32x4_t bacc = vmlaq_u32(
-            vmulq_u32(vandq_u32(sv, mask), sa),
-            vandq_u32(dv, mask), inv);
-#undef ENGINE2D_BLEND_CHANNEL_NEON
-        if (use_const) {
-            uint32_t rv[4], gv[4], bv[4];
-            vst1q_u32(rv, racc);
-            vst1q_u32(gv, gacc);
-            vst1q_u32(bv, bacc);
-            for (int lane = 0; lane < 4; lane++) {
-                uint32_t alpha = s[lane] >> 24;
-                uint32_t scalar_out = alpha == 255u ? s[lane] :
-                    (alpha == 0u ? d[lane] :
-                     (0xff000000u | ((rv[lane] / 255u) << 16) |
-                      ((gv[lane] / 255u) << 8) | (bv[lane] / 255u)));
-                dst[i + lane] = engine2d_box_pixel(scalar_out);
-            }
-            continue;
-        }
-#define ENGINE2D_DIV255_NEON(value) \
-        vshrq_n_u32(vaddq_u32(vaddq_u32((value), vdupq_n_u32(1u)), \
-                              vshrq_n_u32((value), 8)), 8)
-        uint32x4_t rv = ENGINE2D_DIV255_NEON(racc);
-        uint32x4_t gv = ENGINE2D_DIV255_NEON(gacc);
-        uint32x4_t bv = ENGINE2D_DIV255_NEON(bacc);
-#undef ENGINE2D_DIV255_NEON
-        uint32x4_t out = vorrq_u32(
-            vorrq_u32(vshlq_n_u32(rv, 16), vshlq_n_u32(gv, 8)),
-            vorrq_u32(bv, vdupq_n_u32(0xff000000u)));
-        uint64x2_t boxed_lo = vshlq_n_u64(vmovl_u32(vget_low_u32(out)), 3);
-        uint64x2_t boxed_hi = vshlq_n_u64(vmovl_u32(vget_high_u32(out)), 3);
-        vst1q_u64((uint64_t*)(void*)(dst + i), boxed_lo);
-        vst1q_u64((uint64_t*)(void*)(dst + i + 2), boxed_hi);
-    }
-    for (; i < n; i++) {
-        uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);
-        uint32_t d = engine2d_unbox_pixel(dst[i]);
-        dst[i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel(
-            (int64_t)(uint64_t)s, (int64_t)(uint64_t)d));
-    }
-}
-#endif
-
-#if defined(__riscv) && defined(__riscv_vector)
-static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
-                                     int64_t n) {
-    int64_t i = 0;
-    if (n > 0) engine2d_record_simd_row_hit();
-    while (i < n) {
-        size_t request = (size_t)(n - i);
-        if (request > 64) request = 64;
-        size_t vl = __riscv_vsetvl_e32m1(request);
-        int opaque_dst = 1;
-        for (size_t lane = 0; lane < vl; lane++) {
-            uint32_t d_word = engine2d_unbox_pixel(
-                dst[i + (int64_t)lane]);
-            opaque_dst &= ((d_word >> 24) == 255u);
-        }
-        if (!opaque_dst) {
-            for (size_t lane = 0; lane < vl; lane++) {
-                uint32_t s_word = engine2d_unbox_pixel(
-                    src[i + (int64_t)lane]);
-                uint32_t d_word = engine2d_unbox_pixel(
-                    dst[i + (int64_t)lane]);
-                dst[i + (int64_t)lane] = engine2d_box_pixel((uint32_t)
-                    engine2d_blend_pixel(
-                        (int64_t)(uint64_t)s_word,
-                        (int64_t)(uint64_t)d_word));
-            }
-            i += (int64_t)vl;
-            continue;
-        }
-        vuint64m2_t d_boxed = __riscv_vle64_v_u64m2(
-            (const uint64_t*)(const void*)(dst + i), vl);
-        vuint64m2_t s_boxed = __riscv_vle64_v_u64m2(
-            (const uint64_t*)(const void*)(src + i), vl);
-        vuint32m1_t sv = __riscv_vnsrl_wx_u32m1(
-            __riscv_vsrl_vx_u64m2(s_boxed, 3, vl), 0, vl);
-        vuint32m1_t dv = __riscv_vnsrl_wx_u32m1(
-            __riscv_vsrl_vx_u64m2(d_boxed, 3, vl), 0, vl);
-        vuint32m1_t sav = __riscv_vand_vx_u32m1(
-            __riscv_vsrl_vx_u32m1(sv, 24, vl), 255u, vl);
-        vuint32m1_t inv = __riscv_vrsub_vx_u32m1(sav, 255u, vl);
-#define ENGINE2D_BLEND_CHANNEL_RVV(shift) \
-            __riscv_vadd_vv_u32m1( \
-                __riscv_vmul_vv_u32m1( \
-                    __riscv_vand_vx_u32m1( \
-                        __riscv_vsrl_vx_u32m1(sv, shift, vl), 255u, vl), \
-                    sav, vl), \
-                __riscv_vmul_vv_u32m1( \
-                    __riscv_vand_vx_u32m1( \
-                        __riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
-                    inv, vl), vl)
-        vuint32m1_t rv = ENGINE2D_BLEND_CHANNEL_RVV(16);
-        vuint32m1_t gv = ENGINE2D_BLEND_CHANNEL_RVV(8);
-        vuint32m1_t bv = ENGINE2D_BLEND_CHANNEL_RVV(0);
-#undef ENGINE2D_BLEND_CHANNEL_RVV
-#define ENGINE2D_DIV255_RVV(value) \
-        __riscv_vsrl_vx_u32m1( \
-            __riscv_vadd_vv_u32m1( \
-                __riscv_vadd_vx_u32m1(value, 1u, vl), \
-                __riscv_vsrl_vx_u32m1(value, 8, vl), vl), 8, vl)
-        rv = ENGINE2D_DIV255_RVV(rv);
-        gv = ENGINE2D_DIV255_RVV(gv);
-        bv = ENGINE2D_DIV255_RVV(bv);
-#undef ENGINE2D_DIV255_RVV
-        vuint32m1_t out = __riscv_vor_vx_u32m1(
-            __riscv_vor_vv_u32m1(
-                __riscv_vsll_vx_u32m1(rv, 16, vl),
-                __riscv_vsll_vx_u32m1(gv, 8, vl), vl),
-            0xff000000u, vl);
-        out = __riscv_vor_vv_u32m1(out, bv, vl);
-        __riscv_vse64_v_u64m2(
-            (uint64_t*)(void*)(dst + i),
-            __riscv_vsll_vx_u64m2(
-                __riscv_vzext_vf2_u64m2(out, vl), 3, vl), vl);
-        i += (int64_t)vl;
-    }
-}
-
-static void engine2d_blend_const_boxed_rvv(int64_t* dst, int64_t n,
-                                           uint32_t const_src) {
-    uint32_t sa = const_src >> 24;
-    uint32_t inv = 255u - sa;
-    uint32_t sr = ((const_src >> 16) & 255u) * sa;
-    uint32_t sg = ((const_src >> 8) & 255u) * sa;
-    uint32_t sb = (const_src & 255u) * sa;
-    int64_t i = 0;
-    if (n > 0) engine2d_record_simd_row_hit();
-    while (i < n) {
-        size_t request = (size_t)(n - i);
-        if (request > 64) request = 64;
-        size_t vl = __riscv_vsetvl_e32m1(request);
-        int opaque_dst = 1;
-        for (size_t lane = 0; lane < vl; lane++) {
-            uint32_t d = engine2d_unbox_pixel(dst[i + (int64_t)lane]);
-            opaque_dst &= ((d >> 24) == 255u);
-        }
-        if (!opaque_dst) {
-            for (size_t lane = 0; lane < vl; lane++) {
-                uint32_t d = engine2d_unbox_pixel(dst[i + (int64_t)lane]);
-                dst[i + (int64_t)lane] = engine2d_box_pixel((uint32_t)
-                    engine2d_blend_pixel((int64_t)(uint64_t)const_src,
-                                         (int64_t)(uint64_t)d));
-            }
-            i += (int64_t)vl;
-            continue;
-        }
-        vuint64m2_t d_boxed = __riscv_vle64_v_u64m2(
-            (const uint64_t*)(const void*)(dst + i), vl);
-        vuint32m1_t dv = __riscv_vnsrl_wx_u32m1(
-            __riscv_vsrl_vx_u64m2(d_boxed, 3, vl), 0, vl);
-#define ENGINE2D_BLEND_CONST_RVV(shift, source_term) \
-        __riscv_vadd_vx_u32m1( \
-            __riscv_vmul_vx_u32m1( \
-                __riscv_vand_vx_u32m1( \
-                    __riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
-                inv, vl), source_term, vl)
-        vuint32m1_t rv = ENGINE2D_BLEND_CONST_RVV(16, sr);
-        vuint32m1_t gv = ENGINE2D_BLEND_CONST_RVV(8, sg);
-        vuint32m1_t bv = ENGINE2D_BLEND_CONST_RVV(0, sb);
-#undef ENGINE2D_BLEND_CONST_RVV
-#define ENGINE2D_DIV255_CONST_RVV(value) \
-        __riscv_vsrl_vx_u32m1( \
-            __riscv_vadd_vv_u32m1( \
-                __riscv_vadd_vx_u32m1(value, 1u, vl), \
-                __riscv_vsrl_vx_u32m1(value, 8, vl), vl), 8, vl)
-        rv = ENGINE2D_DIV255_CONST_RVV(rv);
-        gv = ENGINE2D_DIV255_CONST_RVV(gv);
-        bv = ENGINE2D_DIV255_CONST_RVV(bv);
-#undef ENGINE2D_DIV255_CONST_RVV
-        vuint32m1_t out = __riscv_vor_vx_u32m1(
-            __riscv_vor_vv_u32m1(
-                __riscv_vsll_vx_u32m1(rv, 16, vl),
-                __riscv_vsll_vx_u32m1(gv, 8, vl), vl),
-            0xff000000u, vl);
-        out = __riscv_vor_vv_u32m1(out, bv, vl);
-        __riscv_vse64_v_u64m2(
-            (uint64_t*)(void*)(dst + i),
-            __riscv_vsll_vx_u64m2(
-                __riscv_vzext_vf2_u64m2(out, vl), 3, vl), vl);
-        i += (int64_t)vl;
-    }
-}
-#endif
 
 /* Blend src[src_off..src_off+n) over dst[dst_off..dst_off+n) in place,
- * straight-alpha src-over (oracle_src_over). No malloc — matches
+ * image-rule src-over (engine2d_blend_u32). No malloc — matches
  * fill_span/copy_span's in-place convention, not blend_row's
  * malloc-two-scratch-buffers convention. */
 SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
@@ -2161,64 +1972,21 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
     if (!dst_data || !src_data) return dst;
     int backwards = (dst_data == src_data && d_off > s_off &&
                      d_off - s_off < n);
-#if SIMD_CAN_AVX2
     if (!backwards) {
-        if (simd_detect_avx2()) {
-            engine2d_blend_boxed_avx2(dst_data + d_off, src_data + s_off,
-                                      n, 0u, 0);
-        } else {
-            engine2d_blend_boxed_sse2(dst_data + d_off, src_data + s_off,
-                                      n, 0u, 0);
-        }
+        engine2d_blend_boxed(dst_data + d_off, src_data + s_off, n, 0u, 0, 0);
         return dst;
     }
-#elif SIMD_HAS_SSE2
-    if (!backwards) {
-        engine2d_blend_boxed_sse2(dst_data + d_off, src_data + s_off,
-                                  n, 0u, 0);
-        return dst;
-    }
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    if (!backwards) {
-        engine2d_blend_boxed_neon(dst_data + d_off, src_data + s_off,
-                                  n, 0u, 0);
-        return dst;
-    }
-#elif defined(__riscv) && defined(__riscv_vector)
-    if (!backwards) {
-        engine2d_blend_boxed_rvv(dst_data + d_off, src_data + s_off, n);
-        return dst;
-    }
-#endif
     for (int64_t step = 0; step < n; step++) {
-        int64_t i = backwards ? n - 1 - step : step;
+        int64_t i = n - 1 - step;
         uint32_t s = engine2d_unbox_pixel(src_data[s_off + i]);
         uint32_t d = engine2d_unbox_pixel(dst_data[d_off + i]);
-        uint32_t sa = s >> 24;
-        uint32_t out;
-        if (sa == 255u) {
-            out = s;
-        } else if (sa == 0u) {
-            out = d;
-        } else if ((d >> 24) == 255u) {
-            uint32_t inv = 255u - sa;
-            uint32_t r = ((((s >> 16) & 255u) * sa) +
-                          (((d >> 16) & 255u) * inv)) / 255u;
-            uint32_t g = ((((s >> 8) & 255u) * sa) +
-                          (((d >> 8) & 255u) * inv)) / 255u;
-            uint32_t b = (((s & 255u) * sa) + ((d & 255u) * inv)) / 255u;
-            out = 0xff000000u | (r << 16) | (g << 8) | b;
-        } else {
-            out = (uint32_t)engine2d_blend_pixel(
-                (int64_t)(uint64_t)s, (int64_t)(uint64_t)d);
-        }
-        dst_data[d_off + i] = engine2d_box_pixel(out);
+        dst_data[d_off + i] = engine2d_box_pixel(engine2d_blend_u32(s, d, 0));
     }
     return dst;
 }
 
 /* Blend one constant colour over dst[offset..offset+count) in place,
- * straight-alpha src-over (oracle_src_over_const). No src array, no malloc. */
+ * solid-fill-rule src-over (engine2d_blend_u32). No src array, no malloc. */
 SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
                                                 int64_t count, int64_t const_color) {
     int64_t off = 0, n = 0;
@@ -2232,42 +2000,7 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
         engine2d_fill_into(dst_data + off, n, engine2d_box_pixel(s));
         return dst;
     }
-#if SIMD_CAN_AVX2
-    if (simd_detect_avx2()) {
-        engine2d_blend_boxed_avx2(dst_data + off, NULL, n, s, 1);
-    } else {
-        engine2d_blend_boxed_sse2(dst_data + off, NULL, n, s, 1);
-    }
-    return dst;
-#elif SIMD_HAS_SSE2
-    engine2d_blend_boxed_sse2(dst_data + off, NULL, n, s, 1);
-    return dst;
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    engine2d_blend_boxed_neon(dst_data + off, NULL, n, s, 1);
-    return dst;
-#elif defined(__riscv) && defined(__riscv_vector)
-    engine2d_blend_const_boxed_rvv(dst_data + off, n, s);
-    return dst;
-#endif
-    uint32_t inv = 255u - sa;
-    uint32_t sr_sa = ((s >> 16) & 255u) * sa;
-    uint32_t sg_sa = ((s >> 8) & 255u) * sa;
-    uint32_t sb_sa = (s & 255u) * sa;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t d = engine2d_unbox_pixel(dst_data[off + i]);
-        uint32_t da = d >> 24;
-        if (da == 255u) {
-            uint32_t r = (sr_sa + (((d >> 16) & 255u) * inv)) / 255u;
-            uint32_t g = (sg_sa + (((d >> 8) & 255u) * inv)) / 255u;
-            uint32_t b = (sb_sa + ((d & 255u) * inv)) / 255u;
-            dst_data[off + i] = engine2d_box_pixel(
-                0xff000000u | (r << 16) | (g << 8) | b);
-        } else {
-            dst_data[off + i] = engine2d_box_pixel((uint32_t)
-                engine2d_blend_pixel((int64_t)(uint64_t)s,
-                                     (int64_t)(uint64_t)d));
-        }
-    }
+    engine2d_blend_boxed(dst_data + off, NULL, n, s, 1, 1);
     return dst;
 }
 
@@ -2280,14 +2013,9 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
  * bit-identical to `blend_opacity` in
  * src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl.
  *
- * This is NOT rt_engine2d_simd_blend_const_span_u32. That one is straight-alpha
- * src-over (/255, +128, alpha from the colour); this one blends by an integer
- * PERCENT (/100, +50). Substituting one for the other shifts every rendered
- * pixel, which is why a separate kernel exists rather than a reused one.
- *
- * The loop is written plainly so the compiler can auto-vectorize it; on x86-64
- * the Rust twin additionally re-emits it under `avx512bw` and LLVM issues ZMM
- * code for it (33 zmm instructions, verified with llvm-objdump).
+ * The colour is opaque; the percent becomes Chrome's 8-bit paint alpha
+ * round(pct*255/100), then the solid-fill rule of engine2d_blend_u32 over an
+ * opaque destination (output alpha 255, as before).
  * ------------------------------------------------------------------------- */
 SplArray* rt_engine2d_blend_const_span_pct_u32(SplArray* dst, int64_t offset,
                                                int64_t count, int64_t color,
@@ -2304,22 +2032,10 @@ SplArray* rt_engine2d_blend_const_span_pct_u32(SplArray* dst, int64_t offset,
     }
     if (opacity_pct <= 0) return dst;
 
-    int32_t pct = (int32_t)opacity_pct;
-    int32_t inv = 100 - pct;
-    int32_t sr = (int32_t)((s >> 16) & 255u);
-    int32_t sg = (int32_t)((s >> 8) & 255u);
-    int32_t sb = (int32_t)(s & 255u);
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t d = engine2d_unbox_pixel(dst_data[off + i]);
-        int32_t dr = (int32_t)((d >> 16) & 255u);
-        int32_t dg = (int32_t)((d >> 8) & 255u);
-        int32_t db = (int32_t)(d & 255u);
-        int32_t r = (sr * pct + dr * inv + 50) / 100;
-        int32_t g = (sg * pct + dg * inv + 50) / 100;
-        int32_t b = (sb * pct + db * inv + 50) / 100;
-        dst_data[off + i] = engine2d_box_pixel(
-            0xff000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b);
-    }
+    uint32_t a = ((uint32_t)opacity_pct * 255u + 50u) / 100u;
+    uint32_t src = (a << 24) | (s & 0x00FFFFFFu);
+    engine2d_blend_lanes(dst_data + off, dst_data + off, NULL, n, src, 1, 1, 3,
+                         0xFF000000u);
     return dst;
 }
 

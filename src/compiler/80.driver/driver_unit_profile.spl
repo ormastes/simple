@@ -19,6 +19,7 @@ use compiler.common.diagnostics.diagnostic_rule_policy.{
 use std.test_runner.test_runner_config.{resolve_edition_from_sdn}
 use compiler.types.units.unit_ops.{unit_op_robust_profile, unit_op_default_profile, unit_op_take_warnings, unit_op_set_mixed_strict}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.nogc_sync_mut.io.env_ops.{cwd}
 
 val UNIT_PROFILE_RULE: text = "SPL-UNIT-004"
 # Undeclared product/quotient of two different units (owner decision 2026-11-17).
@@ -27,12 +28,48 @@ val UNIT_MIXED_RULE: text = "SPL-UNIT-002"
 # Loaded at most once per process (a missing/malformed file is remembered too).
 var _UNIT_POLICY_LOADED = false
 var _UNIT_POLICY: [DiagnosticPolicySnapshot] = []
+# Fail-closed notices (policy unavailable under an assured profile), drained
+# with the SPL-UNIT-004 warnings.
+var _UNIT_PROFILE_NOTICES: [text] = []
+
+fn _unit_policy_parent(dir: text) -> text:
+    val trimmed = if dir.len() > 1 and dir.ends_with("/"): dir.substring(0, dir.byte_len() - 1) else: dir
+    val slash = trimmed.last_index_of("/") ?? -1
+    if slash < 0:
+        return ""
+    if slash == 0:
+        return "/"
+    trimmed.substring(0, slash)
+
+# Nearest ancestor of start_dir (inclusive) holding the policy file; "" if none.
+# The relative default is cwd-only, so a build run from a subdirectory of the
+# repo used to see no policy at all (Fable #9845).
+pub fn unit_profile_policy_path_from(start_dir: text) -> text:
+    val rel = diagnostic_policy_default_path()
+    var dir = start_dir.replace("\\", "/")
+    while dir != "":
+        val sep = if dir.ends_with("/"): "" else: "/"
+        val candidate = dir + sep + rel
+        if file_exists(candidate):
+            return candidate
+        if dir == "/":
+            return ""
+        val parent = _unit_policy_parent(dir)
+        if parent == dir:
+            return ""
+        dir = parent
+    ""
+
+# Assured profiles that must never silently fall back to warning mode.
+fn _unit_profile_requires_strict(raw_profile: text) -> bool:
+    val mode = normalize_profile_name(raw_profile)
+    mode == "robust" or mode == "critical" or mode == "verified"
 
 pub fn unit_profile_policy() -> DiagnosticPolicySnapshot?:
     if not _UNIT_POLICY_LOADED:
         _UNIT_POLICY_LOADED = true
-        val path = diagnostic_policy_default_path()
-        if file_exists(path):
+        val path = unit_profile_policy_path_from(cwd())
+        if path != "":
             match load_diagnostic_policy_text(file_read(path)):
                 case Ok(snapshot): _UNIT_POLICY.push(snapshot)
                 case Err(_): pass
@@ -49,7 +86,7 @@ pub fn unit_profile_strict_for(policy: DiagnosticPolicySnapshot?, raw_profile: t
 # @allow(primitive_api) yes/no strict-mode predicate mirroring unit_ops' own bool switch; no domain type applies
 pub fn unit_rule_strict_for(policy: DiagnosticPolicySnapshot?, rule: text, raw_profile: text) -> bool:
     match policy:
-        case None: false
+        case None: rule == UNIT_PROFILE_RULE and _unit_profile_requires_strict(raw_profile)
         case Some(snapshot):
             val slot = snapshot.slot_of(rule)
             if slot < 0:
@@ -89,6 +126,8 @@ pub fn unit_profile_apply(raw_profile: text):
 # SPL-UNIT-004 and SPL-UNIT-002 each follow their own policy row.
 pub fn unit_profile_apply_for_sdn(raw_profile: text, sdn_path: text):
     val policy = unit_profile_policy()
+    if not policy.? and _unit_profile_requires_strict(raw_profile):
+        _UNIT_PROFILE_NOTICES.push(diagnostic_policy_default_path() + " not found; profile `" + raw_profile + "` applies SPL-UNIT-004 strictly (fail closed)")
     val edition = resolve_edition_from_sdn(sdn_path)
     if unit_rule_strict_for_edition(policy, UNIT_PROFILE_RULE, raw_profile, edition):
         unit_op_robust_profile()
@@ -100,6 +139,9 @@ pub fn unit_profile_apply_for_sdn(raw_profile: text, sdn_path: text):
 # the message's own SPL-UNIT-00N prefix.
 pub fn unit_profile_drain_diagnostics(module_name: text) -> [text]:
     var out: [text] = []
+    for n in _UNIT_PROFILE_NOTICES:
+        out.push("[unit " + UNIT_PROFILE_RULE + "] " + module_name + ": " + n)
+    _UNIT_PROFILE_NOTICES = []
     for w in unit_op_take_warnings():
         val code = if w.starts_with(UNIT_MIXED_RULE): UNIT_MIXED_RULE else: UNIT_PROFILE_RULE
         out.push("[unit " + code + "] " + module_name + ": " + w)
