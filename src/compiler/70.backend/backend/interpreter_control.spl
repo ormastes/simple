@@ -166,9 +166,34 @@ impl InterpreterBackendImpl:
                     case "is_empty": return Ok(backend_value_bool_v1(s.len() == 0))
                     case "to_text": return Ok(recv)
                     case "trim": return Ok(backend_value_string_v1(s.trim()))
+                    case "byte_len": return Ok(backend_value_int_v1(s.byte_len()))
+                    case "to_upper": return Ok(backend_value_string_v1(s.to_upper()))
+                    case "to_lower": return Ok(backend_value_string_v1(s.to_lower()))
                     case _: ()
+                if a.len() == 2:
+                    match a[0]:
+                        case Value.Int(i0):
+                            match a[1]:
+                                case Value.Int(i1):
+                                    match method_name:
+                                        case "substring": return Ok(backend_value_string_v1(s.substring(i0, i1)))
+                                        case "slice": return Ok(backend_value_string_v1(s.slice(i0, i1)))
+                                        case _: ()
+                                case _: ()
+                        case Value.String(f0):
+                            match a[1]:
+                                case Value.String(f1):
+                                    if method_name == "replace":
+                                        return Ok(backend_value_string_v1(s.replace(f0, f1)))
+                                case _: ()
+                        case _: ()
                 if a.len() == 1:
                     match a[0]:
+                        case Value.Int(n):
+                            match method_name:
+                                case "repeat": return Ok(backend_value_string_v1(s.repeat(n)))
+                                case "substring": return Ok(backend_value_string_v1(s.substring(n, s.len())))
+                                case _: ()
                         case Value.String(t):
                             match method_name:
                                 case "contains": return Ok(backend_value_bool_v1(s.contains(t)))
@@ -185,6 +210,39 @@ impl InterpreterBackendImpl:
                 match method_name:
                     case "len": return Ok(backend_value_int_v1(elements.len()))
                     case "is_empty": return Ok(backend_value_bool_v1(elements.len() == 0))
+                    case "clear":
+                        val emptied: [Value] = []
+                        val cleared = backend_value_array_v1(emptied)
+                        self.write_back(receiver, cleared, ctx, span)?
+                        return Ok(cleared)
+                    case "pop":
+                        if elements.len() == 0:
+                            return Err(BackendError.runtime_error("pop on empty array", Some(span)))
+                        val popped = elements[elements.len() - 1]
+                        self.write_back(receiver, backend_value_array_v1(elements.slice(0, elements.len() - 1)), ctx, span)?
+                        return Ok(popped)
+                    case "reverse":
+                        var rev: [Value] = []
+                        var ri = elements.len() - 1
+                        while ri >= 0:
+                            rev = rev.push(elements[ri])
+                            ri = ri - 1
+                        return Ok(backend_value_array_v1(rev))
+                    case "join":
+                        if a.len() == 1:
+                            match a[0]:
+                                case Value.String(sep):
+                                    var joined = ""
+                                    var ji = 0
+                                    while ji < elements.len():
+                                        if ji > 0:
+                                            joined = joined + sep
+                                        match elements[ji]:
+                                            case Value.String(part): joined = joined + part
+                                            case _: return Err(BackendError.runtime_error("join needs text elements", Some(span)))
+                                        ji = ji + 1
+                                    return Ok(backend_value_string_v1(joined))
+                                case _: ()
                     case "push":
                         if a.len() != 1:
                             return Err(BackendError.runtime_error("push takes one argument", Some(span)))
@@ -229,7 +287,17 @@ impl InterpreterBackendImpl:
             with_self = with_self.push(av)
         if val found = self.call_method_by_key("{recv.type_name()}::{method_name}", with_self, ctx):
             return found
-        Err(BackendError.runtime_error("unresolved method call: {method_name} (receiver kind {recv.type_name()}) at {span.file}:{span.line}:{span.col}", Some(span)))
+        var near = ""
+        var near_n = 0
+        if ctx.has_fn_owner:
+            for nm_ in ctx.fn_owner.values():
+                val nm: HirModule = nm_
+                for nf_ in nm.functions.values():
+                    val nf: HirFunction = nf_
+                    if near_n < 4 and nf.name.ends_with(method_name) and nf.name != method_name:
+                        near = near + " " + nm.name + ":" + nf.name
+                        near_n = near_n + 1
+        Err(BackendError.runtime_error("unresolved method call: {method_name} (receiver kind {recv.type_name()}) at {span.file}:{span.line}:{span.col}; candidates:{near}", Some(span)))
 
     fn write_back(target: HirExpr, value: Value, ctx: EvalContext, span: Span) -> Result<(), BackendError>:
         """Store a mutated value back into the variable a mutating method was called on."""
