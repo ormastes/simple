@@ -100,6 +100,55 @@ fn mismatch_count(want: [u32], got: [u32]) -> i64:
         i = i + 1
     wrong
 
+# Full-frame mask, 8x8 checkerboard: 0 = blocked (helpers_clip.mask_blocks_at),
+# 255 = open. Binary on purpose, so with opaque stops every pixel is either a
+# copy or untouched and the two lanes' composite rules cannot differ.
+fn checker_mask() -> [u8]:
+    var m: [u8] = []
+    var y: i32 = 0
+    while y < FB_H:
+        var x: i32 = 0
+        while x < FB_W:
+            if ((x / 8) + (y / 8)) % 2 == 0:
+                m.push(0u8)
+            else:
+                m.push(255u8)
+            x = x + 1
+        y = y + 1
+    m
+
+# Pixels the mask blocks that nevertheless changed, and pixels that changed at all.
+fn masked_changed_count(mask: [u8], before: [u32], got: [u32]) -> i64:
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < got.len():
+        if mask[i] == 0u8 and got[i] != before[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn changed_count(before: [u32], got: [u32]) -> i64:
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < got.len():
+        if got[i] != before[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+# Oracle restricted to a clip rect: outside it the backdrop must survive.
+fn clip_frame(before: [u32], full: [u32], cx: i32, cy: i32, cw: i32, ch: i32) -> [u32]:
+    var out = before
+    var y: i32 = cy
+    while y < cy + ch:
+        var x: i32 = cx
+        while x < cx + cw:
+            val idx = y.to_i64() * FB_W.to_i64() + x.to_i64()
+            out[idx] = full[idx]
+            x = x + 1
+        y = y + 1
+    out
+
 # ---------------------------------------------------------------------------
 # Chrome 159 pixels at device scale 4, copied from web_device_scale_spec
 # (same capture command, same +-2 tolerance; see that file for provenance).
@@ -284,3 +333,60 @@ describe "CSS gradient layers are evaluated and composited on the Vulkan device"
         expect(mismatch_count(cpu_k4(radial_doc(40, 32, RADIAL_B_BG), 40, 32), vk_k4(radial_doc(40, 32, RADIAL_B_BG), 40, 32))).to_equal(0)
         expect(mismatch_count(cpu_k4(radial_doc(40, 40, RADIAL_C_BG), 40, 40), vk_k4(radial_doc(40, 40, RADIAL_C_BG), 40, 40))).to_equal(0)
         expect(mismatch_count(cpu_k4(radial_doc(40, 24, GSTACK_L2_BG), 40, 24), vk_k4(radial_doc(40, 24, GSTACK_L2_BG), 40, 24))).to_equal(0)
+
+    it "declines a masked layer to the host evaluator and still paints cpu_simd's pixels":
+        # The kernel has no mask input, so `draw_gradient_layer_device` must
+        # return false with a mask set and leave the framebuffer untouched;
+        # the host evaluator + masked image blend then paints the layer.
+        val colors: [u32] = [0xFFFFFFFFu32, 0xFF66CCFFu32, 0xFF005588u32, 0xFF331144u32]
+        val positions: [i32] = [0, 180, 480, 800]
+        val mask = checker_mask()
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_opaque_backdrop(dev)
+        val before = dev.read_pixels()
+        dev.set_mask(mask, FB_W, FB_H)
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        dev.draw_radial_gradient_ellipse(3, 2, 150, 110, 55 * 1024 + 512, 78 * 1024, 120 * 1024 + 3, 90 * 1024 + 700, colors, positions)
+        val dev_after = vulkan_device_gradient_count()
+        val host_after = engine2d_host_gradient_eval_count()
+        dev.clear_mask()
+        val got = dev.read_pixels()
+        dev.shutdown()
+        var cpu = Engine2D.create_with_backend_fast(FB_W, FB_H, "cpu_simd")
+        cpu = paint_opaque_backdrop(cpu)
+        cpu.set_mask(mask, FB_W, FB_H)
+        cpu.draw_radial_gradient_ellipse(3, 2, 150, 110, 55 * 1024 + 512, 78 * 1024, 120 * 1024 + 3, 90 * 1024 + 700, colors, positions)
+        cpu.clear_mask()
+        val want = cpu.read_pixels()
+        cpu.shutdown()
+        expect(dev_after - dev_before).to_equal(0)
+        expect(host_after - host_before).to_equal(1)
+        expect(masked_changed_count(mask, before, got)).to_equal(0)
+        expect(changed_count(before, got)).to_be_greater_than(1000)
+        expect(mismatch_count(want, got)).to_equal(0)
+
+    it "keeps a clipped layer on the device and paints only inside the clip":
+        val colors: [u32] = [0xCCFF0000u32, 0x8000FF00u32, 0x00000000u32, 0xE02040F0u32]
+        val positions: [i32] = [0, 450, 800, 1300]
+        val cx_q: i64 = 70 * 1024 + 300
+        val cy_q: i64 = 50 * 1024 - 77
+        val rx_q: i64 = 60 * 1024 + 77
+        val ry_q: i64 = 35 * 1024
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_opaque_backdrop(dev)
+        val before = dev.read_pixels()
+        dev.set_clip(30, 20, 70, 50)
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        dev.draw_radial_gradient_ellipse(10, 8, 140, 100, cx_q, cy_q, rx_q, ry_q, colors, positions)
+        val dev_after = vulkan_device_gradient_count()
+        val host_after = engine2d_host_gradient_eval_count()
+        dev.clear_clip()
+        val got = dev.read_pixels()
+        dev.shutdown()
+        val grad = radial_gradient_pixels(10, 8, 140, 100, cx_q, cy_q, rx_q, ry_q, colors, positions)
+        val full = expected_frame(before, 10, 8, 140, 100, grad)
+        expect(dev_after - dev_before).to_equal(1)
+        expect(host_after - host_before).to_equal(0)
+        expect(mismatch_count(clip_frame(before, full, 30, 20, 70, 50), got)).to_equal(0)
