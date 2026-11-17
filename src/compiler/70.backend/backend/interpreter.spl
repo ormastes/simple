@@ -246,13 +246,46 @@ impl InterpreterBackendImpl:
         # module): without a binding a NamedVar read fell back to a Function
         # value, so `_aggregate_ledger_paths.len()` in std.spec failed with
         # "unresolved method call: len (receiver kind function)".
+        # Providers come in Dict order, not import order: std.spec's
+        # `val _dir_prevention_armed = _dir_prevention_init()` read
+        # dir_prevention's DIR_PREVENTION_ENV before that module was bound, got
+        # a Function fallback, and every spec died ("env_get requires string
+        # name"). A provider whose initializer fails is retried from the
+        # failing constant after the others bind, until no pass makes progress.
         if has_providers:
+            var pending: [HirModule] = []
+            var pending_from: [i64] = []
             for pm2_ in providers.values():
                 val pm2: HirModule = pm2_
                 if pm2.name != module.name:
+                    pending = pending.push(pm2)
+                    pending_from = pending_from.push(0)
+            var progress = true
+            while pending.len() > 0 and progress:
+                progress = false
+                var next: [HirModule] = []
+                var next_from: [i64] = []
+                var pi = 0
+                while pi < pending.len():
+                    val pm3: HirModule = pending[pi]
+                    val start: i64 = pending_from[pi]
                     # Evaluate in the provider's own scope: its initializers
                     # name the provider's structs and functions.
-                    self.bind_module_constants(pm2, self.module_context(pm2, ctx), ctx)?
+                    val bound: i64 = self.bind_module_constants_from(pm3, self.module_context(pm3, ctx), ctx, start)
+                    if bound < 0:
+                        progress = true
+                    else:
+                        if bound > start:
+                            progress = true
+                        next = next.push(pm3)
+                        next_from = next_from.push(bound)
+                    pi = pi + 1
+                pending = next
+                pending_from = next_from
+            if pending.len() > 0:
+                # No progress: surface the first remaining failure.
+                val stuck: HirModule = pending[0]
+                self.bind_module_constants_at(stuck, self.module_context(stuck, ctx), ctx, pending_from[0])?
         self.bind_module_constants(module, ctx, ctx)?
 
         for fn_ in module.functions.values():
@@ -273,6 +306,30 @@ impl InterpreterBackendImpl:
             val c: HirConst = c_
             val cv: Value = self.eval_expr(c.value, eval_ctx)?
             ctx.env.define_global(c.name, cv)
+        Ok(())
+
+    fn bind_module_constants_from(m: HirModule, eval_ctx: EvalContext, ctx: EvalContext, start: i64) -> i64:
+        """Bind `m`'s constants from index `start`; -1 when all bound, else the
+        index of the first constant whose initializer failed (retry later)."""
+        var idx: i64 = 0
+        for c_ in m.constants.values():
+            if idx >= start:
+                val c: HirConst = c_
+                match self.eval_expr(c.value, eval_ctx):
+                    case Ok(cv): ctx.env.define_global(c.name, cv)
+                    case Err(_): return idx
+            idx = idx + 1
+        -1
+
+    fn bind_module_constants_at(m: HirModule, eval_ctx: EvalContext, ctx: EvalContext, at: i64) -> Result<(), BackendError>:
+        """Re-evaluate constant `at` of `m` to surface its error."""
+        var idx: i64 = 0
+        for c_ in m.constants.values():
+            if idx == at:
+                val c: HirConst = c_
+                val cv: Value = self.eval_expr(c.value, eval_ctx)?
+                ctx.env.define_global(c.name, cv)
+            idx = idx + 1
         Ok(())
 
     fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
@@ -352,6 +409,75 @@ impl InterpreterBackendImpl:
         # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
         backend_value_struct_v1(stype, out)
 
+    fn assign_compound_place(place: HirExpr, op: HirAssignOp?, value: Value, ctx: EvalContext, span: Span) -> Result<(), BackendError>:
+        """Field (`a.f = v`) and index (`xs[i] = v`, `d[k] = v`) targets.
+        Reached after the name match, so it also serves native builds, whose
+        index discriminants never equal the hash("Field") fast path."""
+        match place.kind:
+            case HirExprKind.Field(fbase, ffield, _):
+                val fb: HirExpr = fbase
+                val fname: text = ffield
+                val owner = self.eval_expr(fb, ctx)?
+                match owner:
+                    case Value.Object(objv):
+                        val ov: ObjectValue = objv
+                        var fval = value
+                        if op.?:
+                            val cur = ctx.env.store.get_field(ov.handle, fname)
+                            if cur.is_none():
+                                return Err(BackendError.runtime_error("no such field: {fname}", Some(span)))
+                            fval = self.apply_assign_op(op.unwrap(), cur.unwrap(), value, span)?
+                        ctx.env.store.set_field(ov.handle, fname, fval)
+                        Ok(())
+                    case Value.Struct(stype, sfields):
+                        val sf: Dict<text, Value> = sfields
+                        if not sf.has(fname):
+                            return Err(BackendError.runtime_error("no such field: {fname}", Some(span)))
+                        val fval = if op.?: self.apply_assign_op(op.unwrap(), sf[fname], value, span)? else: value
+                        self.store_place(fb, self.struct_with_field(stype, sf, fname, fval), ctx, span)
+                    case _:
+                        Err(BackendError.not_implemented("field assignment target must be a class instance or struct"))
+            case HirExprKind.Index(ibase, iexpr):
+                val ib: HirExpr = ibase
+                val container = self.eval_expr(ib, ctx)?
+                val key = self.eval_expr(iexpr, ctx)?
+                match container:
+                    case Value.Array(elements):
+                        match key:
+                            case Value.Int(i):
+                                if i < 0 or i >= elements.len():
+                                    return Err(BackendError.runtime_error("index out of bounds: {i}", Some(span)))
+                                val ival = if op.?: self.apply_assign_op(op.unwrap(), elements[i], value, span)? else: value
+                                var updated: [Value] = []
+                                var ei = 0
+                                while ei < elements.len():
+                                    updated = updated.push(if ei == i: ival else: elements[ei])
+                                    ei = ei + 1
+                                self.store_place(ib, backend_value_array_v1(updated), ctx, span)
+                            case _:
+                                Err(BackendError.runtime_error("array index must be an integer", Some(span)))
+                    case Value.Dict(entries):
+                        match key:
+                            case Value.String(k):
+                                val de: Dict<text, Value> = entries
+                                var out: Dict<text, Value> = {}
+                                for dk in de.keys():
+                                    val dkt: text = dk
+                                    out[dkt] = de[dkt]
+                                var dval = value
+                                if op.?:
+                                    if not de.has(k):
+                                        return Err(BackendError.runtime_error("no such key: {k}", Some(span)))
+                                    dval = self.apply_assign_op(op.unwrap(), de[k], value, span)?
+                                out[k] = dval
+                                self.store_place(ib, backend_value_dict_v1(out), ctx, span)
+                            case _:
+                                Err(BackendError.runtime_error("dict key must be text", Some(span)))
+                    case _:
+                        Err(BackendError.not_implemented("index assignment target must be an array or dict"))
+            case _:
+                Err(BackendError.not_implemented("assignment target not implemented at {span.file}:{span.line}:{span.col}"))
+
     fn store_place(place: HirExpr, value: Value, ctx: EvalContext, span: Span) -> Result<(), BackendError>:
         """Write `value` to an assignable place: a variable, or a field of a
         class instance / value-type struct (nested struct fields are rebuilt
@@ -384,7 +510,7 @@ impl InterpreterBackendImpl:
             case _:
                 name = ""
         if name == "":
-            return Err(BackendError.not_implemented("assignment target not implemented"))
+            return self.assign_compound_place(place, nil, value, ctx, span)
         # A `me` method's struct receiver is not copied back to the caller, so
         # a write through `self` would be silently lost: refuse it instead.
         if name == "self":
@@ -483,7 +609,7 @@ impl InterpreterBackendImpl:
                     case _:
                         tgt_name = ""
                 if tgt_name == "":
-                    Err(BackendError.not_implemented("assignment target not implemented"))
+                    self.assign_compound_place(target, op, new_value, ctx, stmt.span)
                 else:
                     if op.?:
                         val old_value = ctx.env.lookup(tgt_name)
