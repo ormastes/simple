@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: pin the pure parts of slang's video input path (frame sampling for
+chat `video_url` parts). Audience: engineers wiring video clients at slang.
+
+## Operator workflow
+I send a chat request with a video part. With SLANG_FFMPEG pointing at an
+ffmpeg, slang samples a few JPEG frames from the video and serves them to a
+model that takes images; with none configured the video stays refused. The live
+end to end run is test/03_system/lib/slang/feature/slang_video_live_spec.spl.
+
+## Compatibility and limitations
+This spec runs no ffmpeg: it covers the mjpeg stream splitter, the frame-count
+default and the not-configured refusal. Frame count is SLANG_VIDEO_FRAMES,
+default 8, clamped to 1..32.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.modality.video_frames.{video_ffmpeg_path, video_frame_count, video_max_bytes, split_mjpeg, sample_frames}
+use std.io_runtime.{env_get}
+
+describe "mjpeg stream splitting":
+    it "splits back-to-back JPEGs on SOI/EOI":
+        step("Two frames, the second holding an FF 00 stuffed byte")
+        val stream: [u8] = [255, 216, 1, 2, 3, 255, 217, 255, 216, 9, 255, 0, 8, 255, 217]
+        val frames = split_mjpeg(stream)
+        expect(frames.len()).to_equal(2)
+        expect(frames[0].len()).to_equal(7)
+        expect(frames[1].len()).to_equal(8)
+        expect(frames[1][0]).to_equal(255)
+        expect(frames[1][1]).to_equal(216)
+
+    it "ignores bytes between frames and drops a truncated last frame":
+        val stream: [u8] = [7, 7, 255, 216, 4, 255, 217, 7, 255, 216, 5, 6]
+        val frames = split_mjpeg(stream)
+        expect(frames.len()).to_equal(1)
+        expect(frames[0].len()).to_equal(5)
+
+    it "yields no frame from a stream without a JPEG":
+        val none: [u8] = [1, 2, 3]
+        expect(split_mjpeg(none).len()).to_equal(0)
+
+describe "video sampling configuration":
+    it "bounds the accepted video at the 10 MiB body limit":
+        expect(video_max_bytes()).to_equal(10485760)
+
+    it "defaults to 8 frames":
+        if (env_get("SLANG_VIDEO_FRAMES") ?? "") == "":
+            expect(video_frame_count()).to_equal(8)
+        else:
+            expect(video_frame_count() >= 1 and video_frame_count() <= 32).to_equal(true)
+
+    it "refuses to sample when no ffmpeg is configured":
+        if video_ffmpeg_path() == "":
+            val blob: [u8] = [0, 0, 0, 24]
+            match sample_frames(blob, 8):
+                Err(reason): expect(reason).to_equal("SLANG_FFMPEG is not set")
+                Ok(_): expect(false).to_equal(true)
+        else:
+            val empty: [u8] = []
+            match sample_frames(empty, 8):
+                Err(reason): expect(reason).to_equal("the video is empty")
+                Ok(_): expect(false).to_equal(true)

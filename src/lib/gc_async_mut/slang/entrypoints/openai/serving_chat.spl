@@ -22,7 +22,10 @@
 #   - no backend built -> 503, naming the library that is absent
 #   - will not fit     -> 503, naming the arithmetic that refused it
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage, ChatRequest, chat_message_media_count, parse_chat_request, openai_error_response, openai_chat_completion_response, openai_chat_completion_response_finish, chat_messages_from_body, chat_messages_parse}
+use std.gc_async_mut.slang.modality.video_frames.{video_ffmpeg_path, video_max_bytes, video_frame_count, sample_frames}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage, ChatPart, ChatRequest, chat_message_media_count, parse_chat_request, openai_error_response, openai_chat_completion_response, openai_chat_completion_response_finish, chat_messages_from_body, chat_messages_parse}
 use std.gc_async_mut.slang.entrypoints.openai.serving_models.{SlangModelEntry, discover_models, find_model}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat_stops, engine_complete_chat_media, engine_media_caps_for, engine_lib_path}
@@ -114,13 +117,42 @@ fn media_refusal(model_id: text, messages: [ChatMessage], projector: text) -> Re
         for part in message.parts:
             if part.kind == "video":
                 video = video + 1
+                media = media + 1
             elif part.kind != "text":
                 media = media + 1
-    if video > 0:
+    # With an ffmpeg configured, a video part that is still here belongs to a
+    # request whose model has no projector; the text-only refusal below says so.
+    if video > 0 and video_ffmpeg_path() == "":
         return Err(_unsupported_modality("video input is not supported by this slang build: slang has no video container decoder of its own and does not run external tools such as ffmpeg/ffprobe; send sampled frames as image_url parts instead"))
     if media > 0 and projector == "":
         return Err(_unsupported_modality("model '" + model_id + "' accepts text only (no multimodal projector next to the model); the request carries " + media.to_text() + " image/audio part(s) and slang will not answer it as if they were absent"))
     Ok(())
+
+# Replaces every video part by its sampled JPEG frames, as image parts at the
+# video's place in the message (design §4), so the image path serves them.
+# Err is the response to send: 413 for a video over the size bound, 503 when
+# SLANG_FFMPEG names no file, 400 when the video yields no frame.
+fn expand_video_parts(messages: [ChatMessage]) -> Result<[ChatMessage], ApiResponse>:
+    var expanded: [ChatMessage] = []
+    for message in messages:
+        var parts: [ChatPart] = []
+        for part in message.parts:
+            if part.kind != "video":
+                parts.push(part)
+            else:
+                val blob = base64_decode_bytes(part.data)
+                if blob.len() > video_max_bytes():
+                    return Err(openai_error_response(413, "video is " + blob.len().to_text() + " bytes; slang takes at most " + video_max_bytes().to_text() + " bytes of video per part", "invalid_request_error", "request_too_large", ""))
+                if not file_exists(video_ffmpeg_path()):
+                    return Err(openai_error_response(503, "SLANG_FFMPEG is set to '" + video_ffmpeg_path() + "', which is not a file; video sampling is unavailable", "server_error", "video_decoder_unavailable", ""))
+                match sample_frames(blob, video_frame_count()):
+                    Err(reason):
+                        return Err(openai_error_response(400, "video could not be sampled: " + reason, "invalid_request_error", "invalid_media", ""))
+                    Ok(frames):
+                        for frame in frames:
+                            parts.push(ChatPart(kind: "image", text: "", data: base64_encode_bytes(frame), format: "jpeg"))
+        expanded.push(ChatMessage(role: message.role, content: message.content, parts: parts))
+    Ok(expanded)
 
 fn media_part_count(messages: [ChatMessage]) -> i64:
     var n = 0
@@ -210,11 +242,20 @@ fn chat_prepare(model_root: text, body: text) -> Result<ChatPlan, ApiResponse>:
                     found = m
             if found == nil:
                 return Err(model_not_found_response(request.model))
-            match media_refusal(request.model, messages, found!.mmproj_path):
+            var served = messages
+            var served_frames = framed
+            if found!.mmproj_path != "" and video_ffmpeg_path() != "":
+                match expand_video_parts(messages):
+                    Err(refusal):
+                        return Err(refusal)
+                    Ok(expanded):
+                        served = expanded
+                        served_frames = chat_frames_from_messages(expanded)
+            match media_refusal(request.model, served, found!.mmproj_path):
                 Err(refusal):
                     return Err(refusal)
                 Ok(_): ()
-            Ok(ChatPlan(request: request, messages: messages, framed: framed, model: found!))
+            Ok(ChatPlan(request: request, messages: served, framed: served_frames, model: found!))
 
 fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
     match parse_chat_request(body):

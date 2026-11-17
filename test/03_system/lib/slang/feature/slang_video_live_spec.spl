@@ -1,0 +1,93 @@
+"""
+## Purpose and audience
+Purpose: prove chat `video_url` works end to end on SmolVLM2-256M-Video through
+frame sampling. Audience: engineers verifying slang video input.
+
+## Operator workflow
+I set SLANG_FFMPEG to an ffmpeg.exe, send an mp4 as a `video_url` part and get
+an answer that describes what the video shows. A video over 10 MiB is a 413.
+
+## Compatibility and limitations
+Runs when SLANG_LIVE=1, SLANG_MODEL_ROOT, SLANG_FFMPEG and an mtmd shim
+(SLANG_GGML_LIB) are present. The mp4 is made at run time by ffmpeg from
+llama.cpp's mtmd/test-1.jpeg (a newspaper front page). Timings are appended to
+build/probe/video_answers.txt.
+"""
+
+use std.spec.{describe, it, expect, step, skip}
+use std.gc_async_mut.slang.entrypoints.llm.{engine_backend_available}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{serve_chat_completions}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
+use std.gc_async_mut.slang.modality.video_frames.{video_ffmpeg_path}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+use std.common.text_bytes.{bytes_to_text}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded_bytes}
+use std.io_runtime.{env_get, is_dir, file_exists, file_read_bytes, file_append_text, dir_create_all, time_now_monotonic_ms}
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _live() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and engine_backend_available() and file_exists(video_ffmpeg_path()) and is_dir(_model_root() + "/SmolVLM2-256M-Video-Instruct-GGUF")
+
+fn _record(line: text):
+    dir_create_all("build/probe")
+    file_append_text("build/probe/video_answers.txt", line + "\n")
+
+fn _image() -> text:
+    val configured = env_get("SLANG_MM_ASSET_DIR") ?? ""
+    val dir = if configured != "": configured else: "C:/dev/tools/llama.cpp/tools/mtmd"
+    dir + "/test-1.jpeg"
+
+# A 4 s, 2 fps mp4 of the newspaper image with a slow zoom, so frames differ.
+fn _make_mp4(out: text) -> bool:
+    val args = ["-v", "error", "-y", "-loop", "1", "-i", _image(), "-t", "4", "-r", "2", "-vf", "scale=640:-2,zoompan=z='1+0.002*on':d=1:s=640x480", "-pix_fmt", "yuv420p", out]
+    val run = process_run_bounded_bytes(video_ffmpeg_path(), args, 120000, 1048576)
+    _record("make mp4: exit " + run.2.to_text() + " " + bytes_to_text(run.1).trim())
+    run.2 == 0 and file_exists(out)
+
+fn _body(parts: text) -> text:
+    "{\"model\":\"SmolVLM2-256M-Video-Instruct-GGUF\",\"max_tokens\":80,\"messages\":[{\"role\":\"user\",\"content\":[" + parts + "]}]}"
+
+fn _video_part(b64: text) -> text:
+    "{\"type\":\"video_url\",\"video_url\":{\"url\":\"data:video/mp4;base64," + b64 + "\"}}}}"
+
+fn _text_part(t: text) -> text:
+    "{\"type\":\"text\",\"text\":\"" + t + "\"}"
+
+describe "slang answers from a video":
+    it "describes the content of an mp4 through video_url":
+        if not _live():
+            _record("SKIPPED: describes mp4 -- needs SLANG_LIVE=1, SLANG_MODEL_ROOT, SLANG_FFMPEG, mtmd shim, SmolVLM2")
+            skip("describes the content of an mp4 through video_url", "needs live env")
+            return
+        step("Make a short mp4 from the test image with ffmpeg")
+        dir_create_all("build/probe")
+        val mp4 = "build/probe/l7_test.mp4"
+        expect(_make_mp4(mp4)).to_equal(true)
+        val b64 = base64_encode_bytes(file_read_bytes(mp4))
+        step("Send it as a video_url part")
+        val t0 = time_now_monotonic_ms()
+        val response = serve_chat_completions(_model_root(), _body(_video_part(b64) + "," + _text_part("Describe this video in one sentence.")))
+        val total = time_now_monotonic_ms() - t0
+        val answer = json_string_field(response.body, "content")
+        _record("VIDEO-ANSWER total_ms=" + total.to_text() + " mp4_bytes=" + file_read_bytes(mp4).len().to_text() + " status=" + response.status.to_text() + " answer=" + answer + " body=" + response.body)
+        expect(response.status).to_equal(200)
+        expect(answer.trim() != "").to_equal(true)
+
+    it "answers 413 for a video over 10 MiB before running ffmpeg":
+        if not _live():
+            _record("SKIPPED: 413 -- needs live env")
+            skip("answers 413 for a video over 10 MiB before running ffmpeg", "needs live env")
+            return
+        var big: [u8] = []
+        var i = 0
+        while i < 10485761:
+            big.push(0)
+            i = i + 1
+        val response = serve_chat_completions(_model_root(), _body(_video_part(base64_encode_bytes(big))))
+        expect(response.status).to_equal(413)
+        expect(json_string_field(response.body, "code")).to_equal("request_too_large")
