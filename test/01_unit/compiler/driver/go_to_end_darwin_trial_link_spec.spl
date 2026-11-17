@@ -1,0 +1,43 @@
+"""
+# go-to-end trial link: Darwin Apple ld adaptation & undefined symbol parsing
+
+Pure unit coverage for macOS/Darwin trial-link flag filtering (no GNU/lld-only
+`--error-limit=0` / `--no-gc-sections` flags on Apple ld) and Mach-O
+`", referenced from:"` undefined symbol parsing.
+"""
+
+use std.spec.*
+use compiler.driver.driver_build.go_to_end_trial_link_v1.*
+
+val DARWIN_LD_UNRESOLVED_TEXT_V1 = "Undefined symbols for architecture arm64:\n" +
+    "  \"_lib.common.text.text_len\", referenced from:\n" +
+    "      _app.cli.main in aot-1.o\n" +
+    "  \"___simple_main_app_main\", referenced from:\n" +
+    "      _main in entry.o\n" +
+    "ld: symbol(s) not found for architecture arm64\n"
+
+describe "go-to-end trial link Darwin flag adaptation":
+    it "identifies Darwin/macOS/Apple target triples case-insensitively":
+        expect(go_to_end_target_is_darwin_v1("aarch64-apple-darwin")).to_equal(true)
+        expect(go_to_end_target_is_darwin_v1("x86_64-Apple-Darwin")).to_equal(true)
+        expect(go_to_end_target_is_darwin_v1("macos")).to_equal(true)
+        expect(go_to_end_target_is_darwin_v1("x86_64-unknown-linux-gnu")).to_equal(false)
+        expect(go_to_end_target_is_darwin_v1("x86_64-pc-windows-gnu")).to_equal(false)
+
+    it "drops lld/ELF-only report flags on Darwin and keeps them on Linux":
+        val report_flags = go_to_end_trial_report_flags_v1()
+        expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, "aarch64-apple-darwin")).to_equal([])
+        expect(go_to_end_trial_adapt_extra_flags_v1(report_flags, "x86_64-unknown-linux-gnu")).to_equal(report_flags)
+
+    it "maps unresolved-symbols=ignore-all to Apple ld -Wl,-undefined,dynamic_lookup":
+        val artifact_flags = go_to_end_trial_artifact_flags_v1()
+        expect(go_to_end_trial_adapt_extra_flags_v1(artifact_flags, "aarch64-apple-darwin")).to_equal(["-Wl,-undefined,dynamic_lookup"])
+        expect(go_to_end_trial_adapt_extra_flags_v1(artifact_flags, "x86_64-unknown-linux-gnu")).to_equal(artifact_flags)
+
+describe "go-to-end trial link Apple ld undefined symbol parsing":
+    it "extracts and strips leading Mach-O underscore from referenced-from lines":
+        val syms = go_to_end_link_undefined_symbols_v1(DARWIN_LD_UNRESOLVED_TEXT_V1)
+        expect(syms).to_equal(["lib.common.text.text_len", "__simple_main_app_main"])
+        val mods = go_to_end_symbol_modules_v1(syms, ["lib.common", "lib.common.text", "app.main"])
+        expect(mods).to_equal(["lib.common.text", "app.main"])
+        expect(go_to_end_link_other_errors_v1(DARWIN_LD_UNRESOLVED_TEXT_V1)).to_equal([])
