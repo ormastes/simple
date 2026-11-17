@@ -21,10 +21,17 @@ val UNIT_DEFAULT_ORG: text = "simple-lang"
 var unit_scope_names: [text] = []
 var unit_scope_families: [text] = []
 var unit_scope_ambiguous: [text] = []
+# Library lookup caches live for ONE scope (one file / one interpreter run),
+# not the process: the driver parses each file inside a transient array scope
+# and reclaims every array and text born in it, so a cache filled while
+# parsing file N is freed memory by file N+1. Only these two flags outlive a
+# scope; the arrays are rebuilt on first use after unit_library_cache_drop().
+# doc/08_tracking/bug/unit_scope_cache_freed_by_transient_parse_scope_2026-11-17.md
 var unit_org_dirs: [text] = []
 var unit_org_dirs_loaded: bool = false
 var unit_family_cache_sfx: [text] = []
 var unit_family_cache_fam: [text] = []
+var unit_family_cache_loaded: bool = false
 # Only unit decls registered at or after this index count as declared in scope.
 var unit_scope_decl_base: i64 = 0
 
@@ -32,10 +39,13 @@ pub fn unit_library_set_base(dir: text):
     """Point the library-unit lookup at another root (tests); drops caches."""
     unit_library_root_set(dir)
     module_resolve_cache_reset()
-    unit_org_dirs = []
+    unit_library_cache_drop()
+
+fn unit_library_cache_drop():
+    """Forget the lookup caches without touching the (possibly reclaimed)
+    arrays; the next lookup allocates fresh ones."""
     unit_org_dirs_loaded = false
-    unit_family_cache_sfx = []
-    unit_family_cache_fam = []
+    unit_family_cache_loaded = false
 
 fn unit_library_orgs() -> [text]:
     """Org dir names under the unit library root, listed once per base."""
@@ -55,6 +65,7 @@ pub fn unit_scope_reset_from(decl_base: i64):
     unit_scope_families = []
     unit_scope_ambiguous = []
     unit_scope_decl_base = decl_base
+    unit_library_cache_drop()
 
 pub struct UnitScopeSnapshot:
     names: [text]
@@ -72,6 +83,7 @@ pub fn unit_scope_restore(snap: UnitScopeSnapshot):
     unit_scope_families = snap.families
     unit_scope_ambiguous = snap.ambiguous
     unit_scope_decl_base = snap.decl_base
+    unit_library_cache_drop()
 
 pub fn unit_scope_reset():
     """Interpreter form: the decl registry is not reset between runs, so only
@@ -137,6 +149,10 @@ fn unit_library_families(suffix: text) -> text:
     the unit library root cannot be found (status unknown)."""
     val root = unit_library_root_get()
     if root == "": return "?"
+    if not unit_family_cache_loaded:
+        unit_family_cache_sfx = []
+        unit_family_cache_fam = []
+        unit_family_cache_loaded = true
     var i = 0
     while i < unit_family_cache_sfx.len():
         if unit_family_cache_sfx[i] == suffix: return unit_family_cache_fam[i]

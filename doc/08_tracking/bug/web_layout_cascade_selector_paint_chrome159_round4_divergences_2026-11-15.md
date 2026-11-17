@@ -288,12 +288,11 @@ takes effect can keep the margin inside; `_self_collapses`, `_generates_box`,
 `_is_out_of_flow` in `layout.spl`; a BFC-root box still contains its floats.
 
 Still open:
-- Per-side borders. Chrome: P `border-bottom:5px solid` > C `h10;mt10;mb10`
-  gives P y=10 h25, sibling y=35; `border-top:5px solid` gives P y=0 h25,
-  C y=15, sibling y=35. `border-top`/`border-bottom` shorthands are not parsed
-  and `border-*-width` longhands all write the one `border_width`.
-- Clearance, float avoidance by following content, and the placement of a
-  float/abs box after an empty block are not modelled here.
+- Per-side borders — **fixed 2026-11-17** (`bw-*` rows, next section).
+- Clearance, float placement and BFC float avoidance — **fixed 2026-11-17**
+  (section "Floats and clearance on `_layout_block_node`" below). The
+  placement of a float/abs box after an empty block already matched Chrome
+  (pinned as `ef-*` guards).
 
 Regression sweep (seed `cargo-target-webrender-vk/release/simple`, serial, base `d155cbad528` vs head): the main spec went 41/57 -> 57/57. The 30 specs below gave identical per-spec counts and the same 63 failing test names at base and head, so 0 new failures:
 `test/01_unit/app/ui.chromium/engine_merge_spec.spl`, `test/01_unit/app/ui.chromium/text_metrics_spec.spl`, `test/01_unit/browser_engine/anonymous_block_spec.spl`, `test/01_unit/browser_engine/ifc_linebox_spec.spl`, `test/01_unit/browser_engine/table_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_hit_test_events_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_box_stored_geometry_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_coverage_closure_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_spec.spl`, `test/01_unit/lib/gpu/browser/hit_bounds_halfopen_spec.spl`, `test/01_unit/browser_engine/html_tree_builder_spec.spl`, `test/01_unit/browser_engine/layout_core_block_flex_chrome159_spec.spl`, `test/01_unit/browser_engine/first_child_top_margin_collapse_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_margin_collapse_negative_spec.spl`, `test/01_unit/browser_engine/browser_renderer_spec.spl`, `test/01_unit/browser_engine/browser_renderer_utils_coverage_closure_spec.spl`, `test/01_unit/browser_engine/simple_web_hidden_text_spec.spl`, `test/01_unit/lib/common/web/simple_browser_page_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_smoke_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_ua_defaults_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_web_gap_close_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_software_no_gpu_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_text_node_sibling_paint_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/display_contents_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/float_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_flat_selector_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/dom_color_alpha_normalization_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
@@ -305,3 +304,141 @@ Regression sweep (seed `cargo-target-webrender-vk/release/simple`, serial, base 
 - **Glyph lookup codepoint gate** (`glyph_lookup_codepoint`) — **fixed 2026-11-17.** `glyph_index_for_char`, `glyph_rows_for_char` and `_glyph_charset_index_of` (`src/lib/common/ui/glyph_bitmap_5x7.spl`) gated on `ch.len() == 1` and read `char_code_at(0)`. They now take the single codepoint from `text_codepoints` (rejecting an empty text or more than 4 bytes) and scan `FONT_CHARSET` by `byte_len()`. Measured on the seed `cargo-target-webrender-vk` 2026-11-17: `"•".len()` is 1 and `byte_len()` is 3, so on that seed the old gate already passed; the fix makes the lookup independent of the `len()` unit (owner decision: text slice units are bytes). Pinned by `test/01_unit/browser_engine/glyph_lookup_codepoint_chrome159_spec.spl` (4/4 on base and head on this seed; it is a guard, not a red-to-green row). No Vulkan row: the Vulkan bitmap atlas is ASCII-only. **Still open (not changed):** the Engine2D text walkers `text_render_metrics_to_buf` / `..._scale1` and `text_metrics` (`src/lib/gc_async_mut/gpu/engine2d/helpers_text.spl:52,110,150`) loop `i < text_val.len()` with the codepoint-indexed `char_code_at(i)` and size the run by `len()` cells; under a byte-unit `len()` a 3-byte `•` becomes three cells.
 - **Password disc advance** (`password_mask_advance`) — **fixed 2026-11-17.** Chrome 159 screenshot (60x16 box, 8px Arial, `ABC`): discs ink columns 3..10 with a faint 11, rows 8..9; six discs 3..18 (faint 19); at 13.33px three discs ink 3..16. `measureText('•')` 2.80. The engine stepped each disc by the 5px bitmap cell (ink 4..16). Fix: `input_text_glyph_advance` (`..._paint_raster.spl`) resolves the face's bullet advance at 10x size and rounds (3 at 8px; 13px keeps the cell advance 5), used by the raster walk, the measured width, the caret map and the overlay plan. The Draw IR `_value` command carries `bitmap-glyph-advance` when it differs from the cell, and the Engine2D executor (`_engine2d_draw_ir_bitmap_text`, `engine2d/draw_ir_adv.spl`) steps each codepoint by it, so Engine2D and the Vulkan device readback ink the raster's columns. Engine after the fix: 4..12 on software, Engine2D and lavapipe Vulkan (device pixels equal software). Pinned by `input_password_mask_chrome159_spec` AC-6 and the AC-5 Vulkan row (base 4/6 with the new rows, head 6/6). Residual: the 1-column offset (4 vs 3) is the 5x7 disc cell `01110`, whose ink starts at cell column 1.
 
+### Per-side borders on `_layout_block_node` (2026-11-17)
+
+Chrome for Testing 159.0.8154.6 (`--headless --no-sandbox --window-size=900,2000
+--dump-dom`), each case in a `display:flow-root;width:300px` wrapper W,
+`getBoundingClientRect()` relative to W:
+
+| row | P style (child `h10`, or `h10;mt10;mb10` where a sibling S `h5` follows) | Chrome | base engine |
+|-----|--------------------------------------------|--------|-------------|
+| `bw-bottom` | `border-bottom:5px solid` | P y=10 h=25, S y=35, W h=40 | shorthand ignored — **fixed** |
+| `bw-top` | `border-top:5px solid` | P y=0 h=25, C y=15, S y=35 | **fixed** |
+| `bw-4value` | `width:100px;border-style:solid;border-width:1px 2px 3px 4px` | P 106x14, C x=4 y=1 w=100 | one width — **fixed** |
+| `bw-left-right` | `width:100px;border-left:7px solid;border-right:3px solid` | P y=10 w=110 h=10, C x=7 w=100, S y=30 | **fixed** |
+| `bw-left-right-auto` | `border-left:7px solid;border-right:3px solid` | P w=300, C x=7 w=290 | **fixed** |
+| `bw-border-box` | `box-sizing:border-box;width:100px;height:40px;padding:2px;border-top:5px solid;border-left:6px solid` | P 100x40, C x=8 y=7 w=90 | **fixed** |
+| `bw-border-box-bottom-right` | border-box 100x40, `border-bottom:9px solid;border-right:4px solid` | C x=0 y=0 w=96 | **fixed** |
+| `bw-content-box` | `width:100px;height:40px;border-top:5px solid;border-bottom:2px solid;border-left:6px solid` | P 106x47, C x=6 y=5 w=100 | **fixed** |
+| `bw-no-style` | `border-width:5px` (style stays `none`) | P y=10 h=10, C x=0 w=300, S y=30 | 5px border — **fixed** |
+| `bw-style-only` | `border-style:solid` | P h=16, C x=3 y=3 w=294 (initial `medium` = 3px) | 0 — **fixed** |
+| `bw-order` | `border-width:5px;border-style:solid` and the reverse | both h=20, C x=5 w=290 | passed (guard) |
+| `bw-shorthand-no-width` | `border:solid red` | h=16, C x=3 w=294 | **fixed** |
+| `bw-shorthand-resets-style` | `border-style:solid;border:5px` | h=10, C x=0 w=300 | **fixed** |
+| `bw-side-style-none` | `border:5px solid;border-top-style:none` | h=15, C x=5 y=0 w=290 | **fixed** |
+| `bw-side-width` | `border:2px solid;border-bottom-width:8px` | h=20, C x=2 y=2 w=296 | **fixed** |
+| `bw-style-2value` | `width:100px;border-width:4px;border-style:solid none` | P w=100 h=18, C x=0 y=4 | **fixed** |
+| `bw-hidden` | `border:5px hidden` | h=10, C x=0 | **fixed** |
+| `bw-empty-left` | empty E `border-left:5px solid;mt10;mb10` between A `h10;mb10` and B `h10;mt10` | E h=0, B y=20, W h=30 (left/right borders do not stop self-collapse) | passed (guard) |
+| `bw-empty-top` / `bw-empty-bottom` | same with `border-top` / `border-bottom` | E y=20 h=5, B y=35, W h=45 | **fixed** |
+
+Fix: `StyleProps.border_width`/`border_style` are replaced by specified
+per-side `border_<side>_width` (initial 3px) and `border_<side>_style`
+(initial `none`); the used width is `border_top()` etc. (0 for none/hidden), so
+the result is independent of declaration order. `set_style` parses `border`,
+`border-<side>` (omitted parts reset to medium/none), `border-width` and
+`border-style` (1-4 values) and the per-side longhands. `layout.spl`,
+`layout_core.spl` and `BeLayoutBox` (`border_top/right/bottom/left`) use the
+per-side used widths for content offsets, content-box and border-box sizing;
+the top border blocks top collapse, the bottom border blocks bottom collapse,
+and only top/bottom borders stop self-collapse. `paint_box` keeps the single
+`stroke_rect` for a uniform border and emits one `fill_rect` per side
+otherwise. Spec `test/01_unit/browser_engine/layout_block_node_chrome159_spec.spl`:
+base 59/77 (18 red) -> head 77/77.
+
+Fixture corrections (not assertion changes): `layout_box_content_contract_spec`
+and `ui.chromium/css_spec` declared `border-width` with no `border-style`, which
+Chrome 159 resolves to a 0 width; both fixtures now add `border-style:solid`,
+and their asserted values are unchanged. The `css_spec` row ("accepts the full
+panel property set without losing values") fails on base and head for an
+unrelated reason, so that correction is not yet observed green. The same
+style-less `border-width:1px` was emitted by 10 widget producers in
+`widget_to_dom.spl`; they now also declare `border-style:solid`, keeping their
+1px borders (otherwise those widgets would lose their borders under the
+Chrome rule).
+
+Still open on this path: per-side border COLOURS (`border-<side>` colour tokens
+and `border-<side>-color` are not stored; `paint_box` paints every side with the
+one `border_color`, and only when it is set, so `currentcolor` is not
+modelled), and Chrome's device-pixel snapping of fractional border widths.
+
+
+### Floats and clearance on `_layout_block_node` (2026-11-17)
+
+Chrome for Testing 159 (`chromium-1255`, `--headless --no-sandbox --dump-dom`),
+each case in a `display:flow-root;width:300px` wrapper W, `getBoundingClientRect()`
+relative to W. `FL(w,h)` = `float:left;width:w;height:h`. Pinned in
+`test/01_unit/browser_engine/layout_block_float_clear_chrome159_spec.spl`.
+
+| row | case | Chrome 159 | engine before |
+|-----|------|-----------|---------------|
+| cl-1 | `FL(50,40)` + C `clear:left;h10` | C y=40, W 50 | C y=0, W 40 |
+| cl-3 | `float:right` 50x30 + C `clear:both` | F x=250, C y=30, W 40 | F x=0, C y=0, W 30 |
+| cl-4 | A `h10;mb10` + `FL(50,40)` + C `clear:left;mt20;mb5` + S `h5;mt8` | F y=20, C y=60, S y=78, W 83 | C y=30, S y=48, W 60 |
+| cl-5 | A `h10;mb10` + `FL(50,5)` + C `clear:left;mt-5` | C y=25, W 35 | C y=15, W 25 |
+| cl-8 | P > `FL(50,40)` + C `clear:left;mt10` | P y=0 h50, C y=40, W 50 | P y=10 h10, C y=10, W 20 |
+| cl-10 | P > `FL(50,40)`; sibling C `clear:left` | P h0, C y=40, W 50 | C y=0, W 10 |
+| cl-11 | P > `FL(50,40)` + empty `clear:both`; sibling `h10` | P h40, X y=40, sibling y=40, W 50 | P h0, X y=0, sibling y=0, W 10 |
+| cl-12 | P `mt10` > `FL(50,40)` + C `clear:left;mt20` | P y=10 h50, F y=10, C y=50, W 60 | P y=20 h10, F y=20, C y=20, W 30 |
+| cl-13 | as cl-4, C `mb20`, S `mt5` | C y=60, S y=90, W 95 | C y=30, S y=60, W 65 |
+| cl-d2 | P > `FL(50,5)` + C `clear:left;mt20` | P y=0 h15, C y=5, W 15 | P y=20 h10, C y=20, W 30 |
+| cl-d3 | `FL(50,40)` + P > C `clear:left;mt20` | P y=0 h50, C y=40, W 50 | P y=20 h10, C y=20, W 40 |
+| cl-h2 | `FL(50,40)` + P > empty `clear:both`; sibling `h10` | P h40, sibling y=40, W 50 | P h0, sibling y=0, W 40 |
+| fp-1 | `FL(100,20)` `FL(100,30)` `float:right` 50x10 | x 0/100/250, y 0 | 2nd and 3rd x=0 |
+| fp-2 | `FL(250,20)` `FL(100,10)` `FL(20,10)` | 2nd 0,20; 3rd 100,20; W 30 | 2nd 0,0; 3rd 0,0; W 20 |
+| fp-3 | two right floats 100 wide | x 200, 100 | x 0, 0 |
+| fp-4 | `FL` `mt5;ml5` + `FL` `ml7` | 5,5 and 62,0 | 2nd x=7 |
+| fp-5 | `h10` block + left and right float | both y=10, right x=250 | right x=0 |
+| fp-6 | `FL(200,20)` + right float 150 | 150,20, W 30 | 0,0, W 20 |
+| fp-7 | `FL(100,40)` `FL(150,10)` `FL(100,10)` | 2nd 100,0; 3rd 100,10 | 2nd 0,0; 3rd 0,0 |
+| bfc-1 | `FL(100,40)` + `overflow:hidden;h10` | 100,0,200 | 0,0,300 |
+| bfc-2 | `FL(100,40)` + `flow-root;width:250px` | 0,40, W 50 | 0,0, W 40 |
+| bfc-normal | `FL(100,40)` + `h10` + `overflow:hidden` | normal 0,0,300; BFC 100,10,200 | BFC 0,10,300 |
+| bfc-margin | `overflow:hidden` `ml20` / `ml120` beside `FL(100,40)` | x 100 w200 / x 120 w180 | x 20 w280 |
+| bfc-right | right float 100x40 + `overflow:hidden` | 0,0,200 | 0,0,300 |
+| bfc-drop | `FL(100,20)` + `overflow:hidden;width:250px` + `h5` | 0,20; next y=30, W 35 | 0,0; next y=10, W 20 |
+| bfc-tall / bfc-fits | BFC h50 beside `FL(100,20)`; `flow-root;width:150px` | 100,0,200 / 100,0,150 | 0,0,300 / x=0 |
+
+"Engine before" is measured: the spec was run once against base `layout.spl`
+(`77fd6530d57`), 13/40 passing; the values are the failing `expected` lines.
+
+Guards that already passed: cl-2 (`clear:right` ignores a left float), cl-6,
+cl-7, cl-d4 (the hypothetical position is already past the float, so no
+clearance), cl-9 and cl-d1 (no float, so a `clear` child still collapses
+through its parent), cl-h1 and cl-h3 (a `display:none` float is not a float:
+P > [hidden `FL`, C `clear:left;mt20`] gives P y=20; an empty `clear:both;mt10`
+after a hidden float still self-collapses, everything at y=10, W 20), and
+ef-1..ef-5: a float or abs box after an empty block sits at `cursor +
+collapsed set` (A `h10;mb10` + E `mt20;mb5` gives y=30, E `mt5;mb30` gives
+y=40). cl-h1/cl-h3 were red on the first head of this lane (a hidden float set
+the "preceding float" flag) and are kept as guards for that.
+
+Chrome rule, parent/child: a `clear` first child has clearance, so its margin
+does not collapse through the parent, when it clears a float that precedes it
+in the same parent (cl-8, cl-12, cl-d2 — even a 5px float with a 20px margin
+gives the child y=5) or when its hypothetical edge with the margin collapsed
+through is above an earlier float (cl-d3). An empty `clear:both` after a float
+has clearance, so its parent is not self-collapsing (cl-11, the clearfix; and
+cl-h2 when the float is outside the parent).
+
+Fix (`layout.spl`): `BlockFloats` holds margin-box rects per BFC (a fresh one
+per BFC root, shared by reference down other boxes); `_float_place`,
+`_bfc_place`, `_floats_bottom`; `_top_margin_set` takes the float context and
+hypothetical base; `_self_collapses` sees clearance after a box-generating
+sibling float; a child that took height in layout is never treated as
+self-collapsing (cl-h2).
+
+Still open on this path: floats are not shrink-to-fit (an auto-width float
+fills the line); a BFC root tests the float band at its top edge only; no
+inline layout, so line boxes beside floats are not shortened (only the HTML
+renderer path has `compute_style_wrap_ranges_float_band`); floats inside flex
+or grid containers are not placed; auto margins on an explicit-width BFC root
+beside a float are not pinned; a cleared self-collapsing LAST child and its
+parent's bottom margin (CSS 2.2 §8.3.1) are not pinned; the layout root's own
+margins.
+
+Regression sweep (seed `cargo-target-webrender-blend/release/simple`, serial,
+base `77fd6530d57` vs head): the 37 specs of the per-side border sweep
+(including `float_layout_spec`) gave identical per-spec counts and the same 98
+failing test names at base and head (0 new, 0 fixed); the new spec is 40/40 at
+head (13/40 at base).
