@@ -871,3 +871,13 @@ plain parameters still accept the same value silently. Red/green in about 30 s o
   `index_of|find|find_str/2` and `len|length/0` were stolen until 2026-11-18
   (`test/01_unit/compiler/mir/user_method_builtin_name_lowering_spec.spl`,
   `doc/08_tracking/bug/native_user_method_builtin_name_hijacked_2026-11-18.md`).
+- A `Result<(…, Option<T>, …), E>` payload slot is ONE native word (the canonical Option
+  handle or the nil sentinel), the same contract as an Optional struct field — never
+  `lower_type(Optional(T))`'s inline `(Bool, T)` pair. `result_try_tuple_field_type`
+  admits it as `MirType.i64()` when `result_optional_inner_supported(inner)` holds, and
+  `remember_result_try_tuple_projection` marks the projected local
+  `option_value_locals` + runtime value so `if val` / `.is_some()` decode it. Missing until
+  2026-11-18 ("slot 2 is Optional", Phase 4 `machine_fresh_workload_lifecycle_v2`;
+  `test/01_unit/compiler/mir/result_payload_shape_gaps_spec.spl`,
+  `test/fixtures/native_result_try_tuple_optional_slot/`). The `case Ok((a, b, c))`
+  match-binding route (`wrapper_native_tuple_field_type`) still has no Optional arm.

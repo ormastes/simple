@@ -1,0 +1,72 @@
+# Phase 4 MIR gap: `f()?` on a Result whose tuple payload has an Option slot
+# failed with "unsupported Result tuple payload element type: slot 2 is
+# Optional" (machine_fresh_workload_lifecycle_v2 workflow_current_v3).
+
+struct Deadline:
+    at: i64
+    label: text
+
+struct Holder:
+    stage: i64
+    deadline: Option<Deadline>
+
+fn current(present: bool, fail: bool) -> Result<(i64, text, Option<Deadline>), text>:
+    if fail: return Err("not-active")
+    val holder = if present:
+        Holder(stage: 7, deadline: Some(Deadline(at: 42, label: "soon")))
+    else:
+        Holder(stage: 3, deadline: nil)
+    Ok((holder.stage, "stage", holder.deadline))
+
+fn destructured(present: bool) -> Result<i64, text>:
+    val (a, b, c) = current(present, false)?
+    print "destructured a={a} b={b} some={c.is_some()}"
+    if val d = c:
+        print "deadline at={d.at} label={d.label}"
+        return Ok(a + d.at)
+    print "no deadline"
+    Ok(a)
+
+fn projected(present: bool) -> Result<i64, text>:
+    val t = current(present, false)?
+    print "projected t0={t.0} t1={t.1} some={t.2.is_some()}"
+    if val d = t.2:
+        print "projected deadline label={d.label}"
+        return Ok(t.0 * 10 + d.at)
+    Ok(t.0 * 10)
+
+fn failing() -> Result<i64, text>:
+    val t = current(true, true)?
+    Ok(t.0)
+
+fn direct(present: bool) -> Result<(i64, Option<Deadline>, Option<text>), text>:
+    if present: return Ok((1, Some(Deadline(at: 5, label: "lit")), Some("note")))
+    Ok((2, nil, nil))
+
+fn direct_try(present: bool) -> Result<text, text>:
+    val (n, d, note) = direct(present)?
+    var out = "n={n}"
+    if val dl = d:
+        out = out + " at={dl.at} label={dl.label}"
+    else:
+        out = out + " no-deadline"
+    if val s = note:
+        out = out + " note={s}"
+    else:
+        out = out + " no-note"
+    Ok(out)
+
+fn main():
+    print "r1={destructured(true).unwrap()}"
+    print "r2={destructured(false).unwrap()}"
+    print "r3={projected(true).unwrap()}"
+    print "r4={projected(false).unwrap()}"
+    match failing():
+        case Ok(v): print "unexpected ok {v}"
+        case Err(e): print "err={e}"
+    print "d1={direct_try(true).unwrap()}"
+    print "d2={direct_try(false).unwrap()}"
+    val u = direct(true).unwrap().1
+    if val ud = u:
+        print "unwrap slot label={ud.label} some={u.is_some()}"
+    print "unwrap none some={direct(false).unwrap().2.is_some()}"
