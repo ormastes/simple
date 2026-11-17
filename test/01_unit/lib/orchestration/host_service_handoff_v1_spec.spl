@@ -22,7 +22,9 @@ use std.common.task_runner.distributed_operation_journal_v2.{distributed_operati
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.linux_service_scope_v4
 use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1, host_service_handoff_consume_v1,
-    host_service_handoff_pending_relative_v1, host_service_handoff_adopted_relative_v1}
+    host_service_handoff_pending_relative_v1, host_service_handoff_adopted_relative_v1,
+    host_service_handoff_abandon_v1, host_service_handoff_abandoned_relative_v1,
+    host_service_handoff_abandon_evidence_relative_v1}
 use std.common.contracts.orchestration.host_service_handoff_v1.*
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
 use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
@@ -39,7 +41,7 @@ use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3,
 use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.HostLinuxServiceCurrentV4
 
-val HO_OPS: [text] = ["service-handoff"]
+val HO_OPS: [text] = ["service-handoff", "service-handoff-abandon"]
 val HO_FAR: i64 = 4102444800000
 val HO_CURRENT_OLD: text = "linux-service-current/" + "ab".repeat(16) + ".sdn"
 
@@ -67,6 +69,16 @@ fn ho_signed(record: HostServiceHandoffV1, kind: text = "service-handoff", issue
         "worker_1", kind, "a".repeat(64), 4, 2, 3, 4096, 100)
     val signed = linux_service_verifier_sign_v1(operation, ho_grant([kind]), issuer, approver, expires)
     host_service_handoff_proof_encode_v1(HostServiceHandoffProofV1(record, operation, signed.0, signed.1)).unwrap()
+
+fn ho_abandon(pending: text, sequence: i64 = 1, host: text = "worker_1") -> HostServiceHandoffAbandonV1:
+    HostServiceHandoffAbandonV1(wire_version: HOST_SERVICE_HANDOFF_ABANDON_WIRE_V1, sequence: sequence,
+        pending_digest: sha256_text(pending), physical_host_id: host)
+
+fn ho_abandon_signed(abandon: HostServiceHandoffAbandonV1, issuer: i64 = 1, approver: i64 = 65, expires: i64 = HO_FAR) -> text:
+    val operation = OperationEnvelopeV2(2, "abandon_1", host_service_handoff_abandon_digest_v1(abandon).unwrap(), "user_1", "project_1",
+        "worker_1", "service-handoff-abandon", "a".repeat(64), 4, 2, 3, 4096, 100)
+    val signed = linux_service_verifier_sign_v1(operation, ho_grant(["service-handoff-abandon"]), issuer, approver, expires)
+    host_service_handoff_abandon_proof_encode_v1(HostServiceHandoffAbandonProofV1(abandon, operation, signed.0, signed.1)).unwrap()
 
 fn ho_open(root: text, scope: ContainerHostScopeV2) -> HostCapacityOwnerV1:
     val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
@@ -230,6 +242,11 @@ describe "Successor verify-then-adopt (AT-OPS-01)":
             polls = polls + 1
         expect(host_service_handoff_verify_v1(journal, new_scope, policy, "issuer_1", host_local_context_v1(policy), new_current).unwrap_err())
             .to_equal("APPROVAL_EXPIRED")
+        step("a controller-signed abandon of that exact pending record clears it: the successor then starts fresh")
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", host_local_context_v1(policy),
+            ho_abandon_signed(ho_abandon(short, 2))).is_ok()).to_equal(true)
+        expect(host_service_handoff_verify_v1(journal, new_scope, policy, "issuer_1", host_local_context_v1(policy), new_current).unwrap()).to_equal("")
+        expect(host_service_handoff_consume_v1(journal, new_current, "").unwrap()).to_equal("")
         val closed = host_capacity_owner_close_owned_v2(capacity)
         expect(closed.closed and closed.error == "").to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)
@@ -248,6 +265,83 @@ describe "Handoff wire route (AT-OPS-01)":
         expect(foreign.response.contains("host-service-handoff-operation-mismatch")).to_equal(true)
         step("a well-formed proof over an unpublished owner needs recovery, never a silent success")
         val unstarted = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-service-handoff", "handoff_1", source))
+        expect(unstarted.exit_code).to_equal(2)
+        expect(unstarted.response.contains("linux-host-service-current-unpublished")).to_equal(true)
+
+describe "Controller-signed abandon of an unverifiable pending handoff (AT-OPS-01 recovery)":
+    it "round-trips canonically, refuses other versions and binds the abandon operation kind":
+        # @req AT-OPS-01 (recovery option a)
+        val abandon = ho_abandon("pending-bytes")
+        val bytes = host_service_handoff_abandon_bytes_v1(abandon).unwrap()
+        expect(host_service_handoff_abandon_decode_v1(bytes).unwrap().sequence).to_equal(1)
+        var future = abandon
+        future.wire_version = "service-handoff-abandon-v2"
+        expect(host_service_handoff_abandon_bytes_v1(future).unwrap_err()).to_equal("service-handoff-version-unsupported")
+        expect(host_service_handoff_abandon_decode_v1(bytes + "extra: 1\n").is_err()).to_equal(true)
+        val good = OperationEnvelopeV2(2, "abandon_1", host_service_handoff_abandon_digest_v1(abandon).unwrap(), "user_1", "project_1",
+            "worker_1", "service-handoff-abandon", "a".repeat(64), 4, 2, 3, 4096, 100)
+        expect(host_service_handoff_abandon_match_v1(abandon, good).unwrap()).to_equal(true)
+        var as_handoff = good
+        as_handoff.operation = "service-handoff"
+        expect(host_service_handoff_abandon_match_v1(abandon, as_handoff).unwrap_err()).to_equal("service-handoff-operation-mismatch")
+
+    it "voids exactly the signed pending record, once, and refuses unsigned or mismatched abandons":
+        # @req AT-OPS-01 (recovery option a)
+        # @capture(statistics): refusal reason per gate
+        val fixture = ho_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val old_scope = ho_scope(fixture, "ab")
+        val new_scope = ho_scope(fixture, "cd")
+        val new_current = "linux-service-current/" + "cd".repeat(16) + ".sdn"
+        val root = secure_temp_dir("/tmp", "ho-abandon").unwrap()
+        val capacity = ho_open(root + "/journal", old_scope)
+        val journal = capacity.journal
+        val context = host_local_context_v1(policy)
+        step("nothing pending: an abandon is refused")
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, ho_abandon_signed(ho_abandon("x"))).unwrap_err())
+            .to_equal("service-handoff-abandon-nothing-pending")
+        expect(distributed_operation_journal_publish_v3(journal, HO_CURRENT_OLD, "current-old").unwrap()).to_equal(true)
+        val source = ho_signed(ho_record(old_scope, "current-old"))
+        expect(distributed_operation_journal_publish_v3(journal, host_service_handoff_pending_relative_v1(1), source).unwrap()).to_equal(true)
+        step("an unconfigured controller, foreign keys, another record's digest, or another sequence never void it")
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_9", context, ho_abandon_signed(ho_abandon(source))).unwrap_err())
+            .to_equal("linux-host-service-controller-mismatch")
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, ho_abandon_signed(ho_abandon(source), 2, 66)).unwrap_err())
+            .to_equal("ISSUER_SIGNATURE_INVALID")
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, ho_abandon_signed(ho_abandon("other-record"))).unwrap_err())
+            .to_equal("service-handoff-abandon-mismatch")
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, ho_abandon_signed(ho_abandon(source, 2))).unwrap_err())
+            .to_equal("service-handoff-abandon-mismatch")
+        expect(distributed_operation_journal_read_v3(journal, host_service_handoff_abandoned_relative_v1(1), 4096).unwrap().is_none()).to_equal(true)
+        step("the exact signed abandon voids it through the single journal; the pending record is retained as evidence")
+        val signed = ho_abandon_signed(ho_abandon(source))
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, signed).is_ok()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_service_handoff_abandoned_relative_v1(1), 4096).unwrap().is_some()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_service_handoff_pending_relative_v1(1), 262144).unwrap().unwrap()).to_equal(source)
+        step("the successor now starts fresh and the abandon cannot be replayed")
+        expect(host_service_handoff_verify_v1(journal, new_scope, policy, "issuer_1", context, new_current).unwrap()).to_equal("")
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, signed).unwrap_err())
+            .to_equal("service-handoff-abandon-nothing-pending")
+        step("the signed proof is kept as evidence and replaying it after the next handoff is refused")
+        expect(distributed_operation_journal_read_v3(journal, host_service_handoff_abandon_evidence_relative_v1(1, sha256_text(signed)), 262144).unwrap().unwrap()).to_equal(signed)
+        step("a later handoff takes the next sequence")
+        expect(host_service_handoff_commit_v1(journal, old_scope, policy, "issuer_1", context, HO_CURRENT_OLD, "current-old", None,
+            ho_signed(ho_record(old_scope, "current-old", 2))).is_ok()).to_equal(true)
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, signed).unwrap_err())
+            .to_equal("service-handoff-abandon-mismatch")
+        val closed = host_capacity_owner_close_owned_v2(capacity)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "frames the abandon at the domain and fails closed over an unstarted owner":
+        # @req AT-OPS-01 (recovery option a)
+        val domain = HostServiceDomainV3(HostLocalRootV3.LinuxService(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")))
+        val source = ho_abandon_signed(ho_abandon("pending-bytes"))
+        expect(host_service_domain_turn_v3(domain, HostServiceRequestV2("host-service-handoff-abandon", "abandon_1", "not-a-proof")).exit_code).to_equal(1)
+        val foreign = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-service-handoff-abandon", "abandon_other", source))
+        expect(foreign.exit_code).to_equal(1)
+        expect(foreign.response.contains("host-service-handoff-operation-mismatch")).to_equal(true)
+        val unstarted = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-service-handoff-abandon", "abandon_1", source))
         expect(unstarted.exit_code).to_equal(2)
         expect(unstarted.response.contains("linux-host-service-current-unpublished")).to_equal(true)
 
@@ -283,6 +377,16 @@ describe "Handoff wiring pins (AT-OPS-01, nothing unreachable)":
         expect(current).to_contain("linux-host-service-draining")
         step("the wire route exists and the domain stays the only caller of the installed dispatch")
         expect(domain).to_contain("host-service-handoff")
+        step("the abandon is dispatched and routed, and is not gated on the quarantine it exists to clear")
+        expect(current).to_contain("if action == \"host_service_handoff_abandon_v1\": return linux_service_handoff_abandon_v4(owner, source)")
+        expect(domain).to_contain("host-service-handoff-abandon")
+        val glue = current.substring(current.index_of("fn linux_service_handoff_abandon_v4("), current.index_of("# The workload scope of this service's lending epoch"))
+        expect(glue.index_of("reconcile_error")).to_equal(-1)
+        expect(glue.index_of("continuity_proven")).to_equal(-1)
+        step("the skill doc states the installed-policy key requirement for both signed operation kinds")
+        val skill = file_read_text("doc/00_llm_process/feature_expert/simple_orchestrator/skill.md")
+        expect(skill).to_contain("controller key must list")
+        expect(skill).to_contain("service-handoff-abandon")
         step("the module neither imports the service owner nor touches continuity")
         expect(module.index_of("host_linux_service_current_v4")).to_equal(-1)
         expect(module.index_of("continuity_proven")).to_equal(-1)

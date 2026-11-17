@@ -84,7 +84,7 @@ use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStore
 use std.container.LinuxWorkspaceRootBorrowV3
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
 use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1,
-    host_service_handoff_consume_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1}
+    host_service_handoff_consume_v1, host_service_handoff_abandon_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1}
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
@@ -1217,6 +1217,7 @@ pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: 
     if owner.draining and action != "host_agent_inspect_v4" and action != "host_agent_detach_v4" and action != "host_agent_cancel_v4":
         return linux_service_reply_v4(owner, "", "linux-host-service-draining", false)
     if action == "host_service_handoff_v1": return linux_service_handoff_v4(owner, source)
+    if action == "host_service_handoff_abandon_v1": return linux_service_handoff_abandon_v4(owner, source)
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
     if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
     if action == "host_agent_invoke_v4": return host_linux_service_agent_invoke_v4(owner, source)
@@ -1246,6 +1247,19 @@ fn linux_service_handoff_v4(original: HostLinuxServiceCurrentV4, source: text) -
             return linux_service_reply_v4(owner, "", reply.unwrap_err(), true)
         return linux_service_reply_v4(owner, "", reply.unwrap_err(), false)
     owner.draining = true
+    linux_service_reply_v4(owner, reply.unwrap(), "", true)
+
+# AT-OPS-01 recovery: a controller-signed abandon voids the one pending handoff this (quarantined) successor could not
+# verify. Deliberately NOT gated on the quarantine it exists to clear: only a verified abandon is accepted, written
+# through the single journal writer. The unit is then restarted; the next start finds the sequence consumed. After a
+# failed post-flip consume the voided record had been verified: harmless, the next start re-proves exclusion anyway.
+fn linux_service_handoff_abandon_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val reply = host_service_handoff_abandon_v1(owner.capacity.unwrap().journal, owner.scope.unwrap(), metadata.unwrap().policy,
+        metadata.unwrap().configuration.controller_ref, host_local_context_v1(metadata.unwrap().policy), source)
+    if reply.is_err(): return linux_service_reply_v4(owner, "", reply.unwrap_err(), false)
     linux_service_reply_v4(owner, reply.unwrap(), "", true)
 
 # The workload scope of this service's lending epoch: the bound host (the same
