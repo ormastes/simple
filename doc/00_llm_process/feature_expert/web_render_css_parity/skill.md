@@ -2701,3 +2701,23 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Change:** the default `Style.font_family` is now `serif`. The UA overrides are unchanged.
 - **Pin:** `default_font_family_chrome159_spec`.
 - **Trap:** any spec page that sets no family was being compared against Chrome's serif glyphs with our sans glyphs. Re-measure such pins against Chrome before reading their whole-image metric. On the 8 px wrapped page, mismatch went from 426 to 149 px.
+
+## 2026-11-18 — Fractional computed font-size (Chrome 159)
+- **Rule:** Chrome keeps `font-size` as a float. The UA h3 is 18.72 px, and `1.17em` or `117%` stay fractional. Run width, the `normal` line height and the strut all scale from the float.
+- **Change:**
+  - `Style.font_size` stays whole px, for the raster. `Style.font_size_milli` carries the fraction; 0 means whole px.
+  - Helpers live in `foundation_values.spl`: `font_milli_of`, `font_milli_round_px` and `font_milli_store`.
+  - Run advances are rescaled from an 8x reference size (`resolve_font_metrics_with_language_milli`).
+  - Ascent, descent and gap are each rounded at the float size (`sfnt_line_metric_units_*_milli_px`).
+- **Trap:** an exact .5 px size rounds DOWN for raster rows. Chrome's 13.5 px ink rows equal its 13 px rows.
+- **Pin:** `fractional_font_size_chrome159_spec`.
+- **Catalog 1x:**
+
+| page | before | after |
+|---|---|---|
+| html | 3.65 | 3.51 |
+| css-layout | 3.12 | 3.00 |
+| css-paint | 3.67 | 3.55 |
+| forms-media | 4.05 | 3.93 |
+
+- **Rows tightened:** the four rows above. The animation row is untouched, because its measurement is noisy at 3.47-3.59.
