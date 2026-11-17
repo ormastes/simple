@@ -2,70 +2,46 @@
 # Library-unit source drift gate (plan section 4.2,
 # doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md).
 #
-# Shell twin of library_unit_drift_v1
-# (src/compiler/80.driver/driver_build/library_unit_drift_v1.spl): compares a
-# library dir's RECORDED inventory against the ACTUAL source set.
-#   recorded: <dir>/source_inventory.lock, one root-relative path per line
-#             ('#' comments and blank lines ignored)
-#   actual:   every *.spl under <dir>, root-relative, skipping vendor, build,
-#             target, node_modules and dot dirs (same rule as
-#             source_inventory_scan_v1)
-# Any added or removed path is drift. Both sets empty is ERROR, never a pass.
+# Thin wrapper over the Simple library_unit_drift_v1
+# (src/compiler/80.driver/driver_build/library_unit_drift_v1.spl) via
+# scripts/check/library_unit_drift_entry.spl: compares a library dir's RECORDED
+# inventory (<dir>/source_inventory.lock, one root-relative path per line, '#'
+# comments ignored) against the ACTUAL source set (source_inventory_scan_v1:
+# every *.spl under <dir>, skipping vendor, build, target, node_modules and dot
+# dirs). Any added or removed path is drift. Both sets empty is ERROR.
 #
 # Usage: sh scripts/check/check-library-unit-drift.shs [--selftest] <lib dir>
+# Env: SIMPLE_BIN (default bin/simple).
 # Verdict is the last stdout line. Exit 0 PASS / 1 FAIL / 2 ERROR.
 # NOT wired into any push-tier gate.
 
 LC_ALL=C
 export LC_ALL
 
-scan_actual() {
-    ( cd "$1" 2>/dev/null && find . \
-        \( -name vendor -o -name build -o -name target -o -name node_modules \
-           -o -name '.?*' \) -prune -o -type f -name '*.spl' -print 2>/dev/null \
-        | sed 's|^\./||' | sort -u )
-}
+script_dir=$(cd "$(dirname "$0")" && pwd)
+entry="$script_dir/library_unit_drift_entry.spl"
+SIMPLE_BIN=${SIMPLE_BIN:-"$script_dir/../../bin/simple"}
 
-read_recorded() {
-    grep -v '^[[:space:]]*#' "$1" 2>/dev/null | sed 's/\r$//' | grep -v '^[[:space:]]*$' | sort -u
-}
-
-# check <dir> -> prints verdict, returns 0/1/2
+# check <dir> -> prints verdict, returns 0/1/2. The verdict line decides; an
+# interpreter that printed no verdict is ERROR, never a pass.
 check_dir() {
-    dir=$1
-    lock="$dir/source_inventory.lock"
-    if [ ! -d "$dir" ]; then
-        echo "ERROR — nothing was checked (not a directory: $dir)"; return 2
+    if [ ! -f "$entry" ]; then
+        echo "ERROR — nothing was checked (missing entry: $entry)"; return 2
     fi
-    if [ ! -f "$lock" ]; then
-        echo "ERROR — nothing was checked (no recorded inventory: $lock)"; return 2
+    tmpout=$(mktemp 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    "$SIMPLE_BIN" run "$entry" -- "$1" > "$tmpout" 2>/dev/null
+    irc=$?
+    out=$(tr -d '\r' < "$tmpout" | grep -E '^(PASS|FAIL|ERROR) ' | tail -n 1)
+    rm -f "$tmpout"
+    if [ "$irc" -ne 0 ] && [ "$irc" -ne 1 ] && [ "$irc" -ne 2 ]; then
+        echo "ERROR — nothing was checked (interpreter rc=$irc)"; return 2
     fi
-    tmp=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
-    read_recorded "$lock" > "$tmp/decl"
-    scan_actual "$dir" > "$tmp/act"
-    nd=$(wc -l < "$tmp/decl" | tr -d ' ')
-    na=$(wc -l < "$tmp/act" | tr -d ' ')
-    if [ "$nd" -eq 0 ] && [ "$na" -eq 0 ]; then
-        rm -rf "$tmp"
-        echo "ERROR — nothing was checked (declared and actual inventories are both empty)"; return 2
-    fi
-    comm -13 "$tmp/decl" "$tmp/act" > "$tmp/added"
-    comm -23 "$tmp/decl" "$tmp/act" > "$tmp/removed"
-    nadd=$(wc -l < "$tmp/added" | tr -d ' ')
-    nrem=$(wc -l < "$tmp/removed" | tr -d ' ')
-    checked=$((nd + nadd))
-    if [ "$nadd" -eq 0 ] && [ "$nrem" -eq 0 ]; then
-        rm -rf "$tmp"
-        echo "PASS — $checked checked, 0 added, 0 removed"; return 0
-    fi
-    parts=""
-    [ "$nadd" -gt 0 ] && parts="added: $(paste -sd, "$tmp/added" | sed 's/,/, /g')"
-    if [ "$nrem" -gt 0 ]; then
-        r="removed: $(paste -sd, "$tmp/removed" | sed 's/,/, /g')"
-        if [ -n "$parts" ]; then parts="$parts; $r"; else parts="$r"; fi
-    fi
-    rm -rf "$tmp"
-    echo "FAIL — $checked checked, $nadd added, $nrem removed; $parts"; return 1
+    case $out in
+        "PASS "*) [ "$irc" -eq 0 ] && { echo "$out"; return 0; } ;;
+        "FAIL "*) [ "$irc" -eq 1 ] && { echo "$out"; return 1; } ;;
+        "ERROR "*) echo "$out"; return 2 ;;
+    esac
+    echo "ERROR — nothing was checked (verdict/rc mismatch or no verdict, rc=$irc)"; return 2
 }
 
 expect() { # name want_rc dir
