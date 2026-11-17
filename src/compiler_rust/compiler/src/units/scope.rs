@@ -6,10 +6,10 @@
 //! omitted = simple-lang) or a same-file `unit X: T as sfx` declaration.
 //! Scope entries are keyed `"<org>/<name>"`. Reset per interpreter run.
 //!
-//! TODO(unit-scope-per-module): imports recorded while evaluating an imported
-//! module leak into the importer's scope; pure Simple saves/restores scope
-//! per file (`unit_scope_save`/`unit_scope_restore`). Seed has no per-module
-//! scope boundary yet.
+//! Per-module scope: `UnitScopeGuard::enter_module` saves the importer's scope,
+//! starts the module with an empty scope and restores on drop, so imports recorded
+//! while evaluating an imported module never leak across modules (mirrors pure
+//! Simple `unit_scope_save`/`unit_scope_restore`).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -40,6 +40,27 @@ thread_local! {
 /// Clear the per-run scope (called with the other unit registries).
 pub fn unit_scope_reset() {
     UNIT_SCOPE.with(|s| *s.borrow_mut() = UnitScope::default());
+}
+
+/// RAII per-module scope boundary: saves the current scope, starts the module
+/// with an empty one, and restores the saved scope on drop (also on `?` exits).
+pub struct UnitScopeGuard {
+    saved: Option<UnitScope>,
+}
+
+impl UnitScopeGuard {
+    pub fn enter_module() -> Self {
+        let saved = UNIT_SCOPE.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        Self { saved: Some(saved) }
+    }
+}
+
+impl Drop for UnitScopeGuard {
+    fn drop(&mut self) {
+        if let Some(saved) = self.saved.take() {
+            UNIT_SCOPE.with(|s| *s.borrow_mut() = saved);
+        }
+    }
 }
 
 /// Point lookups at an explicit unit library root (`None` restores auto).
@@ -446,5 +467,41 @@ mod tests {
         unit_library_root_set(None);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&src);
+    }
+}
+
+#[cfg(test)]
+mod module_scope_tests {
+    use super::*;
+    use simple_parser::ast::ModulePath;
+    use simple_parser::token::Span;
+
+    fn use_group(names: &[&str]) -> UseStmt {
+        UseStmt {
+            span: Span::new(0, 0, 0, 0),
+            path: ModulePath::new(vec!["unit".into(), "velocity".into()]),
+            target: ImportTarget::Group(names.iter().map(|n| ImportTarget::Single((*n).into())).collect()),
+            is_type_only: false,
+            is_lazy: false,
+        }
+    }
+
+    fn in_scope(sfx: &str) -> bool {
+        UNIT_SCOPE.with(|s| s.borrow().names.contains(&format!("{}/{}", UNIT_DEFAULT_ORG, sfx)))
+    }
+
+    #[test]
+    fn imported_module_scope_does_not_leak_into_importer() {
+        unit_scope_reset();
+        unit_scope_record_use(&use_group(&["kmph"]));
+        {
+            let _g = UnitScopeGuard::enter_module();
+            assert!(!in_scope("kmph"), "importer scope must not leak into module");
+            unit_scope_record_use(&use_group(&["mph"]));
+            assert!(in_scope("mph"));
+        }
+        assert!(in_scope("kmph"), "importer scope restored");
+        assert!(!in_scope("mph"), "module import must not leak to importer");
+        unit_scope_reset();
     }
 }

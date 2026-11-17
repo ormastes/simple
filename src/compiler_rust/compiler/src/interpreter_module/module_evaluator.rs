@@ -58,6 +58,7 @@ pub fn evaluate_module_exports_with_preloaded(
     global_enums: &mut Enums,
     preloaded_env: Option<&HashMap<String, Value>>,
 ) -> Result<ModuleExports, CompileError> {
+    let _unit_scope = crate::units::scope::UnitScopeGuard::enter_module();
     let _module_origin =
         super::ClosureOriginGuard::enter_module_top_level(module_path.map(|p| p.to_string_lossy()).as_deref());
     let mut env: Env = Env::new();
