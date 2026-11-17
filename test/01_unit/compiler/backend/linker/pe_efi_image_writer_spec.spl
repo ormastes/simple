@@ -1,0 +1,76 @@
+use std.spec.*
+use std.spec.step
+use compiler.backend.linker.coff.pe_image_writer.{
+    PeImageSection, PE_MACHINE_AMD64, PE_MACHINE_ARM64, PE_MACHINE_I386,
+    PE_MACHINE_ARM_THUMB, PE_SUBSYSTEM_EFI_APPLICATION, pe_write_efi_application}
+use compiler.backend.linker.coff.pe_base_relocation.{
+    PE_BASE_RELOCATION_HIGHLOW, PE_BASE_RELOCATION_DIR64, pe_build_base_relocations}
+
+# Shared PE32 / PE32+ EFI application emitter (lanes sbm-a64, sbm-x64,
+# sbm-arm32, sbm-i686). Header offsets: COFF at 0x84, optional header at 0x98.
+
+fn _text() -> PeImageSection:
+    PeImageSection(name: ".text", virtual_address: 0x1000, virtual_size: 4,
+        data: [0 as u8, 0 as u8, 0 as u8, 0 as u8], characteristics: 0xe0000020)
+
+fn _u16_at(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+
+fn _u32_at(bytes: [u8], offset: i64) -> i64:
+    _u16_at(bytes, offset) | (_u16_at(bytes, offset + 2) << 16)
+
+describe "PE EFI application emitter":
+    it "emits a PE32+ AArch64 EFI application (machine 0xAA64, subsystem 10)":
+        step("Write an arm64 EFI app and check the raw header fields")
+        val bytes = pe_write_efi_application([_text()], 0x1000, PE_MACHINE_ARM64, 0).unwrap()
+        expect(_u16_at(bytes, 0x84)).to_equal(0xaa64)
+        expect(_u16_at(bytes, 0x94)).to_equal(0xf0)
+        expect(_u16_at(bytes, 0x98)).to_equal(0x20b)
+        expect(_u32_at(bytes, 0xa8)).to_equal(0x1000)
+        expect(_u16_at(bytes, 0xdc)).to_equal(PE_SUBSYSTEM_EFI_APPLICATION)
+        expect(PE_SUBSYSTEM_EFI_APPLICATION).to_equal(10)
+
+    it "emits a PE32+ x86_64 EFI application":
+        val bytes = pe_write_efi_application([_text()], 0x1000, PE_MACHINE_AMD64, 0).unwrap()
+        expect(_u16_at(bytes, 0x84)).to_equal(0x8664)
+        expect(_u16_at(bytes, 0xdc)).to_equal(10)
+
+    it "emits a PE32 i386 EFI application (magic 0x10b, 32-bit image base)":
+        val bytes = pe_write_efi_application([_text()], 0x1000, PE_MACHINE_I386, 0x400000).unwrap()
+        expect(_u16_at(bytes, 0x84)).to_equal(0x14c)
+        expect(_u16_at(bytes, 0x94)).to_equal(0xe0)
+        expect(_u16_at(bytes, 0x98)).to_equal(0x10b)
+        expect(_u32_at(bytes, 0xb4)).to_equal(0x400000)
+        expect(_u16_at(bytes, 0xdc)).to_equal(10)
+        expect(_u16_at(bytes, 0x96) & 0x0100).to_equal(0x0100)
+
+    it "emits a PE32 ARM EFI application with machine 0x01c2 and a Thumb entry":
+        step("EDK2 ARM accepts only 0x01c2; the entry RVA keeps its Thumb bit")
+        val bytes = pe_write_efi_application([_text()], 0x1001, PE_MACHINE_ARM_THUMB, 0).unwrap()
+        expect(PE_MACHINE_ARM_THUMB).to_equal(0x1c2)
+        expect(_u16_at(bytes, 0x84)).to_equal(0x1c2)
+        expect(_u16_at(bytes, 0x98)).to_equal(0x10b)
+        expect(_u32_at(bytes, 0xa8)).to_equal(0x1001)
+
+    it "rejects a Thumb entry bit on a non-ARM machine":
+        val written = pe_write_efi_application([_text()], 0x1001, PE_MACHINE_ARM64, 0)
+        expect(written.is_err()).to_equal(true)
+
+    it "rejects a PE32 image base above 4 GiB and unknown machines":
+        expect(pe_write_efi_application([_text()], 0x1000, PE_MACHINE_I386, 0x100000000).is_err()).to_equal(true)
+        expect(pe_write_efi_application([_text()], 0x1000, 0x1c4, 0).is_err()).to_equal(true)
+
+    it "publishes a PE32 HIGHLOW base-relocation directory":
+        val relocs = pe_build_base_relocations([0x1000], PE_BASE_RELOCATION_HIGHLOW).unwrap()
+        expect(relocs.len()).to_equal(12)
+        expect(_u16_at(relocs, 8)).to_equal(0x3000)
+        val reloc = PeImageSection(name: ".reloc", virtual_address: 0x2000,
+            virtual_size: relocs.len(), data: relocs, characteristics: 0x42000040)
+        val bytes = pe_write_efi_application([_text(), reloc], 0x1001,
+            PE_MACHINE_ARM_THUMB, 0).unwrap()
+        expect(_u32_at(bytes, 0x120)).to_equal(0x2000)
+        expect(_u32_at(bytes, 0x124)).to_equal(12)
+
+    it "keeps DIR64 blocks for PE32+":
+        val relocs = pe_build_base_relocations([0x1008], PE_BASE_RELOCATION_DIR64).unwrap()
+        expect(_u16_at(relocs, 8)).to_equal(0xa008)

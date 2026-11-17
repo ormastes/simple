@@ -8,6 +8,17 @@ val PE_SECTION_ALIGNMENT: i64 = 0x1000
 val PE_FILE_ALIGNMENT: i64 = 0x200
 val PE_SUBSYSTEM_WINDOWS: i64 = 2
 val PE_SUBSYSTEM_CONSOLE: i64 = 3
+val PE_SUBSYSTEM_EFI_APPLICATION: i64 = 10
+# PE32 (magic 0x10b) machines. EDK2 ARM accepts only 0x01c2 (ARM/Thumb
+# interworking), not lld-link's 0x01c4 (ARMNT).
+val PE_MACHINE_I386: i64 = 0x14c
+val PE_MACHINE_ARM_THUMB: i64 = 0x1c2
+
+fn pe_machine_is_pe32(machine: i64) -> bool:
+    machine == PE_MACHINE_I386 or machine == PE_MACHINE_ARM_THUMB
+
+fn pe_machine_supported(machine: i64) -> bool:
+    machine == PE_MACHINE_AMD64 or machine == PE_MACHINE_ARM64 or pe_machine_is_pe32(machine)
 
 struct PeImagePolicy:
     subsystem: i64
@@ -49,6 +60,25 @@ impl PeImagePolicy:
             os_version_major: 6, os_version_minor: 0,
             image_version_major: 0, image_version_minor: 0,
             subsystem_version_major: 6, subsystem_version_minor: 0)
+
+    static fn efi_application() -> PeImagePolicy:
+        PeImagePolicy(
+            subsystem: PE_SUBSYSTEM_EFI_APPLICATION,
+            stack_reserve: 0x100000,
+            stack_commit: 0x1000,
+            heap_reserve: 0x100000,
+            heap_commit: 0x1000,
+            dynamic_base: false,
+            high_entropy_va: false,
+            nx_compat: false,
+            large_address_aware: false,
+            terminal_server_aware: false,
+            fixed_image: false,
+            section_alignment: PE_SECTION_ALIGNMENT,
+            file_alignment: PE_FILE_ALIGNMENT,
+            os_version_major: 0, os_version_minor: 0,
+            image_version_major: 0, image_version_minor: 0,
+            subsystem_version_major: 0, subsystem_version_minor: 0)
 
 struct PeImageSection:
     name: text
@@ -125,7 +155,8 @@ fn _pe_validate_sections(sections: [PeImageSection], entry_rva: i64,
     Ok(true)
 
 fn pe_validate_policy(policy: PeImagePolicy) -> Result<bool, text>:
-    if policy.subsystem != PE_SUBSYSTEM_CONSOLE and policy.subsystem != PE_SUBSYSTEM_WINDOWS:
+    if (policy.subsystem != PE_SUBSYSTEM_CONSOLE and policy.subsystem != PE_SUBSYSTEM_WINDOWS and
+            policy.subsystem != PE_SUBSYSTEM_EFI_APPLICATION):
         return Err("unsupported PE subsystem {policy.subsystem}")
     if policy.stack_reserve <= 0:
         return Err("PE stack reserve must be positive")
@@ -193,21 +224,33 @@ fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
             return (section.virtual_address, size)
     (0, 0)
 
+fn _pe_base_of_data(sections: [PeImageSection]) -> i64:
+    for section in sections:
+        if (section.characteristics & 0x20) == 0: return section.virtual_address
+    0
+
 fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
         machine: i64, image_base: i64, policy: PeImagePolicy) -> Result<[u8], text>:
-    """Emit a deterministic AMD64 or ARM64 PE32+ executable."""
-    if machine != PE_MACHINE_AMD64 and machine != PE_MACHINE_ARM64:
-        return Err("unsupported PE32+ machine {machine}")
-    if image_base <= 0 or image_base % 0x10000 != 0 or
+    """Emit a deterministic PE32+ (AMD64, ARM64) or PE32 (i386, ARM/Thumb) image."""
+    if not pe_machine_supported(machine):
+        return Err("unsupported PE machine {machine}")
+    val pe32 = pe_machine_is_pe32(machine)
+    if pe32:
+        if image_base <= 0 or image_base % 0x10000 != 0 or image_base > 0xffff0000:
+            return Err("PE32 image base must be a positive 64 KiB-aligned address below 4 GiB")
+    elif image_base <= 0 or image_base % 0x10000 != 0 or
             image_base > 0x7fffffff00000000:
         return Err("PE32+ image base must be a positive 64 KiB-aligned address with 4 GiB headroom")
+    # ARM/Thumb entry points carry the Thumb bit; no other machine may.
+    if (entry_rva & 1) != 0 and machine != PE_MACHINE_ARM_THUMB:
+        return Err("PE entry RVA {entry_rva} has the Thumb bit set on a non-ARM machine")
     val valid_policy = pe_validate_policy(policy)
     if valid_policy.is_err(): return Err(valid_policy.unwrap_err())
     val valid = _pe_validate_sections(
-        sections, entry_rva, policy.section_alignment)
+        sections, entry_rva - (entry_rva & 1), policy.section_alignment)
     if valid.is_err(): return Err(valid.unwrap_err())
     val pe_offset: i64 = 0x80
-    val optional_header_size: i64 = 0xf0
+    val optional_header_size: i64 = if pe32: 0xe0 else: 0xf0
     val headers_end = pe_offset + 4 + 20 + optional_header_size + sections.len() * 40
     val size_of_headers = pe_align_up(headers_end, policy.file_alignment)
 
@@ -252,6 +295,8 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
         file_characteristics = file_characteristics | 0x0001
     if policy.large_address_aware:
         file_characteristics = file_characteristics | 0x0020
+    if pe32:
+        file_characteristics = file_characteristics | 0x0100
 
     var output: [u8] = []
     output = _pe_put_u16(output, 0x5a4d)
@@ -268,7 +313,7 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     output = _pe_put_u16(output, optional_header_size)
     output = _pe_put_u16(output, file_characteristics)
 
-    output = _pe_put_u16(output, 0x20b)
+    output = _pe_put_u16(output, if pe32: 0x10b else: 0x20b)
     output = _pe_put_u8(output, 0)
     output = _pe_put_u8(output, 0)
     output = _pe_put_u32(output, size_of_code)
@@ -276,7 +321,11 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     output = _pe_put_u32(output, size_of_uninitialized_data)
     output = _pe_put_u32(output, entry_rva)
     output = _pe_put_u32(output, base_of_code)
-    output = _pe_put_u64(output, image_base)
+    if pe32:
+        output = _pe_put_u32(output, _pe_base_of_data(sections))
+        output = _pe_put_u32(output, image_base)
+    else:
+        output = _pe_put_u64(output, image_base)
     output = _pe_put_u32(output, policy.section_alignment)
     output = _pe_put_u32(output, policy.file_alignment)
     output = _pe_put_u16(output, policy.os_version_major)
@@ -291,10 +340,16 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     output = _pe_put_u32(output, 0)
     output = _pe_put_u16(output, policy.subsystem)
     output = _pe_put_u16(output, dll_characteristics)
-    output = _pe_put_u64(output, policy.stack_reserve)
-    output = _pe_put_u64(output, policy.stack_commit)
-    output = _pe_put_u64(output, policy.heap_reserve)
-    output = _pe_put_u64(output, policy.heap_commit)
+    if pe32:
+        output = _pe_put_u32(output, policy.stack_reserve)
+        output = _pe_put_u32(output, policy.stack_commit)
+        output = _pe_put_u32(output, policy.heap_reserve)
+        output = _pe_put_u32(output, policy.heap_commit)
+    else:
+        output = _pe_put_u64(output, policy.stack_reserve)
+        output = _pe_put_u64(output, policy.stack_commit)
+        output = _pe_put_u64(output, policy.heap_reserve)
+        output = _pe_put_u64(output, policy.heap_commit)
     output = _pe_put_u32(output, 0)
     output = _pe_put_u32(output, 16)
     var directory: i64 = 0
@@ -337,6 +392,8 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
 fn pe_write_console(sections: [PeImageSection], entry_rva: i64,
         machine: i64, image_base: i64) -> Result<[u8], text>:
     """Emit a deterministic AMD64 or ARM64 PE32+ console executable."""
+    if machine != PE_MACHINE_AMD64 and machine != PE_MACHINE_ARM64:
+        return Err("unsupported PE32+ machine {machine}")
     pe_write_image_policy(
         sections, entry_rva, machine, image_base, PeImagePolicy.default())
 
@@ -348,7 +405,19 @@ fn pe_write_arm64_console(sections: [PeImageSection], entry_rva: i64) -> Result<
     """Emit a deterministic ARM64 PE32+ console executable."""
     pe_write_console(sections, entry_rva, PE_MACHINE_ARM64, PE_ARM64_IMAGE_BASE)
 
+fn pe_write_efi_application(sections: [PeImageSection], entry_rva: i64,
+        machine: i64, image_base: i64) -> Result<[u8], text>:
+    """Emit an EFI application (subsystem 10): PE32+ for 0x8664/0xAA64, PE32
+    for 0x14c/0x1c2. image_base 0 picks the conventional default."""
+    var base = image_base
+    if base == 0:
+        base = if pe_machine_is_pe32(machine): 0x400000 else: 0x140000000
+    pe_write_image_policy(sections, entry_rva, machine, base,
+        PeImagePolicy.efi_application())
+
 export PeImageSection, PeImagePolicy
+export PE_SUBSYSTEM_EFI_APPLICATION, PE_MACHINE_I386, PE_MACHINE_ARM_THUMB
+export pe_machine_is_pe32, pe_machine_supported, pe_write_efi_application
 export pe_validate_policy
 export PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE, PE_MACHINE_AMD64, PE_MACHINE_ARM64
 export PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, PE_SUBSYSTEM_WINDOWS, PE_SUBSYSTEM_CONSOLE
