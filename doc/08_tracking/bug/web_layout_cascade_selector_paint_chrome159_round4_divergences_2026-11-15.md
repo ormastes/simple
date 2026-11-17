@@ -284,6 +284,23 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
   - Plain `<img>` is not painted by the raster lane at all (pre-existing).
 - **Base vs head:** the same 25 specs as the nested-group entry showed 0 new and 0 fixed failing names. **Perf** (median of 3, same pages; opaque-only layers keep one pass): raster 12 groups 6.00 s and nested 6.87 s, cpu_simd 7.50 / 6.77 s, Vulkan 5.49 / 8.45 s, max RSS 728 MB. All of these are within the host-noise spread of the item-1 runs (2.9-10.4 s). A two-pass layer costs one extra bounded layer paint.
 
+## 2026-11-17 — Multi-root opacity pages painted flat on cpu_simd and Vulkan (shadow, outline, text roots)
+
+- **Symptom:** with 2+ opacity roots, one root holding a shadow or an outline made the producer decline bounded surfaces for the whole page. Every group then painted with no opacity: `tg_page` (34,4) was `99ccff` vs Chrome `b7dbff`, and the `mr_page` text root background was flat red vs Chrome `942c63`.
+- **Fix** (`simple_web_html_layout_renderer.spl`):
+  - A directional halo grows the root rect.
+  - Gradient and image background layers count as group paint items.
+  - The text root was red at base too (multi-root ≠ alone). It needed no text-specific change: its command has no glyph run.
+- **Pinned** (cpu_simd and Vulkan, exact): `mr_page` 14 cells (`942C63` ×3, `5BA403` ×2, `F5F19D` ×2, `BF3F3F` ×2, `808080`, `3FBF3F`, `4B4BFF` ×2, `FFA54B`). `tg_page` 17 raster cells plus (34,4) (37,4) `B7DBFF`, (46,4) `FFE793`, (60,12) `BFBFBF`. Also: a text root on the multi-root page equals the same root alone.
+- **Open:**
+  - A root holding a real glyph run (`glyph_run.valid`) still declines surfaces for the whole page. No pinned page produces one.
+  - The outline ring on a positioned box is unpainted on every lane, at opacity 1 too (Chrome `5B579D`).
+  - The `<img>` is unpainted on every lane (Chrome `8829A5`, `B8C2FB`, `9A9FBC`). The yellow-over-image cells (24,12) and (29,12) fold on the Engine2D lanes as a result (`e9a530` vs `e9a52f`).
+  - Chrome's shadow-only pixel is `5F5F5F` on a 10x8 box but `606060` on an 8x5 box with the same shadow. Simple gives `606060` on both.
+  - Engine2D gives +1 green where two translucent paints overlap (40,4): `e3d995` vs `e3d994`.
+- **Needs:** `sfnt_render_glyph_lcd` must be `pub` (upstream `08486feffd2`), or small text on the Engine2D lanes errors out.
+- **Base vs head:** the same 25 specs showed 0 new failing names. 20 names were fixed, all text rows that the cherry-picked `pub` unblocked (`simple_web_renderer` 17, `web_device_scale` 2, `cpu_simd_paint` 1). **Perf** (median of 3, the item-2 head → this head, noisy host): raster 12 groups 6.00→2.34 s and nested 6.87→2.74 s; cpu_simd 7.50→4.51 s and 6.77→4.95 s; Vulkan 5.49→2.95 s and 8.45→3.09 s; max RSS 711→715 MB.
+
 ## 2026-11-17 — `layout.spl` `_layout_block_node` margin collapse, round 2
 
 Chrome 159.0.8154.6, `--headless --no-sandbox --window-size=900,2000 --dump-dom`,

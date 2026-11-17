@@ -232,14 +232,17 @@ val TG_CHROME: [u32] = [
     0xFFBE5C02u32, 0xFFBE7A3Cu32, 0xFFBE7A3Cu32, 0xFFBE5C02u32
 ]
 
-fn tg_mismatches(px: [u32], fw: i32) -> i32:
+# `img_counted` false (the lane does not count the unpainted <img> as a group
+# paint item, so its group folds) skips the cells whose Chrome value needs the
+# image group (13, 14: yellow over the image).
+fn tg_mismatches(px: [u32], fw: i32, img_counted: bool) -> i32:
     if px.len() < fw * 16:
         return 999
     var bad = 0
     var n = 0
     while n < TG_CHROME.len():
         val got = px[TG_Y[n] * fw + TG_X[n]]
-        if got != TG_CHROME[n]:
+        if (img_counted or (n != 13 and n != 14)) and got != TG_CHROME[n]:
             print "translucent-group cell {n} ({TG_X[n]},{TG_Y[n]}) got {got} want {TG_CHROME[n]}"
             bad = bad + 1
         n = n + 1
@@ -249,6 +252,78 @@ fn tg_mismatches(px: [u32], fw: i32) -> i32:
     if grad != 0xFF24B05Eu32 and grad != 0xFF24B15Eu32:
         print "translucent-group gradient cell (2,12) got {grad}"
         bad = bad + 1
+    bad
+
+# Multi-root page whose roots hold text, an outline and a shadow (halo past
+# the command rect). Each cell 24x16.
+fn mr_cell(left: i32, bg: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:0;width:24px;height:16px;background:" + bg + "\">" + inner + "</div>"
+
+fn mr_group(op: text, extra: text, inner: text) -> text:
+    "<div style=\"position:absolute;left:0;top:0;width:24px;height:16px;opacity:" + op + ";" + extra + "\">" + inner + "</div>"
+
+fn mr_box(left: i32, top: i32, w: i32, h: i32, paint: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:" + "{top}" + "px;width:" + "{w}" + "px;height:" + "{h}" + "px;" + paint + "\"></div>"
+
+fn mr_text_cell() -> text:
+    mr_cell(0, "rgb(40,90,200)", mr_group("0.5", "background:rgb(255,0,0);font:10px sans-serif;color:rgb(0,0,0)", "Hi"))
+
+fn mr_page() -> text:
+    var body = mr_text_cell()
+    body = body + mr_cell(24, "rgb(230,220,10)", mr_group("0.6", "", mr_box(4, 4, 8, 8, "background:rgb(0,128,0);outline:2px solid rgb(0,0,255)") + mr_box(14, 0, 10, 16, "background:rgb(255,255,255)")))
+    body = body + mr_cell(48, "rgb(128,128,128)", mr_group("0.5", "", mr_box(0, 0, 10, 8, "background:rgb(255,0,0);box-shadow:3px 3px 0 rgba(0,0,0,0.5)") + mr_box(16, 0, 8, 16, "background:rgb(0,255,0)")))
+    body = body + mr_cell(72, "rgb(255,255,255)", mr_group("0.7", "", mr_box(0, 0, 14, 16, "background:rgb(0,0,255)") + mr_box(10, 0, 14, 16, "background:rgb(255,128,0)")))
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
+
+# Chrome 159 colours of mr_page() (k=4, `--window-size=96,16`): text-root
+# background away from the glyphs, outlined box / sibling, shadow box /
+# background / sibling, two-box group. Not pinned (open, see the bug record):
+# the outline ring (Chrome 5B579D at (26,13) (30,2) (26,8)) -- no lane paints
+# an outline on a positioned box, opacity or not -- and the shadow-only
+# pixels (Chrome 5F5F5F at (59,9) (52,10) (60,5), 606060 for the same shadow
+# on tg_page's 8x5 box; Simple paints 606060 on both).
+val MR_X: [i32] = [21, 22, 12, 29, 35, 38, 41, 50, 51, 62, 66, 74, 81, 89]
+val MR_Y: [i32] = [13, 2, 13, 5, 8, 13, 13, 2, 6, 12, 8, 8, 8, 8]
+val MR_CHROME: [u32] = [
+    0xFF942C63u32, 0xFF942C63u32, 0xFF942C63u32,
+    0xFF5BA403u32, 0xFF5BA403u32, 0xFFF5F19Du32, 0xFFF5F19Du32,
+    0xFFBF3F3Fu32, 0xFFBF3F3Fu32, 0xFF808080u32, 0xFF3FBF3Fu32,
+    0xFF4B4BFFu32, 0xFF4B4BFFu32, 0xFFFFA54Bu32
+]
+
+fn mr_mismatches(px: [u32], fw: i32) -> i32:
+    if px.len() < fw * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < MR_CHROME.len():
+        val got = px[MR_Y[n] * fw + MR_X[n]]
+        if got != MR_CHROME[n]:
+            print "multi-root cell {n} ({MR_X[n]},{MR_Y[n]}) got {got} want {MR_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+# Chrome colours of tg_page() cells the raster declines: the Engine2D lanes
+# composite layers with real alpha. Open (bug record): (40,4), where two
+# translucent paints overlap (Chrome E3D994, Engine2D +1 green), and every
+# <img> pixel -- no lane paints this <img> (Chrome 8829A5 B8C2FB 9A9FBC at
+# (18,12) (50,12) (54,12)), which also skips tg cells 13 and 14.
+val TG_DEV_X: [i32] = [34, 37, 46, 60]
+val TG_DEV_Y: [i32] = [4, 4, 4, 12]
+val TG_DEV_CHROME: [u32] = [0xFFB7DBFFu32, 0xFFB7DBFFu32, 0xFFFFE793u32, 0xFFBFBFBFu32]
+
+fn tg_dev_mismatches(px: [u32], fw: i32) -> i32:
+    var bad = tg_mismatches(px, fw, false)
+    if px.len() < fw * 16:
+        return 999
+    var n = 0
+    while n < TG_DEV_CHROME.len():
+        val got = px[TG_DEV_Y[n] * fw + TG_DEV_X[n]]
+        if got != TG_DEV_CHROME[n]:
+            print "translucent-group device cell {n} ({TG_DEV_X[n]},{TG_DEV_Y[n]}) got {got} want {TG_DEV_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
     bad
 
 describe "CSS opacity groups composite as Chrome 159 does":
@@ -330,4 +405,32 @@ describe "CSS opacity groups composite as Chrome 159 does":
 
     it "composites groups with translucent, shadow, gradient and image members on the CPU raster as Chrome does":
         val px = simple_web_layout_render_html_software_pixels(tg_page(), 64, 16)
-        expect(tg_mismatches(px, 64)).to_equal(0)
+        expect(tg_mismatches(px, 64, true)).to_equal(0)
+
+    it "composites a multi-root page with shadow, translucent, gradient and image members on cpu_simd and Vulkan as Chrome does":
+        for lane in ["cpu_simd", "vulkan"]:
+            val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(tg_page(), 64, 16, lane)
+            expect(tg_dev_mismatches(px, 64)).to_equal(0)
+
+    it "composites a multi-root page with text, outline and shadow roots on cpu_simd and Vulkan as Chrome does":
+        for lane in ["cpu_simd", "vulkan"]:
+            val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(mr_page(), 96, 16, lane)
+            expect(mr_mismatches(px, 96)).to_equal(0)
+
+    it "paints a text root on a multi-root page exactly as on its own page":
+        # Simple-internal: glyph pixels are not pinned to Chrome (raster
+        # differences); the text root must not change with its neighbours.
+        val alone_page = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + mr_text_cell() + "</body></html>"
+        for lane in ["cpu_simd", "vulkan"]:
+            val multi = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(mr_page(), 96, 16, lane)
+            val alone = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(alone_page, 96, 16, lane)
+            var diff = 0
+            var y = 0
+            while y < 16:
+                var x = 0
+                while x < 24:
+                    if multi[y * 96 + x] != alone[y * 96 + x]:
+                        diff = diff + 1
+                    x = x + 1
+                y = y + 1
+            expect(diff).to_equal(0)

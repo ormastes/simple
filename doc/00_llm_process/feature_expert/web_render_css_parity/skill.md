@@ -2528,3 +2528,12 @@ Follow-up to the four 2026-11-16 behaviours. Each item has a `*_chrome159_spec.s
 - **Gap, not caused here:** the raster lane paints a plain `<img>` only with the widget image class, so image members contribute nothing on the raster. The pin for that pixel is left out.
 - **Pins:** `opacity_group_chrome159_spec` row "translucent, shadow, gradient and image members on the CPU raster", 19 exact cells plus the dithered gradient block (Chrome's own `24b05e`/`24b15e`).
 
+## 2026-11-17 — Multi-root opacity pages with shadow, outline and text roots (cpu_simd, Vulkan)
+- **Was:** on a page with 2+ opacity roots, every root needs a bounded translated surface. A root with a shadow or outline (halo past the command rect) was marked untranslatable, which declined surfaces for the WHOLE page: every group painted flat (no opacity).
+- **Halo** (`_simple_web_opacity_halo`, producer): the root rect grows per side by each outset shadow's offset toward that side + spread + 2*blur, and by outline width + |offset|. A shadow length that is not px returns `[]`, and the root stays untranslatable (declined, as before). Symmetric growth was tried first and overlapped the neighbour cells, which blew the one-viewport admission budget.
+- **Text roots:** on this page the text command has no glyph run, so it is translatable. A text root needed only the halo fix, plus the `pub` fix below. A root with a real glyph run (`glyph_run.valid`) is still untranslatable and declines surfaces for the page. That case is open: no pinned page produces one.
+- **Group count:** a gradient or image background paints from the style (the command colour is 0), so the producer counts it as a paint item once per owner, like `_raster_group_node_ops`. Without this the group folds, giving ±1.
+- **Trap:** small text on cpu_simd and Vulkan needs `sfnt_render_glyph_lcd` to be `pub` (upstream `08486feffd2`, cherry-picked). Without it every text page dies with a semantic error under the seed.
+- **Pre-existing, unpinned:** no lane paints an `outline` on a positioned box or this `<img>`. Chrome draws the same 3px 50% shadow as `5F5F5F` on a 10x8 box and as `606060` on an 8x5 box; Simple gives `606060` on both. Engine2D gives +1 green where two translucent paints overlap.
+- **Pins:** `opacity_group_chrome159_spec` has 3 rows: `tg_page` and `mr_page` on cpu_simd and Vulkan against Chrome, plus the text root on the multi-root page equals the text root alone (Simple-internal glyph check).
+

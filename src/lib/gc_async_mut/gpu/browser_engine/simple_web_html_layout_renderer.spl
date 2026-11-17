@@ -1426,6 +1426,41 @@ struct _SimpleWebOpacityRootBounds:
     painted: [i32]
     group: [bool]
 
+# Paint reach past a box's border box, per side [left, top, right, bottom],
+# from its outset shadows (offset toward the side + spread + 2*blur) and its
+# outline (width + |offset| on every side). Empty when a shadow length does
+# not parse as px: the reach is unknown, so the root keeps a viewport surface.
+fn _simple_web_opacity_halo(st: Style) -> [i32]:
+    var o = 0
+    if st.outline_w > 0:
+        o = st.outline_w + (if st.outline_offset_px < 0: 0 - st.outline_offset_px else: st.outline_offset_px)
+    var reach: [i32] = [o, o, o, o]
+    var layers: [[i32]] = []
+    if st.box_shadow_raw != "":
+        for layer in split_top_level_commas(st.box_shadow_raw):  # cpu-lane-loop-ok: one box's shadow layer list
+            if not layer.contains("inset"):
+                var v: [i32] = [0, 0, 0, 0]
+                var k = 0
+                for token in shadow_length_prefix(layer).split(" "):  # cpu-lane-loop-ok: at most four length tokens
+                    if k < 4 and token.trim() != "":
+                        if val n = token.replace("px", "").trim().to_int():
+                            v[k] = n as i32
+                        else:
+                            return []
+                        k = k + 1
+                layers = layers + [v]
+    elif st.box_shadow_color != 0u32:
+        layers = [[st.box_shadow_x_px, st.box_shadow_y_px, st.box_shadow_blur_px, 0]]
+    for v in layers:  # cpu-lane-loop-ok: one box's shadow layers
+        val grow = v[3] + v[2] * 2
+        val sides: [i32] = [grow - v[0], grow - v[1], grow + v[0], grow + v[1]]
+        var n = 0
+        while n < 4:
+            if sides[n] > reach[n]:
+                reach[n] = sides[n]
+            n = n + 1
+    reach
+
 fn _simple_web_draw_ir_command_translatable(command: DrawIrCommand) -> bool:
     if val _geometry = command.fractional_geometry:
         return false
@@ -1455,23 +1490,20 @@ fn _simple_web_opacity_root_bounds(
         if root >= 0 and root < node_count:
             val c = commands[i]
             val movable = _simple_web_draw_ir_command_translatable(c)
-            # A shadow halo or an outline paints outside the command rect;
-            # such a root keeps the viewport surface it had before.
+            # A shadow halo or an outline paints outside the command rect:
+            # the surface rect grows by that reach.
             val owner = if i < owners.len(): owners[i] else: -1
-            var halo = false
-            if owner >= 0 and owner < styles.len():
-                val ost = styles[owner]
-                if ost.box_shadow_color != 0u32 or ost.box_shadow_raw != "" or ost.outline_w > 0:
-                    halo = true
+            val halo: [i32] = if owner >= 0 and owner < styles.len(): _simple_web_opacity_halo(styles[owner]) else: [0, 0, 0, 0]
+            val halo_known = halo.len() == 4
             var chain = root
             while chain >= 0:  # cpu-lane-loop-ok: folds the command into its root and every ancestor root; bound is the nest level cap
-                if not movable or halo:
+                if not movable or not halo_known:
                     translate[chain] = false
-                if c.width > 0 and c.height > 0:
-                    if c.x < x0[chain]: x0[chain] = c.x
-                    if c.y < y0[chain]: y0[chain] = c.y
-                    if c.x + c.width > x1[chain]: x1[chain] = c.x + c.width
-                    if c.y + c.height > y1[chain]: y1[chain] = c.y + c.height
+                if halo_known and c.width > 0 and c.height > 0:
+                    if c.x - halo[0] < x0[chain]: x0[chain] = c.x - halo[0]
+                    if c.y - halo[1] < y0[chain]: y0[chain] = c.y - halo[1]
+                    if c.x + c.width + halo[2] > x1[chain]: x1[chain] = c.x + c.width + halo[2]
+                    if c.y + c.height + halo[3] > y1[chain]: y1[chain] = c.y + c.height + halo[3]
                 chain = if chain < root_parent.len(): root_parent[chain] else: -1
             if ((c.color >> 24) & 255u32) != 0u32 or c.image_uri != "" or c.glyph_run.valid:
                 painted[root] = painted[root] + 1
@@ -1485,6 +1517,10 @@ fn _simple_web_opacity_root_bounds(
                 if est.border_l > 0 or est.border_t > 0 or est.border_r > 0 or est.border_b > 0:
                     painted[root] = painted[root] + 1
                 if est.outline_w > 0 and est.outline_color != 0u32:
+                    painted[root] = painted[root] + 1
+                # A gradient / image background layer paints from the style,
+                # not the command colour.
+                if (est.background_gradient_from != 0u32 and est.background_gradient_to != 0u32) or est.bg_layers_raw != "" or est.background_image_uri != "":
                     painted[root] = painted[root] + 1
         i = i + 1
     var group: [bool] = [false; node_count]
