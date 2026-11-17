@@ -19,6 +19,7 @@ use std.common.ui.draw_ir.{
     DrawIrComposition,
     DrawIrRect,
     DrawIrEmbeddingConfig,
+    draw_ir_embedding_config,
     DrawIrStyleProp,
     Simple2dDrawIrCompositionPlan,
     Simple2dDrawIrPlan,
@@ -31,13 +32,15 @@ use std.common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface, css_opacity_group_surface_id}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
 }
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_advances_codepoint_arity}
-use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
     Engine2dGlassMaterialConfig,
@@ -942,6 +945,84 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if typed_nonuniform:
         eng = engine2d_draw_ir_render_typed_background(
             eng, command, x, y, w, h, effective_corners)
+    elif radius <= 0 and _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry") != "":
+        # A CSS gradient layer list resolved by the producer
+        # (`_html_draw_ir_gradient_layer_props`): the painting area, then per
+        # layer an ellipse (R) or a gradient line (L), Q10 px relative to this
+        # command's origin and device-scaled with it. The box colour paints
+        # first, then the layers bottom-up (the first listed is on top), each
+        # through the shared Engine2D evaluators and `draw_image_blend`.
+        val layer_geom = _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry")
+        val layer_stops = _engine2d_draw_ir_style_value(style, "background-gradient-layer-stops").split(";")
+        if _engine2d_draw_ir_has_visible_alpha(command.color):
+            eng.draw_rect_filled(x, y, w, h, command.color)
+        val lox = (x as i64) * 1024
+        val loy = (y as i64) * 1024
+        val pax = x + (_engine2d_draw_ir_nth_int(layer_geom, 0, 0) / 1024) as i32
+        val pay = y + (_engine2d_draw_ir_nth_int(layer_geom, 1, 0) / 1024) as i32
+        val paw = (_engine2d_draw_ir_nth_int(layer_geom, 2, 0) / 1024) as i32
+        val pah = (_engine2d_draw_ir_nth_int(layer_geom, 3, 0) / 1024) as i32
+        val layer_tiles = _engine2d_draw_ir_style_value(style, "background-gradient-layer-tiles")
+        val layer_repeat = _engine2d_draw_ir_style_value(style, "background-gradient-layer-repeat").split(",")
+        var li: i32 = layer_stops.len() as i32 - 1
+        # cpu-lane-loop-ok: one box's own gradient layer list, bottom layer first; bound is that list
+        while li >= 0:
+            val fields = layer_stops[li].split(":")
+            if fields.len() == 3:
+                val stop_n = fields[1].split(",").len()
+                var lcolors: [u32] = []
+                var lpositions: [i32] = []
+                var k: i32 = 0
+                # cpu-lane-loop-ok: one layer's stops; bound is its stop count
+                while k < stop_n:
+                    lcolors.push(_engine2d_draw_ir_nth_int(fields[1], k, 0) as u32)
+                    lpositions.push(_engine2d_draw_ir_nth_int(fields[2], k, 0) as i32)
+                    k = k + 1
+                val g0 = _engine2d_draw_ir_nth_int(layer_geom, 4 + 4 * li, 0)
+                val g1 = _engine2d_draw_ir_nth_int(layer_geom, 5 + 4 * li, 0)
+                val g2 = _engine2d_draw_ir_nth_int(layer_geom, 6 + 4 * li, 0)
+                val g3 = _engine2d_draw_ir_nth_int(layer_geom, 7 + 4 * li, 0)
+                if layer_tiles != "":
+                    # A tiled layer (`background-gradient-layer-tiles`): the
+                    # gradient is painted once per tile over that tile's
+                    # pixel span (`gradient_tile_spans`, the raster's grid),
+                    # moved to the tile origin. Each tile takes the same
+                    # Engine2D gradient call as an untiled layer, so the
+                    # Vulkan device evaluates it or declines to the host.
+                    val tx = lox + _engine2d_draw_ir_nth_int(layer_tiles, 4 * li, 0)
+                    val ty = loy + _engine2d_draw_ir_nth_int(layer_tiles, 1 + 4 * li, 0)
+                    val tw = _engine2d_draw_ir_nth_int(layer_tiles, 2 + 4 * li, 0)
+                    val th = _engine2d_draw_ir_nth_int(layer_tiles, 3 + 4 * li, 0)
+                    val rflags = if li < layer_repeat.len(): layer_repeat[li] else: "11"
+                    val cx0 = if pax < 0: 0 else: pax
+                    val cy0 = if pay < 0: 0 else: pay
+                    val cx1 = if pax + paw > eng.w: eng.w else: pax + paw
+                    val cy1 = if pay + pah > eng.h: eng.h else: pay + pah
+                    val xs = gradient_tile_spans(cx0, cx1 - cx0, tx, tw, rflags.starts_with("1"))
+                    val ys = gradient_tile_spans(cy0, cy1 - cy0, ty, th, rflags.ends_with("1"))
+                    var yi = 0
+                    # cpu-lane-loop-ok: one Engine2D gradient call per tile row of one layer; bound is the painted area over the tile size
+                    while yi < ys.len():
+                        var xi = 0
+                        # cpu-lane-loop-ok: one Engine2D gradient call per tile of one row; bound is the painted width over the tile size
+                        while xi < xs.len():
+                            val dx = xs[xi + 2] * tw
+                            val dy = ys[yi + 2] * th
+                            val sx = xs[xi] as i32
+                            val sy = ys[yi] as i32
+                            val sw = (xs[xi + 1] - xs[xi]) as i32
+                            val sh = (ys[yi + 1] - ys[yi]) as i32
+                            if fields[0] == "R":
+                                eng.draw_radial_gradient_ellipse(sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, g2, g3, lcolors, lpositions)
+                            else:
+                                eng.draw_linear_gradient_line(sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, lox + g2 + dx, loy + g3 + dy, lcolors, lpositions)
+                            xi = xi + 3
+                        yi = yi + 3
+                elif fields[0] == "R":
+                    eng.draw_radial_gradient_ellipse(pax, pay, paw, pah, lox + g0, loy + g1, g2, g3, lcolors, lpositions)
+                else:
+                    eng.draw_linear_gradient_line(pax, pay, paw, pah, lox + g0, loy + g1, lox + g2, loy + g3, lcolors, lpositions)
+            li = li - 1
     elif _engine2d_draw_ir_gradient_stop_count(style) >= 2 and radius <= 0:
         # GAP-2: an N-stop/angled/radial gradient was parsed at CSS-apply
         # time (simple_web_html_layout_renderer_decl_apply.spl) and threaded
@@ -966,12 +1047,36 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         while gsi < stop_count:
             stop_positions.push(_engine2d_draw_ir_nth_int(stops_raw, stop_count + gsi, 0) as i32)
             gsi = gsi + 1
-        if is_radial:
+        val radial_geometry = _engine2d_draw_ir_style_value(style, "background-gradient-radial-geometry")
+        if is_radial and radial_geometry != "":
+            # CSS radial gradient resolved by the producer against the
+            # gradient box: centre, radii and paint rect in Q10 px relative
+            # to this command's origin (device-scaled with the command).
+            # Layers sit over the box colour.
+            if _engine2d_draw_ir_has_visible_alpha(command.color):
+                eng.draw_rect_filled(x, y, w, h, command.color)
+            val ox = (x as i64) * 1024
+            val oy = (y as i64) * 1024
+            eng.draw_radial_gradient_ellipse(
+                x + (_engine2d_draw_ir_nth_int(radial_geometry, 4, 0) / 1024) as i32,
+                y + (_engine2d_draw_ir_nth_int(radial_geometry, 5, 0) / 1024) as i32,
+                (_engine2d_draw_ir_nth_int(radial_geometry, 6, 0) / 1024) as i32,
+                (_engine2d_draw_ir_nth_int(radial_geometry, 7, 0) / 1024) as i32,
+                ox + _engine2d_draw_ir_nth_int(radial_geometry, 0, 0),
+                oy + _engine2d_draw_ir_nth_int(radial_geometry, 1, 0),
+                _engine2d_draw_ir_nth_int(radial_geometry, 2, 0),
+                _engine2d_draw_ir_nth_int(radial_geometry, 3, 0),
+                stop_colors, stop_positions)
+        elif is_radial:
             val cx = x + w / 2
             val cy = y + h / 2
             val r = if w > h: w / 2 else: h / 2
             eng.draw_radial_gradient_rect_stops(cx, cy, r, stop_colors, stop_positions)
         else:
+            # The box colour sits under the layer (CSS Backgrounds 3), as in
+            # the radial branch: a translucent stop shows it, not the page.
+            if _engine2d_draw_ir_has_visible_alpha(command.color):
+                eng.draw_rect_filled(x, y, w, h, command.color)
             eng.draw_gradient_rect_stops(x, y, w, h, stop_colors, stop_positions, angle_deg)
     elif bg_image.starts_with("linear-gradient(") and radius <= 0:
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
@@ -1596,10 +1701,27 @@ fn _engine2d_draw_ir_text_bitmap_fallback(eng: Engine2D, x: i32, y: i32, command
             paint_clip,
             draw_ir_rect_bounds(x, 0, command.width, eng.height()))
         eng.set_clip(band.x, band.y, band.width, band.height)
-        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+        _engine2d_draw_ir_bitmap_text(eng, x, y, command)
         _engine2d_draw_ir_restore_clip(eng, paint_clip)
     else:
-        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+        _engine2d_draw_ir_bitmap_text(eng, x, y, command)
+
+# A bitmap-glyph run. `bitmap-glyph-advance` (a password mask: Chrome 159's
+# 8px U+2022 advances 2.80, not the 5x7 cell's 5) steps each codepoint by
+# that producer-resolved advance, as the browser raster does; otherwise the
+# run keeps the cell advance of `draw_text`.
+fn _engine2d_draw_ir_bitmap_text(eng: Engine2D, x: i32, y: i32, command: DrawIrCommand):
+    val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+    val step_text = _engine2d_draw_ir_style_value(command.computed_style, "bitmap-glyph-advance")
+    val step = if step_text == "": 0 else: step_text.to_i64() as i32
+    if step <= 0:
+        eng.draw_text(x, y, command.text_value, command.color, font_size)
+        return
+    var pen = x
+    # cpu-lane-loop-ok: one draw_text per codepoint of a single masked input value; bound is that value's codepoint count
+    for cp in text_codepoints(command.text_value):
+        eng.draw_text(pen, y, char_from_codepoint(cp), command.color, font_size)
+        pen = pen + step
 
 fn _engine2d_draw_ir_append_unsupported_reason(reason: text, unsupported_kinds: text) -> text:
     if unsupported_kinds == "none":
@@ -2472,15 +2594,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                     if probe_this:
                         _e2d_text_probe_count = _e2d_text_probe_count + 1
                         print("[e2d-text-probe] ir kind=plain len={command.text_value.len()}")
-                    if command.width > 0:
-                        val band = draw_ir_rect_intersection(
-                            text_paint_clip,
-                            draw_ir_rect_bounds(x, 0, command.width, eng.height()))
-                        eng.set_clip(band.x, band.y, band.width, band.height)
-                        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
-                        _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
-                    else:
-                        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
                     rendered = rendered + 1
             if not font_ready:
                 skipped = skipped + 1
@@ -2747,6 +2861,73 @@ fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
 # today's exact direct translate+clip behavior — this is the load-bearing
 # backward-compatibility path: no regression for callers that never opted
 # into a real embedded surface.
+# Nested CSS opacity groups. The HTML producer tags a command inside nested
+# groups with `css-opacity-group-nest`: one `root,x,y,w,h,opacity_milli` entry
+# per nested level, outermost first, each rect relative to its parent layer,
+# the command itself in its innermost layer's coordinates. Inside a group
+# layer rendered at embed depth `depth`, entry `depth` names the nested group
+# a command belongs to (empty: the command paints straight into this layer).
+fn _engine2d_draw_ir_css_group_nest_entry(command: DrawIrCommand, depth: i32) -> text:
+    val nest = _engine2d_draw_ir_style_value(command.computed_style, "css-opacity-group-nest")
+    if nest == "":
+        return ""
+    val levels = nest.split(";")
+    if depth < 0 or depth >= levels.len():
+        return ""
+    levels[depth]
+
+# Renders a group layer's commands in order: plain runs straight into
+# `layer`, each nested group's run as a group batch one embed depth deeper
+# (its own transparent layer, SkBlendARGB32 restore into `layer`), as Chrome
+# 159 restores every nested saveLayer into its parent's layer.
+fn _engine2d_draw_ir_render_css_group_layer(layer: Engine2D, batch: DrawIrBatch, commands: [DrawIrCommand], images: [Engine2dResolvedDrawIrImage], depth: i32, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
+    var eng = layer
+    var rendered = 0
+    var skipped = 0
+    var occluded = 0
+    var requested = 0
+    var unsupported_kinds = ""
+    var budget = css_background_pixel_work_budget
+    val total = commands.len().to_i32()
+    var i: i32 = 0
+    while i < total:  # cpu-lane-loop-ok: one pass over a group layer's commands cutting nested-group runs; bound is the batch command count
+        val key = _engine2d_draw_ir_css_group_nest_entry(commands[i], depth)
+        var run: [DrawIrCommand] = [commands[i]]
+        var j = i + 1
+        while j < total and _engine2d_draw_ir_css_group_nest_entry(commands[j], depth) == key:  # cpu-lane-loop-ok: extends the same run; each command is visited once
+            run.push(commands[j])
+            j = j + 1
+        val outcome = if key == "":
+            _engine2d_draw_ir_render_commands(
+                eng, run, 0, 0, images, true,
+                batch.backend_target == "metal", draw_ir_no_rect(), budget)
+        else:
+            var nested = batch
+            nested.embedding = draw_ir_embedding_config(
+                css_opacity_group_surface_id(_engine2d_draw_ir_nth_int(key, 0, -1) as i32),
+                batch.embedding.component_id,
+                _engine2d_draw_ir_nth_int(key, 1, 0) as i32,
+                _engine2d_draw_ir_nth_int(key, 2, 0) as i32,
+                _engine2d_draw_ir_nth_int(key, 3, 0) as i32,
+                _engine2d_draw_ir_nth_int(key, 4, 0) as i32,
+                0, _engine2d_draw_ir_nth_int(key, 5, 1000) as i32, true)
+            nested.commands = run
+            _engine2d_draw_ir_render_batch_embedded(
+                eng, nested, images, depth + 1, false, budget)
+        eng = outcome.engine
+        rendered = rendered + outcome.rendered
+        skipped = skipped + outcome.skipped
+        occluded = occluded + outcome.occluded
+        requested = requested + outcome.metal_device_glass_requested_count
+        if outcome.css_background_pixel_work_remaining >= 0:
+            budget = outcome.css_background_pixel_work_remaining
+        if outcome.unsupported_kinds != "" and outcome.unsupported_kinds != "none":
+            unsupported_kinds = if unsupported_kinds == "": outcome.unsupported_kinds else: unsupported_kinds + "," + outcome.unsupported_kinds
+        i = j
+    _engine2d_draw_ir_render_outcome(
+        eng, rendered, skipped, unsupported_kinds, 0, 0, requested, 0, [],
+        "", 0, 0, budget, occluded)
+
 fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     # Preserve the nested Draw IR struct layout across the native
@@ -2981,20 +3162,41 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             "embedded-offscreen-not-created",
             0
         )
-    val inner = _engine2d_draw_ir_render_commands(
-        offscreen, commands, 0, 0, images, true,
-        batch.backend_target == "metal", draw_ir_no_rect(),
-        css_background_pixel_work_budget)
+    # A CSS opacity group (>= 2 painted items under one opacity root) restores
+    # with Chrome's SkBlendARGB32 rule; every other embedded surface keeps the
+    # milli contract of engine2d_composite_region_milli. On Vulkan the restore
+    # runs on the device from the offscreen buffer (no readback); any decline
+    # falls back to the readback restore, which paints the same pixels.
+    val css_group = css_opacity_group_surface(embedding.surface_id)
+    val inner = if css_group:
+        _engine2d_draw_ir_render_css_group_layer(
+            offscreen, batch, commands, images, depth,
+            css_background_pixel_work_budget)
+    else:
+        _engine2d_draw_ir_render_commands(
+            offscreen, commands, 0, 0, images, true,
+            batch.backend_target == "metal", draw_ir_no_rect(),
+            css_background_pixel_work_budget)
     offscreen = inner.engine
-    val child = offscreen.read_pixels_with_source()
-    val composited = eng.draw_ir_composite_readback(
-        embedding.x,
-        embedding.y,
-        embedding.width,
-        embedding.height,
-        child,
-        embedding.opacity_milli
-    )
+    val device_restored = css_group and eng.draw_ir_composite_device_css_group(
+        offscreen, embedding.x, embedding.y, embedding.width, embedding.height,
+        embedding.opacity_milli)
+    val child = if device_restored: engine2d_readback([], "device_restored") else: offscreen.read_pixels_with_source()
+    val composited = if device_restored:
+        true
+    elif css_group:
+        eng.draw_ir_composite_readback_css_group(
+            embedding.x, embedding.y, embedding.width, embedding.height,
+            child, embedding.opacity_milli)
+    else:
+        eng.draw_ir_composite_readback(
+            embedding.x,
+            embedding.y,
+            embedding.width,
+            embedding.height,
+            child,
+            embedding.opacity_milli
+        )
     # A pooled offscreen is retained for the next same-size batch (and future
     # frames); shutting it down would free its buffer and defeat the reuse.
     if not offscreen_pooled:

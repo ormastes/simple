@@ -1,0 +1,58 @@
+# Compiled pure-Simple frontend (flat AST bridge -> HIR, used by native build
+# and lint): a library unit suffix (src/unit/<org>/<family>/<sfx>.spl) needs a
+# `use unit.[<org>.]<family>...` import or a same-file `unit X: T as sfx`
+# declaration, with the same diagnostic text as the core interpreter
+# (eval_units.spl). Scope is per file. Fixture library under build/ (gitignored).
+# Runtime: src/compiler/10.frontend/core/unit_scope.spl,
+# src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use compiler.core.unit_scope.{unit_library_set_base}
+
+val FIXTURE_ROOT: text = "build/tmp/compiled_unit_suffix_scope_spec/unit"
+
+fn setup_fixture():
+    file_write(FIXTURE_ROOT + "/acme/robotics/rpmx.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/acme/robotics/__init__.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/simple-lang/velocity/kmph.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/simple-lang/velocity/mps.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/simple-lang/velocity/__init__.spl", "# fixture\n")
+    unit_library_set_base(FIXTURE_ROOT)
+
+fn diag(src: text) -> text:
+    setup_fixture()
+    val _module = parse_and_build_module(src + "\n", "compiled_unit_suffix_scope_probe.spl")
+    val errs: [text] = if parser_has_errors(): parser_get_errors() else: []
+    unit_library_set_base("")
+    errs.join("\n")
+
+describe "compiled frontend unit suffix scope":
+    it "rejects a library suffix that is not imported":
+        expect(diag("fn main() -> i64:\n    val s = 60_kmph\n    0")).to_contain("unit suffix 'kmph' is not in scope; add " + r"`use unit.velocity.{kmph}`")
+
+    it "accepts an imported suffix":
+        expect(diag(r"use unit.velocity.{kmph}" + "\nfn main() -> i64:\n    val s = 60_kmph\n    0")).not_to_contain("not in scope")
+
+    it "does not admit a sibling suffix of a selective import":
+        expect(diag(r"use unit.velocity.{kmph}" + "\nfn main() -> i64:\n    val s = 3_mps\n    0")).to_contain("unit suffix 'mps' is not in scope")
+
+    it "accepts a family glob import":
+        expect(diag("use unit.velocity.*\nfn main() -> i64:\n    val s = 3_mps\n    0")).not_to_contain("not in scope")
+
+    it "rejects an org suffix that is not imported":
+        expect(diag("fn main() -> i64:\n    val r = 3_rpmx\n    0")).to_contain(r"`use unit.acme.robotics.{rpmx}`")
+
+    it "accepts an org-qualified import":
+        expect(diag(r"use unit.acme.robotics.{rpmx}" + "\nfn main() -> i64:\n    val r = 3_rpmx\n    0")).not_to_contain("not in scope")
+
+    it "accepts a suffix declared in the same file":
+        expect(diag("unit MyKm: i64 as kmph\nfn main() -> i64:\n    val s = 7_kmph\n    0")).not_to_contain("not in scope")
+
+    it "leaves a non-library suffix alone":
+        expect(diag("fn main() -> i64:\n    val b = 5_i32\n    0")).not_to_contain("not in scope")
+
+    it "does not leak an import into the next file":
+        val _first = diag(r"use unit.velocity.{kmph}" + "\nfn main() -> i64:\n    val s = 60_kmph\n    0")
+        expect(diag("fn main() -> i64:\n    val s = 60_kmph\n    0")).to_contain("unit suffix 'kmph' is not in scope")

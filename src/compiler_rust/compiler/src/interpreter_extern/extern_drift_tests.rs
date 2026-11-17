@@ -380,6 +380,11 @@ fn posix_abi_serves_path_identity_externs() {
             "{name} must be served by posix_abi on Linux only"
         );
     }
+    assert_eq!(
+        super::posix_abi::is_supported_name("_NSGetExecutablePath"),
+        cfg!(target_os = "macos"),
+        "_NSGetExecutablePath must be served by posix_abi on macOS only"
+    );
     let expected_host_owner = if cfg!(any(target_os = "macos", target_os = "freebsd")) {
         Some("__error")
     } else if cfg!(target_os = "linux") {

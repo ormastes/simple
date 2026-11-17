@@ -1528,11 +1528,14 @@ pub fn rt_engine2d_simd_copy_span_u32(args: &[Value]) -> Result<Value, CompileEr
     Ok(pack_u32_array(dst))
 }
 
-/// Src-over blend of a single packed straight-alpha pixel (0xAARRGGBB),
-/// bit-exact with `oracle_src_over` (truncating integer division). Shared by
-/// the in-place span bridges below and `rt_engine2d_simd_blend_row_u32`.
+/// Chrome 159 (Skia) source-over of one straight-alpha pixel (0xAARRGGBB).
+/// Opaque destination: `round(s*a/255) + ((d*(256-a)) >> 8)` for a solid
+/// fill (`solid`), `round(s*a/255) + div255r(d*(255-a))` for an image.
+/// Translucent destination: rounded straight-alpha src-over. Twin of
+/// `engine2d_blend_u32` (runtime_simd_dispatch.c), `blend_pixel`
+/// (runtime engine2d_simd_ops.rs) and color.spl `blend` / `blend_solid`.
 #[inline]
-fn engine2d_blend_pixel_u32(s: u32, d: u32) -> u32 {
+fn engine2d_blend_pixel_u32(s: u32, d: u32, solid: bool) -> u32 {
     let sa = (s >> 24) & 0xFF;
     if sa == 255 {
         return s;
@@ -1542,12 +1545,24 @@ fn engine2d_blend_pixel_u32(s: u32, d: u32) -> u32 {
     }
     let da = (d >> 24) & 0xFF;
     let inv = 255 - sa;
-    let dst_weight = da * inv / 255;
-    let out_alpha = sa + dst_weight;
-    let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * dst_weight) / out_alpha;
-    let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * dst_weight) / out_alpha;
-    let b = ((s & 0xFF) * sa + (d & 0xFF) * dst_weight) / out_alpha;
-    (out_alpha << 24) | (r << 16) | (g << 8) | b
+    if da != 255 {
+        let dw = (da * inv + 127) / 255;
+        let oa = sa + dw;
+        let channel = |shift: u32| (((s >> shift) & 0xFF) * sa + ((d >> shift) & 0xFF) * dw + oa / 2) / oa;
+        return (oa << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0);
+    }
+    let channel = |shift: u32| {
+        let sc = (s >> shift) & 0xFF;
+        let dc = (d >> shift) & 0xFF;
+        let dterm = if solid {
+            (dc * (inv + 1)) >> 8
+        } else {
+            let v = dc * inv + 128;
+            (v + (v >> 8)) >> 8
+        };
+        (sc * sa + 127) / 255 + dterm
+    };
+    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 /// Interpreter bridge for the native in-place blend-span ABI. Blends
@@ -1577,7 +1592,7 @@ pub fn rt_engine2d_simd_blend_span_u32(args: &[Value]) -> Result<Value, CompileE
         for i in 0..count {
             let d = dst[dst_offset + i];
             let s = src[src_offset + i];
-            dst[dst_offset + i] = engine2d_blend_pixel_u32(s, d);
+            dst[dst_offset + i] = engine2d_blend_pixel_u32(s, d, false);
         }
     }
     Ok(pack_u32_array(dst))
@@ -1608,7 +1623,7 @@ pub fn rt_engine2d_simd_blend_const_span_u32(args: &[Value]) -> Result<Value, Co
         let count = requested.min(dst.len() - offset);
         for i in 0..count {
             let d = dst[offset + i];
-            dst[offset + i] = engine2d_blend_pixel_u32(s, d);
+            dst[offset + i] = engine2d_blend_pixel_u32(s, d, true);
         }
     }
     Ok(pack_u32_array(dst))
@@ -1640,21 +1655,7 @@ pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileEr
     for i in 0..n {
         let d = dst[i];
         let s = src[i];
-        let sa = (s >> 24) & 0xFF;
-        let pixel = if sa == 255 {
-            s
-        } else if sa == 0 {
-            d
-        } else {
-            let da = (d >> 24) & 0xFF;
-            let inv = 255 - sa;
-            let dst_weight = da * inv / 255;
-            let out_alpha = sa + dst_weight;
-            let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * dst_weight) / out_alpha;
-            let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * dst_weight) / out_alpha;
-            let b = ((s & 0xFF) * sa + (d & 0xFF) * dst_weight) / out_alpha;
-            (out_alpha << 24) | (r << 16) | (g << 8) | b
-        };
+        let pixel = engine2d_blend_pixel_u32(s, d, false);
         out.push(pixel);
     }
     Ok(pack_u32_array(out))
@@ -2220,6 +2221,34 @@ pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod engine2d_span_tests {
+    use super::*;
+
+    #[test]
+    fn const_span_pct_matches_per_pixel_solid_rule() {
+        for pct in 0..=100i32 {
+            for &src in &[0xFF00_0000u32, 0xFFFF_0000, 0x1280_E507, 0xFFFF_FFFF] {
+                let dsts: Vec<u32> = (0..256u32).step_by(15).map(|v| 0x4000_0000 | (v << 16) | ((255 - v) << 8) | (v / 2)).collect();
+                let mut span = dsts.clone();
+                blend_const_span_pct_scalar(&mut span, src, pct);
+                for (i, &d) in dsts.iter().enumerate() {
+                    let want = if pct >= 100 {
+                        src
+                    } else if pct <= 0 {
+                        d
+                    } else {
+                        let a = ((pct as u32) * 255 + 50) / 100;
+                        engine2d_blend_pixel_u32((a << 24) | (src & 0x00FF_FFFF), d | 0xFF00_0000, true)
+                    };
+                    assert_eq!(span[i], want, "pct={pct} src={src:#x} dst={d:#x}");
+                }
+            }
+        }
+        // Chrome 159 cell: rgba(0,0,0,0.4) over rgb(128,128,128) = #4d4d4d.
+        let mut cell = [0xFF80_8080u32];
+        blend_const_span_pct_scalar(&mut cell, 0xFF00_0000, 40);
+        assert_eq!(cell[0], 0xFF4D_4D4D);
+    }
+
     use super::{pack_u32_array, rt_engine2d_simd_blend_row_u32, rt_engine2d_simd_copy_span_u32, unpack_u32_array};
     use crate::value::Value;
 
@@ -2267,7 +2296,7 @@ mod engine2d_span_tests {
         let blended = rt_engine2d_simd_blend_row_u32(&[dst, src]).unwrap();
         assert_eq!(
             unpack_u32_array("blended", &blended).unwrap(),
-            vec![0x80ff_ffff, 0xbfaa_0054, 0x0011_2233]
+            vec![0x80ff_ffff, 0xc0aa_0055, 0x0011_2233]
         );
     }
 }
@@ -2585,41 +2614,33 @@ mod host_probe_tests {
 // same source loop compiled three ways.
 // ---------------------------------------------------------------------------
 
-/// One pixel of the percent blend. MUST stay bit-identical to
-/// `blend_opacity` in
-/// `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl`.
-#[inline(always)]
-fn blend_opacity_pct_u32(src: u32, dst: u32, opacity_pct: i32) -> u32 {
-    if opacity_pct >= 100 {
-        return src;
-    }
-    if opacity_pct <= 0 {
-        return dst;
-    }
-    let sr = ((src >> 16) & 255) as i32;
-    let sg = ((src >> 8) & 255) as i32;
-    let sb = (src & 255) as i32;
-    let dr = ((dst >> 16) & 255) as i32;
-    let dg = ((dst >> 8) & 255) as i32;
-    let db = (dst & 255) as i32;
-    let inv = 100 - opacity_pct;
-    let r = (sr * opacity_pct + dr * inv + 50) / 100;
-    let g = (sg * opacity_pct + dg * inv + 50) / 100;
-    let b = (sb * opacity_pct + db * inv + 50) / 100;
-    // Mirrors the Simple `argb` helper EXACTLY
-    // (renderer_foundation.spl:1223), which does not clamp:
-    //     0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
-    // Clamping here would be a no-op for every reachable input (channels are
-    // 0..255 and opacity_pct is 0..100 after the early returns above), but
-    // writing it out this way makes the two bit-identical by construction
-    // rather than by argument.
-    0xFF00_0000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-}
-
+/// The percent blend over a span. MUST stay bit-identical to `blend_opacity`
+/// in `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl`
+/// and the C kernel `rt_engine2d_blend_const_span_pct_u32`: the percent
+/// becomes a = round(pct*255/100), dst is treated as opaque, and each channel
+/// is Chrome's solid rule round(s*a/255) + ((d*(256-a)) >> 8) (the same
+/// result as `engine2d_blend_pixel_u32(.., true)`). The constant source terms
+/// are hoisted so the loop body is branch-free and widens.
 #[inline(always)]
 fn blend_const_span_pct_scalar(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    if opacity_pct >= 100 {
+        dst.fill(src);
+        return;
+    }
+    if opacity_pct <= 0 {
+        return;
+    }
+    let a = ((opacity_pct as u32) * 255 + 50) / 100;
+    let inv = 256 - a;
+    let sr = (((src >> 16) & 0xFF) * a + 127) / 255;
+    let sg = (((src >> 8) & 0xFF) * a + 127) / 255;
+    let sb = ((src & 0xFF) * a + 127) / 255;
     for d in dst.iter_mut() {
-        *d = blend_opacity_pct_u32(src, *d, opacity_pct);
+        let v = *d;
+        let r = sr + ((((v >> 16) & 0xFF) * inv) >> 8);
+        let g = sg + ((((v >> 8) & 0xFF) * inv) >> 8);
+        let b = sb + (((v & 0xFF) * inv) >> 8);
+        *d = 0xFF00_0000 | (r << 16) | (g << 8) | b;
     }
 }
 

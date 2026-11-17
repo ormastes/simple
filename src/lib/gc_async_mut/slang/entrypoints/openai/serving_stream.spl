@@ -1,0 +1,187 @@
+# @gc — module uses GC runtime
+#
+# stream=true for /v1/chat/completions and /v1/completions: server-sent events
+# written straight to the connection.
+#
+# slang owns the decode loop, so on the ggml runner every sampled token is
+# detokenized, passed through stop-sequence hold-back and flushed to the client
+# as its own `data:` frame BEFORE the next token is sampled — the first content
+# frame leaves after one token, not after the whole answer. Runners that cannot
+# be driven token by token (the pure runner, a shared-context backend) are still
+# answered with valid SSE, but from the finished completion: one content frame.
+# That is labelled here rather than hidden; see engine_can_stream.
+#
+# Wire shape (OpenAI): a role frame, content frames with choices[].delta, a
+# final frame carrying finish_reason, then `data: [DONE]`. The response has no
+# Content-Length; the connection is closed after [DONE].
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, openai_error_response, openai_chat_chunk_sse, openai_chat_delta_json, openai_text_chunk_sse, json_bool_field_is_true, parse_completion_request}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{chat_prepare, media_part_count, chat_plain_prompt_from_body, engine_refusal_response, model_not_found_response}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{scan_model_root}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_can_stream, engine_stream_open, engine_stream_step, engine_stream_close, engine_complete_chat_stops, engine_complete_text_stops}
+
+fn _normalize_route(path: text) -> text:
+    var bare = path
+    val at = bare.find("?")
+    if at >= 0:
+        bare = bare.slice(0, at)
+    bare = bare.trim()
+    if bare.len() > 1 and bare.ends_with("/"):
+        bare = bare.slice(0, bare.len() - 1)
+    bare
+
+# True when this request is a streaming completion request that serve_stream
+# will answer itself.
+fn stream_requested(method: text, path: text, body: text) -> bool:
+    if method.trim().to_upper() != "POST":
+        return false
+    val route = _normalize_route(path)
+    if route != "/v1/chat/completions" and route != "/v1/completions":
+        return false
+    json_bool_field_is_true(body, "stream")
+
+fn _status_reason(status: i32) -> text:
+    if status == 400:
+        return "Bad Request"
+    if status == 404:
+        return "Not Found"
+    if status == 503:
+        return "Service Unavailable"
+    "Error"
+
+fn _write_json(stream: TcpStream, answer: ApiResponse) -> bool:
+    val wire = "HTTP/1.1 " + answer.status.to_text() + " " + _status_reason(answer.status) + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + answer.body.byte_len().to_text() + "\r\nConnection: close\r\n\r\n" + answer.body
+    stream.write_text_status(wire)
+
+fn _write_sse_head(stream: TcpStream) -> bool:
+    stream.write_text_status("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")
+
+# What a request needs once it is known to be servable.
+struct StreamJob:
+    chat: bool
+    model: text
+    framed: text
+    plain_prompt: text
+    max_tokens: i64
+    stops: [text]
+
+fn _chat_job(model_root: text, body: text) -> Result<StreamJob, ApiResponse>:
+    match chat_prepare(model_root, body):
+        Err(refusal):
+            Err(refusal)
+        Ok(plan):
+            if media_part_count(plan.messages) > 0:
+                return Err(openai_error_response(400, "stream=true is not supported for requests with image/audio parts; send stream=false", "invalid_request_error", "unsupported_modality", ""))
+            Ok(StreamJob(chat: true, model: plan.request.model, framed: plan.framed,
+                plain_prompt: chat_plain_prompt_from_body(body), max_tokens: plan.request.max_tokens, stops: plan.request.stop))
+
+fn _text_job(model_root: text, body: text) -> Result<StreamJob, ApiResponse>:
+    match parse_completion_request(body):
+        Err(reason):
+            Err(openai_error_response(400, reason, "invalid_request_error", "invalid_request", ""))
+        Ok(request):
+            var known = false
+            for m in scan_model_root(model_root, engine_backend_available()):
+                if m.id == request.model:
+                    known = true
+            if not known:
+                return Err(model_not_found_response(request.model))
+            Ok(StreamJob(chat: false, model: request.model, framed: request.prompt, plain_prompt: request.prompt,
+                max_tokens: request.max_tokens, stops: request.stop))
+
+fn _frame(job: StreamJob, piece: text, finish: text) -> text:
+    if job.chat:
+        if finish != "":
+            return openai_chat_chunk_sse(job.model, "", finish)
+        return openai_chat_chunk_sse(job.model, openai_chat_delta_json(piece), "")
+    openai_text_chunk_sse(job.model, piece, finish)
+
+fn _write_error_event(stream: TcpStream, reason: text):
+    val answer = openai_error_response(500, reason, "server_error", "generation_failed", "")
+    val _w = stream.write_text_status("data: " + answer.body + "\n\n")
+
+fn _run_live(stream: TcpStream, job: StreamJob):
+    match engine_stream_open(job.framed, job.max_tokens, job.chat, job.stops):
+        Err(reason):
+            val _w = _write_json(stream, engine_refusal_response(job.model, reason))
+        Ok(opened):
+            if not _write_sse_head(stream):
+                engine_stream_close(opened)
+                return
+            if job.chat:
+                if not stream.write_text_status(openai_chat_chunk_sse(job.model, "\"role\":\"assistant\",\"content\":\"\"", "")):
+                    engine_stream_close(opened)
+                    return
+            var st = opened
+            var failed = false
+            while not st.finished:
+                match engine_stream_step(st):
+                    Err(reason):
+                        _write_error_event(stream, reason)
+                        failed = true
+                        break
+                    Ok(next):
+                        st = next
+                        if next.delta != "":
+                            if not stream.write_text_status(_frame(job, next.delta, "")):
+                                engine_stream_close(st)
+                                return
+            engine_stream_close(st)
+            if not failed:
+                val _f = stream.write_text_status(_frame(job, "", st.finish_reason))
+            val _d = stream.write_text_status("data: [DONE]\n\n")
+
+fn _run_buffered(stream: TcpStream, model_root: text, job: StreamJob):
+    var content = ""
+    var finish = "stop"
+    if job.chat:
+        match engine_complete_chat_stops(model_root, job.model, job.framed, job.plain_prompt, job.max_tokens, job.stops):
+            Err(reason):
+                val _w = _write_json(stream, engine_refusal_response(job.model, reason))
+                return
+            Ok(done):
+                content = done.content
+                finish = done.finish_reason
+    else:
+        match engine_complete_text_stops(model_root, job.model, job.framed, job.max_tokens, job.stops):
+            Err(reason):
+                val _w = _write_json(stream, engine_refusal_response(job.model, reason))
+                return
+            Ok(done):
+                content = done.content
+                finish = done.finish_reason
+    if not _write_sse_head(stream):
+        return
+    if job.chat:
+        if not stream.write_text_status(openai_chat_chunk_sse(job.model, "\"role\":\"assistant\",\"content\":\"\"", "")):
+            return
+    if content != "":
+        if not stream.write_text_status(_frame(job, content, "")):
+            return
+    val _f = stream.write_text_status(_frame(job, "", finish))
+    val _d = stream.write_text_status("data: [DONE]\n\n")
+
+# Answers a stream=true request on `stream`. Returns false, having written
+# nothing, when the request is not one serve_stream handles (the caller then
+# routes it normally); true once a response was written. The caller closes the
+# connection.
+fn serve_stream(model_root: text, method: text, path: text, body: text, stream: TcpStream) -> bool:
+    if not stream_requested(method, path, body):
+        return false
+    var planned: Result<StreamJob, ApiResponse> = Err(openai_error_response(500, "unplanned", "server_error", "internal", ""))
+    if _normalize_route(path) == "/v1/chat/completions":
+        planned = _chat_job(model_root, body)
+    else:
+        planned = _text_job(model_root, body)
+    match planned:
+        Err(refusal):
+            val _w = _write_json(stream, refusal)
+        Ok(job):
+            if engine_can_stream(model_root, job.model):
+                _run_live(stream, job)
+            else:
+                _run_buffered(stream, model_root, job)
+    true
+
+export stream_requested, serve_stream, StreamJob

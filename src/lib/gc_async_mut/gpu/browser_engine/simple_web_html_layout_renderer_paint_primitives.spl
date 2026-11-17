@@ -13,7 +13,9 @@ use common.ui.draw_ir.{
     draw_ir_style_prop
 }
 use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
-use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16}
+use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{engine2d_simd_blend_span_u32}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16, radial_gradient_pixels, linear_gradient_pixels}
+use std.gpu.engine2d.color.{blend as engine2d_color_blend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 use std.common.encoding.sfnt.{
     OtFont, OtTable, parse_offset_table, read_u16_be, read_i16_be,
@@ -31,7 +33,14 @@ use std.common.encoding.sfnt_glyf.{
 use std.common.encoding.font_registry.{selected_font_asset_local_path_for_identity}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_bytes}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    parse_int, dec_val, GradientStopSpec, parse_gradient_stops, gradient_inner,
+    split_top_level_commas_paren_aware, is_gradient_shape_or_position_token,
+    gradient_layer_list, parse_gradient_angle_deg, gradient_layer_entries,
+    gradient_layer_split, gradient_layer_tail_parts, background_size_spec,
+    background_position_spec, background_repeat_spec
+}
+use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans}
 
 fn web_glyph_scale(fs: i32) -> i32:
     var s = fs / 8
@@ -176,20 +185,27 @@ fn _scalar_fill_rows_const(fb: [u32], fbw: i32, x0: i32, y0: i32, x1: i32, y1: i
     out
 
 fn blend_opacity(src: u32, dst: u32, opacity_pct: i32) -> u32:
+    """Composite the opaque colour src over dst at an integer percent opacity,
+    as Chrome 159 composites a solid fill: the percent becomes the 8-bit paint
+    alpha a = round(pct*255/100) and each channel is
+    round(s*a/255) + ((d*(256-a)) >> 8) (SkPMSrcOver; dst treated as opaque,
+    output alpha 255). Bit-identical to rt_engine2d_blend_const_span_pct_u32
+    (C runtime and interpreter bridge) and Engine2D color.blend_solid."""
     if opacity_pct >= 100:
         return src
     if opacity_pct <= 0:
         return dst
+    val a = (opacity_pct * 255 + 50) / 100
+    val inv256 = 256 - a
     val sr = (((src >> 16) & 255u32) as i32)
     val sg = (((src >> 8) & 255u32) as i32)
     val sb = ((src & 255u32) as i32)
     val dr = (((dst >> 16) & 255u32) as i32)
     val dg = (((dst >> 8) & 255u32) as i32)
     val db = ((dst & 255u32) as i32)
-    val inv = 100 - opacity_pct
-    val r = (sr * opacity_pct + dr * inv + 50) / 100
-    val g = (sg * opacity_pct + dg * inv + 50) / 100
-    val b = (sb * opacity_pct + db * inv + 50) / 100
+    val r = (sr * a + 127) / 255 + (dr * inv256) / 256
+    val g = (sg * a + 127) / 255 + (dg * inv256) / 256
+    val b = (sb * a + 127) / 255 + (db * inv256) / 256
     web_argb(r, g, b)
 
 fn composite_over_base(src: u32, alpha255: i32, dst: u32) -> u32:
@@ -238,9 +254,9 @@ fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
     # trip pays for itself — the same regime as simd_blend_row (measured 0 ms
     # vs 13 ms), and unlike a constant fill, where it is a documented loss.
     #
-    # The kernel carries PERCENT semantics (/100, +50). It is deliberately not
-    # rt_engine2d_simd_blend_const_span_u32, which is straight-alpha src-over
-    # (/255, +128) and would shift every rendered pixel.
+    # The kernel takes a PERCENT (converted to the 8-bit alpha
+    # round(pct*255/100)); rt_engine2d_simd_blend_const_span_u32 takes the
+    # colour's own alpha byte instead. Both composite with Chrome's solid rule.
     var py = y0
     while py < y1:
         val row = py * fbw
@@ -384,12 +400,18 @@ fn clamp_corner_radius(radius: i32, w: i32, h: i32) -> i32:
 # pass 1px-tall strips to the corners helper, which degenerated the corner
 # tests and painted gradient backgrounds square (radius-16 buttons filled
 # their corners with accent where Chromium shows the page beneath).
-fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, rtl: i32, rtr: i32, rbr: i32, rbl: i32, py: i32, sx: i32, sw: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
+fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, rtl: i32, rtr: i32, rbr: i32, rbl: i32, py: i32, sx: i32, sw: i32, color: u32, opacity_pct: i32, clip: ClipRect, image_alpha255: i32 = -1) -> [u32]:
+    # image_alpha255 >= 0 marks a gradient (image-layer) row: Chrome composites
+    # it with the image rule at the 8-bit stop alpha. A percent loses that
+    # alpha (16 -> 6% -> 15), so opacity_pct is ignored then.
+    val image = image_alpha255 >= 0
+    val src = (color & 0x00FFFFFFu32) | ((image_alpha255 as u32) << 24)
     val tl = clamp_corner_radius(rtl, w, h)
     val tr = clamp_corner_radius(rtr, w, h)
     val br = clamp_corner_radius(rbr, w, h)
     val bl = clamp_corner_radius(rbl, w, h)
-    if tl <= 0 and tr <= 0 and br <= 0 and bl <= 0:
+    val square = tl <= 0 and tr <= 0 and br <= 0 and bl <= 0
+    if square and not image:
         return fb_rect_opacity_clip(fb, fbw, fbh, sx, py, sw, 1, color, opacity_pct, clip)
     if py < 0 or py >= fbh or py < clip.y0 or py >= clip.y1:
         return fb
@@ -405,6 +427,8 @@ fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, 
     if x1 > clip.x1:
         x1 = clip.x1
     val row = py * fbw
+    if square:
+        return fb_blend_image_row(out, row + x0, x1 - x0, src)
     var px = x0
     while px < x1:
         var inside = true
@@ -426,8 +450,30 @@ fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, 
             inside = dx * dx + dy * dy <= br * br
         if inside:
             val idx = row + px
-            out[idx] = blend_opacity(color, out[idx], opacity_pct)
+            if image:
+                out[idx] = engine2d_color_blend(src, out[idx])
+            else:
+                out[idx] = blend_opacity(color, out[idx], opacity_pct)
         px = px + 1
+    out
+
+fn fb_blend_image_row(fb: [u32], offset: i32, count: i32, src: u32) -> [u32]:
+    """Composite one constant translucent colour over a row span with the
+    image rule (native blend_span on a row copy, bulk write-back)."""
+    if count <= 0:
+        return fb
+    var out = fb
+    var dst_row: [u32] = [0; count]
+    dst_row.write_span(out, 0, offset.to_i64(), count.to_i64())
+    val src_row: [u32] = [src; count]
+    val blended = engine2d_simd_blend_span_u32(dst_row, 0, src_row, 0, count.to_i64())
+    if blended.len() == count:
+        out.write_span(blended, offset.to_i64(), 0, count.to_i64())
+        return out
+    var i = 0
+    while i < count:
+        out[offset + i] = engine2d_color_blend(src, out[offset + i])
+        i = i + 1
     out
 
 fn _isqrt_i64(v: i64) -> i64:
@@ -872,6 +918,10 @@ fn mix_color_vertical_centered(a: u32, b: u32, pos: i32, span: i32, px: i32, py:
     val blue = mix_channel_gradient_centered(ab, bb, pos, span, px, py)
     (alpha.to_u32() << 24) | (red.to_u32() << 16) | (green.to_u32() << 8) | blue.to_u32()
 
+fn gradient_pixel_alpha255(color: u32, element_opacity_pct: i32) -> i32:
+    val alpha = (((color >> 24) & 255u32) as i32)
+    (alpha * element_opacity_pct + 50) / 100
+
 fn background_gradient_pixel_opacity(color: u32, element_opacity_pct: i32) -> i32:
     val alpha = (((color >> 24) & 255u32) as i32)
     (element_opacity_pct * alpha + 127) / 255
@@ -918,6 +968,27 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
     # the old path ((pct*255+127)/255 == pct).
     val solid_bg_alpha = (((st.bg >> 24) & 255u32) as i32)
     val solid_bg_opacity = (st.opacity_pct * solid_bg_alpha + 127) / 255
+    if radial_gradient_box_paintable(st):
+        # CSS radial gradient over the box colour (Draw IR twin:
+        # `background-gradient-radial-geometry`, the same geometry function).
+        var radial_out = fb
+        if st.bg != 0u32 and solid_bg_opacity > 0:
+            radial_out = fb_style_rounded_rect_opacity_clip(radial_out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg | 0xFF000000u32, solid_bg_opacity, clip)
+        val rg = radial_gradient_box_geometry(st, x, y, w, h)
+        if rg.len() < 8:
+            return radial_out
+        return fb_radial_gradient_clip(radial_out, fbw, fbh, rg[4] as i32, rg[5] as i32, rg[6] as i32, rg[7] as i32, rg, st.background_gradient_stop_colors, st.background_gradient_stop_positions, st.opacity_pct, clip)
+    if background_gradient_layers_paintable(st):
+        # Gradient layer list over the box colour (Draw IR twin:
+        # `background-gradient-layer-geometry`, the same resolver).
+        var layers_out = fb
+        if st.bg != 0u32 and solid_bg_opacity > 0:
+            layers_out = fb_style_rounded_rect_opacity_clip(layers_out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg | 0xFF000000u32, solid_bg_opacity, clip)
+        val r = background_gradient_box_rects(st, x, y, w, h)
+        if r.len() < 8:
+            return layers_out
+        val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3])
+        return fb_gradient_layers_clip(layers_out, fbw, fbh, r[4], r[5], r[6], r[7], layers, st.opacity_pct, clip)
     if st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32:
         if solid_bg_opacity <= 0:
             return fb
@@ -956,9 +1027,9 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
         while px <= max_x:
             if px == max_x or phase[px & 7] != phase[run_x & 7]:
                 val color = phase[run_x & 7]
-                val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
-                if opacity > 0:
-                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, dev_y, image_base_x + run_x, px - run_x, color | 0xFF000000u32, opacity, image_clip)
+                val alpha255 = gradient_pixel_alpha255(color, st.opacity_pct)
+                if alpha255 > 0:
+                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, dev_y, image_base_x + run_x, px - run_x, color, 100, image_clip, alpha255)
                 run_x = px
             px = px + 1
         py = py + 1
@@ -1098,11 +1169,15 @@ fn fb_linear_gradient_general_clip(fb: [u32], fbw: i32, fbh: i32, bg_x: i32, bg_
                     if t16 > 65536:
                         t16 = 65536
                     val color = lut[(t16 / 64) as i32]
-                    val opacity = background_gradient_pixel_opacity(color, st.opacity_pct)
-                    if opacity >= 100:
+                    # A gradient is an image layer: Chrome composites it with
+                    # its 8-bit stop alpha and the image rule. Quantizing that
+                    # alpha to a percent first loses it (0.066*255 = 16 -> 6%
+                    # -> 15) and moves the Aetheric pin off Chrome's #575758.
+                    val alpha255 = gradient_pixel_alpha255(color, st.opacity_pct)
+                    if alpha255 >= 255:
                         out[row + fx] = color | 0xFF000000u32
-                    elif opacity > 0:
-                        out[row + fx] = blend_opacity(color | 0xFF000000u32, out[row + fx], opacity)
+                    elif alpha255 > 0:
+                        out[row + fx] = engine2d_color_blend((color & 0x00FFFFFFu32) | ((alpha255 as u32) << 24), out[row + fx])
                     fx = fx + 1
             py = py + 1
             continue
@@ -1120,9 +1195,9 @@ fn fb_linear_gradient_general_clip(fb: [u32], fbw: i32, fbh: i32, bg_x: i32, bg_
                     t16 = 65536
                 color = lut[(t16 / 64) as i32]
             if px == max_x or (px > span_start and color != span_color):
-                val opacity = background_gradient_pixel_opacity(span_color, st.opacity_pct)
-                if opacity > 0 and px > span_start:
-                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + span_start, px - span_start, span_color | 0xFF000000u32, opacity, image_clip)
+                val alpha255 = gradient_pixel_alpha255(span_color, st.opacity_pct)
+                if alpha255 > 0 and px > span_start:
+                    out = fb_rounded_rect_row_span_opacity_clip(out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, image_base_y + py, image_base_x + span_start, px - span_start, span_color, 100, image_clip, alpha255)
                 span_start = px
             span_color = color
             px = px + 1
@@ -1188,12 +1263,560 @@ fn _radial_center_pct(spec: text) -> [i32]:
                 y_set = true
     [xp, yp]
 
+# A CSS length token as Q10 px (1/1024 px): "[-]12" / "[-]12.5" plus a
+# "px" unit (stripped by the caller). Fractions keep 4 digits.
+fn _radial_number_q10(tok: text) -> i64:
+    var i = 0
+    val n = tok.byte_len()
+    var neg = false
+    if n > 0 and tok.substring(0, 1) == "-":
+        neg = true
+        i = 1
+    var whole: i64 = 0
+    while i < n and dec_val(tok.substring(i, i + 1)) < 10:
+        whole = whole * 10 + (dec_val(tok.substring(i, i + 1)) as i64)
+        i = i + 1
+    var frac: i64 = 0
+    var scale: i64 = 1
+    if i < n and tok.substring(i, i + 1) == ".":
+        i = i + 1
+        while i < n and dec_val(tok.substring(i, i + 1)) < 10 and scale < 10000:
+            frac = frac * 10 + (dec_val(tok.substring(i, i + 1)) as i64)
+            scale = scale * 10
+            i = i + 1
+    val q = whole * 1024 + (frac * 1024 + scale / 2) / scale
+    if neg: 0 - q else: q
+
+# One position/size component against an axis of `extent` px: "N%" of the
+# extent or "Npx". -1 marks a token that is neither.
+fn _radial_component_q10(tok: text, extent: i32) -> i64:
+    if tok.ends_with("%"):
+        return (extent as i64) * _radial_number_q10(tok.substring(0, tok.byte_len() - 1)) / 100
+    if tok.ends_with("px"):
+        return _radial_number_q10(tok.substring(0, tok.byte_len() - 2))
+    -1
+
+# Centre of `[at <position>]` (1 or 2 values: left/center/right/top/bottom,
+# percentages, px) in Q10 px. A vertical keyword first, or a horizontal one
+# second, swaps the pair. Without px this is `_radial_center_pct`.
+fn _radial_center_q10(spec: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
+    val low = spec.lower()
+    val at = text_index_of(low, "at ")
+    var toks: [text] = []
+    if at >= 0:
+        for raw in low.substring(at + 3, low.byte_len()).trim().split(" "):
+            val t = raw.trim()
+            if t != "":
+                toks.push(t)
+    var has_px = false
+    for t in toks:
+        if t.ends_with("px"):
+            has_px = true
+    if not has_px:
+        val pct = _radial_center_pct(spec)
+        return [(ax as i64) * 1024 + (aw as i64) * 1024 * (pct[0] as i64) / 100, (ay as i64) * 1024 + (ah as i64) * 1024 * (pct[1] as i64) / 100]
+    var first = if toks.len() > 0: toks[0] else: "center"
+    var second = if toks.len() > 1: toks[1] else: "center"
+    if first == "top" or first == "bottom" or second == "left" or second == "right":
+        val tmp = first
+        first = second
+        second = tmp
+    var cx: i64 = (aw as i64) * 512
+    if first == "left":
+        cx = 0
+    elif first == "right":
+        cx = (aw as i64) * 1024
+    elif first != "center":
+        val v = _radial_component_q10(first, aw)
+        if v != -1:
+            cx = v
+    var cy: i64 = (ah as i64) * 512
+    if second == "top":
+        cy = 0
+    elif second == "bottom":
+        cy = (ah as i64) * 1024
+    elif second != "center":
+        val v = _radial_component_q10(second, ah)
+        if v != -1:
+            cy = v
+    [(ax as i64) * 1024 + cx, (ay as i64) * 1024 + cy]
+
+fn _radial_abs_q10(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+# CSS Images 3 §3.2 ending shape of one `radial-gradient(...)` layer against
+# its gradient box (ax, ay, aw, ah; CSS px): [cx, cy, rx, ry] in Q10 px.
+# Shape `circle` / `ellipse` (default ellipse; one length alone means a
+# circle), size keywords closest-side / closest-corner / farthest-side /
+# farthest-corner (the default) or explicit lengths (px; ellipse also %),
+# and the `at <position>` centre (default center). The corner keywords
+# keep the side keyword's aspect ratio for an ellipse (sqrt(2) x the sides).
+fn radial_gradient_geometry_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
+    val parts = split_top_level_commas_paren_aware(gradient_inner(layer))
+    var head = ""
+    if parts.len() > 0 and is_gradient_shape_or_position_token(parts[0]):
+        head = parts[0].trim().lower()
+    val center = _radial_center_q10(head, ax, ay, aw, ah)
+    val cx = center[0]
+    val cy = center[1]
+    val at = text_index_of(head, "at ")
+    val shape_part = if at >= 0: head.substring(0, at) else: head
+    var circle = false
+    var ellipse = false
+    var size_kw = "farthest-corner"
+    var lens: [i64] = []
+    for raw in shape_part.trim().split(" "):
+        val t = raw.trim()
+        if t == "circle":
+            circle = true
+        elif t == "ellipse":
+            ellipse = true
+        elif t == "closest-side" or t == "closest-corner" or t == "farthest-side" or t == "farthest-corner":
+            size_kw = t
+        elif t != "":
+            val axis_extent = if lens.len() == 0: aw else: ah
+            val v = _radial_component_q10(t, axis_extent)
+            if v >= 0:
+                lens.push(v)
+    if not circle and not ellipse and lens.len() == 1:
+        circle = true
+    if lens.len() == 1 and circle:
+        return [cx, cy, lens[0], lens[0]]
+    if lens.len() == 2 and not circle:
+        return [cx, cy, lens[0], lens[1]]
+    val dl = _radial_abs_q10(cx - (ax as i64) * 1024)
+    val dr = _radial_abs_q10((ax as i64 + aw as i64) * 1024 - cx)
+    val dt = _radial_abs_q10(cy - (ay as i64) * 1024)
+    val db = _radial_abs_q10((ay as i64 + ah as i64) * 1024 - cy)
+    val near_x = if dl < dr: dl else: dr
+    val far_x = if dl > dr: dl else: dr
+    val near_y = if dt < db: dt else: db
+    val far_y = if dt > db: dt else: db
+    if circle:
+        if size_kw == "closest-side":
+            val r = if near_x < near_y: near_x else: near_y
+            return [cx, cy, r, r]
+        if size_kw == "farthest-side":
+            val r = if far_x > far_y: far_x else: far_y
+            return [cx, cy, r, r]
+        if size_kw == "closest-corner":
+            val r = _isqrt_i64(near_x * near_x + near_y * near_y)
+            return [cx, cy, r, r]
+        val r = _isqrt_i64(far_x * far_x + far_y * far_y)
+        return [cx, cy, r, r]
+    if size_kw == "closest-side":
+        return [cx, cy, near_x, near_y]
+    if size_kw == "farthest-side":
+        return [cx, cy, far_x, far_y]
+    if size_kw == "closest-corner":
+        return [cx, cy, _isqrt_i64(2 * near_x * near_x), _isqrt_i64(2 * near_y * near_y)]
+    [cx, cy, _isqrt_i64(2 * far_x * far_x), _isqrt_i64(2 * far_y * far_y)]
+
+# Composite one radial gradient layer src-over the framebuffer over the
+# paint rect (px0, py0, pw, ph) intersected with the clip. Colours come from
+# Engine2D's shared evaluator (`radial_gradient_pixels`) and blend with the
+# Engine2D `blend`, so the raster, cpu_simd and the Vulkan device agree.
+# `opacity_pct` < 100 scales each colour's alpha.
+fn fb_radial_gradient_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw: i32, ph: i32, geom: [i64], colors: [u32], positions: [i32], opacity_pct: i32, clip: ClipRect) -> [u32]:
+    if geom.len() < 4:
+        return fb
+    fb_gradient_layer_clip(fb, fbw, fbh, px0, py0, pw, ph, BackgroundGradientLayer(radial: true, geom: geom, colors: colors, positions: positions, tile: [], repeat_x: true, repeat_y: true), opacity_pct, clip)
+
+# One resolved CSS gradient image layer: a radial ellipse [cx, cy, rx, ry]
+# or a linear gradient line [sx, sy, ex, ey] (Q10 px), with its stops.
+# `geom` is resolved against tile 0, `tile` = [tx, ty, tw, th] (Q10 px; []
+# = one untiled image over the paint rect); a repeating axis lays the same
+# gradient again at every tile origin.
+struct BackgroundGradientLayer:
+    radial: bool
+    geom: [i64]
+    colors: [u32]
+    positions: [i32]
+    tile: [i64]
+    repeat_x: bool
+    repeat_y: bool
+
+# Composite one gradient layer src-over the framebuffer over the paint rect
+# (px0, py0, pw, ph) intersected with the clip, with colours from Engine2D's
+# shared evaluators (`radial_gradient_pixels` / `linear_gradient_pixels`)
+# and the Engine2D `blend`, so the raster, cpu_simd and Vulkan agree.
+fn fb_gradient_layer_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw: i32, ph: i32, layer: BackgroundGradientLayer, opacity_pct: i32, clip: ClipRect) -> [u32]:
+    var out = fb
+    val geom = layer.geom
+    if opacity_pct <= 0 or geom.len() < 4:
+        return out
+    var x0 = px0
+    var y0 = py0
+    var x1 = px0 + pw
+    var y1 = py0 + ph
+    if x0 < clip.x0:
+        x0 = clip.x0
+    if y0 < clip.y0:
+        y0 = clip.y0
+    if x1 > clip.x1:
+        x1 = clip.x1
+    if y1 > clip.y1:
+        y1 = clip.y1
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > fbw:
+        x1 = fbw
+    if y1 > fbh:
+        y1 = fbh
+    if x1 <= x0 or y1 <= y0:
+        return out
+    val w = x1 - x0
+    val pixels = gradient_layer_tiled_pixels(x0, y0, w, y1 - y0, layer)
+    if pixels.len() == 0:
+        return out
+    var py = y0
+    while py < y1:
+        val row = py * fbw
+        val src_row = (py - y0) * w
+        var px = x0
+        while px < x1:
+            var src = pixels[src_row + px - x0]
+            if opacity_pct < 100:
+                val scaled_a = (((src >> 24) & 255u32) as i32 * opacity_pct + 50) / 100
+                src = ((scaled_a as u32) << 24) | (src & 0x00FFFFFFu32)
+            val a = (src >> 24) & 255u32
+            if a == 255u32:
+                out[row + px] = src
+            elif a > 0u32:
+                out[row + px] = engine2d_color_blend(src, out[row + px])
+            px = px + 1
+        py = py + 1
+    out
+
+# One gradient layer's colours over the pixel rect (x0, y0, w, h), row-major:
+# every tile of its grid (`gradient_tile_spans`) evaluated with the layer's
+# geometry moved to that tile's origin; pixels no tile covers stay 0
+# (transparent). When every tile is a whole number of pixels, all tiles share
+# one pixel grid, so tile 0 is evaluated once and copied.
+fn gradient_layer_tiled_pixels(x0: i32, y0: i32, w: i32, h: i32, layer: BackgroundGradientLayer) -> [u32]:
+    if layer.tile.len() < 4:
+        return _gradient_layer_kernel(layer, x0, y0, w, h, 0, 0)
+    val t = layer.tile
+    val xs = gradient_tile_spans(x0, w, t[0], t[2], layer.repeat_x)
+    val ys = gradient_tile_spans(y0, h, t[1], t[3], layer.repeat_y)
+    if (xs.len() == 3 and ys.len() == 3 and xs[2] == 0 and ys[2] == 0 and
+            xs[0] == (x0 as i64) and xs[1] == ((x0 + w) as i64) and
+            ys[0] == (y0 as i64) and ys[1] == ((y0 + h) as i64)):
+        return _gradient_layer_kernel(layer, x0, y0, w, h, 0, 0)
+    var out: [u32] = [0u32; w * h]
+    if xs.len() == 0 or ys.len() == 0:
+        return out
+    if t[2] % 1024 == 0 and t[3] % 1024 == 0:
+        val twp = t[2] / 1024
+        val thp = t[3] / 1024
+        var lx0 = xs[0] - xs[2] * twp
+        var lx1 = xs[1] - xs[2] * twp
+        var i = 3
+        while i < xs.len():
+            if xs[i] - xs[i + 2] * twp < lx0:
+                lx0 = xs[i] - xs[i + 2] * twp
+            if xs[i + 1] - xs[i + 2] * twp > lx1:
+                lx1 = xs[i + 1] - xs[i + 2] * twp
+            i = i + 3
+        var ly0 = ys[0] - ys[2] * thp
+        var ly1 = ys[1] - ys[2] * thp
+        i = 3
+        while i < ys.len():
+            if ys[i] - ys[i + 2] * thp < ly0:
+                ly0 = ys[i] - ys[i + 2] * thp
+            if ys[i + 1] - ys[i + 2] * thp > ly1:
+                ly1 = ys[i + 1] - ys[i + 2] * thp
+            i = i + 3
+        val bw = (lx1 - lx0) as i32
+        val base = _gradient_layer_kernel(layer, lx0 as i32, ly0 as i32, bw, (ly1 - ly0) as i32, 0, 0)
+        if base.len() == 0:
+            return out
+        var yi = 0
+        while yi < ys.len():
+            var py = ys[yi]
+            while py < ys[yi + 1]:
+                val src_row = ((py - ys[yi + 2] * thp - ly0) as i32) * bw
+                val dst_row = ((py as i32) - y0) * w
+                var xi = 0
+                while xi < xs.len():
+                    val shift = (xs[xi + 2] * twp + lx0) as i32
+                    var px = xs[xi] as i32
+                    val pe = xs[xi + 1] as i32
+                    while px < pe:
+                        out[dst_row + px - x0] = base[src_row + px - shift]
+                        px = px + 1
+                    xi = xi + 3
+                py = py + 1
+            yi = yi + 3
+        return out
+    var yi = 0
+    while yi < ys.len():
+        var xi = 0
+        while xi < xs.len():
+            val sx = xs[xi] as i32
+            val sy = ys[yi] as i32
+            val tw = (xs[xi + 1] - xs[xi]) as i32
+            val th = (ys[yi + 1] - ys[yi]) as i32
+            val pix = _gradient_layer_kernel(layer, sx, sy, tw, th, xs[xi + 2] * t[2], ys[yi + 2] * t[3])
+            if pix.len() == tw * th:
+                var r = 0
+                while r < th:
+                    var c = 0
+                    while c < tw:
+                        out[(sy - y0 + r) * w + sx - x0 + c] = pix[r * tw + c]
+                        c = c + 1
+                    r = r + 1
+            xi = xi + 3
+        yi = yi + 3
+    out
+
+fn _gradient_layer_kernel(layer: BackgroundGradientLayer, x0: i32, y0: i32, w: i32, h: i32, dx: i64, dy: i64) -> [u32]:
+    val g = layer.geom
+    if layer.radial:
+        return radial_gradient_pixels(x0, y0, w, h, g[0] + dx, g[1] + dy, g[2], g[3], layer.colors, layer.positions)
+    linear_gradient_pixels(x0, y0, w, h, g[0] + dx, g[1] + dy, g[2] + dx, g[3] + dy, layer.colors, layer.positions)
+
+# The typed radial background of a box: the gradient box is the background
+# positioning area (background-origin, padding-box by default) and the paint
+# rect the background painting area (background-clip, border-box by
+# default). Returns [cx, cy, rx, ry] (Q10 px) then the paint rect
+# [px0, py0, pw, ph] (px); empty when the box has no area.
+fn radial_gradient_box_geometry(st: Style, x: i32, y: i32, w: i32, h: i32) -> [i64]:
+    val r = background_gradient_box_rects(st, x, y, w, h)
+    if r.len() < 8:
+        return []
+    val g = radial_gradient_geometry_q10(st.bg_layers_raw, r[0], r[1], r[2], r[3])
+    [g[0], g[1], g[2], g[3], r[4] as i64, r[5] as i64, r[6] as i64, r[7] as i64]
+
+# The background positioning area [ox, oy, ow, oh] (background-origin,
+# padding-box by default; the painting area when that is empty) then the
+# background painting area [bx, by, bw, bh] (background-clip, border-box by
+# default) of a box, in px; empty when the painting area is empty.
+fn background_gradient_box_rects(st: Style, x: i32, y: i32, w: i32, h: i32) -> [i32]:
+    var ox = x + st.border_l
+    var oy = y + st.border_t
+    var ow = w - st.border_l - st.border_r
+    var oh = h - st.border_t - st.border_b
+    if st.background_origin == "border-box":
+        ox = x
+        oy = y
+        ow = w
+        oh = h
+    elif st.background_origin == "content-box":
+        ox = x + st.border_l + st.pad_l
+        oy = y + st.border_t + st.pad_t
+        ow = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+        oh = h - st.border_t - st.border_b - st.pad_t - st.pad_b
+    var bx = x
+    var by = y
+    var bw = w
+    var bh = h
+    if st.background_clip == "padding-box" or st.background_clip == "content-box":
+        bx = bx + st.border_l
+        by = by + st.border_t
+        bw = bw - st.border_l - st.border_r
+        bh = bh - st.border_t - st.border_b
+    if st.background_clip == "content-box":
+        bx = bx + st.pad_l
+        by = by + st.pad_t
+        bw = bw - st.pad_l - st.pad_r
+        bh = bh - st.pad_t - st.pad_b
+    if bw <= 0 or bh <= 0:
+        return []
+    if ow <= 0 or oh <= 0:
+        ox = bx
+        oy = by
+        ow = bw
+        oh = bh
+    [ox, oy, ow, oh, bx, by, bw, bh]
+
+# CSS Images 3 §3.1 gradient line of one `linear-gradient(...)` layer against
+# its gradient box (ax, ay, aw, ah; CSS px): [sx, sy, ex, ey] in Q10 px. The
+# line passes through the box centre at the layer's angle (0deg = to top,
+# clockwise; `to <corner>` depends on the box) and is |w sin| + |h cos| long,
+# so the far corners land on the 0% and 100% points.
+fn linear_gradient_line_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
+    val angle = parse_gradient_angle_deg(layer)
+    val sc = if angle >= 1000: gradient_corner_dir_q16(angle, aw, ah) else: gradient_angle_sin_cos_q16(angle)
+    val s = sc[0]
+    val c = sc[1]
+    val sa = if s < 0: 0 - s else: s
+    val ca = if c < 0: 0 - c else: c
+    # Q16 direction x px -> Q10 length (/ 64), then half of it along (s, -c).
+    val len_q10 = ((aw as i64) * sa + (ah as i64) * ca) / 64
+    val hx = s * len_q10 / 131072
+    val hy = (0 - c) * len_q10 / 131072
+    val cx = (ax as i64) * 1024 + (aw as i64) * 512
+    val cy = (ay as i64) * 1024 + (ah as i64) * 512
+    [cx - hx, cy - hy, cx + hx, cy + hy]
+
+# The image layers of a gradient-only background list (`gradient_layer_list`)
+# resolved against the gradient box (ax, ay, aw, ah; CSS px), in CSS order:
+# the first paints on top. Empty when the list is not gradient-only.
+#
+# Each layer's tile (CSS Backgrounds 3 §3.8-3.9) comes from its
+# `<position> / <size> <repeat>` tail: a gradient has no intrinsic size, so
+# `auto`, `cover` and `contain` are the positioning area; percentages of the
+# size resolve against the area, of the position against (area - tile). A
+# zero-sized layer is not painted. Empty when any tail is unsupported.
+fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [BackgroundGradientLayer]:
+    var out: [BackgroundGradientLayer] = []
+    for entry in gradient_layer_entries(raw):
+        val split = gradient_layer_split(entry)
+        val tail = gradient_layer_tail_parts(split[1])
+        if tail.len() != 3:
+            return []
+        val pos = background_position_spec(tail[0])
+        val size = background_size_spec(tail[1])
+        val rep = background_repeat_spec(tail[2])
+        if pos.len() != 4 or size.len() != 5 or rep.len() != 2:
+            return []
+        val lay = split[0]
+        val stops: [GradientStopSpec] = parse_gradient_stops(lay)
+        var colors: [u32] = []
+        var positions: [i32] = []
+        for stop in stops:
+            colors.push(stop.color)
+            positions.push(stop.pos_permille)
+        val radial = text_index_of(lay.lower(), "radial-gradient(") == 0
+        val aw_q = (aw as i64) * 1024
+        val ah_q = (ah as i64) * 1024
+        var tw = aw_q
+        var th = ah_q
+        if size[0] == 0:
+            if size[1] == 1:
+                tw = size[2]
+            elif size[1] == 2:
+                tw = aw_q * size[2] / 102400
+            if size[3] == 1:
+                th = size[4]
+            elif size[3] == 2:
+                th = ah_q * size[4] / 102400
+        if tw <= 0 or th <= 0:
+            continue
+        # Each tile is one gradient evaluation (one Vulkan dispatch on the
+        # device): a tile grid past BACKGROUND_GRADIENT_TILE_CAP over the
+        # positioning area fails the whole list closed (box colour only).
+        val nx = if rep[0] == 1: aw_q / tw + 2 else: 1
+        val ny = if rep[1] == 1: ah_q / th + 2 else: 1
+        if nx * ny > BACKGROUND_GRADIENT_TILE_CAP:
+            return []
+        val tx = (ax as i64) * 1024 + (aw_q - tw) * pos[0] / 102400 + pos[1]
+        val ty = (ay as i64) * 1024 + (ah_q - th) * pos[2] / 102400 + pos[3]
+        val geom = _gradient_layer_tile_geometry(lay, radial, tx, ty, tw, th)
+        if geom.len() < 4:
+            return []
+        out.push(BackgroundGradientLayer(radial: radial, geom: geom, colors: colors, positions: positions, tile: [tx, ty, tw, th], repeat_x: rep[0] == 1, repeat_y: rep[1] == 1))
+    out
+
+# Most tiles one gradient layer may paint (see background_gradient_layers).
+# Measured 2026-11-17: ~48 ms per tile on the lavapipe device path.
+val BACKGROUND_GRADIENT_TILE_CAP: i64 = 1024
+
+# A layer's geometry resolved against its tile (Q10 px rect). A whole-pixel
+# tile resolves directly; a fractional size resolves at 64x and scales back,
+# which needs the geometry to scale with the box, so a radial layer with an
+# explicit length fails closed (empty) there.
+fn _gradient_layer_tile_geometry(lay: text, radial: bool, tx: i64, ty: i64, tw: i64, th: i64) -> [i64]:
+    if tw % 1024 == 0 and th % 1024 == 0:
+        val w = (tw / 1024) as i32
+        val h = (th / 1024) as i32
+        if tx % 1024 == 0 and ty % 1024 == 0:
+            val ix = (tx / 1024) as i32
+            val iy = (ty / 1024) as i32
+            return if radial: radial_gradient_geometry_q10(lay, ix, iy, w, h) else: linear_gradient_line_q10(lay, ix, iy, w, h)
+        val g = if radial: radial_gradient_geometry_q10(lay, 0, 0, w, h) else: linear_gradient_line_q10(lay, 0, 0, w, h)
+        if radial:
+            return [g[0] + tx, g[1] + ty, g[2], g[3]]
+        return [g[0] + tx, g[1] + ty, g[2] + tx, g[3] + ty]
+    val inner = gradient_inner(lay).lower()
+    if radial and (text_index_of(inner, "px") >= 0 or text_index_of(inner, "em") >= 0):
+        return []
+    val w64 = (tw / 16) as i32
+    val h64 = (th / 16) as i32
+    val g = if radial: radial_gradient_geometry_q10(lay, 0, 0, w64, h64) else: linear_gradient_line_q10(lay, 0, 0, w64, h64)
+    if radial:
+        return [g[0] / 64 + tx, g[1] / 64 + ty, g[2] / 64, g[3] / 64]
+    [g[0] / 64 + tx, g[1] / 64 + ty, g[2] / 64 + tx, g[3] / 64 + ty]
+
+# True when the box paints its background image list as gradient layers: a
+# raw gradient-only list (several layers, or one the typed linear / radial
+# projections leave raw, e.g. a stop at `transparent`) on square corners (a
+# rounded box still falls back to its colour, as the radial does).
+fn background_gradient_layers_paintable(st: Style) -> bool:
+    if st.bg_layers_raw == "" or st.background_image_uri != "":
+        return false
+    if radial_gradient_box_paintable(st):
+        return false
+    if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32:
+        return false
+    if st.border_radius_tl_px > 0 or st.border_radius_tr_px > 0 or st.border_radius_br_px > 0 or st.border_radius_bl_px > 0:
+        return false
+    # Per-layer size / position / repeat travel as each layer's tail
+    # (decl_apply rewrites the longhand lists into it). A list without tails
+    # whose scalar size / position is not the default came from a longhand
+    # this list never saw (another declaration block): keep it fail-closed
+    # (box colour only) rather than paint one untiled gradient.
+    var tailed = false
+    for entry in gradient_layer_entries(st.bg_layers_raw):
+        if gradient_layer_split(entry)[1] != "":
+            tailed = true
+    if not tailed:
+        if st.background_size_w_px != 0 or st.background_size_h_px != 0:
+            return false
+        if not _gradient_layers_default_position(st.background_position_x_px) or not _gradient_layers_default_position(st.background_position_y_px):
+            return false
+    gradient_layer_list(st.bg_layers_raw).len() > 0
+
+fn _gradient_layers_default_position(v: i32) -> bool:
+    v == 0 or (v <= -1000 and v >= -1100)
+
+# Paint gradient layers over the painting area (px0, py0, pw, ph) back to
+# front: CSS Backgrounds 3 paints the FIRST listed layer on top.
+fn fb_gradient_layers_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw: i32, ph: i32, layers: [BackgroundGradientLayer], opacity_pct: i32, clip: ClipRect) -> [u32]:
+    var out = fb
+    var li = layers.len() - 1
+    while li >= 0:
+        out = fb_gradient_layer_clip(out, fbw, fbh, px0, py0, pw, ph, layers[li], opacity_pct, clip)
+        li = li - 1
+    out
+
+# True when the box carries a paintable typed radial layer: at least two
+# stops (Chrome rejects a one-stop gradient) and square corners (a rounded
+# radial still falls back to its colour on both lanes).
+fn radial_gradient_box_paintable(st: Style) -> bool:
+    val n = st.background_gradient_stop_colors.len()
+    (
+        st.background_gradient_is_radial and n >= 2 and
+        st.background_gradient_stop_positions.len() == n and
+        st.border_radius_tl_px <= 0 and st.border_radius_tr_px <= 0 and
+        st.border_radius_br_px <= 0 and st.border_radius_bl_px <= 0
+    )
+
+# Chrome positions the propagated root/body background on the canvas: the
+# viewport (vw x vh), grown to the html element's box when the document is
+# wider or taller. Returns [w, h] in CSS px from the canvas origin.
+fn canvas_background_extent(nodes: [HNode], bx: [i32], by: [i32], bw: [i32], bh: [i32], vw: i32, vh: i32) -> [i32]:
+    var w = vw
+    var h = vh
+    var i = 0
+    while i < nodes.len() and i < bx.len():
+        if nodes[i].tag == "html":
+            if bx[i] + bw[i] > w:
+                w = bx[i] + bw[i]
+            if by[i] + bh[i] > h:
+                h = by[i] + bh[i]
+            break
+        i = i + 1
+    [w, h]
+
 # Paint the radial-gradient layers of a multi-layer `background` stack over
-# the already-painted base ramp. CSS paints the FIRST layer topmost, so layers
-# composite back-to-front (iterate from the last layer up). Falloff is linear
-# from the center stop's rgba alpha down to the "transparent N%" stop, where
-# N% is a fraction of the farthest-corner radius (the CSS default gradient
-# size). Non-radial layers are ignored (the scalar Style fields paint them).
+# the rect (x, y, w, h), which is both the gradient box and the painting
+# area (the propagated canvas background passes the viewport). CSS paints
+# the FIRST layer topmost, so layers composite back-to-front. Non-radial
+# layers are ignored (the scalar Style fields paint them).
 fn fb_background_radial_stack_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, raw: text, opacity_pct: i32, clip: ClipRect) -> [u32]:
     var out = fb
     if w <= 0 or h <= 0 or opacity_pct <= 0:
@@ -1203,107 +1826,18 @@ fn fb_background_radial_stack_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32
     while li >= 0:
         val lay = layers[li]
         li = li - 1
-        val gpos = text_index_of(lay.lower(), "radial-gradient(")
-        if gpos < 0:
+        if text_index_of(lay.lower(), "radial-gradient(") < 0:
             continue
-        val lp = find_from(lay, "(", gpos)
-        val rp = paren_matching_close(lay, lp)
-        if lp < 0 or rp <= lp:
+        val stops: [GradientStopSpec] = parse_gradient_stops(lay)
+        var colors: [u32] = []
+        var positions: [i32] = []
+        for stop in stops:
+            colors.push(stop.color)
+            positions.push(stop.pos_permille)
+        if colors.len() < 2:
             continue
-        val inner = lay.substring(lp + 1, rp)
-        val parts = split_top_level_commas(inner)
-        val pc = parts.len()
-        if pc < 2:
-            continue
-        var pi = 0
-        var cx_pct = 50
-        var cy_pct = 50
-        val head = parts[0].trim().lower()
-        if head.starts_with("circle") or head.starts_with("ellipse") or head.starts_with("at "):
-            val cp = _radial_center_pct(parts[0])
-            cx_pct = cp[0]
-            cy_pct = cp[1]
-            pi = 1
-        if pi >= pc:
-            continue
-        val col = parse_color_any(parts[pi])
-        if col == 0u32:
-            continue
-        val a0 = shadow_layer_alpha(parts[pi])
-        if a0 <= 0:
-            continue
-        var ext_pct = 100
-        val tail = parts[pc - 1].trim().lower()
-        val tpct = text_index_of(tail, "%")
-        if tail.starts_with("transparent") and tpct > 0:
-            var s = tpct - 1
-            while s >= 0 and tail.substring(s, s + 1) != " ":
-                s = s - 1
-            val v = parse_int(tail.substring(s + 1, tpct))
-            if v > 0:
-                ext_pct = v
-        val cx = x + (w * cx_pct) / 100
-        val cy = y + (h * cy_pct) / 100
-        var dxm = cx - x
-        if x + w - cx > dxm:
-            dxm = x + w - cx
-        var dym = cy - y
-        if y + h - cy > dym:
-            dym = y + h - cy
-        val rfull = _isqrt_i64((dxm as i64) * (dxm as i64) + (dym as i64) * (dym as i64))
-        val rstop = (rfull * (ext_pct as i64)) / 100
-        if rstop <= 0:
-            continue
-        val rstop2 = rstop * rstop
-        val src = col | 0xFF000000u32
-        # scan only the circle's bounding box, intersected with box+clip+fb
-        var x0 = cx - (rstop as i32)
-        var y0 = cy - (rstop as i32)
-        var x1 = cx + (rstop as i32) + 1
-        var y1 = cy + (rstop as i32) + 1
-        if x0 < x:
-            x0 = x
-        if y0 < y:
-            y0 = y
-        if x1 > x + w:
-            x1 = x + w
-        if y1 > y + h:
-            y1 = y + h
-        if x0 < 0:
-            x0 = 0
-        if y0 < 0:
-            y0 = 0
-        if x1 > fbw:
-            x1 = fbw
-        if y1 > fbh:
-            y1 = fbh
-        if x0 < clip.x0:
-            x0 = clip.x0
-        if y0 < clip.y0:
-            y0 = clip.y0
-        if x1 > clip.x1:
-            x1 = clip.x1
-        if y1 > clip.y1:
-            y1 = clip.y1
-        var py = y0
-        while py < y1:
-            val row = py * fbw
-            val dy = (py - cy) as i64
-            val dy2 = dy * dy
-            var px = x0
-            while px < x1:
-                val dx = (px - cx) as i64
-                val d2 = dx * dx + dy2
-                if d2 < rstop2:
-                    val d = _isqrt_i64(d2)
-                    var aeff = (((a0 as i64) * (rstop - d)) / rstop) as i32
-                    if opacity_pct < 100:
-                        aeff = (aeff * opacity_pct) / 100
-                    if aeff > 0:
-                        val idx = row + px
-                        out[idx] = composite_over_base(src, aeff, out[idx])
-                px = px + 1
-            py = py + 1
+        val geom = radial_gradient_geometry_q10(lay, x, y, w, h)
+        out = fb_radial_gradient_clip(out, fbw, fbh, x, y, w, h, geom, colors, positions, opacity_pct, clip)
     out
 
 fn fb_border_sides_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, bl: i32, bt: i32, br: i32, bb: i32, cl: u32, ct: u32, cr: u32, cb: u32, clip: ClipRect) -> [u32]:

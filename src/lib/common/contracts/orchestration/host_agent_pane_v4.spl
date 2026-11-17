@@ -1,0 +1,74 @@
+# milestone_0021 PR3b (DESIGN sections 13.1, 14.1 D9, 14A F3): the pane side of a V4 agent primary attach.
+# Pure DATA. The pane holds ONLY a lease (operation id, epoch, fingerprint), never the session or an fd; every
+# pane operation goes through the agent owner (host_linux_service_agent_pane_io_v4), which re-checks the lease
+# against its own live epoch. Pane-registry state is never authority (src/lib never imports the pane app).
+# SOURCE_AUTHORED / NOT_RUN.
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlLeaseV1, SessionRuntimeControlTargetV1}
+use std.common.contracts.container.primary_geometry_v1.ContainerPrimaryGeometryRequestV1
+use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV2
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+# 13.1: a pane Write carries at most 4096 bytes per call (partial accept is the native leaf's answer).
+const HOST_AGENT_PANE_WRITE_MAX_V4: i64 = 4096
+
+# Issued once per attachment by host_linux_service_agent_attachment_lease_v4; `epoch` is the attachment's
+# lease_epoch at issue, so any revoke (epoch + 1) invalidates it without a pane acknowledgement.
+pub struct HostAgentPaneLeaseV4:
+    operation_id: text
+    epoch: i64
+    fingerprint: text
+
+pub struct HostAgentPaneWriteV4:
+    lease: SessionRuntimeControlLeaseV1
+    target: SessionRuntimeControlTargetV1
+    principal: text
+    nonce: text
+    attempt: i64
+    offset: i64
+    maximum: i64
+    data: text
+
+pub enum HostAgentPaneOpV4:
+    Read
+    Write(HostAgentPaneWriteV4)
+    Resize(ContainerPrimaryGeometryRequestV1)
+    ResizePoll
+
+# One result shape for every op (13.1): Read -> chunks + eof; Write -> disposition + accepted_bytes (partial
+# accept); Resize/ResizePoll -> geometry `pending|done`. `error` != "" means the op was NOT accepted.
+pub struct HostAgentPaneIoResultV4:
+    chunks: [ContainerTerminalChunkV2] = []
+    eof: bool = false
+    disposition: text = ""
+    accepted_bytes: i64 = 0
+    geometry: text = ""
+    error: text = ""
+
+pub fn host_agent_pane_io_refused_v4(error: text) -> HostAgentPaneIoResultV4:
+    HostAgentPaneIoResultV4(error: error)
+
+# Binds the lease to the operation, the epoch and the archived attach packet digest, so a lease minted for one
+# attachment never matches another attachment of a later incarnation with the same epoch.
+# allow(primitive_api): reviewed lease epoch DATA word (milestone_0021 13.1)
+pub fn host_agent_pane_lease_fingerprint_v4(operation_id: text, epoch: i64, attach_digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-lease"),
+        "operationId": SdnValue.String(operation_id), "epoch": SdnValue.Int(epoch),
+        "attachDigest": SdnValue.String(attach_digest)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# allow(primitive_api): reviewed lease epoch DATA word (milestone_0021 13.1)
+pub fn host_agent_pane_lease_v4(operation_id: text, epoch: i64, attach_digest: text) -> HostAgentPaneLeaseV4:
+    HostAgentPaneLeaseV4(operation_id: operation_id, epoch: epoch,
+        fingerprint: host_agent_pane_lease_fingerprint_v4(operation_id, epoch, attach_digest))
+
+# Shape bounds of a pane Write before it reaches the native leaf (H-37): 1 <= maximum <= 4096 bytes taken from
+# `data` at `offset` (0 <= offset < data length), attempt >= 1. Partial accept is decided natively.
+pub fn host_agent_pane_write_check_v4(write: HostAgentPaneWriteV4) -> Result<HostAgentPaneWriteV4, text>:
+    if write.maximum < 1 or write.maximum > HOST_AGENT_PANE_WRITE_MAX_V4: return Err("attach-pane-write-maximum")
+    if write.offset < 0 or write.offset >= write.data.byte_len(): return Err("attach-pane-write-offset")
+    if write.attempt < 1: return Err("attach-pane-write-attempt")
+    if write.principal.byte_len() == 0 or write.nonce.byte_len() == 0:
+        return Err("attach-pane-write-principal")
+    Ok(write)

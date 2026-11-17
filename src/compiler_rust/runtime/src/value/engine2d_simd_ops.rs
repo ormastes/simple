@@ -152,8 +152,15 @@ pub extern "C" fn rt_engine2d_simd_copy_span_u32(
     pixel_array(&dst_values)
 }
 
+/// Chrome 159 (Skia) source-over of one straight-alpha 0xAARRGGBB pixel.
+/// Opaque destination (fitted exactly against Chrome screenshots):
+/// solid fill `round(s*a/255) + ((d*(256-a)) >> 8)` (SkPMSrcOver), image /
+/// shader `round(s*a/255) + div255r(d*(255-a))`. Translucent destination (no
+/// Chrome equivalent observed): rounded straight-alpha src-over. Twin of
+/// `engine2d_blend_u32` in `src/runtime/runtime_simd_dispatch.c` and
+/// `interpreter_extern/simd.rs`, and of `blend` / `blend_solid` in color.spl.
 #[inline]
-fn blend_pixel(src: u32, dst: u32) -> u32 {
+fn blend_pixel(src: u32, dst: u32, solid: bool) -> u32 {
     let sa = src >> 24;
     if sa == 255 {
         return src;
@@ -163,10 +170,24 @@ fn blend_pixel(src: u32, dst: u32) -> u32 {
     }
     let da = dst >> 24;
     let inv = 255 - sa;
-    let dst_weight = da * inv / 255;
-    let out_alpha = sa + dst_weight;
-    let channel = |shift| (((src >> shift) & 0xff_u32) * sa + ((dst >> shift) & 0xff_u32) * dst_weight) / out_alpha;
-    (out_alpha << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    if da != 255 {
+        let dw = (da * inv + 127) / 255;
+        let oa = sa + dw;
+        let channel = |shift| (((src >> shift) & 0xff_u32) * sa + ((dst >> shift) & 0xff_u32) * dw + oa / 2) / oa;
+        return (oa << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0);
+    }
+    let channel = |shift: u32| {
+        let sc = (src >> shift) & 0xff_u32;
+        let dc = (dst >> shift) & 0xff_u32;
+        let dterm = if solid {
+            (dc * (inv + 1)) >> 8
+        } else {
+            let v = dc * inv + 128;
+            (v + (v >> 8)) >> 8
+        };
+        (sc * sa + 127) / 255 + dterm
+    };
+    0xff00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 /// Rust-hosted ABI for source-over native `[u32]` row blending.
@@ -177,7 +198,7 @@ pub extern "C" fn rt_engine2d_simd_blend_row_u32(dst: RuntimeValue, src: Runtime
     let values: Vec<u32> = dst
         .iter()
         .zip(src.iter())
-        .map(|(&dst, &src)| blend_pixel(src, dst))
+        .map(|(&dst, &src)| blend_pixel(src, dst, false))
         .collect();
     pixel_array(&values)
 }
@@ -188,8 +209,8 @@ pub extern "C" fn rt_engine2d_simd_blend_row_u32(dst: RuntimeValue, src: Runtime
 /// `blend_row_u32`. Semantics are pinned to the already-proven-bit-exact
 /// interpreter bridge (`rt_engine2d_simd_blend_span_u32` in
 /// `interpreter_extern/simd.rs`), which itself matches the C kernel in
-/// `src/runtime/runtime_simd_dispatch.c` (`engine2d_blend_pixel`, exact
-/// integer floor formula, straight-alpha src-over): a negative offset is
+/// `src/runtime/runtime_simd_dispatch.c` (`engine2d_blend_pixel`,
+/// Chrome image-rule src-over): a negative offset is
 /// **rejected** (destination returned unchanged), not clamped to 0 — unlike
 /// `fill_span_u32`/`copy_span_u32`'s `.max(0)` convention.
 #[no_mangle]
@@ -217,7 +238,7 @@ pub extern "C" fn rt_engine2d_simd_blend_span_u32(
     for i in 0..blended {
         let s = src_values[src_start + i];
         let d = dst_values[dst_start + i];
-        dst_values[dst_start + i] = blend_pixel(s, d);
+        dst_values[dst_start + i] = blend_pixel(s, d, false);
     }
     pixel_array(&dst_values)
 }
@@ -225,7 +246,7 @@ pub extern "C" fn rt_engine2d_simd_blend_span_u32(
 /// Rust-hosted ABI for an in-place-style constant-color `[u32]` span blend.
 ///
 /// Blends a single constant colour over `dst[offset..offset+count)` in
-/// place, straight-alpha src-over — no source array. Semantics pinned to the
+/// place, Chrome solid-fill-rule src-over — no source array. Semantics pinned to the
 /// proven-bit-exact interpreter bridge
 /// (`rt_engine2d_simd_blend_const_span_u32` in
 /// `interpreter_extern/simd.rs`), including its `sa == 0` short circuit (a
@@ -249,7 +270,7 @@ pub extern "C" fn rt_engine2d_simd_blend_const_span_u32(
     }
     let end = start.saturating_add(count as usize).min(dst_values.len());
     for d in &mut dst_values[start..end] {
-        *d = blend_pixel(color, *d);
+        *d = blend_pixel(color, *d, true);
     }
     pixel_array(&dst_values)
 }
@@ -444,12 +465,14 @@ mod tests {
     fn hosted_blend_matches_straight_alpha_boundaries() {
         let cases = [
             (0x80ff_ffff, 0x0000_0000, 0x80ff_ffff),
-            (0x80ff_0000, 0x8000_00ff, 0xbfaa_0054),
+            (0x80ff_0000, 0x8000_00ff, 0xc0aa_0055),
+            // Chrome 159 solid-fill cells (translucent_blend_chrome159_spec).
+            (0x6600_0000, 0xff80_8080, 0xff4d_4d4d),
             (0x0000_0000, 0x0011_2233, 0x0011_2233),
             (0xffff_ffff, 0x7fff_ffff, 0xffff_ffff),
         ];
         for (src, dst, expected) in cases {
-            assert_eq!(blend_pixel(src, dst), expected, "src={src:#010x} dst={dst:#010x}");
+            assert_eq!(blend_pixel(src, dst, true), expected, "src={src:#010x} dst={dst:#010x}");
         }
     }
 
@@ -470,8 +493,8 @@ mod tests {
         let blended = rt_engine2d_simd_blend_span_u32(dst, 1, src, 0, 9);
         let out = pixel_vec(blended);
         assert_eq!(out[0], 0x0000_0000, "untouched before offset");
-        assert_eq!(out[1], blend_pixel(0x80ff_ffff, 0x0000_0000));
-        assert_eq!(out[2], blend_pixel(0x80ff_ffff, 0x0000_0000));
+        assert_eq!(out[1], blend_pixel(0x80ff_ffff, 0x0000_0000, false));
+        assert_eq!(out[2], blend_pixel(0x80ff_ffff, 0x0000_0000, false));
         assert_eq!(out[3], 0xffAA_BBCC, "untouched past clamped span");
     }
 
@@ -481,7 +504,7 @@ mod tests {
         let blended = rt_engine2d_simd_blend_const_span_u32(dst, 1, 1, 0x80ff_ffff_u32 as i64);
         let out = pixel_vec(blended);
         assert_eq!(out[0], 0x0011_2233);
-        assert_eq!(out[1], blend_pixel(0x80ff_ffff, 0x0011_2233));
+        assert_eq!(out[1], blend_pixel(0x80ff_ffff, 0x0011_2233, true));
         assert_eq!(out[2], 0x0011_2233);
 
         let unchanged = pixel_array(&[0x0011_2233]);

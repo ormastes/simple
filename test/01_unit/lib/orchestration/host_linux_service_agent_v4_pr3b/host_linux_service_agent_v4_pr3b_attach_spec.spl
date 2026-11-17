@@ -1,0 +1,214 @@
+"""
+## Purpose and audience
+Pins the pure attach admission of milestone_0021 PR3b (DESIGN 13.2, 14.0 writer rule, 14.1 D2a, 14A F6/F8,
+14B): what refuses an attach BEFORE anything is archived (so the slot stays usable), how an exact replay is
+answered from state, how a conflicting packet is refused, and that any failure after the archive is final for
+the incarnation (`attachment_consumed` is never reset). Written for owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Pure: the agent is built as DATA (no container, so the transfer holder is passed explicitly as "container"
+through the `_core_` entry points; the production entry derives it with `host_agent_transfer_holder_v4`). The
+prepare/begin/open effects after the archive are part 2; post-archive failures are applied through
+`host_agent_attach_failed_v4` exactly as part 2 will. `attach-binding-plan` (14C: plan/binding bytes not the ones
+the signed payload names) and the composed decode -> authorize -> check -> archive -> consume entry are pinned in
+the PR3b apply spec.
+## Verification guidance and troubleshooting
+A refusal that returns Ok(false) means the packet would be archived and the helper prepared.
+"""
+use std.spec.{step}
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentAttachFactsV4,
+    HostAgentAttachmentSummaryV4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, host_agent_attach_check_core_v4,
+    host_agent_attach_admit_core_v4, host_agent_attach_failed_v4, host_linux_service_agent_request_cancel_v4,
+    host_linux_service_agent_attachment_inspect_v4, host_agent_transfer_holder_v4, host_agent_attachment_close_verdict_v4}
+
+fn b_agent(stage: text, pending: bool) -> HostLinuxServiceAgentV4:
+    HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "a".repeat(64), payload_digest: "b".repeat(64),
+        stage: stage, pending: pending, reserved: true, observed: true, clock_ms: 1000)
+
+fn b_binding() -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "a".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: "pane-a", service_epoch: 3)
+
+fn b_facts() -> HostAgentAttachFactsV4:
+    HostAgentAttachFactsV4(helper_kind: "attach-broker", plan_parent_operation_id: "op_1",
+        binding: b_binding(), live_incarnation: "a".repeat(32), live_epoch: 3,
+        prepare_deadline_ms: 30000, not_after: 1000000, now: 1000,
+        monotonic_ms: 1000)
+
+fn b_error(agent: HostLinuxServiceAgentV4, facts: HostAgentAttachFactsV4) -> text:
+    match host_agent_attach_check_core_v4(agent, "container", facts):
+        case Ok(_): ""
+        case Err(reason): reason
+
+# An attachment that was archived and is now failing after the archive (part 2 applies the same writer).
+fn b_archived(agent: HostLinuxServiceAgentV4) -> HostLinuxServiceAgentV4:
+    var state = agent
+    state.attachment_consumed = true
+    state.attachment = Some(HostAgentAttachmentV4(attach_stage: "opening", attach_pending: true, not_after: 1000000,
+        attach_digest: sha256_text("attach-packet-1")))
+    state
+
+describe "V4 agent PR3b: attach refused before anything is archived":
+    it "refuses an attach at stopping, settled or after a signed cancel":
+        # @req H-05, H-06
+        for stage in ["stopping", "settle", "source-return", "host-settle", "settled", "detach", "inspect"]:
+            step("stage " + stage)
+            expect(b_error(b_agent(stage, false), b_facts())).to_equal("attach-stage")
+        step("a signed cancel moves the idle running agent to stopping; a later attach is refused")
+        val cancelled = host_linux_service_agent_request_cancel_v4(b_agent("running", false), sha256_text("signed-cancel"))
+        expect(cancelled.agent.stage).to_equal("stopping")
+        expect(b_error(cancelled.agent, b_facts())).to_equal("attach-stage")
+
+    it "refuses an attach while a native step is pending, and a holder other than the container":
+        # @req H-07, 13.0 (one holder)
+        expect(b_error(b_agent("running", true), b_facts())).to_equal("attach-native-pending")
+        match host_agent_attach_check_core_v4(b_agent("running", false), "fresh", b_facts()):
+            case Ok(_): expect("ok").to_equal("attach-holder")
+            case Err(reason): expect(reason).to_equal("attach-holder")
+        step("a data-only agent holds nothing: the production holder is `none`")
+        expect(host_agent_transfer_holder_v4(b_agent("running", false))).to_equal("none")
+
+    it "refuses an attach once a stop is requested or the signed window has ended":
+        # @req 14A F8
+        var stopping = b_agent("running", false)
+        stopping.stop_requested = true
+        expect(b_error(stopping, b_facts())).to_equal("attach-stopping")
+        var late = b_agent("running", false)
+        late.clock_ms = 1000000
+        expect(b_error(late, b_facts())).to_equal("attach-stopping")
+
+    it "refuses a prepare window longer than 60 s, and a prepare that already expired":
+        # @req H-41 (D2a: the RP wait always ends inside the 120 s grace), P3-3
+        var facts = b_facts()
+        facts.prepare_deadline_ms = 1000 + 60001
+        expect(b_error(b_agent("running", false), facts)).to_equal("attach-prepare-window")
+        facts.prepare_deadline_ms = 1000 + 60000
+        expect(b_error(b_agent("running", false), facts)).to_equal("")
+        step("an expired prepare could only fail after the archive: refused before it")
+        facts.prepare_deadline_ms = 1000
+        expect(b_error(b_agent("running", false), facts)).to_equal("attach-prepare-window")
+        facts.prepare_deadline_ms = 999
+        expect(b_error(b_agent("running", false), facts)).to_equal("attach-prepare-window")
+
+    it "refuses a pane binding for another service incarnation or epoch, or an epoch-0 binding":
+        # @req 14B (wrong binding incarnation/epoch), 14C (service_epoch > 0), P3-3
+        var facts = b_facts()
+        facts.live_incarnation = "b".repeat(32)
+        expect(b_error(b_agent("running", false), facts)).to_equal("attach-binding-mismatch")
+        facts = b_facts()
+        facts.live_epoch = 4
+        expect(b_error(b_agent("running", false), facts)).to_equal("attach-binding-mismatch")
+        step("epoch 0 is refused before archive even when the live epoch is also 0")
+        facts = b_facts()
+        var zero = b_binding()
+        zero.service_epoch = 0
+        facts.binding = zero
+        facts.live_epoch = 0
+        expect(b_error(b_agent("running", false), facts)).to_equal("host-agent-pane-binding-epoch-invalid")
+        step("the plan's identity binding digest is the CONTROL-TARGET digest (14C): not compared with the pane binding")
+        expect(b_error(b_agent("running", false), b_facts())).to_equal("")
+
+    it "refuses a helper that is not an attach broker and a plan for another operation":
+        # @req 13.2 (helper kind attach-broker; plan parent == agent operation)
+        var facts = b_facts()
+        facts.helper_kind = "primary-connection"
+        expect(b_error(b_agent("running", false), facts)).to_equal("attach-helper-kind")
+        facts = b_facts()
+        facts.plan_parent_operation_id = "op_2"
+        expect(b_error(b_agent("running", false), facts)).to_equal("attach-plan-parent")
+
+    it "leaves the slot usable after a pre-archive refusal":
+        # @req H-22
+        val agent = b_agent("running", false)
+        var bad = b_facts()
+        bad.live_epoch = 9
+        val refused = host_agent_attach_admit_core_v4(agent, "container", None, "attach-packet-1", bad)
+        expect(refused.unwrap_err()).to_equal("attach-binding-mismatch")
+        expect(agent.attachment_consumed).to_equal(false)
+        step("the same agent then admits a correct packet (Ok(false): archive next)")
+        expect(host_agent_attach_admit_core_v4(agent, "container", None, "attach-packet-2", b_facts()).unwrap()).to_equal(false)
+
+describe "V4 agent PR3b: archive replay, conflict and consumption":
+    it "answers an exact replay from state without re-checking, even past running":
+        # @req H-12
+        val archived = b_archived(b_agent("running", false))
+        expect(host_agent_attach_admit_core_v4(archived, "container", Some("attach-packet-1"), "attach-packet-1",
+            b_facts()).unwrap()).to_equal(true)
+        var stopped = archived
+        stopped.stage = "stopping"
+        stopped.attachment = None
+        stopped.attachment_summary = Some(HostAgentAttachmentSummaryV4(attach_digest: sha256_text("attach-packet-1"),
+            detach_digest: "", final_stage: "returned", error: ""))
+        expect(host_agent_attach_admit_core_v4(stopped, "container", Some("attach-packet-1"), "attach-packet-1",
+            b_facts()).unwrap()).to_equal(true)
+        step("the replay answer is the read-only report")
+        expect(host_linux_service_agent_attachment_inspect_v4(stopped)).to_contain("returned")
+
+    it "refuses a different packet for an archived slot":
+        # @req H-13
+        step("a consumed incarnation answers attach-consumed")
+        val archived = b_archived(b_agent("running", false))
+        expect(host_agent_attach_admit_core_v4(archived, "container", Some("attach-packet-1"), "attach-packet-2",
+            b_facts()).unwrap_err()).to_equal("attach-consumed")
+        step("an archive present for an agent that never consumed it (racing writer) is a packet conflict")
+        expect(host_agent_attach_admit_core_v4(b_agent("running", false), "container", Some("attach-packet-1"),
+            "attach-packet-2", b_facts()).unwrap_err()).to_equal("attach-packet-conflict")
+
+    it "refuses a second attach after the first returned or failed, before any helper effect":
+        # @req H-14, H-21
+        val failed = host_agent_attach_failed_v4(b_archived(b_agent("running", false)), "helper-prepare-refused", false)
+        expect(failed.attachment.unwrap().attach_stage).to_equal("refused")
+        expect(failed.attachment_consumed).to_equal(true)
+        expect(b_error(failed, b_facts())).to_equal("attach-consumed")
+        var returned = b_agent("running", false)
+        returned.attachment_consumed = true
+        returned.attachment_summary = Some(HostAgentAttachmentSummaryV4(attach_digest: sha256_text("attach-packet-1"),
+            detach_digest: "", final_stage: "returned", error: ""))
+        expect(b_error(returned, b_facts())).to_equal("attach-consumed")
+
+describe "V4 agent PR3b: a failure after the archive is final (writer rule)":
+    it "writes refused before helper begin, and the replay answers the stored error":
+        # @req H-28, 14.0 (RF only when nothing is held)
+        val failed = host_agent_attach_failed_v4(b_archived(b_agent("running", false)), "helper-prepare-refused", false)
+        val att = failed.attachment.unwrap()
+        expect(att.attach_stage).to_equal("refused")
+        expect(att.first_error).to_equal("helper-prepare-refused")
+        expect(host_linux_service_agent_attachment_inspect_v4(failed)).to_contain("helper-prepare-refused")
+        step("RF is non-live: close is not blocked")
+        expect(host_agent_attachment_close_verdict_v4(failed)).to_equal("")
+
+    it "writes failed (live) when anything is held, and RT with a failed summary when nothing is held after begin":
+        # @req H-28, H-34 (14A F6: begin without a lease is held, charged-forever -> RB later)
+        var begun = b_archived(b_agent("running", false))
+        var att = begun.attachment.unwrap()
+        att.begin_attempted = true
+        begun.attachment = Some(att)
+        val held = host_agent_attach_failed_v4(begun, "helper-begin-lease-missing", true)
+        expect(held.attachment.unwrap().attach_stage).to_equal("failed")
+        expect(held.attachment.unwrap().helper.is_none()).to_equal(true)
+        expect(held.attachment.unwrap().detach_bound).to_equal(true)
+        expect(host_agent_attachment_close_verdict_v4(held)).to_equal("linux-host-agent-attachment-release-pending")
+        step("post-begin with nothing held is returned directly, the summary records the failure")
+        val gone = host_agent_attach_failed_v4(b_archived(b_agent("running", false)), "open-refused", true)
+        expect(gone.attachment.is_none()).to_equal(true)
+        expect(gone.attachment_summary.unwrap().final_stage).to_equal("failed")
+        expect(gone.attachment_summary.unwrap().error).to_equal("open-refused")
+
+    it "writes refused-expire-pending for a prepared receipt that was not begun, with the D2b deadline":
+        # @req H-35, 14.1 D2b
+        var prepared = b_archived(b_agent("running", false))
+        var att = prepared.attachment.unwrap()
+        att.prepared_receipt_digest = "d".repeat(64)
+        att.prepare_deadline_ms = 1000 + 59000
+        prepared.attachment = Some(att)
+        val pending = host_agent_attach_failed_v4(prepared, "helper-begin-refused", false)
+        val rp = pending.attachment.unwrap()
+        expect(rp.attach_stage).to_equal("refused-expire-pending")
+        step("deadline = max(now + 120 s, prepare deadline + 5 s)")
+        expect(rp.detach_deadline_ms).to_equal(1000 + 120000)
+        expect(host_agent_attachment_close_verdict_v4(pending)).to_equal("linux-host-agent-attachment-release-pending")

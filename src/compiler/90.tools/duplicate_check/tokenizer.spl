@@ -47,7 +47,17 @@ fn match_operator_bytes(bytes: [u8], source: text, source_len: i64, index: i64) 
         return source[index:index+1]
     ""
 
+fn is_c_source_path(path: text) -> bool:
+    path.ends_with(".c") or path.ends_with(".h")
+
+pub fn tokenize_for_path(path: text, source: text, config: DuplicationConfig) -> [SimpleToken]:
+    """Tokenize with C comment rules (`//`, `/* */`) for .c/.h files."""
+    tokenize_mode(source, config, is_c_source_path(path))
+
 fn tokenize(source: text, config: DuplicationConfig) -> [SimpleToken]:
+    tokenize_mode(source, config, false)
+
+fn tokenize_mode(source: text, config: DuplicationConfig, c_mode: bool) -> [SimpleToken]:
     var result: [SimpleToken] = []
     var i = 0
     var line = 1
@@ -73,6 +83,25 @@ fn tokenize(source: text, config: DuplicationConfig) -> [SimpleToken]:
                     result.push(SimpleToken(kind: SimpleTokenKind.Whitespace, value: source[i:i+1], line: line, column: column, start_offset: i, end_offset: i + 1))
                 i = i + 1
                 column = column + 1
+                handled = true
+
+        if not handled and c_mode and b == 47 and i + 1 < source_len:
+            if bytes[i + 1] == 47:
+                while i < source_len and bytes[i] != 10:
+                    i = i + 1
+                handled = true
+            elif bytes[i + 1] == 42:
+                i = i + 2
+                column = column + 2
+                while i < source_len and not (bytes[i] == 42 and i + 1 < source_len and bytes[i + 1] == 47):
+                    if bytes[i] == 10:
+                        line = line + 1
+                        column = 1
+                    else:
+                        column = column + 1
+                    i = i + 1
+                i = i + 2
+                column = column + 2
                 handled = true
 
         if not handled:

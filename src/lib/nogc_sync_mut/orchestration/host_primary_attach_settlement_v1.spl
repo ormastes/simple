@@ -3,21 +3,27 @@
 use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.HostPrimaryAttachTurnV1
 use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.*
 use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_receipt_v1.*
-use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperAdmissionContextV1
-use std.nogc_sync_mut.orchestration.host_helper_settlement_domain_v1.host_helper_completion_domain_v1
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperAdmissionContextV1, HostHelperStoreV1,
+    host_helper_store_legacy_v1, host_helper_store_rebind_v1}
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.host_helper_store_primary_domain_v1
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.HostHelperSettlementAckV1
-use std.nogc_sync_mut.orchestration.host_primary_attach_recovery_v1.host_primary_attach_commit_reap_v1
+use std.nogc_sync_mut.orchestration.host_primary_attach_recovery_v1.host_primary_attach_commit_reap_core_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.HostHelperLeaseV1
+use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
     container_primary_attach_plan_v1, container_primary_attach_native_matches_v1,
     container_primary_attach_adoption_v1, container_primary_attach_native_cleaned_v1,
     container_terminal_cleanup_v1, container_primary_attach_collect_reap_v1}
-use std.common.contracts.container.primary_attach_v1.{container_primary_attach_plan_encode_v1,
-    container_primary_attach_admission_validate_v1}
+use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlanV1,
+    container_primary_attach_plan_encode_v1, container_primary_attach_admission_validate_v1}
 use std.common.contracts.container.stream_v2.ContainerHelperAdmissionV2
 use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_bytes_v1
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
-use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_collect_reap_v2}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_collect_reap_v2,
+    group_process_stream_cancel_v2, group_process_stream_cleanup_proof_v2}
+use std.nogc_async_mut.container.workspace_primary_retirement_v3.ContainerPrimaryTransportRetirementV3
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessRefV1,
     process_cleanup_piped_owned_v2, process_retire_piped_owned_v2}
 
@@ -32,6 +38,28 @@ pub struct HostPrimaryAttachSettlementTurnV1:
     ack: HostHelperSettlementAckV1?
     error: text
 
+# milestone_0022 N1 (DESIGN 15.1): what cleanup/settle actually need, without a
+# HostLocalRootV1. The container owner is not part of it: neither cleanup nor
+# settle calls the container owner (cleanup goes through the terminal session).
+pub struct HostPrimaryAttachCoreRetainedV1:
+    store: HostHelperStoreV1
+    capacity: HostCapacityOwnerV1
+    helper: HostHelperLeaseV1
+    plan: ContainerPrimaryAttachPlanV1
+    session: Option<ContainerPrimaryAttachSessionV1>
+    cleanup_spawn: Option<PipedProcessOwnedSpawnV2>
+
+pub struct HostPrimaryAttachCoreCleanupTurnV1:
+    retained: HostPrimaryAttachCoreRetainedV1
+    cleaned: bool
+    error: text
+
+pub struct HostPrimaryAttachCoreSettlementTurnV1:
+    retained: HostPrimaryAttachCoreRetainedV1
+    settled: bool
+    ack: Option<HostHelperSettlementAckV1>
+    error: text
+
 struct PrimarySettlementContextV1:
     consumed: HostPrimaryAttachConsumedV1
     authority: HostHelperAdmissionContextV1
@@ -44,19 +72,34 @@ fn primary_reference_matches_v1(native: GroupProcessStreamOwnerV2,
             if (value.pid <= 0 or value.generation != native.launch.transport_generation or
                     value.group_root != native.launch.root or value.group_identity != native.identity_digest):
                 return Err("host-primary-reference-mismatch")
-        case nil: pass
+        case None: ()
     Ok(())
 
-fn primary_retained_context_v1(retained: HostPrimaryAttachTurnV1) -> Result<PrimarySettlementContextV1, text>:
+# Legacy turn <-> core retained. The legacy store is the capacity journal root.
+fn primary_core_retained_v1(turn: HostPrimaryAttachTurnV1) -> HostPrimaryAttachCoreRetainedV1:
+    HostPrimaryAttachCoreRetainedV1(store: host_helper_store_legacy_v1(turn.local.capacity.journal.root),
+        capacity: turn.local.capacity, helper: turn.helper, plan: turn.plan, session: turn.session,
+        cleanup_spawn: turn.cleanup_spawn)
+
+fn primary_legacy_retained_v1(turn: HostPrimaryAttachTurnV1, core: HostPrimaryAttachCoreRetainedV1) -> HostPrimaryAttachTurnV1:
+    var current = turn
+    current.local.capacity = core.capacity
+    current.session = core.session
+    current.cleanup_spawn = core.cleanup_spawn
+    current
+
+# The signed-bundle half of the context: journal state, store domain, consumed record, request and admission
+# agreement, and the recovered native owner. It knows nothing about carriers; every core builds on it.
+fn primary_bundle_v1(retained: HostPrimaryAttachCoreRetainedV1) -> Result<PrimarySettlementContextV1, text>:
     val helper = retained.helper
-    val root = retained.local.capacity.journal.root
-    val state = daemon_operation_exact_v2(retained.local.capacity.journal, helper.operation)?
+    val store = host_helper_store_rebind_v1(retained.store, retained.capacity.journal)
+    val state = daemon_operation_exact_v2(retained.capacity.journal, helper.operation)?
     if not ["executing", "outcome-unknown", "completed"].contains(state.state):
         return Err("host-primary-settlement-execution-required")
-    if host_helper_completion_domain_v1(root, helper.operation.id)? != "primary-attach":
-        return Err("host-primary-consumption-domain-mismatch")
-    val consumed = host_primary_attach_consumed_load_v1(root, helper.operation)?
-    val context = host_primary_attach_validate_record_v1(root, helper.operation, consumed)?
+    # Legacy: the pathname classifier; V4: the store-aware classifier (DESIGN 15.1).
+    host_helper_store_primary_domain_v1(store, helper.operation.id)?
+    val consumed = host_primary_attach_consumed_load_core_v1(store, helper.operation)?
+    val context = host_primary_attach_validate_record_core_v1(store, helper.operation, consumed)?
     if (container_primary_attach_plan_encode_v1(retained.plan)? != container_primary_attach_plan_encode_v1(consumed.primary_plan)? or
             host_helper_plan_bytes_v1(helper.plan)? != host_helper_plan_bytes_v1(context.request.plan)? or
             distributed_encode_operation_v2(helper.operation)? != distributed_encode_operation_v2(context.request.operation)? or
@@ -71,18 +114,24 @@ fn primary_retained_context_v1(retained: HostPrimaryAttachTurnV1) -> Result<Prim
         memory_bytes: helper.memory_bytes)
     val checked = container_primary_attach_admission_validate_v1(consumed.primary_plan, admission)?
     # Current journal ownership was checked before possible metadata repair.
-    val native = host_primary_attach_native_recover_v1(root, helper.operation)?
+    val native = host_primary_attach_native_recover_core_v1(store, helper.operation)?
+    Ok(PrimarySettlementContextV1(consumed, context, native))
+
+fn primary_retained_context_v1(retained: HostPrimaryAttachCoreRetainedV1) -> Result<PrimarySettlementContextV1, text>:
+    val bundle = primary_bundle_v1(retained)?
+    val consumed = bundle.consumed
+    val native = bundle.native
     match retained.session:
         case Some(session):
-            if retained.cleanup_spawn != nil: return Err("host-primary-multiple-native-carriers")
+            if retained.cleanup_spawn.is_some(): return Err("host-primary-multiple-native-carriers")
             if (container_primary_attach_plan_encode_v1(container_primary_attach_plan_v1(session))? !=
                     container_primary_attach_plan_encode_v1(consumed.primary_plan)?):
                 return Err("host-primary-session-plan-mismatch")
             container_primary_attach_native_matches_v1(session, native)?
-        case nil:
+        case None:
             val held = match retained.cleanup_spawn:
                 case Some(value): value
-                case nil: return Err("host-primary-native-carrier-required")
+                case None: return Err("host-primary-native-carrier-required")
             val live = match held:
                 case PipedProcessOwnedSpawnV2.Ready(value, reference):
                     primary_reference_matches_v1(value, Some(reference))?
@@ -93,72 +142,184 @@ fn primary_retained_context_v1(retained: HostPrimaryAttachTurnV1) -> Result<Prim
                 case PipedProcessOwnedSpawnV2.Rejected(_): return Err("host-primary-native-absence-unproven")
             host_primary_attach_native_match_v1(consumed, live)?
             if live.identity_digest != native.identity_digest: return Err("host-primary-native-owner-mismatch")
-    Ok(PrimarySettlementContextV1(consumed, context, native))
+    Ok(bundle)
 
 # Before adoption only. After handoff, the canonical terminal owner performs
 # cleanup and returns its updated session for settlement. Value copies are not
 # mechanically revoked: callers must retain exactly the returned canonical turn.
+# The adoption guard lives HERE ONLY (DESIGN 20); the core accepts adopted sessions.
 pub fn host_primary_attach_cleanup_v1(retained: HostPrimaryAttachTurnV1) -> HostPrimaryAttachCleanupTurnV1:
     match retained.session:
         case Some(session):
-            if container_primary_attach_adoption_v1(session) != nil:
+            if container_primary_attach_adoption_v1(session).is_some():
                 return HostPrimaryAttachCleanupTurnV1(retained, false, "host-primary-cleanup-belongs-to-terminal-owner")
-        case nil: pass
+        case None: ()
+    val cleaned = host_primary_attach_cleanup_core_v1(primary_core_retained_v1(retained))
+    HostPrimaryAttachCleanupTurnV1(primary_legacy_retained_v1(retained, cleaned.retained), cleaned.cleaned, cleaned.error)
+
+# Accepts an adopted session: the V4 agent cleans an adopted primary attach through
+# container_terminal_cleanup_v1(PrimaryAttach(session)) on this path (DESIGN 20).
+pub fn host_primary_attach_cleanup_core_v1(retained: HostPrimaryAttachCoreRetainedV1) -> HostPrimaryAttachCoreCleanupTurnV1:
     val checked = primary_retained_context_v1(retained)
-    if checked.is_err(): return HostPrimaryAttachCleanupTurnV1(retained, false, checked.unwrap_err())
+    if checked.is_err(): return HostPrimaryAttachCoreCleanupTurnV1(retained, false, checked.unwrap_err())
     var current = retained
     match retained.session:
         case Some(session):
             val cleaned = container_terminal_cleanup_v1(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))
             match cleaned.session:
                 case ContainerOwnedTerminalSessionV1.PrimaryAttach(updated): current.session = Some(updated)
-                case _: return HostPrimaryAttachCleanupTurnV1(current, false, "host-primary-cleanup-session-kind")
-            HostPrimaryAttachCleanupTurnV1(current, cleaned.cleaned, cleaned.error)
-        case nil:
+                case _: return HostPrimaryAttachCoreCleanupTurnV1(current, false, "host-primary-cleanup-session-kind")
+            HostPrimaryAttachCoreCleanupTurnV1(current, cleaned.cleaned, cleaned.error)
+        case None:
             val native = checked.unwrap().native
             val reference = match retained.cleanup_spawn.unwrap():
                 case PipedProcessOwnedSpawnV2.Ready(_, value): Some(value)
                 case PipedProcessOwnedSpawnV2.CleanupRequired(_, value, _): value
                 case PipedProcessOwnedSpawnV2.Rejected(_):
-                    return HostPrimaryAttachCleanupTurnV1(current, false, "host-primary-native-absence-unproven")
+                    return HostPrimaryAttachCoreCleanupTurnV1(current, false, "host-primary-native-absence-unproven")
             val cleaned = process_cleanup_piped_owned_v2(native, reference)
-            if cleaned.is_err(): return HostPrimaryAttachCleanupTurnV1(current, false, cleaned.unwrap_err())
+            if cleaned.is_err(): return HostPrimaryAttachCoreCleanupTurnV1(current, false, cleaned.unwrap_err())
             # Exact native retirement succeeded. Retain cleanup authority while
             # removing the stale descriptor reference; charge remains retained.
-            current.cleanup_spawn = Some(PipedProcessOwnedSpawnV2.CleanupRequired(native, nil,
+            current.cleanup_spawn = Some(PipedProcessOwnedSpawnV2.CleanupRequired(native, None,
                 "host-primary-cleaned-awaiting-settlement"))
-            HostPrimaryAttachCleanupTurnV1(current, true, "")
+            HostPrimaryAttachCoreCleanupTurnV1(current, true, "")
 
 # Observation-only: missing native proof never invokes cancel or workload stop.
 # Every failed turn retains session progress and the newest journal/capacity owner.
 pub fn host_primary_attach_settle_v1(retained: HostPrimaryAttachTurnV1) -> HostPrimaryAttachSettlementTurnV1:
+    val settled = host_primary_attach_settle_core_v1(primary_core_retained_v1(retained))
+    var current = primary_legacy_retained_v1(retained, settled.retained)
+    if settled.settled:
+        current.recovery_required = false
+        current.error = ""
+    HostPrimaryAttachSettlementTurnV1(current, settled.settled, settled.ack, settled.error)
+
+pub fn host_primary_attach_settle_core_v1(retained: HostPrimaryAttachCoreRetainedV1) -> HostPrimaryAttachCoreSettlementTurnV1:
     val checked = primary_retained_context_v1(retained)
-    if checked.is_err(): return HostPrimaryAttachSettlementTurnV1(retained, false, nil, checked.unwrap_err())
+    if checked.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, checked.unwrap_err())
     val context = checked.unwrap()
     val lease_result = host_primary_attach_grouped_lease_v1(context.consumed, context.authority, context.native)
-    if lease_result.is_err(): return HostPrimaryAttachSettlementTurnV1(retained, false, nil, lease_result.unwrap_err())
+    if lease_result.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, lease_result.unwrap_err())
     val lease = lease_result.unwrap()
     var current = retained
     match retained.session:
         case Some(session):
-            if (container_primary_attach_adoption_v1(session) != nil and
+            if (container_primary_attach_adoption_v1(session).is_some() and
                     not container_primary_attach_native_cleaned_v1(session)):
-                return HostPrimaryAttachSettlementTurnV1(current, false, nil, "host-primary-terminal-owner-cleanup-required")
+                return HostPrimaryAttachCoreSettlementTurnV1(current, false, None, "host-primary-terminal-owner-cleanup-required")
             val reaped = container_primary_attach_collect_reap_v1(session, context.authority.admission, lease)
             current.session = Some(reaped.session)
-            if reaped.error != "": return HostPrimaryAttachSettlementTurnV1(current, false, nil, reaped.error)
-            if reaped.receipt == nil: return HostPrimaryAttachSettlementTurnV1(current, false, nil, "host-primary-reap-required")
-        case nil:
+            if reaped.error != "": return HostPrimaryAttachCoreSettlementTurnV1(current, false, None, reaped.error)
+            if reaped.receipt.is_none(): return HostPrimaryAttachCoreSettlementTurnV1(current, false, None, "host-primary-reap-required")
+        case None:
             # Canonical proof was acquired above. No stale native-ref retries.
-            val retired = process_retire_piped_owned_v2(context.native, nil)
-            if retired.is_err(): return HostPrimaryAttachSettlementTurnV1(current, false, nil, retired.unwrap_err())
-            current.cleanup_spawn = Some(PipedProcessOwnedSpawnV2.CleanupRequired(context.native, nil,
+            val retired = process_retire_piped_owned_v2(context.native, None)
+            if retired.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(current, false, None, retired.unwrap_err())
+            current.cleanup_spawn = Some(PipedProcessOwnedSpawnV2.CleanupRequired(context.native, None,
                 "host-primary-cleaned-awaiting-settlement"))
             val reaped = group_process_stream_collect_reap_v2(context.native, lease)
-            if reaped.is_err(): return HostPrimaryAttachSettlementTurnV1(current, false, nil, reaped.unwrap_err())
-    val committed = host_primary_attach_commit_reap_v1(current.local.capacity, current.helper.operation)
-    current.local.capacity = committed.owner
-    if committed.ack == nil: return HostPrimaryAttachSettlementTurnV1(current, false, nil, committed.error)
-    current.recovery_required = false
-    current.error = ""
-    HostPrimaryAttachSettlementTurnV1(current, true, committed.ack, "")
+            if reaped.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(current, false, None, reaped.unwrap_err())
+    val committed = host_primary_attach_commit_reap_core_v1(current.store, current.capacity, current.helper.operation)
+    current.capacity = committed.owner
+    if committed.ack.is_none(): return HostPrimaryAttachCoreSettlementTurnV1(current, false, None, committed.error)
+    HostPrimaryAttachCoreSettlementTurnV1(current, true, committed.ack, "")
+
+
+# ---- fallback cores (milestone_0021 13.4 / milestone_0026): F = spawn only, B = session and spawn ----
+
+pub struct HostPrimaryAttachCoreQuiesceTurnV3:
+    retained: HostPrimaryAttachCoreRetainedV1
+    proof_ready: bool
+    error: text
+
+# The spawn carrier a quiesce acts on. Rejected carries no owner, so the absence of a live member cannot be
+# proven from it; a missing carrier is not a quiesce at all. Both are typed refusals, never a release.
+pub fn host_primary_attach_quiesce_carrier_v3(spawn: Option<PipedProcessOwnedSpawnV2>) -> Result<GroupProcessStreamOwnerV2, text>:
+    val held = match spawn:
+        case Some(value): value
+        case None: return Err("host-primary-native-carrier-required")
+    match held:
+        case PipedProcessOwnedSpawnV2.Ready(value, reference):
+            primary_reference_matches_v1(value, Some(reference))?
+            Ok(value)
+        case PipedProcessOwnedSpawnV2.CleanupRequired(value, reference, _):
+            primary_reference_matches_v1(value, reference)?
+            Ok(value)
+        case PipedProcessOwnedSpawnV2.Rejected(_): Err("host-primary-native-absence-unproven")
+
+const PRIMARY_QUIESCE_PROOF_PENDING_V3 = "stream group collected terminal proof remains incomplete"
+const PRIMARY_QUIESCE_CANCEL_PENDING_V3 = "stream group cancellation remains pending"
+
+# Proof of no live member WITHOUT retiring descriptors (the container-side retirement owns that, d3). Only the two
+# owner "remains pending/incomplete" answers are a teardown still draining (Ok("")); a bounded cancel is requested
+# on every retry while the proof is pending. Any other error (no-child proof differs, owner not installed, IO) is
+# a hard Err that keeps its reason.
+fn primary_quiesce_proof_v3(native: GroupProcessStreamOwnerV2) -> Result<text, text>:
+    val first = group_process_stream_cleanup_proof_v2(native)
+    match first:
+        case Ok(value): return Ok(value)
+        case Err(reason): if reason != PRIMARY_QUIESCE_PROOF_PENDING_V3: return Err(reason)
+    val cancelled = group_process_stream_cancel_v2(native)
+    if cancelled.is_err():
+        if cancelled.unwrap_err() == PRIMARY_QUIESCE_CANCEL_PENDING_V3: return Ok("")
+        return Err(cancelled.unwrap_err())
+    match group_process_stream_cleanup_proof_v2(native):
+        case Ok(value): Ok(value)
+        case Err(reason): if reason == PRIMARY_QUIESCE_PROOF_PENDING_V3: Ok("") else: Err(reason)
+
+# d2 of F and B: the signed bundle is bound first (journal, consumed record, admission, recovered native), the
+# spawn's owner must be that same native, and only then is the group proven quiet (`proof_ready` false with no
+# error = still tearing down). The carrier is kept unchanged:
+# F retires it through the container (d3), B drops it on `proof_ready` and continues on the session.
+pub fn host_primary_attach_quiesce_fallback_core_v3(retained: HostPrimaryAttachCoreRetainedV1) -> HostPrimaryAttachCoreQuiesceTurnV3:
+    val live = host_primary_attach_quiesce_carrier_v3(retained.cleanup_spawn)
+    if live.is_err(): return HostPrimaryAttachCoreQuiesceTurnV3(retained, false, live.unwrap_err())
+    val bound = primary_bundle_v1(retained)
+    if bound.is_err(): return HostPrimaryAttachCoreQuiesceTurnV3(retained, false, bound.unwrap_err())
+    val bundle = bound.unwrap()
+    val matched = host_primary_attach_native_match_v1(bundle.consumed, live.unwrap())
+    if matched.is_err(): return HostPrimaryAttachCoreQuiesceTurnV3(retained, false, matched.unwrap_err())
+    if live.unwrap().identity_digest != bundle.native.identity_digest:
+        return HostPrimaryAttachCoreQuiesceTurnV3(retained, false, "host-primary-native-owner-mismatch")
+    val proof = primary_quiesce_proof_v3(bundle.native)
+    if proof.is_err(): return HostPrimaryAttachCoreQuiesceTurnV3(retained, false, proof.unwrap_err())
+    HostPrimaryAttachCoreQuiesceTurnV3(retained, proof.unwrap() != "", "")
+
+# d4 of F: settle the helper from the container-side retirement. The retirement is re-read through the original
+# owner (`current_v3`), must carry a proof, and must name this plan and this native; a session still held means
+# the settle belongs to the S path. The native is NOT retired again (the container did); the spawn carrier is
+# consumed only once the ack is committed.
+pub fn host_primary_attach_settle_retired_core_v3(retained: HostPrimaryAttachCoreRetainedV1,
+        retirement: ContainerPrimaryTransportRetirementV3) -> HostPrimaryAttachCoreSettlementTurnV1:
+    if retained.session.is_some():
+        return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, "host-primary-multiple-native-carriers")
+    val bound = primary_bundle_v1(retained)
+    if bound.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, bound.unwrap_err())
+    val bundle = bound.unwrap()
+    val actual = retirement.current_v3()
+    if actual.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, actual.unwrap_err())
+    val data = actual.unwrap()
+    # The spawn carrier the quiesce proved must still be held and must be the retired native.
+    val carrier = host_primary_attach_quiesce_carrier_v3(retained.cleanup_spawn)
+    if carrier.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, carrier.unwrap_err())
+    if carrier.unwrap().identity_digest != data.native.identity_digest:
+        return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, "host-primary-retirement-carrier-mismatch")
+    if data.proof == "": return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, "host-primary-retirement-proof-empty")
+    val expected_plan = container_primary_attach_plan_encode_v1(bundle.consumed.primary_plan)
+    val actual_plan = container_primary_attach_plan_encode_v1(data.plan)
+    if expected_plan.is_err() or actual_plan.is_err() or expected_plan.unwrap() != actual_plan.unwrap():
+        return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, "host-primary-retirement-plan-mismatch")
+    val matched = host_primary_attach_native_match_v1(bundle.consumed, data.native)
+    if matched.is_err() or data.native.identity_digest != bundle.native.identity_digest:
+        return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, "host-primary-retirement-native-mismatch")
+    val lease = host_primary_attach_grouped_lease_v1(bundle.consumed, bundle.authority, bundle.native)
+    if lease.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, lease.unwrap_err())
+    val reaped = group_process_stream_collect_reap_v2(bundle.native, lease.unwrap())
+    if reaped.is_err(): return HostPrimaryAttachCoreSettlementTurnV1(retained, false, None, reaped.unwrap_err())
+    var current = retained
+    val committed = host_primary_attach_commit_reap_core_v1(current.store, current.capacity, current.helper.operation)
+    current.capacity = committed.owner
+    if committed.ack.is_none(): return HostPrimaryAttachCoreSettlementTurnV1(current, false, None, committed.error)
+    current.cleanup_spawn = None
+    HostPrimaryAttachCoreSettlementTurnV1(current, true, committed.ack, "")

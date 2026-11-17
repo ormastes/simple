@@ -3223,6 +3223,20 @@ fn test_windows_gnu_target_flag_is_only_for_clang_drivers() {
     assert_eq!(windows_gnu_target_flag(target, "x86_64-w64-mingw32-gcc"), None);
 }
 
+#[test]
+fn test_windows_gnu_target_flag_follows_target_arch() {
+    use simple_common::target::Target;
+
+    for (triple, flag) in [
+        ("aarch64-pc-windows-gnullvm", "--target=aarch64-w64-windows-gnu"),
+        ("aarch64-w64-mingw32", "--target=aarch64-w64-windows-gnu"),
+        ("x86_64-pc-windows-gnu", "--target=x86_64-w64-windows-gnu"),
+    ] {
+        let target = Target::parse(triple).unwrap();
+        assert_eq!(windows_gnu_target_flag(target, "clang"), Some(flag), "{triple}");
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn run_required_abi_probe(repo_root: &Path, temp_root: &Path, runtime: &Path, label: &str) {
     let source = temp_root.join(format!("{label}_abi_probe.c"));

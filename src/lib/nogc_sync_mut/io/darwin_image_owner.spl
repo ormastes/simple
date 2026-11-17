@@ -1,0 +1,63 @@
+# Kernel-owned Darwin image identity. No subprocess, argv or environment lookup.
+@when(os="macos"):
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.nogc_sync_mut.io.path_identity_abi.{malloc, free, realpath}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32, volatile_read_u8}
+
+# contract: caller-owned nonnull buffer and u32 bufsize; non-zero return means failure or truncation
+@unsafe(reason: "dyld copies current Mach-O executable path into caller-owned nonnull buffer and updates u32 capacity", capabilities: [ffi, raw_ptr])
+extern fn _NSGetExecutablePath(buffer: i64, bufsize: i64) -> i32
+
+# Capacity is exposed for genuine dyld truncation qualification.
+# @allow(primitive_api): byte-buffer capacity bound exposed for genuine dyld truncation testing
+@unsafe(reason: "bounded private dyld image buffer resolved via realpath and freed before return", capabilities: [ffi, raw_ptr])
+pub fn darwin_image_path_with_capacity(capacity: i64) -> Result<text, text>:
+    if capacity <= 0 or capacity > 32768:
+        return Err("Darwin image query invalid capacity")
+    val buffer = malloc(capacity as u64)
+    if buffer == 0:
+        return Err("Darwin image query allocation failed")
+    val size_cell = malloc(8u64)
+    if size_cell == 0:
+        free(buffer)
+        return Err("Darwin image query allocation failed")
+    volatile_write_u32(size_cell, capacity)
+    val rc = _NSGetExecutablePath(buffer, size_cell)
+    free(size_cell)
+    if rc != 0:
+        free(buffer)
+        return Err("Darwin image query failed or truncated")
+    val resolved = realpath(buffer, 0)
+    free(buffer)
+    if resolved == 0:
+        return Err("Darwin image query realpath failed")
+    var output: [u8] = []
+    var terminated = false
+    var index = 0
+    while index < capacity:
+        val byte = volatile_read_u8(resolved + index)
+        if byte == 0:
+            terminated = true
+            break
+        output.push(byte as u8)
+        index = index + 1
+    free(resolved)
+    if not terminated:
+        return Err("Darwin image query truncated")
+    val decoded: text = match validated_utf8_bytes_to_text_linear(output):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    if decoded == "" or not decoded.starts_with("/") or decoded.ends_with(".spl"):
+        return Err("Darwin image query invalid executable path")
+    Ok(decoded)
+@else:
+# @allow(primitive_api): byte-buffer capacity bound exposed for genuine dyld truncation testing
+pub fn darwin_image_path_with_capacity(capacity: i64) -> Result<text, text>:
+    Err("Darwin image query unavailable on this platform")
+@end
+
+pub fn darwin_image_path() -> Result<text, text>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        darwin_image_path_with_capacity(32768)
+
+export darwin_image_path_with_capacity, darwin_image_path

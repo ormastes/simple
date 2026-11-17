@@ -1,0 +1,170 @@
+"""
+## Purpose and audience
+Pins the V4 attach fallback cores (milestone_0026): `host_primary_attach_quiesce_fallback_core_v3`,
+`host_primary_attach_settle_retired_core_v3` and their call sites, the F (spawn only) and B (session and spawn)
+release sequences of milestone_0021 13.4 / 14A. Adverse cases come first: a missing or rejected carrier, a
+cancel before the bundle is bound, a retirement that settles while a session is held, a spawn dropped without a
+proof, and a charged state released without the container-side retirement. Written for owners of the Host agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+INFEASIBLE here, pinned structurally: quiesce, settle_retired and the F/B arms need a live GroupProcessStreamOwnerV2,
+a SimpleContainerOwnerV2 and a Linux HostCapacityOwnerV1 with a journal; no pure fixture builds them. The carrier
+gate is driven as DATA (None and Rejected need no native owner).
+## Verification guidance and troubleshooting
+A structural failure names the rule; a changed error string is a contract change.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_v1.host_primary_attach_quiesce_carrier_v3
+
+val FB_DIR = "src/lib/nogc_sync_mut/orchestration/"
+
+fn fb_body(source: text, name: text) -> text:
+    val start = source.index_of("fn " + name + "(")
+    if start < 0: return ""
+    val rest = source.substring(start + 3, source.byte_len())
+    val next = rest.index_of("\nfn ")
+    val next_pub = rest.index_of("\npub fn ")
+    var stop = rest.byte_len()
+    if next >= 0 and next < stop: stop = next
+    if next_pub >= 0 and next_pub < stop: stop = next_pub
+    rest.substring(0, stop)
+
+describe "fallback carrier gate (adverse first)":
+    it "refuses a missing spawn carrier":
+        # @req 13.4 F: no carrier means nothing to quiesce
+        val gate = host_primary_attach_quiesce_carrier_v3(None)
+        expect(gate.is_err()).to_equal(true)
+        expect(gate.unwrap_err()).to_equal("host-primary-native-carrier-required")
+
+    it "refuses a rejected spawn as unproven absence, never as a release":
+        # @req 13.4 F: Rejected carries no owner, so absence cannot be proven
+        val gate = host_primary_attach_quiesce_carrier_v3(Some(PipedProcessOwnedSpawnV2.Rejected("spawn-rejected")))
+        expect(gate.is_err()).to_equal(true)
+        expect(gate.unwrap_err()).to_equal("host-primary-native-absence-unproven")
+
+describe "quiesce core":
+    it "binds the signed bundle before any cancel and never retires descriptors":
+        # @req 13.4 d2: proof only; the container owns the retirement
+        val source = file_read_text(FB_DIR + "host_primary_attach_settlement_v1.spl")
+        val core = fb_body(source, "host_primary_attach_quiesce_fallback_core_v3")
+        val bundle = core.index_of("primary_bundle_v1(retained)")
+        val cancel = core.index_of("primary_quiesce_proof_v3(")
+        expect(bundle > 0 and cancel > bundle).to_equal(true)
+        expect(core.contains("process_retire_piped_owned_v2")).to_equal(false)
+        expect(core.contains("process_cleanup_piped_owned_v2")).to_equal(false)
+        step("proof reads first, cancel only when the proof is pending, then re-read")
+        val proof = fb_body(source, "primary_quiesce_proof_v3")
+        val read = proof.index_of("group_process_stream_cleanup_proof_v2(native)")
+        val cancel_call = proof.index_of("group_process_stream_cancel_v2(native)")
+        expect(read > 0 and cancel_call > read).to_equal(true)
+
+    it "treats a pending proof as not ready without an error (a wait, not a refusal)":
+        # @req 13.4 d2
+        val source = file_read_text(FB_DIR + "host_primary_attach_settlement_v1.spl")
+        val proof = fb_body(source, "primary_quiesce_proof_v3")
+        expect(proof).to_contain("PRIMARY_QUIESCE_CANCEL_PENDING_V3: return Ok(\"\")")
+        step("every other owner error stays a hard Err with its reason")
+        expect(proof).to_contain("if reason != PRIMARY_QUIESCE_PROOF_PENDING_V3: return Err(reason)")
+        expect(fb_body(source, "host_primary_attach_quiesce_fallback_core_v3")).to_contain("proof.unwrap() != \"\"")
+
+describe "settle_retired core":
+    it "refuses a held session, an empty proof and a foreign plan or native":
+        # @req 13.4 d4 / settle refuses multiple-native-carriers
+        val core = fb_body(file_read_text(FB_DIR + "host_primary_attach_settlement_v1.spl"), "host_primary_attach_settle_retired_core_v3")
+        val session = core.index_of("host-primary-multiple-native-carriers")
+        val current = core.index_of("retirement.current_v3()")
+        val empty = core.index_of("host-primary-retirement-proof-empty")
+        val carrier = core.index_of("host_primary_attach_quiesce_carrier_v3(retained.cleanup_spawn)")
+        val carrier_native = core.index_of("host-primary-retirement-carrier-mismatch")
+        expect(carrier > current and carrier_native > carrier and carrier_native < empty).to_equal(true)
+        val plan = core.index_of("host-primary-retirement-plan-mismatch")
+        val native = core.index_of("host-primary-retirement-native-mismatch")
+        val reap = core.index_of("group_process_stream_collect_reap_v2(bundle.native, lease.unwrap())")
+        val commit = core.index_of("host_primary_attach_commit_reap_core_v1(")
+        expect(session > 0 and current > session and empty > current and plan > empty and native > plan).to_equal(true)
+        expect(reap > native and commit > reap).to_equal(true)
+
+    it "does not retire the native again: the container already did":
+        # @req 13.4 d4
+        val core = fb_body(file_read_text(FB_DIR + "host_primary_attach_settlement_v1.spl"), "host_primary_attach_settle_retired_core_v3")
+        expect(core.contains("process_retire_piped_owned_v2")).to_equal(false)
+
+    it "consumes the spawn carrier only after the ack":
+        # @req 13.4 d4/d5
+        val core = fb_body(file_read_text(FB_DIR + "host_primary_attach_settlement_v1.spl"), "host_primary_attach_settle_retired_core_v3")
+        val ack = core.index_of("if committed.ack.is_none()")
+        val drop = core.index_of("current.cleanup_spawn = None")
+        expect(ack > 0 and drop > ack).to_equal(true)
+
+describe "release port F and B":
+    it "classifies a spawn carrier as releasable even though F/B never have a journal refusal":
+        # @req 14A F4: R is written only with neither session nor spawn, so F must not wait for one
+        val att = file_read_text(FB_DIR + "host_agent_attachment_v4.spl")
+        val charged = fb_body(att, "host_agent_release_charged_v4")
+        val carrier = charged.index_of("if attachment.session.is_some() or attachment.cleanup_spawn.is_some(): return \"\"")
+        val plan = charged.index_of("linux-host-agent-attach-plan-missing")
+        val journal = charged.index_of("distributed_operation_journal_read_v3(")
+        expect(plan > 0 and carrier > plan and journal > carrier).to_equal(true)
+
+    it "never advances d3 on a retirement captured with an error, and waits while a native step is pending":
+        # @req 13.4 d3, workspace_api_v3 (a retirement with an error authorizes no Host release)
+        val fall = fb_body(file_read_text(FB_DIR + "host_agent_attachment_v4.spl"), "host_agent_release_fallback_v4")
+        expect(fall.contains("if att.native_retirement.is_none():")).to_equal(false)
+        val pending = fall.index_of("if call.pending: return")
+        val cleanup = fall.index_of("simple_container_primary_attach_cleanup_v3(call.container.unwrap())")
+        val advance = fall.index_of("att.attach_stage = HOST_AGENT_ATTACH_CLEANED_V4")
+        val gate = fall.index_of("if returned.error != \"\" or att.native_retirement.is_none():")
+        expect(pending > 0 and cleanup > pending and gate > cleanup and advance > gate).to_equal(true)
+
+    it "answers a still-draining quiesce as a wait and a quiesce error as a refusal":
+        # @req 13.4 d2
+        val fall = fb_body(file_read_text(FB_DIR + "host_agent_attachment_v4.spl"), "host_agent_release_fallback_v4")
+        val refused = fall.index_of("if quiet.error != \"\":")
+        val wait = fall.index_of("if not quiet.proof_ready:")
+        expect(refused > 0 and wait > refused).to_equal(true)
+
+    it "no longer answers a spawn carrier as unbound":
+        # @req 13.4 F/B
+        val att = file_read_text(FB_DIR + "host_agent_attachment_v4.spl")
+        expect(att.contains("HOST_AGENT_RELEASE_FALLBACK_UNBOUND_V4")).to_equal(false)
+        expect(fb_body(att, "host_agent_release_charged_v4")).to_contain("PipedProcessOwnedSpawnV2.Rejected")
+
+    it "runs F as quiesce, container retirement, settle_retired, return, one step per call":
+        # @req 13.4 F: d2 quiesce; d3 simple_container_primary_attach_cleanup_v3; d4 settle_retired; d5 returned
+        val att = file_read_text(FB_DIR + "host_agent_attachment_v4.spl")
+        val fall = fb_body(att, "host_agent_release_fallback_v4")
+        val quiesce = fall.index_of("host_primary_attach_quiesce_fallback_core_v3(")
+        val flag = fall.index_of("att.fallback_quiesced = true")
+        val cleanup = fall.index_of("simple_container_primary_attach_cleanup_v3(call.container.unwrap())")
+        val cleaned = fall.index_of("att.attach_stage = HOST_AGENT_ATTACH_CLEANED_V4")
+        expect(quiesce > 0 and flag > quiesce and cleanup > flag and cleaned > cleanup).to_equal(true)
+        step("d3 needs the quiesce proof flag and the agent container")
+        expect(fall).to_contain("if not att.fallback_quiesced:")
+        expect(fall).to_contain("linux-host-agent-attachment-fallback-carrier-missing")
+        step("a retirement captured with an error is kept and the step is a counted refusal")
+        expect(fall).to_contain("if returned.retirement.is_some(): att.native_retirement = returned.retirement")
+        step("settle uses settle_retired when a retirement and no session are held")
+        val settle = fb_body(att, "host_agent_release_settle_v4")
+        val retired = settle.index_of("host_primary_attach_settle_retired_core_v3(")
+        val plain = settle.index_of("host_primary_attach_settle_core_v1(")
+        expect(retired > 0 and plain > retired).to_equal(true)
+        step("return d4 has no session to return for F: the retirement is cleared and the attachment is returned")
+        val ret = fb_body(att, "host_agent_release_return_v4")
+        expect(ret).to_contain("att.native_retirement = None")
+        expect(ret.index_of("att.native_retirement = None") < ret.index_of("simple_container_primary_session_return_v3(")).to_equal(true)
+
+    it "runs B as quiesce first, drops the spawn only on proof, then the S path":
+        # @req 13.4 B: settle refuses multiple-native-carriers, so the spawn is quiesced and dropped first
+        val att = file_read_text(FB_DIR + "host_agent_attachment_v4.spl")
+        val port = fb_body(att, "host_agent_attachment_release_step_v4")
+        val fallback = port.index_of("host_agent_release_fallback_v4(call, context)")
+        val cleanup = port.index_of("return host_agent_release_cleanup_v4(call, context)")
+        expect(fallback > 0 and cleanup > fallback).to_equal(true)
+        val both = fb_body(att, "host_agent_release_fallback_v4")
+        val quiesce = both.index_of("host_primary_attach_quiesce_fallback_core_v3(")
+        val drop = both.index_of("att.cleanup_spawn = None")
+        expect(quiesce > 0 and drop > quiesce).to_equal(true)

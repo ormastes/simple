@@ -1,0 +1,184 @@
+# Native oracle for struct-keyed Dict lookups (Stage 2 miscompile class:
+# `Dict<SymbolId, _>` in join_point_model.spl forward_join_points_for_module_v1).
+# A native struct value is a raw rt_alloc field block; used verbatim as a dict
+# key the runtime compares it by ADDRESS, so a separately built equal key (or a
+# copy of the stored one) missed, `d[k]` returned nil and the field read
+# SIGSEGVed. The seed interpreter compares struct keys by value.
+# Build: SIMPLE_BOOTSTRAP=1 native-build main.spl --entry-closure (cranelift, llvm).
+# Expected stdout = seed INTERPRETER (`SIMPLE_EXECUTION_MODE=interpret simple run
+# main.spl`); the seed's default JIT run SIGSEGVs on row a (same class).
+# Struct keys other than a single-field integer struct are refused at compile
+# time, and so is every place a struct key meets a generic (erased) Dict<K, _>
+# (E-MIR-STRUCT-DICT-KEY; see refuse_*.spl here and
+# test/01_unit/compiler/mir/struct_keyed_dict_key_lowering_spec.spl).
+# Expected stdout:
+# a alpha
+# b true
+# c false
+# d gamma
+# e 2
+# f 1
+# g false
+# h 3 6
+# i 6
+# j beta
+# k delta
+# l eps
+# m 80 90 3
+# n 24
+# o 24240
+# p 30
+# q tv
+# r 2
+# s 80
+# t 90
+# u 70
+# v 80
+# w 70
+# x 23
+# y 30
+# z 3
+# aa -1
+# ab 70 71 3
+# ac 24
+# ad 2613
+# ae 71 true
+# af 2 false
+
+struct Sid:
+    id: i64
+
+struct Fn:
+    name: text
+
+struct Mod:
+    functions: Dict<Sid, Fn>
+
+struct Holder:
+    key: Sid
+
+fn make_sid(n: i64) -> Sid:
+    Sid(id: n)
+
+fn key_sum(m: Mod) -> i64:
+    var s = 0
+    for k in m.functions.keys():
+        val f: Fn = m.functions[k]
+        if f.name != "": s = s + k.id
+    s
+
+fn main():
+    var d: Dict<Sid, Fn> = {}
+    d[Sid(id: 1)] = Fn(name: "alpha")
+    d[Sid(id: 2)] = Fn(name: "beta")
+    val hit: Fn = d[Sid(id: 1)]
+    print "a {hit.name}"
+    print "b {d.contains_key(Sid(id: 2))}"
+    print "c {d.contains_key(Sid(id: 9))}"
+    d[Sid(id: 1)] = Fn(name: "gamma")
+    val over: Fn = d[Sid(id: 1)]
+    print "d {over.name}"
+    print "e {d.len()}"
+    d.remove(Sid(id: 2))
+    print "f {d.len()}"
+    print "g {d.contains_key(Sid(id: 2))}"
+    d[Sid(id: 2)] = Fn(name: "beta")
+    d[Sid(id: 3)] = Fn(name: "beta")
+    var n = 0
+    var s = 0
+    for k in d.keys():
+        val f: Fn = d[k]
+        if f.name != "":
+            n = n + 1
+            s = s + k.id
+    print "h {n} {s}"
+    print "i {key_sum(Mod(functions: d))}"
+    val made: Fn = d[make_sid(2)]
+    print "j {made.name}"
+    val holder = Holder(key: Sid(id: 4))
+    d[holder.key] = Fn(name: "delta")
+    val from_field: Fn = d[Sid(id: 4)]
+    print "k {from_field.name}"
+    val ids: [Sid] = [Sid(id: 5)]
+    d[ids[0]] = Fn(name: "eps")
+    val from_arr: Fn = d[Sid(id: 5)]
+    print "l {from_arr.name}"
+    var lit: Dict<Sid, i64> = {Sid(id: 7): 70, Sid(id: 8): 80}
+    lit.set(Sid(id: 9), 90)
+    val got = lit.get(Sid(id: 8)) ?? -1
+    print "m {got} {lit[Sid(id: 9)] ?? -1} {lit.len()}"
+    var t = 0
+    for k in lit.keys():
+        t = t + k.id
+    print "n {t}"
+    var u = 0
+    for (k, v) in lit.items():
+        u = u + k.id * 1000 + v
+    print "o {u}"
+    var ik: Dict<i64, i64> = {}
+    ik[3] = 10
+    ik[3] = 30
+    print "p {ik[3]}"
+    var tk: Dict<text, text> = {}
+    tk["x"] = "tv"
+    print "q {tk[\"x\"]}"
+    print "r {tk.len() + ik.len()}"
+    # Generic-boundary rows: an erased generic body never keys a struct, so
+    # only the shapes below (identity through T, a whole dict bound to an
+    # opaque T, payload/closure/nested/call-result receivers) are legal.
+    val s5 = Sid(id: 5)
+    print "s {lit[pick(Sid(id: 8), s5)] ?? -1}"
+    print "t {pick(lit, lit)[Sid(id: 9)] ?? -1}"
+    match MaybeSid.Has(Sid(id: 7)):
+        case Has(found): print "u {lit[found] ?? -1}"
+        case Nope: print "u none"
+    val probe = Sid(id: 8)
+    val read_captured = \fallback: lit[probe] ?? fallback
+    print "v {read_captured(-1)}"
+    var nested: Dict<i64, Dict<Sid, i64>> = {}
+    nested[0] = lit
+    print "w {nested[0][Sid(id: 7)] ?? -1}"
+    var call_keys = 0
+    for k in sid_lit().keys():
+        call_keys = call_keys + k.id
+    print "x {call_keys}"
+    # A dict through a bare generic `T` must be typed as that dict at the
+    # call site whatever its key type (int key, len, miss).
+    print "y {pick(ik, ik)[3] ?? -1}"
+    print "z {pick(lit, lit).len()}"
+    print "aa {pick(lit, lit)[Sid(id: 42)] ?? -1}"
+    # A struct key held in an Optional local (generated hir_codec.spl:
+    # `var dk6: SymbolId? = nil` .. `f_functions[dk6] = ..`) must be unwrapped
+    # and keyed by its field like a plain struct; pre-fix native keyed the
+    # Option word and printed `ab -1 -1 3` / `ac <pointer sum>`.
+    var od: Dict<Sid, i64> = {}
+    var oi = 0
+    while oi < 3:
+        var dk: Sid? = nil
+        if oi >= 0:
+            dk = make_sid(7 + oi)
+        od[dk] = 70 + oi
+        oi = oi + 1
+    print "ab {od[Sid(id: 7)] ?? -1} {od.get(Sid(id: 8)) ?? -1} {od.len()}"
+    var osum = 0
+    for k in od.keys():
+        osum = osum + k.id
+    print "ac {osum}"
+    var ot = 0
+    for (k, v) in od:
+        ot = ot + k.id * 100 + v
+    print "ad {ot}"
+    val ok8: Sid? = make_sid(8)
+    print "ae {od[ok8] ?? -1} {od.contains(ok8)}"
+    od.remove(ok8)
+    print "af {od.len()} {od.contains(Sid(id: 8))}"
+
+enum MaybeSid:
+    Has(s: Sid)
+    Nope
+
+fn pick<T>(a: T, b: T) -> T:
+    a
+
+fn sid_lit() -> Dict<Sid, i64>:
+    {Sid(id: 11): 1, Sid(id: 12): 2}

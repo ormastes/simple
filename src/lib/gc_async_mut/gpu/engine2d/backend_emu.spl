@@ -1114,7 +1114,10 @@ fn _emu_gradient_color_at(colors: [u32], positions_permille: [i32], pos_permille
 # as 1000 + its square-box angle (1045 top right, 1135 bottom right, 1225
 # bottom left, 1315 top left); this returns [sin, cos] of the real angle in
 # Q16 for a w x h box.
-fn gradient_corner_dir_q16(code: i32, w: i32, h: i32) -> [i64]:
+# reason: CSS gradient corner code and box size are i32 paint-domain scalars;
+# shared with the web paint primitives.
+# @allow(primitive_api)
+pub fn gradient_corner_dir_q16(code: i32, w: i32, h: i32) -> [i64]:
     val ww: i64 = if w > 0: w as i64 else: 1
     val hh: i64 = if h > 0: h as i64 else: 1
     val len_q16 = _emu_isqrt_i64((ww * ww + hh * hh) * 4294967296)
@@ -1315,6 +1318,282 @@ fn emu_draw_radial_gradient_stops(mut core: RenderBackend, cx: i32, cy: i32, r: 
         py = py + 1
 
 # ============================================================================
+# CSS radial gradient (CSS Images 3 §3.2, as Chrome 159 paints it)
+#
+# ONE evaluator for every lane: the browser-engine CPU raster, the cpu_simd
+# Engine2D lane and the Vulkan device all take their gradient colours from
+# `radial_gradient_pixels`, then composite them src-over (the raster and the
+# software lane with `blend`, Vulkan with its device SRC_OVER image
+# composite). Geometry is Q10 px (1/1024 px): centre (cx, cy) and the ending
+# ellipse radii (rx, ry). Each pixel is sampled at its centre; t = 0 at the
+# centre and 1 on the ending shape; stops interpolate in premultiplied sRGB
+# (`_emu_gradient_color_at_q16`); past the last stop the colour is clamped.
+# `emu_draw_radial_gradient_stops` above is a different primitive (an
+# integer circle painted only inside its radius, no blend) kept for its
+# existing callers.
+# ============================================================================
+
+# floor(sqrt(v)) by Newton from a nearby seed: neighbouring pixels have
+# nearly equal distances, so the previous pixel's root converges in 1-3 steps.
+fn _emu_isqrt_seeded(v: i64, seed: i64) -> i64:
+    if v <= 0:
+        return 0
+    var g = if seed > 0: seed else: 1
+    # cpu-lane-loop-ok: Newton refinement of one integer square root; converges in a few steps from the neighbouring pixel's root
+    while true:
+        val ng = (g + v / g) / 2
+        val d = if ng > g: ng - g else: g - ng
+        g = ng
+        if d <= 1:
+            break
+    # cpu-lane-loop-ok: final floor correction of the Newton root, at most a couple of steps
+    while g * g > v:
+        g = g - 1
+    # cpu-lane-loop-ok: final floor correction of the Newton root, at most a couple of steps
+    while (g + 1) * (g + 1) <= v:
+        g = g + 1
+    g
+
+val _EMU_RADIAL_T_CLAMP: i64 = 16777216
+
+# Gradient-line extent the stop ramp covers: [0, 1], or further when the last
+# stop sits past 100% (t16, 65536 = 1).
+fn _emu_gradient_t_max(positions_permille: [i32]) -> i64:
+    val last16 = (positions_permille[positions_permille.len() - 1] as i64) * 65536 / 1000
+    if last16 > 65536: last16 else: 65536
+
+# The stop ramp sampled once into 1025 entries over [0, t_max] (premultiplied
+# sRGB, `_emu_gradient_color_at_q16`), shared by the radial and linear
+# evaluators; a pixel's t16 maps to entry (t16 * 1024 + t_max / 2) / t_max.
+fn _emu_gradient_stop_lut(colors: [u32], positions_permille: [i32], t_max: i64) -> [u32]:
+    var lut: [u32] = []
+    var li = 0
+    # cpu-lane-loop-ok: builds the 1025-entry stop ramp once per gradient
+    while li <= 1024:
+        lut.push(_emu_gradient_color_at_q16(colors, positions_permille, (li as i64) * t_max / 1024))
+        li = li + 1
+    lut
+
+# One axis of the radial t: for each pixel p0 .. p0+n-1, its centre's offset
+# from the gradient centre (Q10) scaled so the ending radius is 65536, clamped
+# to +-_EMU_RADIAL_T_CLAMP.
+fn _emu_radial_axis_t16(p0: i32, n: i32, c_q: i64, r_q: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    # cpu-lane-loop-ok: one axis term per column (or row) of the painted rect, not per pixel
+    while i < n:
+        var a = (((p0 + i) as i64) * 1024 + 512 - c_q) * 65536 / r_q
+        if a > _EMU_RADIAL_T_CLAMP:
+            a = _EMU_RADIAL_T_CLAMP
+        if a < 0 - _EMU_RADIAL_T_CLAMP:
+            a = 0 - _EMU_RADIAL_T_CLAMP
+        out.push(a)
+        i = i + 1
+    out
+
+# Straight-ARGB colours of a radial gradient over the w x h pixel rect at
+# (x0, y0), row-major. Empty for an empty rect or a malformed stop list; a
+# single stop or a degenerate (zero) radius paints the last stop everywhere.
+# reason: raw pixel kernel shared verbatim by the raster, cpu_simd and Vulkan lanes; rect in device px, geometry in Q10 px, colours packed 0xAARRGGBB, stop positions in permille
+# @allow(primitive_api)
+pub fn radial_gradient_pixels(x0: i32, y0: i32, w: i32, h: i32, cx_q: i64, cy_q: i64, rx_q: i64, ry_q: i64, colors: [u32], positions_permille: [i32]) -> [u32]:
+    val n = colors.len()
+    if w <= 0 or h <= 0 or n == 0 or positions_permille.len() != n:
+        return []
+    val count = w * h
+    var out: [u32] = [0u32; count]
+    val last = colors[n - 1]
+    if n == 1 or rx_q <= 0 or ry_q <= 0:
+        var k = 0
+        # cpu-lane-loop-ok: solid fill of a degenerate radial gradient; bound is the painted rect
+        while k < count:
+            out[k] = last
+            k = k + 1
+        return out
+    # The stop ramp is sampled once into 1025 entries over [0, t_max]; the
+    # per-pixel work is a root and a lookup.
+    val t_max = _emu_gradient_t_max(positions_permille)
+    val lut = _emu_gradient_stop_lut(colors, positions_permille, t_max)
+    # t16 = sqrt(u^2 + v^2) is separable in its axis terms: u depends only on
+    # the column, v only on the row (shared with the Vulkan device tables).
+    val ut = _emu_radial_axis_t16(x0, w, cx_q, rx_q)
+    val vt = _emu_radial_axis_t16(y0, h, cy_q, ry_q)
+    var row = 0
+    # cpu-lane-loop-ok: radial gradient rows of the painted rect; the CPU evaluator every lane composites
+    while row < h:
+        val v = vt[row]
+        val v2 = v * v
+        var seed: i64 = 65536
+        val base = row * w
+        var col = 0
+        # cpu-lane-loop-ok: radial gradient pixels of one row; one root and one ramp lookup each
+        while col < w:
+            val u = ut[col]
+            val t16 = _emu_isqrt_seeded(u * u + v2, seed)
+            seed = t16
+            if t16 >= t_max:
+                out[base + col] = last
+            else:
+                out[base + col] = lut[((t16 * 1024 + t_max / 2) / t_max) as i32]
+            col = col + 1
+        row = row + 1
+    out
+
+# Straight-ARGB colours of a CSS linear gradient (CSS Images 3 §3.1, as
+# Chrome 159 paints it) over the w x h pixel rect at (x0, y0), row-major.
+# The gradient line runs from (sx, sy) to (ex, ey) in Q10 px (the producer
+# resolves the angle, `to <side|corner>` and the |w sin| + |h cos| length
+# against the background positioning area); each pixel centre projects onto
+# it, t = 0 at the start and 1 at the end, and takes the same 1025-entry
+# premultiplied-sRGB stop ramp as `radial_gradient_pixels`, clamped to the
+# first / last stop beyond the line. Empty for an empty rect or a malformed
+# stop list; a single stop or a zero-length line paints the last stop.
+# reason: raw pixel kernel shared verbatim by the raster, cpu_simd and Vulkan lanes; rect in device px, gradient line in Q10 px, colours packed 0xAARRGGBB, stop positions in permille
+# @allow(primitive_api)
+pub fn linear_gradient_pixels(x0: i32, y0: i32, w: i32, h: i32, sx_q: i64, sy_q: i64, ex_q: i64, ey_q: i64, colors: [u32], positions_permille: [i32]) -> [u32]:
+    val n = colors.len()
+    if w <= 0 or h <= 0 or n == 0 or positions_permille.len() != n:
+        return []
+    val count = w * h
+    var out: [u32] = [0u32; count]
+    val dx = ex_q - sx_q
+    val dy = ey_q - sy_q
+    val len2 = dx * dx + dy * dy
+    if n == 1 or len2 <= 0:
+        val last = colors[n - 1]
+        var k = 0
+        # cpu-lane-loop-ok: solid fill of a degenerate linear gradient; bound is the painted rect
+        while k < count:
+            out[k] = last
+            k = k + 1
+        return out
+    val t_max = _emu_gradient_t_max(positions_permille)
+    val lut = _emu_gradient_stop_lut(colors, positions_permille, t_max)
+    # t16 = proj * 65536 / len2, where proj = (p - s) . (e - s) in Q20. Past
+    # a 64 px line len2 >= 2^32, so divide by len2 / 65536 instead: the
+    # quotient loses < 2^-16 and proj * 65536 can no longer overflow i64.
+    val big = len2 >= 4294967296
+    val den16 = len2 / 65536
+    val step_x = dx * 1024
+    var row = 0
+    # cpu-lane-loop-ok: linear gradient rows of the painted rect; the CPU evaluator every lane composites
+    while row < h:
+        var proj = (((x0 as i64) * 1024 + 512 - sx_q) * dx) + ((((y0 + row) as i64) * 1024 + 512 - sy_q) * dy)
+        val base = row * w
+        var col = 0
+        # cpu-lane-loop-ok: linear gradient pixels of one row; one add, one divide and one ramp lookup each
+        while col < w:
+            var t16 = if big: proj / den16 else: proj * 65536 / len2
+            if t16 < 0:
+                t16 = 0
+            if t16 >= t_max:
+                out[base + col] = lut[1024]
+            else:
+                out[base + col] = lut[((t16 * 1024 + t_max / 2) / t_max) as i32]
+            proj = proj + step_x
+            col = col + 1
+        row = row + 1
+    out
+
+# ----------------------------------------------------------------------------
+# Device tables for the Vulkan gradient layer kernel (shaders/gradient_layer.comp)
+#
+# Everything the device needs to evaluate the SAME t as the two host
+# evaluators above, and nothing per pixel: a 4-word header (t_max, past-end
+# colour, linear divisor, linear shift), the same 1025-entry stop ramp, and
+# O(w + h) per-column / per-row geometry terms. Empty means "decline": the
+# caller keeps the host evaluator, which paints the identical t. The kernel is
+# 32-bit only (the seed's Vulkan device enables no shaderInt64), so these also
+# decline anything whose integer intermediates would not fit it.
+# ----------------------------------------------------------------------------
+
+val _EMU_GRADIENT_DEVICE_T_MAX_LIMIT: i64 = 4000000
+val _EMU_GRADIENT_DEVICE_PROJ_LIMIT: i64 = 70368744177664
+
+fn _emu_word_lo(v: i64) -> u32:
+    (v & 4294967295) as u32
+
+fn _emu_word_hi(v: i64) -> u32:
+    ((v >> 32) & 4294967295) as u32
+
+fn _emu_abs_i64(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+fn _emu_gradient_device_header(lut: [u32], t_max: i64, beyond: u32, div: i64, shift: i64) -> [u32]:
+    var words: [u32] = [_emu_word_lo(t_max), beyond, _emu_word_lo(div), _emu_word_lo(shift)]
+    for c in lut:
+        words.push(c)
+    words
+
+# Device tables for `radial_gradient_pixels` over the same rect: header,
+# ramp, then u per column and v per row (one i32 word each, |u|, |v| <= 2^24).
+# reason: raw device-table builder twinned with radial_gradient_pixels; rect in device px, geometry in Q10 px, colours packed 0xAARRGGBB, stop positions in permille
+# @allow(primitive_api)
+pub fn radial_gradient_device_tables(x0: i32, y0: i32, w: i32, h: i32, cx_q: i64, cy_q: i64, rx_q: i64, ry_q: i64, colors: [u32], positions_permille: [i32]) -> [u32]:
+    val n = colors.len()
+    if w <= 0 or h <= 0 or n < 2 or positions_permille.len() != n or rx_q <= 0 or ry_q <= 0:
+        return []
+    val t_max = _emu_gradient_t_max(positions_permille)
+    if t_max > _EMU_GRADIENT_DEVICE_T_MAX_LIMIT:
+        return []
+    val lut = _emu_gradient_stop_lut(colors, positions_permille, t_max)
+    var words = _emu_gradient_device_header(lut, t_max, colors[n - 1], 0, 0)
+    for u in _emu_radial_axis_t16(x0, w, cx_q, rx_q):
+        words.push(_emu_word_lo(u))
+    for v in _emu_radial_axis_t16(y0, h, cy_q, ry_q):
+        words.push(_emu_word_lo(v))
+    words
+
+# Device tables for `linear_gradient_pixels` over the same rect: header,
+# ramp, then the projection split into a per-column and a per-row i64 (lo, hi
+# words each) whose sum is exactly the host's `proj` for that pixel.
+# reason: raw device-table builder twinned with linear_gradient_pixels; rect in device px, gradient line in Q10 px, colours packed 0xAARRGGBB, stop positions in permille
+# @allow(primitive_api)
+pub fn linear_gradient_device_tables(x0: i32, y0: i32, w: i32, h: i32, sx_q: i64, sy_q: i64, ex_q: i64, ey_q: i64, colors: [u32], positions_permille: [i32]) -> [u32]:
+    val n = colors.len()
+    if w <= 0 or h <= 0 or n < 2 or positions_permille.len() != n:
+        return []
+    val dx = ex_q - sx_q
+    val dy = ey_q - sy_q
+    val len2 = dx * dx + dy * dy
+    # The kernel divides by a 32-bit divisor: len2 itself below 2^32 (then
+    # shifts the projection by 16), len2 / 65536 below 2^48.
+    if len2 <= 0 or len2 >= 281474976710656:
+        return []
+    val t_max = _emu_gradient_t_max(positions_permille)
+    if t_max > _EMU_GRADIENT_DEVICE_T_MAX_LIMIT:
+        return []
+    val col_first = (((x0 as i64) * 1024 + 512 - sx_q) * dx)
+    val col_last = ((((x0 + w - 1) as i64) * 1024 + 512 - sx_q) * dx)
+    val row_first = (((y0 as i64) * 1024 + 512 - sy_q) * dy)
+    val row_last = ((((y0 + h - 1) as i64) * 1024 + 512 - sy_q) * dy)
+    val col_max = if _emu_abs_i64(col_first) > _emu_abs_i64(col_last): _emu_abs_i64(col_first) else: _emu_abs_i64(col_last)
+    val row_max = if _emu_abs_i64(row_first) > _emu_abs_i64(row_last): _emu_abs_i64(row_first) else: _emu_abs_i64(row_last)
+    # Keeps the host's own proj * 65536 inside i64, so the twin is defined.
+    if col_max + row_max >= _EMU_GRADIENT_DEVICE_PROJ_LIMIT:
+        return []
+    val big = len2 >= 4294967296
+    val div = if big: len2 / 65536 else: len2
+    val shift: i64 = if big: 0 else: 16
+    val lut = _emu_gradient_stop_lut(colors, positions_permille, t_max)
+    var words = _emu_gradient_device_header(lut, t_max, lut[1024], div, shift)
+    var col = 0
+    # cpu-lane-loop-ok: one projection term per column of the painted rect, not per pixel
+    while col < w:
+        val term = (((x0 + col) as i64) * 1024 + 512 - sx_q) * dx
+        words.push(_emu_word_lo(term))
+        words.push(_emu_word_hi(term))
+        col = col + 1
+    var row = 0
+    # cpu-lane-loop-ok: one projection term per row of the painted rect, not per pixel
+    while row < h:
+        val term = (((y0 + row) as i64) * 1024 + 512 - sy_q) * dy
+        words.push(_emu_word_lo(term))
+        words.push(_emu_word_hi(term))
+        row = row + 1
+    words
+
+# ============================================================================
 # Alpha-Blended Rectangle — Porter-Duff src-over
 # ============================================================================
 
@@ -1341,7 +1620,7 @@ fn emu_draw_rect_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, 
             val fy = y + py
             if fx >= 0 and fx < fb_w and fy >= 0 and fy < core.height():
                 val dst = fb[fy * fb_w + fx]
-                val blended = _emu_blend_over(sr, sg, sb, sa, dst)
+                val blended = _emu_blend_over(sr, sg, sb, sa, dst, true)
                 result[py * w + px] = blended
             px = px + 1
         py = py + 1

@@ -880,9 +880,9 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
 # the outline keeps its true pen-relative position: column 0 of the bitmap is
 # pen-relative x `slg_bearing_x`, and `phase_q` shifts the outline right by
 # phase_q/4 px (Skia's quarter-pixel positions). One padding pixel on each side
-# holds the filter's 2-subpixel spread. Vertical geometry (height, bearing_y,
-# rows) is identical to sfnt_render_glyph_into, so the two paths only differ
-# horizontally.
+# holds the filter's 2-subpixel spread. Vertically the outline is baseline-anchored and
+# warped by the slight-hinting blue-zone fit (_lcd_hint_knots), so unlike
+# sfnt_render_glyph_into (unhinted, ink-bottom anchored) its rows differ too.
 class SfntLcdGlyph:
     slg_width: i64
     slg_height: i64
@@ -915,7 +915,7 @@ fn _lcd_accumulate_row(edges: [_SfntEdge], sy: f64, subpixels: i64, mut acc: [f6
     var xs: [f64] = []
     var dirs: [i64] = []
     for edge in edges:
-        if edge.y_top <= sy and sy < edge.y_bottom:
+        if edge.y_top < sy and sy <= edge.y_bottom:
             val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
             # insertion sort: a glyph row has a handful of crossings
             var at = xs.len()
@@ -947,7 +947,369 @@ fn _lcd_accumulate_row(edges: [_SfntEdge], sy: f64, subpixels: i64, mut acc: [f6
                     j = j + 1
         i = i + 1
 
-fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, phase_q: i64) -> Option<SfntLcdGlyph>:
+# --- Slight (y-only) autohinter approximation ---------------------------------
+# Chrome on Linux renders through FreeType with hinting "slight": the latin
+# autohinter, y direction only. Two effects reach the pixels at text sizes:
+#   1. the y scale is adjusted so the x-height lands on a whole pixel
+#      (fitted = floor(scaled + 40/64), af_latin_metrics_scale_dim), and
+#   2. every blue zone (baseline, x-height, cap height, ascender, descender)
+#      is snapped: reference to a whole pixel, overshoot collapsed onto it
+#      unless it is at least half a pixel.
+# Horizontal stem width/position snapping (edge hinting) is NOT modelled; glyph
+# points between zones keep the (adjusted) scale. Knots are
+# [font_y0, px_y0, font_y1, px_y1, ...] ascending in font_y; empty = unhinted.
+var _lcd_hint_cache: Dict<text, [f64]> = {}
+
+fn _hint_glyph_y_extent(font: OtFont, codepoint: i64) -> [f64]:
+    val gid = sfnt_cmap_glyph_id(font, codepoint as u32)
+    if gid == 0: return []
+    val outline = match parse_sfnt_glyf_outline(font, gid):
+        Some(value): value
+        None: return []
+    val bounds = match _outline_bounds(outline.commands):
+        Some(value): value
+        None: return []
+    # _SfntBounds is min/max of font y: `top` = lowest y, `bottom` = highest y.
+    val extent: [f64] = [bounds.top, bounds.bottom]
+    extent
+
+fn _hint_floor_half(value: f64) -> f64:
+    _floor_glyf(value + 0.5) as f64
+
+fn _hint_zone_knots(ref_y: f64, shoot_y: f64, is_top: bool, scale: f64) -> [f64]:
+    val ref_px = ref_y * scale
+    val fit = _hint_floor_half(ref_px)
+    var gap = (shoot_y - ref_y) * scale
+    if gap < 0.0: gap = 0.0 - gap
+    if gap > 0.75: return []
+    val gap64 = gap * 64.0
+    val snapped = if gap64 < 32.0: 0.0 else: (if gap64 < 48.0: 0.5 else: 1.0)
+    val shoot_fit = if is_top: fit + snapped else: fit - snapped
+    if shoot_y == ref_y: [ref_y, fit]
+    else if is_top: [ref_y, fit, shoot_y, shoot_fit]
+    else: [shoot_y, shoot_fit, ref_y, fit]
+
+fn _lcd_hint_knots(font: OtFont, units_per_em: i64, size_px: i64) -> [f64]:
+    val scale0 = size_px as f64 / units_per_em as f64
+    val xe = _hint_glyph_y_extent(font, 120)
+    val oe = _hint_glyph_y_extent(font, 111)
+    val he = _hint_glyph_y_extent(font, 72)
+    if xe.len() < 2 or oe.len() < 2 or he.len() < 2: return []
+    val x_shoot = if oe[1] > xe[1]: oe[1] else: xe[1]
+    val scaled = x_shoot * scale0
+    if scaled <= 0.0: return []
+    # FreeType rounds the x-height up more often (threshold 52/64 instead of
+    # 40/64) for 6..14 ppem: its `increase-x-height` property defaults to 14.
+    # FreeType works in 26.6 integers: the scaled x-height is rounded to 1/64
+    # before the fit, so the ratio is fitted64 / scaled64, not fitted / scaled.
+    val scaled64 = _hs_h64(scaled)
+    val threshold64 = if size_px >= 6 and size_px <= 14: 52 else: 40
+    val fitted64 = (scaled64 + threshold64) / 64 * 64
+    val fitted = fitted64 as f64 / 64.0
+    var scale = scale0
+    if fitted > 0.0 and fitted64 != scaled64:
+        val ratio = fitted64 as f64 / scaled64 as f64
+        var tall = he[1] * scale0
+        if tall < 0.0: tall = 0.0 - tall
+        var grow = tall * (ratio - 1.0)
+        if grow < 0.0: grow = 0.0 - grow
+        if grow <= 2.0: scale = scale0 * ratio
+    val ce = _hint_glyph_y_extent(font, 79)
+    val le = _hint_glyph_y_extent(font, 108)
+    val pe = _hint_glyph_y_extent(font, 112)
+    val ge = _hint_glyph_y_extent(font, 103)
+    var knots: [f64] = []
+    knots = knots + _hint_zone_knots(0.0, if oe[0] < 0.0: oe[0] else: 0.0, false, scale)
+    knots = knots + _hint_zone_knots(xe[1], oe[1], true, scale)
+    knots = knots + _hint_zone_knots(he[1], if ce.len() >= 2: ce[1] else: he[1], true, scale)
+    if le.len() >= 2 and le[1] > he[1]:
+        knots = knots + _hint_zone_knots(le[1], le[1], true, scale)
+    if pe.len() >= 2:
+        knots = knots + _hint_zone_knots(pe[0], if ge.len() >= 2: ge[0] else: pe[0], false, scale)
+    # ascending font_y, drop knots that would fold the mapping back
+    var sorted: [f64] = []
+    var pairs = knots.len() / 2
+    var i: i64 = 0
+    while i < pairs:
+        val fy = knots[i * 2]
+        val ty = knots[i * 2 + 1]
+        var at = sorted.len() / 2
+        sorted = sorted + [fy, ty]
+        while at > 0 and sorted[(at - 1) * 2] > fy:
+            sorted[at * 2] = sorted[(at - 1) * 2]
+            sorted[at * 2 + 1] = sorted[(at - 1) * 2 + 1]
+            at = at - 1
+        sorted[at * 2] = fy
+        sorted[at * 2 + 1] = ty
+        i = i + 1
+    var clean: [f64] = []
+    var k: i64 = 0
+    while k < sorted.len() / 2:
+        val fy = sorted[k * 2]
+        val ty = sorted[k * 2 + 1]
+        val m = clean.len()
+        if m == 0:
+            clean = clean + [fy, ty]
+        else if fy > clean[m - 2] and ty >= clean[m - 1]:
+            clean = clean + [fy, ty]
+        k = k + 1
+    # last element carries the adjusted scale for extrapolation
+    clean + [scale, 0.0]
+
+# Font y (units) -> hinted pixel y (y up, baseline 0).
+fn _hint_map_y(knots: [f64], y: f64) -> f64:
+    val n = knots.len() / 2 - 1
+    val scale = knots[n * 2]
+    if n <= 0: return y * scale
+    if y <= knots[0]: return knots[1] + (y - knots[0]) * scale
+    if y >= knots[(n - 1) * 2]: return knots[(n - 1) * 2 + 1] + (y - knots[(n - 1) * 2]) * scale
+    var j: i64 = 0
+    while j + 1 < n and knots[(j + 1) * 2] < y:
+        j = j + 1
+    val f0 = knots[j * 2]
+    val f1 = knots[(j + 1) * 2]
+    val t0 = knots[j * 2 + 1]
+    val t1 = knots[(j + 1) * 2 + 1]
+    t0 + (y - f0) * (t1 - t0) / (f1 - f0)
+
+fn _lcd_hint_knots_cached(font: OtFont, head_offset: i64, units_per_em: i64, size_px: i64) -> [f64]:
+    val key = "{font.blob.len()}|{blob_u32(font.blob, head_offset + 8)}|{size_px}"
+    if val Some(hit) = _lcd_hint_cache.get(key):
+        return hit
+    val knots = _lcd_hint_knots(font, units_per_em, size_px)
+    _lcd_hint_cache[key] = knots
+    knots
+
+
+# --- Horizontal-stem edge snapping (autohinter "light", y direction) ----------
+# Chrome's FreeType latin autohinter also places the EDGES of horizontal stems
+# (crossbars): stem width is NOT adjusted in light mode (it keeps the scaled
+# outline width), only its position is fitted. Per glyph, a stem is a mutual
+# nearest pair of opposite-direction near-horizontal line runs (lower run
+# travels -x, upper +x: the ink is on the right of travel). An edge on a blue
+# zone keeps the zone fit and the partner edge follows at the natural width;
+# otherwise the stem centre snaps to a quarter-pixel lattice (width <= 1 px:
+# k + 1/2; 1..1.5 px: k + 26/64; >= 1.5 px: an edge on a row boundary), all in
+# 26.6 integers as FreeType does. Round (curve) extrema are not stems here.
+fn _hs_abs(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+fn _hs_h64(v: f64) -> i64:
+    _floor_glyf(v * 64.0 + 0.5)
+
+fn _hs_round64(v: i64) -> i64:
+    val t = v + 32
+    val q = if t >= 0: t / 64 else: 0 - ((63 - t) / 64)
+    q * 64
+
+# Near-horizontal line runs (|dy| * 14 <= |dx|, FreeType's direction test) as
+# [y, x_min, x_max, dir] quads; y is the run's mean, dir +1 travels +x.
+fn _hstem_segments(commands: [SfntGlyfCommand]) -> [f64]:
+    var segs: [f64] = []
+    var px = 0.0
+    var py = 0.0
+    var mx = 0.0
+    var my = 0.0
+    for c in commands:
+        var ex = px
+        var ey = py
+        var line = false
+        if c.verb == SFNT_GLYF_MOVE:
+            px = c.x1
+            py = c.y1
+            mx = c.x1
+            my = c.y1
+        elif c.verb == SFNT_GLYF_LINE:
+            ex = c.x1
+            ey = c.y1
+            line = true
+        elif c.verb == SFNT_GLYF_QUAD:
+            px = c.x2
+            py = c.y2
+        else:
+            ex = mx
+            ey = my
+            line = true
+        if line:
+            val dx = ex - px
+            val dy = ey - py
+            val adx = if dx < 0.0: 0.0 - dx else: dx
+            val ady = if dy < 0.0: 0.0 - dy else: dy
+            if adx > 0.0 and ady * 14.0 <= adx:
+                val lo = if dx < 0.0: ex else: px
+                val hi = if dx < 0.0: px else: ex
+                segs = segs + [(py + ey) / 2.0, lo, hi, if dx < 0.0: -1.0 else: 1.0]
+            px = ex
+            py = ey
+    segs
+
+# Index of the best partner of run `i`: the nearest opposite-direction run on
+# the stem side with real x overlap and a plausible thickness, or -1.
+fn _hstem_partner(segs: [f64], i: i64, upem: f64) -> i64:
+    var best = -1
+    var best_d = upem / 5.0
+    val want = 0.0 - segs[i * 4 + 3]
+    var j: i64 = 0
+    while j < segs.len() / 4:
+        if segs[j * 4 + 3] == want:
+            val d = if segs[i * 4 + 3] < 0.0: segs[j * 4] - segs[i * 4] else: segs[i * 4] - segs[j * 4]
+            val lo_x = if segs[i * 4 + 1] > segs[j * 4 + 1]: segs[i * 4 + 1] else: segs[j * 4 + 1]
+            val hi_x = if segs[i * 4 + 2] < segs[j * 4 + 2]: segs[i * 4 + 2] else: segs[j * 4 + 2]
+            if d > 0.0 and d <= best_d and hi_x - lo_x >= upem / 256.0:
+                best = j
+                best_d = d
+        j = j + 1
+    best
+
+# Mutual stem pairs as [lo_y, hi_y, ...], ascending in lo_y, no duplicates.
+fn _hstem_pairs(segs: [f64], upem: f64) -> [f64]:
+    var pairs: [f64] = []
+    var i: i64 = 0
+    while i < segs.len() / 4:
+        if segs[i * 4 + 3] < 0.0:
+            val j = _hstem_partner(segs, i, upem)
+            if j >= 0 and _hstem_partner(segs, j, upem) == i:
+                val lo = segs[i * 4]
+                val hi = segs[j * 4]
+                var dup = false
+                var k: i64 = 0
+                while k < pairs.len() / 2:
+                    if pairs[k * 2] == lo and pairs[k * 2 + 1] == hi: dup = true
+                    k = k + 1
+                if not dup:
+                    var at = pairs.len() / 2
+                    pairs = pairs + [lo, hi]
+                    while at > 0 and pairs[(at - 1) * 2] > lo:
+                        pairs[at * 2] = pairs[(at - 1) * 2]
+                        pairs[at * 2 + 1] = pairs[(at - 1) * 2 + 1]
+                        at = at - 1
+                    pairs[at * 2] = lo
+                    pairs[at * 2 + 1] = hi
+        i = i + 1
+    pairs
+
+# Zone-fit pixel y of the knot within `tol` font units of `y`, as a 1-element
+# list, or [] when `y` is on no blue zone.
+fn _hstem_blue_fit(knots: [f64], n: i64, y: f64, tol: f64) -> [f64]:
+    var best: [f64] = []
+    var best_d = tol
+    var i: i64 = 0
+    while i < n:
+        var d = knots[i * 2] - y
+        if d < 0.0: d = 0.0 - d
+        if d <= best_d:
+            best_d = d
+            best = [knots[i * 2 + 1]]
+        i = i + 1
+    best
+
+# Inserts (fy, ty) keeping the list ascending and non-folding. Returns [] when
+# it would fold the mapping; a knot already at that fy must agree.
+fn _hstem_insert(base: [f64], fy: f64, ty: f64) -> [f64]:
+    var out: [f64] = []
+    var placed = false
+    var i: i64 = 0
+    while i < base.len() / 2:
+        val bf = base[i * 2]
+        val bt = base[i * 2 + 1]
+        if bf - fy < 0.5 and fy - bf < 0.5:
+            if bt - ty < 0.0001 and ty - bt < 0.0001: return base
+            return []
+        if not placed and fy < bf:
+            out = out + [fy, ty]
+            placed = true
+        out = out + [bf, bt]
+        i = i + 1
+    if not placed: out = out + [fy, ty]
+    var k: i64 = 1
+    while k < out.len() / 2:
+        if out[k * 2] <= out[(k - 1) * 2] or out[k * 2 + 1] < out[(k - 1) * 2 + 1]: return []
+        k = k + 1
+    out
+
+fn _hstem_knots(commands: [SfntGlyfCommand], knots: [f64], upem: f64) -> [f64]:
+    val m = knots.len()
+    if m < 4: return knots
+    val scale = knots[m - 2]
+    val pairs = _hstem_pairs(_hstem_segments(commands), upem)
+    if pairs.len() == 0: return knots
+    val bounds = match _outline_bounds(commands):
+        Some(value): value
+        None: return knots
+    var cur: [f64] = []
+    var z: i64 = 0
+    while z < m / 2 - 1:
+        cur = cur + [knots[z * 2], knots[z * 2 + 1]]
+        z = z + 1
+    val zones = cur
+    val n = zones.len() / 2
+    val tol = upem / 40.0
+    # The lowest blue extremum anchors the glyph: unanchored stems are placed
+    # relative to the shift it receives from its zone fit.
+    var shift = 0.0
+    val low = _hstem_blue_fit(zones, n, bounds.top, tol)
+    val high = _hstem_blue_fit(zones, n, bounds.bottom, tol)
+    if low.len() > 0: shift = low[0] - bounds.top * scale
+    else if high.len() > 0: shift = high[0] - bounds.bottom * scale
+    var s: i64 = 0
+    while s < pairs.len() / 2:
+        val lo = pairs[s * 2]
+        val hi = pairs[s * 2 + 1]
+        val len64 = _hs_h64(hi * scale) - _hs_h64(lo * scale)
+        val lob = _hstem_blue_fit(zones, n, lo, tol)
+        val hib = _hstem_blue_fit(zones, n, hi, tol)
+        var pos_lo = 0
+        var pos_hi = 0
+        var place = true
+        if lob.len() > 0 and hib.len() > 0:
+            place = false
+        else if lob.len() > 0:
+            pos_lo = _hs_h64(lob[0])
+            pos_hi = pos_lo + len64
+        else if hib.len() > 0:
+            pos_hi = _hs_h64(hib[0])
+            pos_lo = pos_hi - len64
+        else:
+            val org_pos = _hs_h64(lo * scale + shift)
+            val org_center = org_pos + len64 / 2
+            if len64 < 96:
+                val u_off = if len64 <= 64: 32 else: 38
+                val d_off = if len64 <= 64: 32 else: 26
+                val c1 = _hs_round64(org_center)
+                val e1 = _hs_abs(org_center - (c1 - u_off))
+                val e2 = _hs_abs(org_center - (c1 + d_off))
+                val centre = if e1 < e2: c1 - u_off else: c1 + d_off
+                pos_lo = centre - len64 / 2
+                pos_hi = centre + len64 / 2
+            else:
+                val p1 = _hs_round64(org_pos)
+                val d1 = _hs_abs(p1 + len64 / 2 - org_center)
+                val p2 = _hs_round64(org_pos + len64) - len64
+                val d2 = _hs_abs(p2 + len64 / 2 - org_center)
+                pos_lo = if d1 < d2: p1 else: p2
+            if len64 >= 96: pos_hi = pos_lo + len64
+        if place:
+            val a = _hstem_insert(cur, lo, pos_lo as f64 / 64.0)
+            if a.len() > 0:
+                val b = _hstem_insert(a, hi, pos_hi as f64 / 64.0)
+                if b.len() > 0:
+                    cur = b
+        s = s + 1
+    cur + [scale, 0.0]
+
+fn _hint_commands(commands: [SfntGlyfCommand], knots: [f64], scale: f64) -> [SfntGlyfCommand]:
+    var out: [SfntGlyfCommand] = []
+    for c in commands:
+        if c.verb == SFNT_GLYF_CLOSE:
+            out = out.push(c)
+        else:
+            out = out.push(_command(c.verb, c.x1, _hint_map_y(knots, c.y1) / scale, c.x2, _hint_map_y(knots, c.y2) / scale))
+    out
+
+# reason: SFNT selector/size/phase scalars are the font-table domain;
+# consumed by text_layout/font_renderer.spl, so it must be public.
+# @allow(primitive_api)
+pub fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, phase_q: i64) -> Option<SfntLcdGlyph>:
     if size_px <= 0 or size_px > 512 or phase_q < 0 or phase_q > 3:
         return None
     val font = match parse_offset_table(blob):
@@ -986,14 +1348,28 @@ fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64, si
         None: return None
     val scale = size_px as f64 / units_per_em as f64
     val phase = phase_q as f64 / 4.0
-    val height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
+    var height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
+    var raster_top = -bounds.bottom * scale
+    var bearing_y = _round_glyf_metric(bounds.top * scale)
+    var draw_commands = commands
+    val knots = _lcd_hint_knots_cached(font, head_table.offset as i64, units_per_em, size_px)
+    if knots.len() > 0:
+        draw_commands = _hint_commands(commands, _hstem_knots(commands, knots, units_per_em as f64), scale)
+        val hinted = match _outline_bounds(draw_commands):
+            Some(value): value
+            None: return None
+        val bottom_px = _floor_glyf(hinted.top * scale + 0.0001)
+        val top_px = _ceil_glyf(hinted.bottom * scale - 0.0001)
+        height = if top_px > bottom_px: top_px - bottom_px else: 1
+        raster_top = 0.0 - (bottom_px + height) as f64
+        bearing_y = bottom_px
     val x0 = _floor_glyf(bounds.left * scale + phase) - 1
     val x1 = _ceil_glyf(bounds.right * scale + phase) + 1
     val width = x1 - x0
     if width <= 0 or height <= 0 or width > 4096 or height > 4096:
         return None
     val subpixels = width * 3
-    val edges = _outline_edges(commands, scale, x0 as f64 - phase, -bounds.bottom * scale)
+    val edges = _outline_edges(draw_commands, scale, x0 as f64 - phase, raster_top)
     var gray: [u8] = [0u8; width * height]
     var rgb: [u8] = [0u8; width * height * 3]
     var y: i64 = 0
@@ -1029,7 +1405,7 @@ fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64, si
         slg_width: width, slg_height: height,
         slg_advance: _round_glyf_metric(horizontal[0] as f64 * scale),
         slg_bearing_x: x0,
-        slg_bearing_y: _round_glyf_metric(bounds.top * scale),
+        slg_bearing_y: bearing_y,
         slg_gray: gray, slg_rgb: rgb))
 
 # Blob-level batch glyph-id resolution: one table-directory parse and one cmap

@@ -237,27 +237,60 @@ static inline void plot(device uint* fb, int x, int y, int fb_w, int fb_h, uint 
     }
 }
 
-// Porter-Duff src-over, bit-identical to the CPU reference blend() in
-// engine2d/color.spl. Both inputs use straight alpha, so the destination
-// contribution must first be premultiplied by its own alpha and the final
-// RGB channels must be unpremultiplied by the resulting output alpha.
-static inline uint blend_src_over(uint src, uint dst) {
+// Chrome 159 source-over of straight-alpha src over dst, bit-identical to
+// _blend_rule() in engine2d/color.spl. Opaque dst, per channel:
+//   solid fill:   round(s*a/255) + ((d*(256-a)) >> 8)          (blend_solid)
+//   image/layer:  round(s*a/255) + div255r(d*(255-a))          (blend)
+// Translucent dst: straight-alpha src-over, every division rounded.
+static inline uint blend_rule(uint src, uint dst, bool solid) {
     uint sa = (src >> 24) & 0xFFu;
     if (sa == 255u) return src;
     if (sa == 0u) return dst;
-    uint sr = (src >> 16) & 0xFFu;
-    uint sg = (src >> 8) & 0xFFu;
-    uint sb = src & 0xFFu;
-    uint dr = (dst >> 16) & 0xFFu;
-    uint dg = (dst >> 8) & 0xFFu;
-    uint db = dst & 0xFFu;
     uint da = (dst >> 24) & 0xFFu;
     uint inv = 255u - sa;
-    uint dst_weight = (da * inv) / 255u;
+    if (da != 255u) {
+        uint dw = (da * inv + 127u) / 255u;
+        uint oa = sa + dw;
+        uint half_oa = oa / 2u;
+        uint tr = (((src >> 16) & 0xFFu) * sa + ((dst >> 16) & 0xFFu) * dw + half_oa) / oa;
+        uint tg = (((src >> 8) & 0xFFu) * sa + ((dst >> 8) & 0xFFu) * dw + half_oa) / oa;
+        uint tb = ((src & 0xFFu) * sa + (dst & 0xFFu) * dw + half_oa) / oa;
+        return (oa << 24) | (tr << 16) | (tg << 8) | tb;
+    }
+    uint out = 0xFF000000u;
+    for (uint shift = 0u; shift <= 16u; shift += 8u) {
+        uint sc = (src >> shift) & 0xFFu;
+        uint dc = (dst >> shift) & 0xFFu;
+        uint v = dc * inv + 128u;
+        uint dterm = solid ? (dc * (inv + 1u)) >> 8 : (v + (v >> 8)) >> 8;
+        out |= ((sc * sa + 127u) / 255u + dterm) << shift;
+    }
+    return out;
+}
+
+// Solid colour fills (rect, circle, rounded rect, triangle, gradient rows).
+static inline uint blend_src_over(uint src, uint dst) {
+    return blend_rule(src, dst, true);
+}
+
+// Image / layer composites.
+static inline uint blend_src_over_image(uint src, uint dst) {
+    return blend_rule(src, dst, false);
+}
+
+// Glass material only: the truncating straight-alpha src-over of
+// _glass_blend_over() in draw_ir_glass_material.spl (WM surface, no Chrome
+// equivalent; twin of shaders/glass_material.comp).
+static inline uint glass_blend_over(uint src, uint dst) {
+    uint sa = (src >> 24) & 0xFFu;
+    if (sa == 255u) return src;
+    if (sa == 0u) return dst;
+    uint inv = 255u - sa;
+    uint dst_weight = (((dst >> 24) & 0xFFu) * inv) / 255u;
     uint out_a = sa + dst_weight;
-    uint out_r = (sr * sa + dr * dst_weight) / out_a;
-    uint out_g = (sg * sa + dg * dst_weight) / out_a;
-    uint out_b = (sb * sa + db * dst_weight) / out_a;
+    uint out_r = (((src >> 16) & 0xFFu) * sa + ((dst >> 16) & 0xFFu) * dst_weight) / out_a;
+    uint out_g = (((src >> 8) & 0xFFu) * sa + ((dst >> 8) & 0xFFu) * dst_weight) / out_a;
+    uint out_b = ((src & 0xFFu) * sa + (dst & 0xFFu) * dst_weight) / out_a;
     return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
 }
 
@@ -411,12 +444,12 @@ kernel void kernel_glass_material(
 
     uint saturated = glass_saturate(
         glass_blurred_pixel(snapshot, p, lx, ly), p.saturation_milli);
-    uint surface = blend_src_over(glass_surface_tint(p), saturated);
+    uint surface = glass_blend_over(glass_surface_tint(p), saturated);
     uint result = surface;
     if (p.gradient_enabled != 0) {
         uint destination = p.gradient_layered_over_surface != 0
             ? surface : saturated;
-        result = blend_src_over(glass_gradient_tint(p, ly), destination);
+        result = glass_blend_over(glass_gradient_tint(p, ly), destination);
     }
     framebuffer[py * p.fb_w + px] = result;
 }
@@ -957,9 +990,9 @@ kernel void kernel_composite_image(
     uint color = src[src_idx];
     uint alpha = (color >> 24) & 0xFFu;
     uint opacity = (uint)clamp(p.opacity_milli, 0, 1000);
-    uint scaled_alpha = (alpha * opacity) / 1000u;
+    uint scaled_alpha = (alpha * opacity + 500u) / 1000u;
     uint scaled = (color & 0x00FFFFFFu) | (scaled_alpha << 24);
-    fb[dst_idx] = blend_src_over(scaled, fb[dst_idx]);
+    fb[dst_idx] = blend_src_over_image(scaled, fb[dst_idx]);
 }
 
 // lut_lookup: GpuLut dense-kind lookup (design GpuLut §3.1/§3.2).
