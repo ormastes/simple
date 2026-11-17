@@ -2410,7 +2410,7 @@ Gates and remaining gaps:
   pseudo-class arity (`:-webkit-any` bare, `:-webkit-autofill(p)` dropped);
   a combinator after a pseudo-element (`::before > p`); `::marker::before`
   ordering.
-- **Gates:** see the bug record's "Fixed" entry for base vs head.
+- **Gates** (seed `cargo-target-webrender-blend`, base `83bb26da9b2` vs head, serial, failing NAMES compared): structural spec 83/97 -> 97/97 (14 fixed); parsed_equivalence 10/10, compound_any_order 9/9, of_type 7/7, selector_helpers 12/12, selector_matching 58/58, attr_select 11/11, nth_child_of_selector 28/28, selector_hardening 42/42, structural_pseudo_class 114/114 on both; simple_web_renderer 106/123, `_coverage_spec` 37/39 and module_split 1/3 fail the same names on both (0 new); combo matrix 979 cells, 88 mismatching on both, identical id set.
 
 ## 2026-11-17 — slight vertical hinting (Chrome FreeType autohinter, y only)
 
