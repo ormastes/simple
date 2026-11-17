@@ -98,6 +98,12 @@ fn _grad_doc() -> text:
           ".lin2{{background:linear-gradient(to right,#123456,#abcdef);height:6px}}") +
         "<div class=\"lin\"></div><div class=\"lin2\"></div></body></html>"
 
+# `_grad_doc` laid out at 4x CSS px (the k=4 device picture of the 32x24 page).
+fn _grad_doc_4x() -> text:
+    _head(".lin{{background:linear-gradient(90deg,#ff0000 0%,#00ff00 50%,#0000ff 100%);height:32px}}" +
+          ".lin2{{background:linear-gradient(to right,#123456,#abcdef);height:24px}}") +
+        "<div class=\"lin\"></div><div class=\"lin2\"></div></body></html>"
+
 fn _rad_doc() -> text:
     _head(".rad{{background:radial-gradient(circle at 30% 40%,#ffff00 0%,#ff00ff 100%);height:8px}}") +
         "<div class=\"rad\"></div></body></html>"
@@ -370,9 +376,21 @@ describe "layout phase: paint primitives":
     it "rasters a linear-gradient stack":
         # @req REQ-SSPEC-UNIT
         step("rasters a linear-gradient stack")
+        # Was `_distinct(px) == 3` (page white plus two flat fills): that pin
+        # encoded gradients flattened to one colour, and has failed (65
+        # distinct) since the raster painted real ramps. Two stacked boxes,
+        # each one linear layer -- not a multi-layer stack. Re-pinned
+        # 2026-11-17 to Chrome 159, +-2 per channel, on the 4x layout of the
+        # same page (margins 0, percentages only: the k=4 device picture):
+        #   chrome --headless --no-sandbox --hide-scrollbars \
+        #     --force-device-scale-factor=4 --window-size=32,24 \
+        #     --screenshot=<png> file://<_grad_doc() as html>
         val px = simple_web_layout_render_html_software_pixels(_grad_doc(), 32, 24, 3600000)
         expect(px.len()).to_be(768)
-        expect(_distinct(px)).to_be(3)
+        val px4 = simple_web_layout_render_html_software_pixels(_grad_doc_4x(), 128, 96, 3600000)
+        val pts = [4, 4, 40, 16, 64, 28, 120, 8, 10, 40, 64, 48, 120, 52, 64, 80]
+        val chrome = [0xFFED1100u32, 0xFF5DA100u32, 0xFF00FD02u32, 0xFF001DE1u32, 0xFF1E4062u32, 0xFF5F81A3u32, 0xFFA2C4E6u32, 0xFFFFFFFFu32]
+        expect(_radial_chrome_dev(px4, 128, pts, chrome)).to_be_less_than(3)
 
     it "rasters rounded corners under fractional opacity":
         # @req REQ-SSPEC-UNIT
