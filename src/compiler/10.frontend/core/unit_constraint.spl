@@ -1,0 +1,321 @@
+# Constrained units: `unit Port: u16 where 1 <= self <= 65535` and the range
+# sugar `unit Port: u16 in 1..=65535` (also `lo..hi`, `lo..`, `..=hi`).
+#
+# Both forms lower to ONE `where` predicate over `self` (the range form is
+# rewritten by `unit_range_predicate`), registered through the existing
+# refinement machinery (`refinement_type_register` in types.spl) and remembered
+# here per unit name so the parser (literal rejection), the core interpreter
+# (`raw as Port`, `Port(raw)`, `70000_pt`) and the SFFI facade scanner share a
+# single constraint system.
+#
+# `unit_constraint_eval` is a small predicate evaluator over text: numbers,
+# `self`, `true`/`false`, `+ - * / %`, unary `-`, parentheses, comparison
+# chains (`1 <= self <= 65535`), `and` / `or` / `not`. It returns 1 (holds),
+# 0 (violated) or -1 (predicate shape not supported -> a declaration error,
+# never a silent pass).
+
+var unit_constraint_names: [text] = []
+var unit_constraint_predicates: [text] = []
+var unit_constraint_ref_tags: [i64] = []
+var unit_constraint_min_texts: [text] = []
+var unit_constraint_max_texts: [text] = []
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_pool_reset():
+    unit_constraint_names = []
+    unit_constraint_predicates = []
+    unit_constraint_ref_tags = []
+    unit_constraint_min_texts = []
+    unit_constraint_max_texts = []
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_find(name: text) -> i64:
+    var i = 0
+    while i < unit_constraint_names.len():
+        if unit_constraint_names[i] == name:
+            return i
+        i = i + 1
+    -1
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_text: text, max_text: text) -> i64:
+    val existing = unit_constraint_find(name)
+    if existing >= 0:
+        unit_constraint_predicates[existing] = predicate
+        unit_constraint_ref_tags[existing] = ref_tag
+        unit_constraint_min_texts[existing] = min_text
+        unit_constraint_max_texts[existing] = max_text
+        return existing
+    val idx = unit_constraint_names.len()
+    unit_constraint_names.push(name)
+    unit_constraint_predicates.push(predicate)
+    unit_constraint_ref_tags.push(ref_tag)
+    unit_constraint_min_texts.push(min_text)
+    unit_constraint_max_texts.push(max_text)
+    idx
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_count() -> i64:
+    unit_constraint_names.len()
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_predicate(name: text) -> text:
+    val idx = unit_constraint_find(name)
+    if idx < 0: return ""
+    unit_constraint_predicates[idx]
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_ref_tag(name: text) -> i64:
+    val idx = unit_constraint_find(name)
+    if idx < 0: return -1
+    unit_constraint_ref_tags[idx]
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_min_text(name: text) -> text:
+    val idx = unit_constraint_find(name)
+    if idx < 0: return ""
+    unit_constraint_min_texts[idx]
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_max_text(name: text) -> text:
+    val idx = unit_constraint_find(name)
+    if idx < 0: return ""
+    unit_constraint_max_texts[idx]
+
+# Range sugar -> `where` predicate. `inclusive` is `..=`; an empty bound is
+# open on that side. Both bounds empty yields "" (the caller reports it).
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_range_predicate(lo: text, hi: text, inclusive: bool) -> text:
+    val hi_op = if inclusive: "<=" else: "<"
+    if lo != "" and hi != "":
+        return lo + " <= self and self " + hi_op + " " + hi
+    if lo != "":
+        return lo + " <= self"
+    if hi != "":
+        return "self " + hi_op + " " + hi
+    ""
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_violation_message(unit_name: text, value_text: text, predicate: text) -> text:
+    "SPL-UNIT-005: value " + value_text + " violates the constraint of unit `" + unit_name + "` (`" + predicate + "`)"
+
+# ---------------------------------------------------------------------------
+# Predicate evaluator
+# ---------------------------------------------------------------------------
+
+var uc_toks: [text] = []
+var uc_pos: i64 = 0
+var uc_err: bool = false
+var uc_self: f64 = 0.0
+
+fn uc_is_digit(c: text) -> bool:
+    c >= "0" and c <= "9"
+
+fn uc_is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_" or uc_is_digit(c)
+
+fn uc_tokenize(src: text) -> bool:
+    uc_toks = []
+    var i = 0
+    val n = src.len()
+    while i < n:
+        val c = src[i:i+1]
+        if c == " " or c == "\t":
+            i = i + 1
+            continue
+        if uc_is_digit(c) or (c == "." and i + 1 < n and uc_is_digit(src[i+1:i+2])):
+            var j = i
+            while j < n and (uc_is_digit(src[j:j+1]) or src[j:j+1] == "." or src[j:j+1] == "_"):
+                j = j + 1
+            uc_toks.push(src[i:j])
+            i = j
+            continue
+        if uc_is_ident_char(c):
+            var j = i
+            while j < n and uc_is_ident_char(src[j:j+1]):
+                j = j + 1
+            uc_toks.push(src[i:j])
+            i = j
+            continue
+        val two = if i + 1 < n: src[i:i+2] else: ""
+        if two == "<=" or two == ">=" or two == "==" or two == "!=":
+            uc_toks.push(two)
+            i = i + 2
+            continue
+        if c == "<" or c == ">" or c == "+" or c == "-" or c == "*" or c == "/" or c == "%" or c == "(" or c == ")":
+            uc_toks.push(c)
+            i = i + 1
+            continue
+        return false
+    true
+
+fn uc_peek() -> text:
+    if uc_pos < uc_toks.len(): return uc_toks[uc_pos]
+    ""
+
+fn uc_next() -> text:
+    val t = uc_peek()
+    uc_pos = uc_pos + 1
+    t
+
+# Numeric literal text -> f64 (digits, optional fraction, `_` separators).
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_parse_number(t: text) -> f64:
+    var sign = 1.0
+    var i = 0
+    if t.len() > 0 and t[0:1] == "-":
+        sign = -1.0
+        i = 1
+    var whole = 0.0
+    var frac = 0.0
+    var scale = 1.0
+    var in_frac = false
+    while i < t.len():
+        val c = t[i:i+1]
+        if c == "_":
+            i = i + 1
+            continue
+        if c == ".":
+            in_frac = true
+            i = i + 1
+            continue
+        if not uc_is_digit(c):
+            uc_err = true
+            return 0.0
+        val d = (int(c)) * 1.0
+        if in_frac:
+            scale = scale / 10.0
+            frac = frac + d * scale
+        else:
+            whole = whole * 10.0 + d
+        i = i + 1
+    sign * (whole + frac)
+
+fn uc_primary() -> f64:
+    val t = uc_next()
+    if t == "(":
+        val v = uc_or()
+        if uc_next() != ")":
+            uc_err = true
+        return v
+    if t == "self": return uc_self
+    if t == "true": return 1.0
+    if t == "false": return 0.0
+    if t == "":
+        uc_err = true
+        return 0.0
+    if uc_is_digit(t[0:1]) or t[0:1] == ".":
+        return unit_constraint_parse_number(t)
+    uc_err = true
+    0.0
+
+fn uc_unary() -> f64:
+    if uc_peek() == "-":
+        uc_next()
+        return 0.0 - uc_unary()
+    uc_primary()
+
+fn uc_mul() -> f64:
+    var left = uc_unary()
+    while uc_peek() == "*" or uc_peek() == "/" or uc_peek() == "%":
+        val op = uc_next()
+        val right = uc_unary()
+        if op == "*":
+            left = left * right
+        elif op == "/":
+            if right == 0.0:
+                uc_err = true
+                return 0.0
+            left = left / right
+        else:
+            if right == 0.0:
+                uc_err = true
+                return 0.0
+            val q = (left / right) as i64
+            left = left - (q * 1.0) * right
+    left
+
+fn uc_add() -> f64:
+    var left = uc_mul()
+    while uc_peek() == "+" or uc_peek() == "-":
+        val op = uc_next()
+        val right = uc_mul()
+        if op == "+":
+            left = left + right
+        else:
+            left = left - right
+    left
+
+fn uc_is_cmp(t: text) -> bool:
+    t == "<" or t == "<=" or t == ">" or t == ">=" or t == "==" or t == "!="
+
+fn uc_cmp_holds(op: text, l: f64, r: f64) -> bool:
+    if op == "<": return l < r
+    if op == "<=": return l <= r
+    if op == ">": return l > r
+    if op == ">=": return l >= r
+    if op == "==": return l == r
+    l != r
+
+# Comparison chain: `a <= self <= b` holds when every adjacent pair holds.
+fn uc_cmp() -> f64:
+    var left = uc_add()
+    if not uc_is_cmp(uc_peek()):
+        return left
+    var holds = true
+    while uc_is_cmp(uc_peek()):
+        val op = uc_next()
+        val right = uc_add()
+        if not uc_cmp_holds(op, left, right):
+            holds = false
+        left = right
+    if holds: 1.0 else: 0.0
+
+fn uc_not() -> f64:
+    if uc_peek() == "not":
+        uc_next()
+        val v = uc_not()
+        return if v != 0.0: 0.0 else: 1.0
+    uc_cmp()
+
+fn uc_and() -> f64:
+    var left = uc_not()
+    while uc_peek() == "and":
+        uc_next()
+        val right = uc_not()
+        left = if left != 0.0 and right != 0.0: 1.0 else: 0.0
+    left
+
+fn uc_or() -> f64:
+    var left = uc_and()
+    while uc_peek() == "or":
+        uc_next()
+        val right = uc_and()
+        left = if left != 0.0 or right != 0.0: 1.0 else: 0.0
+    left
+
+# 1 = predicate holds for `self_value`, 0 = violated, -1 = unsupported shape.
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_eval(predicate: text, self_value: f64) -> i64:
+    val trimmed = predicate.trim()
+    if trimmed == "": return -1
+    if not uc_tokenize(trimmed): return -1
+    uc_pos = 0
+    uc_err = false
+    uc_self = self_value
+    val v = uc_or()
+    if uc_err or uc_pos != uc_toks.len(): return -1
+    if v != 0.0: 1 else: 0
+
+# Same, with the value given as literal text (`70000`, `-1`, `2.5`).
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_constraint_eval_literal(predicate: text, literal: text) -> i64:
+    uc_err = false
+    val v = unit_constraint_parse_number(literal.trim())
+    if uc_err: return -1
+    unit_constraint_eval(predicate, v)
+
+export unit_constraint_pool_reset, unit_constraint_find, unit_constraint_register, unit_constraint_count
+export unit_constraint_predicate, unit_constraint_ref_tag, unit_constraint_min_text, unit_constraint_max_text
+export unit_range_predicate, unit_constraint_violation_message
+export unit_constraint_eval, unit_constraint_eval_literal, unit_constraint_parse_number

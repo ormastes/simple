@@ -299,6 +299,37 @@ val weight = 5_kg                   # Mass
 val discount = 20_pct               # Percentage (stored as 0.2)
 ```
 
+### Unit Declarations and Constrained Units
+
+Keyword is `unit` only (`newunit` / `newtype` are deprecated spellings and do
+NOT take a constraint).
+
+```text
+unit FreeBytes: i64 as fbytes                    # nominal unit, optional `as suffix`
+unit Speed = Meter / Second                      # declared derived unit
+
+unit Port: u16 as pt where 1 <= self <= 65535    # (a) any predicate on `self`
+unit Port: u16 as pt in 1..=65535                # (b) range sugar: same `where`
+unit Byte: i64 in 0..256                         #     exclusive upper bound
+unit Even: i64 where self % 2 == 0               #     non-range predicate
+```
+
+Both forms register ONE `where` predicate (the range form is rewritten to
+`lo <= self and self <= hi`) through the refinement registry.
+
+```text
+val p = 70000 as Port        # compile error SPL-UNIT-005 (literal out of range)
+val q = Port(70000)          # compile error SPL-UNIT-005
+val r = 70000_pt             # compile error SPL-UNIT-005
+
+val a = Port(raw)            # Result<Port, ConstraintError>: Ok(port) / Err(e)
+val b = raw as Port          # the unit in range; SPL-UNIT-005 error out of range
+```
+
+Predicates may use numbers, `self`, `+ - * / %`, comparisons (chained),
+`and` / `or` / `not` and parentheses. The old `# @unit_range X lo..hi`
+annotation comment of the SFFI scanner is a deprecated alias of `in lo..=hi`.
+
 ---
 
 ## Collections
