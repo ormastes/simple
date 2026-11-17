@@ -69,7 +69,10 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServic
     host_agent_cancel_request_decode_v4, host_agent_cancel_archive_check_v4, host_linux_service_agent_cancel_authorize_v4,
     HostAgentActionAuthorityV4, host_agent_detach_apply_v4, host_linux_service_agent_attachment_inspect_v4,
     HostAgentAttachServiceV4, host_agent_attach_apply_v4, HostAgentTerminalAuthorityV4, host_agent_terminal_authority_v4,
-    host_linux_service_agent_attachment_authority_inspect_v4}
+    host_linux_service_agent_attachment_authority_inspect_v4,
+    host_linux_service_agent_attachment_lease_v4, host_linux_service_agent_pane_io_v4}
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4,
+    host_agent_pane_io_refused_v4}
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attachment_live_v4, HostAgentReleaseContextV4,
     HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, host_agent_attachment_release_step_v4,
     host_agent_attach_archive_relative_v4, HOST_AGENT_ATTACH_MAX_BYTES_V4, HOST_AGENT_ATTACH_READY_V4,
@@ -1072,6 +1075,54 @@ pub fn host_linux_service_agent_terminal_authority_v4(owner: HostLinuxServiceCur
         HOST_AGENT_ATTACH_MAX_BYTES_V4)?
     host_agent_terminal_authority_v4(agent, archived, authority, scope.continuity_id, linux_service_live_epoch_v4(owner)?)
 
+# ---- milestone_0024 PR3c S0: the pane lease and brokered pane io the smux consumer calls ----
+
+pub struct HostLinuxServiceLeaseTurnV4:
+    owner: HostLinuxServiceCurrentV4
+    lease: Option<HostAgentPaneLeaseV4>
+    error: text
+
+pub struct HostLinuxServicePaneIoTurnV4:
+    owner: HostLinuxServiceCurrentV4
+    result: HostAgentPaneIoResultV4
+
+# "" when a pane entry may reach the agent: a held agent whose controller-signed attach still verifies under the
+# installed policy, a fresh clock and the service's own live incarnation/epoch (so an expired or revoked approval
+# is refused, also after a restart). Pane and smux state are never consulted.
+# It also pins the caller's pane: `expected_binding_uid` must equal the controller-signed binding's uid, so a
+# Host-route caller that does not name the bound pane never claims or reads it.
+fn linux_service_pane_gate_v4(owner: HostLinuxServiceCurrentV4, expected_binding_uid: text) -> text:
+    if owner.agent.is_none(): return "attach-no-attachment"
+    match host_linux_service_agent_terminal_authority_v4(owner):
+        case Ok(authority):
+            if authority.binding.binding_uid != expected_binding_uid: "attach-binding-mismatch" else: ""
+        case Err(reason): reason
+
+# The pane lease of the agent's attachment, handed out ONCE (13.1). The updated owner is always returned.
+pub fn host_linux_service_attachment_lease_v4(original: HostLinuxServiceCurrentV4, expected_binding_uid: text) -> HostLinuxServiceLeaseTurnV4:
+    var owner = original
+    val gate = linux_service_pane_gate_v4(owner, expected_binding_uid)
+    if gate != "": return HostLinuxServiceLeaseTurnV4(owner: owner, lease: None, error: gate)
+    val turn = host_linux_service_agent_attachment_lease_v4(owner.agent.unwrap())
+    owner.agent = Some(turn.agent)
+    HostLinuxServiceLeaseTurnV4(owner: owner, lease: turn.lease, error: turn.error)
+
+# Brokered pane io. There is NO caller `now`: the clock is the service's own grant clock under the installed policy,
+# so a pane caller can neither advance the agent clock nor end the signed window.
+pub fn host_linux_service_pane_io_v4(original: HostLinuxServiceCurrentV4, expected_binding_uid: text,
+        lease: HostAgentPaneLeaseV4, op: HostAgentPaneOpV4) -> HostLinuxServicePaneIoTurnV4:
+    var owner = original
+    val gate = linux_service_pane_gate_v4(owner, expected_binding_uid)
+    if gate != "":
+        return HostLinuxServicePaneIoTurnV4(owner: owner, result: host_agent_pane_io_refused_v4(gate))
+    val metadata = owner.current_v4()
+    if metadata.is_err():
+        return HostLinuxServicePaneIoTurnV4(owner: owner, result: host_agent_pane_io_refused_v4(metadata.unwrap_err()))
+    val turn = host_linux_service_agent_pane_io_v4(owner.agent.unwrap(), lease, op,
+        host_local_context_v1(metadata.unwrap().policy).grant_clock)
+    owner.agent = Some(turn.agent)
+    HostLinuxServicePaneIoTurnV4(owner: owner, result: turn.result)
+
 # The inspect field of the accessor above: "" unless the attachment is ready/adopted, else "verified" or the
 # accessor's refusal (so an operator sees WHY a ready attachment has no usable authority).
 fn linux_service_terminal_authority_state_v4(owner: HostLinuxServiceCurrentV4) -> text:
@@ -1343,3 +1394,4 @@ export host_linux_service_open_installed_v4, host_linux_service_anchor_parent_v4
 export host_linux_service_dispatch_v4, host_linux_service_execute_v4, host_linux_service_dispatch_installed_v4
 export host_linux_service_agent_invoke_v4, host_linux_service_agent_cancel_v4
 export host_linux_service_agent_attach_v4, host_linux_service_agent_terminal_authority_v4
+export HostLinuxServiceLeaseTurnV4, HostLinuxServicePaneIoTurnV4, host_linux_service_attachment_lease_v4, host_linux_service_pane_io_v4
