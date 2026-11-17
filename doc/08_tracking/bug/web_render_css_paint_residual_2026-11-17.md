@@ -1,6 +1,6 @@
 # css-paint residual vs Chrome 159 (5.68% at 1x) - classification, 2026-11-17
 
-Status: classified; NO fix landed. The largest class with a non-excluded cause is not contained.
+Status: classes 1 and 3 (vertical drift from fractional block margins) FIXED 2026-11-17, see skill doc "block-axis margins carry fractions" and spec block_fractional_margin_chrome159_spec; class 2 (fractional font size) and class 5 stay open.
 Setup: seed `cargo-target-webrender-vk`, cpu_simd, Chrome 159.0.8154.6, 900x760, tolerance 8 per channel
 (`pixel_diff.spl`). Reproduced 38,905 px = 5.688% (gate says 5.68).
 

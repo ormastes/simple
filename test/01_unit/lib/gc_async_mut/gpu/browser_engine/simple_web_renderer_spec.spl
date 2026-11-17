@@ -67,7 +67,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
     simple_web_layout_debug_style_by_id}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
-    simple_web_layout_render_html_readback_engine2d_result}
+    simple_web_layout_render_html_readback_engine2d_result,
+    simple_web_layout_render_html_engine2d_result_with_images}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
     simple_web_render_html_to_pixels_with_cpu_draw_ir_backend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
@@ -1688,6 +1689,79 @@ describe "SimpleWebRenderer":
         val cpu_styled_img = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_img, 40, 64, "cpu_simd")
         expect(_count_color(raster_styled_img, 0xFF2563EBu32) > 0).to_equal(true)
         expect(_count_color(cpu_styled_img, 0xFF2563EBu32) > 0).to_equal(true)
+
+    it "paints no inline svg, input text or scrollbar on Draw IR in legacy widget mode, as the raster does":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "paints no inline svg, input text or scrollbar on Draw IR in legacy widget mode, as the raster does"
+        step("Verify: paints no inline svg, input text or scrollbar on Draw IR in legacy widget mode, as the raster does")
+        # The raster paints inline svg shapes, input value text and the
+        # vertical scrollbar only outside widget mode; Draw IR used to paint
+        # them always (200 / 69 / 300 mismatching pixels at 40x64).
+        val svg_page = "<html><body><section class='widget-panel'><svg width='20' height='10'><rect width='20' height='10' fill='#ff0000'></rect></svg></section></body></html>"
+        val input_page = "<html><body><section class='widget-panel'><input type='text' value='ABCD'></section></body></html>"
+        val scroll_page = "<html><body><div style='overflow-y:scroll;height:20px;width:30px'></div><section class='widget-panel'></section></body></html>"
+        val raster_svg = simple_web_layout_render_html_software_pixels(svg_page, 40, 64)
+        val cpu_svg = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(svg_page, 40, 64, "cpu_simd")
+        val raster_input = simple_web_layout_render_html_software_pixels(input_page, 40, 64)
+        val cpu_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(input_page, 40, 64, "cpu_simd")
+        val raster_scroll = simple_web_layout_render_html_software_pixels(scroll_page, 40, 64)
+        val cpu_scroll = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(scroll_page, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(raster_svg, cpu_svg)).to_equal(0)
+        expect(_pixel_mismatches(raster_input, cpu_input)).to_equal(0)
+        expect(_pixel_mismatches(raster_scroll, cpu_scroll)).to_equal(0)
+        expect(cpu_svg[13 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(cpu_input[15 * 40 + 13]).to_equal(0xFFF5F5F5u32)
+        expect(cpu_scroll[8 * 40 + 23]).to_equal(0xFFF5F5F5u32)
+        expect(_count_color(cpu_svg, 0xFFFF0000u32)).to_equal(0)
+        # Outside widget mode (a <style> element) Draw IR paints all three.
+        val styled_svg = "<html><head><style></style></head><body><section class='widget-panel'><svg width='20' height='10'><rect width='20' height='10' fill='#ff0000'></rect></svg></section></body></html>"
+        val styled_input = "<html><head><style></style></head><body><section class='widget-panel'><input type='text' value='ABCD'></section></body></html>"
+        val styled_scroll = "<html><head><style></style></head><body><div style='overflow-y:scroll;height:20px;width:30px'></div><section class='widget-panel'></section></body></html>"
+        val cpu_styled_svg = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_svg, 40, 64, "cpu_simd")
+        val cpu_styled_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_input, 40, 64, "cpu_simd")
+        val cpu_styled_scroll = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_scroll, 40, 64, "cpu_simd")
+        val raster_styled_svg = simple_web_layout_render_html_software_pixels(styled_svg, 40, 64)
+        expect(_count_color(cpu_styled_svg, 0xFFFF0000u32) > 0).to_equal(true)
+        expect(_count_color(raster_styled_svg, 0xFFFF0000u32) > 0).to_equal(true)
+        # The value text itself paints: more ink than the same empty input.
+        val styled_empty_input = "<html><head><style></style></head><body><section class='widget-panel'><input type='text' value=''></section></body></html>"
+        val cpu_styled_empty_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(styled_empty_input, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(cpu_styled_input, cpu_styled_empty_input) > 0).to_equal(true)
+        expect(_count_color(cpu_styled_input, 0xFF000000u32) > _count_color(cpu_styled_empty_input, 0xFF000000u32)).to_equal(true)
+        expect(_count_color(cpu_styled_scroll, 0xFF6B7280u32) > 0).to_equal(true)
+
+    it "paints no URL background layer or its border overlay for a widget node on Draw IR in legacy widget mode":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "paints no URL background layer or its border overlay for a widget node on Draw IR in legacy widget mode"
+        step("Verify: paints no URL background layer or its border overlay for a widget node on Draw IR in legacy widget mode")
+        # The raster skips the whole box paint of a widget-* node in widget
+        # mode. Draw IR still emitted the node's URL background image and the
+        # background border overlay, which rebuilds the border from the raw
+        # style and so repainted the suppressed border.
+        val tile = simpleos_host_gpu_image_resource("image://tile", 4, 2, [0xFFFF0000u32; 8])
+        val widget_page = "<html><body><section class='widget-panel' style='width:20px;height:12px;border:2px solid #0000ff;background-image:url(image://tile);background-repeat:no-repeat'></section></body></html>"
+        val styled_page = "<html><head><style></style></head><body><section class='widget-panel' style='width:20px;height:12px;border:2px solid #0000ff;background-image:url(image://tile);background-repeat:no-repeat'></section></body></html>"
+        var widget_background_commands = 0
+        for batch in simple_web_layout_render_html_draw_ir_with_images(widget_page, 40, 64, [tile]).batches:
+            for command in batch.commands:
+                if command.component_id.contains("_background_image") or command.component_id.contains("_background_border_overlay"):
+                    widget_background_commands = widget_background_commands + 1
+        expect(widget_background_commands).to_equal(0)
+        val raster_widget = simple_web_layout_render_html_software_pixels(widget_page, 40, 64)
+        val cpu_widget = simple_web_layout_render_html_engine2d_result_with_images(widget_page, 40, 64, "cpu_simd", [tile]).pixels
+        expect(_pixel_mismatches(raster_widget, cpu_widget)).to_equal(0)
+        expect(_count_color(cpu_widget, 0xFF0000FFu32)).to_equal(0)
+        expect(_count_color(cpu_widget, 0xFFFF0000u32)).to_equal(0)
+        # Outside widget mode the same markup lowers the image and overlay.
+        var styled_background_commands = 0
+        for batch in simple_web_layout_render_html_draw_ir_with_images(styled_page, 40, 64, [tile]).batches:
+            for command in batch.commands:
+                if command.component_id.contains("_background_image") or command.component_id.contains("_background_border_overlay"):
+                    styled_background_commands = styled_background_commands + 1
+        expect(styled_background_commands).to_equal(2)
+        val cpu_styled = simple_web_layout_render_html_engine2d_result_with_images(styled_page, 40, 64, "cpu_simd", [tile]).pixels
+        expect(_count_color(cpu_styled, 0xFF0000FFu32) > 0).to_equal(true)
+        expect(_count_color(cpu_styled, 0xFFFF0000u32) > 0).to_equal(true)
 
     it "keeps lowercase browser text glyphs distinct from uppercase glyphs":
         # @req REQ-WEB-RENDER-001

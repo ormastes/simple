@@ -2718,6 +2718,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_path_filename",
     "rt_print_err",
     "rt_process_hwm_kib",
+    "rt_process_last_child_cpu_ms",
     "rt_process_last_child_peak_rss_kib",
     "rt_process_run_tuple",
     "rt_process_run_bounded_tuple",

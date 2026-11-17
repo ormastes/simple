@@ -1893,6 +1893,27 @@ impl MirTextCodegen for MirToLlvm:
             val converted = self.builder.fresh_local()
             self.builder.emit("  {converted} = icmp ne ptr {value}, null")
             return converted
+        if src_ty == "ptr" and is_float_type(dst_ty):
+            # A float word read from an untyped slot (rt_array_get /
+            # rt_tuple_get emitted as `call ptr`, e.g. a [f64] element load
+            # in a struct-list loop — app.mcp.ctx_postings) holds raw IEEE
+            # bits; a direct conversion is invalid IR (llc: "invalid cast
+            # opcode ... ptr to double"). Go through the same-width int,
+            # mirroring llvm_bitcast_impl's ptr<->float arms (#9813).
+            val float_bits = self.builder.fresh_local()
+            val as_float = self.builder.fresh_local()
+            val bits_ty = self.float_int_equiv(dst_ty)
+            self.builder.emit("  {float_bits} = ptrtoint ptr {value} to {bits_ty}")
+            self.builder.emit("  {as_float} = bitcast {bits_ty} {float_bits} to {dst_ty}")
+            return as_float
+        if is_float_type(src_ty) and dst_ty == "ptr":
+            # Inverse: a float word stored into an untyped slot.
+            val float_bits = self.builder.fresh_local()
+            val stored = self.builder.fresh_local()
+            val bits_ty = self.float_int_equiv(src_ty)
+            self.builder.emit("  {float_bits} = bitcast {src_ty} {value} to {bits_ty}")
+            self.builder.emit("  {stored} = inttoptr {bits_ty} {float_bits} to ptr")
+            return stored
 
         var cast_inst = self.select_cast_instruction(src_ty, dst_ty)
         if src_unsigned and cast_inst == "sext":
