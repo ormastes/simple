@@ -81,3 +81,12 @@ N2 workers also cannot be RenderDoc-captured until the runner or provider
 calls the in-app start/end capture API. Next: deploy a self-hosted aarch64
 release binary, build the runner with it, and run
 `run-corpus-case01|06|02` with `VK_DRIVER_FILES` pinned to the NVIDIA ICD.
+
+Update (2026-11-18, follow-up): the original `build/` artifacts were lost to a
+worktree cleanup and were regenerated under `/home/yoon/skia-n2/artifacts/`.
+The provider was relinked from the surviving `libskia.a` to the same sha256,
+`758f717f…bc89`. A new GB10 Engine2D RenderDoc capture was taken
+(`ab1bd6af…e3a9`, replay-open verified). The two executable blockers are
+filed in
+`doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`.
+Status unchanged: BLOCKED.

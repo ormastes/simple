@@ -3,15 +3,15 @@
 Date: 2026-11-18. Host: physical Linux aarch64, NVIDIA GB10 (DGX Spark class).
 Scope: `doc/08_tracking/todo/simple_2d_skia_renderdoc_linux_n2_2026-09-27.md`.
 **Outcome: build and device rows qualified; worker/pixel rows BLOCKED.**
-Artifacts live under the lane worktree's `build/` (gitignored, not committed);
+Artifacts live on the host under `/home/yoon/skia-n2/artifacts/` (outside any worktree, not committed);
 only this report and the provider receipt copy are tracked.
 
 ## Device identity (qualified)
 
 Probe: a 40-line C `vkCreateInstance`/`vkGetPhysicalDeviceProperties2`/
-`vkCreateDevice` program (`build/n2/vkprobe.c`), run with
+`vkCreateDevice` program (`/home/yoon/skia-n2/artifacts/vkprobe.c`), run with
 `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`. Receipt:
-`build/n2/device_identity.txt`.
+`/home/yoon/skia-n2/artifacts/device_identity.txt` (regenerated 2026-11-17T18:46:32Z, identical identity).
 
 | field | value |
 |---|---|
@@ -41,7 +41,7 @@ where stated.
   clang 23.1.0 + lld 23.1.2, under `systemd-run --scope -p MemoryMax=10G`.
   1308 ninja targets; libskia.a step ~2 min wall at `-j6`; peak RSS 0.93 GB.
 - Receipt: `doc/09_report/linux_gb10_skia_provider_receipt_2026-11-18.json`
-  (copy of `build/optional/libsimple_upstream_skia_ganesh_vulkan.so.receipt.json`,
+  (also at `/home/yoon/skia-n2/artifacts/libsimple_upstream_skia_ganesh_vulkan.so.receipt.json`,
   sha256 `2c46ae5d5174cc8a35f7c763f9c10150ae229c5df7f58ee179602770c2113ee8`).
 
 | artifact | sha256 |
@@ -89,7 +89,7 @@ No self-hosted pure-Simple release binary exists on this host
 
 - Failing-assertion control: a one-line spec `expect(1).to_equal(2)` exited 1,
   `Results: 1 total, 0 passed, 1 failed`, naming `expected 1 to equal 2`; the
-  passing twin exited 0 (`build/n2/{fail,pass}_control.log`). The seed's SPipe
+  passing twin exited 0 (control logs lost, see Regeneration; spec sources at `/home/yoon/skia-n2/artifacts/controls/`). The seed's SPipe
   verdicts are therefore not vacuous.
 - `native-build` of `src/app/test/vulkan_2d_qualification/main.spl` with the
   README recipe (`native-build --source src/compiler --source src/app
@@ -98,7 +98,7 @@ No self-hosted pure-Simple release binary exists on this host
   interpreted Simple driver: ~65 min of single-threaded front-end work (RSS
   ~2.6 GB, log silent after load warnings), then a child
   `simple run src/app/cli/native_build_worker.spl` still at 100 % CPU and
-  4.1 GB RSS after 58 min. Log: `build/n2/native_build.log`. It was left
+  4.1 GB RSS after 58 min. Log lost, see Regeneration. It was left
   running at the cutoff; this is a throughput blocker of the seed native-build
   path, not a diagnosed compile error.
 - Hedge without `--source src/compiler` (`SIMPLE_NATIVE_BUILD_TRACE=1`,
@@ -108,7 +108,7 @@ No self-hosted pure-Simple release binary exists on this host
   runner at `main.spl:67:9` with `semantic: value is not callable`
   (`if val actual = file_hash_sha256(path)`), after the JIT fell back on an
   ambiguous `getpid` (two co-compiled definitions in `io/sysinfo_ops.spl` and
-  `io_runtime.spl`). Log: `build/n2/seed_case01_skia.log`.
+  `io_runtime.spl`). Re-run log: `/home/yoon/skia-n2/artifacts/seed_worker_case01.log`.
 
 Consequently `01-solid-boxes`, `06-rectangular-clip` and `02-fractional-edges`
 have **no Engine2D or Skia worker readbacks on GB10**. Their rows stay
@@ -131,13 +131,43 @@ have **no Engine2D or Skia worker readbacks on GB10**. Their rows stay
 
 | capture | bytes | sha256 |
 |---|---|---|
-| `build/n2/renderdoc/engine2d_gb10_try2/…_capture.rdc` | 7457 | `ad576b2a8502010317b197d41b3b0f6a4c19d2f37bacebd100db385063bcba45` |
-| `build/n2/renderdoc/engine2d_gb10_try3/…_capture.rdc` | 7616 | `b18190d11030a7ae3eb99ca5a7dab3fb8a751c84ab0bbae7a2a5b2870a6870b2` |
+| original try 2 (lost, see Regeneration) | 7457 | `ad576b2a8502010317b197d41b3b0f6a4c19d2f37bacebd100db385063bcba45` |
+| original try 3 (lost, see Regeneration) | 7616 | `b18190d11030a7ae3eb99ca5a7dab3fb8a751c84ab0bbae7a2a5b2870a6870b2` |
+| `/home/yoon/skia-n2/artifacts/renderdoc/engine2d_gb10_try2/simple_gui_app-20261117T184639Z-2096362_capture.rdc` (regenerated) | 7457 | `ab1bd6af7e0b35749d0e1963a0f6fc0d5cf22dfc61aae0e69f145dccc709e3a9` |
 
 This is the generic capture scene, not an N2 case. The qualification runner
 and `provider.cpp` never call the RenderDoc in-app start/end API and never
 present, so even with a working executable the N2 workers produce no `.rdc`;
 that is a separate blocker.
+
+## Regeneration (2026-11-18, follow-up)
+
+The original `build/` artifacts were lost to a worktree cleanup: the landing
+helper's `git worktree remove` deleted the gitignored `build/` tree. That
+removed the provider `.so`, logs, captures and `device_identity.txt`, and
+killed the still-running seed `native-build`. They were regenerated outside
+any worktree, under `/home/yoon/skia-n2/artifacts/`:
+
+- Provider relinked from the surviving `libskia.a` (`f368cf7b…f60a`) with the
+  exact compile/link line of `build-linux.shs` (no Skia re-sync, because the
+  dependency checkout was partly deleted for disk). The command is in
+  `/home/yoon/skia-n2/artifacts/relink.log`. The result `/home/yoon/skia-n2/artifacts/libsimple_upstream_skia_ganesh_vulkan.so`
+  has sha256 `758f717f521fe4e996f41170a0cd70b53492c94df92d01d570f45f262605bc89`,
+  the same as the original build.
+- `device_identity.txt` regenerated with the same probe; the identity is unchanged.
+- RenderDoc: one new capture of the generic Engine2D scene on the GB10 (NVIDIA
+  ICD). Loop try 1 did not run at all: the log directory did not exist yet,
+  which was a harness mistake and not a device result. Try 2 passed first time
+  with no `vkCreateDevice` retries: `num_captures=1`, `record_valid=1`,
+  pixel hash `694777e1…c52f`. Replay-open evidence is in
+  `/home/yoon/skia-n2/artifacts/renderdoc/engine2d_gb10_try2/replay_open.txt`: `renderdoccmd convert`
+  opened the capture (rc 0, 58 chunks, 3 `vkCmdDispatch`) and it names vendor
+  4318, device 11794, `NVIDIA GB10`, driver `580.173.02`.
+- The seed-hosted worker failure was re-run at `0d4cd599298`, with the same
+  error. Both blockers are filed in
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`.
+- The native-build log and the control logs were not regenerated. The 2 h
+  native-build is the filed blocker, and the controls are summarised above.
 
 ## Row summary
 
@@ -151,6 +181,6 @@ that is a separate blocker.
 | `01-solid-boxes` Engine2D/Skia exact RGBA on GB10 | not-run (blocked) |
 | `06-rectangular-clip` Engine2D/Skia exact RGBA on GB10 | not-run (blocked) |
 | `02-fractional-edges` vs declared tolerance on GB10 | not-run (blocked) |
-| RenderDoc capture on GB10 (generic Engine2D scene) | PASS (2 of 3 tries) |
+| RenderDoc capture on GB10 (generic Engine2D scene) | PASS (2 of 3 tries; regenerated 1 of 1 attempted) |
 | RenderDoc capture of N2 case workers | BLOCKED (no in-app capture hook) |
 | `31-latin-shaping`, GUI input, SPipe/docgen gates | not-run |

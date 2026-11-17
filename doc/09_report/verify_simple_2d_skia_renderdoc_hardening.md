@@ -115,6 +115,10 @@ no native qualification executable could be produced on this host (no
 self-hosted release binary; the seed `native-build` did not produce one; the
 seed interpreter rejects the runner), and the N2 workers have no RenderDoc
 capture hook. Cases 01/06/02 remain `not-run`. Full record:
-`doc/09_report/linux_gb10_skia_n2_qualification_2026-11-18.md`.
+`doc/09_report/linux_gb10_skia_n2_qualification_2026-11-18.md`. Follow-up: the
+original `build/` artifacts were lost to a worktree cleanup and regenerated
+under `/home/yoon/skia-n2/artifacts/` (same provider digest `758f717f…bc89`,
+new GB10 capture `ab1bd6af…e3a9`). Executable blockers are filed in
+`doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`.
 
 **STATUS: FAIL** — release and physical N2 qualification are not admitted.
