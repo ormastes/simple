@@ -137,14 +137,39 @@ fn _normalize_type_relative_path(module_name: text) -> text:
 
     ""
 
-# Unit library root (`src/unit`); settable so tests can resolve fixture orgs.
-var unit_library_root: text = "src/unit"
+# Unit library root. "" override = auto: `src/unit` under the cwd (repo root),
+# else derived from $SIMPLE_LIB (`<src>/lib` -> `<src>/unit`), the same anchors
+# stdlib resolution uses. Unresolvable -> "" so callers fail closed instead of
+# reading an empty cwd-relative listing. Tests may set an explicit override.
+var unit_library_root_override: text = ""
+
+fn _unit_library_root_auto() -> text:
+    if file_exists("src/unit"):
+        return "src/unit"
+    val simple_lib = to_slash(env_get_opt("SIMPLE_LIB") ?? "")
+    if simple_lib != "":
+        var lib = simple_lib
+        while lib.ends_with("/"):
+            lib = lib.substring(0, lib.len() - 1)
+        val sibling = _interp_path_parent(lib) + "/unit"
+        if lib.ends_with("/lib") and file_exists(sibling):
+            return sibling
+        val nested = lib + "/src/unit"
+        if file_exists(nested):
+            return nested
+    ""
 
 pub fn unit_library_root_get() -> text:
-    unit_library_root
+    """Existing unit library root, or "" when it cannot be found."""
+    if unit_library_root_override != "":
+        if file_exists(unit_library_root_override):
+            return unit_library_root_override
+        return ""
+    _unit_library_root_auto()
 
 pub fn unit_library_root_set(dir: text):
-    unit_library_root = dir
+    """Explicit root (tests); "" restores auto resolution."""
+    unit_library_root_override = dir
 
 fn resolve_unit_path(tail: [text]) -> text:
     """Resolve `unit.<...>` import tail to a concrete src/unit/ file path.
@@ -159,6 +184,9 @@ fn resolve_unit_path(tail: [text]) -> text:
     Returns the first existing path, or "" on miss."""
     if tail.len() == 0:
         return ""
+    val unit_root = unit_library_root_get()
+    if unit_root == "":
+        return ""
     var org: text = "simple-lang"
     var rest: [text] = tail
     val first = tail[0]
@@ -166,8 +194,8 @@ fn resolve_unit_path(tail: [text]) -> text:
         org = "simple-lang"
         rest = tail[1..]
     else:
-        val direct_dir = _sffi_path_join(unit_library_root, first)
-        val com_dir = _sffi_path_join(unit_library_root, first + ".com")
+        val direct_dir = _sffi_path_join(unit_root, first)
+        val com_dir = _sffi_path_join(unit_root, first + ".com")
         if file_exists(direct_dir) or file_exists(com_dir):
             org = first
             rest = tail[1..]
@@ -175,7 +203,14 @@ fn resolve_unit_path(tail: [text]) -> text:
     if rest.len() >= 1 and rest[0] == "com":
         rest = rest[1..]
 
-    val unit_root = unit_library_root
+    val hit = _resolve_unit_in_org(unit_root, org, rest)
+    if hit != "" or org == "simple-lang":
+        return hit
+    # An org dir named like a simple-lang family: fall back to the family path
+    # (unit_scope reports the case where both exist as ambiguous).
+    _resolve_unit_in_org(unit_root, "simple-lang", tail)
+
+fn _resolve_unit_in_org(unit_root: text, org: text, rest: [text]) -> text:
     val org_bare = _sffi_path_join(unit_root, org)
     val org_com = _sffi_path_join(unit_root, org + ".com")
     val joined = rest.join("/")

@@ -19,13 +19,18 @@ fn setup_fixture():
     file_write(FIXTURE_ROOT + "/beta.com/robotics/__init__.spl", "# fixture\n")
     file_write(FIXTURE_ROOT + "/simple-lang/robotics/__init__.spl", "# fixture\n")
     file_write(FIXTURE_ROOT + "/simple-lang/velocity/kmph.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/acme/robotics/rpma.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/velocity/misc/rpmv.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/gamma/robotics/rpmg.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/gamma/robotics/__init__.spl", "# fixture\n")
+    file_write(FIXTURE_ROOT + "/simple-lang/gamma/robotics/__init__.spl", "# fixture\n")
     unit_library_set_base(FIXTURE_ROOT)
 
 fn probe(src: text) -> text:
     setup_fixture()
     val result = core_interpret(src + "\n", "use_unit_suffix_org_scope_probe.spl")
     val err = eval_get_error()
-    unit_library_set_base("src/unit")
+    unit_library_set_base("")
     if err != "": return "ERR:" + err
     "" + val_get_int(result)
 
@@ -52,3 +57,30 @@ describe "core interpreter unit suffix scope across orgs":
 
     it "does not admit an org suffix through a same-named simple-lang family":
         expect(probe("use unit.robotics.*\nval r = 6_rpmx\nr.value()")).to_start_with("ERR:unit suffix 'rpmx'")
+
+    it "keys a selective import by org: another org's suffix is not admitted":
+        expect(probe(r"use unit.beta.robotics.{rpma}" + "\nval r = 7_rpma\nr.value()")).to_start_with("ERR:unit suffix 'rpma' is not in scope")
+
+    it "a selective org import still admits its own org's suffix":
+        expect(probe(r"use unit.acme.robotics.{rpma}" + "\nval r = 8_rpma\nr.value()")).to_equal("8")
+
+    it "routes an org name colliding with a simple-lang family to the path that exists":
+        expect(probe("use unit.velocity.kmph\nval s = 9_kmph\ns.value()")).to_equal("9")
+
+    it "reports an import that resolves under both an org and a simple-lang family":
+        val out = probe("use unit.gamma.robotics.*\nval r = 1_rpmg\nr.value()")
+        expect(out).to_start_with("ERR:unit suffix 'rpmg' is not in scope")
+        expect(out).to_contain("is ambiguous")
+
+describe "core interpreter unit library root resolution":
+    it "fails closed when the unit library root does not exist":
+        unit_library_set_base("build/tmp/use_unit_suffix_org_scope_spec/no_such_unit_root")
+        val result = core_interpret("val s = 60_kmph\ns.value()\n", "use_unit_root_probe.spl")
+        val err = eval_get_error()
+        unit_library_set_base("")
+        expect(err).to_contain("unit library root not found")
+
+    it "auto-resolves the default root without an override":
+        unit_library_set_base("")
+        val result = core_interpret("val s = 60_kmph\ns.value()\n", "use_unit_root_probe.spl")
+        expect(eval_get_error()).to_contain(r"`use unit.velocity.{kmph}`")
