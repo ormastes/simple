@@ -12,13 +12,15 @@ Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
 CANNOT be built here, so NOT covered behaviourally (they stay structural in the release spec): the second effect
 sub-step past its input check (helper begin + open core + adoption needs a SimpleContainerOwnerV2 with a live
 provider), the S arms (cleanup, settle, session return), the geometry drain and the pane io Read/Write/Resize arms
-(all need a ContainerPrimaryAttachSessionV1, whose transfer is a native owner no fixture can construct), and U'
-(needs a helper lease whose open core published a journal refusal R through a Linux helper store).
+(all need a ContainerPrimaryAttachSessionV1, whose transfer is a native owner no fixture can construct), and the
+U' cancel itself past R (needs the helper row executing under a real begin). milestone_0031 drives, on a real helper
+store of the fixture journal: the entry guard in admit, the U classification and U' recording a missing R.
 ## Verification guidance and troubleshooting
 A case that reports a helper lease or `begin_attempted` after a forced release means the release port started an
 effect. A changed error string is a contract change.
 """
 use std.spec.{step}
+use std.io.file_read_text
 use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
 use std.common.contracts.orchestration.host_capacity_v1.HostLedgerFenceV1
 use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
@@ -31,7 +33,15 @@ use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmen
     HostAgentReleaseOutcomeV4, HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4,
     HostAgentReleaseContextV4, HostAgentOpenContextV4, host_agent_attachment_open_step_v4,
     host_agent_attachment_release_step_v4, host_agent_attachment_authority_report_v4, host_agent_attachment_report_v4}
-use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, host_agent_attachment_step_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, host_agent_attachment_step_v4,
+    host_agent_attachment_write_v4}
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.host_agent_release_charged_v4
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.HostHelperLeaseV1
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helper_store_open_v1,
+    host_linux_helper_journal_relative_v1, host_primary_attach_refusal_decode_v1}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_read_v3
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.linux_service_attach_admit_v4
 use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
 use test.fixtures.orchestration.host_helper_fixture_v1.{HostHelperFixtureV1, host_helper_fixture_v1,
@@ -76,6 +86,11 @@ fn pb_open(fixture: HostHelperFixtureV1) -> HostAgentOpenContextV4:
     HostAgentOpenContextV4(policy: fixture.policy, scope: fixture.scope, context: host_helper_clock_v1(),
         parent: fixture.request.parent_binding.host_operation,
         execution: ContainerExecutionRequestV2(plan: container_primary_attach_fixture_v1().workload, request_bytes: ""))
+
+# A store with no journal: the open core's entry guard has nothing to check (the legacy world), so admit cases
+# that are about the helper row and prepare checks are not answered by the store.
+fn pb_unbound_store() -> HostHelperStoreV1:
+    HostHelperStoreV1(root: "", journal: None)
 
 # allow(primitive_api): spec forced-release flag
 fn pb_call(attachment: HostAgentAttachmentV4, release: bool) -> HostAgentAttachmentPortCallV4:
@@ -124,11 +139,11 @@ describe "V4 agent attach part B: the read-only helper admission check":
     it "refuses a helper operation that already has a journal row (the service's admit)":
         # @req part B (d): a reused helper id is refused before the archive, not at prepare
         val fixture = pb_fixture(true)
-        expect(linux_service_attach_admit_v4(fixture.owner, fixture.request, fixture.policy, fixture.scope,
+        expect(linux_service_attach_admit_v4(fixture.owner, pb_unbound_store(), fixture.request, fixture.policy, fixture.scope,
             host_helper_clock_v1()).is_ok()).to_equal(true)
         val prepared = host_agent_attachment_open_step_v4(pb_call(pb_attachment(fixture), false), pb_context(fixture.owner, 10),
             pb_open(fixture), host_helper_clock_v1)
-        expect(linux_service_attach_admit_v4(prepared.capacity.unwrap(), fixture.request, fixture.policy, fixture.scope,
+        expect(linux_service_attach_admit_v4(prepared.capacity.unwrap(), pb_unbound_store(), fixture.request, fixture.policy, fixture.scope,
             host_helper_clock_v1()).unwrap_err()).to_equal("attach-helper-operation-reused")
 
 describe "V4 agent attach part B: the step-driver port runs the effects":
@@ -233,3 +248,97 @@ describe "V4 agent inspect: the terminal-authority field":
         expect(host_agent_attachment_authority_report_v4("op_1", Some(ready), None, "attach-binding-mismatch").contains("attach-binding-mismatch")).to_equal(true)
         val kept = HostAgentAttachmentSummaryV4(attach_digest: "a".repeat(64), detach_digest: "", final_stage: "returned", error: "")
         expect(host_agent_attachment_authority_report_v4("op_1", None, Some(kept), "verified").contains("terminalAuthority")).to_equal(false)
+
+# milestone_0031: a helper lease on the fixture's own request (what begin returns), an attachment holding it with
+# no session and no spawn (the open core refused), and a store on the fixture journal's own helper store.
+fn pb_lease(fixture: HostHelperFixtureV1) -> HostHelperLeaseV1:
+    val request = fixture.request
+    HostHelperLeaseV1(plan: request.plan, intent: request.intent, operation: request.operation,
+        receipt: host_helper_reservation_receipt_v1(request.intent, request.operation).unwrap(),
+        deadline: container_effect_deadline_v1(request.plan.request_digest, request.operation.id, ["attach"], 1000).unwrap(),
+        grant_id: "grant_1", issuer_id: "issuer_1", approver_id: "approver_1",
+        cpu_millis: request.intent.reservation.cpu_millis, memory_bytes: request.intent.reservation.memory_bytes)
+
+# allow(primitive_api): spec consume-attempted switch
+fn pb_refused_open(fixture: HostHelperFixtureV1, attempted: bool) -> HostAgentAttachmentV4:
+    HostAgentAttachmentV4(attach_stage: "revoked", helper: Some(pb_lease(fixture)),
+        plan: Some(container_primary_attach_fixture_v1()), consumption_attempted: attempted,
+        first_error: "host-primary-parent-executing-required", attach_digest: "a".repeat(64))
+
+fn pb_bound_store(fixture: HostHelperFixtureV1) -> HostHelperStoreV1:
+    HostHelperStoreV1(root: host_linux_helper_store_open_v1(fixture.owner.journal.root).unwrap(),
+        journal: Some(fixture.owner.journal))
+
+describe "milestone_0031: the open core's entry guard runs before the archive":
+    it "admits on this journal's own helper store with no marker of the helper operation":
+        # @req item 2: the entry guard (15.3) is read-only, so admit runs it
+        val fixture = pb_fixture(true)
+        expect(linux_service_attach_admit_v4(fixture.owner, pb_bound_store(fixture), fixture.request, fixture.policy,
+            fixture.scope, host_helper_clock_v1()).is_ok()).to_equal(true)
+
+    it "refuses a store that is not this journal's helper store, before the archive":
+        # @req item 2: the guard refused only after helper begin before milestone_0031
+        val fixture = pb_fixture(true)
+        val foreign = HostHelperStoreV1(root: "/trusted/helper-store", journal: Some(fixture.owner.journal))
+        expect(linux_service_attach_admit_v4(fixture.owner, foreign, fixture.request, fixture.policy, fixture.scope,
+            host_helper_clock_v1()).unwrap_err()).to_equal("linux-helper-store-invalid")
+
+describe "milestone_0031: a refusal after helper begin is released, never charged forever":
+    it "classifies an unconsumed helper with no R as releasable (11.4 U) and a consume-attempted one as charged":
+        # @req item 2, DESIGN 11.4 U (`consumption_attempted == false`), 14A F4
+        val fixture = pb_fixture(true)
+        val store = pb_bound_store(fixture)
+        expect(host_agent_release_charged_v4(pb_refused_open(fixture, false), store)).to_equal("")
+        expect(host_agent_release_charged_v4(pb_refused_open(fixture, true), store)).to_equal("linux-host-agent-attach-unrecorded-helper")
+
+    it "records the missing pre-consume refusal R through the one writer, then resumes on the cancel":
+        # @req item 2: U' writes R with the attachment's first error when the core could not
+        val fixture = pb_fixture(true)
+        val store = pb_bound_store(fixture)
+        val context = HostAgentReleaseContextV4(capacity: fixture.owner, store: store, monotonic_ms: 10)
+        val step1 = host_agent_attachment_release_step_v4(pb_call(pb_refused_open(fixture, false), false), context)
+        expect(pb_progress(step1.outcome)).to_equal("progress")
+        expect(step1.attachment.attach_stage).to_equal("revoked")
+        expect(step1.attachment.helper.is_some()).to_equal(true)
+        val relative = host_linux_helper_journal_relative_v1("primary-refusal", fixture.request.operation.id)
+        val bytes = distributed_operation_journal_read_v3(fixture.owner.journal, relative, 65536).unwrap()
+        expect(bytes.is_some()).to_equal(true)
+        val refusal = host_primary_attach_refusal_decode_v1(bytes.unwrap()).unwrap()
+        expect(refusal.stage).to_equal("pre-consume")
+        expect(refusal.consumed_digest).to_equal("")
+        expect(refusal.reason_digest).to_equal(sha256_text("host-primary-parent-executing-required"))
+        expect(refusal.prepared_receipt_digest).to_equal(pb_lease(fixture).receipt.receipt_digest)
+        step("the next call takes the unchanged journal-R-bound cancel on that same R (structural: the cancel needs a begun row)")
+        val body = file_read_text("src/lib/nogc_sync_mut/orchestration/host_agent_attachment_v4.spl")
+        val cancel = body.substring(body.index_of("fn host_agent_release_cancel_v4("), body.byte_len())
+        val recorded = cancel.index_of("host_linux_helper_refusal_publish_v1(context.store, operation,")
+        val read = cancel.index_of("distributed_operation_journal_read_required_v3(journal, relative, 65536)")
+        val cancelled = cancel.index_of("host_helper_cancel_unconsumed_v1(")
+        expect(recorded > 0 and read > recorded and cancelled > read).to_equal(true)
+
+    it "blocks at once when the store can never take the R, instead of refusing until the cap":
+        # @req item 2: no silent charged-forever loop; a permanent precondition is a typed Blocked
+        val fixture = pb_fixture(true)
+        val foreign = HostHelperStoreV1(root: "/trusted/helper-store", journal: Some(fixture.owner.journal))
+        val context = HostAgentReleaseContextV4(capacity: fixture.owner, store: foreign, monotonic_ms: 10)
+        val step1 = host_agent_attachment_release_step_v4(pb_call(pb_refused_open(fixture, false), false), context)
+        expect(pb_progress(step1.outcome)).to_equal("blocked")
+        expect(step1.error).to_equal("linux-helper-store-invalid")
+
+describe "milestone_0031: B keeps the dropped spawn's quiesce proof digest (DESIGN 11.4)":
+    it "reports the proof digest for a live attachment and keeps it in the returned summary":
+        # @req item 3: "drop the spawn from the attachment (kept only in the proof)"
+        val digest = sha256_text("quiesce-proof")
+        val live = HostAgentAttachmentV4(attach_stage: "cleaned", attach_digest: "a".repeat(64), quiesce_proof_digest: digest)
+        expect(host_agent_attachment_report_v4("op_1", Some(live), None)).to_contain(digest)
+        var returned = live
+        returned.attach_stage = "returned"
+        val agent = HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "b".repeat(64),
+            payload_digest: "c".repeat(64), stage: "running")
+        val written = host_agent_attachment_write_v4(agent, returned)
+        expect(written.attachment.is_none()).to_equal(true)
+        expect(written.attachment_summary.unwrap().quiesce_proof_digest).to_equal(digest)
+        expect(host_agent_attachment_report_v4("op_1", None, written.attachment_summary)).to_contain(digest)
+        step("no field when no spawn was ever quiesced")
+        val plain = HostAgentAttachmentV4(attach_stage: "cleaned", attach_digest: "a".repeat(64))
+        expect(host_agent_attachment_report_v4("op_1", Some(plain), None).contains("quiesceProofDigest")).to_equal(false)

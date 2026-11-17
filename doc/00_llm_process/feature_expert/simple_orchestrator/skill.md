@@ -310,9 +310,22 @@ available. These source paths and their manuals remain NOT_RUN.
   cancel on each retry while the proof is pending, never retires descriptors) and `host_primary_attach_settle_retired_core_v3` (re-reads the
   `ContainerPrimaryTransportRetirementV3`, refuses a held session / empty proof / foreign plan or native, reaps, commits the
   ack, then consumes the spawn). Release port: F = quiesce (`fallback_quiesced`) -> `simple_container_primary_attach_cleanup_v3`
-  -> `cleaned` -> settle_retired -> d4 clears the retirement -> `returned`; B = quiesce, drop the spawn, then S. d3 repeats until the container reports no error. B drops the spawn without a stored proof digest (open gap vs 11.4). A `Rejected`
+  -> `cleaned` -> settle_retired -> d4 clears the retirement -> `returned`; B = quiesce, drop the spawn, then S. d3 repeats until the container reports no error. B stores `quiesce_proof_digest` (sha256 of the quiesce proof) before it drops the spawn (11.4 "kept only in the proof"); the summary keeps it and inspect reports `quiesceProofDigest`. A `Rejected`
   spawn is Blocked `...-native-absence-unproven`. Trap: quiesce must not retire descriptors, the container's
   `fallback_cleanup_v3` retires them (a second retire with a reference is `stale_process_reference`).
+- milestone_0031 attach hardening (2026-11-18, SOURCE_AUTHORED / NOT_RUN):
+  - F15 pin: before the archive `container_stream_policy_template_pin_v2` requires the signed stream policy's root,
+    broker program/digest/budget and delegated cgroup to EQUAL the enrollment-pinned `agent_helper_template`, and its
+    environment to equal it or be empty (empty = no variables, the provider launches with the policy environment);
+    `container-stream-policy-pin-{root,broker,cgroup,environment,profile}`. Still policy-controlled, constrained only by
+    the native custody bind/validate (`bind_workspace_primary_attach_v3`, the remaining host-side pin): directory,
+    memory policy, snapshot digest, cache identity, child image mode.
+  - Post-begin refusals moved: pre-archive `attach-plan-terminal-mode` (tty only), `host-primary-parent-operation-mismatch`,
+    the plan<->helper association (`host_agent_attach_association_check_v4`, action derived from helper kind as begin
+    does) and the open entry guard in `linux_service_attach_admit_v4`; pre-BEGIN `host_primary_attach_open_precheck_v1`
+    (entry guard, parent executing, provider plan reproduction; RP on refusal). Lease-bound checks stay after begin;
+    a helper with `consumption_attempted == false` and no R is 11.4 U (not charged): U' writes the pre-consume R itself
+    (Blocked at once on `host-primary-refusal-precondition`/`linux-helper-store-invalid`), then cancels.
 - The OP attach effects are bound since m23 part B (below); the RELEASE port never starts them
   (`linux-host-agent-attach-open-abandoned`).
 - Write-back: ports lend `agent.container` and return `container`/`capacity`; every caller adopts the capacity (single

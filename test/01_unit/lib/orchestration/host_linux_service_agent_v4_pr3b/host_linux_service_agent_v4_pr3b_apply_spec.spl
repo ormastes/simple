@@ -28,11 +28,18 @@ use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnve
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
 use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
-use std.common.contracts.container.stream_v2.{container_stream_policy_encode_v2, container_stream_policy_digest_v2}
+use std.common.contracts.container.stream_v2.{ContainerStreamPolicyV2, ContainerOutputIdentityV2, ContainerOutputResourcesV2,
+    container_stream_policy_encode_v2, container_stream_policy_digest_v2}
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.group_process_stream_profile_v3.group_process_cpu_quota_v3
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use test.fixtures.orchestration.host_execution_envelope_fixture_v2.host_execution_envelope_fixture_v2
 use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
 use test.fixtures.orchestration.primary_attach_fixture_v1.primary_policy_fixture_v1
 use test.fixtures.orchestration.host_helper_fixture_v1.HostHelperFixtureV1
-use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, container_primary_attach_plan_encode_v1,
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, ContainerPrimaryAttachPlanV1,
+    container_primary_attach_plan_encode_v1,
     container_primary_attach_plan_decode_v1, container_primary_attach_plan_digest_v1, host_agent_pane_binding_encode_v4,
     host_agent_pane_binding_digest_v4}
 use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
@@ -53,12 +60,15 @@ use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachReq
     host_agent_detach_payload_digest_v4, host_agent_attach_request_encode_v4, host_agent_attach_request_decode_v4,
     host_agent_attach_request_parts_v4, host_agent_detach_request_encode_v4, host_agent_action_archive_v4,
     host_agent_attach_helper_execute_digest_v4, host_agent_attach_helper_authorize_v4,
+    host_agent_attach_association_check_v4,
     host_agent_attach_archive_relative_v4, host_agent_detach_archive_relative_v4}
 use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, HostAgentActionAuthorityV4,
     HostAgentAttachServiceV4, HostAgentActionApplyV4, host_agent_attach_apply_core_v4, host_agent_attach_apply_v4,
     host_agent_detach_apply_v4, host_agent_terminal_authority_v4}
 
-val AP_OP = "parent-operation"
+# The held run IS the helper fixture's parent operation (the envelope fixture's "operation_1"), so the plan, the
+# helper request and the archived execute name one parent (milestone_0031: the association is checked pre-archive).
+val AP_OP = "operation_1"
 val AP_FENCE = "fence-1"
 
 fn ap_seed(offset: i64) -> [u8]:
@@ -79,8 +89,62 @@ fn ap_fixture() -> HostHelperFixtureV1:
     if AP_FIXTURE.len() == 0:
         var fixture = host_helper_fixture_v1()
         fixture.request.plan.helper_kind = "attach-broker"
+        # The helper plan names the primary plan it brokers; the sibling fixture binds and signs it.
+        fixture.request.plan.request_digest = ap_plan(fixture, "helper_attach_1", ap_policy_digest()).request_digest
         AP_FIXTURE = [host_helper_sibling_fixture_v1(fixture, fixture.owner, "helper_attach_1")]
     AP_FIXTURE[0]
+
+fn ap_policy_digest() -> text:
+    container_stream_policy_digest_v2(primary_policy_fixture_v1()).unwrap()
+
+# The primary attach plan ASSOCIATED with a helper fixture (container_primary_attach_admission_validate_v1): the
+# helper's parent workload (the envelope fixture's execution plan) and scope, the helper's operation id and parent
+# digests as its identity, the helper reservation as its resources, a lifetime inside the helper operation's
+# duration, and `tty` (the only mode the workspace primary opens).
+fn ap_plan(helper: HostHelperFixtureV1, operation_id: text, policy_digest: text) -> ContainerPrimaryAttachPlanV1:
+    var plan = container_primary_attach_fixture_v1()
+    val parent = helper.request.plan
+    plan.workload = host_execution_envelope_fixture_v2().common.execution.plan
+    plan.runtime.pod_uid = plan.workload.workload_uid
+    plan.runtime.attempt = plan.workload.attempt
+    plan.runtime.operation_id = plan.workload.operation_id
+    plan.runtime.provider_generation = plan.workload.provider_generation
+    plan.runtime.node_boot_id = container_scope_fence_id_v2(helper.scope).unwrap()
+    plan.identity = ContainerOutputIdentityV2(operation_id: operation_id, parent_operation_id: parent.parent_operation_id,
+        parent_operation_digest: parent.parent_operation_digest, parent_assignment_digest: parent.parent_assignment_digest,
+        parent_budget_digest: parent.parent_budget_digest, binding_digest: "f".repeat(64))
+    plan.resources = ContainerOutputResourcesV2(cpu_millis: helper.request.intent.reservation.cpu_millis,
+        memory_bytes: helper.request.intent.reservation.memory_bytes)
+    plan.launch_template.worker_id = operation_id
+    plan.launch_template.generation = plan.workload.provider_generation
+    plan.launch_template.memory_limit_bytes = plan.resources.memory_bytes
+    plan.launch_template.request.timeout_ms = 100
+    var profile = plan.launch_template.profile_v3.unwrap()
+    profile.helper_cpu = group_process_cpu_quota_v3(plan.resources.cpu_millis).unwrap()
+    plan.launch_template.profile_v3 = Some(profile)
+    plan.terminal_mode = "tty"
+    plan.policy_digest = policy_digest
+    plan.request_digest = ""
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+    plan
+
+fn ap_runtime() -> RuntimeIdentityV1:
+    ap_plan(ap_fixture(), "helper_attach_1", ap_policy_digest()).runtime
+
+# The enrollment-pinned agent helper template of this file: the plan fixture's launch template carrying exactly
+# the root, broker, delegated cgroup path and environment that primary_policy_fixture_v1 repeats.
+fn ap_template() -> GroupProcessStreamLaunchV2:
+    val policy = primary_policy_fixture_v1()
+    var template = container_primary_attach_fixture_v1().launch_template
+    template.root = policy.root
+    template.delegated_cgroup_path = policy.delegated_cgroup_path
+    template.request.broker_program = policy.broker_program
+    template.request.broker_digest = policy.broker_digest
+    template.request.environment = policy.environment
+    var profile = template.profile_v3.unwrap()
+    profile.broker = policy.broker_budget
+    template.profile_v3 = Some(profile)
+    template
 
 fn ap_key(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
     DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1, public_key: public_key,
@@ -155,14 +219,8 @@ fn ap_bytes() -> ApBytes:
         val first = ap_fixture()
         val second = host_helper_sibling_fixture_v1(first, first.owner, "helper_attach_2")
         val policy = primary_policy_fixture_v1()
-        var plan = container_primary_attach_fixture_v1()
-        plan.policy_digest = container_stream_policy_digest_v2(policy).unwrap()
-        plan.request_digest = ""
-        plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
-        var other = container_primary_attach_fixture_v1()
-        other.policy_digest = "8".repeat(64)
-        other.request_digest = ""
-        other.request_digest = container_primary_attach_plan_digest_v1(other).unwrap()
+        val plan = ap_plan(first, "helper_attach_1", ap_policy_digest())
+        val other = ap_plan(first, "helper_attach_1", "8".repeat(64))
         AP_BYTES = [ApBytes(helper: host_helper_request_encode_v1(first.request).unwrap(),
             other_helper: host_helper_request_encode_v1(second.request).unwrap(),
             plan: container_primary_attach_plan_encode_v1(plan).unwrap(),
@@ -221,7 +279,7 @@ fn ap_good(pane: text) -> HostAgentAttachRequestV4:
 fn ap_agent() -> HostLinuxServiceAgentV4:
     HostLinuxServiceAgentV4(operation_id: AP_OP, association_digest: ap_association(), payload_digest: "b".repeat(64),
         stage: "running", reserved: true, observed: true, clock_ms: 500,
-        created: Some(container_primary_attach_fixture_v1().runtime))
+        created: Some(ap_runtime()))
 
 # A fresh journal per case (a root owned by a live journal cannot be opened twice).
 fn ap_journal(tag: text) -> DistributedOperationJournalV2:
@@ -230,7 +288,8 @@ fn ap_journal(tag: text) -> DistributedOperationJournalV2:
 
 fn ap_service(journal: DistributedOperationJournalV2) -> HostAgentAttachServiceV4:
     HostAgentAttachServiceV4(journal: journal, fence: AP_FENCE, live_incarnation: "a".repeat(32), live_epoch: 3,
-        not_after: 1000000, policy_bytes: "policy-bytes", store_root: "/trusted/helper-store", monotonic_ms: 500)
+        not_after: 1000000, policy_bytes: "policy-bytes", store_root: "/trusted/helper-store", monotonic_ms: 500,
+        template: ap_template())
 
 fn ap_progress(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
     var att = call.attachment
@@ -540,3 +599,108 @@ describe "V4 agent attach part B: the controller-signed agent-terminal authority
         var detaching = agent
         detaching.stage = "detach"
         expect(host_agent_terminal_authority_v4(detaching, Some(wire), ap_authority(), "a".repeat(32), 3).unwrap_err()).to_equal("attach-stage")
+
+# milestone_0031 fixtures: a packet whose stream policy is `policy` and whose plan (mode `mode`, parent `parent`) names that policy (so the packet
+# splits and its signatures verify); the helper is the file's fixture helper.
+fn ap_policy_wire(policy: ContainerStreamPolicyV2, mode: text, parent: text) -> text:
+    val stream = container_stream_policy_encode_v2(policy).unwrap()
+    var plan = ap_plan(ap_fixture(), "helper_attach_1", sha256_text(stream))
+    plan.terminal_mode = mode
+    plan.identity.parent_operation_id = parent
+    plan.request_digest = ""
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+    val plan_bytes = container_primary_attach_plan_encode_v1(plan).unwrap()
+    host_agent_attach_request_encode_v4(ap_packet(ap_bytes().helper, plan_bytes,
+        host_agent_pane_binding_encode_v4(ap_binding("pane-a")).unwrap(), plan.request_digest,
+        host_agent_pane_binding_digest_v4(ap_binding("pane-a")).unwrap(), ap_fixture().execution_signed,
+        ap_fixture().execution_approval, stream)).unwrap()
+
+# The refusal of `wire`, after asserting that nothing was consumed and nothing was archived.
+fn ap_refused_clean(wire: text, tag: text) -> text:
+    val journal = ap_journal(tag)
+    val applied = ap_apply(ap_agent(), wire, ap_authority(), ap_service(journal))
+    expect(applied.agent.attachment_consumed).to_equal(false)
+    expect(applied.agent.attachment.is_none()).to_equal(true)
+    expect(distributed_operation_journal_read_v3(journal, host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP),
+        1048576).unwrap().is_none()).to_equal(true)
+    applied.error
+
+describe "milestone_0031: the stream policy may only repeat the enrollment-pinned template":
+    it "names one parent for the held run, the helper and the plan in this file's fixtures":
+        # @req fixture precondition of every case below
+        expect(ap_fixture().request.plan.parent_operation_id).to_equal(AP_OP)
+        expect(ap_plan(ap_fixture(), "helper_attach_1", ap_policy_digest()).identity.parent_operation_id).to_equal(AP_OP)
+
+    it "refuses a controller-signed policy that moves the root, the broker or the cgroup, before the archive":
+        # @req item 1 (F15): root, broker program/digest/budget and delegated cgroup equal the pinned template
+        var root = primary_policy_fixture_v1()
+        root.root = "/trusted/elsewhere"
+        expect(ap_refused_clean(ap_policy_wire(root, "tty", AP_OP), "pin-root")).to_equal("container-stream-policy-pin-root")
+        var program = primary_policy_fixture_v1()
+        program.broker_program = "/trusted/other-broker"
+        expect(ap_refused_clean(ap_policy_wire(program, "tty", AP_OP), "pin-program")).to_equal("container-stream-policy-pin-broker")
+        var digest = primary_policy_fixture_v1()
+        digest.broker_digest = "9".repeat(64)
+        expect(ap_refused_clean(ap_policy_wire(digest, "tty", AP_OP), "pin-digest")).to_equal("container-stream-policy-pin-broker")
+        var budget = primary_policy_fixture_v1()
+        budget.broker_budget.cgroup_path = "/delegated/other-broker"
+        expect(ap_refused_clean(ap_policy_wire(budget, "tty", AP_OP), "pin-budget")).to_equal("container-stream-policy-pin-broker")
+        var cgroup = primary_policy_fixture_v1()
+        cgroup.delegated_cgroup_path = "/delegated/other-helpers"
+        expect(ap_refused_clean(ap_policy_wire(cgroup, "tty", AP_OP), "pin-cgroup")).to_equal("container-stream-policy-pin-cgroup")
+
+    it "refuses an environment the template does not pin and accepts the absent one":
+        # @req item 1: environment equal, or absent where the canonical policy allows it
+        var extra = primary_policy_fixture_v1()
+        extra.environment = ["LANG=C", "LD_PRELOAD=/tmp/x.so"]
+        expect(ap_refused_clean(ap_policy_wire(extra, "tty", AP_OP), "pin-env")).to_equal("container-stream-policy-pin-environment")
+        step("an empty environment passes the pin: the next gate (the plan this helper does not name) answers")
+        var absent = primary_policy_fixture_v1()
+        absent.environment = []
+        expect(ap_refused_clean(ap_policy_wire(absent, "tty", AP_OP), "pin-env-absent")).to_equal("container-output-admission-template-mismatch")
+
+    it "still admits the packet that repeats the pinned template":
+        # @req item 1 (no regression of the honest path)
+        val journal = ap_journal("pin-good")
+        val applied = ap_apply(ap_agent(), host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap(), ap_authority(),
+            ap_service(journal))
+        expect(applied.error).to_equal("")
+        expect(applied.agent.attachment_consumed).to_equal(true)
+
+describe "milestone_0031: plan fields the open core would refuse after helper begin are refused before the archive":
+    it "refuses a plan that is not a tty plan":
+        # @req item 2: the workspace primary opens `tty` only (machine_workspace_primary_plan_v3)
+        expect(ap_refused_clean(ap_policy_wire(primary_policy_fixture_v1(), "stdin", AP_OP), "mode")).to_equal("attach-plan-terminal-mode")
+
+    it "accepts the associated plan and helper on the admission helper begin would return":
+        # @req item 2: container_primary_attach_admission_validate_v1 before the archive
+        val good = ap_good("pane-a")
+        val parts = host_agent_attach_request_parts_v4(good).unwrap()
+        expect(host_agent_attach_association_check_v4(good, parts, ap_fixture().execution_signed.grant).is_ok()).to_equal(true)
+
+    it "refuses a helper that brokers another operation than the plan's, with the open core's own reason":
+        # @req item 2: plan<->helper association (was only checked on the lease, after begin)
+        val bytes = ap_bytes()
+        val second = host_helper_sibling_fixture_v1(ap_fixture(), ap_fixture().owner, "helper_attach_2")
+        val wire = host_agent_attach_request_encode_v4(ap_packet(bytes.other_helper, bytes.plan,
+            host_agent_pane_binding_encode_v4(ap_binding("pane-a")).unwrap(), ap_plan_digest(bytes.plan),
+            host_agent_pane_binding_digest_v4(ap_binding("pane-a")).unwrap(), second.execution_signed,
+            second.execution_approval, bytes.stream)).unwrap()
+        expect(ap_refused_clean(wire, "association")).to_equal("container-output-admission-template-mismatch")
+        step("the pure check alone answers the same for a plan with other resources than the helper reservation")
+        val good = ap_good("pane-a")
+        var parts = host_agent_attach_request_parts_v4(good).unwrap()
+        parts.plan.resources.cpu_millis = parts.plan.resources.cpu_millis + 1
+        expect(host_agent_attach_association_check_v4(good, parts, ap_fixture().execution_signed.grant).is_err()).to_equal(true)
+
+    it "refuses a plan whose parent is not this held run, with the open core's own reason":
+        # @req item 2: the open core's parent check (host-primary-parent-operation-mismatch) ran only after begin
+        expect(ap_refused_clean(ap_policy_wire(primary_policy_fixture_v1(), "tty", "operation_other"), "parent")).to_equal("host-primary-parent-operation-mismatch")
+
+    it "derives the deadline action from the helper kind exactly as helper begin does":
+        # @req item 2: a non-attach helper kind gets the `exec` deadline from begin; the pre-archive check must refuse
+        # it with the reason the open core would give on the lease, not admit it on an `attach` deadline
+        val good = ap_good("pane-a")
+        var parts = host_agent_attach_request_parts_v4(good).unwrap()
+        parts.helper.plan.helper_kind = "exec-broker"
+        expect(host_agent_attach_association_check_v4(good, parts, ap_fixture().execution_signed.grant).unwrap_err()).to_equal("container-output-admission-template-mismatch")
