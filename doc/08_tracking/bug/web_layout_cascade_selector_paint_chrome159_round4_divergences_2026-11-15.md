@@ -164,7 +164,13 @@ kept out of them until fixed.
         - cpu_simd and Vulkan truncate.
         - The raster rounds the ideal (`composite_over_base`).
         - The raster's percent `opacity` gives `#ff8080`. This is the `opacity_box` row above: Chrome gives `#ff7f7f` because alpha 128 and `(255*128)>>8 = 127`.
-      - **Not fixed:** cpu_simd's span blends run in the seed's Rust kernels (`blend_pixel`, `engine2d_blend_pixel_u32`; also `rt_engine2d_blend_const_span_pct_u32` for raster opacity). A `.spl` edit cannot change them. Routing the spans to `.spl` costs about 62 µs/px in the interpreter (5089 ms vs 0-1 ms native for 81,920 px). This needs a Rust kernel change and a seed redeploy (owner decision).
+      - **Not fixed, partly blocked** (measured with a temporary `color.spl` edit, reverted):
+        - Solid fills on cpu_simd and Vulkan did not move. They run in the seed's Rust const-span kernel (`blend_pixel`, `engine2d_blend_pixel_u32`), and so does raster `opacity` (`rt_engine2d_blend_const_span_pct_u32`).
+        - Gradient-layer composites on cpu_simd did move (4471 / 4798 px on S1 / S2): they reach `.spl` `blend`.
+        - `blend` is shared with clipped solid fills, so a `.spl`-only change splits the lanes.
+        - Routing the spans to `.spl` costs about 62 µs/px in the interpreter (5089 ms vs 0-1 ms native for 81,920 px).
+        - Needs a Rust kernel change and a seed redeploy (owner decision).
+      - `opacity` group (saveLayer) does not fit any two-term 8-bit rule: best 1060/1524. Still open.
       - Experiment (raster only, reverted): the shader rule brings S1/S2 full-frame max deviation from 3 to 2. The solid rule leaves 1/2 px at 3.
       - Red rows: `translucent_blend_chrome159_spec` (0/5 at base).
   - **Perf, gradient layer stacks (2026-11-17):** one raster + two `cpu_simd` renders at 640x480, `/usr/bin/time` under `systemd-run MemoryMax=8G`, seed `/home/yoon/.cache/cargo-target-webrender-vk/release/simple` (59635056 bytes, mtime 2026-11-14 09:32, sha256 08aba9746a813ee7...), hybrid JIT/interpreter (`hybrid-interp-splice` demotion), host load ~1.5-2. Mode: hybrid (`[engine-demotion] reason=hybrid-interp-splice`), NOT the pure interpreter of the #9960 numbers above (~20 s for the same page there), so do not compare across the two entries. `10-radial-gradient.html`: base 7.88 / 9.42 / 8.47 s, head 10.38 / 7.77 / 7.78 s, max RSS 1.40-1.42 GB both, so no change beyond noise (the radial path only gained the shared LUT helper). A 640x480 stack page (the same 530x300 tile with `radial-gradient(circle at 30% 40%, rgba(255,0,0,0.8), transparent 60%), linear-gradient(33deg, #0088ff, #ffe000 60%, #88ffbb)`): base 10.74 / 12.22 / 12.53 s at 2.00-2.05 GB (and wrong: 159,000 px raster vs `cpu_simd`), head 8.25 / 7.77 / 10.23 s at 1.40-1.42 GB (raster == `cpu_simd`). The two painted layers cost no measurable time over the old raw-text path.

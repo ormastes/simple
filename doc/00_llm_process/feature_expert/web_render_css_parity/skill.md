@@ -2374,10 +2374,12 @@ Glyph residual was ~75% of css-paint. Classified on a probe page (16 px sans, 16
 - **Base lanes:**
   - cpu_simd and Vulkan truncate (`(s*a + d*(255-a)) / 255`).
   - The raster's `composite_over_base` rounds the ideal; its percent `blend_opacity` gives `#ff8080` where Chrome gives `#ff7f7f`.
-- **Blocker:** on a NEON/AVX2 host, cpu_simd's translucent rect and image blends run in the Rust seed kernels (`blend_pixel` in `runtime/src/value/engine2d_simd_ops.rs`, `engine2d_blend_pixel_u32` in `interpreter_extern/simd.rs`), not `color.spl`. The raster's `opacity` spans use `rt_engine2d_blend_const_span_pct_u32` (Rust).
-  - A `.spl`-only edit would split the lanes.
-  - Routing the spans to the `.spl` scalar loop costs about 62 µs/px under the interpreter: 5089 ms for 81,920 px, against 0-1 ms native.
-  - So the fix needs the Rust kernels plus a seed redeploy (owner call).
+- **Blocker, partial (measured with temporary `color.spl` edits, reverted):**
+  - **Solid fills are blocked.** With the solid rule in `blend`, the six cells did not move on cpu_simd or Vulkan (`4c 05 ff8080 b2`). On a NEON/AVX2 host the unclipped translucent rect spans run in the seed's Rust kernel (`rt_engine2d_simd_blend_const_span_u32` -> `blend_pixel`, `runtime/src/value/engine2d_simd_ops.rs`; interpreter twin `engine2d_blend_pixel_u32`). Vulkan reads back the same truncated value, so Vulkan solid fills are composited by the CPU rule, not by lavapipe float blending (which would give `06` / `4d`). The raster's `opacity` spans use `rt_engine2d_blend_const_span_pct_u32` (Rust).
+  - **Gradient-layer composites are not blocked.** They do reach `.spl` `blend` on cpu_simd: 4471 / 4798 of 20,480 px moved on S1 / S2, with deviations identical to the raster.
+  - **Why `blend` cannot simply change:** `blend` is also the clipped solid-fill path (`sw_set_pixel_blend`). Changing it alone splits clipped from unclipped solid fills, and the raster from cpu_simd (`web_device_scale_spec` pins `gstack_mismatches == 0`).
+  - **Perf of routing:** sending the spans to the `.spl` scalar loop costs about 62 µs/px in the interpreter (5089 ms vs 0-1 ms native for 81,920 px). The Rust kernels plus a seed redeploy are the owner's call.
+- **`opacity` group (saveLayer, >1 child) is unresolved.** No two-term 8-bit candidate fits: best `round(S*a/255) + d*(255-a)//255` at 1060/1524, float ideal 750/1524. The bias is -0.5..-1 vs ideal. A single solid child folds into the solid rule (1059/1059).
 - **Feasibility (temporary `.spl` experiment on the raster, reverted):** with the shader rule, full-frame max deviation on the #9970 stacks S1/S2 drops from 3 (4 / 7 px) to 2 (0 px). With the solid rule it is still 3 (1 / 2 px).
 - **Red rows:** `test/01_unit/browser_engine/translucent_blend_chrome159_spec.spl` (0/5 at base).
   - Six cells on cpu_simd, raster and Vulkan.
