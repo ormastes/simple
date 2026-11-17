@@ -178,7 +178,7 @@ any worktree, under `/home/yoon/skia-n2/artifacts/`:
 | Provider build, `affine_v3=1`, receipt + digests | PASS (build-only) |
 | Failing-assertion control (seed) | PASS |
 | Native qualification executable | BLOCKED (see above) |
-| `01-solid-boxes` Engine2D/Skia exact RGBA on GB10 | not-run (blocked) |
+| `01-solid-boxes` Engine2D/Skia exact RGBA on GB10 | not-run (blocked: runner `not callable` fixed; now web admission `background-position-x`, see bug doc Blocker 3) |
 | `06-rectangular-clip` Engine2D/Skia exact RGBA on GB10 | not-run (blocked) |
 | `02-fractional-edges` vs declared tolerance on GB10 | not-run (blocked) |
 | RenderDoc capture on GB10 (generic Engine2D scene) | PASS (2 of 3 tries; regenerated 1 of 1 attempted) |
