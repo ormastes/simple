@@ -2365,3 +2365,20 @@ Glyph residual was ~75% of css-paint. Classified on a probe page (16 px sans, 16
   - Raster: `paint()` is now a front end over `_paint_passes`. Admitted groups are painted with their members hidden, then each group is painted alone into a bounded layer (coordinates shifted, root opacity forced to 100) and restored after the passes — Chrome's order for a z-auto stacking context relative to in-flow content. Ops are counted like Chrome (bg + border on one box = 2 ops = a group: Chrome paints `ff7e7e`, not the folded `ff7f7f`). Not admitted: nested groups, iframes, widget pages, html/body roots, a group overlapped by a positioned box that paints above it (later in tree order or z > 0), and any member the transparent layer cannot hold exactly (shadow, gradient, image, form control, translucent colour, text without an opaque root background) — the raster blenders treat a transparent destination as opaque black.
 - **Trap: multi-root pages lost their opacity entirely.** Before this, two or more opacity roots that were not `overflow:hidden` and equal-sized failed admission and painted FLAT at full opacity on cpu_simd/Vulkan; the raster painted group children unfaded. A group page at base is wrong by tens of levels, not by one.
 - **Follow-ups.** Multi-root Draw IR pages where any root holds text, a shadow or an outline still paint flat on cpu_simd/Vulkan (needs per-root text translation and halo padding). Nested groups (the Draw IR producer still refuses `parent_root >= 0`). Translucent children on the raster: a translucent child over a transparent layer pixel gets alpha 255 (measured `166975` vs Chrome `1e7b9d`); cpu_simd/Vulkan match Chrome on that probe. Vulkan cost is now ~19 ms per 140x60 group (offscreen create 1 ms, render 15 ms, device restore 2-5 ms).
+
+## 2026-11-17 — Chrome 159 source-over rule measured; blend fix BLOCKED on native kernels (red rows only)
+
+- **Two Skia rules, both fitted exactly** (arm64 software raster; `--disable-gpu` output is byte-identical):
+  - Solid colour fill (rgba background, `opacity` folded into the paint alpha, alpha `= round(css * 255)`): `round(s*a/255) + ((d*(256-a)) >> 8)` (SkPMSrcOver). Fits 6096/6096 single-layer, 3072/3072 two-layer, 1059/1059 `opacity`, 594/594 decimal-alpha channels, plus 2032 + 2032 channels with the source and destination terms isolated.
+  - Shader/image composite (gradient layers, `<img>`): `round(s*a/255) + div255r(d*(255-a))`, where `div255r(v) = (v + 128 + ((v + 128) >> 8)) >> 8` (raster pipeline lowp, NEON exact divide). Fits 12288/12288 channels of a translucent pixelated PNG over an opaque one. The solid rule fits only 8659 of those, so do not use one function for both.
+- **Base lanes:**
+  - cpu_simd and Vulkan truncate (`(s*a + d*(255-a)) / 255`).
+  - The raster's `composite_over_base` rounds the ideal; its percent `blend_opacity` gives `#ff8080` where Chrome gives `#ff7f7f`.
+- **Blocker:** on a NEON/AVX2 host, cpu_simd's translucent rect and image blends run in the Rust seed kernels (`blend_pixel` in `runtime/src/value/engine2d_simd_ops.rs`, `engine2d_blend_pixel_u32` in `interpreter_extern/simd.rs`), not `color.spl`. The raster's `opacity` spans use `rt_engine2d_blend_const_span_pct_u32` (Rust).
+  - A `.spl`-only edit would split the lanes.
+  - Routing the spans to the `.spl` scalar loop costs about 62 µs/px under the interpreter: 5089 ms for 81,920 px, against 0-1 ms native.
+  - So the fix needs the Rust kernels plus a seed redeploy (owner call).
+- **Feasibility (temporary `.spl` experiment on the raster, reverted):** with the shader rule, full-frame max deviation on the #9970 stacks S1/S2 drops from 3 (4 / 7 px) to 2 (0 px). With the solid rule it is still 3 (1 / 2 px).
+- **Red rows:** `test/01_unit/browser_engine/translucent_blend_chrome159_spec.spl` (0/5 at base).
+  - Six cells on cpu_simd, raster and Vulkan.
+  - Full-frame S1/S2 at k=4 against the Chrome PNGs in `test/fixtures/browser_engine/blend_chrome159/`.
