@@ -19,9 +19,11 @@ use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV
 use os.apps.smux.runtime_agent_pane_v1.{smux_agent_pane_claim_gate_v1, smux_agent_pane_claimed_v1,
     smux_agent_pane_read_gate_v1, smux_agent_pane_read_done_v1, smux_agent_pane_keeps_lease_v1,
     smux_agent_pane_resize_refusal_v1, smux_agent_pane_write_done_v1, smux_agent_pane_write_decode_v1,
+    smux_agent_pane_control_token_v1, smux_agent_pane_write_revoke_merge_v1,
     smux_agent_pane_registry_match_v1, smux_agent_pane_attach_supersedes_v1}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
 use std.common.sdn.value.SdnValue
+use os.apps.smux.client_leases.client_lease_token_valid
 use std.common.sdn.encode.sdn_encode_canonical
 
 fn write_body_v1(extra: Dict<text, SdnValue>) -> text:
@@ -142,3 +144,36 @@ describe "smux agent pane consumer":
             expect(smux_agent_pane_attach_supersedes_v1("run-1", "run-2")).to_equal(true)
         step("nothing held, nothing to supersede"):
             expect(smux_agent_pane_attach_supersedes_v1("", "run-2")).to_equal(false)
+
+    it "surfaces a failed native input gate close in the Write response (no retry-inducing error) and keeps the lease (PR4 follow-up)":
+        # @req PR4-WRITE-07
+        val turn = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(disposition: "completed",
+            accepted_bytes: 2, gate_error: "attach-pane-input-gate-revoke:boom"))
+        expect(turn.error).to_equal("")
+        expect(turn.response.contains("completed")).to_equal(true)
+        expect(turn.response.contains("gateError")).to_equal(true)
+        expect(turn.lease.is_some()).to_equal(true)
+        expect(turn.revoked).to_equal(false)
+        val refused = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-write-offset",
+            gate_error: "attach-pane-input-gate-revoke:boom"))
+        expect(refused.error).to_equal("attach-pane-write-offset")
+
+    it "merges a control-lease revoke error without hiding the write outcome (PR4 follow-up)":
+        # @req PR4-WRITE-08
+        expect(smux_agent_pane_write_revoke_merge_v1("", "")).to_equal("")
+        expect(smux_agent_pane_write_revoke_merge_v1("", "control-revision-conflict")).to_equal("runtime-agent-pane-write-revoke:control-revision-conflict")
+        expect(smux_agent_pane_write_revoke_merge_v1("attach-pane-write-offset", "control-revision-conflict")).to_equal("attach-pane-write-offset")
+
+    it "builds the issue token the control owner accepts from signed data only (PR4 follow-up)":
+        # @req PR4-WRITE-06
+        val digest = "b".repeat(64)
+        expect(client_lease_token_valid(smux_agent_pane_control_token_v1(digest, 1))).to_equal(true)
+        expect(client_lease_token_valid(smux_agent_pane_control_token_v1(digest, 123456789))).to_equal(true)
+        expect(smux_agent_pane_control_token_v1(digest, 1) == smux_agent_pane_control_token_v1(digest, 2)).to_equal(false)
+        expect(smux_agent_pane_control_token_v1(digest, 1) == smux_agent_pane_control_token_v1("c".repeat(64), 1)).to_equal(false)
+
+    it "pins the native attempt to 1 per Write (PR4 follow-up)":
+        # @req PR4-WRITE-09
+        val body: Dict<text, SdnValue> = {"bindingUid": SdnValue.String("bind1"), "attempt": SdnValue.Int(2),
+            "offset": SdnValue.Int(0), "maximum": SdnValue.Int(2), "data": SdnValue.String("hi")}
+        expect(smux_agent_pane_write_decode_v1(sdn_encode_canonical(SdnValue.Dict(body))).unwrap_err()).to_equal("runtime-agent-pane-write-attempt")
