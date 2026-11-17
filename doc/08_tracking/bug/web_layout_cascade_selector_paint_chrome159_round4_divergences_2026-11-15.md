@@ -288,10 +288,7 @@ takes effect can keep the margin inside; `_self_collapses`, `_generates_box`,
 `_is_out_of_flow` in `layout.spl`; a BFC-root box still contains its floats.
 
 Still open:
-- Per-side borders. Chrome: P `border-bottom:5px solid` > C `h10;mt10;mb10`
-  gives P y=10 h25, sibling y=35; `border-top:5px solid` gives P y=0 h25,
-  C y=15, sibling y=35. `border-top`/`border-bottom` shorthands are not parsed
-  and `border-*-width` longhands all write the one `border_width`.
+- Per-side borders — **fixed 2026-11-17** (`bw-*` rows, next section).
 - Clearance, float avoidance by following content, and the placement of a
   float/abs box after an empty block are not modelled here.
 
@@ -304,4 +301,62 @@ Regression sweep (seed `cargo-target-webrender-vk/release/simple`, serial, base 
 - **Open: text/password/email `<input>` box-sizing is quirks-only** (`input_ua_box_sizing`, found 2026-11-17). In Chrome 159 standards mode, with the doctype on that spec's PAGE, text, password and email compute content-box: 48x24 for `width:40px;height:16px;padding:2px`, and auto 185x21. Search, button, submit, reset, checkbox and radio stay border-box (40x16). The 2026-11-16 fix (#9859) made every input type border-box from a doctype-less reading. Not changed in the adoption lane: it is #9859's behaviour, and its spec PAGE has no doctype.
 - **Glyph lookup codepoint gate** (`glyph_lookup_codepoint`) — **fixed 2026-11-17.** `glyph_index_for_char`, `glyph_rows_for_char` and `_glyph_charset_index_of` (`src/lib/common/ui/glyph_bitmap_5x7.spl`) gated on `ch.len() == 1` and read `char_code_at(0)`. They now take the single codepoint from `text_codepoints` (rejecting an empty text or more than 4 bytes) and scan `FONT_CHARSET` by `byte_len()`. Measured on the seed `cargo-target-webrender-vk` 2026-11-17: `"•".len()` is 1 and `byte_len()` is 3, so on that seed the old gate already passed; the fix makes the lookup independent of the `len()` unit (owner decision: text slice units are bytes). Pinned by `test/01_unit/browser_engine/glyph_lookup_codepoint_chrome159_spec.spl` (4/4 on base and head on this seed; it is a guard, not a red-to-green row). No Vulkan row: the Vulkan bitmap atlas is ASCII-only. **Still open (not changed):** the Engine2D text walkers `text_render_metrics_to_buf` / `..._scale1` and `text_metrics` (`src/lib/gc_async_mut/gpu/engine2d/helpers_text.spl:52,110,150`) loop `i < text_val.len()` with the codepoint-indexed `char_code_at(i)` and size the run by `len()` cells; under a byte-unit `len()` a 3-byte `•` becomes three cells.
 - **Password disc advance** (`password_mask_advance`) — **fixed 2026-11-17.** Chrome 159 screenshot (60x16 box, 8px Arial, `ABC`): discs ink columns 3..10 with a faint 11, rows 8..9; six discs 3..18 (faint 19); at 13.33px three discs ink 3..16. `measureText('•')` 2.80. The engine stepped each disc by the 5px bitmap cell (ink 4..16). Fix: `input_text_glyph_advance` (`..._paint_raster.spl`) resolves the face's bullet advance at 10x size and rounds (3 at 8px; 13px keeps the cell advance 5), used by the raster walk, the measured width, the caret map and the overlay plan. The Draw IR `_value` command carries `bitmap-glyph-advance` when it differs from the cell, and the Engine2D executor (`_engine2d_draw_ir_bitmap_text`, `engine2d/draw_ir_adv.spl`) steps each codepoint by it, so Engine2D and the Vulkan device readback ink the raster's columns. Engine after the fix: 4..12 on software, Engine2D and lavapipe Vulkan (device pixels equal software). Pinned by `input_password_mask_chrome159_spec` AC-6 and the AC-5 Vulkan row (base 4/6 with the new rows, head 6/6). Residual: the 1-column offset (4 vs 3) is the 5x7 disc cell `01110`, whose ink starts at cell column 1.
+
+### Per-side borders on `_layout_block_node` (2026-11-17)
+
+Chrome for Testing 159.0.8154.6 (`--headless --no-sandbox --window-size=900,2000
+--dump-dom`), each case in a `display:flow-root;width:300px` wrapper W,
+`getBoundingClientRect()` relative to W:
+
+| row | P style (child `h10`, or `h10;mt10;mb10` where a sibling S `h5` follows) | Chrome | base engine |
+|-----|--------------------------------------------|--------|-------------|
+| `bw-bottom` | `border-bottom:5px solid` | P y=10 h=25, S y=35, W h=40 | shorthand ignored — **fixed** |
+| `bw-top` | `border-top:5px solid` | P y=0 h=25, C y=15, S y=35 | **fixed** |
+| `bw-4value` | `width:100px;border-style:solid;border-width:1px 2px 3px 4px` | P 106x14, C x=4 y=1 w=100 | one width — **fixed** |
+| `bw-left-right` | `width:100px;border-left:7px solid;border-right:3px solid` | P y=10 w=110 h=10, C x=7 w=100, S y=30 | **fixed** |
+| `bw-left-right-auto` | `border-left:7px solid;border-right:3px solid` | P w=300, C x=7 w=290 | **fixed** |
+| `bw-border-box` | `box-sizing:border-box;width:100px;height:40px;padding:2px;border-top:5px solid;border-left:6px solid` | P 100x40, C x=8 y=7 w=90 | **fixed** |
+| `bw-border-box-bottom-right` | border-box 100x40, `border-bottom:9px solid;border-right:4px solid` | C x=0 y=0 w=96 | **fixed** |
+| `bw-content-box` | `width:100px;height:40px;border-top:5px solid;border-bottom:2px solid;border-left:6px solid` | P 106x47, C x=6 y=5 w=100 | **fixed** |
+| `bw-no-style` | `border-width:5px` (style stays `none`) | P y=10 h=10, C x=0 w=300, S y=30 | 5px border — **fixed** |
+| `bw-style-only` | `border-style:solid` | P h=16, C x=3 y=3 w=294 (initial `medium` = 3px) | 0 — **fixed** |
+| `bw-order` | `border-width:5px;border-style:solid` and the reverse | both h=20, C x=5 w=290 | passed (guard) |
+| `bw-shorthand-no-width` | `border:solid red` | h=16, C x=3 w=294 | **fixed** |
+| `bw-shorthand-resets-style` | `border-style:solid;border:5px` | h=10, C x=0 w=300 | **fixed** |
+| `bw-side-style-none` | `border:5px solid;border-top-style:none` | h=15, C x=5 y=0 w=290 | **fixed** |
+| `bw-side-width` | `border:2px solid;border-bottom-width:8px` | h=20, C x=2 y=2 w=296 | **fixed** |
+| `bw-style-2value` | `width:100px;border-width:4px;border-style:solid none` | P w=100 h=18, C x=0 y=4 | **fixed** |
+| `bw-hidden` | `border:5px hidden` | h=10, C x=0 | **fixed** |
+| `bw-empty-left` | empty E `border-left:5px solid;mt10;mb10` between A `h10;mb10` and B `h10;mt10` | E h=0, B y=20, W h=30 (left/right borders do not stop self-collapse) | passed (guard) |
+| `bw-empty-top` / `bw-empty-bottom` | same with `border-top` / `border-bottom` | E y=20 h=5, B y=35, W h=45 | **fixed** |
+
+Fix: `StyleProps.border_width`/`border_style` are replaced by specified
+per-side `border_<side>_width` (initial 3px) and `border_<side>_style`
+(initial `none`); the used width is `border_top()` etc. (0 for none/hidden), so
+the result is independent of declaration order. `set_style` parses `border`,
+`border-<side>` (omitted parts reset to medium/none), `border-width` and
+`border-style` (1-4 values) and the per-side longhands. `layout.spl`,
+`layout_core.spl` and `BeLayoutBox` (`border_top/right/bottom/left`) use the
+per-side used widths for content offsets, content-box and border-box sizing;
+the top border blocks top collapse, the bottom border blocks bottom collapse,
+and only top/bottom borders stop self-collapse. `paint_box` keeps the single
+`stroke_rect` for a uniform border and emits one `fill_rect` per side
+otherwise. Spec `test/01_unit/browser_engine/layout_block_node_chrome159_spec.spl`:
+base 59/77 (18 red) -> head 77/77.
+
+Fixture corrections (not assertion changes): `layout_box_content_contract_spec`
+and `ui.chromium/css_spec` declared `border-width` with no `border-style`, which
+Chrome 159 resolves to a 0 width; both fixtures now add `border-style:solid`,
+and their asserted values are unchanged. The `css_spec` row ("accepts the full
+panel property set without losing values") fails on base and head for an
+unrelated reason, so that correction is not yet observed green. The same
+style-less `border-width:1px` was emitted by 10 widget producers in
+`widget_to_dom.spl`; they now also declare `border-style:solid`, keeping their
+1px borders (otherwise those widgets would lose their borders under the
+Chrome rule).
+
+Still open on this path: per-side border COLOURS (`border-<side>` colour tokens
+and `border-<side>-color` are not stored; `paint_box` paints every side with the
+one `border_color`, and only when it is set, so `currentcolor` is not
+modelled), and Chrome's device-pixel snapping of fractional border widths.
 

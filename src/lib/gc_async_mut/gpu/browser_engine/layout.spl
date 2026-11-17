@@ -66,8 +66,8 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
 
     # Element node
     val style = node.style
-    val px = style.padding_left + style.padding_right + style.border_width * 2.0
-    val py = style.padding_top + style.padding_bottom + style.border_width * 2.0
+    val px = style.padding_left + style.padding_right + style.border_left() + style.border_right()
+    val py = style.padding_top + style.padding_bottom + style.border_top() + style.border_bottom()
     val border_box = style.box_sizing == "border-box"
 
     # An explicit width is the content-box width unless box-sizing:border-box
@@ -98,8 +98,8 @@ fn _layout_block_node(node: BeDomNode, x: f64, y: f64, avail_w: f64, avail_h: f6
     val own_bfc = bfc_root or _is_root_element(node)
     val top_through = not own_bfc and _top_margin_passes(style)
     var bottom_through = not own_bfc and _bottom_margin_passes(style)
-    val inner_x = x + style.padding_left + style.border_width
-    val content_top = y + style.padding_top + style.border_width
+    val inner_x = x + style.padding_left + style.border_left()
+    val content_top = y + style.padding_top + style.border_top()
     # cursor_y = bottom border edge of the previous child (or content top)
     var cursor_y = content_top
     val inner_w = self_w - px
@@ -217,7 +217,7 @@ fn _used_horizontal_margins(style: StyleProps, inner_w: f64) -> [f64]:
         return [ml, mr]
     if not style.margin_left_auto and not style.margin_right_auto:
         return [ml, mr]
-    val px = style.padding_left + style.padding_right + style.border_width * 2.0
+    val px = style.padding_left + style.padding_right + style.border_left() + style.border_right()
     var border_w = style.width
     if style.box_sizing != "border-box":
         border_w = style.width + px
@@ -283,13 +283,13 @@ fn _top_margin_passes(style: StyleProps) -> bool:
     """A box's top margin adjoins its first in-flow child's (CSS 2.2 §8.3.1)
     with no top border, no top padding and no own BFC. Clearance is not
     modelled on this path."""
-    not _establishes_bfc(style) and style.padding_top == 0.0 and style.border_width == 0.0
+    not _establishes_bfc(style) and style.padding_top == 0.0 and style.border_top() == 0.0
 
 fn _bottom_margin_passes(style: StyleProps) -> bool:
     """A box's bottom margin adjoins its last in-flow child's with no bottom
     border/padding, an auto height and no own BFC. A min-height that takes
-    effect is checked at layout time. Per-side borders are not in StyleProps."""
-    not _establishes_bfc(style) and style.padding_bottom == 0.0 and style.border_width == 0.0 and style.height <= 0.0 and not style.height_zero
+    effect is checked at layout time."""
+    not _establishes_bfc(style) and style.padding_bottom == 0.0 and style.border_bottom() == 0.0 and style.height <= 0.0 and not style.height_zero
 
 fn _generates_box(node: BeDomNode) -> bool:
     """False for display:none and whitespace-only text."""
@@ -311,7 +311,7 @@ fn _self_collapses(node: BeDomNode, bfc_root: bool) -> bool:
     if node.is_text() or bfc_root or _is_root_element(node):
         return false
     val st = node.style
-    if _establishes_bfc(st) or st.padding_top != 0.0 or st.padding_bottom != 0.0 or st.border_width != 0.0:
+    if _establishes_bfc(st) or st.padding_top != 0.0 or st.padding_bottom != 0.0 or st.border_top() != 0.0 or st.border_bottom() != 0.0:
         return false
     if st.height > 0.0 or st.min_height > 0.0:
         return false
@@ -384,9 +384,26 @@ fn paint_box(box: BeLayoutBox, scene: LayoutPaintScene):
     if box.style.background_color.len() > 0:
         scene.add_command("fill_rect {box.x} {box.y} {box.width} {box.height} {box.style.background_color}")
 
-    # Border
-    if box.style.border_width > 0.0 and box.style.border_color.len() > 0:
-        scene.add_command("stroke_rect {box.x} {box.y} {box.width} {box.height} {box.style.border_width} {box.style.border_color}")
+    # Border: one stroke when all four sides match, else a fill per side.
+    val bt = box.style.border_top()
+    val br = box.style.border_right()
+    val bb = box.style.border_bottom()
+    val bl = box.style.border_left()
+    val bc = box.style.border_color
+    if bc.len() > 0:
+        if bt > 0.0 and bt == br and bt == bb and bt == bl:
+            scene.add_command("stroke_rect {box.x} {box.y} {box.width} {box.height} {bt} {bc}")
+        else:
+            if bt > 0.0:
+                scene.add_command("fill_rect {box.x} {box.y} {box.width} {bt} {bc}")
+            if bb > 0.0:
+                val bottom_y = box.y + box.height - bb
+                scene.add_command("fill_rect {box.x} {bottom_y} {box.width} {bb} {bc}")
+            if bl > 0.0:
+                scene.add_command("fill_rect {box.x} {box.y} {bl} {box.height} {bc}")
+            if br > 0.0:
+                val right_x = box.x + box.width - br
+                scene.add_command("fill_rect {right_x} {box.y} {br} {box.height} {bc}")
 
     # Text content
     if box.text_content.len() > 0:
