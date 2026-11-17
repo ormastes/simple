@@ -22,7 +22,7 @@ Traceability: REQ-BROWSER-ENGINE-OPACITY-GROUP-CHROME159-001 — CSS opacity gro
 use std.spec.*
 use std.io_runtime.{file_read_bytes_result}
 use std.common.image.png_decode.{PngImage, decode_png_to_argb}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count, vulkan_readback_census_reset, vulkan_readback_census_line}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count, vulkan_readback_census_reset, vulkan_readback_census_line, vulkan_device_css_group_restore_count}
 use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_pixel, css_opacity_group_alpha8}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_pixels_engine2d_at_device_scale
@@ -131,6 +131,64 @@ fn grp_chrome_reference(path: text) -> [u32]:
             print "read failed {path}: {msg}"
     out
 
+# Nested groups: one 64x16 block whose groups hold groups (two and three
+# levels, sibling inner groups that overlap inside the outer layer, an outer
+# group whose only item is an inner group, an outer group with its own
+# background). Chrome 159 restores each level into its parent's premultiplied
+# layer with the same SkBlendARGB32 rule; nothing is folded.
+fn ng_block(ox: i32) -> text:
+    var body = ""
+    body = body + grp_cell(ox, 0, "rgb(40,90,200)", grp_group("0.5", grp_box(0, 10, "rgb(250,20,30)") + grp_group("0.6", grp_box(6, 10, "rgb(10,200,60)") + grp_box(12, 4, "rgb(255,255,0)"))))
+    body = body + grp_cell(ox + 16, 0, "rgb(7,7,7)", grp_group_bg("0.7", "rgb(200,30,120)", grp_group("0.4", grp_box(2, 8, "rgb(255,255,255)") + grp_box(6, 8, "rgb(0,0,0)"))))
+    body = body + grp_cell(ox + 32, 0, "rgb(230,220,10)", grp_group("0.8", grp_box(0, 16, "rgb(0,0,255)") + grp_group("0.5", grp_box(4, 12, "rgb(255,0,0)") + grp_group("0.5", grp_box(8, 8, "rgb(0,255,0)") + grp_box(12, 4, "rgb(255,255,255)")))))
+    body = body + grp_cell(ox + 48, 0, "rgb(128,128,128)", grp_group("0.5", grp_group("0.5", grp_box(0, 10, "rgb(255,0,0)") + grp_box(6, 10, "rgb(0,255,0)"))))
+    body = body + grp_cell(ox, 8, "rgb(60,160,90)", grp_group("0.6", grp_group("0.5", grp_box(0, 6, "rgb(255,0,0)") + grp_box(3, 6, "rgb(0,0,255)")) + grp_group("0.5", grp_box(8, 6, "rgb(0,255,0)") + grp_box(11, 5, "rgb(0,0,0)"))))
+    body = body + grp_cell(ox + 16, 8, "rgb(255,255,255)", grp_group("0.9", grp_box(0, 16, "rgb(255,255,255)") + grp_group("0.3", grp_box(2, 6, "rgb(0,0,0)") + grp_box(6, 8, "rgb(255,0,0)"))))
+    # A sibling after an inner group overlaps it: paint order inside the layer.
+    body = body + grp_cell(ox + 32, 8, "rgb(200,200,200)", grp_group("0.5", grp_group("0.5", grp_box(0, 8, "rgb(255,0,0)") + grp_box(4, 8, "rgb(0,0,255)")) + grp_box(6, 10, "rgb(0,255,0)")))
+    body = body + grp_cell(ox + 48, 8, "rgb(20,40,60)", grp_group("0.7", grp_box(0, 8, "rgb(255,255,0)") + grp_group("0.4", grp_box(4, 8, "rgb(0,0,0)") + grp_box(8, 8, "rgb(255,255,255)")) + grp_box(10, 4, "rgb(0,0,255)")))
+    body
+
+fn ng_page(blocks: i32) -> text:
+    var body = ""
+    var k = 0
+    while k < blocks:
+        body = body + ng_block(k * 64)
+        k = k + 1
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
+
+# Chrome 159 colours of ng_page(1) (`--window-size=64,16`, k=4, read at device
+# (x*4+2, y*4+2); every sampled 4x4 device block is uniform).
+val NG_X: [i32] = [3, 8, 11, 14, 17, 20, 23, 28, 31, 34, 38, 42, 46, 51, 56, 61, 1, 5, 7, 8, 10, 13, 15, 17, 20, 23, 28, 31, 34, 37, 40, 46, 50, 54, 57, 59, 62]
+val NG_Y: [i32] = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12]
+val NG_CHROME: [u32] = [
+    0xFF913672u32, 0xFF486D7Bu32, 0xFF1E7B9Du32, 0xFF698C8Bu32,
+    0xFF8E1756u32, 0xFF9E567Cu32, 0xFF550E34u32, 0xFF550E34u32, 0xFF8E1756u32,
+    0xFF2D2BCEu32, 0xFF942B66u32, 0xFF605F66u32, 0xFF945F9Au32,
+    0xFFA06060u32, 0xFF60A060u32, 0xFF60A060u32,
+    0xFF766F3Eu32, 0xFF296F8Bu32, 0xFF296F8Bu32, 0xFF21A557u32, 0xFF29BC3Eu32, 0xFF296F3Eu32, 0xFF296F3Eu32,
+    0xFFFFFFFFu32, 0xFFB8B8B8u32, 0xFFFFB8B8u32, 0xFFFFB8B8u32, 0xFFFFFFFFu32,
+    0xFFD69696u32, 0xFF9696D6u32, 0xFF63E363u32, 0xFF63E363u32,
+    0xFFB9BF11u32, 0xFF707611u32, 0xFF566472u32, 0xFF050BC5u32, 0xFF566472u32
+]
+# Chrome 159 full frame of ng_page(3) at k=4 (`--window-size=192,16`). This
+# page shows no tile-seam deviation (blocks 1 and 2 equal block 0 exactly), so
+# the full frame is pinned exactly.
+val NG_WIDE_REF = "test/fixtures/browser_engine/opacity_group_chrome159/nested_cells_wide_k4.png"
+
+fn ng_mismatches(px: [u32], fw: i32) -> i32:
+    if px.len() < fw * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < NG_CHROME.len():
+        val got = px[NG_Y[n] * fw + NG_X[n]]
+        if got != NG_CHROME[n]:
+            print "nested-group cell {n} ({NG_X[n]},{NG_Y[n]}) got {got} want {NG_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
 describe "CSS opacity groups composite as Chrome 159 does":
     it "restores an opaque layer pixel with SkBlendARGB32 at alpha round(opacity*255)":
         expect(css_opacity_group_alpha8(50)).to_equal(128)
@@ -180,3 +238,30 @@ describe "CSS opacity groups composite as Chrome 159 does":
         val vk = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "vulkan")
         expect(grp_mismatches(vk, 64)).to_equal(0)
         expect(vulkan_readback_census_line()).to_equal("readbacks=1 readback_pixels=1024")
+
+    it "composites nested groups on the CPU raster as Chrome does":
+        val px = simple_web_layout_render_html_software_pixels(ng_page(1), 64, 16)
+        expect(ng_mismatches(px, 64)).to_equal(0)
+
+    it "composites nested groups on cpu_simd as Chrome does":
+        val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(ng_page(1), 64, 16, "cpu_simd")
+        expect(ng_mismatches(px, 64)).to_equal(0)
+
+    it "composites nested groups on Vulkan as Chrome and cpu_simd do":
+        val before = vulkan_readback_count()
+        val restores_before = vulkan_device_css_group_restore_count()
+        val vk = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(ng_page(1), 64, 16, "vulkan")
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(ng_page(1), 64, 16, "cpu_simd")
+        expect(vulkan_readback_count() > before).to_equal(true)
+        # Simple-internal: 8 top-level + 10 nested layers, every one restored
+        # on the device (no per-group readback).
+        expect(vulkan_device_css_group_restore_count() - restores_before).to_equal(18)
+        expect(ng_mismatches(vk, 64)).to_equal(0)
+        expect(grp_frame_max_dev(vk, cpu)).to_equal(0)
+
+    it "matches the Chrome nested-group full frame exactly at k=4":
+        val want = grp_chrome_reference(NG_WIDE_REF)
+        expect(want.len()).to_equal(768 * 64)
+        for lane in ["cpu_simd", "vulkan"]:
+            val got = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ng_page(3), 192, 16, 4, lane)
+            expect(grp_frame_max_dev(got, want)).to_equal(0)
