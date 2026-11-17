@@ -70,7 +70,10 @@ fn unit_path_exists(org_dir_base: text, rest: [text]) -> bool:
 fn unit_import_org(segs: [text], module_path: text) -> text:
     """Org of a `unit.<...>` import (segs include "unit"), or "" when it is
     ambiguous. A path segment naming an org dir AND a simple-lang family is
-    routed to whichever path exists on disk; both existing is an ambiguity."""
+    routed to whichever path exists on disk; both existing is an ambiguity.
+    Ambiguity is enforced here at scope time, not at load time: the loader
+    still loads the org path, but the import admits no suffix and the note is
+    attached to errors for suffixes of that org family only."""
     if segs.len() < 3: return UNIT_DEFAULT_ORG
     val cand = segs[1]
     if cand == UNIT_DEFAULT_ORG or cand == UNIT_DEFAULT_ORG + ".com": return UNIT_DEFAULT_ORG
@@ -81,7 +84,7 @@ fn unit_import_org(segs: [text], module_path: text) -> text:
     val org_hit = unit_path_exists(cand, rest)
     val default_hit = unit_path_exists(UNIT_DEFAULT_ORG, segs[1..])
     if org_hit and default_hit:
-        unit_scope_ambiguous.push("`use " + module_path + "` is ambiguous: both org '" + cand + "' and simple-lang family '" + cand + "' provide it")
+        unit_scope_ambiguous.push(unit_org_name(cand) + "/" + segs[segs.len() - 1] + "\t`use" + module_path + "` is ambiguous: both org '" + cand + "' and simple-lang family '" + cand + "' provide it")
         return ""
     if default_hit and not org_hit: return UNIT_DEFAULT_ORG
     unit_org_name(cand)
@@ -156,5 +159,7 @@ pub fn unit_suffix_scope_error(suffix: text) -> text:
         val prefix = if org == UNIT_DEFAULT_ORG: "" else: org + "."
         hints.push("`use unit." + prefix + fam + ".{" + suffix + "}`")
     var msg = "unit suffix '" + suffix + "' is not in scope; add " + hints.join(" or ") + " (or declare `unit X: T as " + suffix + "`)"
-    if unit_scope_ambiguous.len() > 0: msg = msg + "; " + unit_scope_ambiguous.join("; ")
+    for entry in unit_scope_ambiguous:
+        val tab = entry.index_of("\t")
+        if families.contains(entry.substring(0, tab)): msg = msg + "; " + entry.substring(tab + 1)
     msg

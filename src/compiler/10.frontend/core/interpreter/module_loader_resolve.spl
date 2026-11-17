@@ -138,26 +138,33 @@ fn _normalize_type_relative_path(module_name: text) -> text:
     ""
 
 # Unit library root. "" override = auto: `src/unit` under the cwd (repo root),
-# else derived from $SIMPLE_LIB (`<src>/lib` -> `<src>/unit`), the same anchors
-# stdlib resolution uses. Unresolvable -> "" so callers fail closed instead of
-# reading an empty cwd-relative listing. Tests may set an explicit override.
+# else derived from $SIMPLE_LIB, the same anchor stdlib resolution uses.
+# Unresolvable -> "" so callers fail closed instead of reading an empty
+# cwd-relative listing. Tests may set an explicit override.
 var unit_library_root_override: text = ""
+
+pub fn unit_library_root_from_simple_lib(simple_lib: text) -> text:
+    """Unit root for a $SIMPLE_LIB value: canonical `<root>/src` -> `<src>/unit`
+    (stdlib joins `lib/...` onto it); secondary `<src>/lib` -> sibling
+    `<src>/unit`. "" when neither exists."""
+    var lib = to_slash(simple_lib)
+    while lib.ends_with("/"):
+        lib = lib.substring(0, lib.len() - 1)
+    if lib == "":
+        return ""
+    val direct = lib + "/unit"
+    if file_exists(direct):
+        return direct
+    if lib.ends_with("/lib"):
+        val sibling = _interp_path_parent(lib) + "/unit"
+        if file_exists(sibling):
+            return sibling
+    ""
 
 fn _unit_library_root_auto() -> text:
     if file_exists("src/unit"):
         return "src/unit"
-    val simple_lib = to_slash(env_get_opt("SIMPLE_LIB") ?? "")
-    if simple_lib != "":
-        var lib = simple_lib
-        while lib.ends_with("/"):
-            lib = lib.substring(0, lib.len() - 1)
-        val sibling = _interp_path_parent(lib) + "/unit"
-        if lib.ends_with("/lib") and file_exists(sibling):
-            return sibling
-        val nested = lib + "/src/unit"
-        if file_exists(nested):
-            return nested
-    ""
+    unit_library_root_from_simple_lib(env_get_opt("SIMPLE_LIB") ?? "")
 
 pub fn unit_library_root_get() -> text:
     """Existing unit library root, or "" when it cannot be found."""
