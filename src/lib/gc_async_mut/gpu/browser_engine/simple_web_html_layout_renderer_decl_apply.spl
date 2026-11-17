@@ -11,7 +11,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarat
     parse_supported_outline_shorthand_width_px, css_cascade_root_font_px
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{BoxShadowAgg, shadow_layer_alpha, shadow_length_prefix}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec, gradient_layer_list, gradient_layer_list_color_text}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec, gradient_layer_entries, gradient_layer_list_color_text, gradient_layer_list_apply_longhands}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{_color_alpha_zero, _decl_transparent_color, _decl_top_level_tokens}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille}
@@ -486,7 +486,7 @@ fn _apply_decls_without_grid_inner(
                     # gradient layer painters; only its final colour layer
                     # (if any) is the background colour. `parse_color_alpha`
                     # over the whole list took the first stop instead.
-                    if gradient_layer_list(bgs).len() > 0:
+                    if gradient_layer_entries(bgs).len() > 0:
                         val list_color = gradient_layer_list_color_text(bgs)
                         bg_v = if list_color != "": parse_color_alpha(list_color) else: 0u32
                     else:
@@ -680,6 +680,32 @@ fn _apply_decls_without_grid_inner(
             background_gradient_angle_deg_v = 180
             background_gradient_is_radial_v = false
             bg_layers_raw_v = two_url_plan
+    # Per-layer background-size / -position / -repeat of a gradient list
+    # (CSS Backgrounds 3 §2.2): each image layer takes its own entry of each
+    # longhand list (cyclically) or its own shorthand tail. The list is
+    # rewritten with a `<position> / <size> <repeat>` tail per layer, the form
+    # the gradient layer painters read, and any typed single-layer projection
+    # is dropped so the layer path paints it. Lists whose every layer keeps the
+    # default geometry are left untouched.
+    val layer_size_list = if bg_size.len() > 0 and bg_size_pos > bgs_pos: bg_size else: ""
+    val layer_position_list = if bg_position.len() > 0 and bg_position_pos > bgs_pos: bg_position else: ""
+    val layer_repeat_list = if bg_repeat.len() > 0 and bg_repeat_pos > bgs_pos: bg_repeat else: ""
+    var layer_src = bg_layers_raw_v
+    if layer_src == "":
+        if bg_image.len() > 0 and bg_image_pos > bgs_pos:
+            layer_src = bg_image
+        elif bgs_pos >= 0 and bgs_pos > bg_pos:
+            layer_src = bgs
+    if layer_src != "":
+        val layer_list = gradient_layer_list_apply_longhands(layer_src, layer_size_list, layer_position_list, layer_repeat_list)
+        if layer_list != "":
+            bg_layers_raw_v = layer_list
+            background_gradient_from_v = 0u32
+            background_gradient_to_v = 0u32
+            background_gradient_stop_colors_v = []
+            background_gradient_stop_positions_v = []
+            background_gradient_angle_deg_v = 180
+            background_gradient_is_radial_v = false
     val col = decl_tbl_get_p(decl_tbl, decl_present, "color")
     if col.len() > 0:
         val cv = parse_color(col)
@@ -2760,10 +2786,32 @@ fn _decl_vertical_margin_exact_milli(tok: text, font_px: i32) -> i64:
     val px_milli = svg_number_milli(t) * unit_px
     ((px_milli * 64) / 1000) * 1000 / 64
 
+# `2.5%` -> 2500 (percent x 1000); 0 for anything that is not a plain
+# non-negative percentage (`auto`, `-5%`, `calc(..)`, lengths, `0%`).
+fn _decl_vertical_margin_percent_x1000(tok: text) -> i32:
+    val t = tok.trim()
+    val n = t.byte_len()
+    if n < 2 or not t.ends_with("%") or t.starts_with("-") or t.starts_with("+"):
+        return 0
+    val body = t.substring(0, n - 1)
+    var i = 0
+    while i < body.byte_len():
+        val ch = body.substring(i, i + 1)
+        if ch != "." and dec_val(ch) >= 10:
+            return 0
+        i = i + 1
+    svg_number_milli(body) as i32
+
 # The sub-pixel part to carry in `Style.margin_t_milli` / `margin_b_milli`:
 # the floored milli-px value when it is fractional, else 0 (the whole-px
 # margin already says everything).
 fn _decl_vertical_margin_milli(tok: text, font_px: i32) -> i32:
+    # A non-negative `N%` (CSS 2.2 8.3: of the containing block WIDTH, known
+    # only at layout) is carried as a NEGATIVE milli: -(percent x 1000).
+    # block_margin_milli resolves it; `0%` is a plain zero margin.
+    val pct = _decl_vertical_margin_percent_x1000(tok)
+    if pct != 0:
+        return 0 - pct
     val exact = _decl_vertical_margin_exact_milli(tok, font_px)
     if exact < 0 or exact % 1000 == 0:
         return 0

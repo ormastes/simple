@@ -1,0 +1,48 @@
+# Tile grid of one CSS background image layer (CSS Backgrounds 3 §3.4-3.5):
+# the tile at index 0 starts at t0 (Q10 px) and is ts long; a repeating axis
+# lays tiles at t0 + n * ts in both directions. A device pixel belongs to the
+# tile whose span holds its centre. Shared by the browser-engine raster and
+# the Draw IR executor so both lanes cut identical tile rects.
+
+# floor(a / b) for b > 0.
+fn _gt_floor_div(a: i64, b: i64) -> i64:
+    if a >= 0:
+        return a / b
+    0 - ((0 - a + b - 1) / b)
+
+# First pixel whose centre lies at or after the Q10 edge e.
+fn _gt_center_px(e: i64) -> i64:
+    _gt_floor_div(e + 511, 1024)
+
+# The tiles of one axis that cover the pixel span [p0, p0 + len): flat
+# triples [start_px, end_px, n] (end exclusive, n the tile index), clipped
+# to the span. Only tile 0 when the axis does not repeat.
+# reason: one-axis tile arithmetic shared by the raster and Draw IR lanes; pixel span in device px, tile origin / size in Q10 px
+# @allow(primitive_api)
+pub fn gradient_tile_spans(p0: i32, len: i32, t0: i64, ts: i64, repeat: bool) -> [i64]:
+    var out: [i64] = []
+    if len <= 0 or ts <= 0:
+        return out
+    var n0: i64 = 0
+    var n1: i64 = 0
+    if repeat:
+        n0 = _gt_floor_div((p0 as i64) * 1024 + 512 - t0, ts)
+        n1 = _gt_floor_div(((p0 + len - 1) as i64) * 1024 + 512 - t0, ts)
+    val lo = p0 as i64
+    val hi = (p0 + len) as i64
+    var n = n0
+    # cpu-lane-loop-ok: one tile per step along one axis of one layer; bound is the painted span over the tile size
+    while n <= n1:
+        val e0 = t0 + n * ts
+        var s = _gt_center_px(e0)
+        var e = _gt_center_px(e0 + ts)
+        if s < lo:
+            s = lo
+        if e > hi:
+            e = hi
+        if e > s:
+            out.push(s)
+            out.push(e)
+            out.push(n)
+        n = n + 1
+    out
