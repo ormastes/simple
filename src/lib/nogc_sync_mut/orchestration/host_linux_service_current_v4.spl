@@ -67,10 +67,15 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServic
     host_linux_service_agent_step_v4, host_linux_service_agent_reply_v4, host_linux_service_agent_epoch_v4,
     host_linux_service_agent_close_v4, host_linux_service_agent_release_v4, host_linux_service_agent_request_cancel_v4,
     host_agent_cancel_request_decode_v4, host_agent_cancel_archive_check_v4, host_linux_service_agent_cancel_authorize_v4,
-    HostAgentActionAuthorityV4, host_agent_detach_apply_v4, host_linux_service_agent_attachment_inspect_v4}
+    HostAgentActionAuthorityV4, host_agent_detach_apply_v4, host_linux_service_agent_attachment_inspect_v4,
+    HostAgentAttachServiceV4, host_agent_attach_apply_v4, HostAgentTerminalAuthorityV4, host_agent_terminal_authority_v4,
+    host_linux_service_agent_attachment_authority_inspect_v4}
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attachment_live_v4, HostAgentReleaseContextV4,
     HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, host_agent_attachment_release_step_v4,
-    HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4}
+    host_agent_attach_archive_relative_v4, HOST_AGENT_ATTACH_MAX_BYTES_V4, HOST_AGENT_ATTACH_READY_V4,
+    HOST_AGENT_ATTACH_ADOPTED_V4}
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.host_helper_prepare_check_v1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
 use std.container.LinuxWorkspaceRootBorrowV3
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
@@ -905,8 +910,12 @@ pub fn host_linux_service_agent_invoke_v4(original: HostLinuxServiceCurrentV4, s
             if opened.error != "": return linux_service_reply_v4(owner, "", opened.error, true)
             return linux_service_reply_v4(owner, host_linux_service_agent_reply_v4(opened.agent.unwrap()), "", true)
         return linux_service_reply_v4(owner, "", if opened.error != "": opened.error else: "linux-host-agent-transfer-refused", true)
+    # milestone_0023 part B: the attach effects (helper prepare/begin) verify under the installed policy, the live
+    # service scope and a clock re-read from that policy.
+    val step_policy = metadata.unwrap().policy
+    val step_refresh = fn() -> HostReservationAuthorizationContextV1: host_local_context_v1(step_policy)
     val turn = host_linux_service_agent_step_v4(owner.agent.unwrap(), owner.capacity.unwrap(), input.unwrap(),
-        linux_service_helper_store_v4(owner))
+        linux_service_helper_store_v4(owner), step_policy, scope, step_refresh)
     owner.agent = Some(turn.agent)
     # The returned Host capacity owner is the single journal writer: adopted on every path.
     owner.capacity = Some(turn.capacity)
@@ -969,15 +978,109 @@ pub fn host_linux_service_agent_cancel_v4(original: HostLinuxServiceCurrentV4, s
     owner.agent = Some(cancelled.agent)
     linux_service_reply_v4(owner, cancelled.response, "", cancelled.effect_attempted)
 
-# milestone_0021 13.2 attach: refused BEFORE the archive. The composed effects need a controller-signed
-# `host_helper_execute_v1` grant for helper begin that the 14B attach packet does not carry, a
-# ContainerStreamPolicyV2 for the open core, and a live service epoch / pane-binding incarnation source; none
-# exists on this owner, so no attach is archived and no helper is prepared.
+# milestone_0023 part B (c): the service's LIVE epoch, derived read-only from the verified epoch record. The
+# record is read through the agent's transfer holder, must still be the exact record whose digest this service
+# was lent (`initial_epoch`, the same comparison current_v4 makes), and its `epoch_generation` is the epoch. No
+# field stores it and nothing sets it.
+fn linux_service_live_epoch_v4(owner: HostLinuxServiceCurrentV4) -> Result<i64, text>:
+    if owner.agent.is_none(): return Err("linux-host-agent-attach-unstarted")
+    val record = host_linux_service_agent_epoch_v4(owner.agent.unwrap())?
+    if sha256_text(machine_fresh_epoch_record_bytes_v1(record)?) != owner.initial_epoch:
+        return Err("linux-host-service-epoch-changed")
+    if record.epoch_generation <= 0: return Err("linux-host-service-epoch-generation")
+    Ok(record.epoch_generation)
+
+# The held-run inputs every controller-signed attachment action re-derives (attach, the terminal authority): the
+# archived signed execute of the held agent and its association digest, as HostAgentActionAuthorityV4 under the
+# installed policy and a fresh clock.
+fn linux_service_agent_authority_v4(owner: HostLinuxServiceCurrentV4, metadata: HostPrivateMetadataV2) -> Result<HostAgentActionAuthorityV4, text>:
+    if owner.agent.is_none() or owner.capacity.is_none() or owner.scope.is_none():
+        return Err("linux-host-agent-attach-unstarted")
+    val operation_id = owner.agent.unwrap().operation_id
+    val archived = distributed_operation_journal_read_v3(owner.capacity.unwrap().journal,
+        linux_service_execute_relative_v4(owner.scope.unwrap(), operation_id)?, 2097152)?
+    val execute = host_linux_service_agent_execute_v4(archived, operation_id)?
+    val policy = metadata.policy
+    Ok(HostAgentActionAuthorityV4(snapshot: policy.snapshot, controller_ref: metadata.configuration.controller_ref,
+        execute_operation: execute.operation, execute_association_digest: host_execution_association_digest_v3(execute.association)?,
+        context: host_local_context_v1(policy)))
+
+# The read-only helper admission of an attach, run before its archive: the helper operation must be NEW on this
+# journal (a reused id could only fail at prepare, after the slot was consumed), then the read-only twin of helper
+# prepare's own checks.
+fn linux_service_attach_admit_v4(capacity: HostCapacityOwnerV1, helper: HostHelperRequestV1, policy: LocalAuthorityPolicyV1,
+        scope: ContainerHostScopeV2, context: HostReservationAuthorizationContextV1) -> Result<(), text>:
+    val row = daemon_operation_exact_v2(capacity.journal, helper.operation)
+    if row.is_ok(): return Err("attach-helper-operation-reused")
+    if row.unwrap_err() != "OPERATION_NOT_FOUND": return Err(row.unwrap_err())
+    host_helper_prepare_check_v1(capacity, helper, policy, scope, context)
+
+# milestone_0021 13.2 E1 attach (bound by milestone_0023 part B): the same held-run gates as cancel, then the ONE
+# composed entry (host_agent_attach_apply_v4). Service-owned inputs: the journal and fence of the archive slot,
+# the service's OWN live incarnation (its scope's continuity id) and live epoch (the verified epoch record), the
+# signed window the last step saw, the verified helper store, and `admit`, the read-only helper admission check
+# on THIS capacity owner. Every one of them, and every gate inside the entry, refuses BEFORE the archive, so a
+# refusal here never consumes the one attach slot of the incarnation. The effects (helper prepare, then begin +
+# open + adoption) run on later host-agent-invoke calls through the step driver.
 pub fn host_linux_service_agent_attach_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
-    val owner = original
+    var owner = original
     val metadata = owner.current_v4()
     if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
-    linux_service_reply_v4(owner, "", HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4, false)
+    if not owner.capacity.unwrap().ledger.continuity_proven:
+        return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
+    if owner.reconcile_error != "" or not owner.inventory_returned:
+        return linux_service_reply_v4(owner, "", "linux-host-agent-before-reconcile", false)
+    if owner.agent.is_none(): return linux_service_reply_v4(owner, "", "linux-host-agent-attach-unstarted", false)
+    val agent = owner.agent.unwrap()
+    val scope = owner.scope.unwrap()
+    val capacity = owner.capacity.unwrap()
+    val authority = linux_service_agent_authority_v4(owner, metadata.unwrap())
+    if authority.is_err(): return linux_service_reply_v4(owner, "", authority.unwrap_err(), false)
+    val fence = container_scope_fence_id_v2(scope)
+    if fence.is_err(): return linux_service_reply_v4(owner, "", fence.unwrap_err(), false)
+    val live_epoch = linux_service_live_epoch_v4(owner)
+    if live_epoch.is_err(): return linux_service_reply_v4(owner, "", live_epoch.unwrap_err(), false)
+    val policy = metadata.unwrap().policy
+    val context = authority.unwrap().context
+    # Geometry needs an installed-policy-v3 source this service does not have: `policy_bytes` stays empty and a
+    # pane Resize is refused by the adapter.
+    val service = HostAgentAttachServiceV4(journal: capacity.journal, fence: fence.unwrap(),
+        live_incarnation: scope.continuity_id, live_epoch: live_epoch.unwrap(), not_after: agent.not_after,
+        policy_bytes: "", store_root: linux_service_helper_store_v4(owner).root, monotonic_ms: context.monotonic_ms)
+    val admit = fn(helper: HostHelperRequestV1) -> Result<(), text>: linux_service_attach_admit_v4(capacity, helper, policy, scope, context)
+    val applied = host_agent_attach_apply_v4(agent, source, authority.unwrap(), service, admit)
+    if applied.error != "": return linux_service_reply_v4(owner, "", applied.error, false)
+    owner.agent = Some(applied.agent)
+    # A replay is answered from state; a first packet was archived and consumed the slot.
+    linux_service_reply_v4(owner, host_linux_service_agent_attachment_inspect_v4(applied.agent), "", not applied.replay)
+
+# milestone_0023 part B (f): the controller-signed agent-terminal authority of this service's attach-ready
+# attachment, verified NOW. Read-only (the owner is not changed and nothing is cached): the full current_v4
+# recheck, the reconcile gates, the archived attach packet of the held run read back from this journal, and
+# host_agent_terminal_authority_v4 under the installed policy, a fresh clock and the service's OWN live
+# incarnation and epoch. Err for anything else (no agent, attachment not ready/adopted, an expired or revoked
+# approval, a changed policy generation, a binding of another incarnation or epoch).
+pub fn host_linux_service_agent_terminal_authority_v4(owner: HostLinuxServiceCurrentV4) -> Result<HostAgentTerminalAuthorityV4, text>:
+    val metadata = owner.current_v4()?
+    if not owner.capacity.unwrap().ledger.continuity_proven: return Err("linux-host-service-startup-quarantine")
+    if owner.reconcile_error != "" or not owner.inventory_returned: return Err("linux-host-agent-before-reconcile")
+    val authority = linux_service_agent_authority_v4(owner, metadata)?
+    val scope = owner.scope.unwrap()
+    val agent = owner.agent.unwrap()
+    val archived = distributed_operation_journal_read_v3(owner.capacity.unwrap().journal,
+        host_agent_attach_archive_relative_v4(container_scope_fence_id_v2(scope)?, agent.operation_id),
+        HOST_AGENT_ATTACH_MAX_BYTES_V4)?
+    host_agent_terminal_authority_v4(agent, archived, authority, scope.continuity_id, linux_service_live_epoch_v4(owner)?)
+
+# The inspect field of the accessor above: "" unless the attachment is ready/adopted, else "verified" or the
+# accessor's refusal (so an operator sees WHY a ready attachment has no usable authority).
+fn linux_service_terminal_authority_state_v4(owner: HostLinuxServiceCurrentV4) -> text:
+    if owner.agent.is_none() or owner.agent.unwrap().attachment.is_none(): return ""
+    val stage = owner.agent.unwrap().attachment.unwrap().attach_stage
+    if stage != HOST_AGENT_ATTACH_READY_V4 and stage != HOST_AGENT_ATTACH_ADOPTED_V4: return ""
+    match host_linux_service_agent_terminal_authority_v4(owner):
+        case Ok(_): "verified"
+        case Err(reason): reason
 
 # milestone_0021 13.2 E2 detach: the same held-run gates as cancel, then the composed entry
 # (host_agent_detach_apply_v4: authorize, bind to this attachment, archive no-replace + read-back, ONE forced
@@ -1019,14 +1122,16 @@ pub fn host_linux_service_agent_detach_v4(original: HostLinuxServiceCurrentV4, s
     if applied.error != "": return linux_service_reply_v4(owner, "", applied.error, effect)
     linux_service_reply_v4(owner, host_linux_service_agent_attachment_inspect_v4(applied.agent), "", effect)
 
-# 13.2 inspect: the read-only attachment report; never runs a release step. `source` names the run.
+# 13.2 inspect: the read-only attachment report; never runs a release step. `source` names the run. A
+# ready/adopted attachment also reports its terminal-authority verdict (milestone_0023 part B).
 pub fn host_linux_service_agent_inspect_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
     val owner = original
     val metadata = owner.current_v4()
     if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
     if owner.agent.is_none() or owner.agent.unwrap().operation_id != source:
         return linux_service_reply_v4(owner, "", "linux-host-agent-inspect-unknown", false)
-    linux_service_reply_v4(owner, host_linux_service_agent_attachment_inspect_v4(owner.agent.unwrap()), "", false)
+    linux_service_reply_v4(owner, host_linux_service_agent_attachment_authority_inspect_v4(owner.agent.unwrap(),
+        linux_service_terminal_authority_state_v4(owner)), "", false)
 
 fn linux_service_cancel_relative_v4(scope: ContainerHostScopeV2, operation_id: text) -> Result<text, text>:
     Ok("host-agent-cancel/" + sha256_text(container_scope_fence_id_v2(scope)? + "\n" + operation_id) + ".sdn")
@@ -1237,3 +1342,4 @@ export host_linux_service_start_v4, host_linux_service_prepare_v4, host_linux_se
 export host_linux_service_open_installed_v4, host_linux_service_anchor_parent_v4
 export host_linux_service_dispatch_v4, host_linux_service_execute_v4, host_linux_service_dispatch_installed_v4
 export host_linux_service_agent_invoke_v4, host_linux_service_agent_cancel_v4
+export host_linux_service_agent_attach_v4, host_linux_service_agent_terminal_authority_v4

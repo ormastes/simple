@@ -10,8 +10,9 @@
 # for every attachment sub-step that touches native state (OP open, RP expire, FL classification, RV/CL/ST
 # resume). The machine itself does d1 REVOKE, the deadlines, the refusal and non-advancing counters, RB, the
 # RT/RF writes and the hook. PR3b part 2 binds the production port (`host_agent_attachment_release_step_v4`:
-# U', S, RP, geometry drain; F/B and the attach effects stay fail-closed, see the constants below) and the
-# production pane io port (`host_agent_pane_io_port_v4`).
+# U', S, F/B, RP, geometry drain) and the production pane io port (`host_agent_pane_io_port_v4`).
+# milestone_0023 part B binds the attach effects
+# (`host_agent_attachment_open_step_v4`: helper prepare, then helper begin + open core + adoption).
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2,
@@ -28,7 +29,16 @@ use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneOpV4, Ho
     host_agent_pane_io_refused_v4}
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
     distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3, distributed_operation_journal_read_required_v3}
-use std.nogc_sync_mut.orchestration.host_helper_owner_v1.HostHelperLeaseV1
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.{HostHelperLeaseV1, host_helper_prepare_v1, host_helper_begin_v1}
+use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.{HostPrimaryAttachCoreInputV1,
+    host_primary_attach_open_core_v1}
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.{ContainerStreamPolicyV2, container_stream_policy_decode_v2,
+    container_stream_policy_digest_v2}
 use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, host_helper_request_decode_v1}
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperSettlementAckV1,
     host_helper_cancel_unconsumed_v1}
@@ -41,7 +51,8 @@ use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helpe
     host_linux_helper_attach_expected_v1, host_linux_helper_attach_binding_check_v1, host_primary_attach_refusal_decode_v1}
 use std.container.SimpleContainerOwnerV2
 use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, ContainerOwnedTerminalSessionV1}
-use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2, container_primary_output_read_v1}
+use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2, container_primary_output_read_v1,
+    host_agent_attach_adopt_v4}
 use std.nogc_async_mut.container.terminal_primary_write_v2.{ContainerPrimaryInputRequestV2,
     ContainerPrimaryInputDispositionV2, container_primary_input_write_v2}
 use std.nogc_async_mut.container.workspace_api_v3.{simple_container_primary_session_return_v3,
@@ -108,6 +119,11 @@ pub struct HostAgentAttachmentV4:
     policy_bytes: text = ""
     helper_request_bytes: text = ""
     store_root: text = ""
+    # milestone_0023 part B: the controller-signed `host_helper_execute_v1` grant and stream policy of the VERIFIED
+    # attach packet (both covered by the signed attach payload digest); helper begin re-verifies the grant live.
+    helper_execute_signed: Option<DistributedSignedGrantV2> = None
+    helper_execute_approval: Option<DistributedSignedApprovalV2> = None
+    stream_policy: Option<ContainerStreamPolicyV2> = None
     # A prepared-but-not-begun helper receipt (RP until expired, 13.2).
     prepared_receipt_digest: text = ""
     prepare_deadline_ms: i64 = 0
@@ -239,6 +255,10 @@ pub struct HostAgentAttachmentPortCallV4:
     pending: bool
     # The agent's transfer holder, lent for this call only (I5).
     container: Option<SimpleContainerOwnerV2> = None
+    # A FORCED release (signed detach, stage `detach`, wedged/failed, close): OP never prepares or begins then.
+    release: bool = false
+    # The runtime identity the agent observed at Create (agent.created); the open core reproduces the plan with it.
+    runtime: Option<RuntimeIdentityV1> = None
 
 pub struct HostAgentAttachmentReleaseStepV4:
     attachment: HostAgentAttachmentV4
@@ -257,9 +277,22 @@ pub struct HostAgentReleaseContextV4:
     store: HostHelperStoreV1
     monotonic_ms: i64
 
-# 13.2 effects: helper begin needs its own controller-signed `host_helper_execute_v1` grant, which the 14B attach
-# packet does not carry, and the open core needs a ContainerStreamPolicyV2 the attachment has no decoder for.
-pub const HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4 = "linux-host-agent-attach-helper-begin-grant-unbound"
+# 13.2 effects never start under a forced release or through a port without open context (close, signed detach):
+# an OP attachment then ends by the 14.0 writer rule with this error (RF with nothing held, RP with a receipt).
+pub const HOST_AGENT_ATTACH_OPEN_ABANDONED_V4 = "linux-host-agent-attach-open-abandoned"
+const HOST_AGENT_ATTACH_OPEN_INPUT_V4 = "linux-host-agent-attach-open-input-missing"
+
+# What the attach effects need that is neither attachment state nor the release context (milestone_0023 part B):
+# the installed policy and live service scope of helper prepare/begin, the authorization context of this call,
+# and the parent of the open core, re-derived by the step driver on EVERY call from the archived signed execute
+# (`parent` is the journal row's prepare operation; `execution` is the association's execution request). Built for
+# ONE call next to a `refresh` closure, captured by the port closure, never stored.
+pub struct HostAgentOpenContextV4:
+    policy: LocalAuthorityPolicyV1
+    scope: ContainerHostScopeV2
+    context: HostReservationAuthorizationContextV1
+    parent: OperationEnvelopeV2
+    execution: ContainerExecutionRequestV2
 # One geometry drain step (the native step budget is 1..25 ms; 1 matches terminal_primary_geometry_v2).
 const HOST_AGENT_GEOMETRY_STEP_MS_V4: i64 = 1
 
@@ -288,12 +321,89 @@ fn host_agent_release_charged_v4(attachment: HostAgentAttachmentV4, store: HostH
         case Ok(found): if found.is_some(): "" else: "linux-host-agent-attach-unrecorded-helper"
         case Err(reason): reason
 
-# OP (13.2 effects). The prepare/begin/open chain is NOT bound (HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4), so the
-# open is a FINAL failure per the 14.0 writer rule: nothing held -> RF (rank 4, Progress), a held helper -> FL.
+# An attach that ends at OP or during its effects is FINAL per the 14.0 writer rule: nothing held -> RF (rank 4),
+# a prepared receipt -> RP, anything else held -> FL. Answered Progress (the machine ranks the new stage).
+# allow(primitive_api): reviewed post-begin flag (milestone_0021 14.0, 14A F6)
+fn host_agent_open_failed_v4(call: HostAgentAttachmentPortCallV4, attachment: HostAgentAttachmentV4, error: text,
+        post_begin: bool, capacity: HostCapacityOwnerV1, container: Option<SimpleContainerOwnerV2>) -> HostAgentAttachmentReleaseStepV4:
+    host_agent_release_answer_v4(host_agent_attachment_failure_v4(attachment, error, post_begin, call.now),
+        HostAgentReleaseOutcomeV4.Progress, "", capacity, container)
+
+# OP reached through the RELEASE port (a forced release, or a port with no open context): the effects never start
+# here, so an OP attachment holds at most a prepared receipt (begin and open run in one call, see the open step).
 fn host_agent_release_open_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
-    val att = host_agent_attachment_failure_v4(call.attachment, HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4,
-        call.attachment.helper.is_some() or call.attachment.begin_attempted, call.now)
-    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", context.capacity, call.container)
+    host_agent_open_failed_v4(call, call.attachment, HOST_AGENT_ATTACH_OPEN_ABANDONED_V4,
+        call.attachment.helper.is_some() or call.attachment.begin_attempted, context.capacity, call.container)
+
+# OP sub-step 1 (13.2 effects): the signed helper request is prepared on the service's capacity owner. A refusal
+# with no journal row is RF; a row that exists, or a lookup that fails for any other reason (the prepare may have
+# committed before the error, e.g. a projection that needs a reopen), is treated as a prepared receipt: RP then
+# expires it, or ends release-blocked when this owner can no longer write (never a silent leak).
+fn host_agent_open_prepare_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4,
+        open: HostAgentOpenContextV4, refresh: fn() -> HostReservationAuthorizationContextV1) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    val request = host_helper_request_decode_v1(att.helper_request_bytes)
+    if request.is_err(): return host_agent_open_failed_v4(call, att, request.unwrap_err(), false, context.capacity, call.container)
+    val expected = host_helper_reservation_receipt_v1(request.unwrap().intent, request.unwrap().operation)
+    if expected.is_err(): return host_agent_open_failed_v4(call, att, expected.unwrap_err(), false, context.capacity, call.container)
+    val prepared = host_helper_prepare_v1(context.capacity, request.unwrap(), open.policy, open.scope, open.context, refresh)
+    if prepared.error != "" or prepared.receipt.is_none():
+        val row = daemon_operation_exact_v2(prepared.owner.journal, request.unwrap().operation)
+        if not (row.is_err() and row.unwrap_err() == "OPERATION_NOT_FOUND"):
+            att.prepared_receipt_digest = expected.unwrap().receipt_digest
+        return host_agent_open_failed_v4(call, att,
+            if prepared.error != "": prepared.error else: "linux-host-agent-attach-prepare-unreceipted", false, prepared.owner,
+            call.container)
+    att.prepared_receipt_digest = prepared.receipt.unwrap().receipt_digest
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", prepared.owner, call.container)
+
+# OP sub-step 2 (13.2 effects), ONE call: helper begin under the packet's controller-signed execute grant
+# (re-verified live by host_helper_begin_v1), the open core on the agent's lent container, and the adoption from
+# the VERIFIED pane binding (14B). Begin and open are never split across calls: a helper that executes with no open
+# attempt has no journal refusal R and could never be released. Begin without a lease: the row still `admitted`
+# keeps the receipt (RP); anything else is F6 (begin_attempted, held). After begin every failure is FL with what
+# the core left held; the release classification (U', S, F/B) decides from there.
+fn host_agent_open_begin_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4,
+        open: HostAgentOpenContextV4, refresh: fn() -> HostReservationAuthorizationContextV1) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    val request = host_helper_request_decode_v1(att.helper_request_bytes)
+    if request.is_err(): return host_agent_open_failed_v4(call, att, request.unwrap_err(), false, context.capacity, call.container)
+    if (att.helper_execute_signed.is_none() or att.helper_execute_approval.is_none() or att.stream_policy.is_none() or
+            att.plan.is_none() or att.binding.is_none() or call.container.is_none() or call.runtime.is_none()):
+        return host_agent_open_failed_v4(call, att, HOST_AGENT_ATTACH_OPEN_INPUT_V4, false, context.capacity, call.container)
+    val receipt = host_helper_reservation_receipt_v1(request.unwrap().intent, request.unwrap().operation)
+    if receipt.is_err() or receipt.unwrap().receipt_digest != att.prepared_receipt_digest:
+        return host_agent_open_failed_v4(call, att, "linux-host-agent-attach-receipt-mismatch", false, context.capacity, call.container)
+    val begun = host_helper_begin_v1(context.capacity, request.unwrap(), receipt.unwrap(), att.helper_execute_signed.unwrap(),
+        att.helper_execute_approval.unwrap(), open.policy, open.scope, open.context, refresh)
+    if begun.lease.is_none():
+        val reason = if begun.error != "": begun.error else: "linux-host-agent-attach-begin-unleased"
+        val row = daemon_operation_exact_v2(begun.owner.journal, request.unwrap().operation)
+        if row.is_ok() and row.unwrap().state == "admitted":
+            return host_agent_open_failed_v4(call, att, reason, false, begun.owner, call.container)
+        att.begin_attempted = true
+        att.prepared_receipt_digest = ""
+        return host_agent_open_failed_v4(call, att, reason, true, begun.owner, call.container)
+    att.helper = begun.lease
+    att.prepared_receipt_digest = ""
+    val plan = att.plan.unwrap()
+    val opened = host_primary_attach_open_core_v1(HostPrimaryAttachCoreInputV1(store: context.store, capacity: begun.owner,
+        container: call.container.unwrap(), parent: open.parent), plan, begun.lease.unwrap(), att.stream_policy.unwrap(),
+        open.execution, call.runtime.unwrap())
+    att.session = opened.session
+    att.cleanup_spawn = opened.cleanup_spawn
+    att.consumption_attempted = opened.consumption_attempted
+    if opened.error != "" or opened.session.is_none():
+        return host_agent_open_failed_v4(call, att,
+            if opened.error != "": opened.error else: "linux-host-agent-attach-session-missing", true, opened.capacity,
+            Some(opened.container))
+    val adopted = host_agent_attach_adopt_v4(opened.session.unwrap(), att.binding.unwrap(), plan.identity.parent_operation_id,
+        att.lease_epoch)
+    att.session = Some(adopted.session)
+    if adopted.error != "":
+        return host_agent_open_failed_v4(call, att, adopted.error, true, opened.capacity, Some(opened.container))
+    att.attach_stage = HOST_AGENT_ATTACH_READY_V4
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", opened.capacity, Some(opened.container))
 
 # RP (13.2, D2): expire the prepared receipt on the monotonic clock. `prepare-not-expired` is a WAIT (D2c);
 # a projection that needs a reopen is non-retryable; anything else is a counted refusal. Expired -> RF.
@@ -461,7 +571,7 @@ fn host_agent_release_return_v4(call: HostAgentAttachmentPortCallV4, context: Ho
     host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", context.capacity, Some(returned.owner))
 
 # The production release port (13.4): ONE bounded sub-step per call, resuming at the stored sub-step (d1 is the
-# machine's). OP -> the (unbound) open effect; RP -> expire; FL -> read-only classification; RV -> geometry
+# machine's). OP -> abandoned (the effects run only through host_agent_attachment_open_step_v4); RP -> expire; FL -> read-only classification; RV -> geometry
 # drain, then the charged-forever classification, then U' (cancel) or S d2; CL -> d3; ST -> d4.
 pub fn host_agent_attachment_release_step_v4(call: HostAgentAttachmentPortCallV4,
         context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
@@ -483,6 +593,16 @@ pub fn host_agent_attachment_release_step_v4(call: HostAgentAttachmentPortCallV4
     if stage == HOST_AGENT_ATTACH_SETTLING_V4: return host_agent_release_return_v4(call, context)
     host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, "linux-host-agent-attachment-release-stage:" + stage,
         context.capacity, call.container)
+
+# The production STEP-DRIVER port (milestone_0023 part B): the release port plus the attach effects. An OP
+# attachment that is not being force-released runs ONE effect sub-step (prepare while no receipt is held, then
+# begin + open + adopt); everything else, and every forced release, is the release port unchanged.
+pub fn host_agent_attachment_open_step_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4,
+        open: HostAgentOpenContextV4, refresh: fn() -> HostReservationAuthorizationContextV1) -> HostAgentAttachmentReleaseStepV4:
+    if call.attachment.attach_stage != HOST_AGENT_ATTACH_OPENING_V4 or call.release:
+        return host_agent_attachment_release_step_v4(call, context)
+    if call.attachment.prepared_receipt_digest == "": return host_agent_open_prepare_v4(call, context, open, refresh)
+    host_agent_open_begin_v4(call, context, open, refresh)
 
 pub struct HostAgentPaneIoCallV4:
     attachment: HostAgentAttachmentV4
@@ -600,13 +720,22 @@ pub fn host_linux_service_agent_action_authorize_v4(kind: text, snapshot: Distri
         context.grant_clock, snapshot.generation, context.policy_revision, context.revocation_epoch,
         context.session_generation)
 
-# 14B: attach digest = {operationId, associationDigest, planDigest, helperRequestDigest, paneBindingDigest}.
+# The digest of the packet's `host_helper_execute_v1` grant: the canonical signed grant and approval bytes.
+pub fn host_agent_attach_helper_execute_digest_v4(signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2) -> Result<text, text>:
+    Ok(sha256_text(distributed_encode_signed_grant_v2(signed)? + "\n" + distributed_encode_signed_approval_v2(approval)?))
+
+# 14B + milestone_0023 part B: attach digest = {operationId, associationDigest, planDigest, helperRequestDigest,
+# paneBindingDigest, helperExecuteDigest, streamPolicyDigest}.
 pub fn host_agent_attach_payload_digest_v4(operation_id: text, association_digest: text, plan_digest: text,
-        helper_request_digest: text, pane_binding_digest: text) -> text:
+        helper_request_digest: text, pane_binding_digest: text, helper_execute_digest: text,
+        stream_policy_digest: text) -> text:
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-attach"),
         "operationId": SdnValue.String(operation_id), "associationDigest": SdnValue.String(association_digest),
         "planDigest": SdnValue.String(plan_digest), "helperRequestDigest": SdnValue.String(helper_request_digest),
-        "paneBindingDigest": SdnValue.String(pane_binding_digest)}
+        "paneBindingDigest": SdnValue.String(pane_binding_digest),
+        "helperExecuteDigest": SdnValue.String(helper_execute_digest),
+        "streamPolicyDigest": SdnValue.String(stream_policy_digest)}
     sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
 
 # 13.2: detach digest = {operationId, associationDigest, attachDigest}.
@@ -623,6 +752,9 @@ pub fn host_agent_detach_payload_digest_v4(operation_id: text, association_diges
 # pane binding digests it was signed over (`plan_digest`, `pane_binding_digest`): the signed payload digest is
 # computed from those named digests (and the recomputed helper request digest), and 14C requires a packet whose
 # plan or binding bytes are not the ones those signed digests name to be refused `attach-binding-plan`.
+# milestone_0023 part B: the packet also carries the controller-signed `host_helper_execute_v1` grant of helper
+# begin (`helper_execute_signed`, `helper_execute_approval`) and the canonical stream policy bytes of the open core;
+# both are covered by the signed payload digest through their digests recomputed from the packet's own bytes.
 pub struct HostAgentAttachRequestV4:
     operation_id: text
     association_digest: text
@@ -634,6 +766,9 @@ pub struct HostAgentAttachRequestV4:
     pane_binding: text
     plan_digest: text
     pane_binding_digest: text
+    helper_execute_signed: DistributedSignedGrantV2
+    helper_execute_approval: DistributedSignedApprovalV2
+    stream_policy: text
 
 # The packet's decoded contents: `plan_digest`/`binding_digest` are RECOMPUTED from the bytes, and
 # `payload_digest` is the signed payload over the packet's NAMED plan/binding digests and the recomputed helper
@@ -646,6 +781,14 @@ pub struct HostAgentAttachPartsV4:
     helper_request_digest: text
     binding_digest: text
     payload_digest: text
+    stream_policy: ContainerStreamPolicyV2
+
+# The exact envelope the packet's execute grant is signed over (and host_helper_begin_v1 verifies): the helper
+# request's own operation with `operation = "host_helper_execute_v1"`.
+pub fn host_agent_attach_helper_execute_operation_v4(helper: HostHelperRequestV1) -> OperationEnvelopeV2:
+    var operation = helper.operation
+    operation.operation = "host_helper_execute_v1"
+    operation
 
 pub fn host_agent_attach_request_parts_v4(request: HostAgentAttachRequestV4) -> Result<HostAgentAttachPartsV4, text>:
     val plan = container_primary_attach_plan_decode_v1(request.plan)?
@@ -654,10 +797,33 @@ pub fn host_agent_attach_request_parts_v4(request: HostAgentAttachRequestV4) -> 
     val binding = host_agent_pane_binding_decode_v4(request.pane_binding)?
     val binding_digest = host_agent_pane_binding_digest_v4(binding)?
     val helper_digest = sha256_text(request.helper_request)
+    # The stream policy must be the one the SIGNED plan names (its bytes are canonical, so their digest is the
+    # policy digest); refused before any signature work and long before the archive.
+    val stream_policy = container_stream_policy_decode_v2(request.stream_policy)?
+    if container_stream_policy_digest_v2(stream_policy)? != plan.policy_digest: return Err("attach-stream-policy")
     Ok(HostAgentAttachPartsV4(plan: plan, helper: helper, binding: binding, plan_digest: plan_digest,
         helper_request_digest: helper_digest, binding_digest: binding_digest,
         payload_digest: host_agent_attach_payload_digest_v4(request.operation_id, request.association_digest,
-            request.plan_digest, helper_digest, request.pane_binding_digest)))
+            request.plan_digest, helper_digest, request.pane_binding_digest,
+            host_agent_attach_helper_execute_digest_v4(request.helper_execute_signed, request.helper_execute_approval)?,
+            sha256_text(request.stream_policy)), stream_policy: stream_policy))
+
+# milestone_0023 part B, run BEFORE the archive with the same gates as the action authorize (and cancel): the
+# helper request's own prepare grant and the packet's `host_helper_execute_v1` grant are both issued by the
+# configured controller and verify (issuer + approver signatures, clock, generation, policy revision, revocation
+# epoch, session generation) under the installed snapshot and the LIVE context. Nothing is cached: helper prepare
+# and begin verify again with a fresh clock, so an approval that expired since is refused there.
+pub fn host_agent_attach_helper_authorize_v4(snapshot: DistributedAuthoritySnapshotV2, controller_ref: text,
+        request: HostAgentAttachRequestV4, parts: HostAgentAttachPartsV4,
+        context: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
+    if parts.helper.signed.issuer_id != controller_ref or request.helper_execute_signed.issuer_id != controller_ref:
+        return Err("linux-host-service-controller-mismatch")
+    val prepare = distributed_verify_grant_approval_from_snapshot_v2(snapshot, parts.helper.signed, parts.helper.approval,
+        parts.helper.operation, context.grant_clock, snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)?
+    distributed_verify_grant_approval_from_snapshot_v2(snapshot, request.helper_execute_signed, request.helper_execute_approval,
+        host_agent_attach_helper_execute_operation_v4(parts.helper), context.grant_clock, snapshot.generation,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
 
 # 14C: run AFTER the signature over `parts.payload_digest` verified. The plan<->binding pairing is carried only by
 # the signed digests, so plan or binding bytes that are not the ones the signed payload names are refused before
@@ -680,6 +846,11 @@ pub fn host_agent_attach_request_encode_v4(value: HostAgentAttachRequestV4) -> R
             value.approval.request_digest != sha256_text(distributed_encode_operation_v2(value.operation)?) or
             value.approval.grant_digest != distributed_grant_digest_v2(value.signed.grant)?):
         return Err("linux-host-agent-attach-proof-binding")
+    if (not value.helper_execute_signed.grant.operations.contains("host_helper_execute_v1") or
+            value.helper_execute_approval.request_digest != sha256_text(distributed_encode_operation_v2(
+                host_agent_attach_helper_execute_operation_v4(parts.helper))?) or
+            value.helper_execute_approval.grant_digest != distributed_grant_digest_v2(value.helper_execute_signed.grant)?):
+        return Err("linux-host-agent-attach-helper-execute-binding")
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-attach"),
         "operationId": SdnValue.String(value.operation_id), "associationDigest": SdnValue.String(value.association_digest),
         "operation": SdnValue.String(distributed_encode_operation_v2(value.operation)?),
@@ -687,7 +858,10 @@ pub fn host_agent_attach_request_encode_v4(value: HostAgentAttachRequestV4) -> R
         "approval": SdnValue.String(distributed_encode_signed_approval_v2(value.approval)?),
         "helperRequest": SdnValue.String(value.helper_request), "plan": SdnValue.String(value.plan),
         "paneBinding": SdnValue.String(value.pane_binding), "planDigest": SdnValue.String(value.plan_digest),
-        "paneBindingDigest": SdnValue.String(value.pane_binding_digest)}
+        "paneBindingDigest": SdnValue.String(value.pane_binding_digest),
+        "helperExecuteSigned": SdnValue.String(distributed_encode_signed_grant_v2(value.helper_execute_signed)?),
+        "helperExecuteApproval": SdnValue.String(distributed_encode_signed_approval_v2(value.helper_execute_approval)?),
+        "streamPolicy": SdnValue.String(value.stream_policy)}
     val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if bytes.byte_len() > HOST_AGENT_ATTACH_MAX_BYTES_V4: return Err("linux-host-agent-attach-size")
     Ok(bytes)
@@ -700,7 +874,7 @@ fn host_agent_action_text_v4(fields: Dict<text, SdnValue>, name: text, tag: text
 fn host_agent_action_fields_v4(source: text, maximum: i64, tag: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
     if source.byte_len() == 0 or source.byte_len() > maximum: return Err("linux-host-agent-" + tag + "-size")
     val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: maximum,
-            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16)):
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)):
         case Ok(value): value
         case Err(issue): return Err("linux-host-agent-" + tag + "-syntax:" + issue.code)
     val fields = match parsed.value:
@@ -714,7 +888,7 @@ fn host_agent_action_fields_v4(source: text, maximum: i64, tag: text, names: [te
 pub fn host_agent_attach_request_decode_v4(source: text) -> Result<HostAgentAttachRequestV4, text>:
     val fields = host_agent_action_fields_v4(source, HOST_AGENT_ATTACH_MAX_BYTES_V4, "attach", ["version", "kind",
         "operationId", "associationDigest", "operation", "signed", "approval", "helperRequest", "plan", "paneBinding",
-        "planDigest", "paneBindingDigest"])?
+        "planDigest", "paneBindingDigest", "helperExecuteSigned", "helperExecuteApproval", "streamPolicy"])?
     val value = HostAgentAttachRequestV4(operation_id: host_agent_action_text_v4(fields, "operationId", "attach")?,
         association_digest: host_agent_action_text_v4(fields, "associationDigest", "attach")?,
         operation: distributed_decode_operation_v2(host_agent_action_text_v4(fields, "operation", "attach")?)?,
@@ -724,7 +898,11 @@ pub fn host_agent_attach_request_decode_v4(source: text) -> Result<HostAgentAtta
         plan: host_agent_action_text_v4(fields, "plan", "attach")?,
         pane_binding: host_agent_action_text_v4(fields, "paneBinding", "attach")?,
         plan_digest: host_agent_action_text_v4(fields, "planDigest", "attach")?,
-        pane_binding_digest: host_agent_action_text_v4(fields, "paneBindingDigest", "attach")?)
+        pane_binding_digest: host_agent_action_text_v4(fields, "paneBindingDigest", "attach")?,
+        helper_execute_signed: distributed_decode_signed_grant_v2(host_agent_action_text_v4(fields, "helperExecuteSigned", "attach")?)?,
+        helper_execute_approval: distributed_decode_signed_approval_v2(
+            host_agent_action_text_v4(fields, "helperExecuteApproval", "attach")?)?,
+        stream_policy: host_agent_action_text_v4(fields, "streamPolicy", "attach")?)
     # Canonical bytes only (version and kind included).
     if host_agent_attach_request_encode_v4(value)? != source: return Err("linux-host-agent-attach-noncanonical")
     Ok(value)
@@ -849,6 +1027,12 @@ pub fn host_agent_attach_facts_check_v4(facts: HostAgentAttachFactsV4, operation
 
 pub fn host_agent_attachment_report_v4(operation_id: text, attachment: Option<HostAgentAttachmentV4>,
         summary: Option<HostAgentAttachmentSummaryV4>) -> text:
+    host_agent_attachment_authority_report_v4(operation_id, attachment, summary, "")
+
+# The report of the service inspect (milestone_0023 part B): `terminal_authority` is the verdict of the service's
+# terminal-authority accessor for a ready/adopted attachment ("verified", or its refusal); "" omits the field.
+pub fn host_agent_attachment_authority_report_v4(operation_id: text, attachment: Option<HostAgentAttachmentV4>,
+        summary: Option<HostAgentAttachmentSummaryV4>, terminal_authority: text) -> text:
     var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-agent-attachment"),
         "operationId": SdnValue.String(operation_id)}
     if val att = attachment:
@@ -860,6 +1044,7 @@ pub fn host_agent_attachment_report_v4(operation_id: text, attachment: Option<Ho
         fields["attachDigest"] = SdnValue.String(att.attach_digest)
         fields["detachDigest"] = SdnValue.String(att.detach_digest)
         fields["error"] = SdnValue.String(att.first_error)
+        if terminal_authority != "": fields["terminalAuthority"] = SdnValue.String(terminal_authority)
     elif val kept = summary:
         fields["attachStage"] = SdnValue.String(kept.final_stage)
         fields["attachDigest"] = SdnValue.String(kept.attach_digest)

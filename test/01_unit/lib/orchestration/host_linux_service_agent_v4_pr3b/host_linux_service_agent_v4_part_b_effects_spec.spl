@@ -1,0 +1,235 @@
+"""
+## Purpose and audience
+Behavioural spec of the V4 agent attach EFFECTS and the release port arms that a real capacity owner can drive
+(milestone_0023 part B, items d and g): the read-only helper admission check the service runs before the attach
+archive, the step-driver port's first effect sub-step (helper prepare on a real signed helper request and a real
+capacity journal), the rule that a forced release never prepares or begins, the RP expire arm on the monotonic
+clock, and the port-call flags the step machine passes. Written for owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+CANNOT be built here, so NOT covered behaviourally (they stay structural in the release spec): the second effect
+sub-step past its input check (helper begin + open core + adoption needs a SimpleContainerOwnerV2 with a live
+provider), the S arms (cleanup, settle, session return), the geometry drain and the pane io Read/Write/Resize arms
+(all need a ContainerPrimaryAttachSessionV1, whose transfer is a native owner no fixture can construct), and U'
+(needs a helper lease whose open core published a journal refusal R through a Linux helper store).
+## Verification guidance and troubleshooting
+A case that reports a helper lease or `begin_attempted` after a forced release means the release port started an
+effect. A changed error string is a contract change.
+"""
+use std.spec.{step}
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.orchestration.host_capacity_v1.HostLedgerFenceV1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_prepared_receipt_v1,
+    host_capacity_owner_begin_v1}
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.host_helper_prepare_check_v1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_encode_v1
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentAttachmentSummaryV4,
+    HostAgentReleaseOutcomeV4, HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4,
+    HostAgentReleaseContextV4, HostAgentOpenContextV4, host_agent_attachment_open_step_v4,
+    host_agent_attachment_release_step_v4, host_agent_attachment_authority_report_v4, host_agent_attachment_report_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, host_agent_attachment_step_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.linux_service_attach_admit_v4
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+use test.fixtures.orchestration.host_helper_fixture_v1.{HostHelperFixtureV1, host_helper_fixture_v1,
+    host_helper_sibling_fixture_v1, host_helper_clock_v1}
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+
+# A real `attach-broker` helper request ("helper_attach_b") on a real capacity journal. `executing` = the parent
+# reservation was begun first (an attach-broker helper needs an executing parent); otherwise it is only admitted.
+# allow(primitive_api): spec fixture switch
+fn pb_fixture(executing: bool) -> HostHelperFixtureV1:
+    var fixture = host_helper_fixture_v1()
+    fixture.request.plan.helper_kind = "attach-broker"
+    var owner = fixture.owner
+    if executing:
+        val parent = fixture.request.parent_binding
+        var grant = verification_fixture().signed.grant
+        grant.operations = ["host_reservation_v1", "host_execute_v1"]
+        grant.host_id = parent.host_operation.host_id
+        grant.principal = parent.host_operation.principal
+        grant.project = parent.host_operation.project
+        grant.environment_digest = parent.host_operation.environment_digest
+        val receipt = host_capacity_owner_prepared_receipt_v1(owner, parent.host_intent, parent.host_operation, grant,
+            host_helper_clock_v1()).unwrap()
+        val cap = owner.ledger.capacity
+        val fence = HostLedgerFenceV1(authority_id: cap.authority_id, boot_id: cap.boot_id,
+            provider_generation: cap.provider_generation, revision: owner.ledger.revision)
+        owner = host_capacity_owner_begin_v1(owner, parent.host_intent, parent.host_operation, receipt, fence, grant,
+            host_helper_clock_v1()).unwrap()
+    host_helper_sibling_fixture_v1(fixture, owner, "helper_attach_b")
+
+fn pb_attachment(fixture: HostHelperFixtureV1) -> HostAgentAttachmentV4:
+    HostAgentAttachmentV4(attach_stage: "opening", attach_pending: true, not_after: 1000000,
+        helper_request_bytes: host_helper_request_encode_v1(fixture.request).unwrap(), store_root: "/trusted/helper-store",
+        prepare_deadline_ms: 1000, attach_digest: "a".repeat(64))
+
+# allow(primitive_api): spec monotonic clock DATA word
+fn pb_context(owner: HostCapacityOwnerV1, monotonic_ms: i64) -> HostAgentReleaseContextV4:
+    HostAgentReleaseContextV4(capacity: owner, store: HostHelperStoreV1(root: "/trusted/helper-store", journal: Some(owner.journal)),
+        monotonic_ms: monotonic_ms)
+
+fn pb_open(fixture: HostHelperFixtureV1) -> HostAgentOpenContextV4:
+    HostAgentOpenContextV4(policy: fixture.policy, scope: fixture.scope, context: host_helper_clock_v1(),
+        parent: fixture.request.parent_binding.host_operation,
+        execution: ContainerExecutionRequestV2(plan: container_primary_attach_fixture_v1().workload, request_bytes: ""))
+
+# allow(primitive_api): spec forced-release flag
+fn pb_call(attachment: HostAgentAttachmentV4, release: bool) -> HostAgentAttachmentPortCallV4:
+    HostAgentAttachmentPortCallV4(attachment: attachment, now: 100, pending: false, release: release)
+
+fn pb_progress(outcome: HostAgentReleaseOutcomeV4) -> text:
+    match outcome:
+        case HostAgentReleaseOutcomeV4.Progress: "progress"
+        case HostAgentReleaseOutcomeV4.Wait: "wait"
+        case HostAgentReleaseOutcomeV4.Refused: "refused"
+        case HostAgentReleaseOutcomeV4.Blocked: "blocked"
+
+# A recording port: what the machine passed is written into the attachment's error, the stage is kept.
+fn pb_record(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    var seen = "drive"
+    if call.release: seen = "release"
+    var runtime = "none"
+    if call.runtime.is_some(): runtime = "runtime"
+    att.first_error = seen + ":" + runtime
+    HostAgentAttachmentReleaseStepV4(attachment: att, outcome: HostAgentReleaseOutcomeV4.Wait, error: "")
+
+describe "V4 agent attach part B: the read-only helper admission check":
+    it "admits a signed attach-broker helper under an executing parent and charges nothing":
+        # @req part B (d): the service's `admit` before the archive
+        val fixture = pb_fixture(true)
+        val rows = fixture.owner.ledger.reservations.len()
+        expect(host_helper_prepare_check_v1(fixture.owner, fixture.request, fixture.policy, fixture.scope,
+            host_helper_clock_v1()).is_ok()).to_equal(true)
+        expect(fixture.owner.ledger.reservations.len()).to_equal(rows)
+
+    it "refuses what helper prepare would refuse, before any slot is consumed":
+        # @req part B (d)
+        val admitted_only = pb_fixture(false)
+        expect(host_helper_prepare_check_v1(admitted_only.owner, admitted_only.request, admitted_only.policy,
+            admitted_only.scope, host_helper_clock_v1()).unwrap_err()).to_equal("helper-parent-execution-intent-required")
+        val fixture = pb_fixture(true)
+        var late = host_helper_clock_v1()
+        late.grant_clock = 250
+        expect(host_helper_prepare_check_v1(fixture.owner, fixture.request, fixture.policy, fixture.scope, late).is_err()).to_equal(true)
+        var unsigned = fixture.request
+        unsigned.signed.signature = []
+        expect(host_helper_prepare_check_v1(fixture.owner, unsigned, fixture.policy, fixture.scope,
+            host_helper_clock_v1()).is_err()).to_equal(true)
+
+    it "refuses a helper operation that already has a journal row (the service's admit)":
+        # @req part B (d): a reused helper id is refused before the archive, not at prepare
+        val fixture = pb_fixture(true)
+        expect(linux_service_attach_admit_v4(fixture.owner, fixture.request, fixture.policy, fixture.scope,
+            host_helper_clock_v1()).is_ok()).to_equal(true)
+        val prepared = host_agent_attachment_open_step_v4(pb_call(pb_attachment(fixture), false), pb_context(fixture.owner, 10),
+            pb_open(fixture), host_helper_clock_v1)
+        expect(linux_service_attach_admit_v4(prepared.capacity.unwrap(), fixture.request, fixture.policy, fixture.scope,
+            host_helper_clock_v1()).unwrap_err()).to_equal("attach-helper-operation-reused")
+
+describe "V4 agent attach part B: the step-driver port runs the effects":
+    it "prepares the signed helper request first and stays opening with the receipt":
+        # @req 13.2 effects (prepare), part B (d)
+        val fixture = pb_fixture(true)
+        val rows = fixture.owner.ledger.reservations.len()
+        val step1 = host_agent_attachment_open_step_v4(pb_call(pb_attachment(fixture), false), pb_context(fixture.owner, 10),
+            pb_open(fixture), host_helper_clock_v1)
+        expect(pb_progress(step1.outcome)).to_equal("progress")
+        expect(step1.attachment.attach_stage).to_equal("opening")
+        expect(step1.attachment.prepared_receipt_digest).to_equal(host_helper_reservation_receipt_v1(fixture.request.intent,
+            fixture.request.operation).unwrap().receipt_digest)
+        expect(step1.attachment.helper.is_none()).to_equal(true)
+        expect(step1.capacity.unwrap().ledger.reservations.len()).to_equal(rows + 1)
+        step("the second sub-step refuses without its inputs BEFORE helper begin: the receipt is kept for the expire")
+        val step2 = host_agent_attachment_open_step_v4(pb_call(step1.attachment, false), pb_context(step1.capacity.unwrap(), 10),
+            pb_open(fixture), host_helper_clock_v1)
+        expect(step2.attachment.attach_stage).to_equal("refused-expire-pending")
+        expect(step2.attachment.first_error).to_equal("linux-host-agent-attach-open-input-missing")
+        expect(step2.attachment.helper.is_none()).to_equal(true)
+        expect(step2.attachment.begin_attempted).to_equal(false)
+
+    it "ends the attach refused when helper prepare refuses, with nothing held":
+        # @req 14.0 writer rule (RF), H-40
+        val fixture = pb_fixture(false)
+        val step1 = host_agent_attachment_open_step_v4(pb_call(pb_attachment(fixture), false), pb_context(fixture.owner, 10),
+            pb_open(fixture), host_helper_clock_v1)
+        expect(step1.attachment.attach_stage).to_equal("refused")
+        expect(step1.attachment.first_error).to_equal("helper-parent-execution-intent-required")
+        expect(step1.attachment.prepared_receipt_digest).to_equal("")
+
+    it "never prepares or begins under a forced release":
+        # @req part B (d): close, detach stage and wedged/failed never start an effect
+        val fixture = pb_fixture(true)
+        val rows = fixture.owner.ledger.reservations.len()
+        val forced = host_agent_attachment_open_step_v4(pb_call(pb_attachment(fixture), true), pb_context(fixture.owner, 10),
+            pb_open(fixture), host_helper_clock_v1)
+        expect(forced.attachment.attach_stage).to_equal("refused")
+        expect(forced.attachment.first_error).to_equal("linux-host-agent-attach-open-abandoned")
+        expect(forced.capacity.unwrap().ledger.reservations.len()).to_equal(rows)
+        step("the release port alone (close, signed detach) answers the same")
+        val released = host_agent_attachment_release_step_v4(pb_call(pb_attachment(fixture), false), pb_context(fixture.owner, 10))
+        expect(released.attachment.attach_stage).to_equal("refused")
+        expect(released.attachment.first_error).to_equal("linux-host-agent-attach-open-abandoned")
+
+describe "V4 agent release port: the RP expire arm on a real capacity owner":
+    it "waits before the receipt deadline, then expires it and ends refused":
+        # @req 13.2 (expire), D2c (prepare-not-expired is a WAIT), P2-6
+        val fixture = pb_fixture(true)
+        val prepared = host_agent_attachment_open_step_v4(pb_call(pb_attachment(fixture), false), pb_context(fixture.owner, 10),
+            pb_open(fixture), host_helper_clock_v1)
+        step("a forced release of the prepared attachment keeps the receipt: refused-expire-pending")
+        val abandoned = host_agent_attachment_open_step_v4(pb_call(prepared.attachment, true),
+            pb_context(prepared.capacity.unwrap(), 10), pb_open(fixture), host_helper_clock_v1)
+        expect(abandoned.attachment.attach_stage).to_equal("refused-expire-pending")
+        expect(abandoned.attachment.detach_bound).to_equal(true)
+        step("before the monotonic prepare deadline (1000) the expire is the uncounted wait")
+        val early = host_agent_attachment_release_step_v4(pb_call(abandoned.attachment, true),
+            pb_context(abandoned.capacity.unwrap(), 500))
+        expect(pb_progress(early.outcome)).to_equal("wait")
+        expect(early.attachment.attach_stage).to_equal("refused-expire-pending")
+        step("past it the receipt is expired through the same journal writer")
+        val late = host_agent_attachment_release_step_v4(pb_call(early.attachment, true),
+            pb_context(early.capacity.unwrap(), 2000))
+        expect(pb_progress(late.outcome)).to_equal("progress")
+        expect(late.attachment.attach_stage).to_equal("refused")
+        expect(late.attachment.prepared_receipt_digest).to_equal("")
+
+    it "blocks an expire whose stored helper request cannot be decoded":
+        # @req 13.4 (typed non-retryable -> RB)
+        val fixture = pb_fixture(true)
+        val broken = HostAgentAttachmentV4(attach_stage: "refused-expire-pending", helper_request_bytes: "not-a-request",
+            prepared_receipt_digest: "b".repeat(64))
+        expect(pb_progress(host_agent_attachment_release_step_v4(pb_call(broken, true), pb_context(fixture.owner, 2000)).outcome)).to_equal("blocked")
+
+describe "V4 agent attach part B: what the step machine passes to the port":
+    it "drives an opening attachment unforced with the Create runtime, and forces it at detach":
+        # @req part B (d): `release` and `runtime` of the port call; the signed window is recorded for attach
+        val port = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: pb_record(call)
+        var agent = HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "a".repeat(64), payload_digest: "b".repeat(64),
+            stage: "running", reserved: true, observed: true, attachment_consumed: true,
+            created: Some(container_primary_attach_fixture_v1().runtime),
+            attachment: Some(HostAgentAttachmentV4(attach_stage: "opening", attach_pending: true, not_after: 1000000)))
+        val driven = host_agent_attachment_step_v4(agent, 100, 1000000, port)
+        expect(driven.native).to_equal(false)
+        expect(driven.agent.attachment.unwrap().first_error).to_equal("drive:runtime")
+        expect(driven.agent.not_after).to_equal(1000000)
+        expect(driven.agent.clock_ms).to_equal(100)
+        agent.stage = "detach"
+        val forced = host_agent_attachment_step_v4(agent, 100, 1000000, port)
+        expect(forced.agent.attachment.unwrap().first_error).to_equal("release:runtime")
+
+describe "V4 agent inspect: the terminal-authority field":
+    it "reports the verdict only for a live attachment and only when one is given":
+        # @req part B (f): the accessor's real caller
+        val ready = HostAgentAttachmentV4(attach_stage: "ready", attach_digest: "a".repeat(64))
+        val plain = host_agent_attachment_report_v4("op_1", Some(ready), None)
+        expect(plain.contains("terminalAuthority")).to_equal(false)
+        expect(host_agent_attachment_authority_report_v4("op_1", Some(ready), None, "")).to_equal(plain)
+        expect(host_agent_attachment_authority_report_v4("op_1", Some(ready), None, "verified").contains("terminalAuthority")).to_equal(true)
+        expect(host_agent_attachment_authority_report_v4("op_1", Some(ready), None, "attach-binding-mismatch").contains("attach-binding-mismatch")).to_equal(true)
+        val kept = HostAgentAttachmentSummaryV4(attach_digest: "a".repeat(64), detach_digest: "", final_stage: "returned", error: "")
+        expect(host_agent_attachment_authority_report_v4("op_1", None, Some(kept), "verified").contains("terminalAuthority")).to_equal(false)

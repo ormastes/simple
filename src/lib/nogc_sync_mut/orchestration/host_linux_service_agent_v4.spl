@@ -97,7 +97,11 @@ use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmen
     host_agent_attach_request_decode_v4, host_agent_attach_request_parts_v4, host_agent_attach_binding_plan_check_v4,
     host_agent_attach_facts_v4, host_agent_attach_grant_deadline_v4, host_agent_attach_archive_relative_v4, host_agent_detach_archive_relative_v4,
     host_agent_action_archive_v4, host_agent_detach_request_decode_v4, host_agent_detach_payload_digest_v4,
-    HostAgentAttachRequestV4, HostAgentAttachPartsV4}
+    HostAgentAttachRequestV4, HostAgentAttachPartsV4, HostAgentOpenContextV4, host_agent_attachment_open_step_v4,
+    host_agent_attach_helper_authorize_v4, host_agent_attachment_authority_report_v4}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_live_check_v4}
 
 # 30 s: the collector deadline (provider_cli_container_probe_v1.spl:302-303) and the per-probe timeout cap.
 const HOST_AGENT_PROBE_TIMEOUT_MS_V4: i64 = 30000
@@ -155,6 +159,9 @@ pub struct HostLinuxServiceAgentV4:
     stop_requested: bool = false
     # D7: the last `grant_clock` a step saw (monotonic max); cancel, pane io and close read it as `now`.
     clock_ms: i64 = 0
+    # milestone_0023 part B: the signed window end the last step saw (manifest `not_after`, re-derived by every
+    # step from the signed manifest); an attach reads it as its window. 0 until a step ran: no attach before that.
+    not_after: i64 = 0
 
 # Canonical invoke payload: {operation_id, manifest bytes}. The manifest is untrusted transport; only the
 # signed association digest admits it (section 4 check 1).
@@ -1186,7 +1193,7 @@ fn host_agent_attachment_drive_step_v4(agent: HostLinuxServiceAgentV4, now: i64,
         if not release and agent.stage == "running" and not lapsed: return host_agent_drive_v4(agent, false, "")
         return host_agent_attachment_revoke_v4(agent, att, now)
     val answer = port(HostAgentAttachmentPortCallV4(attachment: att, now: now, pending: agent.pending,
-        container: agent.container))
+        container: agent.container, release: release, runtime: agent.created))
     val carried = host_agent_attachment_carrier_v4(agent, answer)
     if stage == HOST_AGENT_ATTACH_FAILED_V4:
         match answer.outcome:
@@ -1211,6 +1218,7 @@ pub fn host_agent_attachment_step_v4(agent: HostLinuxServiceAgentV4, grant_clock
         port: fn(HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4) -> HostAgentAttachmentStepV4:
     var state = agent
     if grant_clock > state.clock_ms: state.clock_ms = grant_clock
+    state.not_after = not_after
     val now = state.clock_ms
     val broken = host_agent_attachment_invariant_v4(state)
     if broken != "":
@@ -1324,6 +1332,8 @@ fn host_agent_attach_archived_v4(agent: HostLinuxServiceAgentV4, request: HostAg
     state.attachment = Some(HostAgentAttachmentV4(parent: Some(authority.execute_operation), plan: Some(parts.plan),
         binding: Some(parts.binding), not_after: service.not_after, policy_bytes: service.policy_bytes,
         helper_request_bytes: request.helper_request, store_root: service.store_root,
+        helper_execute_signed: Some(request.helper_execute_signed),
+        helper_execute_approval: Some(request.helper_execute_approval), stream_policy: Some(parts.stream_policy),
         prepare_deadline_ms: host_agent_attach_grant_deadline_v4(parts.helper.intent.reservation.prepare_deadline_ms,
             state.clock_ms, service.monotonic_ms),
         attach_stage: HOST_AGENT_ATTACH_OPENING_V4,
@@ -1332,11 +1342,16 @@ fn host_agent_attach_archived_v4(agent: HostLinuxServiceAgentV4, request: HostAg
 
 # 13.2 E1, the ONE composed attach entry, in the mandated order: decode; authorize (held run, association, the
 # operation derived from the archived execute and the payload SIGNED over the packet's named digests, issuer,
-# signatures); 14C `attach-binding-plan` (plan/binding bytes are the signed ones); read the archive slot; the
-# pure transition check with replay/conflict; archive no-replace + read-back; only THEN consume the slot and
-# create the attachment. Any refusal before the read-back leaves the agent unchanged (the slot stays usable).
+# signatures); the helper prepare grant and the `host_helper_execute_v1` grant (same gates, part B); 14C
+# `attach-binding-plan` (plan/binding bytes are the signed ones); the helper store opened, the Create runtime
+# identity known and equal to the plan's (the open core reproduces the plan with it); read the archive slot;
+# the pure transition check with replay/conflict; `admit`, the caller's read-only helper admission check on the
+# service's capacity owner; archive no-replace + read-back; only THEN consume the slot and create the attachment.
+# Any refusal before the read-back leaves the agent unchanged (the slot stays usable): every check that can
+# refuse without an effect runs before the archive (milestone_0023 part B).
 pub fn host_agent_attach_apply_core_v4(agent: HostLinuxServiceAgentV4, holder: text, source: text,
-        authority: HostAgentActionAuthorityV4, service: HostAgentAttachServiceV4) -> HostAgentActionApplyV4:
+        authority: HostAgentActionAuthorityV4, service: HostAgentAttachServiceV4,
+        admit: fn(HostHelperRequestV1) -> Result<(), text>) -> HostAgentActionApplyV4:
     val decoded = host_agent_attach_request_decode_v4(source)
     if decoded.is_err(): return host_agent_action_refused_v4(agent, decoded.unwrap_err())
     val request = decoded.unwrap()
@@ -1348,8 +1363,16 @@ pub fn host_agent_attach_apply_core_v4(agent: HostLinuxServiceAgentV4, holder: t
         request.approval, parts.payload_digest, authority.execute_operation, authority.execute_association_digest,
         agent.operation_id, agent.association_digest, authority.context)
     if granted.is_err(): return host_agent_action_refused_v4(agent, granted.unwrap_err())
+    val helper_granted = host_agent_attach_helper_authorize_v4(authority.snapshot, authority.controller_ref, request, parts,
+        authority.context)
+    if helper_granted.is_err(): return host_agent_action_refused_v4(agent, helper_granted.unwrap_err())
     val paired = host_agent_attach_binding_plan_check_v4(request, parts)
     if paired.is_err(): return host_agent_action_refused_v4(agent, paired.unwrap_err())
+    if service.store_root == "": return host_agent_action_refused_v4(agent, "attach-helper-store")
+    if agent.created.is_none(): return host_agent_action_refused_v4(agent, "attach-runtime-missing")
+    # The open core reproduces the plan with the observed runtime: a plan signed for another runtime identity could
+    # only be refused there, after helper begin.
+    if parts.plan.runtime != agent.created.unwrap(): return host_agent_action_refused_v4(agent, "attach-plan-runtime")
     val relative = host_agent_attach_archive_relative_v4(service.fence, agent.operation_id)
     val archived = distributed_operation_journal_read_v3(service.journal, relative, HOST_AGENT_ATTACH_MAX_BYTES_V4)
     if archived.is_err(): return host_agent_action_refused_v4(agent, archived.unwrap_err())
@@ -1358,14 +1381,16 @@ pub fn host_agent_attach_apply_core_v4(agent: HostLinuxServiceAgentV4, holder: t
     val admitted = host_agent_attach_admit_core_v4(agent, holder, archived.unwrap(), source, facts)
     if admitted.is_err(): return host_agent_action_refused_v4(agent, admitted.unwrap_err())
     if admitted.unwrap(): return HostAgentActionApplyV4(agent: agent, replay: true, error: "")
+    val admissible = admit(parts.helper)
+    if admissible.is_err(): return host_agent_action_refused_v4(agent, admissible.unwrap_err())
     val written = host_agent_action_archive_v4(service.journal, relative, source, "attach-packet-conflict")
     if written.is_err(): return host_agent_action_refused_v4(agent, written.unwrap_err())
     HostAgentActionApplyV4(agent: host_agent_attach_archived_v4(agent, request, parts, authority, service, sha256_text(source)),
         replay: false, error: "")
 
 pub fn host_agent_attach_apply_v4(agent: HostLinuxServiceAgentV4, source: text, authority: HostAgentActionAuthorityV4,
-        service: HostAgentAttachServiceV4) -> HostAgentActionApplyV4:
-    host_agent_attach_apply_core_v4(agent, host_agent_transfer_holder_v4(agent), source, authority, service)
+        service: HostAgentAttachServiceV4, admit: fn(HostHelperRequestV1) -> Result<(), text>) -> HostAgentActionApplyV4:
+    host_agent_attach_apply_core_v4(agent, host_agent_transfer_holder_v4(agent), source, authority, service, admit)
 
 # ANY failure after the archive is FINAL (13.2): RF / RP / FL / RT per the writer rule, then the hook.
 # allow(primitive_api): reviewed post-begin flag (milestone_0021 14.0, 14A F6)
@@ -1473,6 +1498,59 @@ pub fn host_agent_attachment_close_v4(agent: HostLinuxServiceAgentV4,
 pub fn host_linux_service_agent_attachment_inspect_v4(agent: HostLinuxServiceAgentV4) -> text:
     host_agent_attachment_report_v4(agent.operation_id, agent.attachment, agent.attachment_summary)
 
+# The service inspect's report: the same read-only report plus the terminal-authority verdict ("" omits it).
+pub fn host_linux_service_agent_attachment_authority_inspect_v4(agent: HostLinuxServiceAgentV4, terminal_authority: text) -> text:
+    host_agent_attachment_authority_report_v4(agent.operation_id, agent.attachment, agent.attachment_summary, terminal_authority)
+
+# ---- agent-terminal authority (milestone_0023 part B; consumed by the smux pane consumer and the rights lane) ----
+
+# The controller-signed authority behind an attach-ready attachment, as verified NOW: which run and attachment,
+# who issued it (always the configured controller), under which grant and snapshot generation, until when, and
+# the verified pane binding with the live lease epoch. DATA: holding one grants nothing by itself, and it is never
+# cached (every read verifies again).
+pub struct HostAgentTerminalAuthorityV4:
+    operation_id: text
+    association_digest: text
+    attach_digest: text
+    issuer_id: text
+    grant_id: text
+    expires_at: i64
+    snapshot_generation: i64
+    binding: HostAgentPaneBindingV4
+    lease_epoch: i64
+
+# Read-only and pure given the archived attach packet bytes: the agent runs with a `ready` or `adopted`
+# attachment; the archived packet is exactly the one that attachment was created from; it still passes the SAME
+# gates as at attach and as cancel (held run, association, operation derived under the LIVE context, issuer ==
+# controller, issuer + approver signatures, clock, generation, revocation: an expired or revoked approval is
+# refused); its plan/binding bytes are the signed ones; and the binding names the service's OWN live incarnation
+# and epoch. Anything else is Err. Pane or smux state is never consulted.
+# allow(primitive_api): reviewed live epoch DATA word (milestone_0021 14B)
+pub fn host_agent_terminal_authority_v4(agent: HostLinuxServiceAgentV4, archived: Option<text>,
+        authority: HostAgentActionAuthorityV4, live_incarnation: text,
+        live_epoch: i64) -> Result<HostAgentTerminalAuthorityV4, text>:
+    val broken = host_agent_attachment_invariant_v4(agent)
+    if broken != "": return Err(broken)
+    if agent.stage != "running": return Err("attach-stage")
+    if agent.attachment.is_none(): return Err("attach-no-attachment")
+    val att = agent.attachment.unwrap()
+    if att.attach_stage != HOST_AGENT_ATTACH_READY_V4 and att.attach_stage != HOST_AGENT_ATTACH_ADOPTED_V4:
+        return Err("attach-not-ready")
+    if archived.is_none(): return Err("attach-unarchived")
+    if sha256_text(archived.unwrap()) != att.attach_digest: return Err("attach-packet-conflict")
+    val request = host_agent_attach_request_decode_v4(archived.unwrap())?
+    val parts = host_agent_attach_request_parts_v4(request)?
+    val grant = host_linux_service_agent_action_authorize_v4("host_agent_attach_v4", authority.snapshot,
+        authority.controller_ref, request.operation_id, request.association_digest, request.operation, request.signed,
+        request.approval, parts.payload_digest, authority.execute_operation, authority.execute_association_digest,
+        agent.operation_id, agent.association_digest, authority.context)?
+    host_agent_attach_binding_plan_check_v4(request, parts)?
+    host_agent_pane_binding_live_check_v4(parts.binding, live_incarnation, live_epoch)?
+    Ok(HostAgentTerminalAuthorityV4(operation_id: agent.operation_id, association_digest: agent.association_digest,
+        attach_digest: att.attach_digest, issuer_id: request.signed.issuer_id, grant_id: grant.id,
+        expires_at: if request.approval.expires_at < grant.expires_at: request.approval.expires_at else: grant.expires_at,
+        snapshot_generation: authority.snapshot.generation, binding: parts.binding, lease_epoch: att.lease_epoch))
+
 # ---- pane lease and pane io (13.1, D9, F3) ----
 
 pub struct HostAgentPaneLeaseTurnV4:
@@ -1570,12 +1648,18 @@ pub fn host_linux_service_agent_pane_io_v4(agent: HostLinuxServiceAgentV4, lease
 # ---- one bounded step per call ----
 
 # 13.5: the store is HostHelperStoreV1(helper_store, Some(capacity.journal)) from the service owner. The attachment
-# half runs first (E3 of 14.2) through the production release port; the capacity owner it advanced is adopted
-# for the rest of the call and returned in the turn (single journal writer).
+# half runs first (E3 of 14.2) through the production step-driver port (release + the attach effects); the capacity
+# owner it advanced is adopted for the rest of the call and returned in the turn (single journal writer).
+# milestone_0023 part B: `policy`, `scope` and `refresh` are the service's installed policy, live scope and clock
+# refresh for helper prepare/begin; the open context is rebuilt on every call from them and the archived signed
+# execute in `input` (the parent is the journal row's prepare operation).
 pub fn host_linux_service_agent_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapacityOwnerV1,
-        input: HostAgentStepInputV4, store: HostHelperStoreV1) -> HostLinuxServiceAgentTurnV4:
+        input: HostAgentStepInputV4, store: HostHelperStoreV1, policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostLinuxServiceAgentTurnV4:
     val context = HostAgentReleaseContextV4(capacity: capacity, store: store, monotonic_ms: input.clock.monotonic_ms)
-    val port = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: host_agent_attachment_release_step_v4(call, context)
+    val open = HostAgentOpenContextV4(policy: policy, scope: scope, context: input.clock,
+        parent: input.execute.prepare.prepare.operation, execution: input.execute.association.execution)
+    val port = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: host_agent_attachment_open_step_v4(call, context, open, refresh)
     val pre = host_agent_attachment_step_v4(agent, input.clock.grant_clock, input.manifest.base.not_after, port)
     var current = capacity
     if pre.capacity.is_some(): current = pre.capacity.unwrap()
@@ -1807,3 +1891,4 @@ export HostAgentAttachmentCloseV4, host_agent_attachment_close_v4
 export host_linux_service_agent_attachment_lease_v4, host_agent_pane_io_core_v4, host_linux_service_agent_pane_io_v4
 export HostAgentActionAuthorityV4, HostAgentAttachServiceV4, HostAgentActionApplyV4, host_agent_attach_apply_core_v4
 export host_agent_attach_apply_v4
+export host_linux_service_agent_attachment_authority_inspect_v4, HostAgentTerminalAuthorityV4, host_agent_terminal_authority_v4

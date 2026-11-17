@@ -313,10 +313,8 @@ available. These source paths and their manuals remain NOT_RUN.
   -> `cleaned` -> settle_retired -> d4 clears the retirement -> `returned`; B = quiesce, drop the spawn, then S. d3 repeats until the container reports no error. B drops the spawn without a stored proof digest (open gap vs 11.4). A `Rejected`
   spawn is Blocked `...-native-absence-unproven`. Trap: quiesce must not retire descriptors, the container's
   `fallback_cleanup_v3` retires them (a second retire with a reference is `stale_process_reference`).
-- Fail-closed, NOT implemented: the OP attach effects ->
-  `linux-host-agent-attach-helper-begin-grant-unbound` (helper begin needs its own signed `host_helper_execute_v1`
-  grant the 14B packet lacks; no ContainerStreamPolicyV2 decoder; no live epoch source). The cv4 attach arm refuses
-  BEFORE the archive, so no attachment is created in production yet.
+- The OP attach effects are bound since m23 part B (below); the RELEASE port never starts them
+  (`linux-host-agent-attach-open-abandoned`).
 - Write-back: ports lend `agent.container` and return `container`/`capacity`; every caller adopts the capacity (single
   journal writer). `step_v4`/`close_v4` take `HostHelperStoreV1(helper_store, Some(capacity.journal))`;
   `helper_store` is opened at `start_v4`; m23 (2026-11-17): it is NOT rechecked in `current_v4()` any more. The
@@ -329,13 +327,30 @@ available. These source paths and their manuals remain NOT_RUN.
 - Clocks (m23 P2-5, fixed): facts carry `now` (grant clock, `not_after`) and `monotonic_ms` (receipt prepare
   deadline); the attachment stores the deadline converted to the grant clock (`host_agent_attach_grant_deadline_v4`),
   so every attachment bound runs on the grant clock; the expire core still reads the receipt's own monotonic deadline.
-  Attach is STILL refused before archive (m23 item 4 BLOCKED, see below).
-- m23 item 4 Blocked (all-or-nothing, nothing landed unreachable): the packet needs a signed `host_helper_execute_v1`
-  grant inside the signed payload (verify like cancel, issuer == controller_ref, re-verified fresh by
-  `host_helper_begin_checked_v1`), a strict `ContainerStreamPolicyV2` decoder (only a digest function exists in
-  `stream_v2.spl`), a read-only live epoch derived from the verified epoch record, and the OP prepare->begin->open
-  chain with a release context carrying policy, scope and refresh. Binding the attach arm before the OP chain exists
-  would archive, consume the one-per-incarnation slot and end refused. Bug record: `doc/08_tracking/bug/v4_attach_helper_charge_held_without_records_2026-11-17.md`.
+- m23 part B (2026-11-17, SOURCE_AUTHORED / NOT_RUN): the cv4 attach arm is BOUND to `host_agent_attach_apply_v4`.
+  - Packet: `helperExecuteSigned`/`helperExecuteApproval` (the controller's `host_helper_execute_v1` grant over the
+    helper operation) and `streamPolicy` (canonical `ContainerStreamPolicyV2`, must hash to the signed plan's
+    `policy_digest`, else `attach-stream-policy`); both are in the signed attach payload digest. Verified before the
+    archive by `host_agent_attach_helper_authorize_v4` (issuer == controller_ref, signatures, live clock/generation/
+    revocation) and again, fresh, by helper prepare/begin. Codec: `container_stream_policy_{encode,decode}_v2`.
+  - Everything refusable runs BEFORE the archive (the one slot is never burnt by a detectable refusal): helper store
+    opened (`attach-helper-store`), Create runtime known and equal to the plan's (`attach-runtime-missing`,
+    `attach-plan-runtime`), helper operation new on the journal (`attach-helper-operation-reused`), signed window seen by a step
+    (`agent.not_after`), live epoch (`linux_service_live_epoch_v4`: the transfer's epoch record must still digest to
+    `initial_epoch`; its `epoch_generation` is the epoch, no setter), live incarnation = `scope.continuity_id`, and
+    `admit` = `linux_service_attach_admit_v4` (new helper id, then `host_helper_prepare_check_v1`, the read-only
+    twin of helper prepare's checks). A stream policy is also bounded by the 1 MiB attach packet cap.
+  - Effects run in the step driver only (`host_agent_attachment_open_step_v4(call, context, open, refresh)`): sub-step
+    1 helper prepare; sub-step 2 helper begin + open core + adoption in ONE call (never split: a helper executing with
+    no open attempt has no journal refusal R and could never be released). `HostAgentOpenContextV4` is rebuilt per call
+    from the installed policy, service scope and the archived execute (parent = the row's PREPARE operation, not the
+    execute envelope). A forced release (`call.release`: detach stage, wedged/failed, close, signed detach) never
+    prepares or begins.
+  - `host_linux_service_agent_terminal_authority_v4(owner) -> Result<HostAgentTerminalAuthorityV4, text>`: read-only,
+    re-verifies the archived attach packet under the live context for a ready/adopted attachment; inspect reports it
+    as `terminalAuthority`. Never cache it.
+  - Still open: geometry (the service has no installed-policy-v3 source, `policy_bytes` is "", Resize is
+    refused by the adapter); owner/domain lease + pane-io pass-throughs wait for their smux caller. Bug record: `doc/08_tracking/bug/v4_attach_helper_charge_held_without_records_2026-11-17.md`.
 
 ## Exact cleanup scope — AT-CTR-03 (2026-11-17, specs NOT_RUN)
 - `container/providers/linux/cleanup_scope_v1.spl`: fixture-owned sentinel network/volume commands (`simpleorch-sentinel-` prefix + `io.simpleorch.sentinel` label), `cleanup_destroy_scope_error_v1` (destroy may name ONLY the run's own native id; no network/volume/prune/-v/-a; never a sentinel) and `cleanup_sentinels_intact_v1`.

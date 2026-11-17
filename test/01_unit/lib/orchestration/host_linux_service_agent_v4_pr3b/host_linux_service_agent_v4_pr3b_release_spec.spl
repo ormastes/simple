@@ -61,11 +61,15 @@ describe "PR3b part 2: production release port":
         val failed = port.index_of("if stage == HOST_AGENT_ATTACH_FAILED_V4:\n            return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait")
         expect(failed > charged and failed < cancel).to_equal(true)
 
-    it "fails a rejected spawn carrier and the attach effects closed with typed errors":
-        # @req 13.4 F/B (cores bound in milestone_0026), 13.2 effects (not implementable as designed)
+    it "fails a rejected spawn carrier closed and never starts the attach effects through the release port":
+        # @req 13.4 F/B (cores bound in milestone_0026), 13.2 effects (part B: only the step-driver port runs them)
         val att = file_read_text(RL_DIR + "host_agent_attachment_v4.spl")
         expect(rl_body(att, "host_agent_release_charged_v4")).to_contain("linux-host-agent-attach-native-absence-unproven")
-        expect(rl_body(att, "host_agent_release_open_v4")).to_contain("host_agent_attachment_failure_v4(call.attachment, HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4,")
+        expect(rl_body(att, "host_agent_release_open_v4")).to_contain("host_agent_open_failed_v4(call, call.attachment, HOST_AGENT_ATTACH_OPEN_ABANDONED_V4,")
+        val release = rl_body(att, "host_agent_attachment_release_step_v4")
+        for effect in ["host_helper_prepare_v1", "host_helper_begin_v1", "host_primary_attach_open_core_v1"]:
+            expect(rl_count(release, effect)).to_equal(0)
+            expect(rl_count(rl_body(att, "host_agent_release_open_v4"), effect)).to_equal(0)
 
     it "waits at d4 while a native step is pending and returns the session through the agent container":
         # @req H-29, D8, I5
@@ -118,7 +122,7 @@ describe "PR3b part 2: V4 service wiring":
         val cv4 = file_read_text(RL_DIR + "host_linux_service_current_v4.spl")
         for action in ["host_agent_attach_v4", "host_agent_detach_v4", "host_agent_inspect_v4"]:
             expect(cv4).to_contain("if action == \"" + action + "\": return ")
-        expect(rl_body(cv4, "host_linux_service_agent_attach_v4")).to_contain("HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4, false)")
+        expect(rl_body(cv4, "host_linux_service_agent_attach_v4")).to_contain("val applied = host_agent_attach_apply_v4(agent, source, authority.unwrap(), service, admit)")
         val v3 = file_read_text(RL_DIR + "host_service_domain_v3.spl")
         val arm = v3.index_of("if request.action == \"host-agent-attach\" or request.action == \"host-agent-detach\"")
         val v2 = v3.index_of("val invalid = host_service_request_error_v2(request)")

@@ -205,6 +205,23 @@ fn host_helper_prepare_checked_v1(owner: HostCapacityOwnerV1, request: HostHelpe
     val prepared = host_capacity_owner_prepare_helper_v1(owner, request.intent, request.operation, grant, fresh)?
     Ok(HostHelperPrepareTurnV1(prepared, Some(receipt), false, ""))
 
+# Read-only admission checks of host_helper_prepare_v1 (milestone_0023 part B): context, parent row and scope,
+# sibling aggregate, budget proof, the request's own grant and its freshness, in the same order. Nothing is
+# retained and nothing is charged, so a caller with a one-shot slot (the V4 agent attach archive) can refuse
+# BEFORE consuming it. Passing is no admission: host_helper_prepare_v1 runs every check again.
+pub fn host_helper_prepare_check_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1,
+        policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        context: HostReservationAuthorizationContextV1) -> Result<(), text>:
+    val current = host_helper_context_v1(context, context, policy)?
+    val parent = host_helper_parent_v1(owner, request, scope)?
+    val aggregate = host_helper_aggregate_v1(owner, request)?
+    val budget_grant = host_helper_verify_budget_v1(request, policy, context)?
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, request.signed, request.approval,
+        request.operation, context.grant_clock, policy.snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)?
+    val expiry = host_helper_fresh_v1(request, grant, request.approval, request.operation, budget_grant, context)?
+    Ok(())
+
 pub fn host_helper_begin_v1(owner: HostCapacityOwnerV1, request: HostHelperRequestV1,
         receipt: HostPreparedReservationReceiptV1, signed: DistributedSignedGrantV2,
         approval: DistributedSignedApprovalV2, policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
