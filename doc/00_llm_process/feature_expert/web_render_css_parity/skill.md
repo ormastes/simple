@@ -2860,3 +2860,7 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - Group layers (2026-11-18): Chrome keeps an opacity-group layer premultiplied in 8 bits. Engine2D stores it straight, so its translucent-destination blend must compute the premultiplied value first (`_blend_premul_over`), then store it straight. The round trip is exact. The rule has 8 twins (C, Rust runtime, seed interpreter, oracle, scalar fallback, Metal, Vulkan GLSL+SPIR-V); change all of them together and rebuild the seed.
 
 - Per-corner borders (2026-11-18): Engine2D paints them with `engine2d_draw_ir_render_typed_border_ring` (outer per-corner mask minus elliptical inner corners, side colour by the outer-to-inner-corner join). The corner mask samples pixel centres. The raster lane keeps its own corner AA; it is unpinned.
+
+## Images
+
+- Raster (software) lane paints `<img>` only via `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)`; the plain entries paint none. The painter (`_fb_paint_img_clip`, paint_raster) runs in document order right after the node's box paint, with Draw IR geometry via the shared `html_image_fit_size`. Nearest-neighbour is exact only for uniform images (`# ponytail:`); overlapping-paint opacity cells (`tg_page` (50,12)) stay un-admitted on the raster. Spec: `test/01_unit/browser_engine/img_raster_chrome159_spec.spl`.

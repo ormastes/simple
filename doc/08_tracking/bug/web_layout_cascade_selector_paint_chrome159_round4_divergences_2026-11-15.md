@@ -602,3 +602,14 @@ head (13/40 at base).
   - The CPU raster misses 6 of the 21 pins. Its corner AA (`_corner_coverage256`) gives partial coverage where Chrome paints full colour, it uses a circular inner corner, and a straight side next to an arc reads `FB0003`. This is the open raster corner-AA item.
   - The Draw IR ring is not anti-aliased.
   - Dashed, dotted and double styles on per-corner rings paint solid.
+
+## 2026-11-18 — the CPU raster lane painted nothing for `<img>` (FIXED for supplied resources)
+
+- **Symptom:** `simple_web_layout_render_html_software_pixels` took no images and `paint_raster` only counted `img` as an opacity-group item; the box stayed background-coloured on the software lane while cpu_simd and Vulkan painted it.
+- **Fix:** new entry `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)` (the no-image entries pass `[]`). The raster painter draws `<img>` right after the node's own box paint in each paint pass, so later siblings paint over it (document order). Geometry is the Draw IR geometry: content box, object-fit (`html_image_fit_size`, now the single implementation, `_html_draw_ir_fit_size` delegates), object-position, content-box clip. Pixels use the image blend rule (`color.spl` `blend`), node opacity folds into the image alpha, and group layers see the image like any other member.
+  - `ponytail:` nearest-neighbour sampling is exact only for a uniform image (the pinned `TG_IMG`); a non-uniform image needs Chrome's filtered resample.
+  - Natural size is not known to layout (it has no resources), so a bare `<img>` keeps the replaced default size; the spec uses explicit 2x2 / 6x4 sizes.
+- **Evidence:**
+  - New `img_raster_chrome159_spec` 3/3 (2x2 and 6x4 `TG_IMG` = `FF7285F6` inside, white outside; no resource paints nothing). With the paint disabled: 1/3 (both painting rows fail).
+  - `opacity_group_chrome159_spec` 18/18 with a raster row feeding the resource: (18,12) = `8829A5`, `tg_mismatches == 0`. Disabled: 17/18.
+  - Not pinned on the raster: (50,12) / (54,12). That cell's two non-opaque paints overlap, so the raster does not admit it as a group (documented at `TG_X`); with the image painted it reads `7285F6` / `39427B` where Chrome has `B8C2FB` / `9A9FBC`. Admitting overlapping groups is separate work.
