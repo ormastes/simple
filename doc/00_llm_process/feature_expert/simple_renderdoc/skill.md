@@ -120,6 +120,13 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
 - The N2 qualification runner and `provider.cpp` do not call the RenderDoc
   in-app start/end API, and the workers never present, so the N2 case workers
   cannot be captured as-is; only the generic Engine2D capture scene can.
+- The interpreter can report a "value is not callable" error at the wrong
+  line. In the N2 runner it named `main.spl:67`, `_sha256_matches`, but the real
+  call was a same-named private helper in `scene_contract.spl:209`, which had
+  `scene_reference_sha)(kind)`. To find the real site, bisect with `print`
+  traces rather than trusting the reported line. The next case 01 blocker is
+  web admission `background-position-x`; see
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`.
 - Pinned Skia (`35d5edfa…`) builds on this aarch64 host with
   `tools/upstream-skia-ganesh-vulkan/build-linux.shs` in ~2 min at `-j6`
   (`SIMPLE_UPSTREAM_SKIA_NINJA_JOBS`). The full dependency sync is ~7 GB

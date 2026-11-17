@@ -80,8 +80,61 @@ fn _sha256_matches(path: text, expected: text) -> bool:
 
 Log (reproduced twice, 2026-11-18): `/home/yoon/skia-n2/artifacts/seed_worker_case01.log`.
 
+### Root cause (diagnosed 2026-11-18): runner defect, not the interpreter
+
+The reported line is misleading. Temporary `print` traces showed that
+`_sha256_matches("/proc/self/exe", ...)` in `worker_engine2d` returns `true`.
+The failure is in the same-named private helper in `scene_contract.spl`, which
+`web_worker_scene` reaches. The interpreter reports the error against the
+helper-name line in `main.spl`. Commit `24bd582e686` (the rewrite that made
+`file_hash_sha256` return `text?`) produced this at `scene_contract.spl:209`:
+
+```
+not _sha256_matches(scene_reference_path(kind), scene_reference_sha)(kind)):
+```
+
+That passes the function `scene_reference_sha` as the digest, then calls the
+returned `bool` with `(kind)`, so "value is not callable" is a correct
+diagnosis. The fix is `scene_reference_sha(kind))`. No other line in that
+commit has the same shape. The following all passed under the seed:
+
+- minimal repros of the `if val` pattern;
+- a private helper duplicated across modules;
+- the `getpid` JIT demotion.
+
+The `getpid` ambiguity only demotes the JIT to the interpreter and is
+unrelated.
+
+Red/green evidence: a new `it` in
+`test/03_system/app/ui/feature/corpus_case01_physical_capture_spec.spl`
+calls `web_worker_scene(SCENE_CORPUS_CASE01)`. Before the fix it fails with
+`value is not callable`. After the fix it gets past the digest checks and then
+fails on Blocker 3, which is independent. Logs:
+`/home/yoon/skia-n2/artifacts/spec_red.log` and `spec_green.log`.
+
+## Blocker 3 — case 01 Web admission rejects `background-position-x`
+
+With the runner fixed, the case 01 Engine2D worker still fails under the seed
+interpreter. The command is `worker-engine2d-corpus-case01`, with the same
+argument shape as above. It now exits with:
+
+```
+status=blocked reason=web-admission:unhandled-paint-style-value:1:background-position-x
+```
+
+The same reason also fails the two existing `it`s in
+`corpus_case01_physical_capture_spec.spl`, so the problem is not specific to
+the runner. `01-solid-boxes.html` sets no `background-position`, which means
+the layout producer (`simple_web_html_layout_renderer_paint_draw_ir.spl:193`)
+emits command 1 with a non-`0` `background-position-x`. The
+`_web_style_neutral` check in `web_opaque_box_checks.spl` is right to reject
+it. This is not fixed here: it belongs to web-render, and loosening the
+neutral check would weaken the gate. Log:
+`/home/yoon/skia-n2/artifacts/seed_worker_engine2d_case01_after_fix.log`.
+No readback was obtained, so cases 06 and 02 were not run.
+
 ## Not done here
 
-No fix was attempted, per the lane scope. A pure-Simple self-hosted aarch64
+Blocker 2 is fixed (one-token runner fix). Blockers 1 and 3 are not fixed. A pure-Simple self-hosted aarch64
 release binary would bypass both blockers for the N2 run. The interpreter error
 and the `getpid` ambiguity are defects in their own right.
