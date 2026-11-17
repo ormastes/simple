@@ -139,6 +139,11 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
   N2 Engine2D capture always blocks under `simple run`, and physical N2 pixels
   need the native executable. On lavapipe the capture refuses device type
   `cpu`; that is also correct.
+- The fractional and affine strict-Vulkan wiring from the same merge is
+  restored too. The affine SPIR-V and shader had landed; only the session
+  pipeline, backend dispatch, the 60-byte push-constant pack and the
+  `draw_ir_adv` preflight and executor branches were lost. Pinned by
+  `strict_vulkan_fractional_rect_spec` and `strict_vulkan_affine_coverage_spec`.
 - Pinned Skia (`35d5edfa…`) builds on this aarch64 host with
   `tools/upstream-skia-ganesh-vulkan/build-linux.shs` in ~2 min at `-j6`
   (`SIMPLE_UPSTREAM_SKIA_NINJA_JOBS`). The full dependency sync is ~7 GB

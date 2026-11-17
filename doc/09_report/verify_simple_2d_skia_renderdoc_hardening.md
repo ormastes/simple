@@ -143,4 +143,11 @@ failed closed at the device-identity gate, because the seed interpreter cannot
 attest Vulkan UUIDs by design (Blocker 6). 0 pixels were compared. Both legs now
 need the native qualification executable (Blocker 1).
 
+Then (evidence update only; **STATUS unchanged: FAIL**) the fractional and
+affine strict-Vulkan wiring lost in the same merge was restored, completing
+Blocker 4. `strict_vulkan_fractional_rect_spec` passes 2/2 and
+`strict_vulkan_affine_coverage_spec` 3/3 on lavapipe and on the GB10; both
+were 0 on base. This is a source prerequisite for case 02. No case pixels were
+compared.
+
 **STATUS: FAIL** — release and physical N2 qualification are not admitted.
