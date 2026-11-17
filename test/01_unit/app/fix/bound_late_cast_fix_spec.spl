@@ -8,8 +8,8 @@ Audience: compiler and tooling engineers maintaining robust-boundary fixes.
 ## Operator workflow
 Run this spec with the test runner and read the per-scenario verdict lines.
 ## Compatibility and limitations
-Single-file case only; the cast must wrap one raw extern call with literal
-arguments. Cross-file adapters are a later slice of the robust-boundary plan.
+Single-file case only; the cast must wrap one raw extern call with literal or
+local arguments, or a sole-use local copy of one. Cross-file adapters are later.
 """
 # @req: REQ-DIAG-POLICY-001
 
@@ -74,14 +74,76 @@ describe "SPL-BOUND-002 boundary-return autofix":
         expect(cs[0].replacements.len()).to_equal(1)
         expect(cs[0].replacements[0].new_text).to_equal("c_read_distance_as_DistanceKm()")
 
-    it "aborts with no fix when the extern argument is derived from a local":
+    it "passes local and parameter extern arguments through the adapter":
         # @req: REQ-DIAG-POLICY-001
         step("Cast an extern call that takes a local")
         val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance(ch: i32) -> i32\nfn get_distance(n: i32) -> DistanceKm:\n    val ch = n + 1\n    DistanceKm(c_read_distance(ch))\n"
+        val cs = bound_late_cast_fix_candidates(src, FILE, 1)
+        expect(cs.len()).to_equal(1)
+        expect(cs[0].confidence.name()).to_equal("uncertain")
+        val r = tx_for(1, HASH, src).apply(cs[0])
+        expect(r.status.name()).to_equal("applied")
+        expect(r.text_of(FILE)).to_contain("fn c_read_distance_as_DistanceKm(ch: i32) -> DistanceKm:\n    DistanceKm(c_read_distance(ch))")
+        expect(r.text_of(FILE)).to_contain("    c_read_distance_as_DistanceKm(ch)\n")
+        step("Cast an extern call that takes a parameter and a literal")
+        val src2 = "unit DistanceKm: i32 as km\nextern fn c_read_at(ch: i32, k: i32) -> i32\nfn get_distance(n: i32) -> DistanceKm:\n    DistanceKm(c_read_at(n, 3))\n"
+        val cs2 = bound_late_cast_fix_candidates(src2, FILE, 1)
+        expect(cs2.len()).to_equal(1)
+        val r2 = tx_for(1, HASH, src2).apply(cs2[0])
+        expect(r2.text_of(FILE)).to_contain("    c_read_at_as_DistanceKm(n, 3)\n")
+
+    it "still aborts when an extern argument is a nested expression":
+        # @req: REQ-DIAG-POLICY-001
+        step("Cast an extern call whose argument is itself a call")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance(ch: i32) -> i32\nfn get_distance(n: i32) -> DistanceKm:\n    DistanceKm(c_read_distance(abs(n)))\n"
         expect(bound_late_cast_fix_candidates(src, FILE, 1).len()).to_equal(0)
+
+    it "moves a late cast of a local extern copy to the boundary":
+        # @req: REQ-DIAG-POLICY-001
         step("Cast a local copy of the extern result")
-        val src2 = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    DistanceKm(raw)\n"
-        expect(bound_late_cast_fix_candidates(src2, FILE, 1).len()).to_equal(0)
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    DistanceKm(raw)\n"
+        val cs = bound_late_cast_fix_candidates(src, FILE, 1)
+        expect(cs.len()).to_equal(1)
+        expect(cs[0].confidence.name()).to_equal("uncertain")
+        val r = tx_for(1, HASH, src).apply(cs[0])
+        expect(r.status.name()).to_equal("applied")
+        val out = r.text_of(FILE)
+        expect(out).to_contain("    val raw = c_read_distance_as_DistanceKm()\n    raw\n")
+        expect(out).to_contain("fn c_read_distance_as_DistanceKm() -> DistanceKm:\n    DistanceKm(c_read_distance())")
+        step("Same with an `as` cast and a local argument")
+        val src2 = "unit DistanceKm: i32 as km\nextern fn c_read_distance(ch: i32) -> i32\nfn get_distance(ch: i32) -> DistanceKm:\n    val raw = c_read_distance(ch)\n    raw as DistanceKm\n"
+        val cs2 = bound_late_cast_fix_candidates(src2, FILE, 1)
+        expect(cs2.len()).to_equal(1)
+        val r2 = tx_for(1, HASH, src2).apply(cs2[0])
+        expect(r2.text_of(FILE)).to_contain("    val raw = c_read_distance_as_DistanceKm(ch)\n    raw\n")
+
+    it "offers no fix when the local copy has another raw use":
+        # @req: REQ-DIAG-POLICY-001
+        step("The raw value is also logged before the cast")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    print(raw)\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(src, FILE, 1).len()).to_equal(0)
+        step("A column-0 comment does not end the use scan")
+        val c0 = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n# note\n    print(raw)\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(c0, FILE, 1).len()).to_equal(0)
+        step("A var binding is never moved")
+        val v = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    var raw = c_read_distance()\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(v, FILE, 1).len()).to_equal(0)
+        step("Interpolation and closure uses count as raw uses")
+        val ip = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    print(\"{{raw}\")\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(ip, FILE, 1).len()).to_equal(0)
+        val cl = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    val f = \\x: raw + x\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(cl, FILE, 1).len()).to_equal(0)
+        step("A use after the cast, and two casts, both block the move")
+        val after = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    val d = DistanceKm(raw)\n    print(raw)\n    d\n"
+        expect(bound_late_cast_fix_candidates(after, FILE, 1).len()).to_equal(0)
+        val two = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    val a = DistanceKm(raw)\n    DistanceKm(raw)\n"
+        expect(bound_late_cast_fix_candidates(two, FILE, 1).len()).to_equal(0)
+
+    it "never rewrites a cast inside the adapter function itself":
+        # @req: REQ-DIAG-POLICY-001
+        step("A hand-written non-@unsafe adapter holds the only late cast")
+        val src = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn c_read_distance_as_DistanceKm() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+        expect(bound_late_cast_fix_candidates(src, FILE, 1).len()).to_equal(0)
 
     it "carries literal extern arguments into the adapter and the call":
         # @req: REQ-DIAG-POLICY-001

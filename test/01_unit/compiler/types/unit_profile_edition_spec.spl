@@ -2,8 +2,8 @@
 # plan §7): edition >= the row's error_since_lang_version ("2027.2") is error
 # even with no robust profile; edition 2026.11 stays a warning.
 use std.spec
-use compiler.driver.driver_unit_profile.{unit_profile_policy, unit_profile_strict_for_edition, unit_profile_apply_for_sdn}
-use compiler.types.units.unit_ops.{unit_op_is_strict}
+use compiler.driver.driver_unit_profile.{unit_profile_policy, unit_profile_strict_for_edition, unit_profile_apply_for_sdn, unit_rule_strict_for_edition}
+use compiler.types.units.unit_ops.{unit_op_is_strict, unit_op_is_mixed_strict}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
 
@@ -28,14 +28,46 @@ describe "SPL-UNIT-004 strictness by edition + profile":
         expect(unit_profile_strict_for_edition(p, "", "")).to_equal(false)
         expect(unit_profile_strict_for_edition(p, "", "2026")).to_equal(false)
 
-describe "SPL-UNIT-004 strict via simple.sdn [package] edition (end to end)":
+describe "SPL-UNIT-004 strict via simple.sdn project: edition (end to end)":
     it "edition 2027.2 in simple.sdn makes unit_profile_apply strict":
         val dir = secure_temp_dir(".", "unit-profile-edition-spec").unwrap()
         val path = dir + "/simple.sdn"
-        file_write(path, "[package]\nedition = \"2027.2\"\n")
+        file_write(path, "project:\n  name: demo\n  edition: \"2027.2\"\n")
         unit_profile_apply_for_sdn("", path)
         expect(unit_op_is_strict()).to_equal(true)
-        file_write(path, "[package]\nedition = \"2026.11\"\n")
+        file_write(path, "project:\n  name: demo\n  edition: 2026.11\n")
         unit_profile_apply_for_sdn("", path)
         expect(unit_op_is_strict()).to_equal(false)
+        dir_remove_all(dir)
+
+    it "simple.sdn project: without edition stays non-strict":
+        val dir = secure_temp_dir(".", "unit-profile-edition-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        file_write(path, "project:\n  name: demo\n")
+        unit_profile_apply_for_sdn("", path)
+        expect(unit_op_is_strict()).to_equal(false)
+        dir_remove_all(dir)
+
+describe "SPL-UNIT-002 (distinct-unit product without derived decl) by edition + profile":
+    it "warns in default 2026.11, errors in robust/critical/verified and from 2027.2":
+        val p = unit_profile_policy()
+        expect(unit_rule_strict_for_edition(p, "SPL-UNIT-002", "", "2026.11")).to_equal(false)
+        expect(unit_rule_strict_for_edition(p, "SPL-UNIT-002", "moderate", "2026.11")).to_equal(false)
+        expect(unit_rule_strict_for_edition(p, "SPL-UNIT-002", "robust", "2026.11")).to_equal(true)
+        expect(unit_rule_strict_for_edition(p, "SPL-UNIT-002", "critical", "")).to_equal(true)
+        expect(unit_rule_strict_for_edition(p, "SPL-UNIT-002", "verified", "")).to_equal(true)
+        expect(unit_rule_strict_for_edition(p, "SPL-UNIT-002", "", "2027.2")).to_equal(true)
+
+    it "simple.sdn edition drives unit_ops mixed-unit strictness end to end":
+        val dir = secure_temp_dir(".", "unit-mixed-edition-spec").unwrap()
+        val path = dir + "/simple.sdn"
+        file_write(path, "[package]\nedition = \"2027.2\"\n")
+        unit_profile_apply_for_sdn("", path)
+        expect(unit_op_is_mixed_strict()).to_equal(true)
+        file_write(path, "[package]\nedition = \"2026.11\"\n")
+        unit_profile_apply_for_sdn("", path)
+        expect(unit_op_is_mixed_strict()).to_equal(false)
+        unit_profile_apply_for_sdn("robust", path)
+        expect(unit_op_is_mixed_strict()).to_equal(true)
+        unit_profile_apply_for_sdn("", path)
         dir_remove_all(dir)

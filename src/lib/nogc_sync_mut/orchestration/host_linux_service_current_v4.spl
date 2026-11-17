@@ -28,7 +28,14 @@ use std.common.contracts.distributed_control_v2.ExecutionGrantV2
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalOpenCleanupV2,
     distributed_operation_journal_open_cleanup_v2,
     distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3,
-    distributed_operation_journal_read_required_v3}
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_lookup_v2}
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperCancelTurnV1,
+    host_helper_cancel_unconsumed_v1}
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helper_store_root_v1,
+    HostLinuxHelperStoreStateV1, host_linux_helper_store_check_v1, host_linux_helper_store_open_v1,
+    host_linux_helper_journal_relative_v1, host_linux_helper_attach_expected_v1,
+    host_linux_helper_attach_binding_check_v1, host_primary_attach_refusal_decode_v1}
 use std.nogc_sync_mut.io.host_linux_service_records_v4.{HostLinuxServiceRecordsV4, LinuxServiceVerifiedEnrollmentV1,
     linux_service_enrollment_installed_v1, linux_service_enrollment_verify_v1, linux_service_enrollment_fixed_files_v1,
     host_linux_service_root_path_v4}
@@ -59,7 +66,12 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServic
     host_linux_service_agent_input_v4, host_linux_service_agent_budget_v4, host_linux_service_agent_open_v4,
     host_linux_service_agent_step_v4, host_linux_service_agent_reply_v4, host_linux_service_agent_epoch_v4,
     host_linux_service_agent_close_v4, host_linux_service_agent_release_v4, host_linux_service_agent_request_cancel_v4,
-    host_agent_cancel_request_decode_v4, host_agent_cancel_archive_check_v4, host_linux_service_agent_cancel_authorize_v4}
+    host_agent_cancel_request_decode_v4, host_agent_cancel_archive_check_v4, host_linux_service_agent_cancel_authorize_v4,
+    HostAgentActionAuthorityV4, host_agent_detach_apply_v4, host_linux_service_agent_attachment_inspect_v4}
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attachment_live_v4, HostAgentReleaseContextV4,
+    HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, host_agent_attachment_release_step_v4,
+    HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
 use std.container.LinuxWorkspaceRootBorrowV3
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
@@ -115,6 +127,10 @@ pub class HostLinuxServiceCurrentV4:
     agent_root: Option<LinuxWorkspaceRootBorrowV3> = None
     # U-05 (hco:366-368): a post-outcome projection failure of the slot expiry; sticky until restart.
     journal_quarantine: text = ""
+    # milestone_0022 13.1/14.2 (custody wiring deferred from N1 to PR3b): the verified helper store root, opened
+    # after the journal and before any attach; "" when not opened (an attach then refuses). Pathname store: no
+    # handle to close; it outlives every attachment release and is left in place across restarts.
+    helper_store: text = ""
 
     # Rechecks readers, installed records, the sealed proof under freshly read
     # installed policy, the actual native identity, Linux-protected journal
@@ -339,6 +355,11 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
     owner.published = true
     val current = owner.current_v4()
     if current.is_err(): return linux_service_start_error_v4(owner, current.unwrap_err())
+    # milestone_0022 14.2: the helper store opens AFTER the journal and BEFORE any attach (and before the
+    # reconcile). A refused store never fails startup: `helper_store` stays "" and an attach refuses. Only a journal
+    # refusal row R that needs the store (an unsettled charged helper) still quarantines the ledger proof below.
+    val store = host_linux_helper_store_open_v1(owner.capacity.unwrap().journal.root)
+    if store.is_ok(): owner.helper_store = store.unwrap()
     # Fail-closed reconcile (milestone_0018 F, milestone_0019 M3), AFTER the
     # journal writer is held: two offline store reads through the lent borrow,
     # continuity flipped in memory only. The inventory must be lent for the
@@ -346,10 +367,69 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
     # quarantined (status_v4 refuses).
     if inventory.epoch_digest != initial_epoch_digest: owner.reconcile_error = "linux-host-service-inventory-epoch-mismatch"
     else:
-        val flipped = host_linux_service_reconcile_flip_v4(owner.capacity.unwrap(), native, inventory)
-        if flipped.is_err(): owner.reconcile_error = flipped.unwrap_err()
-        else: owner.capacity = Some(flipped.unwrap())
+        # milestone_0022 N3 (16, 17(C)): helper-cancel-resume runs FIRST; its owner is
+        # adopted even on error (single writer); an error quarantines and skips the
+        # flip, which itself is unchanged and re-compares the journal identity.
+        val resumed = host_linux_service_helper_cancel_resume_v4(owner)
+        owner = resumed.owner
+        if resumed.error != "": owner.reconcile_error = resumed.error
+        else:
+            val flipped = host_linux_service_reconcile_flip_v4(owner.capacity.unwrap(), native, inventory)
+            if flipped.is_err(): owner.reconcile_error = flipped.unwrap_err()
+            else: owner.capacity = Some(flipped.unwrap())
     linux_service_start_error_v4(owner, "")
+
+# milestone_0022 N3 (14.3 P2-E, 15.5, 16 P1-1/P2-5): resume every executing or
+# outcome-unknown attach helper row whose JOURNAL refusal R exists: regenerate the
+# mirrors, publish X, settle. Inputs are RE-DERIVED from the journal-stored signed
+# request and checked against R; a mismatch is an Err for that row (it stays
+# charged). Never starts an attach and never touches the parent reservation (17(F)).
+# `turn.owner` always carries the possibly-advanced capacity owner.
+pub struct HostLinuxServiceResumeTurnV4:
+    owner: HostLinuxServiceCurrentV4
+    resumed: i64
+    error: text
+
+# Ok(None): not a resumable row (another operation, another state, or no journal R).
+fn linux_service_helper_cancel_row_v4(capacity: HostCapacityOwnerV1, store_root: text,
+        operation_id: text) -> Result<Option<HostHelperCancelTurnV1>, text>:
+    val row = distributed_operation_journal_lookup_v2(capacity.journal, operation_id)?
+    if row.state != "executing" and row.state != "outcome-unknown": return Ok(None)
+    val operation = distributed_decode_operation_v2(row.envelope)?
+    if operation.operation != "host_helper_reservation_v1": return Ok(None)
+    val refusal_bytes = distributed_operation_journal_read_v3(capacity.journal,
+        host_linux_helper_journal_relative_v1("primary-refusal", operation.id), 65536)?
+    if refusal_bytes.is_none(): return Ok(None)
+    val refusal = host_primary_attach_refusal_decode_v1(refusal_bytes.unwrap())?
+    val expected = host_linux_helper_attach_expected_v1(capacity.journal, operation)?
+    host_linux_helper_attach_binding_check_v1(refusal, None, expected)?
+    Ok(Some(host_helper_cancel_unconsumed_v1(capacity, store_root, operation, expected.plan,
+        expected.request_digest, expected.prepared_receipt_digest)))
+
+pub fn host_linux_service_helper_cancel_resume_v4(original: HostLinuxServiceCurrentV4) -> HostLinuxServiceResumeTurnV4:
+    var owner = original
+    if owner.capacity.is_none():
+        return HostLinuxServiceResumeTurnV4(owner: owner, resumed: 0, error: "linux-host-service-acquisition-incomplete")
+    var capacity = owner.capacity.unwrap()
+    val store_root = host_linux_helper_store_root_v1(capacity.journal.root)
+    var resumed = 0
+    var error = ""
+    # Row ids from the startup journal; each row is re-read from the CURRENT journal.
+    val operation_ids = capacity.journal.operations.keys()
+    for operation_id in operation_ids:
+        val row = linux_service_helper_cancel_row_v4(capacity, store_root, operation_id)
+        if row.is_err():
+            if error == "": error = row.unwrap_err()
+            continue
+        match row.unwrap():
+            case Some(turn):
+                capacity = turn.owner
+                if turn.error != "":
+                    if error == "": error = turn.error
+                else: resumed = resumed + 1
+            case None: ()
+    owner.capacity = Some(capacity)
+    HostLinuxServiceResumeTurnV4(owner: owner, resumed: resumed, error: error)
 
 # Administrator anchor = the installed child root `<parent>/host-root-<64 hex>`
 # (the root the signed installer reports as residue). The parent is this string
@@ -825,7 +905,8 @@ pub fn host_linux_service_agent_invoke_v4(original: HostLinuxServiceCurrentV4, s
             if opened.error != "": return linux_service_reply_v4(owner, "", opened.error, true)
             return linux_service_reply_v4(owner, host_linux_service_agent_reply_v4(opened.agent.unwrap()), "", true)
         return linux_service_reply_v4(owner, "", if opened.error != "": opened.error else: "linux-host-agent-transfer-refused", true)
-    val turn = host_linux_service_agent_step_v4(owner.agent.unwrap(), owner.capacity.unwrap(), input.unwrap())
+    val turn = host_linux_service_agent_step_v4(owner.agent.unwrap(), owner.capacity.unwrap(), input.unwrap(),
+        linux_service_helper_store_v4(owner))
     owner.agent = Some(turn.agent)
     # The returned Host capacity owner is the single journal writer: adopted on every path.
     owner.capacity = Some(turn.capacity)
@@ -888,17 +969,79 @@ pub fn host_linux_service_agent_cancel_v4(original: HostLinuxServiceCurrentV4, s
     owner.agent = Some(cancelled.agent)
     linux_service_reply_v4(owner, cancelled.response, "", cancelled.effect_attempted)
 
+# milestone_0021 13.2 attach: refused BEFORE the archive. The composed effects need a controller-signed
+# `host_helper_execute_v1` grant for helper begin that the 14B attach packet does not carry, a
+# ContainerStreamPolicyV2 for the open core, and a live service epoch / pane-binding incarnation source; none
+# exists on this owner, so no attach is archived and no helper is prepared.
+pub fn host_linux_service_agent_attach_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    val owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    linux_service_reply_v4(owner, "", HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4, false)
+
+# milestone_0021 13.2 E2 detach: the same held-run gates as cancel, then the composed entry
+# (host_agent_detach_apply_v4: authorize, bind to this attachment, archive no-replace + read-back, ONE forced
+# release step through the production port). The capacity owner the release advanced is adopted (13.5).
+pub fn host_linux_service_agent_detach_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    if not owner.capacity.unwrap().ledger.continuity_proven:
+        return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
+    if owner.reconcile_error != "" or not owner.inventory_returned:
+        return linux_service_reply_v4(owner, "", "linux-host-agent-before-reconcile", false)
+    if owner.agent.is_none(): return linux_service_reply_v4(owner, "", "linux-host-agent-detach-unstarted", false)
+    val agent = owner.agent.unwrap()
+    val scope = owner.scope.unwrap()
+    val capacity = owner.capacity.unwrap()
+    val execute_path = linux_service_execute_relative_v4(scope, agent.operation_id)
+    if execute_path.is_err(): return linux_service_reply_v4(owner, "", execute_path.unwrap_err(), false)
+    val archived_execute = distributed_operation_journal_read_v3(capacity.journal, execute_path.unwrap(), 2097152)
+    if archived_execute.is_err(): return linux_service_reply_v4(owner, "", archived_execute.unwrap_err(), false)
+    val execute = host_linux_service_agent_execute_v4(archived_execute.unwrap(), agent.operation_id)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), false)
+    val association = host_execution_association_digest_v3(execute.unwrap().association)
+    if association.is_err(): return linux_service_reply_v4(owner, "", association.unwrap_err(), false)
+    val fence = container_scope_fence_id_v2(scope)
+    if fence.is_err(): return linux_service_reply_v4(owner, "", fence.unwrap_err(), false)
+    val policy = metadata.unwrap().policy
+    val context = host_local_context_v1(policy)
+    val authority = HostAgentActionAuthorityV4(snapshot: policy.snapshot, controller_ref: metadata.unwrap().configuration.controller_ref,
+        execute_operation: execute.unwrap().operation, execute_association_digest: association.unwrap(), context: context)
+    val release = HostAgentReleaseContextV4(capacity: capacity, store: linux_service_helper_store_v4(owner),
+        monotonic_ms: context.monotonic_ms)
+    val port = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: host_agent_attachment_release_step_v4(call, release)
+    val applied = host_agent_detach_apply_v4(agent, source, authority, capacity.journal, fence.unwrap(), port)
+    owner.agent = Some(applied.agent)
+    if applied.capacity.is_some(): owner.capacity = applied.capacity
+    # The release ran (a capacity owner came back) or the detach fully applied: an effect was attempted.
+    val effect = applied.error == "" or applied.capacity.is_some()
+    if applied.error != "": return linux_service_reply_v4(owner, "", applied.error, effect)
+    linux_service_reply_v4(owner, host_linux_service_agent_attachment_inspect_v4(applied.agent), "", effect)
+
+# 13.2 inspect: the read-only attachment report; never runs a release step. `source` names the run.
+pub fn host_linux_service_agent_inspect_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    val owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    if owner.agent.is_none() or owner.agent.unwrap().operation_id != source:
+        return linux_service_reply_v4(owner, "", "linux-host-agent-inspect-unknown", false)
+    linux_service_reply_v4(owner, host_linux_service_agent_attachment_inspect_v4(owner.agent.unwrap()), "", false)
+
 fn linux_service_cancel_relative_v4(scope: ContainerHostScopeV2, operation_id: text) -> Result<text, text>:
     Ok("host-agent-cancel/" + sha256_text(container_scope_fence_id_v2(scope)? + "\n" + operation_id) + ".sdn")
 
-# Accepted-connection dispatch: the two associated actions, the agent invoke (milestone_0021 PR2) and the agent
-# cancel (PR3).
+# Accepted-connection dispatch: the two associated actions, the agent invoke (milestone_0021 PR2), the agent
+# cancel (PR3) and the attachment attach/detach/inspect (PR3b).
 pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: text, source: text,
         project: fn(ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>) -> HostLinuxServiceReplyV4:
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
     if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
     if action == "host_agent_invoke_v4": return host_linux_service_agent_invoke_v4(owner, source)
     if action == "host_agent_cancel_v4": return host_linux_service_agent_cancel_v4(owner, source)
+    if action == "host_agent_attach_v4": return host_linux_service_agent_attach_v4(owner, source)
+    if action == "host_agent_detach_v4": return host_linux_service_agent_detach_v4(owner, source)
+    if action == "host_agent_inspect_v4": return host_linux_service_agent_inspect_v4(owner, source)
     linux_service_reply_v4(owner, "", "linux-host-service-action-unknown", false)
 
 # The workload scope of this service's lending epoch: the bound host (the same
@@ -937,6 +1080,29 @@ fn linux_service_close_reason_v4(error: text, fallback: text) -> text:
     if error != "": return error
     fallback
 
+# 13.5: the helper store context of every agent step/close: the verified store root and this journal.
+# m23 item 3 (14.2): the opened store is rechecked HERE, per helper-dependent operation, never in current_v4. A store
+# that is no longer the derived, valid one is lent as unopened (root ""), so only attach / release / charged-state
+# checks refuse; status, prepare, execute and the helper evidence rows of other domains are unaffected.
+fn linux_service_helper_store_v4(owner: HostLinuxServiceCurrentV4) -> HostHelperStoreV1:
+    if owner.capacity.is_none(): return HostHelperStoreV1(root: "", journal: None)
+    val journal = owner.capacity.unwrap().journal
+    var root = ""
+    if owner.helper_store != "":
+        val checked = host_linux_helper_store_check_v1(journal.root)
+        if checked.is_ok():
+            match checked.unwrap():
+                case HostLinuxHelperStoreStateV1.Valid(valid):
+                    if valid == owner.helper_store: root = valid
+                case HostLinuxHelperStoreStateV1.Absent: ()
+    HostHelperStoreV1(root: root, journal: Some(journal))
+
+# The close-time monotonic clock (m23 P2-4): read from the installed policy of the loaded records, never a
+# constant. 0 only when the records were never loaded, in which case no attachment can exist.
+fn linux_service_close_monotonic_v4(owner: HostLinuxServiceCurrentV4) -> i64:
+    if owner.records.is_none(): return 0
+    host_local_context_v1(owner.records.unwrap().metadata.policy).monotonic_ms
+
 # Shutdown. `closed` is set first so no status/prepare/execute can follow.
 # Owner-bearing carriers stay ONLY in the returned owner: the journal owner is
 # cleared only once its close completed or its cleanup carrier was taken over;
@@ -956,15 +1122,24 @@ pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostL
     var error = ""
     if val agent = owner.agent:
         if not agent.workload_closed:
-            val closed = host_linux_service_agent_close_v4(agent)
+            val closed = host_linux_service_agent_close_v4(agent, owner.capacity, linux_service_helper_store_v4(owner),
+                linux_service_close_monotonic_v4(owner))
             owner.agent = Some(closed.agent)
+            # The returned capacity owner is the single journal writer (13.5).
+            if closed.capacity.is_some(): owner.capacity = closed.capacity
             if not closed.closed and error == "": error = closed.error
-    if owner.journal_cleanup.is_some():
+    # milestone_0021 13.5: while the agent's attachment is live the helper-settlement writer must survive, so the
+    # capacity owner and the journal stay open (no capacity close, no journal cleanup).
+    var attachment_live = false
+    if val agent = owner.agent: attachment_live = host_agent_attachment_live_v4(agent.attachment)
+    if attachment_live:
+        if error == "": error = "linux-host-agent-attachment-release-pending"
+    elif owner.journal_cleanup.is_some():
         val turn = distributed_operation_journal_open_cleanup_v2(owner.journal_cleanup.unwrap())
         owner.journal_cleanup = turn.cleanup
         if (not turn.closed or turn.error != "") and error == "":
             error = linux_service_close_reason_v4(turn.error, "linux-host-service-journal-close-pending")
-    if owner.capacity.is_some() and owner.journal_cleanup.is_none():
+    if not attachment_live and owner.capacity.is_some() and owner.journal_cleanup.is_none():
         val turn = host_capacity_owner_close_owned_v2(owner.capacity.unwrap())
         if turn.closed and turn.error == "":
             owner.capacity = None
@@ -973,13 +1148,15 @@ pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostL
             owner.journal_cleanup = turn.cleanup
         if not turn.closed or turn.error != "":
             if error == "": error = linux_service_close_reason_v4(turn.error, "linux-host-service-journal-close-pending")
-    elif owner.capacity.is_some():
+    elif not attachment_live and owner.capacity.is_some():
         if error == "": error = "linux-host-service-journal-cleanup-pending"
-    if owner.parent_reader.is_some():
+    # m23 P2-4: with a live attachment the readers stay open with the capacity owner and journal (one order: the
+    # readers are released only after the helper-settlement writer is).
+    if not attachment_live and owner.parent_reader.is_some():
         val closed = linux_protected_root_reader_close_v1(owner.parent_reader.unwrap())
         owner.parent_reader = closed.owner
         if not closed.completed and error == "": error = linux_service_close_reason_v4(closed.error, "linux-host-service-reader-close-pending")
-    if owner.root_reader.is_some():
+    if not attachment_live and owner.root_reader.is_some():
         val closed = linux_protected_root_reader_close_v1(owner.root_reader.unwrap())
         owner.root_reader = closed.owner
         if not closed.completed and error == "": error = linux_service_close_reason_v4(closed.error, "linux-host-service-reader-close-pending")

@@ -1,12 +1,17 @@
 # Canonical tagged terminal ownership. Dispatch preserves the returned owner;
 # correlation and platform projection create no native or control authority.
-use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
 use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV2
 use std.common.text_bytes.boxed_text_bytes_checked
 use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, process_read_stdout_ref_v1, process_is_piped_alive_ref_v1}
 use std.nogc_async_mut.container.terminal_session_v1.{ContainerOwnedTerminalSessionV1,
     container_terminal_reference_v1, container_terminal_validate_v1,
-    container_terminal_cleanup_v1, container_terminal_identity_equal_v1}
+    container_terminal_cleanup_v1, container_terminal_identity_equal_v1,
+    ContainerPrimaryAttachSessionV1, container_primary_attach_adoption_v1,
+    container_primary_attach_native_cleaned_v1, ContainerPrimaryAttachAdoptionV1,
+    ContainerPrimaryAttachAdoptionTurnV1, container_primary_attach_adopt_v1, container_primary_attach_plan_v1}
+use std.common.contracts.container.primary_attach_v1.{ContainerPrimaryAttachPlanV1, HostAgentPaneBindingV4,
+    container_primary_attach_plan_digest_v1, host_agent_pane_binding_validate_v4}
 use std.nogc_async_mut.container.providers.windows.primary_connection_v2.{WindowsPrimaryConnectionV2,
     windows_primary_connection_read_v2, windows_primary_connection_identity_v2,
     windows_primary_connection_validate_v2, windows_primary_connection_cleanup_v2,
@@ -92,6 +97,65 @@ pub fn container_terminal_read_v2(session: ContainerOwnedTerminalSessionV2) -> C
             val turn = windows_primary_connection_read_v2(connection)
             ContainerTerminalReadTurnV2(session: ContainerOwnedTerminalSessionV2.WindowsConnection(turn.session),
                 chunks: turn.chunks, eof: turn.eof, error: turn.error)
+
+pub struct ContainerPrimaryOutputReadV1:
+    session: ContainerPrimaryAttachSessionV1
+    chunks: [ContainerTerminalChunkV2]
+    eof: bool
+    error: text
+
+# Adoption-gated primary output (milestone_0022 N4). One call is one
+# non-blocking native read of at most PIPED_RAW_CAP (8192) raw bytes, framed to
+# at most 3*(cap+3) text bytes; no max parameter, no truncation, no remainder.
+# Invalid UTF-8 turns the legacy piped stream to Err("process_stdout_failed"):
+# an existing transport property, not widened here. The caller replaces its
+# canonical session with the returned one and keeps eof sticky on its owner.
+# Lives here, not in terminal_session_v1, because v2 already imports v1.
+pub fn container_primary_output_read_v1(session: ContainerPrimaryAttachSessionV1) -> ContainerPrimaryOutputReadV1:
+    if not container_primary_attach_adoption_v1(session).is_some():
+        return ContainerPrimaryOutputReadV1(session: session, chunks: [], eof: false, error: "primary-output-not-adopted")
+    if container_primary_attach_native_cleaned_v1(session):
+        return ContainerPrimaryOutputReadV1(session: session, chunks: [], eof: false, error: "primary-output-native-cleaned")
+    val turn = container_terminal_read_v2(ContainerOwnedTerminalSessionV2.Legacy(
+        ContainerOwnedTerminalSessionV1.PrimaryAttach(session)))
+    match turn.session:
+        case ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(returned)):
+            ContainerPrimaryOutputReadV1(session: returned, chunks: turn.chunks, eof: turn.eof, error: turn.error)
+        # Defensive and unreachable today: container_terminal_read_v2 returns the
+        # Legacy session it was given unchanged, so no spec drives this arm.
+        case _:
+            ContainerPrimaryOutputReadV1(session: session, chunks: [], eof: false, error: "primary-output-owner-changed")
+
+val HOST_AGENT_LEASE_EPOCH_MAX_V4: i64 = 9223372036854775807
+
+# Agent-side adoption (milestone_0021 14B, milestone_0022 N4). Built only from
+# a controller-issued pane binding the caller has ALREADY verified (signature,
+# authorize kind and live service incarnation/epoch are PR3b), never from an
+# unsigned packet field. Plan gates: integrity (request_digest re-derives) and
+# plan.identity.parent_operation_id == the agent operation. Deliberately NOT
+# enforced (14B clause dropped by milestone_0021 14C): plan.identity.binding_digest
+# is the control-target binding digest (primary_input_v1), not the pane binding
+# digest; the plan<->binding pairing is the controller-signed attach digest over
+# {planDigest, paneBindingDigest}, checked by the PR3b authorize path.
+# allow(primitive_api): reviewed lease-epoch DATA word (milestone_0022 N4)
+pub fn host_agent_attach_adoption_v4(plan: ContainerPrimaryAttachPlanV1, binding: HostAgentPaneBindingV4, operation_id: text, lease_epoch: i64) -> Result<ContainerPrimaryAttachAdoptionV1, text>:
+    val valid = host_agent_pane_binding_validate_v4(binding)?
+    if lease_epoch < 0 or lease_epoch >= HOST_AGENT_LEASE_EPOCH_MAX_V4: return Err("attach-lease-epoch-range")
+    if not builder_identifier_valid_v1(operation_id) or plan.identity.parent_operation_id != operation_id:
+        return Err("attach-plan-operation-mismatch")
+    if container_primary_attach_plan_digest_v1(plan)? != plan.request_digest: return Err("attach-plan-digest-mismatch")
+    Ok(ContainerPrimaryAttachAdoptionV1(binding_uid: valid.binding_uid, service_incarnation: valid.service_incarnation,
+        session_id: valid.session_id, window_id: valid.window_id, pane_id: valid.pane_id,
+        service_epoch: valid.service_epoch, child_incarnation: lease_epoch + 1))
+
+# Applies the agent adoption to the agent's own session using the session's
+# retained plan. Always returns the canonical session (unchanged on refusal);
+# the caller replaces its single copy with turn.session.
+# allow(primitive_api): reviewed lease-epoch DATA word (milestone_0022 N4)
+pub fn host_agent_attach_adopt_v4(session: ContainerPrimaryAttachSessionV1, binding: HostAgentPaneBindingV4, operation_id: text, lease_epoch: i64) -> ContainerPrimaryAttachAdoptionTurnV1:
+    val adoption = host_agent_attach_adoption_v4(container_primary_attach_plan_v1(session), binding, operation_id, lease_epoch)
+    if adoption.is_err(): return ContainerPrimaryAttachAdoptionTurnV1(session: session, error: adoption.unwrap_err())
+    container_primary_attach_adopt_v1(session, adoption.unwrap())
 
 pub fn container_terminal_cleanup_v2(session: ContainerOwnedTerminalSessionV2) -> ContainerTerminalCleanupTurnV2:
     match session:

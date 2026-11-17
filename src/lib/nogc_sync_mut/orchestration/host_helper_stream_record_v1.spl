@@ -4,7 +4,9 @@ use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.orchestration.host_reservation_codec_v1.{host_helper_reservation_receipt_v1}
-use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, HostHelperExecutionProofV1, host_helper_request_load_v1, host_helper_request_encode_v1, host_helper_execution_proof_load_v1, host_helper_execution_proof_load_typed_v1}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, HostHelperExecutionProofV1, host_helper_request_load_v1, host_helper_request_encode_v1, host_helper_execution_proof_load_v1, host_helper_execution_proof_load_typed_v1,
+    host_helper_request_load_owned_v2, host_helper_execution_proof_load_owned_v2, host_helper_execution_proof_load_typed_owned_v2}
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.string_core.str_len
@@ -40,6 +42,43 @@ pub struct HostHelperAdmissionContextV1:
     request: HostHelperRequestV1
     proof: HostHelperExecutionProofV1
     admission: ContainerHelperAdmissionV2
+
+# milestone_0022 N1 (DESIGN 14.1): one helper store context threaded through the
+# primary-attach stack. `journal == None` is the legacy pathname world (root =
+# the HostLocalRootV1 journal root, byte-identical behaviour). `journal ==
+# Some(j)` is the V4 Linux service: stream records live under `root` (the
+# protected helper store), while the signed request and execution proof are
+# read through the owned journal loaders on `j`. A value, not an owner: callers
+# holding a capacity owner rebuild it from the CURRENT journal before use.
+pub struct HostHelperStoreV1:
+    root: text
+    journal: Option<DistributedOperationJournalV2>
+
+pub fn host_helper_store_legacy_v1(root: text) -> HostHelperStoreV1:
+    HostHelperStoreV1(root: root, journal: None)
+
+# A held journal copy goes stale once its owner appends (a Linux-storage read then
+# fails with OPERATION_JOURNAL_REVISION_STALE). Cores holding a capacity owner
+# rebind the V4 store to that owner's CURRENT journal at entry; legacy is unchanged.
+pub fn host_helper_store_rebind_v1(store: HostHelperStoreV1, journal: DistributedOperationJournalV2) -> HostHelperStoreV1:
+    if store.journal.is_none(): return store
+    HostHelperStoreV1(root: store.root, journal: Some(journal))
+
+pub fn host_helper_store_request_load_v1(store: HostHelperStoreV1, operation_id: text) -> Result<HostHelperRequestV1, text>:
+    match store.journal:
+        case Some(journal): host_helper_request_load_owned_v2(journal, operation_id)
+        case None: host_helper_request_load_v1(store.root, operation_id)
+
+pub fn host_helper_store_execution_proof_load_v1(store: HostHelperStoreV1, operation_id: text) -> Result<text, text>:
+    match store.journal:
+        case Some(journal): host_helper_execution_proof_load_owned_v2(journal, operation_id)
+        case None: host_helper_execution_proof_load_v1(store.root, operation_id)
+
+fn host_helper_store_execution_proof_typed_v1(store: HostHelperStoreV1,
+        operation_id: text) -> Result<HostHelperExecutionProofV1, text>:
+    match store.journal:
+        case Some(journal): host_helper_execution_proof_load_typed_owned_v2(journal, operation_id)
+        case None: host_helper_execution_proof_load_typed_v1(store.root, operation_id)
 
 pub fn host_helper_stream_path_v1(root: text, operation_id: text, category: text) -> text:
     root + "/host-helper-stream-" + category + "/" + sha256_text(operation_id) + ".sdn"
@@ -139,20 +178,39 @@ pub fn host_helper_stream_validate_record_v1(root: text, operation: OperationEnv
     Ok(HostHelperStreamContextV1(consumed: consumed, request: context.request,
         proof: context.proof, admission: context.admission))
 
+# Pathname wrapper: unchanged signature and behaviour (store journal None).
 pub fn host_helper_retained_admission_v1(root: text, operation: OperationEnvelopeV2,
+        operation_id: text, operation_digest: text, packet_digest: text,
+        execution_proof_digest: text, prepared_receipt_digest: text,
+        deadline_unix_ms: i64) -> Result<HostHelperAdmissionContextV1, text>:
+    host_helper_retained_admission_core_v1(host_helper_store_legacy_v1(root), operation, operation_id,
+        operation_digest, packet_digest, execution_proof_digest, prepared_receipt_digest, deadline_unix_ms)
+
+# V4 Linux service: request/proof through the owned journal loaders; the helper
+# store root carries only stream records (DESIGN 13.1 admission loaders).
+pub fn host_helper_retained_admission_owned_v2(journal: DistributedOperationJournalV2, store_root: text,
+        operation: OperationEnvelopeV2, operation_id: text, operation_digest: text, packet_digest: text,
+        execution_proof_digest: text, prepared_receipt_digest: text,
+        deadline_unix_ms: i64) -> Result<HostHelperAdmissionContextV1, text>:
+    host_helper_retained_admission_core_v1(HostHelperStoreV1(root: store_root, journal: Some(journal)), operation,
+        operation_id, operation_digest, packet_digest, execution_proof_digest, prepared_receipt_digest, deadline_unix_ms)
+
+# One body for both worlds. Each load site dispatches on the store, so the order
+# of checks (and therefore every refusal text) is identical in both.
+pub fn host_helper_retained_admission_core_v1(store: HostHelperStoreV1, operation: OperationEnvelopeV2,
         operation_id: text, operation_digest: text, packet_digest: text,
         execution_proof_digest: text, prepared_receipt_digest: text,
         deadline_unix_ms: i64) -> Result<HostHelperAdmissionContextV1, text>:
     if operation_id != operation.id or operation_digest != sha256_text(distributed_encode_operation_v2(operation)?):
         return Err("helper-stream-original-operation-mismatch")
-    val request = host_helper_request_load_v1(root, operation.id)?
+    val request = host_helper_store_request_load_v1(store, operation.id)?
     if distributed_encode_operation_v2(request.operation)? != distributed_encode_operation_v2(operation)?:
         return Err("helper-stream-retained-operation-mismatch")
     if sha256_text(host_helper_request_encode_v1(request)?) != packet_digest:
         return Err("helper-stream-retained-request-mismatch")
-    val proof_bytes = host_helper_execution_proof_load_v1(root, operation.id)?
+    val proof_bytes = host_helper_store_execution_proof_load_v1(store, operation.id)?
     if sha256_text(proof_bytes) != execution_proof_digest: return Err("helper-stream-execution-proof-mismatch")
-    val proof = host_helper_execution_proof_load_typed_v1(root, operation.id)?
+    val proof = host_helper_store_execution_proof_typed_v1(store, operation.id)?
     val receipt = host_helper_reservation_receipt_v1(request.intent, request.operation)?
     if receipt.receipt_digest != prepared_receipt_digest: return Err("helper-stream-prepared-receipt-mismatch")
     var expiry = proof.signed.grant.expires_at

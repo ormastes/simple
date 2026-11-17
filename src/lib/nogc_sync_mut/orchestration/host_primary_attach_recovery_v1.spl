@@ -3,8 +3,9 @@
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
 use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.*
 use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_receipt_v1.*
-use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.host_helper_stream_publish_v1
-use std.nogc_sync_mut.orchestration.host_helper_settlement_domain_v1.host_helper_completion_domain_v1
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperStoreV1, host_helper_store_legacy_v1,
+    host_helper_store_rebind_v1, host_helper_stream_publish_v1}
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.host_helper_store_primary_domain_v1
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperSettlementAckV1,
     HostHelperSettlementCommitTurnV1, host_helper_settlement_commit_v1}
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
@@ -37,17 +38,17 @@ pub struct HostPrimaryAttachRecoveredSettlementTurnV1:
     ack: HostHelperSettlementAckV1?
     error: text
 
-fn primary_recover_checked_v1(owner: HostCapacityOwnerV1,
+fn primary_recover_checked_v1(store: HostHelperStoreV1, owner: HostCapacityOwnerV1,
         operation_id: text) -> Result<HostPrimaryAttachRecoveredV1, text>:
     if not owner.journal.operations.contains_key(operation_id): return Err("host-primary-operation-missing")
     val operation = distributed_decode_operation_v2(owner.journal.operations[operation_id].envelope)?
     val state = daemon_operation_exact_v2(owner.journal, operation)?
     if not ["executing", "outcome-unknown", "completed"].contains(state.state):
         return Err("host-primary-recovery-execution-required")
-    if host_helper_completion_domain_v1(owner.journal.root, operation_id)? != "primary-attach":
-        return Err("host-primary-consumption-domain-mismatch")
-    val consumed = host_primary_attach_consumed_load_v1(owner.journal.root, operation)?
-    val context = host_primary_attach_validate_record_v1(owner.journal.root, operation, consumed)?
+    # Legacy: the pathname classifier; V4: the store-aware classifier (DESIGN 15.1).
+    host_helper_store_primary_domain_v1(store, operation_id)?
+    val consumed = host_primary_attach_consumed_load_core_v1(store, operation)?
+    val context = host_primary_attach_validate_record_core_v1(store, operation, consumed)?
     val intent = context.request.intent
     val scope = context.request.plan.scope
     val capacity = owner.ledger.capacity
@@ -57,28 +58,40 @@ fn primary_recover_checked_v1(owner: HostCapacityOwnerV1,
             container_scope_fence_id_v2(scope)? != capacity.boot_id or
             intent.reservation.service_scope_id != scope.service_scope_id):
         return Err("host-primary-recovery-capacity-mismatch")
-    val native = host_primary_attach_native_recover_v1(owner.journal.root, operation)?
+    val native = host_primary_attach_native_recover_core_v1(store, operation)?
     Ok(HostPrimaryAttachRecoveredV1(operation, consumed.primary_plan, native,
         sha256_text(host_primary_attach_consumed_encode_v1(consumed)?)))
 
+# milestone_0022 N1 (DESIGN 14.1): the text-root entry points below are thin
+# wrappers over `_core_v1` bodies taking HostHelperStoreV1 (legacy: journal None,
+# root = the capacity journal root). The reap publish goes to `store.root`.
 pub fn host_primary_attach_recover_v1(owner: HostCapacityOwnerV1,
         operation_id: text) -> HostPrimaryAttachRecoveryTurnV1:
-    match primary_recover_checked_v1(owner, operation_id):
+    host_primary_attach_recover_core_v1(host_helper_store_legacy_v1(owner.journal.root), owner, operation_id)
+
+pub fn host_primary_attach_recover_core_v1(store: HostHelperStoreV1, owner: HostCapacityOwnerV1,
+        operation_id: text) -> HostPrimaryAttachRecoveryTurnV1:
+    match primary_recover_checked_v1(host_helper_store_rebind_v1(store, owner.journal), owner, operation_id):
         case Ok(value): HostPrimaryAttachRecoveryTurnV1(owner, Some(value), false, "")
-        case Err(reason): HostPrimaryAttachRecoveryTurnV1(owner, nil, true, reason)
+        case Err(reason): HostPrimaryAttachRecoveryTurnV1(owner, None, true, reason)
 
 # Shared by live and recovered settlement after exact canonical reap. A current
 # writer is required before publishing; the commit hook then revalidates proof.
 pub fn host_primary_attach_commit_reap_v1(owner: HostCapacityOwnerV1,
         operation: OperationEnvelopeV2) -> HostHelperSettlementCommitTurnV1:
+    host_primary_attach_commit_reap_core_v1(host_helper_store_legacy_v1(owner.journal.root), owner, operation)
+
+pub fn host_primary_attach_commit_reap_core_v1(store: HostHelperStoreV1, owner: HostCapacityOwnerV1,
+        operation: OperationEnvelopeV2) -> HostHelperSettlementCommitTurnV1:
+    val current = host_helper_store_rebind_v1(store, owner.journal)
     val state = daemon_operation_exact_v2(owner.journal, operation)
-    if state.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, state.unwrap_err())
+    if state.is_err(): return HostHelperSettlementCommitTurnV1(owner, None, state.unwrap_err())
     if not ["executing", "outcome-unknown", "completed"].contains(state.unwrap().state):
-        return HostHelperSettlementCommitTurnV1(owner, nil, "host-primary-settlement-execution-required")
-    val outcome = host_primary_attach_settlement_expected_v1(owner.journal.root, operation)
-    if outcome.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, outcome.unwrap_err())
-    val published = host_helper_stream_publish_v1(owner.journal.root, operation.id, "primary-settlement", outcome.unwrap(), false)
-    if published.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, published.unwrap_err())
+        return HostHelperSettlementCommitTurnV1(owner, None, "host-primary-settlement-execution-required")
+    val outcome = host_primary_attach_settlement_expected_core_v1(current, operation)
+    if outcome.is_err(): return HostHelperSettlementCommitTurnV1(owner, None, outcome.unwrap_err())
+    val published = host_helper_stream_publish_v1(current.root, operation.id, "primary-settlement", outcome.unwrap(), false)
+    if published.is_err(): return HostHelperSettlementCommitTurnV1(owner, None, published.unwrap_err())
     host_helper_settlement_commit_v1(owner, operation, "host-primary-attach-settlement", outcome.unwrap())
 
 fn primary_recovered_match_v1(exact: HostPrimaryAttachRecoveredV1,
@@ -97,25 +110,30 @@ fn primary_recovered_match_v1(exact: HostPrimaryAttachRecoveredV1,
 
 pub fn host_primary_attach_settle_recovered_v1(owner: HostCapacityOwnerV1,
         recovered: HostPrimaryAttachRecoveredV1) -> HostPrimaryAttachRecoveredSettlementTurnV1:
-    val current = host_primary_attach_recover_v1(owner, recovered.operation.id)
-    if current.recovered == nil:
-        return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(recovered), false, nil, current.error)
+    host_primary_attach_settle_recovered_core_v1(host_helper_store_legacy_v1(owner.journal.root), owner, recovered)
+
+pub fn host_primary_attach_settle_recovered_core_v1(store: HostHelperStoreV1, owner: HostCapacityOwnerV1,
+        recovered: HostPrimaryAttachRecoveredV1) -> HostPrimaryAttachRecoveredSettlementTurnV1:
+    val bound = host_helper_store_rebind_v1(store, owner.journal)
+    val current = host_primary_attach_recover_core_v1(bound, owner, recovered.operation.id)
+    if current.recovered.is_none():
+        return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(recovered), false, None, current.error)
     val exact = current.recovered.unwrap()
     val matching = primary_recovered_match_v1(exact, recovered)
-    if matching.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(recovered), false, nil, matching.unwrap_err())
-    val consumed = host_primary_attach_consumed_load_v1(owner.journal.root, exact.operation)
-    if consumed.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, nil, consumed.unwrap_err())
-    val authority = host_primary_attach_validate_record_v1(owner.journal.root, exact.operation, consumed.unwrap())
-    if authority.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, nil, authority.unwrap_err())
+    if matching.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(recovered), false, None, matching.unwrap_err())
+    val consumed = host_primary_attach_consumed_load_core_v1(bound, exact.operation)
+    if consumed.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, None, consumed.unwrap_err())
+    val authority = host_primary_attach_validate_record_core_v1(bound, exact.operation, consumed.unwrap())
+    if authority.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, None, authority.unwrap_err())
     val lease = host_primary_attach_grouped_lease_v1(consumed.unwrap(), authority.unwrap(), exact.native)
-    if lease.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, nil, lease.unwrap_err())
+    if lease.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, None, lease.unwrap_err())
     # Existing proof was checked above. No cancel, even after grant expiry or
     # host loss; a missing proof preserves the reservation and recovered owner.
-    val retired = process_retire_piped_owned_v2(exact.native, nil)
-    if retired.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, nil, retired.unwrap_err())
+    val retired = process_retire_piped_owned_v2(exact.native, None)
+    if retired.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, None, retired.unwrap_err())
     val reaped = group_process_stream_collect_reap_v2(exact.native, lease.unwrap())
-    if reaped.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, nil, reaped.unwrap_err())
-    val committed = host_primary_attach_commit_reap_v1(current.owner, exact.operation)
-    if committed.ack == nil:
-        return HostPrimaryAttachRecoveredSettlementTurnV1(committed.owner, Some(exact), false, nil, committed.error)
-    HostPrimaryAttachRecoveredSettlementTurnV1(committed.owner, nil, true, committed.ack, "")
+    if reaped.is_err(): return HostPrimaryAttachRecoveredSettlementTurnV1(current.owner, Some(exact), false, None, reaped.unwrap_err())
+    val committed = host_primary_attach_commit_reap_core_v1(bound, current.owner, exact.operation)
+    if committed.ack.is_none():
+        return HostPrimaryAttachRecoveredSettlementTurnV1(committed.owner, Some(exact), false, None, committed.error)
+    HostPrimaryAttachRecoveredSettlementTurnV1(committed.owner, None, true, committed.ack, "")

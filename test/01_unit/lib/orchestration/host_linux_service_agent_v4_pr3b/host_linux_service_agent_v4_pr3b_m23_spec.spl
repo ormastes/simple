@@ -1,0 +1,103 @@
+"""
+## Purpose and audience
+Pins the milestone_0023 fixes to the PR #9995 final-review findings P2-3..P2-5 and the two owner notes: the
+service close gates its attachment release on a LIVE attachment, takes a real monotonic clock and keeps the
+protected readers with the capacity owner while an attachment is live; the attachment machine runs on ONE clock
+(the receipt's monotonic prepare deadline is converted to the grant clock once, at attach); an unusable helper
+store no longer fails `current_v4` and is lent as unopened per helper-dependent operation; the helper evidence arm
+confines an unusable store to attach-domain rows. Written for owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Pure for the close gate and the facts clocks; source-text structure checks for the service wiring, which needs a
+live Linux service owner (no pure fixture). The evidence arm against a chmod-ed store needs a temp journal and is
+a structure check here (host_helper_store_structure_v1_spec.spl), not a behavioural one.
+## Verification guidance and troubleshooting
+A close that answers `linux-host-service-acquisition-incomplete` for a refused attachment, or a `current_v4` that
+names the helper store, is a defect.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentAttachFactsV4,
+    host_agent_attach_facts_check_v4, host_agent_attach_grant_deadline_v4}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, host_linux_service_agent_close_v4}
+
+val M23_DIR = "src/lib/nogc_sync_mut/orchestration/"
+
+fn m23_body(source: text, name: text) -> text:
+    val start = source.index_of("fn " + name + "(")
+    if start < 0: return ""
+    val rest = source.substring(start + 3, source.byte_len())
+    val next = rest.index_of("\nfn ")
+    val next_pub = rest.index_of("\npub fn ")
+    var stop = rest.byte_len()
+    if next >= 0 and next < stop: stop = next
+    if next_pub >= 0 and next_pub < stop: stop = next_pub
+    rest.substring(0, stop)
+
+fn m23_facts(now: i64, monotonic_ms: i64, prepare_deadline_ms: i64) -> HostAgentAttachFactsV4:
+    HostAgentAttachFactsV4(helper_kind: "attach-broker", plan_parent_operation_id: "op_1",
+        binding: HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "a".repeat(32), session_id: "session-a",
+            window_id: "window-a", pane_id: "pane-a", service_epoch: 3),
+        live_incarnation: "a".repeat(32), live_epoch: 3, prepare_deadline_ms: prepare_deadline_ms, not_after: 1000000,
+        now: now, monotonic_ms: monotonic_ms)
+
+fn m23_check(facts: HostAgentAttachFactsV4) -> text:
+    match host_agent_attach_facts_check_v4(facts, "op_1"):
+        case Ok(_): ""
+        case Err(reason): reason
+
+fn m23_agent(attach_stage: text) -> HostLinuxServiceAgentV4:
+    var agent = HostLinuxServiceAgentV4(operation_id: "op_1", association_digest: "a".repeat(64), payload_digest: "b".repeat(64),
+        stage: "running", clock_ms: 1000, attachment_consumed: true)
+    agent.attachment = Some(HostAgentAttachmentV4(attach_stage: attach_stage, not_after: 1000000, attach_digest: "c".repeat(64)))
+    agent
+
+describe "m23 P2-3: close releases only a LIVE attachment":
+    it "does not wedge the close of a refused attachment on a missing capacity owner":
+        # @req P2-3
+        val store = HostHelperStoreV1(root: "", journal: None)
+        val refused = host_linux_service_agent_close_v4(m23_agent("refused"), None, store, 0)
+        expect(refused.error).to_equal("linux-host-agent-transfer-missing")
+        step("a live attachment with no capacity owner still answers acquisition-incomplete")
+        val live = host_linux_service_agent_close_v4(m23_agent("ready"), None, store, 0)
+        expect(live.error).to_equal("linux-host-service-acquisition-incomplete")
+        expect(live.closed).to_equal(false)
+
+describe "m23 P2-5: one clock for the attachment bounds":
+    it "checks the prepare window on the monotonic clock and the window end on the grant clock":
+        # @req P2-5
+        expect(m23_check(m23_facts(900000, 5, 30000))).to_equal("")
+        expect(m23_check(m23_facts(900000, 5, 5 + 60000))).to_equal("")
+        expect(m23_check(m23_facts(900000, 5, 5 + 60001))).to_equal("attach-prepare-window")
+        expect(m23_check(m23_facts(900000, 5, 5))).to_equal("attach-prepare-window")
+        expect(m23_check(m23_facts(900000, 30001, 30000))).to_equal("attach-prepare-window")
+        expect(m23_check(m23_facts(1000000, 5, 30000))).to_equal("attach-stopping")
+
+    it "stores the receipt deadline on the grant clock as the remaining budget added to the grant now":
+        # @req P2-5
+        expect(host_agent_attach_grant_deadline_v4(30000, 900000, 5)).to_equal(900000 + 29995)
+        expect(host_agent_attach_grant_deadline_v4(30000, 1000, 1000)).to_equal(30000)
+
+describe "m23 P2-4 / item 3: service wiring":
+    it "reads a real monotonic clock at close and keeps the readers with the capacity owner while live":
+        # @req P2-4
+        val cv4 = m23_body(file_read_text(M23_DIR + "host_linux_service_current_v4.spl"), "host_linux_service_close_v4")
+        expect(cv4).to_contain("linux_service_close_monotonic_v4(owner))")
+        expect(cv4).to_contain("if not attachment_live and owner.parent_reader.is_some():")
+        expect(cv4).to_contain("if not attachment_live and owner.root_reader.is_some():")
+        val clock = m23_body(file_read_text(M23_DIR + "host_linux_service_current_v4.spl"), "linux_service_close_monotonic_v4")
+        expect(clock).to_contain("host_local_context_v1(owner.records.unwrap().metadata.policy).monotonic_ms")
+
+    it "does not recheck the helper store in current_v4 and lends it as unopened when it is no longer the valid one":
+        # @req item 3 (owner note 2)
+        val source = file_read_text(M23_DIR + "host_linux_service_current_v4.spl")
+        val current = source.substring(source.index_of("pub fn current_v4()"), source.index_of("pub fn scope_v4()"))
+        expect(current.contains("helper_store")).to_equal(false)
+        expect(current.contains("linux-helper-store-invalid")).to_equal(false)
+        val lent = m23_body(source, "linux_service_helper_store_v4")
+        expect(lent).to_contain("host_linux_helper_store_check_v1(journal.root)")
+        expect(lent).to_contain("                    if valid == owner.helper_store: root = valid")

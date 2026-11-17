@@ -6,7 +6,7 @@ or two-stop vertical gradient. It returns replacement pixels for the requested
 rectangle; callers keep backend presentation and readback ownership.
 """
 
-use std.gpu.engine2d.color.{blend, color_a, color_b, color_g, color_r, rgba}
+use std.gpu.engine2d.color.{color_a, color_b, color_g, color_r, rgba}
 
 pub val ENGINE2D_GLASS_MAX_WORK_PIXELS: i64 = 67108864
 
@@ -105,6 +105,24 @@ fn engine2d_glass_corner_radius(config: Engine2dGlassMaterialConfig) -> i32:
     silently disagree on a rounded edge.
     """
     _glass_radius(config)
+
+fn _glass_blend_over(s: u32, d: u32) -> u32:
+    """CPU twin of `blend_over` in shaders/glass_material.comp (the device
+    glass kernel, SPIR-V pinned): straight-alpha src-over with truncating
+    division. The glass material is Simple's own WM surface with no Chrome
+    equivalent, so it keeps this rule rather than color.blend's Chrome rules."""
+    val sa = color_a(s)
+    if sa == 255:
+        return s
+    if sa == 0:
+        return d
+    val dst_weight = (color_a(d) * (255 - sa)) / 255
+    val out_a = sa + dst_weight
+    rgba(
+        (color_r(s) * sa + color_r(d) * dst_weight) / out_a,
+        (color_g(s) * sa + color_g(d) * dst_weight) / out_a,
+        (color_b(s) * sa + color_b(d) * dst_weight) / out_a,
+        out_a)
 
 fn _glass_inside_rounded_rect(px: i32, py: i32, width: i32, height: i32, radius: i32) -> bool:
     if radius <= 0:
@@ -309,13 +327,13 @@ pub fn engine2d_draw_ir_glass_material_pixels(framebuffer: [u32], config: Engine
                     horizontal, config, px, py, blur_radius)
                 val saturated = _glass_saturate(
                     blurred, config.saturation_milli)
-                val surface = blend(_glass_surface_tint(config), saturated)
+                val surface = _glass_blend_over(_glass_surface_tint(config), saturated)
                 if config.gradient_enabled:
                     val gradient_destination = if config.gradient_layered_over_surface:
                         surface
                     else:
                         saturated
-                    result = blend(
+                    result = _glass_blend_over(
                         _glass_gradient_tint(config, py),
                         gradient_destination
                     )

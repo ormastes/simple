@@ -1,0 +1,50 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4: the read path after an agent adoption.
+# The fixture reference (pid 71, generation 1, owned root /trusted/output) names no
+# bound runtime slot: past the adoption gate the wrapper does ONE native slot
+# lookup (no fd is read) and surfaces the POSIX runtime's stale-reference error.
+# On a non-POSIX runtime stub the state is -1 and the error would be
+# process_stdout_failed; this lane pins POSIX. The data/eof/write-back path is
+# exercised by primary_output_read_admitted_v4_spec.spl.
+# fixture_session is copy-pasted across six specs; accepted (review-n4-r1 P3-4).
+use std.spec.*
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, ContainerPrimaryAttachAdoptionV1,
+    container_primary_attach_adoption_v1}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessRefV1}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_identity_profiled_v3
+use std.nogc_async_mut.container.terminal_session_v2.{host_agent_attach_adoption_v4, container_primary_output_read_v1}
+
+fn fixture_session(adoption: ContainerPrimaryAttachAdoptionV1?, cleaned: bool) -> ContainerPrimaryAttachSessionV1:
+    val plan = container_primary_attach_fixture_v1()
+    var launch = plan.launch_template
+    launch.transport_generation = 1
+    launch.request.launch_deadline_unix_ms = 1
+    val identity = group_process_stream_identity_profiled_v3(launch)
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
+    val transfer = PipedProcessOwnedTransferV2(owner: owner, reference: PipedProcessRefV1(pid: 71,
+        generation: launch.transport_generation, group_root: launch.root, group_identity: identity))
+    ContainerPrimaryAttachSessionV1(plan: plan, transfer: transfer, identity_fingerprint: "c".repeat(64),
+        adoption: adoption, native_cleaned: cleaned)
+
+fn fixture_binding(pane: text, epoch: i64) -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "f".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: pane, service_epoch: epoch)
+
+describe "Primary output read after agent adoption":
+    it "passes the adoption gate and surfaces the dead reference exactly":
+        step("Build the adoption from the binding, place it on the session, read once")
+        val adoption = host_agent_attach_adoption_v4(container_primary_attach_fixture_v1(), fixture_binding("pane-a", 1),
+            "parent-operation", 0).unwrap()
+        val turn = container_primary_output_read_v1(fixture_session(Some(adoption), false))
+        expect(turn.error).to_equal("stale_process_reference")
+        expect(turn.chunks.len()).to_equal(0)
+        expect(turn.eof).to_equal(false)
+        expect(container_primary_attach_adoption_v1(turn.session).unwrap().pane_id).to_equal("pane-a")
+        expect(container_primary_attach_adoption_v1(turn.session).unwrap().child_incarnation).to_equal(1)
+
+    it "still refuses the read on the same session without an adoption":
+        step("Control: the unadopted session is refused before native IO")
+        val turn = container_primary_output_read_v1(fixture_session(None, false))
+        expect(turn.error).to_equal("primary-output-not-adopted")

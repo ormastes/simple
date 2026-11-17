@@ -31,6 +31,7 @@ use std.common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
 }
@@ -942,6 +943,46 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if typed_nonuniform:
         eng = engine2d_draw_ir_render_typed_background(
             eng, command, x, y, w, h, effective_corners)
+    elif radius <= 0 and _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry") != "":
+        # A CSS gradient layer list resolved by the producer
+        # (`_html_draw_ir_gradient_layer_props`): the painting area, then per
+        # layer an ellipse (R) or a gradient line (L), Q10 px relative to this
+        # command's origin and device-scaled with it. The box colour paints
+        # first, then the layers bottom-up (the first listed is on top), each
+        # through the shared Engine2D evaluators and `draw_image_blend`.
+        val layer_geom = _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry")
+        val layer_stops = _engine2d_draw_ir_style_value(style, "background-gradient-layer-stops").split(";")
+        if _engine2d_draw_ir_has_visible_alpha(command.color):
+            eng.draw_rect_filled(x, y, w, h, command.color)
+        val lox = (x as i64) * 1024
+        val loy = (y as i64) * 1024
+        val pax = x + (_engine2d_draw_ir_nth_int(layer_geom, 0, 0) / 1024) as i32
+        val pay = y + (_engine2d_draw_ir_nth_int(layer_geom, 1, 0) / 1024) as i32
+        val paw = (_engine2d_draw_ir_nth_int(layer_geom, 2, 0) / 1024) as i32
+        val pah = (_engine2d_draw_ir_nth_int(layer_geom, 3, 0) / 1024) as i32
+        var li: i32 = layer_stops.len() as i32 - 1
+        # cpu-lane-loop-ok: one box's own gradient layer list, bottom layer first; bound is that list
+        while li >= 0:
+            val fields = layer_stops[li].split(":")
+            if fields.len() == 3:
+                val stop_n = fields[1].split(",").len()
+                var lcolors: [u32] = []
+                var lpositions: [i32] = []
+                var k: i32 = 0
+                # cpu-lane-loop-ok: one layer's stops; bound is its stop count
+                while k < stop_n:
+                    lcolors.push(_engine2d_draw_ir_nth_int(fields[1], k, 0) as u32)
+                    lpositions.push(_engine2d_draw_ir_nth_int(fields[2], k, 0) as i32)
+                    k = k + 1
+                val g0 = _engine2d_draw_ir_nth_int(layer_geom, 4 + 4 * li, 0)
+                val g1 = _engine2d_draw_ir_nth_int(layer_geom, 5 + 4 * li, 0)
+                val g2 = _engine2d_draw_ir_nth_int(layer_geom, 6 + 4 * li, 0)
+                val g3 = _engine2d_draw_ir_nth_int(layer_geom, 7 + 4 * li, 0)
+                if fields[0] == "R":
+                    eng.draw_radial_gradient_ellipse(pax, pay, paw, pah, lox + g0, loy + g1, g2, g3, lcolors, lpositions)
+                else:
+                    eng.draw_linear_gradient_line(pax, pay, paw, pah, lox + g0, loy + g1, lox + g2, loy + g3, lcolors, lpositions)
+            li = li - 1
     elif _engine2d_draw_ir_gradient_stop_count(style) >= 2 and radius <= 0:
         # GAP-2: an N-stop/angled/radial gradient was parsed at CSS-apply
         # time (simple_web_html_layout_renderer_decl_apply.spl) and threaded
@@ -992,6 +1033,10 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
             val r = if w > h: w / 2 else: h / 2
             eng.draw_radial_gradient_rect_stops(cx, cy, r, stop_colors, stop_positions)
         else:
+            # The box colour sits under the layer (CSS Backgrounds 3), as in
+            # the radial branch: a translucent stop shows it, not the page.
+            if _engine2d_draw_ir_has_visible_alpha(command.color):
+                eng.draw_rect_filled(x, y, w, h, command.color)
             eng.draw_gradient_rect_stops(x, y, w, h, stop_colors, stop_positions, angle_deg)
     elif bg_image.starts_with("linear-gradient(") and radius <= 0:
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
@@ -3006,15 +3051,31 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         batch.backend_target == "metal", draw_ir_no_rect(),
         css_background_pixel_work_budget)
     offscreen = inner.engine
-    val child = offscreen.read_pixels_with_source()
-    val composited = eng.draw_ir_composite_readback(
-        embedding.x,
-        embedding.y,
-        embedding.width,
-        embedding.height,
-        child,
-        embedding.opacity_milli
-    )
+    # A CSS opacity group (>= 2 painted items under one opacity root) restores
+    # with Chrome's SkBlendARGB32 rule; every other embedded surface keeps the
+    # milli contract of engine2d_composite_region_milli. On Vulkan the restore
+    # runs on the device from the offscreen buffer (no readback); any decline
+    # falls back to the readback restore, which paints the same pixels.
+    val css_group = css_opacity_group_surface(embedding.surface_id)
+    val device_restored = css_group and eng.draw_ir_composite_device_css_group(
+        offscreen, embedding.x, embedding.y, embedding.width, embedding.height,
+        embedding.opacity_milli)
+    val child = if device_restored: engine2d_readback([], "device_restored") else: offscreen.read_pixels_with_source()
+    val composited = if device_restored:
+        true
+    elif css_group:
+        eng.draw_ir_composite_readback_css_group(
+            embedding.x, embedding.y, embedding.width, embedding.height,
+            child, embedding.opacity_milli)
+    else:
+        eng.draw_ir_composite_readback(
+            embedding.x,
+            embedding.y,
+            embedding.width,
+            embedding.height,
+            child,
+            embedding.opacity_milli
+        )
     # A pooled offscreen is retained for the next same-size batch (and future
     # frames); shutting it down would free its buffer and defeat the reuse.
     if not offscreen_pooled:

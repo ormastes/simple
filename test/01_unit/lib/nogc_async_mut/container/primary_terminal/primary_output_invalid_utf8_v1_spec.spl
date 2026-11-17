@@ -1,0 +1,25 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4 known limitation pin: the legacy
+# piped stdout is UTF-8 framed; invalid UTF-8 turns the stream to error
+# (stdout_state -1) and the read surfaces "process_stdout_failed", which
+# container_terminal_read_v2 and container_primary_output_read_v1 pass through
+# unchanged. Pinned on the same POSIX slot read (no admitted primary fixture).
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_spawn_piped_ref_v1, process_read_stdout_ref_v1}
+use std.io_runtime.thread_sleep
+
+describe "Primary output transport invalid UTF-8":
+    it "surfaces process_stdout_failed and stays failed":
+        step("A child writes byte 0xFF; the stream error is the exact pinned string, never eof or data")
+        val process = process_spawn_piped_ref_v1("/bin/sh", ["-c", "printf '\\377'"]).unwrap()
+        var error: text = ""
+        var reads = 0
+        while error == "" and reads < 5000:
+            match process_read_stdout_ref_v1(process):
+                case Ok(Some(_)): expect("data").to_equal("no data before the framing error")
+                case Ok(None): thread_sleep(1)
+                case Err(reason): error = reason
+            reads = reads + 1
+        expect(error).to_equal("process_stdout_failed")
+        match process_read_stdout_ref_v1(process):
+            case Err(reason): expect(reason).to_equal("process_stdout_failed")
+            case _: expect("ok").to_equal("sticky stream error")

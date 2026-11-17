@@ -44,7 +44,7 @@ describe "DiagnosticRulePolicy load (plan §4)":
         expect(s.has_rule("SPL-UNIT-001")).to_equal(true)
         expect(s.has_rule("SPL-UNIT-002")).to_equal(true)
         val r = s.rule("SPL-TYPE-001")
-        expect(r.error_not_before_date).to_equal("2027-05-01")
+        expect(r.error_not_before_date).to_equal("")
         expect(r.error_since_lang_version).to_equal("2027.2")
         expect(r.exception_policy).to_equal("reason_required")
         expect(s.digest.starts_with("sha256:")).to_equal(true)
@@ -81,14 +81,31 @@ describe "DiagnosticRulePolicy resolution order (plan §4)":
 
     it "makes an edition-mandatory rule deny only when edition AND release date are both reached":
         # @req REQ-DIAG-POLICY-002
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            warn_since_lang_version: \"2026.11\"\n            error_not_before_date: \"2027-05-01\"\n            error_since_lang_version: \"2027.2\"\n            modes:\n                default: warn\n"
+        match load_diagnostic_policy_text(src):
+            Ok(s):
+                step("Edition 2027.2 but released before error_not_before")
+                val early = s.resolve("X-1", ctx_at("moderate", "2027.2", "2027-04-30"), DiagnosticRuleLevel.Warn)
+                step("Edition 2027.2 released on error_not_before")
+                val due = s.resolve("X-1", ctx_at("moderate", "2027.2", "2027-05-01"), DiagnosticRuleLevel.Warn)
+                expect(early.level.name()).to_equal("warn")
+                expect(due.level.name()).to_equal("deny")
+                expect(due.stage).to_equal("edition")
+            Err(e): expect(e).to_equal("loaded")
+
+    it "promotes SPL-UNIT-001 and SPL-TYPE-001 by edition 2027.2 alone (owner decision 2026-11-17, no date)":
+        # @req REQ-DIAG-POLICY-002
         val s = shipped()
-        step("Edition 2027.2 but released before error_not_before")
-        val early = s.resolve("SPL-UNIT-001", ctx_at("moderate", "2027.2", "2027-04-30"), DiagnosticRuleLevel.Warn)
-        step("Edition 2027.2 released on error_not_before")
-        val due = s.resolve("SPL-UNIT-001", ctx_at("moderate", "2027.2", "2027-05-01"), DiagnosticRuleLevel.Warn)
-        expect(early.level.name()).to_equal("warn")
-        expect(due.level.name()).to_equal("deny")
-        expect(due.stage).to_equal("edition")
+        for code in ["SPL-UNIT-001", "SPL-TYPE-001"]:
+            step("Resolve " + code + " on 2026.11 vs 2027.2 with an early release date")
+            expect(s.rule(code).error_not_before_date).to_equal("")
+            expect(s.rule(code).error_since_lang_version).to_equal("2027.2")
+            expect(s.resolve(code, ctx_at("moderate", "2026.11", "2026-11-17"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+            val next = s.resolve(code, ctx_at("moderate", "2027.2", "2026-11-17"), DiagnosticRuleLevel.Warn)
+            expect(next.level.name()).to_equal("deny")
+            expect(next.stage).to_equal("edition")
+        step("SPL-TYPE-001 keeps its robust profile deny")
+        expect(s.resolve("SPL-TYPE-001", ctx_at("robust", "2026.11", "2026-11-17"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
 
     it "keeps a rule silent before its warn schedule starts":
         # @req REQ-DIAG-POLICY-002
@@ -103,7 +120,7 @@ describe "DiagnosticRulePolicy resolution order (plan §4)":
         step("Exception on a deprecation rule vs on the security rule")
         val c = ctx_at("moderate", "2026.11", "2026-11-12").with_scoped_exception()
         val dep = s.resolve("SPL-UNIT-001", c, DiagnosticRuleLevel.Warn)
-        val sec = s.resolve("SPL-UNIT-002", c, DiagnosticRuleLevel.Warn)
+        val sec = s.resolve("SPL-SFFI-ABI-001", c, DiagnosticRuleLevel.Warn)
         expect(dep.level.name()).to_equal("allow")
         expect(dep.stage).to_equal("exception")
         expect(sec.level.name()).to_equal("deny")
@@ -141,10 +158,15 @@ describe "DiagnosticRulePolicy reproducibility (plan §4)":
         # @req REQ-DIAG-POLICY-003
         val s = shipped()
         step("Release dated before error_not_before, rehearsal as of after it")
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-1:\n            warn_since_lang_version: \"2026.11\"\n            error_not_before_date: \"2027-05-01\"\n            error_since_lang_version: \"2027.2\"\n            modes:\n                default: warn\n"
         val c = ctx_at("moderate", "2027.2", "2027-01-01").with_policy_as_of("2027-06-01")
-        val r = s.resolve("SPL-UNIT-001", c, DiagnosticRuleLevel.Warn)
-        expect(r.level.name()).to_equal("deny")
-        expect(r.effective_date).to_equal("2027-06-01")
+        match load_diagnostic_policy_text(src):
+            Ok(d):
+                val r = d.resolve("X-1", c, DiagnosticRuleLevel.Warn)
+                expect(r.level.name()).to_equal("deny")
+                expect(r.effective_date).to_equal("2027-06-01")
+            Err(e): expect(e).to_equal("loaded")
+        expect(s.digest.starts_with("sha256:")).to_equal(true)
 
     it "changes the digest when a rule's schedule changes":
         # @req REQ-DIAG-POLICY-003
@@ -184,8 +206,8 @@ describe "Warning phase per-rule scheduling (plan §4)":
             .to_equal(severity_rank_deny())
         step("Policy resolve with blanket phase and the rule selected")
         val s = shipped()
-        val c = ctx_at("robust", "2026.11", "2026-11-12").with_warning_phase().with_phased_rule("SPL-UNIT-002")
-        val r = s.resolve("SPL-UNIT-002", c, DiagnosticRuleLevel.Warn)
+        val c = ctx_at("robust", "2026.11", "2026-11-12").with_warning_phase().with_phased_rule("SPL-SFFI-ABI-001")
+        val r = s.resolve("SPL-SFFI-ABI-001", c, DiagnosticRuleLevel.Warn)
         expect(r.level.name()).to_equal("deny")
         expect(r.rehearsal).to_equal(false)
 
@@ -194,7 +216,7 @@ describe "Robust-boundary rules (robust_boundaries plan section 7)":
         # @req REQ-DIAG-POLICY-001
         # @capture(value): (edition, profile) -> severity for each ratified rule
         val s = shipped()
-        val rules = ["SPL-BOUND-001", "SPL-BOUND-002", "SPL-BOUND-003", "SPL-UNIT-003", "SPL-UNIT-004"]
+        val rules = ["SPL-BOUND-001", "SPL-BOUND-002", "SPL-BOUND-003", "SPL-UNIT-002", "SPL-UNIT-003", "SPL-UNIT-004"]
         for code in rules:
             step("Resolve " + code + " across (edition, profile)")
             val cur_default = s.resolve(code, ctx_at("default", "2026.11", "2026-11-16"), DiagnosticRuleLevel.Warn)

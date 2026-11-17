@@ -16,7 +16,9 @@ commit needs a capacity owner and is covered by the existing settle specs, which
 are unchanged. The last case is a structural pin: it catches the evidence read
 moving into the wrapper, a changed refusal text or a dropped mapping, but it cannot
 see a wrapper that returns a different owner under the same text (that needs a live
-capacity owner). The `len() == 2` assertion forces a table review when a kind is added.
+capacity owner). The `len() == 3` assertion forces a table review when a kind is added.
+N3 (DESIGN 13.3) added `PrimaryAttachCancelled` with its own field and fact lists; the
+plain commit refuses it (`helper-settlement-use-cancel-commit`) before any evidence read.
 ## Verification guidance and troubleshooting
 If the closed-property case fails a new kind was added without a table row; if a
 structural pin fails the wrapper no longer refuses an unknown text with the
@@ -26,7 +28,7 @@ use std.spec.{step}
 use std.io.file_read_text
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperSettlementKindV1,
     host_helper_settlement_kinds_v1, host_helper_settlement_kind_text_v1, host_helper_settlement_field_names_v1,
-    host_helper_settlement_kind_of_text_v1}
+    host_helper_settlement_kind_of_text_v1, host_helper_settlement_fact_names_v1}
 
 val N2_PATH = "src/lib/nogc_sync_mut/orchestration/host_helper_settlement_commit_v1.spl"
 
@@ -44,16 +46,45 @@ describe "helper settlement typed kind (milestone_0022 N2)":
     it "is closed: every kind has a distinct row and unknown text maps to nothing":
         # @req S40-NATIVE-N2
         val kinds = host_helper_settlement_kinds_v1()
-        expect(kinds.len()).to_equal(2)
+        expect(kinds.len()).to_equal(3)
         expect(host_helper_settlement_kind_text_v1(kinds[0]) != host_helper_settlement_kind_text_v1(kinds[1])).to_equal(true)
-        for text_kind in ["", "host-helper-stream-settlement ", "HOST-PRIMARY-ATTACH-SETTLEMENT", "host-primary-attach-cancelled", "primary-attach"]:
+        expect(host_helper_settlement_kind_text_v1(kinds[1]) != host_helper_settlement_kind_text_v1(kinds[2])).to_equal(true)
+        expect(host_helper_settlement_kind_text_v1(kinds[0]) != host_helper_settlement_kind_text_v1(kinds[2])).to_equal(true)
+        expect(host_helper_settlement_kind_text_v1(HostHelperSettlementKindV1.PrimaryAttachCancelled)).to_equal("host-primary-attach-cancelled")
+        for text_kind in ["", "host-helper-stream-settlement ", "HOST-PRIMARY-ATTACH-SETTLEMENT", "host-primary-attach-cancel", "primary-attach"]:
             expect(host_helper_settlement_kind_of_text_v1(text_kind).is_none()).to_equal(true)
 
-    it "keeps the nine-name field list byte-identical for both kinds":
+    it "keeps the nine-name field list byte-identical for both settlement kinds":
         # @req S40-NATIVE-N2
         val expected = ["version", "kind", "operationId", "operationDigest", "requestDigest", "preparedReceiptDigest",
             "consumptionDigest", "nativeIdentityDigest", "treeReceiptDigest"]
-        expect(host_helper_settlement_field_names_v1()).to_equal(expected)
+        expect(host_helper_settlement_field_names_v1(HostHelperSettlementKindV1.StreamSettlement)).to_equal(expected)
+        expect(host_helper_settlement_field_names_v1(HostHelperSettlementKindV1.PrimaryAttachSettlement)).to_equal(expected)
+        step("the settlement ACK facts keep their six-key order")
+        val facts = ["operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "nativeIdentityDigest", "treeReceiptDigest"]
+        expect(host_helper_settlement_fact_names_v1(HostHelperSettlementKindV1.StreamSettlement)).to_equal(facts)
+        expect(host_helper_settlement_fact_names_v1(HostHelperSettlementKindV1.PrimaryAttachSettlement)).to_equal(facts)
+
+    it "gives the cancelled kind its own field and fact lists with no native or tree fields":
+        # @req S40-NATIVE-N3
+        expect(host_helper_settlement_field_names_v1(HostHelperSettlementKindV1.PrimaryAttachCancelled)).to_equal(
+            ["version", "kind", "operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "refusalDigest"])
+        val facts = host_helper_settlement_fact_names_v1(HostHelperSettlementKindV1.PrimaryAttachCancelled)
+        expect(facts).to_equal(["operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "refusalDigest"])
+        expect(facts.contains("nativeIdentityDigest") or facts.contains("treeReceiptDigest")).to_equal(false)
+
+    it "refuses the cancelled kind in the plain commit before any evidence read":
+        # @req S40-NATIVE-N3
+        val source = file_read_text(N2_PATH)
+        val typed = source.substring(source.index_of("pub fn host_helper_settlement_commit_kind_v1("),
+            source.index_of("fn host_helper_settlement_facts_v1("))
+        val refusal = typed.index_of("HostHelperSettlementCommitTurnV1(owner, None, \"helper-settlement-use-cancel-commit\")")
+        val evidence = typed.index_of("host_helper_settlement_facts_v1(owner, operation, kind, outcome)")
+        expect(refusal >= 0 and evidence > refusal).to_equal(true)
+        expect(typed.contains("case HostHelperSettlementKindV1.PrimaryAttachCancelled:")).to_equal(true)
+        step("the cancel commit is the only settle path for the cancelled kind")
+        val cancel = source.substring(source.index_of("pub fn host_helper_cancel_commit_v1("), source.len())
+        expect(cancel.contains("host_helper_settlement_facts_v1(owner, operation, HostHelperSettlementKindV1.PrimaryAttachCancelled, outcome)")).to_equal(true)
 
     it "refuses an unknown text with the original owner before any evidence read":
         # @req S40-NATIVE-N2
@@ -68,7 +99,7 @@ describe "helper settlement typed kind (milestone_0022 N2)":
         step("the wrapper never reads evidence itself: only the typed entry point does")
         expect(wrapper.contains("host_capacity_completion_evidence_owned_v2")).to_equal(false)
         expect(wrapper.contains("host_helper_settlement_commit_kind_v1(")).to_equal(true)
-        step("the typed entry point carries the old body: evidence, 6-key facts, settle")
+        step("the typed entry point carries the old body: evidence (via the shared fact helper), per-kind facts, settle")
         val typed = source.substring(typed_entry, source.len())
         expect(typed.contains("host_capacity_completion_evidence_owned_v2")).to_equal(true)
         expect(typed.contains("host_capacity_owner_settle_v1")).to_equal(true)

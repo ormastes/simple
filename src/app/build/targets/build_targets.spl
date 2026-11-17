@@ -34,7 +34,8 @@
 # This module is self-contained on purpose: it does not read or import the
 # driver-side target graph owned by another lane.
 
-use std.io_runtime.{file_exists, file_read}
+use std.io_runtime.{file_exists, file_read, host_arch}
+use compiler.common.backend_plugin.model.{BACKEND_PLUGIN_ABI_VERSION_V1, BackendCapability}
 
 struct BuildTarget:
     name: text
@@ -366,17 +367,21 @@ fn _bracket_items(value: text, open: text, close: text) -> [text]:
 
 fn _declared_cpu_tiers(repo_root: text) -> [text]:
     """Every tier name declared in config/build/cpu_tiers.sdn: `levels`,
-    `default_tiers` and alias keys. Empty when the file is missing."""
+    `default_tiers` and alias keys, each as `<arch>|<tier>` (arch from the
+    enclosing `- arch:` entry). Empty when the file is missing."""
     var out: [text] = []
     val path = repo_root + "/config/build/cpu_tiers.sdn"
     if not file_exists(path):
         return out
     val lines = file_read(path).split("\n")
+    var arch = ""
     var i = 0
     while i < lines.len():
         val s = _strip_comment(lines[i]).trim()
         var items: [text] = []
-        if s.starts_with("levels:"):
+        if s.starts_with("- arch:"):
+            arch = s[7:].trim()
+        elif s.starts_with("levels:"):
             items = _bracket_items(s[7:], "[", "]")
         elif s.starts_with("default_tiers:"):
             items = _bracket_items(s[14:], "[", "]")
@@ -388,13 +393,36 @@ fn _declared_cpu_tiers(repo_root: text) -> [text]:
                 p = p + 1
         var k = 0
         while k < items.len():
-            if not out.contains(items[k]):
-                out.push(items[k])
+            val key = arch + "|" + items[k]
+            if not out.contains(key):
+                out.push(key)
             k = k + 1
         i = i + 1
     out
 
+fn _tier_declared(tiers: [text], tier: text) -> bool:
+    var i = 0
+    while i < tiers.len():
+        if tiers[i].ends_with("|" + tier):
+            return true
+        i = i + 1
+    false
+
+pub fn tier_arch_of_triple(triple: text) -> text:
+    """Arch name used by cpu_tiers.sdn for a triple's arch component."""
+    val a = triple.split("-")[0]
+    if a.starts_with("riscv64"):
+        return "riscv64"
+    if a == "arm64":
+        return "aarch64"
+    if a == "amd64":
+        return "x86_64"
+    a
+
 pub fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
+    validate_targets_for_arch(ts, repo_root, host_arch())
+
+pub fn validate_targets_for_arch(ts: TargetSet, repo_root: text, host: text) -> [text]:
     """Full fail-closed validation. Returns every error found (never throws).
 
     Checks, each a distinct named error: parse errors carried in from the
@@ -415,8 +443,12 @@ pub fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
             if not tiers_loaded:
                 tiers = _declared_cpu_tiers(repo_root)
                 tiers_loaded = true
-            if not tiers.contains(t.cpu_tier):
+            if not _tier_declared(tiers, t.cpu_tier):
                 errors.push("target-error: unknown-cpu-tier: " + t.name + ": " + t.cpu_tier)
+            else:
+                val arch = if t.triple.len() > 0: tier_arch_of_triple(t.triple) else: host
+                if not tiers.contains(arch + "|" + t.cpu_tier):
+                    errors.push("target-error: cpu-tier-arch-mismatch: " + t.name + ": " + t.cpu_tier + " (" + arch + ")")
         if t.triple.len() > 0 and not is_well_formed_triple(t.triple):
             errors.push("target-error: malformed-triple: " + t.name + ": " + t.triple)
         var j = 0
@@ -482,12 +514,13 @@ pub fn default_group_targets(ts: TargetSet) -> [text]:
     """Targets a default build selects: members of `default: true` groups.
 
     A file that declares no group keeps the pre-group meaning: every target.
-    A target with an explicit `triple:` is cross (opt-in) and never selected."""
+    A target with an explicit `triple:` (cross) or `cpu_tier:` (tier artifact) is
+    opt-in and never selected: a default build is the host baseline only."""
     var out: [text] = []
     if ts.groups.len() == 0:
         var i = 0
         while i < ts.targets.len():
-            if ts.targets[i].triple.len() == 0:
+            if ts.targets[i].triple.len() == 0 and ts.targets[i].cpu_tier.len() == 0:
                 out.push(ts.targets[i].name)
             i = i + 1
         return out
@@ -497,7 +530,7 @@ pub fn default_group_targets(ts: TargetSet) -> [text]:
             var m = 0
             while m < ts.groups[g].members.len():
                 val idx = find_target(ts, ts.groups[g].members[m])
-                if idx < 0 or ts.targets[idx].triple.len() == 0:
+                if idx < 0 or (ts.targets[idx].triple.len() == 0 and ts.targets[idx].cpu_tier.len() == 0):
                     out.push(ts.groups[g].members[m])
                 m = m + 1
         g = g + 1
@@ -510,7 +543,10 @@ pub fn default_group_targets(ts: TargetSet) -> [text]:
 # that any backend provider is production-ready. Default selection
 # (`default_group_targets`) never consults it, so the host build is unaffected.
 
-pub val BACKEND_PROVIDER_ABI_VERSION: i64 = 1
+# ABI version and capability vocabulary come from the compiler-side V1 backend
+# plugin contract (70.backend/backend_plugin/admission.spl uses the same model),
+# so both admission paths accept/refuse the same ABI and capability names.
+pub val BACKEND_PROVIDER_ABI_VERSION: i64 = BACKEND_PLUGIN_ABI_VERSION_V1
 
 pub struct BackendProviderDescriptor:
     group: text
@@ -518,12 +554,32 @@ pub struct BackendProviderDescriptor:
     host_triple: text
     capabilities: [text]
 
+pub fn backend_provider_capability_names() -> [text]:
+    [
+        BackendCapability.JitExecute.name(), BackendCapability.ObjectEmit.name(),
+        BackendCapability.DebugInfo.name(), BackendCapability.Optimization.name(),
+        BackendCapability.CrossTarget.name(), BackendCapability.IncrementalCompilation.name()
+    ]
+
+fn _unknown_capability(caps: [text]) -> text:
+    val known = backend_provider_capability_names()
+    for c in caps:
+        if not known.contains(c):
+            return c
+    ""
+
 pub fn admit_backend_provider(d: BackendProviderDescriptor, host_triple: text, required_caps: [text]) -> text:
     """Empty text = admitted; otherwise the first stable refusal code."""
     if d.abi_version != BACKEND_PROVIDER_ABI_VERSION:
         return "SPL-PROVIDER-ABI-001: backend-admission: abi-mismatch: " + d.group + ": " + d.abi_version.to_string() + " != " + BACKEND_PROVIDER_ABI_VERSION.to_string()
     if d.host_triple != host_triple:
         return "SPL-PROVIDER-ABI-001: backend-admission: triple-mismatch: " + d.group + ": " + d.host_triple + " != " + host_triple
+    val bad_decl = _unknown_capability(d.capabilities)
+    if bad_decl.len() > 0:
+        return "backend-admission: unknown-capability: " + d.group + ": " + bad_decl
+    val bad_req = _unknown_capability(required_caps)
+    if bad_req.len() > 0:
+        return "backend-admission: unknown-capability: " + d.group + ": " + bad_req
     var i = 0
     while i < required_caps.len():
         var found = false
@@ -533,7 +589,7 @@ pub fn admit_backend_provider(d: BackendProviderDescriptor, host_triple: text, r
                 found = true
             j = j + 1
         if not found:
-            return "backend-admission: missing-capability: " + d.group + ": " + required_caps[i]
+            return "SPL-PROVIDER-ABI-001: backend-admission: missing-capability: " + d.group + ": " + required_caps[i]
         i = i + 1
     ""
 

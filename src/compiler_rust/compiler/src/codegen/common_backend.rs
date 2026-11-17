@@ -50,6 +50,10 @@ pub type BackendResult<T> = Result<T, BackendError>;
 /// Generated module initialization is normally silent.  This gate is opt-in
 /// because a compiler-scale module can have thousands of runtime-backed
 /// initializers.
+fn is_windows_arm64(target: Target) -> bool {
+    target.os == TargetOS::Windows && target.arch == TargetArch::Aarch64
+}
+
 fn module_init_trace_enabled_for(value: Option<&str>) -> bool {
     value.is_some_and(|value| value != "0")
 }
@@ -1036,7 +1040,7 @@ impl BackendSettings {
             opt_level: "speed",
             // Enable PIC for hosted targets (PIE executables, shared libraries).
             // Disable PIC for baremetal/freestanding targets — no GOT, no dynamic linker.
-            is_pic: !target.is_baremetal(),
+            is_pic: !target.is_baremetal() && !is_windows_arm64(target),
             target,
             cpu: TargetCpu::builtin_default_for_arch(target.arch),
             cpu_features: CpuFeatureConfig::from_env(),
@@ -3213,6 +3217,16 @@ mod tests {
     use crate::mir::{BlockId, CallTarget, LocalKind, MirLocal, MirModule, Terminator, VReg};
     use cranelift_object::{ObjectBuilder, ObjectModule};
     use simple_parser::ast::Visibility;
+
+    #[test]
+    fn aot_windows_arm64_is_not_pic() {
+        // cranelift-object cannot emit Aarch64AdrGotPage21 for COFF (panics
+        // "not supported for this file format"); PE has no GOT either.
+        let win_a64 = BackendSettings::aot_for_target(Target::parse("aarch64-pc-windows-gnullvm").unwrap());
+        assert!(!win_a64.is_pic);
+        let lin_a64 = BackendSettings::aot_for_target(Target::parse("aarch64-unknown-linux-gnu").unwrap());
+        assert!(lin_a64.is_pic);
+    }
 
     fn test_backend() -> CodegenBackend<ObjectModule> {
         let settings = BackendSettings::aot();

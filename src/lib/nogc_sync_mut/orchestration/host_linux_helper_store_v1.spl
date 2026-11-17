@@ -1,0 +1,496 @@
+# milestone_0022 N1 (DESIGN 13.1, 13.2, 14.2, 15.1): the protected PATHNAME helper
+# store of the V4 Linux service, its deterministic domain classifier and the Linux
+# evidence arm for `host_helper_reservation_v1`. N3 (13.3, 14.3, 15.3-15.4, 16, 17(D)):
+# the refusal R / cancelled X records (journal first, store mirror second), their full
+# classifier checks, the open entry guard and the AttachCancelled evidence arm.
+# SOURCE_AUTHORED_NOT_RUN.
+# The store sits beside the journal root; one derivation function names it, so no
+# record or packet ever supplies the path. It has pathname-grade tamper resistance
+# (protected parent, 0700, owner == euid, no-follow reads), not the fd journal's:
+# every store record is re-bound to the JOURNAL request and execution proof by
+# host_primary_attach_validate_record_core_v1. Never imports a capacity owner (the
+# capacity owner reaches this module through host_linux_completion_evidence_v3).
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_read_v3}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.host_helper_plan_v1.HostHelperPlanV1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_object_publish_owned_v2,
+    host_helper_request_load_owned_v2}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{host_helper_stream_publish_v1,
+    host_helper_stream_fields_v1, host_helper_stream_text_v1, host_helper_stream_path_v1}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.contracts.container.linux_fresh_probe_cohort_data_v3.linux_fresh_probe_native_security_v3
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperStoreV1, host_helper_archive_present_v1}
+use std.nogc_sync_mut.orchestration.host_helper_settlement_domain_v1.host_helper_completion_domain_v1
+use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_receipt_v1.host_primary_attach_settlement_evidence_core_v1
+use std.nogc_sync_mut.io.path_identity.path_entry_present
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.io.file_ops.directory_fsync
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.common.crypto.sha256.sha256_text
+@when(os="linux"):
+use std.nogc_sync_mut.io.anchored_io_linux_v1.anchored_linux_metadata_v1
+use std.nogc_sync_mut.io.retained_file_abi.geteuid
+@end
+
+pub enum HostLinuxHelperStoreStateV1:
+    Absent
+    Valid(root: text)
+
+# Closed domain set of the 13.2 table. The refused/cancelled rows are first chosen by
+# marker set (pure table), then confirmed by the full R/X record checks (N3).
+pub enum HostLinuxHelperDomainV1:
+    Unrecorded
+    PrimaryConnection
+    PrimaryAttach
+    AttachRefusedPreConsume
+    AttachRefusedPostConsume
+    AttachCancelled
+
+# Observed presence only. Journal: PC (connection), R (refusal), X (cancelled).
+# Store: PA (consumed), N (native), O (output), and the R/X mirrors.
+pub struct HostLinuxHelperMarkersV1:
+    connection: bool
+    consumed: bool
+    native: bool
+    refusal: bool
+    cancelled: bool
+    output: bool
+    refusal_mirror: bool
+    cancelled_mirror: bool
+
+pub fn host_linux_helper_store_root_v1(journal_root: text) -> text:
+    journal_root + ".helper-store"
+
+fn helper_store_invalid_v1() -> text:
+    "linux-helper-store-invalid"
+
+# Absolute, no empty/./.. component, no trailing slash: a trailing slash would put
+# the store INSIDE the journal root instead of beside it.
+fn helper_store_journal_root_valid_v1(journal_root: text) -> bool:
+    if (journal_root.byte_len() < 2 or journal_root.byte_len() > 4000 or not journal_root.starts_with("/") or
+            journal_root.ends_with("/") or journal_root.contains("\0") or journal_root.contains("\n") or
+            journal_root.contains("\r") or journal_root.contains("\\")):
+        return false
+    val parts = journal_root.split("/")
+    var index = 1
+    while index < parts.len():
+        if parts[index] == "" or parts[index] == "." or parts[index] == "..": return false
+        index = index + 1
+    true
+
+fn helper_store_parent_v1(root: text) -> text:
+    val cut = root.last_index_of("/")
+    if cut <= 0: return "/"
+    root.substring(0, cut)
+
+# One no-follow statx of the final component: a symlink reports its own mode and
+# fails "private-dir" (owner == euid and mode exactly 040700).
+@unsafe(reason: "one AT_FDCWD no-follow statx of the helper store path and the effective uid; no descriptor is held", capabilities: [ffi, raw_ptr])
+fn helper_store_private_dir_v1(root: text) -> Result<(), text>:
+    @when(os="linux"):
+    val meta = anchored_linux_metadata_v1(-100, root, false)
+    if meta.is_err(): return Err(helper_store_invalid_v1())
+    val held = meta.unwrap()
+    if linux_fresh_probe_native_security_v3(("", held.uid as i64, held.mode as i64, 0), "private-dir",
+            geteuid() as i64).is_err():
+        return Err(helper_store_invalid_v1())
+    Ok(())
+    @else:
+    Err("linux-helper-store-unsupported-os")
+    @end
+
+# Check only, never repairs (DESIGN 14.2). Absent = no entry at all; any entry that
+# is not a real private directory owned by the effective uid is an Err.
+pub fn host_linux_helper_store_check_v1(journal_root: text) -> Result<HostLinuxHelperStoreStateV1, text>:
+    if not helper_store_journal_root_valid_v1(journal_root): return Err(helper_store_invalid_v1())
+    val root = host_linux_helper_store_root_v1(journal_root)
+    if not dir_is_real_no_follow(helper_store_parent_v1(root)): return Err(helper_store_invalid_v1())
+    if not path_entry_present(root)?: return Ok(HostLinuxHelperStoreStateV1.Absent)
+    if not dir_is_real_no_follow(root): return Err(helper_store_invalid_v1())
+    helper_store_private_dir_v1(root)?
+    Ok(HostLinuxHelperStoreStateV1.Valid(root))
+
+# Create-exclusive-or-adopt (DESIGN 13.1/14.2). Only a directory this call created
+# is chmod-ed; an adopted store must already pass every check. The final answer is
+# always a fresh check, so a raced or substituted entry is refused, never repaired.
+pub fn host_linux_helper_store_open_v1(journal_root: text) -> Result<text, text>:
+    match host_linux_helper_store_check_v1(journal_root)?:
+        case HostLinuxHelperStoreStateV1.Valid(root): return Ok(root)
+        case HostLinuxHelperStoreStateV1.Absent: ()
+    val root = host_linux_helper_store_root_v1(journal_root)
+    if not dir_create(root, false): return Err(helper_store_invalid_v1())
+    # No-follow gate before the chmod: a symlink planted after the Absent check is refused, never chmod-ed.
+    # Residual (recorded, DESIGN 14.2): the C runtime mkdir is not create-exclusive and mkdir-then-chmod is not atomic;
+    # a crash in between leaves a store the next check rejects (fail closed, operator removes it).
+    if not dir_is_real_no_follow(root): return Err(helper_store_invalid_v1())
+    if not file_set_mode(root, 448): return Err(helper_store_invalid_v1())
+    if not directory_fsync(root) or not directory_fsync(helper_store_parent_v1(root)):
+        return Err("linux-helper-store-sync")
+    match host_linux_helper_store_check_v1(journal_root)?:
+        case HostLinuxHelperStoreStateV1.Valid(checked):
+            if checked != root: return Err(helper_store_invalid_v1())
+            Ok(checked)
+        case HostLinuxHelperStoreStateV1.Absent: Err(helper_store_invalid_v1())
+
+fn helper_journal_present_v1(journal: DistributedOperationJournalV2, relative: text,
+        maximum: i64) -> Result<bool, text>:
+    Ok(distributed_operation_journal_read_v3(journal, relative, maximum)?.is_some())
+
+# The journal-side connection marker (PC), readable without the helper store (m23 item 3).
+pub fn host_linux_helper_connection_marker_v1(journal: DistributedOperationJournalV2, operation_id: text) -> Result<bool, text>:
+    val key = sha256_text(operation_id) + ".sdn"
+    Ok(helper_journal_present_v1(journal, "primary-connection-consumed/" + key, 8388608)? or
+        helper_journal_present_v1(journal, "primary-connection-attempt-terminal/" + key, 4096)?)
+
+# A journal-only connection row (m23 item 3): PC present and neither journal attach record (R, X) present. Such a
+# row keeps its connection evidence while the attach store is unusable; any R/X beside PC is ambiguous and stays Err.
+pub fn host_linux_helper_connection_only_v1(journal: DistributedOperationJournalV2, operation_id: text) -> Result<bool, text>:
+    if not host_linux_helper_connection_marker_v1(journal, operation_id)?: return Ok(false)
+    val key = sha256_text(operation_id) + ".sdn"
+    if helper_journal_present_v1(journal, "host-helper-primary-refusal/" + key, 65536)?: return Ok(false)
+    Ok(not helper_journal_present_v1(journal, "host-helper-primary-cancelled/" + key, 65536)?)
+
+# Gather: journal markers through the owned journal, store markers by observed
+# presence (a dangling entry or unreadable directory is an Err, never absence).
+pub fn host_linux_helper_markers_v1(journal: DistributedOperationJournalV2, store: HostLinuxHelperStoreStateV1,
+        operation_id: text) -> Result<HostLinuxHelperMarkersV1, text>:
+    val key = sha256_text(operation_id) + ".sdn"
+    val connection = host_linux_helper_connection_marker_v1(journal, operation_id)?
+    val refusal = helper_journal_present_v1(journal, "host-helper-primary-refusal/" + key, 65536)?
+    val cancelled = helper_journal_present_v1(journal, "host-helper-primary-cancelled/" + key, 65536)?
+    match store:
+        case HostLinuxHelperStoreStateV1.Absent:
+            Ok(HostLinuxHelperMarkersV1(connection: connection, consumed: false, native: false, refusal: refusal,
+                cancelled: cancelled, output: false, refusal_mirror: false, cancelled_mirror: false))
+        case HostLinuxHelperStoreStateV1.Valid(root):
+            Ok(HostLinuxHelperMarkersV1(connection: connection,
+                consumed: host_helper_archive_present_v1(root, operation_id, "primary-consumed")?,
+                native: host_helper_archive_present_v1(root, operation_id, "primary-native")?,
+                refusal: refusal, cancelled: cancelled,
+                output: host_helper_archive_present_v1(root, operation_id, "consumed")?,
+                refusal_mirror: host_helper_archive_present_v1(root, operation_id, "primary-refusal")?,
+                cancelled_mirror: host_helper_archive_present_v1(root, operation_id, "primary-cancelled")?))
+
+# Pure 13.2 table (with the 14.3/15.4 mirror rule). Exactly one domain or an Err.
+pub fn host_linux_helper_domain_of_v1(markers: HostLinuxHelperMarkersV1) -> Result<HostLinuxHelperDomainV1, text>:
+    val ambiguous = "helper-settlement-domain-ambiguous"
+    # A mirror is never authority: a mirror without its journal record is ambiguous.
+    if (markers.refusal_mirror and not markers.refusal) or (markers.cancelled_mirror and not markers.cancelled):
+        return Err(ambiguous)
+    val attach = markers.consumed or markers.native or markers.refusal or markers.cancelled
+    if markers.output:
+        if markers.connection or attach: return Err(ambiguous)
+        return Err("helper-output-follow-unsupported-on-linux-journal")
+    if markers.connection:
+        if attach: return Err(ambiguous)
+        return Ok(HostLinuxHelperDomainV1.PrimaryConnection)
+    if not attach: return Ok(HostLinuxHelperDomainV1.Unrecorded)
+    if markers.native and (markers.refusal or markers.cancelled): return Err(ambiguous)
+    if markers.cancelled:
+        if not markers.refusal: return Err(ambiguous)
+        return Ok(HostLinuxHelperDomainV1.AttachCancelled)
+    if markers.refusal:
+        if markers.consumed: return Ok(HostLinuxHelperDomainV1.AttachRefusedPostConsume)
+        return Ok(HostLinuxHelperDomainV1.AttachRefusedPreConsume)
+    if not markers.consumed: return Err(ambiguous)
+    Ok(HostLinuxHelperDomainV1.PrimaryAttach)
+
+# The marker table, then (refused/cancelled rows only) the full record checks: R/X
+# decode canonically, bind to the operation id, R's stage and consumedDigest agree
+# with PA, X binds R, and every present mirror equals its journal record.
+pub fn host_linux_helper_domain_v1(journal: DistributedOperationJournalV2, store: HostLinuxHelperStoreStateV1,
+        operation_id: text) -> Result<HostLinuxHelperDomainV1, text>:
+    val domain = host_linux_helper_domain_of_v1(host_linux_helper_markers_v1(journal, store, operation_id)?)?
+    if not host_linux_helper_domain_attach_record_v1(domain): return Ok(domain)
+    host_linux_helper_attach_records_check_v1(domain, host_linux_helper_attach_records_v1(journal, store, operation_id)?,
+        operation_id)
+
+# The primary-attach stack's domain gate (DESIGN 15.1). Legacy world: the pathname
+# classifier, unchanged. V4 world: the store must be the derived, still-valid store
+# of THIS journal, and the store-aware classifier must say PrimaryAttach.
+pub fn host_helper_store_primary_domain_v1(store: HostHelperStoreV1, operation_id: text) -> Result<(), text>:
+    match store.journal:
+        case None:
+            if host_helper_completion_domain_v1(store.root, operation_id)? != "primary-attach":
+                return Err("host-primary-consumption-domain-mismatch")
+            Ok(())
+        case Some(journal):
+            val state = host_linux_helper_store_bound_v1(journal, store.root)?
+            match host_linux_helper_domain_v1(journal, state, operation_id)?:
+                case HostLinuxHelperDomainV1.PrimaryAttach: Ok(())
+                case _: Err("host-primary-consumption-domain-mismatch")
+
+# PrimaryAttach evidence on the Linux journal (DESIGN 13.1): the existing pathname
+# evidence over the helper store root, with the request and execution proof loaded
+# through the owned journal loaders. The caller classified the domain first.
+pub fn host_linux_helper_attach_evidence_v1(journal: DistributedOperationJournalV2, store: HostLinuxHelperStoreStateV1,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    match store:
+        case HostLinuxHelperStoreStateV1.Valid(root):
+            host_primary_attach_settlement_evidence_core_v1(HostHelperStoreV1(root: root, journal: Some(journal)), operation)
+        case HostLinuxHelperStoreStateV1.Absent: Err(helper_store_invalid_v1())
+
+# The store of THIS journal: derived from the journal root, Valid, and equal to the
+# root the caller holds (DESIGN 13.1: no record or packet ever names the path).
+pub fn host_linux_helper_store_bound_v1(journal: DistributedOperationJournalV2,
+        store_root: text) -> Result<HostLinuxHelperStoreStateV1, text>:
+    val state = host_linux_helper_store_check_v1(journal.root)?
+    match state:
+        case HostLinuxHelperStoreStateV1.Valid(root):
+            if root != store_root: return Err(helper_store_invalid_v1())
+            Ok(state)
+        case HostLinuxHelperStoreStateV1.Absent: Err(helper_store_invalid_v1())
+
+# ---- milestone_0022 N3: refusal R / cancelled X ---------------------------------
+# Authority is the JOURNAL record; the store copy is a verified mirror (14.3).
+# Categories name both: journal `host-helper-<category>/`, store `host-helper-stream-<category>/`.
+pub struct HostPrimaryAttachRefusalV1:
+    operation_id: text
+    operation_digest: text
+    prepared_receipt_digest: text
+    # "" for stage pre-consume; sha256(consumed record bytes) for post-consume.
+    consumed_digest: text
+    stage: text
+    reason_digest: text
+
+pub struct HostPrimaryAttachCancelledV1:
+    operation_id: text
+    operation_digest: text
+    request_digest: text
+    prepared_receipt_digest: text
+    refusal_digest: text
+
+# Observed record bytes (None = observed absence). Journal R/X are authority.
+pub struct HostLinuxHelperAttachRecordsV1:
+    refusal: Option<text>
+    refusal_mirror: Option<text>
+    cancelled: Option<text>
+    cancelled_mirror: Option<text>
+    consumed: Option<text>
+
+# Digests re-derived from the JOURNAL-stored signed helper request (16 P2-5).
+pub struct HostLinuxHelperAttachExpectedV1:
+    plan: HostHelperPlanV1
+    operation_digest: text
+    request_digest: text
+    prepared_receipt_digest: text
+
+pub fn host_linux_helper_journal_relative_v1(category: text, operation_id: text) -> text:
+    "host-helper-" + category + "/" + sha256_text(operation_id) + ".sdn"
+
+fn helper_attach_digests_valid_v1(digests: [text]) -> bool:
+    for digest in digests:
+        if not builder_digest_valid_v1(digest): return false
+    true
+
+pub fn host_primary_attach_refusal_encode_v1(record: HostPrimaryAttachRefusalV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(record.operation_id): return Err("host-primary-refusal-identity")
+    if not helper_attach_digests_valid_v1([record.operation_digest, record.prepared_receipt_digest, record.reason_digest]):
+        return Err("host-primary-refusal-digest")
+    if record.stage == "pre-consume":
+        if record.consumed_digest != "": return Err("host-primary-refusal-stage")
+    elif record.stage == "post-consume":
+        if not builder_digest_valid_v1(record.consumed_digest): return Err("host-primary-refusal-stage")
+    else: return Err("host-primary-refusal-stage")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-attach-refusal"),
+        "operationId": SdnValue.String(record.operation_id), "operationDigest": SdnValue.String(record.operation_digest),
+        "preparedReceiptDigest": SdnValue.String(record.prepared_receipt_digest),
+        "consumedDigest": SdnValue.String(record.consumed_digest), "stage": SdnValue.String(record.stage),
+        "reasonDigest": SdnValue.String(record.reason_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_primary_attach_refusal_decode_v1(source: text) -> Result<HostPrimaryAttachRefusalV1, text>:
+    val fields = host_helper_stream_fields_v1(source, "host-primary-attach-refusal", ["version", "kind", "operationId",
+        "operationDigest", "preparedReceiptDigest", "consumedDigest", "stage", "reasonDigest"])?
+    val record = HostPrimaryAttachRefusalV1(operation_id: host_helper_stream_text_v1(fields, "operationId")?,
+        operation_digest: host_helper_stream_text_v1(fields, "operationDigest")?,
+        prepared_receipt_digest: host_helper_stream_text_v1(fields, "preparedReceiptDigest")?,
+        consumed_digest: host_helper_stream_text_v1(fields, "consumedDigest")?,
+        stage: host_helper_stream_text_v1(fields, "stage")?, reason_digest: host_helper_stream_text_v1(fields, "reasonDigest")?)
+    if host_primary_attach_refusal_encode_v1(record)? != source: return Err("host-primary-refusal-canonical")
+    Ok(record)
+
+pub fn host_primary_attach_cancelled_encode_v1(record: HostPrimaryAttachCancelledV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(record.operation_id): return Err("host-primary-cancelled-identity")
+    if not helper_attach_digests_valid_v1([record.operation_digest, record.request_digest,
+            record.prepared_receipt_digest, record.refusal_digest]):
+        return Err("host-primary-cancelled-digest")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-attach-cancelled"),
+        "operationId": SdnValue.String(record.operation_id), "operationDigest": SdnValue.String(record.operation_digest),
+        "requestDigest": SdnValue.String(record.request_digest),
+        "preparedReceiptDigest": SdnValue.String(record.prepared_receipt_digest),
+        "refusalDigest": SdnValue.String(record.refusal_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn host_primary_attach_cancelled_decode_v1(source: text) -> Result<HostPrimaryAttachCancelledV1, text>:
+    val fields = host_helper_stream_fields_v1(source, "host-primary-attach-cancelled", ["version", "kind", "operationId",
+        "operationDigest", "requestDigest", "preparedReceiptDigest", "refusalDigest"])?
+    val record = HostPrimaryAttachCancelledV1(operation_id: host_helper_stream_text_v1(fields, "operationId")?,
+        operation_digest: host_helper_stream_text_v1(fields, "operationDigest")?,
+        request_digest: host_helper_stream_text_v1(fields, "requestDigest")?,
+        prepared_receipt_digest: host_helper_stream_text_v1(fields, "preparedReceiptDigest")?,
+        refusal_digest: host_helper_stream_text_v1(fields, "refusalDigest")?)
+    if host_primary_attach_cancelled_encode_v1(record)? != source: return Err("host-primary-cancelled-canonical")
+    Ok(record)
+
+fn host_linux_helper_domain_attach_record_v1(domain: HostLinuxHelperDomainV1) -> bool:
+    match domain:
+        case HostLinuxHelperDomainV1.AttachRefusedPreConsume: true
+        case HostLinuxHelperDomainV1.AttachRefusedPostConsume: true
+        case HostLinuxHelperDomainV1.AttachCancelled: true
+        case _: false
+
+fn helper_attach_mirror_check_v1(journal_bytes: text, mirror: Option<text>) -> Result<(), text>:
+    match mirror:
+        case Some(actual):
+            # A mirror is a verified copy; one that differs is a permanent Err (16 P3-2 (7)).
+            if actual != journal_bytes: return Err("helper-attach-mirror-mismatch")
+            Ok(())
+        case None: Ok(())
+
+# PURE full check of a refused/cancelled row (13.2 + 14.3 {PA,R} rule + 15.4). The
+# marker table already chose `domain`; this confirms it from the record BYTES.
+pub fn host_linux_helper_attach_records_check_v1(domain: HostLinuxHelperDomainV1, records: HostLinuxHelperAttachRecordsV1,
+        operation_id: text) -> Result<HostLinuxHelperDomainV1, text>:
+    val ambiguous = "helper-settlement-domain-ambiguous"
+    if not host_linux_helper_domain_attach_record_v1(domain): return Ok(domain)
+    val refusal_bytes = match records.refusal:
+        case Some(bytes): bytes
+        case None: return Err(ambiguous)
+    val refusal = host_primary_attach_refusal_decode_v1(refusal_bytes)?
+    if refusal.operation_id != operation_id: return Err(ambiguous)
+    helper_attach_mirror_check_v1(refusal_bytes, records.refusal_mirror)?
+    # R's own stage is the only discriminator (16 P2-3): post-consume needs the PA
+    # record with matching bytes; pre-consume needs PA absent.
+    match records.consumed:
+        case Some(consumed):
+            if refusal.stage != "post-consume" or refusal.consumed_digest != sha256_text(consumed): return Err(ambiguous)
+        case None:
+            if refusal.stage != "pre-consume": return Err(ambiguous)
+    match domain:
+        case HostLinuxHelperDomainV1.AttachCancelled:
+            val cancelled_bytes = match records.cancelled:
+                case Some(bytes): bytes
+                case None: return Err(ambiguous)
+            val cancelled = host_primary_attach_cancelled_decode_v1(cancelled_bytes)?
+            if (cancelled.operation_id != operation_id or cancelled.refusal_digest != sha256_text(refusal_bytes) or
+                    cancelled.operation_digest != refusal.operation_digest or
+                    cancelled.prepared_receipt_digest != refusal.prepared_receipt_digest):
+                return Err(ambiguous)
+            helper_attach_mirror_check_v1(cancelled_bytes, records.cancelled_mirror)?
+        case _:
+            if records.cancelled.is_some() or records.cancelled_mirror.is_some(): return Err(ambiguous)
+    Ok(domain)
+
+# PURE binding of R (and X) to the operation envelope and the journal request (13.3,
+# 16 P2-5): a forged or foreign record never authorizes a cancel or an evidence row.
+pub fn host_linux_helper_attach_binding_check_v1(refusal: HostPrimaryAttachRefusalV1,
+        cancelled: Option<HostPrimaryAttachCancelledV1>, expected: HostLinuxHelperAttachExpectedV1) -> Result<(), text>:
+    if (refusal.operation_digest != expected.operation_digest or
+            refusal.prepared_receipt_digest != expected.prepared_receipt_digest):
+        return Err("helper-attach-refusal-binding-mismatch")
+    match cancelled:
+        case Some(actual):
+            if (actual.operation_digest != expected.operation_digest or actual.request_digest != expected.request_digest or
+                    actual.prepared_receipt_digest != expected.prepared_receipt_digest):
+                return Err("helper-attach-cancelled-binding-mismatch")
+        case None: ()
+    Ok(())
+
+fn helper_store_record_v1(store: HostLinuxHelperStoreStateV1, operation_id: text, category: text) -> Result<Option<text>, text>:
+    match store:
+        case HostLinuxHelperStoreStateV1.Absent: Ok(None)
+        case HostLinuxHelperStoreStateV1.Valid(root):
+            if not host_helper_archive_present_v1(root, operation_id, category)?: return Ok(None)
+            Ok(Some(file_read_regular_no_follow_bounded(host_helper_stream_path_v1(root, operation_id, category), 8388608)?))
+
+pub fn host_linux_helper_attach_records_v1(journal: DistributedOperationJournalV2, store: HostLinuxHelperStoreStateV1,
+        operation_id: text) -> Result<HostLinuxHelperAttachRecordsV1, text>:
+    Ok(HostLinuxHelperAttachRecordsV1(
+        refusal: distributed_operation_journal_read_v3(journal, host_linux_helper_journal_relative_v1("primary-refusal", operation_id),
+            65536)?,
+        refusal_mirror: helper_store_record_v1(store, operation_id, "primary-refusal")?,
+        cancelled: distributed_operation_journal_read_v3(journal, host_linux_helper_journal_relative_v1("primary-cancelled", operation_id),
+            65536)?,
+        cancelled_mirror: helper_store_record_v1(store, operation_id, "primary-cancelled")?,
+        consumed: helper_store_record_v1(store, operation_id, "primary-consumed")?))
+
+pub fn host_linux_helper_attach_expected_v1(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2) -> Result<HostLinuxHelperAttachExpectedV1, text>:
+    val request = host_helper_request_load_owned_v2(journal, operation.id)?
+    val operation_bytes = distributed_encode_operation_v2(operation)?
+    if distributed_encode_operation_v2(request.operation)? != operation_bytes: return Err("helper-attach-request-operation-mismatch")
+    val receipt = host_helper_reservation_receipt_v1(request.intent, request.operation)?
+    Ok(HostLinuxHelperAttachExpectedV1(plan: request.plan, operation_digest: sha256_text(operation_bytes),
+        request_digest: request.plan.request_digest, prepared_receipt_digest: receipt.receipt_digest))
+
+# Journal record FIRST (the commitment), store mirror SECOND (14.3, 15.4 (a)(b) and
+# (c)(d)). Both publishes are idempotent: identical retained bytes are accepted, any
+# differing retained bytes are an Err, so a resumed publish regenerates a missing
+# mirror from the journal bytes and never overwrites either copy.
+pub fn host_linux_helper_record_publish_v1(journal: DistributedOperationJournalV2, store_root: text,
+        operation_id: text, category: text, bytes: text) -> Result<(), text>:
+    if category != "primary-refusal" and category != "primary-cancelled": return Err("helper-attach-record-category")
+    val committed = host_helper_object_publish_owned_v2(journal, host_linux_helper_journal_relative_v1(category, operation_id), bytes)?
+    host_helper_stream_publish_v1(store_root, operation_id, category, bytes, false)
+
+# Open-core ENTRY guard (15.3, 16 P2-3), PURE: an attach helper whose markers are not
+# all absent has already been attempted; the core then writes NOTHING.
+pub fn host_primary_open_entry_allowed_v1(markers: HostLinuxHelperMarkersV1) -> Result<(), text>:
+    if (markers.connection or markers.consumed or markers.native or markers.refusal or markers.cancelled or
+            markers.output or markers.refusal_mirror or markers.cancelled_mirror):
+        return Err("host-primary-open-already-attempted")
+    Ok(())
+
+# R-write precondition (15.3, 16 P2-3), PURE and distinct from the entry guard: N, R,
+# X and every foreign marker absent; PA present exactly for a post-consume R.
+fn host_linux_helper_refusal_allowed_v1(markers: HostLinuxHelperMarkersV1, post_consume: bool) -> Result<(), text>:
+    if (markers.connection or markers.native or markers.refusal or markers.cancelled or markers.output or
+            markers.refusal_mirror or markers.cancelled_mirror or markers.consumed != post_consume):
+        return Err("host-primary-refusal-precondition")
+    Ok(())
+
+# Persist a pre-spawn refusal BEFORE the open core returns (13.3, 14.3). `consumed`
+# is "" before the consume publish, else the exact consumed record bytes this call
+# published (re-read and compared). V4 world only; a failure authorizes nothing.
+pub fn host_linux_helper_refusal_publish_v1(store: HostHelperStoreV1, operation: OperationEnvelopeV2,
+        prepared_receipt_digest: text, consumed: text, reason: text) -> Result<(), text>:
+    val journal = match store.journal:
+        case Some(actual): actual
+        case None: return Err("host-primary-refusal-legacy-store")
+    val state = host_linux_helper_store_bound_v1(journal, store.root)?
+    val post_consume = consumed != ""
+    host_linux_helper_refusal_allowed_v1(host_linux_helper_markers_v1(journal, state, operation.id)?, post_consume)?
+    var consumed_digest = ""
+    if post_consume:
+        match helper_store_record_v1(state, operation.id, "primary-consumed")?:
+            case Some(retained):
+                if retained != consumed: return Err("host-primary-refusal-consumed-mismatch")
+            case None: return Err("host-primary-refusal-consumed-mismatch")
+        consumed_digest = sha256_text(consumed)
+    val bytes = host_primary_attach_refusal_encode_v1(HostPrimaryAttachRefusalV1(operation_id: operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(operation)?),
+        prepared_receipt_digest: prepared_receipt_digest, consumed_digest: consumed_digest,
+        stage: if post_consume: "post-consume" else: "pre-consume", reason_digest: sha256_text(reason)))?
+    host_linux_helper_record_publish_v1(journal, store.root, operation.id, "primary-refusal", bytes)
+
+# AttachCancelled evidence (13.3, 15.4, 17(D)): stateless and historical. Checks only
+# R, X, their mirrors (both must exist and equal: settle runs after (d)), their
+# digests and their bindings to the journal operation and request; no native file,
+# no launch root. Returns the X bytes VERBATIM so sha256(evidence) is the outcome.
+pub fn host_linux_helper_cancelled_evidence_v1(journal: DistributedOperationJournalV2, store: HostLinuxHelperStoreStateV1,
+        operation: OperationEnvelopeV2) -> Result<text, text>:
+    val records = host_linux_helper_attach_records_v1(journal, store, operation.id)?
+    if records.refusal_mirror.is_none() or records.cancelled_mirror.is_none(): return Err("helper-attach-mirror-missing")
+    val checked = host_linux_helper_attach_records_check_v1(HostLinuxHelperDomainV1.AttachCancelled, records, operation.id)?
+    val cancelled_bytes = records.cancelled.unwrap()
+    host_linux_helper_attach_binding_check_v1(host_primary_attach_refusal_decode_v1(records.refusal.unwrap())?,
+        Some(host_primary_attach_cancelled_decode_v1(cancelled_bytes)?), host_linux_helper_attach_expected_v1(journal, operation)?)?
+    Ok(cancelled_bytes)
