@@ -26,3 +26,22 @@ No existing doc found for `phase2_mir_unresolved_field_receiver_2026-11-15` in d
 
 Not verified: whether the Index arm alone removes both symptoms; no spec was written because
 reproducing requires a full HIR fixture and a seed able to run it.
+
+## Follow-up review (2026-11-17, by reading only; no code change)
+
+Candidate `case HirExprKind.Index(_, _): return self.declared_container_read_type(receiver)`
+in `receiver_declared_type` was NOT applied, and no spec could be run:
+- `receiver_declared_type` has ~25 callers (provider_metadata, builtin_method_extras,
+  method_calls_literals, native_trait_conversion, expr_dispatch, ...). The Index arm
+  would change typing for all of them at once. `declared_container_read_type`'s own
+  doc says it is "Deliberately NOT folded" into the general path; callers opt in
+  where the failure is proven.
+- The match-attribution path already does that opt-in locally
+  (`switch_operators_calls.spl` ~2943-2946: Index receiver falls back to
+  `declared_container_read_type`), so the remaining gap is the
+  `enum_match_ambiguity_subject_hint` call site; fix it there with the same
+  two-line fallback rather than globally.
+- Types are compatible (`HirType?` both) and `Any`/`Infer`/`Error` elements already map
+  to None.
+- Verifying needs a HIR fixture driving MIR lowering with an `[AttributeStoreV1<i64>]`
+  global, which was not available here.

@@ -15,7 +15,7 @@
 # one model and refuses a switch it cannot afford, rather than letting an HTTP
 # handler decide.
 
-use std.gc_async_mut.slang.model_executor.backend.{MediaBlob, BackendMediaGenerationRequest, generate_media_request, load_mmproj, GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, configure_prefix_cache, prefix_cache_stats, gpu_offload_supported, model_offloaded, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
+use std.gc_async_mut.slang.model_executor.backend.{MediaBlob, BackendMediaGenerationRequest, generate_media_request, load_mmproj, GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, GenStream, generate_stream_open, gen_stream_step, gen_stream_close, configure_prefix_cache, prefix_cache_stats, gpu_offload_supported, model_offloaded, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
 use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
 use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_bind_backend, paged_executor_clear_pending_backend, paged_executor_activate_config, paged_executor_configuration_text, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
@@ -23,6 +23,7 @@ use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit,
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind, runner_kind_text, select_runner}
 use std.gc_async_mut.slang.engine.pure_lane.{PureLane, pure_lane_load, pure_lane_generate}
 use std.io_runtime.{file_exists, env_get, host_os}
+use std.gc_async_mut.slang.model_executor.pure.stop.{stop_scan}
 
 # Resident state. Module-level because the model IS the process's memory: two
 # engines in one process would mean two copies of a 46 GB tensor set.
@@ -412,7 +413,7 @@ fn engine_generate_observed_request(input: EngineGenerationRequest) -> Result<En
             Ok(observed): return Ok(EngineGenerationObservation(
                 output: observed.output, generated_tokens: observed.generated_tokens))
     match generate_observed_request(BackendGenerationRequest(
-          max_tokens: budget.to_text(), prompt: prompt, backend: ENGINE_BACKEND!, chat: false)):
+          max_tokens: budget.to_text(), prompt: prompt, backend: ENGINE_BACKEND!, chat: false, stops: [])):
         Err(e):
             Err(backend_error_text(e))
         Ok(observed):
@@ -482,16 +483,25 @@ struct EngineChatResult:
     prompt_tokens: i64
     completion_tokens: i64
     runner: text
+    # "stop" or "length"; see BackendGeneration.finish_reason.
+    finish_reason: text
 
 fn engine_complete_chat(model_root: text, model_id: text, framed: text, plain_prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
-    _engine_dispatch(model_root, model_id, framed, plain_prompt, max_tokens, true)
+    _engine_dispatch(model_root, model_id, framed, plain_prompt, max_tokens, true, [])
+
+# engine_complete_chat honouring the request's `stop` sequences.
+fn engine_complete_chat_stops(model_root: text, model_id: text, framed: text, plain_prompt: text, max_tokens: i64, stops: [text]) -> Result<EngineChatResult, text>:
+    _engine_dispatch(model_root, model_id, framed, plain_prompt, max_tokens, true, stops)
 
 # Legacy /v1/completions: the raw prompt, no chat template, through the same
 # dispatch (and the same usage counts) as chat.
 fn engine_complete_text(model_root: text, model_id: text, prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
-    _engine_dispatch(model_root, model_id, prompt, prompt, max_tokens, false)
+    _engine_dispatch(model_root, model_id, prompt, prompt, max_tokens, false, [])
 
-fn _engine_dispatch(model_root: text, model_id: text, framed: text, plain_prompt: text, max_tokens: i64, chat: bool) -> Result<EngineChatResult, text>:
+fn engine_complete_text_stops(model_root: text, model_id: text, prompt: text, max_tokens: i64, stops: [text]) -> Result<EngineChatResult, text>:
+    _engine_dispatch(model_root, model_id, prompt, prompt, max_tokens, false, stops)
+
+fn _engine_dispatch(model_root: text, model_id: text, framed: text, plain_prompt: text, max_tokens: i64, chat: bool, stops: [text]) -> Result<EngineChatResult, text>:
     ENGINE_LAST_RUNNER = ""
     var found: NativeModel? = nil
     for m in scan_model_root(model_root, engine_backend_available()):
@@ -516,11 +526,11 @@ fn _engine_dispatch(model_root: text, model_id: text, framed: text, plain_prompt
     ENGINE_LAST_RUNNER = runner_kind_text(kind)
     match kind:
         RunnerKind.Pure:
-            return _complete_pure(plain_prompt, max_tokens)
+            return _complete_pure(plain_prompt, max_tokens, stops)
         RunnerKind.Ggml:
-            return _complete_ggml(framed, max_tokens, chat)
+            return _complete_ggml(framed, max_tokens, chat, stops)
 
-fn _complete_pure(prompt: text, max_tokens: i64) -> Result<EngineChatResult, text>:
+fn _complete_pure(prompt: text, max_tokens: i64, stops: [text]) -> Result<EngineChatResult, text>:
     if not ENGINE_PURE.?:
         return Err("no pure model is resident")
     match pure_lane_generate(ENGINE_PURE!, prompt, max_tokens):
@@ -529,21 +539,77 @@ fn _complete_pure(prompt: text, max_tokens: i64) -> Result<EngineChatResult, tex
             ENGINE_PURE = done.lane
             ENGINE_PURE_LAST_REUSED = done.reused_positions
             ENGINE_PURE_LAST_EVALUATED = done.evaluated_positions
-            Ok(EngineChatResult(content: done.output, prompt_tokens: done.prompt_tokens,
-                completion_tokens: done.completion_tokens, runner: "pure"))
+            # The pure lane generates the whole completion before returning, so
+            # stop sequences are applied to its finished text. Its EOS id is
+            # not counted, so a completion that reached the cap is "length".
+            var content = done.output
+            var finish = "stop"
+            if max_tokens > 0 and done.completion_tokens >= max_tokens:
+                finish = "length"
+            val scan = stop_scan(content, stops)
+            if scan.matched:
+                content = scan.text
+                finish = "stop"
+            Ok(EngineChatResult(content: content, prompt_tokens: done.prompt_tokens,
+                completion_tokens: done.completion_tokens, runner: "pure", finish_reason: finish))
 
-fn _complete_ggml(framed: text, max_tokens: i64, chat: bool) -> Result<EngineChatResult, text>:
+fn _complete_ggml(framed: text, max_tokens: i64, chat: bool, stops: [text]) -> Result<EngineChatResult, text>:
     if paged_executor_active():
         return Err("chat templating and usage counts are not available on the physical page executor")
     var budget = max_tokens
     if budget <= 0:
         budget = 256
     match generate_observed_request(BackendGenerationRequest(
-          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, chat: chat)):
+          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, chat: chat, stops: stops)):
         Err(e): Err(backend_error_text(e))
         Ok(observed):
             Ok(EngineChatResult(content: observed.output, prompt_tokens: observed.prompt_tokens,
-                completion_tokens: parse_nonnegative_i64_text_exact(observed.generated_tokens), runner: "ggml"))
+                completion_tokens: parse_nonnegative_i64_text_exact(observed.generated_tokens), runner: "ggml",
+                finish_reason: observed.finish_reason))
+
+# True when `model_id` can be generated token by token: the ggml runner with
+# per-request contexts and no physical page executor. Everything else (the pure
+# runner, a shared-context backend) is answered whole.
+fn engine_can_stream(model_root: text, model_id: text) -> bool:
+    var found: NativeModel? = None
+    for m in scan_model_root(model_root, engine_backend_available()):
+        if m.id == model_id:
+            found = m
+    if not found.?:
+        return false
+    match select_runner(found!):
+        Err(_): return false
+        Ok(kind):
+            if kind != RunnerKind.Ggml:
+                return false
+    match engine_ensure_loaded(found!):
+        Err(_): return false
+        Ok(_): ()
+    if not ENGINE_BACKEND.? or paged_executor_active():
+        return false
+    ENGINE_BACKEND!.independent_requests
+
+# Opens a token-by-token generation on the resident ggml model. Pair with
+# gen_stream_step and engine_stream_close; call only after engine_can_stream.
+fn engine_stream_open(framed: text, max_tokens: i64, chat: bool, stops: [text]) -> Result<GenStream, text>:
+    if not ENGINE_BACKEND.?:
+        return Err("no model is resident")
+    ENGINE_LAST_RUNNER = "ggml"
+    var budget = max_tokens
+    if budget <= 0:
+        budget = 256
+    match generate_stream_open(BackendGenerationRequest(
+          max_tokens: budget.to_text(), prompt: framed, backend: ENGINE_BACKEND!, chat: chat, stops: stops)):
+        Err(e): Err(backend_error_text(e))
+        Ok(st): Ok(st)
+
+fn engine_stream_step(st: GenStream) -> Result<GenStream, text>:
+    match gen_stream_step(st):
+        Err(e): Err(backend_error_text(e))
+        Ok(next): Ok(next)
+
+fn engine_stream_close(st: GenStream):
+    val _closed = gen_stream_close(st)
 
 # The ggml lane of engine_complete_chat with the backend's generated-token
 # count kept (no plain-text prompt: a pure runner would be given an empty one,
@@ -581,6 +647,7 @@ fn engine_pure_stats() -> PureRunnerStats?:
 export engine_complete_text, EngineChatResult, engine_last_runner, engine_pure_stats, PureRunnerStats
 export engine_set_lib_path, engine_set_gpu_layers_text, engine_gpu_offload_status, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
 export engine_preload, engine_complete_chat, engine_complete_chat_observed, engine_complete_chat_media, engine_media_caps, engine_media_caps_for
+export engine_complete_chat_stops, engine_complete_text_stops, engine_can_stream, engine_stream_open, engine_stream_step, engine_stream_close
 export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
 export EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed, engine_generate_observed_request
 export engine_physical_page_allocated_bytes, engine_physical_page_bytes
