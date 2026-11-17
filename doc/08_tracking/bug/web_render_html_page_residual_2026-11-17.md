@@ -1,6 +1,6 @@
 # html catalog page residual vs Chrome 159 (4.68% at 1x) - classification, 2026-11-17
 
-Status: class 5 (`<a>` without href) FIXED (-139 px, 4.68 -> 4.66); classes 1-4 open, none contained (owners below).
+Status: class 5 (`<a>` without href) FIXED (-139 px, 4.68 -> 4.66); class 2 (1-row drift below the flex header) FIXED by the fractional container origin below; classes 1, 3, 4 open (owners below).
 Setup: seed `cargo-target-webrender-blend`, cpu_simd, Chrome 159.0.8154.6, 900x760, tolerance 8 per channel (`pixel_diff.spl`).
 Reproduced 32,034 px = 4.68% on base 5dab9c5fcd5. Method as in `web_render_css_paint_residual_2026-11-17.md`:
 20-row band histogram of mismatching px, Chrome `getBoundingClientRect` (--dump-dom + inline script) against
@@ -61,3 +61,21 @@ to `simple_web_layout_debug_style_by_id` for the pin.
 
 Catalog 1x after: overview 1.29, html 4.66 (31,895 px), css-layout 3.12, css-paint 3.67, forms-media 4.04,
 animation 3.59, evidence 0.77, tab-bar 0.42 (only html moved; its baseline row lowered to 4.66).
+
+## Fix (class 2): containers carry a start fraction and a fractional auto height
+
+Both known limits are now carried (see `web_render_css_parity/skill.md`, "containers carry a fractional start y down and a fractional auto height up"): the block cursor residual is passed into a child's layout (`g_origin_frac_milli`) and returned from block and single-line flex-row containers (`LayoutResult.end_frac_milli`); a flex item's top margin carries its milli-px fraction and the container's auto height is the milli-px max of its items. The header is 97.44 against Chrome 97.52 (the 0.08 is the h3 line, 28.08 vs the `i32` font size lane), starts at 120.81 and ends at 218.25, which rounds to Chrome's 218 (it was 219). Spec: `fractional_container_origin_chrome159_spec` (red 0/4 on base, green 4/4).
+
+Measured on head (`simple_web_layout_debug_layout_by_id` over `html.html` with ids added, 900x760; Chrome = getBoundingClientRect, snapped = round(top)):
+
+| box | Chrome y (snapped) | Simple y,h before | Simple y,h now |
+|-----|--------------------|-------------------|----------------|
+| article header | 120.81 (121), h 97.52 | 121, 98 | 121, 97 |
+| address | 218.33 (218) | 219 | 218 |
+| figure | 258.33 (258) | 259 | 258 |
+| dl | 346.33 (346) | 347 | 346 |
+| p (keyboard) | 458.33 (458) | 459 | 458 |
+| inventory section | 498.33 (498) | 499 | 498 |
+| inventory h3 | 538.05 (538) | 539 | 538 |
+
+Catalog 1x html 4.66 -> 3.65 (row lowered). The flex-direction:column and flex-wrap paths are not carried (the page's header is a row at 900 px; it only becomes a column under max-width:700px).
