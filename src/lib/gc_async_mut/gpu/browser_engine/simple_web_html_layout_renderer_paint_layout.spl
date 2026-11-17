@@ -1955,7 +1955,8 @@ fn _html_draw_ir_commands(
     var scrollbar_lowering = false
     # cpu-lane-loop-ok: existence scan over the style list to decide whether scrollbar lowering is needed at all; bound is style count, one pass, result is a single bool
     for st in styles:
-        if st.overflow_auto_y:
+        # The raster paints scrollbar chrome only outside legacy widget mode.
+        if st.overflow_auto_y and not widget_mode:
             scrollbar_lowering = true
     val paint_order = _html_draw_ir_node_paint_order(nodes, styles)
     # Cache subtree geometry only when a scrollport exists. A clipping child
@@ -2247,7 +2248,12 @@ fn _html_draw_ir_commands(
                     ))
                     owner_nodes.push(i)
                     k = k + 1
-            if styles[i].background_image_uri != "" or styles[i].bg_layers_raw != "":
+            # A widget-mode suppressed box lowers no URL background layer and
+            # no border overlay (which would repaint the suppressed border).
+            if (
+                not widget_node_box_skipped and not widget_page_bg_skipped and
+                (styles[i].background_image_uri != "" or styles[i].bg_layers_raw != "")
+            ):
                 val background_layers = _html_draw_ir_background_layers(styles[i])
                 var backgrounds_ready = background_layers.len() > 0
                 for layer in background_layers:
@@ -2300,7 +2306,9 @@ fn _html_draw_ir_commands(
                     select_cmd.parent_id = component_id
                     commands.push(select_cmd)
                     owner_nodes.push(i)
-            if nodes[i].tag == "svg" or nodes[i].tag == "video" or nodes[i].tag == "audio":
+            # The raster paints inline svg shapes only outside widget mode
+            # (it paints no video / audio in either mode).
+            if (nodes[i].tag == "svg" and not widget_mode) or nodes[i].tag == "video" or nodes[i].tag == "audio":
                 # cpu-lane-loop-ok: pushes the replaced-media sub-part commands (svg rects, video surface, audio pill) for one element; bound is that element's shape count
                 for media_command in _html_draw_ir_replaced_media_commands(
                     nodes, styles, boxes, i, node_clip
@@ -2329,10 +2337,12 @@ fn _html_draw_ir_commands(
                 target_keys[i] == overlay.target_key and
                 input_accepts_text_overlay(nodes[i])
             )
+            # The raster paints static input value text only outside widget
+            # mode; a live edit overlay (Draw IR only) still paints.
             if (
-                overlay_target or _html_draw_ir_has_input_text(
+                overlay_target or (not widget_mode and _html_draw_ir_has_input_text(
                 nodes[i], styles[i], boxes.bw[i]
-                )
+                ))
             ):
                 val node_overlay = if overlay_target:
                     overlay
