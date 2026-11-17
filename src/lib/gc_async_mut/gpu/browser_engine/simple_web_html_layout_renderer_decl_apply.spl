@@ -2760,10 +2760,32 @@ fn _decl_vertical_margin_exact_milli(tok: text, font_px: i32) -> i64:
     val px_milli = svg_number_milli(t) * unit_px
     ((px_milli * 64) / 1000) * 1000 / 64
 
+# `2.5%` -> 2500 (percent x 1000); 0 for anything that is not a plain
+# non-negative percentage (`auto`, `-5%`, `calc(..)`, lengths, `0%`).
+fn _decl_vertical_margin_percent_x1000(tok: text) -> i32:
+    val t = tok.trim()
+    val n = t.byte_len()
+    if n < 2 or not t.ends_with("%") or t.starts_with("-") or t.starts_with("+"):
+        return 0
+    val body = t.substring(0, n - 1)
+    var i = 0
+    while i < body.byte_len():
+        val ch = body.substring(i, i + 1)
+        if ch != "." and dec_val(ch) >= 10:
+            return 0
+        i = i + 1
+    svg_number_milli(body) as i32
+
 # The sub-pixel part to carry in `Style.margin_t_milli` / `margin_b_milli`:
 # the floored milli-px value when it is fractional, else 0 (the whole-px
 # margin already says everything).
 fn _decl_vertical_margin_milli(tok: text, font_px: i32) -> i32:
+    # A non-negative `N%` (CSS 2.2 8.3: of the containing block WIDTH, known
+    # only at layout) is carried as a NEGATIVE milli: -(percent x 1000).
+    # block_margin_milli resolves it; `0%` is a plain zero margin.
+    val pct = _decl_vertical_margin_percent_x1000(tok)
+    if pct != 0:
+        return 0 - pct
     val exact = _decl_vertical_margin_exact_milli(tok, font_px)
     if exact < 0 or exact % 1000 == 0:
         return 0
