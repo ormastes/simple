@@ -59,6 +59,9 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
     vulkan_device_material_census_reset, vulkan_device_glass_material_count}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_engine2d_result_with_images}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_image_resource}
 
 # The WM Web material fixture's own surface (simple_web_renderer_spec):
 # rgba(31,31,33,0.80) projects "wm-material-surface-alpha-milli" 800 and
@@ -371,3 +374,18 @@ describe "The Vulkan backdrop blur and glass material run on the device, pixel-f
         expect(mismatch_count(cpu_svg, device_svg)).to_equal(0)
         expect(mismatch_count(cpu_input, device_input)).to_equal(0)
         expect(mismatch_count(cpu_scroll, device_scroll)).to_equal(0)
+
+    it "paints no widget-node URL background or its border overlay on the device in widget mode, as cpu_simd does":
+        # A box-suppressed widget node lowers no URL background image and no
+        # border overlay, so the device paints the page base where the
+        # node's border and tile sat, as cpu_simd and the raster do.
+        val tile = simpleos_host_gpu_image_resource("image://tile", 4, 2, [0xFFFF0000u32; 8])
+        val url_page = "<html><body><section class='widget-panel' style='width:20px;height:12px;border:2px solid #0000ff;background-image:url(image://tile);background-repeat:no-repeat'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_url = simple_web_layout_render_html_engine2d_result_with_images(url_page, 40, 64, "vulkan", [tile]).pixels
+        val readbacks_after = vulkan_readback_count()
+        val cpu_url = simple_web_layout_render_html_engine2d_result_with_images(url_page, 40, 64, "cpu_simd", [tile]).pixels
+        expect(readbacks_after - readbacks_before >= 1).to_equal(true)
+        expect(device_url[10 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(device_url[10 * 40 + 11]).to_equal(0xFFF5F5F5u32)
+        expect(mismatch_count(cpu_url, device_url)).to_equal(0)
