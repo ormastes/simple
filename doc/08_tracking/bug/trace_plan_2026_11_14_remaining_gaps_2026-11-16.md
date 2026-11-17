@@ -15,10 +15,12 @@ bare `text` fields or enums, and `TraceReverseIndexV1.by_key` is
 Bare `text` is exempt from the primitive rule (owner decision), so these
 structs meet the requirement as they stand.
 
-Closed-set `text` fields that could become enums if the exemption is ever
-narrowed: `TraceLocator.locator_kind` (file, symbol, scenario, section, cas;
-about 30 string-compare sites, including `graph_schema_v1.spl` and
-`graph_wire_v1.spl`) and `TraceDiagnostic.severity` (error, warning).
+Closed-set `text` field that could become an enum if the exemption is ever
+narrowed: `TraceDiagnostic.severity` (error, warning). `TraceLocator.locator_kind`
+is now the closed enum `TraceLocatorKind` (text only at the SDN boundary via
+`locator_kind_name` / `parse_locator_kind`); the graph wire DTO
+`TraceGraphLocatorV1.locator_kind` stays `text` and is validated by
+`graph_schema_v1.spl`.
 
 ## 3. MCP / ctx
 
