@@ -2792,3 +2792,16 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Catalog 1x:** forms-media 2.74 -> 2.65.
 - **Trap:** a page with no `<p>`/`<span>`/`<h1-3>`/`<button>`/`<code>`/`<label>`/`<a ` takes the CPU raster lane (`_simple_web_engine2d_text_document`), not Draw IR. Wrap a probe's label in a `<span>`.
 - **Residue:** the vertical placement uses the sans ascent (0.905em). That matches Liberation Serif at 16 px (both ascents are 14), but it is not the resolved face's ascent at every size.
+
+## 2026-11-18 — Summary marker sits on the face baseline
+- **Rule (Chrome 159):** the disclosure square ends on the summary strut's baseline. That baseline uses the resolved face's own rounded ascent and descent, with the floored half-leading above: `inline_line_strut_baseline_offset`, the same function layout uses.
+- **Was:** the sans approximation, ascent 0.905em and descent 0.212em (`_html_draw_ir_chrome_text_top` + `_html_draw_ir_chrome_ascent`). It is right for Liberation Sans, but for serif 24px with `line-height: normal` (27) it gives a baseline of 22 where Chrome has 21, so the marker sat one row low.
+- **Pin:** `summary_disclosure_marker_chrome159_spec` AC-4. At x=4 the closed triangle's ink spans rows 5..20 (Chrome). Base gives [6, 21] (3/4); now 4/4.
+- **Residue:** at serif 24 the triangle's top edge is about 0.07 px higher than Chrome's (first-row grey 0x76 vs 0x88). The 0.66em square size has not been re-derived for that face.
+- **Investigation note (forms-media 1x, not fixed):**
+  - Body-text bands have 0 vertical offset (row ink centroids within 0.05 px) and matching per-glyph x.
+  - The residue is per-glyph LCD coverage: Simple has about 3.5% less ink, with a +5..+8 grey bias on Chrome-coverage 1/8..1/2 pixels, plus two-signed shape noise.
+  - Smaller separate classes:
+    - h3 18.72px text, which is rasterised at an integer size;
+    - the list disc's AA (about 14 px per bullet);
+    - the inline-block control x at 92/99/91, already equal to Chrome since #10113.

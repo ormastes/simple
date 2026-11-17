@@ -42,6 +42,8 @@ open, x=4..14
 | 44 | ff | ff | ff | ff | 44 | 00 | b7 | ff | ff | ff | ff |
 | 45 | ff | ff | ff | ff | d6 | 4a | ff | ff | ff | ff | ff |
 | 46 | ff | ff | ff | ff | ff | f5 | ff | ff | ff | ff | ff |
+
+- **Vertical (AC-4):** `--window-size=64,400 --screenshot` of `SERIF_PAGE` (serif 24px, `line-height: normal`, so the line box is 27). Chrome ends the closed triangle on baseline 21 (rows 5..20), which is Liberation Serif's own ascent 21. A sans 0.905em ascent gives 22, one row low. At x=4 its ink spans rows 5 (0x88) to 20 (0x48); rows 4 and 21 are white.
 """
 
 """
@@ -91,6 +93,10 @@ val OPEN: [[i32]] = [
     [0xff, 0xff, 0xff, 0xff, 0xff, 0xf5, 0xff, 0xff, 0xff, 0xff, 0xff]
 ]
 
+val SERIF: text = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"
+# Serif 24px, line-height normal (27): the face baseline is 21 (Liberation
+# Serif ascent 21); a sans 0.905em ascent would put it at 22.
+val SERIF_PAGE: text = "<!doctype html><html><head><style>body{margin:0;background:#fff;color:#000}details{position:absolute;left:4px;top:0;font-family:serif;font-size:24px}</style></head><body><details><summary><span>W</span></summary></details></body></html>"
 fn _abs(v: i32) -> i32:
     if v < 0: 0 - v else: v
 
@@ -109,6 +115,19 @@ fn _worst_delta(px: [u32], x0: i32, y0: i32, grid: [[i32]]) -> i32:
             c = c + 1
         r = r + 1
     worst
+
+# [first, last] row in y0..y1 whose column-x pixel is darker than 0xf0 grey.
+fn _ink_rows(px: [u32], x: i32, y0: i32, y1: i32) -> [i32]:
+    var first = -1
+    var last = -1
+    var y = y0
+    while y < y1:
+        if ((px[y * W + x] >> 8u32) & 0xFFu32) < 0xF0u32:
+            if first < 0:
+                first = y
+            last = y
+        y = y + 1
+    [first, last]
 
 fn _label_x(fs: i32) -> text:
     val html = "<!doctype html><html><head><style>body{{margin:0;font:{fs}px/1.5 sans-serif}}</style></head><body><details><summary><span id=\"x\">Disclosure widget</span></summary></details></body></html>"
@@ -139,3 +158,12 @@ describe "summary disclosure marker against Chrome 159":
         expect(px.len()).to_equal((W * H).to_i64())
         step("Chrome rows 37..46, x 4..14")
         expect(_worst_delta(px, 4, 37, OPEN) <= TOL).to_be(true)
+
+    it "AC-4: ends on the resolved face's baseline, not a sans ascent":
+        if not file_exists(SERIF):
+            skip("no Liberation Serif on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(SERIF_PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome: x=4 inked on rows 5..20 (baseline 21)")
+        expect(_ink_rows(px, 4, 0, 30)).to_equal([5, 20])
