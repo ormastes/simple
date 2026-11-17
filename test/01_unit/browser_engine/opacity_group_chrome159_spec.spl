@@ -22,7 +22,7 @@ Traceability: REQ-BROWSER-ENGINE-OPACITY-GROUP-CHROME159-001 — CSS opacity gro
 use std.spec.*
 use std.io_runtime.{file_read_bytes_result}
 use std.common.image.png_decode.{PngImage, decode_png_to_argb}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count, vulkan_readback_census_reset, vulkan_readback_census_line}
 use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_pixel, css_opacity_group_alpha8}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_pixels_engine2d_at_device_scale
@@ -84,6 +84,7 @@ val GRP_CHROME: [u32] = [
 # Chrome 159 full frame of grp_page(3) at k=4 (`--window-size=192,16`,
 # 768x64 device px). Column 511 is a raster-tile seam (32 px one level off
 # the tile-interior rule).
+val GRP_BG_BORDER_PAGE = "<html><body style=\"margin:0;background:#fff\"><div style=\"position:absolute;left:10px;top:40px;width:24px;height:14px;background:#f00;border:3px solid #00f;opacity:0.5\"></div></body></html>"
 val GRP_WIDE_REF = "test/fixtures/browser_engine/opacity_group_chrome159/group_cells_wide_k4.png"
 
 fn grp_mismatches(px: [u32], fw: i32) -> i32:
@@ -162,7 +163,20 @@ describe "CSS opacity groups composite as Chrome 159 does":
     it "treats one box's background and border as a two-item group on the CPU raster as Chrome does":
         # Chrome 159 (k=4, window 120x70): red bg + 3px blue border at 0.5 over
         # white gives ff7e7e / 7e7eff (a group), not the folded ff7f7f.
-        val page = "<html><body style=\"margin:0;background:#fff\"><div style=\"position:absolute;left:10px;top:40px;width:24px;height:14px;background:#f00;border:3px solid #00f;opacity:0.5\"></div></body></html>"
-        val px = simple_web_layout_render_html_software_pixels(page, 120, 70)
+        val px = simple_web_layout_render_html_software_pixels(GRP_BG_BORDER_PAGE, 120, 70)
         expect(px[50 * 120 + 25]).to_equal(0xFFFF7E7Eu32)
         expect(px[50 * 120 + 11]).to_equal(0xFF7E7EFFu32)
+
+    it "treats one box's background and border as a two-item group on cpu_simd and Vulkan as Chrome does":
+        for lane in ["cpu_simd", "vulkan"]:
+            val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(GRP_BG_BORDER_PAGE, 120, 70, lane)
+            expect(px[50 * 120 + 25]).to_equal(0xFFFF7E7Eu32)
+            expect(px[50 * 120 + 11]).to_equal(0xFF7E7EFFu32)
+
+    it "restores Vulkan groups on the device without reading group pixels back":
+        # Simple-internal: the only readback of the frame is the final one
+        # (64x16 = 1024 px); no per-group layer or destination readback.
+        vulkan_readback_census_reset()
+        val vk = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(grp_page(1), 64, 16, "vulkan")
+        expect(grp_mismatches(vk, 64)).to_equal(0)
+        expect(vulkan_readback_census_line()).to_equal("readbacks=1 readback_pixels=1024")
