@@ -83,6 +83,8 @@ use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
 use std.container.LinuxWorkspaceRootBorrowV3
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
+use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1,
+    host_service_handoff_consume_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1}
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
@@ -140,6 +142,9 @@ pub class HostLinuxServiceCurrentV4:
     # after the journal and before any attach; "" when not opened (an attach then refuses). Pathname store: no
     # handle to close; it outlives every attachment release and is left in place across restarts.
     helper_store: text = ""
+    # AT-OPS-01: set only after a verified controller-signed handoff was published; this owner then admits nothing
+    # (inspect only) and is to be closed. The successor adopts the record at its own start.
+    draining: bool = false
 
     # Rechecks readers, installed records, the sealed proof under freshly read
     # installed policy, the actual native identity, Linux-protected journal
@@ -209,8 +214,9 @@ pub class HostLinuxServiceCurrentV4:
     # keep the service quarantined; no empty-ledger assertion releases them.
     pub fn status_v4() -> Result<text, text>:
         val metadata = self.current_v4()?
+        if self.draining: return Err("linux-host-service-draining")
+        if self.reconcile_error != "": return Err("linux-host-service-reconciliation-required:" + self.reconcile_error)
         if not self.capacity.unwrap().ledger.continuity_proven:
-            if self.reconcile_error != "": return Err("linux-host-service-reconciliation-required:" + self.reconcile_error)
             return Err("linux-host-service-reconciliation-required")
         linux_service_status_bytes_v4(self.records.unwrap().binding, self.scope.unwrap(), self.current_bytes, self.published)
 
@@ -374,7 +380,13 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
     # continuity flipped in memory only. The inventory must be lent for the
     # same epoch as this service; on any refusal startup stays published but
     # quarantined (status_v4 refuses).
-    if inventory.epoch_digest != initial_epoch_digest: owner.reconcile_error = "linux-host-service-inventory-epoch-mismatch"
+    # AT-OPS-01 (D1/D2): a pending controller-signed handoff is VERIFIED here, with the journal writer held and before
+    # any continuity flip; a refused one quarantines like a refused reconcile. It is consumed only after the reconcile
+    # below re-proved exclusion.
+    val adopted = host_service_handoff_verify_v1(journal, scope.unwrap(), loaded.unwrap().metadata.policy,
+        loaded.unwrap().metadata.configuration.controller_ref, host_local_context_v1(loaded.unwrap().metadata.policy), relative)
+    if adopted.is_err(): owner.reconcile_error = adopted.unwrap_err()
+    elif inventory.epoch_digest != initial_epoch_digest: owner.reconcile_error = "linux-host-service-inventory-epoch-mismatch"
     else:
         # milestone_0022 N3 (16, 17(C)): helper-cancel-resume runs FIRST; its owner is
         # adopted even on error (single writer); an error quarantines and skips the
@@ -385,7 +397,10 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
         else:
             val flipped = host_linux_service_reconcile_flip_v4(owner.capacity.unwrap(), native, inventory)
             if flipped.is_err(): owner.reconcile_error = flipped.unwrap_err()
-            else: owner.capacity = Some(flipped.unwrap())
+            else:
+                owner.capacity = Some(flipped.unwrap())
+                val consumed = host_service_handoff_consume_v1(owner.capacity.unwrap().journal, relative, adopted.unwrap())
+                if consumed.is_err(): owner.reconcile_error = consumed.unwrap_err()
     linux_service_start_error_v4(owner, "")
 
 # milestone_0022 N3 (14.3 P2-E, 15.5, 16 P1-1/P2-5): resume every executing or
@@ -642,7 +657,7 @@ pub fn host_linux_service_prepare_v4(original: HostLinuxServiceCurrentV4, source
     var owner = original
     val metadata = owner.current_v4()
     if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
-    if not owner.capacity.unwrap().ledger.continuity_proven:
+    if not owner.capacity.unwrap().ledger.continuity_proven or owner.reconcile_error != "":
         return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
     val request = host_prepare_associated_decode_v3(source)
     if request.is_err(): return linux_service_reply_v4(owner, "", request.unwrap_err(), false)
@@ -750,6 +765,8 @@ pub fn host_linux_service_execute_v4(original: HostLinuxServiceCurrentV4, source
     var owner = original
     val metadata = owner.current_v4()
     if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    # A handoff consume that failed after the reconcile flip leaves continuity proven AND reconcile_error set.
+    if owner.reconcile_error != "": return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
     val request = host_execute_associated_decode_v3(source)
     if request.is_err(): return linux_service_reply_v4(owner, "", request.unwrap_err(), false)
     val prepare = request.unwrap().prepare.prepare
@@ -1196,6 +1213,10 @@ fn linux_service_cancel_relative_v4(scope: ContainerHostScopeV2, operation_id: t
 # cancel (PR3) and the attachment attach/detach/inspect (PR3b).
 pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: text, source: text,
         project: fn(ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>) -> HostLinuxServiceReplyV4:
+    # Draining admits nothing new; inspect, detach and cancel stay so a live attachment can still release the writer.
+    if owner.draining and action != "host_agent_inspect_v4" and action != "host_agent_detach_v4" and action != "host_agent_cancel_v4":
+        return linux_service_reply_v4(owner, "", "linux-host-service-draining", false)
+    if action == "host_service_handoff_v1": return linux_service_handoff_v4(owner, source)
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
     if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
     if action == "host_agent_invoke_v4": return host_linux_service_agent_invoke_v4(owner, source)
@@ -1204,6 +1225,28 @@ pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: 
     if action == "host_agent_detach_v4": return host_linux_service_agent_detach_v4(owner, source)
     if action == "host_agent_inspect_v4": return host_linux_service_agent_inspect_v4(owner, source)
     linux_service_reply_v4(owner, "", "linux-host-service-action-unknown", false)
+
+# AT-OPS-01 drain: verify the controller-signed handoff against THIS owner's live state, publish it as the pending
+# handoff on the single journal, and only then stop admitting. The caller closes the owner next (exit-then-adopt).
+fn linux_service_handoff_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    if not owner.capacity.unwrap().ledger.continuity_proven:
+        return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
+    if owner.reconcile_error != "" or not owner.inventory_returned:
+        return linux_service_reply_v4(owner, "", "linux-host-service-handoff-before-reconcile", false)
+    val reply = host_service_handoff_commit_v1(owner.capacity.unwrap().journal, owner.scope.unwrap(), metadata.unwrap().policy,
+        metadata.unwrap().configuration.controller_ref, host_local_context_v1(metadata.unwrap().policy), owner.current_relative,
+        owner.current_bytes, owner.agent_operation, source)
+    if reply.is_err():
+        # Published but unverified: the record is on the journal, so admission stops and recovery is flagged.
+        if reply.unwrap_err().starts_with(HOST_SERVICE_HANDOFF_UNVERIFIED_V1):
+            owner.draining = true
+            return linux_service_reply_v4(owner, "", reply.unwrap_err(), true)
+        return linux_service_reply_v4(owner, "", reply.unwrap_err(), false)
+    owner.draining = true
+    linux_service_reply_v4(owner, reply.unwrap(), "", true)
 
 # The workload scope of this service's lending epoch: the bound host (the same
 # physical_host_id association_match_v3 compares), "epoch-" + the lent digest
