@@ -18,8 +18,18 @@ use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4,
 use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV2
 use os.apps.smux.runtime_agent_pane_v1.{smux_agent_pane_claim_gate_v1, smux_agent_pane_claimed_v1,
     smux_agent_pane_read_gate_v1, smux_agent_pane_read_done_v1, smux_agent_pane_keeps_lease_v1,
-    smux_agent_pane_op_refusal_v1, smux_agent_pane_registry_match_v1, smux_agent_pane_attach_supersedes_v1}
+    smux_agent_pane_resize_refusal_v1, smux_agent_pane_write_done_v1, smux_agent_pane_write_decode_v1,
+    smux_agent_pane_registry_match_v1, smux_agent_pane_attach_supersedes_v1}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn write_body_v1(extra: Dict<text, SdnValue>) -> text:
+    var fields: Dict<text, SdnValue> = {"bindingUid": SdnValue.String("bind1"), "attempt": SdnValue.Int(1),
+        "offset": SdnValue.Int(0), "maximum": SdnValue.Int(2), "data": SdnValue.String("hi")}
+    for key in extra.keys():
+        fields[key] = extra[key]
+    sdn_encode_canonical(SdnValue.Dict(fields))
 
 fn lease_of(epoch: i64) -> HostAgentPaneLeaseV4:
     host_agent_pane_lease_v4("op-1", epoch, "digest")
@@ -72,11 +82,35 @@ describe "smux agent pane consumer":
             expect(turn.lease.is_some()).to_equal(true)
             expect(turn.response.contains("stdout")).to_equal(true)
             expect(turn.response.contains("true")).to_equal(true)
-    it "refuses ops this slice does not serve":
+    it "refuses resize, which this service does not serve":
         step("resize stays refused on V4"):
-            expect(smux_agent_pane_op_refusal_v1("host-agent-pane-resize")).to_equal("runtime-agent-pane-resize-refused")
-        step("write is a later slice"):
-            expect(smux_agent_pane_op_refusal_v1("host-agent-pane-write")).to_equal("runtime-agent-pane-write-unsupported")
+            expect(smux_agent_pane_resize_refusal_v1()).to_equal("runtime-agent-pane-resize-refused")
+    it "answers a pane Write with the native disposition and keeps the lease only for non-terminal refusals (PR4)":
+        # @req PR4-WRITE-01
+        step("a completed write reports disposition and accepted bytes and keeps the lease"):
+            val turn = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(disposition: "completed", accepted_bytes: 3))
+            expect(turn.error).to_equal("")
+            expect(turn.lease.is_some()).to_equal(true)
+            expect(turn.response.contains("completed")).to_equal(true)
+        step("a write-shape refusal and an unresolved previous input keep the lease"):
+            expect(smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-write-offset")).lease.is_some()).to_equal(true)
+            expect(smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-input-unresolved")).lease.is_some()).to_equal(true)
+        step("a lease-terminal refusal drops the lease and marks the pane revoked"):
+            val dropped = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-lease-revoked"))
+            expect(dropped.lease.is_none()).to_equal(true)
+            expect(dropped.revoked).to_equal(true)
+    it "decodes only the exact write body and never reads a principal, nonce or lease from it (PR4)":
+        # @req PR4-WRITE-02
+        step("the exact body decodes"):
+            val decoded = smux_agent_pane_write_decode_v1(write_body_v1({}))
+            expect(decoded.unwrap().data).to_equal("hi")
+            expect(decoded.unwrap().binding_uid).to_equal("bind1")
+        step("a body with an extra field (principal) is refused"):
+            expect(smux_agent_pane_write_decode_v1(write_body_v1({"principal": SdnValue.String("root")})).is_err()).to_equal(true)
+        step("a body missing a field is refused"):
+            expect(smux_agent_pane_write_decode_v1(sdn_encode_canonical(SdnValue.Dict({"bindingUid": SdnValue.String("bind1")}))).is_err()).to_equal(true)
+        step("an oversized body is refused"):
+            expect(smux_agent_pane_write_decode_v1("x".repeat(16385)).unwrap_err()).to_equal("runtime-agent-pane-write-payload")
     it "treats an observed revoke as final for this attach (S3)":
         step("a lease-terminal read refusal drops the lease and marks the pane revoked"):
             val turn = smux_agent_pane_read_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-lease-revoked"))
