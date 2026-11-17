@@ -1,0 +1,95 @@
+#!/bin/sh
+# check-windows-pe-internal-link.shs — link a C hello for x86_64- and
+# aarch64-w64-windows-gnu (llvm-mingw UCRT CRT + import libs) with the
+# in-house PE/COFF linker (src/compiler/70.backend/linker/coff/), compare the
+# image structure with lld, and run the x64 image natively on a Windows host.
+#
+#   sh scripts/check/check-windows-pe-internal-link.shs [--selftest]
+# Env: MINGW_ROOT (default ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64),
+#      SIMPLE_BIN (default bin/simple), OUT_DIR (default mktemp -d).
+# Verdict is the last line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+# The arm64 image is checked structurally only unless the host is arm64.
+
+ARCHS="x86_64 aarch64"
+EXPECT="hello from simple pe linker"
+
+# fields <readobj output>: structural rows compared against lld.
+fields() {
+    grep -E '^ *(Machine|Subsystem|Characteristics|DLLCharacteristics):|^ *Name: [A-Za-z0-9_.-]+\.(dll|DLL)$' "$1" | sed 's/^ *//' | sort -u
+}
+
+# compare <internal fields> <lld fields>: 0 identical, 1 differ (prints diff), 2 empty.
+compare() {
+    if [ ! -s "$1" ] || [ ! -s "$2" ]; then echo "empty field list"; return 2; fi
+    diff "$1" "$2" >/dev/null && return 0
+    diff "$1" "$2"
+    return 1
+}
+
+selftest() {
+    d=$(mktemp -d)
+    printf '  Machine: IMAGE_FILE_MACHINE_AMD64 (0x8664)\n  Name: KERNEL32.dll\n' > "$d/a"
+    cp "$d/a" "$d/b"
+    printf '  Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)\n  Name: KERNEL32.dll\n' > "$d/c"
+    : > "$d/e"
+    fields "$d/a" > "$d/fa"; fields "$d/b" > "$d/fb"; fields "$d/c" > "$d/fc"
+    compare "$d/fa" "$d/fb" >/dev/null || { echo "selftest: identical must match"; return 1; }
+    compare "$d/fa" "$d/fc" >/dev/null && { echo "selftest: machine diff must fail"; return 1; }
+    compare "$d/e" "$d/fa" >/dev/null; [ $? -eq 2 ] || { echo "selftest: empty must error"; return 1; }
+    rm -rf "$d"
+    return 0
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "${1:-}" = "--selftest" ] && { echo "PASS — selftest"; exit 0; }
+
+repo=$(cd "$(dirname "$0")/../.." && pwd)
+MINGW_ROOT=${MINGW_ROOT:-$(ls -d "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64 2>/dev/null | tail -1)}
+SIMPLE_BIN=${SIMPLE_BIN:-$repo/bin/simple}
+[ -x "$MINGW_ROOT/bin/clang" ] || [ -x "$MINGW_ROOT/bin/clang.exe" ] || { echo "ERROR — nothing was checked (no llvm-mingw at '$MINGW_ROOT')"; exit 2; }
+OUT=${OUT_DIR:-$(mktemp -d)}
+mkdir -p "$OUT"
+# Git Bash paths (/c/...) are not openable by a native Windows simple.exe.
+if command -v cygpath >/dev/null 2>&1; then
+    MINGW_ROOT=$(cygpath -m "$MINGW_ROOT"); OUT=$(cygpath -m "$OUT")
+fi
+cd "$repo" || exit 2
+
+printf '#include <stdio.h>\nint main(void){puts("%s");return 0;}\n' "$EXPECT" > "$OUT/hello.c"
+checked=0; failed=""
+host_arch=$(uname -m)
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) on_windows=1 ;; *) on_windows=0 ;; esac
+
+for a in $ARCHS; do
+    tgt="$a-w64-windows-gnu"; L="$MINGW_ROOT/$a-w64-mingw32/lib"
+    RT=$(ls "$MINGW_ROOT"/lib/clang/*/lib/windows/libclang_rt.builtins-$a.a 2>/dev/null | tail -1)
+    "$MINGW_ROOT/bin/clang" --target="$tgt" -O1 -c "$OUT/hello.c" -o "$OUT/hello.$a.o" || { failed="$failed $a:compile"; continue; }
+    "$MINGW_ROOT/bin/clang" --target="$tgt" "$OUT/hello.$a.o" -o "$OUT/lld.$a.exe" || { failed="$failed $a:lld"; continue; }
+    inputs="$L/crt2.o,$L/crtbegin.o,$OUT/hello.$a.o,$L/crtend.o,$L/libmingw32.a,$RT,$L/libunwind.a,$L/libmoldname.a,$L/libmingwex.a,$L/libmsvcrt.a,$L/libadvapi32.a,$L/libshell32.a,$L/libuser32.a,$L/libkernel32.a"
+    log="$OUT/int.$a.log"
+    LARCH=$a LOUT="$OUT/int.$a.exe" LENTRY=mainCRTStartup LINPUTS="$inputs" \
+        "$SIMPLE_BIN" run test/05_perf/compiler/linker/coff_link_driver.spl > "$log" 2>&1
+    if ! grep -q "LINK-OK" "$log"; then failed="$failed $a:link($(grep -m1 'LINK-ERR\|error' "$log"))"; continue; fi
+    grep "LINK-OK" "$log"
+    for k in int lld; do
+        "$MINGW_ROOT/bin/llvm-readobj" --file-headers --coff-imports "$OUT/$k.$a.exe" > "$OUT/$k.$a.ro" 2>&1
+        fields "$OUT/$k.$a.ro" > "$OUT/$k.$a.f"
+    done
+    if ! compare "$OUT/int.$a.f" "$OUT/lld.$a.f"; then failed="$failed $a:structure"; continue; fi
+    checked=$((checked + 1))
+    echo "$a: structure matches lld ($(wc -l < "$OUT/int.$a.f") fields)"
+    run_ok=0
+    [ "$on_windows" = 1 ] && { [ "$a" = x86_64 ] || [ "$host_arch" = aarch64 ]; } && run_ok=1
+    if [ "$run_ok" = 1 ]; then
+        got=$("$OUT/int.$a.exe"); rc=$?
+        [ "$rc" -eq 0 ] && [ "$got" = "$EXPECT" ] || { failed="$failed $a:run(rc=$rc)"; continue; }
+        echo "$a: native run OK: $got"
+    else
+        echo "$a: native run skipped (host $(uname -s)/$host_arch)"
+    fi
+done
+
+[ -n "$failed" ] && { echo "FAIL —$failed"; exit 1; }
+[ "$checked" -eq 0 ] && { echo "ERROR — nothing was checked"; exit 2; }
+echo "PASS — $checked image(s) linked by the internal PE/COFF linker, structure matches lld"
+exit 0
