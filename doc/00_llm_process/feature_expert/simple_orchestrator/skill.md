@@ -425,3 +425,9 @@ available. These source paths and their manuals remain NOT_RUN.
   N4 (records: .spipe/.../milestone_0030_remote_container_driver/L6C_STOP_DECISIONS_2.md).
 - Trap: on a lent V4 owner the V2 container effect calls are refused (principal None); remote builds must use the V3
   workspace flow, whose observations do not fit the V2 remote evidence freeze.
+- D1 class predicate lives in lib: `remote_build_task_class_v1` (src/lib/nogc_sync_mut/daemon_sdk/), returns "" or a
+  fixed `remote-build-*` code; the controller issuer calls it now, the Host remote-build route (PR-1c) must call it
+  before admitting. The snapshot admits role `execution-host` (N2-a) and refuses an execution-host key that shares
+  key material with any issuer/approver key (`AUTHORITY_ROLES_NOT_SEPARATE`), so key separation holds for any snapshot;
+  PR-1c must take the execution-host key from the role-scoped snapshot lookup (today's remote_* consumers take
+  `host_key` from context).
