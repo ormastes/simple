@@ -8,8 +8,8 @@ be well formed, and a target with an explicit triple never enters the default se
 Run `bin/simple test test/01_unit/app/build/targets_tier_triple_fields_spec.spl` from the repo root.
 
 ## Compatibility and limitations
-The executor does not yet pass tier/triple to codegen; these fields are parsed and
-validated only.
+Tiers are arch-scoped (triple arch, else host); the executor forwards them (see
+targets_executor_tier_triple_spec.spl).
 
 ## Verification guidance and troubleshooting
 `target-error: unknown-cpu-tier:` names a tier missing from cpu_tiers.sdn;
@@ -21,7 +21,7 @@ validated only.
 # @req REQ-BUILD-GROUP-013 a target with an explicit triple is never default-selected
 
 use app.build.targets.build_targets.{
-    parse_targets_text, validate_targets, default_group_targets, is_well_formed_triple
+    parse_targets_text, validate_targets_for_arch, default_group_targets, is_well_formed_triple
 }
 use std.spec.step
 
@@ -40,24 +40,24 @@ describe "target cpu_tier and triple fields":
         expect(ts.errors.len()).to_equal(0)
         expect(ts.targets[0].cpu_tier).to_equal("")
         expect(ts.targets[0].triple).to_equal("")
-        expect(validate_targets(ts, ".").len()).to_equal(0)
+        expect(validate_targets_for_arch(ts, ".", "x86_64").len()).to_equal(0)
 
     it "accepts a declared tier and a well-formed triple":
         # @req REQ-BUILD-GROUP-011
-        step("Given tier x86-64-v3 and triple aarch64-unknown-linux-gnu")
-        val ts = parse_targets_text(_one("    cpu_tier: x86-64-v3\n    triple: aarch64-unknown-linux-gnu\n"))
-        expect(ts.targets[0].cpu_tier).to_equal("x86-64-v3")
+        step("Given tier armv9-a and triple aarch64-unknown-linux-gnu")
+        val ts = parse_targets_text(_one("    cpu_tier: armv9-a\n    triple: aarch64-unknown-linux-gnu\n"))
+        expect(ts.targets[0].cpu_tier).to_equal("armv9-a")
         expect(ts.targets[0].triple).to_equal("aarch64-unknown-linux-gnu")
-        expect(validate_targets(ts, ".").len()).to_equal(0)
-        val sve = parse_targets_text(_one("    cpu_tier: armv9-a+sve\n"))
-        expect(validate_targets(sve, ".").len()).to_equal(0)
+        expect(validate_targets_for_arch(ts, ".", "x86_64").len()).to_equal(0)
+        val sve = parse_targets_text(_one("    cpu_tier: armv9-a+sve\n    triple: aarch64-unknown-linux-gnu\n"))
+        expect(validate_targets_for_arch(sve, ".", "x86_64").len()).to_equal(0)
         val alias = parse_targets_text(_one("    cpu_tier: x86-64-v1\n"))
-        expect(validate_targets(alias, ".").len()).to_equal(0)
+        expect(validate_targets_for_arch(alias, ".", "x86_64").len()).to_equal(0)
 
     it "rejects an unknown cpu tier":
         # @req REQ-BUILD-GROUP-012
         val ts = parse_targets_text(_one("    cpu_tier: x86-64-v9\n"))
-        val errs = validate_targets(ts, ".")
+        val errs = validate_targets_for_arch(ts, ".", "x86_64")
         expect(errs.len()).to_equal(1)
         expect(errs[0]).to_equal("target-error: unknown-cpu-tier: t: x86-64-v9")
 
@@ -68,13 +68,13 @@ describe "target cpu_tier and triple fields":
         for good in ["x86_64-unknown-linux-gnu", "riscv64gc-unknown-none-elf", "x86_64-pc-windows-gnullvm", "aarch64-apple-darwin"]:
             expect(is_well_formed_triple(good)).to_equal(true)
         val ts = parse_targets_text(_one("    triple: x86_64-linux\n"))
-        val errs = validate_targets(ts, ".")
+        val errs = validate_targets_for_arch(ts, ".", "x86_64")
         expect(errs.len()).to_equal(1)
         expect(errs[0]).to_equal("target-error: malformed-triple: t: x86_64-linux")
 
     it "never default-selects a target with an explicit triple":
         # @req REQ-BUILD-GROUP-013
-        val src = "target h:\n    kind: binary\n    entry: src/app/configc/main.spl\n    cpu_tier: x86-64-v3\n" + "target x:\n    kind: binary\n    entry: src/app/configc/main.spl\n    triple: aarch64-unknown-linux-gnu\n" + "group host:\n    default: true\n    members: h, x\n"
+        val src = "target h:\n    kind: binary\n    entry: src/app/configc/main.spl\n" + "target x:\n    kind: binary\n    entry: src/app/configc/main.spl\n    triple: aarch64-unknown-linux-gnu\n" + "group host:\n    default: true\n    members: h, x\n"
         val sel = default_group_targets(parse_targets_text(src))
         expect(sel.len()).to_equal(1)
         expect(sel[0]).to_equal("h")

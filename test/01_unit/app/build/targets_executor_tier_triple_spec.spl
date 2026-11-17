@@ -1,0 +1,101 @@
+"""
+## Purpose and audience
+I prove the target executor forwards a target's `triple:` as `--target` and its
+`cpu_tier:` as `--cpu`, refuses a tier native-build has no `--cpu` policy for,
+scopes tiers to the target arch, and keeps tiered targets out of default builds.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/app/build/targets_executor_tier_triple_spec.spl`.
+
+## Compatibility and limitations
+native-build `--cpu` accepts only `default`, `native` and `x86-64-v1..v4`; any other
+declared tier (aarch64/riscv64 levels) is refused rather than silently built at baseline.
+
+## Verification guidance and troubleshooting
+`target-error: unsupported-cpu_tier: <name>: <tier>` names a tier with no `--cpu` policy;
+`target-error: cpu-tier-arch-mismatch: <name>: <tier> (<arch>)` names a tier of another arch.
+"""
+# @manual_section: target executor tier / triple passthrough
+# @req REQ-BUILD-GROUP-014 triple is forwarded as --target, supported tier as --cpu
+# @req REQ-BUILD-GROUP-015 unsupported tier is refused, never built at baseline
+# @req REQ-BUILD-GROUP-016 a tier must belong to the target (or host) arch
+# @req REQ-BUILD-GROUP-017 a target with an explicit cpu_tier is never default-selected
+
+use app.build.targets.build_targets.{
+    BuildTarget, parse_targets_text, validate_targets_for_arch, default_group_targets
+}
+use app.build.targets.target_executor.{
+    target_action, target_action_args, target_action_error
+}
+use std.spec.step
+
+fn _ts(extra: text):
+    parse_targets_text("target t:\n    kind: binary\n    entry: src/app/configc/main.spl\n" + extra)
+
+fn _has_pair(args: [text], flag: text, value: text) -> bool:
+    var i = 0
+    while i + 1 < args.len():
+        if args[i] == flag and args[i + 1] == value:
+            return true
+        i = i + 1
+    false
+
+describe "target executor tier and triple passthrough":
+    it "leaves args unchanged when neither field is set":
+        # @req REQ-BUILD-GROUP-014
+        val ts = _ts("")
+        val args = target_action_args("/r", target_action("/r", ts, ts.targets[0]))
+        expect(args.contains("--target")).to_equal(false)
+        expect(args.contains("--cpu")).to_equal(false)
+        expect(target_action_error(ts.targets[0])).to_equal("")
+
+    it "forwards a triple as --target":
+        # @req REQ-BUILD-GROUP-014
+        val ts = _ts("    triple: aarch64-unknown-linux-gnu\n")
+        val args = target_action_args("/r", target_action("/r", ts, ts.targets[0]))
+        expect(_has_pair(args, "--target", "aarch64-unknown-linux-gnu")).to_equal(true)
+
+    it "forwards a supported tier as --cpu":
+        # @req REQ-BUILD-GROUP-014
+        for tier in ["x86-64-v2", "x86-64-v3", "x86-64-v4", "x86-64-v1"]:
+            val ts = _ts("    cpu_tier: " + tier + "\n")
+            expect(target_action_error(ts.targets[0])).to_equal("")
+            val args = target_action_args("/r", target_action("/r", ts, ts.targets[0]))
+            expect(_has_pair(args, "--cpu", tier)).to_equal(true)
+        step("Given the x86-64 baseline name, it maps to the x86-64-v1 policy")
+        val base = _ts("    cpu_tier: x86-64\n")
+        val bargs = target_action_args("/r", target_action("/r", base, base.targets[0]))
+        expect(_has_pair(bargs, "--cpu", "x86-64-v1")).to_equal(true)
+
+    it "refuses a tier native-build has no --cpu policy for":
+        # @req REQ-BUILD-GROUP-015
+        for tier in ["rv64gcv", "armv9-a", "armv8.2-a"]:
+            val ts = _ts("    cpu_tier: " + tier + "\n")
+            expect(target_action_error(ts.targets[0])).to_equal("target-error: unsupported-cpu_tier: t: " + tier)
+            val args = target_action_args("/r", target_action("/r", ts, ts.targets[0]))
+            expect(args.contains("--cpu")).to_equal(false)
+
+    it "rejects a tier that does not belong to the target arch":
+        # @req REQ-BUILD-GROUP-016
+        val bad = _ts("    cpu_tier: rv64gcv\n    triple: x86_64-unknown-linux-gnu\n")
+        val errs = validate_targets_for_arch(bad, ".", "x86_64")
+        expect(errs.len()).to_equal(1)
+        expect(errs[0]).to_equal("target-error: cpu-tier-arch-mismatch: t: rv64gcv (x86_64)")
+        val ok = _ts("    cpu_tier: rv64gcv\n    triple: riscv64gc-unknown-linux-gnu\n")
+        expect(validate_targets_for_arch(ok, ".", "x86_64").len()).to_equal(0)
+        step("Given no triple, the host arch scopes the tier")
+        val host = _ts("    cpu_tier: armv9-a\n")
+        expect(validate_targets_for_arch(host, ".", "aarch64").len()).to_equal(0)
+        val herrs = validate_targets_for_arch(host, ".", "x86_64")
+        expect(herrs[0]).to_equal("target-error: cpu-tier-arch-mismatch: t: armv9-a (x86_64)")
+
+    it "never default-selects a target with an explicit cpu_tier":
+        # @req REQ-BUILD-GROUP-017
+        val src = "target h:\n    kind: binary\n    entry: src/app/configc/main.spl\n" + "target v:\n    kind: binary\n    entry: src/app/configc/main.spl\n    cpu_tier: x86-64-v3\n" + "group host:\n    default: true\n    members: h, v\n"
+        val sel = default_group_targets(parse_targets_text(src))
+        expect(sel.len()).to_equal(1)
+        expect(sel[0]).to_equal("h")
+        val nogroup = "target h:\n    kind: binary\n    entry: src/app/configc/main.spl\n" + "target v:\n    kind: binary\n    entry: src/app/configc/main.spl\n    cpu_tier: x86-64-v3\n"
+        val sel2 = default_group_targets(parse_targets_text(nogroup))
+        expect(sel2.len()).to_equal(1)
+        expect(sel2[0]).to_equal("h")
