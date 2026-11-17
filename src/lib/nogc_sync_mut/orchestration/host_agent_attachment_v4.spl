@@ -35,7 +35,8 @@ use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelper
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_expire_prepared_owned_v3}
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
 use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_v1.{HostPrimaryAttachCoreRetainedV1,
-    host_primary_attach_cleanup_core_v1, host_primary_attach_settle_core_v1}
+    host_primary_attach_cleanup_core_v1, host_primary_attach_settle_core_v1,
+    host_primary_attach_quiesce_fallback_core_v3, host_primary_attach_settle_retired_core_v3}
 use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helper_journal_relative_v1,
     host_linux_helper_attach_expected_v1, host_linux_helper_attach_binding_check_v1, host_primary_attach_refusal_decode_v1}
 use std.container.SimpleContainerOwnerV2
@@ -43,7 +44,8 @@ use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSess
 use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2, container_primary_output_read_v1}
 use std.nogc_async_mut.container.terminal_primary_write_v2.{ContainerPrimaryInputRequestV2,
     ContainerPrimaryInputDispositionV2, container_primary_input_write_v2}
-use std.nogc_async_mut.container.workspace_api_v3.simple_container_primary_session_return_v3
+use std.nogc_async_mut.container.workspace_api_v3.{simple_container_primary_session_return_v3,
+    simple_container_primary_attach_cleanup_v3}
 use std.nogc_async_mut.container.workspace_primary_retirement_v3.ContainerPrimaryTransportRetirementV3
 use std.nogc_async_mut.container.primary_geometry_v1.{ContainerPrimaryGeometryOwnerV1, ContainerPrimaryGeometryTurnV1,
     simple_container_primary_geometry_begin_v1, simple_container_primary_geometry_cancel_v1,
@@ -90,6 +92,8 @@ pub struct HostAgentAttachmentV4:
     session: Option<ContainerPrimaryAttachSessionV1> = None
     cleanup_spawn: Option<PipedProcessOwnedSpawnV2> = None
     native_retirement: Option<ContainerPrimaryTransportRetirementV3> = None
+    # F d2 done: the spawn's native group was proven quiet; d3 (the container-side retirement) is next.
+    fallback_quiesced: bool = false
     settlement: Option<HostHelperSettlementAckV1> = None
     geometry: Option<ContainerPrimaryGeometryOwnerV1> = None
     # 13.4: the geometry owner was cancelled by the release and is being drained (one step per call).
@@ -253,10 +257,6 @@ pub struct HostAgentReleaseContextV4:
     store: HostHelperStoreV1
     monotonic_ms: i64
 
-# F and B need the fallback-carrier cores milestone_0021 13.4 names (`quiesce_fallback_core_v3`,
-# `settle_retired_core_v3`); they do not exist in the tree, so a spawn carrier is answered Blocked (RB) rather
-# than released by a substitute that would skip the container-side retirement.
-const HOST_AGENT_RELEASE_FALLBACK_UNBOUND_V4 = "linux-host-agent-attachment-fallback-release-unbound"
 # 13.2 effects: helper begin needs its own controller-signed `host_helper_execute_v1` grant, which the 14B attach
 # packet does not carry, and the open core needs a ContainerStreamPolicyV2 the attachment has no decoder for.
 pub const HOST_AGENT_ATTACH_EFFECTS_UNBOUND_V4 = "linux-host-agent-attach-helper-begin-grant-unbound"
@@ -269,14 +269,19 @@ fn host_agent_release_answer_v4(attachment: HostAgentAttachmentV4, outcome: Host
         container: container)
 
 # F4 classification, read-only: "" = a release exists (S or U'); otherwise the typed charged-forever reason
-# (milestone_0022 16 P3-2: begin without a lease, a spawn carrier (F/B unbound here), `{}` / `{PA}` alone = no
+# (milestone_0022 16 P3-2: begin without a lease, a Rejected spawn carrier, `{}` / `{PA}` alone = no
 # journal refusal R for a helper with no session).
 fn host_agent_release_charged_v4(attachment: HostAgentAttachmentV4, store: HostHelperStoreV1) -> text:
     if attachment.helper.is_none(): return "linux-host-agent-attach-begin-without-lease"
     if store.root == "": return "linux-host-agent-attach-store-unopened"
-    if attachment.cleanup_spawn.is_some(): return HOST_AGENT_RELEASE_FALLBACK_UNBOUND_V4
+    # F/B (milestone_0026): a Rejected spawn carries no owner, so the absence of a live member cannot be proven.
+    if val held = attachment.cleanup_spawn:
+        match held:
+            case PipedProcessOwnedSpawnV2.Rejected(_): return "linux-host-agent-attach-native-absence-unproven"
+            case _: ()
     if attachment.plan.is_none(): return "linux-host-agent-attach-plan-missing"
-    if attachment.session.is_some(): return ""
+    # S has a session; F/B have a spawn carrier and never a journal refusal R (R is only written with neither).
+    if attachment.session.is_some() or attachment.cleanup_spawn.is_some(): return ""
     if store.journal.is_none(): return "linux-host-agent-attach-store-journal-missing"
     val relative = host_linux_helper_journal_relative_v1("primary-refusal", attachment.helper.unwrap().operation.id)
     match distributed_operation_journal_read_v3(store.journal.unwrap(), relative, 65536):
@@ -365,6 +370,42 @@ fn host_agent_release_cancel_v4(call: HostAgentAttachmentPortCallV4, context: Ho
     att.attach_stage = HOST_AGENT_ATTACH_RETURNED_V4
     host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", cancelled.owner, call.container)
 
+# F (spawn only) and B (session and spawn), 13.4: ONE bounded sub-step per call. d2 quiesces the spawn's native
+# group (proof only, no descriptor retirement). B then DROPS the spawn (settle refuses multiple native carriers)
+# and continues on the S path (the spawn is dropped without a stored proof digest: design 11.4 says "kept only in the proof", an open gap); F takes d3, the container-side retirement
+# (`simple_container_primary_attach_cleanup_v3`, which yields the retirement), and moves to `cleaned`, where d4 is
+# `settle_retired`. d3 repeats until the container reports no error: a retirement with an error is kept but never advances.
+fn host_agent_release_fallback_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    var container = call.container
+    if not att.fallback_quiesced:
+        val quiet = host_primary_attach_quiesce_fallback_core_v3(host_agent_release_retained_v4(att, context))
+        att.cleanup_spawn = quiet.retained.cleanup_spawn
+        if quiet.error != "":
+            return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused, quiet.error, quiet.retained.capacity, container)
+        # No error and no proof yet: the group is still tearing down, which is a (counted) wait, not a refusal.
+        if not quiet.proof_ready:
+            return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", quiet.retained.capacity, container)
+        if att.session.is_some():
+            att.cleanup_spawn = None
+            return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", quiet.retained.capacity, container)
+        att.fallback_quiesced = true
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", quiet.retained.capacity, container)
+    # d3 re-runs until the container publishes the retirement cleanly (fallback_cleanup_v3 is idempotent at
+    # native-retired); a retirement captured WITH an error authorizes no Host release (workspace_api_v3).
+    if call.pending: return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", context.capacity, container)
+    if container.is_none():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked,
+            "linux-host-agent-attachment-fallback-carrier-missing", context.capacity, container)
+    val returned = simple_container_primary_attach_cleanup_v3(call.container.unwrap())
+    container = Some(returned.owner)
+    if returned.retirement.is_some(): att.native_retirement = returned.retirement
+    if returned.error != "" or att.native_retirement.is_none():
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused,
+            if returned.error != "": returned.error else: "linux-host-agent-attach-retirement-missing", context.capacity, container)
+    att.attach_stage = HOST_AGENT_ATTACH_CLEANED_V4
+    host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", context.capacity, container)
+
 # S d2 (13.4, D4): the core's adopted-session arm runs container_terminal_cleanup_v1(PrimaryAttach(session)) (the
 # agent is the terminal owner) and returns the cleaned session, written back as the one canonical copy.
 fn host_agent_release_cleanup_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
@@ -381,8 +422,14 @@ fn host_agent_release_cleanup_v4(call: HostAgentAttachmentPortCallV4, context: H
 # S d3: the settlement ack (helper charge released through the V4 evidence arm).
 fn host_agent_release_settle_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
     var att = call.attachment
-    val settled = host_primary_attach_settle_core_v1(host_agent_release_retained_v4(att, context))
+    val retained = host_agent_release_retained_v4(att, context)
+    # F: no session and a container-side retirement -> settle from the retirement; otherwise the S settle.
+    val settled = if att.session.is_none() and att.native_retirement.is_some():
+        host_primary_attach_settle_retired_core_v3(retained, att.native_retirement.unwrap())
+    else:
+        host_primary_attach_settle_core_v1(retained)
     att.session = settled.retained.session
+    att.cleanup_spawn = settled.retained.cleanup_spawn
     if not settled.settled or settled.ack.is_none():
         return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Refused,
             if settled.error != "": settled.error else: "linux-host-agent-attach-settle-unacknowledged", settled.retained.capacity,
@@ -395,6 +442,12 @@ fn host_agent_release_settle_v4(call: HostAgentAttachmentPortCallV4, context: Ho
 fn host_agent_release_return_v4(call: HostAgentAttachmentPortCallV4, context: HostAgentReleaseContextV4) -> HostAgentAttachmentReleaseStepV4:
     var att = call.attachment
     if call.pending: return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", context.capacity, call.container)
+    if att.session.is_none() and att.native_retirement.is_some():
+        # F: the container-side retirement already returned the transport; nothing is left to give back.
+        att.native_retirement = None
+        att.fallback_quiesced = false
+        att.attach_stage = HOST_AGENT_ATTACH_RETURNED_V4
+        return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Progress, "", context.capacity, call.container)
     if call.container.is_none() or att.session.is_none():
         return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, "linux-host-agent-attachment-return-carrier-missing",
             context.capacity, call.container)
@@ -423,6 +476,7 @@ pub fn host_agent_attachment_release_step_v4(call: HostAgentAttachmentPortCallV4
             return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Blocked, charged, context.capacity, call.container)
         if stage == HOST_AGENT_ATTACH_FAILED_V4:
             return host_agent_release_answer_v4(att, HostAgentReleaseOutcomeV4.Wait, "", context.capacity, call.container)
+        if att.cleanup_spawn.is_some(): return host_agent_release_fallback_v4(call, context)
         if att.session.is_none(): return host_agent_release_cancel_v4(call, context)
         return host_agent_release_cleanup_v4(call, context)
     if stage == HOST_AGENT_ATTACH_CLEANED_V4: return host_agent_release_settle_v4(call, context)
