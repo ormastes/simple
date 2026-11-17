@@ -1579,6 +1579,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_rss_kib", file_io::rt_process_rss_kib);
     insert_simple!("rt_process_hwm_kib", file_io::rt_process_hwm_kib);
     insert_simple!("rt_process_last_child_peak_rss_kib", file_io::rt_process_last_child_peak_rss_kib);
+    insert_simple!("rt_process_last_child_cpu_ms", file_io::rt_process_last_child_cpu_ms);
     insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
     insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
     insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);

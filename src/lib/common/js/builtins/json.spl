@@ -2,8 +2,19 @@
 # Parses JSON text into JsValue tree and serializes back.
 
 use std.common.js.types.js_types.*
-use std.common.js.types.pair.{Pair}
 use std.common.js.engine.js_error.{js_script_error, JsBrowserResult}
+
+class JsonParseValueStep:
+    first: JsValue
+    second: i64
+
+class JsonParseStringStep:
+    first: text
+    second: i64
+
+class JsonParseNumberStep:
+    first: f64
+    second: i64
 
 fn _json_hex_digit_slice(c: text) -> i64:
     """Value of one hex digit character, or -1 if not a hex digit."""
@@ -46,35 +57,35 @@ fn json_stringify(value: JsValue, indent: i64) -> text:
 
 # --- Internal parsing ---
 
-fn parse_value(input: text, pos: i64) -> Pair<JsValue, i64>:
+fn parse_value(input: text, pos: i64) -> JsonParseValueStep:
     val p = skip_whitespace(input, pos)
     if p >= input.len():
-        return Pair(first: JsValue.Undefined, second: p)
+        return JsonParseValueStep(first: JsValue.Undefined, second: p)
     val ch = input[p:p + 1]
     if ch == "\"":
         val str_result = parse_string(input, p)
-        return Pair(first: JsValue.String(v: str_result.first), second: str_result.second)
+        return JsonParseValueStep(first: JsValue.String(v: str_result.first), second: str_result.second)
     if ch == "{":
         return parse_object(input, p)
     if ch == "[":
         return parse_array(input, p)
     if ch == "t":
         if _has_literal(input, p, "true"):
-            return Pair(first: JsValue.Boolean(v: true), second: p + 4)
-        return Pair(first: JsValue.Undefined, second: p)
+            return JsonParseValueStep(first: JsValue.Boolean(v: true), second: p + 4)
+        return JsonParseValueStep(first: JsValue.Undefined, second: p)
     if ch == "f":
         if _has_literal(input, p, "false"):
-            return Pair(first: JsValue.Boolean(v: false), second: p + 5)
-        return Pair(first: JsValue.Undefined, second: p)
+            return JsonParseValueStep(first: JsValue.Boolean(v: false), second: p + 5)
+        return JsonParseValueStep(first: JsValue.Undefined, second: p)
     if ch == "n":
         if _has_literal(input, p, "null"):
-            return Pair(first: JsValue.Null, second: p + 4)
-        return Pair(first: JsValue.Undefined, second: p)
+            return JsonParseValueStep(first: JsValue.Null, second: p + 4)
+        return JsonParseValueStep(first: JsValue.Undefined, second: p)
     # Number
     val num_result = parse_number(input, p)
-    Pair(first: JsValue.Number(v: num_result.first), second: num_result.second)
+    JsonParseValueStep(first: JsValue.Number(v: num_result.first), second: num_result.second)
 
-fn parse_string(input: text, pos: i64) -> Pair<text, i64>:
+fn parse_string(input: text, pos: i64) -> JsonParseStringStep:
     # pos points to opening quote
     var i = pos + 1
     var result = ""
@@ -82,7 +93,7 @@ fn parse_string(input: text, pos: i64) -> Pair<text, i64>:
     while i < len:
         val ch = input[i:i + 1]
         if ch == "\"":
-            return Pair(first: result, second: i + 1)
+            return JsonParseStringStep(first: result, second: i + 1)
         if ch == "\\":
             i = i + 1
             if i >= len:
@@ -139,9 +150,9 @@ fn parse_string(input: text, pos: i64) -> Pair<text, i64>:
         else:
             result = result + ch
         i = i + 1
-    Pair(first: result, second: i)
+    JsonParseStringStep(first: result, second: i)
 
-fn parse_number(input: text, pos: i64) -> Pair<f64, i64>:
+fn parse_number(input: text, pos: i64) -> JsonParseNumberStep:
     var i = pos
     val len = input.len()
     var num_str = ""
@@ -192,9 +203,9 @@ fn parse_number(input: text, pos: i64) -> Pair<f64, i64>:
                     break
     # Convert string to f64 — simplified
     val value = _simple_parse_f64(num_str)
-    Pair(first: value, second: i)
+    JsonParseNumberStep(first: value, second: i)
 
-fn parse_array(input: text, pos: i64) -> Pair<JsValue, i64>:
+fn parse_array(input: text, pos: i64) -> JsonParseValueStep:
     # pos points to '['
     var i = pos + 1
     i = skip_whitespace(input, i)
@@ -202,7 +213,7 @@ fn parse_array(input: text, pos: i64) -> Pair<JsValue, i64>:
     if i < len:
         val ch = input[i:i + 1]
         if ch == "]":
-            return Pair(first: JsValue.Array(id: -1), second: i + 1)
+            return JsonParseValueStep(first: JsValue.Array(id: -1), second: i + 1)
     # Parse elements
     var count = 0
     while i < len:
@@ -213,12 +224,12 @@ fn parse_array(input: text, pos: i64) -> Pair<JsValue, i64>:
             break
         val next = input[i:i + 1]
         if next == "]":
-            return Pair(first: JsValue.Array(id: -1), second: i + 1)
+            return JsonParseValueStep(first: JsValue.Array(id: -1), second: i + 1)
         if next == ",":
             i = i + 1
-    Pair(first: JsValue.Array(id: -1), second: i)
+    JsonParseValueStep(first: JsValue.Array(id: -1), second: i)
 
-fn parse_object(input: text, pos: i64) -> Pair<JsValue, i64>:
+fn parse_object(input: text, pos: i64) -> JsonParseValueStep:
     # pos points to '{'
     var i = pos + 1
     i = skip_whitespace(input, i)
@@ -226,7 +237,7 @@ fn parse_object(input: text, pos: i64) -> Pair<JsValue, i64>:
     if i < len:
         val ch = input[i:i + 1]
         if ch == "}":
-            return Pair(first: JsValue.Object(id: -1), second: i + 1)
+            return JsonParseValueStep(first: JsValue.Object(id: -1), second: i + 1)
     # Parse key-value pairs
     while i < len:
         i = skip_whitespace(input, i)
@@ -245,10 +256,10 @@ fn parse_object(input: text, pos: i64) -> Pair<JsValue, i64>:
             break
         val next = input[i:i + 1]
         if next == "}":
-            return Pair(first: JsValue.Object(id: -1), second: i + 1)
+            return JsonParseValueStep(first: JsValue.Object(id: -1), second: i + 1)
         if next == ",":
             i = i + 1
-    Pair(first: JsValue.Object(id: -1), second: i)
+    JsonParseValueStep(first: JsValue.Object(id: -1), second: i)
 
 fn skip_whitespace(input: text, pos: i64) -> i64:
     var i = pos

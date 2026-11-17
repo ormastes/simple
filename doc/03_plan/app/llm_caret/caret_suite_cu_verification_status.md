@@ -30,9 +30,9 @@ progress, and no row is claimed PASS without native evidence.
 | CU-015 | bug close rejected without receipts (backend) | bug_resolve/bug_close_gate, mcp/bugdb_close_gate, mcp/bugdb_resource_loads, bug/workaround_autoretire | spec present | PENDING |
 | CU-016 | workaround revert candidate, dirty WT untouched | bug/workaround_revert_candidates, bug/workaround_autoretire | spec present | PENDING |
 | CU-017 | sizes/DPI/Korean/a11y captures | workbench/gui_dpi_a11y, workbench_tui_cell_writer | spec present; no real user-event captures | PENDING |
-| CU-018 | CPU/RSS/startup/frame measured | cu018_native_perf_measurement (startup/RSS/failure-injection; CPU row fails explicitly, frame/trace-query not covered) | spec authored, native pending | PENDING |
+| CU-018 | CPU/RSS/startup/frame measured | cu018_native_perf_measurement (startup/RSS/per-child CPU via `process_last_child_cpu_ms`/failure-injection; frame/trace-query not covered) | spec authored; CPU API landed (C+Rust twins), native run pending runtime redeploy | PENDING |
 | CU-019 | reconnect generation race | workbench_session_identity | spec present (partial) | PENDING |
 | CU-020 | provider skill checklist, hint decay | observer/{skill_hint, provider_skill_report, codex_skill_signal}, workbench/capability_checklist | spec present | PENDING |
 
 Spec paths are under `test/01_unit/app/` (`llm_caret/` unless another dir is
-named). CU-007/012/018 specs authored 2026-11-17; native runs pending. CU-018 frame/trace-query timing and per-child CPU remain open.
+named). CU-007/012/018 specs authored 2026-11-17; native runs pending. CU-018 frame/trace-query timing remains open; per-child CPU is wired via `rt_process_last_child_cpu_ms` (GetProcessTimes / wait4 rusage) and awaits a native run on a redeployed binary.
