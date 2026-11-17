@@ -1,0 +1,55 @@
+"""
+## Purpose and audience
+Purpose: ROB-EFF-03 and ROB-USE-01/02/03 are wired into the real driver
+typecheck entry (collect_module_typecheck_receipt_v1), not only unit-callable.
+Audience: compiler engineers maintaining the typecheck pass.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+"""
+# @req: ROB-EFF-03, ROB-USE-01, ROB-USE-02
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.common.config.{Logger}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+
+fn receipt_for(src: text, script_mode: bool):
+    val parsed = parse_full_frontend(src, "rw.spl", "rw", Logger(level: 0))
+    var lowering = HirLowering.with_filename("rw.spl")
+    val hir = lowering.lower_module(parsed)
+    collect_module_typecheck_receipt_v1("rw", hir, TypecheckPassSeverity.Deny, false, script_mode)
+
+fn any_has(msgs: [text], needle: text) -> bool:
+    for m in msgs:
+        if m.contains(needle): return true
+    false
+
+val PURE_CALLBACK = "@pure\nfn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\n"
+val PLAIN_CALLBACK = "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\n"
+val DISCARD = "fn risky() -> Result<i64, text>:\n    Ok(1)\nfn caller():\n    risky()\n"
+val CONSUMED = "fn risky() -> Result<i64, text>:\n    Ok(1)\nfn caller():\n    _ = risky()\n"
+
+describe "robust checks wired into the driver typecheck entry":
+    it "a pure function calling an unknown callback yields EFF-E0301":
+        val r = receipt_for(PURE_CALLBACK, false)
+        expect(any_has(r.errors, "EFF-E0301")).to_equal(true)
+
+    it "the same callback in an unannotated function is admitted":
+        val r = receipt_for(PLAIN_CALLBACK, false)
+        expect(any_has(r.messages, "EFF-E0301")).to_equal(false)
+
+    it "a discarded Result is an error when compiled":
+        val r = receipt_for(DISCARD, false)
+        expect(any_has(r.errors, "SPL-USE-001")).to_equal(true)
+
+    it "a discarded Result is only a warning in script mode":
+        val r = receipt_for(DISCARD, true)
+        expect(any_has(r.errors, "SPL-USE-001")).to_equal(false)
+        expect(any_has(r.warnings, "SPL-USE-001")).to_equal(true)
+
+    it "an explicit discard is clean":
+        val r = receipt_for(CONSUMED, false)
+        expect(any_has(r.messages, "SPL-USE-001")).to_equal(false)

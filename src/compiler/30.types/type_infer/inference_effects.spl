@@ -409,3 +409,24 @@ impl HmInferContext:
     me note_declared_fn_symbol(sym: HirSymbol, own_name: text, own_path: text):
         if effect_symbol_is_local_fn(sym, own_name, own_path):
             self.declared_fn_symbols[sym.id.id] = true
+
+impl HmInferContext:
+    me check_effect_region(fn_: HirFunction):
+        """ROB-EFF-03: reject an unproven effect in a pure/nogc/nonblocking
+        function (EFF-E0301). Runs after the body is inferred so callee and
+        parameter types are bound; the surrounding function's row is restored."""
+        if not effect_region_is_restricted(fn_.effect_region):
+            return
+        val saved_row = self.current_function_effects
+        val saved_complete = self.current_function_effects_complete
+        self.current_function_effects = []
+        self.current_function_effects_complete = true
+        val row = self.infer_block_effects(fn_.body)
+        val complete = self.current_function_effects_complete
+        self.current_function_effects = saved_row
+        self.current_function_effects_complete = saved_complete
+        val code = effect_region_admission(fn_.effect_region, row, complete)
+        if code != "":
+            self.error(TypeInferError.Other(
+                "{code}: function '{fn_.name}' is {fn_.effect_region} but contains an effect that could not be proven (unknown callee or callback)",
+                fn_.span))
