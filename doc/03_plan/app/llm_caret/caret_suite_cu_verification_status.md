@@ -14,9 +14,9 @@ progress, and no row is claimed PASS without native evidence.
 | CU | Requirement (short) | Specs tagged | Interp/static | Native |
 |----|---------------------|--------------|---------------|--------|
 | CU-001 | 50 agents/5 hosts, grouping, pin/MRU/search | workbench/roster_order, fleet_transport, fleet_gaps | spec present (loopback) | PENDING |
-| CU-002 | 0 wrong-`(id,generation)` deliveries | workbench_session_identity | spec present (partial; no 1,000-op e2e) | PENDING |
-| CU-003 | pane bound by owner receipt | workbench_session_identity | spec present (partial; no native smux e2e) | PENDING |
-| CU-004 | closing view does not kill agent | workbench/roster_order | spec present (partial) | PENDING |
+| CU-002 | 0 wrong-`(id,generation)` deliveries | workbench_session_identity, caret_workbench_generation | PASS interp 2026-11-17 (generation 2/2: 1,000 seeded ops, 0 wrong sends) | PENDING |
+| CU-003 | pane bound by owner receipt | workbench_session_identity, caret_workbench_e2e, caret_workbench_prod | PASS interp 2026-11-17 (e2e 2/2 incl. "unbound terminal", prod 2/2); native smux e2e not run | PENDING |
+| CU-004 | closing view does not kill agent; stop only hits target | workbench/roster_order, caret_workbench_detach | PASS interp 2026-11-17 (detach 2/2: detach/switch keep real children; targeted stop leaves sibling running). Gap: no authorization model on stop (process-level only) | PENDING |
 | CU-005 | VT/UTF-8/Ctrl+B input fidelity | tui_entry_keys, leader_keys, key_resolver, key_chunker | spec present; no PTY/ConPTY run | PENDING |
 | CU-006 | IDE TUI/GUI same views, lazy load | ide/{ide_tui_profile_parity, caret_shell_visible_views, caret_shell_focus_publish, caret_profile_views, caret_context_keys, caret_context_keys_clear}, observer/skill_{replay_dedup,dedup_cap} | spec present | PENDING |
 | CU-007 | extension deactivation cleanup | cu007_extension_deactivation_cleanup | spec authored, native pending | PENDING |
