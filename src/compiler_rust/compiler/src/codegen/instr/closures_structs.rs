@@ -307,6 +307,19 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // only, so a user `lower(x)` still resolves normally; a typed
             // receiver arrives qualified and never takes this gate.
             | ("lower" | "upper", 0)
+            // Array/list element join (`parts.join(sep)` -> `rt_string_join`).
+            // Same erased-receiver theft class: `found.sort().join(",")` in
+            // `compiler.frontend.core.unit_scope` had its receiver erased to
+            // `ANY` by `rt_sort` and bound by single-candidate name-suffix scan
+            // to `CacheSingleFlightV1.join(self, key, request_id)` in Stage 2
+            // on aarch64-apple-darwin, corrupting unit-scope strings and
+            // crashing Stage 2 workers with SIGSEGV (2026-11-17). Matches the
+            // LLVM backend guard in `pipeline/native_project/mangle.rs` (`"join"
+            // | "Array.join"`). Arity 1 only so 0-arg `Thread.join()` and
+            // multi-arg `CacheSingleFlightV1.join`/`DataFrame.join` still
+            // resolve normally; typed `Path.join` arrives qualified as
+            // `"Path.join"` and is excluded by `!lookup_name.contains('.')`.
+            | ("join", 1)
     )
 }
 
@@ -1054,10 +1067,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
             if !lookup_name.contains('.') && method_part == "has" {
                 return None;
             }
-            // Same policy for bare `len`/`length` (see the rt_len routing
-            // above): never bind by name-suffix to an arbitrary linked
-            // `Type_dot_len`.
-            if !lookup_name.contains('.') && (method_part == "len" || method_part == "length") {
+            // Same policy for bare `len`/`length`/`join` (see the rt_len /
+            // rt_string_join routing above): never bind by name-suffix to an
+            // arbitrary linked `Type_dot_len` or `Type_dot_join`.
+            if !lookup_name.contains('.') && (method_part == "len" || method_part == "length" || method_part == "join") {
                 return None;
             }
 
@@ -1918,6 +1931,14 @@ mod tests {
         assert!(calls.contains("\"first\" => Some(\"rt_array_first\")"));
         assert!(closures.contains("\"filter\" => \"rt_array_filter\""));
     }
+
+    #[test]
+    fn erased_join_uses_builtin_dispatch() {
+        assert!(is_bare_builtin_collection_method("join", 1));
+        assert!(!is_bare_builtin_collection_method("join", 0));
+        assert!(!is_bare_builtin_collection_method("join", 2));
+        assert_eq!(builtin_method_result_type("join", None), Some(TypeId::STRING));
+    }
 }
 
 /// `true` for the integer code-point-to-character builtin, in either the bare
@@ -1983,7 +2004,7 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         // HEAP POINTER as a "successful" integer.
         // doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
         "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase" | "char_at"
-        | "replace" => Some(TypeId::STRING),
+        | "replace" | "join" => Some(TypeId::STRING),
         // `slice`/`substring`/`concat` are shared with array receivers, where
         // the result is an array, not text — so they stay receiver-gated. A
         // wrong entry here could make a previously-correct call worse.
