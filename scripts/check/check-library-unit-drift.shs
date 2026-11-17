@@ -28,13 +28,20 @@ check_dir() {
     if [ ! -f "$entry" ]; then
         echo "ERROR — nothing was checked (missing entry: $entry)"; return 2
     fi
-    out=$("$SIMPLE_BIN" run "$entry" -- "$1" 2>/dev/null | tr -d '\r' | grep -E '^(PASS|FAIL|ERROR) ' | tail -n 1)
+    tmpout=$(mktemp 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    "$SIMPLE_BIN" run "$entry" -- "$1" > "$tmpout" 2>/dev/null
+    irc=$?
+    out=$(tr -d '\r' < "$tmpout" | grep -E '^(PASS|FAIL|ERROR) ' | tail -n 1)
+    rm -f "$tmpout"
+    if [ "$irc" -ne 0 ] && [ "$irc" -ne 1 ] && [ "$irc" -ne 2 ]; then
+        echo "ERROR — nothing was checked (interpreter rc=$irc)"; return 2
+    fi
     case $out in
-        "PASS "*) echo "$out"; return 0 ;;
-        "FAIL "*) echo "$out"; return 1 ;;
+        "PASS "*) [ "$irc" -eq 0 ] && { echo "$out"; return 0; } ;;
+        "FAIL "*) [ "$irc" -eq 1 ] && { echo "$out"; return 1; } ;;
         "ERROR "*) echo "$out"; return 2 ;;
     esac
-    echo "ERROR — nothing was checked (no verdict from $SIMPLE_BIN run $entry)"; return 2
+    echo "ERROR — nothing was checked (verdict/rc mismatch or no verdict, rc=$irc)"; return 2
 }
 
 expect() { # name want_rc dir
