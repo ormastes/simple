@@ -103,10 +103,20 @@ impl HmInferContext:
                     effects = self.merge_effects(effects, self.infer_expr_effects(typed_arg.value))
 
                 # Add effects from the called function
+                var callee_declared = false
+                match callee.kind:
+                    case Var(callee_sym): callee_declared = self.declared_fn_symbols.contains_key(callee_sym.id)
+                    case NamedVar(callee_sym, _): callee_declared = self.declared_fn_symbols.contains_key(callee_sym.id)
+                    case _: pass
                 match self.synthesize_expr(callee):
                     case Ok(callee_ty):
                         match self.resolve(callee_ty).kind:
-                            case Function(_, _, _): pass
+                            case Function(_, _, _):
+                                if not callee_declared:
+                                    # Callback param or closure-typed local: its
+                                    # row is the annotation, not a proof (ROB-EFF-01).
+                                    effects = self.merge_effects(effects, [Effect(kind: EffectKind.Unknown, span: expr.span)])
+                                    self.current_function_effects_complete = false
                             case _:
                                 # Callback or imported value with no function
                                 # summary: not proven pure (ROB-EFF-01).
