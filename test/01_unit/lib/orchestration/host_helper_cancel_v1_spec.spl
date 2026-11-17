@@ -1,0 +1,144 @@
+"""
+## Purpose and audience
+Pins milestone_0022 N3 (DESIGN 13.3, 15.4-15.6, 16, 17(C)(D)(F)): the helper-only
+cancel of a V4 primary-attach helper. Cancel is authorized ONLY by a persisted
+journal refusal R; `{}` and `{PA}` alone are charged-forever (never cancellable,
+never settleable); a completed row is an idempotent Ok only when its outcome is
+the X digest; the AttachCancelled evidence arm returns X verbatim; startup resume
+runs before the unchanged reconcile flip. Written for owners of the V4 service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+The authorization table (`host_helper_cancel_domain_allowed_v1`) is pure and run
+over every (domain, row state) pair. The journal-backed cancel/commit/resume need
+a Linux journal and capacity owner fixture that does not exist yet (PR3b); their
+ORDER and owner-adoption rules are pinned structurally.
+## Verification guidance and troubleshooting
+A table mismatch prints `<domain>/<state>`. A structural failure names the rule
+(resume before flip, adopt owner on error, reconcile untouched, X verbatim).
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.HostLinuxHelperDomainV1
+use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.host_helper_cancel_domain_allowed_v1
+
+val N3C_DIR = "src/lib/nogc_sync_mut/orchestration/"
+
+fn n3c_domains() -> [HostLinuxHelperDomainV1]:
+    [HostLinuxHelperDomainV1.Unrecorded, HostLinuxHelperDomainV1.PrimaryConnection, HostLinuxHelperDomainV1.PrimaryAttach,
+        HostLinuxHelperDomainV1.AttachRefusedPreConsume, HostLinuxHelperDomainV1.AttachRefusedPostConsume,
+        HostLinuxHelperDomainV1.AttachCancelled]
+
+fn n3c_name(domain: HostLinuxHelperDomainV1) -> text:
+    match domain:
+        case HostLinuxHelperDomainV1.Unrecorded: "Unrecorded"
+        case HostLinuxHelperDomainV1.PrimaryConnection: "PrimaryConnection"
+        case HostLinuxHelperDomainV1.PrimaryAttach: "PrimaryAttach"
+        case HostLinuxHelperDomainV1.AttachRefusedPreConsume: "AttachRefusedPreConsume"
+        case HostLinuxHelperDomainV1.AttachRefusedPostConsume: "AttachRefusedPostConsume"
+        case HostLinuxHelperDomainV1.AttachCancelled: "AttachCancelled"
+
+# Oracle written as the design states it, independent of the implementation's shape.
+fn n3c_expected(name: text, state: text) -> text:
+    val live = state == "executing" or state == "outcome-unknown"
+    if live:
+        if name == "AttachRefusedPreConsume" or name == "AttachRefusedPostConsume" or name == "AttachCancelled": return "Ok"
+        return "Err:helper-cancel-unauthorized"
+    if state == "completed":
+        if name == "AttachCancelled": return "Ok"
+        return "Err:helper-cancel-settled-by-another-path"
+    "Err:helper-cancel-row-state"
+
+fn n3c_text(result: Result<(), text>) -> text:
+    match result:
+        case Ok(_): "Ok"
+        case Err(reason): "Err:" + reason
+
+fn n3c_body(file: text, start: text, stop: text) -> text:
+    val source = file_read_text(N3C_DIR + file)
+    val rest = source.substring(source.index_of(start), source.len())
+    val to = rest.substring(1, rest.len()).index_of(stop)
+    if to < 0: return rest
+    rest.substring(0, to + 1)
+
+describe "helper-only cancel (milestone_0022 N3)":
+    it "authorizes cancel only from a refused or cancelled-pending row":
+        # @req S40-NATIVE-N3
+        for domain in n3c_domains():
+            for state in ["admitted", "executing", "outcome-unknown", "completed", "failed"]:
+                val actual = n3c_text(host_helper_cancel_domain_allowed_v1(domain, state))
+                expect(n3c_name(domain) + "/" + state + ":" + actual).to_equal(
+                    n3c_name(domain) + "/" + state + ":" + n3c_expected(n3c_name(domain), state))
+
+    it "keeps the charged-forever states fail closed":
+        # @req S40-NATIVE-N3
+        step("{} (begin committed, open core never ran) and {PA} alone are never cancellable")
+        for state in ["executing", "outcome-unknown"]:
+            expect(n3c_text(host_helper_cancel_domain_allowed_v1(HostLinuxHelperDomainV1.Unrecorded, state))).to_equal("Err:helper-cancel-unauthorized")
+            expect(n3c_text(host_helper_cancel_domain_allowed_v1(HostLinuxHelperDomainV1.PrimaryAttach, state))).to_equal("Err:helper-cancel-unauthorized")
+        step("a refused row has no settlement evidence: only the cancel releases it")
+        val arm = n3c_body("host_linux_completion_evidence_v3.spl", "pub fn host_linux_completion_evidence_v3(", "\n    if operation.operation != \"host_reservation_v1\"")
+        expect(arm.contains("case HostLinuxHelperDomainV1.AttachRefusedPreConsume: return Err(\"helper-attach-refused-cancel-required\")")).to_equal(true)
+        expect(arm.contains("case HostLinuxHelperDomainV1.AttachRefusedPostConsume: return Err(\"helper-attach-refused-cancel-required\")")).to_equal(true)
+        step("an invalid or absent store is an Err for cancel (never a repair)")
+        val prepare = n3c_body("host_helper_settlement_commit_v1.spl", "fn helper_cancel_prepare_v1(", "\n# The only release")
+        expect(prepare.contains("host_linux_helper_store_bound_v1(owner.journal, store_root)?")).to_equal(true)
+
+    it "is idempotent: a completed row re-derives X and must carry its digest":
+        # @req S40-NATIVE-N3
+        val prepare = n3c_body("host_helper_settlement_commit_v1.spl", "fn helper_cancel_prepare_v1(", "\n# The only release")
+        val completed = prepare.substring(prepare.index_of("if row.state == \"completed\":"), prepare.len())
+        expect(completed.contains("host_linux_helper_cancelled_evidence_v1(owner.journal, state, operation)?")).to_equal(true)
+        expect(completed.contains("if sha256_text(retained) != row.outcome_digest: return Err(\"helper-cancel-settled-by-another-path\")")).to_equal(true)
+        step("the order is: R mirror regenerated, X journal + mirror, then the commit")
+        val mirror_r = prepare.index_of("\"primary-refusal\", refusal_bytes)?")
+        val publish_x = prepare.index_of("\"primary-cancelled\", bytes)?")
+        expect(mirror_r >= 0 and publish_x > mirror_r).to_equal(true)
+        val unconsumed = n3c_body("host_helper_settlement_commit_v1.spl", "pub fn host_helper_cancel_unconsumed_v1(", "\npub fn ")
+        expect(unconsumed.contains("host_helper_cancel_commit_v1(owner, operation, prepared.unwrap())")).to_equal(true)
+        step("the attach-broker kind and the journal request digests are required")
+        expect(prepare.contains("if plan.helper_kind != \"attach-broker\": return Err(\"helper-cancel-attach-broker-required\")")).to_equal(true)
+        expect(prepare.contains("return Err(\"helper-cancel-request-mismatch\")")).to_equal(true)
+
+    it "returns the X bytes verbatim from the AttachCancelled evidence arm":
+        # @req S40-NATIVE-N3
+        val arm = n3c_body("host_linux_completion_evidence_v3.spl", "pub fn host_linux_completion_evidence_v3(", "\n    if operation.operation != \"host_reservation_v1\"")
+        expect(arm.contains("case HostLinuxHelperDomainV1.AttachCancelled: return host_linux_helper_cancelled_evidence_v1(journal, store, operation)")).to_equal(true)
+        val evidence = n3c_body("host_linux_helper_store_v1.spl", "pub fn host_linux_helper_cancelled_evidence_v1(", "\npub fn ")
+        expect(evidence.contains("Ok(cancelled_bytes)")).to_equal(true)
+        step("historical only: no native file, no launch root")
+        expect(evidence.contains("group_process_stream_recover_v2")).to_equal(false)
+        expect(evidence.contains("tree-reaped")).to_equal(false)
+        expect(evidence.contains("launch")).to_equal(false)
+
+    it "resumes before the unchanged flip and adopts the owner even on error":
+        # @req S40-NATIVE-N3
+        val start = n3c_body("host_linux_service_current_v4.spl", "pub fn host_linux_service_start_v4(", "\n# milestone_0022 N3")
+        val resume = start.index_of("host_linux_service_helper_cancel_resume_v4(owner)")
+        val adopt = start.index_of("owner = resumed.owner")
+        val quarantine = start.index_of("if resumed.error != \"\": owner.reconcile_error = resumed.error")
+        val flip = start.index_of("host_linux_service_reconcile_flip_v4(owner.capacity.unwrap(), native, inventory)")
+        expect(resume >= 0 and adopt > resume and quarantine > adopt and flip > quarantine).to_equal(true)
+        step("resume runs only in the epoch-matching branch, after the protected-journal check")
+        expect(start.index_of("host_capacity_owner_linux_current_v3(owner.capacity.unwrap())") < resume).to_equal(true)
+        expect(start.index_of("if inventory.epoch_digest != initial_epoch_digest") < resume).to_equal(true)
+        step("the flip and the read-only reconcile do not know about resume")
+        val reconcile = file_read_text(N3C_DIR + "host_linux_service_reconcile_v4.spl")
+        expect(reconcile.contains("helper_cancel")).to_equal(false)
+        val loop = n3c_body("host_linux_service_current_v4.spl", "pub fn host_linux_service_helper_cancel_resume_v4(", "\npub fn ")
+        expect(loop.contains("capacity = turn.owner")).to_equal(true)
+        expect(loop.contains("owner.capacity = Some(capacity)")).to_equal(true)
+
+    it "re-derives resume inputs from the journal request and never touches the parent reservation":
+        # @req S40-NATIVE-N3
+        val row = n3c_body("host_linux_service_current_v4.spl", "fn linux_service_helper_cancel_row_v4(", "\npub fn ")
+        expect(row.contains("if operation.operation != \"host_helper_reservation_v1\": return Ok(None)")).to_equal(true)
+        expect(row.contains("host_linux_helper_attach_expected_v1(capacity.journal, operation)?")).to_equal(true)
+        expect(row.contains("host_linux_helper_attach_binding_check_v1(refusal, None, expected)?")).to_equal(true)
+        expect(row.contains("expected.plan,")).to_equal(true)
+        expect(row.contains("\"host_reservation_v1\"")).to_equal(false)
+        expect(row.contains("host_capacity_owner_settle_v1")).to_equal(false)
+        step("the store root is derived from the journal root (matches current_v4)")
+        val loop = n3c_body("host_linux_service_current_v4.spl", "pub fn host_linux_service_helper_cancel_resume_v4(", "\npub fn ")
+        expect(loop.contains("host_linux_helper_store_root_v1(capacity.journal.root)")).to_equal(true)

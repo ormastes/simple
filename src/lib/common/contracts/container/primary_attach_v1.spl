@@ -6,7 +6,9 @@ use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2,
     group_process_stream_template_digest_v3, group_process_stream_template_encode_v3, group_process_stream_template_decode_v3}
-use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
+use std.common.contracts.mux.request_validation_v1.mux_validate_name_v1
+use std.common.contracts.mux.session_runtime_control_v1.session_runtime_control_incarnation_valid_v1
 use std.common.crypto.sha256.sha256_text
 use std.common.string_core.str_len
 use std.common.sdn.value.SdnValue
@@ -161,3 +163,87 @@ pub fn container_primary_attach_plan_decode_v1(source: text) -> Result<Container
         request_digest: primary_plan_text_v1(fields, "requestDigest")?)
     if container_primary_attach_plan_encode_v1(plan)? != source: return Err("container-primary-attach-plan-noncanonical")
     Ok(plan)
+
+# Controller-issued pane binding for an agent primary attach (milestone_0021
+# 14B). Pure DATA: signature/authorize-kind verification and its stored copy on
+# the agent attachment belong to the agent owner (PR3b). Field rules mirror
+# terminal_adoption_valid_v1, including service_epoch > 0 (milestone_0021 14C):
+# an epoch-0 binding could never be adopted nor matched by a control target.
+pub struct HostAgentPaneBindingV4:
+    binding_uid: text
+    service_incarnation: text
+    session_id: text
+    window_id: text
+    pane_id: text
+    service_epoch: i64
+
+val HOST_AGENT_PANE_BINDING_SOURCE_MAX_V4: i64 = 4096
+
+pub fn host_agent_pane_binding_validate_v4(binding: HostAgentPaneBindingV4) -> Result<HostAgentPaneBindingV4, text>:
+    if not builder_identifier_valid_v1(binding.binding_uid): return Err("host-agent-pane-binding-uid-invalid")
+    if not session_runtime_control_incarnation_valid_v1(binding.service_incarnation):
+        return Err("host-agent-pane-binding-incarnation-invalid")
+    if (mux_validate_name_v1(binding.session_id).is_err() or mux_validate_name_v1(binding.window_id).is_err() or
+            mux_validate_name_v1(binding.pane_id).is_err()):
+        return Err("host-agent-pane-binding-pane-name-invalid")
+    if binding.service_epoch <= 0: return Err("host-agent-pane-binding-epoch-invalid")
+    Ok(binding)
+
+pub fn host_agent_pane_binding_encode_v4(binding: HostAgentPaneBindingV4) -> Result<text, text>:
+    val valid = host_agent_pane_binding_validate_v4(binding)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-binding"),
+        "bindingUid": SdnValue.String(valid.binding_uid), "serviceIncarnation": SdnValue.String(valid.service_incarnation),
+        "sessionId": SdnValue.String(valid.session_id), "windowId": SdnValue.String(valid.window_id),
+        "paneId": SdnValue.String(valid.pane_id), "serviceEpoch": SdnValue.Int(valid.service_epoch)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > HOST_AGENT_PANE_BINDING_SOURCE_MAX_V4: return Err("host-agent-pane-binding-source-size")
+    Ok(source)
+
+pub fn host_agent_pane_binding_digest_v4(binding: HostAgentPaneBindingV4) -> Result<text, text>:
+    Ok(sha256_text(host_agent_pane_binding_encode_v4(binding)?))
+
+fn pane_binding_text_v4(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-agent-pane-binding-text-required:" + key)
+
+fn pane_binding_int_v4(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-agent-pane-binding-integer-required:" + key)
+
+# Strict: exact field set, version/kind, field rules, and byte-exact
+# re-encode (any non-canonical spelling of a valid binding is refused).
+pub fn host_agent_pane_binding_decode_v4(source: text) -> Result<HostAgentPaneBindingV4, text>:
+    if str_len(source) == 0 or str_len(source) > HOST_AGENT_PANE_BINDING_SOURCE_MAX_V4:
+        return Err("host-agent-pane-binding-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: HOST_AGENT_PANE_BINDING_SOURCE_MAX_V4,
+            max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(_): return Err("host-agent-pane-binding-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-agent-pane-binding-object-required")
+    val names = ["version", "kind", "bindingUid", "serviceIncarnation", "sessionId", "windowId", "paneId", "serviceEpoch"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("host-agent-pane-binding-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("host-agent-pane-binding-missing-field:" + key)
+    if pane_binding_int_v4(fields, "version")? != 4 or pane_binding_text_v4(fields, "kind")? != "host-agent-pane-binding":
+        return Err("host-agent-pane-binding-version-kind")
+    val binding = HostAgentPaneBindingV4(binding_uid: pane_binding_text_v4(fields, "bindingUid")?,
+        service_incarnation: pane_binding_text_v4(fields, "serviceIncarnation")?,
+        session_id: pane_binding_text_v4(fields, "sessionId")?, window_id: pane_binding_text_v4(fields, "windowId")?,
+        pane_id: pane_binding_text_v4(fields, "paneId")?, service_epoch: pane_binding_int_v4(fields, "serviceEpoch")?)
+    if host_agent_pane_binding_encode_v4(binding)? != source: return Err("host-agent-pane-binding-noncanonical")
+    Ok(binding)
+
+# Pure live comparison (14B): the binding must name the agent/service's OWN
+# live incarnation and epoch. The caller supplies live values from its own
+# service state, never from smux pane state or the packet.
+# allow(primitive_api): reviewed service-epoch DATA word (milestone_0022 N4 / milestone_0021 14B)
+pub fn host_agent_pane_binding_live_check_v4(binding: HostAgentPaneBindingV4, live_incarnation: text, live_epoch: i64) -> Result<(), text>:
+    val valid = host_agent_pane_binding_validate_v4(binding)?
+    if valid.service_incarnation != live_incarnation or valid.service_epoch != live_epoch:
+        return Err("attach-binding-mismatch")
+    Ok(())

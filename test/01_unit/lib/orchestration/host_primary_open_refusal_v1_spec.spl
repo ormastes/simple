@@ -1,0 +1,125 @@
+"""
+## Purpose and audience
+Pins milestone_0022 N3 (DESIGN 15.2, 16, 17(A)(B)): the typed refusal
+`ContainerPrimaryOpenRefusalV1` carried by `ContainerPrimaryOpenResultV1` from the
+machine provider (`machine_workspace_primary_open_v3`), the fresh provider
+(`open_primary_attach_v3`), the adapter (`open_primary_attach_v1`) and the common
+entry (`simple_container_open_primary_attach_v1`). Only NoCustody and
+SpawnRejectedRetired authorize the Host refusal record. One spec per return site.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+The authorize predicate and the custody rule are pure DATA cases. Return-site
+variants are source pins (the fresh-workspace provider has no scripted fixture);
+the legacy adapter sites are ALSO run behaviourally in
+`test/01_unit/lib/nogc_async_mut/container/providers/linux/primary_attach_provider_v1_spec.spl`
+(NoCustody / NotRefused with no session and no cleanup spawn).
+## Verification guidance and troubleshooting
+A site pin failure names the provider file and the reason text. Any new Rejected
+return in these functions must be typed explicitly and pinned here.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.common.contracts.container.primary_open_refusal_v1.{ContainerPrimaryOpenRefusalV1,
+    container_primary_open_refusal_authorizes_v1}
+use std.nogc_sync_mut.container.machine_fresh_workspace_primary_v3.machine_workspace_primary_refusal_of_v3
+
+val N3R_MACHINE = "src/lib/nogc_sync_mut/container/machine_fresh_workspace_primary_v3.spl"
+val N3R_FRESH = "src/lib/nogc_async_mut/container/providers/linux/fresh_epoch_workload_v2.spl"
+val N3R_ADAPTER = "src/lib/nogc_async_mut/container/providers/linux/simple_container_adapter_v2.spl"
+val N3R_COMMON = "src/lib/nogc_async_mut/container/primary_attach_v1.spl"
+
+fn n3r_text(refusal: ContainerPrimaryOpenRefusalV1) -> text:
+    match refusal:
+        case ContainerPrimaryOpenRefusalV1.NotRefused: "NotRefused"
+        case ContainerPrimaryOpenRefusalV1.NoCustody: "NoCustody"
+        case ContainerPrimaryOpenRefusalV1.SpawnRejectedRetired: "SpawnRejectedRetired"
+        case ContainerPrimaryOpenRefusalV1.CustodyAdvanced(reason): "CustodyAdvanced:" + reason
+
+fn n3r_body(path: text, start: text, stop: text) -> text:
+    val source = file_read_text(path)
+    val rest = source.substring(source.index_of(start), source.len())
+    val to = rest.substring(1, rest.len()).index_of(stop)
+    if to < 0: return rest
+    rest.substring(0, to + 1)
+
+fn n3r_count(haystack: text, needle: text) -> i64:
+    var count = 0
+    var rest = haystack
+    var at = rest.index_of(needle)
+    while at >= 0:
+        count = count + 1
+        rest = rest.substring(at + needle.len(), rest.len())
+        at = rest.index_of(needle)
+    count
+
+describe "typed primary open refusal (milestone_0022 N3)":
+    it "authorizes the refusal record only for NoCustody and SpawnRejectedRetired":
+        # @req S40-NATIVE-N3
+        expect(container_primary_open_refusal_authorizes_v1(ContainerPrimaryOpenRefusalV1.NoCustody)).to_equal(true)
+        expect(container_primary_open_refusal_authorizes_v1(ContainerPrimaryOpenRefusalV1.SpawnRejectedRetired)).to_equal(true)
+        expect(container_primary_open_refusal_authorizes_v1(ContainerPrimaryOpenRefusalV1.NotRefused)).to_equal(false)
+        expect(container_primary_open_refusal_authorizes_v1(ContainerPrimaryOpenRefusalV1.CustodyAdvanced("x"))).to_equal(false)
+
+    it "types an inner-open error by observed custody, not by its position (17(A))":
+        # @req S40-NATIVE-N3
+        expect(n3r_text(machine_workspace_primary_refusal_of_v3("absent", "workspace-primary-plan-changed"))).to_equal("NoCustody")
+        expect(n3r_text(machine_workspace_primary_refusal_of_v3("present", "workload-publish-io"))).to_equal("CustodyAdvanced:workload-publish-io")
+        step("custody that cannot be ruled out (stale slot, entry failure) fails closed")
+        expect(n3r_text(machine_workspace_primary_refusal_of_v3("unknown:machine-fresh-workload-stale", "machine-fresh-workload-stale"))).to_equal("CustodyAdvanced:machine-fresh-workload-stale")
+        val probe = n3r_body(N3R_MACHINE, "fn machine_workspace_primary_custody_probe_v3(", "
+# One rule")
+        expect(probe.contains("if reason == \"workspace-primary-custody-required\": return \"absent\"")).to_equal(true)
+        step("a failed workload_publish_v3 then a retry: custody is retained, so the retry is CustodyAdvanced(already-attempted)")
+        val open = n3r_body(N3R_MACHINE, "pub(package) fn machine_workspace_primary_open_v3(", "\nfn machine_workspace_primary_open_inner_v3(")
+        val entry = open.index_of("if machine_workspace_primary_custody_probe_v3(state) == \"present\":")
+        val inner = open.index_of("machine_workspace_primary_open_inner_v3(")
+        expect(entry >= 0 and entry < inner).to_equal(true)
+        expect(open.contains("refusal: ContainerPrimaryOpenRefusalV1.CustodyAdvanced(\"already-attempted\"))")).to_equal(true)
+        expect(open.contains("machine_workspace_primary_refusal_of_v3(machine_workspace_primary_custody_probe_v3(state), actual.unwrap_err())")).to_equal(true)
+
+    it "types the machine provider spawn result":
+        # @req S40-NATIVE-N3
+        val inner = n3r_body(N3R_MACHINE, "fn machine_workspace_primary_open_inner_v3(", "\npub(package) fn ")
+        step("SpawnRejectedRetired only when the provider retirement is confirmed Ok")
+        val retired = inner.index_of("val recorded = primary_publish_retired_v3(Some(storage), state)")
+        val advanced = inner.index_of("refusal: ContainerPrimaryOpenRefusalV1.CustodyAdvanced(recorded.unwrap_err())")
+        val confirmed = inner.index_of("refusal: ContainerPrimaryOpenRefusalV1.SpawnRejectedRetired")
+        expect(retired >= 0 and advanced > retired and confirmed > advanced).to_equal(true)
+        expect(inner.contains("case _: Ok(ContainerPrimaryOpenResultV1(spawn: spawned, refusal: ContainerPrimaryOpenRefusalV1.NotRefused))")).to_equal(true)
+        step("custody capture follows action_begin_v2 directly, so the observed rule is exact")
+        val begin = inner.index_of("val states = state.action_begin_v2(\"primary-attach\", generation)?")
+        val capture = inner.index_of("state.capture_primary_custody_v3(machine_workspace_primary_custody_v3(current, helper))")
+        expect(begin >= 0 and capture > begin).to_equal(true)
+        expect(inner.substring(begin, capture).contains("?\n    ") and inner.substring(begin, capture).split("\n").len() == 2).to_equal(true)
+        step("owner-stale / not-live dispatch refusals are NoCustody")
+        val rejected = n3r_body(N3R_MACHINE, "pub(package) fn machine_workspace_primary_rejected_v3(", "\npub(package) fn ")
+        expect(rejected.contains("refusal: ContainerPrimaryOpenRefusalV1.NoCustody))")).to_equal(true)
+
+    it "types every fresh provider return site":
+        # @req S40-NATIVE-N3
+        val open = n3r_body(N3R_FRESH, "pub fn open_primary_attach_v3(", "\n    pub fn ")
+        expect(open.contains("PipedProcessOwnedSpawnV2.Rejected(\"linux-fresh-workload-legacy-operation-unavailable\"),\n                refusal: ContainerPrimaryOpenRefusalV1.NoCustody)")).to_equal(true)
+        expect(open.contains("PipedProcessOwnedSpawnV2.Rejected(\"workspace-primary-spawn-turn-mismatch\"),\n                refusal: ContainerPrimaryOpenRefusalV1.CustodyAdvanced(\"turn-mismatch\"))")).to_equal(true)
+        expect(open.contains("case MachineWorkspacePrimaryReplyV3.Spawn(actual): actual")).to_equal(true)
+
+    it "types every adapter return site: pre-provider NoCustody, legacy provider NotRefused":
+        # @req S40-NATIVE-N3
+        val open = n3r_body(N3R_ADAPTER, "pub me open_primary_attach_v1(request: ContainerExecutionRequestV2", "\n    pub fn ")
+        expect(open.contains("PipedProcessOwnedSpawnV2.Rejected(")).to_equal(false)
+        expect(n3r_count(open, "return primary_open_no_custody_v1(")).to_equal(7)
+        val provider = open.index_of("self.provider.open_primary_attach_v1(")
+        expect(provider > open.index_of("self._checked_request_v2(request)")).to_equal(true)
+        expect(open.substring(provider, open.len()).contains("refusal: ContainerPrimaryOpenRefusalV1.NotRefused")).to_equal(true)
+        expect(open.contains("if val actual = self._fresh: return actual.open_primary_attach_v3(")).to_equal(true)
+
+    it "types every common entry return site and keeps native owners NotRefused":
+        # @req S40-NATIVE-N3
+        val open = n3r_body(N3R_COMMON, "pub fn simple_container_open_primary_attach_v1(", "\n# Actual construction")
+        expect(open.contains("case Err(reason): return ContainerPrimaryAttachTurnV1(owner, None, None, reason, ContainerPrimaryOpenRefusalV1.NoCustody)")).to_equal(true)
+        expect(open.contains("ContainerPrimaryAttachTurnV1(retained_owner, None, None, reason, spawned.refusal)")).to_equal(true)
+        step("every turn holding a session or cleanup spawn is NotRefused; so is the Windows arm")
+        expect(n3r_count(open, "ContainerPrimaryAttachTurnV1(")).to_equal(7)
+        expect(n3r_count(open, "ContainerPrimaryOpenRefusalV1.NotRefused")).to_equal(5)
+        expect(n3r_count(open, "spawned.refusal")).to_equal(1)

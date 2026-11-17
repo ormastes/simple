@@ -13,6 +13,9 @@ use std.nogc_sync_mut.orchestration.host_cleanup_evidence_v1.{host_cleanup_inten
 use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.host_execution_decode_v2
 use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_load_owned_v3
 use std.nogc_sync_mut.orchestration.host_primary_connection_receipt_v2.host_primary_connection_completion_evidence_v2
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperDomainV1,
+    host_linux_helper_store_check_v1, host_linux_helper_domain_v1, host_linux_helper_attach_evidence_v1,
+    host_linux_helper_cancelled_evidence_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.contracts.orchestration.host_execute_associated_v3.host_execute_associated_decode_v3
@@ -26,9 +29,23 @@ pub fn host_linux_completion_evidence_v3(journal: DistributedOperationJournalV2,
         operation: OperationEnvelopeV2) -> Result<text, text>:
     distributed_operation_journal_linux_current_v3(journal)?
     if operation.operation == "host_helper_reservation_v1":
-        # This owner-aware path checks exact consumed request, closed/attempt
-        # receipt, policy and same committed outcome; missing domain never falls
-        # through to legacy external broker pathname recovery.
+        # milestone_0022 N1 (DESIGN 13.1, 14.2): the store check runs before any
+        # read (Err -> arm Err, row stays charged); the deterministic classifier
+        # picks exactly one domain. PrimaryAttach reads the protected helper store
+        # with owned admission; {} and PrimaryConnection keep the owner-aware path
+        # below unchanged (exact consumed request, closed/attempt receipt, policy,
+        # same committed outcome). Neither the pathname classifier nor external
+        # broker recovery records are consulted here.
+        val store = host_linux_helper_store_check_v1(journal.root)?
+        match host_linux_helper_domain_v1(journal, store, operation.id)?:
+            case HostLinuxHelperDomainV1.PrimaryAttach: return host_linux_helper_attach_evidence_v1(journal, store, operation)
+            case HostLinuxHelperDomainV1.Unrecorded: ()
+            case HostLinuxHelperDomainV1.PrimaryConnection: ()
+            # N3 (13.3, 17(D)): historical R/X evidence; returns the X bytes verbatim.
+            case HostLinuxHelperDomainV1.AttachCancelled: return host_linux_helper_cancelled_evidence_v1(journal, store, operation)
+            # A refusal alone settles nothing: only the cancel (X) releases the charge.
+            case HostLinuxHelperDomainV1.AttachRefusedPreConsume: return Err("helper-attach-refused-cancel-required")
+            case HostLinuxHelperDomainV1.AttachRefusedPostConsume: return Err("helper-attach-refused-cancel-required")
         return host_primary_connection_completion_evidence_v2(journal, operation)
     if operation.operation != "host_reservation_v1" or not builder_identifier_valid_v1(operation.id):
         return Err("host-linux-completion-original-action")

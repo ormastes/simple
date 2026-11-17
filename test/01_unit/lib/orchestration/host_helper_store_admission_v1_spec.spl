@@ -1,0 +1,84 @@
+"""
+## Purpose and audience
+Pins milestone_0022 N1 (DESIGN 13.1, 14.1): `host_helper_retained_admission_v1`
+is split into one store-aware body (`_core_v1`), the unchanged pathname wrapper
+and the V4 `_owned_v2` entry. A stream record naming a different operation is
+refused before any load, identically through every entry. Written for owners of
+the Host helper admission path.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+The forged-operation cases fail before any request/proof read, so they need no
+fixture root. The owned loaders over a live Linux journal are exercised by the
+V4 agent attach specs (PR3b); here the dispatch is pinned structurally.
+## Verification guidance and troubleshooting
+If the wrapper and core disagree, the legacy pathname world is no longer
+byte-identical; if a load site names `root` directly, the V4 world would read
+the request from the helper store instead of the journal.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{host_helper_store_legacy_v1,
+    host_helper_retained_admission_v1, host_helper_retained_admission_core_v1}
+
+val N1_RECORD_PATH = "src/lib/nogc_sync_mut/orchestration/host_helper_stream_record_v1.spl"
+val N1_REQUEST_PATH = "src/lib/nogc_sync_mut/orchestration/host_helper_request_v1.spl"
+
+fn n1_operation(id: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: id, payload_digest: "b".repeat(64), principal: "user_1", project: "project_1",
+        host_id: "host_1", operation: "host_helper_reservation_v1", environment_digest: "c".repeat(64), policy_revision: 4,
+        revocation_epoch: 2, session_generation: 3, memory_bytes: 1024, duration_ms: 1000)
+
+describe "helper retained admission store split (milestone_0022 N1)":
+    it "refuses a record naming a different operation, identically through wrapper and core":
+        # @req S40-NATIVE-N1
+        val operation = n1_operation("op_1")
+        val digest = sha256_text(distributed_encode_operation_v2(operation).unwrap())
+        val proof = "d".repeat(64)
+        val absent_root = "/nonexistent/n1-admission"
+        step("a forged operation id")
+        val wrapped = host_helper_retained_admission_v1(absent_root, operation, "op_2", digest, proof, proof, proof, 5)
+        val cored = host_helper_retained_admission_core_v1(host_helper_store_legacy_v1(absent_root), operation, "op_2",
+            digest, proof, proof, proof, 5)
+        expect(wrapped.unwrap_err()).to_equal("helper-stream-original-operation-mismatch")
+        expect(cored.unwrap_err()).to_equal(wrapped.unwrap_err())
+        step("a forged operation digest for the right id")
+        val forged = host_helper_retained_admission_v1(absent_root, operation, "op_1", "e".repeat(64), proof, proof, proof, 5)
+        expect(forged.unwrap_err()).to_equal("helper-stream-original-operation-mismatch")
+        step("past the binding check the legacy wrapper reads the pathname root (missing here -> load Err, not Ok)")
+        val missing = host_helper_retained_admission_v1(absent_root, operation, "op_1", digest, proof, proof, proof, 5)
+        expect(missing.is_err()).to_equal(true)
+        expect(host_helper_retained_admission_core_v1(host_helper_store_legacy_v1(absent_root), operation, "op_1", digest,
+            proof, proof, proof, 5).unwrap_err()).to_equal(missing.unwrap_err())
+
+    it "dispatches every request/proof load on the store, never on a bare root":
+        # @req S40-NATIVE-N1
+        val source = file_read_text(N1_RECORD_PATH)
+        val core = source.substring(source.index_of("pub fn host_helper_retained_admission_core_v1("), source.len())
+        expect(core.contains("host_helper_store_request_load_v1(store, operation.id)")).to_equal(true)
+        expect(core.contains("host_helper_store_execution_proof_load_v1(store, operation.id)")).to_equal(true)
+        expect(core.contains("host_helper_store_execution_proof_typed_v1(store, operation.id)")).to_equal(true)
+        expect(core.contains("host_helper_request_load_v1(")).to_equal(false)
+        step("the owned branch uses the journal loaders, the legacy branch the pathname loaders")
+        expect(source.contains("case Some(journal): host_helper_execution_proof_load_typed_owned_v2(journal, operation_id)")).to_equal(true)
+        expect(source.contains("case None: host_helper_execution_proof_load_typed_v1(store.root, operation_id)")).to_equal(true)
+        step("the wrapper and the owned entry only construct a store and call the core")
+        val wrapper = source.substring(source.index_of("pub fn host_helper_retained_admission_v1("),
+            source.index_of("pub fn host_helper_retained_admission_owned_v2("))
+        expect(wrapper.contains("host_helper_retained_admission_core_v1(host_helper_store_legacy_v1(root)")).to_equal(true)
+        val owned = source.substring(source.index_of("pub fn host_helper_retained_admission_owned_v2("),
+            source.index_of("pub fn host_helper_retained_admission_core_v1("))
+        expect(owned.contains("HostHelperStoreV1(root: store_root, journal: Some(journal))")).to_equal(true)
+
+    it "decodes the typed owned proof exactly like the pathname typed loader":
+        # @req S40-NATIVE-N1
+        val source = file_read_text(N1_REQUEST_PATH)
+        val owned = source.substring(source.index_of("pub fn host_helper_execution_proof_load_typed_owned_v2("),
+            source.index_of("# Execution proof data"))
+        expect(owned.contains("host_helper_request_load_owned_v2(journal, operation_id)")).to_equal(true)
+        expect(owned.contains("\"host-helper-execution-proofs/\" + sha256_text(operation_id) + \".sdn\", 1048576")).to_equal(true)
+        expect(owned.contains("host_helper_execution_proof_decode_v1(request, bytes)")).to_equal(true)

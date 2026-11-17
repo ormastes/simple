@@ -1,0 +1,75 @@
+# AUTHORED SOURCE-ONLY NOT_RUN. milestone_0022 N4: the existing write port refuses a
+# target that is not the adoption (agent passes the pane op target through).
+# REGRESSION PIN: pins pre-existing port behaviour and passes without N4 (review-n4-r1 P3-4).
+# fixture_session is copy-pasted across six specs; the duplication is accepted.
+use std.spec.*
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, ContainerPrimaryAttachAdoptionV1}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedTransferV2, PipedProcessRefV1}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_identity_profiled_v3
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1,
+    SessionRuntimeControlLeaseV1, SessionRuntimeControlKindV1}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.terminal_session_v1.container_primary_input_write_v1
+use std.nogc_sync_mut.io.process_input_control_v1.ProcessInputWriteDispositionV1
+
+# Metadata-only session (tests may set private fields). pid 71 is never a live
+# admitted child: every scenario here must refuse before any native IO.
+fn fixture_session(adoption: ContainerPrimaryAttachAdoptionV1?, cleaned: bool) -> ContainerPrimaryAttachSessionV1:
+    val plan = container_primary_attach_fixture_v1()
+    var launch = plan.launch_template
+    launch.transport_generation = 1
+    launch.request.launch_deadline_unix_ms = 1
+    val identity = group_process_stream_identity_profiled_v3(launch)
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
+    val transfer = PipedProcessOwnedTransferV2(owner: owner, reference: PipedProcessRefV1(pid: 71,
+        generation: launch.transport_generation, group_root: launch.root, group_identity: identity))
+    ContainerPrimaryAttachSessionV1(plan: plan, transfer: transfer, identity_fingerprint: "c".repeat(64),
+        adoption: adoption, native_cleaned: cleaned)
+
+fn fixture_adoption(pane: text, child_incarnation: i64) -> ContainerPrimaryAttachAdoptionV1:
+    ContainerPrimaryAttachAdoptionV1(binding_uid: "binding-a", service_incarnation: "f".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: pane, service_epoch: 1,
+        child_incarnation: child_incarnation)
+
+fn fixture_target(pane: text, child_incarnation: i64) -> SessionRuntimeControlTargetV1:
+    val plan = container_primary_attach_fixture_v1()
+    val workload = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id,
+        service_scope_id: workload.service_scope_id, boot_id: workload.boot_id,
+        provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    SessionRuntimeControlTargetV1(scope: scope, runtime: plan.runtime,
+        workload_request_digest: workload.request_digest, binding_uid: "binding-a",
+        binding_digest: plan.identity.binding_digest, service_incarnation: "f".repeat(32),
+        session_id: "session-a", window_id: "window-a", pane_id: pane, service_epoch: 1,
+        child_incarnation: child_incarnation, client_id: "client-a", attachment_generation: 1,
+        execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+
+# Explicitly unissued lease: the adoption mismatch refuses before lease checks.
+fn fixture_lease(target: SessionRuntimeControlTargetV1) -> SessionRuntimeControlLeaseV1:
+    SessionRuntimeControlLeaseV1(target: target, kind: SessionRuntimeControlKindV1.Input,
+        principal_id: "fixture-owner", nonce_digest: sha256_text("unissued-fixture-nonce"),
+        revision: 1, issued_monotonic_ms: 1, expires_monotonic_ms: 1000)
+
+describe "Primary input write with a foreign target":
+    it "rejects another pane before plan lease or native write":
+        step("Adopted for pane-a; write targeting pane-b is refused with zero accepted bytes")
+        val session = fixture_session(Some(fixture_adoption("pane-a", 2)), false)
+        val target = fixture_target("pane-b", 2)
+        val written = container_primary_input_write_v1(session, fixture_lease(target), target,
+            "fixture-owner", "unissued-fixture-nonce", 1, "input", 0, 5)
+        expect(written.error).to_equal("primary-input-adoption-mismatch")
+        expect(written.disposition).to_equal(ProcessInputWriteDispositionV1.Rejected)
+        expect(written.accepted_bytes).to_equal(0)
+
+    it "rejects writes on an unadopted session":
+        step("No adoption means no write, whatever the target")
+        val session = fixture_session(None, false)
+        val target = fixture_target("pane-a", 2)
+        val written = container_primary_input_write_v1(session, fixture_lease(target), target,
+            "fixture-owner", "unissued-fixture-nonce", 1, "input", 0, 5)
+        expect(written.error).to_equal("primary-input-not-adopted")
+        expect(written.accepted_bytes).to_equal(0)

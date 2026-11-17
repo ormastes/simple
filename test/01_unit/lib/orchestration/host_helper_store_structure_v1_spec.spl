@@ -1,0 +1,146 @@
+"""
+## Purpose and audience
+Structural pins for milestone_0022 N1 (DESIGN 14.1, 15.1, 20, 13.1): the census
+of `journal.root` reads in the primary-attach / helper stack, the legacy
+wrapper -> core shape, the cleanup adoption guard placement, and the Linux
+evidence arm's sources. Written for reviewers of the V4 attach lane.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Source-text pins, not behaviour: they catch a V4-reachable function that reads
+`capacity.journal.root` (or any `journal.root`) for stream records, a guard moved
+into the core, or the evidence arm consulting the pathname classifier. Live
+behaviour of the legacy wrappers is covered by the unchanged legacy specs.
+Output-follow code (`host_helper_settlement_v1.spl`, `host_helper_stream_owner_v1.spl`)
+is EXCLUDED by design (`{O}` is refused on the V4 store) and named below.
+## Verification guidance and troubleshooting
+A census failure names `<file>:<function>`. Either route the read through the
+store (`store.root`) or, for a legacy text-root wrapper, add it to the allow
+list with a reviewer's sign-off.
+"""
+use std.spec.{step}
+use std.io.file_read_text
+
+val N1_DIR = "src/lib/nogc_sync_mut/orchestration/"
+
+# Every file of the primary-attach stack plus the shared helper modules it uses.
+fn n1_scanned_files() -> [text]:
+    ["host_primary_attach_owner_v1.spl", "host_primary_attach_record_v1.spl", "host_primary_attach_recovery_v1.spl",
+        "host_primary_attach_settlement_receipt_v1.spl", "host_primary_attach_settlement_v1.spl",
+        "host_helper_stream_record_v1.spl", "host_helper_request_v1.spl", "host_helper_settlement_domain_v1.spl",
+        "host_linux_helper_store_v1.spl", "host_linux_completion_evidence_v3.spl"]
+
+# Output-follow only; never reachable from the V4 store (excluded, DESIGN 15.1).
+fn n1_excluded_files() -> [text]:
+    ["host_helper_settlement_v1.spl", "host_helper_stream_owner_v1.spl"]
+
+# `<file>:<function>` allowed to name `journal.root`: legacy text-root wrappers
+# (construct the legacy store) and the single store derivation from the journal.
+fn n1_allowed() -> [text]:
+    ["host_primary_attach_owner_v1.spl:host_primary_attach_open_v1",
+        "host_primary_attach_settlement_v1.spl:primary_core_retained_v1",
+        "host_primary_attach_recovery_v1.spl:host_primary_attach_recover_v1",
+        "host_primary_attach_recovery_v1.spl:host_primary_attach_commit_reap_v1",
+        "host_primary_attach_recovery_v1.spl:host_primary_attach_settle_recovered_v1",
+        "host_linux_helper_store_v1.spl:host_linux_helper_store_bound_v1",
+        "host_linux_completion_evidence_v3.spl:host_linux_completion_evidence_v3"]
+
+fn n1_fn_name(line: text) -> text:
+    val head = if line.starts_with("pub fn "): line.substring(7, line.len()) else: line.substring(3, line.len())
+    val cut = head.index_of("(")
+    if cut < 0: return head
+    head.substring(0, cut)
+
+# `<file>:<function>` for every top-level function whose body names journal.root.
+fn n1_census(file: text) -> [text]:
+    var hits: [text] = []
+    var current = ""
+    for line in file_read_text(N1_DIR + file).split("\n"):
+        if line.starts_with("pub fn ") or line.starts_with("fn "): current = n1_fn_name(line)
+        if line.contains("journal.root") and not line.trim().starts_with("#"):
+            val hit = file + ":" + current
+            if not hits.contains(hit): hits.push(hit)
+    hits
+
+fn n1_body(file: text, start: text, stop: text) -> text:
+    val source = file_read_text(N1_DIR + file)
+    val from = source.index_of(start)
+    val rest = source.substring(from, source.len())
+    val to = rest.substring(1, rest.len()).index_of(stop)
+    if to < 0: return rest
+    rest.substring(0, to + 1)
+
+describe "helper store threading structure (milestone_0022 N1)":
+    it "reads journal.root only in legacy wrappers and the store derivation":
+        # @req S40-NATIVE-N1
+        for file in n1_scanned_files():
+            for hit in n1_census(file):
+                expect(hit + " allowed=" + "{n1_allowed().contains(hit)}").to_equal(hit + " allowed=true")
+        step("no _core_v1 body and no owned entry is on the allow list")
+        for entry in n1_allowed():
+            expect(entry.ends_with("_core_v1") or entry.ends_with("_owned_v2")).to_equal(false)
+        step("the excluded output-follow files are not part of the scan and never take a helper store")
+        for file in n1_excluded_files():
+            expect(n1_scanned_files().contains(file)).to_equal(false)
+            expect(file_read_text(N1_DIR + file).contains("HostHelperStoreV1")).to_equal(false)
+            expect(file_read_text(N1_DIR + file).contains("host_linux_helper_store_v1")).to_equal(false)
+
+    it "keeps every legacy text-root entry a thin wrapper over its core":
+        # @req S40-NATIVE-N1
+        val pairs = [["host_primary_attach_record_v1.spl", "pub fn host_primary_attach_validate_record_v1(", "host_primary_attach_validate_record_core_v1(host_helper_store_legacy_v1(root)"],
+            ["host_primary_attach_record_v1.spl", "pub fn host_primary_attach_consumed_load_v1(", "host_primary_attach_consumed_load_core_v1(host_helper_store_legacy_v1(root)"],
+            ["host_primary_attach_record_v1.spl", "pub fn host_primary_attach_native_store_v1(", "host_primary_attach_native_store_core_v1(host_helper_store_legacy_v1(root)"],
+            ["host_primary_attach_record_v1.spl", "pub fn host_primary_attach_native_load_v1(", "host_primary_attach_native_load_core_v1(host_helper_store_legacy_v1(root)"],
+            ["host_primary_attach_record_v1.spl", "pub fn host_primary_attach_native_recover_v1(", "host_primary_attach_native_recover_core_v1(host_helper_store_legacy_v1(root)"],
+            ["host_primary_attach_settlement_receipt_v1.spl", "pub fn host_primary_attach_settlement_expected_v1(", "host_primary_attach_settlement_expected_core_v1(host_helper_store_legacy_v1(root)"],
+            ["host_primary_attach_settlement_receipt_v1.spl", "pub fn host_primary_attach_settlement_evidence_v1(", "host_primary_attach_settlement_evidence_core_v1(host_helper_store_legacy_v1(root)"],
+            ["host_primary_attach_recovery_v1.spl", "pub fn host_primary_attach_recover_v1(", "host_primary_attach_recover_core_v1(host_helper_store_legacy_v1(owner.journal.root)"],
+            ["host_primary_attach_recovery_v1.spl", "pub fn host_primary_attach_commit_reap_v1(", "host_primary_attach_commit_reap_core_v1(host_helper_store_legacy_v1(owner.journal.root)"],
+            ["host_primary_attach_recovery_v1.spl", "pub fn host_primary_attach_settle_recovered_v1(", "host_primary_attach_settle_recovered_core_v1(host_helper_store_legacy_v1(owner.journal.root)"]]
+        for pair in pairs:
+            expect(n1_body(pair[0], pair[1], "\npub fn ").contains(pair[2])).to_equal(true)
+        step("the reap publish goes to the store root, never the journal root")
+        val reap = n1_body("host_primary_attach_recovery_v1.spl", "pub fn host_primary_attach_commit_reap_core_v1(", "\npub fn ")
+        expect(reap.contains("host_helper_stream_publish_v1(current.root, operation.id, \"primary-settlement\"")).to_equal(true)
+
+    it "keeps the adoption guard in the legacy cleanup wrapper only":
+        # @req S40-NATIVE-N1
+        val wrapper = n1_body("host_primary_attach_settlement_v1.spl", "pub fn host_primary_attach_cleanup_v1(", "\n# Accepts an adopted")
+        expect(wrapper.contains("container_primary_attach_adoption_v1(session).is_some()")).to_equal(true)
+        expect(wrapper.contains("\"host-primary-cleanup-belongs-to-terminal-owner\"")).to_equal(true)
+        expect(wrapper.contains("host_primary_attach_cleanup_core_v1(primary_core_retained_v1(retained))")).to_equal(true)
+        step("the core accepts an adopted session: no adoption check, no guard text")
+        val core = n1_body("host_primary_attach_settlement_v1.spl", "pub fn host_primary_attach_cleanup_core_v1(", "\n# Observation-only")
+        expect(core.contains("container_primary_attach_adoption_v1")).to_equal(false)
+        expect(core.contains("host-primary-cleanup-belongs-to-terminal-owner")).to_equal(false)
+        expect(core.contains("container_terminal_cleanup_v1(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))")).to_equal(true)
+
+    it "routes the open core through the store and the given parent only":
+        # @req S40-NATIVE-N1
+        val core = n1_body("host_primary_attach_owner_v1.spl", "pub fn host_primary_attach_open_core_v1(", "\npub fn ")
+        expect(core.contains("host_local_")).to_equal(false)
+        expect(core.contains("daemon_operation_exact_v2(input.capacity.journal, input.parent)")).to_equal(true)
+        expect(core.contains("host_helper_stream_publish_v1(store.root, helper.operation.id,")).to_equal(true)
+        step("the legacy wrapper keeps the pre-core sequence before calling the core")
+        val wrapper = n1_body("host_primary_attach_owner_v1.spl", "pub fn host_primary_attach_open_v1(", "\n# One body for both worlds")
+        val order = [wrapper.index_of("primary_consumption_v1(store"), wrapper.index_of("host_local_retained_execution_v2("),
+            wrapper.index_of("daemon_operation_exact_v2(local.capacity.journal"), wrapper.index_of("host_local_resolve_execution_v2("),
+            wrapper.index_of("host_primary_attach_open_core_v1(")]
+        for at in 1..order.len():
+            expect(order[at - 1] >= 0 and order[at - 1] < order[at]).to_equal(true)
+
+    it "classifies the Linux helper row over the store, never through pathname or broker recovery":
+        # @req S40-NATIVE-N1
+        val arm = n1_body("host_linux_completion_evidence_v3.spl", "pub fn host_linux_completion_evidence_v3(", "\n    if operation.operation != \"host_reservation_v1\"")
+        val check = arm.index_of("host_linux_helper_store_check_v1(journal.root)?")
+        val classify = arm.index_of("host_linux_helper_domain_v1(journal, store, operation.id)?")
+        expect(check >= 0 and check < classify).to_equal(true)
+        expect(arm.contains("host_primary_connection_completion_evidence_v2(journal, operation)")).to_equal(true)
+        expect(arm.contains("host_helper_completion_domain_v1")).to_equal(false)
+        expect(arm.contains("host_broker_recovery_records_v7")).to_equal(false)
+        val store = file_read_text(N1_DIR + "host_linux_helper_store_v1.spl")
+        expect(store.contains("host_broker_recovery_records_v7")).to_equal(false)
+        val attach = n1_body("host_linux_helper_store_v1.spl", "pub fn host_linux_helper_attach_evidence_v1(", "\npub fn ")
+        expect(attach.contains("HostHelperStoreV1(root: root, journal: Some(journal))")).to_equal(true)
+        expect(attach.contains("host_helper_completion_domain_v1")).to_equal(false)
