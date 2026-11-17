@@ -388,3 +388,10 @@ available. These source paths and their manuals remain NOT_RUN.
   with `OPERATION_DENIED`.
 - Specs: `test/01_unit/lib/orchestration/host_service_handoff_v1_spec.spl`; live env-gated, two-process
   `test/03_system/tools/host_service_handoff_live_spec.spl` (pending until its fixture env exists).
+
+### PR4 LinuxService agent-terminal rights (milestone_0025, AUTHORED, NOT_RUN)
+- `linux_service_agent_pane_policy_v5` (runtime_connection_policy_v5.spl) is a FIXED ceiling: exactly `[Input]`, 5000 ms lease, no Geometry (Resize is refused on V4). It is not derived from the authority (the loader runs at open, before any attach, and owner_v5 compares reloaded policy to the opened one).
+- The right is exercised only while `host_linux_service_agent_terminal_authority_v4` is Ok: `capabilities_v5` (LinuxService arm), the control issue and every Write re-ask it (an expired/revoked approval ends it mid-connection).
+- `host_linux_service_agent_pane_control_target_v4` (current_v4) -> `host_agent_pane_control_target_v4` (attachment_v4) builds the `SessionRuntimeControlTargetV1` from the verified binding, `lease_epoch` (attachment_generation), the attachment plan and the attached session's adoption; `client_id` = `agent-pane-` + signed binding uid. Err unless authority is Ok and the session is adopted as the binding names it.
+- `host-agent-pane-write` is intercepted in `smux_runtime_connection_host_constrained_v5` (the only place with the control owner): body = exact SDN dict {bindingUid, attempt, offset, maximum, data}; a fresh Input lease per Write, revoked on return; the port installs the lease on the native input gate (refusing an unresolved/unknown previous outcome) before the write. `smux_agent_pane_op_refusal_v1` is replaced by `smux_agent_pane_resize_refusal_v1`.
+- Not authored: Ok-authority grant path (needs a started owner with a ready attach).

@@ -27,6 +27,10 @@ use std.nogc_async_mut.container.terminal_session_v2.ContainerOwnedTerminalSessi
 use std.nogc_async_mut.container.terminal_session_v2.container_terminal_cleanup_v2
 use std.nogc_async_mut.container.terminal_primary_v2.container_primary_terminal_view_v2
 use os.apps.smux.runtime_connection_policy_v5.smux_runtime_connection_policy_load_v5
+use os.apps.smux.runtime_agent_pane_v1.smux_agent_pane_write_decode_v1
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{host_linux_service_agent_terminal_authority_v4,
+    host_linux_service_agent_pane_control_target_v4}
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneWriteV4, host_agent_pane_write_check_v4}
 use os.apps.smux.smux_runtime_control_owner_v1.{SmuxRuntimeControlOwnerV1, smux_runtime_control_owner_new_v1,
     smux_runtime_control_issue_v1, smux_runtime_control_check_v1, smux_runtime_control_revoke_v1, smux_runtime_control_find_v1}
 use os.apps.smux.runtime_primary_request_v4.{SmuxRuntimePrimaryRequestV4, smux_runtime_primary_request_digest_v4}
@@ -399,11 +403,12 @@ pub fn smux_runtime_connection_open_v5(domain: HostServiceDomainV3,
         incarnation: text) -> SmuxRuntimeConnectionOpenV5:
     val policy = smux_runtime_connection_policy_load_v5(domain.local)
     if policy.is_err(): return SmuxRuntimeConnectionOpenV5(nil, Some(domain), policy.unwrap_err())
-    # The signed-enrollment LinuxService serves Host operations only. It has no
-    # direct primary-connection provider, so supported_v3 stays false for it and
-    # capabilities_v5 keeps input/geometry unavailable. Its admission is the
-    # full current_v4 recheck policy_load_v5 just ran, whose own error text was
-    # returned above.
+    # The signed-enrollment LinuxService has no direct primary-connection provider
+    # (supported_v3 stays false for it). Its only terminal is the V4 agent pane,
+    # whose Input right is the fixed policy policy_load_v5 returned and is usable
+    # only while the terminal-authority accessor is Ok (capabilities_v5 and every
+    # pane Write re-ask it). Its admission is the full current_v4 recheck
+    # policy_load_v5 just ran, whose own error text was returned above.
     val supported = match domain.local:
         case HostLocalRootV3.LinuxService(_): true
         case _: host_primary_connection_supported_v3(domain.local)
@@ -451,15 +456,81 @@ pub fn smux_runtime_connection_host_v5(original: SmuxRuntimeConnectionOwnerV5,
         request: HostServiceRequestV2) -> SmuxRuntimeConnectionTurnV5:
     smux_runtime_connection_host_constrained_v5(original, request, nil)
 
+# milestone_0025 PR4: a pane Write through the smux control lease. Only here is the owner's control owner
+# reachable, so the write is intercepted before the continuation. Rights come from the verified terminal
+# authority alone: the target is built by the service from the signed binding and the attached session, the body
+# names only the binding uid and the byte window, and the lease principal is the fixed policy's. A fresh Input
+# lease is issued per Write (TTL = policy max, bounded by the 15 s validator), the service re-verifies terminal
+# authority again inside the pane io on this very call, and the lease is revoked when the write returns. Native
+# input revisions must rise per attach and each owner's control revision restarts at 1: that is safe only while the
+# pane lease is handed out once per attachment (one connection ever writes); revisit if that rule changes.
+fn agent_pane_write_turn_v5(original: SmuxRuntimeConnectionOwnerV5, request: HostServiceRequestV2) -> SmuxRuntimeConnectionTurnV5:
+    if original.closing: return reply_v5(original, "runtime-connection-closing")
+    val context = host_context_v6(original)
+    val gate = smux_host_continuation_pane_write_gate_v6(original.host, context, request.operation_id)
+    if gate != "": return reply_v5(original, gate)
+    val body = smux_agent_pane_write_decode_v1(request.payload)
+    if body.is_err(): return reply_v5(original, body.unwrap_err())
+    val service = match original.domain.local:
+        case HostLocalRootV3.LinuxService(value): value
+        case _: return reply_v5(original, "host-linux-service-action-route")
+    var owner = original
+    # A refusal of the terminal AUTHORITY is the agent's own answer and drops the pane lease like a refused Read;
+    # a target-construction refusal (session not adopted yet, plan mismatch) keeps it.
+    val authority = host_linux_service_agent_terminal_authority_v4(service)
+    if authority.is_err(): return agent_pane_write_refused_v5(owner, authority.unwrap_err())
+    val target = host_linux_service_agent_pane_control_target_v4(service)
+    if target.is_err(): return reply_v5(owner, target.unwrap_err())
+    if target.unwrap().binding_uid != body.unwrap().binding_uid:
+        return reply_v5(owner, "attach-binding-mismatch")
+    if target.unwrap().service_incarnation != owner.service_incarnation:
+        return reply_v5(owner, "attach-binding-registry-mismatch")
+    val uid = target.unwrap().binding_uid
+    val digest = session_runtime_control_target_digest_v1(target.unwrap())
+    if digest.is_err(): return reply_v5(owner, digest.unwrap_err())
+    val fresh = sosix_random_hex(32)
+    if fresh.is_none(): return reply_v5(owner, "runtime-connection-entropy-unavailable")
+    val now = sosix_time_now_monotonic_ms()
+    val held = smux_runtime_control_find_v1(owner.controls, uid, SessionRuntimeControlKindV1.Input)
+    val expected_revision = if held.is_none(): 0 else: held.unwrap().lease.revision
+    # A token from signed data only (target digest + lease epoch), never smux client-lease state.
+    val token = sha256_text(digest.unwrap())[0:32] + ":" + target.unwrap().attachment_generation.to_text()
+    val issued = smux_runtime_control_issue_v1(owner.controls, target.unwrap(), SessionRuntimeControlKindV1.Input,
+        token, now + owner.controls.policy.max_lease_ms, expected_revision, fresh.unwrap(), now)
+    owner.controls = issued.owner
+    if issued.error != "" or issued.lease.is_none(): return reply_v5(owner, issued.error)
+    val write = HostAgentPaneWriteV4(lease: issued.lease.unwrap(), target: target.unwrap(),
+        principal: owner.controls.policy.principal_id, nonce: issued.nonce, attempt: body.unwrap().attempt,
+        offset: body.unwrap().offset, maximum: body.unwrap().maximum, data: body.unwrap().data)
+    val shaped = host_agent_pane_write_check_v4(write)
+    if shaped.is_err():
+        owner.controls = smux_runtime_control_revoke_v1(owner.controls, uid, SessionRuntimeControlKindV1.Input,
+            issued.revision, sosix_time_now_monotonic_ms()).owner
+        return reply_v5(owner, shaped.unwrap_err())
+    val turn = smux_host_continuation_pane_write_v6(owner.domain, owner.host, context, uid, write)
+    owner.domain = turn.domain
+    owner.host = turn.state
+    owner.controls = smux_runtime_control_revoke_v1(owner.controls, uid, SessionRuntimeControlKindV1.Input,
+        issued.revision, sosix_time_now_monotonic_ms()).owner
+    SmuxRuntimeConnectionTurnV5(owner, None, None, turn.response, turn.error)
+
+# A terminal-authority refusal is the agent's own answer: it drops the pane lease exactly as a refused Read does.
+fn agent_pane_write_refused_v5(original: SmuxRuntimeConnectionOwnerV5, error: text) -> SmuxRuntimeConnectionTurnV5:
+    var owner = original
+    val turn = smux_host_continuation_pane_write_refused_v6(owner.domain, owner.host, error)
+    owner.host = turn.state
+    SmuxRuntimeConnectionTurnV5(owner, None, None, "", turn.error)
+
 # Restriction only: this is the SAME retained signed Host domain and writer.
 pub fn smux_runtime_connection_host_constrained_v5(original: SmuxRuntimeConnectionOwnerV5,
         request: HostServiceRequestV2, requested_constraint: Option<ContainerPreStartConstraintV1>) -> SmuxRuntimeConnectionTurnV5:
+    if request.action == "host-agent-pane-write": return agent_pane_write_turn_v5(original, request)
     val turn = smux_host_continuation_begin_constrained_v6(original.domain, original.host,
         request, host_context_v6(original), requested_constraint)
     var owner = original
     owner.domain = turn.domain
     owner.host = turn.state
-    SmuxRuntimeConnectionTurnV5(owner, nil, nil, turn.response, turn.error)
+    SmuxRuntimeConnectionTurnV5(owner, None, None, turn.response, turn.error)
 
 pub fn smux_runtime_connection_plan_v5(original: SmuxRuntimeConnectionOwnerV5,
         request: SmuxRuntimePrimaryRequestV4, resources: ContainerOutputResourcesV2,
@@ -971,6 +1042,16 @@ pub struct SmuxConnectionCapabilitiesV5:
     geometry_allowed: bool
 
 pub fn smux_runtime_connection_capabilities_v5(owner: SmuxRuntimeConnectionOwnerV5) -> SmuxConnectionCapabilitiesV5:
+    match owner.domain.local:
+        case HostLocalRootV3.LinuxService(service):
+            if owner.closing: return SmuxConnectionCapabilitiesV5(false, false, false)
+            val loaded = smux_runtime_connection_policy_load_v5(owner.domain.local)
+            if loaded.is_err() or loaded.unwrap().allowed != owner.controls.policy.allowed:
+                return SmuxConnectionCapabilitiesV5(false, false, false)
+            # Input only while the controller-signed terminal authority verifies NOW; Geometry is never offered on V4.
+            val live = host_linux_service_agent_terminal_authority_v4(service).is_ok()
+            return SmuxConnectionCapabilitiesV5(live, live and loaded.unwrap().allowed.contains(SessionRuntimeControlKindV1.Input), false)
+        case _: pass
     if owner.closing or not host_primary_connection_supported_v3(owner.domain.local):
         return SmuxConnectionCapabilitiesV5(false, false, false)
     val policy = smux_runtime_connection_policy_load_v5(owner.domain.local)

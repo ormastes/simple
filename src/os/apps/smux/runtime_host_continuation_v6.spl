@@ -18,11 +18,13 @@ use std.nogc_sync_mut.orchestration.host_service_execution_v4.{HostServiceExecut
 use std.io.tcp.TcpListener
 use std.common.crypto.sha256.sha256_text
 use os.apps.smux.runtime_host_operation_match_v6.smux_host_operation_match_v6
-use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4}
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneWriteV4,
+    host_agent_pane_io_refused_v4}
 use std.nogc_sync_mut.orchestration.host_service_domain_v3.{host_service_domain_attachment_lease_v3, host_service_domain_pane_io_v3}
 use std.common.build_manager.contracts.builder_identifier_valid_v1
 use os.apps.smux.runtime_agent_pane_v1.{smux_agent_pane_claim_gate_v1, smux_agent_pane_claimed_v1,
-    smux_agent_pane_read_gate_v1, smux_agent_pane_read_done_v1, smux_agent_pane_op_refusal_v1,
+    smux_agent_pane_read_gate_v1, smux_agent_pane_read_done_v1, smux_agent_pane_resize_refusal_v1,
+    smux_agent_pane_write_done_v1,
     smux_agent_pane_registry_match_v1, smux_agent_pane_attach_supersedes_v1}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
 use os.apps.smux.api.smux_list_panes
@@ -159,7 +161,7 @@ pub fn smux_host_continuation_begin_constrained_v6(domain: HostServiceDomainV3,
     if (state.execution.is_some() or context.planning_pending) and request.action != "host-status":
         return refused_v6(domain, state, "runtime-host-execution-pending")
     if (request.action == "host-agent-pane-claim" or request.action == "host-agent-pane-read" or
-            request.action == "host-agent-pane-resize" or request.action == "host-agent-pane-write"):
+            request.action == "host-agent-pane-resize"):
         return agent_pane_turn_v6(domain, state, request, context)
     val turn = host_service_domain_turn_v3(domain, request)
     if (request.action == "host-agent-attach" and turn.exit_code == 0 and
@@ -177,16 +179,13 @@ fn agent_pane_turn_v6(domain: HostServiceDomainV3, original: SmuxHostContinuatio
     var state = original
     if context.connection_pending: return refused_v6(domain, state, "runtime-connection-opening")
     if not builder_identifier_valid_v1(request.operation_id): return refused_v6(domain, state, "runtime-agent-pane-operation")
-    if request.action == "host-agent-pane-resize" or request.action == "host-agent-pane-write":
-        return refused_v6(domain, state, smux_agent_pane_op_refusal_v1(request.action))
+    if request.action == "host-agent-pane-resize":
+        return refused_v6(domain, state, smux_agent_pane_resize_refusal_v1())
     # The payload names the controller-signed binding uid of the pane the caller means; the owner refuses a mismatch.
     if not builder_identifier_valid_v1(request.payload): return refused_v6(domain, state, "runtime-agent-pane-payload")
     val incarnation = context.service_incarnation
     val registry_check = fn(binding: HostAgentPaneBindingV4) -> text:
-        var ids: [text] = []
-        for pane in smux_list_panes(binding.session_id, binding.window_id):
-            ids.push(pane.pane_id)
-        smux_agent_pane_registry_match_v1(binding, incarnation, ids)
+        pane_registry_check_v6(binding, incarnation)
     if request.action == "host-agent-pane-claim":
         val gate = smux_agent_pane_claim_gate_v1(state.agent_pane_lease, state.agent_pane_revoked)
         if gate != "": return refused_v6(domain, state, gate)
@@ -202,6 +201,46 @@ fn agent_pane_turn_v6(domain: HostServiceDomainV3, original: SmuxHostContinuatio
     state.agent_pane_lease = read.lease
     state.agent_pane_revoked = read.revoked
     SmuxHostTurnV6(io.owner, state, read.response, read.error)
+
+# smux's own registry consistency check on the VERIFIED binding (never authority).
+fn pane_registry_check_v6(binding: HostAgentPaneBindingV4, incarnation: text) -> text:
+    var ids: [text] = []
+    for pane in smux_list_panes(binding.session_id, binding.window_id):
+        ids.push(pane.pane_id)
+    smux_agent_pane_registry_match_v1(binding, incarnation, ids)
+
+# milestone_0025 PR4: "" when a pane Write may proceed to the owner's control-lease issue: the same gates as Read
+# (operation id, no connection opening, no pending execution/inspection/planning, a held, un-revoked pane lease).
+pub fn smux_host_continuation_pane_write_gate_v6(state: SmuxHostContinuationV6, context: SmuxHostContextV6,
+        operation_id: text) -> text:
+    if context.connection_pending: return "runtime-connection-opening"
+    if not builder_identifier_valid_v1(operation_id): return "runtime-agent-pane-operation"
+    if state.execution.is_some() or context.planning_pending: return "runtime-host-execution-pending"
+    smux_agent_pane_read_gate_v1(state.agent_pane_lease, state.agent_pane_revoked)
+
+# The Write itself, after the owner minted `write` (its lease and target) from signed authority. The same registry
+# consistency check and brokered pane io as Read; the service re-verifies terminal authority on this very call.
+pub fn smux_host_continuation_pane_write_v6(domain: HostServiceDomainV3, original: SmuxHostContinuationV6,
+        context: SmuxHostContextV6, binding_uid: text, write: HostAgentPaneWriteV4) -> SmuxHostTurnV6:
+    var state = original
+    val incarnation = context.service_incarnation
+    val registry_check = fn(binding: HostAgentPaneBindingV4) -> text:
+        pane_registry_check_v6(binding, incarnation)
+    val io = host_service_domain_pane_io_v3(domain, binding_uid, registry_check, state.agent_pane_lease.unwrap(),
+        HostAgentPaneOpV4.Write(write))
+    val done = smux_agent_pane_write_done_v1(state.agent_pane_lease, io.result)
+    state.agent_pane_lease = done.lease
+    state.agent_pane_revoked = done.revoked
+    SmuxHostTurnV6(io.owner, state, done.response, done.error)
+
+# The agent refused before the io (terminal authority no longer verifies): the same record update as a refused Read.
+pub fn smux_host_continuation_pane_write_refused_v6(domain: HostServiceDomainV3, original: SmuxHostContinuationV6,
+        error: text) -> SmuxHostTurnV6:
+    var state = original
+    val done = smux_agent_pane_write_done_v1(state.agent_pane_lease, host_agent_pane_io_refused_v4(error))
+    state.agent_pane_lease = done.lease
+    state.agent_pane_revoked = done.revoked
+    SmuxHostTurnV6(domain, state, "", done.error)
 
 pub fn smux_host_continuation_progress_v6(state: SmuxHostContinuationV6) -> SmuxHostProgressV6:
     SmuxHostProgressV6(state.execution_operation_id, state.execution.is_some(),

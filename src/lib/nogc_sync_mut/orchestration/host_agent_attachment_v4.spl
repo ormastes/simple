@@ -53,6 +53,13 @@ use std.container.SimpleContainerOwnerV2
 use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, ContainerOwnedTerminalSessionV1}
 use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2, container_primary_output_read_v1,
     host_agent_attach_adopt_v4}
+use std.nogc_async_mut.container.terminal_primary_input_v2.{container_primary_input_gate_v2,
+    container_primary_input_install_v2, container_primary_input_revoke_v2}
+use std.common.contracts.orchestration.host_agent_pane_v4.HostAgentPaneWriteV4
+use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1, session_runtime_control_target_validate_v1,
+    session_runtime_control_target_match_v1}
+use std.common.contracts.container.primary_input_v1.container_primary_input_plan_match_v1
+use std.nogc_async_mut.container.terminal_session_v1.container_primary_attach_adoption_v1
 use std.nogc_async_mut.container.terminal_primary_write_v2.{ContainerPrimaryInputRequestV2,
     ContainerPrimaryInputDispositionV2, container_primary_input_write_v2}
 use std.nogc_async_mut.container.workspace_api_v3.{simple_container_primary_session_return_v3,
@@ -639,6 +646,57 @@ fn host_agent_pane_geometry_v4(attachment: HostAgentAttachmentV4, turn: Containe
 # primary input (partial accept is the native answer; the legacy primary ignores `frame_sequence`, which is set
 # to the attempt to satisfy its bounds); Resize begins the ONE geometry owner, ResizePoll steps it. The lease,
 # epoch, window and io deadline are enforced by the machine (host_agent_pane_io_core_v4) before this runs.
+# milestone_0025 PR4: the native input gate must carry THIS write's lease before the leaf writes. A prior unresolved
+# or unknown outcome refuses (it never self-clears); otherwise the old holder is revoked and the lease installed,
+# then the installed gate is read back and must be this lease's revision. "" when the write may proceed.
+fn host_agent_pane_input_install_v4(session: ContainerPrimaryAttachSessionV1, write: HostAgentPaneWriteV4) -> text:
+    val owned = ContainerOwnedTerminalSessionV2.Legacy(ContainerOwnedTerminalSessionV1.PrimaryAttach(session))
+    val before = container_primary_input_gate_v2(owned)
+    if before.is_err(): return before.unwrap_err()
+    if before.unwrap().pending or before.unwrap().unknown: return "attach-pane-input-unresolved"
+    val revoked = container_primary_input_revoke_v2(owned)
+    if revoked.is_err(): return revoked.unwrap_err()
+    val installed = container_primary_input_install_v2(owned, write.lease, write.target, write.principal, write.nonce)
+    if installed.is_err(): return installed.unwrap_err()
+    val gate = installed.unwrap()
+    if (not gate.controlled or not gate.active or gate.pending or gate.unknown or gate.revision != write.lease.revision):
+        return "attach-pane-input-install-not-current"
+    ""
+
+# milestone_0025 PR4: the control target of the agent's own pane, built ONLY from the verified terminal-authority
+# binding, the lease epoch of that authority, the attachment's retained plan and the attached session's adoption
+# (never smux state, never the caller). The client identity is a fixed agent-pane prefix plus the signed binding uid
+# and the attachment generation is the authority's lease epoch + 1 (the epoch starts at 0 and the target requires a
+# generation >= 1, like child_incarnation), so a revoke (epoch + 1) changes the target.
+# Err unless the session is adopted exactly as the signed binding names it and the plan matches the target.
+# allow(primitive_api): reviewed lease epoch DATA word (milestone_0025 PR4)
+pub fn host_agent_pane_control_target_v4(attachment: HostAgentAttachmentV4, binding: HostAgentPaneBindingV4,
+        lease_epoch: i64) -> Result<SessionRuntimeControlTargetV1, text>:
+    if attachment.session.is_none() or attachment.plan.is_none(): return Err("attach-no-session")
+    val adoption = match container_primary_attach_adoption_v1(attachment.session.unwrap()):
+        case Some(value): value
+        case None: return Err("attach-not-adopted")
+    if (adoption.binding_uid != binding.binding_uid or adoption.service_incarnation != binding.service_incarnation or
+            adoption.session_id != binding.session_id or adoption.window_id != binding.window_id or
+            adoption.pane_id != binding.pane_id or adoption.service_epoch != binding.service_epoch):
+        return Err("attach-adoption-binding-mismatch")
+    val plan = attachment.plan.unwrap()
+    val workload = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id, service_scope_id: workload.service_scope_id,
+        boot_id: workload.boot_id, provider_generation: workload.provider_generation,
+        native_machine_id: workload.native_machine_id, continuity_mode: workload.continuity_mode,
+        continuity_id: workload.continuity_id)
+    val target = SessionRuntimeControlTargetV1(scope: scope, runtime: plan.runtime,
+        workload_request_digest: workload.request_digest, binding_uid: binding.binding_uid,
+        binding_digest: plan.identity.binding_digest, service_incarnation: binding.service_incarnation,
+        session_id: binding.session_id, window_id: binding.window_id, pane_id: binding.pane_id,
+        service_epoch: binding.service_epoch, child_incarnation: adoption.child_incarnation,
+        client_id: "agent-pane-" + binding.binding_uid, attachment_generation: lease_epoch + 1,
+        execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+    session_runtime_control_target_validate_v1(target)?
+    container_primary_input_plan_match_v1(plan, target)?
+    Ok(target)
+
 pub fn host_agent_pane_io_port_v4(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
     var att = call.attachment
     if att.session.is_none(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4("attach-no-session"))
@@ -653,6 +711,13 @@ pub fn host_agent_pane_io_port_v4(call: HostAgentPaneIoCallV4) -> HostAgentPaneI
             val request = ContainerPrimaryInputRequestV2(lease: write.lease, target: write.target, principal: write.principal,
                 nonce: write.nonce, attempt: write.attempt, frame_sequence: write.attempt, payload: write.data,
                 offset: write.offset, maximum: write.maximum)
+            val derived = if att.binding.is_some(): host_agent_pane_control_target_v4(att, att.binding.unwrap(), att.lease_epoch)
+                else: Err("attach-no-binding")
+            if derived.is_err(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4(derived.unwrap_err()))
+            val matched = session_runtime_control_target_match_v1(write.target, derived.unwrap())
+            if matched.is_err(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4("attach-pane-write-target"))
+            val installed = host_agent_pane_input_install_v4(session, write)
+            if installed != "": return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4(installed))
             val written = container_primary_input_write_v2(ContainerOwnedTerminalSessionV2.Legacy(
                 ContainerOwnedTerminalSessionV1.PrimaryAttach(session)), request)
             if written.is_err(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4(written.unwrap_err()))
