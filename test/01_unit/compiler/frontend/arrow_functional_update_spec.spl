@@ -12,7 +12,7 @@ Audience: compiler frontend engineers.
 use std.spec.*
 use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name, decl_get_body}
 use compiler.core.ast_expr.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right,
-    EXPR_ASSIGN, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_MATCH}
+    EXPR_ASSIGN, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_MATCH, EXPR_BLOCK, EXPR_CALL, EXPR_TRY, expr_get_stmts}
 use compiler.core.ast_stmt.{stmt_get_expr}
 use compiler.core.parser.{parse_module, parser_has_errors}
 
@@ -93,11 +93,41 @@ describe "arrow update val scoping and place restrictions":
         val src = "fn f():\n    var (a, b) = ([1], [2])\n    a->concat([3])\n"
         expect(arrow_parse(src, "arrow_tuple_var.spl")).to_equal(false)
 
-    it "rejects an index target whose index is a call":
-        expect(arrow_parse("fn f():\n    var a = [[1]]\n    a[g()]->concat([2])\n", "arrow_idx_call.spl")).to_equal(true)
-
-    it "rejects a field target whose base is a call":
-        expect(arrow_parse("fn f():\n    g().x->concat([2])\n", "arrow_field_call.spl")).to_equal(true)
 
     it "accepts plain field and literal-index targets":
         expect(arrow_parse("fn f():\n    var a = [[1]]\n    a[0]->concat([2])\n    self.items->concat([3])\n", "arrow_plain.spl")).to_equal(false)
+
+fn arrow_count_calls(e: i64, callee: text) -> i64:
+    if e <= 0:
+        return 0
+    var n = 0
+    if expr_get_tag(e) == EXPR_CALL and expr_get_str(expr_get_left(e)) == callee:
+        n = 1
+    n = n + arrow_count_calls(expr_get_left(e), callee) + arrow_count_calls(expr_get_right(e), callee)
+    for s in expr_get_stmts(e):
+        n = n + arrow_count_calls(stmt_get_expr(s), callee)
+    n
+
+describe "arrow update single evaluation (ROB-ARR-05) and ? ordering (ROB-ARR-06)":
+    it "evaluates an index-call target exactly once":
+        val e = arrow_body_expr("fn f():\n    var a = [[1]]\n    a[g()]->concat([2])\n", "arrow_idx_call.spl", "f")
+        if e < 0: return
+        expect(expr_get_tag(e)).to_equal(EXPR_BLOCK)
+        expect(arrow_count_calls(e, "g")).to_equal(1)
+
+    it "evaluates a field-of-call target exactly once":
+        val e = arrow_body_expr("fn f():\n    var a = 1\n    g().x->concat([2])\n", "arrow_field_call.spl", "f")
+        if e < 0: return
+        expect(expr_get_tag(e)).to_equal(EXPR_BLOCK)
+        expect(arrow_count_calls(e, "g")).to_equal(1)
+
+    it "keeps a plain place a bare assignment":
+        val e = arrow_body_expr("fn f():\n    var a = [[1]]\n    a[0]->concat([2])\n", "arrow_plain_assign.spl", "f")
+        if e < 0: return
+        expect(expr_get_tag(e)).to_equal(EXPR_ASSIGN)
+
+    it "propagates ? before the store: x = (x.f())?":
+        val e = arrow_body_expr("fn f():\n    var x = [1]\n    x->concat([2])?\n", "arrow_try.spl", "f")
+        if e < 0: return
+        expect(expr_get_tag(e)).to_equal(EXPR_ASSIGN)
+        expect(expr_get_tag(expr_get_right(e))).to_equal(EXPR_TRY)
