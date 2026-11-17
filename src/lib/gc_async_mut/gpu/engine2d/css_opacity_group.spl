@@ -1,0 +1,104 @@
+# CSS `opacity` group composite (Chrome 159 saveLayerAlpha restore).
+#
+# A box with opacity < 1 and two or more painted items is a group: Chrome
+# rasterises the subtree into a transparent premultiplied 8-bit layer and
+# restores it with paint alpha A = round(opacity * 255) through Skia's
+# SkBlendARGB32 (fitted 2026-11-17 on Chrome 159 arm64 headless, k=4,
+# 601884/604800 and 602574/604800 channels; every miss lies in a raster-tile
+# seam column, see
+# doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md):
+#
+#     sc  = A + 1
+#     p   = 0xFFFF - La * sc
+#     ds  = (p + (p >> 8)) >> 8
+#     out = (L * sc + D * ds) >> 8          (every channel, alpha included)
+#
+# L/La is the premultiplied layer pixel, D the premultiplied destination.
+# A single painted item keeps the existing fold path (opacity folded into its
+# paint alpha); only the group path reaches this file. This is NOT the
+# embedded-surface rule of `engine2d_composite_region_milli`, whose oracles
+# are Simple-internal and stay pinned.
+
+# reason: CSS opacity percent -> Skia paint alpha, round(pct * 255 / 100)
+# @allow(primitive_api)
+pub fn css_opacity_group_alpha8(opacity_pct: i32) -> i32:
+    if opacity_pct <= 0:
+        return 0
+    if opacity_pct >= 100:
+        return 255
+    (opacity_pct * 255 + 50) / 100
+
+# reason: per-mille opacity (Draw IR embedding) -> Skia paint alpha, round(milli * 255 / 1000)
+# @allow(primitive_api)
+pub fn css_opacity_group_alpha8_milli(opacity_milli: i32) -> i32:
+    if opacity_milli <= 0:
+        return 0
+    if opacity_milli >= 1000:
+        return 255
+    (opacity_milli * 255 + 500) / 1000
+
+fn _css_group_premul_channel(c: i32, a: i32) -> i32:
+    if a >= 255:
+        return c
+    (c * a + 127) / 255
+
+fn _css_group_unpremul_channel(c: i32, a: i32) -> i32:
+    if a >= 255:
+        return c
+    if a <= 0:
+        return 0
+    val v = (c * 255 + a / 2) / a
+    if v > 255: 255 else: v
+
+# reason: one pixel of the Chrome group restore; layer and dst are straight-alpha 0xAARRGGBB, result straight-alpha
+# @allow(primitive_api)
+pub fn css_opacity_group_composite_pixel(layer: u32, dst: u32, alpha8: i32) -> u32:
+    val la = ((layer >> 24) & 255u32) as i32
+    if la == 0 or alpha8 <= 0:
+        return dst
+    val da = ((dst >> 24) & 255u32) as i32
+    val sc = alpha8 + 1
+    val p = 0xFFFF - la * sc
+    val ds = (p + (p >> 8)) >> 8
+    # An opaque destination stays opaque: Chrome's backing shows the
+    # premultiplied channels as-is, so they are not divided back out.
+    val oa = if da >= 255: 255 else: (la * sc + da * ds) >> 8
+    var out = (oa as u32) << 24
+    for shift in [16u32, 8u32, 0u32]:
+        val l = _css_group_premul_channel(((layer >> shift) & 255u32) as i32, la)
+        val d = _css_group_premul_channel(((dst >> shift) & 255u32) as i32, da)
+        val c = _css_group_unpremul_channel((l * sc + d * ds) >> 8, oa)
+        out = out | ((c as u32) << shift)
+    out
+
+# reason: composites a w*h straight-alpha layer onto the fb_w*fb_h framebuffer at (dst_x, dst_y), clipped to the framebuffer; returns the updated framebuffer
+# @allow(primitive_api)
+pub fn css_opacity_group_composite_into(fb: [u32], fb_w: i32, fb_h: i32,
+                                        layer: [u32], w: i32, h: i32,
+                                        dst_x: i32, dst_y: i32, alpha8: i32) -> [u32]:
+    var out = fb
+    if alpha8 <= 0 or w <= 0 or h <= 0 or layer.len() < w.to_i64() * h.to_i64():
+        return out
+    var row = 0
+    while row < h:  # cpu-lane-loop-ok: per-pixel group restore over the layer's clipped bounds only (CSS opacity group, Chrome SkBlendARGB32)
+        val fy = dst_y + row
+        if fy >= 0 and fy < fb_h:
+            var col = 0
+            while col < w:  # cpu-lane-loop-ok: inner row of the same bounded group restore
+                val fx = dst_x + col
+                if fx >= 0 and fx < fb_w:
+                    val s = layer[(row * w + col).to_i64()]
+                    if (s >> 24) != 0u32:
+                        val idx = (fy * fb_w + fx).to_i64()
+                        out[idx] = css_opacity_group_composite_pixel(s, out[idx], alpha8)
+                col = col + 1
+        row = row + 1
+    out
+
+# reason: Draw IR readback twin; returns w*h composited pixels for a dst region already read back (region-local indexing)
+# @allow(primitive_api)
+pub fn css_opacity_group_composite_region(layer: [u32], dst: [u32], w: i32, h: i32, alpha8: i32) -> [u32]:
+    val total = w.to_i64() * h.to_i64()
+    if layer.len() < total or dst.len() < total:
+        return dst
+    css_opacity_group_composite_into(dst, w, h, layer, w, h, 0, 0, alpha8)
