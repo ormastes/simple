@@ -42,6 +42,12 @@ int main(void) {
     CHECK(rt__shared_file_text_at_string_data(0, &n) == NULL && n == 0);
     CHECK(rt__shared_file_text_at_string_data((int64_t)(uintptr_t)big, &n) == big && n == 5);
 
+    /* little-endian u32 read, byte-wise (alignment independent) */
+    const uint8_t le[8] = {0x78, 0x56, 0x34, 0x12, 0xff, 0xff, 0xff, 0xff};
+    CHECK(rt__shared_read_u32_le(le) == 0x12345678u);
+    CHECK(rt__shared_read_u32_le(le + 1) == 0xff123456u);
+    CHECK(rt__shared_read_u32_le(le + 4) == 0xffffffffu);
+
     printf(fails ? "rt_shared_inline_selfcheck FAIL\n" : "rt_shared_inline_selfcheck PASS\n");
     return fails != 0;
 }

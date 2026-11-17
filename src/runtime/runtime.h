@@ -2537,6 +2537,11 @@ static inline void rt__shared_hex_encode_into(const uint8_t* data, size_t n, cha
     out[2 * n] = '\0';
 }
 
+/* Little-endian u32 from 4 bytes (byte-wise: no alignment/endian assumption). */
+static inline uint32_t rt__shared_read_u32_le(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 /* FNV-1a 64-bit; NULL hashes to the offset basis. */
 static inline uint64_t rt__shared_str_hash(const char* s) {
     uint64_t h = 14695981039346656037ULL;
