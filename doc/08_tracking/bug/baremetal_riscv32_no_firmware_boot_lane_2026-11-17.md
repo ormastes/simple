@@ -20,3 +20,29 @@ runtime `bm_rt.spl` has no division/multiply, so no compiler-rt helper is needed
 Build pinned OpenSBI v1.4 with `PLATFORM=generic PLATFORM_RISCV_XLEN=32 LLVM=1
 FW_PAYLOAD=y`. Add `crt0_riscv32.S` and a `riscv32` case (`qemu-system-riscv32
 -machine virt -bios fw_payload.bin`, payload at 0x80400000). Never `-kernel`.
+
+## Progress 2026-11-17 (nbm-rv32 lane) -- status: open, partially booted
+- Firmware: `~/.simple/firmware/src/opensbi-1.7` builds a clang (`LLVM=1`)
+  rv32 `fw_payload.bin` with `PLATFORM=generic PLATFORM_RISCV_XLEN=32
+  FW_PAYLOAD=y FW_PAYLOAD_PATH=image.bin` (payload at 0x80400000, S-mode).
+  `qemu-system-riscv32 -machine virt -bios fw_payload.bin` (no `-kernel`) boots it:
+  banner shows `Domain0 Next Address : 0x80400000`, `Next Mode : S-mode`.
+- Added `crt0_riscv32.S`. The backend lowers i64 to register pairs under ilp32
+  (lo=a0/a2, hi=a1/a3), so `bm_load8`/`bm_arena_*` return `a0:a1` and `bm_store8`
+  takes the value in `a2`. `bm_rt.spl` compiles for riscv32 unchanged with no
+  undefined symbols.
+- Link with `ld.lld -T image.ld` (base 0x80400000) and the PAYLOAD RUNS: serial
+  prints `hello from Simple bare metal` -- then the transcript diverges, which
+  is the remaining defect:
+  1. text emitted by `print` is followed by NUL padding (a text length is read
+     as a wrong/garbage value on rv32 -- suspect `rt_println_str`/`rt_println`
+     length or `bm_load64` of the header on the 32-bit pair ABI);
+  2. `panic("boom")` printed `explicit panic() -- diverging, must not fall
+     through` instead of `panic: boom` and did not halt (`after panic` printed):
+     on riscv32 the backend does not route panic through `rt_panic(ptr,len)`.
+  3. `ints 0 -7 MAX MIN` and `n=42` lines are corrupted (NULs between fields).
+- Not yet done: `riscv32` case in `check-baremetal-efi-boot.shs` (OpenSBI 1.7
+  fw_payload build + `-march=rv32imac -mabi=ilp32`), i64 MIN print proof.
+- Environment blocker hit mid-lane: C: reached 100% (2.2 GB free) and the WSL
+  `Ubuntu-24.04` vhdx went `WSL_E_DISK_CORRUPTED`; no further builds possible
+  until the owner repairs it. Not touched by this lane (shared with other lanes).
