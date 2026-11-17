@@ -45,3 +45,16 @@ in `receiver_declared_type` was NOT applied, and no spec could be run:
   to None.
 - Verifying needs a HIR fixture driving MIR lowering with an `[AttributeStoreV1<i64>]`
   global, which was not available here.
+
+## Spec run (2026-11-18, seed on release/1.0.0 tip 7e47421cb82)
+
+Spec `test/01_unit/compiler/50.mir/indexed_global_receiver_method_call_spec.spl`
+(single-module `var stores: [Store<i64>]`, `match stores[0].get(idx)` with bare
+`Ok`/`Err`, and `stores[0].set(i, v)`): 2/2 pass on current source with zero HIR/MIR
+errors. Mutation check: removing the local Index opt-in at
+`switch_operators_calls.spl` ~2943-2946 still gives 2/2 pass, so this single-module
+shape does NOT reach the frozen "unknown receiver.get()" path; the spec is a pin, not
+a reproduction. No source change made. The frozen failure needs a shape this fixture
+does not have (the real site is `nodes.spl`, class imported from another module in a
+whole-program closure); a cross-module fixture is the next step. The LLVM `ptr`-operand
+half is untouched (emitter-level, needs an LLVM fixture).

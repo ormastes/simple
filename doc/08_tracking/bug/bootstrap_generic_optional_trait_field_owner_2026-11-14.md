@@ -22,3 +22,13 @@ Observed results:
 All current logs are under `.simple/storage/build/bootstrap/patched-owner-dispatch` in the recovery checkout. These targeted results do not admit Stage 2/3, qualify Hello/link parity, or close unrelated generic printing behavior.
 
 Full Stage 2 rebuild was not rerun. The review/landing scope is the demonstrated owner-identity/link repair, not a claim that every production-store output or bootstrap gate passes.
+
+## Current-source pin (2026-11-18)
+
+`trait AttrOwnerV1<T>` is still present and used as `owner: AttrOwnerV1<T>?` in
+`src/compiler/00.common/data/attribute_schema_v1.spl`. Spec
+`test/01_unit/compiler/50.mir/generic_trait_optional_field_owner_spec.spl` (same shape in
+a single module: generic trait, `impl Owner<i64> for Cells`, generic class with
+`Owner<T>?` and `Owner<i64>?` fields, `if val o = self.owner: o.owner_read(..)`) lowers
+through HIR and MIR with zero errors on the pure-Simple compiler sources (1/1). Root
+is already fixed in current source; the frozen Phase 2 still needs the workaround.
