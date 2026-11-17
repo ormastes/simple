@@ -19,6 +19,7 @@ use std.common.ui.draw_ir.{
     DrawIrComposition,
     DrawIrRect,
     DrawIrEmbeddingConfig,
+    draw_ir_embedding_config,
     DrawIrStyleProp,
     Simple2dDrawIrCompositionPlan,
     Simple2dDrawIrPlan,
@@ -32,7 +33,7 @@ use std.common.ui.draw_ir.{
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans}
-use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface, css_opacity_group_surface_id}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
 }
@@ -2860,6 +2861,73 @@ fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
 # today's exact direct translate+clip behavior — this is the load-bearing
 # backward-compatibility path: no regression for callers that never opted
 # into a real embedded surface.
+# Nested CSS opacity groups. The HTML producer tags a command inside nested
+# groups with `css-opacity-group-nest`: one `root,x,y,w,h,opacity_milli` entry
+# per nested level, outermost first, each rect relative to its parent layer,
+# the command itself in its innermost layer's coordinates. Inside a group
+# layer rendered at embed depth `depth`, entry `depth` names the nested group
+# a command belongs to (empty: the command paints straight into this layer).
+fn _engine2d_draw_ir_css_group_nest_entry(command: DrawIrCommand, depth: i32) -> text:
+    val nest = _engine2d_draw_ir_style_value(command.computed_style, "css-opacity-group-nest")
+    if nest == "":
+        return ""
+    val levels = nest.split(";")
+    if depth < 0 or depth >= levels.len():
+        return ""
+    levels[depth]
+
+# Renders a group layer's commands in order: plain runs straight into
+# `layer`, each nested group's run as a group batch one embed depth deeper
+# (its own transparent layer, SkBlendARGB32 restore into `layer`), as Chrome
+# 159 restores every nested saveLayer into its parent's layer.
+fn _engine2d_draw_ir_render_css_group_layer(layer: Engine2D, batch: DrawIrBatch, commands: [DrawIrCommand], images: [Engine2dResolvedDrawIrImage], depth: i32, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
+    var eng = layer
+    var rendered = 0
+    var skipped = 0
+    var occluded = 0
+    var requested = 0
+    var unsupported_kinds = ""
+    var budget = css_background_pixel_work_budget
+    val total = commands.len().to_i32()
+    var i: i32 = 0
+    while i < total:  # cpu-lane-loop-ok: one pass over a group layer's commands cutting nested-group runs; bound is the batch command count
+        val key = _engine2d_draw_ir_css_group_nest_entry(commands[i], depth)
+        var run: [DrawIrCommand] = [commands[i]]
+        var j = i + 1
+        while j < total and _engine2d_draw_ir_css_group_nest_entry(commands[j], depth) == key:  # cpu-lane-loop-ok: extends the same run; each command is visited once
+            run.push(commands[j])
+            j = j + 1
+        val outcome = if key == "":
+            _engine2d_draw_ir_render_commands(
+                eng, run, 0, 0, images, true,
+                batch.backend_target == "metal", draw_ir_no_rect(), budget)
+        else:
+            var nested = batch
+            nested.embedding = draw_ir_embedding_config(
+                css_opacity_group_surface_id(_engine2d_draw_ir_nth_int(key, 0, -1) as i32),
+                batch.embedding.component_id,
+                _engine2d_draw_ir_nth_int(key, 1, 0) as i32,
+                _engine2d_draw_ir_nth_int(key, 2, 0) as i32,
+                _engine2d_draw_ir_nth_int(key, 3, 0) as i32,
+                _engine2d_draw_ir_nth_int(key, 4, 0) as i32,
+                0, _engine2d_draw_ir_nth_int(key, 5, 1000) as i32, true)
+            nested.commands = run
+            _engine2d_draw_ir_render_batch_embedded(
+                eng, nested, images, depth + 1, false, budget)
+        eng = outcome.engine
+        rendered = rendered + outcome.rendered
+        skipped = skipped + outcome.skipped
+        occluded = occluded + outcome.occluded
+        requested = requested + outcome.metal_device_glass_requested_count
+        if outcome.css_background_pixel_work_remaining >= 0:
+            budget = outcome.css_background_pixel_work_remaining
+        if outcome.unsupported_kinds != "" and outcome.unsupported_kinds != "none":
+            unsupported_kinds = if unsupported_kinds == "": outcome.unsupported_kinds else: unsupported_kinds + "," + outcome.unsupported_kinds
+        i = j
+    _engine2d_draw_ir_render_outcome(
+        eng, rendered, skipped, unsupported_kinds, 0, 0, requested, 0, [],
+        "", 0, 0, budget, occluded)
+
 fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     # Preserve the nested Draw IR struct layout across the native
@@ -3094,17 +3162,22 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             "embedded-offscreen-not-created",
             0
         )
-    val inner = _engine2d_draw_ir_render_commands(
-        offscreen, commands, 0, 0, images, true,
-        batch.backend_target == "metal", draw_ir_no_rect(),
-        css_background_pixel_work_budget)
-    offscreen = inner.engine
     # A CSS opacity group (>= 2 painted items under one opacity root) restores
     # with Chrome's SkBlendARGB32 rule; every other embedded surface keeps the
     # milli contract of engine2d_composite_region_milli. On Vulkan the restore
     # runs on the device from the offscreen buffer (no readback); any decline
     # falls back to the readback restore, which paints the same pixels.
     val css_group = css_opacity_group_surface(embedding.surface_id)
+    val inner = if css_group:
+        _engine2d_draw_ir_render_css_group_layer(
+            offscreen, batch, commands, images, depth,
+            css_background_pixel_work_budget)
+    else:
+        _engine2d_draw_ir_render_commands(
+            offscreen, commands, 0, 0, images, true,
+            batch.backend_target == "metal", draw_ir_no_rect(),
+            css_background_pixel_work_budget)
+    offscreen = inner.engine
     val device_restored = css_group and eng.draw_ir_composite_device_css_group(
         offscreen, embedding.x, embedding.y, embedding.width, embedding.height,
         embedding.opacity_milli)

@@ -922,8 +922,11 @@ fn widget_offset_text_node_rects(nodes: [HNode], styles: [Style], bx: [i32], by:
 # after the regular passes, which is Chrome's order for a z-index:auto
 # stacking context relative to in-flow content, so a group is admitted only
 # when no positioned box outside it that Chrome would paint ABOVE it (later
-# in tree order, or z-index > 0) overlaps it. Nested groups, iframes and
-# widget pages stay on the per-element path.
+# in tree order, or z-index > 0) overlaps it. Iframes and widget pages stay on
+# the per-element path. A nested group (an opacity root inside a group) is
+# rasterised into its own layer and restored into its parent's layer at its
+# tree-order slot; positioned siblings after it that overlap it are painted
+# after that restore (`_raster_layer_passes`), matching Chrome 159.
 # ---------------------------------------------------------------------------
 
 fn _raster_group_alpha(c: u32) -> u32:
@@ -942,31 +945,100 @@ fn _raster_group_node_ops(nd: HNode, st: Style) -> i32:
         ops = ops + 1
     if st.outline_w > 0 and st.outline_color != 0u32:
         ops = ops + 1
+    if nd.tag == "img":
+        ops = ops + 1
+    if _raster_group_has_shadow(st):
+        ops = ops + 1
+    if _raster_group_has_image_layer(st):
+        ops = ops + 1
     ops
 
-# The raster layer starts transparent and the raster blenders treat a
-# transparent destination as opaque black, so only opaque paint is exact in
-# a layer. Shadows, gradients, images, form controls and any translucent
-# colour keep the group on the per-element path (follow-up: layer alpha).
+# Outset shadow extent past each border-box edge [left, top, right, bottom]:
+# offset toward that edge + spread + 2*blur (the blur ramp stays inside
+# 2*blur), the max over layers. Directional and tighter than
+# `_paint_shadow_pad`'s symmetric +8 tile margin, which would make a group
+# overlap its neighbours and fail the overlap rule.
+fn _raster_group_shadow_edges(ox: i32, oy: i32, blur: i32, sp: i32, ext: [i32]) -> [i32]:
+    var out = ext
+    val reach = sp + blur * 2
+    val l = reach - ox
+    val t = reach - oy
+    val r = reach + ox
+    val b = reach + oy
+    if l > out[0]: out[0] = l
+    if t > out[1]: out[1] = t
+    if r > out[2]: out[2] = r
+    if b > out[3]: out[3] = b
+    out
+
+fn _raster_group_shadow_extent(st: Style) -> [i32]:
+    var ext: [i32] = [0, 0, 0, 0]
+    if st.box_shadow_raw == "":
+        return _raster_group_shadow_edges(st.box_shadow_x_px, st.box_shadow_y_px, st.box_shadow_blur_px, 0, ext)
+    for layer in split_top_level_commas(st.box_shadow_raw):  # cpu-lane-loop-ok: one node's shadow layer list
+        if not layer.contains("inset"):
+            val prefix = shadow_length_prefix(layer)
+            val ox = parse_signed_nth_int(prefix, 0)
+            val oy = parse_signed_nth_int(prefix, 1)
+            if ox != -1000000 and oy != -1000000:
+                var blur = parse_signed_nth_int(prefix, 2)
+                if blur == -1000000 or blur < 0:
+                    blur = 0
+                var sp = parse_signed_nth_int(prefix, 3)
+                if sp == -1000000 or sp < 0:
+                    sp = 0
+                ext = _raster_group_shadow_edges(ox, oy, blur, sp, ext)
+    ext
+
+fn _raster_group_has_shadow(st: Style) -> bool:
+    st.box_shadow_color != 0u32 or st.box_shadow_raw != ""
+
+fn _raster_group_has_image_layer(st: Style) -> bool:
+    (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or st.bg_layers_raw != "" or st.background_image_uri != ""
+
+# The raster blenders treat a transparent destination as opaque black (and
+# write alpha 255), so a layer is painted once over opaque black (B) -- whose
+# colour channels are then exactly Chrome's premultiplied layer colour -- and,
+# when the layer holds non-opaque paint, again over opaque white (W): the
+# layer alpha is 255 - (W - B). That alpha is exact for one non-opaque paint
+# per pixel over a not-yet-opaque pixel (any number of opaque paints): the
+# white backdrop term of every Chrome rule is exactly 255 - a. Two non-opaque
+# paints overlapping on a non-opaque pixel round differently (+-1), so a
+# layer's non-opaque paint rects must be pairwise disjoint; otherwise the
+# group stays on the per-element path (follow-up: a white-forced alpha pass
+# at every raster pixel-write site). Form controls and SVG always decline.
 fn _raster_group_node_layer_safe(nd: HNode, st: Style) -> bool:
+    nd.tag != "input" and nd.tag != "svg" and nd.tag != "select" and nd.tag != "textarea" and nd.tag != "button"
+
+# Non-opaque paint items one node contributes to a layer: an image, a shadow,
+# a gradient or image layer that is not two opaque stops, translucent
+# background / border / outline colours. Text over the root's opaque
+# background (the only text the layer admits) is exact and is not counted.
+fn _raster_group_node_translucent_items(nd: HNode, st: Style) -> i32:
     if nd.tag == "#text":
-        return true
-    if nd.tag == "img" or nd.tag == "input" or nd.tag == "svg" or nd.tag == "select" or nd.tag == "textarea" or nd.tag == "button":
-        return false
-    if st.box_shadow_color != 0u32 or st.box_shadow_raw != "":
-        return false
-    if (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or st.bg_layers_raw != "" or st.background_image_uri != "":
-        return false
+        return 0
+    var items = 0
+    if nd.tag == "img":
+        items = items + 1
+    if _raster_group_has_shadow(st):
+        items = items + 1
+    if st.bg_layers_raw != "" or st.background_image_uri != "":
+        items = items + 1
+    elif st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32 and (_raster_group_alpha(st.background_gradient_from) != 255u32 or _raster_group_alpha(st.background_gradient_to) != 255u32):
+        items = items + 1
     val bga = _raster_group_alpha(st.bg)
     if bga != 0u32 and bga != 255u32:
-        return false
-    if st.border_l > 0 and _raster_group_alpha(st.border_color_l) != 255u32: return false
-    if st.border_t > 0 and _raster_group_alpha(st.border_color_t) != 255u32: return false
-    if st.border_r > 0 and _raster_group_alpha(st.border_color_r) != 255u32: return false
-    if st.border_b > 0 and _raster_group_alpha(st.border_color_b) != 255u32: return false
+        items = items + 1
+    var border_translucent = false
+    if st.border_l > 0 and _raster_group_alpha(st.border_color_l) != 255u32: border_translucent = true
+    if st.border_t > 0 and _raster_group_alpha(st.border_color_t) != 255u32: border_translucent = true
+    if st.border_r > 0 and _raster_group_alpha(st.border_color_r) != 255u32: border_translucent = true
+    if st.border_b > 0 and _raster_group_alpha(st.border_color_b) != 255u32: border_translucent = true
+    if border_translucent:
+        items = items + 1
     if st.outline_w > 0 and st.outline_color != 0u32 and _raster_group_alpha(st.outline_color) != 255u32:
-        return false
-    true
+        items = items + 1
+    items
 
 fn _raster_group_visible(nodes: [HNode], styles: [Style], i: i32) -> bool:
     styles[i].display != "none" and not styles[i].visibility_hidden and
@@ -982,8 +1054,14 @@ struct _RasterOpacityGroup:
     y: i32
     w: i32
     h: i32
+    two_pass: bool
 
-fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fbw: i32, fbh: i32) -> [_RasterOpacityGroup]:
+# `nested` scans inside a parent group's layer (the parent root is at opacity
+# 100 and everything outside it is hidden): one painted item is already a
+# layer there (a fold onto the transparent layer is not exact on the raster),
+# and the overlap rule is replaced by the tree-order interleave in
+# `_raster_layer_passes`.
+fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fbw: i32, fbh: i32, nested: bool) -> [_RasterOpacityGroup]:
     var groups: [_RasterOpacityGroup] = []
     val n = nodes.len() as i32
     var claimed: [bool] = [false; n]
@@ -999,7 +1077,15 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
             var members: [bool] = [false; n]
             members[g] = true
             var painted = 0
-            var reject = false  # nested group, iframe, or a member the layer cannot hold exactly
+            var reject = false  # iframe, or a member the layer cannot hold exactly
+            var has_nested = false
+            var has_text = false
+            var has_z = false
+            var two_pass = false
+            var tx0: [i32] = []
+            var ty0: [i32] = []
+            var tx1: [i32] = []
+            var ty1: [i32] = []
             var x0 = fbw
             var y0 = fbh
             var x1 = 0
@@ -1011,7 +1097,9 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
                     members[j] = true
                     val st = styles[j]
                     if j != g and st.opacity_pct < 100:
-                        reject = true
+                        has_nested = true
+                    if j != g and st.z_index != 0:
+                        has_z = true
                     if nodes[j].tag == "iframe":
                         reject = true
                     val ops = if _raster_group_visible(nodes, styles, j): _raster_group_node_ops(nodes[j], st) else: 0
@@ -1019,15 +1107,41 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
                         painted = painted + ops
                         if not _raster_group_node_layer_safe(nodes[j], st):
                             reject = true
+                        val sh: [i32] = if _raster_group_has_shadow(st): _raster_group_shadow_extent(st) else: [0, 0, 0, 0]
+                        val translucent = _raster_group_node_translucent_items(nodes[j], st)
+                        if translucent > 1:
+                            reject = true
+                        if translucent == 1:
+                            two_pass = true
+                            val opad = if st.outline_w > 0: st.outline_w + _tile_abs_i32(st.outline_offset_px) else: 0
+                            val rx0 = bx[j] - (if sh[0] > opad: sh[0] else: opad)
+                            val ry0 = by[j] - (if sh[1] > opad: sh[1] else: opad)
+                            val rx1 = bx[j] + bw[j] + (if sh[2] > opad: sh[2] else: opad)
+                            val ry1 = by[j] + bh[j] + (if sh[3] > opad: sh[3] else: opad)
+                            var q = 0
+                            while q < tx0.len():  # cpu-lane-loop-ok: pairwise disjointness of this group's non-opaque paint rects; bound is that count
+                                if rx0 < tx1[q] and rx1 > tx0[q] and ry0 < ty1[q] and ry1 > ty0[q]:
+                                    reject = true
+                                q = q + 1
+                            tx0.push(rx0)
+                            ty0.push(ry0)
+                            tx1.push(rx1)
+                            ty1.push(ry1)
                         # Antialiased text needs an opaque backdrop inside the
                         # layer: only a root with an opaque background gives one.
-                        if nodes[j].tag == "#text" and _raster_group_alpha(gst.bg) != 255u32:
-                            reject = true
+                        if nodes[j].tag == "#text":
+                            has_text = true
+                            if _raster_group_alpha(gst.bg) != 255u32:
+                                reject = true
                         val pad = if st.outline_w > 0: st.outline_w + _tile_abs_i32(st.outline_offset_px) else: 0
-                        if bx[j] - pad < x0: x0 = bx[j] - pad
-                        if by[j] - pad < y0: y0 = by[j] - pad
-                        if bx[j] + bw[j] + pad > x1: x1 = bx[j] + bw[j] + pad
-                        if by[j] + bh[j] + pad > y1: y1 = by[j] + bh[j] + pad
+                        val px0 = bx[j] - (if sh[0] > pad: sh[0] else: pad)
+                        val py0 = by[j] - (if sh[1] > pad: sh[1] else: pad)
+                        val px1 = bx[j] + bw[j] + (if sh[2] > pad: sh[2] else: pad)
+                        val py1 = by[j] + bh[j] + (if sh[3] > pad: sh[3] else: pad)
+                        if px0 < x0: x0 = px0
+                        if py0 < y0: y0 = py0
+                        if px1 > x1: x1 = px1
+                        if py1 > y1: y1 = py1
                 j = j + 1
             var k = g
             while k < n:  # cpu-lane-loop-ok: marks the subtree claimed so a descendant root is never a second group; bound is node_count
@@ -1038,8 +1152,13 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
             if y0 < 0: y0 = 0
             if x1 > fbw: x1 = fbw
             if y1 > fbh: y1 = fbh
-            var admitted = painted >= 2 and not reject and x1 > x0 and y1 > y0
-            if admitted:
+            # Nested layers: text needs the opaque backdrop of its own layer
+            # root and z-index reorders paint across the tree-order interleave.
+            if has_nested and (has_text or has_z or two_pass):
+                reject = true
+            val min_painted = if nested: 1 else: 2
+            var admitted = painted >= min_painted and not reject and x1 > x0 and y1 > y0
+            if admitted and not nested:
                 var a = 0
                 while a < n:  # cpu-lane-loop-ok: overlap check against positioned boxes outside the group; bound is node_count
                     val ast = styles[a]
@@ -1060,14 +1179,16 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
                             admitted = false
                     a = a + 1
             if admitted:
-                groups.push(_RasterOpacityGroup(root: g, members: members, x: x0, y: y0, w: x1 - x0, h: y1 - y0))
+                groups.push(_RasterOpacityGroup(root: g, members: members, x: x0, y: y0, w: x1 - x0, h: y1 - y0, two_pass: two_pass))
         g = g + 1
     groups
 
 # Runs the regular passes with the `hide` nodes marked visibility:hidden and
 # `full_opacity_root` painted at opacity 100, then restores the styles (Style
 # is shared by reference; same pattern as the tile-cull pass below).
-fn _raster_paint_hiding(nodes: [HNode], styles: [Style], hide: [bool], full_opacity_root: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
+# `layer` paints a group's layer content: nested groups inside it are layered
+# again (`_raster_layer_passes`) instead of painted per element.
+fn _raster_paint_hiding(nodes: [HNode], styles: [Style], hide: [bool], full_opacity_root: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool, layer: bool) -> [u32]:
     var work = styles
     val n = styles.len() as i32
     var prev_hidden: [bool] = [false; n]
@@ -1085,7 +1206,7 @@ fn _raster_paint_hiding(nodes: [HNode], styles: [Style], hide: [bool], full_opac
         prev_opacity = rst.opacity_pct
         rst.opacity_pct = 100
         work[full_opacity_root] = rst
-    val out = _paint_passes(nodes, work, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
+    val out = if layer: _raster_layer_passes(nodes, work, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode) else: _paint_passes(nodes, work, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
     if full_opacity_root >= 0:
         var rst = work[full_opacity_root]
         rst.opacity_pct = prev_opacity
@@ -1105,10 +1226,111 @@ fn _raster_shifted(v: [i32], d: i32) -> [i32]:
         out.push(x - d)
     out
 
+# Paints `grp` alone into a bounded transparent layer (root at opacity 100,
+# coordinates shifted into the layer) and restores it onto `fb`.
+fn _raster_restore_group(nodes: [HNode], styles: [Style], grp: _RasterOpacityGroup, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
+    val n = nodes.len() as i32
+    var outside: [bool] = [true; n]
+    var i = 0
+    while i < n:  # cpu-lane-loop-ok: complement of the group's members; bound is node_count
+        if grp.members[i]:
+            outside[i] = false
+        i = i + 1
+    val alpha8 = css_opacity_group_alpha8(styles[grp.root].opacity_pct)
+    val lbx = _raster_shifted(bx, grp.x)
+    val lby = _raster_shifted(by, grp.y)
+    # Two-pass layers start OPAQUE black: some raster paths (gradient layers
+    # via Engine2D blend) honour a transparent destination and would leave
+    # straight, not premultiplied, colour in B.
+    val black_fb: [u32] = [if grp.two_pass: 0xFF000000u32 else: 0u32; grp.w * grp.h]
+    val black = _raster_paint_hiding(nodes, styles, outside, grp.root, lbx, lby, bw, bh, wrap_cache, black_fb, grp.w, grp.h, widget_mode, true)
+    if not grp.two_pass:
+        return css_opacity_group_composite_into(fb, fbw, fbh, black, grp.w, grp.h, grp.x, grp.y, alpha8)
+    val white_fb: [u32] = [0xFFFFFFFFu32; grp.w * grp.h]
+    val white = _raster_paint_hiding(nodes, styles, outside, grp.root, lbx, lby, bw, bh, wrap_cache, white_fb, grp.w, grp.h, widget_mode, true)
+    css_opacity_group_composite_into(fb, fbw, fbh, _raster_group_layer_from_passes(black, white), grp.w, grp.h, grp.x, grp.y, alpha8)
+
+fn _raster_group_unpremul(c: i32, a: i32) -> i32:
+    val v = (c * 255 + a / 2) / a
+    if v > 255: 255 else: v
+
+# Straight-alpha layer from the black (B) and white (W) passes: alpha
+# 255 - (W - B) (green channel; every channel carries the same backdrop
+# term), colour = B's premultiplied channels divided back out.
+fn _raster_group_layer_from_passes(black: [u32], white: [u32]) -> [u32]:
+    val n = black.len()
+    var out: [u32] = [0u32; n]
+    var i: i64 = 0
+    while i < n:  # cpu-lane-loop-ok: per-pixel alpha recovery over one bounded group layer
+        val b = black[i]
+        val w = white[i]
+        if (b & 0x00FFFFFFu32) == (w & 0x00FFFFFFu32):
+            out[i] = b | 0xFF000000u32
+        else:
+            val a = 255 - ((((w >> 8) & 255u32) as i32) - (((b >> 8) & 255u32) as i32))
+            if a > 0:
+                val r = _raster_group_unpremul(((b >> 16) & 255u32) as i32, a)
+                val g = _raster_group_unpremul(((b >> 8) & 255u32) as i32, a)
+                val bl = _raster_group_unpremul((b & 255u32) as i32, a)
+                out[i] = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (bl as u32)
+        i = i + 1
+    out
+
+# A group's layer content. Without nested groups it is the regular passes.
+# Otherwise the nested groups and every positioned box after a nested group
+# that overlaps it ("late" boxes, with their subtrees) are held back; the rest
+# paints first, then the nested-group restores and late subtrees run in tree
+# order -- Chrome paints an opacity stacking context at its tree-order slot
+# among the positioned, z-index:auto content of its parent context.
+fn _raster_layer_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
+    val inner = _raster_opacity_groups(nodes, styles, bx, by, bw, bh, fbw, fbh, true)
+    if inner.len() == 0:
+        return _paint_passes(nodes, styles, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
+    val n = nodes.len() as i32
+    var group_at: [i32] = [-1; n]
+    var in_inner: [bool] = [false; n]
+    var gi = 0
+    while gi < inner.len():  # cpu-lane-loop-ok: union of the nested groups' members; bound is nested group count x node_count
+        group_at[inner[gi].root] = gi
+        var m = 0
+        while m < n:  # cpu-lane-loop-ok: same union, inner node loop
+            if inner[gi].members[m]:
+                in_inner[m] = true
+            m = m + 1
+        gi = gi + 1
+    var late_owner: [i32] = [-1; n]
+    var hide: [bool] = [false; n]
+    var i = 0
+    while i < n:  # cpu-lane-loop-ok: one pre-order pass marking late subtrees (parent index < child index); bound is node_count x nested group count
+        val parent = nodes[i].parent as i32
+        if parent >= 0 and late_owner[parent] >= 0:
+            late_owner[i] = late_owner[parent]
+        elif not in_inner[i] and _raster_group_positioned(styles[i]) and _raster_group_visible(nodes, styles, i):
+            for grp in inner:  # cpu-lane-loop-ok: overlap test against each nested group before this node
+                if grp.root < i and bx[i] < grp.x + grp.w and bx[i] + bw[i] > grp.x and by[i] < grp.y + grp.h and by[i] + bh[i] > grp.y:
+                    late_owner[i] = i
+        hide[i] = in_inner[i] or late_owner[i] >= 0
+        i = i + 1
+    var out = _raster_paint_hiding(nodes, styles, hide, -1, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode, false)
+    i = 0
+    while i < n:  # cpu-lane-loop-ok: tree-order interleave of nested restores and late subtrees; each runs once
+        if late_owner[i] == i:
+            var only: [bool] = [true; n]
+            var j = i
+            while j < n:  # cpu-lane-loop-ok: the late subtree minus its nested groups; bound is node_count
+                if late_owner[j] == i and not in_inner[j]:
+                    only[j] = false
+                j = j + 1
+            out = _raster_paint_hiding(nodes, styles, only, -1, bx, by, bw, bh, wrap_cache, out, fbw, fbh, widget_mode, false)
+        if group_at[i] >= 0:
+            out = _raster_restore_group(nodes, styles, inner[group_at[i]], bx, by, bw, bh, wrap_cache, out, fbw, fbh, widget_mode)
+        i = i + 1
+    out
+
 fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
     if widget_mode:
         return _paint_passes(nodes, styles, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
-    val groups = _raster_opacity_groups(nodes, styles, bx, by, bw, bh, fbw, fbh)
+    val groups = _raster_opacity_groups(nodes, styles, bx, by, bw, bh, fbw, fbh, false)
     if groups.len() == 0:
         return _paint_passes(nodes, styles, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
     val n = nodes.len() as i32
@@ -1119,17 +1341,9 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             if grp.members[i]:
                 in_group[i] = true
             i = i + 1
-    var out = _raster_paint_hiding(nodes, styles, in_group, -1, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
+    var out = _raster_paint_hiding(nodes, styles, in_group, -1, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode, false)
     for grp in groups:  # cpu-lane-loop-ok: one bounded layer paint + restore per admitted group
-        var outside: [bool] = [true; n]
-        var i = 0
-        while i < n:  # cpu-lane-loop-ok: complement of the group's members; bound is node_count
-            if grp.members[i]:
-                outside[i] = false
-            i = i + 1
-        val layer_fb: [u32] = [0u32; grp.w * grp.h]
-        val layer = _raster_paint_hiding(nodes, styles, outside, grp.root, _raster_shifted(bx, grp.x), _raster_shifted(by, grp.y), bw, bh, wrap_cache, layer_fb, grp.w, grp.h, widget_mode)
-        out = css_opacity_group_composite_into(out, fbw, fbh, layer, grp.w, grp.h, grp.x, grp.y, css_opacity_group_alpha8(styles[grp.root].opacity_pct))
+        out = _raster_restore_group(nodes, styles, grp, bx, by, bw, bh, wrap_cache, out, fbw, fbh, widget_mode)
     out
 
 fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:

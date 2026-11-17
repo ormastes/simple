@@ -238,7 +238,7 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
 - **Chrome 159 rule:** premultiplied layer, restore with SkBlendARGB32 at `A = round(opacity*255)` (`sc = A+1`, `ds = (p + (p>>8)) >> 8` with `p = 0xFFFF - La*sc`, `out = (L*sc + D*ds) >> 8`). Fit 601884/604800 and 602574/604800 channels; every miss is a Chrome raster-tile seam (device columns just left of x = 256*k, k >= 2, +-1..2, group pages only, fixed in device space when content shifts 16 px). Control page without a group: 604800/604800.
 - **Fix:** `engine2d/css_opacity_group.spl` (math), Draw IR bounded group surfaces + `draw_ir_composite_readback_css_group`, Vulkan device restore `shaders/css_group_restore.comp` (`draw_ir_composite_device_css_group`, no readback), raster `paint()` group front end. A box's background + border is a two-item group on every lane (Chrome `ff7e7e`/`7e7eff`). Pinned by `test/01_unit/browser_engine/opacity_group_chrome159_spec.spl` (raster, cpu_simd, Vulkan == cpu_simd, k=4 full frame across a seam <= 2).
 - **Re-pinned with a Chrome citation:** `fractional_subtree_opacity_spec` pixels `ff8080/8080ff` -> Chrome `ff7e7e/7e7eff`; its surface width 16 -> 12 is Simple-internal (layer bounded to the subtree's clipped bounds).
-- **Still open:** multi-root Draw IR pages where any root holds text, a shadow or an outline still lose all opacity on cpu_simd/Vulkan (pre-existing, unchanged: pixel-identical to base on a probe page with a shadow root, an outline root, a bg+border root and a text root); nested groups; translucent/shadow/gradient/image members on the raster lane (layer alpha, kept on the per-element path); the single-item path (`opacity_box`, `ff8080` vs `ff7f7f`) belongs to the blend lane.
+- **Still open:** multi-root Draw IR pages where any root holds text, a shadow or an outline still lose all opacity on cpu_simd/Vulkan (pre-existing, unchanged: pixel-identical to base on a probe page with a shadow root, an outline root, a bg+border root and a text root); nested groups (fixed, see the nested-group entry below); translucent/shadow/gradient/image members on the raster lane (layer alpha, kept on the per-element path); the single-item path (`opacity_box`, `ff8080` vs `ff7f7f`) belongs to the blend lane.
 - **Perf** (12 groups of 140x60 with 3 children on 600x200; seed sha256 08aba9746a813ee7; median of 3; base painted these groups with NO opacity):
 
   | lane | base | head |
@@ -249,6 +249,57 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
   | max RSS (whole run) | 969 MB | 996 MB |
 
   Vulkan per group before the device kernel: render 15 ms, layer readback 45 ms, destination region readback 713 ms (whole-frame read), .spl restore 28 ms, upload 87 ms; after: create 1 ms, render 15 ms, device restore 2-5 ms.
+
+## 2026-11-17 — nested `opacity` groups: fixed
+
+- **Was:** a group inside a group painted flat on every lane. The Draw IR producer refused `parent_root >= 0` (so the page had no opacity at all on cpu_simd/Vulkan), and the raster rejected nested groups (members unfaded). Measured at base on the nested page: `fa141e` where Chrome gives `913672`.
+- **Chrome 159:** every level is restored into its parent's premultiplied layer with SkBlendARGB32, in tree order. There is no fold, even for an outer group whose only item is the inner group. A model reproduces all 37 sampled cells.
+- **Fix:**
+  - Draw IR: the producer builds a root tree (max nest level 2), tags nested commands with `css-opacity-group-nest`, and scales that prop under device scale.
+  - `draw_ir_adv` renders each nested run as a group batch one embed depth deeper. On Vulkan the device restore goes into the translucent parent layer; the existing shader handles it.
+  - Raster: a recursive layer paint with a tree-order interleave of nested restores and positioned boxes painted after them.
+- **Pinned** by `opacity_group_chrome159_spec`: 4 new rows covering 37 cells on raster, cpu_simd and Vulkan, plus Vulkan device-restore count 18 and the k=4 full frame of 3 blocks, exact.
+- **Base vs head:** a 25-spec list ran serially, comparing failing names, with 0 new and 0 fixed (pre-existing reds unchanged). The 25 specs: opacity_group_chrome159, fractional_subtree_opacity, simple_web_renderer, simple_web_html_layout_renderer_coverage, simple_web_engine2d_renderer, iframe_draw_ir_embedding, cpu_simd_paint, tile_paint_parity ×2, vulkan_device_glass_blur, spirv_blob_bare_hex_words, web_device_scale, embedded_surface, linear_gradient_angle ×2, opacity_row_kernel_parity, draw_ir_adv, draw_ir_adv_branch_coverage, draw_ir_adv_native_optional_contract, paint_primitives/paint_layout/core_pure_helpers/paint_tiles_gpu coverage closures, module_split, scan_index_space.
+- **Perf** (600x200; whole process `seed run`, median of 3, host load ~10, seed `cargo-target-webrender-blend`; base painted the nested page FLAT):
+
+  | page / lane | base | head |
+  |---|---|---|
+  | 12 groups, raster | 5.43 s | 2.93 s |
+  | 12 groups, cpu_simd | 8.56 s | 6.01 s |
+  | 12 groups, Vulkan | 6.14 s | 9.15 s |
+  | 12 nested (2-level) groups, raster | 4.40 s | 5.89 s |
+  | 12 nested groups, cpu_simd | 5.37 s | 5.83 s |
+  | 12 nested groups, Vulkan | 5.73 s | 7.49 s |
+  | max RSS | 741 MB | 748 MB |
+
+  The 12-group page takes the same code path at base and head, so its spread (2.9-10.4 s across runs) is host noise. The nested page's added cost is the extra layer per group.
+
+## 2026-11-17 — raster `opacity` groups with translucent / shadow / gradient members: fixed (disjoint case)
+
+- **Was:** any translucent colour, shadow, gradient or image member kept the group on the raster's per-element path. Measured at base, 21 of 21 probe cells were off, e.g. a translucent red child gave `942d64` where Chrome gives `5e4396`.
+- **Fix:** a two-pass layer (B over opaque black, W over opaque white; alpha `255-(W-B)`), admitted when the layer's non-opaque paint rects are pairwise disjoint. Chrome's ops now include shadow, img and gradient layers. The shadow extent is directional.
+- **Pinned:** `opacity_group_chrome159_spec`, 20 cells (one is Chrome-dithered).
+- **Still open (raster):**
+  - Overlapping non-opaque members decline to the per-element path. Chrome values: `B7DBFF E3D994 FFE793` (two translucent boxes) and `B8C2FB 9A9FBC BFBFBF` (image + translucent black).
+  - Plain `<img>` is not painted by the raster lane at all (pre-existing).
+- **Base vs head:** the same 25 specs as the nested-group entry showed 0 new and 0 fixed failing names. **Perf** (median of 3, same pages; opaque-only layers keep one pass): raster 12 groups 6.00 s and nested 6.87 s, cpu_simd 7.50 / 6.77 s, Vulkan 5.49 / 8.45 s, max RSS 728 MB. All of these are within the host-noise spread of the item-1 runs (2.9-10.4 s). A two-pass layer costs one extra bounded layer paint.
+
+## 2026-11-17 — Multi-root opacity pages painted flat on cpu_simd and Vulkan (shadow, outline, text roots)
+
+- **Symptom:** with 2+ opacity roots, one root holding a shadow or an outline made the producer decline bounded surfaces for the whole page. Every group then painted with no opacity: `tg_page` (34,4) was `99ccff` vs Chrome `b7dbff`, and the `mr_page` text root background was flat red vs Chrome `942c63`.
+- **Fix** (`simple_web_html_layout_renderer.spl`):
+  - A directional halo grows the root rect.
+  - Gradient and image background layers count as group paint items.
+  - The text root was red at base too (multi-root ≠ alone). It needed no text-specific change: its command has no glyph run.
+- **Pinned** (cpu_simd and Vulkan, exact): `mr_page` 14 cells (`942C63` ×3, `5BA403` ×2, `F5F19D` ×2, `BF3F3F` ×2, `808080`, `3FBF3F`, `4B4BFF` ×2, `FFA54B`). `tg_page` 17 raster cells plus (34,4) (37,4) `B7DBFF`, (46,4) `FFE793`, (60,12) `BFBFBF`. Also: a text root on the multi-root page equals the same root alone.
+- **Open:**
+  - A root holding a real glyph run (`glyph_run.valid`) still declines surfaces for the whole page. No pinned page produces one.
+  - The outline ring on a positioned box is unpainted on every lane, at opacity 1 too (Chrome `5B579D`).
+  - The `<img>` is unpainted on every lane (Chrome `8829A5`, `B8C2FB`, `9A9FBC`). The yellow-over-image cells (24,12) and (29,12) fold on the Engine2D lanes as a result (`e9a530` vs `e9a52f`).
+  - Chrome's shadow-only pixel is `5F5F5F` on a 10x8 box but `606060` on an 8x5 box with the same shadow. Simple gives `606060` on both.
+  - Engine2D gives +1 green where two translucent paints overlap (40,4): `e3d995` vs `e3d994`.
+- **Needs:** `sfnt_render_glyph_lcd` must be `pub` (upstream `08486feffd2`), or small text on the Engine2D lanes errors out.
+- **Base vs head:** the same 25 specs showed 0 new failing names. 20 names were fixed, all text rows that the cherry-picked `pub` unblocked (`simple_web_renderer` 17, `web_device_scale` 2, `cpu_simd_paint` 1). **Perf** (median of 3, the item-2 head → this head, noisy host): raster 12 groups 6.00→2.34 s and nested 6.87→2.74 s; cpu_simd 7.50→4.51 s and 6.77→4.95 s; Vulkan 5.49→2.95 s and 8.45→3.09 s; max RSS 711→715 MB.
 
 ## 2026-11-17 — `layout.spl` `_layout_block_node` margin collapse, round 2
 
