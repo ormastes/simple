@@ -143,13 +143,26 @@ fn helper_journal_present_v1(journal: DistributedOperationJournalV2, relative: t
         maximum: i64) -> Result<bool, text>:
     Ok(distributed_operation_journal_read_v3(journal, relative, maximum)?.is_some())
 
+# The journal-side connection marker (PC), readable without the helper store (m23 item 3).
+pub fn host_linux_helper_connection_marker_v1(journal: DistributedOperationJournalV2, operation_id: text) -> Result<bool, text>:
+    val key = sha256_text(operation_id) + ".sdn"
+    Ok(helper_journal_present_v1(journal, "primary-connection-consumed/" + key, 8388608)? or
+        helper_journal_present_v1(journal, "primary-connection-attempt-terminal/" + key, 4096)?)
+
+# A journal-only connection row (m23 item 3): PC present and neither journal attach record (R, X) present. Such a
+# row keeps its connection evidence while the attach store is unusable; any R/X beside PC is ambiguous and stays Err.
+pub fn host_linux_helper_connection_only_v1(journal: DistributedOperationJournalV2, operation_id: text) -> Result<bool, text>:
+    if not host_linux_helper_connection_marker_v1(journal, operation_id)?: return Ok(false)
+    val key = sha256_text(operation_id) + ".sdn"
+    if helper_journal_present_v1(journal, "host-helper-primary-refusal/" + key, 65536)?: return Ok(false)
+    Ok(not helper_journal_present_v1(journal, "host-helper-primary-cancelled/" + key, 65536)?)
+
 # Gather: journal markers through the owned journal, store markers by observed
 # presence (a dangling entry or unreadable directory is an Err, never absence).
 pub fn host_linux_helper_markers_v1(journal: DistributedOperationJournalV2, store: HostLinuxHelperStoreStateV1,
         operation_id: text) -> Result<HostLinuxHelperMarkersV1, text>:
     val key = sha256_text(operation_id) + ".sdn"
-    val connection = (helper_journal_present_v1(journal, "primary-connection-consumed/" + key, 8388608)? or
-        helper_journal_present_v1(journal, "primary-connection-attempt-terminal/" + key, 4096)?)
+    val connection = host_linux_helper_connection_marker_v1(journal, operation_id)?
     val refusal = helper_journal_present_v1(journal, "host-helper-primary-refusal/" + key, 65536)?
     val cancelled = helper_journal_present_v1(journal, "host-helper-primary-cancelled/" + key, 65536)?
     match store:

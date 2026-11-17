@@ -95,7 +95,7 @@ use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmen
     HOST_AGENT_ATTACH_FAILED_V4, HOST_AGENT_ATTACH_BLOCKED_V4, HOST_AGENT_EXPIRE_SLACK_MS_V4,
     HOST_AGENT_NON_ADVANCING_LIMIT_V4, HOST_AGENT_ATTACH_MAX_BYTES_V4, HOST_AGENT_DETACH_MAX_BYTES_V4,
     host_agent_attach_request_decode_v4, host_agent_attach_request_parts_v4, host_agent_attach_binding_plan_check_v4,
-    host_agent_attach_facts_v4, host_agent_attach_archive_relative_v4, host_agent_detach_archive_relative_v4,
+    host_agent_attach_facts_v4, host_agent_attach_grant_deadline_v4, host_agent_attach_archive_relative_v4, host_agent_detach_archive_relative_v4,
     host_agent_action_archive_v4, host_agent_detach_request_decode_v4, host_agent_detach_payload_digest_v4,
     HostAgentAttachRequestV4, HostAgentAttachPartsV4}
 
@@ -1232,7 +1232,9 @@ pub fn host_agent_attachment_step_v4(agent: HostLinuxServiceAgentV4, grant_clock
         val driven = host_agent_attachment_drive_step_v4(state, now, true, port)
         return HostAgentAttachmentStepV4(agent: driven.agent, native: false, error: driven.error, capacity: driven.capacity)
     if state.stage != "running": return HostAgentAttachmentStepV4(agent: state, native: true, error: "")
-    if grant_clock >= not_after:
+    # A run with no live attachment keeps its final Inspect at the window end: the native Inspect step
+    # records the exit first and the window end only when the workload still runs (m23 item 2).
+    if grant_clock >= not_after and host_agent_attachment_live_v4(state.attachment):
         state = host_agent_stop_cause_v4(state, "failed", host_agent_window_end_digest_v4(not_after, now))
     if state.stop_requested and not state.pending:
         return HostAgentAttachmentStepV4(agent: host_agent_begin_stop_v4(state, now), native: false, error: "")
@@ -1297,6 +1299,8 @@ pub struct HostAgentAttachServiceV4:
     not_after: i64
     policy_bytes: text
     store_root: text
+    # The monotonic clock of the receipt's prepare deadline (the agent clock is the grant clock; m23 P2-5).
+    monotonic_ms: i64
 
 # One composed action answer: `replay` = the exact archived bytes, answered from state (inspect), no effect.
 pub struct HostAgentActionApplyV4:
@@ -1320,7 +1324,9 @@ fn host_agent_attach_archived_v4(agent: HostLinuxServiceAgentV4, request: HostAg
     state.attachment = Some(HostAgentAttachmentV4(parent: Some(authority.execute_operation), plan: Some(parts.plan),
         binding: Some(parts.binding), not_after: service.not_after, policy_bytes: service.policy_bytes,
         helper_request_bytes: request.helper_request, store_root: service.store_root,
-        prepare_deadline_ms: parts.helper.intent.reservation.prepare_deadline_ms, attach_stage: HOST_AGENT_ATTACH_OPENING_V4,
+        prepare_deadline_ms: host_agent_attach_grant_deadline_v4(parts.helper.intent.reservation.prepare_deadline_ms,
+            state.clock_ms, service.monotonic_ms),
+        attach_stage: HOST_AGENT_ATTACH_OPENING_V4,
         attach_pending: true, attach_digest: attach_digest))
     state
 
@@ -1348,7 +1354,7 @@ pub fn host_agent_attach_apply_core_v4(agent: HostLinuxServiceAgentV4, holder: t
     val archived = distributed_operation_journal_read_v3(service.journal, relative, HOST_AGENT_ATTACH_MAX_BYTES_V4)
     if archived.is_err(): return host_agent_action_refused_v4(agent, archived.unwrap_err())
     val facts = host_agent_attach_facts_v4(parts, service.live_incarnation, service.live_epoch, service.not_after,
-        agent.clock_ms)
+        agent.clock_ms, service.monotonic_ms)
     val admitted = host_agent_attach_admit_core_v4(agent, holder, archived.unwrap(), source, facts)
     if admitted.is_err(): return host_agent_action_refused_v4(agent, admitted.unwrap_err())
     if admitted.unwrap(): return HostAgentActionApplyV4(agent: agent, replay: true, error: "")
@@ -1653,11 +1659,13 @@ fn host_agent_close_reply_v4(agent: HostLinuxServiceAgentV4, capacity: Option<Ho
 # R2, N's lender and the authority stay in the holder.
 # PR3b (13.5) order: C1 collector close; C2 ONE attachment release step BEFORE the wedged return (release-blocked
 # -> attachment-release-blocked, any other live attachment -> attachment-release-pending, and nothing later
-# runs); C3 wedged; C4 settle-pending; C5 probe record; C6 root loan end; C7 workload close. Close has no clock:
-# an RP expire answers `prepare-not-expired` (monotonic 0) and stays pending until the step driver expires it.
+# runs); C3 wedged; C4 settle-pending; C5 probe record; C6 root loan end; C7 workload close. Close takes
+# the caller's REAL monotonic clock for the RP expire (m23 P2-4: a constant would answer `prepare-not-expired`
+# forever once no step driver runs). C2 runs only for a LIVE attachment (m23 P2-3): a refused one holds nothing.
 # `capacity` is needed only for C2 (an attachment); a retried close after the service released it still runs C3..C7.
+# allow(primitive_api): reviewed monotonic clock DATA word (m23 P2-4)
 pub fn host_linux_service_agent_close_v4(agent: HostLinuxServiceAgentV4, capacity: Option<HostCapacityOwnerV1>,
-        store: HostHelperStoreV1) -> HostLinuxServiceAgentCloseV4:
+        store: HostHelperStoreV1, monotonic_ms: i64) -> HostLinuxServiceAgentCloseV4:
     var state = agent
     var current = capacity
     if state.workload_closed: return host_agent_close_reply_v4(state, current, true, "")
@@ -1673,9 +1681,12 @@ pub fn host_linux_service_agent_close_v4(agent: HostLinuxServiceAgentV4, capacit
         turns = turns + 1
     if state.collector.is_some(): return host_agent_close_reply_v4(state, current, false, "linux-host-agent-collector-close-pending")
     state = host_agent_copy_helper_dirs_v4(state)
-    if state.attachment.is_some():
+    # The invariant verdict runs for ANY attachment (a broken one stops the close); only a LIVE one needs C2.
+    val broken = host_agent_attachment_invariant_v4(state)
+    if broken != "": return host_agent_close_reply_v4(state, current, false, broken)
+    if host_agent_attachment_live_v4(state.attachment):
         if current.is_none(): return host_agent_close_reply_v4(state, current, false, "linux-host-service-acquisition-incomplete")
-        val context = HostAgentReleaseContextV4(capacity: current.unwrap(), store: store, monotonic_ms: 0)
+        val context = HostAgentReleaseContextV4(capacity: current.unwrap(), store: store, monotonic_ms: monotonic_ms)
         val port = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: host_agent_attachment_release_step_v4(call, context)
         val released = host_agent_attachment_close_v4(state, port)
         state = released.agent

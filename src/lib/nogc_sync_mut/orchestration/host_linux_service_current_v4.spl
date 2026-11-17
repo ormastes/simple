@@ -187,13 +187,6 @@ pub class HostLinuxServiceCurrentV4:
         if linux_service_current_bytes_v4(loaded.binding, self.scope.unwrap(), native, self.initial_epoch,
                 loaded.claim_digest, capacity.journal)? != self.current_bytes:
             return Err("linux-host-service-current-binding-mismatch")
-        # 14.2: an opened helper store is rechecked on every call (it must still be the derived, valid store).
-        if self.helper_store != "":
-            val store = host_linux_helper_store_check_v1(capacity.journal.root)?
-            match store:
-                case HostLinuxHelperStoreStateV1.Valid(root):
-                    if root != self.helper_store: return Err("linux-helper-store-invalid")
-                case _: return Err("linux-helper-store-invalid")
         Ok(loaded.metadata)
 
     # Scope for correlation through the shared Host domain. Before startup it
@@ -363,7 +356,8 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
     val current = owner.current_v4()
     if current.is_err(): return linux_service_start_error_v4(owner, current.unwrap_err())
     # milestone_0022 14.2: the helper store opens AFTER the journal and BEFORE any attach (and before the
-    # reconcile). A refused store never fails startup: `helper_store` stays "" and an attach refuses.
+    # reconcile). A refused store never fails startup: `helper_store` stays "" and an attach refuses. Only a journal
+    # refusal row R that needs the store (an unsettled charged helper) still quarantines the ledger proof below.
     val store = host_linux_helper_store_open_v1(owner.capacity.unwrap().journal.root)
     if store.is_ok(): owner.helper_store = store.unwrap()
     # Fail-closed reconcile (milestone_0018 F, milestone_0019 M3), AFTER the
@@ -1087,9 +1081,27 @@ fn linux_service_close_reason_v4(error: text, fallback: text) -> text:
     fallback
 
 # 13.5: the helper store context of every agent step/close: the verified store root and this journal.
+# m23 item 3 (14.2): the opened store is rechecked HERE, per helper-dependent operation, never in current_v4. A store
+# that is no longer the derived, valid one is lent as unopened (root ""), so only attach / release / charged-state
+# checks refuse; status, prepare, execute and the helper evidence rows of other domains are unaffected.
 fn linux_service_helper_store_v4(owner: HostLinuxServiceCurrentV4) -> HostHelperStoreV1:
-    if owner.capacity.is_none(): return HostHelperStoreV1(root: owner.helper_store, journal: None)
-    HostHelperStoreV1(root: owner.helper_store, journal: Some(owner.capacity.unwrap().journal))
+    if owner.capacity.is_none(): return HostHelperStoreV1(root: "", journal: None)
+    val journal = owner.capacity.unwrap().journal
+    var root = ""
+    if owner.helper_store != "":
+        val checked = host_linux_helper_store_check_v1(journal.root)
+        if checked.is_ok():
+            match checked.unwrap():
+                case HostLinuxHelperStoreStateV1.Valid(valid):
+                    if valid == owner.helper_store: root = valid
+                case HostLinuxHelperStoreStateV1.Absent: ()
+    HostHelperStoreV1(root: root, journal: Some(journal))
+
+# The close-time monotonic clock (m23 P2-4): read from the installed policy of the loaded records, never a
+# constant. 0 only when the records were never loaded, in which case no attachment can exist.
+fn linux_service_close_monotonic_v4(owner: HostLinuxServiceCurrentV4) -> i64:
+    if owner.records.is_none(): return 0
+    host_local_context_v1(owner.records.unwrap().metadata.policy).monotonic_ms
 
 # Shutdown. `closed` is set first so no status/prepare/execute can follow.
 # Owner-bearing carriers stay ONLY in the returned owner: the journal owner is
@@ -1110,7 +1122,8 @@ pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostL
     var error = ""
     if val agent = owner.agent:
         if not agent.workload_closed:
-            val closed = host_linux_service_agent_close_v4(agent, owner.capacity, linux_service_helper_store_v4(owner))
+            val closed = host_linux_service_agent_close_v4(agent, owner.capacity, linux_service_helper_store_v4(owner),
+                linux_service_close_monotonic_v4(owner))
             owner.agent = Some(closed.agent)
             # The returned capacity owner is the single journal writer (13.5).
             if closed.capacity.is_some(): owner.capacity = closed.capacity
@@ -1137,11 +1150,13 @@ pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostL
             if error == "": error = linux_service_close_reason_v4(turn.error, "linux-host-service-journal-close-pending")
     elif not attachment_live and owner.capacity.is_some():
         if error == "": error = "linux-host-service-journal-cleanup-pending"
-    if owner.parent_reader.is_some():
+    # m23 P2-4: with a live attachment the readers stay open with the capacity owner and journal (one order: the
+    # readers are released only after the helper-settlement writer is).
+    if not attachment_live and owner.parent_reader.is_some():
         val closed = linux_protected_root_reader_close_v1(owner.parent_reader.unwrap())
         owner.parent_reader = closed.owner
         if not closed.completed and error == "": error = linux_service_close_reason_v4(closed.error, "linux-host-service-reader-close-pending")
-    if owner.root_reader.is_some():
+    if not attachment_live and owner.root_reader.is_some():
         val closed = linux_protected_root_reader_close_v1(owner.root_reader.unwrap())
         owner.root_reader = closed.owner
         if not closed.completed and error == "": error = linux_service_close_reason_v4(closed.error, "linux-host-service-reader-close-pending")

@@ -278,14 +278,20 @@ describe "V4 agent PR3b: deadlines the step driver enforces at running":
         expect(adopted.agent.attachment.unwrap().attach_stage).to_equal("revoked")
         expect(adopted.agent.stage).to_equal("running")
 
-    it "fixes the window-end cause with its marker digest, also for a run with no attachment":
-        # @req 14A F2 (outcome failed + window-end digest), P3-4 (legacy behaviour change)
+    it "fixes the window-end cause with its marker digest, and gives a run with no attachment its final Inspect first":
+        # @req 14A F2 (outcome failed + window-end digest); m23 item 2 (no attachment: Inspect before the stop)
         val refuse = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: l_refuse(call)
         val legacy = HostLinuxServiceAgentV4(operation_id: "op_1", stage: "running", clock_ms: 1000)
         val ended = host_agent_attachment_step_v4(legacy, 1000000, 1000000, refuse)
-        expect(ended.agent.stage).to_equal("stopping")
-        expect(ended.agent.outcome).to_equal("failed")
-        expect(ended.agent.exit_digest).to_equal(l_window_end(1000000, 1000000))
+        expect(ended.native).to_equal(true)
+        expect(ended.agent.stage).to_equal("running")
+        expect(ended.agent.stop_requested).to_equal(false)
+        step("a pending Inspect also drains first, and the window end is then recorded by the native Inspect step")
+        var pending = legacy
+        pending.pending = true
+        val drained = host_agent_attachment_step_v4(pending, 1000000, 1000000, refuse)
+        expect(drained.native).to_equal(true)
+        expect(drained.agent.stop_requested).to_equal(false)
         step("with a live attachment the same cause is fixed and the agent detaches first")
         val attached = host_agent_attachment_step_v4(l_agent("adopted"), 1000000, 1000000, refuse)
         expect(attached.agent.stage).to_equal("detach")

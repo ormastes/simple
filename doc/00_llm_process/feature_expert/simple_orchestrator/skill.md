@@ -287,9 +287,10 @@ available. These source paths and their manuals remain NOT_RUN.
   family per file).
 
 ## V4 agent attach/detach machine — milestone_0021 PR3b part 1 (2026-11-17, specs NOT_RUN)
-- Behaviour change (14A F2), also for a run with NO attachment: at the signed window end the step driver stops
-  WITHOUT a final Inspect and fixes outcome `failed` + the window-end marker digest, even if the workload already
-  exited 0 (before PR3b: `succeeded` + the exit digest). Owner note belongs in the PR body.
+- Window end (14A F2): with a LIVE attachment the step driver stops at the signed window end and fixes outcome
+  `failed` + the window-end marker digest. A run with NO live attachment keeps its final Inspect (m23, 2026-11-17):
+  the attachment step answers `native` so the Inspect records the exit first (`succeeded`/exit digest when the
+  workload exited), and the window-end marker only when it still runs. (PR3b part 1 had dropped that Inspect.)
 - Entries: `host_agent_attach_apply_v4` / `host_agent_detach_apply_v4` are the ONLY signed entries (decode ->
   authorize -> 14C check -> pure check -> archive no-replace + read-back -> consume -> effects); the archive writer
   is private. The attach packet NAMES `planDigest`/`paneBindingDigest`; the signature covers those, and bytes that
@@ -312,8 +313,20 @@ available. These source paths and their manuals remain NOT_RUN.
   BEFORE the archive, so no attachment is created in production yet.
 - Write-back: ports lend `agent.container` and return `container`/`capacity`; every caller adopts the capacity (single
   journal writer). `step_v4`/`close_v4` take `HostHelperStoreV1(helper_store, Some(capacity.journal))`;
-  `helper_store` is opened at `start_v4` and rechecked in `current_v4()`.
-- Close C2 runs one release step before the wedged return; the service close keeps the capacity owner and journal
-  open while an attachment is live. Pane io reads ONLY via `container_primary_output_read_v1` (eof sticky).
-- Trap: `prepare_deadline_ms` is monotonic but the agent clock is the grant clock; the part-1 facts check compares
-  across the two. Bug record: `doc/08_tracking/bug/v4_attach_helper_charge_held_without_records_2026-11-17.md`.
+  `helper_store` is opened at `start_v4`; m23 (2026-11-17): it is NOT rechecked in `current_v4()` any more. The
+  recheck is `linux_service_helper_store_v4(owner)`, per helper-dependent operation, lending root "" (unopened) when
+  the store is no longer the derived valid one; the helper evidence arm confines an unusable store to attach-domain
+  rows (a journal-only connection row, PC without R/X, keeps its connection evidence; R/X beside PC stays Err).
+- Close C2 runs one release step before the wedged return, only for a LIVE attachment, with the caller's real
+  monotonic clock (`linux_service_close_monotonic_v4`); the service close keeps the capacity owner, journal AND both
+  protected readers open while an attachment is live. Pane io reads ONLY via `container_primary_output_read_v1` (eof sticky).
+- Clocks (m23 P2-5, fixed): facts carry `now` (grant clock, `not_after`) and `monotonic_ms` (receipt prepare
+  deadline); the attachment stores the deadline converted to the grant clock (`host_agent_attach_grant_deadline_v4`),
+  so every attachment bound runs on the grant clock; the expire core still reads the receipt's own monotonic deadline.
+  Attach is STILL refused before archive (m23 item 4 BLOCKED, see below).
+- m23 item 4 Blocked (all-or-nothing, nothing landed unreachable): the packet needs a signed `host_helper_execute_v1`
+  grant inside the signed payload (verify like cancel, issuer == controller_ref, re-verified fresh by
+  `host_helper_begin_checked_v1`), a strict `ContainerStreamPolicyV2` decoder (only a digest function exists in
+  `stream_v2.spl`), a read-only live epoch derived from the verified epoch record, and the OP prepare->begin->open
+  chain with a release context carrying policy, scope and refresh. Binding the attach arm before the OP chain exists
+  would archive, consume the one-per-incarnation slot and end refused. Bug record: `doc/08_tracking/bug/v4_attach_helper_charge_held_without_records_2026-11-17.md`.
