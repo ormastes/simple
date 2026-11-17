@@ -100,6 +100,17 @@ impl MirLowering:
                 case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
                     self.runtime_array_locals[local.id] = true
                     self.mark_runtime_value_local(local.id)
+                case HirTypeKind.Named(result_owner, _):
+                    # A record result (`core.read_pixels_region(..)` ->
+                    # `Engine2DReadback`) needs its layout owner, same as the
+                    # indirect-call result arm: without it a projection
+                    # `.pixels` on this local never takes the declared-field
+                    # path, so the `[u32]` field lost its runtime-array mark
+                    # and `.slice` fell to the runtime fallback.
+                    if val result_declaration = self.symbols.get_symbol_raw(result_owner.id):
+                        val result_layout_key = self.declared_struct_layout_key(self.composite_layout_key(result_declaration))
+                        if self.struct_field_order.has(result_layout_key):
+                            self.struct_value_syms[local.id] = result_layout_key
                 case _: ()
             if self.native_trait_owner_for_type(marked) != "":
                 val result_mir_type = self.local_mir_type_of(local)
