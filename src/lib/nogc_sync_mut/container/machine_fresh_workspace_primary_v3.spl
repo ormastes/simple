@@ -22,6 +22,14 @@ use std.common.build_manager.group_process_stream_profile_v3.group_process_cpu_q
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
 use std.common.contracts.container.workspace_preparation_window_v3.container_workspace_launch_expiry_v3
+use std.common.contracts.container.primary_open_refusal_v1.ContainerPrimaryOpenRefusalV1
+
+# milestone_0022 N3 (DESIGN 16, 17(B)): the typed open reply. `spawn` is the actual
+# native output (owners retained exactly as before); `refusal` types WHY no native
+# owner exists, so only provably pre-custody or retired refusals authorize R.
+pub struct ContainerPrimaryOpenResultV1:
+    spawn: PipedProcessOwnedSpawnV2
+    refusal: ContainerPrimaryOpenRefusalV1
 
 pub(package) fn machine_workspace_primary_plan_v3(custody: LinuxFreshEpochSuccessorCustodyV1,
         state: MachineFreshWorkloadLifecycleV2, request: ContainerExecutionRequestV2,
@@ -75,16 +83,40 @@ pub(package) fn machine_workspace_primary_open_v3(storage: MachineStorageOwnerV1
         custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
         generation: i64, request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
         plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
-        policy: ContainerStreamPolicyV2) -> PipedProcessOwnedSpawnV2:
+        policy: ContainerStreamPolicyV2) -> ContainerPrimaryOpenResultV1:
+    # 17(A): a retained custody (an earlier attempt) is never NoCustody.
+    if machine_workspace_primary_custody_probe_v3(state) == "present":
+        return ContainerPrimaryOpenResultV1(spawn: PipedProcessOwnedSpawnV2.Rejected("workspace-primary-already-attempted"),
+            refusal: ContainerPrimaryOpenRefusalV1.CustodyAdvanced("already-attempted"))
     val actual = machine_workspace_primary_open_inner_v3(storage, custody, state, generation, request, expected, plan, helper, policy)
-    if actual.is_err(): return PipedProcessOwnedSpawnV2.Rejected(actual.unwrap_err())
+    if actual.is_err():
+        return ContainerPrimaryOpenResultV1(spawn: PipedProcessOwnedSpawnV2.Rejected(actual.unwrap_err()),
+            refusal: machine_workspace_primary_refusal_of_v3(machine_workspace_primary_custody_probe_v3(state), actual.unwrap_err()))
     actual.unwrap()
+
+# Observed custody: "present", "absent" (ONLY the exact absence refusal), or
+# "unknown:<reason>" (stale slot, entry failure: custody cannot be ruled out).
+fn machine_workspace_primary_custody_probe_v3(state: MachineFreshWorkloadLifecycleV2) -> text:
+    match state.primary_custody_v3():
+        case Ok(_): "present"
+        case Err(reason):
+            if reason == "workspace-primary-custody-required": return "absent"
+            "unknown:" + reason
+
+# One rule for every `?` of the inner open (17(A)): the OBSERVED custody decides,
+# not the textual position of the error. Custody is captured right after
+# `action_begin_v2` succeeds (which mutates nothing when it refuses), so an error
+# with PROVABLY no custody is before any provider custody (NoCustody); present or
+# unknown custody fails closed (CustodyAdvanced): the charge follows custody retirement.
+fn machine_workspace_primary_refusal_of_v3(custody: text, reason: text) -> ContainerPrimaryOpenRefusalV1:
+    if custody == "absent": return ContainerPrimaryOpenRefusalV1.NoCustody
+    ContainerPrimaryOpenRefusalV1.CustodyAdvanced(reason)
 
 fn machine_workspace_primary_open_inner_v3(storage: MachineStorageOwnerV1,
         custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
         generation: i64, request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
         plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
-        policy: ContainerStreamPolicyV2) -> Result<PipedProcessOwnedSpawnV2, text>:
+        policy: ContainerStreamPolicyV2) -> Result<ContainerPrimaryOpenResultV1, text>:
     val current = machine_workspace_primary_plan_v3(custody, state, request, expected,
         plan.identity, policy, plan.resources, plan.terminal_mode)?
     if container_primary_attach_plan_encode_v1(current)? != container_primary_attach_plan_encode_v1(plan)?:
@@ -136,9 +168,13 @@ fn machine_workspace_primary_open_inner_v3(storage: MachineStorageOwnerV1,
             # Only the actual post-consumption IO Rejected result establishes
             # no native helper obligation. Earlier/ambiguous publication errors
             # never enter this completion path or free the workload charge.
+            # Only a CONFIRMED retirement types the refusal SpawnRejectedRetired (16).
             val recorded = primary_publish_retired_v3(Some(storage), state)
-        case _: pass
-    Ok(spawned)
+            if recorded.is_err():
+                return Ok(ContainerPrimaryOpenResultV1(spawn: spawned,
+                    refusal: ContainerPrimaryOpenRefusalV1.CustodyAdvanced(recorded.unwrap_err())))
+            Ok(ContainerPrimaryOpenResultV1(spawn: spawned, refusal: ContainerPrimaryOpenRefusalV1.SpawnRejectedRetired))
+        case _: Ok(ContainerPrimaryOpenResultV1(spawn: spawned, refusal: ContainerPrimaryOpenRefusalV1.NotRefused))
 
 pub(package) fn machine_workspace_primary_handoff_v3(state: MachineFreshWorkloadLifecycleV2,
         session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
@@ -214,7 +250,7 @@ pub struct MachineWorkspacePrimarySessionBindingDataV3:
 
 pub enum MachineWorkspacePrimaryReplyV3:
     Plan(Result<ContainerPrimaryAttachPlanV1, text>)
-    Spawn(PipedProcessOwnedSpawnV2)
+    Spawn(ContainerPrimaryOpenResultV1)
     Completion(Result<(), text>)
     Retirement(Result<MachineWorkspacePrimaryRetirementDataV3, text>)
     SessionBinding(Result<MachineWorkspacePrimarySessionBindingDataV3, text>)
@@ -228,7 +264,10 @@ pub(package) fn machine_workspace_primary_requires_live_v3(call: MachineWorkspac
 pub(package) fn machine_workspace_primary_rejected_v3(call: MachineWorkspacePrimaryCallV3, reason: text) -> MachineWorkspacePrimaryReplyV3:
     match call:
         case MachineWorkspacePrimaryCallV3.Plan(_, _, _, _, _, _): MachineWorkspacePrimaryReplyV3.Plan(Err(reason))
-        case MachineWorkspacePrimaryCallV3.Open(_, _, _, _, _): MachineWorkspacePrimaryReplyV3.Spawn(PipedProcessOwnedSpawnV2.Rejected(reason))
+        # Owner-stale / not-live refusals precede the provider entirely (16).
+        case MachineWorkspacePrimaryCallV3.Open(_, _, _, _, _):
+            MachineWorkspacePrimaryReplyV3.Spawn(ContainerPrimaryOpenResultV1(spawn: PipedProcessOwnedSpawnV2.Rejected(reason),
+                refusal: ContainerPrimaryOpenRefusalV1.NoCustody))
         case MachineWorkspacePrimaryCallV3.Retirement: MachineWorkspacePrimaryReplyV3.Retirement(Err(reason))
         case MachineWorkspacePrimaryCallV3.SessionBinding(_): MachineWorkspacePrimaryReplyV3.SessionBinding(Err(reason))
         case _: MachineWorkspacePrimaryReplyV3.Completion(Err(reason))

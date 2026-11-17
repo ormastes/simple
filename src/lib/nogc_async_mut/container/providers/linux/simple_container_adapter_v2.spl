@@ -41,6 +41,8 @@ use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, Contain
     container_stream_policy_digest_v2, container_output_plan_digest_v2, container_output_admission_validate_v2}
 use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_launch_template_v2
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, PipedProcessOwnedTransferV2}
+use std.nogc_sync_mut.container.machine_fresh_workspace_primary_v3.ContainerPrimaryOpenResultV1
+use std.common.contracts.container.primary_open_refusal_v1.ContainerPrimaryOpenRefusalV1
 use std.nogc_async_mut.container.terminal_session_v1.ContainerPrimaryAttachSessionV1
 use std.nogc_async_mut.container.workspace_primary_retirement_v3.{ContainerPrimaryTransportRetirementV3, ContainerPrimarySessionBindingV3}
 use std.common.contracts.container.output_capabilities_v2.ContainerOutputCapabilitiesV2
@@ -69,6 +71,12 @@ pub struct LinuxOciContainmentHostObservationV1:
     profile_digest: text
     runtime_digest: text
     containment_identity_digest: text
+
+# milestone_0022 N3 (17(B)): an adapter return BEFORE the provider call. Nothing was
+# spawned and no provider custody exists, so the refusal is typed NoCustody.
+fn primary_open_no_custody_v1(reason: text) -> ContainerPrimaryOpenResultV1:
+    ContainerPrimaryOpenResultV1(spawn: PipedProcessOwnedSpawnV2.Rejected(reason),
+        refusal: ContainerPrimaryOpenRefusalV1.NoCustody)
 
 fn _linux_container_scope_error_v2(scope: ContainerHostScopeV2) -> text:
     match container_host_scope_bytes_v2(scope):
@@ -598,35 +606,39 @@ impl LinuxSimpleContainerAdapterV2:
         plan.request_digest = container_primary_attach_plan_digest_v1(plan)?
         Ok(plan)
 
+    # milestone_0022 N3 (17(B)): typed reply. Every return before the provider call
+    # is NoCustody (nothing spawned, no custody); the legacy OCI provider result is
+    # untyped (NotRefused) and never authorizes the Host refusal record.
     pub me open_primary_attach_v1(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
             plan: ContainerPrimaryAttachPlanV1, helper: ContainerHelperAdmissionV2,
-            policy: ContainerStreamPolicyV2) -> PipedProcessOwnedSpawnV2:
+            policy: ContainerStreamPolicyV2) -> ContainerPrimaryOpenResultV1:
         if val actual = self._fresh: return actual.open_primary_attach_v3(request, expected, plan, helper, policy)
         if plan.containment_profile_digest != "" or plan.containment_identity_digest != "":
-            return PipedProcessOwnedSpawnV2.Rejected("primary-attach-containment-not-admitted")
+            return primary_open_no_custody_v1("primary-attach-containment-not-admitted")
         val original = match container_primary_attach_plan_encode_v1(plan):
             case Ok(value): value
-            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Err(reason): return primary_open_no_custody_v1(reason)
         val current = match self.primary_attach_plan_v1(request, expected, plan.identity, policy,
                 plan.resources, plan.terminal_mode):
             case Ok(value): value
-            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Err(reason): return primary_open_no_custody_v1(reason)
         val canonical = match container_primary_attach_plan_encode_v1(current):
             case Ok(value): value
-            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
-        if original != canonical: return PipedProcessOwnedSpawnV2.Rejected("primary-attach-plan-changed")
+            case Err(reason): return primary_open_no_custody_v1(reason)
+        if original != canonical: return primary_open_no_custody_v1("primary-attach-plan-changed")
         match container_primary_attach_admission_validate_v1(current, helper):
-            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Err(reason): return primary_open_no_custody_v1(reason)
             case Ok(_): pass
         val checked = match self._checked_request_v2(request):
             case Ok(value): value
-            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Err(reason): return primary_open_no_custody_v1(reason)
         var launch = current.launch_template
         var child = launch.request
         child.launch_deadline_unix_ms = helper.deadline.expires_at_unix_ms
         launch.request = child
-        self.provider.open_primary_attach_v1(checked.0, expected, current.provider_identity_digest,
-            current.terminal_mode, launch)
+        ContainerPrimaryOpenResultV1(spawn: self.provider.open_primary_attach_v1(checked.0, expected,
+            current.provider_identity_digest, current.terminal_mode, launch),
+            refusal: ContainerPrimaryOpenRefusalV1.NotRefused)
 
     pub fn primary_session_handoff_v3(session: ContainerPrimaryAttachSessionV1) -> Result<(), text>:
         if val actual = self._fresh: return actual.primary_session_handoff_v3(session)

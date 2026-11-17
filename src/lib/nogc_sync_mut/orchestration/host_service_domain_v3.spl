@@ -25,6 +25,7 @@ use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.build_manager.contracts.builder_identifier_valid_v1
 use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{host_agent_invoke_request_decode_v4, host_agent_cancel_request_decode_v4}
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attach_request_decode_v4, host_agent_detach_request_decode_v4}
 
 pub struct HostServiceDomainV3:
     local: HostLocalRootV3
@@ -167,14 +168,36 @@ fn host_service_agent_invoke_request_error_v3(request: HostServiceRequestV2) -> 
 # The PR3a cancel carries a controller-signed packet (HostAgentCancelRequestV4), not the invoke bytes: the same
 # bounds, and the signed packet must name the request's operation id. Signatures are verified by the owner.
 fn host_service_agent_cancel_request_error_v3(request: HostServiceRequestV2) -> text:
+    val framed = host_service_agent_frame_error_v3(request)
+    if framed != "": return framed
+    val decoded = host_agent_cancel_request_decode_v4(request.payload)
+    if decoded.is_err(): return decoded.unwrap_err()
+    if decoded.unwrap().operation_id != request.operation_id: return "host-service-agent-cancel-operation-mismatch"
+    ""
+
+fn host_service_agent_frame_error_v3(request: HostServiceRequestV2) -> text:
     if not builder_identifier_valid_v1(request.operation_id) or request.operation_id.byte_len() > HOST_SERVICE_MAX_OPERATION_BYTES_V2:
         return "host-service-operation-invalid"
     if request.payload.byte_len() == 0 or request.payload.byte_len() > HOST_SERVICE_MAX_PAYLOAD_BYTES_V2:
         return "host-service-payload-size"
     if request.payload.contains("\u{0}"): return "host-service-payload-nul"
-    val decoded = host_agent_cancel_request_decode_v4(request.payload)
-    if decoded.is_err(): return decoded.unwrap_err()
-    if decoded.unwrap().operation_id != request.operation_id: return "host-service-agent-cancel-operation-mismatch"
+    ""
+
+# milestone_0021 PR3b: attach/detach carry controller-signed packets naming the run; inspect names the run in
+# its payload (read-only). Each packet's operation id must equal the request's.
+fn host_service_agent_attachment_request_error_v3(request: HostServiceRequestV2) -> text:
+    val framed = host_service_agent_frame_error_v3(request)
+    if framed != "": return framed
+    var named = request.payload
+    if request.action == "host-agent-attach":
+        val attach = host_agent_attach_request_decode_v4(request.payload)
+        if attach.is_err(): return attach.unwrap_err()
+        named = attach.unwrap().operation_id
+    elif request.action == "host-agent-detach":
+        val detach = host_agent_detach_request_decode_v4(request.payload)
+        if detach.is_err(): return detach.unwrap_err()
+        named = detach.unwrap().operation_id
+    if named != request.operation_id: return "host-service-agent-attachment-operation-mismatch"
     ""
 
 # EFFECT actions (invoke, and the PR3 cancel): an effect-attempted refusal maps to exit 2 with the recovery flag in
@@ -214,6 +237,15 @@ pub fn host_service_domain_turn_v3(owner: HostServiceDomainV3, request: HostServ
                 val cancel_recheck = local.current_v4()
                 if cancel_recheck.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, cancel_recheck.unwrap_err(), true))
                 return service_linux_agent_action_v3(local, request, "host_agent_cancel_v4")
+            if request.action == "host-agent-attach" or request.action == "host-agent-detach" or request.action == "host-agent-inspect":
+                val attachment_invalid = host_service_agent_attachment_request_error_v3(request)
+                if attachment_invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, attachment_invalid, false))
+                val attachment_recheck = local.current_v4()
+                if attachment_recheck.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, attachment_recheck.unwrap_err(), true))
+                var routed = "host_agent_inspect_v4"
+                if request.action == "host-agent-attach": routed = "host_agent_attach_v4"
+                if request.action == "host-agent-detach": routed = "host_agent_detach_v4"
+                return service_linux_agent_action_v3(local, request, routed)
             val invalid = host_service_request_error_v2(request)
             if invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, invalid, false))
             if request.action != "host-status" and request.action != "host-prepare":

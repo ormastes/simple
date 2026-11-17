@@ -1,0 +1,338 @@
+"""
+## Purpose and audience
+Pins the ONE composed signed attach entry of milestone_0021 PR3b (DESIGN 13.2, 14B, 14C) and its detach
+analogue, end to end over REAL packet bytes: a real `attach-broker` helper request, a real primary attach plan
+and a controller-signed pane binding, signed with real ed25519 keys, archived in a real temporary operation
+journal. Order under test: decode -> authorize (payload signed over the packet's NAMED plan/binding digests) ->
+14C `attach-binding-plan` -> pure transition check (replay / conflict) -> archive no-replace + read-back -> only
+then `attachment_consumed` and the `opening` attachment. Written for owners of the Linux Host service agent.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+The agent is DATA (no container), so the transfer holder is passed as "container" through
+`host_agent_attach_apply_core_v4`; the production `host_agent_attach_apply_v4` derives it and answers
+`attach-holder` here. GAP: a read-back that differs from what was just published needs a racing writer between
+the publish and the read inside one call and is not driven; a pre-seeded different archive (conflict) and a
+journal that cannot archive (nothing consumed) are.
+## Verification guidance and troubleshooting
+A case that reports `attachment_consumed == true` after any refusal means the slot was burnt without an archive.
+"""
+use std.spec.{step}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, container_primary_attach_plan_encode_v1,
+    container_primary_attach_plan_decode_v1, container_primary_attach_plan_digest_v1, host_agent_pane_binding_encode_v4,
+    host_agent_pane_binding_digest_v4}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_authority_snapshot_create_v2}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_encode_v1
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_open_v2, distributed_operation_journal_read_v3, distributed_operation_journal_publish_v3,
+    distributed_operation_journal_close_v2}
+use test.fixtures.orchestration.host_helper_fixture_v1.{host_helper_fixture_v1, host_helper_sibling_fixture_v1}
+use test.fixtures.orchestration.container_primary_attach_fixture_v1.container_primary_attach_fixture_v1
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachRequestV4, HostAgentDetachRequestV4,
+    HostAgentReleaseOutcomeV4, HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4,
+    host_agent_action_operation_v4, host_linux_service_agent_action_authorize_v4, host_agent_attach_payload_digest_v4,
+    host_agent_detach_payload_digest_v4, host_agent_attach_request_encode_v4, host_agent_attach_request_decode_v4,
+    host_agent_attach_request_parts_v4, host_agent_detach_request_encode_v4, host_agent_action_archive_v4,
+    host_agent_attach_archive_relative_v4, host_agent_detach_archive_relative_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServiceAgentV4, HostAgentActionAuthorityV4,
+    HostAgentAttachServiceV4, host_agent_attach_apply_core_v4, host_agent_attach_apply_v4, host_agent_detach_apply_v4}
+
+val AP_OP = "parent-operation"
+val AP_FENCE = "fence-1"
+
+fn ap_seed(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn ap_text_bytes(message: text) -> [u8]:
+    var out: [u8] = []
+    for i in 0..message.len(): out.push(message.byte_at(i) as u8)
+    out
+
+fn ap_key(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1, public_key: public_key,
+        principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: ["host_agent_attach_v4", "host_agent_detach_v4"],
+        maximum_memory_bytes: 2048, maximum_duration_ms: 2000, policy_revision: 4, revocation_epoch: 2,
+        expires_at: 300, revoked: false)
+
+fn ap_execute() -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: AP_OP, payload_digest: "b".repeat(64), principal: "user_1", project: "project_1",
+        host_id: "worker_1", operation: "host_execute_associated_v3", environment_digest: "a".repeat(64),
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3, memory_bytes: 512, duration_ms: 500)
+
+fn ap_context() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: 100, monotonic_ms: 0, policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3)
+
+fn ap_association() -> text:
+    sha256_text("association-a")
+
+struct ApSigned:
+    operation: OperationEnvelopeV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+fn ap_sign(kind: text, payload: text) -> ApSigned:
+    val operation = host_agent_action_operation_v4(kind, ap_execute(), payload, ap_context()).unwrap()
+    val grant = ExecutionGrantV2(id: "grant_" + kind, principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: [kind], environment_digest: "a".repeat(64), policy_revision: 4, revocation_epoch: 2,
+        expires_at: 200, maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: "issuer_1", key_revision: 1, signature: [])
+    signed.signature = pure_ed25519_sign_from_seed_v1(ap_seed(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = DistributedSignedApprovalV2(approver_id: "approver_1", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(), request_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()),
+        policy_revision: 4, session_generation: 3, expires_at: 190, signature: [])
+    approval.signature = pure_ed25519_sign_from_seed_v1(ap_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    ApSigned(operation: operation, signed: signed, approval: approval)
+
+var AP_SNAPSHOT: [DistributedAuthoritySnapshotV2] = []
+
+fn ap_snapshot() -> DistributedAuthoritySnapshotV2:
+    if AP_SNAPSHOT.len() == 0:
+        val issuer = pure_ed25519_sign_from_seed_v1(ap_seed(1), ap_text_bytes("k")).public_key
+        val approver = pure_ed25519_sign_from_seed_v1(ap_seed(65), ap_text_bytes("k")).public_key
+        AP_SNAPSHOT = [distributed_authority_snapshot_create_v2([ap_key("issuer_1", "grant-issuer", issuer),
+            ap_key("approver_1", "human-approver", approver)], 1, 4, 2).unwrap()]
+    AP_SNAPSHOT[0]
+
+fn ap_authority() -> HostAgentActionAuthorityV4:
+    HostAgentActionAuthorityV4(snapshot: ap_snapshot(), controller_ref: "issuer_1", execute_operation: ap_execute(),
+        execute_association_digest: ap_association(), context: ap_context())
+
+# Real packet ingredients, built once: two `attach-broker` helper requests (siblings with real signatures) and the
+# primary attach plan fixture, whose identity names AP_OP as its parent.
+struct ApBytes:
+    helper: text
+    other_helper: text
+    plan: text
+    other_plan: text
+
+var AP_BYTES: [ApBytes] = []
+
+fn ap_bytes() -> ApBytes:
+    if AP_BYTES.len() == 0:
+        var fixture = host_helper_fixture_v1()
+        fixture.request.plan.helper_kind = "attach-broker"
+        val first = host_helper_sibling_fixture_v1(fixture, fixture.owner, "helper_attach_1")
+        val second = host_helper_sibling_fixture_v1(fixture, fixture.owner, "helper_attach_2")
+        val plan = container_primary_attach_fixture_v1()
+        var other = container_primary_attach_fixture_v1()
+        other.policy_digest = "8".repeat(64)
+        other.request_digest = ""
+        other.request_digest = container_primary_attach_plan_digest_v1(other).unwrap()
+        AP_BYTES = [ApBytes(helper: host_helper_request_encode_v1(first.request).unwrap(),
+            other_helper: host_helper_request_encode_v1(second.request).unwrap(),
+            plan: container_primary_attach_plan_encode_v1(plan).unwrap(),
+            other_plan: container_primary_attach_plan_encode_v1(other).unwrap())]
+    AP_BYTES[0]
+
+fn ap_binding(pane: text) -> HostAgentPaneBindingV4:
+    HostAgentPaneBindingV4(binding_uid: "binding-a", service_incarnation: "a".repeat(32), session_id: "session-a",
+        window_id: "window-a", pane_id: pane, service_epoch: 3)
+
+fn ap_plan_digest(plan: text) -> text:
+    container_primary_attach_plan_digest_v1(container_primary_attach_plan_decode_v1(plan).unwrap()).unwrap()
+
+# A packet carrying the given bytes, whose NAMED digests (the ones the signature covers) are given separately.
+fn ap_request(helper: text, plan: text, binding: text, plan_digest: text, binding_digest: text) -> HostAgentAttachRequestV4:
+    val payload = host_agent_attach_payload_digest_v4(AP_OP, ap_association(), plan_digest, sha256_text(helper), binding_digest)
+    val proof = ap_sign("host_agent_attach_v4", payload)
+    HostAgentAttachRequestV4(operation_id: AP_OP, association_digest: ap_association(), operation: proof.operation,
+        signed: proof.signed, approval: proof.approval, helper_request: helper, plan: plan, pane_binding: binding,
+        plan_digest: plan_digest, pane_binding_digest: binding_digest)
+
+# The honest packet for pane `pane`: every named digest is the digest of the bytes it travels with.
+fn ap_good(pane: text) -> HostAgentAttachRequestV4:
+    val bytes = ap_bytes()
+    ap_request(bytes.helper, bytes.plan, host_agent_pane_binding_encode_v4(ap_binding(pane)).unwrap(),
+        ap_plan_digest(bytes.plan), host_agent_pane_binding_digest_v4(ap_binding(pane)).unwrap())
+
+fn ap_agent() -> HostLinuxServiceAgentV4:
+    HostLinuxServiceAgentV4(operation_id: AP_OP, association_digest: ap_association(), payload_digest: "b".repeat(64),
+        stage: "running", reserved: true, observed: true, clock_ms: 500)
+
+# A fresh journal per case (a root owned by a live journal cannot be opened twice).
+fn ap_journal(tag: text) -> DistributedOperationJournalV2:
+    distributed_operation_journal_open_v2(secure_temp_dir("/tmp", "pr3b-apply-" + tag).unwrap() + "/journal",
+        "a".repeat(64), "b".repeat(64), 32).unwrap()
+
+fn ap_service(journal: DistributedOperationJournalV2) -> HostAgentAttachServiceV4:
+    HostAgentAttachServiceV4(journal: journal, fence: AP_FENCE, live_incarnation: "a".repeat(32), live_epoch: 3,
+        not_after: 1000000, policy_bytes: "policy-bytes", store_root: "/trusted/helper-store")
+
+fn ap_progress(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4:
+    var att = call.attachment
+    if att.attach_stage == "revoked": att.attach_stage = "cleaned"
+    HostAgentAttachmentReleaseStepV4(attachment: att, outcome: HostAgentReleaseOutcomeV4.Progress, error: "")
+
+describe "V4 agent PR3b: the attach packet over real bytes":
+    it "encodes, decodes canonically and recomputes its parts from its own bytes":
+        # @req 13.2 (packet), 14B (paneBindingDigest), 14C (named plan/binding digests)
+        val request = ap_good("pane-a")
+        val wire = host_agent_attach_request_encode_v4(request).unwrap()
+        val decoded = host_agent_attach_request_decode_v4(wire).unwrap()
+        expect(host_agent_attach_request_encode_v4(decoded).unwrap()).to_equal(wire)
+        expect(host_agent_attach_request_decode_v4(wire + " ").is_err()).to_equal(true)
+        val parts = host_agent_attach_request_parts_v4(decoded).unwrap()
+        expect(parts.plan_digest).to_equal(request.plan_digest)
+        expect(parts.binding_digest).to_equal(request.pane_binding_digest)
+        expect(parts.helper_request_digest).to_equal(sha256_text(request.helper_request))
+        expect(parts.payload_digest).to_equal(request.operation.payload_digest)
+        expect(parts.helper.plan.helper_kind).to_equal("attach-broker")
+        expect(parts.plan.identity.parent_operation_id).to_equal(AP_OP)
+
+    it "refuses a helper request, plan or pane binding swapped after signing, with real digests":
+        # @req H-04, 14C (attach-binding-plan before archive)
+        val bytes = ap_bytes()
+        val good = ap_good("pane-a")
+        step("a swapped helper request changes the recomputed payload: the signature no longer covers it")
+        var helper_swap = good
+        helper_swap.helper_request = bytes.other_helper
+        expect(host_agent_attach_request_encode_v4(helper_swap).unwrap_err()).to_equal("linux-host-agent-attach-operation-mismatch")
+        val swapped_parts = host_agent_attach_request_parts_v4(helper_swap).unwrap()
+        val refused = host_linux_service_agent_action_authorize_v4("host_agent_attach_v4", ap_snapshot(), "issuer_1",
+            AP_OP, ap_association(), good.operation, good.signed, good.approval, swapped_parts.payload_digest, ap_execute(),
+            ap_association(), AP_OP, ap_association(), ap_context())
+        expect(refused.unwrap_err()).to_equal("linux-host-agent-attach-operation-mismatch")
+        step("plan or binding bytes swapped while the signed named digests stay: attach-binding-plan, nothing archived")
+        val journal = ap_journal("swap")
+        for which in ["plan", "binding"]:
+            var swapped = good
+            if which == "plan":
+                swapped.plan = bytes.other_plan
+            else:
+                swapped.pane_binding = host_agent_pane_binding_encode_v4(ap_binding("pane-b")).unwrap()
+            val wire = host_agent_attach_request_encode_v4(swapped).unwrap()
+            val applied = host_agent_attach_apply_core_v4(ap_agent(), "container", wire, ap_authority(), ap_service(journal))
+            expect(applied.error).to_equal("attach-binding-plan")
+            expect(applied.agent.attachment_consumed).to_equal(false)
+            expect(applied.agent.attachment.is_none()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP),
+            1048576).unwrap().is_none()).to_equal(true)
+        step("naming the swapped digests too breaks the signature instead")
+        var renamed = good
+        renamed.pane_binding = host_agent_pane_binding_encode_v4(ap_binding("pane-b")).unwrap()
+        renamed.pane_binding_digest = host_agent_pane_binding_digest_v4(ap_binding("pane-b")).unwrap()
+        expect(host_agent_attach_request_encode_v4(renamed).unwrap_err()).to_equal("linux-host-agent-attach-operation-mismatch")
+
+describe "V4 agent PR3b: the composed attach entry (13.2 order)":
+    it "archives, reads back, and only then consumes the slot and opens the attachment":
+        # @req 13.2 (authorize -> pure check -> archive + read-back -> consumed -> effects), H-12, H-14
+        val journal = ap_journal("apply")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        val applied = host_agent_attach_apply_core_v4(ap_agent(), "container", wire, ap_authority(), ap_service(journal))
+        expect(applied.error).to_equal("")
+        expect(applied.replay).to_equal(false)
+        expect(distributed_operation_journal_read_v3(journal, host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP),
+            1048576).unwrap().unwrap()).to_equal(wire)
+        expect(applied.agent.attachment_consumed).to_equal(true)
+        val att = applied.agent.attachment.unwrap()
+        expect(att.attach_stage).to_equal("opening")
+        expect(att.attach_pending).to_equal(true)
+        expect(att.attach_digest).to_equal(sha256_text(wire))
+        expect(att.binding.unwrap().pane_id).to_equal("pane-a")
+        expect(att.store_root).to_equal("/trusted/helper-store")
+        expect(att.not_after).to_equal(1000000)
+        step("the exact archived bytes are a replay answered from state: nothing changes")
+        val replay = host_agent_attach_apply_core_v4(applied.agent, "container", wire, ap_authority(), ap_service(journal))
+        expect(replay.error).to_equal("")
+        expect(replay.replay).to_equal(true)
+        expect(replay.agent.attachment.unwrap().attach_digest).to_equal(sha256_text(wire))
+        step("a different, correctly signed packet after the slot is consumed is refused")
+        val second = host_agent_attach_request_encode_v4(ap_good("pane-b")).unwrap()
+        expect(host_agent_attach_apply_core_v4(applied.agent, "container", second, ap_authority(),
+            ap_service(journal)).error).to_equal("attach-consumed")
+
+    it "refuses before the archive and leaves the slot usable":
+        # @req H-07, H-13, H-22, 13.0 (one holder)
+        val journal = ap_journal("refuse")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        var pending = ap_agent()
+        pending.pending = true
+        val busy = host_agent_attach_apply_core_v4(pending, "container", wire, ap_authority(), ap_service(journal))
+        expect(busy.error).to_equal("attach-native-pending")
+        expect(busy.agent.attachment_consumed).to_equal(false)
+        step("the production entry derives the holder: a data-only agent holds no container")
+        expect(host_agent_attach_apply_v4(ap_agent(), wire, ap_authority(), ap_service(journal)).error).to_equal("attach-holder")
+        step("a different packet already in the slot is a conflict; nothing is consumed")
+        val relative = host_agent_attach_archive_relative_v4(AP_FENCE, AP_OP)
+        expect(distributed_operation_journal_publish_v3(journal, relative, "racing-writer-bytes\n").unwrap()).to_equal(true)
+        val conflict = host_agent_attach_apply_core_v4(ap_agent(), "container", wire, ap_authority(), ap_service(journal))
+        expect(conflict.error).to_equal("attach-packet-conflict")
+        expect(conflict.agent.attachment_consumed).to_equal(false)
+        step("an unsigned packet never reaches the archive")
+        var unsigned = ap_good("pane-a")
+        unsigned.signed.signature = []
+        unsigned.approval.signature = []
+        val clean = ap_journal("unsigned")
+        val refused = host_agent_attach_apply_core_v4(ap_agent(), "container",
+            host_agent_attach_request_encode_v4(unsigned).unwrap(), ap_authority(), ap_service(clean))
+        expect(refused.error).to_equal("SIGNATURE_INVALID")
+        expect(distributed_operation_journal_read_v3(clean, relative, 1048576).unwrap().is_none()).to_equal(true)
+
+    it "consumes nothing when the journal cannot archive":
+        # @req 13.2 (consumed only after the archive is read back)
+        val journal = ap_journal("closed")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        expect(distributed_operation_journal_close_v2(journal).is_ok()).to_equal(true)
+        val applied = host_agent_attach_apply_core_v4(ap_agent(), "container", wire, ap_authority(), ap_service(journal))
+        expect(applied.error == "").to_equal(false)
+        expect(applied.agent.attachment_consumed).to_equal(false)
+        expect(applied.agent.attachment.is_none()).to_equal(true)
+
+describe "V4 agent PR3b: the archive helper and the composed detach entry":
+    it "publishes no-replace and reads back: same bytes pass, different bytes are a conflict":
+        # @req 13.2 (archive no-replace + read-back), F5
+        val journal = ap_journal("archive")
+        val relative = host_agent_detach_archive_relative_v4(AP_FENCE, AP_OP)
+        expect(host_agent_action_archive_v4(journal, relative, "packet-1\n", "detach-stage").is_ok()).to_equal(true)
+        expect(host_agent_action_archive_v4(journal, relative, "packet-1\n", "detach-stage").is_ok()).to_equal(true)
+        expect(host_agent_action_archive_v4(journal, relative, "packet-2\n", "detach-stage").unwrap_err()).to_equal("detach-stage")
+        expect(distributed_operation_journal_read_v3(journal, relative, 65536).unwrap().unwrap()).to_equal("packet-1\n")
+
+    it "archives a signed detach bound to this attachment, replays it, and refuses another attachment's digest":
+        # @req H-03 (detach), H-18, 14A F5, P2-2 (detach check compares the packet attach digest)
+        val journal = ap_journal("detach")
+        val wire = host_agent_attach_request_encode_v4(ap_good("pane-a")).unwrap()
+        var agent = host_agent_attach_apply_core_v4(ap_agent(), "container", wire, ap_authority(), ap_service(journal)).agent
+        var att = agent.attachment.unwrap()
+        att.attach_stage = "adopted"
+        att.attach_pending = false
+        agent.attachment = Some(att)
+        val port = fn(call: HostAgentAttachmentPortCallV4) -> HostAgentAttachmentReleaseStepV4: ap_progress(call)
+        step("a detach naming another attachment's digest is refused before its archive")
+        val foreign_digest = sha256_text("another-attach-packet")
+        val foreign_proof = ap_sign("host_agent_detach_v4", host_agent_detach_payload_digest_v4(AP_OP, ap_association(), foreign_digest))
+        val foreign = host_agent_detach_request_encode_v4(HostAgentDetachRequestV4(operation_id: AP_OP,
+            association_digest: ap_association(), attach_digest: foreign_digest, operation: foreign_proof.operation,
+            signed: foreign_proof.signed, approval: foreign_proof.approval)).unwrap()
+        expect(host_agent_detach_apply_v4(agent, foreign, ap_authority(), journal, AP_FENCE, port).error).to_equal("detach-attach-digest")
+        val relative = host_agent_detach_archive_relative_v4(AP_FENCE, AP_OP)
+        expect(distributed_operation_journal_read_v3(journal, relative, 65536).unwrap().is_none()).to_equal(true)
+        step("the bound detach is archived and runs d1 (revoke)")
+        val proof = ap_sign("host_agent_detach_v4", host_agent_detach_payload_digest_v4(AP_OP, ap_association(), sha256_text(wire)))
+        val detach = host_agent_detach_request_encode_v4(HostAgentDetachRequestV4(operation_id: AP_OP,
+            association_digest: ap_association(), attach_digest: sha256_text(wire), operation: proof.operation,
+            signed: proof.signed, approval: proof.approval)).unwrap()
+        val first = host_agent_detach_apply_v4(agent, detach, ap_authority(), journal, AP_FENCE, port)
+        expect(first.error).to_equal("")
+        expect(first.replay).to_equal(false)
+        expect(first.agent.attachment.unwrap().attach_stage).to_equal("revoked")
+        expect(distributed_operation_journal_read_v3(journal, relative, 65536).unwrap().unwrap()).to_equal(detach)
+        step("the exact replay is idempotent and proceeds with the same release step")
+        val again = host_agent_detach_apply_v4(first.agent, detach, ap_authority(), journal, AP_FENCE, port)
+        expect(again.replay).to_equal(true)
+        expect(again.agent.attachment.unwrap().attach_stage).to_equal("cleaned")

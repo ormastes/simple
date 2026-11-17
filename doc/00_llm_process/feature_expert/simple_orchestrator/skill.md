@@ -237,3 +237,83 @@ available. These source paths and their manuals remain NOT_RUN.
 - `check-continuity-proven-setters.shs` also counts positional `HostCapacityLedgerV1(` constructions, using a
   paren-depth scan across lines. Multi-line named constructions are therefore fine, but a `)` inside a string can
   skew the scan.
+
+## V4 primary-attach cancel — milestone_0022 N3 (2026-11-17, specs NOT_RUN)
+- Authority: `DESIGN.md` of `.spipe/simple_orchestrator/continuation_20261116/milestone_0022_native_attach/` sections 13.3-17.
+  Code: `host_linux_helper_store_v1.spl` (R/X codec, full checks, entry guard, AttachCancelled evidence),
+  `host_helper_settlement_commit_v1.spl` (cancel commit and `host_helper_cancel_unconsumed_v1`),
+  `host_linux_service_current_v4.spl` (`host_linux_service_helper_cancel_resume_v4`).
+- A cancel is authorized only by a JOURNAL refusal R (`host-helper-primary-refusal/`). The store copy is a mirror.
+  Publish order is always journal first, mirror second, for R and for X. Both publishes are idempotent.
+- The provider types the refusal (`ContainerPrimaryOpenRefusalV1`) by OBSERVED custody. Only the exact
+  `workspace-primary-custody-required` absence counts as NoCustody; stale or unknown custody fails closed to
+  CustodyAdvanced. Only NoCustody or SpawnRejectedRetired may write R.
+- The startup resume runs before the reconcile flip. Its owner is adopted even on error. A row error sets
+  `reconcile_error` and skips the flip, which quarantines the whole service.
+- Charged forever (fail closed until an operator acts): `{}`, `{PA}` alone, any failed open after
+  `action_begin_v2`, a crash before the R write, a failed post-consume R publish, R/X with an invalid store,
+  a mirror that differs from the journal, and a permanent X settle failure.
+
+## V4 primary-attach output read — milestone_0022 N4 (2026-11-17, specs NOT_RUN)
+- `container_primary_output_read_v1(session) -> ContainerPrimaryOutputReadV1 {session, chunks, eof, error}` lives in
+  `terminal_session_v2.spl` (NOT v1: v2 already imports v1, so v1 calling `container_terminal_read_v2` would be an
+  import cycle). Gate order: adoption, then not native_cleaned, then one `container_terminal_read_v2` call. No max
+  parameter: one call = one non-blocking read <= PIPED_RAW_CAP 8192 raw bytes (text cap 3*(cap+3)). Write the
+  returned session back. Sticky eof belongs to the agent attachment (PR3b), not the session.
+- Invalid UTF-8 is an existing transport property: the stream fails with `process_stdout_failed`.
+- Write/geometry are NOT re-implemented: `container_primary_input_write_v1` (adoption + 4096 B) and
+  `container_primary_geometry_authorized_v1` (adoption) already gate. Section 5's `container_primary_resize_v1` is
+  superseded by the container-owned geometry path (sections 10.3/11).
+- Pane binding (milestone_0021 14B): `HostAgentPaneBindingV4 {binding_uid, service_incarnation, session_id,
+  window_id, pane_id, service_epoch}` + validate/encode/decode/digest/live_check live in
+  `common/contracts/container/primary_attach_v1.spl` (no smux import). Field rules mirror
+  `terminal_adoption_valid_v1` including `service_epoch > 0` (14C; `host-agent-pane-binding-epoch-invalid`).
+  Decode is strict + byte-exact re-encode; the codec spec pins golden canonical bytes + sha256 digest and the
+  exact refusal reason per branch. `live_check` returns `Result<(), text>`.
+- `host_agent_attach_adoption_v4(plan, binding, operation_id, lease_epoch)` and the apply helper
+  `host_agent_attach_adopt_v4(session, binding, operation_id, lease_epoch) -> ContainerPrimaryAttachAdoptionTurnV1`
+  live in `terminal_session_v2.spl`. Gates: binding valid, `0 <= lease_epoch < i64 max`
+  (`child_incarnation = 1 + lease_epoch`), `plan.identity.parent_operation_id == operation_id`, plan request digest
+  re-derives. The apply helper uses the session's retained plan and always returns the session.
+- 14C DROPPED 14B's `plan.identity.binding_digest == pane binding digest`: that field is the control-target binding
+  digest compared on every write/geometry (`primary_input_v1`). The plan<->binding pairing is the controller-signed
+  attach digest over `{planDigest, paneBindingDigest}`; PR3b refuses `attach-binding-plan` before archive.
+- Read wrapper specs: `primary_output_read_admitted_v4_spec` drives data/eof/write-back with a real UNOWNED
+  `/bin/sh` ref in the fixture session (owned v2 slot binding not exercised); the dead fixture ref (pid 71, owned
+  root) surfaces `stale_process_reference` on POSIX (`process_stdout_failed` on the non-POSIX stub).
+- PR3b owns: signature/authorize-kind verification of the binding, calling `host_agent_pane_binding_live_check_v4`
+  with the agent/service's own live incarnation/epoch, storing the binding on the attachment.
+- Specs: `test/01_unit/lib/nogc_async_mut/container/primary_terminal/` and `.../agent_pane_binding/` (one scenario
+  family per file).
+
+## V4 agent attach/detach machine — milestone_0021 PR3b part 1 (2026-11-17, specs NOT_RUN)
+- Behaviour change (14A F2), also for a run with NO attachment: at the signed window end the step driver stops
+  WITHOUT a final Inspect and fixes outcome `failed` + the window-end marker digest, even if the workload already
+  exited 0 (before PR3b: `succeeded` + the exit digest). Owner note belongs in the PR body.
+- Entries: `host_agent_attach_apply_v4` / `host_agent_detach_apply_v4` are the ONLY signed entries (decode ->
+  authorize -> 14C check -> pure check -> archive no-replace + read-back -> consume -> effects); the archive writer
+  is private. The attach packet NAMES `planDigest`/`paneBindingDigest`; the signature covers those, and bytes that
+  are not the named ones answer `attach-binding-plan` before archive.
+- Release port answers are finite by construction: `non_advancing` counts Wait / same-rank Progress (cap 64 -> RB
+  `attachment-no-progress`); only a wait while `pending` and the RP expire wait (bounded by prepare deadline + 5 s,
+  then RB `attachment-expire-overdue`) are uncounted. Part 2 must answer charged-forever states Blocked up front.
+
+## V4 agent attach/detach — milestone_0021 PR3b part 2 (2026-11-17, specs NOT_RUN)
+- Production release port `host_agent_attachment_release_step_v4(call, HostAgentReleaseContextV4{capacity,
+  store, monotonic_ms})`: RP expire (monotonic clock; `prepare-not-expired` = Wait, `reopen-required` = Blocked);
+  RV geometry cancel-then-drain (budget 1 ms per call); charged-forever classification (`host_agent_release_charged_v4`)
+  BEFORE U' (journal-R-bound `host_helper_cancel_unconsumed_v1`) or S (cleanup core -> settle core ->
+  `simple_container_primary_session_return_v3`, Wait while `pending`). FL: the machine asks the port to classify
+  (read-only); Blocked -> RB in the same call, else d1.
+- Fail-closed, NOT implemented: F/B (any `cleanup_spawn`) -> `...-fallback-release-unbound` (the
+  `quiesce_fallback_core_v3`/`settle_retired_core_v3` cores do not exist); the OP attach effects ->
+  `linux-host-agent-attach-helper-begin-grant-unbound` (helper begin needs its own signed `host_helper_execute_v1`
+  grant the 14B packet lacks; no ContainerStreamPolicyV2 decoder; no live epoch source). The cv4 attach arm refuses
+  BEFORE the archive, so no attachment is created in production yet.
+- Write-back: ports lend `agent.container` and return `container`/`capacity`; every caller adopts the capacity (single
+  journal writer). `step_v4`/`close_v4` take `HostHelperStoreV1(helper_store, Some(capacity.journal))`;
+  `helper_store` is opened at `start_v4` and rechecked in `current_v4()`.
+- Close C2 runs one release step before the wedged return; the service close keeps the capacity owner and journal
+  open while an attachment is live. Pane io reads ONLY via `container_primary_output_read_v1` (eof sticky).
+- Trap: `prepare_deadline_ms` is monotonic but the agent clock is the grant clock; the part-1 facts check compares
+  across the two. Bug record: `doc/08_tracking/bug/v4_attach_helper_charge_held_without_records_2026-11-17.md`.

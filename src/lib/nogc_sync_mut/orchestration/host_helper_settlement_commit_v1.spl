@@ -7,6 +7,13 @@ use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.crypto.sha256.sha256_text
+use std.common.contracts.orchestration.host_helper_plan_v1.{HostHelperPlanV1, host_helper_plan_bytes_v1}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_read_required_v3
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperDomainV1,
+    host_linux_helper_store_bound_v1, host_linux_helper_domain_v1, host_linux_helper_journal_relative_v1,
+    host_linux_helper_record_publish_v1, host_linux_helper_attach_expected_v1, host_linux_helper_attach_binding_check_v1,
+    host_linux_helper_cancelled_evidence_v1, host_primary_attach_refusal_decode_v1, host_primary_attach_cancelled_encode_v1,
+    HostPrimaryAttachCancelledV1}
 
 pub struct HostHelperSettlementAckV1:
     operation_id: text
@@ -23,24 +30,40 @@ pub struct HostHelperSettlementCommitTurnV1:
     ack: HostHelperSettlementAckV1?
     error: text
 
-# Closed set of settlement domains (milestone_0022 N2). One table maps each kind to its record kind text; both
-# kinds share one exact field list. The text entry point and the typed entry point share them, so there is no
+# Closed set of settlement domains (milestone_0022 N2, N3). One table maps each kind to its record kind text, its
+# exact field list and its ACK fact list; the text entry point and the typed entry point share them, so there is no
 # second list. A kind added later needs a table row and a match arm (the compiler checks the match).
+# PrimaryAttachCancelled (N3) settles ONLY through host_helper_cancel_commit_v1: the plain commit refuses it.
 pub enum HostHelperSettlementKindV1:
     StreamSettlement
     PrimaryAttachSettlement
+    PrimaryAttachCancelled
 
 fn host_helper_settlement_kinds_v1() -> [HostHelperSettlementKindV1]:
-    [HostHelperSettlementKindV1.StreamSettlement, HostHelperSettlementKindV1.PrimaryAttachSettlement]
+    [HostHelperSettlementKindV1.StreamSettlement, HostHelperSettlementKindV1.PrimaryAttachSettlement,
+        HostHelperSettlementKindV1.PrimaryAttachCancelled]
 
 fn host_helper_settlement_kind_text_v1(kind: HostHelperSettlementKindV1) -> text:
     match kind:
         case HostHelperSettlementKindV1.StreamSettlement: "host-helper-stream-settlement"
         case HostHelperSettlementKindV1.PrimaryAttachSettlement: "host-primary-attach-settlement"
+        case HostHelperSettlementKindV1.PrimaryAttachCancelled: "host-primary-attach-cancelled"
 
-fn host_helper_settlement_field_names_v1() -> [text]:
-    ["version", "kind", "operationId", "operationDigest", "requestDigest", "preparedReceiptDigest",
-        "consumptionDigest", "nativeIdentityDigest", "treeReceiptDigest"]
+fn host_helper_settlement_field_names_v1(kind: HostHelperSettlementKindV1) -> [text]:
+    match kind:
+        case HostHelperSettlementKindV1.PrimaryAttachCancelled:
+            ["version", "kind", "operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "refusalDigest"]
+        case _:
+            ["version", "kind", "operationId", "operationDigest", "requestDigest", "preparedReceiptDigest",
+                "consumptionDigest", "nativeIdentityDigest", "treeReceiptDigest"]
+
+# Per-kind ACK facts, in ACK order. Indexes 0/1 are always operationId/operationDigest.
+fn host_helper_settlement_fact_names_v1(kind: HostHelperSettlementKindV1) -> [text]:
+    match kind:
+        case HostHelperSettlementKindV1.PrimaryAttachCancelled:
+            ["operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "refusalDigest"]
+        case _:
+            ["operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "nativeIdentityDigest", "treeReceiptDigest"]
 
 # Text -> kind by walking the one table: an unknown text maps to nothing.
 fn host_helper_settlement_kind_of_text_v1(kind: text) -> Option<HostHelperSettlementKindV1>:
@@ -57,23 +80,14 @@ pub fn host_helper_settlement_commit_v1(owner: HostCapacityOwnerV1, operation: O
 
 pub fn host_helper_settlement_commit_kind_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
         kind: HostHelperSettlementKindV1, outcome: text) -> HostHelperSettlementCommitTurnV1:
-    # Derive ACK facts from independently validated evidence, not caller facts.
-    val checked = host_capacity_completion_evidence_owned_v2(owner.journal, owner.ledger.capacity, operation)
-    if checked.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, checked.unwrap_err())
-    if checked.unwrap() != outcome: return HostHelperSettlementCommitTurnV1(owner, nil, "helper-settlement-evidence-mismatch")
-    val decoded = host_helper_stream_fields_v1(outcome, host_helper_settlement_kind_text_v1(kind),
-        host_helper_settlement_field_names_v1())
-    if decoded.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, decoded.unwrap_err())
-    val fields = decoded.unwrap()
-    var facts: [text] = []
-    for key in ["operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "nativeIdentityDigest", "treeReceiptDigest"]:
-        val fact = host_helper_stream_text_v1(fields, key)
-        if fact.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, fact.unwrap_err())
-        facts.push(fact.unwrap())
-    val operation_bytes = distributed_encode_operation_v2(operation)
-    if operation_bytes.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, operation_bytes.unwrap_err())
-    if facts[0] != operation.id or facts[1] != sha256_text(operation_bytes.unwrap()):
-        return HostHelperSettlementCommitTurnV1(owner, nil, "helper-settlement-operation-mismatch")
+    # Refused before any evidence read, with the original owner (DESIGN 13.3).
+    match kind:
+        case HostHelperSettlementKindV1.PrimaryAttachCancelled:
+            return HostHelperSettlementCommitTurnV1(owner, None, "helper-settlement-use-cancel-commit")
+        case _: ()
+    val derived = host_helper_settlement_facts_v1(owner, operation, kind, outcome)
+    if derived.is_err(): return HostHelperSettlementCommitTurnV1(owner, nil, derived.unwrap_err())
+    val facts = derived.unwrap()
     val committed = host_capacity_owner_settle_v1(owner, operation)
     if not committed.settled: return HostHelperSettlementCommitTurnV1(committed.owner, nil, committed.error)
     val state = daemon_operation_exact_v2(committed.owner.journal, operation)
@@ -86,3 +100,118 @@ pub fn host_helper_settlement_commit_kind_v1(owner: HostCapacityOwnerV1, operati
         outcome_digest: outcome_digest, journal_revision: committed.owner.journal.revision,
         journal_sequence: committed.owner.journal.sequence)
     HostHelperSettlementCommitTurnV1(committed.owner, Some(ack), "")
+
+# Derive ACK facts from independently validated evidence, not caller facts. Shared by
+# the settlement commit and the cancel commit; no journal or ledger effect.
+fn host_helper_settlement_facts_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        kind: HostHelperSettlementKindV1, outcome: text) -> Result<[text], text>:
+    val checked = host_capacity_completion_evidence_owned_v2(owner.journal, owner.ledger.capacity, operation)?
+    if checked != outcome: return Err("helper-settlement-evidence-mismatch")
+    val fields = host_helper_stream_fields_v1(outcome, host_helper_settlement_kind_text_v1(kind),
+        host_helper_settlement_field_names_v1(kind))?
+    var facts: [text] = []
+    for key in host_helper_settlement_fact_names_v1(kind):
+        facts.push(host_helper_stream_text_v1(fields, key)?)
+    if facts[0] != operation.id or facts[1] != sha256_text(distributed_encode_operation_v2(operation)?):
+        return Err("helper-settlement-operation-mismatch")
+    Ok(facts)
+
+# ---- milestone_0022 N3: helper-only cancel (DESIGN 13.3, 14.3, 15.4, 16) ---------
+# No native or tree fields: a cancelled attach never had a native helper.
+pub struct HostHelperCancelAckV1:
+    operation_id: text
+    request_digest: text
+    prepared_receipt_digest: text
+    refusal_digest: text
+    outcome_digest: text
+    journal_revision: text
+    journal_sequence: i64
+
+# Retain `owner` even on error (single-writer rule, as host_capacity_owner_settle_v1).
+pub struct HostHelperCancelTurnV1:
+    owner: HostCapacityOwnerV1
+    ack: Option<HostHelperCancelAckV1>
+    error: text
+
+# Settle with X as the evidence (15.4 (e)). The capacity evidence arm re-derives X
+# (AttachCancelled, 17(D)), so sha256(outcome) is the recorded outcome digest; a row
+# already completed with that digest is an idempotent Ok, any other outcome an Err.
+pub fn host_helper_cancel_commit_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        outcome: text) -> HostHelperCancelTurnV1:
+    val derived = host_helper_settlement_facts_v1(owner, operation, HostHelperSettlementKindV1.PrimaryAttachCancelled, outcome)
+    if derived.is_err(): return HostHelperCancelTurnV1(owner, None, derived.unwrap_err())
+    val facts = derived.unwrap()
+    val committed = host_capacity_owner_settle_v1(owner, operation)
+    if not committed.settled: return HostHelperCancelTurnV1(committed.owner, None, committed.error)
+    val state = daemon_operation_exact_v2(committed.owner.journal, operation)
+    if state.is_err(): return HostHelperCancelTurnV1(committed.owner, None, state.unwrap_err())
+    val outcome_digest = sha256_text(outcome)
+    if state.unwrap().state != "completed" or state.unwrap().outcome_digest != outcome_digest:
+        return HostHelperCancelTurnV1(committed.owner, None, "helper-cancel-journal-settlement-mismatch")
+    val ack = HostHelperCancelAckV1(operation_id: operation.id, request_digest: facts[2],
+        prepared_receipt_digest: facts[3], refusal_digest: facts[4], outcome_digest: outcome_digest,
+        journal_revision: committed.owner.journal.revision, journal_sequence: committed.owner.journal.sequence)
+    HostHelperCancelTurnV1(committed.owner, Some(ack), "")
+
+# PURE authorization by (classified domain, journal row state) (13.3, 15.4, 16 P2-4).
+# Executing/outcome-unknown: a refused row (cancel) or a cancelled-pending row
+# (resume after X was published). Completed: only an AttachCancelled row (the caller
+# then requires outcome == sha256(X)). `{}` (Unrecorded) and `{PA}` alone
+# (PrimaryAttach) are NEVER cancellable: they stay charged (15.6, charged-forever).
+pub fn host_helper_cancel_domain_allowed_v1(domain: HostLinuxHelperDomainV1, row_state: text) -> Result<(), text>:
+    val refused = match domain:
+        case HostLinuxHelperDomainV1.AttachRefusedPreConsume: true
+        case HostLinuxHelperDomainV1.AttachRefusedPostConsume: true
+        case _: false
+    val cancelled = match domain:
+        case HostLinuxHelperDomainV1.AttachCancelled: true
+        case _: false
+    if row_state == "executing" or row_state == "outcome-unknown":
+        if refused or cancelled: return Ok(())
+        return Err("helper-cancel-unauthorized")
+    if row_state == "completed":
+        if cancelled: return Ok(())
+        return Err("helper-cancel-settled-by-another-path")
+    Err("helper-cancel-row-state")
+
+# Make X durable (journal first, mirror second) and return its bytes. R must already
+# be durable in the journal (it is the sole authorization); a missing R mirror is
+# regenerated from the journal bytes. Request digests are re-derived from the
+# journal-stored signed request and compared with the caller's and R's.
+fn helper_cancel_prepare_v1(owner: HostCapacityOwnerV1, store_root: text, operation: OperationEnvelopeV2,
+        plan: HostHelperPlanV1, request_digest: text, prepared_receipt_digest: text) -> Result<text, text>:
+    if plan.helper_kind != "attach-broker": return Err("helper-cancel-attach-broker-required")
+    val row = daemon_operation_exact_v2(owner.journal, operation)?
+    val expected = host_linux_helper_attach_expected_v1(owner.journal, operation)?
+    if (host_helper_plan_bytes_v1(expected.plan)? != host_helper_plan_bytes_v1(plan)? or
+            expected.request_digest != request_digest or expected.prepared_receipt_digest != prepared_receipt_digest):
+        return Err("helper-cancel-request-mismatch")
+    val state = host_linux_helper_store_bound_v1(owner.journal, store_root)?
+    val domain = host_linux_helper_domain_v1(owner.journal, state, operation.id)?
+    host_helper_cancel_domain_allowed_v1(domain, row.state)?
+    if row.state == "completed":
+        val retained = host_linux_helper_cancelled_evidence_v1(owner.journal, state, operation)?
+        if sha256_text(retained) != row.outcome_digest: return Err("helper-cancel-settled-by-another-path")
+        return Ok(retained)
+    val refusal_bytes = distributed_operation_journal_read_required_v3(owner.journal,
+        host_linux_helper_journal_relative_v1("primary-refusal", operation.id), 65536)?
+    val refusal = host_primary_attach_refusal_decode_v1(refusal_bytes)?
+    val cancelled = HostPrimaryAttachCancelledV1(operation_id: operation.id, operation_digest: expected.operation_digest,
+        request_digest: expected.request_digest, prepared_receipt_digest: expected.prepared_receipt_digest,
+        refusal_digest: sha256_text(refusal_bytes))
+    host_linux_helper_attach_binding_check_v1(refusal, Some(cancelled), expected)?
+    # 15.4 (b): regenerate a missing R mirror (identical bytes or Err).
+    host_linux_helper_record_publish_v1(owner.journal, store_root, operation.id, "primary-refusal", refusal_bytes)?
+    val bytes = host_primary_attach_cancelled_encode_v1(cancelled)?
+    # 15.4 (c)(d): X is a pure function of R and the journal request, so a resumed
+    # publish reproduces the identical bytes.
+    host_linux_helper_record_publish_v1(owner.journal, store_root, operation.id, "primary-cancelled", bytes)?
+    Ok(bytes)
+
+# The only release of a charged attach helper with no native helper (13.3). Never
+# probes a launch root; never starts an attach; never touches the parent reservation.
+pub fn host_helper_cancel_unconsumed_v1(owner: HostCapacityOwnerV1, store_root: text, operation: OperationEnvelopeV2,
+        plan: HostHelperPlanV1, request_digest: text, prepared_receipt_digest: text) -> HostHelperCancelTurnV1:
+    val prepared = helper_cancel_prepare_v1(owner, store_root, operation, plan, request_digest, prepared_receipt_digest)
+    if prepared.is_err(): return HostHelperCancelTurnV1(owner, None, prepared.unwrap_err())
+    host_helper_cancel_commit_v1(owner, operation, prepared.unwrap())
