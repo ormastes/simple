@@ -148,6 +148,9 @@ fn request_parse_error_status(message: text) -> HttpStatus:
         return HttpStatus.BadRequest
     HttpStatus.BadRequest
 
+fn _no_stream_handler(req: HttpRequest, stream: TcpStream) -> bool:
+    false
+
 class SimpleHttpServer:
     host: text
     port: i32
@@ -156,6 +159,12 @@ class SimpleHttpServer:
     policy: SecureServerPolicy
     admission: ConnectionAdmission
     request_parser: HttpRequestParserV1?
+    # Optional raw-connection handler: called with the parsed request and the
+    # live stream BEFORE routing. Returning true means it wrote the whole
+    # response itself (e.g. server-sent events flushed as they are produced);
+    # the server then only closes the connection.
+    stream_handler: fn(HttpRequest, TcpStream) -> bool
+    has_stream_handler: bool
 
     static fn new(host: text, port: i32, router: Router) -> SimpleHttpServer:
         SimpleHttpServer(
@@ -165,13 +174,20 @@ class SimpleHttpServer:
             running: false,
             policy: SecureServerPolicy.production(),
             admission: ConnectionAdmission.new(DEFAULT_MAX_CONNECTIONS),
-            request_parser: nil
+            request_parser: nil,
+            stream_handler: _no_stream_handler,
+            has_stream_handler: false
         )
 
     # Explicit opt-in. The default constructor leaves request_parser=nil and
     # retains the existing scalar `read_line` parser path.
     me with_http_request_parser_v1(parser: HttpRequestParserV1) -> SimpleHttpServer:
         self.request_parser = parser
+        self
+
+    me with_stream_handler(handler: fn(HttpRequest, TcpStream) -> bool) -> SimpleHttpServer:
+        self.stream_handler = handler
+        self.has_stream_handler = true
         self
 
     me with_policy(policy: SecureServerPolicy) -> SimpleHttpServer:
@@ -315,6 +331,13 @@ class SimpleHttpServer:
         if parsed_request != nil:
             var request = parsed_request!
             request.remote_addr = remote_addr
+            if self.has_stream_handler:
+                val streamer = self.stream_handler
+                if streamer(request, stream):
+                    val _ = stream.close()
+                    return _http_connection_owned_result_v1(
+                        true, provider_used, provider_attempts, provider_successes,
+                        buffered_remainder, self.request_parser, "request-handled")
             val resp = with_default_security_headers(self.router.dispatch(request), false)
             if not write_response_limited(stream, resp, self.policy.max_response_bytes):
                 val _ = stream.close()
