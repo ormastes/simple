@@ -1,0 +1,135 @@
+# Fast/deep lint rule cost-tier registry (P0-5, ROB-COST-01/02).
+#
+# Every canonical lint rule name (see `all_lint_names` in config_and_model.spl)
+# is assigned a cost tier. The normal build profile runs Low rules only; the
+# default lint profile runs everything. A rule missing from the registry is
+# High (fail closed: unknown cost is never run on the fast path).
+
+enum LintCostTier:
+    Low
+    Medium
+    High
+
+fn lint_cost_tier_name(tier: LintCostTier) -> text:
+    match tier:
+        case Low: "low"
+        case Medium: "medium"
+        case High: "high"
+
+enum LintCompleteness:
+    Pass
+    Fail
+    Incomplete
+    TimedOut
+    Unsupported
+    NotApplicable
+
+fn lint_completeness_name(status: LintCompleteness) -> text:
+    match status:
+        case Pass: "pass"
+        case Fail: "fail"
+        case Incomplete: "incomplete"
+        case TimedOut: "timed_out"
+        case Unsupported: "unsupported"
+        case NotApplicable: "not_applicable"
+
+enum LintTierProfile:
+    NormalBuild
+    DefaultLint
+
+# Syntactic / source-pattern rules: single pass, no cross-statement analysis.
+fn _low_cost_rules() -> [text]:
+    ["primitive_api", "bare_bool", "bare_text_domain", "simple_script_required",
+     "print_in_test_spec", "todo_format", "spipe_no_print_based_tests",
+     "spipe_missing_docstrings", "spipe_minimal_docstrings",
+     "spipe_manual_assertions", "spipe_placeholder_tests", "spipe_empty_examples",
+     "spipe_boolean_wrapper_assertions", "spipe_false_boolean_wrapper_assertions",
+     "export_outside_init", "unknown_annotation", "unknown_decorator",
+     "unknown_attribute", "parser_contextual_keyword", "deprecated_if_let",
+     "struct_construction_parens", "short_grammar_refactor", "raw_unit_postfix",
+     "required_comment", "ui_no_raw_widget_kind", "ui_no_raw_variant",
+     "ui_no_raw_theme_name", "hash_bracket_attribute", "style_convention",
+     "multiline_bool", "dummy_accessor", "too_many_arguments",
+     "wildcard_match", "stub_impl", "raw_rt_access", "const_ref_default",
+     "module_init_literal", "nil_outside_unsafe"]
+
+# Per-declaration structural rules.
+fn _medium_cost_rules() -> [text]:
+    ["unnamed_duplicate_typed_args", "init_boundary_violation",
+     "bypass_with_code_files", "similar_parent_method_name", "nonexistent_type",
+     "stale_md_diagrams", "semantic_markdown_links", "llvm_backend_type_safety",
+     "unused_code", "unsafe_pattern", "visibility_boundary",
+     "tracking_traceability", "freestanding_enum_eq",
+     "freestanding_anon_tuple_return", "freestanding_bare_conversion",
+     "freestanding_global_call_init", "bare_primitive_internal",
+     "representation_boundary", "unwrapped_foreign_resource", "raw_sffi_call",
+     "variant_shadow_binding", "written_any_decl", "wm_lane_boundary",
+     "robust_option_surface", "nil_return_non_optional"]
+
+# Flow / cross-function / typed analyses that can dominate a build.
+fn _high_cost_rules() -> [text]:
+    ["resource_leak", "non_exhaustive_match", "simd_opportunity",
+     "concurrency_misuse", "closure_capture", "ignored_return", "memory_safety",
+     "collection_performance", "database_integrity", "linear_scan_in_loop",
+     "bound_late_cast", "bound_unit_reassert", "sffi_abi_mismatch",
+     "silent_default", "nil_compare_non_optional", "inferred_type_fallback_use",
+     "any_fallback_use", "any_receiver_use", "gpu_2d_perf", "panic_free"]
+
+fn lint_registered_rule_names() -> [text]:
+    var names: [text] = []
+    for n in _low_cost_rules():
+        names.push(n)
+    for n in _medium_cost_rules():
+        names.push(n)
+    for n in _high_cost_rules():
+        names.push(n)
+    names
+
+fn lint_rule_cost_tier(name: text) -> LintCostTier:
+    if _low_cost_rules().contains(name):
+        return LintCostTier.Low
+    if _medium_cost_rules().contains(name):
+        return LintCostTier.Medium
+    LintCostTier.High
+
+# Pure rule selection. NormalBuild keeps Low only; DefaultLint keeps all.
+fn lint_rules_for_profile(profile: LintTierProfile, names: [text]) -> [text]:
+    match profile:
+        case DefaultLint:
+            names
+        case NormalBuild:
+            var picked: [text] = []
+            for n in names:
+                if lint_rule_cost_tier(n) == LintCostTier.Low:
+                    picked.push(n)
+            picked
+
+# Reduce per-rule results to one status. An exhausted budget can never yield
+# Pass: a clean-looking run that was cut short is Incomplete.
+# Precedence: Fail > TimedOut > Incomplete > Unsupported > Pass; NotApplicable
+# only when nothing applied.
+fn lint_completeness_reduce(results: [LintCompleteness], budget_exhausted: bool) -> LintCompleteness:
+    var any_fail = false
+    var any_timed_out = false
+    var any_incomplete = budget_exhausted
+    var any_unsupported = false
+    var any_pass = false
+    for r in results:
+        match r:
+            case Fail: any_fail = true
+            case TimedOut: any_timed_out = true
+            case Incomplete: any_incomplete = true
+            case Unsupported: any_unsupported = true
+            case Pass: any_pass = true
+            case NotApplicable: pass
+    if any_fail:
+        return LintCompleteness.Fail
+    if any_timed_out:
+        return LintCompleteness.TimedOut
+    if any_incomplete:
+        return LintCompleteness.Incomplete
+    if any_unsupported:
+        return LintCompleteness.Unsupported
+    if any_pass:
+        return LintCompleteness.Pass
+    LintCompleteness.NotApplicable
