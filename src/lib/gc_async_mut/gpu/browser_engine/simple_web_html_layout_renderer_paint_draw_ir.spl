@@ -459,6 +459,21 @@ fn _html_draw_ir_codepoint_advances(txt: text, cp_advances: [i32]) -> [i32]:
 # Falls back to the styled/flat command when vector fonts are off or the
 # resolver returns nothing usable -- in which case BOTH sides are flat, which
 # is consistent, rather than one side each.
+# At device scale k > 1 layout records, per `#text` run, how far (device px)
+# Chrome's device-px strut puts the baseline from where k x CSS layout put it
+# (LayoutResult.device_dy / device_dy_rest). The command carries it as
+# `device-y-offset`, which `draw_ir_composition_at_device_scale` adds to the
+# scaled y and strips. At k == 1 both tables are empty: the command is untouched.
+fn _html_draw_ir_text_with_device_dy(command: DrawIrCommand, boxes: LayoutResult, i: i32, line_i: i32) -> DrawIrCommand:
+    val table = if line_i == 0: boxes.device_dy else: boxes.device_dy_rest
+    if i < 0 or i >= table.len() or table[i] == 0:
+        return command
+    var out = command
+    var style = command.computed_style
+    style.push(draw_ir_style_prop("device-y-offset", table[i].to_text()))
+    out.computed_style = style
+    out
+
 fn _html_draw_ir_resolved_text_command(
     nodes: [HNode], i: i32, node: HNode, st: Style, cid: text,
     tx: i32, ty: i32, txt: text, computed_style: [DrawIrStyleProp],
@@ -772,11 +787,11 @@ fn _html_draw_ir_command(
                 text_line_box_w(boxes.first_line_dx, boxes.line_boxes, i, 0, content_w) - st.text_indent_px,
                 0, wrap_line_starts.len()
             )
-            return _html_draw_ir_resolved_text_command(
+            return _html_draw_ir_text_with_device_dy(_html_draw_ir_resolved_text_command(
                 nodes, i, node, st, _html_draw_ir_component_id(node, i),
                 first_x, content_y, visual_text, computed_style, clip_rect,
                 vector_fonts
-            )
+            ), boxes, i, 0)
         # text-indent shifts the first line, as in the CPU raster loop
         # (`line_base_x = text_x + st.text_indent_px` for line 0); a large
         # negative indent moves the run off the box (image-replacement idiom).
@@ -788,11 +803,11 @@ fn _html_draw_ir_command(
                 content_x + st.text_indent_px, content_w - st.text_indent_px,
                 0, 1
             )
-        return _html_draw_ir_resolved_text_command(
+        return _html_draw_ir_text_with_device_dy(_html_draw_ir_resolved_text_command(
             nodes, i, node, st, _html_draw_ir_component_id(node, i),
             single_x, content_y, visual_text, computed_style, clip_rect,
             vector_fonts
-        )
+        ), boxes, i, 0)
     val command = draw_ir_box_with_style(
         _html_draw_ir_component_id(node, i),
         x,
@@ -887,12 +902,12 @@ fn _html_draw_ir_wrap_extra_line_commands(
             st, visual_text_rtl, wrap_line_starts[line_i], wrap_line_ends[line_i],
             content_x + line_dx, text_line_box_w(boxes.first_line_dx, boxes.line_boxes, i, line_i, content_w), line_i, wrap_line_count
         )
-        out.push(_html_draw_ir_resolved_text_command(
+        out.push(_html_draw_ir_text_with_device_dy(_html_draw_ir_resolved_text_command(
             nodes, i, node, st,
             _html_draw_ir_component_id(node, i) + "_line{line_i}",
             line_x, line_y, line_text, computed_style, clip_rect,
             vector_fonts
-        ))
+        ), boxes, i, line_i))
         line_i = line_i + 1
     out
 
