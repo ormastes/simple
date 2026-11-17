@@ -362,6 +362,17 @@ fn inline_box_shifted_descent(child_index: HtmlChildIndex, html_nodes: [HNode], 
         child = child_index.next_sibling[child]
     descent
 
+# `vertical-align: top | bottom | text-top | text-bottom` on an ATOMIC inline
+# (inline-block, replaced, widget): returns the keyword, or "" for every other
+# box. CSS 2.2 10.8 aligns the MARGIN box, so the margins are part of what is
+# placed and of the line height. Plain inline elements are not handled here.
+fn inline_atomic_valign(node: HNode, st: Style) -> text:
+    if node.tag == "#text" or st.display == "inline":
+        return ""
+    if st.vertical_align == "top" or st.vertical_align == "bottom" or st.vertical_align == "text-top" or st.vertical_align == "text-bottom":
+        return st.vertical_align
+    ""
+
 fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
     var out_bx = bx
     var out_by = by
@@ -371,10 +382,37 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         )
     var ascent = inline_line_strut_baseline_offset(line_style)
     var descent = inline_line_baseline_descent(line_style)
+    # The parent's content area around the baseline: `text-top` / `text-bottom`
+    # hang from its top / bottom edge.
+    val content_ascent = inline_content_area_ascent(line_style)
+    val content_descent = inline_content_area_height(line_style) - content_ascent
+    var top_margin_box_h = 0
+    var bottom_margin_box_h = 0
     var baseline_i = 0
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
+        val node_valign = inline_atomic_valign(html_nodes[node_index], node_style)
+        if node_valign != "":
+            val margin_box_h = margin_ts[baseline_i] + bh[node_index] + margin_bs[baseline_i]
+            if node_valign == "top":
+                if margin_box_h > top_margin_box_h:
+                    top_margin_box_h = margin_box_h
+            elif node_valign == "bottom":
+                if margin_box_h > bottom_margin_box_h:
+                    bottom_margin_box_h = margin_box_h
+            elif node_valign == "text-top":
+                if content_ascent > ascent:
+                    ascent = content_ascent
+                if margin_box_h - content_ascent > descent:
+                    descent = margin_box_h - content_ascent
+            else:
+                if margin_box_h - content_descent > ascent:
+                    ascent = margin_box_h - content_descent
+                if content_descent > descent:
+                    descent = content_descent
+            baseline_i = baseline_i + 1
+            continue
         val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
         val widget_baseline = inline_widget_baseline_from_top(
             child_index, html_nodes, styles, node_index, bh
@@ -406,9 +444,37 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     var resolved_height = ascent + descent
     if line_height > resolved_height:
         resolved_height = line_height
+    # A top-aligned box taller than the rest grows the line downwards; a
+    # bottom-aligned one grows it upwards, which moves the baseline down.
+    val baseline_set_height = resolved_height
+    if top_margin_box_h > resolved_height:
+        resolved_height = top_margin_box_h
+    if bottom_margin_box_h > resolved_height:
+        resolved_height = bottom_margin_box_h
+    val baseline_drop = if bottom_margin_box_h > baseline_set_height: resolved_height - baseline_set_height else: 0
+    val aligned_line_y = line_y + baseline_drop
     baseline_i = 0
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
+        val node_valign = inline_atomic_valign(html_nodes[node_index], styles[node_index])
+        if node_valign != "":
+            val box_top = if node_valign == "top":
+                line_y + margin_ts[baseline_i]
+            elif node_valign == "bottom":
+                line_y + resolved_height - margin_bs[baseline_i] - bh[node_index]
+            elif node_valign == "text-top":
+                aligned_line_y + ascent - content_ascent + margin_ts[baseline_i]
+            else:
+                aligned_line_y + ascent + content_descent - margin_bs[baseline_i] - bh[node_index]
+            val valign_shift = box_top - out_by[node_index]
+            if valign_shift != 0:
+                val shifted_valign = offset_layout_subtree(
+                    child_index, node_index, 0, valign_shift, out_bx, out_by
+                )
+                out_bx = shifted_valign.bx
+                out_by = shifted_valign.by
+            baseline_i = baseline_i + 1
+            continue
         val node_widget_baseline = inline_widget_baseline_from_top(
             child_index, html_nodes, styles, node_index, bh
         )
@@ -472,11 +538,11 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         else:
             0
         val shift_y = if node_baseline_shift != 0:
-            line_y + ascent + node_baseline_shift - inline_content_area_ascent(styles[node_index]) - out_by[node_index]
+            aligned_line_y + ascent + node_baseline_shift - inline_content_area_ascent(styles[node_index]) - out_by[node_index]
         elif node_is_half_leaded:
             line_y + (resolved_height - bh[node_index]) / 2 - out_by[node_index]
         else:
-            line_y + ascent - node_baseline_offset - out_by[node_index] + text_half_leading
+            aligned_line_y + ascent - node_baseline_offset - out_by[node_index] + text_half_leading
         if shift_y != 0:
             val shifted = offset_layout_subtree(
                 child_index, node_index, 0, shift_y, out_bx, out_by
