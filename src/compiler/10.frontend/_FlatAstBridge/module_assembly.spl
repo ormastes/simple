@@ -1854,6 +1854,11 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
         val _lx_tokens = lex_tokenize_all(source)
         val _lx_t1 = _sffi_time_now_unix_micros()
         print("LEXPHASE\ttokenize_all\t{_lx_t1 - _lx_t0}\ttokens\t{_lx_tokens}\tchars\t{source.len()}\tpath\t{path}")
+    # The unit suffix scope AND its unit decl pool are process-global and
+    # shared with the core interpreter (checked at eval time). reset_all_pools
+    # wipes the decl pool, so the snapshot must be taken here, before it, and
+    # handed back once the bridge is done with its own file.
+    val saved_unit_scope = unit_scope_save()
     reset_all_pools()
     parser_init_with_path(source, path)
     val reference_roundtrip = not reference_checked and flat_roundtrip_enabled()
@@ -2011,6 +2016,9 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
             panic("failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE for {path}")
         if not _sffi_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path):
             panic("failed to restore SIMPLE_BOOTSTRAP_LEX_PATH for {path}")
+    # After the transient scope has ended: the snapshot arrays predate the
+    # scope, so rebinding the globals to them leaves nothing scope-stamped.
+    unit_scope_restore(saved_unit_scope)
     frontend_compiler_trace_scope_exit(saved_compiler_trace_scope)
     FlatReferenceCheckedParseV1(module: built_module, had_errors: reference_had_errors,
         errors: reference_errors)
