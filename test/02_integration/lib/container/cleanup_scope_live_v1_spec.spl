@@ -1,0 +1,55 @@
+# @req AT-CTR-03
+# NOT_RUN. Live engine, env-gated (owner decision 2026-11-16, OPEN_ISSUE B-10):
+# every example records pending("BLOCKED: <unset vars>") and returns first when
+# the fixture env is absent -- counted, never a pass.
+use std.spec.*
+use std.io_runtime.env_get_opt
+use std.nogc_sync_mut.io.process_ops.process_run
+use std.nogc_async_mut.container.providers.linux.cleanup_scope_v1.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.build_destroy_command
+
+fn cleanup_live_missing_v1() -> text:
+    var missing = ""
+    for name in ["SIMPLE_CTR_CLEANUP_ENGINE", "SIMPLE_CTR_CLEANUP_IMAGE", "SIMPLE_CTR_CLEANUP_FIXTURE_ID"]:
+        if (env_get_opt(name) ?? "") == "":
+            missing = if missing == "": name else: missing + ", " + name
+    missing
+
+val cleanup_live_missing = cleanup_live_missing_v1()
+
+describe "Live exact cleanup preserves sentinel network and volume (AT-CTR-03)":
+    it "destroys only the run container and leaves both fixture sentinels":
+        if cleanup_live_missing != "":
+            pending("BLOCKED: live cleanup fixture env unset: {cleanup_live_missing}")
+            return
+        val engine = env_get_opt("SIMPLE_CTR_CLEANUP_ENGINE") ?? ""
+        val image = env_get_opt("SIMPLE_CTR_CLEANUP_IMAGE") ?? ""
+        val fixture = env_get_opt("SIMPLE_CTR_CLEANUP_FIXTURE_ID") ?? ""
+        val net = cleanup_sentinel_v1("network", fixture, "n").unwrap()
+        val vol = cleanup_sentinel_v1("volume", fixture, "v").unwrap()
+        val run_name = "simpleorch-cleanup-run-" + fixture
+        # Best-effort removal of leftovers from an earlier failed run.
+        for s in [net, vol]:
+            process_run(engine, cleanup_sentinel_remove_command_v1(engine, s).unwrap().args)
+        process_run(engine, ["rm", "--force", run_name])
+        var creates: [i64] = []
+        for s in [net, vol]:
+            creates = creates.push(process_run(engine, cleanup_sentinel_create_command_v1(engine, s).unwrap().args).2)
+        val created = process_run(engine, ["create", "--name", run_name, image, "true"])
+        val cmd = build_destroy_command(engine, "/unused", run_name, false).1
+        val scope_error = cleanup_destroy_scope_error_v1(engine, cmd, run_name)
+        val destroyed = process_run(engine, cmd.args)
+        val gone = process_run(engine, ["inspect", run_name])
+        var codes: [i64] = []
+        for s in [net, vol]:
+            codes = codes.push(process_run(engine, cleanup_sentinel_inspect_command_v1(engine, s).unwrap().args).2)
+        # Teardown before any assertion so a failure cannot leak fixture resources.
+        for s in [net, vol]:
+            process_run(engine, cleanup_sentinel_remove_command_v1(engine, s).unwrap().args)
+        process_run(engine, ["rm", "--force", run_name])
+        expect(creates).to_equal([0, 0])
+        expect(created.2).to_equal(0)
+        expect(scope_error).to_equal("")
+        expect(destroyed.2).to_equal(0)
+        expect(gone.2 != 0).to_equal(true)
+        expect(cleanup_sentinels_intact_v1([net, vol], codes).unwrap()).to_equal(true)
