@@ -77,7 +77,7 @@ describe "SPL-SFFI-ABI-001: @c_abi on the unit declaration":
         step("Lint the old @c_abi(Unit: ctype) form")
         val src = "unit Ticks: i32 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
         expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(1)
-        val notes = sffi_abi_deprecation_notes(src)
+        val notes = sffi_abi_deprecation_notes(src, "app/x.spl")
         expect(notes.len()).to_equal(1)
         expect(notes[0].line_num).to_equal(2)
         expect(notes[0].message).to_contain("deprecated")
@@ -86,4 +86,26 @@ describe "SPL-SFFI-ABI-001: @c_abi on the unit declaration":
         # @req: REQ-DIAG-POLICY-001
         step("Check notes for both decorator placements")
         val src = "@c_abi(\"int32_t\") unit Fd: i32 as fd\n@c_abi(\"long\")\nunit Off: i64 as off\nextern fn c(f: Fd, o: Off)\n"
-        expect(sffi_abi_deprecation_notes(src).len()).to_equal(0)
+        expect(sffi_abi_deprecation_notes(src, "app/x.spl").len()).to_equal(0)
+
+    it "checks a unit param on a continuation line of a multi-line extern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a mismatched @c_abi unit used on the second line of an extern signature")
+        val src = "@c_abi(\"int64_t\") unit Fd: i32 as fd\nextern fn c_dup(a: i32,\n    b: Fd) -> i32\n"
+        val fs = check_sffi_abi_mismatch(src, "app/x.spl", LINUX)
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(2)
+        expect(fs[0].message).to_contain("width mismatch")
+
+    it "reports one finding when a unit has both the decl form and an alias line":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a unit with decl @c_abi and a deprecated alias line, both mismatched")
+        val src = "@c_abi(\"int64_t\") unit Fd: i32 as fd\n@c_abi(Fd: \"int64_t\")\nextern fn c_close(f: Fd) -> i32\n"
+        expect(check_sffi_abi_mismatch(src, "app/x.spl", LINUX).len()).to_equal(1)
+
+    it "does not emit deprecation notes for vendored files":
+        # @req: REQ-DIAG-POLICY-001
+        step("Check notes on an alias line under /vendor/")
+        val src = "unit Ticks: i32 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n"
+        expect(sffi_abi_deprecation_notes(src, "src/x/vendor/y.spl").len()).to_equal(0)
+        expect(sffi_abi_deprecation_notes(src, "app/x.spl").len()).to_equal(1)
