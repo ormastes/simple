@@ -1,0 +1,202 @@
+#version 450
+// Device CSS gradient layer kernel: evaluates t per pixel with the exact
+// integer math of radial_gradient_pixels() / linear_gradient_pixels() in
+// src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl, looks the colour up in
+// the SAME 1025-entry premultiplied-sRGB stop ramp the host builds
+// (_emu_gradient_stop_lut), and composites it src-over the framebuffer with
+// Chrome 159's gradient / image layer rule (chrome_layer_src_over below).
+//
+// binding 0 = framebuffer uint[], index = y * fb_w + x (READ ONLY here)
+// binding 1 = output uint[], w * h words at offset 0 (index = py * w + px),
+//             followed by the host tables at tab_off (disjoint from the
+//             written region, so no barrier is required):
+//               tab_off + 0      t_max (t16 units, 65536 = 1)
+//               tab_off + 1      colour past the end of the ramp
+//               tab_off + 2      linear divisor D (len2 or len2 / 65536)
+//               tab_off + 3      linear shift (16 when D = len2, else 0)
+//               tab_off + 4 ...  stop ramp, 1025 straight-ARGB words
+//               col_off ...      per-column geometry term
+//               row_off ...      per-row geometry term
+//             radial (mode 0): one i32 word per column (u) and per row (v),
+//               the host's clamped t16 axis values (|u|, |v| <= 2^24);
+//             linear (mode 1): one i64 (lo, hi words) per column and per
+//               row; their sum is the host's projection onto the line, Q20.
+// push constants (40 bytes): x0, y0, w, h, fb_w, fb_h, mode, tab_off,
+//                            col_off, row_off
+// dispatch: 2D, ceil(w/16) x ceil(h/16) workgroups of 16x16
+//
+// WHY THIS IS 32-BIT ONLY: the seed creates the Vulkan device with every
+// VkPhysicalDeviceFeatures bit zero, so shaderInt64 is not enabled and int64
+// in GLSL would be undefined. 64-bit quantities are carried as (hi, lo) uint
+// pairs through umulExtended / uaddCarry, the square root is a float seed with
+// an exact integer correction (floor isqrt is unique, so it equals the host's
+// seeded Newton root), and the linear quotient is an exact restoring
+// division. The host declines (falls back to its own evaluator) whenever a
+// value would not fit these bounds.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Framebuffer { uint data[]; } fb;
+layout(set = 0, binding = 1) buffer GradientOut { uint data[]; } dst;
+
+layout(push_constant) uniform PushConstants {
+    int x0;
+    int y0;
+    int w;
+    int h;
+    int fb_w;
+    int fb_h;
+    int mode;
+    int tab_off;
+    int col_off;
+    int row_off;
+} pc;
+
+uint div255r(uint v) {
+    return (v + 128u + ((v + 128u) >> 8u)) >> 8u;
+}
+
+// Chrome 159 gradient / image layer src-over, straight-ARGB in and out:
+// each channel is round(s*a/255) + div255r(d*(255-a)). This is the ONE place
+// the device gradient composite rule lives; reconcile it here when the host
+// blend lane (color.spl blend, runtime_simd_dispatch.c) adopts the same rule.
+// Over a destination with alpha < 255 (outside Chrome's stated rule, which
+// assumes an opaque destination) the same rule runs on the premultiplied
+// destination and the result is unpremultiplied with rounding.
+uint chrome_layer_src_over(uint s, uint d) {
+    uint a = s >> 24u;
+    if (a == 0u) return d;
+    if (a == 255u) return s;
+    uint inv = 255u - a;
+    uint da = d >> 24u;
+    uint sr = (s >> 16u) & 255u;
+    uint sg = (s >> 8u) & 255u;
+    uint sb = s & 255u;
+    uint dr = (d >> 16u) & 255u;
+    uint dg = (d >> 8u) & 255u;
+    uint db = d & 255u;
+    if (da == 255u) {
+        uint r = (sr * a + 127u) / 255u + div255r(dr * inv);
+        uint g = (sg * a + 127u) / 255u + div255r(dg * inv);
+        uint b = (sb * a + 127u) / 255u + div255r(db * inv);
+        return 0xFF000000u | (r << 16u) | (g << 8u) | b;
+    }
+    uint oa = a + div255r(da * inv);
+    uint pr = (sr * a + 127u) / 255u + div255r(div255r(dr * da) * inv);
+    uint pg = (sg * a + 127u) / 255u + div255r(div255r(dg * da) * inv);
+    uint pb = (sb * a + 127u) / 255u + div255r(div255r(db * da) * inv);
+    uint r = min(255u, (pr * 255u + oa / 2u) / oa);
+    uint g = min(255u, (pg * 255u + oa / 2u) / oa);
+    uint b = min(255u, (pb * 255u + oa / 2u) / oa);
+    return (oa << 24u) | (r << 16u) | (g << 8u) | b;
+}
+
+// (g * g) > (hi:lo), all unsigned.
+bool square_exceeds(uint g, uint hi, uint lo) {
+    uint sh;
+    uint sl;
+    umulExtended(g, g, sh, sl);
+    return sh > hi || (sh == hi && sl > lo);
+}
+
+// floor(sqrt(hi:lo)) for hi:lo < 2^50.
+uint isqrt64(uint hi, uint lo) {
+    float f = float(hi) * 4294967296.0 + float(lo);
+    uint g = uint(sqrt(f));
+    while (g > 0u && square_exceeds(g, hi, lo)) {
+        g = g - 1u;
+    }
+    while (!square_exceeds(g + 1u, hi, lo)) {
+        g = g + 1u;
+    }
+    return g;
+}
+
+// floor((hi:lo) / d) for a quotient known to fit 32 bits; d > 0.
+uint udiv64_32(uint hi, uint lo, uint d) {
+    uint r = 0u;
+    uint q = 0u;
+    for (int i = 63; i >= 0; --i) {
+        uint bit = (i >= 32) ? ((hi >> uint(i - 32)) & 1u) : ((lo >> uint(i)) & 1u);
+        bool top = (r & 0x80000000u) != 0u;
+        r = (r << 1u) | bit;
+        if (top || r >= d) {
+            r = r - d;
+            if (i < 32) {
+                q = q | (1u << uint(i));
+            }
+        }
+    }
+    return q;
+}
+
+void main() {
+    int px = int(gl_GlobalInvocationID.x);
+    int py = int(gl_GlobalInvocationID.y);
+    if (px >= pc.w || py >= pc.h) return;
+
+    uint t_max = dst.data[uint(pc.tab_off)];
+    uint beyond = dst.data[uint(pc.tab_off + 1)];
+    uint lut0 = uint(pc.tab_off + 4);
+
+    bool past_end = false;
+    uint t16 = 0u;
+    if (pc.mode == 0) {
+        int u = int(dst.data[uint(pc.col_off + px)]);
+        int v = int(dst.data[uint(pc.row_off + py)]);
+        uint au = uint(abs(u));
+        uint av = uint(abs(v));
+        uint uh;
+        uint ul;
+        uint vh;
+        uint vl;
+        umulExtended(au, au, uh, ul);
+        umulExtended(av, av, vh, vl);
+        uint carry;
+        uint lo = uaddCarry(ul, vl, carry);
+        uint hi = uh + vh + carry;
+        t16 = isqrt64(hi, lo);
+        past_end = t16 >= t_max;
+    } else {
+        uint cl = dst.data[uint(pc.col_off + 2 * px)];
+        uint ch = dst.data[uint(pc.col_off + 2 * px + 1)];
+        uint rl = dst.data[uint(pc.row_off + 2 * py)];
+        uint rh = dst.data[uint(pc.row_off + 2 * py + 1)];
+        uint carry;
+        uint lo = uaddCarry(cl, rl, carry);
+        uint hi = ch + rh + carry;
+        // proj <= 0 clamps to t = 0 (the host's quotient truncates toward
+        // zero and is then clamped at 0).
+        if (int(hi) >= 0 && (hi != 0u || lo != 0u)) {
+            uint dv = dst.data[uint(pc.tab_off + 2)];
+            uint shift = dst.data[uint(pc.tab_off + 3)];
+            if (shift == 16u) {
+                if ((hi >> 16u) != 0u) {
+                    past_end = true;
+                } else {
+                    hi = (hi << 16u) | (lo >> 16u);
+                    lo = lo << 16u;
+                }
+            }
+            if (!past_end) {
+                uint mh;
+                uint ml;
+                umulExtended(t_max, dv, mh, ml);
+                if (hi > mh || (hi == mh && lo >= ml)) {
+                    past_end = true;
+                } else {
+                    t16 = udiv64_32(hi, lo, dv);
+                }
+            }
+        }
+    }
+
+    uint s = past_end ? beyond : dst.data[lut0 + (t16 * 1024u + t_max / 2u) / t_max];
+
+    int fx = pc.x0 + px;
+    int fy = pc.y0 + py;
+    uint d = 0u;
+    if (fx >= 0 && fx < pc.fb_w && fy >= 0 && fy < pc.fb_h) {
+        d = fb.data[uint(fy * pc.fb_w + fx)];
+    }
+    dst.data[uint(py * pc.w + px)] = chrome_layer_src_over(s, d);
+}
