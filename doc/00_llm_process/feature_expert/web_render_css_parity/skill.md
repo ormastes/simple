@@ -2848,9 +2848,10 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
     | css-layout | 4.07 | 4.02 |
     | css-paint | 4.93 | 4.87 |
     | forms-media | 5.35 | 5.27 |
-    | animation | 4.16 | 4.09 |
+    | animation | 4.16 | 4.09 / 4.06 (two runs) |
     | evidence | 0.58 | 0.57 |
     | tab-bar | 0.30 | 0.30 |
 
   - css-paint is still above its 4.49 row (the #9951 regression), so stage 1 alone does not close it.
-  - The dpr4 rows lowered are html, forms-media, animation and evidence.
+  - Re-measured after rebasing onto 84ebb6ebf1b, base and head are the same numbers. The dpr4 rows lowered are html, forms-media and animation (to the worse of the two head runs). evidence (-0.01) is not a clear margin, so it is left alone.
+  - The two bands that got worse are the bold h1 (overview) and the bold h3 (css-paint): their block tops are still CSS px x 4 (h1 top 66.44 CSS px lands at device row 264; Chrome puts it at 266), so the correct borrow moves the glyph 1 px further from Chrome there. Stage 2 (fractional block y and line-box height in device px) is the follow-up.
