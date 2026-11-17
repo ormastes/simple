@@ -2721,3 +2721,31 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 | forms-media | 4.05 | 3.93 |
 
 - **Rows tightened:** the four rows above. The animation row is untouched, because its measurement is noisy at 3.47-3.59.
+
+## 2026-11-18 — Mid-line text run keeps Chrome's fractional pen origin (LCD phase)
+- **Rule:** Chrome 159 lays a line out in fractional units. A `#text` run after an inline element starts at the exact sum of what precedes it. `<span>ll</span> l` at left:1 starts at `1 + 7.1094 + 4.4453 = 12.5547`, so its first glyph takes the 12.5 quarter phase. The inline loop is whole-pixel (pen 12 or 13), so every glyph in the run was painted at the wrong LCD phase. Chrome alone repaints 4,329 px of one forms-media `<li>` when its origin moves from .617 to .0.
+- **Change:**
+  - `Style.resolved_font_width_milli` / `resolved_space_milli` hold exact widths. They are set only for an unadjusted run.
+  - The inline loop carries `inline_err_milli`, the exact-minus-integer error. It stays valid only while the cursor sits at the recorded (x, line); a line start is 0. See `inline_pen_err` and `inline_item_width_err_milli` in layout_foundation.
+  - An exact advance is a one-line `#text` run, or a plain inline element with one such run. Anything else makes the error unknown, and the run keeps today's integer pen.
+  - Each `#text` records `LayoutResult.pen_origin_milli` (`g_text_pen_origin_milli`, same lifecycle as `g_text_first_line_dx`). It is recorded only on left-aligned lines.
+  - Draw IR carries the origin as the `pen-origin-milli` style prop on the single-line or first-line command.
+  - `_lcd_apply_pen_phases(..., pen_origin_milli)` folds the origin into each glyph's quarter phase. A glyph with no phase cell takes a whole-pixel round shift, which is 0 when the origin is 0. The draw band widens by `ceil(|origin|)`.
+- **Pin:** `inline_run_pen_origin_chrome159_spec`: AC-1 frac 12.5547 and AC-2 whole 9.0. Both fail on base (0/2) and pass now (2/2).
+- **Catalog 1x:** forms-media 3.93 -> 2.84. Each `<li><code>` line dropped from ~4.3k to ~1.8k mismatched px.
+- **Not done:**
+  - Wrapped runs (lines 2+ start at a line-box edge, so they are exact anyway).
+  - Centred, right-aligned and RTL lines.
+  - Letter- or word-spacing-adjusted runs.
+  - The integer cursor itself still drifts: `<span>l</span> l` places at 10, where Chrome places at 9. The origin corrects the paint, not the box.
+- **Catalog 1x, measured on base 9368a4df112 and head (rows lowered to head):**
+
+| page | before | after |
+|---|---|---|
+| html | 3.51 | 2.62 |
+| css-layout | 3.00 | 2.52 |
+| css-paint | 3.55 | 2.80 |
+| forms-media | 3.93 | 2.84 |
+| animation | 3.47 | 2.91 |
+
+  overview, evidence and tab-bar are unchanged at 1.29, 0.77 and 0.42.

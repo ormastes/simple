@@ -17,6 +17,7 @@ use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, block_margin_milli, style_with_resolved_percent_margins, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac}
 
 
@@ -757,6 +758,7 @@ pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlCh
     # Fresh layout pass: no float carries over from a previous document.
     float_ctx_reset()
     text_first_line_dx_reset()
+    text_pen_origin_reset()
     text_line_boxes_reset()
     val flow = layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
     # ::marker box post-pass (bug browser_engine_no_list_marker_boxes_
@@ -782,7 +784,7 @@ pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlCh
                 out_bw[marker_i] = if marker_ordered: 16 else: 6
                 out_bh[marker_i] = out_bh[marker_li]
         marker_i = marker_i + 1
-    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: flow.wrap_starts, wrap_ends: flow.wrap_ends, intrinsic_widths: flow.intrinsic_widths, height: flow.height, first_line_dx: g_text_first_line_dx, line_boxes: g_text_line_boxes)
+    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: flow.wrap_starts, wrap_ends: flow.wrap_ends, intrinsic_widths: flow.intrinsic_widths, height: flow.height, first_line_dx: g_text_first_line_dx, line_boxes: g_text_line_boxes, pen_origin_milli: g_text_pen_origin_milli)
 
 # =========================================================================
 # `contain: layout` fast path for layout_selected. See containment.spl for
@@ -898,6 +900,7 @@ pub fn layout_selected(
             g_text_first_line_dx = retained.first_line_dx
             g_text_line_boxes = retained.line_boxes
             g_text_line_boxes_pending = []
+            text_pen_origin_restore(retained.pen_origin_milli)
             val sub = layout_with_style(
                 nodes, styles, child_index, boundary,
                 retained.bx[boundary], retained.by[boundary], retained.bw[boundary],
@@ -913,7 +916,8 @@ pub fn layout_selected(
                         trailing_margin_b: sub.trailing_margin_b,
                         leading_margin_t: sub.leading_margin_t,
                         first_line_dx: g_text_first_line_dx,
-                        line_boxes: g_text_line_boxes
+                        line_boxes: g_text_line_boxes,
+                        pen_origin_milli: g_text_pen_origin_milli
                     ),
                     fault: ""
                 )
@@ -2889,6 +2893,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     val line_probe_h = if style_line_h(st) > 0: style_line_h(st) else: 1
     var line_nodes: [i32] = []
     var inline_x = inline_start_x
+    # Exact-minus-integer error of `inline_x` (milli-px), valid while the
+    # cursor stays at (`inline_err_x`, line `inline_err_y`); see inline_pen_err.
+    var inline_err_milli: i64 = 0
+    var inline_err_x = -1
+    var inline_err_y = -1
     var inline_line_h = 0
     var inline_baseline_nodes: [i32] = []
     var inline_baseline_margin_ts: [i32] = []
@@ -3438,9 +3447,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     inline_x > inline_start_x and
                     text_starts_with_collapsible_space(nodes[c].text_data)
                 ):
-                    inline_x = inline_x + resolved_space_advance(
+                    val lead_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli)
+                    val lead_space = resolved_space_advance(
                         cst, text_codepoints(nodes[c].text_trimmed)
                     )
+                    inline_x = inline_x + lead_space
+                    if lead_err != INLINE_PEN_ERR_UNKNOWN and cst.resolved_space_milli > 0:
+                        inline_err_milli = lead_err + cst.resolved_space_milli - (lead_space as i64) * 1000
+                        inline_err_x = inline_x
+                        inline_err_y = cy
                 if nodes[c].tag == "#text" and (not cst.white_space_nowrap or cst.text_overflow_ellipsis):
                     val avail_inline = line_iw - inline_x
                     if avail_inline > 0 and inline_w > avail_inline:
@@ -3538,6 +3553,19 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         inline_box_x = ix + inline_base_x
                         inline_w = iw - inline_base_x
                         g_text_line_boxes_pending = text_line_boxes
+                # Where this run's first line REALLY starts relative to its
+                # integer pen (Chrome 159 keeps the fraction of the inline
+                # content before it: `<span>ll</span> l` puts the `l` at
+                # 12.5547, this loop at 13). Left-aligned LTR lines only: an
+                # aligned line moves by a whole-pixel free space.
+                val run_pen_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli)
+                val run_pen_origin = if (
+                    run_pen_err != INLINE_PEN_ERR_UNKNOWN and
+                    text_run_aligns_line_left(st) and text_run_aligns_line_left(cst)
+                ):
+                    run_pen_err as i32
+                else:
+                    0
                 val child = layout_with_style(nodes, styles, child_index, c, inline_box_x, inline_y, inline_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_inline_style)
                 out_bx = child.bx
                 out_by = child.by
@@ -3557,6 +3585,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     out_bh[c] = text_lines * style_line_h(cst)
                     g_text_first_line_dx_pending = 0
                     text_first_line_dx_record(nodes.len() as i32, c, text_first_dx)
+                    text_pen_origin_record(nodes.len() as i32, c, run_pen_origin)
                     g_text_line_boxes_pending = []
                     text_line_boxes_record(nodes.len() as i32, c, line_boxes_prefix(text_line_boxes, text_lines))
                     # Inline content FOLLOWING a wrapped run continues on the
@@ -3658,10 +3687,16 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     inline_baseline_margin_bs = inline_baseline_margin_bs.push(
                         vertical_margin_px_in(cst, false, viewport_h, iw)
                     )
+                val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli)
+                val item_delta = inline_item_width_err_milli(nodes, styles, child_index, c, out_bw, out_wrap_starts)
                 inline_x = (
                     inline_x + inline_margin_l + out_bw[c] +
                     inline_margin_r
                 )
+                if item_err != INLINE_PEN_ERR_UNKNOWN and item_delta != INLINE_PEN_ERR_UNKNOWN:
+                    inline_err_milli = item_err + item_delta
+                    inline_err_x = inline_x
+                    inline_err_y = cy
                 prev_margin_b = 0
                 child_count = child_count + 1
                 c = child_index.next_sibling[c]

@@ -440,6 +440,20 @@ fn _engine2d_draw_ir_style_value(props: [DrawIrStyleProp], key: text) -> text:
             return prop_value
     ""
 
+# `pen-origin-milli`: where a resolved-advance run really starts relative to
+# its command x, in milli-px (signed; 0 when absent). The browser producer
+# emits it for a run laid out mid-line after fractional-width inline content.
+fn _engine2d_draw_ir_text_pen_origin_milli(command: DrawIrCommand) -> i64:
+    val raw = _engine2d_draw_ir_style_value(command.computed_style, "pen-origin-milli")
+    if raw == "":
+        return 0
+    raw.to_i64()
+
+# Whole pixels a run's glyphs can move past its command box for that origin.
+fn _engine2d_draw_ir_pen_origin_pad(origin_milli: i64) -> i32:
+    val mag = if origin_milli < 0: 0 - origin_milli else: origin_milli
+    ((mag + 999) / 1000).to_i32()
+
 struct Engine2dDrawIrLinearStroke:
     valid: bool
     color: u32
@@ -2623,15 +2637,19 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         # CSS overflow:visible. Skipped when the command carries
                         # no laid-out width (unstyled producers emit width=0):
                         # an empty clip rect would erase the whole paint.
+                        val pen_origin = _engine2d_draw_ir_text_pen_origin_milli(command)
                         if command.width > 0:
+                            # The band widens by the pixels a fractional pen
+                            # origin can move the glyphs past the box.
+                            val origin_pad = _engine2d_draw_ir_pen_origin_pad(pen_origin)
                             val band = draw_ir_rect_intersection(
                                 text_paint_clip,
-                                draw_ir_rect_bounds(x, 0, command.width, eng.height()))
+                                draw_ir_rect_bounds(x - origin_pad, 0, command.width + 2 * origin_pad, eng.height()))
                             eng.set_clip(band.x, band.y, band.width, band.height)
-                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin)
                             _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
                         else:
-                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin)
                     if probe_this:
                         _e2d_text_probe_count = _e2d_text_probe_count + 1
                         val branch_kind = if shaped and payload_valid: "shaped" else if not shaped: "resolved" else: "shaped-invalid"
@@ -3468,7 +3486,8 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                         drawn = eng.draw_text_with_advances_vulkan_only(
                             command.x, command.y, command.text_value, advances,
                             command.color,
-                            _engine2d_draw_ir_text_font_size(command.computed_style))
+                            _engine2d_draw_ir_text_font_size(command.computed_style),
+                            _engine2d_draw_ir_text_pen_origin_milli(command))
                 if drawn:
                     rendered = rendered + 1
                 else:
