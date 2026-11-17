@@ -101,4 +101,20 @@ physical Linux Vulkan host, capture both backends, and verify the selected
 case/GUI pixels. Keep the 48-case corpus rows `not-run` until their own gates
 pass.
 
+Physical Linux continuation on 2026-11-18 (evidence update only — **STATUS
+unchanged: FAIL**): an aarch64 Ubuntu 24.04 host with an NVIDIA GB10
+(integrated, Vulkan 1.4.312, driver 580.173.02, deviceUUID
+`1883ff9c30a91b8abc50ef34ac2f5a89`, driverUUID
+`6d5e1e1841115cbdae1ec369f9e3c390`) now supplies the N2 device. The pinned
+Skia checkout synced 45 attested dependencies (digest `28e98416…c666`) and
+`build-linux.shs` built the affine-v3 provider (`758f717f…bc89`; receipt
+`doc/09_report/linux_gb10_skia_provider_receipt_2026-11-18.json`). The seed
+passed a failing-assertion control. A RenderDoc capture of the generic
+Engine2D scene on the GB10 passed on 2 of 3 tries. The N2 rows did not run:
+no native qualification executable could be produced on this host (no
+self-hosted release binary; the seed `native-build` did not produce one; the
+seed interpreter rejects the runner), and the N2 workers have no RenderDoc
+capture hook. Cases 01/06/02 remain `not-run`. Full record:
+`doc/09_report/linux_gb10_skia_n2_qualification_2026-11-18.md`.
+
 **STATUS: FAIL** — release and physical N2 qualification are not admitted.

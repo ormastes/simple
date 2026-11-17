@@ -35,16 +35,34 @@ if [ ! -f "$SKIA_ROOT/DEPS" ] ||
 fi
 provider_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$provider_dir/../.." && pwd)
-# Force the pinned checkout's DEPS even if the caller has an override set.
-GIT_SYNC_DEPS_PATH="$SKIA_ROOT/DEPS" python3 "$SKIA_ROOT/tools/git-sync-deps"
 deps_manifest=$(mktemp)
 trap 'rm -f "$deps_manifest"' EXIT HUP INT TERM
-deps_checkout_digest=$(sh "$provider_dir/verify-skia-deps.shs" "$SKIA_ROOT" "$deps_manifest")
+# Sync only when the checkout is not already attested (same rule as
+# build-macos.shs): a re-sync runs unrelated DEPS hooks such as Emscripten
+# activation. The attestation below still fails closed on any drift.
+if ! deps_checkout_digest=$(sh "$provider_dir/verify-skia-deps.shs" "$SKIA_ROOT" "$deps_manifest" 2>/dev/null); then
+    # Force the pinned checkout's DEPS even if the caller has an override set.
+    GIT_SYNC_DEPS_PATH="$SKIA_ROOT/DEPS" python3 "$SKIA_ROOT/tools/git-sync-deps"
+    deps_checkout_digest=$(sh "$provider_dir/verify-skia-deps.shs" "$SKIA_ROOT" "$deps_manifest")
+fi
+# Never GCC: Skia's GN defaults (cc="cc", cxx="c++") resolve to GCC on common
+# distributions, so the clang toolchain is named explicitly. Fontconfig is off
+# because the provider renders no text and the system fontconfig/freetype2
+# headers are not a build dependency of this lane (bundled FreeType is used).
+skia_cc=${CC:-clang}
+skia_cxx=${CXX:-clang++}
+skia_ar=${AR:-llvm-ar}
+# gn_args is the feature configuration pinned by the qualification runner;
+# gn_host_args selects the host toolchain and font plumbing only. Both are
+# passed to gn and both are recorded in the receipt.
+gn_args="is_debug=false skia_use_vulkan=true skia_use_gl=false skia_use_metal=false skia_use_dawn=false"
+gn_host_args="skia_use_fontconfig=false skia_use_system_freetype2=false cc=\"$skia_cc\" cxx=\"$skia_cxx\" ar=\"$skia_ar\""
+ninja_jobs=${SIMPLE_UPSTREAM_SKIA_NINJA_JOBS:-}
 skia_out="$SKIA_ROOT/out/simple-upstream-ganesh-vulkan"
 (
     cd "$SKIA_ROOT"
-    bin/gn gen out/simple-upstream-ganesh-vulkan --args='is_debug=false skia_use_vulkan=true skia_use_gl=false skia_use_metal=false skia_use_dawn=false'
-    ninja -C out/simple-upstream-ganesh-vulkan skia
+    bin/gn gen out/simple-upstream-ganesh-vulkan --args="$gn_args $gn_host_args"
+    ninja ${ninja_jobs:+-j "$ninja_jobs"} -C out/simple-upstream-ganesh-vulkan skia
 )
 if [ ! -f "$skia_out/libskia.a" ]; then
     echo "pinned Skia build produced no libskia.a" >&2
@@ -57,14 +75,20 @@ if [ "$deps_checkout_digest_after" != "$deps_checkout_digest" ]; then
 fi
 output="${1:-$repo_dir/build/optional/libsimple_upstream_skia_ganesh_vulkan.so}"
 mkdir -p "$(dirname -- "$output")"
-${CXX:-c++} -std=c++17 -O2 -fPIC -shared -Wl,--no-undefined \
+# Skia's in-tree Vulkan headers (no system Vulkan dev package is required);
+# link the loader by its runtime soname, which exists without the -dev symlink.
+"$skia_cxx" -std=c++17 -O2 -fPIC -shared -fuse-ld=lld -Wl,--no-undefined \
     "-DSIMPLE_UPSTREAM_SKIA_ENABLE_AFFINE_V3=$affine_v3" \
-    -I"$SKIA_ROOT" -I"$repo_dir/src/runtime" \
+    -DSK_USE_INTERNAL_VULKAN_HEADERS \
+    -I"$SKIA_ROOT" -I"$SKIA_ROOT/include/third_party/vulkan" \
+    -I"$repo_dir/src/runtime" \
     "$provider_dir/provider.cpp" "$skia_out/libskia.a" \
-    -lvulkan -ldl -lpthread -lz -o "$output"
+    -l:libvulkan.so.1 -ldl -lpthread -lz -o "$output"
 deps_digest=$(sha256sum "$SKIA_ROOT/DEPS" | cut -d ' ' -f 1)
 skia_digest=$(sha256sum "$skia_out/libskia.a" | cut -d ' ' -f 1)
 provider_digest=$(sha256sum "$output" | cut -d ' ' -f 1)
+gn_host_args_json=$(printf '%s' "$gn_host_args" | sed 's/\\/\\\\/g; s/"/\\"/g')
+cxx_version_json=$("$skia_cxx" --version | head -n 1 | sed 's/\\/\\\\/g; s/"/\\"/g')
 cat > "$output.receipt.json" <<EOF
 {
   "provider": "upstream-skia-ganesh-vulkan",
@@ -75,7 +99,10 @@ cat > "$output.receipt.json" <<EOF
   "skia_archive_sha256": "$skia_digest",
   "provider_sha256": "$provider_digest",
   "affine_v3_enabled": $affine_v3,
-  "gn_args": "is_debug=false skia_use_vulkan=true skia_use_gl=false skia_use_metal=false skia_use_dawn=false",
+  "gn_args": "$gn_args",
+  "gn_host_args": "$gn_host_args_json",
+  "cxx_version": "$cxx_version_json",
+  "platform": "linux-$(uname -m)",
   "qualification": "build-only; physical Linux device render/readback required"
 }
 EOF
