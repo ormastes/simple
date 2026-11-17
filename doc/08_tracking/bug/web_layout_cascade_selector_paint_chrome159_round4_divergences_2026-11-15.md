@@ -570,3 +570,19 @@ head (13/40 at base).
   - (54,12), the image under `rgba(0,0,0,.5)`: Chrome `9A9FBC`, Engine2D `9AA0BC`. This is the same +1-green two-translucent-overlap class as (40,4).
   - The raster (fb) lane has no image paint at all; `_html_draw_ir_image_command` exists only on the Draw IR path. This matters wherever the raster lane is the ground truth or the fallback.
   - Scaled non-uniform images are unpinned against Chrome's filtering.
+
+## 2026-11-18 — translucent-over-translucent inside a group layer: one green level off (FIXED)
+
+- **Symptom:** where two translucent paints overlap inside an opacity group, cpu_simd and Vulkan read one green level high. Measured at `tg_page` (40,4): Chrome `E3D994`, Engine2D `E3DA94`. Also at (54,12), the image under `rgba(0,0,0,.5)`: Chrome `9A9FBC`, Engine2D `9AA0BC`.
+- **Cause:** Skia keeps the group layer premultiplied in 8 bits: `P = round(s*sa/255) + round(round(d*da/255)*(255-sa)/255)`. Engine2D's translucent-destination branch of `_blend_rule` computed straight-alpha src-over directly, so it skipped Chrome's intermediate rounding.
+  - One model fits both points with no free parameter: a premultiplied layer, then SkBlendARGB32 at A = round-half-up(opacity*255) = 128 and 179.
+  - Every standard straight-alpha rounding variant we tried predicts the Engine2D values, not Chrome's.
+- **Fix:** the translucent-destination branch computes Chrome's premultiplied P and stores it straight as `round(P*255/oa)`. The straight store round-trips exactly (error <= oa/510 < 1/2), so `css_opacity_group_composite_pixel` re-premultiplies to Chrome's P. A transparent destination returns src, bit-identical to before. Opaque destinations are untouched.
+  - The rule changed in every twin: `color.spl`, C `engine2d_blend_u32`, Rust runtime `blend_pixel`, seed interpreter `engine2d_blend_pixel_u32`, `scalar_oracle.spl`, the scalar fallback in `nogc_sync_mut/.../simd_kernels.spl`, Metal `blend_rule`, and the Vulkan `_glsl_blit`. The blit SPIR-V was regenerated with `gen-blit-spirv.shs`, and the pin check passes.
+  - **The seed must be rebuilt** for the Rust twins to take effect.
+  - The Metal twin is edited but unverified on this Linux host.
+- **Evidence:**
+  - `opacity_group_chrome159_spec` 17/17. It now pins (40,4)=`E3D994` and (54,12)=`9A9FBC` on cpu_simd and Vulkan.
+  - `simd_isa_provider_spec` 24/24: the native kernel matches the oracle at the new hash. `engine2d_color_simd_blend_parity_spec` 5/5.
+  - Three pinned random-destination hashes were re-derived by an independent FNV/LCG replica. The replica first reproduces the previous pins under the old rule.
+  - Base vs head over 353 specs, run serially: the only new failures were those three hash pins, now updated. `web_draw_ir_engine_reuse` flips between 7 and 9 of 11 on base and head alike.

@@ -66,13 +66,20 @@ fn oracle_src_over(s: i64, d: i64) -> i64:
     val out_b = (oracle_blue(s) * sa + oracle_blue(d) * dst_weight) / out_a
     oracle_pack(out_a, out_r, out_g, out_b)
 
+fn _oracle_premul_over(s: i64, sa: i64, d: i64, da: i64, inv_a: i64, oa: i64) -> i64:
+    val p = (s * sa + 127) / 255 + (((d * da + 127) / 255) * inv_a + 127) / 255
+    val v = (p * 255 + oa / 2) / oa
+    if v > 255: 255 else: v
+
 fn oracle_src_over_chrome(s: i64, d: i64, solid: bool) -> i64:
     """Chrome 159 source-over, the rule the const and image span kernels use
     (twin of color.spl `_blend_rule` and engine2d_blend_u32 in
     runtime_simd_dispatch.c). Opaque dst, per channel:
       solid: round(s*a/255) + ((d*(256-a)) >> 8)
       image: round(s*a/255) + div255r(d*(255-a))
-    Translucent dst: oracle_src_over with every division rounded.
+    Translucent dst (an opacity-group layer): Skia's premultiplied 8-bit
+    value P = round(s*sa/255) + round(round(d*da/255)*(255-sa)/255), stored
+    straight as round(P*255/oa); transparent dst returns s.
     `oracle_src_over` stays the coverage-mask kernel's rule."""
     val sa = oracle_alpha(s)
     if sa == 255:
@@ -81,14 +88,15 @@ fn oracle_src_over_chrome(s: i64, d: i64, solid: bool) -> i64:
         return d
     val da = oracle_alpha(d)
     val inv_a = 255 - sa
+    if da == 0:
+        return s
     if da != 255:
         val dw = (da * inv_a + 127) / 255
         val oa = sa + dw
-        val half = oa / 2
         return oracle_pack(oa,
-            (oracle_red(s) * sa + oracle_red(d) * dw + half) / oa,
-            (oracle_green(s) * sa + oracle_green(d) * dw + half) / oa,
-            (oracle_blue(s) * sa + oracle_blue(d) * dw + half) / oa)
+            _oracle_premul_over(oracle_red(s), sa, oracle_red(d), da, inv_a, oa),
+            _oracle_premul_over(oracle_green(s), sa, oracle_green(d), da, inv_a, oa),
+            _oracle_premul_over(oracle_blue(s), sa, oracle_blue(d), da, inv_a, oa))
     if solid:
         return oracle_pack(255,
             (oracle_red(s) * sa + 127) / 255 + (oracle_red(d) * (inv_a + 1)) / 256,

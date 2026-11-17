@@ -1,7 +1,7 @@
 # Linux GB10 N2: no runnable qualification executable (seed native-build stall + interpreter "value is not callable")
 
 - **Filed:** 2026-11-18
-- **Status:** open (2, 3 and the readers' half of 4 fixed; 1, 5 and 6 open, plus the lost fractional and affine part of 4)
+- **Status:** open (2, 3 and 4 fixed; 1, 5 and 6 open)
 - **Blocks:** `doc/08_tracking/todo/simple_2d_skia_renderdoc_linux_n2_2026-09-27.md`
   (cases 01/06/02 on the NVIDIA GB10 have no worker readbacks)
 - **Host:** physical aarch64 Ubuntu 24.04.4 LTS, NVIDIA GB10. There is no
@@ -209,6 +209,28 @@ pixel helpers. With the field restored, `strict_vulkan_fractional_rect_spec`
 `fractional-geometry-unsupported` rather than the missing field. Case 02
 (fractional edges) will need that hunk.
 
+### Blocker 4 — the fractional and affine wiring is restored (2026-11-18, own lane)
+
+A per-symbol `git log -S` proof showed the drop was accidental: every helper
+occurs 0 times in parent 1, more than 0 in parent 2 and 0 on release.
+`814795e109d`, which added the generic `fractional-geometry-unsupported`
+preflight, is on parent 1's lineage and never saw the wip, so it was a
+fail-closed default, not a reversal. The affine SPIR-V module and its shader
+had landed; only the wiring was lost. Restored:
+
+- the fractional pixel-center coverage rect;
+- the session pipeline, the backend dispatch, the 60-byte push-constant pack
+  and the Engine2D entry points for affine coverage;
+- the strict preflight and executor branches.
+
+Left out: fresh-device v4, the batch/composition v4 helpers and the image
+damage hunks.
+
+`strict_vulkan_fractional_rect_spec` went from 0/2 to 2/2 and
+`strict_vulkan_affine_coverage_spec` from 0/3 to 3/3, on both lavapipe and
+the GB10. The other strict and legacy specs give the same result on base and
+head.
+
 Case 01 Engine2D retried on the GB10 under the seed interpreter.
 `vkCreateDevice` succeeded on attempt 4. Strict submit, the generation-linked
 readback and the frame-receipt checks all passed. It then exited 3 with:
@@ -252,8 +274,8 @@ No readback was obtained on either leg, so cases 06 and 02 were not run.
 
 ## Not done here
 
-Blockers 2 (runner), 3 (admission reader) and the readers' half of 4
-(the `submission_generation` producer) are fixed. Blockers 1 and 5 are open,
-as is the lost fractional and affine part of 4; Blocker 6 is by design. A native
+Blockers 2 (runner), 3 (admission reader) and 4 (the `submission_generation`
+producer and the fractional and affine wiring) are fixed. Blockers 1 and 5 are
+open; Blocker 6 is by design. A native
 qualification executable is now the single gate for both case 01 legs. The interpreter error
 and the `getpid` ambiguity are defects in their own right.

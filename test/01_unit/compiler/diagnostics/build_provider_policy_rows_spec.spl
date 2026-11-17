@@ -1,0 +1,36 @@
+# Policy rows for the build-source and provider-ABI diagnostics (robust_boundaries plan section 7).
+# @cover config/policy/diagnostic_policy.sdn
+use std.spec
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticRuleLevel, DiagnosticPolicySnapshot, PolicyResolveContext,
+    load_diagnostic_policy_text, diagnostic_policy_default_path
+}
+
+fn shipped() -> DiagnosticPolicySnapshot:
+    match load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path())):
+        Ok(s): s
+        Err(e):
+            panic("shipped policy failed to load: " + e)
+
+fn ctx_at(profile: text, edition: text) -> PolicyResolveContext:
+    PolicyResolveContext.new(profile, edition, "2026-11-18")
+
+describe "SPL-BUILD-SRC-001 policy row":
+    it "warns by default, denies in robust/critical, denies from edition 2027.2":
+        val s = shipped()
+        expect(s.resolve("SPL-BUILD-SRC-001", ctx_at("default", "2026.11"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("SPL-BUILD-SRC-001", ctx_at("robust", "2026.11"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+        expect(s.resolve("SPL-BUILD-SRC-001", ctx_at("critical", "2026.11"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+        expect(s.resolve("SPL-BUILD-SRC-001", ctx_at("default", "2027.2"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+        expect(s.rule("SPL-BUILD-SRC-001").error_not_before_date).to_equal("")
+
+describe "SPL-PROVIDER-ABI-001 policy row":
+    it "denies in every profile and edition":
+        val s = shipped()
+        for profile in ["default", "robust", "critical", "verified"]:
+            expect(s.resolve("SPL-PROVIDER-ABI-001", ctx_at(profile, "2026.11"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+
+describe "SPL-BUILD-ROLE-001 policy row":
+    it "is not registered (owner decision pending)":
+        expect(shipped().resolve("SPL-BUILD-ROLE-001", ctx_at("default", "2026.11"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")

@@ -1,0 +1,105 @@
+# `simple build doctor --source-ownership [--robust] [<lib dir>...]` — check that
+# every `.spl` under each library dir is owned by exactly one unit
+# (SPL-BUILD-SRC-001, plan section 4.2/7). Each dir is one unit: its owned set is
+# the scan resolved through `<dir>/simple.sdn` include/exclude globs, its scanned
+# set is every `.spl` under it. Paths are reported as `<dir>/<relative path>`.
+# Severity comes from config/policy/diagnostic_policy.sdn (warn by default,
+# deny with --robust). Exit 0 clean/warn-only, 1 error findings, 2 usage/nothing checked.
+
+use app.io.mod.{is_dir, file_exists, file_read}
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticRuleLevel, PolicyResolveContext, load_diagnostic_policy_text, diagnostic_policy_default_path
+}
+use compiler.driver.driver_build.source_inventory_v1.{
+    SourceInventoryUnitV1, SourceInventoryFileV1, SourceInventoryFindingV1, source_inventory_ownership_check_v1
+}
+use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_v1, source_inventory_scan_resolve_v1}
+use compiler.driver.driver_build.library_unit_manifest_v1.{library_unit_manifest_parse_v1}
+
+@allow(primitive_api)  # CLI boundary: severity is the policy level name ("warn"/"deny")
+pub fn doctor_source_ownership_report(units: [SourceInventoryUnitV1], scanned: [text], severity: text) -> text:
+    if scanned.len() == 0:
+        return "ERROR — nothing was checked (no source files scanned)\n"
+    val findings = source_inventory_ownership_check_v1(units, scanned)
+    val label = if severity == "deny": "error" else: "warning"
+    var out = ""
+    for f in findings:
+        out = out + "{label}[{f.code}] {f.path}: {f.message}\n"
+    if findings.len() == 0:
+        return out + "PASS — {scanned.len()} checked, 0 findings\n"
+    if severity == "deny":
+        return out + "FAIL — {scanned.len()} checked, {findings.len()} error finding(s)\n"
+    out + "PASS — {scanned.len()} checked, {findings.len()} warning(s)\n"
+
+@allow(primitive_api)  # CLI boundary: severity is the policy level name ("warn"/"deny")
+pub fn doctor_source_ownership_exit(units: [SourceInventoryUnitV1], scanned: [text], severity: text) -> i64:
+    if scanned.len() == 0:
+        return 2
+    if severity == "deny" and source_inventory_ownership_check_v1(units, scanned).len() > 0:
+        return 1
+    0
+
+fn _doctor_severity(robust: bool) -> text:
+    val loaded = load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path()))
+    val profile = if robust: "robust" else: "default"
+    match loaded:
+        case Ok(s):
+            val r = s.resolve("SPL-BUILD-SRC-001", PolicyResolveContext.new(profile, "2026.11", ""), DiagnosticRuleLevel.Warn)
+            if r.level.name() == "deny": "deny" else: "warn"
+        case Err(_):
+            if robust: "deny" else: "warn"
+
+fn _doctor_strip(dir: text) -> text:
+    var d = dir.replace("\\", "/")
+    while d.len() > 1 and d.ends_with("/"):
+        d = d[0:d.len() - 1]
+    d
+
+@allow(primitive_api)  # CLI argv boundary: argv in, process exit code out
+pub fn run_build_doctor(args: [text]) -> i64:
+    var source_ownership = false
+    var robust = false
+    var dirs: [text] = []
+    for a in args:
+        if a == "--source-ownership":
+            source_ownership = true
+        elif a == "--robust":
+            robust = true
+        elif a.starts_with("-"):
+            print("usage: simple build doctor --source-ownership [--robust] [<lib dir>...]")
+            return 2
+        else:
+            dirs.push(_doctor_strip(a))
+    if not source_ownership:
+        print("usage: simple build doctor --source-ownership [--robust] [<lib dir>...]")
+        return 2
+    if dirs.len() == 0:
+        dirs.push(".")
+    var units: [SourceInventoryUnitV1] = []
+    var scanned: [text] = []
+    for dir in dirs:
+        if not is_dir(dir):
+            print("build-doctor-error: not a directory: {dir}")
+            return 2
+        val prefix = if dir == ".": "" else: dir + "/"
+        var includes = ["**/*.spl"]
+        var excludes: [text] = []
+        val manifest_path = dir + "/simple.sdn"
+        if file_exists(manifest_path):
+            match library_unit_manifest_parse_v1(dir, file_read(manifest_path) ?? ""):
+                case Ok(m):
+                    includes = m.includes
+                    excludes = m.excludes
+                case Err(e):
+                    print("build-doctor-error: {e}")
+                    return 2
+        var files: [SourceInventoryFileV1] = []
+        for p in source_inventory_scan_resolve_v1(dir, includes, excludes):
+            files.push(SourceInventoryFileV1(path: prefix + p, digest: ""))
+        units.push(SourceInventoryUnitV1(name: dir, files: files))
+        for p in source_inventory_scan_v1(dir):
+            scanned.push(prefix + p)
+    val severity = _doctor_severity(robust)
+    print(doctor_source_ownership_report(units, scanned, severity))
+    doctor_source_ownership_exit(units, scanned, severity)
