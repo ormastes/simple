@@ -1209,44 +1209,58 @@ fn parse_arrow_update(base: i64) -> i64:
             k = par_kind_get()
     parser_expect(TOK_RPAREN)
     val tag = expr_get_tag(base)
-    if tag != EXPR_IDENT and tag != EXPR_FIELD_ACCESS and tag != EXPR_INDEX:
-        parser_error("arrow update `->{name}(...)` target must be a place (identifier, field or index)")
+    if (tag != EXPR_IDENT and tag != EXPR_FIELD_ACCESS and tag != EXPR_INDEX) or not arrow_place_rooted_in_ident(base):
+        parser_error("arrow update `->{name}(...)` target must be a place rooted in a variable (identifier, field or index); a call result is not assignable")
         return base
     if tag == EXPR_IDENT and arrow_is_val(expr_get_str(base)):
         parser_error("arrow update `{expr_get_str(base)}->{name}(...)` rebinds `{expr_get_str(base)}`, which is an immutable `val`; declare it with `var`")
         return base
-    # ROB-ARR-05: bind non-simple sub-expressions of the place to fresh temps
-    # (left to right) so each is evaluated exactly once.
-    var pre: [i64] = []
-    val place = arrow_stabilize(base, start, pre)
+    # ROB-ARR-05: bind non-simple operands (index expressions, fields of a
+    # var-rooted place) to fresh temps, left to right, so each evaluates once.
     val span = flat_span_new(start, lex_token_start_get(), line, col)
+    val stab = arrow_stabilize(base, start, span, [])
+    val place = stab.0
+    var stmts: [i64] = stab.1
     var call = expr_method_call_named(place, name, args, arg_names, span)
     # ROB-ARR-06: `x->f()?` is `x = (x.f())?`; propagation precedes the store.
     while par_kind_get() == TOK_QUESTION:
         parser_advance()
-        call = expr_try(call, 0)
-    val assign = expr_assign(place, call, 0)
-    if pre.len() == 0:
+        call = expr_try(call, span)
+    val assign = expr_assign(place, call, span)
+    if stmts.len() == 0:
         return assign
-    pre.push(stmt_expr_stmt(assign, 0))
-    expr_block(pre, 0, 0)
+    stmts = stmts + [stmt_expr_stmt(assign, span)]
+    expr_block(stmts, 0, span)
 
-# Replace every non-simple operand of a place by a fresh `val __arrow_<start>_<n>`
-# temp appended to `pre`. Names are unique per `->` token offset.
-fn arrow_stabilize(e: i64, start: i64, pre: [i64]) -> i64:
+# The root of a place must be an identifier: `g().x` / `g()[i]` are rvalues.
+fn arrow_place_rooted_in_ident(e: i64) -> bool:
+    val t = expr_get_tag(e)
+    if t == EXPR_IDENT:
+        return true
+    if t == EXPR_FIELD_ACCESS or t == EXPR_INDEX:
+        return arrow_place_rooted_in_ident(expr_get_left(e))
+    false
+
+# Returns (place, pre): `place` with non-simple index operands replaced by
+# `__arrow_<start>_<n>` idents, `pre` the `val` temp bindings (threaded by value).
+fn arrow_stabilize(e: i64, start: i64, span: i64, pre: [i64]) -> (i64, [i64]):
     if arrow_operand_simple(e):
-        return e
+        return (e, pre)
     val t = expr_get_tag(e)
     if t == EXPR_FIELD_ACCESS:
-        val l = arrow_stabilize(expr_get_left(e), start, pre)
-        return expr_field_access(l, expr_get_str(e), 0)
+        val l = arrow_stabilize(expr_get_left(e), start, span, pre)
+        return (expr_field_access(l.0, expr_get_str(e), span), l.1)
     if t == EXPR_INDEX:
-        val l = arrow_stabilize(expr_get_left(e), start, pre)
-        val r = arrow_stabilize(expr_get_right(e), start, pre)
-        return expr_index(l, r, 0)
+        val l = arrow_stabilize(expr_get_left(e), start, span, pre)
+        val r = arrow_temp_operand(expr_get_right(e), start, span, l.1)
+        return (expr_index(l.0, r.0, span), r.1)
+    (e, pre)
+
+fn arrow_temp_operand(e: i64, start: i64, span: i64, pre: [i64]) -> (i64, [i64]):
+    if arrow_operand_simple(e):
+        return (e, pre)
     val tmp = "__arrow_{start}_{pre.len()}"
-    pre.push(stmt_val_decl(tmp, 0, e, 0))
-    expr_ident(tmp, 0)
+    (expr_ident(tmp, span), pre + [stmt_val_decl(tmp, 0, e, span)])
 
 fn parser_postfix_span_from(base: i64) -> i64:
     """Span for a postfix node (`base.field`, `base[i]`): from the base's own

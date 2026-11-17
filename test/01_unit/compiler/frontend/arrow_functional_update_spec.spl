@@ -12,7 +12,7 @@ Audience: compiler frontend engineers.
 use std.spec.*
 use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name, decl_get_body}
 use compiler.core.ast_expr.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right,
-    EXPR_ASSIGN, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_MATCH, EXPR_BLOCK, EXPR_CALL, EXPR_TRY, expr_get_stmts}
+    EXPR_ASSIGN, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_MATCH, EXPR_BLOCK, EXPR_CALL, EXPR_TRY, expr_get_stmts, expr_get_span}
 use compiler.core.ast_stmt.{stmt_get_expr}
 use compiler.core.parser.{parse_module, parser_has_errors}
 
@@ -40,7 +40,7 @@ fn arrow_body_expr(source: text, path: text, wanted: text) -> i64:
 describe "arrow functional update (self-hosted parser)":
     it "desugars x->m(args) into an assignment of x.m(args)":
         val e = arrow_body_expr("fn f():\n    var x = [1]\n    x->concat([2])\n", "arrow_basic.spl", "f")
-        if e < 0: return
+        expect(e >= 0).to_equal(true)
         expect(expr_get_tag(e)).to_equal(EXPR_ASSIGN)
         val target = expr_get_left(e)
         expect(expr_get_tag(target)).to_equal(EXPR_IDENT)
@@ -111,23 +111,38 @@ fn arrow_count_calls(e: i64, callee: text) -> i64:
 describe "arrow update single evaluation (ROB-ARR-05) and ? ordering (ROB-ARR-06)":
     it "evaluates an index-call target exactly once":
         val e = arrow_body_expr("fn f():\n    var a = [[1]]\n    a[g()]->concat([2])\n", "arrow_idx_call.spl", "f")
-        if e < 0: return
+        expect(e >= 0).to_equal(true)
         expect(expr_get_tag(e)).to_equal(EXPR_BLOCK)
         expect(arrow_count_calls(e, "g")).to_equal(1)
 
-    it "evaluates a field-of-call target exactly once":
-        val e = arrow_body_expr("fn f():\n    var a = 1\n    g().x->concat([2])\n", "arrow_field_call.spl", "f")
-        if e < 0: return
+    it "rejects a non-lvalue root (call result field)":
+        expect(arrow_parse("fn f():\n    g().x->concat([2])\n", "arrow_field_call.spl")).to_equal(true)
+
+    it "rejects a non-lvalue root (call result index)":
+        expect(arrow_parse("fn f():\n    g()[0]->concat([2])\n", "arrow_idx_root_call.spl")).to_equal(true)
+
+    it "evaluates a call index under a field of a var root exactly once":
+        val e = arrow_body_expr("fn f():\n    var a = 1\n    a.items[g()]->concat([2])\n", "arrow_field_idx.spl", "f")
+        expect(e >= 0).to_equal(true)
         expect(expr_get_tag(e)).to_equal(EXPR_BLOCK)
         expect(arrow_count_calls(e, "g")).to_equal(1)
+
+    it "gives the generated assign the arrow span":
+        val e = arrow_body_expr("fn f():\n    var a = [[1]]\n    a[g()]->concat([2])\n", "arrow_span.spl", "f")
+        expect(e >= 0).to_equal(true)
+        val stmts = expr_get_stmts(e)
+        val assign = stmt_get_expr(stmts[stmts.len() - 1])
+        val call_span = expr_get_span(expr_get_right(assign))
+        expect(expr_get_span(assign)).to_equal(call_span)
+        expect(call_span > 0).to_equal(true)
 
     it "keeps a plain place a bare assignment":
         val e = arrow_body_expr("fn f():\n    var a = [[1]]\n    a[0]->concat([2])\n", "arrow_plain_assign.spl", "f")
-        if e < 0: return
+        expect(e >= 0).to_equal(true)
         expect(expr_get_tag(e)).to_equal(EXPR_ASSIGN)
 
     it "propagates ? before the store: x = (x.f())?":
         val e = arrow_body_expr("fn f():\n    var x = [1]\n    x->concat([2])?\n", "arrow_try.spl", "f")
-        if e < 0: return
+        expect(e >= 0).to_equal(true)
         expect(expr_get_tag(e)).to_equal(EXPR_ASSIGN)
         expect(expr_get_tag(expr_get_right(e))).to_equal(EXPR_TRY)
