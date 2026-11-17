@@ -57,25 +57,32 @@ shard_files() { # legacy -> sorted shard paths (may be empty)
 AWK_ROWID='function rowid(s) { sub(/^[ \t]+/, "", s); sub(/,.*/, "", s); sub(/[ \t]+$/, "", s); return s }'
 
 # merged: splice shards into the legacy body.
-cmd_merged() {
+# Pass shard paths via a manifest file rather than `-v shards=...`: BSD/macOS
+# awk rejects literal newlines inside `-v` variable values.
+cmd_merged() (
     _legacy=${1:-$DEFAULT_LEGACY}
     [ -f "$_legacy" ] || die "$_legacy not found"
-    _list=$(shard_files "$_legacy")
-    awk -v shards="$_list" "$AWK_ROWID"'
+    _manifest=$(mktemp) || die "merged: cannot create shard manifest"
+    trap 'rm -f "$_manifest"' 0
+    shard_files "$_legacy" > "$_manifest" || die "merged: cannot list shards"
+    SHARD_MANIFEST="$_manifest" awk "$AWK_ROWID"'
     function flush() { if (cur != "" && (cur in extra)) { printf "%s", extra[cur]; delete extra[cur] } }
     BEGIN {
-        n = split(shards, f, "\n")
-        for (i = 1; i <= n; i++) {
-            fn = f[i]; if (fn == "") continue
+        manifest = ENVIRON["SHARD_MANIFEST"]
+        while ((mrc = (getline fn < manifest)) > 0) {
+            if (fn == "") continue
             id = fn; sub(/.*\//, "", id); sub(/\.sdn$/, "", id); ov[id] = 1
             t = ""
-            while ((getline line < fn) > 0) {
+            while ((frc = (getline line < fn)) > 0) {
                 if (line ~ /^#/) continue
                 if (line ~ /^[A-Za-z_]+ \|/) { t = line; sub(/ .*/, "", t); if (!(t in hdr)) { hdr[t] = line; order[++no] = t }; continue }
                 if (t != "" && t != "strings" && line ~ /^[ \t]+[^ \t#]/) extra[t] = extra[t] line "\n"
             }
             close(fn)
+            if (frc < 0) { err = 2; exit 2 }
         }
+        close(manifest)
+        if (mrc < 0) { err = 2; exit 2 }
         cur = ""
     }
     NR == 1 && /^#sdn-crc32:/ { next }
@@ -84,10 +91,11 @@ cmd_merged() {
     /^[ \t]*$/ { flush(); cur = ""; print; next }
     { print }
     END {
+        if (err) exit err
         flush()
         for (i = 1; i <= no; i++) { t = order[i]; if (!(t in seen) && (t in extra)) { print hdr[t]; printf "%s\n", extra[t] } }
     }' "$_legacy"
-}
+)
 
 # extract: the unsealed shard body for one id out of a merged file.
 cmd_extract() {
@@ -160,7 +168,7 @@ cmd_check() {
     _hashes=$(mktemp); : > "$_hashes"
     if [ -n "$_list" ]; then
         # shellcheck disable=SC2086
-        csm_hash_batch "$(shard_algo)" "$_hashes" $_list || { echo "ERROR — nothing was checked (cannot hash shards)"; return 2; }
+        csm_hash_batch "$(shard_algo)" "$_hashes" $_list || { rm -f "$_hashes"; echo "ERROR — nothing was checked (cannot hash shards)"; return 2; }
     fi
     _i=0
     for _f in $_list; do
@@ -179,11 +187,17 @@ cmd_check() {
             /^[ \t]*$/ { t = "" }' "$_f")
         [ -z "$_mis" ] || _bad="$_bad $_stem(row-id=$_mis)"
     done
-    _dup=$(cmd_merged "$_legacy" | awk "$AWK_ROWID"'
+    _merged=$(mktemp) || { rm -f "$_hashes"; echo "ERROR — nothing was checked (cannot create merged view)"; return 2; }
+    if ! cmd_merged "$_legacy" > "$_merged"; then
+        rm -f "$_hashes" "$_merged"
+        echo "ERROR — nothing was checked (cannot build merged view)"
+        return 2
+    fi
+    _dup=$(awk "$AWK_ROWID"'
         /^bugs(_active)? \|/ { t = 1; next } /^[A-Za-z_]+ \|/ { t = 0; next }
         t && /^[ \t]+[^ \t#]/ { id = rowid($0); if (id in seen) print id; seen[id] = 1 }
-        /^[ \t]*$/ { t = 0 }' | LC_ALL=C sort -u | tr '\n' ' ')
-    rm -f "$_hashes"
+        /^[ \t]*$/ { t = 0 }' "$_merged" | LC_ALL=C sort -u | tr '\n' ' ')
+    rm -f "$_hashes" "$_merged"
     [ -z "$_dup" ] || _bad="$_bad duplicate-bug-id:$_dup"
     if [ -n "$_bad" ]; then echo "FAIL — $_n shard(s) checked, offenders:$_bad"; return 1; fi
     echo "PASS — $_n shard(s) checked, 0 offenders (merged view has no duplicate bug id)"
@@ -248,12 +262,25 @@ selftest() {
     grep -q '^    a, P1, open' "$_m2" || die "selftest: untouched legacy row must survive"
     grep -q '^bug_scope |' "$_m2" || die "selftest: shard-only table must be appended"
     cmd_check "$_l" | tail -n 1 | grep -q '^PASS' || die "selftest: clean tree must PASS"
+    # Multi-shard merge/count/check (>= 2 shards triggers newlines in shard list).
+    _wa=$(mktemp); awk '/^    a, P1, open/ { print "    a, P1, closed, A, f, 1, , 2026-11-01, 2026-11-03, true"; next } { print }' "$_m2" > "$_wa"
+    cmd_write a "$_wa" "$_l" >/dev/null || die "selftest: write a"
+    _m3=$(mktemp); _m3_err=$(mktemp)
+    cmd_merged "$_l" > "$_m3" 2> "$_m3_err" || die "selftest: multi-shard merged failed"
+    [ ! -s "$_m3_err" ] || die "selftest: multi-shard merged emitted stderr: $(cat "$_m3_err")"
+    grep -q '^    a, P1, closed' "$_m3" || die "selftest: multi-shard merged lost a override"
+    grep -q '^    b, P2, fixed' "$_m3" || die "selftest: multi-shard merged lost b override"
+    [ "$(grep -c '^    a, ' "$_m3")" = 2 ] || die "selftest: legacy a row must be dropped"
+    cmd_count "$_l" > "$_m3_err" || die "selftest: multi-shard count failed"
+    grep -q '^TOTAL P1 closed 1$' "$_m3_err" || die "selftest: multi-shard count wrong for a"
+    grep -q '^TOTAL P2 fixed 1$' "$_m3_err" || die "selftest: multi-shard count wrong for b"
+    cmd_check "$_l" | tail -n 1 | grep -q '^PASS' || die "selftest: multi-shard clean tree must PASS"
     cp "$_fx/db/b.sdn" "$_fx/db/c.sdn"; seal_file "$_fx/db/c.sdn" || die "selftest: seal c"
     cmd_check "$_l" | tail -n 1 | grep -q 'c(row-id=b)' || die "selftest: foreign row id must FAIL"
     rm -f "$_fx/db/c.sdn" "$_fx/db/c."*.csm
     printf '    b, 1, "late"\n' >> "$_fx/db/b.sdn"
     cmd_check "$_l" | tail -n 1 | grep -q 'stale-seal' || die "selftest: stale seal must FAIL"
-    rm -rf "$_fx" "$_m" "$_w" "$_m2"
+    rm -rf "$_fx" "$_m" "$_w" "$_m2" "$_wa" "$_m3" "$_m3_err"
     echo "selftest: PASS"
 }
 
