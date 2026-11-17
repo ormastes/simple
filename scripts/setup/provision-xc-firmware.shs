@@ -1,0 +1,46 @@
+#!/bin/sh
+# Provision the extra firmware the cross-compile matrix's 32-bit bare-metal rows need,
+# WITHOUT root: ovmf-ia32 + qemu-efi-arm (apt download + dpkg -x) and a riscv32
+# OpenSBI built with clang (LLVM=1; never GCC). Output: ~/.simple/firmware/.
+#   ovmf-ia32/usr/share/OVMF/OVMF32_CODE_4M.fd
+#   qemu-efi-arm/usr/share/AAVMF/AAVMF32_CODE.fd
+#   opensbi-riscv32/fw_dynamic.{bin,elf}      (rv32imafdc / ilp32d, generic platform)
+# usage: sh scripts/setup/provision-xc-firmware.shs [--selftest]
+set -u
+F=${XC_FIRMWARE_DIR:-$HOME/.simple/firmware}
+SBI_VER=${XC_OPENSBI_VERSION:-1.7}
+
+if [ "${1:-}" = --selftest ]; then
+    # EDK2 ARM32 only accepts PE machine 0x01c2 (ARMTHUMB_MIXED); lld-link emits 0x01c4.
+    command -v clang >/dev/null 2>&1 && command -v lld-link >/dev/null 2>&1 || { echo "ERROR — nothing was checked (need clang + lld-link)"; exit 2; }
+    t=$(mktemp -d) || exit 2
+    printf 'int efi_main(void){return 0;}\n' > "$t/a.c"
+    clang --target=armv7-unknown-windows-msvc -ffreestanding -c "$t/a.c" -o "$t/a.o" &&
+        lld-link -subsystem:efi_application -entry:efi_main -nodefaultlib -machine:arm "$t/a.o" -out:"$t/a.efi" >/dev/null 2>&1 || { rm -rf "$t"; echo "ERROR — nothing was checked (arm32 PE link failed)"; exit 2; }
+    off=$(od -An -tu4 -j60 -N4 "$t/a.efi" | tr -d ' ')
+    m=$(od -An -tx2 -j$((off + 4)) -N2 "$t/a.efi" | tr -d ' ')
+    rm -rf "$t"
+    [ "$m" = 01c4 ] && { echo "PASS — 1 invariant(s) checked, lld-link arm32 PE machine is 0x$m (patch to 01c2 for AAVMF32)"; exit 0; }
+    echo "FAIL — lld-link arm32 PE machine is 0x$m, expected 01c4 (re-derive the AAVMF32 note)"; exit 1
+fi
+
+mkdir -p "$F/dl" "$F/src" || { echo "ERROR — cannot create $F"; exit 2; }
+( cd "$F/dl" && for p in ovmf-ia32 qemu-efi-arm; do
+      apt-get download "$p" >/dev/null 2>&1 || { echo "ERROR — apt-get download $p failed"; exit 2; }
+  done
+  for d in ovmf-ia32_*.deb qemu-efi-arm_*.deb; do n=${d%%_*}; mkdir -p "$F/$n" && dpkg -x "$d" "$F/$n"; done ) || exit 2
+if [ ! -s "$F/opensbi-riscv32/fw_dynamic.elf" ]; then
+    command -v clang >/dev/null 2>&1 || { echo "ERROR — clang missing"; exit 2; }
+    ( cd "$F/src" &&
+      [ -f "opensbi-$SBI_VER.tar.gz" ] || wget -q -O "opensbi-$SBI_VER.tar.gz" "https://github.com/riscv-software-src/opensbi/archive/refs/tags/v$SBI_VER.tar.gz"
+      rm -rf "opensbi-$SBI_VER" && tar xzf "opensbi-$SBI_VER.tar.gz" && cd "opensbi-$SBI_VER" &&
+      make -j4 LLVM=1 PLATFORM=generic PLATFORM_RISCV_XLEN=32 PLATFORM_RISCV_ISA=rv32imafdc_zicsr_zifencei \
+          PLATFORM_RISCV_ABI=ilp32d O="$F/src/build32" >/dev/null &&
+      mkdir -p "$F/opensbi-riscv32" && cp "$F"/src/build32/platform/generic/firmware/fw_dynamic.bin "$F"/src/build32/platform/generic/firmware/fw_dynamic.elf "$F/opensbi-riscv32/" ) || { echo "ERROR — riscv32 OpenSBI build failed"; exit 2; }
+fi
+n=0
+for f in ovmf-ia32/usr/share/OVMF/OVMF32_CODE_4M.fd qemu-efi-arm/usr/share/AAVMF/AAVMF32_CODE.fd opensbi-riscv32/fw_dynamic.elf; do
+    [ -s "$F/$f" ] || { echo "FAIL — missing $F/$f"; exit 1; }
+    n=$((n + 1))
+done
+echo "PASS — $n firmware file(s) present under $F"
