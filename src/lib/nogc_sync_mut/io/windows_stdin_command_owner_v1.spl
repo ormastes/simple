@@ -23,7 +23,12 @@ pub struct WindowsStdinCommandTurnV1:
     result: WindowsStdinCommandResultV1?
     error: text
 
-struct CommandState:
+struct StdinCommandState:
+    # Renamed from CommandState: windows_command_owner_v2.spl declares a
+    # struct with the same name; the stage2 candidate rejects the bare-name
+    # collision ('ambiguous struct/class field owner ... no module-qualified
+    # type provenance') when one closure pulls both modules (caret build,
+    # 2026-11-16). v2 keeps the canonical name.
     request: WindowsStdinCommandRequestV1
     stage: text = "pin-begin"
     pin: WindowsStdinExecutablePinV1? = None
@@ -70,9 +75,9 @@ struct CommandState:
 
 # Nonreused slots and a single canonical thread make copied wrappers aliases
 # of one native owner. Every returned turn supersedes the caller's old copy.
-var commands: [CommandState?] = []
+var commands: [StdinCommandState?] = []
 
-fn fail(state: CommandState, reason: text) -> CommandState:
+fn fail(state: StdinCommandState, reason: text) -> StdinCommandState:
     var changed = state
     if changed.error == "": changed.error = reason
     changed.stage = if changed.handles[1] != 0: "terminate" else: "cleanup"
@@ -87,11 +92,11 @@ pub fn windows_stdin_command_begin_v1(request: WindowsStdinCommandRequestV1) -> 
         case Ok(_): pass
     if commands.len() >= 100000: return WindowsStdinCommandTurnV1(None, None, "windows-command-slot-bound")
     val slot = commands.len()
-    commands.push(Some(CommandState(request: windows_stdin_command_freeze_v1(request))))
+    commands.push(Some(StdinCommandState(request: windows_stdin_command_freeze_v1(request))))
     WindowsStdinCommandTurnV1(Some(WindowsStdinCommandOwnerV1(slot: slot)), None, "")
 
 @unsafe(reason: "all temporary allocations immediately join the canonical cleanup list", capabilities: [ffi, raw_ptr])
-fn prepare(state: CommandState) -> CommandState:
+fn prepare(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     val line = windows_stdin_native_line_v1(state.request, state.canonical_image)
     if line.is_err(): return fail(changed, line.unwrap_err())
@@ -135,7 +140,7 @@ fn prepare(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "captures both CreatePipe outputs even on failure; exact inherited endpoints only", capabilities: [ffi, raw_ptr])
-fn prepare_pipes(state: CommandState) -> CommandState:
+fn prepare_pipes(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     val arena = state.arena
     var failed = false
@@ -153,7 +158,7 @@ fn prepare_pipes(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "CSPRNG first-instance local pipe with protected owner/SYSTEM DACL and exact inheritable child endpoint", capabilities: [ffi, raw_ptr])
-fn open_stdin(state: CommandState) -> CommandState:
+fn open_stdin(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     val arena = state.arena
     val sddl = windows_process_wide_linear_v1(state.heap, "D:P(A;;GA;;;SY)(A;;GA;;;OW)")
@@ -196,7 +201,7 @@ fn open_stdin(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "zero-wait completion and actual connected parent-client identity before child launch", capabilities: [ffi, raw_ptr])
-fn finish_stdin_connection(state: CommandState) -> CommandState:
+fn finish_stdin_connection(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     if changed.connect_pending:
         if GetOverlappedResult(state.handles[8], state.arena + 4640, state.arena + 456, 0) == 0:
@@ -212,7 +217,7 @@ fn finish_stdin_connection(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "one bounded overlapped stdin chunk, completion-only prefix accounting and exact EOF closure", capabilities: [ffi, raw_ptr])
-fn advance_input(state: CommandState) -> CommandState:
+fn advance_input(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     if state.stdin_closed or state.error != "": return changed
     if state.write_pending:
@@ -253,7 +258,7 @@ fn advance_input(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "request cancellation and observe one retained overlapped request before releasing any backing storage", capabilities: [ffi, raw_ptr])
-fn cancel_pending_io(state: CommandState) -> CommandState:
+fn cancel_pending_io(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     val offset = if state.connect_pending: 4640 else: 4608
     if CancelIoEx(state.handles[8], state.arena + offset) == 0 and GetLastError() != 1168u32:
@@ -273,7 +278,7 @@ fn cancel_pending_io(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "retain exact child stream whitelist and startup attribute storage", capabilities: [ffi, raw_ptr])
-fn prepare_attributes(state: CommandState) -> CommandState:
+fn prepare_attributes(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     val arena = state.arena
     volatile_write_u32(arena, 112)
@@ -300,7 +305,7 @@ fn prepare_attributes(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "kill-on-close job before any suspended process creation", capabilities: [ffi, raw_ptr])
-fn prepare_job(state: CommandState) -> CommandState:
+fn prepare_job(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     changed.handles[0] = CreateJobObjectW(0, 0)
     volatile_write_u32(state.arena + 256, 8192)
@@ -313,7 +318,7 @@ fn prepare_job(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "actual Unix admission clock immediately precedes suspended CreateProcess; all returned handles retained", capabilities: [ffi, raw_ptr])
-fn create(state: CommandState) -> CommandState:
+fn create(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     val clock = windows_command_admission_clock_v2(state.request.expires_at_unix_ms, time_sample_unix_micros_or_failure())
     if clock.is_err(): return fail(changed, clock.unwrap_err())
@@ -329,7 +334,7 @@ fn create(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "one available output chunk per stream; sole reader; never a blocking empty-pipe read", capabilities: [ffi, raw_ptr])
-fn read_stream(state: CommandState, stream: i64) -> CommandState:
+fn read_stream(state: StdinCommandState, stream: i64) -> StdinCommandState:
     var changed = state
     if (stream == 0 and state.stdout_eof) or (stream == 1 and state.stderr_eof): return changed
     val pipe = state.handles[4 + stream * 2]
@@ -363,7 +368,7 @@ fn read_stream(state: CommandState, stream: i64) -> CommandState:
     changed
 
 @unsafe(reason: "zero-wait exact process and job-tree observation, no PID authority", capabilities: [ffi, raw_ptr])
-fn observe(state: CommandState) -> CommandState:
+fn observe(state: StdinCommandState) -> StdinCommandState:
     var changed = read_stream(state, 0)
     changed = read_stream(changed, 1)
     if not state.termination_requested and state.error == "":
@@ -392,7 +397,7 @@ fn observe(state: CommandState) -> CommandState:
     changed
 
 @unsafe(reason: "one retryable native handle release or one allocation release per step", capabilities: [ffi, raw_ptr])
-fn cleanup(state: CommandState) -> CommandState:
+fn cleanup(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     if state.handles[1] != 0 and not state.terminal: return fail(changed, "windows-command-cleanup-before-terminal-refused")
     # Overlapped requests still own arena/event/input-buffer addresses even
