@@ -101,4 +101,38 @@ physical Linux Vulkan host, capture both backends, and verify the selected
 case/GUI pixels. Keep the 48-case corpus rows `not-run` until their own gates
 pass.
 
+Physical Linux continuation on 2026-11-18 (evidence update only — **STATUS
+unchanged: FAIL**): an aarch64 Ubuntu 24.04 host with an NVIDIA GB10
+(integrated, Vulkan 1.4.312, driver 580.173.02, deviceUUID
+`1883ff9c30a91b8abc50ef34ac2f5a89`, driverUUID
+`6d5e1e1841115cbdae1ec369f9e3c390`) now supplies the N2 device. The pinned
+Skia checkout synced 45 attested dependencies (digest `28e98416…c666`) and
+`build-linux.shs` built the affine-v3 provider (`758f717f…bc89`; receipt
+`doc/09_report/linux_gb10_skia_provider_receipt_2026-11-18.json`). The seed
+passed a failing-assertion control. A RenderDoc capture of the generic
+Engine2D scene on the GB10 passed on 2 of 3 tries. The N2 rows did not run:
+no native qualification executable could be produced on this host (no
+self-hosted release binary; the seed `native-build` did not produce one; the
+seed interpreter rejects the runner), and the N2 workers have no RenderDoc
+capture hook. Cases 01/06/02 remain `not-run`. Full record:
+`doc/09_report/linux_gb10_skia_n2_qualification_2026-11-18.md`. Follow-up: the
+original `build/` artifacts were lost to a worktree cleanup and regenerated
+under `/home/yoon/skia-n2/artifacts/` (same provider digest `758f717f…bc89`,
+new GB10 capture `ab1bd6af…e3a9`). Executable blockers are filed in
+`doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`.
+
+Later the same day (evidence update only; **STATUS unchanged: FAIL**), two
+blockers were fixed:
+- the runner's `value is not callable` defect (PR #10122);
+- the Web admission check misreading the 0% `background-position` encoding.
+
+Case 01 was then run on the GB10 through the seed interpreter, with the
+following results:
+- **Engine2D leg: BLOCKED.** The Vulkan device opened, but the strict-capture
+  producer half was lost in merge `e5b290e42a0` (bug doc Blocker 4).
+- **Skia leg: BLOCKED.** The seed interpreter has no `rt_gpu_provider_loaded`
+  (Blocker 5).
+
+0 pixels were compared, so cases 06 and 02 were not run.
+
 **STATUS: FAIL** — release and physical N2 qualification are not admitted.
