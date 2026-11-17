@@ -2341,6 +2341,25 @@ Gates and remaining gaps:
   `simple_web_html_layout_renderer_module_split_spec` "keeps every parser input
   below 128 KiB" was already red at base (`..._core_selectors.spl` 138,390 B),
   and this change grows the file to 147,903 B. Split the file before adding more.
+- **Split done (2026-11-17, pure move, no logic edits).** Rule admission,
+  rule indexing and cascade ordering moved to
+  `simple_web_html_layout_renderer_core_rule_index.spl` (47,584 B):
+  `CSS_KNOWN_PSEUDO_CLASSES`/`_ELEMENTS`, `selector_list_has_unknown_pseudo`
+  and its helpers, the `selector_bucket_*` keys, `build_rule_buckets`,
+  `style_rule_candidates`, the sorted-list merge helpers, `_part_specificity`/
+  `_group_specificity` and the candidate / z-index / style-order sorts.
+  `_core_selectors.spl` (104,598 B) keeps parsing and matching, plus
+  `_canonical_compound` (called by `selector_group_parts`) and
+  `selector_group_matches_node_parts` (writes the module-level `_sel_*` step
+  budget, so it must stay beside it). Import chain is now
+  `core_types -> core_selectors -> core_rule_index -> core_css_rules -> core`;
+  each layer `export use`s the one below with an explicit list, so a symbol
+  moved between layers must also leave the lower list. Import
+  `build_rule_buckets`, `style_rule_candidates` and the sort helpers from
+  `_core_rule_index`, not `_core_selectors`. A new family file must also be
+  added to the `names` list in
+  `simple_web_html_layout_renderer_module_split_spec` (it compares the
+  directory walk count to that list).
 ## 2026-11-17 — slight vertical hinting (Chrome FreeType autohinter, y only)
 
 Glyph residual was ~75% of css-paint. Classified on a probe page (16 px sans, 16 px serif, 13 px sans, black on white, 3 lines, 2,791 mismatching px at tolerance 8 before the fix, heuristic split; scripts were scratch .spl, not committed):
