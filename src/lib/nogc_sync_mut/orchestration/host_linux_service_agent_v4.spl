@@ -81,7 +81,8 @@ use std.common.sdn.encode.sdn_encode_canonical
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4, HostAgentPaneWriteV4,
-    host_agent_pane_io_refused_v4, host_agent_pane_lease_v4, host_agent_pane_write_check_v4}
+    host_agent_pane_io_refused_v4, host_agent_pane_lease_v4, host_agent_pane_write_check_v4, host_agent_pane_write_ledger_empty_v4,
+    host_agent_pane_write_lookup_v4, host_agent_pane_write_replay_v4, host_agent_pane_write_record_v4}
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentAttachmentSummaryV4,
     HostAgentReleaseOutcomeV4, HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, HostAgentPaneIoCallV4,
     HostAgentPaneIoPortTurnV4, HostAgentAttachFactsV4, HostAgentReleaseContextV4, host_agent_attachment_live_v4, host_agent_attachment_in_flight_v4,
@@ -98,7 +99,9 @@ use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmen
     host_agent_attach_facts_v4, host_agent_attach_grant_deadline_v4, host_agent_attach_archive_relative_v4, host_agent_detach_archive_relative_v4,
     host_agent_action_archive_v4, host_agent_detach_request_decode_v4, host_agent_detach_payload_digest_v4,
     HostAgentAttachRequestV4, HostAgentAttachPartsV4, HostAgentOpenContextV4, host_agent_attachment_open_step_v4,
-    host_agent_attach_helper_authorize_v4, host_agent_attachment_authority_report_v4}
+    host_agent_attach_helper_authorize_v4, host_agent_attachment_authority_report_v4,
+    host_agent_attach_association_check_v4}
+use std.common.contracts.container.stream_v2.container_stream_policy_template_pin_v2
 use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
 use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
 use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_live_check_v4}
@@ -1069,7 +1072,7 @@ fn host_agent_attachment_write_v4(agent: HostLinuxServiceAgentV4, attachment: Ho
         state.attachment_summary = Some(HostAgentAttachmentSummaryV4(attach_digest: attachment.attach_digest,
             detach_digest: attachment.detach_digest,
             final_stage: if attachment.first_error == "": HOST_AGENT_ATTACH_RETURNED_V4 else: HOST_AGENT_ATTACH_FAILED_V4,
-            error: attachment.first_error))
+            error: attachment.first_error, quiesce_proof_digest: attachment.quiesce_proof_digest))
         return host_agent_after_release_write_v4(state)
     state.attachment = Some(attachment)
     if attachment.attach_stage == HOST_AGENT_ATTACH_REFUSED_V4: return host_agent_after_release_write_v4(state)
@@ -1309,6 +1312,9 @@ pub struct HostAgentAttachServiceV4:
     store_root: text
     # The monotonic clock of the receipt's prepare deadline (the agent clock is the grant clock; m23 P2-5).
     monotonic_ms: i64
+    # milestone_0031 (F15): the enrollment-pinned agent helper template of the service records. The packet's
+    # controller-signed stream policy may only repeat its root, broker, delegated cgroup path and environment.
+    template: GroupProcessStreamLaunchV2
 
 # One composed action answer: `replay` = the exact archived bytes, answered from state (inspect), no effect.
 pub struct HostAgentActionApplyV4:
@@ -1343,7 +1349,10 @@ fn host_agent_attach_archived_v4(agent: HostLinuxServiceAgentV4, request: HostAg
 # 13.2 E1, the ONE composed attach entry, in the mandated order: decode; authorize (held run, association, the
 # operation derived from the archived execute and the payload SIGNED over the packet's named digests, issuer,
 # signatures); the helper prepare grant and the `host_helper_execute_v1` grant (same gates, part B); 14C
-# `attach-binding-plan` (plan/binding bytes are the signed ones); the helper store opened, the Create runtime
+# `attach-binding-plan` (plan/binding bytes are the signed ones); milestone_0031: the stream policy repeats the
+# enrollment-pinned template (`container-stream-policy-pin-*`), the plan is a `tty` plan (the only mode the
+# workspace primary opens) naming this held run as its parent, and the plan<->helper association the open core would check on the lease holds; the
+# helper store opened, the Create runtime
 # identity known and equal to the plan's (the open core reproduces the plan with it); read the archive slot;
 # the pure transition check with replay/conflict; `admit`, the caller's read-only helper admission check on the
 # service's capacity owner; archive no-replace + read-back; only THEN consume the slot and create the attachment.
@@ -1368,6 +1377,15 @@ pub fn host_agent_attach_apply_core_v4(agent: HostLinuxServiceAgentV4, holder: t
     if helper_granted.is_err(): return host_agent_action_refused_v4(agent, helper_granted.unwrap_err())
     val paired = host_agent_attach_binding_plan_check_v4(request, parts)
     if paired.is_err(): return host_agent_action_refused_v4(agent, paired.unwrap_err())
+    val pinned = container_stream_policy_template_pin_v2(parts.stream_policy, service.template)
+    if pinned.is_err(): return host_agent_action_refused_v4(agent, pinned.unwrap_err())
+    if parts.plan.terminal_mode != "tty": return host_agent_action_refused_v4(agent, "attach-plan-terminal-mode")
+    # The open core's parent is this held run (the step driver passes its journal row): a plan naming another parent
+    # could only be refused after helper begin.
+    if parts.plan.identity.parent_operation_id != agent.operation_id:
+        return host_agent_action_refused_v4(agent, "host-primary-parent-operation-mismatch")
+    val associated = host_agent_attach_association_check_v4(request, parts, helper_granted.unwrap())
+    if associated.is_err(): return host_agent_action_refused_v4(agent, associated.unwrap_err())
     if service.store_root == "": return host_agent_action_refused_v4(agent, "attach-helper-store")
     if agent.created.is_none(): return host_agent_action_refused_v4(agent, "attach-runtime-missing")
     # The open core reproduces the plan with the observed runtime: a plan signed for another runtime identity could
@@ -1630,9 +1648,23 @@ pub fn host_agent_pane_io_core_v4(agent: HostLinuxServiceAgentV4, lease: HostAge
         return host_agent_pane_refused_v4(state, "attach-stopping")
     val shape = host_agent_pane_shape_v4(op, att)
     if shape != "": return host_agent_pane_refused_v4(state, shape)
+    # A Write is answered from the ledger when its id was already attempted: an exact retry gets the recorded outcome
+    # WITHOUT a second native write; a reused id with other bytes, a stale id or an unreadable ledger is refused.
+    val ledger = if att.pane_writes.is_some(): att.pane_writes.unwrap() else: host_agent_pane_write_ledger_empty_v4()
+    match op:
+        case HostAgentPaneOpV4.Write(write):
+            match host_agent_pane_write_lookup_v4(ledger, write):
+                case Err(reason): return host_agent_pane_refused_v4(state, reason)
+                case Ok(Some(record)): return HostAgentPaneIoTurnV4(agent: state, result: host_agent_pane_write_replay_v4(record))
+                case Ok(None): pass
+        case _: pass
     val turn = io(HostAgentPaneIoCallV4(attachment: att, op: op, now: state.clock_ms, container: state.container))
     att = turn.attachment
     var result = turn.result
+    match op:
+        case HostAgentPaneOpV4.Write(write):
+            if result.write_attempted: att.pane_writes = Some(host_agent_pane_write_record_v4(ledger, write, result))
+        case _: pass
     if result.eof: att.eof = true
     result.eof = att.eof
     if result.error == "":

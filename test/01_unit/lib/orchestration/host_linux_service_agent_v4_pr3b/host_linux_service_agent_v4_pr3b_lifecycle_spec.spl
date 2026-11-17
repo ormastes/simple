@@ -26,7 +26,8 @@ use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
 use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1, SessionRuntimeControlLeaseV1,
     SessionRuntimeControlKindV1}
 use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneOpV4, HostAgentPaneIoResultV4,
-    HostAgentPaneWriteV4, host_agent_pane_lease_v4, host_agent_pane_write_check_v4}
+    HostAgentPaneWriteV4, host_agent_pane_lease_v4, host_agent_pane_write_check_v4,
+    HostAgentPaneWriteRecordV4, HostAgentPaneWriteLedgerV4}
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentReleaseOutcomeV4,
     HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, HostAgentPaneIoCallV4, HostAgentPaneIoPortTurnV4,
     host_agent_attachment_arm_bound_v4, host_agent_release_charged_v4}
@@ -97,8 +98,27 @@ fn l_write(attempt: i64, offset: i64, maximum: i64, data: text, principal: text)
     val lease = SessionRuntimeControlLeaseV1(target: target, kind: SessionRuntimeControlKindV1.Input,
         principal_id: "pane-owner", nonce_digest: sha256_text("nonce"), revision: 1, issued_monotonic_ms: 1,
         expires_monotonic_ms: 1000)
-    HostAgentPaneWriteV4(lease: lease, target: target, principal: principal, nonce: "nonce-1", attempt: attempt,
+    HostAgentPaneWriteV4(lease: lease, target: target, principal: principal, nonce: "nonce-1", attempt: attempt, write_id: 1,
         offset: offset, maximum: maximum, data: data)
+
+fn l_write_id(write_id: i64, maximum: i64, data: text) -> HostAgentPaneWriteV4:
+    var write = l_write(1, 0, maximum, data, "pane-owner")
+    write.write_id = write_id
+    write
+
+# A native Write leaf that REPORTS an attempted write whose receipt is unavailable (the Unknown outcome), accepting 2.
+fn l_io_unknown(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(disposition: "unknown",
+        accepted_bytes: 2, write_attempted: true))
+
+# A leaf that would answer differently (99 bytes): seeing 2 after a retry proves no second native write happened.
+fn l_io_second(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(disposition: "completed",
+        accepted_bytes: 99, write_attempted: true))
+
+# A leaf that refuses before any native write (install refusal): nothing attempted, nothing to record.
+fn l_io_install_refused(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4:
+    HostAgentPaneIoPortTurnV4(attachment: call.attachment, result: HostAgentPaneIoResultV4(error: "attach-pane-input-unresolved"))
 
 fn l_write_error(write: HostAgentPaneWriteV4) -> text:
     match host_agent_pane_write_check_v4(write):
@@ -365,3 +385,120 @@ describe "V4 agent PR3b: every port answer is finite (P2-1, F4)":
         state = host_agent_attachment_step_v4(state, 1000, 1000000, block).agent
         expect(state.stage).to_equal("wedged")
         expect(state.attachment.unwrap().attach_stage).to_equal("release-blocked")
+
+describe "V4 agent pane Write replay ledger":
+    it "answers an exact retry after an Unknown outcome from the record, without a second native write":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        val first = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2000, unknown)
+        expect(first.result.disposition).to_equal("unknown")
+        expect(first.result.replayed).to_equal(false)
+        expect(first.agent.attachment.unwrap().pane_writes.unwrap().records.len()).to_equal(1)
+        step("the retry (same id, same bytes) is the recorded outcome and the leaf is not reached")
+        val retry = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2001, second)
+        expect(retry.result.error).to_equal("")
+        expect(retry.result.disposition).to_equal("unknown")
+        expect(retry.result.accepted_bytes).to_equal(2)
+        expect(retry.result.replayed).to_equal(true)
+        expect(retry.agent.attachment.unwrap().pane_writes.unwrap().records.len()).to_equal(1)
+        step("a new id is a new write and reaches the leaf")
+        val fresh = host_agent_pane_io_core_v4(retry.agent, lease, HostAgentPaneOpV4.Write(l_write_id(8, 4, "abcd")), 2002, second)
+        expect(fresh.result.accepted_bytes).to_equal(99)
+        expect(fresh.result.replayed).to_equal(false)
+
+    it "refuses a reused id with different bytes or window, and never lets the leaf run":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        val first = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2000, unknown)
+        val other_bytes = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abce")), 2001, second)
+        expect(other_bytes.result.error).to_equal("attach-pane-write-id-reused")
+        val other_window = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 3, "abcd")), 2001, second)
+        expect(other_window.result.error).to_equal("attach-pane-write-id-reused")
+        expect(other_window.agent.attachment.unwrap().pane_writes.unwrap().records.len()).to_equal(1)
+
+    it "does not record a Write that never reached the native write, so its retry may proceed":
+        # @req agent-pane-write-unknown-replay
+        val refused = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_install_refused(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        val first = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(3, 4, "abcd")), 2000, refused)
+        expect(first.result.error).to_equal("attach-pane-input-unresolved")
+        expect(first.agent.attachment.unwrap().pane_writes.is_none()).to_equal(true)
+        val retry = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(3, 4, "abcd")), 2001, second)
+        expect(retry.result.accepted_bytes).to_equal(99)
+
+    it "refuses an invalid id and a ledger it cannot consult instead of guessing":
+        # @req agent-pane-write-unknown-replay
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        expect(l_write_error(l_write_id(0, 4, "abcd"))).to_equal("attach-pane-write-id")
+        val bad = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(-5, 4, "abcd")), 2000, second)
+        expect(bad.result.error).to_equal("attach-pane-write-id")
+        step("a malformed ledger (duplicate ids) cannot be consulted: refuse, the leaf is not reached")
+        var agent = issued.agent
+        var att = agent.attachment.unwrap()
+        val row = HostAgentPaneWriteRecordV4(write_id: 2, digest: "d", disposition: "completed", accepted_bytes: 1,
+            error: "", gate_error: "")
+        att.pane_writes = Some(HostAgentPaneWriteLedgerV4(records: [row, row], floor: 0))
+        agent.attachment = Some(att)
+        val unreadable = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(9, 4, "abcd")), 2000, second)
+        expect(unreadable.result.error).to_equal("attach-pane-write-record-unavailable")
+        step("a ledger past its bound is unreadable too")
+        var many: [HostAgentPaneWriteRecordV4] = []
+        var id = 1
+        while id <= 17:
+            many.push(HostAgentPaneWriteRecordV4(write_id: id, digest: "d", disposition: "completed", accepted_bytes: 1,
+                error: "", gate_error: ""))
+            id = id + 1
+        att.pane_writes = Some(HostAgentPaneWriteLedgerV4(records: many, floor: 0))
+        agent.attachment = Some(att)
+        val overfull = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(30, 4, "abcd")), 2000, second)
+        expect(overfull.result.error).to_equal("attach-pane-write-record-unavailable")
+
+    it "bounds the record: an evicted id is stale, never treated as new":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        var agent = issued.agent
+        var id = 1
+        while id <= 17:
+            agent = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(id, 4, "abcd")), 2000 + id, unknown).agent
+            id = id + 1
+        val ledger = agent.attachment.unwrap().pane_writes.unwrap()
+        expect(ledger.records.len()).to_equal(16)
+        expect(ledger.floor).to_equal(1)
+        val stale = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(1, 4, "abcd")), 3000, second)
+        expect(stale.result.error).to_equal("attach-pane-write-id-stale")
+        val kept = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(2, 4, "abcd")), 3001, second)
+        expect(kept.result.replayed).to_equal(true)
+        expect(kept.result.accepted_bytes).to_equal(2)
+
+    it "keeps the ledger consultable when ids arrive out of order (eviction takes the smallest id)":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        var agent = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(20, 4, "abcd")), 2000, unknown).agent
+        var id = 1
+        while id <= 16:
+            agent = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(id, 4, "abcd")), 2000 + id, unknown).agent
+            id = id + 1
+        val ledger = agent.attachment.unwrap().pane_writes.unwrap()
+        expect(ledger.records.len()).to_equal(16)
+        expect(ledger.floor).to_equal(1)
+        val next = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(21, 4, "abcd")), 3000, second)
+        expect(next.result.error).to_equal("")
+        expect(next.result.accepted_bytes).to_equal(99)
+        val kept20 = host_agent_pane_io_core_v4(next.agent, lease, HostAgentPaneOpV4.Write(l_write_id(20, 4, "abcd")), 3001, second)
+        expect(kept20.result.replayed).to_equal(true)

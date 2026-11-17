@@ -1,0 +1,120 @@
+# milestone_0030 D1/D2: controller-side issuance of ONE signed grant and a policy-driven (non-interactive)
+# approval for the pre-authorized remote build/test class, issue-then-verify against the controller's installed
+# snapshot. Issuer and approver seeds are OpenSSH Ed25519 private files in the protected identity store (dir 0700,
+# file 0600, owner uid, no links: host_identity_store_linux_v1); each signature reads its file, signs through the
+# domain-pinned sign-only entry point and wipes the bytes. No seed, key file, path or signer error detail is logged.
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2, distributed_grant_digest_v2,
+    distributed_encode_operation_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{distributed_authority_snapshot_key_v2,
+    distributed_verify_grant_approval_from_snapshot_v2}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.ControllerDispatchContextV1
+use std.nogc_sync_mut.io.host_identity_store_v1.{host_identity_store_open_v1, host_identity_store_read_v1,
+    host_identity_store_close_v1}
+use app.orchestrator.host_identity_key_v1.{host_identity_private_sign_grant_v1, host_identity_private_sign_approval_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.secure_memory.secure_zero_u8_slots
+
+pub struct ControllerIssuedAuthorityV1:
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+# Route actions a remote build grant may carry beside its one build/test action (controller_dispatch_authority_v3).
+val CONTROLLER_REMOTE_BUILD_ROUTE_ACTIONS_V1 = ["controller_assignment_v1", "controller_execute_v1",
+    "host_reservation_v1", "host_execute_v1"]
+
+pub fn controller_authority_key_leaf_v1(key: DistributedAuthorityKeyV2) -> text:
+    sha256_text("simple-controller-authority-key-v1\n" + key.role + "\n" + key.identity + "\n" + str(key.revision)) + ".key"
+
+# Production key reader: one bounded read of the role key's leaf from the protected store, which is closed
+# before the bytes are used. Store errors are fixed codes.
+fn controller_authority_store_read_v1(store_root: text, key: DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    val opened = host_identity_store_open_v1(store_root)
+    if opened.owner.is_none(): return Err("controller-key-store-unavailable")
+    # Read only through a cleanly opened store; a refused open is closed and nothing is read.
+    if not opened.ready or opened.cleanup_pending or opened.error != "":
+        host_identity_store_close_v1(opened.owner.unwrap())
+        return Err("controller-key-store-unavailable")
+    val read = host_identity_store_read_v1(opened.owner.unwrap(), controller_authority_key_leaf_v1(key), 4096)
+    val closed = host_identity_store_close_v1(read.owner)
+    var bytes: [u8] = []
+    if val value = read.bytes: bytes = value
+    if read.error != "" or read.absent or read.cleanup_pending or read.bytes.is_none() or not closed.completed or
+            closed.error != "":
+        secure_zero_u8_slots(bytes)
+        return Err("controller-key-unavailable")
+    Ok(bytes)
+
+pub fn controller_authority_store_reader_v1(store_root: text) -> fn(DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    \key: controller_authority_store_read_v1(store_root, key)
+
+# D1 pre-authorized task class: the approver key's enrolled scope covers the grant, the grant names exactly one of
+# build/test plus only route actions, the request is one of the grant's operations, the environment is the
+# native-container class bound by digest, and the approval cannot outlive the grant or the key.
+fn controller_task_class_v1(approver: DistributedAuthorityKeyV2, grant: ExecutionGrantV2, request: OperationEnvelopeV2,
+        requested: ExecutionEnvironmentV2, approval_expires_at: i64, now: i64) -> bool:
+    if requested.isolation_class != "native-container" or requested.host_id != grant.host_id: return false
+    val digest = distributed_environment_digest_v2(requested)
+    if digest.is_err() or digest.unwrap() != grant.environment_digest or digest.unwrap() != request.environment_digest:
+        return false
+    if approver.principal != grant.principal or approver.project != grant.project or approver.host_id != grant.host_id:
+        return false
+    if grant.maximum_memory_bytes > approver.maximum_memory_bytes or
+            grant.maximum_duration_ms > approver.maximum_duration_ms or grant.expires_at > approver.expires_at:
+        return false
+    var actions = 0
+    for operation in grant.operations:
+        if not approver.operations.contains(operation): return false
+        if operation == "build" or operation == "test": actions = actions + 1
+        elif not CONTROLLER_REMOTE_BUILD_ROUTE_ACTIONS_V1.contains(operation): return false
+    if actions != 1 or not grant.operations.contains(request.operation): return false
+    approval_expires_at > now and approval_expires_at <= grant.expires_at
+
+fn controller_authority_sign_v1(read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>,
+        key: DistributedAuthorityKeyV2, message: [u8], grant_domain: bool) -> Result<[u8], text>:
+    val file = read_key(key)?
+    val signed = if grant_domain: host_identity_private_sign_grant_v1(file, key.public_key, message)
+        else: host_identity_private_sign_approval_v1(file, key.public_key, message)
+    val wipe = secure_zero_u8_slots(file)
+    if not wipe.verified(): return Err("controller-key-buffer-wipe")
+    signed
+
+# Issue-then-verify. Nothing is returned unless the pair verifies from the same installed snapshot the host uses,
+# at `now` (the controller grant clock, controller_dispatch_grant_clock_v1), under issuer == controller.
+pub fn controller_authority_issue_v1(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, issuer_id: text, approver_id: text,
+        grant: ExecutionGrantV2, request: OperationEnvelopeV2, requested: ExecutionEnvironmentV2,
+        approval_expires_at: i64, now: i64) -> Result<ControllerIssuedAuthorityV1, text>:
+    if now <= 0: return Err("dispatch-wall-clock-unavailable")
+    if issuer_id != context.config.controller_id: return Err("controller-issuer-not-controller")
+    val snapshot = context.policy.snapshot
+    val issuer = distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", issuer_id)?
+    val approver = distributed_authority_snapshot_key_v2(snapshot, "human-approver", approver_id)?
+    if not controller_task_class_v1(approver, grant, request, requested, approval_expires_at, now):
+        return Err("controller-approval-outside-task-class")
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: issuer_id, key_revision: issuer.revision, signature: [])
+    var approval = DistributedSignedApprovalV2(approver_id: approver_id, key_revision: approver.revision,
+        grant_digest: distributed_grant_digest_v2(grant)?, request_digest: sha256_text(distributed_encode_operation_v2(request)?),
+        policy_revision: snapshot.policy_revision, session_generation: context.policy.session_generation,
+        expires_at: approval_expires_at, signature: [])
+    # Refuse BEFORE any key is read: with empty signatures the verifier runs every non-signature check (key
+    # revocation/expiry/scope for both roles, role separation, request-vs-grant) and can only end at SIGNATURE_INVALID.
+    match distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed, approval, request, now,
+        snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch, context.policy.session_generation):
+        case Err(code):
+            if code != "SIGNATURE_INVALID": return Err(code)
+        case Ok(_): return Err("controller-unsigned-pair-accepted")
+    # Both messages (and their metadata validation) before the first signature.
+    val grant_message = distributed_grant_signature_message_v2(signed)?
+    val approval_message = distributed_approval_signature_message_v2(approval)?
+    signed.signature = controller_authority_sign_v1(read_key, issuer, grant_message, true)?
+    approval.signature = controller_authority_sign_v1(read_key, approver, approval_message, false)?
+    distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed, approval, request, now,
+        snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch, context.policy.session_generation)?
+    Ok(ControllerIssuedAuthorityV1(signed: signed, approval: approval))
+
+export ControllerIssuedAuthorityV1, controller_authority_key_leaf_v1, controller_authority_store_reader_v1
+export controller_authority_issue_v1

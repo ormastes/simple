@@ -310,9 +310,22 @@ available. These source paths and their manuals remain NOT_RUN.
   cancel on each retry while the proof is pending, never retires descriptors) and `host_primary_attach_settle_retired_core_v3` (re-reads the
   `ContainerPrimaryTransportRetirementV3`, refuses a held session / empty proof / foreign plan or native, reaps, commits the
   ack, then consumes the spawn). Release port: F = quiesce (`fallback_quiesced`) -> `simple_container_primary_attach_cleanup_v3`
-  -> `cleaned` -> settle_retired -> d4 clears the retirement -> `returned`; B = quiesce, drop the spawn, then S. d3 repeats until the container reports no error. B drops the spawn without a stored proof digest (open gap vs 11.4). A `Rejected`
+  -> `cleaned` -> settle_retired -> d4 clears the retirement -> `returned`; B = quiesce, drop the spawn, then S. d3 repeats until the container reports no error. B stores `quiesce_proof_digest` (sha256 of the quiesce proof) before it drops the spawn (11.4 "kept only in the proof"); the summary keeps it and inspect reports `quiesceProofDigest`. A `Rejected`
   spawn is Blocked `...-native-absence-unproven`. Trap: quiesce must not retire descriptors, the container's
   `fallback_cleanup_v3` retires them (a second retire with a reference is `stale_process_reference`).
+- milestone_0031 attach hardening (2026-11-18, SOURCE_AUTHORED / NOT_RUN):
+  - F15 pin: before the archive `container_stream_policy_template_pin_v2` requires the signed stream policy's root,
+    broker program/digest/budget and delegated cgroup to EQUAL the enrollment-pinned `agent_helper_template`, and its
+    environment to equal it or be empty (empty = no variables, the provider launches with the policy environment);
+    `container-stream-policy-pin-{root,broker,cgroup,environment,profile}`. Still policy-controlled, constrained only by
+    the native custody bind/validate (`bind_workspace_primary_attach_v3`, the remaining host-side pin): directory,
+    memory policy, snapshot digest, cache identity, child image mode.
+  - Post-begin refusals moved: pre-archive `attach-plan-terminal-mode` (tty only), `host-primary-parent-operation-mismatch`,
+    the plan<->helper association (`host_agent_attach_association_check_v4`, action derived from helper kind as begin
+    does) and the open entry guard in `linux_service_attach_admit_v4`; pre-BEGIN `host_primary_attach_open_precheck_v1`
+    (entry guard, parent executing, provider plan reproduction; RP on refusal). Lease-bound checks stay after begin;
+    a helper with `consumption_attempted == false` and no R is 11.4 U (not charged): U' writes the pre-consume R itself
+    (Blocked at once on `host-primary-refusal-precondition`/`linux-helper-store-invalid`), then cancels.
 - The OP attach effects are bound since m23 part B (below); the RELEASE port never starts them
   (`linux-host-agent-attach-open-abandoned`).
 - Write-back: ports lend `agent.container` and return `container`/`capacity`; every caller adopts the capacity (single
@@ -356,3 +369,59 @@ available. These source paths and their manuals remain NOT_RUN.
 - `container/providers/linux/cleanup_scope_v1.spl`: fixture-owned sentinel network/volume commands (`simpleorch-sentinel-` prefix + `io.simpleorch.sentinel` label), `cleanup_destroy_scope_error_v1` (destroy may name ONLY the run's own native id; no network/volume/prune/-v/-a; never a sentinel) and `cleanup_sentinels_intact_v1`.
 - Wired into `oci_runtime_v1` destroy BEFORE `live_enabled`/`_execute`; pinned by a provider-level spec in `cleanup_scope_v1_spec`. Live proof `cleanup_scope_live_v1_spec` records `pending("BLOCKED: <unset vars>")` without `SIMPLE_CTR_CLEANUP_ENGINE/IMAGE/FIXTURE_ID`.
 - Not covered: Windows-engine sentinels (still ENV-BLOCKED).
+
+### PR3c smux consumer (milestone_0024, AUTHORED, NOT_RUN)
+- The pane holds only a `HostAgentPaneLeaseV4`; smux actions `host-agent-pane-claim` / `host-agent-pane-read` (runtime_host_continuation_v6.spl, core `os.apps.smux.runtime_agent_pane_v1`) reach the agent through `host_service_domain_attachment_lease_v3` / `host_service_domain_pane_io_v3` -> `host_linux_service_attachment_lease_v4` / `host_linux_service_pane_io_v4`, both gated on `host_linux_service_agent_terminal_authority_v4` (expired approvals refused after restart) and using the service's own grant clock.
+- The request payload is the controller-signed binding uid of the intended pane (`attach-binding-mismatch` otherwise, lease kept). The lease record is kept only on success, `attach-not-ready` and a binding mismatch; any other refusal drops it. After a smux restart the lease is gone (agent issues it once): re-attach. smux never cleans native state. `host-agent-pane-resize` stays refused (no installed-policy source on V4); `host-agent-pane-write` is the next slice (needs the smux control lease/target).
+- PR3c S3 (AUTHORED, NOT_RUN): pane actions are refused while a connection is pending; the owner gate runs a smux registry consistency check (service incarnation + pane listed by `smux_list_panes`; `attach-binding-registry-mismatch`, lease kept) AFTER the signed authority verifies. An observed revoke tombstones the pane (`runtime-agent-pane-revoked`, no agent call) until an attach of a DIFFERENT run succeeds; a replayed attach of the held run changes nothing. Brokered panes never call `smux_pane_cleanup_primary_v5` (design 11.1 wins over 9.1).
+
+## AT-OPS-01 drain/update handoff (2026-11-17, SOURCE_AUTHORED / NOT_RUN)
+- Owner decisions: D1 exit-then-adopt (no live custody transfer), D2 build on the V4 service start path, D3 signed
+  operation kind `service-handoff`, D4 exact wire version `service-handoff-v1` only (anything else refused).
+- Contract `common/contracts/orchestration/host_service_handoff_v1.spl`; driver `nogc_sync_mut/orchestration/host_service_handoff_v1.spl`
+  (never imports the service owner). Old owner: dispatch action `host_service_handoff_v1` (wire route `host-service-handoff`
+  in `host_service_domain_v3`) verifies issuer == controller_ref, scope, signatures at its clock, its own current record
+  digest and agent slot, then publishes `service-handoff/pending-<n>.sdn` (no-replace, read back) and only then sets
+  `draining` (inspect, detach and cancel stay; every other action and `status_v4` refuse). The service manager then
+  stops the unit (V6 `service-stop` is not a route; exit is the manager's job) and the owner close releases the writer.
+- Successor: `host_linux_service_start_v4` VERIFIES a pending record after the journal writer is held and the current
+  record is published, before the reconcile flip (a refusal sets `reconcile_error`: quarantine; status refuses), and
+  CONSUMES it (`service-handoff/adopted-<n>.sdn`, no-replace, exact verified digest) only after the reconcile flip.
+  The handoff never flips continuity; the reconcile re-proves exclusion. An approval that expired while the service
+  was down is refused at the successor (APPROVAL_EXPIRED).
+- Recovery (coordinator decision 2026-11-18, option a): a pending record the successor cannot verify (expired
+  approval, policy bump) quarantines the start. A controller-signed ABANDON (operation kind `service-handoff-abandon`,
+  payload names the pending sequence + digest + host; wire route `host-service-handoff-abandon`, dispatch
+  `host_service_handoff_abandon_v1`, NOT gated on the quarantine) is verified through the same V4 path and published
+  no-replace as `service-handoff/abandoned-<n>.sdn`; the pending record is kept as evidence and never adopted. After
+  the unit restarts, the sequence is consumed and the start is fresh (the reconcile re-proves exclusion). Operator
+  journal repair stays the last resort. Unsigned or mismatched abandons are refused.
+- INSTALL REQUIREMENT: the installed authority policy's controller key must list BOTH operation kinds,
+  `service-handoff` and `service-handoff-abandon` (the policy `operations` list), or every handoff/abandon is refused
+  with `OPERATION_DENIED`.
+- Specs: `test/01_unit/lib/orchestration/host_service_handoff_v1_spec.spl`; live env-gated, two-process
+  `test/03_system/tools/host_service_handoff_live_spec.spl` (pending until its fixture env exists).
+
+### PR4 LinuxService agent-terminal rights (milestone_0025, AUTHORED, NOT_RUN)
+- `linux_service_agent_pane_policy_v5` (runtime_connection_policy_v5.spl) is a FIXED ceiling: exactly `[Input]`, 5000 ms lease, no Geometry (Resize is refused on V4). It is not derived from the authority (the loader runs at open, before any attach, and owner_v5 compares reloaded policy to the opened one).
+- The right is exercised only while `host_linux_service_agent_terminal_authority_v4` is Ok: `capabilities_v5` (LinuxService arm), the control issue and every Write re-ask it (an expired/revoked approval ends it mid-connection).
+- `host_linux_service_agent_pane_control_target_v4` (current_v4) -> `host_agent_pane_control_target_v4` (attachment_v4) builds the `SessionRuntimeControlTargetV1` from the verified binding, `lease_epoch` (attachment_generation), the attachment plan and the attached session's adoption; `client_id` = `agent-pane-` + signed binding uid. Err unless authority is Ok and the session is adopted as the binding names it.
+- `host-agent-pane-write` is intercepted in `smux_runtime_connection_host_constrained_v5` (the only place with the control owner): body = exact SDN dict {bindingUid, attempt, writeId, offset, maximum, data}; a fresh Input lease per Write, revoked on return; the port installs the lease on the native input gate (refusing an unresolved/unknown previous outcome) before the write. `smux_agent_pane_op_refusal_v1` is replaced by `smux_agent_pane_resize_refusal_v1`.
+- Follow-up (AUTHORED, NOT_RUN): the native input gate is closed on return and on every error path after the install (`host_agent_pane_input_close_v4`; a failed close is the Write's `gate_error`, the write outcome stands, lease kept); a failed control-lease revoke after a completed write rides in the response as `revokeError` (`smux_agent_pane_write_revoke_report_v1`; turn error only when the write itself failed); the issue token is `smux_agent_pane_control_token_v1` (spec-checked against `client_lease_token_valid`).
+- Write replay protection (AUTHORED, NOT_RUN; bug `agent_pane_write_unknown_replay_2026-11-18`): the client supplies `writeId` (integer >= 1, bound into `HostAgentPaneWriteV4.write_id`). The AGENT (single owner, no lock) keeps `HostAgentAttachmentV4.pane_writes`, a per-lease ledger of the last 16 Writes whose native write was ATTEMPTED (id, sha256 of {offset, maximum, data}, disposition, accepted bytes, error, gate error); consulted in `host_agent_pane_io_core_v4` before the leaf. An exact retry (same id, same window and bytes) returns the recorded outcome with `replayed: true` and NO second native write, even when the first outcome was Unknown. Refusals (lease kept, nothing written): `attach-pane-write-id-reused` (same id, other bytes/window), `attach-pane-write-id-stale` (id at or below the eviction floor: its record was evicted, so it is never guessed new), `attach-pane-write-record-unavailable` (malformed/over-bound ledger), `attach-pane-write-id` / `runtime-agent-pane-write-id` (id < 1). A Write refused before the native write (install refusal, shape) is not recorded and may be retried. Retry rule for clients: after an Unknown disposition or a lost reply, retry with the SAME `writeId` and bytes; use a new id only for new bytes. A native write error is recorded too and is replayed on every retry (it drops the pane lease). Ids are scoped per attachment: one writer per pane lease.
+- Client parsing of Write errors and response fields: the turn ERROR is `<write error>` plus optional suffixes in this order, `;gate:<native gate close error>` then `;control-revoke:<control lease revoke error>`; split on the first `;` for the primary code. After a COMPLETED write nothing rides in the error: a failed gate close is the response field `gateError` and a failed control-lease revoke is `revokeError` (never retry on these; the write stands). A COMPLETED write whose response could not be merged reports `runtime-agent-pane-write-revoke:<revoke error>`.
+- Not authored: Ok-authority grant path (needs a started owner with a ready attach).
+
+## Controller authority issuance + `remote-run-plan` — milestone_0030 PR-1a (2026-11-18, specs NOT_RUN)
+- `controller_authority_issue_v1` (src/app/orchestrator/controller_authority_issue_v1.spl): issue-then-verify of ONE
+  grant + policy-driven approval (D1 class: approver scope covers the grant, exactly one build/test action plus only
+  route actions, `native-container` env bound by digest, approval <= grant expiry). Issuer must equal the configured
+  controller. Keys: OpenSSH Ed25519 files in the protected identity store, leaf
+  `sha256("simple-controller-authority-key-v1\n" + role + "\n" + identity + "\n" + revision) + ".key"`; read only
+  through a cleanly opened store; signed via domain-pinned `host_identity_private_sign_{grant,approval}_v1`.
+- `distributed_authority_snapshot_key_v2`: role-scoped lookup; never resolves a key under another role.
+- `orchestrator remote-run-plan`: prints only operationId/grantDigest/planDigest; never prints or writes the signed
+  pair; starts no run. The remote run itself (V4 slot kind, V3 executor, chunked route) is blocked on owner decision
+  N4 (records: .spipe/.../milestone_0030_remote_container_driver/L6C_STOP_DECISIONS_2.md).
+- Trap: on a lent V4 owner the V2 container effect calls are refused (principal None); remote builds must use the V3
+  workspace flow, whose observations do not fit the V2 remote evidence freeze.

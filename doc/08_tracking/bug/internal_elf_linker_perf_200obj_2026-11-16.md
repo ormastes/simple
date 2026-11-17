@@ -79,4 +79,17 @@ and the phase takes 18 ms.
    `"global:"+name` key text per relocation (~1 KB/reloc retained in collect,
    ~1.5 KB/reloc in prep+apply).
 
+6. Round 3 (2026-11-17, verification-pending): the apply loops (serial,
+   `elf_apply_worker`, non-deferred) call `ElfSealedOperationsV1.relocate_fast`
+   first. It is Result-free, runs `reloc_apply` once (`reloc_patch_value`), and
+   is live only on operations from `elf_builtin_*operations_v1`, so a caller's
+   relocation callback is never bypassed; a reject or custom operation falls
+   back to `relocate` and its error text. Symtab uses `elf_entry_addr_fast` and
+   calls `elf_symtab_address` only for STT_TLS. On a regenerated 200-object set
+   (100 fns x 200 files, clang -O1 -fno-pic), same session, Windows native,
+   jobs=1: 4706-5167 ms / 742 MB -> 3392-3407 ms / 717 MB, image
+   byte-identical; relocated 1.47 s -> 0.68 s, symtab 1.55 s -> 0.97 s.
+   RSS ratchet lowered to 750000 KiB. Remaining symtab cost is text-keyed dict
+   work, and RSS is dominated by per-ref key texts (item 5), not Result.
+
 Target: under 2 s and under 500 MB on this set. Not met yet.

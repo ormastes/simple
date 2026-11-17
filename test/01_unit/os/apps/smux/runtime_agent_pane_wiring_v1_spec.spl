@@ -1,0 +1,64 @@
+"""
+## Purpose and audience
+Source-text checks that the smux Host continuation reaches the agent only through the owner/domain pass-throughs,
+which gate on the controller-verified terminal authority (milestone_0024 PR3c S0/S2). Owners of the service wiring.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Structure checks only: a live Linux service owner has no pure fixture.
+## Verification guidance and troubleshooting
+A pane entry that does not call host_linux_service_agent_terminal_authority_v4, or a pane io that takes a caller
+clock, is a defect (expired approvals must be refused after restart; a pane must not advance the agent clock).
+"""
+use std.spec.{step}
+use std.io.file_read_text
+
+fn body_of(source: text, name: text) -> text:
+    val start = source.index_of("fn " + name + "(")
+    if start < 0: return ""
+    val rest = source.substring(start + 3, source.byte_len())
+    val next = rest.index_of("\nfn ")
+    val next_pub = rest.index_of("\npub fn ")
+    var stop = rest.byte_len()
+    if next >= 0 and next < stop: stop = next
+    if next_pub >= 0 and next_pub < stop: stop = next_pub
+    rest.substring(0, stop)
+
+describe "agent pane wiring":
+    it "gates every pane entry on the terminal authority":
+        val current = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl") ?? ""
+        step("the shared gate calls the accessor"):
+            expect(body_of(current, "linux_service_pane_gate_v4").contains("host_linux_service_agent_terminal_authority_v4")).to_equal(true)
+        step("lease and io both use the gate"):
+            expect(body_of(current, "host_linux_service_attachment_lease_v4").contains("linux_service_pane_gate_v4")).to_equal(true)
+            expect(body_of(current, "host_linux_service_pane_io_v4").contains("linux_service_pane_gate_v4")).to_equal(true)
+        step("the gate runs the registry consistency check after the authority verifies"):
+            val gate_body = body_of(current, "linux_service_pane_gate_v4")
+            expect(gate_body.contains("registry_check")).to_equal(true)
+        step("the gate pins the signed binding uid"):
+            val gate = body_of(current, "linux_service_pane_gate_v4")
+            expect(gate.contains("binding_uid")).to_equal(true)
+            expect(gate.contains("attach-binding-mismatch")).to_equal(true)
+        step("pane io has no caller clock"):
+            val io = body_of(current, "host_linux_service_pane_io_v4")
+            expect(io.contains("now:")).to_equal(false)
+            expect(io.contains("grant_clock")).to_equal(true)
+    it "routes smux actions to the pass-throughs only":
+        val cont = file_read_text("src/os/apps/smux/runtime_host_continuation_v6.spl") ?? ""
+        step("claim and read reach the domain pass-throughs"):
+            expect(cont.contains("host_service_domain_attachment_lease_v3")).to_equal(true)
+            expect(cont.contains("host_service_domain_pane_io_v3")).to_equal(true)
+        step("the pane family sits below the pending gates"):
+            val gate_at = cont.index_of("request.action != \"host-status\":\n        return refused_v6(domain, state, \"runtime-host-execution-pending\")")
+            val arm_at = cont.index_of("agent_pane_turn_v6(domain, state, request, context)")
+            expect(gate_at >= 0 and arm_at > gate_at).to_equal(true)
+        step("the pane family is refused while a connection is pending"):
+            expect(body_of(cont, "agent_pane_turn_v6").contains("context.connection_pending")).to_equal(true)
+        step("the registry check reads the smux pane list, never authority"):
+            expect(cont.contains("smux_list_panes")).to_equal(true)
+        step("smux never calls the agent or the pane cleanup for a brokered pane"):
+            expect(cont.contains("host_linux_service_agent_pane_io_v4")).to_equal(false)
+            expect(cont.contains("smux_pane_cleanup_primary_v5")).to_equal(false)
+        step("the lease is held in the continuation state"):
+            expect(cont.contains("agent_pane_lease")).to_equal(true)

@@ -3,7 +3,8 @@
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use std.io_runtime.{file_read_nullable, dir_exists, env_get_opt}
 use compiler.common.driver_source_file.{SourceFile, source_file_coverage_identity}
-use compiler.common.module_path_naming.{module_logical_name_from_path, module_canonical_fold_name}
+use compiler.common.module_path_naming.{module_logical_name_from_path, module_canonical_fold_name,
+    module_numbered_compiler_candidates_v1}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1,
     source_root_numbered_candidate_v1, source_root_numbered_match_v1,
     source_root_std_family_order_v1}
@@ -1512,56 +1513,8 @@ fn _driver_resolve_relative_entry_import(module_path: text, entry_dir: text) -> 
     val rel = module_path.substring(dots).replace(".", "/")
     _driver_try_entry_import_rel(rel, base_dir)
 
-# One ordered compatibility mapping for both checkout and admitted-root lookup.
-# Full candidates must be exhausted before interpreting a suffix as an item.
-fn _driver_numbered_compiler_candidates_v1(module_path: text) -> [text]:
-    # The exact compiler.mir_opt facade is intentionally owned by src/lib.
-    if module_path == "compiler.mir_opt": return []
-    val is_numbered = module_path.starts_with("compiler.") or module_path == "linker" or module_path.starts_with("linker.")
-    if not is_numbered: return []
-    var candidates: [text] = []
-    val mappings: [[text]] = [
-        ["compiler.common", "compiler/00.common"],
-        ["compiler.core", "compiler/10.frontend/core"],
-        ["compiler.frontend", "compiler/10.frontend"],
-        ["compiler.blocks.blocks", "compiler/15.blocks/blocks"],
-        ["compiler.blocks", "compiler/15.blocks/blocks"],
-        ["compiler.hir", "compiler/20.hir"],
-        ["compiler.traits", "compiler/25.traits"],
-        ["compiler.types", "compiler/30.types"],
-        ["compiler.semantics", "compiler/35.semantics"],
-        ["compiler.mir", "compiler/50.mir"],
-        ["compiler.borrow", "compiler/55.borrow"],
-        ["compiler.mir_opt", "compiler/60.mir_opt/mir_opt"],
-        # Parent level owns the module shims (optimization_passes, optimizer_manifest,
-        # optimizer_plugin, optimizer_kernel_contract, mir_opt_integration, and the
-        # _OptimizationPasses part package) -- files that exist ONLY here. Without
-        # this candidate, compiler.mir_opt.<name> for these fell through to the
-        # src/lib stub facade (all-zero declaration arrays; cycle-38 frontier:
-        # 3x 'no exported item' + consequences, surfaces idx 871/2183/2415).
-        # Listed AFTER the nested layout so every currently-resolving first-hit
-        # is preserved (the two levels share no file names).
-        ["compiler.mir_opt", "compiler/60.mir_opt"],
-        ["compiler.loader", "compiler/99.loader"],
-        ["compiler.backend", "compiler/70.backend"],
-        ["compiler.driver", "compiler/80.driver"],
-        ["compiler.shb", "compiler/80.driver/shb"],
-        ["compiler.interpreter", "compiler/95.interp/interpreter"],
-        ["linker", "compiler/70.backend/linker"],
-        ["compiler.backend", "compiler/70.backend/backend"],
-        ["compiler.loader", "compiler/99.loader/loader"]
-    ]
-    for mapping in mappings:
-        val prefix = mapping[0]
-        if module_path == prefix or module_path.starts_with(prefix + "."):
-            var relative = mapping[1]
-            if module_path.len() > prefix.len():
-                relative = relative + "/" + module_path.substring(prefix.len() + 1).replace(".", "/")
-            candidates = candidates.push(relative)
-    candidates
-
 fn _driver_resolve_numbered_compiler_import(module_path: text, entry_dir: text) -> text:
-    for relative in _driver_numbered_compiler_candidates_v1(module_path):
+    for relative in module_numbered_compiler_candidates_v1(module_path):
         val selected = _driver_try_entry_import_rel(relative, entry_dir)
         if selected != "": return selected
     ""
@@ -1856,7 +1809,7 @@ fn _driver_resolve_source_root_entry_import_scratch_v1(module_path: text, source
         # backend/codegen_types) must precede a shorter parent facade. Reuse
         # the checkout resolver's mapping, but probe only declared authority.
         # Every exact custom root above remains ahead of compatibility paths.
-        val compiler_candidates = _driver_numbered_compiler_candidates_v1(probe)
+        val compiler_candidates = module_numbered_compiler_candidates_v1(probe)
         for source_root in source_roots:
             if source_root.ends_with(".spl"): continue
             var root = source_root

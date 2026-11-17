@@ -135,6 +135,29 @@ pub fn container_stream_policy_encode_v2(policy: ContainerStreamPolicyV2) -> Res
 pub fn container_stream_policy_digest_v2(policy: ContainerStreamPolicyV2) -> Result<text, text>:
     Ok(sha256_text(container_stream_policy_encode_v2(policy)?))
 
+# milestone_0031 (F15: the launch template is pinned in the signed enrollment). A stream policy, even a
+# controller-signed one, may only REPEAT what the pinned template says about where a helper runs and what brokers
+# it: the root, the broker (program, digest, budget), the delegated cgroup path and the environment. An empty
+# environment is the one absent form the canonical policy has: the workspace primary launches with the policy's
+# environment, so absent means NO variables (strictly narrower than the pin), never an inherited one. The pinned root
+# is the BASE root: the agent derives `<root>-<nonce>-w<i>` and the workspace primary `<root>/primary-attach-<id>`
+# from it. Each mismatch has its own reason. Still policy-controlled and constrained only by the native custody
+# bind/validate (`bind_workspace_primary_attach_v3`, `validate_workspace_primary_attach_v3`, the remaining host-side
+# pin): directory, memory policy, snapshot digest, cache identity and child image mode.
+pub fn container_stream_policy_template_pin_v2(policy: ContainerStreamPolicyV2,
+        template: GroupProcessStreamLaunchV2) -> Result<(), text>:
+    val profile = match template.profile_v3:
+        case Some(value): value
+        case None: return Err("container-stream-policy-pin-profile")
+    if policy.root != template.root: return Err("container-stream-policy-pin-root")
+    if (policy.broker_program != template.request.broker_program or
+            policy.broker_digest != template.request.broker_digest or policy.broker_budget != profile.broker):
+        return Err("container-stream-policy-pin-broker")
+    if policy.delegated_cgroup_path != template.delegated_cgroup_path: return Err("container-stream-policy-pin-cgroup")
+    if policy.environment.len() != 0 and policy.environment != template.request.environment:
+        return Err("container-stream-policy-pin-environment")
+    Ok(())
+
 val CONTAINER_STREAM_POLICY_MAX_BYTES_V2: i64 = 1114112
 
 fn container_stream_policy_text_v2(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:

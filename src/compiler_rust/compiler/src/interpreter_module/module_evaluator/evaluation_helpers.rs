@@ -499,6 +499,7 @@ pub(super) fn process_imports_and_assignments(
     for item in items.iter() {
         match item {
             Node::UseStmt(use_stmt) => {
+                crate::units::scope::unit_scope_record_use(use_stmt);
                 process_use_stmt(
                     use_stmt,
                     module_path,

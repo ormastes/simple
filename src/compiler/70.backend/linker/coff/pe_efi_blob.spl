@@ -1,0 +1,39 @@
+# Wrap a flat, position-independent bare-metal blob in a PE EFI application.
+#
+# Blob contract (shared with the per-arch EFI entry stubs, e.g.
+# src/lib/nogc_async_mut_noalloc/baremetal/freestanding/efi_stub_aarch64.S):
+#   offset 0  : entry code (a branch over the length slot)
+#   offset 8  : u64 little-endian blob length, patched here
+# The whole blob becomes one RWX .text section at RVA 0x1000; the entry RVA is
+# 0x1000 plus entry_offset (callers pass bit 0 set for an ARM Thumb entry).
+
+use compiler.backend.linker.coff.pe_image_writer.{
+    PeImageSection, pe_write_efi_application}
+
+val PE_EFI_BLOB_RVA: i64 = 0x1000
+val PE_EFI_BLOB_LEN_OFFSET: i64 = 8
+
+fn pe_efi_patch_blob_len(blob: [u8]) -> Result<[u8], text>:
+    if blob.len() < PE_EFI_BLOB_LEN_OFFSET + 8:
+        return Err("EFI blob is {blob.len()} bytes; it must hold the 16-byte entry header")
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < blob.len():
+        if i >= PE_EFI_BLOB_LEN_OFFSET and i < PE_EFI_BLOB_LEN_OFFSET + 8:
+            out = out.push(((blob.len() >> ((i - PE_EFI_BLOB_LEN_OFFSET) * 8)) & 0xff) as u8)
+        else:
+            out = out.push(blob[i])
+        i = i + 1
+    Ok(out)
+
+fn pe_efi_wrap_blob(blob: [u8], machine: i64, entry_offset: i64) -> Result<[u8], text>:
+    val patched = pe_efi_patch_blob_len(blob)
+    if patched.is_err(): return Err(patched.unwrap_err())
+    val data = patched.unwrap()
+    # IMAGE_SCN_CNT_CODE | MEM_EXECUTE | MEM_READ | MEM_WRITE
+    val text = PeImageSection(name: ".text", virtual_address: PE_EFI_BLOB_RVA,
+        virtual_size: data.len(), data: data, characteristics: 0xe0000020)
+    pe_write_efi_application([text], PE_EFI_BLOB_RVA + entry_offset, machine, 0)
+
+export PE_EFI_BLOB_RVA, PE_EFI_BLOB_LEN_OFFSET
+export pe_efi_patch_blob_len, pe_efi_wrap_blob

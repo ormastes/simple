@@ -163,10 +163,69 @@ if [ "${1:-}" = --selftest ]; then
     st_out=$(cat "$st_repo/out.txt" 2>/dev/null)
     if [ "$st_rc" = "2" ] && printf '%s' "$st_out" | "$GREP" -q "core.worktree"; then
         echo "$SELF: selftest fixture 1 (core.worktree poison named, fail closed) -> PASS: ok"
-        echo "$SELF: selftest: 1 fixture(s) passed"
+    else
+        echo "$SELF: selftest FIXTURE 1 FAILED (core.worktree must fail closed naming core.worktree): rc=$st_rc out=$st_out" >&2
+        echo "$SELF: ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    # Fixtures 2-4 (2026-11-17, perf): clean range PASSes within a git-exec
+    # budget (each exec is ~5 s on a loaded Windows host, so exec COUNT is the
+    # cost), a .jjconflict tree FAILs naming the commit, a mixed range FAILs.
+    st2="$st_tmp/perf-repo"
+    mkdir -p "$st2/scripts/check" "$st2/shim"
+    cp "$st_self" "$st2/scripts/check/check-no-conflict-tree-push.shs"
+    st_real_git=$(command -v git)
+    cat > "$st2/shim/git" <<SHIM_EOF
+#!/bin/sh
+echo x >> "$st2/gitcalls.txt"
+exec "$st_real_git" "\$@"
+SHIM_EOF
+    chmod +x "$st2/shim/git"
+    (
+        cd "$st2" || exit 2
+        git init -q
+        git config user.email test@example.com
+        git config user.name test
+        printf 'a\n' > f.txt
+        git add f.txt
+        git commit -q -m base
+        git rev-parse HEAD > base.txt
+        printf 'b\n' > f.txt
+        git add f.txt
+        git commit -q -m clean1
+        git rev-parse HEAD > clean.txt
+        mkdir .jjconflict-side-0
+        printf 'c\n' > .jjconflict-side-0/f.txt
+        git add .jjconflict-side-0
+        git commit -q -m conflict1
+        git rev-parse HEAD > conflict.txt
+    )
+    st_b=$(cat "$st2/base.txt"); st_c=$(cat "$st2/clean.txt"); st_x=$(cat "$st2/conflict.txt")
+    : > "$st2/gitcalls.txt"
+    (cd "$st2" && PATH="$st2/shim:$PATH" sh scripts/check/check-no-conflict-tree-push.shs "$st_b..$st_c" > out2.txt 2>&1; echo $? > rc2.txt)
+    st_calls=$(wc -l < "$st2/gitcalls.txt" | tr -d ' ')
+    if [ "$(cat "$st2/rc2.txt")" = "0" ] && "$GREP" -q 'PASS' "$st2/out2.txt" && [ "$st_calls" -le 4 ]; then
+        echo "$SELF: selftest fixture 2 (clean 1-commit range PASS, $st_calls git exec(s) <= 4) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 2 FAILED (clean range must PASS in <= 4 git execs): rc=$(cat "$st2/rc2.txt") calls=$st_calls out=$(cat "$st2/out2.txt")" >&2
+        echo "$SELF: ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    (cd "$st2" && sh scripts/check/check-no-conflict-tree-push.shs "$st_c..$st_x" > out3.txt 2>&1; echo $? > rc3.txt)
+    if [ "$(cat "$st2/rc3.txt")" = "1" ] && "$GREP" -q "CONFLICT COMMIT: $st_x" "$st2/out3.txt"; then
+        echo "$SELF: selftest fixture 3 (.jjconflict tree FAIL naming commit) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 3 FAILED (conflict tree must exit 1 naming the commit): rc=$(cat "$st2/rc3.txt") out=$(cat "$st2/out3.txt")" >&2
+        echo "$SELF: ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    (cd "$st2" && sh scripts/check/check-no-conflict-tree-push.shs "$st_b..$st_x" > out4.txt 2>&1; echo $? > rc4.txt)
+    if [ "$(cat "$st2/rc4.txt")" = "1" ] && "$GREP" -q 'FAIL' "$st2/out4.txt"; then
+        echo "$SELF: selftest fixture 4 (mixed clean+conflict range FAIL) -> PASS: ok"
+        echo "$SELF: selftest: 4 fixture(s) passed"
         exit 0
     fi
-    echo "$SELF: selftest FIXTURE 1 FAILED (core.worktree must fail closed naming core.worktree): rc=$st_rc out=$st_out" >&2
+    echo "$SELF: selftest FIXTURE 4 FAILED (mixed range must exit 1): rc=$(cat "$st2/rc4.txt") out=$(cat "$st2/out4.txt")" >&2
     echo "$SELF: ERROR — nothing was checked (selftest failed)"
     exit 2
 fi
@@ -209,9 +268,38 @@ esac
 # main tree wipe looks broken and invites being pushed past. Name the cause
 # and the repair instead.
 # doc/08_tracking/bug/core_worktree_config_disables_all_pre_push_guards_2026-08-08.md
-_cw_git_common=$(git rev-parse --git-common-dir 2>/dev/null) || _cw_git_common=""
+# One rev-parse yields both the common dir and the toplevel (2026-11-17 perf:
+# every exec is ~5-13 s on a loaded Windows host). If it fails, fall back to the
+# common dir alone so the core.worktree diagnosis still runs.
+_cw_both=$(git rev-parse --git-common-dir --show-toplevel 2>/dev/null) && _cw_ok=1 || _cw_ok=0
+if [ "$_cw_ok" -eq 1 ]; then
+    _cw_git_common=${_cw_both%%
+*}
+    toplevel=${_cw_both#*
+}
+else
+    _cw_git_common=$(git rev-parse --git-common-dir 2>/dev/null) || _cw_git_common=""
+    toplevel=""
+fi
 if [ -n "$_cw_git_common" ] && [ -f "$_cw_git_common/config" ]; then
-    _cw_value=$(git config --file "$_cw_git_common/config" --get core.worktree 2>/dev/null) || _cw_value=""
+    # Parsed in-shell (no `git config` exec): value of the first `worktree` key
+    # inside a plain [core] section; any non-empty value poisons.
+    _cw_value=""
+    _cw_in_core=0
+    while IFS= read -r _cw_line || [ -n "$_cw_line" ]; do
+        _cw_line=${_cw_line#"${_cw_line%%[! 	]*}"}
+        case "$_cw_line" in
+            "[core]"*|"[Core]"*|"[CORE]"*) _cw_in_core=1 ;;
+            "["*) _cw_in_core=0 ;;
+            [Ww][Oo][Rr][Kk][Tt][Rr][Ee][Ee]*=*)
+                if [ "$_cw_in_core" -eq 1 ]; then
+                    _cw_value=${_cw_line#*=}
+                    _cw_value=${_cw_value#"${_cw_value%%[! 	]*}"}
+                    [ -n "$_cw_value" ] && break
+                fi
+                ;;
+        esac
+    done < "$_cw_git_common/config"
     if [ -n "$_cw_value" ]; then
         die 2 "core.worktree = '$_cw_value' is set in $_cw_git_common/config.
   That key redirects every git command in this repository — this guard
@@ -223,20 +311,30 @@ if [ -n "$_cw_git_common" ] && [ -f "$_cw_git_common/config" ]; then
 fi
 
 # --- 1. cwd must be inside a git repository ---------------------------------
-toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+[ -n "$toplevel" ] || toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
 if [ -z "$toplevel" ]; then
     die 2 "cwd '$(pwd)' is not inside a git repository.
   This guard must run from the repo root of the clone you are about to push.
   A 'git archive' worktree under /dev/shm or /run/user/1000 has no .git and
   CANNOT be checked from — cd to the real clone and re-run."
 fi
-toplevel=$(CDPATH= cd -- "$toplevel" && pwd -P) || die 2 "cannot canonicalise toplevel"
+# Canonicalise with `cd -P` + $PWD in the current shell: no $(...) fork (each
+# fork/exec costs seconds on a loaded Windows host; 2026-11-17 perf).
+_orig_pwd=$PWD
+CDPATH= cd -P -- "$toplevel" 2>/dev/null || die 2 "cannot canonicalise toplevel"
+toplevel=$PWD
+cd -- "$_orig_pwd" 2>/dev/null || die 2 "cannot return to '$_orig_pwd'"
 
 # --- 2. cross-check: are we checking the repo this script ships in? ---------
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || script_dir=""
-if [ -n "$script_dir" ]; then
-    script_root=$(CDPATH= cd -- "$script_dir/../.." 2>/dev/null && pwd -P) || script_root=""
+# Parameter expansion, not dirname: every exec is ~5 s on a loaded Windows host.
+case "$0" in */*) _sd=${0%/*} ;; *) _sd=. ;; esac
+script_dir=""
+script_root=""
+if CDPATH= cd -P -- "$_sd" 2>/dev/null; then
+    script_dir=$PWD
+    if CDPATH= cd -P -- "$script_dir/../.." 2>/dev/null; then script_root=$PWD; fi
 fi
+cd -- "$_orig_pwd" 2>/dev/null || die 2 "cannot return to '$_orig_pwd'"
 if [ -n "${script_root:-}" ] && [ "$script_root" != "$toplevel" ]; then
     if [ -e "$script_root/.git" ]; then
         die 2 "repository mismatch.
@@ -274,35 +372,53 @@ if [ "$rawmode" -eq 0 ]; then
     right=${right#.}          # tolerate the A...B form
     [ -n "$left" ]  || die 2 "range '$range' has an empty left endpoint"
     [ -n "$right" ] || die 2 "range '$range' has an empty right endpoint"
-    for ep in "$left" "$right"; do
-        git rev-parse --verify --quiet "$ep^{commit}" >/dev/null 2>&1 \
-            || die 2 "revision '$ep' (from range '$range') does not exist in the repository at $toplevel.
-  Either you are in the wrong clone, or the commit was never fetched here."
-    done
+    # Endpoint existence is verified lazily in step 5: `git log` exits non-zero
+    # on an unknown revision, and only then is the (extra) rev-parse run to name
+    # the cause. Happy path saves one git exec (2026-11-17 perf); still fail-closed.
 fi
 
 # --- 5. enumerate the range, checking git's exit status --------------------
 if [ "$rawmode" -eq 1 ]; then
     range="rev-list-args: $*"
-    revs=$(git rev-list --max-count=$((MAX_PUSH_COMMITS + 1)) "$@" 2>/dev/null)
+    tree_pairs=$(git -c log.showSignature=false log --max-count=$((MAX_PUSH_COMMITS + 1)) --format='%H %T' "$@" 2>/dev/null)
 else
-    revs=$(git rev-list --max-count=$((MAX_PUSH_COMMITS + 1)) "$range" 2>/dev/null)
+    tree_pairs=$(git -c log.showSignature=false log --max-count=$((MAX_PUSH_COMMITS + 1)) --format='%H %T' "$range" 2>/dev/null)
 fi
 rl=$?
-[ "$rl" -eq 0 ] || die 2 "git rev-list '$range' failed with status $rl"
+if [ "$rl" -ne 0 ]; then
+    if [ "$rawmode" -eq 0 ]; then
+        git rev-parse "$left^{commit}" "$right^{commit}" >/dev/null 2>&1 ||
+            die 2 "revision '$left' or '$right' (from range '$range') does not exist in the repository at $toplevel.
+  Either you are in the wrong clone, or the commit was never fetched here."
+    fi
+    die 2 "git log '$range' failed with status $rl"
+fi
 
-if [ -z "$revs" ] && [ -n "$FALLBACK_TIPS" ]; then
+if [ -z "$tree_pairs" ] && [ -n "$FALLBACK_TIPS" ]; then
     peeled_fallback_tips=""
     for fallback_tip in $FALLBACK_TIPS; do
         peeled_fallback=$(git rev-parse --verify --quiet "$fallback_tip^{commit}" 2>/dev/null) ||
             die 2 "fallback destination tip '$fallback_tip' is not a commit"
         peeled_fallback_tips="$peeled_fallback_tips $peeled_fallback"
     done
-    revs=$(printf '%s\n' $peeled_fallback_tips | awk 'NF && !seen[$0]++')
+    revs=""
+    for fb in $peeled_fallback_tips; do
+        case " $revs " in *" $fb "*) ;; *) revs="$revs $fb" ;; esac
+    done
+    tree_pairs=$(git show -s --format='%H %T' $revs 2>/dev/null)
+    [ "$?" -eq 0 ] || die 2 "cannot resolve tree identities for outgoing commits"
 fi
 
+# Count commits and collect unique trees in pure shell (no awk/grep execs).
 n=0
-for rev in $revs; do n=$((n + 1)); done
+trees=""
+while read -r _c _t _extra; do
+    [ -n "$_c" ] && [ -n "$_t" ] && [ -z "$_extra" ] || continue
+    n=$((n + 1))
+    case " $trees " in *" $_t "*) ;; *) trees="$trees $_t" ;; esac
+done <<EOF_PAIRS
+$tree_pairs
+EOF_PAIRS
 
 [ "$n" -le "$MAX_PUSH_COMMITS" ] || die 2 "range exceeds the bounded limit of $MAX_PUSH_COMMITS commits.
   Split the push into smaller ranges; no over-limit history is accepted unchecked."
@@ -324,10 +440,6 @@ fi
 # inspect each unique tree once. Rebases and metadata-only histories commonly
 # contain repeated trees; per-commit `git ls-tree` made their cost needlessly
 # linear in commit count even inside the hard safety bound.
-tree_pairs=$(git show -s --format='%H %T' $revs 2>/dev/null)
-tp_rc=$?
-[ "$tp_rc" -eq 0 ] || die 2 "cannot resolve tree identities for outgoing commits"
-trees=$(printf '%s\n' "$tree_pairs" | awk 'NF == 2 && !seen[$2]++ {print $2}')
 [ -n "$trees" ] || die 2 "outgoing commits yielded no tree identities"
 found=0
 checked_trees=0
@@ -336,13 +448,19 @@ for tree in $trees; do
     entries=$(git ls-tree --name-only "$tree" 2>/dev/null)
     lt=$?
     [ "$lt" -eq 0 ] || die 2 "git ls-tree failed (status $lt) on tree $tree — cannot verify this commit tree"
-    if printf '%s\n' "$entries" | "$GREP" -q '^\.jjconflict'; then
-        conflict_revs=$(printf '%s\n' "$tree_pairs" | awk -v tree="$tree" '$2 == tree {print $1}')
-        for rev in $conflict_revs; do
-            echo "CONFLICT COMMIT: $rev $(git log -1 --format=%s "$rev" 2>/dev/null)" >&2
-        done
-        found=1
-    fi
+    nl='
+'
+    case "$nl$entries" in
+        *"$nl.jjconflict"*)
+            while read -r _c _t _extra; do
+                [ "$_t" = "$tree" ] || continue
+                echo "CONFLICT COMMIT: $_c $(git log -1 --format=%s "$_c" 2>/dev/null)" >&2
+            done <<EOF_CONF
+$tree_pairs
+EOF_CONF
+            found=1
+            ;;
+    esac
 done
 
 if [ "$found" -ne 0 ]; then

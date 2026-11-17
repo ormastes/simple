@@ -34,6 +34,8 @@ use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.common.driver_core_modes.{OutputFormat, driver_output_format_native,
     driver_output_format_is_both}
+use compiler.common.module_path_naming.{module_canonical_fold_name,
+    module_numbered_compiler_candidates_v1}
 
 pub const GO_TO_END_ENV_V1: text = "SIMPLE_NATIVE_GO_TO_END"
 pub const GO_TO_END_SCHEMA_V1: text = "simple-native-go-to-end-v1"
@@ -139,19 +141,115 @@ impl GoToEndLedgerV1:
             index = index + 1
         names
 
-# True when `import_path` (as written in a `use`) names module `module_name`.
-# Module names are physical (`lib.common.text`, `compiler.hir.hir_types`);
-# imports may be logical (`std.text`). Over-matching only excludes more
-# modules, which is safe: an excluded module is reported, never linked.
-pub fn go_to_end_import_names_module_v1(import_path: text, module_name: text) -> bool:
-    if import_path == "" or module_name == "":
-        return false
-    if import_path == module_name:
-        return true
-    val logical = if import_path.starts_with("std."): import_path.substring(4) else: import_path
-    if logical == module_name:
-        return true
-    module_name.ends_with("." + logical)
+# Edge binding mirrors the closure resolver (driver_entry_closure_core
+# _driver_resolve_entry_import) over NAMES, with no filesystem probe: a module
+# excluded while an importer stays lowers that importer with no provider
+# ("missing provider declaration for imported global"), and an importer kept
+# while its provider is excluded is the same fault from the other side. So an
+# import binds the FIRST module key, in resolver order, that it can name.
+#
+# Lib family directories, in the checkout resolver's probe order.
+fn go_to_end_lib_families_v1() -> [text]:
+    ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common",
+     "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]
+
+# Identity -> module key. Built once per recovery. Exact folded spellings
+# first (tier segments dropped, `std.` -> `lib.`), then a package entry
+# (`x.__init__`, `x.mod`) under its package `x`, then the spelling of an
+# UNAMBIGUOUS rewrite-table entry (`compiler.core.x` also answers
+# `compiler.frontend.core.x`). An identity is never overwritten, so a
+# plain `x.spl` beats `x/__init__.spl` as it does in the resolver.
+pub fn go_to_end_module_index_v1(names: [text]) -> Dict<text, text>:
+    var index: Dict<text, text> = {}
+    var pass_no = 0
+    while pass_no < 3:
+        for name in names:
+            var identity = module_canonical_fold_name(name)
+            if pass_no == 1:
+                identity = go_to_end_package_identity_v1(identity)
+            elif pass_no == 2:
+                val rewrites = module_numbered_compiler_candidates_v1(name)
+                identity = if rewrites.len() == 1: go_to_end_package_identity_v1(module_canonical_fold_name(rewrites[0].replace("/", "."))) else: ""
+            if identity != "" and not index.contains_key(identity):
+                index[identity] = name
+        pass_no = pass_no + 1
+    index
+
+fn go_to_end_package_identity_v1(folded: text) -> text:
+    if folded.ends_with(".__init__"):
+        return folded.substring(0, folded.byte_len() - 9)
+    if folded.ends_with(".mod"):
+        return folded.substring(0, folded.byte_len() - 4)
+    folded
+
+fn go_to_end_index_hit_v1(index: Dict<text, text>, spelling: text) -> text:
+    match index.get(module_canonical_fold_name(spelling)):
+        case Some(key): key
+        case _: ""
+
+# One absolute probe, in _driver_resolve_entry_import_exact order: direct
+# (checkout root and src/), the importer's directory, the numbered-compiler
+# rewrite table, then lib.X and lib.<family>.X (std.X: lib.X is the direct
+# spelling). Never a deeper suffix: `use provider` is not `lib.x.y.provider`.
+fn go_to_end_bind_probe_v1(index: Dict<text, text>, package: text, probe: text) -> text:
+    var hit = go_to_end_index_hit_v1(index, probe)
+    if hit != "":
+        return hit
+    if package != "":
+        hit = go_to_end_index_hit_v1(index, package + "." + probe)
+        if hit != "":
+            return hit
+    for relative in module_numbered_compiler_candidates_v1(probe):
+        hit = go_to_end_index_hit_v1(index, relative.replace("/", "."))
+        if hit != "":
+            return hit
+    val is_std = probe.starts_with("std.")
+    val logical = if is_std: probe.substring(4) else: probe
+    if not is_std:
+        hit = go_to_end_index_hit_v1(index, "lib." + logical)
+        if hit != "":
+            return hit
+    for family in go_to_end_lib_families_v1():
+        hit = go_to_end_index_hit_v1(index, "lib." + family + "." + logical)
+        if hit != "":
+            return hit
+    ""
+
+# Drop one trailing segment, keeping a leading-dot relative marker
+# (`..a.B` -> `..a`, `..a` -> ""), as _driver_entry_import_parent does.
+fn go_to_end_import_parent_v1(path: text) -> text:
+    var leading = 0
+    while leading < path.byte_len() and path.substring(leading, leading + 1) == ".":
+        leading = leading + 1
+    var last = -1
+    var i = leading
+    while i < path.byte_len():
+        if path.substring(i, i + 1) == ".":
+            last = i
+        i = i + 1
+    if last < 0:
+        return ""
+    path.substring(0, last)
+
+# The module key `import_path`, written in module `importer`, binds in
+# `index`, or "" for none. The full spelling is exhausted before a trailing
+# segment is read as an item (`use span.Span`, `use a.b.Item`).
+pub fn go_to_end_import_target_v1(index: Dict<text, text>, importer: text, import_path: text) -> text:
+    val relative = import_path.starts_with(".")
+    val package = go_to_end_import_parent_v1(importer)
+    var probe = import_path
+    while probe != "":
+        var hit = ""
+        if relative:
+            val absolute = go_to_end_resolve_import_v1(importer, probe)
+            if absolute != "":
+                hit = go_to_end_index_hit_v1(index, absolute)
+        else:
+            hit = go_to_end_bind_probe_v1(index, package, probe)
+        if hit != "":
+            return hit
+        probe = go_to_end_import_parent_v1(probe)
+    ""
 
 # Resolve a raw parser import path against the importer's module path. `.x` is
 # a sibling of the importer, `..x` one package level higher (each leading dot
@@ -176,33 +274,41 @@ pub fn go_to_end_resolve_import_v1(importer: text, import_path: text) -> text:
 
 # Modules (from `candidates`) that import a failed module, transitively.
 # `edge_from[i]` imports `edge_to[i]`. Failed modules themselves are not
-# returned. Fixed point; quadratic but over the import graph only.
+# returned; they need not be candidates (HIR already dropped them). Each edge
+# is bound once, then a fixed point over the bound edges.
 pub fn go_to_end_blocked_modules_v1(candidates: [text], edge_from: [text],
         edge_to: [text], failed: [text]) -> [text]:
-    var bad: [text] = failed
-    var blocked: [text] = []
+    var names: [text] = []
+    for name in candidates:
+        names = names.push(name)
+    for name in failed:
+        names = names.push(name)
+    val index = go_to_end_module_index_v1(names)
+    var targets: [text] = []
+    var edge = 0
+    while edge < edge_from.len() and edge < edge_to.len():
+        targets = targets.push(go_to_end_import_target_v1(index, edge_from[edge], edge_to[edge]))
+        edge = edge + 1
+    var bad: Dict<text, bool> = {}
+    for name in failed:
+        bad[name] = true
     var changed = true
     while changed:
         changed = false
-        for name in candidates:
-            var already = false
-            for b in bad:
-                if b == name:
-                    already = true
-            if not already:
-                var hit = false
-                var edge = 0
-                while edge < edge_from.len() and not hit:
-                    if edge_from[edge] == name:
-                        val target = go_to_end_resolve_import_v1(name, edge_to[edge])
-                        for b in bad:
-                            if go_to_end_import_names_module_v1(target, b):
-                                hit = true
-                    edge = edge + 1
-                if hit:
-                    bad = bad.push(name)
-                    blocked = blocked.push(name)
-                    changed = true
+        edge = 0
+        while edge < targets.len():
+            val importer = edge_from[edge]
+            if targets[edge] != "" and bad.contains_key(targets[edge]) and not bad.contains_key(importer):
+                bad[importer] = true
+                changed = true
+            edge = edge + 1
+    var failed_set: Dict<text, bool> = {}
+    for name in failed:
+        failed_set[name] = true
+    var blocked: [text] = []
+    for name in candidates:
+        if bad.contains_key(name) and not failed_set.contains_key(name):
+            blocked = blocked.push(name)
     blocked
 
 pub fn go_to_end_sdn_quote_v1(value: text) -> text:

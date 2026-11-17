@@ -339,3 +339,53 @@ pub fn module_canonical_fold_name(module_name: text) -> text:
     if canonical.starts_with("std."):
         return "lib." + canonical.substring(4)
     canonical
+
+# One ordered compatibility mapping for checkout and admitted-root import
+# lookup (driver_entry_closure_core) and go-to-end edge binding: the repo-
+# relative directories a `compiler.*`/`linker` import may name, in probe order.
+# Full candidates must be exhausted before interpreting a suffix as an item.
+pub fn module_numbered_compiler_candidates_v1(module_path: text) -> [text]:
+    # The exact compiler.mir_opt facade is intentionally owned by src/lib.
+    if module_path == "compiler.mir_opt": return []
+    val is_numbered = module_path.starts_with("compiler.") or module_path == "linker" or module_path.starts_with("linker.")
+    if not is_numbered: return []
+    var candidates: [text] = []
+    val mappings: [[text]] = [
+        ["compiler.common", "compiler/00.common"],
+        ["compiler.core", "compiler/10.frontend/core"],
+        ["compiler.frontend", "compiler/10.frontend"],
+        ["compiler.blocks.blocks", "compiler/15.blocks/blocks"],
+        ["compiler.blocks", "compiler/15.blocks/blocks"],
+        ["compiler.hir", "compiler/20.hir"],
+        ["compiler.traits", "compiler/25.traits"],
+        ["compiler.types", "compiler/30.types"],
+        ["compiler.semantics", "compiler/35.semantics"],
+        ["compiler.mir", "compiler/50.mir"],
+        ["compiler.borrow", "compiler/55.borrow"],
+        ["compiler.mir_opt", "compiler/60.mir_opt/mir_opt"],
+        # Parent level owns the module shims (optimization_passes, optimizer_manifest,
+        # optimizer_plugin, optimizer_kernel_contract, mir_opt_integration, and the
+        # _OptimizationPasses part package) -- files that exist ONLY here. Without
+        # this candidate, compiler.mir_opt.<name> for these fell through to the
+        # src/lib stub facade (all-zero declaration arrays; cycle-38 frontier:
+        # 3x 'no exported item' + consequences, surfaces idx 871/2183/2415).
+        # Listed AFTER the nested layout so every currently-resolving first-hit
+        # is preserved (the two levels share no file names).
+        ["compiler.mir_opt", "compiler/60.mir_opt"],
+        ["compiler.loader", "compiler/99.loader"],
+        ["compiler.backend", "compiler/70.backend"],
+        ["compiler.driver", "compiler/80.driver"],
+        ["compiler.shb", "compiler/80.driver/shb"],
+        ["compiler.interpreter", "compiler/95.interp/interpreter"],
+        ["linker", "compiler/70.backend/linker"],
+        ["compiler.backend", "compiler/70.backend/backend"],
+        ["compiler.loader", "compiler/99.loader/loader"]
+    ]
+    for mapping in mappings:
+        val prefix = mapping[0]
+        if module_path == prefix or module_path.starts_with(prefix + "."):
+            var relative = mapping[1]
+            if module_path.byte_len() > prefix.byte_len():
+                relative = relative + "/" + module_path.substring(prefix.byte_len() + 1).replace(".", "/")
+            candidates = candidates.push(relative)
+    candidates

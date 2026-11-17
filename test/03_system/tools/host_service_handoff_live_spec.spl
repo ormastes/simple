@@ -1,0 +1,68 @@
+"""
+## Purpose and audience
+Live AT-OPS-01 driver on one installed host: the old incarnation takes a controller-signed `service-handoff`, stops
+admitting and closes; the successor start verifies and adopts it exactly once.
+Status: AUTHORED, NOT_RUN. Env-gated; with the fixture absent every example is pending, never a pass.
+## Operator workflow
+Install the Linux service fixture (supervisor profile, fresh-epoch profile, installed policy whose controller key
+lists the `service-handoff` operation), export the variables below, run this file with the self-hosted runner.
+## Compatibility and limitations
+Needs root-owned installed state, a systemd manager and the dedicated service account. The pure gates, the wire route
+and the start-path ordering are covered by test/01_unit/lib/orchestration/host_service_handoff_v1_spec.spl.
+## Verification guidance and troubleshooting
+SIMPLE_HANDOFF_LIVE_ANCHOR is the installed anchor; SIMPLE_HANDOFF_LIVE_OPERATION the signed envelope id and
+SIMPLE_HANDOFF_LIVE_SIGNED the controller-signed proof naming the OLD incarnation's current record. The operator's
+controller produces both; this spec never signs. SIMPLE_HANDOFF_LIVE_PHASE is `old` or `successor`: custody is
+process-bound (D1 exit-then-adopt), so run this file twice, `old` first and `successor` in a NEW process after it exits.
+"""
+use std.spec.{step, fail, pending}
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{host_linux_service_open_installed_v4, host_linux_service_close_v4}
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, host_service_domain_turn_v3}
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+
+fn handoff_live_missing() -> [text]:
+    var missing: [text] = []
+    for name in ["SIMPLE_HANDOFF_LIVE_ANCHOR", "SIMPLE_HANDOFF_LIVE_OPERATION", "SIMPLE_HANDOFF_LIVE_SIGNED", "SIMPLE_HANDOFF_LIVE_PHASE"]:
+        if (env_get(name) ?? "") == "": missing.push(name)
+    missing
+
+describe "Installed service drain/update handoff (live)":
+    it "drains the old incarnation, refuses new admission, and the successor adopts exactly once":
+        # @req AT-OPS-01
+        val missing = handoff_live_missing()
+        if missing.len() > 0:
+            pending("BLOCKED: " + missing.join(", "))
+        else:
+            val anchor = env_get("SIMPLE_HANDOFF_LIVE_ANCHOR") ?? ""
+            val operation = env_get("SIMPLE_HANDOFF_LIVE_OPERATION") ?? ""
+            val signed = env_get("SIMPLE_HANDOFF_LIVE_SIGNED") ?? ""
+            val phase = env_get("SIMPLE_HANDOFF_LIVE_PHASE") ?? ""
+            if phase == "old":
+                step("the old incarnation starts and takes the handoff")
+                val old_started = host_linux_service_open_installed_v4(anchor)
+                expect(old_started.error).to_equal("")
+                val domain = HostServiceDomainV3(HostLocalRootV3.LinuxService(old_started.owner))
+                val drained = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-service-handoff", operation, signed))
+                expect(drained.exit_code).to_equal(0)
+                step("a draining owner refuses a following prepare and no longer reports ready")
+                val refused = host_service_domain_turn_v3(drained.owner, HostServiceRequestV2("host-prepare", "operation_after", "x"))
+                expect(refused.response.contains("linux-host-service-draining")).to_equal(true)
+                val status = host_service_domain_turn_v3(drained.owner, HostServiceRequestV2("host-status", "", ""))
+                expect(status.response.contains("linux-host-service-draining")).to_equal(true)
+                step("the old owner closes, releasing the single journal writer; the process then exits")
+                match drained.owner.local:
+                    case HostLocalRootV3.LinuxService(old_owner):
+                        val closed = host_linux_service_close_v4(old_owner)
+                        expect(closed.completed).to_equal(true)
+                    case _: fail("expected the Linux service arm")
+            elif phase == "successor":
+                step("the successor start (a new process) verifies the pending handoff, reconciles, then consumes it")
+                val successor = host_linux_service_open_installed_v4(anchor)
+                expect(successor.error).to_equal("")
+                expect(successor.owner.reconcile_error).to_equal("")
+                val closed_successor = host_linux_service_close_v4(successor.owner)
+                expect(closed_successor.completed).to_equal(true)
+            else:
+                fail("SIMPLE_HANDOFF_LIVE_PHASE must be old or successor")
