@@ -34,7 +34,7 @@
 # This module is self-contained on purpose: it does not read or import the
 # driver-side target graph owned by another lane.
 
-use std.io_runtime.{file_exists, file_read}
+use std.io_runtime.{file_exists, file_read, host_arch}
 
 struct BuildTarget:
     name: text
@@ -366,17 +366,21 @@ fn _bracket_items(value: text, open: text, close: text) -> [text]:
 
 fn _declared_cpu_tiers(repo_root: text) -> [text]:
     """Every tier name declared in config/build/cpu_tiers.sdn: `levels`,
-    `default_tiers` and alias keys. Empty when the file is missing."""
+    `default_tiers` and alias keys, each as `<arch>|<tier>` (arch from the
+    enclosing `- arch:` entry). Empty when the file is missing."""
     var out: [text] = []
     val path = repo_root + "/config/build/cpu_tiers.sdn"
     if not file_exists(path):
         return out
     val lines = file_read(path).split("\n")
+    var arch = ""
     var i = 0
     while i < lines.len():
         val s = _strip_comment(lines[i]).trim()
         var items: [text] = []
-        if s.starts_with("levels:"):
+        if s.starts_with("- arch:"):
+            arch = s[7:].trim()
+        elif s.starts_with("levels:"):
             items = _bracket_items(s[7:], "[", "]")
         elif s.starts_with("default_tiers:"):
             items = _bracket_items(s[14:], "[", "]")
@@ -388,13 +392,36 @@ fn _declared_cpu_tiers(repo_root: text) -> [text]:
                 p = p + 1
         var k = 0
         while k < items.len():
-            if not out.contains(items[k]):
-                out.push(items[k])
+            val key = arch + "|" + items[k]
+            if not out.contains(key):
+                out.push(key)
             k = k + 1
         i = i + 1
     out
 
+fn _tier_declared(tiers: [text], tier: text) -> bool:
+    var i = 0
+    while i < tiers.len():
+        if tiers[i].ends_with("|" + tier):
+            return true
+        i = i + 1
+    false
+
+pub fn tier_arch_of_triple(triple: text) -> text:
+    """Arch name used by cpu_tiers.sdn for a triple's arch component."""
+    val a = triple.split("-")[0]
+    if a.starts_with("riscv64"):
+        return "riscv64"
+    if a == "arm64":
+        return "aarch64"
+    if a == "amd64":
+        return "x86_64"
+    a
+
 pub fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
+    validate_targets_for_arch(ts, repo_root, host_arch())
+
+pub fn validate_targets_for_arch(ts: TargetSet, repo_root: text, host: text) -> [text]:
     """Full fail-closed validation. Returns every error found (never throws).
 
     Checks, each a distinct named error: parse errors carried in from the
@@ -415,8 +442,12 @@ pub fn validate_targets(ts: TargetSet, repo_root: text) -> [text]:
             if not tiers_loaded:
                 tiers = _declared_cpu_tiers(repo_root)
                 tiers_loaded = true
-            if not tiers.contains(t.cpu_tier):
+            if not _tier_declared(tiers, t.cpu_tier):
                 errors.push("target-error: unknown-cpu-tier: " + t.name + ": " + t.cpu_tier)
+            else:
+                val arch = if t.triple.len() > 0: tier_arch_of_triple(t.triple) else: host
+                if not tiers.contains(arch + "|" + t.cpu_tier):
+                    errors.push("target-error: cpu-tier-arch-mismatch: " + t.name + ": " + t.cpu_tier + " (" + arch + ")")
         if t.triple.len() > 0 and not is_well_formed_triple(t.triple):
             errors.push("target-error: malformed-triple: " + t.name + ": " + t.triple)
         var j = 0
@@ -482,12 +513,13 @@ pub fn default_group_targets(ts: TargetSet) -> [text]:
     """Targets a default build selects: members of `default: true` groups.
 
     A file that declares no group keeps the pre-group meaning: every target.
-    A target with an explicit `triple:` is cross (opt-in) and never selected."""
+    A target with an explicit `triple:` (cross) or `cpu_tier:` (tier artifact) is
+    opt-in and never selected: a default build is the host baseline only."""
     var out: [text] = []
     if ts.groups.len() == 0:
         var i = 0
         while i < ts.targets.len():
-            if ts.targets[i].triple.len() == 0:
+            if ts.targets[i].triple.len() == 0 and ts.targets[i].cpu_tier.len() == 0:
                 out.push(ts.targets[i].name)
             i = i + 1
         return out
@@ -497,7 +529,7 @@ pub fn default_group_targets(ts: TargetSet) -> [text]:
             var m = 0
             while m < ts.groups[g].members.len():
                 val idx = find_target(ts, ts.groups[g].members[m])
-                if idx < 0 or ts.targets[idx].triple.len() == 0:
+                if idx < 0 or (ts.targets[idx].triple.len() == 0 and ts.targets[idx].cpu_tier.len() == 0):
                     out.push(ts.groups[g].members[m])
                 m = m + 1
         g = g + 1
