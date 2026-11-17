@@ -27,7 +27,9 @@
 #   PROVEN HERE from real bodies:
 #     * loop presence and shape (`Loop` / `While` / `For` in HirExprKind)
 #     * `while true` and bare `loop:` -> LOOP_BOUND_NONE
-#     * `while i < <int literal>` -> LOOP_BOUND_CONST
+#     * `while i < <int literal>` / `<=` -> LOOP_BOUND_CONST only when the body
+#       advances `i` by a positive int literal (`i = i + k` / `i += k`) as a
+#       direct statement (ROB-EFF-04); anything else -> LOOP_BOUND_NONE
 #     * `for x in a..<int literal>` -> LOOP_BOUND_CONST; any other `for` ->
 #       LOOP_BOUND_CAPACITY (iterating a collection is bounded by its length)
 #     * container growth in a loop body (`.push` / `.insert` / `.append` /
@@ -106,26 +108,80 @@ pub fn effect_fn_names_for_module_v1(module: HirModule) -> Dict<i64, text>:
 # Loop-bound classification
 # ============================================================================
 
-fn effect_while_bound(cond: HirExpr) -> i64:
-    """Trip-bound class for a `while` condition.
+fn effect_while_bound(cond: HirExpr, body: HirBlock) -> i64:
+    """Trip-bound class for a `while` loop.
 
     Fail-CLOSED: anything this pass cannot prove finite is NONE. Classifying an
     unprovable bound as CONST would make `@bounded_loop` pass on exactly the
-    loops it exists to reject.
+    loops it exists to reject. CONST needs all of: condition `i < N` or
+    `i <= N` with an int literal N, and a direct body statement advancing `i`
+    by a positive int literal (ROB-EFF-04).
     """
     match cond.kind:
-        case HirExprKind.BoolLit(_):
+        case HirExprKind.Binary(op, left, right):
+            val is_upper = match op:
+                case HirBinOp.Lt: true
+                case HirBinOp.LtEq: true
+                case _: false
+            if not is_upper:
+                return LOOP_BOUND_NONE
+            val rhs: HirExpr = right
+            val rhs_is_lit = match rhs.kind:
+                case HirExprKind.IntLit(_, _): true
+                case _: false
+            if not rhs_is_lit:
+                return LOOP_BOUND_NONE
+            val counter = effect_var_symbol_id(left)
+            if counter < 0:
+                return LOOP_BOUND_NONE
+            if effect_block_advances(body, counter):
+                LOOP_BOUND_CONST
+            else:
+                LOOP_BOUND_NONE
+        case _:
             # `while true` (and `while false`, which is dead) has no bound.
             LOOP_BOUND_NONE
-        case HirExprKind.Binary(_, _, right):
-            val rhs: HirExpr = right
-            match rhs.kind:
-                case HirExprKind.IntLit(_, _):
-                    LOOP_BOUND_CONST
-                case _:
-                    LOOP_BOUND_NONE
-        case _:
-            LOOP_BOUND_NONE
+
+# SymbolId.id of a plain variable reference, or -1.
+fn effect_var_symbol_id(e: HirExpr) -> i64:
+    match e.kind:
+        case HirExprKind.Var(sym): sym.id
+        case HirExprKind.NamedVar(sym, _): sym.id
+        case _: -1
+
+fn effect_is_positive_int_lit(e: HirExpr) -> bool:
+    match e.kind:
+        case HirExprKind.IntLit(v, _): v > 0
+        case _: false
+
+# True when `value` is `counter + k` or `k + counter` with k a positive int literal.
+fn effect_is_counter_plus_lit(value: HirExpr, counter: i64) -> bool:
+    match value.kind:
+        case HirExprKind.Binary(op, l, r):
+            val is_add = match op:
+                case HirBinOp.Add: true
+                case _: false
+            if not is_add:
+                return false
+            (effect_var_symbol_id(l) == counter and effect_is_positive_int_lit(r)) or (effect_var_symbol_id(r) == counter and effect_is_positive_int_lit(l))
+        case _: false
+
+# A direct statement of `body` advances `counter`: `i = i + k` or `i += k`, k > 0.
+fn effect_block_advances(body: HirBlock, counter: i64) -> bool:
+    for stmt in body.stmts:
+        match stmt.kind:
+            case HirStmtKind.Assign(target, op, value):
+                if effect_var_symbol_id(target) == counter:
+                    if val o = op:
+                        val is_add = match o:
+                            case HirAssignOp.Add: true
+                            case _: false
+                        if is_add and effect_is_positive_int_lit(value):
+                            return true
+                    elif effect_is_counter_plus_lit(value, counter):
+                        return true
+            case _: ()
+    false
 
 fn effect_for_bound(iter: HirExpr) -> i64:
     """Trip-bound class for a `for` iterable.
@@ -310,7 +366,7 @@ fn effect_expr_loops(expr: HirExpr) -> [LoopSite]:
             for lp in effect_block_loops(body):
                 out = out.push(lp)
         case HirExprKind.While(cond, body, _):
-            out = out.push(LoopSite(detail: "while", bound_kind: effect_while_bound(cond),
+            out = out.push(LoopSite(detail: "while", bound_kind: effect_while_bound(cond, body),
                 grows_container: effect_block_grows(body), line: expr.span.line))
             for lp in effect_block_loops(body):
                 out = out.push(lp)

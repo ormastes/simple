@@ -1,0 +1,56 @@
+"""
+## Purpose and audience
+Purpose: ROB-EFF-04. A `while` loop is only CONST-bounded when its condition is
+`i < N` / `i <= N` with an integer literal N AND the body advances `i` by a
+positive integer literal (`i = i + k` or `i += k`). A literal right-hand side
+alone is not a bound. Fail closed: everything else is NONE.
+Audience: compiler engineers maintaining effect verification.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+"""
+# @req: ROB-EFF-04
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.common.config.{Logger}
+use compiler.semantics.effect_validation.{effect_function_facts_v1, effect_struct_sizes, effect_fn_names}
+use compiler.semantics.effect_verifier.{LOOP_BOUND_NONE, LOOP_BOUND_CONST}
+
+fn bound_of(body: text) -> i64:
+    val src = "fn f():\n    var i = 0\n" + body
+    val parsed = parse_full_frontend(src, "loop_bound.spl", "loop_bound", Logger(level: 0))
+    var lowering = HirLowering.with_filename("loop_bound.spl")
+    val hir = lowering.lower_module(parsed)
+    val modules = {"loop_bound": hir}
+    val sizes = effect_struct_sizes(modules)
+    val names = effect_fn_names(modules)
+    var bound = -1
+    for func in hir.functions.values():
+        val row = effect_function_facts_v1(func, sizes, names)
+        if row.loops.len() > 0: bound = row.loops[0].bound_kind
+    bound
+
+describe "ROB-EFF-04 while-loop bound soundness":
+    it "literal bound with no induction progress is NONE":
+        expect(bound_of("    while i < 10:\n        val x = 1\n")).to_equal(LOOP_BOUND_NONE)
+
+    it "not-equal comparison is NONE even with progress":
+        expect(bound_of("    while i != 10:\n        i = i + 1\n")).to_equal(LOOP_BOUND_NONE)
+
+    it "decrementing the counter under `<` is NONE":
+        expect(bound_of("    while i < 10:\n        i = i - 1\n")).to_equal(LOOP_BOUND_NONE)
+
+    it "advancing a different variable is NONE":
+        expect(bound_of("    var j = 0\n    while i < 10:\n        j = j + 1\n")).to_equal(LOOP_BOUND_NONE)
+
+    it "`i = i + 1` under `<` literal is CONST":
+        expect(bound_of("    while i < 10:\n        i = i + 1\n")).to_equal(LOOP_BOUND_CONST)
+
+    it "`i += 2` under `<=` literal is CONST":
+        expect(bound_of("    while i <= 10:\n        i += 2\n")).to_equal(LOOP_BOUND_CONST)
+
+    it "`while true` stays NONE":
+        expect(bound_of("    while true:\n        i = i + 1\n")).to_equal(LOOP_BOUND_NONE)
