@@ -60,8 +60,12 @@ uint div255r(uint v) {
 // the device gradient composite rule lives; reconcile it here when the host
 // blend lane (color.spl blend, runtime_simd_dispatch.c) adopts the same rule.
 // Over a destination with alpha < 255 (outside Chrome's stated rule, which
-// assumes an opaque destination) the same rule runs on the premultiplied
-// destination and the result is unpremultiplied with rounding.
+// assumes an opaque destination) the framebuffer's straight-alpha src-over
+// (color.spl blend: dst weight da*(255-a)/255, channels unpremultiplied by
+// the output alpha) runs with each truncating divide ROUNDED instead. Keeping
+// the colour at full precision matters: premultiplying it first quantises a
+// low-alpha source to a few levels (measured up to 64 off over a transparent
+// destination), while this form returns the source exactly when da = 0.
 uint chrome_layer_src_over(uint s, uint d) {
     uint a = s >> 24u;
     if (a == 0u) return d;
@@ -80,13 +84,11 @@ uint chrome_layer_src_over(uint s, uint d) {
         uint b = (sb * a + 127u) / 255u + div255r(db * inv);
         return 0xFF000000u | (r << 16u) | (g << 8u) | b;
     }
-    uint oa = a + div255r(da * inv);
-    uint pr = (sr * a + 127u) / 255u + div255r(div255r(dr * da) * inv);
-    uint pg = (sg * a + 127u) / 255u + div255r(div255r(dg * da) * inv);
-    uint pb = (sb * a + 127u) / 255u + div255r(div255r(db * da) * inv);
-    uint r = min(255u, (pr * 255u + oa / 2u) / oa);
-    uint g = min(255u, (pg * 255u + oa / 2u) / oa);
-    uint b = min(255u, (pb * 255u + oa / 2u) / oa);
+    uint dw = div255r(da * inv);
+    uint oa = a + dw;
+    uint r = (sr * a + dr * dw + oa / 2u) / oa;
+    uint g = (sg * a + dg * dw + oa / 2u) / oa;
+    uint b = (sb * a + db * dw + oa / 2u) / oa;
     return (oa << 24u) | (r << 16u) | (g << 8u) | b;
 }
 
