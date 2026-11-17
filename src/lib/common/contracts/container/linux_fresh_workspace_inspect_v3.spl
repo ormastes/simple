@@ -6,10 +6,12 @@ use std.common.contracts.container.linux_workspace_profile_v1.*
 use std.common.contracts.container.linux_agent_workspace_profile_v1.*
 use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
 use std.common.json.value.*
+use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
 
 pub fn linux_fresh_workspace_inspect_format_v3() -> text:
     val base = linux_fresh_workload_inspect_format_v2()
-    base.substring(0, base.byte_len() - 1) + ",\"tty\":{{{{json .Config.Tty}}}},\"open_stdin\":{{{{json .Config.OpenStdin}}}},\"stdin_once\":{{{{json .Config.StdinOnce}}}},\"userns_mode\":{{{{json .HostConfig.UsernsMode}}}}}"
+    base.substring(0, base.byte_len() - 1) + ",\"tty\":{{{{json .Config.Tty}}}},\"open_stdin\":{{{{json .Config.OpenStdin}}}},\"stdin_once\":{{{{json .Config.StdinOnce}}}},\"userns_mode\":{{{{json .HostConfig.UsernsMode}}}},\"exit_code\":{{{{json .State.ExitCode}}}}}"
 
 pub fn linux_fresh_workspace_inspect_fields_v3(raw: text) -> Result<JsonValue, text>:
     if raw.byte_len() < 1 or raw.byte_len() > 1048576: return Err("fresh-workspace-inspect-size")
@@ -137,4 +139,35 @@ pub fn linux_fresh_workspace_created_config_validate_v3(workspace: LinuxWorkspac
     Ok(())
 
 pub fn linux_fresh_workspace_inspect_field_names_v3() -> [text]:
-    linux_fresh_workload_inspect_field_names_v2() + ["tty", "open_stdin", "stdin_once", "userns_mode"]
+    linux_fresh_workload_inspect_field_names_v2() + ["tty", "open_stdin", "stdin_once", "userns_mode", "exit_code"]
+
+# N7: engine-native exit DATA from the same fixed Inspect projection, read before
+# Stop (after Stop, ExitCode is the stop signal, not the workload's own exit).
+# Podman reports ExitCode 0 while created or running, so only status "exited"
+# or "stopped" (exited, cleanup pending) with pid 0 yields Exited. An engine failure or undecodable field is Unknown,
+# never Exited(0). Err is reserved for a foreign subject or a non-Inspect command.
+# allow(primitive_api): engine_exit is the helper process exit word of the same fixed Inspect read (N7)
+pub fn linux_fresh_workspace_exit_status_v3(command: LinuxFreshWorkloadCommandV2, engine_exit: i64, raw: text) -> Result<RuntimeExitStatusV1, text>:
+    if command.action != LinuxFreshWorkloadActionV2.Inspect: return Err("fresh-workspace-exit-inspect-action-required")
+    if not builder_digest_valid_v1(command.native_id): return Err("fresh-workspace-exit-inspect-native-id")
+    if engine_exit != 0: return Ok(RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-engine-failed"))
+    val value = match linux_fresh_workspace_inspect_fields_v3(raw):
+        case Ok(found): found
+        case Err(reason): return Ok(RuntimeExitStatusV1.Unknown(reason))
+    val plan = command.request.plan
+    for pair in [("id", command.native_id), ("pod_uid", plan.workload_uid), ("attempt", str(plan.attempt)),
+            ("node_boot_id", container_scope_fence_id_v2(command.scope)?), ("provider_generation", str(command.scope.provider_generation)),
+            ("operation_id", plan.operation_id)]:
+        val label = linux_fresh_workload_inspect_text_v2(value, pair.0)
+        if label.is_err() or label.unwrap() != pair.1: return Err("fresh-workspace-exit-inspect-identity")
+    val status = match linux_fresh_workload_inspect_text_v2(value, "status"):
+        case Ok(found): found
+        case Err(reason): return Ok(RuntimeExitStatusV1.Unknown(reason))
+    if status != "exited" and status != "stopped": return Ok(RuntimeExitStatusV1.NotExited(status))
+    if linux_fresh_workload_inspect_member_v2(value, "pid")? != JsonValue.Int(0):
+        return Ok(RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-live-pid"))
+    match linux_fresh_workload_inspect_member_v2(value, "exit_code")?:
+        case JsonValue.Int(code):
+            if code < 0 or code > 255: return Ok(RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-code-range"))
+            Ok(RuntimeExitStatusV1.Exited(code))
+        case _: Ok(RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-code-type"))
