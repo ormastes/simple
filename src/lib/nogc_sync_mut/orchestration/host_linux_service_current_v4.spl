@@ -71,6 +71,7 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServic
     HostAgentAttachServiceV4, host_agent_attach_apply_v4, HostAgentTerminalAuthorityV4, host_agent_terminal_authority_v4,
     host_linux_service_agent_attachment_authority_inspect_v4,
     host_linux_service_agent_attachment_lease_v4, host_linux_service_agent_pane_io_v4}
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
 use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4,
     host_agent_pane_io_refused_v4}
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attachment_live_v4, HostAgentReleaseContextV4,
@@ -1091,17 +1092,21 @@ pub struct HostLinuxServicePaneIoTurnV4:
 # is refused, also after a restart). Pane and smux state are never consulted.
 # It also pins the caller's pane: `expected_binding_uid` must equal the controller-signed binding's uid, so a
 # Host-route caller that does not name the bound pane never claims or reads it.
-fn linux_service_pane_gate_v4(owner: HostLinuxServiceCurrentV4, expected_binding_uid: text) -> text:
+fn linux_service_pane_gate_v4(owner: HostLinuxServiceCurrentV4, expected_binding_uid: text,
+        registry_check: fn(HostAgentPaneBindingV4) -> text) -> text:
     if owner.agent.is_none(): return "attach-no-attachment"
     match host_linux_service_agent_terminal_authority_v4(owner):
         case Ok(authority):
-            if authority.binding.binding_uid != expected_binding_uid: "attach-binding-mismatch" else: ""
+            if authority.binding.binding_uid != expected_binding_uid: return "attach-binding-mismatch"
+            # smux's own registry consistency check on the VERIFIED binding (never authority).
+            registry_check(authority.binding)
         case Err(reason): reason
 
 # The pane lease of the agent's attachment, handed out ONCE (13.1). The updated owner is always returned.
-pub fn host_linux_service_attachment_lease_v4(original: HostLinuxServiceCurrentV4, expected_binding_uid: text) -> HostLinuxServiceLeaseTurnV4:
+pub fn host_linux_service_attachment_lease_v4(original: HostLinuxServiceCurrentV4, expected_binding_uid: text,
+        registry_check: fn(HostAgentPaneBindingV4) -> text) -> HostLinuxServiceLeaseTurnV4:
     var owner = original
-    val gate = linux_service_pane_gate_v4(owner, expected_binding_uid)
+    val gate = linux_service_pane_gate_v4(owner, expected_binding_uid, registry_check)
     if gate != "": return HostLinuxServiceLeaseTurnV4(owner: owner, lease: None, error: gate)
     val turn = host_linux_service_agent_attachment_lease_v4(owner.agent.unwrap())
     owner.agent = Some(turn.agent)
@@ -1110,9 +1115,9 @@ pub fn host_linux_service_attachment_lease_v4(original: HostLinuxServiceCurrentV
 # Brokered pane io. There is NO caller `now`: the clock is the service's own grant clock under the installed policy,
 # so a pane caller can neither advance the agent clock nor end the signed window.
 pub fn host_linux_service_pane_io_v4(original: HostLinuxServiceCurrentV4, expected_binding_uid: text,
-        lease: HostAgentPaneLeaseV4, op: HostAgentPaneOpV4) -> HostLinuxServicePaneIoTurnV4:
+        registry_check: fn(HostAgentPaneBindingV4) -> text, lease: HostAgentPaneLeaseV4, op: HostAgentPaneOpV4) -> HostLinuxServicePaneIoTurnV4:
     var owner = original
-    val gate = linux_service_pane_gate_v4(owner, expected_binding_uid)
+    val gate = linux_service_pane_gate_v4(owner, expected_binding_uid, registry_check)
     if gate != "":
         return HostLinuxServicePaneIoTurnV4(owner: owner, result: host_agent_pane_io_refused_v4(gate))
     val metadata = owner.current_v4()
