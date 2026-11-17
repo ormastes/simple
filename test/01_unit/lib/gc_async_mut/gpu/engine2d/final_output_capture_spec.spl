@@ -5,12 +5,15 @@ use std.spec.*
 use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_SCHEMA_VERSION,
     DRAW_IR_SCHEMA_VERSION_V4}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
-    Engine2dDrawIrAdvResult, Engine2dDrawIrAdvSubmitResult}
+    Engine2dDrawIrAdvResult, Engine2dDrawIrAdvSubmitResult,
+    engine2d_draw_ir_adv_strict_vulkan_submit_with_images,
+    engine2d_draw_ir_adv_strict_vulkan_readback}
 use std.gc_async_mut.gpu.engine2d.final_output_capture.{
     engine2d_strict_vulkan_final_capture,
     engine2d_strict_vulkan_capture_completed_submission}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use common.ui.draw_ir.{draw_ir_composition}
+use common.ui.draw_ir.{draw_ir_composition, draw_ir_batch,
+    draw_ir_embedding_config, draw_ir_rect}
 
 fn completed_result() -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
@@ -37,7 +40,7 @@ describe "Engine2D strict Vulkan final-output adapter":
         # @req REQ-2D-003
         match engine2d_strict_vulkan_final_capture(completed_result(),
             "controlled-opaque-rect-v1",
-            "90fc023c54e082fff358647440e8213d45185a6d848c553839484b3",
+            "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3",
             "frame-1"):
             Ok(capture):
                 expect(capture.metadata.resource_id).to_equal(
@@ -141,4 +144,32 @@ describe "Engine2D strict Vulkan final-output adapter":
             fake, "fixture", "digest", "frame"):
             Ok(_): assert(false)
             Err(reason): expect(reason).to_contain("submission generation stale")
+        owner.shutdown()
+
+    it "links a real strict submission to its readback through the submission generation":
+        # @req REQ-2D-003 NFR-2D-004
+        val created = Engine2D.create_with_backend_strict(4, 2, "vulkan")
+        if not created.is_ok():
+            fail("blocked: physical Vulkan device required for submission-generation evidence")
+        val batch = draw_ir_batch("gen-link", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config("surface", "scene", 0, 0, 4, 2, 0, 1000, false),
+            [draw_ir_rect("clear", 0, 0, 4, 2, 0xff2771c7u32)])
+        val composition = draw_ir_composition("gen-link", "scene",
+            DRAW_IR_BACKEND_GPU, [batch])
+        val submission = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+            created.unwrap(), composition, [])
+        expect(submission.fallback_required).to_equal(false)
+        expect(submission.submission_generation).to_be_greater_than(0)
+        expect(submission.submission_generation).to_equal(
+            submission.engine.vulkan_submission_generation())
+        # The physical-identity gate in the capture adapter is out of scope: the
+        # seed interpreter deliberately cannot attest device UUIDs.
+        val result = engine2d_draw_ir_adv_strict_vulkan_readback(submission)
+        expect(result.fallback_required).to_equal(false)
+        expect(result.readback_source).to_equal("device_readback")
+        expect(result.submission_generation).to_equal(
+            submission.submission_generation)
+        expect(result.frame_width).to_equal(4)
+        expect(result.frame_height).to_equal(2)
+        var owner = submission.engine
         owner.shutdown()

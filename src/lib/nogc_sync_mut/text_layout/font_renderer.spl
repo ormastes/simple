@@ -348,7 +348,7 @@ use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_render_glyph_lcd, SfntLcdGlyph}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
-use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
@@ -3546,12 +3546,22 @@ pub fn browser_face_ascent_descent_px(family: text, bold: bool, italic: bool, fo
 # reason: family name, style flags and milli-px size are the web-style domain.
 # @allow(primitive_api)
 pub fn browser_face_ascent_descent_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> [i32]:
-    if font_size_milli <= 0 or font_size_milli > 512000:
+    browser_face_ascent_descent_device_px(family, bold, italic, font_size_milli, 1)
+
+# Device-scale twin: [ascent, descent] in whole DEVICE px at device scale `k`
+# (Chrome --force-device-scale-factor), from the face at font_size_milli * k
+# with Blink's subpixel-positioning borrow
+# (`sfnt_line_metric_units_ascent_descent_device_px`). k == 1 answers exactly
+# what `browser_face_ascent_descent_milli_px` always answered.
+# reason: family name, style flags, milli-px size and integer device scale are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: bool, font_size_milli: i32, k: i32) -> [i32]:
+    if font_size_milli <= 0 or font_size_milli > 512000 or k < 1:
         return []
     if not browser_host_has_measured_linux_face_set():
         return []
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
-    val key = family + style_key + font_size_milli.to_string()
+    val key = family + style_key + font_size_milli.to_string() + (if k > 1: "@" + k.to_string() else: "")
     val memoisable = browser_bundled_font_path_for_family(family) == ""
     if memoisable and _browser_face_ascent_descent_memo.has(key):
         return _browser_face_ascent_descent_memo[key]
@@ -3561,7 +3571,7 @@ pub fn browser_face_ascent_descent_milli_px(family: text, bold: bool, italic: bo
         if out.len() == 0:
             val path = font_face_spec_path(candidate)
             if file_exists(path):
-                val ad = sfnt_line_metric_units_ascent_descent_milli_px(_browser_face_line_units(path), font_size_milli.to_i64())
+                val ad = sfnt_line_metric_units_ascent_descent_device_px(_browser_face_line_units(path), font_size_milli.to_i64(), k.to_i64())
                 if ad.len() == 2:
                     out = [ad[0] as i32, ad[1] as i32]
     if memoisable and out.len() == 2:

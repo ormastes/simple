@@ -328,5 +328,26 @@ pub fn sfnt_line_metric_units_ascent_descent_milli_px(units: [i64], size_milli: 
     if upem <= 0: return []
     [_sfnt_round_scaled_units_milli(units[0], size_milli, upem), _sfnt_round_scaled_units_milli(units[1], size_milli, upem)]
 
+# Device-pixel strut at device scale `k` (Chrome --force-device-scale-factor):
+# [ascent, descent] in whole DEVICE px of the face at size_milli * k, each
+# rounded on its own, then Blink's subpixel-positioning borrow (on at dsf > 1,
+# SimpleFontData::PlatformInit): when the rounded descent is below the raw one
+# and the ascent is at least 1, one device px moves from ascent to descent.
+# DejaVu Sans at 64 device px: 59.41 / 15.09 -> 59 / 15 -> 58 / 16. k == 1 is
+# exactly `sfnt_line_metric_units_ascent_descent_milli_px` (no borrow: 1x
+# Linux text is hinted, without subpixel positioning).
+# reason: font-unit scalars, a milli-px size and an integer device scale are the SFNT table domain.
+# @allow(primitive_api)
+pub fn sfnt_line_metric_units_ascent_descent_device_px(units: [i64], size_milli: i64, k: i64) -> [i64]:
+    if k <= 1:
+        return sfnt_line_metric_units_ascent_descent_milli_px(units, size_milli)
+    val ad = sfnt_line_metric_units_ascent_descent_milli_px(units, size_milli * k)
+    if ad.len() != 2:
+        return ad
+    # rounded descent < raw descent  <=>  desc * upem * 1000 < units * size
+    if ad[1] * units[3] * 1000 < units[1] * size_milli * k and ad[0] >= 1:
+        return [ad[0] - 1, ad[1] + 1]
+    ad
+
 fn _sfnt_round_scaled_units_milli(units: i64, size_milli: i64, upem: i64) -> i64:
     (units * size_milli + upem * 500) / (upem * 1000)

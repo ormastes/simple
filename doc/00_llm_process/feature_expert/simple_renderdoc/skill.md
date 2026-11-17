@@ -120,6 +120,25 @@ SPipe lane. Never replace explicit fail placeholders with false-green passes.
 - The N2 qualification runner and `provider.cpp` do not call the RenderDoc
   in-app start/end API, and the workers never present, so the N2 case workers
   cannot be captured as-is; only the generic Engine2D capture scene can.
+- The interpreter can report a "value is not callable" error at the wrong
+  line. In the N2 runner it named `main.spl:67`, `_sha256_matches`, but the real
+  call was a same-named private helper in `scene_contract.spl:209`, which had
+  `scene_reference_sha)(kind)`. To find the real site, bisect with `print`
+  traces rather than trusting the reported line. A second case reported
+  `main.spl:2258` in an 864-line file.
+- Web admission: `background-position-*` uses the encoding `-1000 - pct`,
+  so `-1000` means CSS initial 0%. Only `0` and `-1000` are neutral.
+- Engine2D strict capture on release/1.0.0 is missing
+  `submission_generation` on the `draw_ir_adv` result structs. Merge
+  `e5b290e42a0` dropped the producer half of wip `ef35100f1d4`. The seed
+  interpreter also lacks `rt_gpu_provider_loaded`. See
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`,
+  Blockers 4 and 5.
+- The `submission_generation` producer is restored. The seed interpreter
+  never attests `rt_vulkan_selected_device_identity_v1` (by design), so the
+  N2 Engine2D capture always blocks under `simple run`, and physical N2 pixels
+  need the native executable. On lavapipe the capture refuses device type
+  `cpu`; that is also correct.
 - Pinned Skia (`35d5edfa…`) builds on this aarch64 host with
   `tools/upstream-skia-ganesh-vulkan/build-linux.shs` in ~2 min at `-j6`
   (`SIMPLE_UPSTREAM_SKIA_NINJA_JOBS`). The full dependency sync is ~7 GB

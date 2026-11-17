@@ -239,19 +239,25 @@ static void rt_pool_state_handle_put(int64_t handle) {
     RT_POOL_HANDLE_UNLOCK();
 }
 
+/* Called with the handle lock held: mark the slot closing, drop the closer's
+ * own ref, then wait until every other holder has released. */
+static void rt_pool_slot_drain_locked(int* closing, uint32_t* refs) {
+    *closing = 1;
+    if (*refs > 0) (*refs)--;
+#ifdef RT_POOL_PTHREAD
+    while (*refs > 0) pthread_cond_wait(&g_pool_handle_changed, &g_pool_handle_lock);
+#else
+    while (*refs > 0) SleepConditionVariableCS(&g_pool_handle_changed, &g_pool_handle_lock, INFINITE);
+#endif
+}
+
 static int rt_pool_state_handle_close_wait(int64_t handle, RtPoolState* state) {
     uint32_t index = rt_pool_handle_index(handle), generation = rt_pool_handle_generation(handle);
     if (rt_pool_handle_kind(handle) != RT_POOL_HANDLE_KIND_STATE || index == 0 || index >= RT_POOL_STATE_SLOT_COUNT) return 0;
     RT_POOL_HANDLE_LOCK();
     RtPoolStateSlot* slot = &g_pool_state_slots[index];
     if (slot->generation != generation || slot->ptr != state || slot->closing) { RT_POOL_HANDLE_UNLOCK(); return 0; }
-    slot->closing = 1;
-    if (slot->refs > 0) slot->refs--; /* destroy's acquire */
-#ifdef RT_POOL_PTHREAD
-    while (slot->refs > 0) pthread_cond_wait(&g_pool_handle_changed, &g_pool_handle_lock);
-#else
-    while (slot->refs > 0) SleepConditionVariableCS(&g_pool_handle_changed, &g_pool_handle_lock, INFINITE);
-#endif
+    rt_pool_slot_drain_locked(&slot->closing, &slot->refs); /* destroy's acquire */
     slot->ptr = NULL;
     RT_POOL_HANDLE_UNLOCK();
     return 1;
@@ -312,13 +318,7 @@ static int rt_pool_task_handle_close_wait(int64_t handle, RtPoolTask* task) {
     RT_POOL_HANDLE_LOCK();
     RtPoolTaskSlot* slot = &g_pool_task_slots[index];
     if (slot->generation != generation || slot->ptr != task || slot->closing) { RT_POOL_HANDLE_UNLOCK(); return 0; }
-    slot->closing = 1;
-    if (slot->refs > 0) slot->refs--; /* release's acquire */
-#ifdef RT_POOL_PTHREAD
-    while (slot->refs > 0) pthread_cond_wait(&g_pool_handle_changed, &g_pool_handle_lock);
-#else
-    while (slot->refs > 0) SleepConditionVariableCS(&g_pool_handle_changed, &g_pool_handle_lock, INFINITE);
-#endif
+    rt_pool_slot_drain_locked(&slot->closing, &slot->refs); /* release's acquire */
     slot->ptr = NULL;
     RT_POOL_HANDLE_UNLOCK();
     return 1;
@@ -471,12 +471,9 @@ static void rt_pool_state_task_completed(RtPoolTask* task) {
 #endif
 }
 
-static RtPoolTask* rt_pool_pop_task(int worker_id) {
-#ifdef RT_POOL_PTHREAD
-    pthread_mutex_lock(&g_pool_lock);
-    while (!rt_pool_has_tasks_locked()) {
-        pthread_cond_wait(&g_pool_not_empty, &g_pool_lock);
-    }
+/* Called with g_pool_lock held and at least one queued task: pop from the
+ * worker's own queue, else steal; account the task as running. */
+static RtPoolTask* rt_pool_take_task_locked(int worker_id) {
     int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
     RtPoolTask* task = rt_pool_queue_pop_head(&g_pool_queues[worker_id % count]);
     for (int offset = 1; task == NULL && offset < count; offset++) {
@@ -487,6 +484,16 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
         if (g_pool_pending_tasks > 0) g_pool_pending_tasks--;
         g_pool_busy_workers++;
     }
+    return task;
+}
+
+static RtPoolTask* rt_pool_pop_task(int worker_id) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    while (!rt_pool_has_tasks_locked()) {
+        pthread_cond_wait(&g_pool_not_empty, &g_pool_lock);
+    }
+    RtPoolTask* task = rt_pool_take_task_locked(worker_id);
     pthread_mutex_unlock(&g_pool_lock);
     if (task != NULL) rt_pool_state_task_started(task);
     return task;
@@ -495,16 +502,7 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
     while (!rt_pool_has_tasks_locked()) {
         SleepConditionVariableCS(&g_pool_not_empty, &g_pool_lock, INFINITE);
     }
-    int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
-    RtPoolTask* task = rt_pool_queue_pop_head(&g_pool_queues[worker_id % count]);
-    for (int offset = 1; task == NULL && offset < count; offset++) {
-        int victim = (worker_id + offset) % count;
-        task = rt_pool_queue_pop_head(&g_pool_queues[victim]);
-    }
-    if (task != NULL) {
-        if (g_pool_pending_tasks > 0) g_pool_pending_tasks--;
-        g_pool_busy_workers++;
-    }
+    RtPoolTask* task = rt_pool_take_task_locked(worker_id);
     LeaveCriticalSection(&g_pool_lock);
     if (task != NULL) rt_pool_state_task_started(task);
     return task;
@@ -832,6 +830,16 @@ int64_t rt_pool_safepoint(void) {
     return spawned;
 }
 
+static void rt_pool_task_sync_init(RtPoolTask* task) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_init(&task->lock, NULL);
+    pthread_cond_init(&task->done_cond, NULL);
+#else
+    InitializeCriticalSection(&task->lock);
+    InitializeConditionVariable(&task->done_cond);
+#endif
+}
+
 static RtPoolTask* rt_pool_task_create(int64_t arg0, int64_t arg1) {
     int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
     if (closure_ptr == 0) return NULL;
@@ -867,13 +875,7 @@ static RtPoolTask* rt_pool_task_create(int64_t arg0, int64_t arg1) {
     if (task == NULL) return NULL;
     task->entry = entry;
     task->closure_ptr = closure_ptr;
-#ifdef RT_POOL_PTHREAD
-    pthread_mutex_init(&task->lock, NULL);
-    pthread_cond_init(&task->done_cond, NULL);
-#else
-    InitializeCriticalSection(&task->lock);
-    InitializeConditionVariable(&task->done_cond);
-#endif
+    rt_pool_task_sync_init(task);
     return task;
 }
 
@@ -903,13 +905,7 @@ static RtPoolTask* rt_pool_scalar_task_create(int64_t kind, int64_t function_val
     }
     task->closure_ptr = (int64_t)(intptr_t)task;
     task->state_owned = 1;
-#ifdef RT_POOL_PTHREAD
-    pthread_mutex_init(&task->lock, NULL);
-    pthread_cond_init(&task->done_cond, NULL);
-#else
-    InitializeCriticalSection(&task->lock);
-    InitializeConditionVariable(&task->done_cond);
-#endif
+    rt_pool_task_sync_init(task);
     return task;
 }
 
@@ -1013,6 +1009,28 @@ int64_t rt_pool_state_create_v1(int64_t capacity) {
  * chosen by the submitter: ADDRESS for a machine-address record (runtime and
  * test callers), VALUE for a tagged Simple function value. Unknown kinds and
  * tags are rejected (-3). Twin of runtime_thread.c. */
+/* Undo a counted-but-unscheduled submit: drop the state's outstanding/pending
+ * counts, tear down and free the task, release the state handle. Returns -3. */
+static int64_t rt_pool_submit_rollback(RtPoolState* state, RtPoolTask* task, int64_t state_handle) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&state->lock);
+    state->outstanding--;
+    state->pending--;
+    pthread_mutex_unlock(&state->lock);
+    pthread_cond_destroy(&task->done_cond);
+    pthread_mutex_destroy(&task->lock);
+#else
+    EnterCriticalSection(&state->lock);
+    state->outstanding--;
+    state->pending--;
+    LeaveCriticalSection(&state->lock);
+    DeleteCriticalSection(&task->lock);
+#endif
+    spl_pool_task_free(task);
+    rt_pool_state_handle_put(state_handle);
+    return -3;
+}
+
 int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state_handle, int64_t kind, int64_t arg0, int64_t arg1) {
     RtPoolState* state = rt_pool_state_handle_get(state_handle);
     if (state == NULL) return -3;
@@ -1063,44 +1081,12 @@ int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state_handle, int64_t kind,
 #endif
     int64_t task_handle = rt_pool_task_handle_alloc(task);
     if (task_handle == 0) {
-#ifdef RT_POOL_PTHREAD
-        pthread_mutex_lock(&state->lock);
-        state->outstanding--;
-        state->pending--;
-        pthread_mutex_unlock(&state->lock);
-        pthread_cond_destroy(&task->done_cond);
-        pthread_mutex_destroy(&task->lock);
-#else
-        EnterCriticalSection(&state->lock);
-        state->outstanding--;
-        state->pending--;
-        LeaveCriticalSection(&state->lock);
-        DeleteCriticalSection(&task->lock);
-#endif
-        spl_pool_task_free(task);
-        rt_pool_state_handle_put(state_handle);
-        return -3;
+        return rt_pool_submit_rollback(state, task, state_handle);
     }
     task->public_handle = task_handle;
     if (rt_pool_schedule_task(task) == 0) {
         rt_pool_task_handle_close_wait(task_handle, task);
-#ifdef RT_POOL_PTHREAD
-        pthread_mutex_lock(&state->lock);
-        state->outstanding--;
-        state->pending--;
-        pthread_mutex_unlock(&state->lock);
-        pthread_cond_destroy(&task->done_cond);
-        pthread_mutex_destroy(&task->lock);
-#else
-        EnterCriticalSection(&state->lock);
-        state->outstanding--;
-        state->pending--;
-        LeaveCriticalSection(&state->lock);
-        DeleteCriticalSection(&task->lock);
-#endif
-        spl_pool_task_free(task);
-        rt_pool_state_handle_put(state_handle);
-        return -3;
+        return rt_pool_submit_rollback(state, task, state_handle);
     }
     rt_pool_state_handle_put(state_handle);
     return task_handle;

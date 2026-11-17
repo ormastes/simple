@@ -15333,6 +15333,32 @@ bool rt_io_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
+/* Reads the rest of `f` into a RuntimeValue text and closes it. Returns nil
+ * (RT_NIL == 3, TAG_SPECIAL payload 0) on allocation failure. */
+static int64_t rt_file_slurp_text_close(FILE* f) {
+    const int64_t rt_nil = 3;
+    size_t cap = 4096;
+    size_t len = 0;
+    char* content = (char*)rt_observed_malloc_v1(cap);
+    if (!content) { fclose(f); return rt_nil; }
+    for (;;) {
+        if (len >= cap) {
+            size_t new_cap = cap * 2;
+            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
+            if (!grown) { free(content); fclose(f); return rt_nil; }
+            content = grown;
+            cap = new_cap;
+        }
+        size_t n = fread(content + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    fclose(f);
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
+    free(content);
+    return result;
+}
+
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
  * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
@@ -15374,26 +15400,7 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
         fprintf(stderr, " converted='%s'\n", path);
         return rt_nil;
     }
-    size_t cap = 4096;
-    size_t len = 0;
-    char* content = (char*)rt_observed_malloc_v1(cap);
-    if (!content) { fclose(f); return rt_nil; }
-    for (;;) {
-        if (len >= cap) {
-            size_t new_cap = cap * 2;
-            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
-            if (!grown) { free(content); fclose(f); return rt_nil; }
-            content = grown;
-            cap = new_cap;
-        }
-        size_t n = fread(content + len, 1, cap - len, f);
-        len += n;
-        if (n == 0) break;
-    }
-    fclose(f);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
+    return rt_file_slurp_text_close(f);
 }
 
 /* Memory-map a file and copy its bytes into the canonical runtime string.
@@ -15622,26 +15629,7 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
     FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_nil;
-    size_t cap = 4096;
-    size_t len = 0;
-    char* content = (char*)rt_observed_malloc_v1(cap);
-    if (!content) { fclose(f); return rt_nil; }
-    for (;;) {
-        if (len >= cap) {
-            size_t new_cap = cap * 2;
-            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
-            if (!grown) { free(content); fclose(f); return rt_nil; }
-            content = grown;
-            cap = new_cap;
-        }
-        size_t n = fread(content + len, 1, cap - len, f);
-        len += n;
-        if (n == 0) break;
-    }
-    fclose(f);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
+    return rt_file_slurp_text_close(f);
 }
 
 /*

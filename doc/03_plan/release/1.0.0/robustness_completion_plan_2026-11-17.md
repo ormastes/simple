@@ -161,6 +161,32 @@ negative tests, imported/generated-code behaviour, native/interpreter parity,
 diagnostic severity, documentation and the performance gate agree. A registry
 entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
 
-## 8. Implementation log
 
-- 2026-11-18 P0-4 (ROB-ARR-01/03/04 slice): self-hosted parser now parses postfix `x->m(args)` and desugars it to `x = x.m(args)` (`parser_expr.spl` `parse_arrow_update`); match patterns/guards parse with the arrow suppressed so arm and return-type arrows are unchanged; `val` and temporary targets are named parser errors. Spec `arrow_functional_update_spec.spl` 8/8; `functional_update_spec.spl` titles corrected. Open: index/field targets re-evaluate the base (single-evaluation, ROB-ARR-05), `->f()?` ordering, type-mismatch error, `a->b()->c()` chains, native MIR parity evidence.
+## Implementation log
+
+- 2026-11-18 P0-3 slice: `inference_effects.spl` — non-function callee type and
+  trait-method calls now infer Unknown (incomplete row); `Await` has an explicit
+  Async arm; `effect_region_admission` rejects Unknown in pure/nogc/nonblocking
+  regions with `EFF-E0301`. Spec `effect_admission_spec.spl` 6/6 (was 1/6 red).
+  Remaining: loader/versioned summary + stale-summary rejection, wiring the
+  admission check into the driver region checks, imported-function summaries.
+- 2026-11-18 P0-1 slice (verification-pending): `35.semantics/must_use_discard.spl`
+  is the typed-HIR discard authority (SPL-USE-001 Result/Option discard,
+  SPL-USE-002 `@must_use` name; `must_use_finding_severity` = error compiled /
+  warning script). Spec `test/01_unit/compiler/semantics/must_use_discard_spec.spl`
+  10/10 (was 0 executed, module missing). Existing specs unchanged:
+  must_use_spec 4/5 (1 pre-existing failure), ignored_return_warning 4/4,
+  must_use_streaming_scan 4/4.
+  TODO (open): interpreter `eval_stmt_expr` still emits its own `error[R9]`
+  strings and does not consume this check; method-call return types and
+  imported callees are not resolved (only `@must_use` method names match);
+  `80.driver` admission projection and TLDR/SMF obligation metadata not wired.
+- 2026-11-18 P0-1 review fixes: only the exact `_ = f()` shape (unit Block, one
+  Expr stmt, NilLit tail) is skipped; other blocks are scanned; with/try/lambda
+  block bodies walked; callees resolve per module (no cross-module name match;
+  unresolved calls are not flagged, TODO in source for import-table
+  resolution); `MUST_USE_CODE_*`/`MustUseFinding` are `pub`; unused severity
+  `code` param removed. Spec now 18/18. with/try/lambda walkers have no spec
+  case yet (source syntax not confirmed).
+- 2026-11-18 P0-5 slice 1: `90.tools/lint/_LintMain/rule_cost_tier.spl` adds LintCostTier (Low/Medium/High; unlisted = High), registry covering all `all_lint_names()`, LintCompleteness, `lint_rules_for_profile`, `lint_completeness_reduce` (exhausted budget -> incomplete). Spec `rule_cost_tier_registry_spec.spl` 6/6. Remaining: `lint --fast` / `--diagnostic` wiring, timed_out enforcement per rule, warm-build wall/RSS evidence.
+- 2026-11-18 P0-4 (ROB-ARR-01/03/04 slice): self-hosted parser now parses postfix `x->m(args)` and desugars it to `x = x.m(args)` (`parser_expr.spl` `parse_arrow_update`); match patterns/guards parse with the arrow suppressed so arm and return-type arrows are unchanged; `val` and temporary targets are named parser errors. Spec `arrow_functional_update_spec.spl` 16/16 (block-scoped val tracking, nested-fn hide/restore, `val (a, b)`); `functional_update_spec.spl` titles corrected; non-simple field/index bases are a named error until ROB-ARR-05 single-evaluation. Open: module-level `val` not parser-checked, `->f()?` ordering, type-mismatch error, `a->b()->c()` chains, native MIR parity evidence.

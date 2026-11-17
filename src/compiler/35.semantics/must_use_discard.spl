@@ -1,0 +1,194 @@
+# ROB-USE-01/02/03: typed-HIR discard check -- the single authority for
+# `must_use` enforcement (doc/03_plan/release/1.0.0/robustness_completion_plan_2026-11-17.md P0-1).
+#
+# An expression statement whose callee returns Result/Option (declared return
+# type of a function in the same module), or whose callee is in the caller
+# supplied `@must_use` name set, and whose value is dropped, is a finding with
+# a stable code. Consumption forms are not findings because they are not bare
+# expression statements: `val x = f()`, `return f()`, `f()?`, `match f():`,
+# and the explicit discard `_ = f()` (lowered to a unit `Block` holding exactly
+# one Expr stmt with a NilLit tail; see `must_use_is_explicit_discard`).
+#
+# Severity projection mirrors SPL-UNIT-002: error in compiled code, warning in
+# script mode (see `unit_profile_apply`'s `script_mode`).
+#
+# NOT covered yet (tracked in the plan's Implementation log): method-call
+# return types (only `@must_use` method NAMES are matched), imported callees,
+# the interpreter consumer (`eval_stmt_expr` still emits its own R9 strings),
+# and TLDR/SMF metadata carrying the obligation.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+pub val MUST_USE_CODE_RESULT: text = "SPL-USE-001"
+pub val MUST_USE_CODE_MARKED: text = "SPL-USE-002"
+
+pub struct MustUseFinding:
+    code: text
+    function: text
+    callee: text
+
+# Per-module resolution scope: callees resolve against THIS module's functions
+# only (by symbol id, else by name inside the module). A bare name is never
+# matched across modules.
+# TODO(ROB-USE-01): resolve imported callees through the module's import table
+# (HirModule.imports) so a discarded imported Result is flagged; until then an
+# unresolved call is not flagged.
+struct MustUseScope:
+    owner: text
+    names: Dict<i64, text>
+    result_like: Dict<text, bool>
+    marked: [text]
+
+# `script_mode` true only for interpreted script execution. Severity does not
+# depend on the finding code.
+# @allow(primitive_api) severity word is the diagnostic wire format shared with eval_warnings
+pub fn must_use_finding_severity(script_mode: bool) -> text:
+    if script_mode:
+        return "warning"
+    "error"
+
+fn must_use_is_result_like(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Result(_, _): true
+        case HirTypeKind.Optional(_): true
+        case _: false
+
+# Name of a callee resolved inside this module; "" when unresolved.
+fn must_use_callee_name(callee: HirExpr, scope: MustUseScope) -> text:
+    match callee.kind:
+        case HirExprKind.NamedVar(symbol, name):
+            if scope.names.contains_key(symbol.id):
+                return scope.names[symbol.id]
+            if scope.names.values().contains(name):
+                return name
+            ""
+        case HirExprKind.Var(symbol):
+            if scope.names.contains_key(symbol.id):
+                return scope.names[symbol.id]
+            ""
+        case _: ""
+
+# The exact shape `_ = rhs` lowers to (hir_lowering/statements.spl
+# lower_hir_assignment_kind): a unit Block with one Expr stmt and a NilLit
+# unit tail. Any other Block is scanned like ordinary statements.
+fn must_use_is_explicit_discard(block: HirBlock) -> bool:
+    if block.has or block.stmts.len() != 1:
+        return false
+    val only: HirStmt = block.stmts[0]
+    val single = match only.kind:
+        case HirStmtKind.Expr(_): true
+        case _: false
+    if not single:
+        return false
+    match block.value.kind:
+        case HirExprKind.NilLit: true
+        case _: false
+
+fn must_use_extend(out: [MustUseFinding], more: [MustUseFinding]) -> [MustUseFinding]:
+    var acc = out
+    for f in more: acc = acc.push(f)
+    acc
+
+fn must_use_opt_block(b: HirBlock?, scope: MustUseScope) -> [MustUseFinding]:
+    match b:
+        case Some(blk): must_use_nested(blk, scope)
+        case None: []
+
+# An expression in statement position: its value is discarded.
+fn must_use_classify(e: HirExpr, scope: MustUseScope) -> [MustUseFinding]:
+    match e.kind:
+        case HirExprKind.Call(callee, _, _):
+            val name = must_use_callee_name(callee, scope)
+            if name == "":
+                # Unresolved here; marked names still match (caller supplied).
+                match callee.kind:
+                    case HirExprKind.NamedVar(_, n):
+                        if scope.marked.contains(n):
+                            return [MustUseFinding(code: MUST_USE_CODE_MARKED, function: scope.owner, callee: n)]
+                    case _:
+                        pass_do_nothing("unresolved callee is not flagged")
+                return []
+            if scope.marked.contains(name):
+                return [MustUseFinding(code: MUST_USE_CODE_MARKED, function: scope.owner, callee: name)]
+            if scope.result_like.contains_key(name):
+                return [MustUseFinding(code: MUST_USE_CODE_RESULT, function: scope.owner, callee: name)]
+            []
+        case HirExprKind.MethodCall(_, method, _, _):
+            if scope.marked.contains(method):
+                return [MustUseFinding(code: MUST_USE_CODE_MARKED, function: scope.owner, callee: method)]
+            []
+        case HirExprKind.If(_, then_, else_):
+            must_use_extend(must_use_nested(then_, scope), must_use_opt_block(else_, scope))
+        case HirExprKind.IfChain(arms, else_):
+            var out: [MustUseFinding] = []
+            for arm in arms:
+                val a: HirIfArm = arm
+                out = must_use_extend(out, must_use_nested(a.then_, scope))
+            must_use_extend(out, must_use_opt_block(else_, scope))
+        case HirExprKind.While(_, body, _): must_use_nested(body, scope)
+        case HirExprKind.Loop(body, _): must_use_nested(body, scope)
+        case HirExprKind.For(_, _, body, _): must_use_nested(body, scope)
+        case HirExprKind.With(_, body): must_use_nested(body, scope)
+        case HirExprKind.UnsafeBlock(body): must_use_nested(body, scope)
+        case HirExprKind.TryCatch(body, clauses, finally_):
+            var out = must_use_nested(body, scope)
+            for c in clauses:
+                val cl: HirCatchClause = c
+                out = must_use_extend(out, must_use_nested(cl.body, scope))
+            must_use_extend(out, must_use_opt_block(finally_, scope))
+        case HirExprKind.MatchCase(_, arms):
+            var out: [MustUseFinding] = []
+            for arm in arms:
+                val a: HirMatchArm = arm
+                out = must_use_extend(out, must_use_nested(a.body, scope))
+            out
+        case HirExprKind.Lambda(_, body, _):
+            # A lambda body is its return value, not a discarded statement;
+            # only statements inside a block body are scanned.
+            match body.kind:
+                case HirExprKind.Block(b): must_use_block(b, scope)
+                case _: []
+        case HirExprKind.Block(b):
+            if must_use_is_explicit_discard(b):
+                return []
+            must_use_nested(b, scope)
+        case _:
+            []
+
+fn must_use_block(block: HirBlock, scope: MustUseScope) -> [MustUseFinding]:
+    var out: [MustUseFinding] = []
+    for st in block.stmts:
+        val s: HirStmt = st
+        match s.kind:
+            case HirStmtKind.Expr(e):
+                out = must_use_extend(out, must_use_classify(e, scope))
+            case HirStmtKind.Block(inner):
+                out = must_use_extend(out, must_use_nested(inner, scope))
+            case _:
+                pass_do_nothing("statement kind cannot discard a call result")
+    out
+
+# A block in statement position: its tail value is discarded too.
+fn must_use_nested(block: HirBlock, scope: MustUseScope) -> [MustUseFinding]:
+    var out = must_use_block(block, scope)
+    if block.has:
+        out = must_use_extend(out, must_use_classify(block.value, scope))
+    out
+
+# Scans every function body in `modules` (impl/class methods are merged into
+# `module.functions`). `marked` is the `@must_use` name set.
+pub fn must_use_discard_scan(modules: Dict<text, HirModule>, marked: [text]) -> [MustUseFinding]:
+    var out: [MustUseFinding] = []
+    for key in modules.keys():
+        val module: HirModule = modules[key]
+        var names: Dict<i64, text> = {}
+        var result_like: Dict<text, bool> = {}
+        for func in module.functions.values():
+            names[func.symbol.id] = func.name
+            if must_use_is_result_like(func.return_type):
+                result_like[func.name] = true
+        for func in module.functions.values():
+            val scope = MustUseScope(owner: func.name, names: names, result_like: result_like, marked: marked)
+            out = must_use_extend(out, must_use_block(func.body, scope))
+    out
