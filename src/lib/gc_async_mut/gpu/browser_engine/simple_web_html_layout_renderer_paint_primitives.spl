@@ -35,6 +35,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_bytes}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
     parse_int, dec_val, GradientStopSpec, parse_gradient_stops, gradient_inner,
+    parse_gradient_stops_on_line,
     split_top_level_commas_paren_aware, is_gradient_shape_or_position_token,
     gradient_layer_list, parse_gradient_angle_deg, gradient_layer_entries,
     gradient_layer_split, gradient_layer_tail_parts, background_size_spec,
@@ -987,7 +988,7 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
         val r = background_gradient_box_rects(st, x, y, w, h)
         if r.len() < 8:
             return layers_out
-        val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3])
+        val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3], st.font_size)
         return fb_gradient_layers_clip(layers_out, fbw, fbh, r[4], r[5], r[6], r[7], layers, st.opacity_pct, clip)
     if st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32:
         if solid_bg_opacity <= 0:
@@ -1661,7 +1662,11 @@ fn linear_gradient_line_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32) -> 
 # `auto`, `cover` and `contain` are the positioning area; percentages of the
 # size resolve against the area, of the position against (area - tile). A
 # zero-sized layer is not painted. Empty when any tail is unsupported.
-fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [BackgroundGradientLayer]:
+#
+# Stop positions given as lengths (`px`, `em` of `em_px`) resolve per layer
+# against that layer's gradient line on its tile: a linear line's length, a
+# radial's gradient ray (its horizontal radius).
+fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32, em_px: i32 = 16) -> [BackgroundGradientLayer]:
     var out: [BackgroundGradientLayer] = []
     for entry in gradient_layer_entries(raw):
         val split = gradient_layer_split(entry)
@@ -1674,12 +1679,6 @@ fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32) -> 
         if pos.len() != 4 or size.len() != 5 or rep.len() != 2:
             return []
         val lay = split[0]
-        val stops: [GradientStopSpec] = parse_gradient_stops(lay)
-        var colors: [u32] = []
-        var positions: [i32] = []
-        for stop in stops:
-            colors.push(stop.color)
-            positions.push(stop.pos_permille)
         val radial = text_index_of(lay.lower(), "radial-gradient(") == 0
         val aw_q = (aw as i64) * 1024
         val ah_q = (ah as i64) * 1024
@@ -1708,6 +1707,13 @@ fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32) -> 
         val geom = _gradient_layer_tile_geometry(lay, radial, tx, ty, tw, th)
         if geom.len() < 4:
             return []
+        val line_q10 = if radial: geom[2] else: _isqrt_i64((geom[2] - geom[0]) * (geom[2] - geom[0]) + (geom[3] - geom[1]) * (geom[3] - geom[1]))
+        val stops: [GradientStopSpec] = parse_gradient_stops_on_line(lay, line_q10, em_px)
+        var colors: [u32] = []
+        var positions: [i32] = []
+        for stop in stops:
+            colors.push(stop.color)
+            positions.push(stop.pos_permille)
         out.push(BackgroundGradientLayer(radial: radial, geom: geom, colors: colors, positions: positions, tile: [tx, ty, tw, th], repeat_x: rep[0] == 1, repeat_y: rep[1] == 1))
     out
 
