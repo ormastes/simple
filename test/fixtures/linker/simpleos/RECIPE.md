@@ -21,3 +21,21 @@ clang --target=x86_64-unknown-none-elf -c -O1 -ffreestanding -fno-pic -fno-stack
 
 Cross-check: `ld.lld -T simpleos_user.ld -nostdlib -static --gc-sections
 crt0_x64.o main_x64.o` reports `Entry point address: 0x10000000`.
+
+## aarch64
+
+- `simpleos_user_a64.ld` — copy of the script written by
+  `scripts/os/simpleos-sysroot-aarch64.shs` (`ENTRY(_start)`, text at `0x50000000`).
+- `crt0_a64.s`, `main_a64.c` (same C as `main_x64.c`).
+
+Produced with `Ubuntu clang version 18.1.3`:
+
+```
+clang --target=aarch64-unknown-none-elf -c crt0_a64.s -o crt0_a64.o
+clang --target=aarch64-unknown-none-elf -c -O1 -ffreestanding -fno-pic -fno-stack-protector \
+    -fno-asynchronous-unwind-tables -fno-unwind-tables main_a64.c -o main_a64.o
+```
+
+Cross-check: `ld.lld -T simpleos_user_a64.ld -nostdlib -static --gc-sections
+crt0_a64.o main_a64.o` reports `Machine: AArch64`, `Entry point address:
+0x50000000`, `main` at `0x5000001c`, `base` at `0x50001000`.

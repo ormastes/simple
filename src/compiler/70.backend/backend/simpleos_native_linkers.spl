@@ -101,6 +101,25 @@ fn link_simpleos_user_64(arch: text, user_objects: [text], output: text, verbose
             file_delete(entry_object)
             if init_o != "": file_delete(init_o)
             return Err(e)
+    if arch == "aarch64" and _simpleos_internal_requested():
+        # Same inputs and order as simpleos_user_link_args_for_arch, routed
+        # through the in-house ELF engine instead of ld.lld.
+        var internal_objects = ["{sysroot}/lib/crt0.o", entry_object]
+        if init_o != "": internal_objects.push(init_o)
+        for obj in user_objects: internal_objects.push(obj)
+        var internal_archives: [text] = []
+        if core_archive != "": internal_archives.push(core_archive)
+        internal_archives.push("{sysroot}/lib/libsimpleos_all.a")
+        var internal_flags = ["-T", script_path, "-nostdlib", "-static", "--gc-sections",
+            "--start-group", "--end-group"]
+        if init_o != "": internal_flags.push("--wrap=__simple_call_module_inits")
+        val internal = _simpleos_internal_link(internal_objects, internal_archives, output,
+            "simpleos-aarch64", internal_flags, verbose)
+        file_delete(entry_object)
+        if init_o != "": file_delete(init_o)
+        if internal.is_err():
+            return Err("SimpleOS {arch} user internal link failed: {internal.unwrap_err()}")
+        return internal
     if verbose:
         val joined_args = args.join(" ")
         print "[llvm-link] SimpleOS {arch} user link: ld.lld {joined_args}"
