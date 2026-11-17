@@ -187,6 +187,13 @@ class LayoutResult:
     # `<div><p>t</p></div>` measured 40 px where Chrome measures 24.
     # Units: milli-px.
     leading_margin_t: i32 = 0
+    # Residual of the block cursor at this box's bottom edge, in milli-px: its
+    # true bottom is (y + height) * 1000 + end_frac_milli, so a parent continues
+    # its own cursor from it instead of dropping the container's sub-pixel
+    # height. Only meaningful when end_frac_valid (block and single-line flex
+    # row paths); every other path leaves the parent's cursor alone.
+    end_frac_milli: i32 = 0
+    end_frac_valid: bool = false
     # Per node: how far the FIRST line of a wrapped `#text` run starts to the
     # right of its box's left edge. A run that starts mid-line (after an
     # inline sibling) shares that line box, and its continuation lines start
@@ -2740,13 +2747,44 @@ fn resolve_vertical_margin_px(margin_px: i32, viewport_h: i32) -> i32:
 # Block-axis margin in milli-px (Chrome LayoutUnit carries 1/64 px). The ONE
 # place that turns a Style's vertical margin into the value the block cursor
 # collapses and advances by: a cascaded fraction (UA h1-h6 em margins) wins,
-# otherwise the whole-px margin (percent/vh sentinels resolved) times 1000.
-fn block_margin_milli(st: Style, top: bool, viewport_h: i32) -> i32:
+# otherwise the whole-px margin (vh sentinel resolved) times 1000. A NEGATIVE
+# milli is an author percent (-(percent x 1000), see _decl_vertical_margin_milli):
+# CSS 2.2 8.3 resolves it against the containing block WIDTH `containing_w`,
+# floored to Chrome's 1/64 px LayoutUnit.
+fn block_margin_milli(st: Style, top: bool, viewport_h: i32, containing_w: i32) -> i32:
     val px = if top: st.margin_t else: st.margin_b
     val milli = if top: st.margin_t_milli else: st.margin_b_milli
+    if milli < 0:
+        val exact = (containing_w as i64) * (0 - milli).to_i64() / 100
+        return ((exact * 64) / 1000 * 1000 / 64) as i32
     if milli != 0 and px >= 0:
         return milli
     resolve_vertical_margin_px(px, viewport_h) * 1000
+
+# Whole-px vertical margin for layout paths with no fractional cursor: a
+# percent margin (negative milli) resolves against `containing_w` and floors
+# to px; every other form keeps the legacy whole-px reading.
+fn vertical_margin_px_in(st: Style, top: bool, viewport_h: i32, containing_w: i32) -> i32:
+    val milli = if top: st.margin_t_milli else: st.margin_b_milli
+    if milli < 0:
+        return block_margin_milli(st, top, viewport_h, containing_w) / 1000
+    resolve_vertical_margin_px(if top: st.margin_t else: st.margin_b, viewport_h)
+
+# Layout paths with no fractional cursor (flex, absolute, float, inline-block,
+# grid) read only the whole-px `margin_t` / `margin_b`. A percent margin (a
+# negative milli) is resolved here against the containing block width and
+# floored to whole px, with the milli cleared so no reader sees it twice.
+fn style_with_resolved_percent_margins(st: Style, containing_w: i32, viewport_h: i32) -> Style:
+    if st.margin_t_milli >= 0 and st.margin_b_milli >= 0:
+        return st
+    val out = style_with_width(st, st.width_px)
+    if st.margin_t_milli < 0:
+        out.margin_t = vertical_margin_px_in(st, true, viewport_h, containing_w)
+        out.margin_t_milli = 0
+    if st.margin_b_milli < 0:
+        out.margin_b = vertical_margin_px_in(st, false, viewport_h, containing_w)
+        out.margin_b_milli = 0
+    out
 
 # The block cursor is the ROUNDED y (cy, what boxes store) plus a residual
 # `frac` in [-500, 500) milli-px, so true y = cy*1000 + frac. Advancing by a
@@ -2832,7 +2870,7 @@ fn absolute_child_y(nodes: [HNode], styles: [Style], child_i: i32, parent_y: i32
 fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containing_h: i32, tag: text) -> Style:
     # Percentages of an abspos box are of the containing block's padding box.
     val padding_box_w = containing_w + parent.pad_l + parent.pad_r
-    var resolved_child = style_with_resolved_percent_min_max(child, padding_box_w, containing_h)
+    var resolved_child = style_with_resolved_percent_min_max(style_with_resolved_percent_margins(child, padding_box_w, 0), padding_box_w, containing_h)
     if child.width_px < 0:
         val child_width_px = padding_box_w * (0 - child.width_px) / 100
         resolved_child = style_with_width(resolved_child, child_width_px)

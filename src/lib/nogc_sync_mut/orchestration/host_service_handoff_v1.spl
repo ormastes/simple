@@ -1,0 +1,150 @@
+# AT-OPS-01 drain/update handoff driver (owner decisions 2026-11-17: D1 exit-then-adopt, D2 the new unit's start path,
+# D3 `service-handoff` signed operation, D4 exact wire version). Steps over the ONE Host capacity journal (commit; verify before and consume after the successor's reconcile):
+#   commit  - the draining OLD owner verifies the controller-signed record against its own live state and publishes it
+#             as the pending handoff (no-replace, read back byte-exact). It then exits; no custody is transferred.
+#   verify/consume - the SUCCESSOR, already holding the sole journal writer after it exits-then-opens, verifies the same
+#             signatures under the installed policy at ITS clock, proves the predecessor's current record is still the
+#             recorded one, and consumes the handoff with a no-replace adoption marker.
+# Neither step touches continuity: the successor's startup reconcile still re-proves exclusion before any flip.
+# This module never imports the service owner (no cycle); the service passes its pieces in.
+use std.common.contracts.orchestration.host_service_handoff_v1.{HostServiceHandoffProofV1, host_service_handoff_proof_decode_v1,
+    host_service_handoff_match_v1}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3, distributed_operation_journal_read_required_v3}
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+val HOST_SERVICE_HANDOFF_MAX_CHAIN_V1: i64 = 1099511627776
+pub val HOST_SERVICE_HANDOFF_UNVERIFIED_V1: text = "service-handoff-pending-unverified:"
+val HOST_SERVICE_HANDOFF_READ_MAX_V1: i64 = 262144
+
+fn host_service_handoff_pending_relative_v1(sequence: i64) -> text:
+    "service-handoff/pending-" + sequence.to_text() + ".sdn"
+
+fn host_service_handoff_adopted_relative_v1(sequence: i64) -> text:
+    "service-handoff/adopted-" + sequence.to_text() + ".sdn"
+
+fn service_handoff_adopted_v1(journal: DistributedOperationJournalV2, sequence: i64) -> Result<bool, text>:
+    val marker = distributed_operation_journal_read_v3(journal, host_service_handoff_adopted_relative_v1(sequence), 4096)?
+    Ok(marker.is_some())
+
+# The first sequence whose adoption marker does not exist: the only one a handoff may name. Adopted markers are
+# contiguous from 1, so the head is found by doubling then bisecting (O(log n) reads; a plain start never grows linearly).
+fn service_handoff_next_v1(journal: DistributedOperationJournalV2) -> Result<i64, text>:
+    if not service_handoff_adopted_v1(journal, 1)?: return Ok(1)
+    var low = 1
+    var high = 2
+    while true:
+        if not service_handoff_adopted_v1(journal, high)?: break
+        low = high
+        if high > HOST_SERVICE_HANDOFF_MAX_CHAIN_V1: return Err("service-handoff-sequence-exhausted")
+        high = high * 2
+    while high - low > 1:
+        val middle = low + (high - low) / 2
+        if service_handoff_adopted_v1(journal, middle)?: low = middle
+        else: high = middle
+    Ok(high)
+
+fn service_handoff_controller_v1(proof: HostServiceHandoffProofV1, controller_ref: text) -> Result<bool, text>:
+    if proof.signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    Ok(true)
+
+fn service_handoff_grant_v1(proof: HostServiceHandoffProofV1, policy: LocalAuthorityPolicyV1,
+        context: HostReservationAuthorizationContextV1) -> Result<bool, text>:
+    val matched = host_service_handoff_match_v1(proof.handoff, proof.operation)?
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, proof.signed, proof.approval, proof.operation,
+        context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)?
+    Ok(true)
+
+fn service_handoff_reply_v1(kind: text, sequence: i64, digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String(kind),
+        "sequence": SdnValue.Int(sequence), "digest": SdnValue.String(digest)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+# OLD owner. `current_relative`/`current_bytes` are its own published current record, `retained` its agent-slot
+# envelope (None when nothing is retained). Returns the canonical reply; the caller stops admitting only on Ok.
+pub fn host_service_handoff_commit_v1(journal: DistributedOperationJournalV2, scope: ContainerHostScopeV2,
+        policy: LocalAuthorityPolicyV1, controller_ref: text, context: HostReservationAuthorizationContextV1,
+        current_relative: text, current_bytes: text, retained: Option<OperationEnvelopeV2>, source: text) -> Result<text, text>:
+    val proof = host_service_handoff_proof_decode_v1(source)?
+    val controller = service_handoff_controller_v1(proof, controller_ref)?
+    if container_host_scope_bytes_v2(proof.handoff.scope)? != container_host_scope_bytes_v2(scope)?:
+        return Err("service-handoff-scope-mismatch")
+    val granted = service_handoff_grant_v1(proof, policy, context)?
+    if proof.handoff.from_current_relative != current_relative or proof.handoff.from_current_digest != sha256_text(current_bytes):
+        return Err("service-handoff-current-mismatch")
+    var retained_digest = ""
+    if val envelope = retained: retained_digest = sha256_text(distributed_encode_operation_v2(envelope)?)
+    if proof.handoff.retained_operation_digest != retained_digest: return Err("service-handoff-retained-mismatch")
+    val sequence = service_handoff_next_v1(journal)?
+    if proof.handoff.sequence != sequence: return Err("service-handoff-sequence-mismatch")
+    val pending = host_service_handoff_pending_relative_v1(sequence)
+    # No-replace: an unconsumed pending record is never overwritten.
+    # A publish error may still have landed the record: report it unverified so the owner stops admitting.
+    val saved = distributed_operation_journal_publish_v3(journal, pending, source)
+    if saved.is_err(): return Err(HOST_SERVICE_HANDOFF_UNVERIFIED_V1 + saved.unwrap_err())
+    if not saved.unwrap(): return Err("service-handoff-pending-exists")
+    # From here the record IS on the journal: a failed readback is reported with the unverified prefix so the owner
+    # still stops admitting (the successor re-verifies everything at adoption).
+    val readback = distributed_operation_journal_read_required_v3(journal, pending, HOST_SERVICE_HANDOFF_READ_MAX_V1)
+    if readback.is_err(): return Err(HOST_SERVICE_HANDOFF_UNVERIFIED_V1 + readback.unwrap_err())
+    if readback.unwrap() != source: return Err(HOST_SERVICE_HANDOFF_UNVERIFIED_V1 + "readback-mismatch")
+    Ok(service_handoff_reply_v1("service-handoff-published", sequence, sha256_text(source)))
+
+# SUCCESSOR, step 1 (before the reconcile flip, nothing is written). Returns "" when no handoff is pending (a plain
+# start), else the pending record's digest. Any error means a handoff was pending and could not be verified: the caller
+# quarantines, it never silently starts as if none existed.
+pub fn host_service_handoff_verify_v1(journal: DistributedOperationJournalV2, scope: ContainerHostScopeV2,
+        policy: LocalAuthorityPolicyV1, controller_ref: text, context: HostReservationAuthorizationContextV1,
+        current_relative: text) -> Result<text, text>:
+    val sequence = service_handoff_next_v1(journal)?
+    val pending = distributed_operation_journal_read_v3(journal, host_service_handoff_pending_relative_v1(sequence),
+        HOST_SERVICE_HANDOFF_READ_MAX_V1)?
+    if pending.is_none(): return Ok("")
+    val source = pending.unwrap()
+    val proof = host_service_handoff_proof_decode_v1(source)?
+    val controller = service_handoff_controller_v1(proof, controller_ref)?
+    if (container_scope_fence_id_v2(proof.handoff.scope)? == container_scope_fence_id_v2(scope)? or
+            proof.handoff.from_current_relative == current_relative):
+        return Err("service-handoff-self-adoption")
+    if (proof.handoff.scope.physical_host_id != scope.physical_host_id or
+            proof.handoff.scope.native_machine_id != scope.native_machine_id):
+        return Err("service-handoff-host-mismatch")
+    val granted = service_handoff_grant_v1(proof, policy, context)?
+    if proof.handoff.sequence != sequence: return Err("service-handoff-sequence-mismatch")
+    val recorded = distributed_operation_journal_read_v3(journal, proof.handoff.from_current_relative, HOST_SERVICE_HANDOFF_READ_MAX_V1)?
+    if recorded.is_none(): return Err("service-handoff-predecessor-record-missing")
+    if sha256_text(recorded.unwrap()) != proof.handoff.from_current_digest: return Err("service-handoff-predecessor-record-mismatch")
+    Ok(sha256_text(source))
+
+# SUCCESSOR, step 2: consume the verified handoff AFTER the startup reconcile re-proved exclusion and flipped (D1).
+# A no-replace marker on the same journal; a replay finds the next sequence with nothing pending.
+pub fn host_service_handoff_consume_v1(journal: DistributedOperationJournalV2, current_relative: text,
+        verified_digest: text) -> Result<text, text>:
+    val sequence = service_handoff_next_v1(journal)?
+    val pending = distributed_operation_journal_read_v3(journal, host_service_handoff_pending_relative_v1(sequence),
+        HOST_SERVICE_HANDOFF_READ_MAX_V1)?
+    # Only the exact record verify approved is consumed; a pending record that appeared or changed since is refused.
+    if pending.is_none():
+        if verified_digest != "": return Err("service-handoff-pending-changed")
+        return Ok("")
+    val digest = sha256_text(pending.unwrap())
+    if digest != verified_digest: return Err("service-handoff-pending-changed")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("service-handoff-adopted"),
+        "sequence": SdnValue.Int(sequence), "pendingDigest": SdnValue.String(digest),
+        "successorCurrent": SdnValue.String(current_relative)}
+    val marker = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    val marker_path = host_service_handoff_adopted_relative_v1(sequence)
+    val saved = distributed_operation_journal_publish_v3(journal, marker_path, marker)?
+    if not saved: return Err("service-handoff-already-adopted")
+    val readback = distributed_operation_journal_read_required_v3(journal, marker_path, 4096)?
+    if readback != marker: return Err("service-handoff-adoption-readback")
+    Ok(digest)

@@ -35,9 +35,13 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_bytes}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
     parse_int, dec_val, GradientStopSpec, parse_gradient_stops, gradient_inner,
+    parse_gradient_stops_on_line,
     split_top_level_commas_paren_aware, is_gradient_shape_or_position_token,
-    gradient_layer_list, parse_gradient_angle_deg
+    gradient_layer_list, parse_gradient_angle_deg, gradient_layer_entries,
+    gradient_layer_split, gradient_layer_tail_parts, background_size_spec,
+    background_position_spec, background_repeat_spec
 }
+use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
 
 fn web_glyph_scale(fs: i32) -> i32:
     var s = fs / 8
@@ -984,7 +988,12 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
         val r = background_gradient_box_rects(st, x, y, w, h)
         if r.len() < 8:
             return layers_out
-        val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3])
+        val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3], st.font_size)
+        val shape = background_gradient_clip_shape(st, r[4], r[5], r[6], r[7])
+        if shape.len() == 8:
+            # Rounded: the colour joins the one clipped background image.
+            val base = if st.bg != 0u32 and solid_bg_alpha > 0: st.bg else: 0u32
+            return fb_gradient_layers_round_clip(fb, fbw, fbh, layers, base, st.opacity_pct, clip, shape)
         return fb_gradient_layers_clip(layers_out, fbw, fbh, r[4], r[5], r[6], r[7], layers, st.opacity_pct, clip)
     if st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32:
         if solid_bg_opacity <= 0:
@@ -1417,15 +1426,21 @@ fn radial_gradient_geometry_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32)
 fn fb_radial_gradient_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw: i32, ph: i32, geom: [i64], colors: [u32], positions: [i32], opacity_pct: i32, clip: ClipRect) -> [u32]:
     if geom.len() < 4:
         return fb
-    fb_gradient_layer_clip(fb, fbw, fbh, px0, py0, pw, ph, BackgroundGradientLayer(radial: true, geom: geom, colors: colors, positions: positions), opacity_pct, clip)
+    fb_gradient_layer_clip(fb, fbw, fbh, px0, py0, pw, ph, BackgroundGradientLayer(radial: true, geom: geom, colors: colors, positions: positions, tile: [], repeat_x: true, repeat_y: true), opacity_pct, clip)
 
 # One resolved CSS gradient image layer: a radial ellipse [cx, cy, rx, ry]
 # or a linear gradient line [sx, sy, ex, ey] (Q10 px), with its stops.
+# `geom` is resolved against tile 0, `tile` = [tx, ty, tw, th] (Q10 px; []
+# = one untiled image over the paint rect); a repeating axis lays the same
+# gradient again at every tile origin.
 struct BackgroundGradientLayer:
     radial: bool
     geom: [i64]
     colors: [u32]
     positions: [i32]
+    tile: [i64]
+    repeat_x: bool
+    repeat_y: bool
 
 # Composite one gradient layer src-over the framebuffer over the paint rect
 # (px0, py0, pw, ph) intersected with the clip, with colours from Engine2D's
@@ -1459,12 +1474,53 @@ fn fb_gradient_layer_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw:
     if x1 <= x0 or y1 <= y0:
         return out
     val w = x1 - x0
-    val pixels = if layer.radial:
-        radial_gradient_pixels(x0, y0, w, y1 - y0, geom[0], geom[1], geom[2], geom[3], layer.colors, layer.positions)
-    else:
-        linear_gradient_pixels(x0, y0, w, y1 - y0, geom[0], geom[1], geom[2], geom[3], layer.colors, layer.positions)
+    val pixels = gradient_layer_tiled_pixels(x0, y0, w, y1 - y0, layer)
     if pixels.len() == 0:
         return out
+    _fb_blend_pixels(out, fbw, x0, y0, w, y1 - y0, pixels, opacity_pct)
+
+# Gradient list on a rounded box (`shape` = [x, y, w, h, tl, tr, br, bl], the
+# painting area with its clip radii): the box colour `base` and every layer
+# are composited into ONE image of the painting area
+# (`gradient_layer_stack_over`), its alpha scaled once by the anti-aliased
+# corner coverage (`gradient_pixels_round_clip`), then blended over the
+# framebuffer -- Chrome clips the whole background once, so stacked layers do
+# not compound the corner coverage.
+fn fb_gradient_layers_round_clip(fb: [u32], fbw: i32, fbh: i32, layers: [BackgroundGradientLayer], base: u32, opacity_pct: i32, clip: ClipRect, shape: [i32]) -> [u32]:
+    var out = fb
+    if opacity_pct <= 0 or shape.len() != 8:
+        return out
+    var x0 = if shape[0] > clip.x0: shape[0] else: clip.x0
+    var y0 = if shape[1] > clip.y0: shape[1] else: clip.y0
+    var x1 = if shape[0] + shape[2] < clip.x1: shape[0] + shape[2] else: clip.x1
+    var y1 = if shape[1] + shape[3] < clip.y1: shape[1] + shape[3] else: clip.y1
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > fbw:
+        x1 = fbw
+    if y1 > fbh:
+        y1 = fbh
+    if x1 <= x0 or y1 <= y0:
+        return out
+    val w = x1 - x0
+    val h = y1 - y0
+    var acc: [u32] = [base; w * h]
+    var li = layers.len() - 1
+    while li >= 0:
+        val pixels = gradient_layer_tiled_pixels(x0, y0, w, h, layers[li])
+        if pixels.len() == w * h:
+            acc = gradient_layer_stack_over(acc, pixels)
+        li = li - 1
+    _fb_blend_pixels(out, fbw, x0, y0, w, h, gradient_pixels_round_clip(acc, x0, y0, w, h, shape), opacity_pct)
+
+# Composite straight-ARGB `pixels` (w x h at x0, y0, already clipped) over the
+# framebuffer with the Engine2D image rule, alpha scaled by `opacity_pct`.
+fn _fb_blend_pixels(fb: [u32], fbw: i32, x0: i32, y0: i32, w: i32, h: i32, pixels: [u32], opacity_pct: i32) -> [u32]:
+    var out = fb
+    val x1 = x0 + w
+    val y1 = y0 + h
     var py = y0
     while py < y1:
         val row = py * fbw
@@ -1483,6 +1539,94 @@ fn fb_gradient_layer_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw:
             px = px + 1
         py = py + 1
     out
+
+# One gradient layer's colours over the pixel rect (x0, y0, w, h), row-major:
+# every tile of its grid (`gradient_tile_spans`) evaluated with the layer's
+# geometry moved to that tile's origin; pixels no tile covers stay 0
+# (transparent). When every tile is a whole number of pixels, all tiles share
+# one pixel grid, so tile 0 is evaluated once and copied.
+fn gradient_layer_tiled_pixels(x0: i32, y0: i32, w: i32, h: i32, layer: BackgroundGradientLayer) -> [u32]:
+    if layer.tile.len() < 4:
+        return _gradient_layer_kernel(layer, x0, y0, w, h, 0, 0)
+    val t = layer.tile
+    val xs = gradient_tile_spans(x0, w, t[0], t[2], layer.repeat_x)
+    val ys = gradient_tile_spans(y0, h, t[1], t[3], layer.repeat_y)
+    if (xs.len() == 3 and ys.len() == 3 and xs[2] == 0 and ys[2] == 0 and
+            xs[0] == (x0 as i64) and xs[1] == ((x0 + w) as i64) and
+            ys[0] == (y0 as i64) and ys[1] == ((y0 + h) as i64)):
+        return _gradient_layer_kernel(layer, x0, y0, w, h, 0, 0)
+    var out: [u32] = [0u32; w * h]
+    if xs.len() == 0 or ys.len() == 0:
+        return out
+    if t[2] % 1024 == 0 and t[3] % 1024 == 0:
+        val twp = t[2] / 1024
+        val thp = t[3] / 1024
+        var lx0 = xs[0] - xs[2] * twp
+        var lx1 = xs[1] - xs[2] * twp
+        var i = 3
+        while i < xs.len():
+            if xs[i] - xs[i + 2] * twp < lx0:
+                lx0 = xs[i] - xs[i + 2] * twp
+            if xs[i + 1] - xs[i + 2] * twp > lx1:
+                lx1 = xs[i + 1] - xs[i + 2] * twp
+            i = i + 3
+        var ly0 = ys[0] - ys[2] * thp
+        var ly1 = ys[1] - ys[2] * thp
+        i = 3
+        while i < ys.len():
+            if ys[i] - ys[i + 2] * thp < ly0:
+                ly0 = ys[i] - ys[i + 2] * thp
+            if ys[i + 1] - ys[i + 2] * thp > ly1:
+                ly1 = ys[i + 1] - ys[i + 2] * thp
+            i = i + 3
+        val bw = (lx1 - lx0) as i32
+        val base = _gradient_layer_kernel(layer, lx0 as i32, ly0 as i32, bw, (ly1 - ly0) as i32, 0, 0)
+        if base.len() == 0:
+            return out
+        var yi = 0
+        while yi < ys.len():
+            var py = ys[yi]
+            while py < ys[yi + 1]:
+                val src_row = ((py - ys[yi + 2] * thp - ly0) as i32) * bw
+                val dst_row = ((py as i32) - y0) * w
+                var xi = 0
+                while xi < xs.len():
+                    val shift = (xs[xi + 2] * twp + lx0) as i32
+                    var px = xs[xi] as i32
+                    val pe = xs[xi + 1] as i32
+                    while px < pe:
+                        out[dst_row + px - x0] = base[src_row + px - shift]
+                        px = px + 1
+                    xi = xi + 3
+                py = py + 1
+            yi = yi + 3
+        return out
+    var yi = 0
+    while yi < ys.len():
+        var xi = 0
+        while xi < xs.len():
+            val sx = xs[xi] as i32
+            val sy = ys[yi] as i32
+            val tw = (xs[xi + 1] - xs[xi]) as i32
+            val th = (ys[yi + 1] - ys[yi]) as i32
+            val pix = _gradient_layer_kernel(layer, sx, sy, tw, th, xs[xi + 2] * t[2], ys[yi + 2] * t[3])
+            if pix.len() == tw * th:
+                var r = 0
+                while r < th:
+                    var c = 0
+                    while c < tw:
+                        out[(sy - y0 + r) * w + sx - x0 + c] = pix[r * tw + c]
+                        c = c + 1
+                    r = r + 1
+            xi = xi + 3
+        yi = yi + 3
+    out
+
+fn _gradient_layer_kernel(layer: BackgroundGradientLayer, x0: i32, y0: i32, w: i32, h: i32, dx: i64, dy: i64) -> [u32]:
+    val g = layer.geom
+    if layer.radial:
+        return radial_gradient_pixels(x0, y0, w, h, g[0] + dx, g[1] + dy, g[2], g[3], layer.colors, layer.positions)
+    linear_gradient_pixels(x0, y0, w, h, g[0] + dx, g[1] + dy, g[2] + dx, g[3] + dy, layer.colors, layer.positions)
 
 # The typed radial background of a box: the gradient box is the background
 # positioning area (background-origin, padding-box by default) and the paint
@@ -1544,7 +1688,11 @@ fn background_gradient_box_rects(st: Style, x: i32, y: i32, w: i32, h: i32) -> [
 # clockwise; `to <corner>` depends on the box) and is |w sin| + |h cos| long,
 # so the far corners land on the 0% and 100% points.
 fn linear_gradient_line_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
-    val angle = parse_gradient_angle_deg(layer)
+    linear_gradient_line_q10_at_angle(parse_gradient_angle_deg(layer), ax, ay, aw, ah)
+
+# The same line for a parsed angle (`parse_gradient_angle_deg`: degrees, or
+# >= 1000 for a `to <corner>` direction).
+fn linear_gradient_line_q10_at_angle(angle: i32, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
     val sc = if angle >= 1000: gradient_corner_dir_q16(angle, aw, ah) else: gradient_angle_sin_cos_q16(angle)
     val s = sc[0]
     val c = sc[1]
@@ -1561,24 +1709,101 @@ fn linear_gradient_line_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32) -> 
 # The image layers of a gradient-only background list (`gradient_layer_list`)
 # resolved against the gradient box (ax, ay, aw, ah; CSS px), in CSS order:
 # the first paints on top. Empty when the list is not gradient-only.
-fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [BackgroundGradientLayer]:
+#
+# Each layer's tile (CSS Backgrounds 3 §3.8-3.9) comes from its
+# `<position> / <size> <repeat>` tail: a gradient has no intrinsic size, so
+# `auto`, `cover` and `contain` are the positioning area; percentages of the
+# size resolve against the area, of the position against (area - tile). A
+# zero-sized layer is not painted. Empty when any tail is unsupported.
+#
+# Stop positions given as lengths (`px`, `em` of `em_px`) resolve per layer
+# against that layer's gradient line on its tile: a linear line's length, a
+# radial's gradient ray (its horizontal radius).
+fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32, em_px: i32 = 16) -> [BackgroundGradientLayer]:
     var out: [BackgroundGradientLayer] = []
-    for lay in gradient_layer_list(raw):
-        val stops: [GradientStopSpec] = parse_gradient_stops(lay)
+    for entry in gradient_layer_entries(raw):
+        val split = gradient_layer_split(entry)
+        val tail = gradient_layer_tail_parts(split[1])
+        if tail.len() != 3:
+            return []
+        val pos = background_position_spec(tail[0])
+        val size = background_size_spec(tail[1])
+        val rep = background_repeat_spec(tail[2])
+        if pos.len() != 4 or size.len() != 5 or rep.len() != 2:
+            return []
+        val lay = split[0]
+        val radial = text_index_of(lay.lower(), "radial-gradient(") == 0
+        val aw_q = (aw as i64) * 1024
+        val ah_q = (ah as i64) * 1024
+        var tw = aw_q
+        var th = ah_q
+        if size[0] == 0:
+            if size[1] == 1:
+                tw = size[2]
+            elif size[1] == 2:
+                tw = aw_q * size[2] / 102400
+            if size[3] == 1:
+                th = size[4]
+            elif size[3] == 2:
+                th = ah_q * size[4] / 102400
+        if tw <= 0 or th <= 0:
+            continue
+        # Each tile is one gradient evaluation (one Vulkan dispatch on the
+        # device): a tile grid past BACKGROUND_GRADIENT_TILE_CAP over the
+        # positioning area fails the whole list closed (box colour only).
+        val nx = if rep[0] == 1: aw_q / tw + 2 else: 1
+        val ny = if rep[1] == 1: ah_q / th + 2 else: 1
+        if nx * ny > BACKGROUND_GRADIENT_TILE_CAP:
+            return []
+        val tx = (ax as i64) * 1024 + (aw_q - tw) * pos[0] / 102400 + pos[1]
+        val ty = (ay as i64) * 1024 + (ah_q - th) * pos[2] / 102400 + pos[3]
+        val geom = _gradient_layer_tile_geometry(lay, radial, tx, ty, tw, th)
+        if geom.len() < 4:
+            return []
+        val line_q10 = if radial: geom[2] else: _isqrt_i64((geom[2] - geom[0]) * (geom[2] - geom[0]) + (geom[3] - geom[1]) * (geom[3] - geom[1]))
+        val stops: [GradientStopSpec] = parse_gradient_stops_on_line(lay, line_q10, em_px)
         var colors: [u32] = []
         var positions: [i32] = []
         for stop in stops:
             colors.push(stop.color)
             positions.push(stop.pos_permille)
-        val radial = text_index_of(lay.lower(), "radial-gradient(") == 0
-        val geom = if radial: radial_gradient_geometry_q10(lay, ax, ay, aw, ah) else: linear_gradient_line_q10(lay, ax, ay, aw, ah)
-        out.push(BackgroundGradientLayer(radial: radial, geom: geom, colors: colors, positions: positions))
+        out.push(BackgroundGradientLayer(radial: radial, geom: geom, colors: colors, positions: positions, tile: [tx, ty, tw, th], repeat_x: rep[0] == 1, repeat_y: rep[1] == 1))
     out
+
+# Most tiles one gradient layer may paint (see background_gradient_layers).
+# Measured 2026-11-17: ~48 ms per tile on the lavapipe device path.
+val BACKGROUND_GRADIENT_TILE_CAP: i64 = 1024
+
+# A layer's geometry resolved against its tile (Q10 px rect). A whole-pixel
+# tile resolves directly; a fractional size resolves at 64x and scales back,
+# which needs the geometry to scale with the box, so a radial layer with an
+# explicit length fails closed (empty) there.
+fn _gradient_layer_tile_geometry(lay: text, radial: bool, tx: i64, ty: i64, tw: i64, th: i64) -> [i64]:
+    if tw % 1024 == 0 and th % 1024 == 0:
+        val w = (tw / 1024) as i32
+        val h = (th / 1024) as i32
+        if tx % 1024 == 0 and ty % 1024 == 0:
+            val ix = (tx / 1024) as i32
+            val iy = (ty / 1024) as i32
+            return if radial: radial_gradient_geometry_q10(lay, ix, iy, w, h) else: linear_gradient_line_q10(lay, ix, iy, w, h)
+        val g = if radial: radial_gradient_geometry_q10(lay, 0, 0, w, h) else: linear_gradient_line_q10(lay, 0, 0, w, h)
+        if radial:
+            return [g[0] + tx, g[1] + ty, g[2], g[3]]
+        return [g[0] + tx, g[1] + ty, g[2] + tx, g[3] + ty]
+    val inner = gradient_inner(lay).lower()
+    if radial and (text_index_of(inner, "px") >= 0 or text_index_of(inner, "em") >= 0):
+        return []
+    val w64 = (tw / 16) as i32
+    val h64 = (th / 16) as i32
+    val g = if radial: radial_gradient_geometry_q10(lay, 0, 0, w64, h64) else: linear_gradient_line_q10(lay, 0, 0, w64, h64)
+    if radial:
+        return [g[0] / 64 + tx, g[1] / 64 + ty, g[2] / 64, g[3] / 64]
+    [g[0] / 64 + tx, g[1] / 64 + ty, g[2] / 64 + tx, g[3] / 64 + ty]
 
 # True when the box paints its background image list as gradient layers: a
 # raw gradient-only list (several layers, or one the typed linear / radial
-# projections leave raw, e.g. a stop at `transparent`) on square corners (a
-# rounded box still falls back to its colour, as the radial does).
+# projections leave raw, e.g. a stop at `transparent`); rounded corners clip
+# it (`background_gradient_clip_shape`).
 fn background_gradient_layers_paintable(st: Style) -> bool:
     if st.bg_layers_raw == "" or st.background_image_uri != "":
         return false
@@ -1586,18 +1811,48 @@ fn background_gradient_layers_paintable(st: Style) -> bool:
         return false
     if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32:
         return false
-    if st.border_radius_tl_px > 0 or st.border_radius_tr_px > 0 or st.border_radius_br_px > 0 or st.border_radius_bl_px > 0:
-        return false
-    # Per-layer background-size / tiling is not implemented: each layer is
-    # painted once over the positioning area. That is exact only for the
-    # default size (auto, 0 here), where every keyword / percentage position
-    # (0, or the -1000..-1100 sentinels) resolves to a zero offset; any other
-    # size or a px position stays fail-closed (box colour only).
-    if st.background_size_w_px != 0 or st.background_size_h_px != 0:
-        return false
-    if not _gradient_layers_default_position(st.background_position_x_px) or not _gradient_layers_default_position(st.background_position_y_px):
-        return false
+    # Per-layer size / position / repeat travel as each layer's tail
+    # (decl_apply rewrites the longhand lists into it). A list without tails
+    # whose scalar size / position is not the default came from a longhand
+    # this list never saw (another declaration block): keep it fail-closed
+    # (box colour only) rather than paint one untiled gradient.
+    var tailed = false
+    for entry in gradient_layer_entries(st.bg_layers_raw):
+        if gradient_layer_split(entry)[1] != "":
+            tailed = true
+    if not tailed:
+        if st.background_size_w_px != 0 or st.background_size_h_px != 0:
+            return false
+        if not _gradient_layers_default_position(st.background_position_x_px) or not _gradient_layers_default_position(st.background_position_y_px):
+            return false
     gradient_layer_list(st.bg_layers_raw).len() > 0
+
+# The rounded clip of a gradient list painted over the painting area (x, y,
+# w, h), the background-clip box: [x, y, w, h, tl, tr, br, bl], each radius
+# the border-box radius minus the border (padding-box) and padding
+# (content-box) widths it is inset by on its wider side; [] when square.
+fn background_gradient_clip_shape(st: Style, x: i32, y: i32, w: i32, h: i32) -> [i32]:
+    if st.border_radius_tl_px <= 0 and st.border_radius_tr_px <= 0 and st.border_radius_br_px <= 0 and st.border_radius_bl_px <= 0:
+        return []
+    var il = 0
+    var it = 0
+    var ir = 0
+    var ib = 0
+    if st.background_clip == "padding-box" or st.background_clip == "content-box":
+        il = st.border_l
+        it = st.border_t
+        ir = st.border_r
+        ib = st.border_b
+    if st.background_clip == "content-box":
+        il = il + st.pad_l
+        it = it + st.pad_t
+        ir = ir + st.pad_r
+        ib = ib + st.pad_b
+    [x, y, w, h, _inset_radius(st.border_radius_tl_px, il, it), _inset_radius(st.border_radius_tr_px, ir, it), _inset_radius(st.border_radius_br_px, ir, ib), _inset_radius(st.border_radius_bl_px, il, ib)]
+
+fn _inset_radius(r: i32, a: i32, b: i32) -> i32:
+    val m = if a > b: a else: b
+    if r > m: r - m else: 0
 
 fn _gradient_layers_default_position(v: i32) -> bool:
     v == 0 or (v <= -1000 and v >= -1100)
@@ -1640,6 +1895,64 @@ fn canvas_background_extent(nodes: [HNode], bx: [i32], by: [i32], bw: [i32], bh:
             break
         i = i + 1
     [w, h]
+
+# The root node whose gradient layer list is the canvas background outside
+# widget mode (CSS Backgrounds 3 §2.11.2): `<html>` when it has a background,
+# else `<body>`. -1 when that node's background is not a paintable gradient
+# list (a plain colour already reaches the canvas as its base colour).
+fn canvas_gradient_source(nodes: [HNode], styles: [Style]) -> i32:
+    var hi = -1
+    var bi = -1
+    var i = 0
+    while i < nodes.len() and i < styles.len() and (hi < 0 or bi < 0):
+        if nodes[i].tag == "html" and hi < 0:
+            hi = i
+        elif nodes[i].tag == "body" and bi < 0:
+            bi = i
+        i = i + 1
+    if hi < 0:
+        return -1
+    val hs = styles[hi]
+    val html_has_bg = hs.bg != 0u32 or hs.bg_layers_raw != "" or hs.background_image_uri != "" or hs.background_gradient_stop_colors.len() > 0 or (hs.background_gradient_from != 0u32 and hs.background_gradient_to != 0u32)
+    if html_has_bg:
+        return if _canvas_gradient_paintable(hs): hi else: -1
+    if bi >= 0 and _canvas_gradient_paintable(styles[bi]):
+        return bi
+    -1
+
+# A gradient list, a typed radial (its raw list is kept) or a typed linear
+# layer with the default size and position.
+fn _canvas_gradient_paintable(st: Style) -> bool:
+    if background_gradient_layers_paintable(st) or (radial_gradient_box_paintable(st) and st.bg_layers_raw != ""):
+        return true
+    val n = st.background_gradient_stop_colors.len()
+    (
+        st.bg_layers_raw == "" and not st.background_gradient_is_radial and n >= 2 and
+        st.background_gradient_stop_positions.len() == n and
+        st.background_size_w_px == 0 and st.background_size_h_px == 0 and
+        _gradient_layers_default_position(st.background_position_x_px) and
+        _gradient_layers_default_position(st.background_position_y_px) and
+        st.background_repeat == "repeat"
+    )
+
+# The canvas gradient layers of `src` (see canvas_gradient_source): Chrome
+# positions the propagated root background on the root (`<html>`) box, so a
+# default `repeat` tiles it past that box over the whole canvas.
+fn canvas_gradient_layers(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], src: i32) -> [BackgroundGradientLayer]:
+    var i = 0
+    while i < nodes.len() and i < bx.len():
+        if nodes[i].tag == "html":
+            val st = styles[src]
+            if st.bg_layers_raw != "":
+                return background_gradient_layers(st.bg_layers_raw, bx[i], by[i], bw[i], bh[i], st.font_size)
+            # A typed linear layer: its parsed stops on the html box, repeating.
+            val tile: [i64] = [(bx[i] as i64) * 1024, (by[i] as i64) * 1024, (bw[i] as i64) * 1024, (bh[i] as i64) * 1024]
+            if bw[i] <= 0 or bh[i] <= 0:
+                return []
+            val geom = linear_gradient_line_q10_at_angle(st.background_gradient_angle_deg, bx[i], by[i], bw[i], bh[i])
+            return [BackgroundGradientLayer(radial: false, geom: geom, colors: st.background_gradient_stop_colors, positions: st.background_gradient_stop_positions, tile: tile, repeat_x: true, repeat_y: true)]
+        i = i + 1
+    []
 
 # Paint the radial-gradient layers of a multi-layer `background` stack over
 # the rect (x, y, w, h), which is both the gradient box and the painting

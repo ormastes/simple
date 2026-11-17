@@ -356,3 +356,29 @@ available. These source paths and their manuals remain NOT_RUN.
 - `container/providers/linux/cleanup_scope_v1.spl`: fixture-owned sentinel network/volume commands (`simpleorch-sentinel-` prefix + `io.simpleorch.sentinel` label), `cleanup_destroy_scope_error_v1` (destroy may name ONLY the run's own native id; no network/volume/prune/-v/-a; never a sentinel) and `cleanup_sentinels_intact_v1`.
 - Wired into `oci_runtime_v1` destroy BEFORE `live_enabled`/`_execute`; pinned by a provider-level spec in `cleanup_scope_v1_spec`. Live proof `cleanup_scope_live_v1_spec` records `pending("BLOCKED: <unset vars>")` without `SIMPLE_CTR_CLEANUP_ENGINE/IMAGE/FIXTURE_ID`.
 - Not covered: Windows-engine sentinels (still ENV-BLOCKED).
+
+### PR3c smux consumer (milestone_0024, AUTHORED, NOT_RUN)
+- The pane holds only a `HostAgentPaneLeaseV4`; smux actions `host-agent-pane-claim` / `host-agent-pane-read` (runtime_host_continuation_v6.spl, core `os.apps.smux.runtime_agent_pane_v1`) reach the agent through `host_service_domain_attachment_lease_v3` / `host_service_domain_pane_io_v3` -> `host_linux_service_attachment_lease_v4` / `host_linux_service_pane_io_v4`, both gated on `host_linux_service_agent_terminal_authority_v4` (expired approvals refused after restart) and using the service's own grant clock.
+- The request payload is the controller-signed binding uid of the intended pane (`attach-binding-mismatch` otherwise, lease kept). The lease record is kept only on success, `attach-not-ready` and a binding mismatch; any other refusal drops it. After a smux restart the lease is gone (agent issues it once): re-attach. smux never cleans native state. `host-agent-pane-resize` stays refused (no installed-policy source on V4); `host-agent-pane-write` is the next slice (needs the smux control lease/target).
+- PR3c S3 (AUTHORED, NOT_RUN): pane actions are refused while a connection is pending; the owner gate runs a smux registry consistency check (service incarnation + pane listed by `smux_list_panes`; `attach-binding-registry-mismatch`, lease kept) AFTER the signed authority verifies. An observed revoke tombstones the pane (`runtime-agent-pane-revoked`, no agent call) until an attach of a DIFFERENT run succeeds; a replayed attach of the held run changes nothing. Brokered panes never call `smux_pane_cleanup_primary_v5` (design 11.1 wins over 9.1).
+
+## AT-OPS-01 drain/update handoff (2026-11-17, SOURCE_AUTHORED / NOT_RUN)
+- Owner decisions: D1 exit-then-adopt (no live custody transfer), D2 build on the V4 service start path, D3 signed
+  operation kind `service-handoff`, D4 exact wire version `service-handoff-v1` only (anything else refused).
+- Contract `common/contracts/orchestration/host_service_handoff_v1.spl`; driver `nogc_sync_mut/orchestration/host_service_handoff_v1.spl`
+  (never imports the service owner). Old owner: dispatch action `host_service_handoff_v1` (wire route `host-service-handoff`
+  in `host_service_domain_v3`) verifies issuer == controller_ref, scope, signatures at its clock, its own current record
+  digest and agent slot, then publishes `service-handoff/pending-<n>.sdn` (no-replace, read back) and only then sets
+  `draining` (inspect, detach and cancel stay; every other action and `status_v4` refuse). The service manager then
+  stops the unit (V6 `service-stop` is not a route; exit is the manager's job) and the owner close releases the writer.
+- Successor: `host_linux_service_start_v4` VERIFIES a pending record after the journal writer is held and the current
+  record is published, before the reconcile flip (a refusal sets `reconcile_error`: quarantine; status refuses), and
+  CONSUMES it (`service-handoff/adopted-<n>.sdn`, no-replace, exact verified digest) only after the reconcile flip.
+  The handoff never flips continuity; the reconcile re-proves exclusion. An approval that expired while the service
+  was down is refused at the successor (APPROVAL_EXPIRED).
+- OPEN owner decision: a pending record the successor cannot verify (expired approval, policy bump) quarantines every
+  restart and cannot be superseded; implemented as option (c) operator journal repair. Options (a) signed abandon
+  record, (b) signed supersede: see milestone_0029_ops01_drain_handoff/DESIGN_AND_DECISION.md.
+- The installed policy's controller key must list the `service-handoff` operation.
+- Specs: `test/01_unit/lib/orchestration/host_service_handoff_v1_spec.spl`; live env-gated, two-process
+  `test/03_system/tools/host_service_handoff_live_spec.spl` (pending until its fixture env exists).

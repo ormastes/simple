@@ -17,7 +17,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_pr
     radial_gradient_box_paintable, radial_gradient_box_geometry,
     radial_gradient_geometry_q10, canvas_background_extent,
     BackgroundGradientLayer, background_gradient_layers_paintable,
-    background_gradient_layers, background_gradient_box_rects
+    background_gradient_layers, background_gradient_box_rects,
+    canvas_gradient_source, canvas_gradient_layers, background_gradient_clip_shape
 }
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use std.common.encoding.utf8.{
@@ -625,10 +626,48 @@ fn _html_draw_ir_gradient_layer_props(layers: [BackgroundGradientLayer], x: i32,
             stops.push("{stop_pos}")
             k = k + 1
         li = li + 1
-    [
+    var props = [
         draw_ir_style_prop("background-gradient-layer-geometry", geom.build()),
         draw_ir_style_prop("background-gradient-layer-stops", stops.build())
     ]
+    # Tiled layers (a sized / offset / no-repeat tile that does not cover
+    # the painting area) add each layer's tile 0 rect, Q10 px relative to
+    # (x, y), and its repeat axes `<x><y>` (1 = repeat). Absent: every layer
+    # paints untiled, as before.
+    if _html_draw_ir_gradient_layers_tiled(layers, px, py, pw, ph):
+        var tiles = StringBuilder.new()
+        var repeat = StringBuilder.new()
+        li = 0
+        # cpu-lane-loop-ok: encodes one box's own gradient layer list; bound is that list
+        while li < layers.len():
+            val t = layers[li].tile
+            val tx = t[0] - ox
+            val ty = t[1] - oy
+            val tw = t[2]
+            val th = t[3]
+            if li > 0:
+                tiles.push(",")
+                repeat.push(",")
+            tiles.push("{tx},{ty},{tw},{th}")
+            repeat.push(if layers[li].repeat_x: "1" else: "0")
+            repeat.push(if layers[li].repeat_y: "1" else: "0")
+            li = li + 1
+        props.push(draw_ir_style_prop("background-gradient-layer-tiles", tiles.build()))
+        props.push(draw_ir_style_prop("background-gradient-layer-repeat", repeat.build()))
+    props
+
+# True when some layer's tile 0 does not cover the painting area (px, py,
+# pw, ph): only then do tile rects change any pixel.
+fn _html_draw_ir_gradient_layers_tiled(layers: [BackgroundGradientLayer], px: i32, py: i32, pw: i32, ph: i32) -> bool:
+    val x0 = (px as i64) * 1024
+    val y0 = (py as i64) * 1024
+    val x1 = ((px + pw) as i64) * 1024
+    val y1 = ((py + ph) as i64) * 1024
+    for layer in layers:
+        val t = layer.tile
+        if t.len() == 4 and (t[0] > x0 or t[1] > y0 or t[0] + t[2] < x1 or t[1] + t[3] < y1):
+            return true
+    false
 
 fn _html_draw_ir_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
@@ -658,9 +697,17 @@ fn _html_draw_ir_command(
     elif background_gradient_layers_paintable(st):
         val r = background_gradient_box_rects(st, x, y, w, h)
         if r.len() == 8:
-            val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3])
+            val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3], st.font_size)
             for prop in _html_draw_ir_gradient_layer_props(layers, x, y, r[4], r[5], r[6], r[7]):
                 computed_style.push(prop)
+            # Rounded clip of the painting area (lengths, device-scaled).
+            val shape = background_gradient_clip_shape(st, r[4], r[5], r[6], r[7])
+            if shape.len() == 8:
+                val rtl = shape[4]
+                val rtr = shape[5]
+                val rbr = shape[6]
+                val rbl = shape[7]
+                computed_style.push(draw_ir_style_prop("background-gradient-layer-clip-radii", "{rtl},{rtr},{rbr},{rbl}"))
     # Text-run nodes carry no background of their own; emitting them as a
     # (transparent) box makes the Draw IR executor paint an opaque zero-color
     # fill that reads back as a solid bar over the parent's background. Emit a
@@ -2271,6 +2318,10 @@ fn _html_draw_ir_commands(
                         scrollbar_commands_at[flush_at].push(thumb)
                         scrollbar_owners_at[flush_at].push(scrollbar_index)
             scrollbar_index = scrollbar_index - 1
+    # Outside widget mode a root gradient list is the canvas background (the
+    # raster `_paint_passes` twin): its command paints the canvas, positioned
+    # on the html box, and not its own box.
+    val canvas_src = if widget_mode: -1 else: canvas_gradient_source(nodes, styles)
     var paint_index: i32 = 0
     # cpu-lane-loop-ok: the Draw IR emission pass: one command group per node in stacking-context paint order. Bound is paint_order.len() == node_count; emitting per node is the whole purpose of this producer
     while paint_index < paint_order.len():
@@ -2291,6 +2342,13 @@ fn _html_draw_ir_commands(
                 nodes, styles, boxes, i, node_clip, vector_fonts
             )
             node_command.parent_id = parent_id
+            if i == canvas_src:
+                val canvas = canvas_background_extent(
+                    nodes, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height)
+                val root_layers = canvas_gradient_layers(
+                    nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, i)
+                node_command = _html_draw_ir_root_canvas_gradient(
+                    node_command, root_layers, boxes.bx[i], boxes.by[i], canvas[0], canvas[1])
             # Legacy widget mode box suppression, as the raster `paint`
             # passes 1-4: the html/body background (skip_widget_page_bg) and
             # the whole box paint of a widget-* / icon-image node
@@ -2573,15 +2631,34 @@ fn _html_draw_ir_canvas_radial(command: DrawIrCommand, st: Style, x: i32, y: i32
     out.computed_style = props
     out
 
+# The propagated root canvas background: the command's own box colour is
+# dropped (the canvas base carries it) and its gradient layers, resolved on
+# the html box, paint the canvas (width x height from the origin).
+fn _html_draw_ir_root_canvas_gradient(command: DrawIrCommand, layers: [BackgroundGradientLayer], x: i32, y: i32, width: i32, height: i32) -> DrawIrCommand:
+    var out = command
+    out.color = 0u32
+    var props: [DrawIrStyleProp] = []
+    # cpu-lane-loop-ok: rewrites one box command's own computed-style list; bound is that prop list
+    for prop in command.computed_style:
+        if prop.key == "background-color":
+            props.push(draw_ir_style_prop(prop.key, "0"))
+        elif prop.key != "background-gradient-layer-geometry" and prop.key != "background-gradient-layer-stops" and prop.key != "background-gradient-layer-tiles" and prop.key != "background-gradient-layer-repeat" and prop.key != "background-gradient-layer-clip-radii":
+            props.push(prop)
+    if layers.len() > 0:
+        for prop in _html_draw_ir_gradient_layer_props(layers, x, y, 0, 0, width, height):
+            props.push(prop)
+    out.computed_style = props
+    out
+
 # Re-resolve a body gradient layer list against the canvas (width x height
 # from the origin), relative to the command origin.
 fn _html_draw_ir_canvas_gradient_layers(command: DrawIrCommand, st: Style, x: i32, y: i32, width: i32, height: i32) -> DrawIrCommand:
     var out = command
-    val layers = background_gradient_layers(st.bg_layers_raw, 0, 0, width, height)
+    val layers = background_gradient_layers(st.bg_layers_raw, 0, 0, width, height, st.font_size)
     var props: [DrawIrStyleProp] = []
     # cpu-lane-loop-ok: rewrites one box command's own computed-style list; bound is that prop list
     for prop in command.computed_style:
-        if prop.key != "background-gradient-layer-geometry" and prop.key != "background-gradient-layer-stops":
+        if prop.key != "background-gradient-layer-geometry" and prop.key != "background-gradient-layer-stops" and prop.key != "background-gradient-layer-tiles" and prop.key != "background-gradient-layer-repeat":
             props.push(prop)
     for prop in _html_draw_ir_gradient_layer_props(layers, x, y, 0, 0, width, height):
         props.push(prop)
@@ -2603,7 +2680,7 @@ fn _html_draw_ir_widget_suppressed_box(command: DrawIrCommand, whole_box: bool, 
             props.push(draw_ir_style_prop(key, "0"))
         elif not keep_gradient and key == "background-gradient-stops":
             props.push(draw_ir_style_prop(key, ""))
-        elif not keep_gradient and (key == "background-gradient-layer-geometry" or key == "background-gradient-layer-stops"):
+        elif not keep_gradient and (key == "background-gradient-layer-geometry" or key == "background-gradient-layer-stops" or key == "background-gradient-layer-tiles" or key == "background-gradient-layer-repeat"):
             # (dropped: the suppressed box paints no gradient layers)
             continue
         elif whole_box and key == "background-layers-raw":

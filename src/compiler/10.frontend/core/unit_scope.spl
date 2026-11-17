@@ -12,7 +12,7 @@
 # `unit X: T as sfx`. Families are tracked as "<org>/<family>".
 # Callers reset scope per file (interpreter: per core_interpret run).
 
-use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at}
+use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at, UnitDeclPoolSnapshot, unit_decl_pool_save, unit_decl_pool_restore}
 use std.io_runtime.{dir_list_or_empty, file_exists}
 use compiler.core.interpreter.module_loader_resolve.{unit_library_root_get, unit_library_root_set, module_resolve_cache_reset}
 
@@ -72,13 +72,20 @@ pub struct UnitScopeSnapshot:
     families: [text]
     ambiguous: [text]
     decl_base: i64
+    # `decl_base` indexes the unit decl pool, so the pool travels with it:
+    # the bridge's reset_all_pools wipes the pool before it parses its own
+    # file, and a bare `decl_base` restored over an empty pool would both
+    # lose the script's `unit ... as sfx` declarations and exceed the count.
+    decls: UnitDeclPoolSnapshot
 
 pub fn unit_scope_save() -> UnitScopeSnapshot:
-    """Capture the current scope so a nested per-file reset (the flat AST
-    bridge called from an interpreted script) can hand it back afterwards."""
-    UnitScopeSnapshot(names: unit_scope_names, families: unit_scope_families, ambiguous: unit_scope_ambiguous, decl_base: unit_scope_decl_base)
+    """Capture the current scope and its unit decl pool so a nested per-file
+    reset (the flat AST bridge called from an interpreted script) can hand
+    them back afterwards. Take it BEFORE the pool reset."""
+    UnitScopeSnapshot(names: unit_scope_names, families: unit_scope_families, ambiguous: unit_scope_ambiguous, decl_base: unit_scope_decl_base, decls: unit_decl_pool_save())
 
 pub fn unit_scope_restore(snap: UnitScopeSnapshot):
+    unit_decl_pool_restore(snap.decls)
     unit_scope_names = snap.names
     unit_scope_families = snap.families
     unit_scope_ambiguous = snap.ambiguous
@@ -176,9 +183,16 @@ fn unit_suffix_declared(suffix: text) -> bool:
         i = i + 1
     false
 
+fn unit_is_primitive_numeric_suffix(suffix: text) -> bool:
+    """Built-in numeric literal type suffixes are language primitives, never library units."""
+    (suffix == "i8" or suffix == "i16" or suffix == "i32" or suffix == "i64" or suffix == "i128" or
+        suffix == "u8" or suffix == "u16" or suffix == "u32" or suffix == "u64" or suffix == "u128" or
+        suffix == "isize" or suffix == "usize" or suffix == "f16" or suffix == "f32" or suffix == "f64")
+
 pub fn unit_suffix_scope_error(suffix: text) -> text:
     """"" when `suffix` is in scope, else the diagnostic text. Fails closed
     when the unit library root cannot be found."""
+    if unit_is_primitive_numeric_suffix(suffix): return ""
     if unit_suffix_declared(suffix): return ""
     val joined = unit_library_families(suffix)
     if joined == "?":
@@ -194,7 +208,7 @@ pub fn unit_suffix_scope_error(suffix: text) -> text:
         val org = key.substring(0, key.index_of("/"))
         val fam = key.substring(key.index_of("/") + 1)
         val prefix = if org == UNIT_DEFAULT_ORG: "" else: org + "."
-        hints.push("`use unit." + prefix + fam + ".{" + suffix + "}`")
+        hints.push("`use unit." + prefix + fam + r".{" + suffix + r"}`")
     var msg = "unit suffix '" + suffix + "' is not in scope; add " + hints.join(" or ") + " (or declare `unit X: T as " + suffix + "`)"
     for entry in unit_scope_ambiguous:
         val tab = entry.index_of("\t")

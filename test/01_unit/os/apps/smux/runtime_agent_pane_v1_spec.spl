@@ -1,0 +1,110 @@
+"""
+## Purpose and audience
+Pins the smux consumer of a V4 agent primary attach (milestone_0024 PR3c, DESIGN 9.1/11.1): the pane holds ONLY a
+HostAgentPaneLeaseV4, claims it once, relays Read through the agent and drops its record when the agent refuses the
+lease. smux/pane state is never authority; Resize and Write are refused here (no installed-policy source for
+Resize on V4; Write needs a control lease and is a later slice). Written for owners of the smux Host route.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+Pure over data. The live owner wiring (lease and pane io through HostLinuxServiceCurrentV4) is pinned by
+runtime_agent_pane_wiring_v1_spec.spl as source-text checks because a live Linux service owner has no pure fixture.
+## Verification guidance and troubleshooting
+A held lease that survives `attach-lease-revoked`, or a second claim that reaches the agent, is a defect.
+"""
+use std.spec.{step}
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneIoResultV4, host_agent_pane_lease_v4}
+use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV2
+use os.apps.smux.runtime_agent_pane_v1.{smux_agent_pane_claim_gate_v1, smux_agent_pane_claimed_v1,
+    smux_agent_pane_read_gate_v1, smux_agent_pane_read_done_v1, smux_agent_pane_keeps_lease_v1,
+    smux_agent_pane_op_refusal_v1, smux_agent_pane_registry_match_v1, smux_agent_pane_attach_supersedes_v1}
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+
+fn lease_of(epoch: i64) -> HostAgentPaneLeaseV4:
+    host_agent_pane_lease_v4("op-1", epoch, "digest")
+
+describe "smux agent pane consumer":
+    it "claims once and refuses a second claim before the agent is reached":
+        step("no lease held: claim may proceed"):
+            expect(smux_agent_pane_claim_gate_v1(None, false)).to_equal("")
+        step("a held lease refuses another claim"):
+            expect(smux_agent_pane_claim_gate_v1(Some(lease_of(0)), false)).to_equal("runtime-agent-pane-held")
+    it "stores the lease from an agent answer and never from a refusal":
+        step("accepted lease is stored and encoded"):
+            val turn = smux_agent_pane_claimed_v1(Some(lease_of(3)), "")
+            expect(turn.error).to_equal("")
+            expect(turn.lease.is_some()).to_equal(true)
+            expect(turn.response.contains("host-agent-pane-lease")).to_equal(true)
+            expect(turn.response.contains("digest")).to_equal(false)
+        step("agent refusal keeps no lease"):
+            val turn = smux_agent_pane_claimed_v1(None, "attach-lease-held")
+            expect(turn.lease.is_none()).to_equal(true)
+            expect(turn.error).to_equal("attach-lease-held")
+        step("an answer with neither lease nor error is refused"):
+            val turn = smux_agent_pane_claimed_v1(None, "")
+            expect(turn.error).to_equal("runtime-agent-pane-no-lease")
+    it "reads only through a claimed lease":
+        step("unclaimed read is refused"):
+            expect(smux_agent_pane_read_gate_v1(None, false)).to_equal("runtime-agent-pane-not-claimed")
+        step("claimed read may reach the agent"):
+            expect(smux_agent_pane_read_gate_v1(Some(lease_of(1)), false)).to_equal("")
+    it "drops the lease when the agent says it is no longer valid":
+        step("the lease-terminal errors drop it"):
+            expect(smux_agent_pane_keeps_lease_v1("attach-lease-revoked")).to_equal(false)
+            expect(smux_agent_pane_keeps_lease_v1("attach-no-attachment")).to_equal(false)
+            expect(smux_agent_pane_keeps_lease_v1("attach-stopping")).to_equal(false)
+            expect(smux_agent_pane_keeps_lease_v1("attach-stage")).to_equal(false)
+            expect(smux_agent_pane_keeps_lease_v1("some-authorize-error")).to_equal(false)
+        step("transient errors and success keep it"):
+            expect(smux_agent_pane_keeps_lease_v1("")).to_equal(true)
+            expect(smux_agent_pane_keeps_lease_v1("attach-not-ready")).to_equal(true)
+            expect(smux_agent_pane_keeps_lease_v1("attach-binding-mismatch")).to_equal(true)
+        step("a revoked read leaves no lease and reports the refusal"):
+            val turn = smux_agent_pane_read_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-lease-revoked"))
+            expect(turn.lease.is_none()).to_equal(true)
+            expect(turn.error).to_equal("attach-lease-revoked")
+    it "encodes a read result canonically with sticky eof":
+        step("chunks and eof are reported, the lease stays"):
+            val chunk = ContainerTerminalChunkV2(stream: "stdout", bytes: [104, 105])
+            val turn = smux_agent_pane_read_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(chunks: [chunk], eof: true))
+            expect(turn.error).to_equal("")
+            expect(turn.lease.is_some()).to_equal(true)
+            expect(turn.response.contains("stdout")).to_equal(true)
+            expect(turn.response.contains("true")).to_equal(true)
+    it "refuses ops this slice does not serve":
+        step("resize stays refused on V4"):
+            expect(smux_agent_pane_op_refusal_v1("host-agent-pane-resize")).to_equal("runtime-agent-pane-resize-refused")
+        step("write is a later slice"):
+            expect(smux_agent_pane_op_refusal_v1("host-agent-pane-write")).to_equal("runtime-agent-pane-write-unsupported")
+    it "treats an observed revoke as final for this attach (S3)":
+        step("a lease-terminal read refusal drops the lease and marks the pane revoked"):
+            val turn = smux_agent_pane_read_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-lease-revoked"))
+            expect(turn.revoked).to_equal(true)
+        step("a transient or binding refusal does not mark it revoked"):
+            expect(smux_agent_pane_read_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-not-ready")).revoked).to_equal(false)
+            expect(smux_agent_pane_read_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-binding-registry-mismatch")).revoked).to_equal(false)
+        step("a revoked pane refuses claim and read before the agent is reached"):
+            expect(smux_agent_pane_claim_gate_v1(None, true)).to_equal("runtime-agent-pane-revoked")
+            expect(smux_agent_pane_read_gate_v1(None, true)).to_equal("runtime-agent-pane-revoked")
+        step("a claim before ready leaves no lease and may be retried"):
+            val turn = smux_agent_pane_claimed_v1(None, "attach-not-ready")
+            expect(turn.lease.is_none()).to_equal(true)
+            expect(turn.revoked).to_equal(false)
+            expect(smux_agent_pane_claim_gate_v1(None, false)).to_equal("")
+    it "cross-checks the signed binding against the registry without trusting it":
+        val binding = HostAgentPaneBindingV4(binding_uid: "b1", service_incarnation: "inc-1", session_id: "s1",
+            window_id: "w1", pane_id: "p1", service_epoch: 1)
+        step("matching incarnation and a registered pane agree"):
+            expect(smux_agent_pane_registry_match_v1(binding, "inc-1", ["p0", "p1"])).to_equal("")
+        step("an absent pane refuses"):
+            expect(smux_agent_pane_registry_match_v1(binding, "inc-1", ["p0"])).to_equal("attach-binding-registry-mismatch")
+        step("another service incarnation refuses"):
+            expect(smux_agent_pane_registry_match_v1(binding, "inc-2", ["p1"])).to_equal("attach-binding-registry-mismatch")
+    it "clears the pane record only for an attach of a different run":
+        step("a replay of the held run's attach keeps the lease the agent will not reissue"):
+            expect(smux_agent_pane_attach_supersedes_v1("run-1", "run-1")).to_equal(false)
+        step("an attach of another run supersedes the record"):
+            expect(smux_agent_pane_attach_supersedes_v1("run-1", "run-2")).to_equal(true)
+        step("nothing held, nothing to supersede"):
+            expect(smux_agent_pane_attach_supersedes_v1("", "run-2")).to_equal(false)

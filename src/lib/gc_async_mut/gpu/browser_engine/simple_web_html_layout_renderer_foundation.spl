@@ -2119,7 +2119,24 @@ fn gradient_inner(raw: text) -> text:
 # left out; `gradient_layer_list_color_text` returns it. Anything else
 # (url(), repeating-/conic- gradients, a colour inside an image layer, a
 # malformed layer) returns [] so the whole list stays fail-closed.
+#
+# A layer may carry a shorthand tail after its function,
+# `<position> [/ <size>] <repeat>` (`gradient_layer_tail_parts`); the list is
+# [] when any tail is outside that subset, and only the functions are
+# returned here (`gradient_layer_entries` keeps the tails).
 fn gradient_layer_list(raw: text) -> [text]:
+    var layers: [text] = []
+    for entry in gradient_layer_entries(raw):
+        val split = gradient_layer_split(entry)
+        if gradient_layer_tail_parts(split[1]).len() == 0:
+            return []
+        layers.push(split[0])
+    layers
+
+# The image layers of a gradient-only background list with their tails,
+# whatever the tail holds; [] when any image layer is not a plain linear /
+# radial gradient function with >= 2 stops.
+fn gradient_layer_entries(raw: text) -> [text]:
     val parts = split_top_level_commas_paren_aware(raw.trim())
     var count = parts.len()
     if count > 1 and gradient_layer_list_color_text(raw) != "":
@@ -2127,20 +2144,311 @@ fn gradient_layer_list(raw: text) -> [text]:
     var layers: [text] = []
     var i = 0
     while i < count:
-        val layer = parts[i]
-        val lower = layer.lower()
-        var open = -1
-        if text_starts_with_portable(lower, "linear-gradient("):
-            open = "linear-gradient".len()
-        elif text_starts_with_portable(lower, "radial-gradient("):
-            open = "radial-gradient".len()
-        if open < 0 or gradient_matching_close(layer, open) != layer.byte_len() - 1:
-            return []
-        if parse_gradient_stops(layer).len() < 2:
+        val layer = parts[i].trim()
+        val split = gradient_layer_split(layer)
+        if split.len() != 2 or parse_gradient_stops(split[0]).len() < 2:
             return []
         layers.push(layer)
         i = i + 1
     layers
+
+# One background layer split after its leading `linear-gradient(...)` /
+# `radial-gradient(...)` function: [function, tail]; [] otherwise.
+fn gradient_layer_split(layer: text) -> [text]:
+    val lower = layer.lower()
+    var open = -1
+    if text_starts_with_portable(lower, "linear-gradient("):
+        open = "linear-gradient".len()
+    elif text_starts_with_portable(lower, "radial-gradient("):
+        open = "radial-gradient".len()
+    if open < 0:
+        return []
+    val close = gradient_matching_close(layer, open)
+    if close <= open:
+        return []
+    [layer.substring(0, close + 1), layer.substring(close + 1, layer.byte_len()).trim()]
+
+# The `<position> [/ <size>] <repeat>` texts of a layer tail (each "" when
+# absent), or [] when the tail holds anything else (a box, `fixed`, a colour,
+# a 3/4-value position). `scroll` is the default attachment and is ignored.
+fn gradient_layer_tail_parts(tail: text) -> [text]:
+    var positions: [text] = []
+    var sizes: [text] = []
+    var repeats: [text] = []
+    var after_slash = false
+    var slash_seen = false
+    var last_group = ""
+    for raw_tok in tail.replace("/", " / ").split(" "):
+        val tok = raw_tok.trim().lower()
+        if tok == "":
+            continue
+        if after_slash:
+            if (tok == "auto" or tok == "cover" or tok == "contain" or _bg_len_q10(tok).len() == 2) and sizes.len() < 2:
+                sizes.push(tok)
+                continue
+            if sizes.len() == 0:
+                return []
+            after_slash = false
+        if tok == "/":
+            if slash_seen or positions.len() == 0 or last_group != "position":
+                return []
+            slash_seen = true
+            after_slash = true
+            last_group = "size"
+        elif tok == "scroll":
+            last_group = "scroll"
+        elif tok == "repeat" or tok == "no-repeat" or tok == "repeat-x" or tok == "repeat-y" or tok == "space" or tok == "round":
+            if repeats.len() > 0 and last_group != "repeat":
+                return []
+            repeats.push(tok)
+            last_group = "repeat"
+        elif tok == "left" or tok == "right" or tok == "top" or tok == "bottom" or tok == "center" or _bg_len_q10(tok).len() == 2:
+            if (positions.len() > 0 and last_group != "position") or slash_seen:
+                return []
+            positions.push(tok)
+            last_group = "position"
+        else:
+            return []
+    if slash_seen and sizes.len() == 0:
+        return []
+    if positions.len() > 2 or repeats.len() > 2:
+        return []
+    [_bg_join(positions, " "), _bg_join(sizes, " "), _bg_join(repeats, " ")]
+
+# A `<length-percentage>` token as [unit, value in Q10] (unit 1 = px,
+# 2 = percent; a bare 0 is 0px), [] when it is anything else.
+fn _bg_len_q10(tok: text) -> [i64]:
+    var unit: i64 = 0
+    var body = tok
+    if tok.ends_with("px"):
+        unit = 1
+        body = tok.substring(0, tok.byte_len() - 2)
+    elif tok.ends_with("%"):
+        unit = 2
+        body = tok.substring(0, tok.byte_len() - 1)
+    var neg = false
+    var i = 0
+    if body.starts_with("-"):
+        neg = true
+        i = 1
+    var int_part: i64 = 0
+    var frac: i64 = 0
+    var frac_scale: i64 = 1
+    var digits = 0
+    var dot = false
+    while i < body.byte_len():
+        val c = body.substring(i, i + 1)
+        if c == ".":
+            if dot:
+                return []
+            dot = true
+        else:
+            val d = dec_val(c)
+            if d > 9:
+                return []
+            digits = digits + 1
+            if dot:
+                if frac_scale < 10000:
+                    frac = frac * 10 + (d as i64)
+                    frac_scale = frac_scale * 10
+            else:
+                int_part = int_part * 10 + (d as i64)
+        i = i + 1
+    if digits == 0:
+        return []
+    var v = int_part * 1024 + (frac * 1024 + frac_scale / 2) / frac_scale
+    if neg:
+        v = 0 - v
+    if unit == 0:
+        if v != 0:
+            return []
+        unit = 1
+    [unit, v]
+
+# `background-size` of one layer: [kind, w_unit, w_q10, h_unit, h_q10]
+# (kind 0 = explicit, 1 = cover, 2 = contain; unit 0 = auto, 1 = px,
+# 2 = percent), [] when invalid. "" is `auto`.
+fn background_size_spec(t: text) -> [i64]:
+    val toks = _bg_words(t)
+    if toks.len() == 0:
+        return [0, 0, 0, 0, 0]
+    if toks.len() == 1 and toks[0] == "cover":
+        return [1, 0, 0, 0, 0]
+    if toks.len() == 1 and toks[0] == "contain":
+        return [2, 0, 0, 0, 0]
+    if toks.len() > 2:
+        return []
+    var out: [i64] = [0]
+    for tok in toks:
+        if tok == "auto":
+            out.push(0)
+            out.push(0)
+        else:
+            val l = _bg_len_q10(tok)
+            if l.len() != 2 or l[1] < 0:
+                return []
+            out.push(l[0])
+            out.push(l[1])
+    if out.len() == 3:
+        out.push(0)
+        out.push(0)
+    out
+
+# `background-position` of one layer (1 or 2 values): [x_pct_q10, x_px_q10,
+# y_pct_q10, y_px_q10] (offset = pct * (area - tile) / 100 + px), [] when
+# invalid. "" is `0% 0%`.
+fn background_position_spec(t: text) -> [i64]:
+    val toks = _bg_words(t)
+    if toks.len() == 0:
+        return [0, 0, 0, 0]
+    if toks.len() > 2:
+        return []
+    var xt = toks[0]
+    var yt = "center"
+    if toks.len() == 1:
+        if xt == "top" or xt == "bottom":
+            yt = xt
+            xt = "center"
+    else:
+        yt = toks[1]
+        if xt == "top" or xt == "bottom" or yt == "left" or yt == "right":
+            if not _bg_position_keyword(xt) or not _bg_position_keyword(yt):
+                return []
+            val sw = xt
+            xt = yt
+            yt = sw
+    val x = _bg_position_axis(xt, "left", "right")
+    val y = _bg_position_axis(yt, "top", "bottom")
+    if x.len() != 2 or y.len() != 2:
+        return []
+    [x[0], x[1], y[0], y[1]]
+
+fn _bg_position_keyword(s: text) -> bool:
+    s == "left" or s == "right" or s == "top" or s == "bottom" or s == "center"
+
+fn _bg_words(t: text) -> [text]:
+    var out: [text] = []
+    for w in t.trim().lower().split(" "):
+        if w.trim() != "":
+            out.push(w.trim())
+    out
+
+fn _bg_join(parts: [text], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            out = out + sep
+        out = out + parts[i]
+        i = i + 1
+    out
+
+fn _bg_position_axis(tok: text, start_kw: text, end_kw: text) -> [i64]:
+    if tok == start_kw:
+        return [0, 0]
+    if tok == "center":
+        return [51200, 0]
+    if tok == end_kw:
+        return [102400, 0]
+    val l = _bg_len_q10(tok)
+    if l.len() != 2:
+        return []
+    if l[0] == 2:
+        return [l[1], 0]
+    [0, l[1]]
+
+# `background-repeat` of one layer: [repeat_x, repeat_y] (1 = repeat,
+# 0 = no-repeat), [] for `space` / `round` (not implemented) or invalid.
+# "" is `repeat`.
+fn background_repeat_spec(t: text) -> [i64]:
+    val toks = _bg_words(t)
+    if toks.len() == 0:
+        return [1, 1]
+    if toks.len() == 1:
+        val r = toks[0]
+        if r == "repeat":
+            return [1, 1]
+        if r == "no-repeat":
+            return [0, 0]
+        if r == "repeat-x":
+            return [1, 0]
+        if r == "repeat-y":
+            return [0, 1]
+        return []
+    if toks.len() != 2:
+        return []
+    var out: [i64] = []
+    for r in toks:
+        if r == "repeat":
+            out.push(1)
+        elif r == "no-repeat":
+            out.push(0)
+        else:
+            return []
+    out
+
+# True when a layer's size / position / repeat texts leave its tile 0 on
+# the positioning area: size auto / 100% (or cover / contain, which are the
+# area for a gradient) and no px offset (a percentage offset of a full-area
+# tile is 0). The repeat is not considered: it only changes the border area,
+# which the untiled paths already paint by extrapolation (open). Invalid
+# texts are not default (the painter fails closed on them).
+fn background_layer_geometry_default(size: text, position: text, repeat: text) -> bool:
+    val s = background_size_spec(size)
+    val p = background_position_spec(position)
+    val r = background_repeat_spec(repeat)
+    if s.len() != 5 or p.len() != 4 or r.len() != 2:
+        return false
+    val full_w = s[1] == 0 or (s[1] == 2 and s[2] == 102400)
+    val full_h = s[3] == 0 or (s[3] == 2 and s[4] == 102400)
+    (s[0] != 0 or (full_w and full_h)) and p[1] == 0 and p[3] == 0
+
+# A gradient list rewritten so every image layer carries its own
+# `<position> / <size> <repeat>` tail: the per-layer entry of each
+# non-empty longhand list (repeated cyclically, CSS Backgrounds 3 §2.2),
+# else the layer's shorthand tail. "" when `raw` is not a gradient list or
+# every layer keeps the default geometry (nothing to rewrite).
+fn gradient_layer_list_apply_longhands(raw: text, size_list: text, position_list: text, repeat_list: text) -> text:
+    val entries = gradient_layer_entries(raw)
+    if entries.len() == 0:
+        return ""
+    val sizes = if size_list.trim() == "": [] else: split_top_level_commas_paren_aware(size_list.trim())
+    val positions = if position_list.trim() == "": [] else: split_top_level_commas_paren_aware(position_list.trim())
+    val repeats = if repeat_list.trim() == "": [] else: split_top_level_commas_paren_aware(repeat_list.trim())
+    # One tail-less layer that does not repeat stays on the typed
+    # single-gradient path: it already places one sized tile, with Chrome's
+    # ordered dither, which the layer path does not carry.
+    if entries.len() == 1 and gradient_layer_split(entries[0])[1].trim() == "" and repeats.len() > 0:
+        val rx_ry = background_repeat_spec(repeats[0].trim())
+        if rx_ry.len() == 2 and rx_ry[0] == 0 and rx_ry[1] == 0:
+            return ""
+    var out: [text] = []
+    var any_change = false
+    var i = 0
+    while i < entries.len():
+        val split = gradient_layer_split(entries[i])
+        var tail = gradient_layer_tail_parts(split[1])
+        if tail.len() == 0:
+            # An unsupported shorthand tail stays as authored (fail-closed).
+            out.push(entries[i])
+            any_change = true
+        else:
+            val pos = if positions.len() > 0: positions[i % positions.len()].trim() else: tail[0]
+            val size = if sizes.len() > 0: sizes[i % sizes.len()].trim() else: tail[1]
+            val rep = if repeats.len() > 0: repeats[i % repeats.len()].trim() else: tail[2]
+            if not background_layer_geometry_default(size, pos, rep):
+                any_change = true
+            val p = if pos == "": "0% 0%" else: pos
+            val s = if size == "": "auto" else: size
+            val r = if rep == "": "repeat" else: rep
+            out.push(split[0] + " " + p + " / " + s + " " + r)
+        i = i + 1
+    if not any_change:
+        return ""
+    val color = gradient_layer_list_color_text(raw)
+    if color != "" and split_top_level_commas_paren_aware(raw.trim()).len() > entries.len():
+        out.push(color.trim())
+    _bg_join(out, ", ")
 
 # The final top-level layer of a background list when it is a bare colour
 # (no image or function other than a colour function), else "".
@@ -2219,7 +2527,7 @@ fn gradient_stop_color_text(part: text) -> text:
     if ls < 0:
         return part
     val after = part.substring(ls + 1, part.byte_len()).trim()
-    if parse_percent_permille(after) >= 0:
+    if parse_percent_permille(after) >= 0 or gradient_stop_token(after, 16)[0] != 0:
         return part.substring(0, ls).trim()
     part
 
@@ -2325,11 +2633,98 @@ fn parse_gradient_angle_deg(raw: text) -> i32:
         return 270
     180
 
-# Full N-stop list for a `linear-gradient(...)`/`radial-gradient(...)` value.
-# Explicit "%" stop positions are honored; stops without one default to 0 for
-# the first, 1000 for the last, and are evenly spaced in between (matching
-# plain-CSS gradient-stop defaulting).
+# Full N-stop list for a `linear-gradient(...)`/`radial-gradient(...)` value
+# with every stop position in permille of the gradient line. Length stops
+# (`px`, `em`) cannot be placed without a line; here they are unpositioned
+# (`parse_gradient_stops_on_line` resolves them against a known line).
 fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
+    parse_gradient_stops_on_line(raw, 0, 16)
+
+# One stop's position token: [kind, value]. kind 0 = no position, 1 =
+# percentage (value in permille, signed), 2 = length (value in Q10 px,
+# signed; `em` is `em_px` px).
+# reason: stop-position token scanner shared by the cascade and the gradient layer painters; value in permille or Q10 px
+# @allow(primitive_api)
+pub fn gradient_stop_token(tok: text, em_px: i32) -> [i64]:
+    val t = tok.trim().lower()
+    val n = t.byte_len()
+    if n == 0:
+        return [0, 0]
+    val neg = t.substring(0, 1) == "-"
+    val body = if neg or t.substring(0, 1) == "+": t.substring(1, n) else: t
+    val bn = body.byte_len()
+    if bn >= 2 and body.substring(bn - 1, bn) == "%":
+        val pm = parse_percent_permille(body)
+        if pm < 0:
+            return [0, 0]
+        return [1, if neg: 0 - (pm as i64) else: pm as i64]
+    var unit_len = 0
+    var scale: i64 = 0
+    if bn >= 3 and body.substring(bn - 2, bn) == "px":
+        unit_len = 2
+        scale = 1
+    elif bn >= 3 and body.substring(bn - 2, bn) == "em" and not (bn >= 4 and body.substring(bn - 3, bn) == "rem"):
+        unit_len = 2
+        scale = em_px as i64
+    if unit_len == 0:
+        return [0, 0]
+    # Decimal magnitude in 1/1000 units.
+    var int_part: i64 = 0
+    var frac: i64 = 0
+    var frac_den: i64 = 1
+    var in_frac = false
+    var seen = false
+    var i = 0
+    while i < bn - unit_len:
+        val c = body.substring(i, i + 1)
+        val d = dec_val(c)
+        if d < 10:
+            seen = true
+            if in_frac:
+                if frac_den < 1000:
+                    frac = frac * 10 + (d as i64)
+                    frac_den = frac_den * 10
+            else:
+                int_part = int_part * 10 + (d as i64)
+        elif c == "." and not in_frac:
+            in_frac = true
+        else:
+            return [0, 0]
+        i = i + 1
+    if not seen:
+        return [0, 0]
+    val milli = int_part * 1000 + frac * 1000 / frac_den
+    val q10 = (milli * scale * 1024 + 500) / 1000
+    [2, if neg: 0 - q10 else: q10]
+
+# True when any stop of the gradient function `raw` is positioned by a
+# length: such a gradient can only be resolved per box (and per tile), so
+# the cascade's typed single-layer projections must leave it to the
+# gradient layer path.
+# reason: cascade-time predicate over raw CSS gradient text
+# @allow(primitive_api)
+pub fn gradient_has_length_stop(raw: text) -> bool:
+    val inner = gradient_inner(raw)
+    if inner.len() == 0:
+        return false
+    for part in split_top_level_commas_paren_aware(inner):
+        val ls = find_last_top_level_space(part)
+        if ls >= 0:
+            if gradient_stop_token(part.substring(ls + 1, part.byte_len()), 16)[0] == 2:
+                return true
+    false
+
+# Full N-stop list resolved against a gradient line `line_q10` long (Q10 px;
+# 0 = unknown, length stops then stay unpositioned). Explicit stops are
+# honored (percentages, or lengths as a share of the line, rounded to the
+# nearest permille); CSS Images 3 §3.4.3 fix-up: an unpositioned first stop
+# is 0%, an unpositioned last stop 100%, a stop below the largest position
+# before it is raised to it, and runs of unpositioned stops are spaced
+# evenly between their positioned neighbours. Positions may lie outside
+# 0..1000.
+# reason: shared stop resolver for the cascade (line unknown) and the per-layer painters; line in Q10 px, font size in px
+# @allow(primitive_api)
+pub fn parse_gradient_stops_on_line(raw: text, line_q10: i64, em_px: i32) -> [GradientStopSpec]:
     val inner = gradient_inner(raw)
     var stops: [GradientStopSpec] = []
     if inner.len() == 0:
@@ -2352,31 +2747,46 @@ fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
         return stops
     var colors: [u32] = []
     var raw_pos: [i32] = []
+    var placed: [bool] = []
     var i2 = 0
     while i2 < n:
         val cp = color_parts[i2]
         colors.push(parse_color_any(gradient_stop_color_text(cp)))
-        raw_pos.push(gradient_stop_position_or_neg1(cp))
+        val ls = find_last_top_level_space(cp)
+        val tok = if ls >= 0: gradient_stop_token(cp.substring(ls + 1, cp.byte_len()), em_px) else: [0, 0]
+        if tok[0] == 1:
+            raw_pos.push(tok[1] as i32)
+            placed.push(true)
+        elif tok[0] == 2 and line_q10 > 0:
+            val num = tok[1] * 1000
+            val pm = if num >= 0: (num + line_q10 / 2) / line_q10 else: 0 - ((0 - num + line_q10 / 2) / line_q10)
+            raw_pos.push(pm as i32)
+            placed.push(true)
+        else:
+            raw_pos.push(0)
+            placed.push(false)
         i2 = i2 + 1
-    if raw_pos[0] < 0:
+    if not placed[0]:
         raw_pos[0] = 0
-    if raw_pos[n - 1] < 0:
-        raw_pos[n - 1] = 1000
+        placed[0] = true
+    if not placed[n - 1]:
+        raw_pos[n - 1] = if raw_pos[0] > 1000: raw_pos[0] else: 1000
+        placed[n - 1] = true
     # CSS Images 3 §3.4.3: a positioned stop below the largest position
     # before it is raised to that position (a hard edge).
     var run_max = raw_pos[0]
     var q = 1
     while q < n:
-        if raw_pos[q] >= 0:
+        if placed[q]:
             if raw_pos[q] < run_max:
                 raw_pos[q] = run_max
             run_max = raw_pos[q]
         q = q + 1
     var k = 1
     while k < n - 1:
-        if raw_pos[k] < 0:
+        if not placed[k]:
             var j = k + 1
-            while j < n - 1 and raw_pos[j] < 0:
+            while j < n - 1 and not placed[j]:
                 j = j + 1
             val prev_pos = raw_pos[k - 1]
             val next_pos = raw_pos[j]

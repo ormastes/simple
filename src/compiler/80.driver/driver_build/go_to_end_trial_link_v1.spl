@@ -32,7 +32,7 @@
 # are `-Wl,`-prefixed like the line's own `-Wl,--gc-sections`; a bare-lld
 # linker strips the prefix (the spec's fixture linker does).
 use std.io_runtime.{file_exists, file_delete, dir_list_optional, file_read}
-use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, host_os}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.backend.llvm_native_link.{NativeLinkOptions, link_llvm_native}
 use compiler.driver.driver_build.go_to_end.{go_to_end_user_output_v1, go_to_end_sdn_quote_v1,
@@ -55,6 +55,25 @@ pub fn go_to_end_trial_report_flags_v1() -> [text]:
 # Artifact pass: tolerate undefined symbols, still fail on anything else.
 pub fn go_to_end_trial_artifact_flags_v1() -> [text]:
     ["-Wl,--unresolved-symbols=ignore-all", "-Wl,--warn-unresolved-symbols", "-Wl,--error-limit=0", "-Wl,--no-gc-sections"]
+
+@allow(primitive_api) # reason: boolean target-triple predicate used by Darwin trial-link specs and hosted linker
+pub fn go_to_end_target_is_darwin_v1(target_triple: text) -> bool:
+    val lowered = target_triple.to_lower()
+    lowered.contains("darwin") or lowered.contains("apple") or lowered.contains("macos")
+
+pub fn go_to_end_trial_adapt_extra_flags_v1(extra_flags: [text], target_triple: text) -> [text]:
+    if not go_to_end_target_is_darwin_v1(target_triple):
+        return extra_flags
+    var adapted: [text] = []
+    for flag in extra_flags:
+        if flag == "-Wl,--error-limit=0" or flag == "-Wl,--no-gc-sections" or flag == "-Wl,--warn-unresolved-symbols":
+            continue
+        elif flag == "-Wl,--unresolved-symbols=ignore-all":
+            if not adapted.contains("-Wl,-undefined,dynamic_lookup"):
+                adapted = adapted.push("-Wl,-undefined,dynamic_lookup")
+        elif not adapted.contains(flag):
+            adapted = adapted.push(flag)
+    adapted
 
 # Identity with a declared Result parameter. A trait-object method call's
 # return type does not reach the caller's local under the self-hosted
@@ -107,6 +126,13 @@ pub fn go_to_end_link_undefined_symbols_v1(linker_text: text) -> [text]:
         elif trimmed.contains("undefined reference to "):
             val parts = trimmed.split("undefined reference to ")
             payload = parts[parts.len() - 1].trim()
+        elif trimmed.contains(", referenced from:"):
+            val parts = trimmed.split(", referenced from:")
+            val raw = parts[0].trim().replace("\"", "").replace("'", "").trim()
+            if raw.starts_with("_"):
+                payload = raw.substring(1)
+            else:
+                payload = raw
         if payload == "":
             continue
         val name = payload.split(" ")[0].replace("`", "").replace("'", "").replace("\"", "").replace(",", "").replace(";", "").trim()
@@ -173,10 +199,16 @@ pub struct GoToEndHostedTrialLinkerV1:
 impl GoToEndTrialLinkerV1 for GoToEndHostedTrialLinkerV1:
     fn link(objects: [text], output: text, extra_flags: [text]) -> Result<text, text>:
         var trial_opts = self.opts
+        val effective_target = if self.opts.target_triple != "":
+            self.opts.target_triple
+        else:
+            val env_target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+            if env_target != "": env_target else: host_os()
+        val adapted_extra = go_to_end_trial_adapt_extra_flags_v1(extra_flags, effective_target)
         var flags: [text] = []
         for flag in self.opts.linker_flags:
             flags = flags.push(flag)
-        for flag in extra_flags:
+        for flag in adapted_extra:
             flags = flags.push(flag)
         trial_opts.linker_flags = flags
         link_llvm_native(objects, output, trial_opts)
