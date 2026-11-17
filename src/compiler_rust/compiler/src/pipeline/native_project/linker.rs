@@ -491,7 +491,7 @@ fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
 /// looked up in the `-L` dirs first, then via the driver's own sysroot search
 /// (`-print-file-name`, i.e. llvm-mingw's x86_64-w64-mingw32/lib).
 #[cfg(target_os = "windows")]
-fn gnu_link_line_libraries(cmd: &std::process::Command, cc: &str) -> Vec<PathBuf> {
+fn gnu_link_line_libraries(cmd: &std::process::Command, cc: &str, driver_target: &str) -> Vec<PathBuf> {
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     let search_dirs: Vec<PathBuf> = args.iter().filter_map(|a| a.strip_prefix("-L")).map(PathBuf::from).collect();
     let mut names: Vec<&str> = args.iter().filter_map(|a| a.strip_prefix("-l")).collect();
@@ -506,7 +506,7 @@ fn gnu_link_line_libraries(cmd: &std::process::Command, cc: &str) -> Vec<PathBuf
         let path = in_dirs.or_else(|| {
             candidates.iter().find_map(|c| {
                 let out = std::process::Command::new(cc)
-                    .arg("--target=x86_64-w64-windows-gnu")
+                    .arg(driver_target)
                     .arg(format!("-print-file-name={c}"))
                     .output()
                     .ok()?;
@@ -2861,7 +2861,11 @@ int main(int argc, char** argv) {
             // System libraries named by `-l` (plus the driver's implicit
             // mingw/unwind libs) are real providers: never trap-stub their
             // imports (WriteFile, sockets, _Unwind_*).
-            let system_libs = gnu_link_line_libraries(&cmd, &cc);
+            let system_libs = gnu_link_line_libraries(
+                &cmd,
+                &cc,
+                windows_gnu_target_flag(cross_target, &cc).unwrap_or("--target=x86_64-w64-windows-gnu"),
+            );
             let stubs_o = super::stubs::generate_stub_object_with_policy(
                 temp_dir,
                 object_paths,

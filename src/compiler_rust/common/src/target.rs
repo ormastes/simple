@@ -683,6 +683,8 @@ impl Target {
                 "macos" | "darwin" | "apple" => TargetOS::MacOS,
                 "freebsd" => TargetOS::FreeBSD,
                 "none" | "bare" | "wasi" => TargetOS::None,
+                // llvm-mingw spelling: `<arch>-w64-mingw32` / `<arch>-w64-windows-gnu`.
+                "w64" => TargetOS::Windows,
                 "unknown" | "pc" => {
                     // Standard triple: arch-vendor-os or arch-vendor-os-env
                     // Check remaining parts for OS identification
@@ -706,7 +708,10 @@ impl Target {
         };
 
         let linker_flavor_hint = if os == TargetOS::Windows {
-            if os_joined.ends_with("-gnu") {
+            if os_joined.ends_with("-gnu")
+                || os_joined.ends_with("-gnullvm")
+                || os_joined.ends_with("-mingw32")
+            {
                 Some(LinkerFlavor::Gnu)
             } else if os_joined.ends_with("-msvc") {
                 Some(LinkerFlavor::Msvc)
@@ -1018,6 +1023,24 @@ mod tests {
         let target = Target::parse("aarch64-macos").unwrap();
         assert_eq!(target.arch, TargetArch::Aarch64);
         assert_eq!(target.os, TargetOS::MacOS);
+    }
+
+    #[test]
+    fn parse_windows_arm64_mingw_triples_select_gnu_flavor() {
+        for triple in [
+            "aarch64-pc-windows-gnullvm",
+            "aarch64-pc-windows-gnu",
+            "aarch64-w64-mingw32",
+            "aarch64-w64-windows-gnu",
+        ] {
+            let target = Target::parse(triple).unwrap();
+            assert_eq!(target.arch, TargetArch::Aarch64, "{triple}");
+            assert_eq!(target.os, TargetOS::Windows, "{triple}");
+            assert_eq!(target.linker_flavor_hint, Some(LinkerFlavor::Gnu), "{triple}");
+        }
+        let x64 = Target::parse("x86_64-w64-mingw32").unwrap();
+        assert_eq!(x64.os, TargetOS::Windows);
+        assert_eq!(x64.linker_flavor_hint, Some(LinkerFlavor::Gnu));
     }
 
     #[test]
