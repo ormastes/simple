@@ -60,6 +60,30 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_style_by_id,
     simple_web_layout_uses_legacy_widget_chrome
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_resolved_engine2d_backend
+}
+
+# Largest per-channel deviation of px[y * fw + x] from Chrome over the sample
+# points (pts = x0, y0, x1, y1, ...).
+fn _radial_chrome_dev(px: [u32], fw: i32, pts: [i32], want: [u32]) -> i32:
+    var worst = 0
+    var i = 0
+    while i < want.len():
+        val got = px[pts[2 * i + 1] * fw + pts[2 * i]]
+        var sh = 0u32
+        while sh <= 16u32:
+            val g = ((got >> sh) & 255u32) as i32
+            val w = ((want[i] >> sh) & 255u32) as i32
+            val d = if g > w: g - w else: w - g
+            if d > worst:
+                worst = d
+            sh = sh + 8u32
+        i = i + 1
+    worst
 
 # --- fixtures ---------------------------------------------------------------
 # A single-property brace group like {color:red} lexes as a string
@@ -76,6 +100,12 @@ fn _grad_doc() -> text:
 
 fn _rad_doc() -> text:
     _head(".rad{{background:radial-gradient(circle at 30% 40%,#ffff00 0%,#ff00ff 100%);height:8px}}") +
+        "<div class=\"rad\"></div></body></html>"
+
+# `_rad_doc` laid out at 4x CSS px (html/body margin 0, so the 4x layout is
+# exactly the k=4 device picture of the 32x24 page).
+fn _rad_doc_4x() -> text:
+    _head(".rad{{background:radial-gradient(circle at 30% 40%,#ffff00 0%,#ff00ff 100%);height:32px}}") +
         "<div class=\"rad\"></div></body></html>"
 
 fn _shadow_doc() -> text:
@@ -354,15 +384,19 @@ describe "layout phase: paint primitives":
     it "enters the radial-gradient painter":
         # @req REQ-SSPEC-UNIT
         step("enters the radial-gradient painter")
-        # Measured: this fixture currently resolves to 2 distinct values, i.e.
-        # the radial stack flattens to a solid fill at this box size rather
-        # than painting a visible ramp. The example is kept because it does
-        # enter `fb_background_radial_stack_clip`, and the pinned count will
-        # move the day that flattening changes -- it is NOT evidence that a
-        # radial gradient renders correctly.
+        # Was `_distinct(px) == 2`: the `background:` shorthand flattened the
+        # radial to its first stop. Re-pinned 2026-11-17 to Chrome 159 pixels
+        # (owner: radial same as Chrome), +-2 per channel, on the 4x layout
+        # of the same page, which is the k=4 device picture:
+        #   chrome --headless --no-sandbox --hide-scrollbars \
+        #     --force-device-scale-factor=4 --window-size=32,24 \
+        #     --screenshot=<png> file://<_rad_doc() as html>
         val px = simple_web_layout_render_html_software_pixels(_rad_doc(), 32, 24, 3600000)
         expect(px.len()).to_be(768)
-        expect(_distinct(px)).to_be(2)
+        val px4 = simple_web_layout_render_html_software_pixels(_rad_doc_4x(), 128, 96, 3600000)
+        val pts = [38, 12, 64, 16, 100, 4, 127, 31, 0, 0, 10, 28, 64, 60]
+        val chrome = [0xFFFFFE01u32, 0xFFFFB549u32, 0xFFFF50AEu32, 0xFFFF01FDu32, 0xFFFF906Eu32, 0xFFFFA659u32, 0xFFFFFFFFu32]
+        expect(_radial_chrome_dev(px4, 128, pts, chrome)).to_be_less_than(3)
 
     it "rasters a text run carrying decoded numeric entities":
         # @req REQ-SSPEC-UNIT
@@ -399,13 +433,35 @@ describe "layout phase: paint primitives":
         expect(_distinct(px)).to_be(3)
 
     it "enters fb_background_radial_stack_clip via a legacy-widget-chrome radial body background":
-        # Measured: 14 distinct ARGB values over a 32x24 frame -- only a real
-        # radial-ramp raster produces that many bins; a flattened/solid fill
-        # (as seen in the non-widget-chrome `_rad_doc` fixture above) would
-        # read 2.
+        # Was `_distinct(px) == 14` (the first stop fading inside the body
+        # box). Re-pinned 2026-11-17 to Chrome 159 (owner: radial same as
+        # Chrome) in two links, since widget chrome and the 8px body margin do
+        # not scale to a 4x layout: the raster equals cpu_simd exactly at 1x,
+        # and cpu_simd at k=4 is within +-2 of Chrome at k=4:
+        #   chrome --headless --no-sandbox --hide-scrollbars \
+        #     --force-device-scale-factor=4 --window-size=32,24 \
+        #     --screenshot=<png> file://<_widget_radial_body_doc() as html>
+        # The body radial is the canvas background, positioned on the html
+        # box (34 CSS px tall here, taller than the viewport). The points lie
+        # on its centre row, clear of the "x" glyph Chrome draws at x 32..72
+        # and of the widget focus border Simple draws at x 0..3 / 124..127:
+        # off that row the 0.2 px line-height difference between Simple and
+        # Chrome moves the centre enough to cost up to 4 levels.
         val px = simple_web_layout_render_html_software_pixels(_widget_radial_body_doc(), 32, 24, 3600000)
         expect(px.len()).to_be(768)
-        expect(_distinct(px)).to_be(14)
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(_widget_radial_body_doc(), 32, 24, "cpu_simd")
+        var mismatches = 0
+        var i = 0
+        while i < px.len() and i < cpu.len():
+            if px[i] != cpu[i]:
+                mismatches = mismatches + 1
+            i = i + 1
+        expect(cpu.len()).to_equal(768)
+        expect(mismatches).to_equal(0)
+        val k4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_widget_radial_body_doc(), 32, 24, 4, "cpu_simd")
+        val pts = [8, 68, 16, 68, 88, 68, 100, 68, 112, 68, 120, 68]
+        val chrome = [0xFF680096u32, 0xFF7E0080u32, 0xFFBC0042u32, 0xFF9C0062u32, 0xFF7B0083u32, 0xFF650099u32]
+        expect(_radial_chrome_dev(k4, 128, pts, chrome)).to_be_less_than(3)
 
     it "enters fb_widget_image_placeholder_clip via a non-widget-mode widget-image img":
         # Measured: page-bg white, placeholder fill, placeholder border -> 3
