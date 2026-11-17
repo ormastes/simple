@@ -1,0 +1,79 @@
+# @cover src/lib/gc_async_mut/slang/entrypoints/openai/serving/serving_transcriptions.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+
+"""
+## Purpose and audience
+Purpose: prove on a real recording that /v1/audio/transcriptions returns the
+words that were spoken. Audience: engineers changing slang's ASR path.
+
+## What is checked
+- Phase A: Qwen3-ASR-0.6B (a Chat model with an audio projector) transcribes
+  jfk.wav through serve_transcriptions -> engine_complete_chat_media; the
+  answer holds "country" and carries no "<asr_text>" metadata prefix.
+- a text-only chat model is refused with 400 wrong_model_kind.
+Coarse keywords only: a 0.6B model need not spell every word.
+
+## Compatibility and limitations
+Runs when SLANG_LIVE=1, SLANG_MODEL_ROOT names the model directory and
+SLANG_GGML_LIB names a shim built with SLANG_SHIM_MTMD=1. The recording is
+SLANG_ASR_WAV (default C:/dev/tools/whisper.cpp/samples/jfk.wav, 16 kHz mono).
+Answers and timings are appended to build/probe/asr_answers.txt.
+"""
+
+use std.spec.{describe, it, expect, step, skip}
+use std.gc_async_mut.slang.entrypoints.llm.{engine_backend_available}
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_transcriptions.{serve_transcriptions}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+use std.io_runtime.{env_get, is_dir, file_exists, file_read_bytes, file_append_text, dir_create_all, time_now_monotonic_ms}
+use std.common.text_ascii.{to_lower_ascii}
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _wav() -> text:
+    val configured = env_get("SLANG_ASR_WAV") ?? ""
+    if configured != "":
+        return configured
+    "C:/dev/tools/whisper.cpp/samples/jfk.wav"
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and engine_backend_available() and file_exists(_wav())
+
+fn _record(line: text):
+    dir_create_all("build/probe")
+    file_append_text("build/probe/asr_answers.txt", line + "\n")
+
+fn _body(model: text) -> text:
+    "{\"model\":\"" + model + "\",\"file_b64\":\"" + base64_encode_bytes(file_read_bytes(_wav())) + "\",\"format\":\"wav\"}"
+
+describe "Phase A: an audio chat model transcribes":
+    it "transcribes jfk.wav with Qwen3-ASR-0.6B":
+        val model = "Qwen3-ASR-0.6B-GGUF"
+        if not _live_enabled() or not is_dir(_model_root() + "/" + model):
+            _record("SKIPPED: phase A -- needs SLANG_LIVE=1, SLANG_MODEL_ROOT, an mtmd shim, " + model + " and the wav")
+            skip("transcribes jfk.wav with Qwen3-ASR-0.6B", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, an mtmd shim, Qwen3-ASR and the wav")
+            return
+        step("POST the recording as file_b64")
+        val t0 = time_now_monotonic_ms()
+        val response = serve_transcriptions(_model_root(), _body(model))
+        val t1 = time_now_monotonic_ms()
+        val answer = json_string_field(response.body, "text")
+        _record("ASR-A " + model + " status=" + response.status.to_text() + " ms=" + (t1 - t0).to_text() + " text=" + answer + " body=" + response.body)
+        expect(response.status).to_equal(200)
+        expect(to_lower_ascii(answer).find("country") >= 0).to_equal(true)
+        expect(answer.find("<asr_text>") < 0).to_equal(true)
+
+    it "refuses a text-only model":
+        val model = "gemma-3-270m-it-GGUF"
+        if not _live_enabled() or not is_dir(_model_root() + "/" + model):
+            _record("SKIPPED: wrong kind -- needs SLANG_LIVE=1 and " + model)
+            skip("refuses a text-only model", "needs SLANG_LIVE=1 and gemma-3-270m-it-GGUF")
+            return
+        val response = serve_transcriptions(_model_root(), _body(model))
+        _record("ASR-WRONG-KIND status=" + response.status.to_text() + " " + response.body)
+        expect(response.status).to_equal(400)
+        expect(json_string_field(response.body, "code")).to_equal("wrong_model_kind")

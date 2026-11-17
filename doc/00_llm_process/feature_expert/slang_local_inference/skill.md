@@ -447,3 +447,6 @@ route env, file exists/read, directory list and process capture through SOSIX
 - Shim build (`scripts/check/build-slang-ggml-shim.shs`): Linux = clang (refuses a non-clang
   `CC`, never GCC) + `-fuse-ld=lld`; macOS = clang `-dynamiclib` (system ld64), `nm -gU` with the
   `_` prefix stripped; Windows lanes unchanged. Linux/macOS builds are unverified (no host).
+## ASR / `/v1/audio/transcriptions` (lane L3, 2026-11-17)
+
+`serving/serving_transcriptions.spl`: `serve_transcriptions(model_root, body)`, body JSON `{model, file_b64, format[, max_tokens]}` (multipart waits for L2). It does NOT use `model_for_kind(Asr)`: Qwen3-ASR resolves as Chat [Text, Audio], so the handler accepts a Chat model with Audio input (recording as the only user content through `engine_complete_chat_media`, `language X<asr_text>` prefix stripped by `strip_asr_prefix`) and answers any other model 400 `wrong_model_kind`. Phase A live (Qwen3-ASR-0.6B Q8_0, jfk.wav, CPU, model load included): "And so, my fellow Americans, ask not what your country can do for you; ask what you can do for your country." in 129 s. Specs: `test/01_unit/lib/gc_async_mut/slang/serving/serving_transcriptions_spec.spl`, `test/03_system/lib/slang/feature/slang_asr_live_spec.spl` (needs an mtmd shim: `SLANG_SHIM_MTMD=1`).
