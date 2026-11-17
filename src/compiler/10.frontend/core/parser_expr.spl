@@ -65,7 +65,7 @@ use compiler.core.ast.{expr_cast, EXPR_CAST}
 use compiler.core.tokens.{TOK_KW_AS}
 use compiler.frontend.core._ParserPrimary.unit_literal_check.{parser_unit_literal_cast_check, parser_unit_literal_call_check}
 use compiler.core.ast.{asm_arm_new}
-use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_args, expr_get_arg_names, expr_call_args_set, expr_get_span, expr_set_span}
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_call_args_set, expr_get_span, expr_set_span}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get, lex_token_start_get, lex_token_end_get}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get}
@@ -1104,26 +1104,73 @@ pub fn arrow_suppress_set(on: bool) -> bool:
     expr_nest_state.g_arrow_suppressed = on
     prev
 
-# Per-function `val` registry so `v->m()` on an immutable binding is a named error.
-pub fn arrow_val_names_reset():
-    expr_nest_state.g_arrow_val_names = []
+# Lexically scoped `val` registry so `v->m()` on an immutable binding is a
+# named error. Innermost declaration wins (a `var` shadows an outer `val`);
+# block exit drops the block's names; a nested fn is a barrier that hides the
+# outer names (the outer list is restored, never cleared, on fn exit).
+pub fn arrow_scope_enter():
+    expr_nest_state.g_arrow_marks.push(expr_nest_state.g_arrow_names.len())
+
+pub fn arrow_scope_leave():
+    val n = expr_nest_state.g_arrow_marks.len()
+    if n == 0:
+        return
+    val mark = expr_nest_state.g_arrow_marks[n - 1]
+    expr_nest_state.g_arrow_marks.pop()
+    while expr_nest_state.g_arrow_names.len() > mark:
+        expr_nest_state.g_arrow_names.pop()
+        expr_nest_state.g_arrow_is_val.pop()
+
+pub fn arrow_fn_enter():
+    arrow_scope_enter()
+    expr_nest_state.g_arrow_names.push("")
+    expr_nest_state.g_arrow_is_val.push(false)
 
 # @allow(primitive_api) parser-internal flag/identifier-name hook, same raw-scalar parser API surface as the sibling parser_* helpers
 pub fn arrow_note_val(name: text):
-    expr_nest_state.g_arrow_val_names.push(name)
+    expr_nest_state.g_arrow_names.push(name)
+    expr_nest_state.g_arrow_is_val.push(true)
 
 # @allow(primitive_api) parser-internal flag/identifier-name hook, same raw-scalar parser API surface as the sibling parser_* helpers
 pub fn arrow_note_var(name: text):
-    var kept: [text] = []
-    for n in expr_nest_state.g_arrow_val_names:
-        if n != name:
-            kept.push(n)
-    expr_nest_state.g_arrow_val_names = kept
+    expr_nest_state.g_arrow_names.push(name)
+    expr_nest_state.g_arrow_is_val.push(false)
+
+# Destructured binding `(a,b)` / `(a, _)`: note every name.
+# @allow(primitive_api) parser-internal encoded tuple-binding text
+pub fn arrow_note_tuple(encoded: text, is_val: bool):
+    var inner = encoded
+    if inner.starts_with("("):
+        inner = inner[1:inner.len() - 1]
+    for part in inner.split(","):
+        val nm = part.trim()
+        if nm != "" and nm != "_":
+            if is_val:
+                arrow_note_val(nm)
+            else:
+                arrow_note_var(nm)
 
 fn arrow_is_val(name: text) -> bool:
-    for n in expr_nest_state.g_arrow_val_names:
+    var i = expr_nest_state.g_arrow_names.len() - 1
+    while i >= 0:
+        val n = expr_nest_state.g_arrow_names[i]
+        if n == "":
+            return false
         if n == name:
-            return true
+            return expr_nest_state.g_arrow_is_val[i]
+        i = i - 1
+    false
+
+# ROB-ARR-05 guard: the desugar shares the base node between the read and the
+# store, so only operands that are safe to evaluate twice are accepted.
+fn arrow_operand_simple(e: i64) -> bool:
+    val t = expr_get_tag(e)
+    if t == EXPR_IDENT or t == EXPR_INT_LIT or t == EXPR_STRING_LIT or t == EXPR_BOOL_LIT or t == EXPR_FLOAT_LIT:
+        return true
+    if t == EXPR_FIELD_ACCESS:
+        return arrow_operand_simple(expr_get_left(e))
+    if t == EXPR_INDEX:
+        return arrow_operand_simple(expr_get_left(e)) and arrow_operand_simple(expr_get_right(e))
     false
 
 fn arrow_update_active() -> bool:
@@ -1139,31 +1186,31 @@ fn parse_arrow_update(base: i64) -> i64:
         parser_error("expected method name after '->'")
         return base
     parser_advance()
-    if par_kind_get() != 140:
+    if par_kind_get() != TOK_LPAREN:
         parser_error("arrow update `x->{name}(...)` requires an argument list")
         return base
     parser_advance()
     var args: [i64] = []
     var arg_names: [text] = []
     var k = par_kind_get()
-    if k != 141:
+    if k != TOK_RPAREN:
         val first_arg = parse_call_arg(placeholder_callee_name_is_higher_order(name))
         args.push(first_arg.0)
         arg_names.push(first_arg.1)
         k = par_kind_get()
-        while k == 160:
+        while k == TOK_COMMA:
             parser_advance()
             k = par_kind_get()
-            if k == 141:
+            if k == TOK_RPAREN:
                 break
             val next_arg = parse_call_arg(placeholder_callee_name_is_higher_order(name))
             args.push(next_arg.0)
             arg_names.push(next_arg.1)
             k = par_kind_get()
-    parser_expect(141)
+    parser_expect(TOK_RPAREN)
     val tag = expr_get_tag(base)
-    if tag != EXPR_IDENT and tag != EXPR_FIELD_ACCESS and tag != EXPR_INDEX:
-        parser_error("arrow update `->{name}(...)` target must be an assignable place (var, field or index), not a temporary")
+    if (tag != EXPR_IDENT and tag != EXPR_FIELD_ACCESS and tag != EXPR_INDEX) or not arrow_operand_simple(base):
+        parser_error("arrow update `->{name}(...)` target must be a plain place (identifier, or field/index of identifiers and literals); calls and other expressions would be evaluated twice until ROB-ARR-05")
         return base
     if tag == EXPR_IDENT and arrow_is_val(expr_get_str(base)):
         parser_error("arrow update `{expr_get_str(base)}->{name}(...)` rebinds `{expr_get_str(base)}`, which is an immutable `val`; declare it with `var`")
@@ -1374,7 +1421,7 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 base = expr_call_named(base, call_args, call_arg_names, ppo_call_span)
                 expr_set_call_type_args(base, explicit_call_types)
             explicit_call_types = []
-        elif kind == 167 and arrow_update_active():
+        elif kind == TOK_ARROW and arrow_update_active():
             base = parse_arrow_update(base)
         elif kind == 131:
             parser_advance()
@@ -1644,7 +1691,7 @@ fn parse_postfix() -> i64:
             explicit_call_types = []
             if parser_expr_trace_line_enabled():
                 eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
-        elif kind == 167 and arrow_update_active():
+        elif kind == TOK_ARROW and arrow_update_active():
             base = parse_arrow_update(base)
         elif kind == 131:
             # Optional chaining (safe navigation): x?.field / x?.method(args).
@@ -1686,10 +1733,12 @@ export parse_int_text
 pub struct ExprNestState:
     g_expr_nest_depth: i64
     g_arrow_suppressed: bool
-    g_arrow_val_names: [text]
+    g_arrow_names: [text]
+    g_arrow_is_val: [bool]
+    g_arrow_marks: [i64]
 
 fn expr_nest_state_fresh() -> ExprNestState:
-    ExprNestState(g_expr_nest_depth: 0, g_arrow_suppressed: false, g_arrow_val_names: [])
+    ExprNestState(g_expr_nest_depth: 0, g_arrow_suppressed: false, g_arrow_names: [], g_arrow_is_val: [], g_arrow_marks: [])
 
 var expr_nest_state: ExprNestState = expr_nest_state_fresh()
 
@@ -1701,4 +1750,4 @@ pub fn expr_nest_state_take() -> ExprNestState:
 pub fn expr_nest_state_install(s: ExprNestState):
     expr_nest_state = s
 
-export ExprNestState, expr_nest_state_take, expr_nest_state_install, arrow_suppress_set, arrow_val_names_reset, arrow_note_val, arrow_note_var
+export ExprNestState, expr_nest_state_take, expr_nest_state_install, arrow_suppress_set, arrow_scope_enter, arrow_scope_leave, arrow_fn_enter, arrow_note_val, arrow_note_var, arrow_note_tuple

@@ -71,3 +71,33 @@ describe "arrow functional update (self-hosted parser)":
 
     it "keeps function return-type arrows intact":
         expect(arrow_parse("fn f(a: i64) -> i64:\n    a\n", "arrow_ret.spl")).to_equal(false)
+
+describe "arrow update val scoping and place restrictions":
+    it "allows x->m() after an inner block's val x went out of scope":
+        val src = "fn f(c: bool):\n    var x = [1]\n    if c:\n        val x = [2]\n        print(x)\n    x->concat([3])\n"
+        expect(arrow_parse(src, "arrow_scope_ok.spl")).to_equal(false)
+
+    it "rejects x->m() inside the block that declares val x":
+        val src = "fn f(c: bool):\n    var x = [1]\n    if c:\n        val x = [2]\n        x->concat([3])\n"
+        expect(arrow_parse(src, "arrow_scope_val.spl")).to_equal(true)
+
+    it "does not let a nested fn clear the outer val list":
+        val src = "fn f():\n    val x = [1]\n    fn g():\n        print(1)\n    x->concat([2])\n"
+        expect(arrow_parse(src, "arrow_nested_fn.spl")).to_equal(true)
+
+    it "rejects a destructured val target":
+        val src = "fn f():\n    val (a, b) = ([1], [2])\n    a->concat([3])\n"
+        expect(arrow_parse(src, "arrow_tuple_val.spl")).to_equal(true)
+
+    it "accepts a destructured var target":
+        val src = "fn f():\n    var (a, b) = ([1], [2])\n    a->concat([3])\n"
+        expect(arrow_parse(src, "arrow_tuple_var.spl")).to_equal(false)
+
+    it "rejects an index target whose index is a call":
+        expect(arrow_parse("fn f():\n    var a = [[1]]\n    a[g()]->concat([2])\n", "arrow_idx_call.spl")).to_equal(true)
+
+    it "rejects a field target whose base is a call":
+        expect(arrow_parse("fn f():\n    g().x->concat([2])\n", "arrow_field_call.spl")).to_equal(true)
+
+    it "accepts plain field and literal-index targets":
+        expect(arrow_parse("fn f():\n    var a = [[1]]\n    a[0]->concat([2])\n    self.items->concat([3])\n", "arrow_plain.spl")).to_equal(false)
