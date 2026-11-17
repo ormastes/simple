@@ -306,8 +306,14 @@ available. These source paths and their manuals remain NOT_RUN.
   BEFORE U' (journal-R-bound `host_helper_cancel_unconsumed_v1`) or S (cleanup core -> settle core ->
   `simple_container_primary_session_return_v3`, Wait while `pending`). FL: the machine asks the port to classify
   (read-only); Blocked -> RB in the same call, else d1.
-- Fail-closed, NOT implemented: F/B (any `cleanup_spawn`) -> `...-fallback-release-unbound` (the
-  `quiesce_fallback_core_v3`/`settle_retired_core_v3` cores do not exist); the OP attach effects ->
+- F/B (milestone_0026, NOT_RUN): `host_primary_attach_quiesce_fallback_core_v3` (bundle bound first; proof-only, bounded
+  cancel on each retry while the proof is pending, never retires descriptors) and `host_primary_attach_settle_retired_core_v3` (re-reads the
+  `ContainerPrimaryTransportRetirementV3`, refuses a held session / empty proof / foreign plan or native, reaps, commits the
+  ack, then consumes the spawn). Release port: F = quiesce (`fallback_quiesced`) -> `simple_container_primary_attach_cleanup_v3`
+  -> `cleaned` -> settle_retired -> d4 clears the retirement -> `returned`; B = quiesce, drop the spawn, then S. d3 repeats until the container reports no error. B drops the spawn without a stored proof digest (open gap vs 11.4). A `Rejected`
+  spawn is Blocked `...-native-absence-unproven`. Trap: quiesce must not retire descriptors, the container's
+  `fallback_cleanup_v3` retires them (a second retire with a reference is `stale_process_reference`).
+- Fail-closed, NOT implemented: the OP attach effects ->
   `linux-host-agent-attach-helper-begin-grant-unbound` (helper begin needs its own signed `host_helper_execute_v1`
   grant the 14B packet lacks; no ContainerStreamPolicyV2 decoder; no live epoch source). The cv4 attach arm refuses
   BEFORE the archive, so no attachment is created in production yet.
