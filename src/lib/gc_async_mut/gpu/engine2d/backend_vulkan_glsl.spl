@@ -691,15 +691,23 @@ void main() {
     // CPU parity: src/lib/**/engine2d/color.spl blend() (Chrome 159 image
     // rule; composite mode 1) and blend_solid() (solid fill; mode 2). Opaque
     // dst: round(s*a/255) + div255r(d*(255-a)) resp. (d*(256-a))>>8.
-    // Translucent dst (both modes): straight-alpha src-over, every division
-    // rounded.
+    // Translucent dst (both modes): Skia's premultiplied 8-bit layer value
+    // P = round(s*sa/255) + round(round(d*da/255)*(255-sa)/255), stored
+    // straight as round(P*255/oa) (exact round trip); transparent dst = s.
+    if (da == 0u) {
+        fb.data[dst_idx] = s;
+        return;
+    }
     if (da != 255u) {
         uint dw = (da * inv + 127u) / 255u;
         uint oa = sa + dw;
         uint half_oa = oa / 2u;
-        uint tr = ((((s >> 16u) & 255u) * sa) + (((d >> 16u) & 255u) * dw) + half_oa) / oa;
-        uint tg = ((((s >> 8u) & 255u) * sa) + (((d >> 8u) & 255u) * dw) + half_oa) / oa;
-        uint tb = (((s & 255u) * sa) + ((d & 255u) * dw) + half_oa) / oa;
+        uint pr = (((s >> 16u) & 255u) * sa + 127u) / 255u + (((((d >> 16u) & 255u) * da + 127u) / 255u) * inv + 127u) / 255u;
+        uint pg = (((s >> 8u) & 255u) * sa + 127u) / 255u + (((((d >> 8u) & 255u) * da + 127u) / 255u) * inv + 127u) / 255u;
+        uint pb = ((s & 255u) * sa + 127u) / 255u + ((((d & 255u) * da + 127u) / 255u) * inv + 127u) / 255u;
+        uint tr = min((pr * 255u + half_oa) / oa, 255u);
+        uint tg = min((pg * 255u + half_oa) / oa, 255u);
+        uint tb = min((pb * 255u + half_oa) / oa, 255u);
         fb.data[dst_idx] = (oa << 24u) | (tr << 16u) | (tg << 8u) | tb;
         return;
     }
