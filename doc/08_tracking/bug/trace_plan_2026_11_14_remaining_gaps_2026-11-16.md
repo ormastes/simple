@@ -20,14 +20,6 @@ narrowed: `TraceLocator.locator_kind` (file, symbol, scenario, section, cas;
 about 30 string-compare sites, including `graph_schema_v1.spl` and
 `graph_wire_v1.spl`) and `TraceDiagnostic.severity` (error, warning).
 
-## 3. MCP / ctx
-
-- `simple_ctx_purge` is a compare-and-swap on the store generation key, but an
-  append that lands between the final key check and the rename still targets
-  the replaced file and is lost (`src/app/mcp/main_lazy_ctx_tools.spl`,
-  `ctx_purge_commit`). Unblock: an OS compare-and-rename, or appends that
-  re-check the generation after writing.
-
 ## 4. Test query and harness
 
 - The plan (sections 3.5, 9.1) lists `TESTDB-001`..`TESTDB-010` as one range and

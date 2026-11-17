@@ -1,0 +1,78 @@
+"""
+# Context Store Append Re-check Specification
+
+**Requirements:** CTX-008 (explicit purge / retention) — plan §3.4, lost-write window of `simple_ctx_purge`
+
+## Purpose
+
+Audience: maintainers of the lock-free ctx store in `app.mcp.main_lazy_ctx_tools`.
+
+A purge commits by atomically renaming a rewritten file over `chunks.sdn`. An
+append written to the replaced file between the purge's final generation check
+and its rename would be lost. Appends therefore re-check the store generation
+after writing and, when it moved and the rows did not survive, re-apply them to
+the new store (bounded, no lock).
+
+## Behavior
+
+- An append whose store is replaced by an older copy between write and re-check
+  still ends with its chunk in the store, exactly once.
+- An undisturbed append writes its chunk exactly once (no duplicate re-apply).
+"""
+
+# @feature mcp_ctx_append_recheck
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_read, file_write, time_now_unix_micros}
+use app.mcp.main_lazy_ctx_tools.{ctx_index_text, ctx_index_text_observed, ctx_store_dir, handle_simple_ctx_search}
+
+var _SNAPSHOT: text = ""
+var _HOOK_FIRED: bool = false
+
+fn _fresh_store() -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/simple_ctx_append_recheck_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    env_set("SIMPLE_CTX_DIR", dir)
+    dir
+
+fn _store_text() -> text:
+    file_read(ctx_store_dir() + "/chunks.sdn")
+
+# What a purge rename landing inside the append window does: the store file is
+# replaced by the snapshot the purge read, which lacks the new append. Fires
+# once: the retry then lands on the stable new store.
+fn _replace_store_with_snapshot():
+    if _HOOK_FIRED:
+        return
+    _HOOK_FIRED = true
+    file_write(ctx_store_dir() + "/chunks.sdn", _SNAPSHOT)
+
+fn _count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+describe "ctx append generation re-check":
+    it "adverse: an append whose store is replaced between write and re-check is re-applied":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("alpha linker notes", "doc:keep").count, 1)
+        _SNAPSHOT = _store_text()
+        _HOOK_FIRED = false
+        step("the append is written, then a purge rename replaces the store with the older snapshot")
+        assert_equal(ctx_index_text_observed("beta lateappend notes", "doc:late", _replace_store_with_snapshot).count, 1)
+        step("the re-check noticed the lost write and re-applied it to the new store")
+        assert_equal(_count_of(_store_text(), "lateappend"), 1)
+        assert_contains(handle_simple_ctx_search("1", "{\"query\":\"lateappend\"}"), "source=doc:late")
+        assert_contains(handle_simple_ctx_search("2", "{\"query\":\"linker\"}"), "source=doc:keep")
+
+    it "an undisturbed append is written exactly once":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("alpha linker notes", "doc:keep").count, 1)
+        step("no generation change during the write: nothing is re-applied")
+        assert_equal(ctx_index_text("beta quietappend notes", "doc:quiet").count, 1)
+        assert_equal(_count_of(_store_text(), "quietappend"), 1)
