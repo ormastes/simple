@@ -27,7 +27,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_rect_thick, emu_draw_circle_thick, emu_draw_rounded_rect_outline,
     emu_draw_gradient_rect_h, emu_draw_radial_gradient,
     emu_draw_linear_gradient_stops, emu_draw_radial_gradient_stops, radial_gradient_pixels,
-    linear_gradient_pixels,
+    linear_gradient_pixels, radial_gradient_device_tables, linear_gradient_device_tables,
     emu_draw_rect_blend, emu_draw_image_blend,
     emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
@@ -396,6 +396,16 @@ var _vec_text_probe_count: i32 = 0
 var _vec_blit_probe_count: i32 = 0
 var _vec_entry_probe_count: i32 = 0
 var _font_batch_receipt_count: i32 = 0
+# CSS gradient layers whose pixels the HOST evaluated (radial_gradient_pixels /
+# linear_gradient_pixels) inside draw_radial_gradient_ellipse /
+# draw_linear_gradient_line. On Vulkan these stay put while
+# vulkan_device_gradient_count() rises: the device evaluated the layer.
+var _e2d_host_gradient_evals: i64 = 0
+
+# reason: process-global instrumentation counter read by specs; a plain count of host gradient evaluations
+# @allow(primitive_api)
+pub fn engine2d_host_gradient_eval_count() -> i64:
+    _e2d_host_gradient_evals
 # Memoized result of Engine2D.detect_best_backend_viable(). Empty = not yet
 # resolved this process. The deep viability probe (init + draw + present +
 # provenance readback) runs at most once per process; per-render cost is a
@@ -3820,11 +3830,41 @@ class Engine2D with DrawIrRenderTarget:
         else:
             emu_draw_radial_gradient_stops(self.backend, cx, cy, r, stop_colors, stop_positions)
 
+    # One CSS gradient layer evaluated AND composited on the Vulkan device
+    # (`gradient_layer.comp`): only `tables` (header, 1025-entry stop ramp,
+    # per-column / per-row geometry terms) are uploaded. False when there is
+    # no Vulkan primitive target or the device declined; nothing was drawn.
+    me _draw_gradient_layer_on_device(x0: i32, y0: i32, w: i32, h: i32, mode: i32, tables: [u32]) -> bool:
+        if tables.len() == 0:
+            return false
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            var vulkan_typed: VulkanBackend = vulkan
+            val done = vulkan_typed.draw_gradient_layer_device(x0, y0, w, h, mode, tables)
+            self.vulkan_backend = Some(vulkan_typed)
+            self.backend = vulkan_typed
+            return done
+        false
+
+    # True when gradient layers should try the Vulkan device kernel: the same
+    # backend precedence as `draw_image_blend` (virtio, baremetal and cuda
+    # keep the host evaluator), and a Vulkan primitive target exists.
+    me _gradient_layer_device_candidate() -> bool:
+        if val Some(vg) = self.virtio_gpu_backend:
+            return false
+        if val Some(bm) = self.baremetal_backend:
+            return false
+        if self.selected_backend_name == "cuda":
+            return false
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return true
+        false
+
     # CSS radial gradient (Q10 px geometry) composited src-over the paint
-    # rect. The colours come from the shared host evaluator
-    # (`radial_gradient_pixels`, also used by the browser-engine raster);
-    # `draw_image_blend` then routes the composite to the selected backend
-    # (Vulkan: the device SRC_OVER image composite).
+    # rect. On Vulkan the device evaluates and composites it
+    # (`_draw_gradient_layer_on_device`); otherwise, or when the device
+    # declines, the colours come from the shared host evaluator
+    # (`radial_gradient_pixels`, also used by the browser-engine raster) and
+    # `draw_image_blend` routes the composite to the selected backend.
     me draw_radial_gradient_ellipse(ax: i32, ay: i32, aw: i32, ah: i32, cx_q: i64, cy_q: i64, rx_q: i64, ry_q: i64, stop_colors: [u32], stop_positions: [i32]):
         var x0 = ax
         var y0 = ay
@@ -3836,15 +3876,20 @@ class Engine2D with DrawIrRenderTarget:
         if y1 > self.h: y1 = self.h
         if x1 <= x0 or y1 <= y0:
             return
+        if self._gradient_layer_device_candidate():
+            val tables = radial_gradient_device_tables(x0, y0, x1 - x0, y1 - y0, cx_q, cy_q, rx_q, ry_q, stop_colors, stop_positions)
+            if self._draw_gradient_layer_on_device(x0, y0, x1 - x0, y1 - y0, 0, tables):
+                return
+        _e2d_host_gradient_evals = _e2d_host_gradient_evals + 1
         val pixels = radial_gradient_pixels(x0, y0, x1 - x0, y1 - y0, cx_q, cy_q, rx_q, ry_q, stop_colors, stop_positions)
         if pixels.len() > 0:
             self.draw_image_blend(x0, y0, x1 - x0, y1 - y0, pixels)
 
     # CSS linear gradient along the line (sx, sy) -> (ex, ey) (Q10 px)
-    # composited src-over the paint rect: the radial twin above, with colours
-    # from the shared host evaluator `linear_gradient_pixels` (also used by
-    # the browser-engine raster) and the composite routed by `draw_image_blend`
-    # (Vulkan: the device SRC_OVER image composite).
+    # composited src-over the paint rect: the radial twin above (Vulkan: the
+    # device kernel; otherwise the shared host evaluator
+    # `linear_gradient_pixels`, also used by the browser-engine raster, with
+    # the composite routed by `draw_image_blend`).
     me draw_linear_gradient_line(ax: i32, ay: i32, aw: i32, ah: i32, sx_q: i64, sy_q: i64, ex_q: i64, ey_q: i64, stop_colors: [u32], stop_positions: [i32]):
         var x0 = ax
         var y0 = ay
@@ -3856,6 +3901,11 @@ class Engine2D with DrawIrRenderTarget:
         if y1 > self.h: y1 = self.h
         if x1 <= x0 or y1 <= y0:
             return
+        if self._gradient_layer_device_candidate():
+            val tables = linear_gradient_device_tables(x0, y0, x1 - x0, y1 - y0, sx_q, sy_q, ex_q, ey_q, stop_colors, stop_positions)
+            if self._draw_gradient_layer_on_device(x0, y0, x1 - x0, y1 - y0, 1, tables):
+                return
+        _e2d_host_gradient_evals = _e2d_host_gradient_evals + 1
         val pixels = linear_gradient_pixels(x0, y0, x1 - x0, y1 - y0, sx_q, sy_q, ex_q, ey_q, stop_colors, stop_positions)
         if pixels.len() > 0:
             self.draw_image_blend(x0, y0, x1 - x0, y1 - y0, pixels)
