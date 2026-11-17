@@ -942,6 +942,46 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if typed_nonuniform:
         eng = engine2d_draw_ir_render_typed_background(
             eng, command, x, y, w, h, effective_corners)
+    elif radius <= 0 and _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry") != "":
+        # A CSS gradient layer list resolved by the producer
+        # (`_html_draw_ir_gradient_layer_props`): the painting area, then per
+        # layer an ellipse (R) or a gradient line (L), Q10 px relative to this
+        # command's origin and device-scaled with it. The box colour paints
+        # first, then the layers bottom-up (the first listed is on top), each
+        # through the shared Engine2D evaluators and `draw_image_blend`.
+        val layer_geom = _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry")
+        val layer_stops = _engine2d_draw_ir_style_value(style, "background-gradient-layer-stops").split(";")
+        if _engine2d_draw_ir_has_visible_alpha(command.color):
+            eng.draw_rect_filled(x, y, w, h, command.color)
+        val lox = (x as i64) * 1024
+        val loy = (y as i64) * 1024
+        val pax = x + (_engine2d_draw_ir_nth_int(layer_geom, 0, 0) / 1024) as i32
+        val pay = y + (_engine2d_draw_ir_nth_int(layer_geom, 1, 0) / 1024) as i32
+        val paw = (_engine2d_draw_ir_nth_int(layer_geom, 2, 0) / 1024) as i32
+        val pah = (_engine2d_draw_ir_nth_int(layer_geom, 3, 0) / 1024) as i32
+        var li: i32 = layer_stops.len() as i32 - 1
+        # cpu-lane-loop-ok: one box's own gradient layer list, bottom layer first; bound is that list
+        while li >= 0:
+            val fields = layer_stops[li].split(":")
+            if fields.len() == 3:
+                val stop_n = fields[1].split(",").len()
+                var lcolors: [u32] = []
+                var lpositions: [i32] = []
+                var k: i32 = 0
+                # cpu-lane-loop-ok: one layer's stops; bound is its stop count
+                while k < stop_n:
+                    lcolors.push(_engine2d_draw_ir_nth_int(fields[1], k, 0) as u32)
+                    lpositions.push(_engine2d_draw_ir_nth_int(fields[2], k, 0) as i32)
+                    k = k + 1
+                val g0 = _engine2d_draw_ir_nth_int(layer_geom, 4 + 4 * li, 0)
+                val g1 = _engine2d_draw_ir_nth_int(layer_geom, 5 + 4 * li, 0)
+                val g2 = _engine2d_draw_ir_nth_int(layer_geom, 6 + 4 * li, 0)
+                val g3 = _engine2d_draw_ir_nth_int(layer_geom, 7 + 4 * li, 0)
+                if fields[0] == "R":
+                    eng.draw_radial_gradient_ellipse(pax, pay, paw, pah, lox + g0, loy + g1, g2, g3, lcolors, lpositions)
+                else:
+                    eng.draw_linear_gradient_line(pax, pay, paw, pah, lox + g0, loy + g1, lox + g2, loy + g3, lcolors, lpositions)
+            li = li - 1
     elif _engine2d_draw_ir_gradient_stop_count(style) >= 2 and radius <= 0:
         # GAP-2: an N-stop/angled/radial gradient was parsed at CSS-apply
         # time (simple_web_html_layout_renderer_decl_apply.spl) and threaded
