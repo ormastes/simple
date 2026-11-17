@@ -2488,3 +2488,10 @@ Follow-up to the four 2026-11-16 behaviours. Each item has a `*_chrome159_spec.s
   - Vulkan (lavapipe): base 13.4 s, head 29.4 s, untiled twin 14.5 s. Tiling overhead is +14.9 s (~2x): one device dispatch per tile, ~48 ms each.
   - Max RSS 0.95-1.0 GB on every lane, base and head (one ~0.24 GB run in most triples).
   - Follow-up (perf, filed here): evaluate a whole tile grid in ONE Vulkan dispatch (tile-local coordinates in `gradient_layer.comp`), and reuse one host tile on cpu_simd when tiles are pixel-aligned.
+## 2026-11-17 — html catalog page classified; `<a>` needs href for the UA link style
+
+- **Classification (32,034 px = 4.68%, full table in `doc/08_tracking/bug/web_render_html_page_residual_2026-11-17.md`):** glyph residual ~67%, one-row drift below the flex `<article><header>` 24.5% (Chrome header 97.52 px high, Simple 98, article start rounded to 121 vs 120.81), fractional h3 18.72 px ~7.5%, card corner AA 0.25%, `<a>` link style 0.43%.
+- **Fixed:** `tag_defaults` painted every `<a>` blue + underlined; Chrome's `a:-webkit-any-link` needs `href` (empty `href=""` counts). The style pass in `core.spl` restores the inherited `fg` / underline for an `<a>` without `HNODE_ATTR_HREF_BIT`. Spec `anchor_without_href_chrome159_spec` (red 2/4 on base). html 4.68 -> 4.66; the catalog feature list holds hundreds of `<a>` examples but only one is inside the 760 px viewport, so the page gain is small.
+- **Trap — the drift needs BOTH known limits fixed.** A fractional flex-container height alone gives 121 + 97.52 = 218.52 -> 219, Chrome 218.33 -> 218. The container's start fraction (120.81) must reach its children as well. Do not land one half.
+- **Trap — `tag_defaults` sees only the tag.** Anything in Chrome's UA sheet keyed on an attribute (`a[href]`, form `type`) is applied in the `core.spl` style pass, ahead of author declarations, using `nd.attr_mask` hot bits.
+- **Method note:** the scratch tools (band histogram, dy-credit, pixel probe) are `.spl` scripts run with `SIMPLE_EXECUTION_MODE=interpreter` from the repo root (imports resolve from the cwd); `cli_get_args()` includes the script path as `args[0]`.
