@@ -83,7 +83,7 @@ use compiler.backend.linker.elf.link_trace.{elf_link_trace}
 use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
-use compiler.backend.linker.internal_elf_hosted_target.{internal_elf_hosted_target_v1}
+use compiler.backend.linker.internal_elf_hosted_target.{internal_elf_hosted_target_sysroot_v1}
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest,
     coff_link_amd64_retained_image_policy_full,
@@ -834,7 +834,8 @@ fn internal_elf_runpath(extra_flags: [text]) -> Result<text, text>:
                 flag == "--no-undefined" or
                 flag.starts_with("--hash-style=") or flag == "--strip-all" or
                 flag == "-s" or flag == "--as-needed" or flag == "--no-as-needed" or
-                flag == "-Wl,--as-needed" or flag == "-Wl,--no-as-needed":
+                flag == "-Wl,--as-needed" or flag == "-Wl,--no-as-needed" or
+                flag.starts_with("--sysroot="):
             # These are modeled internal-ELF policies. Every image emits the
             # sorted unwind header and GNU SHA-1 note; section-GC selection is
             # projected into ElfLinkRequest before layout.
@@ -873,6 +874,19 @@ fn internal_elf_hash_style(extra_flags: [text]) -> Result<text, text>:
                 return Err("internal ELF hash style flags conflict")
             selected = style
     if selected == "": return Ok("both")
+    Ok(selected)
+
+fn internal_elf_sysroot(extra_flags: [text]) -> Result<text, text>:
+    """Return the `--sysroot=<dir>` target root, or "" for the host root."""
+    var selected = ""
+    for flag in extra_flags:
+        if flag.starts_with("--sysroot="):
+            val root = flag.substring(10)
+            if root == "" or root.contains("\0"):
+                return Err("internal ELF sysroot is empty or contains NUL")
+            if selected != "" and selected != root:
+                return Err("internal ELF sysroot flags conflict")
+            selected = root
     Ok(selected)
 
 fn internal_elf_bind_now(extra_flags: [text]) -> bool:
@@ -1515,7 +1529,13 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
         object_files: [text], output: text, operations: ElfSealedOperationsV1) -> Result<text, text>:
     if not operations.has_byte_source(): return Err("internal engine: ELF byte-source operation is not bound")
     var source = _InternalElfByteInputs(operations: operations, cache: {})
-    val hosted = internal_elf_hosted_target_v1(os, arch, host_os(), host_arch())?
+    # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 decodes a `?`-unwrapped Result<text,_> payload as i64; bind through a typed match
+    val sysroot: text = match internal_elf_sysroot(config.extra_flags):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    if sysroot != "" and os != "freebsd":
+        return Err("internal engine: unsupported --sysroot for hosted ELF OS '{os}'")
+    val hosted = internal_elf_hosted_target_sysroot_v1(os, arch, host_os(), host_arch(), sysroot)?
     var before: [text] = []
     var after: [text] = []
     var system_shared: [text] = []
@@ -1523,7 +1543,7 @@ fn internal_link_native_with_operations(os: text, arch: text, config: NativeLink
     var system_paths: [text] = []
     var interpreter = ""
     if os == "freebsd":
-        val selected = freebsd_hosted_inputs("", config.pie)?
+        val selected = freebsd_hosted_inputs(sysroot, config.pie)?
         before = selected.before
         after = selected.after
         system_shared = selected.shared

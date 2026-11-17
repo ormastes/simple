@@ -7,7 +7,7 @@
 # (dynamic) RV64 link with a named "unsupported" error because RV64
 # PLT/GOT/dynamic relocations are not implemented -- pinned below so the
 # receipt classifies it as UnsupportedFeature, not ResourceFailure.
-use compiler.backend.linker.internal_elf_hosted_target.{internal_elf_hosted_target_v1}
+use compiler.backend.linker.internal_elf_hosted_target.{internal_elf_hosted_target_v1, internal_elf_hosted_target_sysroot_v1}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC,
     ELF_LINK_DYNAMIC_PIE}
@@ -59,6 +59,17 @@ describe "internal ELF hosted target admission":
         expect(target_err("linux", "riscv64", "linux", "aarch64")).to_contain("unsupported cross-host link (target linux/riscv64")
         expect(target_err("freebsd", "riscv64", "linux", "riscv64")).to_contain("unsupported cross-host link")
         expect(target_err("windows", "x86_64", "windows", "x86_64")).to_contain("unsupported hosted ELF OS 'windows'")
+
+    it "admits a FreeBSD cross-host link only with an explicit sysroot":
+        val x = internal_elf_hosted_target_sysroot_v1("freebsd", "amd64", "linux", "x86_64", "/sr/amd64").unwrap()
+        expect(x.reloc == RelocArch.X86_64).to_equal(true)
+        val a = internal_elf_hosted_target_sysroot_v1("freebsd", "aarch64", "windows", "x86_64", "/sr/aarch64").unwrap()
+        expect(a.reloc == RelocArch.AArch64).to_equal(true)
+        val no_root = internal_elf_hosted_target_sysroot_v1("freebsd", "aarch64", "linux", "x86_64", "")
+        expect(no_root.unwrap_err()).to_contain("unsupported cross-host link")
+        # A sysroot never opens a Linux cross-host link: Linux CRT discovery reads the host.
+        val linux = internal_elf_hosted_target_sysroot_v1("linux", "aarch64", "linux", "x86_64", "/sr")
+        expect(linux.unwrap_err()).to_contain("unsupported cross-host link")
 
     it "has the engine refuse a hosted RV64 link as an unsupported feature":
         val exec_err = rv64_dynamic_err(ELF_LINK_DYNAMIC_EXEC)
