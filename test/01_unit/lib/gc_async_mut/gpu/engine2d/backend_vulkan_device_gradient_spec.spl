@@ -426,3 +426,24 @@ describe "CSS gradient layers are evaluated and composited on the Vulkan device"
         expect(host_after - host_before).to_equal(1)
         expect(changed_count(before, got)).to_be_greater_than(1000)
         expect(mismatch_count(want, got)).to_equal(0)
+
+    it "paints tiled per-layer gradient backgrounds tile by tile through the device path, equal to cpu_simd and within +-2 of Chrome 159":
+        # background_layer_tiling_chrome159_spec pages P6 (two 10x10 px tiled
+        # layers over 40x24: 12 + 12 tiles) and P1 (10x8 repeat-x, 20x16
+        # no-repeat, 10x8 repeat-x over 40x32: 4 + 1 + 4 tiles). Draw IR paints
+        # each tile with its own Engine2D gradient call, so every tile is
+        # either evaluated on the device or declined to the host evaluator:
+        # the two counters together account for all 33 tiles, and the frame
+        # equals cpu_simd's.
+        val p6 = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><div style=\"width:40px;height:24px;background-color:#ffff00;background-image:linear-gradient(to right, #ff0000, transparent), radial-gradient(#00ff00, #0000ff);background-size:10px 10px\"></div></body></html>"
+        val p1 = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><div style=\"width:40px;height:32px;background-color:#ffff00;background-image:linear-gradient(to right, rgba(255,0,0,0.7), transparent), radial-gradient(circle, #00ff00, transparent 70%), linear-gradient(#ffffff, #000000);background-size:10px 8px, 20px 16px;background-repeat:repeat-x, no-repeat;background-position:0 4px, 50% 50%\"></div></body></html>"
+        val dev_before = vulkan_device_gradient_count()
+        val host_before = engine2d_host_gradient_eval_count()
+        val dev6 = vk_k4(p6, 40, 24)
+        val dev1 = vk_k4(p1, 40, 32)
+        val tiles = (vulkan_device_gradient_count() - dev_before) + (engine2d_host_gradient_eval_count() - host_before)
+        expect(tiles).to_equal(33)
+        expect(mismatch_count(cpu_k4(p6, 40, 24), dev6)).to_equal(0)
+        expect(mismatch_count(cpu_k4(p1, 40, 32), dev1)).to_equal(0)
+        # Chrome 159 at the BGL_PTS_96 points of bgl_p6.png.
+        expect(radial_max_dev(dev6, 160, [5, 5, 27, 20, 47, 37, 66, 50, 93, 70, 118, 90, 141, 60, 155, 93, 20, 80, 130, 18], [0xFFDC0A19u32, 0xFF50812Fu32, 0xFFCF0B25u32, 0xFF566444u32, 0xFFA93126u32, 0xFF0940B4u32, 0xFF768108u32, 0xFF1D5B87u32, 0xFF7C295Au32, 0xFFBC2C17u32])).to_be_less_than(3)

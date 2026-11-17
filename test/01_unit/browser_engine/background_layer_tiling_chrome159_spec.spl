@@ -1,0 +1,207 @@
+"""
+## Purpose and audience
+Purpose: Pin per-layer `background-size`, `background-repeat` and
+`background-position` of multi-layer CSS gradient backgrounds against Chrome
+159 at device scale 4 (384 dpi). Each layer of a background list takes its own
+entry of each comma list (repeated cyclically when a list is shorter than the
+image list, CSS Backgrounds 3 §2.2), from the longhands or from the layer's
+own `<position> / <size> <repeat>` tail in the `background` shorthand. A
+gradient has no intrinsic size: `auto`, `cover` and `contain` resolve to the
+background positioning area (padding-box by default). A tiled layer is
+re-evaluated at every tile origin, and repeating tiles reach into the border
+area under the default border-box clip.
+Audience: browser-engine and Engine2D maintainers of the web renderer.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(per-layer background-size / tiling of gradient lists).
+"""
+use std.spec.*
+use std.common.ui.draw_ir.{
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
+    draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_box_with_style
+}
+use std.common.ui.draw_ir_device_scale.{draw_ir_composition_at_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_resolved_engine2d_backend
+}
+
+# ---------------------------------------------------------------------------
+# Oracle: Chrome 159 (chromium-1255, linux-arm64)
+#   chrome --headless --no-sandbox --hide-scrollbars \
+#     --force-device-scale-factor=4 --window-size=W,H --screenshot=<png> file://<html>
+# <html> = bgl_doc(w, h, bgl_bg(n, 1)), standards mode. Oracle pages (kept in
+# the lane scratch dir, not committed): bgl_p1.html .. bgl_p6.html, one per
+# BGL_Pn below; W,H = the div size, except bgl_p3 (48,40: a 4 px border).
+# Expected values are Chrome's own pixels at the listed device points.
+# Tolerance +-2 per channel, the measured gradient tolerance (see
+# web_device_scale_spec). Every tile here starts and ends on a whole device
+# pixel: Chrome blends the seam pixel of a fractional tile, which is open.
+#
+# The CPU raster has no device-scale entry: it lays the same page out at 4x
+# CSS px, so every px value in the background is multiplied by 4 there.
+# ---------------------------------------------------------------------------
+
+fn bgl_doc(w: i32, h: i32, bg: text) -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><div style=\"width:" + "{w}" + "px;height:" + "{h}" + "px;" + bg + "\"></div></body></html>"
+
+fn bgl_px(n: i32, k: i32) -> text:
+    val v = n * k
+    "{v}px"
+
+# Background declarations; `k` scales every px length (1 for the device-scale
+# lanes, 4 for the 4x raster layout).
+fn bgl_bg(n: i32, k: i32) -> text:
+    if n == 1:
+        # Longhand lists of 2 entries over 3 image layers: the third layer
+        # takes entry 0 again (10x8 repeat-x at y = 4).
+        return "background-color:#ffff00;background-image:linear-gradient(to right, rgba(255,0,0,0.7), transparent), radial-gradient(circle, #00ff00, transparent 70%), linear-gradient(#ffffff, #000000);background-size:" + bgl_px(10, k) + " " + bgl_px(8, k) + ", " + bgl_px(20, k) + " " + bgl_px(16, k) + ";background-repeat:repeat-x, no-repeat;background-position:0 " + bgl_px(4, k) + ", 50% 50%"
+    if n == 2:
+        # Shorthand tails, a percentage size and a final colour layer.
+        return "background:linear-gradient(45deg, rgba(0,0,255,0.8), transparent) right bottom / 25% 50% repeat-y, radial-gradient(#ff00ff, #00ffff) " + bgl_px(5, k) + " " + bgl_px(2, k) + " / " + bgl_px(12, k) + " " + bgl_px(9, k) + " repeat, #ffff00"
+    if n == 3:
+        # Default size and repeat with a border: the positioning area is the
+        # padding box, the tiles repeat into the border-box painting area.
+        return "border:" + bgl_px(4, k) + " solid transparent;background-image:linear-gradient(to right, rgba(255,0,0,0.8), transparent 50%), linear-gradient(#00ff00, #0000ff)"
+    if n == 4:
+        # One typed linear layer, one-value size (height auto = the area).
+        return "background-image:linear-gradient(to right, #00ff00, #0000ff);background-size:" + bgl_px(10, k) + ";background-position:center"
+    if n == 5:
+        # no-repeat at percentage positions; `contain` on a gradient is the area.
+        return "background:radial-gradient(circle, #ff0000, #0000ff) 75% 25% / " + bgl_px(16, k) + " " + bgl_px(12, k) + " no-repeat, linear-gradient(to right, #00ff00, #ff00ff) center / contain no-repeat"
+    # n == 6: the page web_device_scale_spec used to pin as colour-only.
+    "background-color:#ffff00;background-image:linear-gradient(to right, #ff0000, transparent), radial-gradient(#00ff00, #0000ff);background-size:" + bgl_px(10, k) + " " + bgl_px(10, k)
+
+# The div is 40 x dh CSS px; the frame (Chrome's --window-size) is fw x fh.
+fn bgl_cpu_simd_k4(n: i32, dh: i32, fw: i32, fh: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(bgl_doc(40, dh, bgl_bg(n, 1)), fw, fh, 4, "cpu_simd")
+
+fn bgl_raster_4x(n: i32, dh: i32, fw: i32, fh: i32) -> [u32]:
+    simple_web_layout_render_html_software_pixels(bgl_doc(160, dh * 4, bgl_bg(n, 4)), fw * 4, fh * 4, 600000)
+
+fn bgl_channel_dev(got: u32, want: u32) -> i32:
+    var worst = 0
+    var sh = 0u32
+    while sh <= 16u32:
+        val g = ((got >> sh) & 255u32) as i32
+        val w = ((want >> sh) & 255u32) as i32
+        val d = if g > w: g - w else: w - g
+        if d > worst:
+            worst = d
+        sh = sh + 8u32
+    worst
+
+# Largest per-channel deviation from Chrome over the sample points
+# (pts = x0, y0, x1, y1, ...); 999 when a point is off the frame.
+fn bgl_max_dev(px: [u32], fw: i32, pts: [i32], want: [u32]) -> i32:
+    var worst = 0
+    var i = 0
+    while i < want.len():
+        val idx = pts[2 * i + 1] * fw + pts[2 * i]
+        if idx < 0 or idx >= px.len():
+            return 999
+        val d = bgl_channel_dev(px[idx], want[i])
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst
+
+fn bgl_mismatches(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+val BGL_PTS_128: [i32] = [5, 5, 27, 20, 47, 37, 66, 50, 93, 70, 118, 90, 141, 110, 155, 125, 20, 60, 130, 18]
+val BGL_P1_CHROME: [u32] = [0xFFFFFF00u32, 0xFFE4ACACu32, 0xFFB52424u32, 0xFF88FF00u32, 0xFF6BFF00u32, 0xFFFFFF00u32, 0xFFFFFF00u32, 0xFFFFFF00u32, 0xFFFFFF00u32, 0xFFF57171u32]
+val BGL_P2_CHROME: [u32] = [0xFF54ABFFu32, 0xFF7888FFu32, 0xFF8976FFu32, 0xFF32CCFFu32, 0xFFA956FFu32, 0xFF4CB2FFu32, 0xFF413FFFu32, 0xFF3747FFu32, 0xFF4DB1FFu32, 0xFF5F41FFu32]
+# bgl_p3 frame is 192x160; the first two and the last three points sit in the border.
+val BGL_P3_PTS: [i32] = [2, 2, 8, 80, 190, 80, 100, 158, 60, 60, 140, 100, 180, 20, 30, 150, 100, 4, 186, 154]
+val BGL_P3_CHROME: [u32] = [0xFF001AE4u32, 0xFF007E80u32, 0xFFA72B2Cu32, 0xFF00E21Du32, 0xFF5A6B39u32, 0xFF0056A8u32, 0xFFC03C02u32, 0xFFA75404u32, 0xFF0016E8u32, 0xFFB14806u32]
+val BGL_P4_CHROME: [u32] = [0xFF005CA2u32, 0xFF00D030u32, 0xFF0050AFu32, 0xFF00D529u32, 0xFF002AD6u32, 0xFF008976u32, 0xFF00F60Au32, 0xFF009C63u32, 0xFF00FB03u32, 0xFF003CC2u32]
+# The radial tile covers device (72,20)-(136,68); (71,44) is just outside it.
+val BGL_P5_PTS: [i32] = [5, 5, 27, 20, 47, 37, 66, 50, 93, 70, 118, 90, 141, 110, 155, 125, 20, 60, 130, 18, 80, 30, 104, 44, 130, 60, 73, 21, 135, 67, 71, 44]
+val BGL_P5_CHROME: [u32] = [0xFF09F609u32, 0xFF2CD42Cu32, 0xFF4CB34Cu32, 0xFF6A956Au32, 0xFF956A95u32, 0xFFBC42BCu32, 0xFFE21EE2u32, 0xFFF807F8u32, 0xFF20DE20u32, 0xFFD02FD0u32, 0xFF5200ACu32, 0xFFFA0004u32, 0xFF3800C7u32, 0xFF0D00F1u32, 0xFF0400FAu32, 0xFF728E72u32]
+val BGL_PTS_96: [i32] = [5, 5, 27, 20, 47, 37, 66, 50, 93, 70, 118, 90, 141, 60, 155, 93, 20, 80, 130, 18]
+val BGL_P6_CHROME: [u32] = [0xFFDC0A19u32, 0xFF50812Fu32, 0xFFCF0B25u32, 0xFF566444u32, 0xFFA93126u32, 0xFF0940B4u32, 0xFF768108u32, 0xFF1D5B87u32, 0xFF7C295Au32, 0xFFBC2C17u32]
+
+describe "per-layer background size, repeat and position of gradient lists match Chrome 159 at device scale 4":
+    it "takes each layer's entry of the size, repeat and position longhand lists, cyclically":
+        expect(bgl_max_dev(bgl_cpu_simd_k4(1, 32, 40, 32), 160, BGL_PTS_128, BGL_P1_CHROME)).to_be_less_than(3)
+        expect(bgl_max_dev(bgl_raster_4x(1, 32, 40, 32), 160, BGL_PTS_128, BGL_P1_CHROME)).to_be_less_than(3)
+
+    it "takes each layer's position / size repeat tail from the background shorthand, over its final colour":
+        expect(bgl_max_dev(bgl_cpu_simd_k4(2, 32, 40, 32), 160, BGL_PTS_128, BGL_P2_CHROME)).to_be_less_than(3)
+        expect(bgl_max_dev(bgl_raster_4x(2, 32, 40, 32), 160, BGL_PTS_128, BGL_P2_CHROME)).to_be_less_than(3)
+
+    it "repeats a default-sized layer from the padding box into the border area":
+        expect(bgl_max_dev(bgl_cpu_simd_k4(3, 32, 48, 40), 192, BGL_P3_PTS, BGL_P3_CHROME)).to_be_less_than(3)
+        expect(bgl_max_dev(bgl_raster_4x(3, 32, 48, 40), 192, BGL_P3_PTS, BGL_P3_CHROME)).to_be_less_than(3)
+
+    it "tiles a single gradient with a one-value size and a centre position":
+        expect(bgl_max_dev(bgl_cpu_simd_k4(4, 32, 40, 32), 160, BGL_PTS_128, BGL_P4_CHROME)).to_be_less_than(3)
+        expect(bgl_max_dev(bgl_raster_4x(4, 32, 40, 32), 160, BGL_PTS_128, BGL_P4_CHROME)).to_be_less_than(3)
+
+    it "places no-repeat layers at percentage positions and sizes contain to the positioning area":
+        expect(bgl_max_dev(bgl_cpu_simd_k4(5, 32, 40, 32), 160, BGL_P5_PTS, BGL_P5_CHROME)).to_be_less_than(3)
+        expect(bgl_max_dev(bgl_raster_4x(5, 32, 40, 32), 160, BGL_P5_PTS, BGL_P5_CHROME)).to_be_less_than(3)
+
+    it "tiles a sized gradient list over its background colour instead of painting the colour alone":
+        expect(bgl_max_dev(bgl_cpu_simd_k4(6, 24, 40, 24), 160, BGL_PTS_96, BGL_P6_CHROME)).to_be_less_than(3)
+        expect(bgl_max_dev(bgl_raster_4x(6, 24, 40, 24), 160, BGL_PTS_96, BGL_P6_CHROME)).to_be_less_than(3)
+
+    it "keeps a gradient list with background-repeat space fail-closed to its colour on both lanes":
+        # `space` / `round` are not implemented: the list paints the box
+        # colour only (not a Chrome match), never one stretched gradient.
+        val page = bgl_doc(40, 24, "background-color:#ffff00;background-image:linear-gradient(to right, #ff0000, transparent), radial-gradient(#00ff00, #0000ff);background-size:10px 10px;background-repeat:space")
+        val raster = simple_web_layout_render_html_software_pixels(page, 40, 24)
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(page, 40, 24, "cpu_simd")
+        expect(bgl_mismatches(raster, cpu)).to_equal(0)
+        expect(cpu[5 * 40 + 2]).to_equal(0xFFFFFF00u32)
+        expect(cpu[20 * 40 + 30]).to_equal(0xFFFFFF00u32)
+
+    it "keeps a gradient list fail-closed to its colour when a layer would paint more than 1024 tiles":
+        # 0.5 px tiles over 40x24 are about 4,100 tiles per layer: each tile is
+        # one gradient evaluation (one device dispatch on Vulkan), so the list
+        # paints its box colour only (not a Chrome match), never a near-hang.
+        val page = bgl_doc(40, 24, "background-color:#ffff00;background-image:linear-gradient(to right, #ff0000, #0000ff);background-size:0.5px 0.5px")
+        val raster = simple_web_layout_render_html_software_pixels(page, 40, 24)
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(page, 40, 24, "cpu_simd")
+        expect(bgl_mismatches(raster, cpu)).to_equal(0)
+        expect(cpu[5 * 40 + 2]).to_equal(0xFFFFFF00u32)
+        expect(cpu[20 * 40 + 30]).to_equal(0xFFFFFF00u32)
+
+    it "carries the layer tile rects as Q10 px scaled by k":
+        val style = [
+            draw_ir_style_prop("background-gradient-layer-tiles", "1024,-2048,10240,8192"),
+            draw_ir_style_prop("background-gradient-layer-repeat", "10")
+        ]
+        val box = draw_ir_box_with_style(
+            "g", 1, 1, 4, 5, 0u32,
+            draw_ir_rect_bounds(1, 1, 4, 5), draw_ir_rect_bounds(1, 1, 4, 5),
+            draw_ir_rect_bounds(1, 1, 4, 5), draw_ir_rect_bounds(0, 0, 8, 8), style)
+        val comp = draw_ir_composition("c", "scene", "cpu", [
+            draw_ir_batch("b", "cpu", draw_ir_embedding_config("s", "root", 0, 0, 8, 8, 0, 1000, true), [box])
+        ])
+        val scaled = draw_ir_composition_at_device_scale(comp, 4)
+        var tiles = "<absent>"
+        var repeat = "<absent>"
+        for prop in scaled.batches[0].commands[0].computed_style:
+            if prop.key == "background-gradient-layer-tiles":
+                tiles = prop.value
+            if prop.key == "background-gradient-layer-repeat":
+                repeat = prop.value
+        expect(tiles).to_equal("4096,-8192,40960,32768")
+        expect(repeat).to_equal("10")
