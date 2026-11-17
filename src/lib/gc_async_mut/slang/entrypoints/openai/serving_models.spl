@@ -9,13 +9,14 @@
 
 use std.gc_async_mut.slang.model_executor.model_loader.manifest.{parse_manifest}
 use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list}
+use std.io_runtime.{is_dir}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, json_text_literal, openai_error_response}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
 use std.gc_async_mut.slang.modality.kinds.{KindProfile, ModelKind, Modality, kind_profile, model_kind_text, model_kind_eq, modalities_json}
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
 use std.gc_async_mut.slang.engine.kind_dispatch.{kind_open}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available}
-use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{scan_model_root}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{describe_model}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
 
 # A model the loader can see. `id` is the manifest's own model_id, so what the
@@ -100,13 +101,33 @@ fn models_list_response(packs: [SlangModelEntry], natives: [NativeModel], owner:
         data = data + _model_json(m.id, owner, m.profile)
     ApiResponse(status: 200, body: "{\"object\":\"list\",\"data\":[" + data + "]}")
 
-# 400 wrong_model_kind when the model of `id` resolves to a kind other than
+# The native model directory named `id` directly under `model_root`, described
+# alone (no root scan). `id` is matched against the directory listing, never
+# joined into a path unchecked.
+fn native_model_named(model_root: text, id: text) -> NativeModel?:
+    if id == "" or model_root.trim() == "":
+        return None
+    match dir_list_optional(model_root):
+        case Some(names):
+            for name in names:
+                if name == id:
+                    val dir = _join(model_root, name)
+                    if is_dir(dir):
+                        return Some(describe_model(dir, engine_backend_available()))
+        case None:
+            pass
+    None
+
+# 400 wrong_model_kind when the native model `id` resolves to a kind other than
 # `want`; Ok when it matches or is not a native model (the route handler
 # reports a missing model itself).
-fn kind_mismatch(natives: [NativeModel], id: text, want: ModelKind, route: text) -> Result<(), ApiResponse>:
-    for m in natives:
-        if m.id == id and not model_kind_eq(m.profile.kind, want):
-            return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
+fn kind_mismatch(model_root: text, id: text, want: ModelKind, route: text) -> Result<(), ApiResponse>:
+    match native_model_named(model_root, id):
+        case Some(m):
+            if not model_kind_eq(m.profile.kind, want):
+                return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
+        case None:
+            pass
     Ok(())
 
 # The native model a kind route is asked for: 400 when the body names none,
@@ -116,14 +137,13 @@ fn model_for_kind(model_root: text, body: text, want: ModelKind, route: text) ->
     val id = json_string_field(body, "model")
     if id == "":
         return Err(openai_error_response(400, "missing or empty required field: model", "invalid_request_error", "invalid_request", ""))
-    val natives = scan_model_root(model_root, engine_backend_available())
-    match kind_mismatch(natives, id, want, route):
-        Err(refusal):
-            return Err(refusal)
-        Ok(_): ()
-    for m in natives:
-        if m.id == id:
+    match native_model_named(model_root, id):
+        case Some(m):
+            if not model_kind_eq(m.profile.kind, want):
+                return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
             return Ok(m)
+        case None:
+            pass
     Err(openai_error_response(404, "model '" + id + "' was not found under the configured slang model root", "invalid_request_error", "model_not_found", ""))
 
 # 501 for a kind route whose serving is not built yet. The reason is the kind
@@ -136,4 +156,4 @@ fn kind_not_implemented_response(model: NativeModel, route: text) -> ApiResponse
             openai_error_response(501, route + " is not implemented in this slang build: the " + model_kind_text(model.profile.kind) + " runner opened but no serving module answers this route yet", "server_error", "not_implemented", "")
 
 export SlangModelEntry, read_model_entry, discover_models, model_ids, find_model
-export pack_profile, models_list_response, kind_mismatch, model_for_kind, kind_not_implemented_response
+export pack_profile, models_list_response, native_model_named, kind_mismatch, model_for_kind, kind_not_implemented_response

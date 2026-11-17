@@ -31,7 +31,7 @@ use std.common.text_bytes.{bytes_to_text}
 use std.io_runtime.{file_exists, read_file, dir_list_optional, is_dir, file_size}
 
 val KIND_OVERRIDE_FILE = "slang_kind.sdn"
-val GGUF_FIRST_READ = 16384
+val GGUF_FIRST_READ = 4096
 val GGUF_MAX_READ = 67108864
 
 # GGUF value type ids (gguf.h).
@@ -366,16 +366,21 @@ fn gguf_file_is_projector(f: GgufFile) -> bool:
         return f.name.starts_with("mmproj")
     gguf_facts_are_projector(f.facts)
 
-# Every readable GGUF in `dir`, each header walked once.
+# Every `.gguf` in `dir` carrying the GGUF magic, each header walked once. A
+# file whose KV block cannot be walked (truncated, GGUF v1, unknown value type)
+# is kept with empty facts rather than dropped: the magic is still evidence,
+# and it then resolves by filename and as Chat.
 fn gguf_files(dir: text) -> [GgufFile]:
     var out: [GgufFile] = []
     for name in _files(dir):
         if name.ends_with(".gguf"):
-            match gguf_facts(_join(dir, name)):
+            val path = _join(dir, name)
+            match gguf_facts(path):
                 Ok(facts):
                     out.push(GgufFile(name: name, facts: facts))
                 Err(_):
-                    pass
+                    if _magic(path) == "GGUF":
+                        out.push(GgufFile(name: name, facts: GgufFacts(arch: "", general_type: "", pooling_type: -1, has_vision: false, has_audio: false)))
     out
 
 fn _override_profile(dir: text, kind_name: text) -> KindProfile:
@@ -398,7 +403,10 @@ fn _is_tts(k: ModelKind) -> bool:
 # The kind profile of the model in `dir`. Never fails: an unrecognised
 # directory resolves to Chat with the reason it cannot be served.
 fn resolve_kind(dir: text) -> KindProfile:
-    val gguf = gguf_files(dir)
+    resolve_kind_from(dir, gguf_files(dir))
+
+# resolve_kind over the directory's already-walked GGUF files.
+fn resolve_kind_from(dir: text, gguf: [GgufFile]) -> KindProfile:
     # 1. manifest override
     val override_kind = kind_override_field(dir, "kind")
     if override_kind != "":
@@ -447,4 +455,4 @@ fn resolve_kind(dir: text) -> KindProfile:
 
 export GgufFacts, GgufWalkStop, GgufFile
 export gguf_facts_from_bytes, gguf_facts, gguf_facts_are_projector, gguf_file_is_projector, gguf_facts_are_vocoder, gguf_files
-export arch_kind, pooling_kind, kind_override_field, kind_unserved_reason, safetensors_is_sd_unet, ggml_magic_file, resolve_kind
+export arch_kind, pooling_kind, kind_override_field, kind_unserved_reason, safetensors_is_sd_unet, ggml_magic_file, resolve_kind, resolve_kind_from

@@ -351,12 +351,13 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   through `external_file_read_bytes_at` costs ~2 s/MiB on the seed). Keys written
   after the tokenizer block are not seen; use `slang_kind.sdn`.
 - `/v1/models` entries add `slang_kind`, `input_modalities`, `output_modalities`
-  (3.7 s over C:/dev/model on the seed). `ApiResponse` gained `content_type`
+  (`scan_model_root(C:/dev/model)` 573 ms vs 229 ms before kinds, 12 dirs, seed;
+  each describe walks every GGUF header once, first read 4 KiB). `ApiResponse` gained `content_type`
   (default `application/json`) and `body_bytes` (default empty = text body).
 - Route table `api_server.kind_routes`; `entrypoints/openai/serving/` holds one
   stub per family (`serve_transcriptions`, `serve_speech`, `serve_images`,
   `serve_embeddings`, `serve_rerank`): wrong kind = 400 `wrong_model_kind` (chat
-  routes too), right kind = 501 `not_implemented` naming the runner
+  routes too, by describing only the named directory), right kind = 501 `not_implemented` naming the runner
   (`engine/kind_dispatch.kind_open`, which loads nothing yet).
 - Spec: `test/01_unit/lib/gc_async_mut/slang/kind_registry_spec.spl`.
 
