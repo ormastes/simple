@@ -2886,3 +2886,7 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
   | forms-media | 2.65 | 2.40 |
   | animation | 2.77 | 2.46 |
   | evidence | 0.77 | 0.68 |
+
+## Images
+
+- Raster (software) lane paints `<img>` only via `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)`; the plain entries paint none. The painter (`_fb_paint_img_clip`, paint_raster) runs in document order right after the node's box paint, with Draw IR geometry via the shared `html_image_fit_size`. Nearest-neighbour is exact only for uniform images (`# ponytail:`); overlapping-paint opacity cells (`tg_page` (50,12)) stay un-admitted on the raster. Spec: `test/01_unit/browser_engine/img_raster_chrome159_spec.spl`.
