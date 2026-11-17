@@ -155,3 +155,21 @@ successful typed HIR admission and survives HIR eviction; strict contexts reject
 diagnostic bypass. See `doc/07_guide/compiler/strict_nogc_ownership_gate.md`.
 The focused specs are authored but await an admitted full pure-Simple runtime;
 do not use the Rust seed or source inspection as production execution evidence.
+
+## 2026-11-17 ownership-flow solve order and budget
+
+`OwnershipFlow.check` solves in reverse postorder sweeps over dirty blocks,
+not a FIFO queue. The queue re-ran everything below a join once per arm, which
+exhausted the budget on `lower_expr_impl` and `lower_enum_match_flat` in the
+Stage 3 self-build. `NLLChecker.check` now passes `OwnershipFlow.work_budget`
+(scaled from blocks, points, edges, events and moves; floor 1,000,000, cap
+2,000,000,000). Traps:
+
+- State arrays are shared between blocks. Never `push` onto a state that came
+  out of `incoming`; go through `ownership_append`, which copies first.
+- Diagnostic order is breadth-first block discovery order, computed only when
+  there is an error. Solve order must not leak into it.
+- The spec `ownership_flow_spec.spl` pins the exact charge of a one-block
+  function (8 fails, 9 passes). New bookkeeping must not charge that case.
+
+Record: `doc/08_tracking/bug/ownership_flow_work_budget_exhausted_2026-11-17.md`.

@@ -91,6 +91,36 @@ pub class OwnershipFlow:
             at_point = self.events[point]
         self.events[point] = at_point.push(event)
 
+    fn work_budget(points: Dict<i64, [i64]>, successors: Dict<i64, [i64]>) -> i64:
+        """Fail-closed `check` budget proportional to the function's size.
+
+        One sweep charges at most about (blocks + points + edges + events)
+        times the largest maybe-moved set, which the Move event count bounds.
+        Sixteen sweeps are allowed. Small functions keep the former 1,000,000
+        floor and nothing gets more than 2,000,000,000 work units.
+        """
+        var size = 0
+        for block_id in points.keys():
+            size = size + 1 + points[block_id].len()
+        for block_id in successors.keys():
+            size = size + successors[block_id].len()
+        var moves = 0
+        for point in self.events.keys():
+            val events = self.events[point]
+            for event in events:
+                size = size + 1
+                match event:
+                    case OwnershipEvent.Move(_):
+                        moves = moves + 1
+                    case OwnershipEvent.Read(_) | OwnershipEvent.Revive(_) | OwnershipEvent.Write(_):
+                        pass
+        val scaled = 16 * size * (1 + moves)
+        if scaled < 1000000:
+            return 1000000
+        if scaled > 2000000000:
+            return 2000000000
+        scaled
+
     fn check(entry: i64, points: Dict<i64, [i64]>, successors: Dict<i64, [i64]>, work_limit: i64 = 1000000) -> [OwnershipFlowError]:
         """Union incoming facts, apply ordered gen/kill events, reach a fixpoint.
 
@@ -133,70 +163,127 @@ pub class OwnershipFlow:
                     return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
                 if not points.contains_key(target):
                     return [OwnershipFlowError(point: block_id, message: "ownership CFG edge targets a missing block")]
+        # Reverse postorder is the solve order. The walk is linear in the
+        # blocks and edges that the validation above already charged.
+        var postorder: [i64] = []
+        var walk: Dict<i64, i64> = {}
+        var next_edge: Dict<i64, i64> = {}
+        var dirty: Dict<i64, bool> = {}
+        walk[0] = entry
+        next_edge[entry] = 0
+        dirty[entry] = true
+        var depth = 1
+        while depth > 0:
+            val block_id = walk[depth - 1]
+            var targets: [i64] = []
+            if successors.contains_key(block_id):
+                targets = successors[block_id]
+            var edge = next_edge[block_id]
+            var target = block_id
+            var descend = false
+            while edge < targets.len() and not descend:
+                target = targets[edge]
+                edge = edge + 1
+                if not next_edge.contains_key(target):
+                    descend = true
+            if descend:
+                next_edge[block_id] = edge
+                next_edge[target] = 0
+                dirty[target] = false
+                walk[depth] = target
+                depth = depth + 1
+            else:
+                postorder = postorder.push(block_id)
+                depth = depth - 1
+        # Sweep dirty blocks in reverse postorder until none is left. A join
+        # then runs after its forward predecessors, so an acyclic region
+        # converges in one sweep and a loop nest in about one sweep per level.
+        # The former FIFO queue re-ran everything below a join once per arm.
         var incoming: Dict<i64, [Place]> = {}
         incoming[entry] = []
-        var pending: [i64] = [entry]
-        var scheduled: Dict<i64, bool> = {}
-        scheduled[entry] = true
-        var reachable: [i64] = [entry]
-        var cursor = 0
-        while cursor < pending.len():
-            val block_id = pending[cursor]
-            cursor = cursor + 1
-            scheduled[block_id] = false
-            var state: [Place] = incoming[block_id]
-            val block_points = points[block_id]
-            work = work + 1 + state.len() + block_points.len()
-            if work > work_limit:
-                return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
-            for point in block_points:
-                if self.events.contains_key(point):
-                    val events = self.events[point]
-                    for event in events:
-                        work = work + 1 + state.len()
-                        if work > work_limit:
-                            return [OwnershipFlowError(point: point, message: "ownership CFG work budget exhausted")]
-                        state = ownership_event_transfer(state, event)
-            if work > work_limit:
-                return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
-            if successors.contains_key(block_id):
-                val targets = successors[block_id]
-                for target in targets:
+        var dirty_count = 1
+        while dirty_count > 0:
+            var slot = postorder.len()
+            while slot > 0 and dirty_count > 0:
+                slot = slot - 1
+                val block_id = postorder[slot]
+                if not dirty[block_id]:
                     work = work + 1
                     if work > work_limit:
                         return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
-                    if not points.contains_key(target):
-                        return [OwnershipFlowError(point: block_id, message: "ownership CFG edge targets a missing block")]
-                    val first_visit = not incoming.contains_key(target)
-                    var merged: [Place] = []
-                    if not first_visit:
-                        val previous: [Place] = incoming[target]
-                        for moved in previous:
+                else:
+                    dirty[block_id] = false
+                    dirty_count = dirty_count - 1
+                    var state: [Place] = incoming[block_id]
+                    val block_points = points[block_id]
+                    work = work + 1 + state.len() + block_points.len()
+                    if work > work_limit:
+                        return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+                    for point in block_points:
+                        if self.events.contains_key(point):
+                            val events = self.events[point]
+                            for event in events:
+                                work = work + 1 + state.len()
+                                if work > work_limit:
+                                    return [OwnershipFlowError(point: point, message: "ownership CFG work budget exhausted")]
+                                state = ownership_event_transfer(state, event)
+                    if successors.contains_key(block_id):
+                        val targets = successors[block_id]
+                        for target in targets:
                             work = work + 1
                             if work > work_limit:
                                 return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
-                            merged = merged.push(moved)
-                    var changed = first_visit
-                    for moved in state:
-                        work = work + 1 + merged.len()
-                        if work > work_limit:
-                            return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
-                        if not ownership_contains(merged, moved):
-                            merged = merged.push(moved)
-                            changed = true
-                    incoming[target] = merged
-                    if first_visit:
-                        reachable = reachable.push(target)
-                    if changed:
-                        var already_scheduled = false
-                        if scheduled.contains_key(target):
-                            already_scheduled = scheduled[target]
-                        if not already_scheduled:
-                            scheduled[target] = true
-                            pending = pending.push(target)
+                            var changed = false
+                            if not incoming.contains_key(target):
+                                # No state array is pushed to after it is
+                                # stored (see ownership_append), so the first
+                                # edge into a block shares its source state.
+                                incoming[target] = state
+                                changed = true
+                            else:
+                                val previous: [Place] = incoming[target]
+                                # States reaching a join mostly extend one
+                                # dominating state: skip the equal prefix.
+                                var prefix = 0
+                                var scanning = true
+                                while scanning:
+                                    if prefix >= state.len() or prefix >= previous.len():
+                                        scanning = false
+                                    elif place_equals(state[prefix], previous[prefix]):
+                                        prefix = prefix + 1
+                                    else:
+                                        scanning = false
+                                work = work + 1 + prefix
+                                if work > work_limit:
+                                    return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+                                var merged: [Place] = previous
+                                var position = 0
+                                for moved in state:
+                                    if position >= prefix:
+                                        work = work + 1 + merged.len()
+                                        if work > work_limit:
+                                            return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted")]
+                                        if not ownership_contains(merged, moved):
+                                            if changed:
+                                                merged = merged.push(moved)
+                                            else:
+                                                # Copies `previous` before the
+                                                # first insertion; it may be
+                                                # shared with another block.
+                                                work = work + merged.len()
+                                                merged = ownership_append(merged, moved)
+                                                changed = true
+                                    position = position + 1
+                                if changed:
+                                    incoming[target] = merged
+                            if changed and not dirty[target]:
+                                dirty[target] = true
+                                dirty_count = dirty_count + 1
 
-        var errors: [OwnershipFlowError] = []
-        for block_id in reachable:
+        var block_errors: Dict<i64, [OwnershipFlowError]> = {}
+        var error_count = 0
+        for block_id in postorder:
+            var errors: [OwnershipFlowError] = []
             work = work + 1
             if work > work_limit:
                 return [OwnershipFlowError(point: block_id, message: "ownership CFG work budget exhausted during replay")]
@@ -232,4 +319,28 @@ pub class OwnershipFlow:
                                         errors = errors.push(OwnershipFlowError(point: point, message: "Write through moved owner: {place_to_text(place)}"))
                                         break
                         state = ownership_event_transfer(state, event)
-        errors
+            if errors.len() > 0:
+                block_errors[block_id] = errors
+                error_count = error_count + errors.len()
+        var ordered: [OwnershipFlowError] = []
+        if error_count == 0:
+            return ordered
+        # Diagnostics keep breadth-first block discovery order.
+        var reachable: [i64] = [entry]
+        var discovered: Dict<i64, bool> = {}
+        discovered[entry] = true
+        var cursor = 0
+        while cursor < reachable.len():
+            val block_id = reachable[cursor]
+            cursor = cursor + 1
+            if block_errors.contains_key(block_id):
+                val errors: [OwnershipFlowError] = block_errors[block_id]
+                for error in errors:
+                    ordered = ordered.push(error)
+            if successors.contains_key(block_id):
+                val targets = successors[block_id]
+                for target in targets:
+                    if not discovered.contains_key(target):
+                        discovered[target] = true
+                        reachable = reachable.push(target)
+        ordered
