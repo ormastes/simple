@@ -320,7 +320,7 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   becomes `SLANG_MEDIA_MARKER` (`<__media__>`) in the chat frame.
 - **Video (L7):** `modality/video_frames.spl` `sample_frames(blob, n)`. With
   `SLANG_FFMPEG=<path to ffmpeg.exe>` set and a projector model, `serving_chat.expand_video_parts`
-  replaces each `video_url` part by n JPEG `image` parts (default 8, `SLANG_VIDEO_FRAMES`, 1..32; 384 px edge;
+  replaces each `video_url` part by n JPEG `image` parts (default 4 because 8 SmolVLM2 frames overflow n_ctx 4096; `SLANG_VIDEO_FRAMES`, 1..32; 384 px edge;
   duration from `ffmpeg -i`, then `fps=n/dur` -> mjpeg image2pipe split on SOI/EOI). ffmpeg runs only via
   `process_run_bounded_bytes` (local wrapper, to become `sosix_process_run_bounded_bytes`); temp file removed.
   Video >10 MiB decoded = 413 `request_too_large`; `SLANG_FFMPEG` not a file = 503; no frame = 400
