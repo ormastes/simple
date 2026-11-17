@@ -45,8 +45,12 @@ Found while raising unit coverage of `layout_with_style_flow`
 
 | case | selector | markup | Chrome | actual |
 |---|---|---|---:|---:|
-| is_list | `:is(p, div).k` | `<div id="t" class="k"></div>` | 77 | 10 |
-| invalid_in_list | `div, p:frobnicate` | `<div id="t"></div>` | 10 | 77 |
+| webkit_unknown_class | `div, p:-webkit-frob` | `<div id="t"></div>` | 10 | 77 |
+| class_after_element | `div, p::before:hover` | `<div id="t"></div>` | 10 | 77 |
+| element_in_not | `div, :not(::before)` | `<div id="t"></div>` | 10 | 77 |
+| nth_of_type_of_s | `div, b:nth-of-type(1 of p)` | `<div id="t"></div>` | 10 | 77 |
+
+The four open rows above are known-permissive gaps in `selector_list_has_unknown_pseudo` (it keeps a rule Chrome drops). Their Chrome value comes from a Chrome 159.0.8154.6 `<style>` probe: `sheet.cssRules.length` is 0 for each selector (2026-11-17).
 
 ### Painted pixels (RRGGBB at x:y)
 
@@ -58,8 +62,6 @@ Found while raising unit coverage of `layout_with_style_flow`
 
 ## Notes
 
-- `invalid_in_list`: Selectors 4 section 3.1 -- one invalid selector in a
-  list invalidates the whole rule. The renderer keeps the valid half.
 - `opacity_box`: Chrome blends `#ff0000` at 0.5 over white to `#ff7f7f`;
   the renderer rounds to `#ff8080` (off by one per channel).
 - `z_neg`: a `z-index:-1` child of a stacking context paints below the
@@ -82,6 +84,8 @@ kept out of them until fixed.
 - `casc_box_sizing_inherit` (2026-11-16): `box-sizing:inherit` was read as "not border-box". `Style.inherit_border_box` now captures the parent's value in `inherit_from` (and is part of `inherited_digest`, so the cascade memo cannot share an entry across different parents), and both dispatchers honour `inherit`. Pinned by `test/01_unit/browser_engine/box_sizing_inherit_chrome159_spec.spl`. That spec uses `height:20px` because a border-box height below padding+border is a SEPARATE defect, filed above as `border_box_height_floor`: the content box must floor at 0, but the ~15 `st.height_px - pad - border` sites in `..._layout_engine.spl` do not floor it.
 - `compound_tag_class_id` (2026-11-16): the selector parser, the text matcher, the rule-bucket key and specificity all assumed the order `tag#id.class`, so `div.a.b#t` read its tag as `div.a.b`, and `.a#t` bucketed under the class `a#t`. One splitter, `_compound_base_tokens` (`..._core_selectors.spl`), now serves all four and accepts any order. `*` counts as no tag, and two different ids never match. Specificity now counts every class: `#id.a.b` was 110 and is now 120. Pinned by `test/01_unit/browser_engine/compound_selector_any_order_chrome159_spec.spl` (base 3/9, head 9/9).
 - `first_of_type`/`last_of_type`/`only_of_type` (2026-11-16): no code existed for these names, so `_pseudo_code_for` returned -1 and the selector was dead. Added `PSEUDO_FIRST/LAST/ONLY_OF_TYPE` with branches in both the text-path and parsed-path matchers (`_type_position`/`_type_count`), and `-of-type` in `_option_needs_ctx` so `:not(:first-of-type)` gets sibling context. Pinned by `test/01_unit/browser_engine/of_type_pseudo_classes_chrome159_spec.spl` (base 3/7, head 7/7).
+- `is_list` (2026-11-17, adopted from abandoned `28dff1927c4`): a pseudo-class written before a class (`:is(p, div).k`, `div:first-of-type.k`) was read as part of the pseudo. `_canonical_compound` (`..._core_selectors.spl`, run by `selector_group_parts`) now moves pseudo-classes behind the tag, ids, classes and attributes. Pinned in `layout_renderer_selector_structural_chrome159_spec.spl` (Chrome 159 values inline).
+- `invalid_in_list` (2026-11-17, same adoption): Selectors 4 section 3.1, one invalid selector invalidates the whole rule; the renderer kept the valid half. `selector_list_has_unknown_pseudo` now drops a rule naming an unknown pseudo-class or `::` pseudo-element, including inside `:not()`, `:has()` and `:nth-child(An+B of S)`, but not inside the forgiving `:is()`/`:where()`. Its name tables were checked against Chrome 159 (`:first`/`:left`/`:right`/`:blank` removed, `:active-view-transition` added). Pinned by 15 rows in the same spec.
 - `abs_stretch` (2026-11-16): with `top` and `bottom` set and `height:auto`, an absolute box was 1 px tall. `absolute_child_style` now stretches it over the containing padding box (CSS 2.2 10.6.4), and a replaced element keeps its intrinsic height (new `tag` parameter, same rule as the width stretch). Found alongside: absolute boxes ignored their own margins in position (`absolute_child_x/y`) and in the width stretch; both now apply them (`absolute_margin_*`, `auto` = 0). Pinned by `test/01_unit/browser_engine/abs_height_stretch_chrome159_spec.spl` (base 1/4, head 4/4). Open: `vh` vertical margins on an absolute box resolve to 0.
 - `abs_static_pos` (2026-11-16): an absolute box with `top` and `bottom` both `auto` was placed at the parent's top edge. In block flow it now sits at its static position: the cursor `cy`, plus the pending sibling `prev_margin_b`, plus its own margin-top (CSS 2.2 10.6.4). Pinned by `test/01_unit/browser_engine/abs_static_position_chrome159_spec.spl` (base 1/4, head 4/4). Open: an inline run and `position:fixed` keep the old y.
 - `flex_basis_pct` (2026-11-16): a percentage `flex-basis` (longhand or `flex` shorthand) was treated as `auto`. It is now kept as `Style.flex_basis_permille` and resolved against the flex container's content width in `flex_item_percent_style` (Flexbox 1 §7.2.3). Pinned by `test/01_unit/browser_engine/flex_basis_percent_chrome159_spec.spl` (base 2/7, head 7/7). Open: a percentage basis in a column flexbox stays `auto` (the column path does not resolve it, since it needs a definite container height).
