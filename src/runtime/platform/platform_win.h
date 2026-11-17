@@ -481,24 +481,7 @@ int64_t rt_munmap_raw(int64_t addr, int64_t length) {
 }
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
-    if (!addr || length <= 0) return -1;
-    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
-    DWORD protect;
-    if (prot == 0x0) protect = PAGE_NOACCESS;
-    else if (prot == 0x1) protect = PAGE_READONLY;
-    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
-    else if (prot == 0x4) protect = PAGE_EXECUTE;
-    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-    else return -1;
-    DWORD old_protect;
-    if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
-    if ((prot & 0x4) != 0 &&
-        !FlushInstructionCache(GetCurrentProcess(), (void*)(uintptr_t)addr, (SIZE_T)length)) {
-        DWORD ignored;
-        (void)VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, old_protect, &ignored);
-        return -1;
-    }
-    return 0;
+    return spl_windows_mprotect_raw(addr, length, prot);
 }
 
 int64_t rt_madvise_raw(int64_t addr, int64_t length, int64_t advice) {

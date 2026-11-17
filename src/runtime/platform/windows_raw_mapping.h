@@ -36,6 +36,36 @@ static inline intptr_t spl_windows_os_handle(int fd) {
 #endif
 }
 
+/* POSIX PROT_* bits -> Win32 PAGE_* (no WRITECOPY / file-section nuance).
+ * Shared by the anonymous mmap branch below and spl_windows_mprotect_raw. */
+static inline int rt__shared_win_prot_to_page(int64_t prot, DWORD* out) {
+    if (prot == 0x0) *out = PAGE_NOACCESS;
+    else if (prot == 0x1) *out = PAGE_READONLY;
+    else if (prot == 0x2 || prot == 0x3) *out = PAGE_READWRITE;
+    else if (prot == 0x4) *out = PAGE_EXECUTE;
+    else if (prot == 0x5) *out = PAGE_EXECUTE_READ;
+    else return 0;
+    return 1;
+}
+
+/* Shared body of rt_mprotect on Windows (platform_win.h and the legacy core
+ * lane each keep their exported rt_mprotect wrapper). */
+static inline int64_t spl_windows_mprotect_raw(int64_t addr, int64_t length, int64_t prot) {
+    if (!addr || length <= 0) return -1;
+    if ((prot & 0x6) == 0x6) return -1; /* PROT_WRITE | PROT_EXEC */
+    DWORD protect;
+    if (!rt__shared_win_prot_to_page(prot, &protect)) return -1;
+    DWORD old_protect;
+    if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
+    if ((prot & 0x4) != 0 &&
+        !FlushInstructionCache(GetCurrentProcess(), (void*)(uintptr_t)addr, (SIZE_T)length)) {
+        DWORD ignored;
+        (void)VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, old_protect, &ignored);
+        return -1;
+    }
+    return 0;
+}
+
 /* Shared Windows implementation behind the raw mmap ABI used by the SMF
  * loader. Anonymous mappings are VirtualAlloc reservations. File mappings
  * retain the caller's CRT descriptor only for CreateFileMapping; the mapped
@@ -50,12 +80,7 @@ static inline int64_t spl_windows_mmap_raw(
 
     if (fd == -1) {
         DWORD protect;
-        if (prot == 0x0) protect = PAGE_NOACCESS;
-        else if (prot == 0x1) protect = PAGE_READONLY;
-        else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
-        else if (prot == 0x4) protect = PAGE_EXECUTE;
-        else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-        else return -1;
+        if (!rt__shared_win_prot_to_page(prot, &protect)) return -1;
         void* result = VirtualAlloc((void*)(uintptr_t)addr, (SIZE_T)length,
                                     MEM_COMMIT | MEM_RESERVE, protect);
         return result ? (int64_t)(uintptr_t)result : -1;

@@ -19720,7 +19720,7 @@ static const uint8_t xxh3c_secret[192] = {
 #define RT_XXH_MX2 0x9FB21C651E98DF25ull
 
 static uint32_t xxh3c_r32(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return rt__shared_read_u32_le(p);
 }
 static uint64_t xxh3c_r64(const uint8_t* p) {
     return (uint64_t)xxh3c_r32(p) | ((uint64_t)xxh3c_r32(p + 4) << 32);
