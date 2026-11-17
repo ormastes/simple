@@ -45,7 +45,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     vulkan_image_upload_u32_requested, vulkan_image_upload_note,
     vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
     VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
-    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER
+    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER, VK_IMAGE_COMPOSITE_SRC_OVER_SOLID
 }
 use std.gpu.engine2d.backend_emu.{
     emu_draw_rect, emu_draw_line, emu_line_host_work_admitted_v1, emu_draw_circle, emu_draw_circle_filled,
@@ -1293,7 +1293,7 @@ impl RenderBackend for VulkanBackend:
                 self.mark_cpu_fallback("alpha-rect-size-overflow")
                 return
             val pixels: [u32] = [color; w * h]
-            self.draw_image_blend(x, y, w, h, pixels)
+            self._draw_image_blend_impl(x, y, w, h, pixels, VK_IMAGE_COMPOSITE_SRC_OVER_SOLID)
             return
         if self.mask_buf.len() > 0:
             # The rect compute kernel packs clip state but has no mask plane,
@@ -1632,7 +1632,8 @@ impl RenderBackend for VulkanBackend:
             return 0
         if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or self.mask_buf.len() > 0 or
             opacity_milli <= 0 or opacity_milli > 1000 or
-            (composite_mode != VK_IMAGE_COMPOSITE_COPY and composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER)):
+            (composite_mode != VK_IMAGE_COMPOSITE_COPY and composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER and
+             composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER_SOLID)):
             vulkan_image_reason_note(VK_IMG_R_ARGS)
             return 0
 
@@ -2707,16 +2708,18 @@ impl RenderBackend for VulkanBackend:
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if not vulkan_timing_enabled():
-            self._draw_image_blend_impl(x, y, w, h, pixels)
+            self._draw_image_blend_impl(x, y, w, h, pixels, VK_IMAGE_COMPOSITE_SRC_OVER)
             return
         val _t = vulkan_timing_now_us()
-        self._draw_image_blend_impl(x, y, w, h, pixels)
+        self._draw_image_blend_impl(x, y, w, h, pixels, VK_IMAGE_COMPOSITE_SRC_OVER)
         vulkan_timing_add(VK_T_IMAGE_BLEND, _t)
 
-    me _draw_image_blend_impl(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+    me _draw_image_blend_impl(x: i32, y: i32, w: i32, h: i32, pixels: [u32], composite_mode: i32):
+        # composite_mode: VK_IMAGE_COMPOSITE_SRC_OVER (image pixels) or
+        # VK_IMAGE_COMPOSITE_SRC_OVER_SOLID (a translucent solid rect).
         if self.completion_unknown: return
         _vk_stat_image_op(w, h, true)
-        val native_status = self._draw_image_blend_native(x, y, w, h, pixels, 1000)
+        val native_status = self._draw_image_composite_native(x, y, w, h, w, h, pixels, 1000, composite_mode, false)
         if native_status > 0:
             return
         if native_status < 0:
@@ -2726,6 +2729,9 @@ impl RenderBackend for VulkanBackend:
         if not self._flush_for_host_fallback("image-blend-host-readback"):
             return
         self.mark_cpu_fallback("image-blend-host-fallback")
+        if composite_mode == VK_IMAGE_COMPOSITE_SRC_OVER_SOLID:
+            emu_draw_rect_blend(self, x, y, w, h, pixels[0])
+            return
         emu_draw_image_blend(self, x, y, w, h, pixels)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
