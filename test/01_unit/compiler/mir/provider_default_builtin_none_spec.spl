@@ -1,0 +1,107 @@
+"""Provider struct field defaults a consumer may omit: `None`, literals, `[]`.
+
+Phase 4 full-CLI native build (integ9): `HostAgentAttachmentV4.helper:
+Option<HostHelperLeaseV1> = None` (orchestration/host_agent_attachment_v4.spl:112)
+constructed in host_linux_service_agent_v4.spl with the field omitted raised
+"unsupported provider default ...; supply the field explicitly". HIR spells the
+built-in `None` as a module-less Function symbol in the PROVIDER table;
+relocate_provider_default sent it down the callable route, which has no link
+name for it, and returned Error.
+"""
+# @cover src/compiler/50.mir/_MirLowering/provider_metadata.spl
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.provider_metadata.*
+
+fn default_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()), span: Span.empty())
+
+fn provider_builtin_none(provider: SymbolTable) -> SymbolId:
+    # Exactly what HIR lowering defines for a bare `None`.
+    provider.define("None", SymbolKind.Function, None, Span.empty(), Visibility.Private, false, None)
+
+describe "provider field default `None` and literal forms":
+    it "relocates the built-in None to the consumer's built-in None symbol":
+        var provider = SymbolTable.new()
+        # Shift provider ids so a raw provider id is not valid by accident.
+        provider.define("pad", SymbolKind.Function, None, Span.empty(), Visibility.Private, false, Some("app.provider"))
+        val none_symbol = provider_builtin_none(provider)
+        var lowering = MirLowering.new(SymbolTable.new())
+        val relocated = lowering.relocate_provider_default(
+            default_expr(HirExprKind.NamedVar(none_symbol, "None")), provider, {})
+        match relocated.kind:
+            case HirExprKind.NamedVar(target, name):
+                expect(name).to_equal("None")
+                expect(target.id >= 0).to_equal(true)
+                expect(lowering.symbols.lookup_or_invalid("None").id).to_equal(target.id)
+                expect(lowering.symbols.symbol_defining_module_scalar_raw(target.id)).to_equal("")
+            case _: fail("built-in None provider default was not relocated")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "reuses one consumer None symbol across defaults":
+        var provider = SymbolTable.new()
+        val none_symbol = provider_builtin_none(provider)
+        var lowering = MirLowering.new(SymbolTable.new())
+        var ids: [i64] = []
+        for round in [0, 1]:
+            match lowering.relocate_provider_default(default_expr(HirExprKind.Var(none_symbol)), provider, {}).kind:
+                case HirExprKind.NamedVar(target, _): ids = ids.push(target.id)
+                case _: fail("built-in None provider default was not relocated")
+        expect(ids.len()).to_equal(2)
+        expect(ids[0]).to_equal(ids[1])
+
+    it "keeps literal and empty-array defaults as they are":
+        val provider = SymbolTable.new()
+        var lowering = MirLowering.new(SymbolTable.new())
+        match lowering.relocate_provider_default(default_expr(HirExprKind.NilLit), provider, {}).kind:
+            case HirExprKind.NilLit: ()
+            case _: fail("NilLit default changed")
+        match lowering.relocate_provider_default(default_expr(HirExprKind.IntLit(7, None)), provider, {}).kind:
+            case HirExprKind.IntLit(value, _): expect(value).to_equal(7)
+            case _: fail("int default changed")
+        match lowering.relocate_provider_default(default_expr(HirExprKind.FloatLit(1.5, None)), provider, {}).kind:
+            case HirExprKind.FloatLit(value, _): expect(value).to_equal(1.5)
+            case _: fail("float default changed")
+        match lowering.relocate_provider_default(default_expr(HirExprKind.BoolLit(true)), provider, {}).kind:
+            case HirExprKind.BoolLit(value): expect(value).to_equal(true)
+            case _: fail("bool default changed")
+        match lowering.relocate_provider_default(default_expr(HirExprKind.StringLit("web", None)), provider, {}).kind:
+            case HirExprKind.StringLit(value, _): expect(value).to_equal("web")
+            case _: fail("text default changed")
+        match lowering.relocate_provider_default(default_expr(HirExprKind.ArrayLit([], None)), provider, {}).kind:
+            case HirExprKind.ArrayLit(elements, _): expect(elements.len()).to_equal(0)
+            case _: fail("empty array default changed")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "still refuses a provider-owned callable named None that has no link":
+        var provider = SymbolTable.new()
+        val owned = provider.define("None", SymbolKind.Function, None, Span.empty(),
+            Visibility.Private, false, Some("app.provider"))
+        var lowering = MirLowering.new(SymbolTable.new())
+        match lowering.relocate_provider_default(default_expr(HirExprKind.NamedVar(owned, "None")), provider, {}).kind:
+            case HirExprKind.Error: ()
+            case _: fail("a module-owned None is a provider callable, not the built-in")
+
+    it "still refuses a call to an unlinked provider-private function":
+        var provider = SymbolTable.new()
+        val helper = provider.define("make_default", SymbolKind.Function, None, Span.empty(),
+            Visibility.Private, false, Some("app.provider"))
+        var lowering = MirLowering.new(SymbolTable.new())
+        val call = default_expr(HirExprKind.Call(default_expr(HirExprKind.Var(helper)), [], []))
+        match lowering.relocate_provider_default(call, provider, {}).kind:
+            case HirExprKind.Error: ()
+            case _: fail("an arbitrary provider call must stay fatal at use")
+
+    it "does not bind the built-in None to a consumer symbol owned by a module":
+        var provider = SymbolTable.new()
+        val none_symbol = provider_builtin_none(provider)
+        var consumer = SymbolTable.new()
+        consumer.define("None", SymbolKind.Function, None, Span.empty(), Visibility.Private, false, Some("app.consumer"))
+        var lowering = MirLowering.new(consumer)
+        match lowering.relocate_provider_default(default_expr(HirExprKind.NamedVar(none_symbol, "None")), provider, {}).kind:
+            case HirExprKind.Error: ()
+            case _: fail("a consumer symbol named None owned by a module is not the built-in")
