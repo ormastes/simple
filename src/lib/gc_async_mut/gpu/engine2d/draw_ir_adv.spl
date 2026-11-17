@@ -31,6 +31,7 @@ use std.common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
 }
@@ -3051,14 +3052,22 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         css_background_pixel_work_budget)
     offscreen = inner.engine
     val child = offscreen.read_pixels_with_source()
-    val composited = eng.draw_ir_composite_readback(
-        embedding.x,
-        embedding.y,
-        embedding.width,
-        embedding.height,
-        child,
-        embedding.opacity_milli
-    )
+    # A CSS opacity group (>= 2 painted items under one opacity root) restores
+    # with Chrome's SkBlendARGB32 rule; every other embedded surface keeps the
+    # milli contract of engine2d_composite_region_milli.
+    val composited = if css_opacity_group_surface(embedding.surface_id):
+        eng.draw_ir_composite_readback_css_group(
+            embedding.x, embedding.y, embedding.width, embedding.height,
+            child, embedding.opacity_milli)
+    else:
+        eng.draw_ir_composite_readback(
+            embedding.x,
+            embedding.y,
+            embedding.width,
+            embedding.height,
+            child,
+            embedding.opacity_milli
+        )
     # A pooled offscreen is retained for the next same-size batch (and future
     # frames); shutting it down would free its buffer and defeat the reuse.
     if not offscreen_pooled:

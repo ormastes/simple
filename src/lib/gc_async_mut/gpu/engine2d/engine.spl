@@ -17,6 +17,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_region, css_opacity_group_alpha8_milli}
 use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
@@ -4060,6 +4061,27 @@ class Engine2D with DrawIrRenderTarget:
             self.draw_image(dst_x, dst_y, width, height, pixels)
             return true
         self.draw_image_blend(dst_x, dst_y, width, height, pixels)
+        true
+
+    me draw_ir_composite_readback_css_group(dst_x: i32, dst_y: i32, width: i32, height: i32, readback: Engine2DReadback, opacity_milli: i32) -> bool:
+        """Restore a CSS opacity group layer as Chrome 159 does
+        (`css_opacity_group.spl`): read the destination region back, run the
+        SkBlendARGB32 restore in .spl, write the result as an opaque copy. Every
+        backend, Vulkan and Metal included, takes this one path, so a device
+        lane is pixel-identical to cpu_simd; the native image-blend shaders
+        implement the embedded-surface milli rule, not this one."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        val total = width.to_i64() * height.to_i64()
+        if readback.pixels.len() != total:
+            return false
+        val fb = self.read_pixels_region(dst_x, dst_y, width, height)
+        if fb.pixels.len() != total:
+            return false
+        val pixels = css_opacity_group_composite_region(
+            readback.pixels, fb.pixels, width, height,
+            css_opacity_group_alpha8_milli(opacity_milli))
+        self.draw_image(dst_x, dst_y, width, height, pixels)
         true
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):

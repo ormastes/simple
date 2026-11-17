@@ -9,6 +9,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry
     _SimpleWebAnimationSchedule
 }
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface_id}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_engine.{web_html_layout_tree}
 # `min_i64` is defined in several closure modules and the native import map leaves the
 # bare call unresolved even with an explicit import (doc/08_tracking/bug/
@@ -1368,23 +1369,84 @@ fn _simple_web_fractional_opacity_command_roots(
         command_roots.push(root)
     (root_count > 0, command_roots, root_count)
 
-fn _simple_web_fractional_opacity_root_bounded(
-    styles: [Style], boxes: LayoutResult, root: i32,
-    width: i32, height: i32
-) -> bool:
-    if root < 0 or root >= styles.len():
-        return false
-    val st = styles[root]
-    val x = boxes.bx[root].to_i64()
-    val y = boxes.by[root].to_i64()
-    val w = boxes.bw[root].to_i64()
-    val h = boxes.bh[root].to_i64()
+# Per opacity root: the surface rect its commands are painted into, whether
+# they are translated into it, and how many of them paint (a colour with
+# alpha, an image or a glyph run). Two or more painted items make the root a
+# CSS opacity GROUP (Chrome saveLayer + SkBlendARGB32 restore); one keeps the
+# existing single-item surface path. The rect is the union of the root's
+# command rects clipped to the viewport, so a layer never exceeds the
+# subtree's clipped bounds. A command that cannot be moved by
+# `_simple_web_draw_ir_translate_command` (glyph runs, points, fractional or
+# affine geometry, paint transforms, CSS background images) or a member with a
+# box-shadow or outline keeps that root on a viewport-sized, untranslated
+# surface.
+struct _SimpleWebOpacityRootBounds:
+    x: [i32]
+    y: [i32]
+    w: [i32]
+    h: [i32]
+    translate: [bool]
+    painted: [i32]
+
+fn _simple_web_draw_ir_command_translatable(command: DrawIrCommand) -> bool:
     (
-        st.overflow_hidden and st.outline_w == 0 and
-        st.box_shadow_raw == "" and st.box_shadow_color == 0u32 and
-        x >= 0 and y >= 0 and w > 0 and h > 0 and
-        x + w <= width.to_i64() and y + h <= height.to_i64()
+        not command.glyph_run.valid and command.points.len() == 0 and
+        command.fractional_geometry == nil and
+        command.affine_transform == nil and not command.has_transform and
+        not _simple_web_draw_ir_css_background(command)
     )
+
+fn _simple_web_opacity_root_bounds(
+    commands: [DrawIrCommand], command_roots: [i32], owners: [i32],
+    styles: [Style], node_count: i32, width: i32, height: i32
+) -> _SimpleWebOpacityRootBounds:
+    var x0: [i32] = [width; node_count]
+    var y0: [i32] = [height; node_count]
+    var x1: [i32] = [0; node_count]
+    var y1: [i32] = [0; node_count]
+    var translate: [bool] = [true; node_count]
+    var painted: [i32] = [0; node_count]
+    var i = 0
+    while i < commands.len():  # cpu-lane-loop-ok: one pass over the emitted commands folding each into its opacity root's bounds; bound is the command count, once per compose
+        val root = command_roots[i]
+        if root >= 0 and root < node_count:
+            val c = commands[i]
+            if not _simple_web_draw_ir_command_translatable(c):
+                translate[root] = false
+            # A shadow halo or an outline paints outside the command rect;
+            # such a root keeps the viewport surface it had before.
+            val owner = if i < owners.len(): owners[i] else: -1
+            if owner >= 0 and owner < styles.len():
+                val ost = styles[owner]
+                if ost.box_shadow_color != 0u32 or ost.box_shadow_raw != "" or ost.outline_w > 0:
+                    translate[root] = false
+            if ((c.color >> 24) & 255u32) != 0u32 or c.image_uri != "" or c.glyph_run.valid:
+                painted[root] = painted[root] + 1
+            if c.width > 0 and c.height > 0:
+                if c.x < x0[root]: x0[root] = c.x
+                if c.y < y0[root]: y0[root] = c.y
+                if c.x + c.width > x1[root]: x1[root] = c.x + c.width
+                if c.y + c.height > y1[root]: y1[root] = c.y + c.height
+        i = i + 1
+    var w: [i32] = [width; node_count]
+    var h: [i32] = [height; node_count]
+    var r = 0
+    while r < node_count:  # cpu-lane-loop-ok: clamps each root's rect to the viewport; bound is node_count, once per compose
+        val cx0 = if x0[r] > 0: x0[r] else: 0
+        val cy0 = if y0[r] > 0: y0[r] else: 0
+        val cx1 = if x1[r] < width: x1[r] else: width
+        val cy1 = if y1[r] < height: y1[r] else: height
+        if translate[r] and cx1 > cx0 and cy1 > cy0:
+            x0[r] = cx0
+            y0[r] = cy0
+            w[r] = cx1 - cx0
+            h[r] = cy1 - cy0
+        else:
+            translate[r] = false
+            x0[r] = 0
+            y0[r] = 0
+        r = r + 1
+    _SimpleWebOpacityRootBounds(x: x0, y: y0, w: w, h: h, translate: translate, painted: painted)
 
 fn _simple_web_draw_ir_css_background(command: DrawIrCommand) -> bool:
     for prop in command.computed_style:  # cpu-lane-loop-ok: scans one command's computed_style list for the css-background image role; bound is that command's property count
@@ -1459,19 +1521,20 @@ fn _simple_web_layout_merge_material_witness(
 
 fn _simple_web_layout_segment_batch(
     source: DrawIrSourceInfo, embedding: DrawIrEmbeddingConfig,
-    nodes: [HNode], styles: [Style], boxes: LayoutResult,
-    opacity_root: i32, opacity_root_count: i32,
+    nodes: [HNode], styles: [Style],
+    opacity_root: i32, bounds: _SimpleWebOpacityRootBounds,
     segment_index: i32, commands: [DrawIrCommand]
 ) -> DrawIrBatch:
     if opacity_root >= 0:
-        val bounded = opacity_root_count > 1
+        val surface_id = if bounds.painted[opacity_root] >= 2:
+            css_opacity_group_surface_id(opacity_root)
+        else:
+            "html-opacity-{opacity_root}"
         val opacity_embedding = draw_ir_embedding_config(
-            "html-opacity-{opacity_root}",
+            surface_id,
             _html_draw_ir_component_id(nodes[opacity_root], opacity_root),
-            if bounded: boxes.bx[opacity_root] else: 0,
-            if bounded: boxes.by[opacity_root] else: 0,
-            if bounded: boxes.bw[opacity_root] else: embedding.width,
-            if bounded: boxes.bh[opacity_root] else: embedding.height,
+            bounds.x[opacity_root], bounds.y[opacity_root],
+            bounds.w[opacity_root], bounds.h[opacity_root],
             0, styles[opacity_root].opacity_pct * 10, true
         )
         return draw_ir_batch_with_source(
@@ -1742,34 +1805,27 @@ fn _simple_web_layout_compose_retained(
     var opacity_supported = (
         opacity_found and opacity_command_roots.len() == commands.len()
     )
+    val opacity_bounds = _simple_web_opacity_root_bounds(
+        commands,
+        if opacity_supported: opacity_command_roots else: [-1; commands.len()],
+        command_owner_nodes, styles, nodes.len(), width, height
+    )
     if opacity_supported and opacity_root_count > 1:
+        # Several surfaces: each must be bounded (translatable into its own
+        # clipped rect) and together they may not exceed one viewport of
+        # composite work.
         var admission_index = 0
         var admitted_root = -1
         var surface_pixel_work: i64 = 0
         val viewport_pixel_work = width.to_i64() * height.to_i64()
-        var pooled_width = -1
-        var pooled_height = -1
         while admission_index < commands.len():  # cpu-lane-loop-ok: opacity-surface admission scan over the emitted commands; bound is the command count and it runs only when more than one opacity root exists
             val root = opacity_command_roots[admission_index]
-            if root >= 0 and (
-                not _simple_web_fractional_opacity_root_bounded(
-                    styles, boxes, root, width, height
-                ) or _simple_web_draw_ir_css_background(
-                    commands[admission_index]
-                )
-            ):
-                opacity_supported = false
             if root >= 0 and root != admitted_root:
-                if pooled_width < 0:
-                    pooled_width = boxes.bw[root]
-                    pooled_height = boxes.bh[root]
-                elif (
-                    boxes.bw[root] != pooled_width or
-                    boxes.bh[root] != pooled_height
-                ):
+                if not opacity_bounds.translate[root]:
                     opacity_supported = false
                 surface_pixel_work = surface_pixel_work + (
-                    boxes.bw[root].to_i64() * boxes.bh[root].to_i64()
+                    opacity_bounds.w[root].to_i64() *
+                    opacity_bounds.h[root].to_i64()
                 )
                 if surface_pixel_work > viewport_pixel_work:
                     opacity_supported = false
@@ -1797,16 +1853,16 @@ fn _simple_web_layout_compose_retained(
         if next_root != run_root:
             if run_commands.len() > 0:
                 batches.push(_simple_web_layout_segment_batch(
-                    source, embedding, nodes, styles, boxes, run_root,
-                    opacity_root_count, segment_index, run_commands
+                    source, embedding, nodes, styles, run_root,
+                    opacity_bounds, segment_index, run_commands
                 ))
                 segment_index = segment_index + 1
             run_root = next_root
             run_commands = []
-        val command = if run_root >= 0 and opacity_root_count > 1:
+        val command = if run_root >= 0 and opacity_bounds.translate[run_root]:
             _simple_web_draw_ir_translate_command(
-                commands[command_index], 0 - boxes.bx[run_root],
-                0 - boxes.by[run_root]
+                commands[command_index], 0 - opacity_bounds.x[run_root],
+                0 - opacity_bounds.y[run_root]
             )
         else:
             commands[command_index]
@@ -1841,10 +1897,10 @@ fn _simple_web_layout_compose_retained(
                     now >= _web_render_deadline_us or
                     _simple_web_iframe_fractional_ancestor(nodes, styles, owner)
                 ):
-                    if run_root >= 0 and opacity_root_count > 1:
+                    if run_root >= 0 and opacity_bounds.translate[run_root]:
                         run_commands.push(_simple_web_draw_ir_translate_command(
-                            placeholder, 0 - boxes.bx[run_root],
-                            0 - boxes.by[run_root]
+                            placeholder, 0 - opacity_bounds.x[run_root],
+                            0 - opacity_bounds.y[run_root]
                         ))
                     else:
                         run_commands.push(placeholder)
@@ -1861,10 +1917,10 @@ fn _simple_web_layout_compose_retained(
                     )
                     _web_render_deadline_us = save_deadline
                     if _simple_web_draw_ir_has_material_request(child.composition):
-                        if run_root >= 0 and opacity_root_count > 1:
+                        if run_root >= 0 and opacity_bounds.translate[run_root]:
                             run_commands.push(_simple_web_draw_ir_translate_command(
-                                placeholder, 0 - boxes.bx[run_root],
-                                0 - boxes.by[run_root]
+                                placeholder, 0 - opacity_bounds.x[run_root],
+                                0 - opacity_bounds.y[run_root]
                             ))
                         else:
                             run_commands.push(placeholder)
@@ -1872,8 +1928,8 @@ fn _simple_web_layout_compose_retained(
                         # An admitted child is the only case that needs a new
                         # flat batch boundary. Denials stay in this group.
                         batches.push(_simple_web_layout_segment_batch(
-                            source, embedding, nodes, styles, boxes, run_root,
-                            opacity_root_count, segment_index, run_commands
+                            source, embedding, nodes, styles, run_root,
+                            opacity_bounds, segment_index, run_commands
                         ))
                         segment_index = segment_index + 1
                         run_commands = []
@@ -1888,8 +1944,8 @@ fn _simple_web_layout_compose_retained(
         command_index = command_index + 1
     if run_commands.len() > 0:
         batches.push(_simple_web_layout_segment_batch(
-            source, embedding, nodes, styles, boxes, run_root,
-            opacity_root_count, segment_index, run_commands
+            source, embedding, nodes, styles, run_root,
+            opacity_bounds, segment_index, run_commands
         ))
     val composition = draw_ir_composition(
         "html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches
