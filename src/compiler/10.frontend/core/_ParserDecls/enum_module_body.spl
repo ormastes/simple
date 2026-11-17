@@ -357,6 +357,11 @@ fn unit_decl_inner_is_numeric(inner_type: i64) -> bool:
 # Struct decl id produced by the most recent parser_lower_unit_decl call.
 var PARSER_LAST_UNIT_DECL_ID_V1: i64 = -1
 
+# Set by the `pub unit` arm of parse_module_decl_with_visibility so the module
+# dispatcher can bind the visibility observation row (the arm itself returns -1
+# because the unit lowering already added the decl to the module).
+var PARSER_VISIBLE_UNIT_DECL_ID_V1: i64 = -1
+
 # One lowering for `unit`, `newunit`, and numeric `newtype`: a single-field
 # struct (`value`) plus a canonical UnitDecl row. `legacy_origin` is "" for the
 # canonical spelling, else the deprecated keyword that produced the row.
@@ -840,6 +845,11 @@ fn record_top_level_visibility_intent_v1(source_start: i64, explicit_pri: bool, 
 # the generic module_add_decl must never infer which declaration owns a row.
 fn module_add_source_decl_v1(source_id: i64, observation_row: i64):
     module_add_decl(source_id)
+    module_bind_source_decl_row_v1(source_id, observation_row)
+
+# Binds an observation row to a decl that is ALREADY in the module (the unit
+# lowering adds its own struct decl, so adding it again would duplicate it).
+fn module_bind_source_decl_row_v1(source_id: i64, observation_row: i64):
     if observation_row < 0: return
     if observation_row >= TOP_LEVEL_VISIBILITY_DECL_IDS_V1.len() or
             source_id < 0 or source_id >= decl_count():
@@ -973,15 +983,17 @@ fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
         val unit_decl_id = parse_unit_decl_after_keyword_v1()
         if unit_decl_id >= 0:
             decl_set_visibility_text(unit_decl_id, visibility)
+            PARSER_VISIBLE_UNIT_DECL_ID_V1 = unit_decl_id
         return -1
     parser_error("expected declaration after visibility modifier")
     -1
 
 # unit ByteCount: u64 as Bc -- canonical nominal unit declaration. Called at the
 # `unit` soft keyword. `as suffix` is optional; a suffix-less unit is
-# full-name-only in the registry. Returns the lowered struct decl id, or -1 for
-# a derived unit.
+# full-name-only in the registry. Returns the lowered struct decl id (also
+# for a derived unit), or -1 when lowering failed.
 fn parse_unit_decl_after_keyword_v1() -> i64:
+    PARSER_LAST_UNIT_DECL_ID_V1 = -1
     parser_advance()
     val u_name = par_text_get()
     parser_expect(6)
@@ -1003,7 +1015,7 @@ fn parse_unit_decl_after_keyword_v1() -> i64:
         val d_rhs = par_text_get()
         parser_expect(6)
         parser_lower_derived_unit_decl(u_name, d_lhs, d_lhs + d_op + d_rhs)
-        return -1
+        return PARSER_LAST_UNIT_DECL_ID_V1
     parser_expect(161)
     val u_inner = parser_parse_type()
     var u_suffix = ""
@@ -1516,7 +1528,11 @@ pub fn parse_module_body():
         if parsed_visibility != "private":
             parser_skip_newlines_and_semicolons()
             lock_level_reject_non_function(par_kind_get())
+            PARSER_VISIBLE_UNIT_DECL_ID_V1 = -1
             val visible_decl = parse_module_decl_with_visibility(i, parsed_visibility)
+            if visible_decl < 0 and PARSER_VISIBLE_UNIT_DECL_ID_V1 >= 0:
+                module_bind_source_decl_row_v1(PARSER_VISIBLE_UNIT_DECL_ID_V1, visibility_observation_row)
+                PARSER_VISIBLE_UNIT_DECL_ID_V1 = -1
             if visible_decl >= 0:
                 decl_set_asm_placement(visible_decl, parser_pending_asm_placement())
                 parser_apply_pending_kernel_attrs(visible_decl)

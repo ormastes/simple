@@ -22,6 +22,9 @@ use std.spec
 use compiler.core.types.{reset_all_pools, unit_decl_find, named_type_find}
 use compiler.core.parser.{parser_has_errors, parser_init_with_path}
 use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.ast.{decl_get_name, decl_get_visibility_text}
+use compiler.frontend.core._Ast.module_state.{module_decl_count_get, module_decl_at}
+use compiler.frontend.core._ParserDecls.enum_module_body.{parser_top_level_visibility_intent_count_v1, parser_top_level_visibility_intent_decl_id_v1, parser_top_level_visibility_intent_bindings_valid_v1}
 
 fn spec_parse(source: text, path: text):
     reset_all_pools()
@@ -50,3 +53,27 @@ describe "pure-Simple parser: seed-accepted forms":
         expect(parser_has_errors()).to_equal(false)
         expect(unit_decl_find("Meter") >= 0).to_equal(true)
         expect(unit_decl_find("Speed") >= 0).to_equal(true)
+
+fn module_decl_visibility(name: text) -> text:
+    for index in 0..module_decl_count_get():
+        val id = module_decl_at(index)
+        if decl_get_name(id) == name: return decl_get_visibility_text(id)
+    "missing"
+
+describe "pub unit visibility stamping and observation binding":
+    it "stamps pub on a pub derived unit":
+        spec_parse("pub unit Meter: f64\npub unit Second: f64\npub unit Speed = Meter / Second\n", "pub_derived_vis.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module_decl_visibility("Speed")).to_equal("public")
+
+    it "stamps pub on a pub nominal unit":
+        spec_parse("pub unit FreeBytes: i64 as fbytes\n", "pub_nominal_vis.spl")
+        expect(module_decl_visibility("FreeBytes")).to_equal("public")
+
+    it "binds the visibility observation row of pub units to their decls":
+        spec_parse("pub unit Meter: f64\npub unit Second: f64\npub unit Speed = Meter / Second\n", "pub_unit_rows.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(parser_top_level_visibility_intent_bindings_valid_v1()).to_equal(true)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(3)
+        expect(decl_get_name(parser_top_level_visibility_intent_decl_id_v1(0))).to_equal("Meter")
+        expect(decl_get_name(parser_top_level_visibility_intent_decl_id_v1(2))).to_equal("Speed")
