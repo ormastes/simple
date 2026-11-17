@@ -1,6 +1,6 @@
 # Native phase-3 worker parse sees unstripped top-level `@when(...):`
 
-Status: open (root cause NOT yet located; investigation notes only — no fix landed)
+Status: verification-pending (root cause located 2026-11-17; fix in work/file-worker-when-fix-20261117 — needs a phase-3 workers-on native run)
 
 ## Symptom
 stage2d (release/1.0.0 tip + PR #9884) phase-3 `native-build --target x86_64-pc-windows-gnu
@@ -41,3 +41,40 @@ in which the directive was not blanked.
    frontend cache, then flip one knob per run (`--target`, `--entry-closure`, workers off,
    `SIMPLE_WORKER_ADMITTED_MEMO=0`). A minimal `native-build` of a 7-line `@when` file did
    not finish within 400 s on this host (whole std closure), so this needs the phase-3 lane.
+
+## Root cause (2026-11-17)
+A worker builds an empty PLACEHOLDER surface for every module outside its closure slice
+(`worker_mode == 2`, `driver_source_parse_selected.spl` `add_streaming_module_surface`).
+The placeholder parse text was `""`, parsed under the module's REAL path. Preprocessing
+ran on `""` (a no-op), then `lex_init_with_path` (`10.frontend/core/lexer.spl`) saw an
+empty source with a named path and re-read the file from disk -- the defense against the
+old "reads every source as empty" native bug. The lexer therefore lexed the RAW file, with
+every `@when(...):` / `@else:` intact. Directive-free files parsed "fine" (raw = selected),
+which is why only the files with top-level directives failed. `SIMPLE_FILE_WORKERS=0`
+builds no placeholders. The earlier "workers off is clean" bisect was also cache-masked:
+the p5nw run reported every phase-2 parse as `cached`.
+
+Side effects of the old behaviour: placeholder surfaces were never empty (they carried the
+raw file's declarations), and every placeholder shared one private parse-cache key
+(`xxh3("")`), so a stored raw parse could be restored for another module's placeholder.
+
+Evidence: interpreter control (`seed_p1 test`) parsing `""` under a fixture path with a
+top-level `@when(os="windows"):` prints `[parser_error] line 2:20: unexpected token in
+expression: : ':'` -- the exact native symptom. The worker unit child log
+(`native-build-stderr-30880-2.log`) shows the same errors after `[file-worker] unit picked=1`.
+
+## Fix
+`driver_worker_placeholder_parse_text_v1()` (`driver_hir_worker_surface_v1.spl`) returns a
+non-empty empty module (`"\n"`); mode 2 parses it, so the lexer never touches the disk.
+Spec: `test/01_unit/compiler/80.driver/hir_worker_placeholder_parse_text_spec.spl`
+(red before: helper missing / `""` control reproduces 2:20; green after).
+
+Behaviour change to watch: placeholder surfaces are now truly empty. If
+`worker_admitted_closure_v1` misses a module a worker needs, phase 3 may now surface
+unresolved-import errors that the raw re-read used to hide.
+
+Not verified: that the in-process coordinator stream (`native-build-stderr-30880-1.log`,
+no `[parser_error]` lines, no closure-phase marker) goes through the same mode-2 route.
+Gate: phase-3 `native-build` with file workers on and a cold frontend cache.
+
+Lexer hazard left in place (separate bug): `lexer_empty_source_disk_reread_bypasses_preprocess_2026-11-17.md`.
