@@ -1,0 +1,166 @@
+"""
+## Purpose and audience
+Purpose: Pin Chrome 159's authored-size rules for the form controls the
+`<input>` border-box change left open: checkbox/radio take an authored size
+and draw a centred square glyph, `type=image` carries no UA border, and
+`<select>` is border-box while `<textarea>` stays content-box.
+Audience: browser-engine form-control layout and paint maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6, STANDARDS mode -- the pages carry
+`<!DOCTYPE html>` --, `--headless --dump-dom` + `--screenshot`, 900x2000,
+2026-11-17). Each control is
+`display:block;width:40px;height:16px;padding:2px;font:8px Arial`, UA border:
+
+| control         | computed box-sizing / border | rect (x,y w x h) |
+|-----------------|------------------------------|------------------|
+| checkbox        | border-box / 0               | 4,3 40x16        |
+| radio           | border-box / 0               | 5,22 40x16       |
+| image           | content-box / 0              | 0,38 44x20       |
+| textarea        | content-box / 1px            | 0,58 46x22       |
+| select          | border-box / 1px             | 0,80 40x16       |
+
+Auto-sized (no author width/height): textarea 182x36, select 57x19,
+checkbox and radio 13x13 -- `box-sizing` only reinterprets an authored size.
+A `width:60px;height:30px` textarea is 66x36 (content-box).
+
+Trap: without the doctype Chrome is in QUIRKS mode, where `<textarea>`
+(and text/password/email `<input>`) compute border-box -- 40x16 and 60x30.
+The abandoned 2026-11-17 lane pinned those quirks values; this renderer has
+no quirks path, so standards mode is the target.
+
+Paint (screenshot, 64x96): a 40x16 checkbox at (4,3) inks a 16x16 square at
+columns 16..31, rows 3..18 (side min(w,h), centred in the box); the radio
+at (5,22) inks columns 17..32, rows 22..37.
+
+Filed in doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(`form_control_authored_size`).
+"""
+
+"""
+Traceability: REQ-WEB-RENDER-001 — form controls honour an authored size as Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels,
+    simple_web_render_html_to_readback_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name
+}
+
+val PAGE: text = "<!DOCTYPE html><html><head><style>html,body{{margin:0;padding:0;background:#fff}}" +
+    " .w input,.w textarea,.w select{{display:block;width:40px;height:16px;padding:2px;font:8px Arial}}" +
+    "</style></head><body><div class=w><input id=w_checkbox type=checkbox><input id=w_radio type=radio>" +
+    "<input id=w_image type=image><textarea id=w_textarea></textarea>" +
+    "<select id=w_select><option>A</option></select></div>" +
+    "<div><textarea id=a_textarea></textarea></div><div><select id=a_select><option>Alpha</option></select></div>" +
+    "<div><input id=a_check type=checkbox><input id=a_radio type=radio></div>" +
+    "<div><textarea id=s_textarea style='width:60px;height:30px'></textarea></div></body></html>"
+
+val PIX_W: i32 = 64
+val PIX_H: i32 = 48
+val PIX: text = "<!DOCTYPE html><html><head><style>html,body{{margin:0;padding:0;background:#fff}}" +
+    " input{{display:block;width:40px;height:16px;padding:2px}}</style></head><body>" +
+    "<input type=checkbox><input type=radio></body></html>"
+
+fn _rect(id: text) -> text:
+    val composition = simple_web_layout_render_html_draw_ir(PAGE, 300, 400)
+    for c in composition.batches[0].commands:
+        if c.kind == "rect" and c.component_id == id:
+            return c.x.to_text() + "," + c.y.to_text() + " " + c.width.to_text() + "x" + c.height.to_text()
+    "missing " + id
+
+fn _size(id: text) -> text:
+    val r = _rect(id)
+    if r.starts_with("missing"):
+        return r
+    r.split(" ")[1]
+
+# Bounding box "x0..x1,y0..y1" of the non-white pixels in rows y0..y1-1.
+fn _ink_box(pixels: [u32], y0: i32, y1: i32) -> text:
+    var minx = PIX_W
+    var maxx = -1
+    var miny = PIX_H
+    var maxy = -1
+    var y = y0
+    while y < y1:
+        var x = 0
+        while x < PIX_W:
+            if (pixels[y * PIX_W + x] & 0xFFFFFFu32) != 0xFFFFFFu32:
+                if x < minx:
+                    minx = x
+                if x > maxx:
+                    maxx = x
+                if y < miny:
+                    miny = y
+                if y > maxy:
+                    maxy = y
+            x = x + 1
+        y = y + 1
+    if maxx < 0:
+        return "none"
+    minx.to_text() + ".." + maxx.to_text() + "," + miny.to_text() + ".." + maxy.to_text()
+
+fn _check_glyphs(pixels: [u32]):
+    # oracle (Chrome 159.0.8154.6, 2026-11-17): chrome --headless --no-sandbox --hide-scrollbars --window-size=64,48 --force-device-scale-factor=4 --screenshot file://<this PIX>.html; ink box in device px / 4 (dpr 1 gives the same box)
+    step("Chrome 159: checkbox square 16..31 x 3..18, radio 17..32 x 22..37")
+    expect(_ink_box(pixels, 0, 21)).to_equal("16..31,3..18")
+    expect(_ink_box(pixels, 21, 41)).to_equal("17..32,22..37")
+
+describe "form controls honour an authored size (Chrome 159)":
+    it "AC-1: a checkbox and a radio take the authored border box":
+        # oracle (Chrome 159.0.8154.6, 2026-11-17): chrome --headless --no-sandbox --hide-scrollbars --window-size=900,2000 --dump-dom file://<this PAGE>.html; a script writes getBoundingClientRect + computed box-sizing/border into <pre id=o>
+        step("Chrome 159: checkbox 4,3 40x16; radio 5,22 40x16")
+        expect(_rect("w_checkbox")).to_equal("4,3 40x16")
+        expect(_rect("w_radio")).to_equal("5,22 40x16")
+
+    it "AC-2: an auto-sized checkbox and radio stay 13x13":
+        # oracle (Chrome 159.0.8154.6, 2026-11-17): chrome --headless --no-sandbox --hide-scrollbars --window-size=900,2000 --dump-dom file://<this PAGE>.html; a script writes getBoundingClientRect + computed box-sizing/border into <pre id=o>
+        step("Chrome 159: 13x13")
+        expect(_size("a_check")).to_equal("13x13")
+        expect(_size("a_radio")).to_equal("13x13")
+
+    it "AC-3: type=image has no UA border":
+        # oracle (Chrome 159.0.8154.6, 2026-11-17): chrome --headless --no-sandbox --hide-scrollbars --window-size=900,2000 --dump-dom file://<this PAGE>.html; a script writes getBoundingClientRect + computed box-sizing/border into <pre id=o>
+        step("Chrome 159: 0,38 44x20 (content-box, border 0)")
+        expect(_rect("w_image")).to_equal("0,38 44x20")
+
+    it "AC-4: select is border-box; textarea stays content-box":
+        # oracle (Chrome 159.0.8154.6, 2026-11-17): chrome --headless --no-sandbox --hide-scrollbars --window-size=900,2000 --dump-dom file://<this PAGE>.html; a script writes getBoundingClientRect + computed box-sizing/border into <pre id=o>
+        step("Chrome 159 (standards): textarea 0,58 46x22 content-box; select 0,80 40x16 border-box")
+        expect(_rect("w_textarea")).to_equal("0,58 46x22")
+        expect(_rect("w_select")).to_equal("0,80 40x16")
+        # oracle (Chrome 159.0.8154.6, 2026-11-17): chrome --headless --no-sandbox --hide-scrollbars --window-size=900,2000 --dump-dom file://<this PAGE>.html; a script writes getBoundingClientRect + computed box-sizing/border into <pre id=o>
+        step("Chrome 159 (standards): width:60px;height:30px textarea is 66x36")
+        expect(_size("s_textarea")).to_equal("66x36")
+
+    it "AC-5: auto-sized textarea and select keep their intrinsic boxes":
+        # Engine 2026-11-17: textarea 181x36 (Chrome 159: 182x36, a
+        # pre-existing 1px column-advance gap, unchanged by this fix).
+        # oracle (Chrome 159.0.8154.6, 2026-11-17): chrome --headless --no-sandbox --hide-scrollbars --window-size=900,2000 --dump-dom file://<this PAGE>.html; a script writes getBoundingClientRect + computed box-sizing/border into <pre id=o>
+        step("Chrome 159: textarea 182x36, select 57x19")
+        expect(_size("a_textarea")).to_equal("181x36")
+        expect(_size("a_select")).to_equal("57x19")
+
+    it "AC-6: the software raster and the Engine2D path draw a centred square glyph":
+        _check_glyphs(simple_web_layout_render_html_software_pixels(PIX, PIX_W, PIX_H))
+        _check_glyphs(simple_web_render_html_to_pixels(PIX, PIX_W, PIX_H))
+
+describe "authored checkbox size on a real Vulkan device":
+    it "AC-7: a Vulkan device readback draws the centred square glyph":
+        # Runs where a Vulkan ICD is installed (llvmpipe:
+        # VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json). Where none
+        # is, the row has nothing to drive and says so: it is NOT exercised.
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-7: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        step("the request really resolved to Vulkan (no silent software fallback)")
+        expect(simple_web_resolved_engine2d_backend_name(PIX_W, PIX_H, "vulkan")).to_equal("vulkan")
+        val rb = simple_web_render_html_to_readback_with_engine2d_backend(PIX, PIX_W, PIX_H, "vulkan")
+        expect(rb.source).to_equal("device_readback")
+        _check_glyphs(rb.pixels)
+        expect(rb.pixels).to_equal(simple_web_render_html_to_pixels(PIX, PIX_W, PIX_H))
