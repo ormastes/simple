@@ -10,6 +10,7 @@
  * C-string ABI consumed by the hosted Simple runtime.
  */
 
+#include "runtime.h"
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -146,15 +147,7 @@ const char *rt_rsa_decrypt(const char *ciphertext,
                                    (int64_t)strlen(private_key_pem), NULL);
 }
 
-static int hex_value(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
 const char *rt_wire_to_hex(const char *wire, int64_t wire_len) {
-    static const char digits[] = "0123456789abcdef";
     char *result;
     size_t length;
 
@@ -166,12 +159,7 @@ const char *rt_wire_to_hex(const char *wire, int64_t wire_len) {
     if ((uint64_t)wire_len > (SIZE_MAX - 1) / 2) abort();
     length = (size_t)wire_len;
     result = tls_text_alloc_or_abort(length * 2 + 1);
-    for (size_t i = 0; i < length; ++i) {
-        unsigned char byte = (unsigned char)wire[i];
-        result[i * 2] = digits[byte >> 4];
-        result[i * 2 + 1] = digits[byte & 0x0f];
-    }
-    result[length * 2] = '\0';
+    rt__shared_hex_encode_into((const uint8_t *)wire, length, result);
     return result;
 }
 
@@ -185,14 +173,9 @@ const char *rt_hex_to_wire(const char *hex) {
     if ((hex_len & 1u) != 0 || hex_len == SIZE_MAX) goto invalid;
     wire_len = hex_len / 2;
     result = tls_text_alloc_or_abort(wire_len + 1);
-    for (size_t i = 0; i < wire_len; ++i) {
-        int high = hex_value(hex[i * 2]);
-        int low = hex_value(hex[i * 2 + 1]);
-        if (high < 0 || low < 0) {
-            free(result);
-            goto invalid;
-        }
-        result[i] = (char)((high << 4) | low);
+    if (rt__shared_hex_decode_into(hex, wire_len, (uint8_t *)result) != 0) {
+        free(result);
+        goto invalid;
     }
     result[wire_len] = '\0';
     return result;

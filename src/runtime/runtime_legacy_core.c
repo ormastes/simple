@@ -253,6 +253,7 @@ int64_t rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
     return result;
 }
 
+/* Not shared with runtime.c: plain malloc, no memtrack tag (see runtime.c spl_strdup). */
 char* spl_strdup(const char* s) {
     return spl_str_new(s);
 }
@@ -334,13 +335,7 @@ char* spl_str_replace(const char* s, const char* old_s, const char* new_s) {
 }
 
 uint64_t spl_str_hash(const char* s) {
-    uint64_t hash = 14695981039346656037ULL;
-    if (!s) return hash;
-    while (*s) {
-        hash ^= (unsigned char)*s++;
-        hash *= 1099511628211ULL;
-    }
-    return hash;
+    return rt__shared_str_hash(s); /* FNV-1a 64, NULL -> offset basis */
 }
 
 int64_t rt_str_hash(const char* s) {
