@@ -1,6 +1,7 @@
 # Native: erased generic class `T?` returns/params miscompile (2026-11-15)
 
-**Status:** open. Pre-existing and involves no traits. The `Box<T>` and
+**Status:** open (root cause pinned 2026-11-17, codegen fix not landed;
+store-side workaround verification-pending). Pre-existing and involves no traits. The `Box<T>` and
 `G<T>` repros below were run on an older Stage 2 (run 33,
 `/home/yoon/dev/simple-boot-fable-20261112/build/bootstrap/pinned-src/pinned-8220cfef5b8a/build/bootstrap-fable-33/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`)
 and on the Stage 2 built from `81625788a20` (pre-rebase sha of `1570c5778b8`). The true pre-fix base is run 34
@@ -113,6 +114,50 @@ go through the erased store:
   `AttributeStoreV1<text>` (text was measured correct). Default stays OFF.
 - Interpreter regression: `test/01_unit/compiler/data/attribute_layouts_spec.spl`
   ("concrete i64 node attribute store"), RED before the class existed, 11/11 GREEN after.
+
+## Root cause pinned in MIR/LLVM (2026-11-17)
+
+The SparseHash ÷8 is a write/read ABI split *inside one erased method
+pair*, shown by the in-process HIR -> MIR -> LLVM spec
+`test/01_unit/compiler/50.mir/generic_method_erased_i64_boundary_spec.spl`
+(`GMEB_DUMP=1` prints the IR; run with `bin/simple.exe` of 11-17, the
+11-13 `seed_p1.exe` can no longer parse `driver_compile_options.spl:63`):
+
+```
+Store.set:  %l7 = call @rt_value_int_wide(%key)       ; key encoded
+            call @rt_dict_set(%h, %l7, %value)         ; VALUE stored RAW
+Store.get:  %l19 = call @rt_dict_get(%h, %key_enc)
+            %l20 = call @rt_value_as_int_wide(%l19)    ; read DECODES (>>3)
+probe:      call @Store.set(ptr %s, i64 1, i64 %v)     ; caller passes v raw
+```
+
+Why: a generic-class method has an untyped symbol in bootstrap mode, so
+its `T` arguments arrive plain ("plain in/out"), and `box_runtime_value`
+leaves the `T` param unboxed at `rt_dict_set` (`mir_lowering_stmts.spl`
+~2851). Concrete code and free generic fns write `Dict<K,T>` values
+encoded, so the method READ must decode (b08: `Bag.lookup` over a
+concretely built dict) — the method WRITE is the odd one out.
+
+Why no body-side fix: inside the one erased body the runtime kind of a
+plain `T` word is unknown (i64 raw vs f64 bits vs bool 0/1 vs a text/record
+handle), so the body cannot pick `rt_value_int_wide` vs heap-box vs pass
+through. Only the call site, where the receiver binds `T`, can encode.
+
+Remaining scope (one change, not separable without a new silent ÷8/×8):
+1. Encode method args into bare `T` / `[T]` / `Dict<K,T>` params at the call
+   when the receiver instance binds `T` to a scalar (`box_runtime_value`, as
+   `lower_call` already does for free fns).
+2. Decode `T?` / `Result<T,E>` / bare `T` method results at the caller,
+   binding `T` from the receiver's HIR type args
+   (`decode_erased_scalar_call_payload` currently states methods never
+   reach it); drop the body re-box of a bare `-> T` tail and the
+   `current_fn_is_method` exemption in `lower_dict_runtime_read`.
+3. Generic-class FIELDS of scalar `T` must then also be encoded at
+   construct sites and decoded at concrete field reads — today
+   `Box<i64>(v: Some(41))` stores raw (`infer_erased_call_result_instance`),
+   so 1+2 alone would turn `Box.read()` into a ÷8.
+The spec is tagged `@tag:in-development` and its third example is the
+acceptance row for 1-3. The `AttrI64StoreV1` workaround stays.
 
 Native verification needed: a Stage 2 rebuilt from this source run with
 `SIMPLE_NODE_ATTR=extra=sparse_hash,op=sparse_hash` must not print the
