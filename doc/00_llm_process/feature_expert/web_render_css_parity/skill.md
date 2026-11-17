@@ -2297,6 +2297,44 @@ Gates and remaining gaps:
 - **Trap:** the shadow was NOT the dominant cost of the box command (about 30 s of 113 s); do not extrapolate a per-phase share from a command total.
 - **Open / not investigated:** glyph raster on an atlas miss (item 2) and full-frame fills (item 4); remaining page time not attributed per phase. Details: `doc/08_tracking/bug/web_render_dpr4_residual_per_pixel_cost_2026-11-16.md`.
 
+## 2026-11-17 — selectors round 4 (adopted from abandoned `28dff1927c4`)
+
+- **Two compound fixes now coexist.** Upstream `_compound_base_tokens` reads
+  the base (tag/#id/.class) in any order. `_canonical_compound` (run on every
+  part `selector_group_parts` returns) also moves a pseudo-class written
+  BEFORE a class or id behind it, so `:is(p, div).k` and
+  `div:first-of-type.k` match. Both matcher paths consume
+  `selector_group_parts`, so one fix reaches the text and the pre-parsed path.
+- **Of-type codes:** upstream's `PSEUDO_FIRST_OF_TYPE` (16), `PSEUDO_LAST_OF_TYPE`
+  (17) and `PSEUDO_ONLY_OF_TYPE` (18) won the merge; the abandoned lane's
+  "map first-of-type to nth-of-type(1)" variant was dropped. A new
+  pseudo-class must still be added to both `simple_match`/`_pseudo_ctx_matches`
+  and `_pseudo_code_for`/`_pseudo_ctx_matches_parsed`, or
+  `web_selector_parsed_equivalence_spec` diverges.
+- **Invalid vs unsatisfied.** `_pseudo_code_for` returns -1 for both an unknown
+  name and a valid-but-static-false one (`:hover`). Only an unknown name drops
+  the whole rule: `selector_list_has_unknown_pseudo`, called once per rule in
+  `_extract_css_vw_with_rule_limit` (the only rule-admission site). It
+  recurses into `:not()`, `:has()` and the `of S` of `:nth-child()` /
+  `:nth-last-child()`, NOT into `:is()`/`:where()` (forgiving in Chrome), and
+  checks `::` names against `CSS_KNOWN_PSEUDO_ELEMENTS` (`::-webkit-*` always
+  accepted).
+- **Validate the name tables against Chrome, not memory.** A `<style>` probe
+  (`st.sheet.cssRules.length` after `div:NAME{}`) found `:first`, `:left`,
+  `:right` and `:blank` rejected in style rules (@page-only) and
+  `:active-view-transition` missing. A name missing from a table drops valid
+  rules on real pages, so add before you remove.
+- **Still permissive (keeps a rule Chrome drops):** any `:-webkit-*`
+  pseudo-class (Chrome rejects `:-webkit-frob`), a pseudo-class after a
+  pseudo-element (`::before:hover` is invalid, `::part(x):hover` valid), a
+  pseudo-element inside `:not()`, and `:nth-of-type(1 of p)` (`of S` is
+  nth-child only).
+- **Gates at the fix (2026-11-17, Chrome 159.0.8154.6, seed `cargo-target-webrender-vk`):**
+  matrix 979 cells, 88 mismatching (base 88, no change). Selector structural spec
+  base 62/71 -> head 71/71. 25 nearby specs, no new failing names.
+  `simple_web_html_layout_renderer_module_split_spec` "keeps every parser input
+  below 128 KiB" was already red at base (`..._core_selectors.spl` 138,390 B),
+  and this change grows the file to 147,903 B. Split the file before adding more.
 ## 2026-11-17 — slight vertical hinting (Chrome FreeType autohinter, y only)
 
 Glyph residual was ~75% of css-paint. Classified on a probe page (16 px sans, 16 px serif, 13 px sans, black on white, 3 lines, 2,791 mismatching px at tolerance 8 before the fix, heuristic split; scripts were scratch .spl, not committed):
@@ -2315,3 +2353,15 @@ Glyph residual was ~75% of css-paint. Classified on a probe page (16 px sans, 16
 - **Not done.** The grayscale raster (above 48 device px, `sfnt_render_glyph_into`) is not hinted: the 4x `Hg` frame is unchanged (827 of 15,360 px mismatching Chrome). Horizontal-stem edge snapping (rank 2) needs edge detection and stem placement, not a blue-zone warp.
 - **Open — 8 px text.** `simple_web_renderer_spec` "uses explicit line-height for wrapped text layout" pins the darkest ink px (`0xFF352A44` x 2). Hinting now gives the 8 px caps Chrome's 6 rows, but that pin is a pen-phase statistic (Chrome's L stem sits about half a pixel right of ours): text-box mismatch 711 to 709 px, sum of abs delta +1.3%, darkest px `0x283151` (Chrome `0x483E5F` x 1). Not strictly closer, so not re-pinned; the spec stays red until the 8 px pen phase is fixed.
 - Spec: `test/01_unit/browser_engine/glyph_shape_vertical_hint_chrome159_spec.spl`. Bug record: `doc/08_tracking/bug/web_render_css_paint_residual_2026-11-17.md`.
+
+## 2026-11-17 — CSS opacity groups (saveLayer) match Chrome 159
+
+- **Chrome's rule (fitted, not guessed).** A box with `opacity < 1` and two or more painted items rasterises its subtree into a transparent premultiplied 8-bit layer (children use the solid rule), then restores it with paint alpha `A = round(opacity*255)` through SkBlendARGB32: `sc = A+1`, `p = 0xFFFF - La*sc`, `ds = (p + (p>>8)) >> 8`, `out = (L*sc + D*ds) >> 8` on every channel. Fit: 601884/604800 (single level) and 602574/604800 (nested, 2-decimal opacities) channels; a no-group control page is 604800/604800. Rejected: NEON lowp `div255r`, `S32A_Blend`, 2-term truncation, float.
+- **Tile seams are Chrome's, not the rule's.** Every miss sits in a few device columns just left of x = 256*k (k >= 2), +-1 (rarely 2), only on group pages, and the runs stay at the same device x when the content moves 16 px. Pin cells inside one 256-device-px tile; a full-frame row across a seam asserts max deviation <= 2 (`opacity_group_chrome159_spec`).
+- **Code.** The math lives only in `engine2d/css_opacity_group.spl` (alpha mapping, pixel restore, region restore, surface-id prefix `html-opacity-group-`). `engine2d_composite_region_milli` is untouched (its 930 -> 117 oracle is Simple-internal).
+  - Draw IR: `_simple_web_opacity_root_bounds` gives each opacity root a surface rect = union of its commands clipped to the viewport. A root with an untranslatable command (glyph runs, points, fractional/affine geometry, paint transforms, CSS background images) or a member with box-shadow/outline (halo outside the command rect) keeps a viewport surface — but only a SINGLE such root is admitted; on a page with two or more roots one such root turns surfaces off for the whole page (base behaviour: flat, no opacity). >= 2 painted commands name the surface as a group; `draw_ir_adv` routes it to `Engine2D.draw_ir_composite_readback_css_group` (region readback + .spl restore + opaque `draw_image`, all backends, so Vulkan == cpu_simd). A box's border and outline ride its background command but count as items of their own (once per owner), matching the raster. One painted item keeps the old single-item surface.
+  - Vulkan: `Engine2D.draw_ir_composite_device_css_group` restores the layer straight from the shared offscreen's device buffer with `shaders/css_group_restore.comp` (integer twin of `css_opacity_group_composite_pixel`; generated `backend_vulkan_css_group_restore_spirv.spl`, pinned by `scripts/check/check-css-group-restore-spirv-pinned.shs`, regenerated by `scripts/tool/gen-css-group-restore-spirv.shs`). It is submitted on its own after a flush, because the layer buffer belongs to another backend and must not enter the pending-source release list. Clip, mask or a host fallback on either side declines to the readback restore. Counter: `vulkan_device_css_group_restore_count`.
+- **Trap: Vulkan region readback is a whole-frame read.** `read_pixels_region` on Vulkan inherits the RenderBackend default (full-frame read + host crop) and, without `SIMPLE_VK_READBACK=native`, the read is an interpreted per-pixel unpack (~5 us/px). The first group restore spent 713 ms of ~900 ms per 140x60 group there (600x200 frame); never read the destination back for a per-element composite on Vulkan.
+  - Raster: `paint()` is now a front end over `_paint_passes`. Admitted groups are painted with their members hidden, then each group is painted alone into a bounded layer (coordinates shifted, root opacity forced to 100) and restored after the passes — Chrome's order for a z-auto stacking context relative to in-flow content. Ops are counted like Chrome (bg + border on one box = 2 ops = a group: Chrome paints `ff7e7e`, not the folded `ff7f7f`). Not admitted: nested groups, iframes, widget pages, html/body roots, a group overlapped by a positioned box that paints above it (later in tree order or z > 0), and any member the transparent layer cannot hold exactly (shadow, gradient, image, form control, translucent colour, text without an opaque root background) — the raster blenders treat a transparent destination as opaque black.
+- **Trap: multi-root pages lost their opacity entirely.** Before this, two or more opacity roots that were not `overflow:hidden` and equal-sized failed admission and painted FLAT at full opacity on cpu_simd/Vulkan; the raster painted group children unfaded. A group page at base is wrong by tens of levels, not by one.
+- **Follow-ups.** Multi-root Draw IR pages where any root holds text, a shadow or an outline still paint flat on cpu_simd/Vulkan (needs per-root text translation and halo padding). Nested groups (the Draw IR producer still refuses `parent_root >= 0`). Translucent children on the raster: a translucent child over a transparent layer pixel gets alpha 255 (measured `166975` vs Chrome `1e7b9d`); cpu_simd/Vulkan match Chrome on that probe. Vulkan cost is now ~19 ms per 140x60 group (offscreen create 1 ms, render 15 ms, device restore 2-5 ms).
