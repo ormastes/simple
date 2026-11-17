@@ -713,6 +713,31 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
         eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
     eng
 
+# Paint the CSS outline ring of a box: `outline-width` thick, square, grown
+# `outline-width + outline-offset` past the border box. Twin of the raster
+# lane's `fb_outline_clip` (browser_engine paint_primitives); keep the two in
+# step. Four non-overlapping slivers, so a translucent ring blends once per
+# pixel. Engine2D is value-copied across this boundary: reassign the result.
+fn _engine2d_draw_ir_render_outline(engine: Engine2D, style: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32) -> Engine2D:
+    var eng = engine
+    val ow_t = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "outline-width"), 0, 0) as i32
+    val color = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "outline-color"), 0, 0) as u32
+    if ow_t <= 0 or not _engine2d_draw_ir_has_visible_alpha(color):
+        return eng
+    val grow = ow_t + (_engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "outline-offset"), 0, 0) as i32)
+    val ox = x - grow
+    val oy = y - grow
+    val ow = w + grow * 2
+    val oh = h + grow * 2
+    if ow <= 0 or oh <= 0:
+        return eng
+    eng.draw_rect_filled(ox, oy, ow, ow_t, color)
+    eng.draw_rect_filled(ox, oy + oh - ow_t, ow, ow_t, color)
+    if oh - ow_t * 2 > 0:
+        eng.draw_rect_filled(ox, oy + ow_t, ow_t, oh - ow_t * 2, color)
+        eng.draw_rect_filled(ox + ow - ow_t, oy + ow_t, ow_t, oh - ow_t * 2, color)
+    eng
+
 # Adjacent sides of different colours (`transparent` included) meet on the
 # diagonal from the outer to the inner corner, as Chrome paints them -- a CSS
 # triangle is a triangle. Twin of the framebuffer lane's
@@ -992,6 +1017,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
                 eng, typed_shadows.layers, x, y, w, h, effective_corners)
         eng = _engine2d_draw_ir_render_borders(
             eng, style, x, y, w, h, radius)
+        eng = _engine2d_draw_ir_render_outline(eng, style, x, y, w, h)
         return Engine2dDrawIrBoxOutcome(
             engine: eng, glass_execution: glass.execution)
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
@@ -1193,6 +1219,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         eng = engine2d_draw_ir_render_typed_inset_shadows(
             eng, typed_shadows.layers, x, y, w, h, effective_corners)
     eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius)
+    eng = _engine2d_draw_ir_render_outline(eng, style, x, y, w, h)
     Engine2dDrawIrBoxOutcome(
         engine: eng,
         glass_execution: engine2d_glass_execution_unavailable(

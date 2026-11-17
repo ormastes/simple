@@ -2749,3 +2749,8 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 | animation | 3.47 | 2.91 |
 
   overview, evidence and tab-bar are unchanged at 1.29, 0.77 and 0.42.
+
+
+## Outline (2026-11-18)
+- Engine2D executor paints the outline ring in `_engine2d_draw_ir_render_outline` (`engine2d/draw_ir_adv.spl`); its raster twin is `fb_outline_clip` (`paint_primitives`). Keep them in step. Pinned by `outline_engine2d_chrome159_spec` plus the opacity spec ring points.
+- Trap: a missing paint on the Engine2D lanes often means the executor ignores a Draw IR style prop the producer already emits. Grep `draw_ir_adv.spl` for the prop key before suspecting layout.
