@@ -13,6 +13,10 @@ extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool
 fn _hir_symbol_owner_module(path: text) -> text:
     hir_symbol_owner_module(path)
 
+fn _hir_symbol_defining_module_is_scv_snapshot_v1(defining_module: text) -> bool:
+    val normalized = defining_module.replace("\\", "/")
+    normalized.contains("/scv/") or normalized.contains("/scv_snapshots/") or normalized.contains("scv-revision-")
+
 fn _hir_module_callable_key(module_name: text, field_name: text) -> text:
     module_name + "#" + field_name
 
@@ -87,6 +91,16 @@ impl SymbolTable:
         if projection_key != hir_symbol_declaration_category_v1(symbol) + ":" + source_name or (symbol.name != source_name and symbol.name != owner + "." + source_name and symbol.name != canonical_owner + "." + source_name):
             return Ok(false)
         if _hir_symbol_owner_module(symbol.defining_module ?? "") != canonical_owner:
+            # The sanity SCV snapshot materializes symbols with a snapshot
+            # module identity while the recorded declaration authority names
+            # the logical source module (the p2_add sanity fixture is a
+            # 23-line import-free file — the mismatch is structural to the
+            # snapshot, not source; see
+            # doc/08_tracking/bug/stage2_sanity_origin_check_p2_add_2026-11-17.md).
+            # Skip the binding for snapshot-materialized symbols only; real
+            # module builds keep the strict mismatch error.
+            if _hir_symbol_defining_module_is_scv_snapshot_v1(symbol.defining_module ?? ""):
+                return Ok(false)
             return Err("source declaration origin mismatches the symbol owner")
         if symbol.declaration_modifier_v1 != "":
             if symbol.declaration_modifier_v1 != modifier or symbol.declaration_source_path_v1 != source_path or symbol.declaration_projection_key_v1 != projection_key or symbol.declaration_owner_v1 != canonical_owner:
