@@ -1049,6 +1049,7 @@ pub fn clear_interpreter_state() {
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
     USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    crate::units::scope::unit_scope_reset();
 
     // Clear literal functions
     LITERAL_FUNCTIONS.with(|cell| cell.borrow_mut().clear());
