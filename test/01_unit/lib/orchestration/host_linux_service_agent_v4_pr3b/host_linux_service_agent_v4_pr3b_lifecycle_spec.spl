@@ -502,3 +502,24 @@ describe "V4 agent pane Write replay ledger":
         expect(next.result.accepted_bytes).to_equal(99)
         val kept20 = host_agent_pane_io_core_v4(next.agent, lease, HostAgentPaneOpV4.Write(l_write_id(20, 4, "abcd")), 3001, second)
         expect(kept20.result.replayed).to_equal(true)
+
+    it "keeps eof and io-deadline bookkeeping consistent when a Write is answered from the record":
+        # @req agent-pane-write-unknown-replay
+        val unknown = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_unknown(call)
+        val second = fn(call: HostAgentPaneIoCallV4) -> HostAgentPaneIoPortTurnV4: l_io_second(call)
+        val issued = host_linux_service_agent_attachment_lease_v4(l_agent("ready"))
+        val lease = issued.lease.unwrap()
+        val first = host_agent_pane_io_core_v4(issued.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2000, unknown)
+        val first_deadline = first.agent.attachment.unwrap().io_deadline_ms
+        step("a replay of a recorded success renews the io deadline like any accepted op"):
+            val retry = host_agent_pane_io_core_v4(first.agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2005, second)
+            expect(retry.result.replayed).to_equal(true)
+            expect(retry.agent.attachment.unwrap().io_deadline_ms).to_equal(first_deadline + 5)
+        step("a sticky eof is reported on the replayed answer"):
+            var agent = first.agent
+            var att = agent.attachment.unwrap()
+            att.eof = true
+            agent.attachment = Some(att)
+            val at_eof = host_agent_pane_io_core_v4(agent, lease, HostAgentPaneOpV4.Write(l_write_id(7, 4, "abcd")), 2006, second)
+            expect(at_eof.result.replayed).to_equal(true)
+            expect(at_eof.result.eof).to_equal(true)
