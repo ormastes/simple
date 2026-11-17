@@ -146,6 +146,25 @@ fn _pixels_equal(a: [u32], b: [u32]) -> bool:
         idx = idx + 1
     true
 
+fn _pixel_mismatches(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var wrong: i32 = 0
+    var idx: i32 = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            wrong = wrong + 1
+        idx = idx + 1
+    wrong
+
+fn _draw_ir_component_count(html: text, width: i32, height: i32, prefix: text) -> i32:
+    var count: i32 = 0
+    for batch in simple_web_layout_render_html_draw_ir(html, width, height).batches:
+        for command in batch.commands:
+            if command.component_id.starts_with(prefix):
+                count = count + 1
+    count
+
 fn _simple_scene_has_fill_color(html: text, color: u32) -> bool:
     val scene = simple_web_render_html_to_scene(html, 140, 90)
     var idx: i32 = 0
@@ -1512,18 +1531,24 @@ describe "SimpleWebRenderer":
                     text_runs = text_runs + 1
         var chrome_points_without = 0
         var text_runs_without = 0
+        var offset_text_without = 0
         for batch in without_text.batches:
             for command in batch.commands:
                 if command.component_id.starts_with("widget-chrome-text-"):
                     chrome_points_without = chrome_points_without + 1
+                if command.component_id.starts_with("widget-offset-text-"):
+                    offset_text_without = offset_text_without + 1
                 if command.text_value != "":
                     text_runs_without = text_runs_without + 1
         # Every table point once; the generated text replaces the node glyphs.
         expect(chrome_points).to_equal(table.xs.len())
         expect(text_runs).to_equal(0)
-        # No widget-ancestor text: the node text paints and no table point does.
+        # No widget-ancestor text: the node text paints and no table point
+        # does. As in the raster it paints as legacy sparse offset text, not
+        # as a text run.
         expect(chrome_points_without).to_equal(0)
-        expect(text_runs_without > 0).to_equal(true)
+        expect(offset_text_without > 0).to_equal(true)
+        expect(text_runs_without).to_equal(0)
         # Pixel API (Draw IR -> Engine2D) paints every table point exactly.
         val pixels = simple_web_render_html_to_pixels(html_with_widget_text, 40, 64)
         var wrong = 0
@@ -1541,6 +1566,55 @@ describe "SimpleWebRenderer":
                 if command.component_id.starts_with("widget-chrome-text-"):
                     small_points = small_points + 1
         expect(small_points).to_equal(0)
+
+    it "lowers the legacy widget frame rects into Draw IR, so cpu_simd paints the raster's frame":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "lowers the legacy widget frame rects into Draw IR, so cpu_simd paints the raster's frame"
+        step("Verify: lowers the legacy widget frame rects into Draw IR, so cpu_simd paints the raster's frame")
+        val html = "<html><body><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        val raster = simple_web_layout_render_html_software_pixels(html, 40, 64)
+        val cpu = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(html, 40, 64, "cpu_simd")
+        expect(_draw_ir_component_count(html, 40, 64, "widget-frame-") > 0).to_equal(true)
+        # The 1px focus border, the image swatch with its two chips, and the
+        # button frame / face / icon, at points the chrome text does not cover.
+        expect(cpu[0]).to_equal(0xFF0066CCu32)
+        expect(cpu[63 * 40 + 39]).to_equal(0xFF0066CCu32)
+        expect(cpu[34 * 40 + 6]).to_equal(0xFF2563EBu32)
+        expect(cpu[38 * 40 + 10]).to_equal(0xFFF59E0Bu32)
+        expect(cpu[39 * 40 + 20]).to_equal(0xFF22C55Eu32)
+        expect(cpu[50 * 40 + 5]).to_equal(0xFF64748Bu32)
+        expect(cpu[52 * 40 + 7]).to_equal(0xFFCBD5E1u32)
+        expect(cpu[57 * 40 + 12]).to_equal(0xFF2563EBu32)
+        # fbh <= 66: the two bottom-corner patches restore the page base.
+        expect(cpu[63 * 40 + 2]).to_equal(0xFFF5F5F5u32)
+        # The whole frame, chrome text included, is the raster's.
+        expect(_pixel_mismatches(raster, cpu)).to_equal(0)
+        # A non-legacy page carries no widget frame.
+        val styled = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}</style></head><body><section class='widget-panel'>Menu</section></body></html>"
+        expect(_draw_ir_component_count(styled, 40, 64, "widget-frame-")).to_equal(0)
+
+    it "paints legacy widget offset text through Draw IR exactly as the raster does":
+        # @req REQ-WEB-RENDER-001
+        # @capture(gui_image): retained evidence for scenario "paints legacy widget offset text through Draw IR exactly as the raster does"
+        step("Verify: paints legacy widget offset text through Draw IR exactly as the raster does")
+        # Widget mode without the chrome text gate: text under no widget
+        # ancestor, and a frame too narrow for the generated table. Both take
+        # the sparse x+8 / y+7 offset text path instead of a normal text run.
+        val no_widget_text = "<html><body><div>Menu</div><section class='widget-panel'></section></body></html>"
+        val narrow = "<html><body><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+        expect(_draw_ir_component_count(no_widget_text, 40, 64, "widget-offset-text-") > 0).to_equal(true)
+        expect(_draw_ir_component_count(narrow, 37, 64, "widget-offset-text-") > 0).to_equal(true)
+        val raster_a = simple_web_layout_render_html_software_pixels(no_widget_text, 40, 64)
+        val cpu_a = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(no_widget_text, 40, 64, "cpu_simd")
+        val raster_b = simple_web_layout_render_html_software_pixels(narrow, 37, 64)
+        val cpu_b = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(narrow, 37, 64, "cpu_simd")
+        # The sparse glyphs really paint: the same page without the text
+        # differs from it on cpu_simd.
+        val bare = "<html><body><div></div><section class='widget-panel'></section></body></html>"
+        val cpu_bare = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(bare, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(cpu_bare, cpu_a) > 0).to_equal(true)
+        expect(_pixel_mismatches(raster_a, cpu_a)).to_equal(0)
+        expect(_pixel_mismatches(raster_b, cpu_b)).to_equal(0)
 
     it "keeps lowercase browser text glyphs distinct from uppercase glyphs":
         # @req REQ-WEB-RENDER-001
