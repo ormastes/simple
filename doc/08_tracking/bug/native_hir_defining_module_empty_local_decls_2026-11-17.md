@@ -26,6 +26,7 @@ Annotate and use safe absence:
 Spec: `test/01_unit/compiler/hir/declaration_defining_module_typed_option_spec.spl`.
 
 ## Workaround
-The tagged guard in `bind_declaration_origin_v1` that fills an empty
-defining_module from owner is REMOVABLE once a native Stage 2 run shows
+A separate lane is landing a tagged guard in `bind_declaration_origin_v1`
+(`src/compiler/20.hir/hir_symbol_table_methods.spl`) that fills an empty
+defining_module from owner; it is not in this commit's tree. That guard is REMOVABLE once a native Stage 2 run shows
 non-empty defining_module for p2_add's local declarations without it.
