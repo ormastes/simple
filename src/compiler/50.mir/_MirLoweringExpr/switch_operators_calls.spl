@@ -8321,6 +8321,10 @@ impl MirLowering:
         val trace = (_sffi_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1"
         if val return_hir = declared_return:
             if not self.hir_type_mentions_type_param(return_hir, self.symbols): return
+            # Before the record gate: another binder of the same call may be
+            # bound to a record (`f<T, U>(d, rec)`) while `T` is a whole dict.
+            if self.infer_erased_call_result_dict(result, return_hir, args, call_param_types, lowered):
+                return
             val bindings = self.erased_callback_record_bindings_for_call(args, call_param_types, lowered)
             if trace:
                 print "[erased-result-inference] result={result.id} bindings={bindings.len()} params={call_param_types.len()} args={args.len()}"
@@ -8348,6 +8352,81 @@ impl MirLowering:
                     self.runtime_dict_locals[result.id] = true
                     self.mark_runtime_value_local(result.id)
                 case _: ()
+
+    me infer_erased_call_result_dict(result: LocalId, return_hir: HirType, args: [HirCallArg], call_param_types: [HirType], lowered: [MirOperand]) -> bool:
+        """A bare `T` result whose binder is bound to one whole concrete Dict
+        (`fn pick<T>(a: T, b: T) -> T` called as `pick(d, d)`) is that dict
+        at the call site. The erased body only moves the handle word, so this
+        is type information only. Untyped, `pick(d, d)[k]` took the array
+        index path and `.len()` a non-dict len: a silent wrong value natively.
+        Every positional argument bound to the binder (a bare `T`, or the
+        element of a `[T]`) must carry the same concrete Dict type; any other
+        or unknown evidence types nothing."""
+        var binder = ""
+        match return_hir.kind:
+            case HirTypeKind.TypeParam(return_binder, _): binder = return_binder
+            case _: return false
+        var bound: HirType? = None
+        var index = 0
+        while index < args.len() and index < call_param_types.len():
+            val call_arg: HirCallArg = args[index]
+            val declared_param: HirType = call_param_types[index]
+            var binds = false
+            var element_binder = false
+            match declared_param.kind:
+                case HirTypeKind.TypeParam(param_binder, _): binds = param_binder == binder
+                case HirTypeKind.Array(array_member, _) | HirTypeKind.Slice(array_member):
+                    match array_member.kind:
+                        case HirTypeKind.TypeParam(member_binder, _):
+                            binds = member_binder == binder
+                            element_binder = true
+                        case _: ()
+                case _: ()
+            if binds:
+                if call_arg.has_name:
+                    return false
+                var arg_type: HirType? = None
+                val arg_expr: HirExpr = call_arg.value
+                if arg_expr.has_type_:
+                    arg_type = Some(arg_expr.type_)
+                if index < lowered.len():
+                    val lowered_operand: MirOperand = lowered[index]
+                    match lowered_operand.kind:
+                        case MirOperandKind.Copy(lowered_local) | MirOperandKind.Move(lowered_local):
+                            if val remembered = self.find_local_hir_type(lowered_local.id):
+                                if self.erased_result_dict_of_v1(arg_type, element_binder) == None:
+                                    arg_type = Some(remembered)
+                        case _: ()
+                val actual = self.erased_result_dict_of_v1(arg_type, element_binder)
+                val found = actual ?? return_hir
+                if actual == None or self.hir_type_mentions_type_param(found, self.symbols):
+                    return false
+                if val prior = bound:
+                    if not hir_types_equal(prior, found):
+                        return false
+                else:
+                    bound = Some(found)
+            index = index + 1
+        if val dict_type = bound:
+            self.remember_local_hir_type(result.id, dict_type, 0, 0)
+            self.runtime_dict_locals[result.id] = true
+            self.mark_runtime_value_local(result.id)
+            return true
+        false
+
+    fn erased_result_dict_of_v1(arg_type: HirType?, element_binder: bool) -> HirType?:
+        """The Dict an argument type binds: itself, or its element when the
+        declared parameter is `[T]`. None for any other shape."""
+        if val arg_hir = arg_type:
+            var candidate = arg_hir
+            if element_binder:
+                match arg_hir.kind:
+                    case HirTypeKind.Array(member, _) | HirTypeKind.Slice(member): candidate = member
+                    case _: return None
+            match candidate.kind:
+                case HirTypeKind.Dict(_, _): return Some(candidate)
+                case _: return None
+        None
 
     me infer_erased_call_result_instance(result: LocalId, return_hir: HirType, args: [HirCallArg], call_param_types: [HirType], lowered: [MirOperand], source_locals: Dict<i64, i64>):
         """A generic call whose declared result is a generic struct INSTANCE
@@ -9797,6 +9876,7 @@ impl MirLowering:
             var boundary_runtime_classify = true
             if current_arg_index < call_param_types.len():
                 val declared_param_type = call_param_types[current_arg_index]
+                self.refuse_struct_key_generic_call_v1(direct_name, direct_symbol, call_param_types, current_arg_index, arg_value, arg_local)
                 arg_local = self.coerce_native_trait_object(arg_local, arg_value, declared_param_type)
                 # A scalar Optional passed where the plain scalar is declared
                 # (`g(v)` after `if v != nil:`) hands over the payload, not
@@ -9917,7 +9997,7 @@ impl MirLowering:
                     case _:
                         ()
                 if direct_runtime_value_abi == 1 and current_arg_index == 1:
-                    arg_local = self.box_runtime_dictionary_key_v1(arg_local)
+                    arg_local = self.box_dict_key_v1(arg_local)
                 if direct_runtime_value_abi == 2:
                     match declared_param_type.kind:
                         case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:

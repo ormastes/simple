@@ -2379,7 +2379,501 @@ impl MirLowering:
                 case _: ()
         false
 
+    me dict_key_struct_name_v1(local: LocalId) -> text:
+        """Layout name of a dict key that is a STRUCT value, "" otherwise.
+
+        A native struct is a headerless rt_alloc field block, so neither
+        runtime can hash or compare it by value: used verbatim as a key it
+        is compared by ADDRESS and an equal key built elsewhere (or the
+        value-copy a struct param or loop variable gets) misses. Classes keep
+        reference identity; bitfields and newtypes over a primitive are
+        already integer words."""
+        if self.nil_locals.contains(local.id) or self.bitfield_value_syms.contains(local.id):
+            return ""
+        var name = ""
+        if self.struct_value_syms.contains(local.id):
+            name = self.struct_value_syms[local.id]
+        if not self.struct_field_order.contains(name):
+            name = ""
+            if val key_mir_type = self.local_mir_type_of(local):
+                match key_mir_type.kind:
+                    case MirTypeKind.Struct(key_struct_symbol): name = self.mir_struct_symbol_name(key_struct_symbol)
+                    case _: ()
+        if name == "" and self.box_runtime_value_local_is_record(local):
+            if val key_hir_type = self.find_local_hir_type(local.id):
+                match key_hir_type.kind:
+                    case HirTypeKind.Named(key_owner, _): name = self.mir_struct_symbol_name(key_owner)
+                    case _: ()
+        if name == "" or not self.struct_field_order.contains(name):
+            return ""
+        if self.class_type_names.contains(name) or custom_primitive_underlying_type_tag_by_name(name) >= 0:
+            return ""
+        name
+
+    me dict_key_optional_struct_name_v1(local: LocalId) -> text:
+        """Layout name S of a dict key held in an Optional local `S?` (S a
+        struct), "" otherwise.
+
+        `var dk: SymbolId? = nil` then `f_functions[dk] = ..` (the generated
+        HIR codec) holds a `T?` word -- the canonical Option box or a raw
+        record pointer -- and is in nil_locals, so dict_key_struct_name_v1
+        never saw a struct and the dict was keyed by that POINTER, which the
+        keys()/for-(k, v) rebuild then read back as the id field. Decided by
+        the retained HIR type only: MIR lowers `S?` to Tuple([Bool, S]), which
+        a genuine `(bool, S)` tuple key shares."""
+        if val key_hir_type = self.find_local_hir_type(local.id):
+            match key_hir_type.kind:
+                case HirTypeKind.Optional(inner):
+                    match inner.kind:
+                        case HirTypeKind.Named(owner, _):
+                            if self.bitfield_map.has(owner.id):
+                                return ""
+                            val name = self.mir_struct_symbol_name(owner)
+                            if name == "" or not self.struct_field_order.contains(name):
+                                return ""
+                            if self.class_type_names.contains(name) or custom_primitive_underlying_type_tag_by_name(name) >= 0:
+                                return ""
+                            return name
+                        case _: ()
+                case _: ()
+        ""
+
+    me dict_key_some_payload_v1(local: LocalId, name: text) -> LocalId:
+        """The record inside an Optional struct key; None panics (a dict key
+        must be Some -- keying by nil has no field word). rt_is_some is exact
+        on both Option lanes, rt_unwrap_or_self reads the payload on both."""
+        var b = self.builder
+        val is_some_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_is_some"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val is_some = b.emit_call(is_some_op, [mir_operand_copy(local)], MirType.bool()) ?? LocalId(id: 0)
+        val some_block = b.new_block(Some("struct_key_some"))
+        val none_block = b.new_block(Some("struct_key_none"))
+        b.terminate_if(mir_operand_copy(is_some), some_block, none_block)
+        b.switch_to_block(none_block)
+        val msg = "dict key of type '{name}?' is None; an Optional struct key must be Some"
+        val msg_local = b.new_temp(self.bootstrap_text_type())
+        b.emit_const(msg_local, MirConstValue.Str(msg), self.bootstrap_text_type())
+        val panic_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        b.emit_call(panic_op, [mir_operand_copy(msg_local)], MirType.unit())
+        b.terminate_abort(msg)
+        b.switch_to_block(some_block)
+        self.builder = b
+        self.option_payload_or_self(local)
+
+    me dict_key_struct_is_word_v1(name: text) -> bool:
+        """True when struct `name` is keyed by value natively: exactly one
+        field, a 64-bit integer (`SymbolId`). The key word is that field,
+        boxed like any i64 key; every key-out path rebuilds the struct."""
+        if self.class_type_names.contains(name) or custom_primitive_underlying_type_tag_by_name(name) >= 0:
+            return false
+        if not self.struct_field_order.contains(name) or self.struct_field_order[name].len() != 1:
+            return false
+        if not self.struct_field_hir_type.contains(name):
+            return false
+        val field_types = self.struct_field_hir_type[name]
+        if field_types.len() != 1:
+            return false
+        match field_types[0].kind:
+            case HirTypeKind.Int(bits, _): return bits == 64
+            case _: return false
+
+    me canonical_struct_dict_key_v1(local: LocalId) -> LocalId?:
+        """Value-keyed word for a struct dict key; None when `local` is not a
+        struct. A struct the runtime cannot key by value is a compile error
+        naming the type, never a silent address-compared miss."""
+        val optional_name = self.dict_key_optional_struct_name_v1(local)
+        if optional_name != "" and self.dict_key_struct_is_word_v1(optional_name):
+            val payload = self.dict_key_some_payload_v1(local, optional_name)
+            var b_opt = self.builder
+            val payload_word = b_opt.emit_get_field(mir_operand_copy(payload), 0, MirType.i64())
+            self.builder = b_opt
+            return Some(self.box_runtime_value(payload_word))
+        if optional_name != "":
+            # Unwrapped it would be refused like a plain multi-field key;
+            # wrapped it was silently keyed by the Option word's address.
+            self.error_fatal("E-MIR-STRUCT-DICT-KEY: struct type '{optional_name}?' is not supported as a native dict key: only a struct with exactly one i64/u64 field is keyed by value (key by that field instead; module: {self.current_module_id})", None)
+            return None
+        val name = self.dict_key_struct_name_v1(local)
+        if name == "":
+            return None
+        if not self.dict_key_struct_is_word_v1(name):
+            self.error_fatal("E-MIR-STRUCT-DICT-KEY: struct type '{name}' is not supported as a native dict key: only a struct with exactly one i64/u64 field is keyed by value (key by that field instead; module: {self.current_module_id})", None)
+            return None
+        var b = self.builder
+        val field_word = b.emit_get_field(mir_operand_copy(local), 0, MirType.i64())
+        self.builder = b
+        Some(self.box_runtime_value(field_word))
+
+    me word_struct_key_mir_type_v1(declared_key: HirType) -> MirType?:
+        """`Struct(sym)` when the declared dict key type is a value-keyed
+        struct (dict_key_struct_is_word_v1), else None."""
+        match declared_key.kind:
+            case HirTypeKind.Named(key_owner, _):
+                if self.dict_key_struct_is_word_v1(self.mir_struct_symbol_name(key_owner)):
+                    return Some(MirType(kind: MirTypeKind.Struct(self.canonical_mir_type_symbol(key_owner))))
+            case _: ()
+        None
+
+    # Generics lower to ONE erased body whose `K` slot holds the caller's raw
+    # word, so erased code keys a Dict<K, _> by the struct POINTER while
+    # concrete code keys a value-keyed struct by its field. The two views of
+    # one dict may only meet where a type parameter used as a Dict key is
+    # bound; every such meeting with a value-keyed struct is refused below.
+    me dict_key_type_params_v1(type_: HirType, found: [text]) -> [text]:
+        """Type parameters that occur as a Dict KEY anywhere in `type_`."""
+        var out = found
+        match type_.kind:
+            case HirTypeKind.Dict(key, value):
+                match key.kind:
+                    case HirTypeKind.TypeParam(name, _):
+                        if not out.contains(name):
+                            out = out.push(name)
+                    case _: ()
+                out = self.dict_key_type_params_v1(key, out)
+                out = self.dict_key_type_params_v1(value, out)
+            case HirTypeKind.Array(inner, _): out = self.dict_key_type_params_v1(inner, out)
+            case HirTypeKind.Slice(inner): out = self.dict_key_type_params_v1(inner, out)
+            case HirTypeKind.Optional(inner): out = self.dict_key_type_params_v1(inner, out)
+            case HirTypeKind.Ref(inner, _): out = self.dict_key_type_params_v1(inner, out)
+            case HirTypeKind.Result(ok, err):
+                out = self.dict_key_type_params_v1(ok, out)
+                out = self.dict_key_type_params_v1(err, out)
+            case HirTypeKind.Named(_, items):
+                for item in items:
+                    out = self.dict_key_type_params_v1(item, out)
+            case HirTypeKind.Tuple(items):
+                for item in items:
+                    out = self.dict_key_type_params_v1(item, out)
+            case _: ()
+        out
+
+    me erased_dict_key_struct_binding_v1(declared: HirType, actual: HirType?, local: LocalId?, params: [text]) -> text:
+        """The value-keyed struct that an argument binds to one of `params`
+        (type parameters used as a Dict key by the callee) through declared
+        parameter type `declared`; "?" when the argument's type is unknown at
+        a position that mentions such a parameter; "" when nothing binds."""
+        match declared.kind:
+            case HirTypeKind.TypeParam(name, _):
+                if not params.contains(name):
+                    return ""
+                var struct_name = ""
+                if val lowered = local:
+                    struct_name = self.dict_key_struct_name_v1(lowered)
+                if struct_name == "":
+                    if val bound_type = actual:
+                        match bound_type.kind:
+                            case HirTypeKind.Named(bound_owner, _): struct_name = self.mir_struct_symbol_name(bound_owner)
+                            case _: ()
+                if struct_name != "" and self.dict_key_struct_is_word_v1(struct_name):
+                    return struct_name
+                return ""
+            case _: ()
+        if not self.hir_type_mentions_params_v1(declared, params):
+            return ""
+        var actual_type = declared
+        if val present_actual = actual:
+            actual_type = present_actual
+        elif val lowered_local = local:
+            if val local_hir = self.find_local_hir_type(lowered_local.id):
+                actual_type = local_hir
+            else:
+                # No HIR type for the argument: judge by the same MIR struct
+                # provenance key-in uses (a struct element or key is recorded).
+                return self.erased_dict_key_struct_binding_mir_v1(lowered_local)
+        else:
+            return "?"
+        match actual_type.kind:
+            case HirTypeKind.Ref(actual_inner, _): actual_type = actual_inner
+            case _: ()
+        var pairs: [(HirType, HirType)] = []
+        var shape_matches = true
+        match declared.kind:
+            case HirTypeKind.Dict(declared_key, declared_value):
+                match actual_type.kind:
+                    case HirTypeKind.Dict(actual_key, actual_value):
+                        pairs = [(declared_key, actual_key), (declared_value, actual_value)]
+                    case _: shape_matches = false
+            case HirTypeKind.Array(declared_elem, _):
+                match actual_type.kind:
+                    case HirTypeKind.Array(actual_elem, _): pairs = [(declared_elem, actual_elem)]
+                    case HirTypeKind.Slice(actual_elem): pairs = [(declared_elem, actual_elem)]
+                    case _: shape_matches = false
+            case HirTypeKind.Optional(declared_inner):
+                match actual_type.kind:
+                    case HirTypeKind.Optional(actual_inner): pairs = [(declared_inner, actual_inner)]
+                    case _: pairs = [(declared_inner, actual_type)]
+            case HirTypeKind.Ref(declared_inner, _): pairs = [(declared_inner, actual_type)]
+            case HirTypeKind.Named(_, declared_args):
+                match actual_type.kind:
+                    case HirTypeKind.Named(_, actual_args):
+                        if declared_args.len() != actual_args.len():
+                            shape_matches = false
+                        var i = 0
+                        while shape_matches and i < declared_args.len():
+                            pairs = pairs.push((declared_args[i], actual_args[i]))
+                            i = i + 1
+                    case _: shape_matches = false
+            case HirTypeKind.Tuple(declared_items):
+                match actual_type.kind:
+                    case HirTypeKind.Tuple(actual_items):
+                        if declared_items.len() != actual_items.len():
+                            shape_matches = false
+                        var j = 0
+                        while shape_matches and j < declared_items.len():
+                            pairs = pairs.push((declared_items[j], actual_items[j]))
+                            j = j + 1
+                    case _: shape_matches = false
+            case _: shape_matches = false
+        if not shape_matches:
+            return "?"
+        for pair in pairs:
+            val (declared_part, actual_part) = pair
+            val bound = self.erased_dict_key_struct_binding_v1(declared_part, Some(actual_part), None, params)
+            if bound != "":
+                return bound
+        ""
+
+    me hir_type_mentions_params_v1(type_: HirType, params: [text]) -> bool:
+        """True when one of `params` occurs anywhere in `type_`."""
+        match type_.kind:
+            case HirTypeKind.TypeParam(name, _): return params.contains(name)
+            case HirTypeKind.Array(inner, _): return self.hir_type_mentions_params_v1(inner, params)
+            case HirTypeKind.Slice(inner): return self.hir_type_mentions_params_v1(inner, params)
+            case HirTypeKind.Optional(inner): return self.hir_type_mentions_params_v1(inner, params)
+            case HirTypeKind.Ref(inner, _): return self.hir_type_mentions_params_v1(inner, params)
+            case HirTypeKind.Dict(key, value): return self.hir_type_mentions_params_v1(key, params) or self.hir_type_mentions_params_v1(value, params)
+            case HirTypeKind.Result(ok, err): return self.hir_type_mentions_params_v1(ok, params) or self.hir_type_mentions_params_v1(err, params)
+            case HirTypeKind.Named(_, items):
+                for item in items:
+                    if self.hir_type_mentions_params_v1(item, params):
+                        return true
+            case HirTypeKind.Tuple(items):
+                for item in items:
+                    if self.hir_type_mentions_params_v1(item, params):
+                        return true
+            case HirTypeKind.Function(fn_params, fn_ret, _):
+                for fn_param in fn_params:
+                    if self.hir_type_mentions_params_v1(fn_param, params):
+                        return true
+                return self.hir_type_mentions_params_v1(fn_ret, params)
+            case _: ()
+        false
+
+    me erased_dict_key_struct_binding_mir_v1(local: LocalId) -> text:
+        """MIR-provenance fallback for an argument without a HIR type: the
+        value-keyed struct recorded as its element or key, else "" ("?" only
+        when the local has no MIR type at all)."""
+        if val mir_type = self.local_mir_type_of(local):
+            var struct_name = ""
+            if self.array_element_struct_syms.has(local.id):
+                struct_name = self.array_element_struct_syms[local.id]
+            match mir_type.kind:
+                case MirTypeKind.Array(element, _):
+                    match element.kind:
+                        case MirTypeKind.Struct(element_sym): struct_name = self.mir_struct_symbol_name(element_sym)
+                        case _: ()
+                case MirTypeKind.Dict(key, _):
+                    match key.kind:
+                        case MirTypeKind.Struct(key_sym): struct_name = self.mir_struct_symbol_name(key_sym)
+                        case _: ()
+                case _: ()
+            if struct_name != "" and self.dict_key_struct_is_word_v1(struct_name):
+                return struct_name
+            return ""
+        "?"
+
+    me refuse_struct_instantiated_dict_generic_v1(type_: HirType, site: text):
+        """Refuse a generic class instantiated with a value-keyed struct type
+        argument when that class has a field keyed by a type parameter
+        (`d: Dict<K, _>`): its erased methods key that dict by the raw word,
+        concrete code by the field. Checked wherever such a type is declared
+        (parameters, returns, `val`/`var` bindings, method receivers).
+        Conservative: any value-keyed struct type argument refuses."""
+        match type_.kind:
+            case HirTypeKind.Named(owner_sym, type_args):
+                var struct_arg = ""
+                for type_arg in type_args:
+                    match type_arg.kind:
+                        case HirTypeKind.Named(arg_owner, _):
+                            val arg_name = self.mir_struct_symbol_name(arg_owner)
+                            if struct_arg == "" and arg_name != "" and self.dict_key_struct_is_word_v1(arg_name):
+                                struct_arg = arg_name
+                        case _: ()
+                    self.refuse_struct_instantiated_dict_generic_v1(type_arg, site)
+                if struct_arg != "":
+                    var params: [text] = []
+                    for owner_key in [mir_class_identity_raw(self.symbols, owner_sym.id), self.mir_struct_symbol_name(owner_sym)]:
+                        if params.len() == 0 and self.struct_field_hir_type.has(owner_key):
+                            for field_type in self.struct_field_hir_type[owner_key]:
+                                params = self.dict_key_type_params_v1(field_type, params)
+                    if params.len() > 0:
+                        self.error_fatal("E-MIR-STRUCT-DICT-KEY: struct type '{struct_arg}' instantiates a generic class with a field keyed by a type parameter ({site}); its erased methods key that dict by the raw word while concrete code keys '{struct_arg}' by its field (key the dict by that field instead; module: {self.current_module_id})", None)
+            case HirTypeKind.Array(inner, _): self.refuse_struct_instantiated_dict_generic_v1(inner, site)
+            case HirTypeKind.Slice(inner): self.refuse_struct_instantiated_dict_generic_v1(inner, site)
+            case HirTypeKind.Optional(inner): self.refuse_struct_instantiated_dict_generic_v1(inner, site)
+            case HirTypeKind.Ref(inner, _): self.refuse_struct_instantiated_dict_generic_v1(inner, site)
+            case HirTypeKind.Dict(key, value):
+                self.refuse_struct_instantiated_dict_generic_v1(key, site)
+                self.refuse_struct_instantiated_dict_generic_v1(value, site)
+            case HirTypeKind.Tuple(items):
+                for item in items:
+                    self.refuse_struct_instantiated_dict_generic_v1(item, site)
+            case _: ()
+
+    me refuse_struct_key_generic_call_v1(callee_name: text, callee_symbol: SymbolId, param_types: [HirType], arg_index: i64, arg_value: HirExpr, arg_local: LocalId):
+        """Refuse a call that binds a value-keyed struct to a type parameter
+        the callee uses as a Dict key (in a parameter or its return type)."""
+        if arg_index >= param_types.len() or not hir_type_has_unresolved_type_param(param_types[arg_index]):
+            return
+        match arg_value.kind:
+            case HirExprKind.DictLit(entries, _, _):
+                # An empty literal holds no key in either representation.
+                if entries.len() == 0:
+                    return
+            case _: ()
+        var params: [text] = []
+        for param_type in param_types:
+            params = self.dict_key_type_params_v1(param_type, params)
+        if callee_symbol.id >= 0:
+            if val callee_sym = self.symbols.get_symbol_raw(callee_symbol.id):
+                if val callee_type = callee_sym.type_:
+                    match callee_type.kind:
+                        case HirTypeKind.Function(_, callee_ret, _): params = self.dict_key_type_params_v1(callee_ret, params)
+                        case _: ()
+        if params.len() == 0:
+            return
+        var actual = self.receiver_declared_type(arg_value)
+        if not actual.? and arg_value.has_type_:
+            actual = Some(arg_value.type_)
+        val bound = self.erased_dict_key_struct_binding_v1(param_types[arg_index], actual, Some(arg_local), params)
+        if bound == "":
+            return
+        val what = if bound == "?": "an argument whose type cannot be shown free of value-keyed structs" else: "struct type '{bound}'"
+        self.error_fatal("E-MIR-STRUCT-DICT-KEY: {what} is bound to a type parameter that generic '{callee_name}' uses as a Dict key; its erased body keys that dict by the raw word while concrete code keys a value-keyed struct by its field (key the dict by that field instead; module: {self.current_module_id})", Some(arg_value.span))
+
+    me refuse_struct_key_on_erased_dict_v1(receiver: HirExpr, key_local: LocalId):
+        """Refuse a value-keyed struct key on a dict whose DECLARED key type
+        is a type parameter (a generic class field `Dict<K, _>` read from
+        concrete code): that class's erased methods key it by the raw word."""
+        var name = self.dict_key_optional_struct_name_v1(key_local)
+        if name == "":
+            name = self.dict_key_struct_name_v1(key_local)
+        if name == "" or not self.dict_key_struct_is_word_v1(name):
+            return
+        if val declared = self.receiver_declared_type(receiver):
+            var dict_type = declared
+            match dict_type.kind:
+                case HirTypeKind.Ref(ref_inner, _): dict_type = ref_inner
+                case HirTypeKind.Optional(opt_inner): dict_type = opt_inner
+                case _: ()
+            match dict_type.kind:
+                case HirTypeKind.Dict(declared_key, _):
+                    if hir_type_has_unresolved_type_param(declared_key):
+                        self.error_fatal("E-MIR-STRUCT-DICT-KEY: struct type '{name}' keys a dict declared with a generic key type; that dict's erased generic code keys it by the raw word while this concrete site keys '{name}' by its field (key the dict by that field instead; module: {self.current_module_id})", Some(receiver.span))
+                case _: ()
+
+    me refuse_struct_key_generic_method_v1(receiver: HirExpr, method: text, resolution: MethodResolution):
+        """Method receivers are the one place a generic class instance is
+        used without a declared binding (`mk_box().put(..)`)."""
+        match resolution:
+            case MethodResolution.InstanceMethod(_, _):
+                if val receiver_type = self.receiver_declared_type(receiver):
+                    self.refuse_struct_instantiated_dict_generic_v1(receiver_type, "receiver of '{method}'")
+                elif receiver.has_type_:
+                    self.refuse_struct_instantiated_dict_generic_v1(receiver.type_, "receiver of '{method}'")
+            case _: ()
+
+    me dict_declared_word_struct_key_v1(dict_local: LocalId, key_mir: MirType) -> MirType?:
+        """The struct key type to rebuild with when `key_mir` (the dict's MIR
+        key type) is not already `Struct`: an erased I64 or an Opaque(name)
+        decode type still has a declared HIR key."""
+        match key_mir.kind:
+            case MirTypeKind.Struct(_): return None
+            case _: ()
+        if val declared = self.find_local_hir_type(dict_local.id):
+            var dict_hir = declared
+            match dict_hir.kind:
+                case HirTypeKind.Ref(inner_hir, _): dict_hir = inner_hir
+                case _: ()
+            match dict_hir.kind:
+                case HirTypeKind.Dict(declared_key, _): return self.word_struct_key_mir_type_v1(declared_key)
+                case _: ()
+        None
+
+    me box_struct_or_runtime_value_key_v1(local: LocalId) -> LocalId:
+        """Key boxing for the sites that box a dict key with plain
+        box_runtime_value (`.set`, dict literals): structs take the
+        value-keyed word, everything else is unchanged."""
+        if val struct_key = self.canonical_struct_dict_key_v1(local):
+            return struct_key
+        self.box_runtime_value(local)
+
+    me rebuild_struct_dict_key_v1(word: LocalId, key_type: MirType) -> LocalId:
+        """Inverse of canonical_struct_dict_key_v1 for one runtime key word:
+        a fresh struct block holding the unboxed field."""
+        val field_value = self.decode_runtime_value(word, MirType.i64())
+        match key_type.kind:
+            case MirTypeKind.Struct(key_symbol):
+                var b = self.builder
+                val rebuilt = b.emit_aggregate(AggregateKind.Struct(key_symbol), [mir_operand_copy(field_value)], key_type)
+                self.builder = b
+                return rebuilt
+            case _:
+                self.error_fatal("E-MIR-STRUCT-DICT-KEY: struct dict key has no struct MIR type at a key read; cannot rebuild it (module: {self.current_module_id})", None)
+                return word
+
+    me rebuild_struct_dict_key_array_v1(keys: LocalId, key_type: MirType) -> LocalId:
+        """Replace every key word of a fresh rt_dict_keys array, in place, by
+        the struct rebuilt from it. The array may escape as `[S]`, so the
+        array itself is converted, not only a loop variable."""
+        var b = self.builder
+        val len_local = b.emit_call_value(self.rt_array_len_operand(), [mir_operand_copy(keys)], MirType.i64())
+        val counter = b.new_local(None, MirType.i64(), LocalKind.Var)
+        val zero = b.emit_const_int(0)
+        b.emit_copy(counter, zero)
+        val one = b.emit_const_int(1)
+        val cond_block = b.new_block(Some("struct_key_cond"))
+        val body_block = b.new_block(Some("struct_key_body"))
+        val exit_block = b.new_block(Some("struct_key_exit"))
+        b.terminate_goto(cond_block)
+        b.switch_to_block(cond_block)
+        val in_range = b.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b.terminate_if(mir_operand_copy(in_range), body_block, exit_block)
+        b.switch_to_block(body_block)
+        val word = b.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(keys), mir_operand_copy(counter)], MirType.i64())
+        self.builder = b
+        val rebuilt = self.rebuild_struct_dict_key_v1(word, key_type)
+        var b_set = self.builder
+        val set_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_set"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        b_set.emit_call(set_fn, [mir_operand_copy(keys), mir_operand_copy(counter), mir_operand_copy(rebuilt)], MirType(kind: MirTypeKind.I8))
+        val next = b_set.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), MirType.i64())
+        b_set.emit_copy(counter, next)
+        b_set.terminate_goto(cond_block)
+        b_set.switch_to_block(exit_block)
+        self.builder = b_set
+        keys
+
+    me box_dict_key_v1(local: LocalId) -> LocalId:
+        """A genuine dict KEY (`d[k]`, `.get`, rt_dict_contains): structs take
+        the value-keyed word, everything else the identity-preserving box.
+        Only key sites may call this -- box_runtime_dictionary_key_v1 is also
+        the `Any`/`T` call-argument boxer, where a struct is a record pointer
+        (canonicalizing there refused a multi-field struct passed to
+        `gen_opt<T>(v: T)` and turned a single-field one into its field word)."""
+        if val struct_key = self.canonical_struct_dict_key_v1(local):
+            return struct_key
+        self.box_runtime_dictionary_key_v1(local)
+
     me box_runtime_dictionary_key_v1(local: LocalId) -> LocalId:
+        # Struct-agnostic: dict key sites canonicalize first (box_dict_key_v1).
         # Preserve registered text identity even when a field/load lost its
         # static tagged-text note. rt_string_data is registry-aware: tagged
         # text returns its data buffer; a borrowed C string returns itself.
@@ -4113,7 +4607,7 @@ impl MirLowering:
             # live in lower_dict_runtime_get, shared verbatim with the
             # `d.get(k)` method lowering (method_calls_literals.spl) so the two
             # readers of rt_dict_get can never drift apart again.
-            val dict_key = self.lower_dict_key(index)
+            val dict_key = self.lower_dict_key(index, Some(base))
             return self.lower_dict_runtime_read(base, base_local, dict_key, false, nil_probe)
         var index_local = self.lower_expr(index)
         # Index the evaluated array even for CLI-named calls. Ordinary
