@@ -2296,3 +2296,22 @@ Gates and remaining gaps:
 - **Trap:** in the interpreter a read method (`slice`, `min`, `max`) interleaved with `write_span` on the same array re-decodes its whole backing store (11-13 ms at 3.66 M px). Keep one read-only `src` and one write-only `outp`. Bug record: `doc/08_tracking/bug/interpreter_array_read_after_write_redecodes_backing_2026-11-17.md`.
 - **Trap:** the shadow was NOT the dominant cost of the box command (about 30 s of 113 s); do not extrapolate a per-phase share from a command total.
 - **Open / not investigated:** glyph raster on an atlas miss (item 2) and full-frame fills (item 4); remaining page time not attributed per phase. Details: `doc/08_tracking/bug/web_render_dpr4_residual_per_pixel_cost_2026-11-16.md`.
+
+## 2026-11-17 — slight vertical hinting (Chrome FreeType autohinter, y only)
+
+Glyph residual was ~75% of css-paint. Classified on a probe page (16 px sans, 16 px serif, 13 px sans, black on white, 3 lines, 2,791 mismatching px at tolerance 8 before the fix, heuristic split; scripts were scratch .spl, not committed):
+
+| rank | class | px (base) | share | status |
+|------|-------|-----------|-------|--------|
+| 1 | vertical metrics: no y hinting (cap 11 rows vs Chrome 12, x-height 8 vs 9, baseline/bottom rows blurred) | 772 | 27.7% of the mismatch | FIXED (`sfnt_glyf.spl`) |
+| 2 | horizontal-stem edge snapping (H crossbar, e bar: Chrome puts the TOP edge on a row boundary) | ~1,025 (delta 17-64 after fix) | ~37% | open |
+| 3 | low-amplitude coverage / FIR / gamma (delta 9-16; ink 2.9% under Chrome after fix, 8% before) | ~876 | ~31% | open |
+| 4 | advance / kerning (per-word ink centroid within +-0.23 px, one word -0.65 px) | <1% | - | none at 16 px |
+
+- **Measured Chrome behaviour.** Liberation Sans 16 px: H is 12 rows (unhinted 11.0), x is 9 rows (8.45), g descender and l ascender land on the same rows as ours after the fix. This is FreeType's latin autohinter in light mode: (1) the y scale is fitted so the x-height is a whole pixel, `fitted = floor(scaled + 40/64)`, with `52/64` for 6..14 ppem (`increase-x-height` defaults to 14); (2) each blue zone (baseline, x-height, cap height, ascender, descender) is snapped to a whole row and the overshoot collapses onto it unless it is >= 1/2 px.
+- **Code.** `_lcd_hint_knots` builds piecewise-linear font-y to pixel-y knots from the font's own `x o H O l p g` outlines (cached per font + size in `_lcd_hint_cache`); `sfnt_render_glyph_lcd` warps the outline y with `_hint_commands` and now anchors the raster to the BASELINE (`bearing_y` = floor of the hinted bottom). Before, the bitmap was anchored to the ink bottom and `bearing_y` was `round(min y)`, so a glyph's rows could sit up to half a row off. Unhinted fonts (no `x o H`) keep the old path.
+- **Trap — a `[a, b]` literal on the line after a `match` arm parses as an index of the arm.** Bind it (`val extent: [f64] = [...]`) first.
+- **Trap — ink count is not a closeness metric.** `web_device_scale_spec` 1x ink went 190 to 186 while Chrome measures 146 on that exact crop (the "199" in the LCD section was a different crop); per-pixel mismatch against Chrome went 114 to 77 of 960. Compare per pixel.
+- **Not done.** The grayscale raster (above 48 device px, `sfnt_render_glyph_into`) is not hinted: the 4x `Hg` frame is unchanged (827 of 15,360 px mismatching Chrome). Horizontal-stem edge snapping (rank 2) needs edge detection and stem placement, not a blue-zone warp.
+- **Open — 8 px text.** `simple_web_renderer_spec` "uses explicit line-height for wrapped text layout" pins the darkest ink px (`0xFF352A44` x 2). Hinting now gives the 8 px caps Chrome's 6 rows, but that pin is a pen-phase statistic (Chrome's L stem sits about half a pixel right of ours): text-box mismatch 711 to 709 px, sum of abs delta +1.3%, darkest px `0x283151` (Chrome `0x483E5F` x 1). Not strictly closer, so not re-pinned; the spec stays red until the 8 px pen phase is fixed.
+- Spec: `test/01_unit/browser_engine/glyph_shape_vertical_hint_chrome159_spec.spl`. Bug record: `doc/08_tracking/bug/web_render_css_paint_residual_2026-11-17.md`.
