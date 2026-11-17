@@ -1,6 +1,6 @@
 # Native: erased generic class `T?` returns/params miscompile (2026-11-15)
 
-**Status:** open (root cause pinned 2026-11-17, codegen fix not landed;
+**Status:** verification-pending for scope item 1 on `Dict<K, T>`-valued generic classes (call-site encode landed 2026-11-18, MIR-shape verified only, not native); items 2 and 3 remain open (root cause pinned 2026-11-17,
 store-side workaround verification-pending). Pre-existing and involves no traits. The `Box<T>` and
 `G<T>` repros below were run on an older Stage 2 (run 33,
 `/home/yoon/dev/simple-boot-fable-20261112/build/bootstrap/pinned-src/pinned-8220cfef5b8a/build/bootstrap-fable-33/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`)
@@ -162,3 +162,37 @@ acceptance row for 1-3. The `AttrI64StoreV1` workaround stays.
 Native verification needed: a Stage 2 rebuilt from this source run with
 `SIMPLE_NODE_ATTR=extra=sparse_hash,op=sparse_hash` must not print the
 `failed its round-trip self-check` line.
+
+## Scope item 1 landed for Dict-valued generic classes (2026-11-18) — verification-pending
+
+`register_erased_method_params_v1` / `register_erased_dict_class_v1`
+(`50.mir/_MirLowering/module_lowering.spl`) publish, per instance method of a
+generic class whose only `T`-bearing fields are `Dict<K, T>` values (K free of
+`T`), which params are bare `T`; the flags ride the Err-shape text registry
+(`mir_method_erased_params_key_v1`, key `<link>#erased-t-params`, class marker
+`<Class>#erased-dict-class`) because the param-type registries reject a
+TypeParam-bearing list. `erased_method_param_types_v1` (`expr_dispatch.spl`)
+turns them into `Any` slots for the `InstanceMethod` call arm, so
+`lower_method_call_arg` boxes the argument (`rt_value_int_wide`) like any Any
+slot. Acceptance `generic_method_erased_i64_boundary_spec.spl` 3/3 GREEN (tag
+dropped); prevention `generic_method_erased_field_roundtrip_spec.spl`.
+
+Deliberately NOT done (and why): a bare `T`, `T?` or `[T]` FIELD class is
+excluded. Probe: `Cell<T>{v: T}.set(x)` with the encode on stores the tagged
+word while concrete `c.v` reads raw, i.e. x8 (a regression of a currently
+coherent raw/raw path). Items 2 (caller decode of `T?`/`Result<T,E>`/bare `T`
+returns) and 3 (encode at construct sites, decode at concrete field reads)
+are still required before those shapes can be encoded. Named arguments to such
+methods and the unresolved-owner recovery arm keep the old raw behaviour.
+Native verification still needed (no native build was run).
+
+Gate (after the 2026-11-18 IR trace review): the encode applies only when (a)
+every `T`-bearing field of the class is a `Dict<K, T>` value, (b) no method of
+the class returns `T`/`T?` other than inside `Result<T, E>` (`Bag.take -> T`
+decodes then RE-ENCODES its tail and no caller decodes it, so encoding the
+store would read back x8 — scope item 2), (c) the argument is a plain i64/u64
+(text/records/bool/narrower ints keep their old representation), (d) no named
+arguments. The production `AttributeStoreV1<T>` (`slots: [T?]` + `owner`
+fields) is therefore NOT affected by this change; the `AttrI64StoreV1`
+workaround stays. A `Result<T, E>` read (`Store.get`) was traced balanced: one
+`rt_value_as_int_wide`, key encodes only, payload raw into `Ok`.
