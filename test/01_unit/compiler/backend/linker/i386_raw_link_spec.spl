@@ -1,0 +1,79 @@
+# @cover src/compiler/70.backend/linker/elf/arm32_raw_link.spl
+# i386 (R_386_*) support in the shared ELF32 raw-image linker.
+
+use compiler.backend.linker.elf_inspect.{ElfHeader, ElfSectionHeader, SHT_PROGBITS, ET_REL, EM_ARM, EM_386}
+use compiler.backend.linker.elf_parser.{
+    ElfObject, ElfSymbol, ElfRelocation, elf_make_empty_strtab,
+    STB_LOCAL, STB_GLOBAL, STT_NOTYPE, STT_FUNC
+}
+use compiler.backend.linker.elf.arm32_raw_link.{elf_i386_link_parsed, elf_arm32_link_parsed}
+
+fn i386_sym(name: text, binding: i64, section: i64, value: i64) -> ElfSymbol:
+    ElfSymbol(st_name: 0, st_info: (binding << 4) | STT_FUNC,
+        st_other: 0, st_shndx: section, st_value: value, st_size: 4, name: name)
+
+fn i386_obj(machine: i64, symbols: [ElfSymbol], relocations: [ElfRelocation],
+        data: [i64]) -> ElfObject:
+    val data_offset: i64 = 128
+    var raw: [i64] = [0; 128]
+    raw[4] = 1
+    for b in data:
+        raw = raw.push(b)
+    val header = ElfHeader(e_type: ET_REL, e_machine: machine, e_entry: 0,
+        e_phoff: 0, e_shoff: 32, e_shnum: 2, e_shstrndx: 0)
+    val sections = [
+        ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0,
+            sh_addr: 0, sh_size: 0, sh_info: 0),
+        ElfSectionHeader(sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 2,
+            sh_addr: data_offset, sh_size: data.len(), sh_info: 0)
+    ]
+    val empty = elf_make_empty_strtab()
+    ElfObject(header: header, sections: sections, symbols: symbols,
+        relocations: relocations, strtab: empty, shstrtab: empty, raw: raw)
+
+# main: 8 bytes; offset 0 = R_386_32 target, offset 4 = R_386_PC32 target (A=-4)
+fn i386_main(machine: i64) -> ElfObject:
+    val syms = [i386_sym("", STB_LOCAL, 0, 0), i386_sym("_start", STB_GLOBAL, 1, 0),
+        i386_sym("target", STB_GLOBAL, 0, 0)]
+    val rels = [
+        ElfRelocation(r_offset: 0, r_info: (2 << 32) | 1, r_addend: 0,
+            section_idx: 0, target_section_idx: 1),
+        ElfRelocation(r_offset: 4, r_info: (2 << 32) | 2, r_addend: -4,
+            section_idx: 0, target_section_idx: 1)
+    ]
+    i386_obj(machine, syms, rels, [0, 0, 0, 0, 0, 0, 0, 0])
+
+fn i386_target(machine: i64) -> ElfObject:
+    i386_obj(machine, [i386_sym("", STB_LOCAL, 0, 0), i386_sym("target", STB_GLOBAL, 1, 0)],
+        [], [0xc3, 0x90, 0x90, 0x90])
+
+describe "i386 raw ELF linker (shared ELF32 core)":
+    it "applies R_386_32 and R_386_PC32 at the 16 MiB IA32 load base":
+        val linked = elf_i386_link_parsed([i386_main(EM_386), i386_target(EM_386)],
+            0x1000000, "_start")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.entry_addr).to_equal(0x1000000)
+        expect(image.bytes.len()).to_equal(12)
+        # target = 0x1000008, little endian
+        expect(image.bytes[0:4]).to_equal([0x08, 0x00, 0x00, 0x01])
+        # PC32: S + A - P = 0x1000008 - 4 - 0x1000004 = 0
+        expect(image.bytes[4:8]).to_equal([0, 0, 0, 0])
+        expect(image.bytes[8]).to_equal(0xc3)
+
+    it "rejects ARM objects on the i386 lane":
+        val linked = elf_i386_link_parsed([i386_main(EM_ARM), i386_target(EM_ARM)],
+            0x1000000, "_start")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("EM_386")
+
+    it "rejects i386 objects on the ARM32 lane":
+        val linked = elf_arm32_link_parsed([i386_main(EM_386), i386_target(EM_386)],
+            0x1000000, "_start")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("EM_ARM")
+
+    it "does not truncate a PC32 that overflows 32 bits":
+        val linked = elf_i386_link_parsed([i386_main(EM_386), i386_target(EM_386)],
+            0x1_0000_0000, "_start")
+        expect(linked.is_err()).to_equal(true)
