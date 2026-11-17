@@ -4108,6 +4108,47 @@ impl MirLowering:
                 return symbol_row.declared_param_types_v1
         None
 
+    me erased_method_param_types_v1(symbol: SymbolId, args: [HirCallArg]) -> [HirType]:
+        """Param list of a generic-class method whose bare `T` params are
+        invisible to the registries (TypeParam is not symbol-free): the
+        `__erased_scalar_slot__` marker at each erased slot (lower_method_call_arg
+        encodes an integer argument there), `Error` elsewhere (untouched).
+        [] for an ordinary or vetoed method, or when any argument is named."""
+        for arg in args:
+            if arg.has_name:
+                return []
+        val sym = self.symbols.get_symbol_raw(symbol.id)
+        if val found_sym = sym:
+            val owner = self.erased_method_owner_name_v1(found_sym.name)
+            if owner == "": return []
+            if (bootstrap_fn_ret_err_shape_lookup(owner + "#erased-ret-veto") ?? "") == "1": return []
+            val dotted = found_sym.name.replace("::", ".")
+            var flags = bootstrap_fn_ret_err_shape_lookup(mir_method_erased_params_key_v1(found_sym.name)) ?? ""
+            if flags == "":
+                flags = bootstrap_fn_ret_err_shape_lookup(mir_method_erased_params_key_v1(dotted)) ?? ""
+            if flags != "":
+                var types: [HirType] = []
+                var index = 0
+                while index < flags.len():
+                    val kind = if flags.substring(index, index + 1) == "1": HirTypeKind.TypeParam("__erased_scalar_slot__", []) else: HirTypeKind.Error
+                    types.push(HirType(kind: kind, span: found_sym.span))
+                    index = index + 1
+                return types
+        []
+
+    me box_erased_scalar_arg_v1(local: LocalId) -> LocalId:
+        """Encode an i64/u64 argument bound to an erased `T` slot; every other
+        kind (text, records, bool, narrower ints, already tagged words) keeps
+        its existing representation."""
+        if self.local_is_str(local) or self.box_runtime_value_local_is_record(local):
+            return local
+        val slot_type = self.local_mir_type_of(local)
+        if val present_type = slot_type:
+            match present_type.kind:
+                case MirTypeKind.I64 | MirTypeKind.U64: return self.box_runtime_value(local)
+                case _: ()
+        local
+
     me resolved_call_hir_param_types(symbol: SymbolId) -> [HirType]:
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
