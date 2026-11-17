@@ -19,7 +19,7 @@ use simple_parser::ast::{ImportTarget, UseStmt};
 
 const UNIT_DEFAULT_ORG: &str = "simple-lang";
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct UnitScope {
     /// `"<org>/<suffix>"` admitted by a selective or bare import.
     names: HashSet<String>,
@@ -31,6 +31,9 @@ struct UnitScope {
 
 thread_local! {
     static UNIT_SCOPE: RefCell<UnitScope> = RefCell::new(UnitScope::default());
+    /// Scope each evaluated module ended with, keyed by module owner key; consulted
+    /// when one of that module's functions runs under another module's scope.
+    static MODULE_SCOPES: RefCell<HashMap<String, UnitScope>> = RefCell::new(HashMap::new());
     /// (root, suffix) -> sorted "<org>/<family>" keys whose unit module defines it.
     static UNIT_FAMILY_CACHE: RefCell<HashMap<(PathBuf, String), Vec<String>>> = RefCell::new(HashMap::new());
     /// Explicit root (tests only); `None` = auto resolution on every lookup.
@@ -39,6 +42,7 @@ thread_local! {
 
 /// Clear the per-run scope (called with the other unit registries).
 pub fn unit_scope_reset() {
+    MODULE_SCOPES.with(|m| m.borrow_mut().clear());
     UNIT_SCOPE.with(|s| *s.borrow_mut() = UnitScope::default());
 }
 
@@ -46,21 +50,37 @@ pub fn unit_scope_reset() {
 /// with an empty one, and restores the saved scope on drop (also on `?` exits).
 pub struct UnitScopeGuard {
     saved: Option<UnitScope>,
+    owner: Option<String>,
 }
 
 impl UnitScopeGuard {
-    pub fn enter_module() -> Self {
+    pub fn enter_module(owner: Option<&str>) -> Self {
         let saved = UNIT_SCOPE.with(|s| std::mem::take(&mut *s.borrow_mut()));
-        Self { saved: Some(saved) }
+        Self { saved: Some(saved), owner: owner.map(str::to_string) }
     }
 }
 
 impl Drop for UnitScopeGuard {
     fn drop(&mut self) {
         if let Some(saved) = self.saved.take() {
+            if let Some(owner) = self.owner.take() {
+                let own = UNIT_SCOPE.with(|s| s.borrow().clone());
+                MODULE_SCOPES.with(|m| m.borrow_mut().insert(owner, own));
+            }
             UNIT_SCOPE.with(|s| *s.borrow_mut() = saved);
         }
     }
+}
+
+/// Run `f` under the scope `owner`'s module ended with (a function body runs in its
+/// defining module's scope, not the caller's); no recorded scope = current scope.
+pub fn with_owner_scope<R>(owner: Option<&str>, f: impl FnOnce() -> R) -> R {
+    let own = owner.and_then(|o| MODULE_SCOPES.with(|m| m.borrow().get(o).cloned()));
+    let Some(own) = own else { return f() };
+    let prev = UNIT_SCOPE.with(|s| std::mem::replace(&mut *s.borrow_mut(), own));
+    let r = f();
+    UNIT_SCOPE.with(|s| *s.borrow_mut() = prev);
+    r
 }
 
 /// Point lookups at an explicit unit library root (`None` restores auto).
@@ -495,13 +515,29 @@ mod module_scope_tests {
         unit_scope_reset();
         unit_scope_record_use(&use_group(&["kmph"]));
         {
-            let _g = UnitScopeGuard::enter_module();
+            let _g = UnitScopeGuard::enter_module(None);
             assert!(!in_scope("kmph"), "importer scope must not leak into module");
             unit_scope_record_use(&use_group(&["mph"]));
             assert!(in_scope("mph"));
         }
         assert!(in_scope("kmph"), "importer scope restored");
         assert!(!in_scope("mph"), "module import must not leak to importer");
+        unit_scope_reset();
+    }
+
+    #[test]
+    fn function_literal_resolves_in_defining_module_scope() {
+        unit_scope_reset();
+        {
+            let _g = UnitScopeGuard::enter_module(Some("mod_a"));
+            unit_scope_record_use(&use_group(&["kmph"]));
+        }
+        // importer never imported kmph, but A's function runs under A's scope
+        assert!(!in_scope("kmph"));
+        let seen = with_owner_scope(Some("mod_a"), || in_scope("kmph"));
+        assert!(seen, "defining-module scope applies while its function runs");
+        assert!(!in_scope("kmph"), "caller scope restored");
+        assert!(!with_owner_scope(Some("other"), || in_scope("kmph")));
         unit_scope_reset();
     }
 }
