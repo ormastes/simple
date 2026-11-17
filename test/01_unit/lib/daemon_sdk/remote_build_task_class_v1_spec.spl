@@ -1,0 +1,86 @@
+# milestone_0030 D1: the shared remote build/test task-class predicate. AUTHORED_NOT_RUN.
+use std.spec.{describe, it, expect}
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.nogc_sync_mut.daemon_sdk.remote_build_task_class_v1.remote_build_task_class_v1
+
+fn class_approver_v1() -> DistributedAuthorityKeyV2:
+    var public_key: [u8] = []
+    for i in 0..32: public_key.push(i as u8)
+    DistributedAuthorityKeyV2(identity: "approver_1", role: "human-approver", revision: 1, public_key: public_key,
+        principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: ["build", "host_reservation_v1", "host_execute_v1"], maximum_memory_bytes: 4096,
+        maximum_duration_ms: 4000, policy_revision: 4, revocation_epoch: 2, expires_at: 10000, revoked: false)
+
+fn class_env_v1(isolation: text) -> ExecutionEnvironmentV2:
+    ExecutionEnvironmentV2(host_id: "worker_1", execution_platform: "linux-x86_64", target_platform: "linux-x86_64",
+        test_runtime: "none", isolation_class: isolation, toolchain_digest: "c".repeat(64), sdk_digest: "d".repeat(64),
+        abi: "sysv", isa: "x86_64", optimization: "release")
+
+fn class_grant_v1(env: ExecutionEnvironmentV2, operations: [text]) -> ExecutionGrantV2:
+    ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: operations, environment_digest: distributed_environment_digest_v2(env).unwrap(),
+        policy_revision: 4, revocation_epoch: 2, expires_at: 5000, maximum_memory_bytes: 2048, maximum_duration_ms: 2000)
+
+fn class_request_v1(env: ExecutionEnvironmentV2, operation: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: "operation_1", payload_digest: "b".repeat(64), principal: "user_1",
+        project: "project_1", host_id: "worker_1", operation: operation,
+        environment_digest: distributed_environment_digest_v2(env).unwrap(), policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3, memory_bytes: 1024, duration_ms: 1000)
+
+describe "remote build/test task class V1 (milestone_0030 D1)":
+    it "accepts one build action plus route actions in a native-container environment":
+        val env = class_env_v1("native-container")
+        expect(remote_build_task_class_v1(class_approver_v1(), class_grant_v1(env, ["build", "host_execute_v1"]),
+            class_request_v1(env, "build"), env, 4000, 100)).to_equal("")
+
+    it "names the first violated rule":
+        val env = class_env_v1("native-container")
+        val process = class_env_v1("native-process")
+        val approver = class_approver_v1()
+        expect(remote_build_task_class_v1(approver, class_grant_v1(process, ["build"]), class_request_v1(process, "build"),
+            process, 4000, 100)).to_equal("remote-build-isolation-class")
+        var other = env
+        other.toolchain_digest = "e".repeat(64)
+        expect(remote_build_task_class_v1(approver, class_grant_v1(env, ["build"]), class_request_v1(env, "build"), other,
+            4000, 100)).to_equal("remote-build-environment-digest")
+        var narrow = approver
+        narrow.project = "project_2"
+        expect(remote_build_task_class_v1(narrow, class_grant_v1(env, ["build"]), class_request_v1(env, "build"), env,
+            4000, 100)).to_equal("remote-build-approver-scope")
+        var small = approver
+        small.maximum_memory_bytes = 1024
+        expect(remote_build_task_class_v1(small, class_grant_v1(env, ["build"]), class_request_v1(env, "build"), env,
+            4000, 100)).to_equal("remote-build-approver-budget")
+        expect(remote_build_task_class_v1(approver, class_grant_v1(env, ["build", "test"]), class_request_v1(env, "build"),
+            env, 4000, 100)).to_equal("remote-build-approver-operations")
+        expect(remote_build_task_class_v1(approver, class_grant_v1(env, ["host_execute_v1"]),
+            class_request_v1(env, "host_execute_v1"), env, 4000, 100)).to_equal("remote-build-grant-operations")
+        expect(remote_build_task_class_v1(approver, class_grant_v1(env, ["build"]),
+            class_request_v1(env, "host_execute_v1"), env, 4000, 100)).to_equal("remote-build-request-operation")
+        expect(remote_build_task_class_v1(approver, class_grant_v1(env, ["build"]), class_request_v1(env, "build"), env,
+            5001, 100)).to_equal("remote-build-approval-expiry")
+        expect(remote_build_task_class_v1(approver, class_grant_v1(env, ["build"]), class_request_v1(env, "build"), env,
+            100, 100)).to_equal("remote-build-approval-expiry")
+
+    it "refuses a non-approver or revoked key, a foreign host, two actions and a non-route extra":
+        val env = class_env_v1("native-container")
+        var issuer_role = class_approver_v1()
+        issuer_role.role = "grant-issuer"
+        expect(remote_build_task_class_v1(issuer_role, class_grant_v1(env, ["build"]), class_request_v1(env, "build"),
+            env, 4000, 100)).to_equal("remote-build-approver-key")
+        var revoked = class_approver_v1()
+        revoked.revoked = true
+        expect(remote_build_task_class_v1(revoked, class_grant_v1(env, ["build"]), class_request_v1(env, "build"),
+            env, 4000, 100)).to_equal("remote-build-approver-key")
+        var foreign = env
+        foreign.host_id = "worker_2"
+        expect(remote_build_task_class_v1(class_approver_v1(), class_grant_v1(env, ["build"]),
+            class_request_v1(env, "build"), foreign, 4000, 100)).to_equal("remote-build-environment-host")
+        var wide = class_approver_v1()
+        wide.operations = ["build", "test", "deploy", "host_execute_v1"]
+        expect(remote_build_task_class_v1(wide, class_grant_v1(env, ["build", "test"]), class_request_v1(env, "build"),
+            env, 4000, 100)).to_equal("remote-build-grant-operations")
+        expect(remote_build_task_class_v1(wide, class_grant_v1(env, ["build", "deploy"]), class_request_v1(env, "build"),
+            env, 4000, 100)).to_equal("remote-build-grant-operations")
