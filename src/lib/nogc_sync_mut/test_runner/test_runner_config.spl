@@ -134,15 +134,33 @@ fn resolve_mcdc_mode_for_profile(
 # what a real edition mechanism would gate and why it isn't gated yet.
 # =========================================================================
 #
-# PLUMBING ONLY: nothing beyond resolve_edition() and its spec consumes this
-# value -- no language/lint semantics are gated on an edition anywhere in
-# the compiler or test runner today. Do not wire new behavior to this
-# accessor without a design decision recorded in the scoping doc first.
-# Recorded consumer: owner decision 5C (plan doc/03_plan/release/1.0.0/
-# robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md §7) --
-# driver_unit_profile.spl promotes SPL-UNIT-004 by edition + profile.
+# Owner decision 5C (plan doc/03_plan/release/1.0.0/
+# robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md §7) defines
+# editions 2026.11 (warn) and 2027.2 (error_since_lang_version); its one
+# consumer is driver_unit_profile.spl, which promotes SPL-UNIT-004 by
+# edition + profile. Do not wire other behavior to this accessor without a
+# design decision recorded in the scoping doc first.
 
 val EDITION_DEFAULT = "2026"
+
+# Recognized editions = EDITION_DEFAULT plus every *_lang_version value the
+# diagnostic policy schedules. The policy file is the single source; there is
+# no second hardcoded list. Self-contained line scan like the readers below.
+val EDITION_POLICY_PATH = "config/policy/diagnostic_policy.sdn"
+
+fn _policy_editions() -> [text]:
+    var out: [text] = [EDITION_DEFAULT]
+    val content = file_read(EDITION_POLICY_PATH) ?? ""
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("#") or not trimmed.contains("_lang_version:"):
+            continue
+        val parts = trimmed.split(":")
+        if parts.len() >= 2:
+            val v = parts[1].replace("\"", "").trim()
+            if v != "" and not out.contains(v):
+                out.push(v)
+    out
 
 # Tracks which unknown simple.sdn [package] edition= values have already
 # warned this process. Mirrors _warn_deprecated_profile_alias_once
@@ -156,7 +174,8 @@ fn _warn_unknown_edition_once(raw: text):
     if _EDITION_UNKNOWN_WARN_COUNTS.contains_key(raw):
         return
     _EDITION_UNKNOWN_WARN_COUNTS[raw] = 1
-    print "warning: simple.sdn [package] edition=\"{raw}\" is not a recognized edition; using the default edition \"{EDITION_DEFAULT}\". Valid: {EDITION_DEFAULT}."
+    val valid = _policy_editions().join(", ")
+    print "warning: simple.sdn [package] edition=\"{raw}\" is not a recognized edition; using the default edition \"{EDITION_DEFAULT}\". Valid: {valid}."
 
 # Test-support accessor: how many times has the unknown-edition warning
 # actually fired for this raw value (0 or 1, never more)? Mirrors
@@ -209,7 +228,7 @@ fn _read_sdn_package_edition(sdn_path: text) -> text:
 fn resolve_edition_from_value(raw: text) -> text:
     if raw == "":
         return EDITION_DEFAULT
-    if raw == EDITION_DEFAULT:
+    if _policy_editions().contains(raw):
         return raw
     _warn_unknown_edition_once(raw)
     EDITION_DEFAULT
@@ -222,7 +241,10 @@ fn resolve_edition_from_value(raw: text) -> text:
 # Unknown values warn once and fall back to EDITION_DEFAULT rather than
 # failing -- an edition value error should never itself break `test`/`run`.
 pub fn resolve_edition() -> text:
-    resolve_edition_from_value(_read_sdn_package_edition("simple.sdn"))
+    resolve_edition_from_sdn("simple.sdn")
+
+pub fn resolve_edition_from_sdn(sdn_path: text) -> text:
+    resolve_edition_from_value(_read_sdn_package_edition(sdn_path))
 
 # Resolve the effective MC/DC mode from the environment for `resolved_profile`
 # and publish it for child processes. Every runner lane (full runner, the
