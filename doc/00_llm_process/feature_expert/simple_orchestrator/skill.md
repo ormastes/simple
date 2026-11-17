@@ -409,3 +409,17 @@ available. These source paths and their manuals remain NOT_RUN.
 - `host-agent-pane-write` is intercepted in `smux_runtime_connection_host_constrained_v5` (the only place with the control owner): body = exact SDN dict {bindingUid, attempt, offset, maximum, data}; a fresh Input lease per Write, revoked on return; the port installs the lease on the native input gate (refusing an unresolved/unknown previous outcome) before the write. `smux_agent_pane_op_refusal_v1` is replaced by `smux_agent_pane_resize_refusal_v1`.
 - Follow-up (AUTHORED, NOT_RUN): the native input gate is closed on return and on every error path after the install (`host_agent_pane_input_close_v4`; a failed close is the Write's `gate_error`, the write outcome stands, lease kept); a failed control-lease revoke after a completed write rides in the response as `revokeError` (`smux_agent_pane_write_revoke_report_v1`; turn error only when the write itself failed); the issue token is `smux_agent_pane_control_token_v1` (spec-checked against `client_lease_token_valid`).
 - Not authored: Ok-authority grant path (needs a started owner with a ready attach).
+
+## Controller authority issuance + `remote-run-plan` — milestone_0030 PR-1a (2026-11-18, specs NOT_RUN)
+- `controller_authority_issue_v1` (src/app/orchestrator/controller_authority_issue_v1.spl): issue-then-verify of ONE
+  grant + policy-driven approval (D1 class: approver scope covers the grant, exactly one build/test action plus only
+  route actions, `native-container` env bound by digest, approval <= grant expiry). Issuer must equal the configured
+  controller. Keys: OpenSSH Ed25519 files in the protected identity store, leaf
+  `sha256("simple-controller-authority-key-v1\n" + role + "\n" + identity + "\n" + revision) + ".key"`; read only
+  through a cleanly opened store; signed via domain-pinned `host_identity_private_sign_{grant,approval}_v1`.
+- `distributed_authority_snapshot_key_v2`: role-scoped lookup; never resolves a key under another role.
+- `orchestrator remote-run-plan`: prints only operationId/grantDigest/planDigest; never prints or writes the signed
+  pair; starts no run. The remote run itself (V4 slot kind, V3 executor, chunked route) is blocked on owner decision
+  N4 (records: .spipe/.../milestone_0030_remote_container_driver/L6C_STOP_DECISIONS_2.md).
+- Trap: on a lent V4 owner the V2 container effect calls are refused (principal None); remote builds must use the V3
+  workspace flow, whose observations do not fit the V2 remote evidence freeze.
