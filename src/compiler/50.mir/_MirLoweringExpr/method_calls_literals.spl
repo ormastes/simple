@@ -2499,6 +2499,19 @@ impl MirLowering:
                 case _: ()
         None
 
+    me receiver_local_owns_user_method_v1(local: LocalId, method: text) -> bool:
+        """The lowered receiver holds a user struct/class value whose type
+        defines `method`. A builtin text/array fallback keyed on the method
+        name must not take such a call.
+
+        A local can keep a stale owner hint under a reused id, so a local
+        that is proven text or a runtime array is never a user receiver."""
+        if self.local_is_str(local) or self.local_hir_type_is_str(local) or self.local_is_runtime_array(local):
+            return false
+        val owner = self.struct_value_syms.get(local.id)
+        if owner == None or owner == "": return false
+        self.struct_method_key_present_v1(self.struct_owner_method_key(owner ?? "", method))
+
     me declared_record_receiver_owner(receiver: HirExpr) -> i64:
         # Only a bound runtime value can use instance recovery. A type-valued
         # static receiver must retain its existing static dispatch path.
@@ -3622,7 +3635,16 @@ impl MirLowering:
                         # `local_mir_type_of` is authoritative for params even
                         # though runtime_dict_locals isn't) -- reuse the same
                         # helper here instead of only checking the id-keyed map.
-                        if self.local_is_runtime_dict(receiver_local):
+                        #
+                        # A constructor temporary (`Flight(waiters: 4).len()`)
+                        # has no static type here either, but its lowered local
+                        # names the user owner. Leave that call to the
+                        # unresolved arm and hand it this local, so the
+                        # receiver is lowered once.
+                        if self.receiver_local_owns_user_method_v1(receiver_local, method):
+                            prelowered_method_receiver = receiver_local
+                            has_prelowered_method_receiver = true
+                        elif self.local_is_runtime_dict(receiver_local):
                             self.runtime_dict_locals[receiver_local.id] = true
                             len_symbol = "rt_dict_len"
                         else:
@@ -3658,8 +3680,33 @@ impl MirLowering:
                     return result_local
                 return receiver_local
 
-        if val join_hit = self.try_lower_text_join_v1(receiver, method, args, resolution):
-            return join_hit
+        # A user method named like a text/array builtin keeps its user owner.
+        # A receiver that is not a variable (constructor temporary, call
+        # result, field, array element) arrives Unresolved, and its owner is
+        # only known once it is lowered. The join / char_at / offset-find
+        # fallbacks below would lower it anyway, so lower it here once, ask
+        # its owner, and let every later arm reuse the local.
+        # doc/08_tracking/bug/native_user_method_builtin_name_hijacked_2026-11-18.md
+        var builtin_name_has_user_owner = false
+        var builtin_name_shape = (method == "join" or method == "char_at") and args.len() == 1
+        if (method == "index_of" or method == "find" or method == "find_str") and args.len() == 2:
+            builtin_name_shape = true
+        if method == "join":
+            match receiver.kind:
+                case ArrayLit(_, _): builtin_name_shape = false
+                case _: ()
+        if builtin_name_shape and resolution_is_unresolved and static_receiver_name == "":
+            if not has_prelowered_method_receiver:
+                prelowered_method_receiver = self.lower_expr(receiver)
+                has_prelowered_method_receiver = true
+            builtin_name_has_user_owner = self.receiver_local_owns_user_method_v1(prelowered_method_receiver, method)
+            if builtin_name_has_user_owner:
+                predicate_has_custom_owner = true
+
+        if not builtin_name_has_user_owner:
+            if val join_hit = self.try_lower_text_join_v1(receiver, method, args, resolution,
+                    prelowered_method_receiver, has_prelowered_method_receiver):
+                return join_hit
 
         if val starts_hit = self.try_lower_text_starts_with_v1(receiver, method, args, resolution_is_unresolved,
                 predicate_receiver_is_text, predicate_has_custom_owner, prelowered_method_receiver):
@@ -3849,8 +3896,10 @@ impl MirLowering:
                 erased_slice_recv = self.lower_expr(receiver)
             return self.lower_erased_receiver_slice_v1(erased_slice_recv, args)
 
-        if val char_at_hit = self.try_lower_text_char_at_v1(receiver, method, args, resolution_is_unresolved):
-            return char_at_hit
+        if not builtin_name_has_user_owner:
+            if val char_at_hit = self.try_lower_text_char_at_v1(receiver, method, args, resolution_is_unresolved,
+                    prelowered_method_receiver, has_prelowered_method_receiver):
+                return char_at_hit
 
         if val search_hit = self.try_lower_text_search_and_transform_v1(receiver, method, args,
                 resolution_is_unresolved, predicate_receiver_is_text, predicate_has_custom_owner,
@@ -4194,7 +4243,8 @@ impl MirLowering:
         None
 
     me try_lower_text_join_v1(receiver: HirExpr, method: text, args: [HirCallArg],
-            resolution: MethodResolution) -> LocalId?:
+            resolution: MethodResolution, prelowered_method_receiver: LocalId,
+            has_prelowered_method_receiver: bool) -> LocalId?:
         # Task #145 (join-family silent-null): `[...].join(sep)` on the
         # bootstrap flat-HIR path resolves to MethodResolution.Unresolved (no
         # method-resolution info at this stage), so it fell through to
@@ -4289,7 +4339,7 @@ impl MirLowering:
                     # `case Unresolved:` -> const-0 -> join rendered as `0`
                     # (W100; "tools":[0] in MCP servers,
                     # native_call_return_type_loss family).
-                    val jna_recv = self.lower_expr(receiver)
+                    val jna_recv = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
                     val jna_sep_arg = args[0]
                     val jna_sep_expr = jna_sep_arg.value
                     val jna_sep_raw = self.lower_expr(jna_sep_expr)
@@ -4407,7 +4457,8 @@ impl MirLowering:
         None
 
     me try_lower_text_char_at_v1(receiver: HirExpr, method: text, args: [HirCallArg],
-            resolution_is_unresolved: bool) -> LocalId?:
+            resolution_is_unresolved: bool, prelowered_method_receiver: LocalId,
+            has_prelowered_method_receiver: bool) -> LocalId?:
         # `.char_at(index)` (task #178 text3 probe #4): had NO native MIR
         # lowering at all -- unlike substring/slice above, this fell all the
         # way to `case Unresolved:` -> const-0 placeholder -> the existing
@@ -4424,7 +4475,7 @@ impl MirLowering:
         # with substring's return representation and with the oracle
         # (`"h"`, a 1-char text, not a char code).
         if method == "char_at" and args.len() == 1 and resolution_is_unresolved:
-            val ca_recv_tagged = self.lower_expr(receiver)
+            val ca_recv_tagged = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
             val ca_cstr_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_interp_cstr"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
