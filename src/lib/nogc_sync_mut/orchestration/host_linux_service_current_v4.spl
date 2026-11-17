@@ -82,6 +82,7 @@ use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlTar
 use std.nogc_sync_mut.orchestration.host_helper_owner_v1.host_helper_prepare_check_v1
 use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
+use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.host_primary_attach_open_entry_check_v1
 use std.container.LinuxWorkspaceRootBorrowV3
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
 use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1,
@@ -1028,13 +1029,16 @@ fn linux_service_agent_authority_v4(owner: HostLinuxServiceCurrentV4, metadata: 
         context: host_local_context_v1(policy)))
 
 # The read-only helper admission of an attach, run before its archive: the helper operation must be NEW on this
-# journal (a reused id could only fail at prepare, after the slot was consumed), then the read-only twin of helper
-# prepare's own checks.
-fn linux_service_attach_admit_v4(capacity: HostCapacityOwnerV1, helper: HostHelperRequestV1, policy: LocalAuthorityPolicyV1,
-        scope: ContainerHostScopeV2, context: HostReservationAuthorizationContextV1) -> Result<(), text>:
+# journal (a reused id could only fail at prepare, after the slot was consumed), the open core's entry guard holds
+# on `store` (milestone_0031: this journal's own valid helper store with no marker of the operation; it could only
+# refuse after helper begin otherwise), then the read-only twin of helper prepare's own checks.
+fn linux_service_attach_admit_v4(capacity: HostCapacityOwnerV1, store: HostHelperStoreV1, helper: HostHelperRequestV1,
+        policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        context: HostReservationAuthorizationContextV1) -> Result<(), text>:
     val row = daemon_operation_exact_v2(capacity.journal, helper.operation)
     if row.is_ok(): return Err("attach-helper-operation-reused")
     if row.unwrap_err() != "OPERATION_NOT_FOUND": return Err(row.unwrap_err())
+    host_primary_attach_open_entry_check_v1(store, helper.operation.id)?
     host_helper_prepare_check_v1(capacity, helper, policy, scope, context)
 
 # milestone_0021 13.2 E1 attach (bound by milestone_0023 part B): the same held-run gates as cancel, then the ONE
@@ -1064,12 +1068,16 @@ pub fn host_linux_service_agent_attach_v4(original: HostLinuxServiceCurrentV4, s
     if live_epoch.is_err(): return linux_service_reply_v4(owner, "", live_epoch.unwrap_err(), false)
     val policy = metadata.unwrap().policy
     val context = authority.unwrap().context
+    # F15 (B) / milestone_0031: the enrollment-pinned template the packet's stream policy must repeat.
+    val template = owner.records.unwrap().agent_helper_template
+    if template.is_none(): return linux_service_reply_v4(owner, "", "linux-host-agent-helper-template-invalid", false)
+    val store = linux_service_helper_store_v4(owner)
     # Geometry needs an installed-policy-v3 source this service does not have: `policy_bytes` stays empty and a
     # pane Resize is refused by the adapter.
     val service = HostAgentAttachServiceV4(journal: capacity.journal, fence: fence.unwrap(),
         live_incarnation: scope.continuity_id, live_epoch: live_epoch.unwrap(), not_after: agent.not_after,
-        policy_bytes: "", store_root: linux_service_helper_store_v4(owner).root, monotonic_ms: context.monotonic_ms)
-    val admit = fn(helper: HostHelperRequestV1) -> Result<(), text>: linux_service_attach_admit_v4(capacity, helper, policy, scope, context)
+        policy_bytes: "", store_root: store.root, monotonic_ms: context.monotonic_ms, template: template.unwrap())
+    val admit = fn(helper: HostHelperRequestV1) -> Result<(), text>: linux_service_attach_admit_v4(capacity, store, helper, policy, scope, context)
     val applied = host_agent_attach_apply_v4(agent, source, authority.unwrap(), service, admit)
     if applied.error != "": return linux_service_reply_v4(owner, "", applied.error, false)
     owner.agent = Some(applied.agent)

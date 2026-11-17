@@ -92,8 +92,9 @@ fn primary_core_refused_v1(turn: HostPrimaryAttachCoreTurnV1, store: HostHelperS
 
 # Open-core ENTRY guard (15.3), V4 world only, before ANY publish: the store must be
 # the derived Valid store of this journal and none of PA, N, R, X (nor any foreign
-# marker) may exist. A refusal here writes nothing.
-fn primary_open_entry_guard_v1(store: HostHelperStoreV1, operation_id: text) -> Result<(), text>:
+# marker) may exist. A refusal here writes nothing. Read-only, so the V4 service also
+# runs it before its attach archive (milestone_0031).
+pub fn host_primary_attach_open_entry_check_v1(store: HostHelperStoreV1, operation_id: text) -> Result<(), text>:
     match store.journal:
         case None: Ok(())
         case Some(journal):
@@ -174,6 +175,31 @@ pub fn host_primary_attach_open_v1(local: HostLocalRootV1, plan: ContainerPrimar
     turn.recovery_required = opened.error != ""
     turn
 
+# The plan-reproduction half of the open core, shared with the read-only precheck below so the two can never
+# disagree: the parent row is executing and is the plan's parent, and the provider reproduces the signed plan byte
+# for byte from the live workload. Reads the journal and asks the provider for a plan; publishes nothing and
+# consumes nothing. The container owner the provider returned is in the turn on every path; `error` is the refusal.
+fn primary_reproduced_v1(turn: HostPrimaryAttachCoreTurnV1, parent: OperationEnvelopeV2, plan: ContainerPrimaryAttachPlanV1,
+        policy: ContainerStreamPolicyV2, execution: ContainerExecutionRequestV2,
+        runtime: RuntimeIdentityV1) -> HostPrimaryAttachCoreTurnV1:
+    var current = turn
+    val parent_state = daemon_operation_exact_v2(current.capacity.journal, parent)
+    if parent_state.is_err(): return primary_core_failed_v1(current, parent_state.unwrap_err())
+    if parent_state.unwrap().state != "executing":
+        return primary_core_failed_v1(current, "host-primary-parent-executing-required")
+    if parent.id != plan.identity.parent_operation_id:
+        return primary_core_failed_v1(current, "host-primary-parent-operation-mismatch")
+    val planned = simple_container_primary_attach_plan_v1(current.container, execution, runtime, plan.identity, policy,
+        plan.resources, plan.terminal_mode)
+    current.container = planned.owner
+    if planned.error != "": return primary_core_failed_v1(current, planned.error)
+    if planned.plan.is_none(): return primary_core_failed_v1(current, "host-primary-plan-required")
+    val expected_bytes = container_primary_attach_plan_encode_v1(plan)
+    val actual_bytes = container_primary_attach_plan_encode_v1(planned.plan.unwrap())
+    if (expected_bytes.is_err() or actual_bytes.is_err() or expected_bytes.unwrap() != actual_bytes.unwrap()):
+        return primary_core_failed_v1(current, "host-primary-observed-plan-changed")
+    current
+
 # One body for both worlds. Writes only `store.root` stream records; the parent
 # executing check reads the capacity journal. V4 world (N3): the entry guard runs
 # first; every refusal before the consume publish persists a pre-consume R; after
@@ -185,25 +211,13 @@ pub fn host_primary_attach_open_core_v1(input: HostPrimaryAttachCoreInputV1, pla
     var turn = HostPrimaryAttachCoreTurnV1(capacity: input.capacity, container: input.container, session: None,
         cleanup_spawn: None, consumption_attempted: false, error: "")
     val store = host_helper_store_rebind_v1(input.store, input.capacity.journal)
-    val guard = primary_open_entry_guard_v1(store, helper.operation.id)
+    val guard = host_primary_attach_open_entry_check_v1(store, helper.operation.id)
     if guard.is_err(): return primary_core_failed_v1(turn, guard.unwrap_err())
     val validated = primary_consumption_v1(store, input.capacity, plan, helper)
     if validated.is_err(): return primary_core_refused_v1(turn, store, helper, "", validated.unwrap_err())
-    val parent_state = daemon_operation_exact_v2(input.capacity.journal, input.parent)
-    if parent_state.is_err(): return primary_core_refused_v1(turn, store, helper, "", parent_state.unwrap_err())
-    if parent_state.unwrap().state != "executing":
-        return primary_core_refused_v1(turn, store, helper, "", "host-primary-parent-executing-required")
-    if input.parent.id != plan.identity.parent_operation_id:
-        return primary_core_refused_v1(turn, store, helper, "", "host-primary-parent-operation-mismatch")
-    val planned = simple_container_primary_attach_plan_v1(turn.container, execution, runtime, plan.identity, policy,
-        plan.resources, plan.terminal_mode)
-    turn.container = planned.owner
-    if planned.error != "": return primary_core_refused_v1(turn, store, helper, "", planned.error)
-    if planned.plan.is_none(): return primary_core_refused_v1(turn, store, helper, "", "host-primary-plan-required")
-    val expected_bytes = container_primary_attach_plan_encode_v1(plan)
-    val actual_bytes = container_primary_attach_plan_encode_v1(planned.plan.unwrap())
-    if (expected_bytes.is_err() or actual_bytes.is_err() or expected_bytes.unwrap() != actual_bytes.unwrap()):
-        return primary_core_refused_v1(turn, store, helper, "", "host-primary-observed-plan-changed")
+    val reproduced = primary_reproduced_v1(turn, input.parent, plan, policy, execution, runtime)
+    turn.container = reproduced.container
+    if reproduced.error != "": return primary_core_refused_v1(turn, store, helper, "", reproduced.error)
     # Recheck the same writer and all archived correlations after provider IO.
     val refreshed = primary_consumption_v1(store, turn.capacity, plan, helper)
     if refreshed.is_err(): return primary_core_refused_v1(turn, store, helper, "", refreshed.unwrap_err())
@@ -241,3 +255,17 @@ pub fn host_primary_attach_open_core_v1(input: HostPrimaryAttachCoreInputV1, pla
                 case _:
                     return primary_core_failed_v1(turn, if opened.error == "": "host-primary-session-unconfirmed" else: opened.error)
     turn
+
+# milestone_0031: everything of the open core that needs neither the helper lease nor a write, in the core's own
+# order: the entry guard, then the plan reproduction. A caller that has not begun its helper yet (the V4 agent,
+# between helper prepare and helper begin) runs it first, so a signed plan this host would not reproduce is
+# refused while only a prepared receipt is held. Passing is no admission: the open core runs every check again.
+pub fn host_primary_attach_open_precheck_v1(input: HostPrimaryAttachCoreInputV1, plan: ContainerPrimaryAttachPlanV1,
+        operation_id: text, policy: ContainerStreamPolicyV2, execution: ContainerExecutionRequestV2,
+        runtime: RuntimeIdentityV1) -> HostPrimaryAttachCoreTurnV1:
+    val turn = HostPrimaryAttachCoreTurnV1(capacity: input.capacity, container: input.container, session: None,
+        cleanup_spawn: None, consumption_attempted: false, error: "")
+    val guard = host_primary_attach_open_entry_check_v1(host_helper_store_rebind_v1(input.store, input.capacity.journal),
+        operation_id)
+    if guard.is_err(): return primary_core_failed_v1(turn, guard.unwrap_err())
+    primary_reproduced_v1(turn, input.parent, plan, policy, execution, runtime)
