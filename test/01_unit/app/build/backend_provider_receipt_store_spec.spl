@@ -1,0 +1,62 @@
+"""
+## Purpose and audience
+Purpose: Prove that backend provider admission persists a receipt keyed to the
+provider artifact FILE bytes on disk (plan §6): the first admission writes
+`<receipt_dir>/<group>.sdn`, an unchanged rerun is admitted, and a modified
+artifact is refused with SPL-PROVIDER-ABI-001 receipt-mismatch.
+Audience: compiler and tooling engineers who maintain backend build groups.
+"""
+# @req: REQ-APP-BUILD-001 — backend provider admission receipt store (plan §6).
+
+use app.build.targets.build_targets.{BackendProviderDescriptor, BACKEND_PROVIDER_ABI_VERSION}
+use app.build.targets.provider_receipt.{provider_artifact_file_sha256, admit_provider_with_receipt}
+use std.nogc_sync_mut.io_runtime.{file_write, file_exists, dir_create_all}
+use std.spec.step
+
+val HOST = "x86_64-unknown-linux-gnu"
+val ROOT = "build/tmp/backend_provider_receipt_store_spec"
+
+fn _desc() -> BackendProviderDescriptor:
+    BackendProviderDescriptor(group: "backends_cuda", abi_version: BACKEND_PROVIDER_ABI_VERSION, host_triple: HOST, capabilities: ["codegen"])
+
+fn _setup(case_name: text, content: text) -> text:
+    val dir = ROOT + "/" + case_name
+    dir_create_all(dir)
+    file_write(dir + "/provider.bin", content)
+    dir
+
+describe "backend provider receipt store":
+    it "hashes the provider artifact file bytes from disk":
+        val dir = _setup("hash", "abc")
+        val h = provider_artifact_file_sha256(dir + "/provider.bin")
+        # oracle: SHA-256("abc") from FIPS 180-2
+        expect(h.unwrap()).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+    it "refuses a missing artifact file":
+        val h = provider_artifact_file_sha256(ROOT + "/no_such_dir/provider.bin")
+        expect(h.is_err()).to_equal(true)
+
+    it "writes a receipt on first admission and admits an unchanged rerun":
+        val dir = _setup("rerun", "provider-v1")
+        val rdir = dir + "/receipts"
+        step("Verify: first run writes the receipt")
+        expect(admit_provider_with_receipt(_desc(), HOST, ["codegen"], dir + "/provider.bin", rdir)).to_equal("")
+        expect(file_exists(rdir + "/backends_cuda.sdn")).to_equal(true)
+        step("Verify: unchanged rerun is admitted")
+        expect(admit_provider_with_receipt(_desc(), HOST, ["codegen"], dir + "/provider.bin", rdir)).to_equal("")
+
+    it "refuses a modified artifact against the stored receipt":
+        val dir = _setup("modified", "provider-v1")
+        val rdir = dir + "/receipts"
+        expect(admit_provider_with_receipt(_desc(), HOST, ["codegen"], dir + "/provider.bin", rdir)).to_equal("")
+        file_write(dir + "/provider.bin", "provider-v2-tampered")
+        val r = admit_provider_with_receipt(_desc(), HOST, ["codegen"], dir + "/provider.bin", rdir)
+        expect(r.starts_with("SPL-PROVIDER-ABI-001: receipt-mismatch: artifact_sha256")).to_equal(true)
+
+    it "refuses a corrupt stored receipt":
+        val dir = _setup("corrupt", "provider-v1")
+        val rdir = dir + "/receipts"
+        dir_create_all(rdir)
+        file_write(rdir + "/backends_cuda.sdn", "not a receipt")
+        val r = admit_provider_with_receipt(_desc(), HOST, ["codegen"], dir + "/provider.bin", rdir)
+        expect(r.starts_with("SPL-PROVIDER-ABI-001: receipt-mismatch: unreadable")).to_equal(true)

@@ -29,6 +29,7 @@
 use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
 use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
 use std.io_runtime.{file_exists}
+use std.gc_async_mut.slang.model_executor.pure.stop.{stop_scan}
 
 # Bytes IN only: the callee gets (prefix..., ptr, len, suffix...) for a copy that
 # lives for this one call. Media payloads cross the int64-only ABI this way.
@@ -191,6 +192,9 @@ struct BackendGeneration:
     generated_tokens: text
     output: text
     prompt_tokens: i64
+    # "stop" (end-of-generation token or a stop sequence) or "length" (the
+    # token budget ended generation).
+    finish_reason: text
 
 # `chat` marks `prompt` as chat frames (see chat_frame) to be rendered through
 # the model's chat template; otherwise `prompt` is fed to the model verbatim.
@@ -199,6 +203,7 @@ struct BackendGenerationRequest:
     prompt: text
     backend: GgmlBackend
     chat: bool
+    stops: [text]
 
 struct BackendActiveGenerationRequest:
     max_tokens: text
@@ -206,6 +211,7 @@ struct BackendActiveGenerationRequest:
     backend: GgmlBackend
     request: GgmlRequest
     chat: bool
+    stops: [text]
 
 struct PhysicalPagePoolCreateRequest:
     execution_namespace: text
@@ -609,14 +615,12 @@ fn cancel_backend_request(b: GgmlBackend, request: GgmlRequest) -> Result<(), Ba
         return Err(BackendError.NotOpen)
     Ok(())
 
-fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<BackendGeneration, BackendError>:
+# Everything up to (not including) the first sample: prompt text, chat render,
+# capacity guard, prefix prepare and prompt eval. Returns the prompt token count.
+fn _prefill_request(input: BackendActiveGenerationRequest, max_tokens: i64) -> Result<i64, BackendError>:
     val b = input.backend
     val request = input.request
-    val prompt = input.prompt
-    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
-    if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
-        return Err(BackendError.InvalidTokenBudget)
-    if _push_request_text(b, request, prompt) < 0:
+    if _push_request_text(b, request, input.prompt) < 0:
         return Err(BackendError.TokenizeFailed)
     if input.chat and (b.f_request_chat_render == 0 or
                        _call1(b.f_request_chat_render, request.handle) < 0):
@@ -633,24 +637,115 @@ fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<B
         return Err(BackendError.DecodeFailed)
     if _call1(b.f_request_eval_prompt, request.handle) < 0:
         return Err(BackendError.DecodeFailed)
-    _sample_loop(b, request, max_tokens, prompt_tokens)
+    Ok(prompt_tokens)
+
+fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<BackendGeneration, BackendError>:
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
+        return Err(BackendError.InvalidTokenBudget)
+    match _prefill_request(input, max_tokens):
+        Err(e): Err(e)
+        Ok(prompt_tokens): _sample_loop(input.backend, input.request, max_tokens, prompt_tokens, input.stops)
+
+# One in-flight generation that the caller drives token by token. `raw` is all
+# decoded text so far; `text` is the same after stop-sequence truncation;
+# `delta` is what the LAST step made safe to send (a trailing partial stop
+# sequence is held back until a later token resolves it, and flushed at the
+# end when none matched).
+struct GenStream:
+    backend: GgmlBackend
+    request: GgmlRequest
+    max_tokens: i64
+    produced: i64
+    prompt_tokens: i64
+    stops: [text]
+    raw: text
+    text: text
+    emitted: i64
+    delta: text
+    finished: bool
+    finish_reason: text
+
+fn _gs_tail(t: text, from: i64) -> text:
+    if from >= t.len():
+        return ""
+    t.slice(from, t.len())
+
+fn _gs_finish(st: GenStream, text: text, reason: text, produced: i64) -> GenStream:
+    GenStream(backend: st.backend, request: st.request, max_tokens: st.max_tokens, produced: produced,
+        prompt_tokens: st.prompt_tokens, stops: st.stops, raw: st.raw, text: text, emitted: text.len(),
+        delta: _gs_tail(text, st.emitted), finished: true, finish_reason: reason)
+
+fn gen_stream_new(b: GgmlBackend, request: GgmlRequest, max_tokens: i64, prompt_tokens: i64, stops: [text]) -> GenStream:
+    GenStream(backend: b, request: request, max_tokens: max_tokens, produced: 0, prompt_tokens: prompt_tokens,
+        stops: stops, raw: "", text: "", emitted: 0, delta: "", finished: false, finish_reason: "")
+
+# One sample, one detokenize, one eval. The stop conditions are evaluated here:
+# end-of-generation token or stop sequence -> "stop", token budget -> "length".
+fn gen_stream_step(st: GenStream) -> Result<GenStream, BackendError>:
+    if st.finished:
+        return Ok(st)
+    val b = st.backend
+    val request = st.request
+    if st.produced >= st.max_tokens:
+        return Ok(_gs_finish(st, st.text, "length", st.produced))
+    val tok = _call1(b.f_request_sample, request.handle)
+    if _call1(b.f_is_eog, tok) == 1:
+        return Ok(_gs_finish(st, st.text, "stop", st.produced))
+    if _call2(b.f_request_piece, request.handle, tok) < 0:
+        return Err(BackendError.DecodeFailed)
+    val raw = st.raw + _read_request_out(b, request)
+    val scan = stop_scan(raw, st.stops)
+    val moved = GenStream(backend: b, request: request, max_tokens: st.max_tokens, produced: st.produced + 1,
+        prompt_tokens: st.prompt_tokens, stops: st.stops, raw: raw, text: scan.text, emitted: st.emitted,
+        delta: "", finished: false, finish_reason: "")
+    if scan.matched:
+        return Ok(_gs_finish(moved, scan.text, "stop", moved.produced))
+    if _call2(b.f_request_eval, request.handle, tok) < 0:
+        return Err(BackendError.DecodeFailed)
+    if moved.produced >= moved.max_tokens:
+        return Ok(_gs_finish(moved, raw, "length", moved.produced))
+    val safe = scan.text.len() - scan.hold_back
+    if safe > st.emitted:
+        return Ok(GenStream(backend: b, request: request, max_tokens: st.max_tokens, produced: moved.produced,
+            prompt_tokens: st.prompt_tokens, stops: st.stops, raw: raw, text: scan.text, emitted: safe,
+            delta: scan.text.slice(st.emitted, safe), finished: false, finish_reason: ""))
+    Ok(moved)
+
+# Opens a request context, prefills, and returns the stream ready for the first
+# gen_stream_step. The caller must gen_stream_close it. Needs per-request
+# contexts (the shared-context path has no handle to hold across steps).
+fn generate_stream_open(input: BackendGenerationRequest) -> Result<GenStream, BackendError>:
+    val b = input.backend
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
+        return Err(BackendError.InvalidTokenBudget)
+    if not b.independent_requests:
+        return Err(BackendError.NotOpen)
+    match open_request(b, _call0(b.f_n_ctx)):
+        Err(error): Err(error)
+        Ok(request):
+            val active = BackendActiveGenerationRequest(max_tokens: input.max_tokens, prompt: input.prompt,
+                backend: b, request: request, chat: input.chat, stops: input.stops)
+            match _prefill_request(active, max_tokens):
+                Err(error):
+                    val _closed = close_backend_request(b, request)
+                    Err(error)
+                Ok(prompt_tokens):
+                    Ok(gen_stream_new(b, request, max_tokens, prompt_tokens, input.stops))
+
+fn gen_stream_close(st: GenStream) -> Result<(), BackendError>:
+    close_backend_request(st.backend, st.request)
 
 # One sample, one detokenize, one eval per iteration, after a prefill that left
 # logits for the last prompt position.
-fn _sample_loop(b: GgmlBackend, request: GgmlRequest, max_tokens: i64, prompt_tokens: i64) -> Result<BackendGeneration, BackendError>:
-    var out = ""
-    var produced = 0
-    while produced < max_tokens:
-        val tok = _call1(b.f_request_sample, request.handle)
-        if _call1(b.f_is_eog, tok) == 1:
-            break
-        if _call2(b.f_request_piece, request.handle, tok) < 0:
-            return Err(BackendError.DecodeFailed)
-        out = out + _read_request_out(b, request)
-        if _call2(b.f_request_eval, request.handle, tok) < 0:
-            return Err(BackendError.DecodeFailed)
-        produced = produced + 1
-    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text(), prompt_tokens: prompt_tokens))
+fn _sample_loop(b: GgmlBackend, request: GgmlRequest, max_tokens: i64, prompt_tokens: i64, stops: [text]) -> Result<BackendGeneration, BackendError>:
+    var st = gen_stream_new(b, request, max_tokens, prompt_tokens, stops)
+    while not st.finished:
+        match gen_stream_step(st):
+            Err(e): return Err(e)
+            Ok(next): st = next
+    Ok(BackendGeneration(output: st.text, generated_tokens: st.produced.to_text(), prompt_tokens: prompt_tokens, finish_reason: st.finish_reason))
 
 # The mmproj projector a model's media goes through. Returns the capability mask
 # (1 = vision, 2 = audio). Call after load_model, before any media request.
@@ -726,7 +821,7 @@ fn _generate_media_active(input: BackendMediaGenerationRequest, request: GgmlReq
         return Err(BackendError.CapacityExceeded)
     if _call1(b.f_mm_eval_prompt, request.handle) < 0:
         return Err(BackendError.DecodeFailed)
-    _sample_loop(b, request, max_tokens, positions)
+    _sample_loop(b, request, max_tokens, positions, [])
 
 # slang's decode loop. One sample, one detokenize, one eval per iteration, with
 # the stop conditions evaluated here rather than inside the kernel library.
@@ -744,7 +839,7 @@ fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendG
             Ok(request):
                 val result = _generate_request_observed(BackendActiveGenerationRequest(
                     max_tokens: input.max_tokens, prompt: prompt, backend: b,
-                    request: request, chat: input.chat))
+                    request: request, chat: input.chat, stops: input.stops))
                 val closed = close_backend_request(b, request)
                 match closed:
                     Err(_): return Err(BackendError.DecodeFailed)
@@ -767,9 +862,11 @@ fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendG
         return Err(BackendError.DecodeFailed)
     var out = ""
     var produced = 0
+    var finish = "length"
     while produced < max_tokens:
         val tok = _call0(b.f_sample)
         if _call1(b.f_is_eog, tok) == 1:
+            finish = "stop"
             break
         if _call1(b.f_piece, tok) < 0:
             return Err(BackendError.DecodeFailed)
@@ -777,12 +874,18 @@ fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendG
         if _call1(b.f_eval, tok) < 0:
             return Err(BackendError.DecodeFailed)
         produced = produced + 1
-    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text(), prompt_tokens: shared_prompt_tokens))
+    # Stop sequences are applied to the finished text on this shared-context
+    # path (the per-request path above applies them per token).
+    val scan = stop_scan(out, input.stops)
+    if scan.matched:
+        out = scan.text
+        finish = "stop"
+    Ok(BackendGeneration(output: out, generated_tokens: produced.to_text(), prompt_tokens: shared_prompt_tokens, finish_reason: finish))
 
 fn generate_observed(b: GgmlBackend, prompt: text,
                      max_tokens: i64) -> Result<BackendGeneration, BackendError>:
     generate_observed_request(BackendGenerationRequest(
-        max_tokens: max_tokens.to_text(), prompt: prompt, backend: b, chat: false))
+        max_tokens: max_tokens.to_text(), prompt: prompt, backend: b, chat: false, stops: []))
 
 fn generate(b: GgmlBackend, prompt: text, max_tokens: i64) -> Result<text, BackendError>:
     match generate_observed(b, prompt, max_tokens):
@@ -1041,6 +1144,7 @@ export request_sample, request_is_eog, request_piece
 export gpu_offload_supported, model_offloaded
 export MediaBlob, BackendMediaGenerationRequest, generate_media_request, load_mmproj, backend_media_caps
 export generate, generate_observed, generate_observed_request, configure_prefix_cache, prefix_cache_stats, configure_matched_cpu_context, close_backend
+export GenStream, generate_stream_open, gen_stream_step, gen_stream_close
 export physical_page_version_probe_is_authorized, physical_page_group_status_from_probe
 export physical_page_provider_status
 export INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact

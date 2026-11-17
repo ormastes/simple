@@ -255,6 +255,16 @@ impl MirLowering:
                 None
             case _: None
 
+    me native_trait_callable_record_return(fn_type_opt: HirType?, span: Span) -> HirType?:
+        if fn_type_opt == None: return None
+        val fn_type = fn_type_opt ?? HirType(kind: HirTypeKind.Error, span: span)
+        match fn_type.kind:
+            case HirTypeKind.Function(_, ret_ty, _):
+                if self.native_trait_concrete_record_type(ret_ty):
+                    return Some(ret_ty)
+            case _: ()
+        None
+
     me native_trait_some_payload_word(option: LocalId, value: HirExpr) -> LocalId:
         """Payload word of a statically-Some Option handle, carrying the
         `Some` argument's static type: its own HIR type, else the class or
@@ -289,6 +299,21 @@ impl MirLowering:
                             val symbol_entry: HirSymbol = present_symbol
                             if symbol_entry.kind == SymbolKind.Class or symbol_entry.kind == SymbolKind.Struct:
                                 payload_type = Some(HirType(kind: HirTypeKind.Named(constructor, []), span: value.span))
+                            elif symbol_entry.kind == SymbolKind.Function or symbol_entry.kind == SymbolKind.Method:
+                                payload_type = self.native_trait_callable_record_return(symbol_entry.type_, value.span)
+                case HirExprKind.StaticCall(static_type, _, _, resolution):
+                    match resolution:
+                        case MethodResolution.StaticMethod(_, method_id):
+                            if method_id.id >= 0:
+                                if val present_method = self.symbols.get_symbol_raw(method_id.id):
+                                    val method_sym: HirSymbol = present_method
+                                    payload_type = self.native_trait_callable_record_return(method_sym.type_, value.span)
+                        case _: ()
+                    if payload_type == None and self.native_trait_concrete_record_type(static_type):
+                        payload_type = Some(static_type)
+                case HirExprKind.StructLit(struct_type, _):
+                    if self.native_trait_concrete_record_type(struct_type):
+                        payload_type = Some(struct_type)
                 case _: ()
         # `Some(c)` with `c` an unannotated local (`val c = Concrete(..)`):
         # type the payload the way the direct `slot = c` form types `c` -- the

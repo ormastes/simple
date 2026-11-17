@@ -10,12 +10,15 @@ use std.js.engine.vm_object_store.{ObjectStore}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask, MAX_SCRIPT_EXECUTION_STEPS, js_timer_deadline_ms}
 use std.nogc_sync_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value}
 use std.nogc_sync_mut.http.types.{status_text}
-use std.js.engine.runtime.{dispatch_native, NATIVE_PROMISE_EXECUTOR_RESOLVE, NATIVE_PROMISE_EXECUTOR_REJECT, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_AGG_FULFILL, NATIVE_PROMISE_AGG_REJECT, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.js.engine.runtime.{NATIVE_PROMISE_EXECUTOR_RESOLVE, NATIVE_PROMISE_EXECUTOR_REJECT, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_AGG_FULFILL, NATIVE_PROMISE_AGG_REJECT, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_string_methods.{JsInterpreter}
 
 val MAX_PROMISE_CALLBACKS_PER_DRAIN: i64 = 1000
 val MAX_PENDING_PROMISE_HANDLERS: i64 = 4096
+
+fn _async_js_err_msg(err: JsError) -> text:
+    err.message
 
 # Promise id carried by a `__simple_promise_settle:<id>` native name, or -1.
 fn _promise_id_from_settler_name(name: text) -> i64:
@@ -253,7 +256,7 @@ impl JsInterpreter:
     me _construct_promise(arg_vals: [JsValue], env: i64) -> JsBrowserResult<JsValue>:
         val promise_id = self._create_pending_promise_object()
         if arg_vals.len() > 0:
-            val executor_id = _get_fn_id(arg_vals.get(0))
+            val executor_id = _get_fn_id(arg_vals[0])
             if executor_id >= 0:
                 val settlers = [
                     JsValue.Function(id: self._promise_settler_fn(promise_id, NATIVE_PROMISE_EXECUTOR_RESOLVE)),
@@ -269,10 +272,10 @@ impl JsInterpreter:
     me _native_promise_executor_settle(fn_id: i64, native_id: i64, arg_vals: [JsValue]) -> JsValue:
         if fn_id < 0 or fn_id >= self.functions.len():
             return JsValue.Undefined
-        val promise_id = _promise_id_from_settler_name(self.functions.get(fn_id).name)
+        val promise_id = _promise_id_from_settler_name(self.functions[fn_id].name)
         if promise_id < 0 or _simple_fetch_state(promise_id, self.object_store) != "pending":
             return JsValue.Undefined
-        val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
+        val value = if arg_vals.len() > 0: arg_vals[0] else: JsValue.Undefined
         if native_id == NATIVE_PROMISE_EXECUTOR_REJECT:
             self._settle_promise(promise_id, value, true)
             return JsValue.Undefined
@@ -429,18 +432,18 @@ impl JsInterpreter:
             return Ok(self._native_promise_agg_step(fn_id, native_id, arg_vals))
         if native_id != 0:
             return Ok(self._dispatch_native_with_receiver(native_id, JsValue.Undefined, arg_vals, self.global_env))
-        val js_fn = self.functions.get(fn_id)
+        val js_fn = self.functions[fn_id]
         val fn_env = self.env_stack.create_env(js_fn.closure_env)
         var gi = 0
         while gi < self.global_var_names.len():
-            self.env_stack.define_var(fn_env, self.global_var_names.get(gi), self.global_var_values.get(gi))
+            self.env_stack.define_var(fn_env, self.global_var_names[gi], self.global_var_values[gi])
             gi = gi + 1
         var pi = 0
         while pi < js_fn.params.len():
             var pv = JsValue.Undefined
             if pi < arg_vals.len():
-                pv = arg_vals.get(pi)
-            self.env_stack.define_var(fn_env, js_fn.params.get(pi), pv)
+                pv = arg_vals[pi]
+            self.env_stack.define_var(fn_env, js_fn.params[pi], pv)
             pi = pi + 1
         self.env_stack.define_var(fn_env, "this", JsValue.Undefined)
         val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: JsValue.Undefined)
@@ -450,7 +453,7 @@ impl JsInterpreter:
         var result = JsValue.Undefined
         var bi = 0
         while bi < js_fn.body.len():
-            result = self.exec_statement(js_fn.body.get(bi), fn_env)?
+            result = self.exec_statement(js_fn.body[bi], fn_env)?
             if self.control_return:
                 result = self.return_value
                 break
@@ -585,7 +588,7 @@ impl JsInterpreter:
                                         next_value = callback_result
                                         propagate_rejection = state == "rejected" and on_rejected < 0
                                 Err(e):
-                                    next_value = JsValue.String(v: e.message)
+                                    next_value = JsValue.String(v: _async_js_err_msg(e))
                                     propagate_rejection = true
                         else:
                             if handler_kind == "finally":
@@ -599,8 +602,8 @@ impl JsInterpreter:
         var i = 0
         val len = self.class_proto_fns.len()
         while i < len:
-            if self.class_proto_fns.get(i) == fn_id:
-                return self.class_proto_ids.get(i)
+            if self.class_proto_fns[i] == fn_id:
+                return self.class_proto_ids[i]
             i = i + 1
         -1
 
@@ -645,7 +648,7 @@ impl JsInterpreter:
                 var headers: [text] = []
                 var i = 0
                 while i < obj.properties.len():
-                    val prop = obj.properties.get(i)
+                    val prop = obj.properties[i]
                     if prop.key.lower() != "cookie":
                         headers.push(prop.key + ": " + self._js_to_string(prop.value))
                     i = i + 1
@@ -707,7 +710,7 @@ impl JsInterpreter:
                 var first = true
                 val plen = obj.properties.len()
                 while oi < plen:
-                    val prop = obj.properties.get(oi)
+                    val prop = obj.properties[oi]
                     # Skip internal __proto__ property
                     if prop.key != "__proto__":
                         if not first:

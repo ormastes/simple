@@ -6,22 +6,19 @@ Plan: `simple_traceability_spipe_bug_mcp_skills_improvement_plan_2026-11-14.md`.
 This record collects the open items that have no other bug record. Items that
 already have their own record are listed at the end by path only.
 
-## 2. Public primitives still left in the traceability model
+## 2. Public primitives in the traceability model — closed
 
-The `primitive_api` lint checks `pub fn` signatures only, so these are not
-flagged, but they break the "no primitive in public API" requirement:
+Re-checked 2026-11-17 on `release/1.0.0`: `TraceLocator`, `TraceClaim`,
+`TraceEdge`, `SnapshotSubject`, `TraceDiagnostic` and `TraceNode` hold only
+bare `text` fields or enums, and `TraceReverseIndexV1.by_key` is
+`Dict<text, [TraceEntityIdV1]>`. No `i64`/`bool`/`u8` public field is left.
+Bare `text` is exempt from the primitive rule (owner decision), so these
+structs meet the requirement as they stand.
 
-- `src/lib/common/traceability/model.spl` struct id/count fields still bare
-  `text`/`i64`: `TraceLocator` (about 110 field-use sites in src+test, measured
-  2026-11-17, over the per-struct ceiling), `TraceClaim`, `TraceEdge`,
-  `SnapshotSubject`, `TraceDiagnostic`, `TraceNode`. Needs new wrappers for
-  blob ids and locator kinds (closed set: file, line, sdn-node, ...).
-  Converted so far: `TraceEdgeOrigin`, `TraceQueryResult`, `TraceAuthority`,
-  `TraceDocument`, `TraceConventionRule`, `TraceOrigin`, `TraceQuery`,
-  `TracePolicy`.
-- `TraceReverseIndexV1.by_key` is `Dict<text, [TraceEntityIdV1]>`.
-- Unblock: convert one struct per change, smallest use-site count first,
-  unwrap at use sites, keep the SDN wire format byte-identical (codec specs).
+Closed-set `text` fields that could become enums if the exemption is ever
+narrowed: `TraceLocator.locator_kind` (file, symbol, scenario, section, cas;
+about 30 string-compare sites, including `graph_schema_v1.spl` and
+`graph_wire_v1.spl`) and `TraceDiagnostic.severity` (error, warning).
 
 ## 3. MCP / ctx
 
@@ -30,11 +27,6 @@ flagged, but they break the "no primitive in public API" requirement:
   the replaced file and is lost (`src/app/mcp/main_lazy_ctx_tools.spl`,
   `ctx_purge_commit`). Unblock: an OS compare-and-rename, or appends that
   re-check the generation after writing.
-- CLI `trace missing` ignores `--profile`: `run_trace_query_v1`
-  (`src/app/traceability/query_main.spl`) hardcodes `TraceProfile.Worktree` for
-  the missing path, while the MCP `simple_trace` applies the requested profile
-  through `trace_command_verdict_v1`. Unblock: parse `--profile` in the legacy
-  query options and pass it to `trace_query_completion_exit_v1`.
 
 ## 4. Test query and harness
 

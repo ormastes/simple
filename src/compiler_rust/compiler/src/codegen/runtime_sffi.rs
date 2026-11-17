@@ -2650,6 +2650,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_print_err", &[I64], &[]),
     RuntimeFuncSpec::new("rt_process_hwm_kib", &[], &[I64]),
     RuntimeFuncSpec::new("rt_process_last_child_peak_rss_kib", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_last_child_cpu_ms", &[], &[I64]),
     RuntimeFuncSpec::new("rt_process_run_tuple", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_run_bounded_tuple", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_run_bounded_observed_tuple_v1", &[I64, I64, I64, I64, I64], &[I64]),

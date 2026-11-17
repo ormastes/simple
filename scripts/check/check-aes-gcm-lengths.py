@@ -18,6 +18,8 @@ if a.openssl:
 else:
     start=src.index('static const uint8_t aes_sbox[256]')
     end=src.index('#endif /* SPL_HAVE_OPENSSL */',start)
+wrap_start=src.index('/* ---- shared AES-GCM text wrappers (both backends) ---- */')
+wrap_end=src.index('/* ---- end shared AES-GCM text wrappers ---- */',wrap_start)
 # Exact production slice: allocator macros only adapt the standalone test host.
 prefix='''#include <stdint.h>
 #include <limits.h>
@@ -45,7 +47,7 @@ unit=a.output/'aes_gcm_owner.c'
 suffix=''
 if a.inject_evp_failures:
     suffix=(a.root/'test/01_unit/runtime/aes_gcm_evp_faults_test.c').read_text()
-unit.write_text(prefix+src[start:end]+'\n'+fixture.read_text()+'\n'+suffix)
+unit.write_text(prefix+src[start:end]+'\n'+src[wrap_start:wrap_end]+'\n'+fixture.read_text()+'\n'+suffix)
 if a.emit_only:
     print(str(unit))
     raise SystemExit(0)
