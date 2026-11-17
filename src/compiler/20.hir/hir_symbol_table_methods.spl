@@ -101,6 +101,25 @@ impl SymbolTable:
         # unset — owners match (owner == declared_owner) and the empty
         # recording made the comparison misfire on every declaration).
         if (symbol.defining_module ?? "") != "" and _hir_symbol_owner_module(symbol.defining_module ?? "") != canonical_owner:
+            # Import-cycle artifact (cycle 39 mcp rebuild): a declaration
+            # whose authority names module B can carry a defining_module
+            # recording from module A when A and B sit in an import cycle
+            # and A was lowered first — the symbol slot is materialized
+            # during whichever cycle module lowers earliest. All 28 errors
+            # in that cycle were owner == declared_owner == B with
+            # source_path in B; the recording is an order artifact, not the
+            # origin. When the declared source file's module agrees with the
+            # binding owner, adopt the authoritative origin and heal the
+            # recording (which also fixes visibility checks that key on the
+            # defining module).
+            if _hir_symbol_owner_module(source_path) == canonical_owner:
+                symbol.defining_module = canonical_owner
+                symbol.declaration_modifier_v1 = modifier
+                symbol.declaration_source_path_v1 = source_path
+                symbol.declaration_projection_key_v1 = projection_key
+                symbol.declaration_owner_v1 = canonical_owner
+                self.symbols[id.id] = symbol
+                return Ok(true)
             # The sanity SCV snapshot materializes symbols with a snapshot
             # module identity while the recorded declaration authority names
             # the logical source module (the p2_add sanity fixture is a
