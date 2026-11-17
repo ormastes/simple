@@ -1,0 +1,125 @@
+#!/bin/sh
+# fetch-large-assets.shs — download large/binary assets that are NOT stored in git.
+#
+# Owner policy: never Git LFS, never commit large binaries. Each asset is listed
+# in config/assets/large_assets.sdn (path, url, sha256, size), gitignored, and
+# materialised here: download to a temp file, verify sha256 (and size), then
+# atomically mv into place. Idempotent: a file already matching is left alone.
+#
+# Usage:
+#   sh scripts/setup/fetch-large-assets.shs            # fetch missing/mismatched
+#   sh scripts/setup/fetch-large-assets.shs --check    # verify only, no network
+#   sh scripts/setup/fetch-large-assets.shs --selftest # offline fixture test
+#   [--manifest FILE] [--root DIR]
+# Exit: 0 ok, 1 missing/mismatch/download failure, 2 usage/tooling error.
+set -u
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+    else echo "fetch-large-assets: no sha256sum/shasum" >&2; return 2; fi
+}
+
+size_of() { wc -c < "$1" | tr -d ' '; }
+
+download() { # url dest
+    case "$1" in
+        file://*) cp "${1#file://}" "$2" 2>/dev/null ;;
+        *)
+            if command -v curl >/dev/null 2>&1; then
+                if [ -n "${GITHUB_TOKEN:-}" ]; then
+                    curl -fsSL -H "Authorization: token $GITHUB_TOKEN" -o "$2" "$1"
+                else
+                    curl -fsSL -o "$2" "$1"
+                fi
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O "$2" "$1"
+            else
+                echo "fetch-large-assets: no curl/wget" >&2; return 2
+            fi ;;
+    esac
+}
+
+# Emits "path<TAB>url<TAB>sha<TAB>size" for each data row of the manifest.
+manifest_rows() {
+    awk '/^[ \t]+"/ {
+        line=$0; n=0
+        while (match(line, /"[^"]*"/)) { n++; f[n]=substr(line, RSTART+1, RLENGTH-2); line=substr(line, RSTART+RLENGTH) }
+        gsub(/[ ,\t\r]/, "", line)
+        if (n == 3) printf "%s\t%s\t%s\t%s\n", f[1], f[2], f[3], line
+    }' "$1"
+}
+
+run() { # mode manifest root
+    r_mode=$1; r_manifest=$2; r_root=$3
+    [ -f "$r_manifest" ] || { echo "ERROR — manifest not found: $r_manifest"; return 2; }
+    total=0; ok=0; fetched=0; bad=0
+    tab=$(printf '\t')
+    rows=$(manifest_rows "$r_manifest")
+    [ -n "$rows" ] || { echo "ERROR — nothing was checked (empty manifest)"; return 2; }
+    while IFS="$tab" read -r path url sha size; do
+        [ -n "$path" ] || continue
+        total=$((total + 1)); dest="$r_root/$path"
+        if [ -f "$dest" ] && [ "$(sha256_of "$dest")" = "$sha" ]; then ok=$((ok + 1)); continue; fi
+        if [ "$r_mode" = check ]; then
+            echo "MISSING-OR-MISMATCH $path"; bad=$((bad + 1)); continue
+        fi
+        mkdir -p "$(dirname "$dest")"
+        tmp="$dest.fetch.$$"
+        if ! download "$url" "$tmp"; then
+            rm -f "$tmp"; echo "DOWNLOAD-FAILED $path"; bad=$((bad + 1)); continue
+        fi
+        got=$(sha256_of "$tmp"); gsz=$(size_of "$tmp")
+        if [ "$got" != "$sha" ] || { [ -n "$size" ] && [ "$gsz" != "$size" ]; }; then
+            rm -f "$tmp"; echo "SHA-MISMATCH $path (got $got size $gsz)"; bad=$((bad + 1)); continue
+        fi
+        mv -f "$tmp" "$dest"; fetched=$((fetched + 1))
+    done <<EOF
+$rows
+EOF
+    if [ "$bad" -ne 0 ]; then
+        echo "FAIL — $total asset(s) checked, $bad missing/mismatched, $fetched fetched"; return 1
+    fi
+    echo "PASS — $total asset(s) checked, $ok already present, $fetched fetched"; return 0
+}
+
+selftest() {
+    t=$(mktemp -d 2>/dev/null || mktemp -d -t fla); fails=0
+    mkdir -p "$t/src" "$t/root"
+    printf 'hello-asset' > "$t/src/a.bin"
+    good=$(sha256_of "$t/src/a.bin"); gsz=$(size_of "$t/src/a.bin")
+    printf 'assets |path, url, sha256, size|\n    "d/a.bin", "file://%s/src/a.bin", "%s", %s\n' "$t" "$good" "$gsz" > "$t/good.sdn"
+    printf 'assets |path, url, sha256, size|\n    "d/b.bin", "file://%s/src/a.bin", "%s", %s\n' "$t" "0000000000000000000000000000000000000000000000000000000000000000" "$gsz" > "$t/bad.sdn"
+    # 1. --check on missing file fails without fetching
+    run check "$t/good.sdn" "$t/root" >/dev/null; [ $? -eq 1 ] && [ ! -f "$t/root/d/a.bin" ] || { echo "selftest: check-missing"; fails=$((fails+1)); }
+    # 2. correct sha installs
+    run fetch "$t/good.sdn" "$t/root" >/dev/null; [ $? -eq 0 ] && [ "$(sha256_of "$t/root/d/a.bin")" = "$good" ] || { echo "selftest: install"; fails=$((fails+1)); }
+    # 3. idempotent rerun fetches nothing
+    out=$(run fetch "$t/good.sdn" "$t/root"); case "$out" in *"1 already present, 0 fetched"*) ;; *) echo "selftest: idempotent"; fails=$((fails+1));; esac
+    # 4. --check passes when present
+    run check "$t/good.sdn" "$t/root" >/dev/null || { echo "selftest: check-present"; fails=$((fails+1)); }
+    # 5. wrong sha fails and leaves nothing behind
+    run fetch "$t/bad.sdn" "$t/root" >/dev/null; [ $? -eq 1 ] && [ -z "$(ls "$t/root/d" | grep b.bin)" ] || { echo "selftest: bad-sha"; fails=$((fails+1)); }
+    # 6. empty manifest is an ERROR, never a pass
+    : > "$t/empty.sdn"; run check "$t/empty.sdn" "$t/root" >/dev/null; [ $? -eq 2 ] || { echo "selftest: empty"; fails=$((fails+1)); }
+    rm -rf "$t"
+    if [ "$fails" -ne 0 ]; then echo "FAIL — selftest: $fails of 6 fixture(s) failed"; return 1; fi
+    echo "PASS — selftest: 6 fixture(s)"; return 0
+}
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+mode=fetch; manifest="$repo_root/config/assets/large_assets.sdn"; root="$repo_root"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check) mode=check ;;
+        --selftest) mode=selftest ;;
+        --manifest) shift; manifest=$1 ;;
+        --root) shift; root=$1 ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+if [ "$mode" = selftest ]; then selftest; exit $?; fi
+selftest >/dev/null || { echo "ERROR — selftest failed; refusing to run"; exit 2; }
+run "$mode" "$manifest" "$root"

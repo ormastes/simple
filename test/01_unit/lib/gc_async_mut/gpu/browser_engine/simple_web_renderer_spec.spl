@@ -1657,6 +1657,28 @@ describe "SimpleWebRenderer":
         expect(_count_color(cpu_styled_panel, 0xFF00FF00u32) > 0).to_equal(true)
         expect(_count_color(cpu_styled_panel, 0xFF0000FFu32) > 0).to_equal(true)
 
+    it "paints a widget-mode body radial gradient on the canvas on Draw IR exactly as the raster does":
+        # @req REQ-WEB-RENDER-001
+        step("Verify: paints a widget-mode body radial gradient on the canvas on Draw IR exactly as the raster does")
+        # PR #9930 residual: the raster painted the first stop fading by
+        # distance inside the body box, Draw IR an opaque box-centred circle
+        # (1203 mismatching pixels). Chrome 159 propagates the body radial to
+        # the canvas, positioned on the html box (at least the viewport;
+        # Chrome pixels are pinned at device scale 4 in web_device_scale_spec).
+        # Both lanes now share one evaluator, so they agree exactly.
+        val image_page = "<html><body style='background-image:radial-gradient(circle,#ff0000 0%,#0000ff 100%)'><section class='widget-panel'></section></body></html>"
+        val shorthand_page = "<html><body style='background:radial-gradient(circle,#ff0000 0%,#0000ff 100%)'><div class='widget-panel'>x</div></body></html>"
+        val raster_image = simple_web_layout_render_html_software_pixels(image_page, 40, 64)
+        val cpu_image = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(image_page, 40, 64, "cpu_simd")
+        val raster_short = simple_web_layout_render_html_software_pixels(shorthand_page, 40, 64)
+        val cpu_short = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(shorthand_page, 40, 64, "cpu_simd")
+        expect(_pixel_mismatches(raster_image, cpu_image)).to_equal(0)
+        expect(_pixel_mismatches(raster_short, cpu_short)).to_equal(0)
+        # (35, 18) lies outside the body box: Chrome paints the gradient there
+        # (the canvas), not the widget page base.
+        expect(cpu_image[18 * 40 + 35] != 0xFFF5F5F5u32).to_equal(true)
+        expect(cpu_short[18 * 40 + 35] != 0xFFF5F5F5u32).to_equal(true)
+
     it "paints no widget-image placeholder or form-control chrome on Draw IR in legacy widget mode, as the raster does":
         # @req REQ-WEB-RENDER-001
         # @capture(gui_image): retained evidence for scenario "paints no widget-image placeholder or form-control chrome on Draw IR in legacy widget mode, as the raster does"
@@ -1814,9 +1836,14 @@ describe "SimpleWebRenderer":
         # LCD subpixel text (owner: same as Chrome). At 8 px, LCD coverage never
         # saturates all three channels on a 1 px stem, so no pixel is exactly the
         # text colour #0f172a. Chrome 159 also paints 0 such pixels on this HTML;
-        # its darkest ink pixel is 0xFF4B3E5A (1 pixel). The engine's darkest ink
-        # pixel is 0xFF352A44, exactly 2 pixels.
-        expect(_count_color(pixels, 0xFF352A44u32)).to_equal(2)
+        # its darkest ink pixel is 0xFF4B3E5A (1 pixel). Re-pinned again 2026-11-17
+        # for slight vertical hinting: the 8 px caps now take Chrome's 6 rows and
+        # the text box mismatches Chrome on 709 px (was 711), while the summed
+        # channel delta grew 1.3% (45,684 -> 46,282) because the L stem's pen
+        # phase still sits ~1/2 px left of Chrome's (open, skill doc). The pin
+        # tracks the engine's darkest ink pixel: 0xFF283151, exactly 3 pixels
+        # (was 0xFF352A44 x2).
+        expect(_count_color(pixels, 0xFF283151u32)).to_equal(3)
 
     it "applies class selector colors and inline overrides in generic layout":
         # @req REQ-WEB-RENDER-001
