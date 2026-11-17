@@ -81,6 +81,14 @@ fn hir_const_with_export_visibility(hir_const: HirConst, exported: Dict<text, bo
     lifted.is_public = true
     lifted
 
+fn hir_module_path_is_scv_snapshot_v1(path: text) -> bool:
+    # Mirrors _hir_symbol_path_is_scv_snapshot_v1 in hir_symbol_table_methods.spl
+    # (kept private to the symbol-table module); the two predicates must move together.
+    if path == "":
+        return false
+    val normalized = path.replace("\\", "/")
+    normalized.contains("/scv/") or normalized.contains("/scv_snapshots/") or normalized.contains("scv-revision-")
+
 impl HirLowering:
     me bind_source_declaration_origin_v1(intents: Dict<text, text>, id: SymbolId, category: text, source_name: text):
         val key = category + ":" + source_name
@@ -94,6 +102,19 @@ impl HirLowering:
         if bound.is_err():
             self.error(bound.unwrap_err(), Span.empty())
         elif not bound.unwrap():
+            # Ok(false) is a by-design skip inside bind_declaration_origin_v1:
+            # the transparent-alias shared-SymbolId guard, and the SCV snapshot
+            # escapes (snapshot-identity predicate + SIMPLE_SCV_INVENTORY_COLD_INIT
+            # gate). The stage-2 sanity snapshot build takes the snapshot escape
+            # for every fixture declaration; erroring unconditionally here
+            # re-arms the origin gate one layer up (cycle 37: p2_add main,
+            # tag_bool, tag_text, tag_i64s all died with "typed declaration did
+            # not retain its source identity" AFTER the v3 gate had already
+            # skipped the bind by design). Mirror the escape predicates so the
+            # sanity snapshot can skip; real module builds keep this fail-closed
+            # error for unexpected skips.
+            if hir_module_path_is_scv_snapshot_v1(self.module_filename) or (hir_module_env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1":
+                return
             self.error("typed declaration did not retain its source identity: " + key, Span.empty())
 
     # Sub-plan P1 wiring (immutable_views_async_init_revisions_2026-11-13.md
