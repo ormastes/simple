@@ -1,0 +1,92 @@
+"""
+CU-018 acceptance: CPU/RSS/startup measured with cold/warm runs and failure
+injection, against the DEPLOYED native binary.
+
+Binary: $SIMPLE_CU018_BIN, else bin/simple.exe (Windows) or bin/simple.
+Every measurement that cannot be taken FAILS explicitly with the reason; there
+is no skip path. Numbers are printed as `CU018 <metric>=<value>` lines so a
+native run's log is the evidence record.
+
+Not covered here (still open for CU-018): frame time and trace-query latency
+need a running caret GUI/TUI session, and per-child CPU time needs the
+lease-based observed-process API; the CPU row below fails until it is wired.
+"""
+# @req CU-018
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_exists, env_get}
+use std.io.process_ops.{process_run_bounded, process_last_child_peak_rss_kib}
+use std.io.time_ops.{current_time_ms}
+
+val CU018_TIMEOUT_MS: i64 = 60000
+val CU018_MAX_OUT: i64 = 1048576
+
+fn cu018_binary() -> text:
+    val override = env_get("SIMPLE_CU018_BIN")
+    if override != "":
+        return override
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    "bin/simple"
+
+# Runs one `--version` launch; returns (exit_code, wall_ms, peak_rss_kib).
+fn cu018_launch(bin: text, args: [text]) -> (i64, i64, i64):
+    val t0 = current_time_ms()
+    val r = process_run_bounded(bin, args, CU018_TIMEOUT_MS, CU018_MAX_OUT)
+    val wall = current_time_ms() - t0
+    val rss = process_last_child_peak_rss_kib()
+    (r.2, wall, rss)
+
+describe "CU-018 native CPU/RSS/startup measurement":
+
+    it "has a deployed native binary to measure":
+        # @req CU-018
+        val bin = cu018_binary()
+        print "CU018 binary={bin}"
+        expect(file_exists(bin)).to_equal(true)
+
+    it "records cold and warm startup wall time":
+        # @req CU-018
+        val bin = cu018_binary()
+        expect(file_exists(bin)).to_equal(true)
+        step("cold launch (first in this process)")
+        val cold = cu018_launch(bin, ["--version"])
+        print "CU018 startup_cold_ms={cold.1} exit={cold.0}"
+        expect(cold.0).to_equal(0)
+        step("warm launches")
+        var best: i64 = -1
+        for i in 0..3:
+            val warm = cu018_launch(bin, ["--version"])
+            expect(warm.0).to_equal(0)
+            if best < 0 or warm.1 < best:
+                best = warm.1
+        print "CU018 startup_warm_ms={best}"
+        expect(best >= 0).to_equal(true)
+
+    it "records peak RSS of the launched child":
+        # @req CU-018
+        val bin = cu018_binary()
+        expect(file_exists(bin)).to_equal(true)
+        val run = cu018_launch(bin, ["--version"])
+        print "CU018 peak_rss_kib={run.2}"
+        # -1 means the runtime did not measure the child: an explicit failure.
+        expect(run.2 > 0).to_equal(true)
+
+    it "records CPU time of the launched child":
+        # @req CU-018
+        # Per-child user/system CPU is only exposed through the lease-based
+        # observed-process API (ObservedProcessRusageV1); this harness does not
+        # wire it yet, so the row fails explicitly instead of inventing a value.
+        val cpu_ms: i64 = -1
+        print "CU018 cpu_ms={cpu_ms} (unavailable: observed-process rusage not wired)"
+        expect(cpu_ms >= 0).to_equal(true)
+
+    it "measures under failure injection (bad argument) without hanging":
+        # @req CU-018
+        val bin = cu018_binary()
+        expect(file_exists(bin)).to_equal(true)
+        val bad = cu018_launch(bin, ["--cu018-no-such-flag"])
+        print "CU018 failure_injection_ms={bad.1} exit={bad.0} rss_kib={bad.2}"
+        expect(bad.0 == 0).to_equal(false)
+        expect(bad.1 < CU018_TIMEOUT_MS).to_equal(true)
