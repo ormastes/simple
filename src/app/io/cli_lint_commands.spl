@@ -8,7 +8,8 @@ use compiler.tools.lint.main.{
     Linter, LintCliPolicy, LintReadFileResult, lint_read_file,
     semantic_markdown_authority_option_v1,
     run_lint_source_with_linter_policy, simple_lint_adapter_result,
-    simple_lint_verdict_name, simple_lint_human_summary}
+    simple_lint_verdict_name, simple_lint_human_summary,
+    LintCompleteness, lint_completeness_reduce, lint_completeness_name}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixToolApplicator, apply_fixes_to_disk, fix_read_source}
 use lazy compiler.tools.fix.engine.{fix_filter_by_code, fix_validate, fix_outcome_diff, snapshots_from_sources}
 use lazy compiler.tools.fix.rules.impl_.lint_simd.{check_simd_opportunities, easyfix_id_text, easyfix_description_text}
@@ -74,7 +75,7 @@ pub fn lint_option_error(args: [text]) -> text:
         other_count = other_count + 1
         # --wm-lane enables the default-off WM/GUI/web/2D portable-lane
         # dependency boundary rule (wm_lane_boundary) and nothing else.
-        if arg == "--deny-all" or arg == "--warn-all" or arg == "--json" or arg == "--fix" or arg == "--fix-all" or arg == "--fix-dry-run" or arg == "--mcp-perf" or arg == "--all" or arg == "--simd" or arg == "--wm-lane" or arg == "--gpu-2d-perf":
+        if arg == "--deny-all" or arg == "--warn-all" or arg == "--json" or arg == "--fix" or arg == "--fix-all" or arg == "--fix-dry-run" or arg == "--mcp-perf" or arg == "--all" or arg == "--simd" or arg == "--fast" or arg == "--wm-lane" or arg == "--gpu-2d-perf":
             continue
         # Assurance WARNING PHASE: drop every diagnostic this profile raises by
         # exactly one severity level (error -> warning), still reporting all of
@@ -197,7 +198,7 @@ pub fn run_lint_command(args: [text]) -> i64:
         val _wp_set = rt_env_set(warning_phase_env_var_name(), "1")
 
     if args.contains("--help") or args.contains("-h"):
-        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd]"
+        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd] [--fast]"
         return 0
 
     var files: [text] = []
@@ -290,7 +291,7 @@ pub fn run_lint_command(args: [text]) -> i64:
         if json_output:
             print "{{\"type\":\"lint-error\",\"message\":\"no input files\"}"
             return 2
-        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd]"
+        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd] [--fast]"
         print ""
         print "Runs lint passes on Simple source files."
         print "Checks for:"
@@ -480,11 +481,20 @@ pub fn run_lint_command(args: [text]) -> i64:
         diagnostic_files, error_files, warning_files)
     if adapter.exit_code != 0 and exit_code == 0:
         exit_code = adapter.exit_code
+    var completeness_inputs: [LintCompleteness] = []
+    if failed_files > 0 or error_files > 0:
+        completeness_inputs.push(LintCompleteness.Fail)
+    if not_linted_files > 0:
+        completeness_inputs.push(LintCompleteness.Incomplete)
+    if completed_files > 0:
+        completeness_inputs.push(LintCompleteness.Pass)
+    val completeness = lint_completeness_name(lint_completeness_reduce(completeness_inputs, false))
     if json_output:
-        print "{{\"type\":\"lint-summary\",\"status\":\"{simple_lint_verdict_name(adapter.kernel_result)}\",\"failed_files\":{failed_files},\"not_linted_files\":{not_linted_files},\"completed_files\":{completed_files}}"
+        print "{{\"type\":\"lint-summary\",\"status\":\"{simple_lint_verdict_name(adapter.kernel_result)}\",\"failed_files\":{failed_files},\"not_linted_files\":{not_linted_files},\"completed_files\":{completed_files},\"completeness\":\"{completeness}\"}"
     else:
         print ""
         print simple_lint_human_summary(adapter.kernel_result)
+        print "lint completeness: {completeness}"
     exit_code
 
 pub fn run_fmt_command(all_args: [text]) -> i64:
