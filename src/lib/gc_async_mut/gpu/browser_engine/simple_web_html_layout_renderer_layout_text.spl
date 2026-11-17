@@ -840,6 +840,11 @@ fn resolved_space_advance(st: Style, measured_cps: [i64]) -> i32:
         if measured_cps[i] == 32 and ai >= 0 and ai < st.resolved_font_advances.len():
             return st.resolved_font_advances[ai]
         i = i + 1
+    # No space inside the measured run (`<b>ab</b> <b>`, ` l`): the face's
+    # own space (Chrome 159: 4.4453 px at Liberation Sans 16), not the flat
+    # half-cell fallback, which is 5.
+    if st.resolved_space_milli > 0:
+        return ((st.resolved_space_milli + 500) / 1000) as i32
     style_space_advance(st)
 
 fn _lay_inline_text_advance_width_inner(node: HNode, st: Style) -> i32:
@@ -880,8 +885,17 @@ fn _lay_inline_text_advance_width_inner(node: HNode, st: Style) -> i32:
                 edges = edges + 1
             if cps.len() > 1 and codepoint_is_space(cps[cps.len() - 1]):
                 edges = edges + 1
+            # Round the exact run plus its exact edge spaces once: `, ` is
+            # 4.4453 + 4.4453 = 8.89 -> 9 in Chrome 159, not 4 + 4.
+            if edges > 0 and st.resolved_font_width_milli >= 0 and st.resolved_space_milli > 0:
+                return ((st.resolved_font_width_milli + (edges as i64) * st.resolved_space_milli + 500) / 1000) as i32
             return st.resolved_font_width + edges * resolved_space_advance(st, trimmed_cps)
     if raw == " " and node.text_trimmed == "":
+        # The inline loop already charges this space as the next run's lead
+        # space (mid-line) or drops it (line start); with the face known the
+        # node adds nothing more (Chrome 159: one 4.4453 px space in total).
+        if st.resolved_space_milli > 0:
+            return 0
         var whitespace_advance = style_space_advance(st) / 3
         if whitespace_advance < 1:
             whitespace_advance = 1

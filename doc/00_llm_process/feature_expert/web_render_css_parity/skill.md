@@ -2759,3 +2759,16 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 ## Images (2026-11-18)
 - Trap: the direct `html -> pixels` entries pass `images: []` and resolve no `data:` URLs. Resource loading is the hosted session's job. To test image paint, decode the resource and call a `*_with_images` entry (`simple_web_layout_render_html_pixels_engine2d_with_images`). "Image unpainted" through a direct entry is not a renderer bug.
 - The raster (fb) lane has no image paint; only Draw IR has `_html_draw_ir_image_command`.
+## 2026-11-18 — A collapsible space between inline boxes advances one face space
+- **Rule:** Chrome 159 advances exactly one space of the face between two inline boxes. For Liberation Sans 16 that is 4.4453, so inline-block 120 + space puts the next box at 124.45, and the catalog button (119.48) + newline puts `<output>` at 123.94.
+- **Bug:** Simple advanced 6 px:
+  - a flat 5 px fallback lead space (`style_space_advance`, half the fixed cell);
+  - plus a 1 px box that the `" "` node kept from a June heuristic (`space/3`, min 1). That heuristic predates the lead-space charge.
+  - On forms-media this pushed "Not exercised" 2 px right.
+- **Change:**
+  - `resolved_space_advance` falls back to the face space (`Style.resolved_space_milli`, rounded) when the run has no interior space.
+  - A collapsible whitespace-only run measures 0 once the face is known, and the inline loop zeroes its box after layout (`collapsed_space_run`), because `layout_with_style` floors a `#text` box at 1 px.
+  - A run's edge spaces round together with the run: `round(width_milli + edges*space_milli)`. Rounding each piece put `, ` at 4+4 instead of Chrome's 8.89 -> 9, which drifted the overview paragraph 3 px left until this was added.
+- **Pin:** `inline_space_between_elements_advance_chrome159_spec` (6 ACs). It fails on base (0/6) and passes now (6/6).
+- **Matrix:** 5 button cells now match Chrome and left the baseline (154 -> 149 ids): `tt-td-button-{w,p}`, `ln-tt-td-button-{w,p}`, `tt-legend-button-p`.
+- **Catalog 1x** (base b974addb1b0 -> head, both measured; rows lowered): overview 1.29 -> 1.21, html 2.62 -> 2.57, forms-media 2.84 -> 2.74, animation 2.84 -> 2.77 (row 2.91). css-layout 2.52, css-paint 2.80, evidence 0.77 and tab-bar 0.42 are unchanged.
