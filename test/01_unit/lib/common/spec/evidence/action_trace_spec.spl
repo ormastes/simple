@@ -24,14 +24,15 @@ use std.common.spec.evidence.evidence_comparator.{compare_evidence}
 use std.common.spec.evidence.action_trace.{
     UiActionKind, UiTargetResolution, SettleCondition, UiActionStep, ActionTrace,
     target_resolution, settle_condition, ui_action_step, action_trace,
-    target_resolution_is_valid, settle_condition_is_valid,
-    ui_action_step_is_valid, ui_action_step_advances_revision, action_trace_is_valid,
+    TraceValidity, SettleOutcome, RevisionProgress, CaptureNeed,
+    target_resolution_validity, settle_condition_validity,
+    ui_action_step_validity, ui_action_step_revision_progress, action_trace_validity,
     action_trace_to_evidence, action_trace_manual_lines, ui_action_step_manual_line,
-    should_capture_gui_image
+    gui_image_capture_need
 }
 
 fn settled(kind: text) -> SettleCondition:
-    settle_condition(kind, "detail", 1, false)
+    settle_condition(kind, "detail", 1, SettleOutcome.Stable)
 
 fn click_step(sequence: i64, target: UiTargetResolution, after_state: text, revision: i64) -> UiActionStep:
     ui_action_step(
@@ -68,39 +69,39 @@ describe "Interactive action traces":
         val target = target_resolution("Add task", "12,34", "coordinates", "main#add_task")
 
         step("Verify the resolution is valid because the hit node is recorded")
-        assert_true(target_resolution_is_valid(target))
+        assert_true(target_resolution_validity(target) == TraceValidity.Valid)
 
     it "rejects a coordinate-resolved target with no recorded hit node":
         step("Resolve a click target by coordinates but omit the hit node")
         val target = target_resolution("Add task", "12,34", "coordinates", "")
 
         step("Verify the resolution is invalid: nobody can say what was actually clicked")
-        assert_false(target_resolution_is_valid(target))
+        assert_true(target_resolution_validity(target) == TraceValidity.Invalid)
 
     it "accepts a settle condition that stabilized before timing out":
         step("Wait for revision_stable and reach it within the iteration budget")
-        val settle = settle_condition("revision_stable", "rev 2", 3, false)
+        val settle = settle_condition("revision_stable", "rev 2", 3, SettleOutcome.Stable)
 
         step("Verify the settle condition is valid")
-        assert_true(settle_condition_is_valid(settle))
+        assert_true(settle_condition_validity(settle) == TraceValidity.Valid)
 
     it "rejects a settle condition that timed out":
         step("Wait for state_appeared but exhaust the iteration budget")
-        val settle = settle_condition("state_appeared", "dialog", 40, true)
+        val settle = settle_condition("state_appeared", "dialog", 40, SettleOutcome.TimedOut)
 
         step("Verify the settle condition is invalid: the after-state was never observed stable")
-        assert_false(settle_condition_is_valid(settle))
+        assert_true(settle_condition_validity(settle) == TraceValidity.Invalid)
 
     it "rejects a step whose after_state rests on a timed-out settle":
         step("Build a click step whose settle condition timed out")
         val target = target_resolution("Add task", "main#add_task", "role_and_name", "")
-        val bad_settle = settle_condition("state_appeared", "dialog", 40, true)
+        val bad_settle = settle_condition("state_appeared", "dialog", 40, SettleOutcome.TimedOut)
         val bad_step = ui_action_step(
             1, UiActionKind.click, target, "", "before", "acting", "dialog open", bad_settle, 1
         )
 
         step("Verify the step is invalid even though its target resolution is fine")
-        assert_false(ui_action_step_is_valid(bad_step))
+        assert_true(ui_action_step_validity(bad_step) == TraceValidity.Invalid)
 
     it "accepts a mutating step whose revision advances past the previous one":
         step("Build a click step at revision 2 following a trace at revision 1")
@@ -108,7 +109,7 @@ describe "Interactive action traces":
         val advancing = click_step(2, target, "dialog open", 2)
 
         step("Verify the revision-advance check passes")
-        assert_true(ui_action_step_advances_revision(advancing, 1))
+        assert_true(ui_action_step_revision_progress(advancing, 1) == RevisionProgress.Advanced)
 
     it "rejects a mutating step whose revision does not advance":
         step("Build a click step whose revision repeats the previous one")
@@ -116,7 +117,7 @@ describe "Interactive action traces":
         val stuck = click_step(2, target, "dialog open", 1)
 
         step("Verify the revision-advance check fails: the action recorded no observable change")
-        assert_false(ui_action_step_advances_revision(stuck, 1))
+        assert_true(ui_action_step_revision_progress(stuck, 1) == RevisionProgress.Stalled)
 
     it "exempts non-mutating focus and select steps from the revision-advance check":
         step("Build a focus step whose revision repeats the previous one")
@@ -126,14 +127,14 @@ describe "Interactive action traces":
         )
 
         step("Verify the revision-advance check passes: focus is not expected to mutate state")
-        assert_true(ui_action_step_advances_revision(focus_step, 1))
+        assert_true(ui_action_step_revision_progress(focus_step, 1) == RevisionProgress.Advanced)
 
     it "accepts a whole trace whose steps are individually valid and advance revision":
         step("Build the add-task trace: click Add task, then type the task name")
         val trace = add_task_trace()
 
         step("Verify the whole trace validates")
-        assert_true(action_trace_is_valid(trace))
+        assert_true(action_trace_validity(trace) == TraceValidity.Valid)
 
     it "rejects a whole trace when one step's revision does not advance":
         step("Build a trace whose second step repeats the first step's revision")
@@ -151,20 +152,20 @@ describe "Interactive action traces":
         )
 
         step("Verify the trace is invalid")
-        assert_false(action_trace_is_valid(trace))
+        assert_true(action_trace_validity(trace) == TraceValidity.Invalid)
 
     it "captures GUI image only when the surface is GUI-only, visual is the requirement, or configured":
         step("Check a TUI surface with a GUI backend merely present but nothing else true")
-        assert_false(should_capture_gui_image("tui", false, false, false))
+        assert_true(gui_image_capture_need("tui", CaptureNeed.NotRequired, CaptureNeed.NotRequired, CaptureNeed.NotRequired) == CaptureNeed.NotRequired)
 
         step("Check a GUI-only surface")
-        assert_true(should_capture_gui_image("gui", true, false, false))
+        assert_true(gui_image_capture_need("gui", CaptureNeed.Required, CaptureNeed.NotRequired, CaptureNeed.NotRequired) == CaptureNeed.Required)
 
         step("Check a surface where visual correctness is the requirement under test")
-        assert_true(should_capture_gui_image("web", false, true, false))
+        assert_true(gui_image_capture_need("web", CaptureNeed.NotRequired, CaptureNeed.Required, CaptureNeed.NotRequired) == CaptureNeed.Required)
 
         step("Check a surface where capture was explicitly configured")
-        assert_true(should_capture_gui_image("web", false, false, true))
+        assert_true(gui_image_capture_need("web", CaptureNeed.NotRequired, CaptureNeed.NotRequired, CaptureNeed.Required) == CaptureNeed.Required)
 
     it "renders the manual action list from visible target names, not canonical ids or coordinates":
         step("Build the add-task trace and render its manual lines")

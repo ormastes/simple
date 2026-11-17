@@ -56,11 +56,15 @@ pub fn ui_action_kind_name(kind: UiActionKind) -> text:
 # `focus` and `select` inspect/move attention without changing application
 # state on their own, so a revision that fails to advance on those kinds is
 # not evidence of a stuck trace.
-pub fn ui_action_kind_is_mutating(kind: UiActionKind) -> bool:
+pub enum ActionEffect:
+    Mutating
+    Observing
+
+pub fn ui_action_kind_effect(kind: UiActionKind) -> ActionEffect:
     match kind:
-        case UiActionKind.focus: false
-        case UiActionKind.select: false
-        case _: true
+        case UiActionKind.focus: ActionEffect.Observing
+        case UiActionKind.select: ActionEffect.Observing
+        case _: ActionEffect.Mutating
 
 # ---------------------------------------------------------------------------
 # Target resolution
@@ -80,37 +84,47 @@ pub struct UiTargetResolution:
 pub fn target_resolution(requested: text, resolved: text, resolved_by: text, hit_node: text) -> UiTargetResolution:
     UiTargetResolution(requested: requested, resolved: resolved, resolved_by: resolved_by, hit_node: hit_node)
 
-pub fn target_resolved_by_coordinates(target: UiTargetResolution) -> bool:
+fn target_resolved_by_coordinates(target: UiTargetResolution) -> bool:
     target.resolved_by == "coordinates"
 
 # A coordinate resolution with no recorded hit node cannot be trusted: it
 # claims a point was clicked without saying what was actually there, so a
 # later UI reflow could silently change what the trace exercises.
-pub fn target_resolution_is_valid(target: UiTargetResolution) -> bool:
-    if target_resolved_by_coordinates(target):
-        return target.hit_node != ""
-    true
+pub enum TraceValidity:
+    Valid
+    Invalid
+
+pub fn target_resolution_validity(target: UiTargetResolution) -> TraceValidity:
+    if target_resolved_by_coordinates(target) and target.hit_node == "":
+        return TraceValidity.Invalid
+    TraceValidity.Valid
 
 # ---------------------------------------------------------------------------
 # Settle conditions
 # ---------------------------------------------------------------------------
 
 # What the driver waited on before treating `after_state` as observable.
-# `iterations` records how many polls it took; `timed_out` records whether it
-# gave up instead of actually stabilizing.
+# `iterations` records how many polls it took; `outcome` records whether it
+# gave up (TimedOut) instead of actually stabilizing.
+pub enum SettleOutcome:
+    Stable
+    TimedOut
+
 pub struct SettleCondition:
     kind: text
     detail: text
     iterations: i64
-    timed_out: bool
+    outcome: SettleOutcome
 
-pub fn settle_condition(kind: text, detail: text, iterations: i64, timed_out: bool) -> SettleCondition:
-    SettleCondition(kind: kind, detail: detail, iterations: iterations, timed_out: timed_out)
+pub fn settle_condition(kind: text, detail: text, iterations: i64, outcome: SettleOutcome) -> SettleCondition:
+    SettleCondition(kind: kind, detail: detail, iterations: iterations, outcome: outcome)
 
 # A timed-out settle means the driver never observed a stable state, so
 # whatever `after_state` was captured is a race, not a fact about the system.
-pub fn settle_condition_is_valid(settle: SettleCondition) -> bool:
-    not settle.timed_out
+pub fn settle_condition_validity(settle: SettleCondition) -> TraceValidity:
+    if settle.outcome == SettleOutcome.TimedOut:
+        return TraceValidity.Invalid
+    TraceValidity.Valid
 
 # ---------------------------------------------------------------------------
 # Action steps and traces
@@ -161,33 +175,39 @@ pub fn action_trace(surface: text, steps: [UiActionStep]) -> ActionTrace:
 # both valid on their own terms. Combining the two gates here (rather than
 # leaving callers to remember both) is what stops a trace validator from
 # checking one rule and silently skipping the other.
-pub fn ui_action_step_is_valid(step: UiActionStep) -> bool:
-    if not target_resolution_is_valid(step.target):
-        return false
-    settle_condition_is_valid(step.settle)
+pub fn ui_action_step_validity(step: UiActionStep) -> TraceValidity:
+    if target_resolution_validity(step.target) == TraceValidity.Invalid:
+        return TraceValidity.Invalid
+    settle_condition_validity(step.settle)
 
 # A mutating action whose revision does not advance past the previous step's
 # revision recorded nothing: either the action was a no-op or the capture
 # never actually re-observed the system after it. Non-mutating kinds
 # (focus/select) are exempt because they are not expected to move revision.
-pub fn ui_action_step_advances_revision(step: UiActionStep, previous_revision: i64) -> bool:
-    if not ui_action_kind_is_mutating(step.kind):
-        return true
-    step.revision > previous_revision
+pub enum RevisionProgress:
+    Advanced
+    Stalled
+
+pub fn ui_action_step_revision_progress(step: UiActionStep, previous_revision: i64) -> RevisionProgress:
+    if ui_action_kind_effect(step.kind) == ActionEffect.Observing:
+        return RevisionProgress.Advanced
+    if step.revision > previous_revision:
+        return RevisionProgress.Advanced
+    RevisionProgress.Stalled
 
 # Validates every step in sequence, threading the previous revision forward
 # so a trace of N steps enforces N-1 revision-advance checks plus N per-step
 # validity checks. The first step is compared against revision 0 exactly like
 # an ordinary initial state, so a first mutating action still has to move it.
-pub fn action_trace_is_valid(trace: ActionTrace) -> bool:
+pub fn action_trace_validity(trace: ActionTrace) -> TraceValidity:
     var previous_revision = 0
     for step in trace.steps:
-        if not ui_action_step_is_valid(step):
-            return false
-        if not ui_action_step_advances_revision(step, previous_revision):
-            return false
+        if ui_action_step_validity(step) == TraceValidity.Invalid:
+            return TraceValidity.Invalid
+        if ui_action_step_revision_progress(step, previous_revision) == RevisionProgress.Stalled:
+            return TraceValidity.Invalid
         previous_revision = step.revision
-    true
+    TraceValidity.Valid
 
 # ---------------------------------------------------------------------------
 # Evidence projection
@@ -262,9 +282,14 @@ pub fn action_trace_manual_lines(trace: ActionTrace) -> [text]:
 # capture on an ordinary interaction (see sspec_typed_evidence.md §3): only
 # capture when the surface is GUI-only, when visual correctness is the actual
 # requirement under test, or when the run was explicitly configured to.
-pub fn should_capture_gui_image(surface: text, gui_only: bool, visual_requirement: bool, configured: bool) -> bool:
-    if gui_only:
-        return true
-    if visual_requirement:
-        return true
+pub enum CaptureNeed:
+    Required
+    NotRequired
+
+# Each input says whether that factor alone requires a capture.
+pub fn gui_image_capture_need(surface: text, gui_only: CaptureNeed, visual_requirement: CaptureNeed, configured: CaptureNeed) -> CaptureNeed:
+    if gui_only == CaptureNeed.Required:
+        return CaptureNeed.Required
+    if visual_requirement == CaptureNeed.Required:
+        return CaptureNeed.Required
     configured
