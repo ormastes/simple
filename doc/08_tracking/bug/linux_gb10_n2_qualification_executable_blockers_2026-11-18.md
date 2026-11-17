@@ -1,7 +1,7 @@
 # Linux GB10 N2: no runnable qualification executable (seed native-build stall + interpreter "value is not callable")
 
 - **Filed:** 2026-11-18
-- **Status:** open (2 and 3 fixed; 1, 4 and 5 open)
+- **Status:** open (2, 3 and the readers' half of 4 fixed; 1, 5 and 6 open, plus the lost fractional and affine part of 4)
 - **Blocks:** `doc/08_tracking/todo/simple_2d_skia_renderdoc_linux_n2_2026-09-27.md`
   (cases 01/06/02 on the NVIDIA GB10 have no worker readbacks)
 - **Host:** physical aarch64 Ubuntu 24.04.4 LTS, NVIDIA GB10. There is no
@@ -188,6 +188,50 @@ Not restored here. It is a 3-week-stale lost-half backport into a hot file,
 and it needs its own lane and review. Log:
 `/home/yoon/skia-n2/artifacts/w-engine2d-corpus-case01.log`.
 
+### Blocker 4 — the readers' half is restored (2026-11-18, own lane)
+
+The rewind is confirmed. `git log -S submission_generation` shows that no
+later commit removed or replaced the producer on purpose; the only other hits
+are history of `engine.spl` accessors. Merge `e5b290e42a0` dropped two things
+that the release readers need:
+- `draw_ir_adv.spl`: the strict submit/readback `submission_generation`
+  producer, plus `frame_width`/`frame_height`;
+- `engine.spl`: the `Engine2D.vulkan_device_type()` accessor.
+
+Only these were restored. `final_output_capture_spec` went from 0/7 on base to
+8/8, and `physical_capture_artifact_spec` from 0/1 to 1/1. `draw_ir_adv_spec`
+is 68/70 on both base and head.
+
+**Still lost from the same merge, and not restored** (no release reader of
+`submission_generation` needs them): the fractional and affine strict-Vulkan
+pixel helpers. With the field restored, `strict_vulkan_fractional_rect_spec`
+(0/2) and `strict_vulkan_affine_coverage_spec` (0/3) now fail on
+`fractional-geometry-unsupported` rather than the missing field. Case 02
+(fractional edges) will need that hunk.
+
+Case 01 Engine2D retried on the GB10 under the seed interpreter.
+`vkCreateDevice` succeeded on attempt 4. Strict submit, the generation-linked
+readback and the frame-receipt checks all passed. It then exited 3 with:
+
+```
+status=blocked reason=engine2d-capture:selected Vulkan physical device identity unavailable
+```
+
+That is Blocker 6.
+
+## Blocker 6 — the seed interpreter cannot attest the Vulkan device UUIDs (by design)
+
+The seed interpreter's `rt_vulkan_selected_device_identity_v1`
+(`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs:4442`) returns `""`
+on purpose. In its own words: "It cannot attest that native Engine2D
+framebuffer generation, so the typed Simple facade must reject this lane."
+`vulkan_sffi_selected_device_identity_v1` therefore fails closed.
+
+This is correct behaviour, not a defect. A physical N2 Engine2D capture can
+only come from the native qualification executable (Blocker 1), the same as
+the Skia leg (Blocker 5). Log:
+`/home/yoon/skia-n2/artifacts/w-engine2d-corpus-case01-subgen.log`.
+
 ## Blocker 5 — seed interpreter has no `rt_gpu_provider_loaded`
 
 The case 01 Skia worker, under the seed interpreter on the GB10 with the
@@ -208,7 +252,8 @@ No readback was obtained on either leg, so cases 06 and 02 were not run.
 
 ## Not done here
 
-Blockers 2 (runner) and 3 (admission reader) are fixed. Blockers 1, 4 and 5
-are open. A pure-Simple self-hosted aarch64 release binary would bypass
-Blockers 1 and 5, but not Blocker 4. The interpreter error
+Blockers 2 (runner), 3 (admission reader) and the readers' half of 4
+(the `submission_generation` producer) are fixed. Blockers 1 and 5 are open,
+as is the lost fractional and affine part of 4; Blocker 6 is by design. A native
+qualification executable is now the single gate for both case 01 legs. The interpreter error
 and the `getpid` ambiguity are defects in their own right.
