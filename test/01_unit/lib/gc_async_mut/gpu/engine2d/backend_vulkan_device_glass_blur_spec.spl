@@ -425,3 +425,34 @@ describe "The Vulkan backdrop blur and glass material run on the device, pixel-f
             expect(device.len()).to_equal(160 * heights[i] * 4)
             expect(mismatch_count(cpu, device)).to_equal(0)
             i = i + 1
+
+    it "composites CSS gradient layer stacks on the device at device scale 4 exactly as cpu_simd does":
+        # Each linear / radial layer is evaluated once on the host by the
+        # shared evaluators (backend_emu linear_gradient_pixels /
+        # radial_gradient_pixels) and composited src-over on the device,
+        # bottom layer first. Chrome 159 pixels for these pages are pinned in
+        # web_device_scale_spec (tolerance +-2); here the device must equal
+        # cpu_simd exactly, read back from the device.
+        val pages = [
+            radial_dev_doc(40, 24, "background-color:#ffff00;background-image:linear-gradient(to right, rgba(0,0,255,0.6), transparent)"),
+            radial_dev_doc(40, 32, "background:radial-gradient(circle at 30% 40%, #ff0000, transparent 50%), linear-gradient(to bottom, #00ff00, #0000ff)"),
+            radial_dev_doc(40, 32, "background-color:#ffff00;background-image:linear-gradient(90deg, rgba(255,0,0,0.8), transparent 60%), radial-gradient(circle, transparent 20%, #0000ff)"),
+            "<html><body style=\"background-image:radial-gradient(circle at 30% 30%, rgba(255,0,0,0.8), transparent 60%), linear-gradient(#ffffff,#0000ff)\"><section class=\"widget-panel\"></section></body></html>",
+            radial_dev_doc(40, 24, "background-color:#ffff00;background-image:linear-gradient(to right, rgba(0,0,255,0.6), rgba(0,0,255,0.1))"),
+            radial_dev_doc(40, 24, "background:linear-gradient(45deg, #ff0000, #00ff00 40%, #0000ff)")
+        ]
+        val heights = [24, 32, 32, 64, 24, 24]
+        var i = 0
+        while i < pages.len():
+            val readbacks_before = vulkan_readback_count()
+            # reason 0 = VK_IMG_R_OK: an image composite completed on the device
+            val composites_before = vulkan_image_reason_count(0)
+            val device = simple_web_layout_render_html_pixels_engine2d_at_device_scale(pages[i], 40, heights[i], 4, "vulkan")
+            val composites_after = vulkan_image_reason_count(0)
+            val readbacks_after = vulkan_readback_count()
+            val cpu = simple_web_layout_render_html_pixels_engine2d_at_device_scale(pages[i], 40, heights[i], 4, "cpu_simd")
+            expect(readbacks_after - readbacks_before >= 1).to_equal(true)
+            expect(composites_after - composites_before >= 1).to_equal(true)
+            expect(device.len()).to_equal(160 * heights[i] * 4)
+            expect(mismatch_count(cpu, device)).to_equal(0)
+            i = i + 1

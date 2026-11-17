@@ -13,7 +13,7 @@ use common.ui.draw_ir.{
     draw_ir_style_prop
 }
 use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
-use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16, radial_gradient_pixels}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16, radial_gradient_pixels, linear_gradient_pixels}
 use std.gpu.engine2d.color.{blend as engine2d_color_blend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 use std.common.encoding.sfnt.{
@@ -34,7 +34,8 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_bytes}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
     parse_int, dec_val, GradientStopSpec, parse_gradient_stops, gradient_inner,
-    split_top_level_commas_paren_aware, is_gradient_shape_or_position_token
+    split_top_level_commas_paren_aware, is_gradient_shape_or_position_token,
+    gradient_layer_list, parse_gradient_angle_deg
 }
 
 fn web_glyph_scale(fs: i32) -> i32:
@@ -932,6 +933,17 @@ fn fb_style_background_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
         if rg.len() < 8:
             return radial_out
         return fb_radial_gradient_clip(radial_out, fbw, fbh, rg[4] as i32, rg[5] as i32, rg[6] as i32, rg[7] as i32, rg, st.background_gradient_stop_colors, st.background_gradient_stop_positions, st.opacity_pct, clip)
+    if background_gradient_layers_paintable(st):
+        # Gradient layer list over the box colour (Draw IR twin:
+        # `background-gradient-layer-geometry`, the same resolver).
+        var layers_out = fb
+        if st.bg != 0u32 and solid_bg_opacity > 0:
+            layers_out = fb_style_rounded_rect_opacity_clip(layers_out, fbw, fbh, bg_x, bg_y, bg_w, bg_h, st, st.bg | 0xFF000000u32, solid_bg_opacity, clip)
+        val r = background_gradient_box_rects(st, x, y, w, h)
+        if r.len() < 8:
+            return layers_out
+        val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3])
+        return fb_gradient_layers_clip(layers_out, fbw, fbh, r[4], r[5], r[6], r[7], layers, st.opacity_pct, clip)
     if st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32:
         if solid_bg_opacity <= 0:
             return fb
@@ -1357,7 +1369,25 @@ fn radial_gradient_geometry_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32)
 # Engine2D `blend`, so the raster, cpu_simd and the Vulkan device agree.
 # `opacity_pct` < 100 scales each colour's alpha.
 fn fb_radial_gradient_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw: i32, ph: i32, geom: [i64], colors: [u32], positions: [i32], opacity_pct: i32, clip: ClipRect) -> [u32]:
+    if geom.len() < 4:
+        return fb
+    fb_gradient_layer_clip(fb, fbw, fbh, px0, py0, pw, ph, BackgroundGradientLayer(radial: true, geom: geom, colors: colors, positions: positions), opacity_pct, clip)
+
+# One resolved CSS gradient image layer: a radial ellipse [cx, cy, rx, ry]
+# or a linear gradient line [sx, sy, ex, ey] (Q10 px), with its stops.
+struct BackgroundGradientLayer:
+    radial: bool
+    geom: [i64]
+    colors: [u32]
+    positions: [i32]
+
+# Composite one gradient layer src-over the framebuffer over the paint rect
+# (px0, py0, pw, ph) intersected with the clip, with colours from Engine2D's
+# shared evaluators (`radial_gradient_pixels` / `linear_gradient_pixels`)
+# and the Engine2D `blend`, so the raster, cpu_simd and Vulkan agree.
+fn fb_gradient_layer_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw: i32, ph: i32, layer: BackgroundGradientLayer, opacity_pct: i32, clip: ClipRect) -> [u32]:
     var out = fb
+    val geom = layer.geom
     if opacity_pct <= 0 or geom.len() < 4:
         return out
     var x0 = px0
@@ -1383,7 +1413,10 @@ fn fb_radial_gradient_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw
     if x1 <= x0 or y1 <= y0:
         return out
     val w = x1 - x0
-    val pixels = radial_gradient_pixels(x0, y0, w, y1 - y0, geom[0], geom[1], geom[2], geom[3], colors, positions)
+    val pixels = if layer.radial:
+        radial_gradient_pixels(x0, y0, w, y1 - y0, geom[0], geom[1], geom[2], geom[3], layer.colors, layer.positions)
+    else:
+        linear_gradient_pixels(x0, y0, w, y1 - y0, geom[0], geom[1], geom[2], geom[3], layer.colors, layer.positions)
     if pixels.len() == 0:
         return out
     var py = y0
@@ -1411,6 +1444,17 @@ fn fb_radial_gradient_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw
 # default). Returns [cx, cy, rx, ry] (Q10 px) then the paint rect
 # [px0, py0, pw, ph] (px); empty when the box has no area.
 fn radial_gradient_box_geometry(st: Style, x: i32, y: i32, w: i32, h: i32) -> [i64]:
+    val r = background_gradient_box_rects(st, x, y, w, h)
+    if r.len() < 8:
+        return []
+    val g = radial_gradient_geometry_q10(st.bg_layers_raw, r[0], r[1], r[2], r[3])
+    [g[0], g[1], g[2], g[3], r[4] as i64, r[5] as i64, r[6] as i64, r[7] as i64]
+
+# The background positioning area [ox, oy, ow, oh] (background-origin,
+# padding-box by default; the painting area when that is empty) then the
+# background painting area [bx, by, bw, bh] (background-clip, border-box by
+# default) of a box, in px; empty when the painting area is empty.
+fn background_gradient_box_rects(st: Style, x: i32, y: i32, w: i32, h: i32) -> [i32]:
     var ox = x + st.border_l
     var oy = y + st.border_t
     var ow = w - st.border_l - st.border_r
@@ -1446,8 +1490,81 @@ fn radial_gradient_box_geometry(st: Style, x: i32, y: i32, w: i32, h: i32) -> [i
         oy = by
         ow = bw
         oh = bh
-    val g = radial_gradient_geometry_q10(st.bg_layers_raw, ox, oy, ow, oh)
-    [g[0], g[1], g[2], g[3], bx as i64, by as i64, bw as i64, bh as i64]
+    [ox, oy, ow, oh, bx, by, bw, bh]
+
+# CSS Images 3 §3.1 gradient line of one `linear-gradient(...)` layer against
+# its gradient box (ax, ay, aw, ah; CSS px): [sx, sy, ex, ey] in Q10 px. The
+# line passes through the box centre at the layer's angle (0deg = to top,
+# clockwise; `to <corner>` depends on the box) and is |w sin| + |h cos| long,
+# so the far corners land on the 0% and 100% points.
+fn linear_gradient_line_q10(layer: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [i64]:
+    val angle = parse_gradient_angle_deg(layer)
+    val sc = if angle >= 1000: gradient_corner_dir_q16(angle, aw, ah) else: gradient_angle_sin_cos_q16(angle)
+    val s = sc[0]
+    val c = sc[1]
+    val sa = if s < 0: 0 - s else: s
+    val ca = if c < 0: 0 - c else: c
+    # Q16 direction x px -> Q10 length (/ 64), then half of it along (s, -c).
+    val len_q10 = ((aw as i64) * sa + (ah as i64) * ca) / 64
+    val hx = s * len_q10 / 131072
+    val hy = (0 - c) * len_q10 / 131072
+    val cx = (ax as i64) * 1024 + (aw as i64) * 512
+    val cy = (ay as i64) * 1024 + (ah as i64) * 512
+    [cx - hx, cy - hy, cx + hx, cy + hy]
+
+# The image layers of a gradient-only background list (`gradient_layer_list`)
+# resolved against the gradient box (ax, ay, aw, ah; CSS px), in CSS order:
+# the first paints on top. Empty when the list is not gradient-only.
+fn background_gradient_layers(raw: text, ax: i32, ay: i32, aw: i32, ah: i32) -> [BackgroundGradientLayer]:
+    var out: [BackgroundGradientLayer] = []
+    for lay in gradient_layer_list(raw):
+        val stops: [GradientStopSpec] = parse_gradient_stops(lay)
+        var colors: [u32] = []
+        var positions: [i32] = []
+        for stop in stops:
+            colors.push(stop.color)
+            positions.push(stop.pos_permille)
+        val radial = text_index_of(lay.lower(), "radial-gradient(") == 0
+        val geom = if radial: radial_gradient_geometry_q10(lay, ax, ay, aw, ah) else: linear_gradient_line_q10(lay, ax, ay, aw, ah)
+        out.push(BackgroundGradientLayer(radial: radial, geom: geom, colors: colors, positions: positions))
+    out
+
+# True when the box paints its background image list as gradient layers: a
+# raw gradient-only list (several layers, or one the typed linear / radial
+# projections leave raw, e.g. a stop at `transparent`) on square corners (a
+# rounded box still falls back to its colour, as the radial does).
+fn background_gradient_layers_paintable(st: Style) -> bool:
+    if st.bg_layers_raw == "" or st.background_image_uri != "":
+        return false
+    if radial_gradient_box_paintable(st):
+        return false
+    if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32:
+        return false
+    if st.border_radius_tl_px > 0 or st.border_radius_tr_px > 0 or st.border_radius_br_px > 0 or st.border_radius_bl_px > 0:
+        return false
+    # Per-layer background-size / tiling is not implemented: each layer is
+    # painted once over the positioning area. That is exact only for the
+    # default size (auto, 0 here), where every keyword / percentage position
+    # (0, or the -1000..-1100 sentinels) resolves to a zero offset; any other
+    # size or a px position stays fail-closed (box colour only).
+    if st.background_size_w_px != 0 or st.background_size_h_px != 0:
+        return false
+    if not _gradient_layers_default_position(st.background_position_x_px) or not _gradient_layers_default_position(st.background_position_y_px):
+        return false
+    gradient_layer_list(st.bg_layers_raw).len() > 0
+
+fn _gradient_layers_default_position(v: i32) -> bool:
+    v == 0 or (v <= -1000 and v >= -1100)
+
+# Paint gradient layers over the painting area (px0, py0, pw, ph) back to
+# front: CSS Backgrounds 3 paints the FIRST listed layer on top.
+fn fb_gradient_layers_clip(fb: [u32], fbw: i32, fbh: i32, px0: i32, py0: i32, pw: i32, ph: i32, layers: [BackgroundGradientLayer], opacity_pct: i32, clip: ClipRect) -> [u32]:
+    var out = fb
+    var li = layers.len() - 1
+    while li >= 0:
+        out = fb_gradient_layer_clip(out, fbw, fbh, px0, py0, pw, ph, layers[li], opacity_pct, clip)
+        li = li - 1
+    out
 
 # True when the box carries a paintable typed radial layer: at least two
 # stops (Chrome rejects a one-stop gradient) and square corners (a rounded
