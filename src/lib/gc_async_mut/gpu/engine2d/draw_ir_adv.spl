@@ -3051,11 +3051,19 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         batch.backend_target == "metal", draw_ir_no_rect(),
         css_background_pixel_work_budget)
     offscreen = inner.engine
-    val child = offscreen.read_pixels_with_source()
     # A CSS opacity group (>= 2 painted items under one opacity root) restores
     # with Chrome's SkBlendARGB32 rule; every other embedded surface keeps the
-    # milli contract of engine2d_composite_region_milli.
-    val composited = if css_opacity_group_surface(embedding.surface_id):
+    # milli contract of engine2d_composite_region_milli. On Vulkan the restore
+    # runs on the device from the offscreen buffer (no readback); any decline
+    # falls back to the readback restore, which paints the same pixels.
+    val css_group = css_opacity_group_surface(embedding.surface_id)
+    val device_restored = css_group and eng.draw_ir_composite_device_css_group(
+        offscreen, embedding.x, embedding.y, embedding.width, embedding.height,
+        embedding.opacity_milli)
+    val child = if device_restored: engine2d_readback([], "device_restored") else: offscreen.read_pixels_with_source()
+    val composited = if device_restored:
+        true
+    elif css_group:
         eng.draw_ir_composite_readback_css_group(
             embedding.x, embedding.y, embedding.width, embedding.height,
             child, embedding.opacity_milli)

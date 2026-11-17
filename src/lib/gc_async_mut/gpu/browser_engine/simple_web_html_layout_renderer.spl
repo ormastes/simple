@@ -1372,7 +1372,8 @@ fn _simple_web_fractional_opacity_command_roots(
 # Per opacity root: the surface rect its commands are painted into, whether
 # they are translated into it, and how many of them paint (a colour with
 # alpha, an image or a glyph run). Two or more painted items make the root a
-# CSS opacity GROUP (Chrome saveLayer + SkBlendARGB32 restore); one keeps the
+# CSS opacity GROUP (Chrome saveLayer + SkBlendARGB32 restore); a box's border
+# and outline count as items of their own. One keeps the
 # existing single-item surface path. The rect is the union of the root's
 # command rects clipped to the viewport, so a layer never exceeds the
 # subtree's clipped bounds. A command that cannot be moved by
@@ -1406,6 +1407,7 @@ fn _simple_web_opacity_root_bounds(
     var y1: [i32] = [0; node_count]
     var translate: [bool] = [true; node_count]
     var painted: [i32] = [0; node_count]
+    var edge_owner = -1
     var i = 0
     while i < commands.len():  # cpu-lane-loop-ok: one pass over the emitted commands folding each into its opacity root's bounds; bound is the command count, once per compose
         val root = command_roots[i]
@@ -1422,6 +1424,17 @@ fn _simple_web_opacity_root_bounds(
                     translate[root] = false
             if ((c.color >> 24) & 255u32) != 0u32 or c.image_uri != "" or c.glyph_run.valid:
                 painted[root] = painted[root] + 1
+            # A box's border and outline ride its background command but are
+            # separate paint items to Chrome (bg + border at 0.5 is a group:
+            # ff7e7e, not ff7f7f) -- counted once per owner, as the raster
+            # lane's _raster_group_node_ops does.
+            if owner >= 0 and owner < styles.len() and owner != edge_owner:
+                edge_owner = owner
+                val est = styles[owner]
+                if est.border_l > 0 or est.border_t > 0 or est.border_r > 0 or est.border_b > 0:
+                    painted[root] = painted[root] + 1
+                if est.outline_w > 0 and est.outline_color != 0u32:
+                    painted[root] = painted[root] + 1
             if c.width > 0 and c.height > 0:
                 if c.x < x0[root]: x0[root] = c.x
                 if c.y < y0[root]: y0[root] = c.y

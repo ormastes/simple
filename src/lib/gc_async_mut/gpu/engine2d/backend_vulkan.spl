@@ -35,6 +35,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_circle_pc, _pack_line_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
     _pack_glass_material_pc, _pack_blur_rect_pc, _pack_shadow_rect_pc,
+    _pack_css_group_restore_pc,
     vulkan_dispatch_region_kernel_checked,
     _pixels_to_bytes, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
@@ -3101,6 +3102,60 @@ impl RenderBackend for VulkanBackend:
             return false
         true
 
+    # reason: raw device kernel entry; layer_buf is the framebuffer handle of a shared offscreen VulkanBackend holding w*h straight-alpha words, alpha8 is Skia paint alpha
+    # @allow(primitive_api)
+    me draw_css_group_restore_device(layer_buf: i64, x0: i32, y0: i32, w: i32, h: i32, alpha8: i32) -> bool:
+        """Restore a CSS opacity group layer onto the framebuffer on the device.
+
+        `css_group_restore.comp` is the integer twin of
+        `css_opacity_group_composite_pixel` and reads the layer straight from
+        the offscreen surface's buffer, so neither the layer nor the
+        destination region is read back and nothing is uploaded. The kernel is
+        submitted on its own (fenced) after this frame's recorded work, because
+        the layer buffer belongs to another backend and must never enter this
+        backend's pending-source release list.
+
+        Fail-closed: every `false` return has left the framebuffer untouched,
+        so the caller keeps the host readback restore, which paints the same
+        pixels. A clip or mask is declined (the kernel honours neither).
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0 or layer_buf <= 0:
+            return false
+        if self.session.pipe_css_group_restore <= 0 or self.cpu_fallback_used:
+            return false
+        if self.mask_buf.len() > 0 or self.clip_enabled:
+            return false
+        if w <= 0 or h <= 0 or alpha8 <= 0 or alpha8 > 255:
+            return false
+        val flushed = self._flush_pending_compute_at("css-group-restore-device")
+        if flushed < 0:
+            self.completion_unknown = true
+            return false
+        if flushed != 1:
+            return false
+        val pc = _pack_css_group_restore_pc(x0, y0, w, h, self.w, self.h, alpha8)
+        val gx = (_i64(w) + 15) / 16
+        val gy = (_i64(h) + 15) / 16
+        val produced = vulkan_dispatch_region_kernel_checked(
+            self.d_framebuffer, self.session.pipe_css_group_restore, layer_buf, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("css-group-restore-device x={x0} y={y0} w={w} h={h} a={alpha8} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if produced < 0:
+                self.completion_unknown = true
+            return false
+        # Same bookkeeping as `_finish_image_composite`: the written rect is
+        # exactly the group rect.
+        self.dirty = true
+        self.host_mirror_frame_fresh = false
+        self.hint_damage(_i64(x0), _i64(y0), _i64(w), _i64(h))
+        self.consume_damage_hint()
+        self.mark_device_content_changed()
+        if produced == VK_DISPATCH_COMPLETED_INELIGIBLE:
+            self.mark_cpu_fallback("css-group-restore-cleanup-ineligible")
+        vulkan_stat_note_device_css_group_restore()
+        true
+
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
         if self.completion_unknown: return
         if w <= 0 or h <= 0:
@@ -3298,6 +3353,7 @@ pub fn vulkan_readback_count() -> i64:
 # correctly by some path".
 var _vk_stat_device_blur_rects: i64 = 0
 var _vk_stat_device_glass_materials: i64 = 0
+var _vk_stat_device_css_group_restores: i64 = 0
 
 pub fn vulkan_stat_note_device_blur_rect():
     _vk_stat_device_blur_rects = _vk_stat_device_blur_rects + 1
@@ -3310,6 +3366,14 @@ pub fn vulkan_device_blur_rect_count() -> i64:
 
 pub fn vulkan_device_glass_material_count() -> i64:
     _vk_stat_device_glass_materials
+
+fn vulkan_stat_note_device_css_group_restore():
+    _vk_stat_device_css_group_restores = _vk_stat_device_css_group_restores + 1
+
+# CSS opacity groups restored by css_group_restore.comp (no layer or
+# destination readback, no upload).
+pub fn vulkan_device_css_group_restore_count() -> i64:
+    _vk_stat_device_css_group_restores
 
 pub fn vulkan_device_material_census_line() -> text:
     "device_blur_rects={_vk_stat_device_blur_rects} device_glass_materials={_vk_stat_device_glass_materials}"

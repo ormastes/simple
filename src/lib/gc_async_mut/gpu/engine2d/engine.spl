@@ -4063,6 +4063,38 @@ class Engine2D with DrawIrRenderTarget:
         self.draw_image_blend(dst_x, dst_y, width, height, pixels)
         true
 
+    me draw_ir_composite_device_css_group(layer: Engine2D, dst_x: i32, dst_y: i32, width: i32, height: i32, opacity_milli: i32) -> bool:
+        """Vulkan twin of `draw_ir_composite_readback_css_group`: restore the
+        group layer rendered into the shared offscreen `layer` straight from
+        its device buffer (`css_group_restore.comp`), with no readback and no
+        upload. False leaves the framebuffer untouched; the caller then takes
+        the readback path, which paints the same pixels."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        if self.backend_name() != "vulkan" or layer.backend_name() != "vulkan":
+            return false
+        if self.vulkan_font_state_unknown or layer.vulkan_font_state_unknown:
+            return false
+        if val Some(lvk) = layer._vulkan_primitive_target():
+            if lvk.w != width or lvk.h != height or lvk.completion_unknown:
+                return false
+            # The layer's recorded draws must have landed before the kernel
+            # reads its buffer; a host-side fallback means the device buffer
+            # is not the layer.
+            val flushed = lvk._flush_pending_compute_at("css-group-layer")
+            if flushed < 0:
+                lvk.mark_completion_unknown()
+            if flushed != 1 or lvk.cpu_fallback_used:
+                return false
+            if val Some(vk) = self._vulkan_primitive_target():
+                val restored = vk.draw_css_group_restore_device(
+                    lvk.d_framebuffer, dst_x, dst_y, width, height,
+                    css_opacity_group_alpha8_milli(opacity_milli))
+                self.vulkan_backend = Some(vk)
+                self.backend = vk
+                return restored
+        false
+
     me draw_ir_composite_readback_css_group(dst_x: i32, dst_y: i32, width: i32, height: i32, readback: Engine2DReadback, opacity_milli: i32) -> bool:
         """Restore a CSS opacity group layer as Chrome 159 does
         (`css_opacity_group.spl`): read the destination region back, run the

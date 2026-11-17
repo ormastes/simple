@@ -203,6 +203,16 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
 
 - **Was:** cpu_simd/Vulkan dropped the opacity of pages with several unbounded opacity roots (flat paint), single roots used the Simple-internal milli surface rule (`ff8080` for red at 0.5), and the raster painted group children unfaded.
 - **Chrome 159 rule:** premultiplied layer, restore with SkBlendARGB32 at `A = round(opacity*255)` (`sc = A+1`, `ds = (p + (p>>8)) >> 8` with `p = 0xFFFF - La*sc`, `out = (L*sc + D*ds) >> 8`). Fit 601884/604800 and 602574/604800 channels; every miss is a Chrome raster-tile seam (device columns just left of x = 256*k, k >= 2, +-1..2, group pages only, fixed in device space when content shifts 16 px). Control page without a group: 604800/604800.
-- **Fix:** `engine2d/css_opacity_group.spl` (math), Draw IR bounded group surfaces + `draw_ir_composite_readback_css_group`, raster `paint()` group front end. Pinned by `test/01_unit/browser_engine/opacity_group_chrome159_spec.spl` (raster, cpu_simd, Vulkan == cpu_simd, k=4 full frame across a seam <= 2).
+- **Fix:** `engine2d/css_opacity_group.spl` (math), Draw IR bounded group surfaces + `draw_ir_composite_readback_css_group`, Vulkan device restore `shaders/css_group_restore.comp` (`draw_ir_composite_device_css_group`, no readback), raster `paint()` group front end. A box's background + border is a two-item group on every lane (Chrome `ff7e7e`/`7e7eff`). Pinned by `test/01_unit/browser_engine/opacity_group_chrome159_spec.spl` (raster, cpu_simd, Vulkan == cpu_simd, k=4 full frame across a seam <= 2).
 - **Re-pinned with a Chrome citation:** `fractional_subtree_opacity_spec` pixels `ff8080/8080ff` -> Chrome `ff7e7e/7e7eff`; its surface width 16 -> 12 is Simple-internal (layer bounded to the subtree's clipped bounds).
-- **Still open:** multi-root Draw IR pages where any root holds text, a shadow or an outline still lose all opacity on cpu_simd/Vulkan (unchanged from base); cpu_simd single box bg+border folds (`ff8080` vs Chrome `ff7e7e`; raster fixed); nested groups; translucent/shadow/gradient/image members on the raster lane (layer alpha, kept on the per-element path); Vulkan per-group cost — 12 groups of 140x60 on 600x200, seed sha256 08aba9746a813ee7: raster 0.47 -> 1.31 s, cpu_simd 2.45 -> 2.86 s, Vulkan 0.89 -> 11.5 s (base painted no opacity on that page, so this is correctness bought with time; max RSS readings 1015/970/233 MB were inconsistent and are not claimed); the single-item path (`opacity_box`, `ff8080` vs `ff7f7f`) is unchanged and belongs to the blend lane.
+- **Still open:** multi-root Draw IR pages where any root holds text, a shadow or an outline still lose all opacity on cpu_simd/Vulkan (pre-existing, unchanged: pixel-identical to base on a probe page with a shadow root, an outline root, a bg+border root and a text root); nested groups; translucent/shadow/gradient/image members on the raster lane (layer alpha, kept on the per-element path); the single-item path (`opacity_box`, `ff8080` vs `ff7f7f`) belongs to the blend lane.
+- **Perf** (12 groups of 140x60 with 3 children on 600x200; seed sha256 08aba9746a813ee7; median of 3; base painted these groups with NO opacity):
+
+  | lane | base | head |
+  |---|---|---|
+  | raster | 0.67 s | 1.19 s |
+  | cpu_simd | 2.48 s | 2.83 s |
+  | Vulkan | 0.87 s | 0.93 s (was 11.5 s with the readback restore) |
+  | max RSS (whole run) | 969 MB | 996 MB |
+
+  Vulkan per group before the device kernel: render 15 ms, layer readback 45 ms, destination region readback 713 ms (whole-frame read), .spl restore 28 ms, upload 87 ms; after: create 1 ms, render 15 ms, device restore 2-5 ms.
