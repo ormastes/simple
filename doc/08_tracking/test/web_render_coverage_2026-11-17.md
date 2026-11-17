@@ -50,3 +50,16 @@ Third spec skipped: remaining low-coverage areas (layout_engine float/flex,
 foundation, paint) are private helpers already driven by chrome159 geometry specs;
 a direct spec would pin internals, not Chrome behaviour. 90% was not reached by
 this measure (lower bound ~30-50% for most files).
+
+## Real coverage tool attempt (authoritative result: none obtainable)
+Ran `simple test test/01_unit/browser_engine --coverage` on the blend seed
+(under `systemd-run MemoryMax=6G`, `timeout 3600`). Every spec failed before
+running, each with:
+
+    Error: ABORTED BEFORE EXECUTION — coverage instrumentation wrapper failed to compile; the spec was NEVER run under the requested coverage path, so this is NOT a test result. limit=memory; compile_ms=~25000-30000; resource_class=large; budget_status=pass. Compiler diagnostic: warning W-STR-BRACE-001: `{print $1}` in string literal ... (set SIMPLE_COVERAGE_FALLBACK=interpreter to explicitly accept an UNINSTRUMENTED interpreter run instead)
+
+preceded by "coverage: no SCV compile-event journal in this checkout; this
+first instrumented build runs the one-time inventory cold init". The fallback
+is uninstrumented, so it yields no coverage. I stopped the run after the first
+3 specs aborted (~25-30 s each; the rest of the directory would only repeat it).
+The name-reference table above is therefore the only table.

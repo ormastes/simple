@@ -2590,3 +2590,8 @@ Follow-up to the four 2026-11-16 behaviours. Each item has a `*_chrome159_spec.s
 - **Pre-existing, unpinned:** no lane paints an `outline` on a positioned box or this `<img>`. Chrome draws the same 3px 50% shadow as `5F5F5F` on a 10x8 box and as `606060` on an 8x5 box; Simple gives `606060` on both. Engine2D gives +1 green where two translucent paints overlap.
 - **Pins:** `opacity_group_chrome159_spec` has 3 rows: `tg_page` and `mr_page` on cpu_simd and Vulkan against Chrome, plus the text root on the multi-root page equals the text root alone (Simple-internal glyph check).
 
+
+## 2026-11-17 — Coverage lane: sfnt_glyf public API and browser face line metrics
+- **Measurement trap:** `simple test <dir> --coverage` does not work on the blend seed. Every spec aborts with "coverage instrumentation wrapper failed to compile ... NEVER run under the requested coverage path". Use name-reference function coverage (`doc/08_tracking/test/web_render_coverage_2026-11-17.md`) as a lower bound only.
+- **Pins:** `sfnt_glyf_public_api_spec` (raw-byte oracles: table directory, hmtx advance * size / unitsPerEm). `browser_face_line_metrics_chrome159_spec`: normal line height equals Chrome at 12/16/24/32/48px for serif, sans-serif, monospace; ascent equals Chrome except 48px serif and sans-serif.
+- **Gap:** Chrome baseline at 48px is 44 for serif and sans-serif, Simple returns 43 (`browser_face_ascent_descent_px`). Bug: `doc/08_tracking/bug/browser_face_ascent_48px_off_by_one_2026-11-17.md`.
