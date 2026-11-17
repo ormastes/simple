@@ -164,11 +164,12 @@ describe "Engine2D embedded render surface":
             val result = engine2d_draw_ir_adv_batch(engine, batch, false)
             val p = result.pixels[1 * 4 + 1]
 
-            # Opaque RED (alpha 255) scaled by opacity_milli=500 -> alpha 127,
-            # then Porter-Duff src-over onto opaque BG (black): the integer
-            # math resolves to exactly rgba(127, 0, 0, 255) — ~50% red.
+            # Opaque RED (alpha 255) scaled by opacity_milli=500 rounds to alpha
+            # 128 (Chrome: alpha = round(0.5*255); its opacity:0.5 red over white
+            # paints ff7f7f, which needs alpha 128), then src-over onto opaque
+            # black: round(255*128/255) = 128 -> rgba(128, 0, 0, 255).
             expect(color_a(p)).to_equal(255)  # oracle: src-over onto an opaque background yields an opaque pixel
-            expect(color_r(p)).to_equal(127)  # oracle: alpha 255 scaled by opacity_milli 500 truncates to 127
+            expect(color_r(p)).to_equal(128)  # oracle: alpha 255 scaled by opacity_milli 500 rounds to 128
             expect(color_g(p)).to_equal(0)  # oracle: pure red contributes no green channel
             expect(color_b(p)).to_equal(0)  # oracle: pure red contributes no blue channel
             engine.shutdown()
@@ -443,7 +444,10 @@ describe "Engine2D embedded render surface":
             val scaled_blend_image = engine2d_resolved_draw_ir_image("image://scaled-blend", 2, 1, [half_source, zero_source])
             var scaled_blend_full_cpu = Engine2D.create_with_backend(3, 1, "cpu")
             val scaled_blend_full_result = engine2d_draw_ir_adv_composition_with_images(scaled_blend_full_cpu, scaled_blend_full_composition, false, [scaled_blend_image])
-            expect(scaled_blend_full_result.pixels).to_equal([rgba(120, 70, 49, 255), rgba(120, 70, 49, 255), blend_bg])
+            # Chrome image rule (2026-11-17): b = round(40*128/255) +
+            # (60*127+127)/255 = 20 + 30 = 50 (exact 49.96); the truncating rule
+            # gave 49. r and g are unchanged (110+10, 50+20).
+            expect(scaled_blend_full_result.pixels).to_equal([rgba(120, 70, 50, 255), rgba(120, 70, 50, 255), blend_bg])
             scaled_blend_full_cpu.shutdown()
 
             step("Scale transparent IMAGE pixels through Vulkan src-over with CPU-oracle parity")
@@ -457,7 +461,7 @@ describe "Engine2D embedded render surface":
                 draw_ir_batch("batch-scaled-blend-root", "gpu", scaled_blend_root, [draw_ir_rect("scaled-blend-root-background", 0, 0, 4, 1, BG)]),
                 scaled_blend_batch
             ])
-            val scaled_blend_oracle = [BG, rgba(120, 70, 49, 255), rgba(120, 70, 49, 255), blend_bg]
+            val scaled_blend_oracle = [BG, rgba(120, 70, 50, 255), rgba(120, 70, 50, 255), blend_bg]
             var scaled_blend_cpu = Engine2D.create_with_backend(4, 1, "cpu")
             val scaled_blend_expected = engine2d_draw_ir_adv_fresh_device_composition_with_images(scaled_blend_cpu, scaled_blend_composition, [scaled_blend_image])
             expect(scaled_blend_expected.pixels).to_equal(scaled_blend_oracle)

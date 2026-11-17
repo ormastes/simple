@@ -19,6 +19,7 @@ use std.spec.*
 use std.io_runtime.{file_read_bytes_result}
 use std.common.image.png_decode.{PngImage, decode_png_to_argb}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count}
+use std.gc_async_mut.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_pixels_engine2d_at_device_scale
 }
@@ -141,3 +142,18 @@ describe "two-layer gradient stacks match Chrome 159 over the full frame at devi
         expect(frame_max_dev(cpu, want)).to_be_less_than(3)
         val raster = simple_web_layout_render_html_software_pixels(gstack_doc(160, 128, GSTACK_S2), 160, 128, 600000)
         expect(frame_max_dev(raster, want)).to_be_less_than(3)
+
+describe "the Metal blend source carries the same Chrome 159 rules":
+    it "keeps solid fills on the solid rule, image composites on the image rule and rounds the opacity scale":
+        # Metal is static analysis on a Linux host, as the WM material row in
+        # simple_web_renderer_spec is: pin the MSL text that encodes each rule.
+        val msl = _engine2d_msl()
+        expect(msl.contains("uint dterm = solid ? (dc * (inv + 1u)) >> 8 : (v + (v >> 8)) >> 8;")).to_equal(true)
+        expect(msl.contains("out |= ((sc * sa + 127u) / 255u + dterm) << shift;")).to_equal(true)
+        expect(msl.contains("uint dw = (da * inv + 127u) / 255u;")).to_equal(true)
+        expect(msl.contains("    return blend_rule(src, dst, true);")).to_equal(true)
+        expect(msl.contains("    return blend_rule(src, dst, false);")).to_equal(true)
+        expect(msl.contains("uint scaled_alpha = (alpha * opacity + 500u) / 1000u;")).to_equal(true)
+        expect(msl.contains("fb[dst_idx] = blend_src_over_image(scaled, fb[dst_idx]);")).to_equal(true)
+        # The glass material keeps its own truncating twin (no Chrome equivalent).
+        expect(msl.contains("uint surface = glass_blend_over(glass_surface_tint(p), saturated);")).to_equal(true)
