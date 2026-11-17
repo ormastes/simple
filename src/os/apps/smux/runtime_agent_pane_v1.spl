@@ -123,20 +123,35 @@ pub fn smux_agent_pane_write_done_v1(held: Option<HostAgentPaneLeaseV4>, result:
         val kept_lease = (smux_agent_pane_keeps_lease_v1(result.error) or result.error.starts_with("attach-pane-write-") or
             result.error == "attach-pane-input-unresolved")
         val kept = if kept_lease: held else: None
-        return SmuxAgentPaneTurnV1(lease: kept, response: "", error: result.error, revoked: not kept_lease)
-    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-write"),
+        # A gate close failure on a failed write is appended (never dropped); the keep rule used the write error alone.
+        val named = if result.gate_error != "": result.error + ";gate:" + result.gate_error else: result.error
+        return SmuxAgentPaneTurnV1(lease: kept, response: "", error: named, revoked: not kept_lease)
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-write"),
         "disposition": SdnValue.String(result.disposition), "acceptedBytes": SdnValue.Int(result.accepted_bytes)}
     # The write outcome stands even when the native gate could not be closed: the failure rides in the response
     # (`gateError`), NOT the turn error, so a client never retries (and double-writes) a completed write.
     if result.gate_error != "": fields["gateError"] = SdnValue.String(result.gate_error)
     SmuxAgentPaneTurnV1(lease: held, response: sdn_encode_canonical(SdnValue.Dict(fields)), error: "")
 
-# The error a Write returns: the write's own error first, else a failed control-lease revoke (visible, never dropped).
-# A `runtime-agent-pane-write-revoke:` error comes WITH the response: the write already happened, so never retry on it.
-pub fn smux_agent_pane_write_revoke_merge_v1(write_error: text, revoke_error: text) -> text:
-    if write_error != "": return write_error
-    if revoke_error != "": return "runtime-agent-pane-write-revoke:" + revoke_error
-    ""
+pub struct SmuxAgentPaneWriteReportV1:
+    response: text
+    error: text
+
+# Folds a failed control-lease revoke into a Write answer. After a COMPLETED write (no error) it rides in the
+# response as `revokeError`, never the turn error, so no client retries (and double-writes) a completed write. When
+# the write itself failed the error stays the turn error and the revoke error is appended to it, not dropped.
+pub fn smux_agent_pane_write_revoke_report_v1(response: text, error: text, revoke_error: text) -> SmuxAgentPaneWriteReportV1:
+    if revoke_error == "": return SmuxAgentPaneWriteReportV1(response: response, error: error)
+    if error != "": return SmuxAgentPaneWriteReportV1(response: response, error: error + ";control-revoke:" + revoke_error)
+    val parsed = sdn_parse_strict_v1(response, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8))
+    if parsed.is_err(): return SmuxAgentPaneWriteReportV1(response: response, error: "runtime-agent-pane-write-revoke:" + revoke_error)
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return SmuxAgentPaneWriteReportV1(response: response, error: "runtime-agent-pane-write-revoke:" + revoke_error)
+    var merged = fields
+    merged["revokeError"] = SdnValue.String(revoke_error)
+    SmuxAgentPaneWriteReportV1(response: sdn_encode_canonical(SdnValue.Dict(merged)), error: "")
 
 # The control-lease attachment token, from signed data only (the target digest and the attachment generation, which
 # is >= 1): 32 hex of the digest, ":", the generation; the control owner requires this shape and a nonzero lead digit.
