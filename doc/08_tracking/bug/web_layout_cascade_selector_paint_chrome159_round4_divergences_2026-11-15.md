@@ -246,3 +246,51 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
   | max RSS (whole run) | 969 MB | 996 MB |
 
   Vulkan per group before the device kernel: render 15 ms, layer readback 45 ms, destination region readback 713 ms (whole-frame read), .spl restore 28 ms, upload 87 ms; after: create 1 ms, render 15 ms, device restore 2-5 ms.
+
+## 2026-11-17 — `layout.spl` `_layout_block_node` margin collapse, round 2
+
+Chrome 159.0.8154.6, `--headless --no-sandbox --window-size=900,2000 --dump-dom`,
+each case in a `display:flow-root; width:300px` wrapper, `getBoundingClientRect()`
+y/h relative to the wrapper. Pinned in
+`test/01_unit/browser_engine/layout_block_node_chrome159_spec.spl` (`mc-*` rows).
+
+| id | case | Chrome 159 | engine before |
+|----|------|-----------|---------------|
+| `mc_empty_sibling` | A `h10;mb10` + E `mt20;mb5` + B `h10;mt15` | E y=30 h0, B y=30, W 40 | B y=45 — **fixed** |
+| `mc_empty_negative` | A `h10;mb10` + E `mt-5;mb30` + B `h10;mt5` | E y=15, B y=35, W 45 | **fixed** |
+| `mc_empty_first` | P > E `mt10;mb20` + C `h10;mt5` | P y=20 h10, E/C y=20, W 30 | P y=10, C y=30 — **fixed** |
+| `mc_empty_last` | P > C `h10;mb5` + E `mt30`; sibling `h5` | P h10, E y=40, S y=40, W 45 | **fixed** |
+| `mc_empty_nested` | A `h10` + P `mt5` > E `mt10;mb15` + S `h5;mt3` | P/E/S y=25, W 30 | **fixed** |
+| `mc_height0_parent` | P `height:0` > C `h10;mb10`; sibling `h5` | P h0, S y=0, W 5 | `height:0` read as auto — **fixed** |
+| `mc_height0_empty` | A `h10;mb10` + E `height:0;mt20;mb25` + B `h10` | E y=30, B y=35, W 45 | **fixed** |
+| `mc_min_height_empty` | A `h10;mb10` + E `min-height:1px;mt20;mb20` + B `h10` | E y=30 h1, B y=51, W 61 | min-height not parsed — **fixed** |
+| `mc_min_height_used` | P `min-height:30px` > C `h10;mb10`; sibling `h5` | P h30, S y=30 | **fixed** |
+| `mc_min_height_top` | P `min-height:30px` > C `h10;mt10` | P y=10 h30, C y=10, W 40 | **fixed** |
+| `mc_float_between` | A `h10;mb10` + F `float;w50;h5;mt7` + B `h10;mt20` | F y=27, B y=30, W 40 | float stacked in flow — **fixed** |
+| `mc_abs_between` | same with `position:absolute;mt3` | X y=23, B y=30, W 40 (`mt0`: X y=20) | **fixed** |
+| `mc_float_first` / `mc_abs_first` | P > float/abs `w50;h5` + C `h10;mt10` | P y=10 h10, both y=10, W 20 | **fixed** |
+| `mc_whitespace` | P > `"\n   "` + C `h10;mt10;mb10` + `"\n   "`; sibling `h5` | P y=10 h10, S y=30, W 35 | whitespace was a 24px text box — **fixed** |
+| `mc_grid_items` | P `display:grid` > A `h10;mb10` + B `h10;mt10` | B y=30, P h40 | grid items collapsed (y=20) — **fixed** |
+
+Guards that already passed: `min-height:5px` below content keeps the bottom
+collapse (P h10, S y=20 — Chrome only blocks it when min-height raises the
+height), per-side padding (padding-bottom only: P y=10 h24, S y=34;
+padding-top only: P y=0 h24, C y=14, S y=34), an empty block with
+`padding-top:1px` (y=20 h1, next y=41), flex-column items (B y=30).
+
+Fix: `StyleProps.height_zero` (explicit zero length, not `auto`/`%`) and
+`StyleProps.min_height` (`set_style`); `BeLayoutBox.after_margin_pos/neg`
+carry the bottom-margin set a laid-out box presents, so a min-height that
+takes effect can keep the margin inside; `_self_collapses`, `_generates_box`,
+`_is_out_of_flow` in `layout.spl`; a BFC-root box still contains its floats.
+
+Still open:
+- Per-side borders. Chrome: P `border-bottom:5px solid` > C `h10;mt10;mb10`
+  gives P y=10 h25, sibling y=35; `border-top:5px solid` gives P y=0 h25,
+  C y=15, sibling y=35. `border-top`/`border-bottom` shorthands are not parsed
+  and `border-*-width` longhands all write the one `border_width`.
+- Clearance, float avoidance by following content, and the placement of a
+  float/abs box after an empty block are not modelled here.
+
+Regression sweep (seed `cargo-target-webrender-vk/release/simple`, serial, base `d155cbad528` vs head): the main spec went 41/57 -> 57/57. The 30 specs below gave identical per-spec counts and the same 63 failing test names at base and head, so 0 new failures:
+`test/01_unit/app/ui.chromium/engine_merge_spec.spl`, `test/01_unit/app/ui.chromium/text_metrics_spec.spl`, `test/01_unit/browser_engine/anonymous_block_spec.spl`, `test/01_unit/browser_engine/ifc_linebox_spec.spl`, `test/01_unit/browser_engine/table_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_hit_test_events_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_box_stored_geometry_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_coverage_closure_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_spec.spl`, `test/01_unit/lib/gpu/browser/hit_bounds_halfopen_spec.spl`, `test/01_unit/browser_engine/html_tree_builder_spec.spl`, `test/01_unit/browser_engine/layout_core_block_flex_chrome159_spec.spl`, `test/01_unit/browser_engine/first_child_top_margin_collapse_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_margin_collapse_negative_spec.spl`, `test/01_unit/browser_engine/browser_renderer_spec.spl`, `test/01_unit/browser_engine/browser_renderer_utils_coverage_closure_spec.spl`, `test/01_unit/browser_engine/simple_web_hidden_text_spec.spl`, `test/01_unit/lib/common/web/simple_browser_page_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_smoke_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_ua_defaults_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_web_gap_close_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_software_no_gpu_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_text_node_sibling_paint_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/display_contents_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/float_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_flat_selector_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/dom_color_alpha_normalization_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
