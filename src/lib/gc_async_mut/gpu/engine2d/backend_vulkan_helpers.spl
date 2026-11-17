@@ -17,6 +17,7 @@ use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.nogc_sync_mut.sffi.time.{time_monotonic_ns}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
+use std.common.binary_io.{f32_to_bits}
 use std.nogc_sync_mut.gpu.engine2d.sffi_dispatch.{gpu_sffi_uses_interpreter_array_abi}
 
 extern fn rt_bytes_alloc(n: i64) -> [u8]?
@@ -1862,6 +1863,28 @@ fn _pack_rect_pc(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i3
     _write_rect_pc_into(buf, 0, x, y, w, h, color, fb_w, fb_h, clip_x, clip_y, clip_w, clip_h, clip_enabled)
     buf
 
+fn _pack_affine_coverage_pc(rx: i32, ry: i32, rw: i32, rh: i32,
+    fb_w: i32, fb_h: i32, color: u32, local_w: f64, local_h: f64,
+    a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64) -> [u8]:
+    """Pack the 60-byte affine shader block after strict f64 preflight."""
+    var data: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    data = _pack_i32_le(data, 0, rx)
+    data = _pack_i32_le(data, 4, ry)
+    data = _pack_i32_le(data, 8, rw)
+    data = _pack_i32_le(data, 12, rh)
+    data = _pack_i32_le(data, 16, fb_w)
+    data = _pack_i32_le(data, 20, fb_h)
+    data = _pack_u32_le(data, 24, color)
+    data = _pack_u32_le(data, 28, f32_to_bits(local_w as f32))
+    data = _pack_u32_le(data, 32, f32_to_bits(local_h as f32))
+    data = _pack_u32_le(data, 36, f32_to_bits(a as f32))
+    data = _pack_u32_le(data, 40, f32_to_bits(b as f32))
+    data = _pack_u32_le(data, 44, f32_to_bits(c as f32))
+    data = _pack_u32_le(data, 48, f32_to_bits(d as f32))
+    data = _pack_u32_le(data, 52, f32_to_bits(tx as f32))
+    data = _pack_u32_le(data, 56, f32_to_bits(ty as f32))
+    data
+
 fn _pack_rect_batch_pc(bx: i32, by: i32, bw: i32, bh: i32, n: i32,
                        fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32,
                        clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
@@ -2128,6 +2151,27 @@ fn _pack_shadow_rect_pc(mx: i32, my: i32, mw: i32, mh: i32,
     buf = _pack_i32_le(buf, 32, sb)
     buf = _pack_i32_le(buf, 36, shadow_a)
     buf = _pack_i32_le(buf, 40, prof_off)
+    buf
+
+fn _pack_gradient_layer_pc(x0: i32, y0: i32, w: i32, h: i32, fb_w: i32, fb_h: i32,
+                           mode: i32, tab_off: i32, col_off: i32, row_off: i32) -> [u8]:
+    """Push constants for the device CSS gradient layer kernel (40 bytes used).
+
+    FROZEN: the field order is shaders/gradient_layer.comp's PushConstants
+    block. `mode` is 0 radial / 1 linear; the three offsets are WORD indices
+    into the binding-1 buffer (header + stop ramp, column terms, row terms).
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x0)
+    buf = _pack_i32_le(buf, 4, y0)
+    buf = _pack_i32_le(buf, 8, w)
+    buf = _pack_i32_le(buf, 12, h)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, mode)
+    buf = _pack_i32_le(buf, 28, tab_off)
+    buf = _pack_i32_le(buf, 32, col_off)
+    buf = _pack_i32_le(buf, 36, row_off)
     buf
 
 fn _pack_glass_material_pc(fb_w: i32, fb_h: i32, rx: i32, ry: i32, rw: i32, rh: i32,

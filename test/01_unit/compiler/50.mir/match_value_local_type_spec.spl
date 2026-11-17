@@ -1,0 +1,86 @@
+# @req REQ-MIR-MATCH-VALUE-TYPE-001
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# Regression pins: a value-position `if val ... else: match ...` and an untyped
+# `var x = match ...` whose arms include a diverging `return` must keep the
+# payload type on the bound local (never Unit/void in LLVM).
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+# Returns [ret_f64, ret_other, call_args_f64, call_args_unit] for fn `target`.
+fn value_type_shape(source: text) -> [i64]:
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", Logger(level: 0))
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = hir_lowering.lower_module(ast)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir, [hir])
+    expect(lowering.errors.len()).to_equal(0)
+    var functions = 0
+    var ret_f64 = 0
+    var ret_other = 0
+    var args_f64 = 0
+    var args_unit = 0
+    for function in mir.functions.values():
+        if function.name == "target" or function.name.ends_with(".target"):
+            functions = functions + 1
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Call(_, _, args):
+                            for arg in args:
+                                match arg.kind:
+                                    case MirOperandKind.Copy(id) | MirOperandKind.Move(id):
+                                        for local in function.locals:
+                                            if local.id.id == id.id:
+                                                if local.type_.kind == MirTypeKind.F64:
+                                                    args_f64 = args_f64 + 1
+                                                if local.type_.kind == MirTypeKind.Unit:
+                                                    args_unit = args_unit + 1
+                                    case _: ()
+                        case _: ()
+                match block.terminator:
+                    case MirTerminator.Ret(value):
+                        if val operand = value:
+                            var actual = MirTypeKind.Unit
+                            match operand.kind:
+                                case MirOperandKind.Copy(id) | MirOperandKind.Move(id):
+                                    for local in function.locals:
+                                        if local.id.id == id.id:
+                                            actual = local.type_.kind
+                                case MirOperandKind.Const(_, type_): actual = type_.kind
+                                case _: ()
+                            if actual == MirTypeKind.F64:
+                                ret_f64 = ret_f64 + 1
+                            else:
+                                ret_other = ret_other + 1
+                    case _: ()
+    expect(functions).to_equal(1)
+    [ret_f64, ret_other, args_f64, args_unit]
+
+describe "match value bound to a local keeps its payload type":
+    it "if-val whose else tail is a match with returning arms is not void":
+        val src = "enum Reply:\n    Got(value: f64)\n    Bad\n    Empty\n\nfn take(x: f64) -> f64:\n    x\n\nfn target(held: f64?, r: Reply) -> f64:\n    val completion = if val retained = held: retained else:\n        match r:\n            Reply.Got(value): value\n            Reply.Bad: return 1.0\n            _: return 2.0\n    take(completion)\n"
+        val shape = value_type_shape(src)
+        expect(shape[1]).to_equal(0)
+        expect(shape[3]).to_equal(0)
+        expect(shape[2]).to_equal(1)
+
+    it "untyped var from a match with a diverging arm keeps field type":
+        val src = "struct Lib:\n    handle: f64\n\nenum Loaded:\n    Opened(lib: Lib)\n    Failed(detail: f64)\n\nfn take(x: f64) -> f64:\n    x\n\nfn target(loaded: Loaded) -> f64:\n    var library = match loaded:\n        Loaded.Opened(lib): lib\n        Loaded.Failed(detail): return detail\n    take(library.handle)\n"
+        val shape = value_type_shape(src)
+        expect(shape[1]).to_equal(0)
+        expect(shape[3]).to_equal(0)
+        expect(shape[2]).to_equal(1)

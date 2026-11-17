@@ -304,7 +304,7 @@ pub class FileFiberTldrBridgeV1:
     me _drain_completions(table: TldrTableV1) -> Result<(), FileFiberTldrBridgeErrorV1>:
         var drained = 0
         while drained < _FF_WAKE_BATCH:
-            val completion = if val retained = self.pending_completion:
+            val completion: RingCompletion<i64> = if val retained = self.pending_completion:
                 retained
             else:
                 # @workaround bug=ctor_mir_2026-10-31 reason=annotate binder; stage2 leaves Cpl unsubstituted in generic-self method Result
@@ -325,14 +325,15 @@ pub class FileFiberTldrBridgeV1:
                 # A foreign/stale completion is never allowed to release a live
                 # reservation owned by another record.
                 return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
-            val fiber = self.waits[found].fiber
+            val wait_entry: FileFiberTldrWaitV1 = self.waits[found]
+            val fiber = wait_entry.fiber
             if completion.task_key != (fiber + 1).to_u64():
                 return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
             var error_text = ""
             if completion.kind == RingTerminalKind.Cancelled:
                 error_text = completion.error
             else:
-                match table.resolve_async(table.handle(self.waits[found].key, ""), self.waits[found].reference):
+                match table.resolve_async(table.handle(wait_entry.key, ""), wait_entry.reference):
                     case Err(TldrAsyncErrorV1.Source(message)): error_text = message
                     case Err(error): return Err(FileFiberTldrBridgeErrorV1.Table(error))
                     case Ok(Some(_)): ()

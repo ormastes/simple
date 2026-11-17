@@ -241,21 +241,25 @@ static inline void plot(device uint* fb, int x, int y, int fb_w, int fb_h, uint 
 // _blend_rule() in engine2d/color.spl. Opaque dst, per channel:
 //   solid fill:   round(s*a/255) + ((d*(256-a)) >> 8)          (blend_solid)
 //   image/layer:  round(s*a/255) + div255r(d*(255-a))          (blend)
-// Translucent dst: straight-alpha src-over, every division rounded.
+// Translucent dst: Skia's premultiplied 8-bit layer value stored straight
+// (exact round trip); transparent dst returns src.
 static inline uint blend_rule(uint src, uint dst, bool solid) {
     uint sa = (src >> 24) & 0xFFu;
     if (sa == 255u) return src;
     if (sa == 0u) return dst;
     uint da = (dst >> 24) & 0xFFu;
     uint inv = 255u - sa;
+    if (da == 0u) return src;
     if (da != 255u) {
         uint dw = (da * inv + 127u) / 255u;
         uint oa = sa + dw;
-        uint half_oa = oa / 2u;
-        uint tr = (((src >> 16) & 0xFFu) * sa + ((dst >> 16) & 0xFFu) * dw + half_oa) / oa;
-        uint tg = (((src >> 8) & 0xFFu) * sa + ((dst >> 8) & 0xFFu) * dw + half_oa) / oa;
-        uint tb = ((src & 0xFFu) * sa + (dst & 0xFFu) * dw + half_oa) / oa;
-        return (oa << 24) | (tr << 16) | (tg << 8) | tb;
+        uint res = oa << 24;
+        for (uint sh = 0u; sh <= 16u; sh += 8u) {
+            uint p = (((src >> sh) & 0xFFu) * sa + 127u) / 255u
+                + (((((dst >> sh) & 0xFFu) * da + 127u) / 255u) * inv + 127u) / 255u;
+            res |= min((p * 255u + oa / 2u) / oa, 255u) << sh;
+        }
+        return res;
     }
     uint out = 0xFF000000u;
     for (uint shift = 0u; shift <= 16u; shift += 8u) {

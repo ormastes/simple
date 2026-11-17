@@ -2808,7 +2808,7 @@ impl MirLowering:
                     # `d[k]` is lowered ONCE and reused by both the compound
                     # read and the write, so a side-effecting key expression
                     # runs exactly once (same rule as the array arm below).
-                    val dict_key = self.lower_dict_key(index)
+                    val dict_key = self.lower_dict_key(index, Some(base))
                     var dict_value = value_local
                     if op.?:
                         # Bug jit_struct_field_compound_assign_loads_zero: the
@@ -3141,7 +3141,17 @@ impl MirLowering:
                 # Method parameters use the same RuntimeValue ABI as free
                 # functions (erased `T` included). Already tagged arguments
                 # remain tagged once.
-                arg_local = self.box_runtime_value(arg_local)
+                var erased_scalar_slot = false
+                match declared_param_type.kind:
+                    case HirTypeKind.TypeParam(slot_name, _): erased_scalar_slot = slot_name == "__erased_scalar_slot__"
+                    case _: ()
+                if erased_scalar_slot:
+                    # Synthesized by erased_method_param_types_v1 (generic
+                    # class with Dict<K, T> storage): only an integer word is
+                    # encoded; text/records keep their existing representation.
+                    arg_local = self.box_erased_scalar_arg_v1(arg_local)
+                else:
+                    arg_local = self.box_runtime_value(arg_local)
             case HirTypeKind.Optional(optional_inner):
                 val scalar_payload = match optional_inner.kind:
                     case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char: true
@@ -5341,8 +5351,12 @@ impl MirLowering:
                         entry_key_mir = dict_key_mir
                         entry_value_mir = dict_value_mir
                     case _: ()
+            var entry_key_field = self.builtin_dict_entry_field_type(dict_key_hir, entry_key_mir)
+            if val declared_entry_key = dict_key_hir:
+                if val struct_entry_key = self.word_struct_key_mir_type_v1(declared_entry_key):
+                    entry_key_field = struct_entry_key
             val entry_fields = [
-                self.builtin_dict_entry_field_type(dict_key_hir, entry_key_mir),
+                entry_key_field,
                 self.builtin_dict_entry_field_type(dict_value_hir, entry_value_mir)
             ]
             val native_entries = self.builtin_dict_entries_array(collection_local, entry_fields)

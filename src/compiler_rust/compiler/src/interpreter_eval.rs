@@ -519,6 +519,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
     USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    crate::units::scope::unit_scope_reset();
     // Clear module-level globals from previous runs
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     crate::interpreter::reset_owned_globals_from_initial();
@@ -1687,6 +1688,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             }
             // Module system nodes
             Node::UseStmt(use_stmt) => {
+                crate::units::scope::unit_scope_record_use(use_stmt);
                 // Handle runtime module loading
                 // Determine the binding name (alias or imported item name)
                 let binding_name = match &use_stmt.target {

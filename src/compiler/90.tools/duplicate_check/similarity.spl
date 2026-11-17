@@ -1,0 +1,379 @@
+# One similarity interface for every duplicate-check mode.
+#
+# Each mode (token line-window hashing, token-frequency cosine, MinHash/LSH
+# prefilter, semantic doc vectors, Ollama embeddings, text fallback) is a
+# `SimilarityEngine` value built by a factory below; the engine implements
+# `SimilarityAlgorithm`. Callers pick one with `similarity_for_mode` and drive
+# it only through featurize -> candidates -> score; thresholding is shared in
+# `score_candidates`. Engines are fn-field structs (same shape as
+# lint_rule_api's StaticLintRule) so dispatch needs no trait objects.
+
+use compiler.tools.duplicate_check.features.{FeatureVec, build_feature_vector, cosine_similarity, feature_signature}
+use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense}
+use compiler.tools.duplicate_check.lsh_prefilter.{lsh_candidate_pairs_for_streams, sorted_tokens}
+
+# Raw material for one block. Each engine reads the part it needs:
+# token/text engines read `text_val`, cosine reads `tokens`, the embedding
+# engine reads `embedding` (fetched by the caller, which owns cache/network IO).
+pub struct SimilarityInput:
+    text_val: text
+    tokens: [text]
+    embedding: [f64]
+
+pub struct SimilarityFeatures:
+    key: text
+    sparse: FeatureVec
+    dense: [f64]
+
+pub struct SimilarityPair:
+    left: i64
+    right: i64
+
+pub struct ScoredPair:
+    left: i64
+    right: i64
+    score: f64
+
+pub struct SimilarityCandidates:
+    pairs: [SimilarityPair]
+    # "'token' (size blocks, cap N)" for every bucket skipped by the size cap.
+    skipped_buckets: [text]
+    dropped_slots: i64
+
+pub trait SimilarityAlgorithm:
+    fn name() -> text
+    fn groups_by_exact_key() -> bool
+    fn featurize(input: SimilarityInput) -> SimilarityFeatures
+    fn score(a: SimilarityFeatures, b: SimilarityFeatures) -> f64
+    fn candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates
+
+pub struct SimilarityEngine:
+    algo_name: text
+    exact_key: bool
+    featurize_fn: fn(SimilarityInput) -> SimilarityFeatures
+    score_fn: fn(SimilarityFeatures, SimilarityFeatures) -> f64
+    candidates_fn: fn([SimilarityFeatures], [bool]) -> SimilarityCandidates
+
+impl SimilarityAlgorithm for SimilarityEngine:
+    fn name() -> text: self.algo_name
+    fn groups_by_exact_key() -> bool: self.exact_key
+    fn featurize(input: SimilarityInput) -> SimilarityFeatures: self.featurize_fn(input)
+    fn score(a: SimilarityFeatures, b: SimilarityFeatures) -> f64: self.score_fn(a, b)
+    fn candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates:
+        self.candidates_fn(features, excluded)
+
+val SIGNATURE_TOP_N: i64 = 5
+# Intentional recall ceiling: a token so common it is not discriminative
+# (e.g. "value"); a genuine pair shares 5 signature tokens, so it also lands
+# in smaller buckets.
+val MAX_BUCKET_SIZE: i64 = 400
+val TEXT_FALLBACK_MIN_LEN: i64 = 10
+
+# ---------------------------------------------------------------- selection
+
+# @allow(primitive_api) mode name, threshold and score are the CLI/config scalars the duplicate checker already exposes
+pub fn similarity_for_mode(mode: text, use_lsh_prefilter: bool) -> SimilarityEngine:
+    if mode == "token":
+        return token_similarity()
+    if mode == "semantic":
+        val local = semantic_doc_similarity()
+        if use_lsh_prefilter:
+            return with_lsh_prefilter(local)
+        return local
+    if mode == "semantic-llm":
+        return semantic_embedding_similarity()
+    if mode == "semantic-text":
+        return semantic_text_similarity()
+    if mode == "lsh":
+        return lsh_similarity()
+    cosine_token_similarity()
+
+pub fn token_similarity() -> SimilarityEngine:
+    SimilarityEngine(algo_name: "token", exact_key: true,
+        featurize_fn: featurize_exact_text, score_fn: score_exact_key,
+        candidates_fn: exact_key_candidates)
+
+pub fn cosine_token_similarity() -> SimilarityEngine:
+    SimilarityEngine(algo_name: "cosine", exact_key: false,
+        featurize_fn: featurize_token_frequencies, score_fn: score_sparse_cosine,
+        candidates_fn: signature_bucket_candidates)
+
+pub fn lsh_similarity() -> SimilarityEngine:
+    with_lsh_prefilter(cosine_token_similarity())
+
+pub fn semantic_doc_similarity() -> SimilarityEngine:
+    SimilarityEngine(algo_name: "semantic", exact_key: false,
+        featurize_fn: featurize_doc_words, score_fn: score_sparse_cosine,
+        candidates_fn: signature_bucket_candidates)
+
+pub fn semantic_embedding_similarity() -> SimilarityEngine:
+    SimilarityEngine(algo_name: "semantic-llm", exact_key: false,
+        featurize_fn: featurize_embedding, score_fn: score_dense_cosine,
+        candidates_fn: dense_all_pair_candidates)
+
+pub fn semantic_text_similarity() -> SimilarityEngine:
+    SimilarityEngine(algo_name: "semantic-text", exact_key: false,
+        featurize_fn: featurize_exact_text, score_fn: score_text_lcs,
+        candidates_fn: long_text_all_pair_candidates)
+
+pub fn with_lsh_prefilter(engine: SimilarityEngine) -> SimilarityEngine:
+    """Same featurize/score, MinHash/LSH banding for candidate selection."""
+    SimilarityEngine(algo_name: engine.algo_name + "+lsh", exact_key: engine.exact_key,
+        featurize_fn: engine.featurize_fn, score_fn: engine.score_fn,
+        candidates_fn: lsh_candidates)
+
+# ---------------------------------------------------------------- shared driver
+
+# @allow(primitive_api) mode name, threshold and score are the CLI/config scalars the duplicate checker already exposes
+pub fn similarity_input_text(text_val: text) -> SimilarityInput:
+    SimilarityInput(text_val: text_val, tokens: [], embedding: [])
+
+pub fn featurize_all(engine: SimilarityEngine, inputs: [SimilarityInput]) -> [SimilarityFeatures]:
+    var out: [SimilarityFeatures] = []
+    for input in inputs:
+        out.push(engine.featurize(input))
+    out
+
+# @allow(primitive_api) mode name, threshold and score are the CLI/config scalars the duplicate checker already exposes
+pub fn score_candidates(engine: SimilarityEngine, features: [SimilarityFeatures], candidates: SimilarityCandidates, threshold: f64) -> [ScoredPair]:
+    """Shared thresholding: score every candidate pair, keep score >= threshold
+    in candidate order."""
+    var out: [ScoredPair] = []
+    for pair in candidates.pairs:
+        val sim = engine.score(features[pair.left], features[pair.right])
+        if sim >= threshold:
+            out.push(ScoredPair(left: pair.left, right: pair.right, score: sim))
+    out
+
+# @allow(primitive_api) mode name, threshold and score are the CLI/config scalars the duplicate checker already exposes
+pub fn similar_pairs(engine: SimilarityEngine, features: [SimilarityFeatures], excluded: [bool], threshold: f64) -> [ScoredPair]:
+    score_candidates(engine, features, engine.candidates(features, excluded), threshold)
+
+pub fn empty_features() -> SimilarityFeatures:
+    SimilarityFeatures(key: "", sparse: FeatureVec(block_id: 0, features: {}, magnitude: 0.0), dense: [])
+
+# ---------------------------------------------------------------- featurize
+
+fn featurize_exact_text(input: SimilarityInput) -> SimilarityFeatures:
+    SimilarityFeatures(key: input.text_val, sparse: FeatureVec(block_id: 0, features: {}, magnitude: 0.0), dense: [])
+
+fn featurize_token_frequencies(input: SimilarityInput) -> SimilarityFeatures:
+    var freq: {text: i64} = {}
+    for tok in input.tokens:
+        val current = freq[tok] ?? 0
+        freq[tok] = current + 1
+    SimilarityFeatures(key: "", sparse: build_feature_vector(0, freq), dense: [])
+
+fn featurize_doc_words(input: SimilarityInput) -> SimilarityFeatures:
+    SimilarityFeatures(key: "", sparse: build_feature_vector(0, doc_word_frequencies(input.text_val)), dense: [])
+
+fn featurize_embedding(input: SimilarityInput) -> SimilarityFeatures:
+    SimilarityFeatures(key: input.text_val, sparse: FeatureVec(block_id: 0, features: {}, magnitude: 0.0), dense: input.embedding)
+
+fn doc_word_frequencies(text_val: text) -> {text: i64}:
+    """Lower-cased alphanumeric words of length >= 2."""
+    var freq = {}
+    val bytes = text_val.bytes()
+    val len = bytes.len()
+    var word_start = -1
+    var i = 0
+    while i < len:
+        val c = bytes[i]
+        val is_alpha = (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
+        val is_digit = c >= 48 and c <= 57
+        if is_alpha or is_digit:
+            if word_start < 0:
+                word_start = i
+        else:
+            if word_start >= 0 and i - word_start >= 2:
+                val lower = text_val[word_start:i].lower()
+                val existing = freq[lower] ?? 0
+                freq[lower] = existing + 1
+            word_start = -1
+        i = i + 1
+    if word_start >= 0 and len - word_start >= 2:
+        val lower = text_val[word_start:len].lower()
+        val existing = freq[lower] ?? 0
+        freq[lower] = existing + 1
+    freq
+
+# ---------------------------------------------------------------- score
+
+fn score_exact_key(a: SimilarityFeatures, b: SimilarityFeatures) -> f64:
+    if a.key == b.key:
+        return 1.0
+    0.0
+
+fn score_sparse_cosine(a: SimilarityFeatures, b: SimilarityFeatures) -> f64:
+    cosine_similarity(a.sparse, b.sparse)
+
+fn score_dense_cosine(a: SimilarityFeatures, b: SimilarityFeatures) -> f64:
+    cosine_similarity_dense(a.dense, b.dense)
+
+fn score_text_lcs(a: SimilarityFeatures, b: SimilarityFeatures) -> f64:
+    text_similarity(a.key, b.key)
+
+# @allow(primitive_api) mode name, threshold and score are the CLI/config scalars the duplicate checker already exposes
+pub fn text_similarity(a: text, b: text) -> f64:
+    if a == b:
+        return 1.0
+    val total_len = a.len() + b.len()
+    if total_len == 0:
+        return 1.0
+    val lcs = longest_common_subsequence_len(a, b)
+    val numerator = (lcs * 2) * 1.0
+    val denominator = total_len * 1.0
+    numerator / denominator
+
+fn longest_common_subsequence_len(a: text, b: text) -> i64:
+    if a.len() == 0 or b.len() == 0:
+        return 0
+
+    var prev: [i64] = []
+    var init_j = 0
+    while init_j <= b.len():
+        prev.push(0)
+        init_j = init_j + 1
+
+    var i = 0
+    while i < a.len():
+        var curr: [i64] = [0]
+        var j = 0
+        while j < b.len():
+            val a_ch = a[i:i+1]
+            val b_ch = b[j:j+1]
+            if a_ch == b_ch:
+                curr.push(prev[j] + 1)
+            else:
+                curr.push(max_i64(curr[j], prev[j + 1]))
+            j = j + 1
+        prev = curr
+        i = i + 1
+
+    prev[b.len()]
+
+fn max_i64(a: i64, b: i64) -> i64:
+    if a >= b:
+        return a
+    b
+
+# ---------------------------------------------------------------- candidates
+
+fn is_skipped(excluded: [bool], i: i64) -> bool:
+    i < excluded.len() and excluded[i]
+
+fn exact_key_candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates:
+    """Pairs that share an identical key (hash buckets, never all-pairs)."""
+    var buckets: {text: [i64]} = {}
+    var i = 0
+    while i < features.len():
+        if not is_skipped(excluded, i):
+            val k = features[i].key
+            if buckets.has(k):
+                var members = buckets[k]
+                members.push(i)
+                buckets[k] = members
+            else:
+                buckets[k] = [i]
+        i = i + 1
+    var pairs: [SimilarityPair] = []
+    for k in buckets.keys():
+        val members = buckets[k]
+        var a = 0
+        while a < members.len():
+            var b = a + 1
+            while b < members.len():
+                pairs.push(SimilarityPair(left: members[a], right: members[b]))
+                b = b + 1
+            a = a + 1
+    SimilarityCandidates(pairs: pairs, skipped_buckets: [], dropped_slots: 0)
+
+fn signature_bucket_candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates:
+    """Inverted index over each vector's top-N signature tokens; only pairs that
+    share a bucket are candidates (near-linear instead of all-pairs)."""
+    var token_to_indices: {text: [i64]} = {}
+    var gi = 0
+    while gi < features.len():
+        val fv = features[gi].sparse
+        if fv.magnitude != 0.0 and not is_skipped(excluded, gi):
+            for tok in feature_signature(fv, SIGNATURE_TOP_N).split(","):
+                if tok.len() > 0:
+                    if token_to_indices.has(tok):
+                        var indices = token_to_indices[tok]
+                        indices.push(gi)
+                        token_to_indices[tok] = indices
+                    else:
+                        token_to_indices[tok] = [gi]
+        gi = gi + 1
+
+    var pairs: [SimilarityPair] = []
+    var skipped: [text] = []
+    var dropped = 0
+    var seen_pairs: {text: bool} = {}
+    for tok in token_to_indices.keys():
+        val indices = token_to_indices[tok]
+        if indices.len() > MAX_BUCKET_SIZE:
+            skipped.push("'{tok}' ({indices.len()} blocks, cap {MAX_BUCKET_SIZE})")
+            dropped = dropped + indices.len()
+            continue
+        var pi = 0
+        while pi < indices.len():
+            val i = indices[pi]
+            var pj = pi + 1
+            while pj < indices.len():
+                val j = indices[pj]
+                val lo = if i < j: i else: j
+                val hi = if i < j: j else: i
+                val pair_key = "{lo}-{hi}"
+                if not seen_pairs.has(pair_key):
+                    seen_pairs[pair_key] = true
+                    pairs.push(SimilarityPair(left: i, right: j))
+                pj = pj + 1
+            pi = pi + 1
+    SimilarityCandidates(pairs: pairs, skipped_buckets: skipped, dropped_slots: dropped)
+
+fn lsh_candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates:
+    """MinHash/LSH banding over each vector's token set; bounded, never all-pairs."""
+    var streams: [[text]] = []
+    var i = 0
+    while i < features.len():
+        if features[i].sparse.magnitude != 0.0 and not is_skipped(excluded, i):
+            streams.push(sorted_tokens(features[i].sparse.features.keys()))
+        else:
+            streams.push([])
+        i = i + 1
+    val lsh_pairs = lsh_candidate_pairs_for_streams(streams)
+    var pairs: [SimilarityPair] = []
+    for p in lsh_pairs:
+        val a = p.left
+        val b = p.right
+        if a < features.len() and b < features.len():
+            if features[a].sparse.magnitude != 0.0 and features[b].sparse.magnitude != 0.0:
+                pairs.push(SimilarityPair(left: a, right: b))
+    SimilarityCandidates(pairs: pairs, skipped_buckets: [], dropped_slots: 0)
+
+fn dense_all_pair_candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates:
+    var pairs: [SimilarityPair] = []
+    var i = 0
+    while i < features.len():
+        if features[i].dense.len() > 0 and not is_skipped(excluded, i):
+            var j = i + 1
+            while j < features.len():
+                if features[j].dense.len() > 0 and not is_skipped(excluded, j):
+                    pairs.push(SimilarityPair(left: i, right: j))
+                j = j + 1
+        i = i + 1
+    SimilarityCandidates(pairs: pairs, skipped_buckets: [], dropped_slots: 0)
+
+fn long_text_all_pair_candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates:
+    var pairs: [SimilarityPair] = []
+    var i = 0
+    while i < features.len():
+        if features[i].key.len() >= TEXT_FALLBACK_MIN_LEN and not is_skipped(excluded, i):
+            var j = i + 1
+            while j < features.len():
+                if features[j].key.len() >= TEXT_FALLBACK_MIN_LEN and not is_skipped(excluded, j):
+                    pairs.push(SimilarityPair(left: i, right: j))
+                j = j + 1
+        i = i + 1
+    SimilarityCandidates(pairs: pairs, skipped_buckets: [], dropped_slots: 0)

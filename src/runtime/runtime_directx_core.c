@@ -293,6 +293,62 @@ static void rt_directx_argb_color(uint32_t argb, float color[4]) {
     color[3] = (float)((argb >> 24) & 0xffu) / 255.0f;
 }
 
+/* Replay a validated DX11 command stream into a render target. Shared by the
+ * async submission path and the synchronous readback path. Returns 0 on
+ * allocation failure. */
+static int rt_directx_replay_commands(RtDirectXDevice *dev, ID3D11Texture2D *target,
+                                      ID3D11RenderTargetView *view, const int64_t *words) {
+    uint32_t command_count = (uint32_t)words[2];
+    uint32_t command_index;
+    int64_t pos = 4;
+    for (command_index = 0; command_index < command_count; command_index++) {
+        uint32_t op = (uint32_t)words[pos + 0];
+        uint32_t record_words = (uint32_t)words[pos + 1];
+        uint32_t x = (uint32_t)words[pos + 2];
+        uint32_t y = (uint32_t)words[pos + 3];
+        uint32_t w = (uint32_t)words[pos + 4];
+        uint32_t h = (uint32_t)words[pos + 5];
+        uint32_t arg = (uint32_t)words[pos + 6];
+        if (op == RT_DX11_OP_CLEAR) {
+            float color[4];
+            rt_directx_argb_color(arg, color);
+            ID3D11DeviceContext_ClearRenderTargetView(dev->context, view, color);
+        } else if (op == RT_DX11_OP_RECT) {
+            float color[4];
+            D3D11_RECT rect;
+            rect.left = (LONG)x;
+            rect.top = (LONG)y;
+            rect.right = (LONG)(x + w);
+            rect.bottom = (LONG)(y + h);
+            rt_directx_argb_color(arg, color);
+            ID3D11DeviceContext1_ClearView(dev->context1, (ID3D11View *)view, color, &rect, 1);
+        } else {
+            D3D11_BOX box;
+            uint32_t payload_words = (uint32_t)words[pos + 7];
+            size_t image_bytes = (size_t)payload_words * sizeof(uint32_t);
+            uint32_t *image_pixels;
+            uint32_t pixel_index;
+            if (payload_words != 0 && image_bytes / sizeof(uint32_t) != payload_words) return 0;
+            image_pixels = (uint32_t *)malloc(image_bytes);
+            if (!image_pixels) return 0;
+            for (pixel_index = 0; pixel_index < payload_words; pixel_index++) {
+                image_pixels[pixel_index] = (uint32_t)words[pos + RT_DX11_RECORD_WORDS + pixel_index];
+            }
+            box.left = x;
+            box.top = y;
+            box.front = 0;
+            box.right = x + w;
+            box.bottom = y + h;
+            box.back = 1;
+            ID3D11DeviceContext_UpdateSubresource(dev->context, (ID3D11Resource *)target, 0, &box,
+                                                  image_pixels, w * sizeof(uint32_t), 0);
+            free(image_pixels);
+        }
+        pos += record_words;
+    }
+    return 1;
+}
+
 int64_t rt_directx_submission_submit(int64_t width_arg, int64_t height_arg,
                                      const int64_t *words, int64_t words_len) {
     RtDirectXSubmission *submission;
@@ -300,8 +356,7 @@ int64_t rt_directx_submission_submit(int64_t width_arg, int64_t height_arg,
     D3D11_TEXTURE2D_DESC desc;
     HRESULT hr;
     int64_t id;
-    uint32_t width, height, command_count, command_index;
-    int64_t pos = 4;
+    uint32_t width, height;
 
     if (width_arg <= 0 || height_arg <= 0 || width_arg > UINT_MAX || height_arg > UINT_MAX ||
         !rt_directx_stream_valid((uint32_t)width_arg, (uint32_t)height_arg, words, words_len)) return 0;
@@ -325,52 +380,7 @@ int64_t rt_directx_submission_submit(int64_t width_arg, int64_t height_arg,
     hr = ID3D11Device_CreateRenderTargetView(submission->device.device, (ID3D11Resource *)submission->target,
                                                NULL, &submission->view);
     if (FAILED(hr) || !submission->view) goto fail;
-    command_count = (uint32_t)words[2];
-    for (command_index = 0; command_index < command_count; command_index++) {
-        uint32_t op = (uint32_t)words[pos + 0];
-        uint32_t record_words = (uint32_t)words[pos + 1];
-        uint32_t x = (uint32_t)words[pos + 2];
-        uint32_t y = (uint32_t)words[pos + 3];
-        uint32_t w = (uint32_t)words[pos + 4];
-        uint32_t h = (uint32_t)words[pos + 5];
-        uint32_t arg = (uint32_t)words[pos + 6];
-        if (op == RT_DX11_OP_CLEAR) {
-            float color[4];
-            rt_directx_argb_color(arg, color);
-            ID3D11DeviceContext_ClearRenderTargetView(submission->device.context, submission->view, color);
-        } else if (op == RT_DX11_OP_RECT) {
-            float color[4];
-            D3D11_RECT rect;
-            rect.left = (LONG)x;
-            rect.top = (LONG)y;
-            rect.right = (LONG)(x + w);
-            rect.bottom = (LONG)(y + h);
-            rt_directx_argb_color(arg, color);
-            ID3D11DeviceContext1_ClearView(submission->device.context1, (ID3D11View *)submission->view, color, &rect, 1);
-        } else {
-            D3D11_BOX box;
-            uint32_t payload_words = (uint32_t)words[pos + 7];
-            size_t image_bytes = (size_t)payload_words * sizeof(uint32_t);
-            uint32_t *image_pixels;
-            uint32_t pixel_index;
-            if (payload_words != 0 && image_bytes / sizeof(uint32_t) != payload_words) goto fail;
-            image_pixels = (uint32_t *)malloc(image_bytes);
-            if (!image_pixels) goto fail;
-            for (pixel_index = 0; pixel_index < payload_words; pixel_index++) {
-                image_pixels[pixel_index] = (uint32_t)words[pos + RT_DX11_RECORD_WORDS + pixel_index];
-            }
-            box.left = x;
-            box.top = y;
-            box.front = 0;
-            box.right = x + w;
-            box.bottom = y + h;
-            box.back = 1;
-            ID3D11DeviceContext_UpdateSubresource(submission->device.context, (ID3D11Resource *)submission->target,
-                                                  0, &box, image_pixels, w * sizeof(uint32_t), 0);
-            free(image_pixels);
-        }
-        pos += record_words;
-    }
+    if (!rt_directx_replay_commands(&submission->device, submission->target, submission->view, words)) goto fail;
     desc.Usage = D3D11_USAGE_STAGING;
     desc.BindFlags = 0;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -506,10 +516,8 @@ int64_t rt_directx_execute_readback_checked(int64_t width_arg, int64_t height_ar
     ID3D11Texture2D *staging = NULL;
     D3D11_TEXTURE2D_DESC desc;
     D3D11_MAPPED_SUBRESOURCE mapped;
-    uint32_t width, height, command_count;
+    uint32_t width, height;
     uint64_t pixel_count;
-    int64_t pos = 4;
-    uint32_t command_index;
     int mapped_ok = 0;
     int64_t token = 0;
     HRESULT hr;
@@ -539,51 +547,7 @@ int64_t rt_directx_execute_readback_checked(int64_t width_arg, int64_t height_ar
     hr = ID3D11Device_CreateRenderTargetView(state.device, (ID3D11Resource *)target, NULL, &view);
     if (FAILED(hr) || !view) goto cleanup;
 
-    command_count = (uint32_t)words[2];
-    for (command_index = 0; command_index < command_count; command_index++) {
-        uint32_t op = (uint32_t)words[pos + 0];
-        uint32_t record_words = (uint32_t)words[pos + 1];
-        uint32_t x = (uint32_t)words[pos + 2];
-        uint32_t y = (uint32_t)words[pos + 3];
-        uint32_t w = (uint32_t)words[pos + 4];
-        uint32_t h = (uint32_t)words[pos + 5];
-        uint32_t arg = (uint32_t)words[pos + 6];
-        if (op == RT_DX11_OP_CLEAR) {
-            float color[4];
-            rt_directx_argb_color(arg, color);
-            ID3D11DeviceContext_ClearRenderTargetView(state.context, view, color);
-        } else if (op == RT_DX11_OP_RECT) {
-            float color[4];
-            D3D11_RECT rect;
-            rect.left = (LONG)x;
-            rect.top = (LONG)y;
-            rect.right = (LONG)(x + w);
-            rect.bottom = (LONG)(y + h);
-            rt_directx_argb_color(arg, color);
-            ID3D11DeviceContext1_ClearView(state.context1, (ID3D11View *)view, color, &rect, 1);
-        } else {
-            D3D11_BOX box;
-            uint32_t payload_words = (uint32_t)words[pos + 7];
-            size_t image_bytes = (size_t)payload_words * sizeof(uint32_t);
-            if (payload_words != 0 && image_bytes / sizeof(uint32_t) != payload_words) goto cleanup;
-            uint32_t *image_pixels = (uint32_t *)malloc(image_bytes);
-            uint32_t pixel_index;
-            if (!image_pixels) goto cleanup;
-            for (pixel_index = 0; pixel_index < payload_words; pixel_index++) {
-                image_pixels[pixel_index] = (uint32_t)words[pos + RT_DX11_RECORD_WORDS + pixel_index];
-            }
-            box.left = x;
-            box.top = y;
-            box.front = 0;
-            box.right = x + w;
-            box.bottom = y + h;
-            box.back = 1;
-            ID3D11DeviceContext_UpdateSubresource(state.context, (ID3D11Resource *)target, 0, &box,
-                                                  image_pixels, w * sizeof(uint32_t), 0);
-            free(image_pixels);
-        }
-        pos += record_words;
-    }
+    if (!rt_directx_replay_commands(&state, target, view, words)) goto cleanup;
 
     desc.Usage = D3D11_USAGE_STAGING;
     desc.BindFlags = 0;

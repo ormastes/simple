@@ -1,6 +1,6 @@
  PARTLY FIXED 2026-11-17: vertical hinting landed, see "Class 5 breakdown" below |# css-paint residual vs Chrome 159 (5.68% at 1x) - classification, 2026-11-17
 
-Status: classes 1 and 3 (vertical drift from fractional block margins) FIXED 2026-11-17, see skill doc "block-axis margins carry fractions" and spec block_fractional_margin_chrome159_spec; class 2 (fractional font size) and class 5 stay open.
+Status: classes 1 and 3 (vertical drift from fractional block margins) FIXED 2026-11-17, see skill doc "block-axis margins carry fractions" and specs block_fractional_margin_chrome159_spec (UA heading margins) and author_fractional_margin_chrome159_spec (author em/rem/fractional-px margins); still open in this family: percent vertical margins (not resolved against the containing width), negative em/rem vertical margins, fractional container y/height; class 2 (fractional font size) and class 5 stay open.
 Setup: seed `cargo-target-webrender-vk`, cpu_simd, Chrome 159.0.8154.6, 900x760, tolerance 8 per channel
 (`pixel_diff.spl`). Reproduced 38,905 px = 5.688% (gate says 5.68).
 
@@ -62,7 +62,7 @@ No spec, code change, catalog run or matrix run was made (nothing to prove witho
 | rank | sub-class | mismatching px | share of probe mismatch | status |
 |------|-----------|----------------|-------------------------|--------|
 | 1 | vertical metrics: y hinting missing (cap 11 vs 12 rows, x-height 8 vs 9, blurred baseline row) | 772 | 27.7% | fixed: `sfnt_render_glyph_lcd` blue-zone fit (slight autohinter) |
-| 2 | horizontal-stem edge snapping (H/e crossbars: Chrome snaps the stem's top edge to a row) | ~1,025 | ~37% | open |
+| 2 | horizontal-stem edge snapping (H/e/A crossbars) | ~1,025 | ~37% | fixed 2026-11-17: `_hstem_knots` (glyph grid mismatch 3685 -> 3079; catalog css-paint 4.01 -> 3.67). Open: curve extrema, diagonal legs |
 | 3 | low-amplitude coverage / FIR / gamma, delta 9-16 (ink 2.9% under Chrome after the fix) | ~876 | ~31% | open |
 | 4 | advance / kerning | <1% | - | none at 16 px; 8 px pen phase is owned elsewhere |
 

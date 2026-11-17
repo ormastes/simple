@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Prove every duplicate-check mode is driven through the one SimilarityAlgorithm interface.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-APP-CLI-001 — stable requirement identity for this spec.
+
+use compiler.tools.duplicate_check.similarity.{SimilarityEngine, SimilarityInput, SimilarityFeatures, similarity_for_mode, lsh_similarity, similar_pairs}
+use std.spec.step
+
+fn block_a() -> SimilarityInput:
+    val code = "fn add_items(xs, ys):\n    var total = 0\n    for x in xs:\n        total = total + x\n    return total"
+    SimilarityInput(
+        text_val: code,
+        tokens: ["fn", "add_items", "(", "xs", ",", "ys", ")", "var", "total", "=", "0", "for", "x", "in", "xs", "total", "=", "total", "+", "x", "return", "total"],
+        embedding: [0.9, 0.1, 0.3, 0.7])
+
+fn block_unrelated() -> SimilarityInput:
+    val code = "struct Color:\n    red: i64\n    green: i64\n    blue: i64\n    alpha: i64"
+    SimilarityInput(
+        text_val: code,
+        tokens: ["struct", "Color", ":", "red", "i64", "green", "i64", "blue", "i64", "alpha", "i64"],
+        embedding: [-0.1, 0.9, -0.7, 0.05])
+
+fn max_score(engine: SimilarityEngine) -> f64:
+    val a = engine.featurize(block_a())
+    val b = engine.featurize(block_a())
+    engine.score(a, b)
+
+fn unrelated_score(engine: SimilarityEngine) -> f64:
+    val a = engine.featurize(block_a())
+    val b = engine.featurize(block_unrelated())
+    engine.score(a, b)
+
+fn identical_pair_found(engine: SimilarityEngine) -> bool:
+    val feats: [SimilarityFeatures] = [engine.featurize(block_a()), engine.featurize(block_unrelated()), engine.featurize(block_a())]
+    val pairs = similar_pairs(engine, feats, [], 0.9)
+    var found_identical = false
+    var found_unrelated = false
+    for p in pairs:
+        if p.left == 0 and p.right == 2:
+            found_identical = true
+        if p.left == 1 or p.right == 1:
+            found_unrelated = true
+    found_identical and not found_unrelated
+
+describe "duplicate-check SimilarityAlgorithm interface":
+    it "selects a named implementation for every mode":
+        step("Verify: selects a named implementation for every mode")
+        # @req: REQ-APP-CLI-001
+        expect(similarity_for_mode("token", false).name()).to_equal("token")  # oracle: token — line-window hashing
+        expect(similarity_for_mode("cosine", false).name()).to_equal("cosine")  # oracle: cosine — token frequency
+        expect(similarity_for_mode("semantic", false).name()).to_equal("semantic")  # oracle: semantic — doc words
+        expect(similarity_for_mode("semantic", true).name()).to_equal("semantic+lsh")  # oracle: semantic+lsh — LSH prefilter wraps it
+        expect(similarity_for_mode("semantic-llm", false).name()).to_equal("semantic-llm")  # oracle: semantic-llm — embeddings
+        expect(similarity_for_mode("semantic-text", false).name()).to_equal("semantic-text")  # oracle: semantic-text — text fallback
+        expect(lsh_similarity().name()).to_equal("cosine+lsh")  # oracle: cosine+lsh — MinHash/LSH prefilter
+        expect(similarity_for_mode("token", false).groups_by_exact_key()).to_equal(true)  # oracle: true — token groups by hash key
+        expect(similarity_for_mode("cosine", false).groups_by_exact_key()).to_equal(false)  # oracle: false — cosine scores pairs
+
+    it "scores identical blocks at max similarity in every mode":
+        step("Verify: scores identical blocks at max similarity in every mode")
+        # @req: REQ-APP-CLI-001
+        for mode in ["token", "cosine", "lsh", "semantic", "semantic-llm", "semantic-text"]:
+            expect(max_score(similarity_for_mode(mode, false)) >= 0.999).to_equal(true)  # oracle: true — identical input is max similarity
+
+    it "scores unrelated blocks low in every mode":
+        step("Verify: scores unrelated blocks low in every mode")
+        # @req: REQ-APP-CLI-001
+        for mode in ["token", "cosine", "lsh", "semantic", "semantic-llm", "semantic-text"]:
+            expect(unrelated_score(similarity_for_mode(mode, false)) < 0.5).to_equal(true)  # oracle: true — disjoint content scores low
+
+    it "finds the identical pair and drops the unrelated block through candidates + threshold":
+        step("Verify: finds the identical pair and drops the unrelated block through candidates + threshold")
+        # @req: REQ-APP-CLI-001
+        for mode in ["token", "cosine", "lsh", "semantic", "semantic-llm", "semantic-text"]:
+            expect(identical_pair_found(similarity_for_mode(mode, false))).to_equal(true)  # oracle: true — only (0,2) is similar

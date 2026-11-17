@@ -13,7 +13,8 @@
  *     the target of every sled's CALL. Simple twin + unwind encoder:
  *     src/lib/common/trace/xray_native_trampoline_win64_v1.spl, compared byte
  *     for byte by scripts/check/check-xray-native-win64-objects.shs.
- *  2. The registration sled leaf (same contract as SysV).
+ *  2. The registration sled leaf (same contract as SysV; shared body in
+ *     xray_native_registry_v1.h, XMAP_X64_REL32_SLED_LEAF).
  *  3. The registry/handler (xray_native_registry_v1.h) with the Windows
  *     text_base rule: the map header's text_base field holds the .text RVA
  *     (IMAGE_REL_AMD64_ADDR32NB), resolved against this module's __ImageBase.
@@ -53,27 +54,14 @@ extern const uint8_t __ImageBase[];
 #define XMAP_ON_WORD 0x9066u  /* 66 90  2-byte nop */
 /* The CALL at +2 returns to +7. */
 #define XMAP_RETURN_TO_SLED 7
+/* xray_isa_sled_calls_trampoline comes from xray_native_registry_v1.h. */
+#define XMAP_X64_REL32_SLED_LEAF 1
 
 #ifdef SIMPLE_XRAY_NATIVE_SUPPORTED
 
 /* The registry header calls the trampoline __simple_xray_trampoline_v1. */
 #define __simple_xray_trampoline_v1 __simple_xray_trampoline_win64_v1
 extern void __simple_xray_trampoline_v1(void);
-
-/* Registration leaf: activation word OFF or ON, `E8 rel32` at +2 reaching
- * THIS runtime's trampoline, `EB 04` at +7, imm32 at +9 == the row's id. */
-static int xray_isa_sled_calls_trampoline(uintptr_t sled, uint32_t site_id) {
-    const volatile uint8_t *bytes = (const volatile uint8_t *)sled;
-    uint32_t word = __atomic_load_n((const uint16_t *)sled, __ATOMIC_RELAXED);
-    if (word != XMAP_OFF_WORD && word != XMAP_ON_WORD) return 0;
-    if (bytes[2] != 0xE8 || bytes[7] != 0xEB || bytes[8] != 0x04) return 0;
-    uint32_t rel = (uint32_t)bytes[3] | ((uint32_t)bytes[4] << 8) | ((uint32_t)bytes[5] << 16) |
-                   ((uint32_t)bytes[6] << 24);
-    uint32_t id = (uint32_t)bytes[9] | ((uint32_t)bytes[10] << 8) | ((uint32_t)bytes[11] << 16) |
-                  ((uint32_t)bytes[12] << 24);
-    if (id != site_id) return 0;
-    return sled + 7 + (uintptr_t)(int64_t)(int32_t)rel == (uintptr_t)&__simple_xray_trampoline_v1;
-}
 
 /* Frame (0x238 bytes below rbp-after-pushes): [rsp+0x00..0x20) shadow space,
  * ymm0-15 at +0x20, MXCSR at +0x220. Above rbp: rbp+0x00..0x30 = r11 r10 r9 r8

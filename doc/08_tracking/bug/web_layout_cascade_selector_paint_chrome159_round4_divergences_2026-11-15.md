@@ -43,14 +43,9 @@ Found while raising unit coverage of `layout_with_style_flow`
 
 ### Selectors (width 77 = match, 10 = no match)
 
-| case | selector | markup | Chrome | actual |
-|---|---|---|---:|---:|
-| webkit_unknown_class | `div, p:-webkit-frob` | `<div id="t"></div>` | 10 | 77 |
-| class_after_element | `div, p::before:hover` | `<div id="t"></div>` | 10 | 77 |
-| element_in_not | `div, :not(::before)` | `<div id="t"></div>` | 10 | 77 |
-| nth_of_type_of_s | `div, b:nth-of-type(1 of p)` | `<div id="t"></div>` | 10 | 77 |
-
-The four open rows above are known-permissive gaps in `selector_list_has_unknown_pseudo` (it keeps a rule Chrome drops). Their Chrome value comes from a Chrome 159.0.8154.6 `<style>` probe: `sheet.cssRules.length` is 0 for each selector (2026-11-17).
+No open rows. The four permissive rule-admission rows (`webkit_unknown_class`,
+`class_after_element`, `element_in_not`, `nth_of_type_of_s`) are fixed; see
+"Fixed" below.
 
 ### Painted pixels (RRGGBB at x:y)
 
@@ -78,6 +73,8 @@ same harnesses where the renderer agrees with Chrome; every row above is
 kept out of them until fixed.
 
 ## Fixed
+
+- `webkit_unknown_class`, `class_after_element`, `element_in_not`, `nth_of_type_of_s` (2026-11-17): `selector_list_has_unknown_pseudo` (`simple_web_html_layout_renderer_core_rule_index.spl`) kept four rules Chrome 159.0.8154.6 drops. (1) Every `:-webkit-*` pseudo-class was accepted; now only the seven Chrome accepts (`-webkit-any`, `-webkit-any-link`, `-webkit-autofill`, `-webkit-drag`, `-webkit-full-page-media`, `-webkit-full-screen`, `-webkit-full-screen-ancestor`) are in `CSS_KNOWN_PSEUDO_CLASSES`. (2) A pseudo-class after a pseudo-element was never checked; now `_css_pseudo_class_allowed_after` encodes the measured per-element table (`::part()`/`::details-content`/`::picker()` take any known non-structural class; `::-webkit-scrollbar*`/`::-webkit-resizer` the scrollbar set; other `::-webkit-*`, `::file-selector-button`, `::cue` the user-action set; `::selection` only `:window-inactive`; `::search-text` only `:current`; `::view-transition-*()` only `:only-child`; `::scroll-button`/`::scroll-marker` user-action plus their states; everything else none; `:is()`/`:where()` after any; `:not()` checks its argument against the same element). Legacy `:before`/`:after`/`:first-line`/`:first-letter` count as pseudo-elements, and a class/id/attribute after a pseudo-element drops the rule. (3) A pseudo-element (`::x` or legacy `:before`) inside `:not()` or `:has()` drops the rule; inside `:nth-child(.. of S)` Chrome accepts it. (4) `of S` on `:nth-of-type()`/`:nth-last-of-type()` drops the rule. Also added: the 11 scrollbar state names (`:horizontal`, `:window-inactive`, ...), which Chrome accepts on their own and the renderer used to DROP. Pinned by 26 new rows in `layout_renderer_selector_structural_chrome159_spec` (71 -> 97; 14 red at base, all green). Still open (measured, not fixed): `:-internal-*` is accepted wholesale (Chrome accepts only some, e.g. `-internal-autofill-selected`, and drops `:-internal-foo`); pseudo-class arity is not checked (`:-webkit-any` without parens, `:-webkit-autofill(p)` are dropped by Chrome); a combinator after a pseudo-element (`::before > p`, `::part(x) p`) is still kept; `::marker::before` (dropped) vs `::before::marker` (accepted) ordering is not checked. Gates (seed `cargo-target-webrender-blend`, base `83bb26da9b2` vs head, serial, failing NAMES compared): structural spec 83/97 -> 97/97 (14 fixed); parsed_equivalence 10/10, compound_any_order 9/9, of_type 7/7, selector_helpers 12/12, selector_matching 58/58, attr_select 11/11, nth_child_of_selector 28/28, selector_hardening 42/42, structural_pseudo_class 114/114 on both; simple_web_renderer 106/123, `_coverage_spec` 37/39 and module_split 1/3 fail the same names on both (0 new); combo matrix 979 cells, 88 mismatching on both, identical id set.
 
 - `block_min_max` (2026-11-16): `constrained_outer_width` applied min-width before max-width, so a smaller max-width won; the auto-margin centring clamp ignored min-width entirely. Both now apply max first, then min (CSS 2.1 10.4). Pinned by `test/01_unit/browser_engine/min_width_beats_max_width_chrome159_spec.spl` (percentage, px and auto width, padding/border, auto margins; Chrome 159 values).
 - `casc_rem_width` (2026-11-16): every `rem` was resolved against a fixed 16px. The cascade now records the `html` element's computed font-size (`css_cascade_root_font_set`, `..._declarations.spl`) and `rem` in width/height, padding, font-size and min/max-width reads it. The `margin-left`/`margin-right` longhands also parsed `em`/`rem` as 0 (bare `parse_int`); they now resolve them. Pinned by `test/01_unit/browser_engine/rem_uses_root_font_size_chrome159_spec.spl` (Chrome 159 values). Still open: the `margin` shorthand, `margin-inline-*`, and vertical margins in `em`/`rem`.
@@ -183,6 +180,9 @@ kept out of them until fixed.
         - Still open: rounded-corner gradient rows composite per pixel in Simple (as before; the square path is native).
   - **Perf, gradient layer stacks (2026-11-17):** one raster + two `cpu_simd` renders at 640x480, `/usr/bin/time` under `systemd-run MemoryMax=8G`, seed `/home/yoon/.cache/cargo-target-webrender-vk/release/simple` (59635056 bytes, mtime 2026-11-14 09:32, sha256 08aba9746a813ee7...), hybrid JIT/interpreter (`hybrid-interp-splice` demotion), host load ~1.5-2. Mode: hybrid (`[engine-demotion] reason=hybrid-interp-splice`), NOT the pure interpreter of the #9960 numbers above (~20 s for the same page there), so do not compare across the two entries. `10-radial-gradient.html`: base 7.88 / 9.42 / 8.47 s, head 10.38 / 7.77 / 7.78 s, max RSS 1.40-1.42 GB both, so no change beyond noise (the radial path only gained the shared LUT helper). A 640x480 stack page (the same 530x300 tile with `radial-gradient(circle at 30% 40%, rgba(255,0,0,0.8), transparent 60%), linear-gradient(33deg, #0088ff, #ffe000 60%, #88ffbb)`): base 10.74 / 12.22 / 12.53 s at 2.00-2.05 GB (and wrong: 159,000 px raster vs `cpu_simd`), head 8.25 / 7.77 / 10.23 s at 1.40-1.42 GB (raster == `cpu_simd`). The two painted layers cost no measurable time over the old raw-text path.
   - **Open, perf regression from the 2026-11-17 radial fix:** `test/fixtures/html_css/corpus/cases/10-radial-gradient.html` at 640x480, one raster + two cpu_simd renders, `/usr/bin/time -v` under `systemd-run MemoryMax=8G`, seed `/home/yoon/.cache/cargo-target-webrender-vk/release/simple` (59635056 bytes, mtime 2026-11-14 09:32:20): base 4.62 s / 718 MB max RSS, head 20.05 s / 717 MB, so ~1 s -> ~6 s per render net of ~1.4 s startup. Base flattened the radial to its first stop (almost no work); head evaluates 159,000 radial px per render (per-pixel seeded isqrt + LUT lookup). Interpreter only, JIT unmeasured (next item). Upgrade path: evaluate the radial on the device in a shader for Vulkan, and vectorise the per-row evaluator for cpu_simd.
+  - **Vulkan half fixed 2026-11-17 (device gradient layer kernel):** `shaders/gradient_layer.comp` evaluates radial / linear gradient layers on the device, so the Vulkan lane no longer runs `radial_gradient_pixels` / `linear_gradient_pixels` on the host or uploads their pixels. The host uploads a 4-word header, the same 1025-entry stop ramp and O(w + h) per-column / per-row geometry terms (`radial_gradient_device_tables` / `linear_gradient_device_tables`, `backend_emu`); the kernel computes t with the host's exact integer math in 32-bit only (the seed's interpreter device enables no `shaderInt64`: `(hi, lo)` pairs via `umulExtended` / `uaddCarry`, float-seeded isqrt with exact integer correction, restoring 64/32 division) and composites with Chrome's layer rule. Measured, same seed (`/home/yoon/.cache/cargo-target-webrender-vk/release/simple`, 59635056 bytes, mtime 2026-11-14 09:32:20, sha256 08aba9746a813ee7...), `10-radial-gradient.html` at 640x480 on Vulkan (lavapipe, `VK_DRIVER_FILES=.../lvp_icd.json`), three renders in one process, `/usr/bin/time -v` under `systemd-run MemoryMax=8G`, host load ~5.3-8.6: **interpreter** (`SIMPLE_EXECUTION_MODE=interpreter`) base 5364 / 4885 / 4902 ms per render, 707 MB max RSS; head 1760 / 1560 / 1560 and 1935 / 1586 / 1580 ms, 730-735 MB. **Hybrid default mode:** base 227 / 7 / 6 and 47 / 6 / 5 ms, 1.43 GB; head 113 / 3 / 2 and 52 / 2 / 3 ms, 1.44-1.49 GB (first render includes session start; one more lavapipe pipeline compiles there). Pixel samples identical base vs head. The cpu_simd half (vectorise the per-row evaluator) stays open; the host radial evaluator now reads per-column / per-row axis tables (`_emu_radial_axis_t16`) instead of recomputing u per pixel.
+  - **Resolved 2026-11-17 by #9993 (blend rounding, `a44733b2237`), rebased onto it:** with the rebuilt seed `/home/yoon/.cache/cargo-target-webrender-blend/release/simple` (60799992 bytes, mtime 2026-11-17 16:01, sha256 `119feb0f865390b5dabb084e8b3ec94a4e5dbb391ffae2339b9af6fc7bd01b91`) the glass-blur stack row passes unedited (15/15). Base (`a44733b2237`) vs head, same seed, 11 specs: no new failing name; the only failing names on both sides are the known private-import rejections (`simple_web_renderer_spec` 17, `web_device_scale_spec` 2) plus `simple_web_html_layout_renderer_coverage_spec` "rasters a text run carrying decoded numeric entities" / "rasters rounded corners under fractional opacity" (red on base too). `backend_vulkan_device_gradient_spec` base 3/10 -> head 10/10 (the out-of-range row was added after the base run; head 11/11). Decline rows added: a masked layer and an out-of-range linear line (len2 >= 2^48, projection >= 2^46) decline to the host evaluator (device +0, host +1, pixels == cpu_simd); red when the guard is removed (8246 masked-off pixels painted; 14000 px differ). A clipped layer stays on the device and paints only inside the clip. Perf, `10-radial-gradient.html` 640x480, `SIMPLE_EXECUTION_MODE=interpreter` (hybrid `run` fails on this seed at base and head with the private-import rejection), lavapipe, 3 processes x 3 renders, median, load 4.7-7.5: Vulkan steady render base 4966 ms -> head 1629 ms, process wall 15.91 -> 6.67 s, max RSS 738,916 -> 730,676 KB; cpu_simd 7645 -> 7510 ms, 25.42 -> 25.58 s, 668,736 -> 668,984 KB (cpu_simd shares the refactored table-driven host radial evaluator, `_emu_radial_axis_t16`; -1.8% steady render, outside the 7622-7651 ms base spread; RSS flat). Sample checksums identical base vs head on both lanes.
+  - **Was open, composite-rule split (2026-11-17, before #9993):** the device kernel composites with Chrome 159's layer rule (`round(s*a/255) + div255r(d*(255-a))`, `chrome_layer_src_over` in `gradient_layer.comp`), while the cpu_simd host composite still truncates (`color.spl` `blend`, owned by a parallel lane). Device vs cpu_simd at k=4: S1 11,880 / 20,480 px, S2 10,944 / 20,480, S3 11,437 / 40,960 differ, every one by exactly 1 level; L1, L1B, L2, D and radial A-C 0. The Engine2D-level oracle rows (`backend_vulkan_device_gradient_spec`) prove the device equals host evaluator colours + the Chrome rule bit for bit, so the split is the composite rule alone. This flips `backend_vulkan_device_glass_blur_spec` "composites CSS gradient layer stacks on the device at device scale 4 exactly as cpu_simd does" (S1, S2, S3 sub-expectations) until the host blend adopts the same rounding; the row was not edited. A destination with alpha < 255 is outside Chrome's stated rule: the kernel runs the host's straight-alpha src-over with each truncating divide rounded (a premultiply-first form was tried and measured up to 64 levels off over a transparent destination). Measured on one translucent radial vs cpu_simd: transparent destination 0 px differ; 0x80336699 destination 13,330 / 19,200 px, max 2 levels; opaque 12,817 px, max 1. Reconcile with the host lane.
   - **Open, JIT demotion:** `use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}` plus `fn main(): print "x"` demotes the whole module to the interpreter on that seed (`HIR lowering error: Unsupported feature: cannot infer field type while lowering interpolate: struct 'ANY' field 'b'`), at base `758cb6bf16d` and head alike; the same file without the import runs JIT.
   - **Pre-fix analysis:** The raster's `fb_background_radial_stack_clip` paints, per layer, the first colour stop at alpha `a0 * (rstop - isqrt(d2)) / rstop` (strictly inside `rstop`), centred at the layer's position percent with `rstop` = farthest-corner distance times the transparent-stop percent, clipped to box ∩ clip, blended with `composite_over_base`. Engine2D's radial path (`draw_ir_adv.spl` -> `emu_draw_radial_gradient_stops`, `backend_emu.spl:1277`) differs on every axis read: centre `x+w/2, y+h/2` and radius `max(w,h)/2` from the command box, `d <= r` inclusive, colour interpolated by permille position, emitted through opaque `draw_rect_filled` runs (no alpha blend), and it scans the whole circle, not box ∩ clip. A port was not attempted: an exact match needs the raster's distance, alpha and blend math as an Engine2D primitive on `cpu_simd` and the Vulkan device (or O(w*h) 1x1 rects, rejected as unbounded per frame). Reach is fixture-only (legacy widget mode); deleting legacy widget mode remains the owner-call alternative.
 - `paint_input_text_glyph_cap`, `simple_web_renderer_spec` "shares transformed aligned clipped themed input text with Draw IR" (2026-11-16, 3 → 2 red rows).
@@ -199,14 +199,14 @@ kept out of them until fixed.
       - `web_draw_ir_clip_cache_contract_spec`: query clip height 13 -> 10; `#hint` clip 20x14 -> 16x10 (Chrome border-box content box). Its stale `hin` pin, left over from the glyph cap removed in #9786 (`paint_input_text_glyph_cap`), is now `hint`. Chrome 159 keeps the 25.80px placeholder whole in the 16px content box and clips it. The spec is now 2/2 (base 1/2).
     - Gates after the four behaviours (2026-11-16): combo matrix 979 cells, 88 mismatching (no change). Catalog 1x PASS, worst 6.80, forms-media 6.08 (no change), animation 6.75 -> 6.68 (baseline lowered). Regression over 26 specs, base -> head: no head-only failure.
     - **Still open (measured with the same Chrome page):**
-      - Checkbox/radio ignore an authored size: the engine stays 13x13, Chrome gives 40x16 at (4,179) / (5,198). The 13x13 frame and the check paint would both have to follow.
-      - `type=image` still carries the UA 2px border: engine 48x24, Chrome 44x20 (border 0).
-      - `<textarea>` and `<select>` are border-box in Chrome (40x16); the engine is content-box (46x22).
+      - Checkbox/radio ignore an authored size: the engine stays 13x13, Chrome gives 40x16 at (4,179) / (5,198). The 13x13 frame and the check paint would both have to follow. **Fixed 2026-11-17** (`form_control_authored_size`, below).
+      - `type=image` still carries the UA 2px border: engine 48x24, Chrome 44x20 (border 0). **Fixed 2026-11-17.**
+      - `<select>` is border-box in Chrome (40x16); the engine was content-box (46x22). **Fixed 2026-11-17.** `<textarea>` is NOT: border-box is a quirks-mode reading. Chrome 159 standards mode (`<!DOCTYPE html>`) gives 46x22 content-box, which the engine already matched.
       - The default width of `type=button`/`submit` is 185 in the engine; Chrome is 33.78/57.48, the label width plus 6px padding.
-      - `glyph_rows_for_char` / `glyph_index_for_char` in `common/ui/glyph_bitmap_5x7.spl` gate on `ch.len() == 1`, which counts BYTES, so a 3-byte `•` still resolves to the unknown box through Engine2D's `glyph_data`. The browser paint path (`glyph_index_for_char_code` on decoded codepoints) uses the new cell. The Engine2D page frame paints discs byte-equal to the software raster (`input_password_mask_chrome159_spec` AC-4), so this gate is not on that path; it bites direct `glyph_data` callers. The Vulkan bitmap-font atlas covers only ASCII 32..126 and rejects any run with another character, so the Vulkan rows prove that the device presents the Engine2D frame, not a GPU glyph path for U+2022.
+      - `glyph_rows_for_char` / `glyph_index_for_char` in `common/ui/glyph_bitmap_5x7.spl` gate on `ch.len() == 1`, which counts BYTES, so a 3-byte `•` still resolves to the unknown box through Engine2D's `glyph_data`. The browser paint path (`glyph_index_for_char_code` on decoded codepoints) uses the new cell. The Engine2D page frame paints discs byte-equal to the software raster (`input_password_mask_chrome159_spec` AC-4), so this gate is not on that path; it bites direct `glyph_data` callers. The Vulkan bitmap-font atlas covers only ASCII 32..126 and rejects any run with another character, so the Vulkan rows prove that the device presents the Engine2D frame, not a GPU glyph path for U+2022. **Fixed 2026-11-17** (`glyph_lookup_codepoint`, below); correction: on the current seed `text.len()` counts codepoints (`"•".len()` 1, `byte_len()` 3), so the gate only misfires under the byte-unit `len()`.
       - The engine inks one column past its measured text run: `ABC` at 8px is measured 16 wide but inks columns 1..16, so an end-aligned run in a 96px block loses its column at x=96. `direction_rtl_bidi_order_chrome159_spec` compares only in-viewport columns because of this.
     - **RTL reversal** (`rtl_latin_reversal`) — **fixed 2026-11-16** (owner decision "all same as chrome"). Chrome 159 measurements (96px block, 8px Arial, `Range` rects): rtl `ABC` puts A 79.55, B 84.88, C 90.22 (ink 79..95), the same glyph order as ltr (0, 5.33, 10.67), only end-anchored. In rtl `ABC!` the `!` sits at 77.31, left of A, so the visual order is `!ABC`. Rtl `אבC` puts C 80.41, ב 86.19, א 90.97 (visual `Cבא`). Carets of an rtl `abé` are 82.64, 87.08, 91.53, 95.98 (ascending). A 60px rtl input `ABCDE` inks 29..56. Fix: `bidi_visual_text_for_rtl` (`..._paint_primitives.spl`) is a reduced UAX #9 with one RTL embedding level: L runs (letters and digits, plus the neutrals between two of them) keep their order; runs, R/AL characters and edge neutrals are laid out right to left. It replaces `reverse_text_for_paint` at all six sites, including the `core.spl` advance-metric table, which must see the same visual string. `input_text_visual_map` mirrors caret boundaries only when the value has a strong RTL character (`text_has_rtl_strong`). `reverse_text_for_paint` is kept as the codepoint reverser for fallback and its helper specs. Software, Engine2D and a lavapipe Vulkan device readback paint the logical order; the device frame equals the Engine2D CPU frame. Pinned by `test/01_unit/browser_engine/direction_rtl_bidi_order_chrome159_spec.spl` (base 1/6, head 6/6; base passes only the Hebrew row AC-3). Rows corrected to Chrome: `simple_web_renderer_spec` themed input (`KJIHGFEDCBA` -> `ABCDEFGHIJK`), `web_draw_ir_clip_cache_contract_spec` (same), `browser_renderer_spec` "renders direction rtl Latin text in logical glyph order, end-anchored" (ink count equal to ltr, pixels differ from both ltr and `CBA`, no ink in the left half), the paint_layout coverage closure "keeps RTL Latin #text in logical order" (`abc`, rtl x > ltr x), and `simple_web_input_overlay_spec` "maps RTL Latin source boundaries to ascending visual x" (was descending). Not covered: explicit bidi controls, mirrored brackets, numbers inside RTL text (digits count as L), and multi-line RTL wrap order.
-    - **Password mask glyph** (`password_mask_glyph`) — **fixed 2026-11-16** (owner approval "all same as chrome"). Chrome 159 computes `-webkit-text-security: disc` and paints one U+2022 per codepoint; with 8px Arial in a 60x16 box, the three discs of `ABC` ink rows 8..9 (the vertical middle) and columns 3..10, and `measureText` gives 2.80 (`*` 3.11, inking rows 6..7). The engine used `*`. Fix: `INPUT_PASSWORD_MASK_GLYPH` (`•`) at all three mask sites in `..._paint_raster.spl` (painted text, visual map, caret prefix). The shared 5x7 table had no U+2022 cell, so the glyph was appended at index 88 (rows 2..4, `01110`), outside the ASCII `FONT_CHARSET`; the Engine2D atlas unknown slot moved 88 -> 89 (count 90). Software, Engine2D and a lavapipe Vulkan device readback (`device_readback`) all ink rows 6..8, and the device pixels are byte-equal to software. Pinned by `test/01_unit/browser_engine/input_password_mask_chrome159_spec.spl` (base 0/5, head 5/5). Rows re-pinned to `•`: `input_text_overflow_clip_chrome159_spec` AC-3, `simple_web_renderer_spec` "emits input values as Draw IR text", `simple_web_input_overlay_spec` "keeps password cleartext out". **Still open:** the engine advances U+2022 by 5px (the bitmap cell); Chrome uses 2.8px, so the three discs span columns 4..16 instead of 3..10.
+    - **Password mask glyph** (`password_mask_glyph`) — **fixed 2026-11-16** (owner approval "all same as chrome"). Chrome 159 computes `-webkit-text-security: disc` and paints one U+2022 per codepoint; with 8px Arial in a 60x16 box, the three discs of `ABC` ink rows 8..9 (the vertical middle) and columns 3..10, and `measureText` gives 2.80 (`*` 3.11, inking rows 6..7). The engine used `*`. Fix: `INPUT_PASSWORD_MASK_GLYPH` (`•`) at all three mask sites in `..._paint_raster.spl` (painted text, visual map, caret prefix). The shared 5x7 table had no U+2022 cell, so the glyph was appended at index 88 (rows 2..4, `01110`), outside the ASCII `FONT_CHARSET`; the Engine2D atlas unknown slot moved 88 -> 89 (count 90). Software, Engine2D and a lavapipe Vulkan device readback (`device_readback`) all ink rows 6..8, and the device pixels are byte-equal to software. Pinned by `test/01_unit/browser_engine/input_password_mask_chrome159_spec.spl` (base 0/5, head 5/5). Rows re-pinned to `•`: `input_text_overflow_clip_chrome159_spec` AC-3, `simple_web_renderer_spec` "emits input values as Draw IR text", `simple_web_input_overlay_spec` "keeps password cleartext out". **Still open:** the engine advances U+2022 by 5px (the bitmap cell); Chrome uses 2.8px, so the three discs span columns 4..16 instead of 3..10. **Fixed 2026-11-17** (`password_mask_advance`, below).
     - **Overflowing button label** (`button_label_overflow`) — **fixed 2026-11-16** (owner approval "all same as chrome"). Chrome 159, 30px border-box submit/button/reset with a 1px white border, 2px padding, 8px Arial, value `ABCDEFGHIJK` (scrollWidth 58 > clientWidth 28): ink columns 3..28. It starts at the content x and runs into the right padding. Nothing is inked at x>=29, so the clip is the **padding box**; the note above said border box, which Chrome does not measure. Under `direction:rtl` the ink is 1..26, end-anchored at the content right edge 27. A fitting `ABC` in an 80px submit stays centred (ink 31..47). Fix in `input_text_paint_plan`: a button label is centred only when it fits, and overflow uses the same start/RTL-end rule as a text value; the clip is the padding box for the three button types only. The engine now inks 3..28, 1..26 and 32..46 on software, Engine2D and a lavapipe Vulkan device readback, which is byte-equal to software. Pinned by `test/01_unit/browser_engine/input_button_label_overflow_chrome159_spec.spl` (base 0/6, head 6/6; on base AC-4 failed only on the clip, 3,67,74,10 vs 1,65,78,14).
     - **Dead helper:** `input_text_prefix` has no `src` caller left. Two specs (`non_ascii_byte_index_helpers_spec`, the paint_layout coverage-closure spec) still test it, so removing it is left to the owner.
 - `select_ua_background` (2026-11-16, catalog forms-media 6.37 -> 6.08 at 1x): no UA background existed for `<select>`, so the catalog's "Choice" select showed the page through where Chrome paints ButtonFace. Chrome 159 computes `background-color: rgb(239, 239, 239)` for every select, but only PAINTS it once the author styles the box: any `border*` (radius alone is enough), `background*`, `box-shadow` or non-`auto` `appearance` (incl. `-webkit-appearance:none`) declaration. An unstyled select keeps the native menulist white field; `padding`, `color` and `font-size` do not count (measured one property per select, screenshot pixel 3 px inside the left edge). A listbox (`multiple`, or `size` > 1) paints a white `Field` even with an author border. Fix: `form_control_ua_box_decls` adds `background-color:#efefef` for a menulist select and `#fff` for a listbox, and the cascade tail paints `#fff` when `_select_author_styled` finds none of those declarations (`..._core.spl`). Pinned by `test/01_unit/browser_engine/select_ua_background_chrome159_spec.spl` (base 1/6, head 6/6).
@@ -235,7 +235,7 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
 - **Chrome 159 rule:** premultiplied layer, restore with SkBlendARGB32 at `A = round(opacity*255)` (`sc = A+1`, `ds = (p + (p>>8)) >> 8` with `p = 0xFFFF - La*sc`, `out = (L*sc + D*ds) >> 8`). Fit 601884/604800 and 602574/604800 channels; every miss is a Chrome raster-tile seam (device columns just left of x = 256*k, k >= 2, +-1..2, group pages only, fixed in device space when content shifts 16 px). Control page without a group: 604800/604800.
 - **Fix:** `engine2d/css_opacity_group.spl` (math), Draw IR bounded group surfaces + `draw_ir_composite_readback_css_group`, Vulkan device restore `shaders/css_group_restore.comp` (`draw_ir_composite_device_css_group`, no readback), raster `paint()` group front end. A box's background + border is a two-item group on every lane (Chrome `ff7e7e`/`7e7eff`). Pinned by `test/01_unit/browser_engine/opacity_group_chrome159_spec.spl` (raster, cpu_simd, Vulkan == cpu_simd, k=4 full frame across a seam <= 2).
 - **Re-pinned with a Chrome citation:** `fractional_subtree_opacity_spec` pixels `ff8080/8080ff` -> Chrome `ff7e7e/7e7eff`; its surface width 16 -> 12 is Simple-internal (layer bounded to the subtree's clipped bounds).
-- **Still open:** multi-root Draw IR pages where any root holds text, a shadow or an outline still lose all opacity on cpu_simd/Vulkan (pre-existing, unchanged: pixel-identical to base on a probe page with a shadow root, an outline root, a bg+border root and a text root); nested groups; translucent/shadow/gradient/image members on the raster lane (layer alpha, kept on the per-element path); the single-item path (`opacity_box`, `ff8080` vs `ff7f7f`) belongs to the blend lane.
+- **Still open:** multi-root Draw IR pages where any root holds text, a shadow or an outline still lose all opacity on cpu_simd/Vulkan (pre-existing, unchanged: pixel-identical to base on a probe page with a shadow root, an outline root, a bg+border root and a text root); nested groups (fixed, see the nested-group entry below); translucent/shadow/gradient/image members on the raster lane (layer alpha, kept on the per-element path); the single-item path (`opacity_box`, `ff8080` vs `ff7f7f`) belongs to the blend lane.
 - **Perf** (12 groups of 140x60 with 3 children on 600x200; seed sha256 08aba9746a813ee7; median of 3; base painted these groups with NO opacity):
 
   | lane | base | head |
@@ -246,6 +246,57 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
   | max RSS (whole run) | 969 MB | 996 MB |
 
   Vulkan per group before the device kernel: render 15 ms, layer readback 45 ms, destination region readback 713 ms (whole-frame read), .spl restore 28 ms, upload 87 ms; after: create 1 ms, render 15 ms, device restore 2-5 ms.
+
+## 2026-11-17 — nested `opacity` groups: fixed
+
+- **Was:** a group inside a group painted flat on every lane. The Draw IR producer refused `parent_root >= 0` (so the page had no opacity at all on cpu_simd/Vulkan), and the raster rejected nested groups (members unfaded). Measured at base on the nested page: `fa141e` where Chrome gives `913672`.
+- **Chrome 159:** every level is restored into its parent's premultiplied layer with SkBlendARGB32, in tree order. There is no fold, even for an outer group whose only item is the inner group. A model reproduces all 37 sampled cells.
+- **Fix:**
+  - Draw IR: the producer builds a root tree (max nest level 2), tags nested commands with `css-opacity-group-nest`, and scales that prop under device scale.
+  - `draw_ir_adv` renders each nested run as a group batch one embed depth deeper. On Vulkan the device restore goes into the translucent parent layer; the existing shader handles it.
+  - Raster: a recursive layer paint with a tree-order interleave of nested restores and positioned boxes painted after them.
+- **Pinned** by `opacity_group_chrome159_spec`: 4 new rows covering 37 cells on raster, cpu_simd and Vulkan, plus Vulkan device-restore count 18 and the k=4 full frame of 3 blocks, exact.
+- **Base vs head:** a 25-spec list ran serially, comparing failing names, with 0 new and 0 fixed (pre-existing reds unchanged). The 25 specs: opacity_group_chrome159, fractional_subtree_opacity, simple_web_renderer, simple_web_html_layout_renderer_coverage, simple_web_engine2d_renderer, iframe_draw_ir_embedding, cpu_simd_paint, tile_paint_parity ×2, vulkan_device_glass_blur, spirv_blob_bare_hex_words, web_device_scale, embedded_surface, linear_gradient_angle ×2, opacity_row_kernel_parity, draw_ir_adv, draw_ir_adv_branch_coverage, draw_ir_adv_native_optional_contract, paint_primitives/paint_layout/core_pure_helpers/paint_tiles_gpu coverage closures, module_split, scan_index_space.
+- **Perf** (600x200; whole process `seed run`, median of 3, host load ~10, seed `cargo-target-webrender-blend`; base painted the nested page FLAT):
+
+  | page / lane | base | head |
+  |---|---|---|
+  | 12 groups, raster | 5.43 s | 2.93 s |
+  | 12 groups, cpu_simd | 8.56 s | 6.01 s |
+  | 12 groups, Vulkan | 6.14 s | 9.15 s |
+  | 12 nested (2-level) groups, raster | 4.40 s | 5.89 s |
+  | 12 nested groups, cpu_simd | 5.37 s | 5.83 s |
+  | 12 nested groups, Vulkan | 5.73 s | 7.49 s |
+  | max RSS | 741 MB | 748 MB |
+
+  The 12-group page takes the same code path at base and head, so its spread (2.9-10.4 s across runs) is host noise. The nested page's added cost is the extra layer per group.
+
+## 2026-11-17 — raster `opacity` groups with translucent / shadow / gradient members: fixed (disjoint case)
+
+- **Was:** any translucent colour, shadow, gradient or image member kept the group on the raster's per-element path. Measured at base, 21 of 21 probe cells were off, e.g. a translucent red child gave `942d64` where Chrome gives `5e4396`.
+- **Fix:** a two-pass layer (B over opaque black, W over opaque white; alpha `255-(W-B)`), admitted when the layer's non-opaque paint rects are pairwise disjoint. Chrome's ops now include shadow, img and gradient layers. The shadow extent is directional.
+- **Pinned:** `opacity_group_chrome159_spec`, 20 cells (one is Chrome-dithered).
+- **Still open (raster):**
+  - Overlapping non-opaque members decline to the per-element path. Chrome values: `B7DBFF E3D994 FFE793` (two translucent boxes) and `B8C2FB 9A9FBC BFBFBF` (image + translucent black).
+  - Plain `<img>` is not painted by the raster lane at all (pre-existing).
+- **Base vs head:** the same 25 specs as the nested-group entry showed 0 new and 0 fixed failing names. **Perf** (median of 3, same pages; opaque-only layers keep one pass): raster 12 groups 6.00 s and nested 6.87 s, cpu_simd 7.50 / 6.77 s, Vulkan 5.49 / 8.45 s, max RSS 728 MB. All of these are within the host-noise spread of the item-1 runs (2.9-10.4 s). A two-pass layer costs one extra bounded layer paint.
+
+## 2026-11-17 — Multi-root opacity pages painted flat on cpu_simd and Vulkan (shadow, outline, text roots)
+
+- **Symptom:** with 2+ opacity roots, one root holding a shadow or an outline made the producer decline bounded surfaces for the whole page. Every group then painted with no opacity: `tg_page` (34,4) was `99ccff` vs Chrome `b7dbff`, and the `mr_page` text root background was flat red vs Chrome `942c63`.
+- **Fix** (`simple_web_html_layout_renderer.spl`):
+  - A directional halo grows the root rect.
+  - Gradient and image background layers count as group paint items.
+  - The text root was red at base too (multi-root ≠ alone). It needed no text-specific change: its command has no glyph run.
+- **Pinned** (cpu_simd and Vulkan, exact): `mr_page` 14 cells (`942C63` ×3, `5BA403` ×2, `F5F19D` ×2, `BF3F3F` ×2, `808080`, `3FBF3F`, `4B4BFF` ×2, `FFA54B`). `tg_page` 17 raster cells plus (34,4) (37,4) `B7DBFF`, (46,4) `FFE793`, (60,12) `BFBFBF`. Also: a text root on the multi-root page equals the same root alone.
+- **Open:**
+  - A root holding a real glyph run (`glyph_run.valid`) still declines surfaces for the whole page. No pinned page produces one.
+  - ~~The outline ring on a positioned box is unpainted on every lane~~ FIXED 2026-11-18: the raster lane already painted it; cpu_simd and Vulkan painted NO outline at all (see "Engine2D lanes never painted CSS outlines" below). The ring is now pinned at `5B579D`.
+  - ~~The `<img>` is unpainted on every lane~~ CORRECTED 2026-11-18: an artefact of the direct html->pixels entries, which resolve no resources (see "`<img>` was never a paint defect" below). Fed the resource, the Engine2D lanes match Chrome at `8829A5` and `B8C2FB` and at cells (24,12) and (29,12); (54,12) is the open +1-green overlap.
+  - Chrome's shadow-only pixel is `5F5F5F` on a 10x8 box but `606060` on an 8x5 box with the same shadow. Simple gives `606060` on both.
+  - Engine2D gives +1 green where two translucent paints overlap (40,4): `e3d995` vs `e3d994`.
+- **Needs:** `sfnt_render_glyph_lcd` must be `pub` (upstream `08486feffd2`), or small text on the Engine2D lanes errors out.
+- **Base vs head:** the same 25 specs showed 0 new failing names. 20 names were fixed, all text rows that the cherry-picked `pub` unblocked (`simple_web_renderer` 17, `web_device_scale` 2, `cpu_simd_paint` 1). **Perf** (median of 3, the item-2 head → this head, noisy host): raster 12 groups 6.00→2.34 s and nested 6.87→2.74 s; cpu_simd 7.50→4.51 s and 6.77→4.95 s; Vulkan 5.49→2.95 s and 8.45→3.09 s; max RSS 711→715 MB.
 
 ## 2026-11-17 — `layout.spl` `_layout_block_node` margin collapse, round 2
 
@@ -285,12 +336,281 @@ takes effect can keep the margin inside; `_self_collapses`, `_generates_box`,
 `_is_out_of_flow` in `layout.spl`; a BFC-root box still contains its floats.
 
 Still open:
-- Per-side borders. Chrome: P `border-bottom:5px solid` > C `h10;mt10;mb10`
-  gives P y=10 h25, sibling y=35; `border-top:5px solid` gives P y=0 h25,
-  C y=15, sibling y=35. `border-top`/`border-bottom` shorthands are not parsed
-  and `border-*-width` longhands all write the one `border_width`.
-- Clearance, float avoidance by following content, and the placement of a
-  float/abs box after an empty block are not modelled here.
+- Per-side borders — **fixed 2026-11-17** (`bw-*` rows, next section).
+- Clearance, float placement and BFC float avoidance — **fixed 2026-11-17**
+  (section "Floats and clearance on `_layout_block_node`" below). The
+  placement of a float/abs box after an empty block already matched Chrome
+  (pinned as `ef-*` guards).
 
 Regression sweep (seed `cargo-target-webrender-vk/release/simple`, serial, base `d155cbad528` vs head): the main spec went 41/57 -> 57/57. The 30 specs below gave identical per-spec counts and the same 63 failing test names at base and head, so 0 new failures:
 `test/01_unit/app/ui.chromium/engine_merge_spec.spl`, `test/01_unit/app/ui.chromium/text_metrics_spec.spl`, `test/01_unit/browser_engine/anonymous_block_spec.spl`, `test/01_unit/browser_engine/ifc_linebox_spec.spl`, `test/01_unit/browser_engine/table_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_hit_test_events_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_box_stored_geometry_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_coverage_closure_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_spec.spl`, `test/01_unit/lib/gpu/browser/hit_bounds_halfopen_spec.spl`, `test/01_unit/browser_engine/html_tree_builder_spec.spl`, `test/01_unit/browser_engine/layout_core_block_flex_chrome159_spec.spl`, `test/01_unit/browser_engine/first_child_top_margin_collapse_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_margin_collapse_negative_spec.spl`, `test/01_unit/browser_engine/browser_renderer_spec.spl`, `test/01_unit/browser_engine/browser_renderer_utils_coverage_closure_spec.spl`, `test/01_unit/browser_engine/simple_web_hidden_text_spec.spl`, `test/01_unit/lib/common/web/simple_browser_page_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_smoke_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_ua_defaults_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_web_gap_close_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_software_no_gpu_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_text_node_sibling_paint_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/display_contents_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/float_layout_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_flat_selector_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/dom_color_alpha_normalization_spec.spl`, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`
+
+## 2026-11-17 — form-control sizing follow-up (owner decision "all same as chrome")
+
+- **Authored form-control size** (`form_control_authored_size`) — **fixed 2026-11-17.** Chrome 159 (`display:block;width:40px;height:16px;padding:2px;font:8px Arial`, UA border): checkbox 4,3 40x16, radio 5,22 40x16 (border-box, border 0), image 0,38 44x20 (content-box, border 0), textarea 0,58 46x22 (content-box) and select 0,80 40x16 (border-box), both with a 1px border; all values are standards mode (`<!DOCTYPE html>`). Auto sizes do not move: textarea 182x36 (engine 181, pre-existing), select 57x19, checkbox/radio 13x13. A `width:60px;height:30px` textarea is 66x36. Screenshot: the checkbox glyph is a 16x16 square at columns 16..31, rows 3..18 (side min(w,h), centred); the radio 17..32, 22..37. The engine gave 13x13 / 48x24 / 46x22 and painted the glyph at the box's top-left, capped at 14. Fix: the layout form-control branch uses an authored width/height as the border box for checkbox/radio; `form_control_ua_box_decls` drops the `image` border and adds `box-sizing:border-box` for `<select>`; both checkable painters centre a min(w,h) square. Software, Engine2D and a lavapipe Vulkan device readback ink the Chrome squares; the device frame equals the Engine2D frame. Pinned by `test/01_unit/browser_engine/form_control_authored_size_chrome159_spec.spl` (red 2/7 before the fix, 7/7 after). Rows re-pinned: `input_ua_box_sizing_chrome159_spec` AC-5 (image 48x24 -> 44x20, Chrome 44x20) and AC-8 (checkbox 13x13 -> 40x16, Chrome 40x16). **Adopted 2026-11-17 from the abandoned lane, with a correction:** that lane read Chrome on doctype-less (QUIRKS) pages and also made `<textarea>` border-box. That broke `line_strut_baseline_chrome159_spec` AC-8 (Chrome standards: textarea 106x46, line 53). The textarea decl is reverted, and the `table_cell_max_content_inline` AC-7 textarea row is back to its base check, now citing Chrome standards (textarea 66, table 96.45; quirks gives 60 and 90.45).
+- **Open: text/password/email `<input>` box-sizing is quirks-only** (`input_ua_box_sizing`, found 2026-11-17). In Chrome 159 standards mode, with the doctype on that spec's PAGE, text, password and email compute content-box: 48x24 for `width:40px;height:16px;padding:2px`, and auto 185x21. Search, button, submit, reset, checkbox and radio stay border-box (40x16). The 2026-11-16 fix (#9859) made every input type border-box from a doctype-less reading. Not changed in the adoption lane: it is #9859's behaviour, and its spec PAGE has no doctype.
+- **Glyph lookup codepoint gate** (`glyph_lookup_codepoint`) — **fixed 2026-11-17.** `glyph_index_for_char`, `glyph_rows_for_char` and `_glyph_charset_index_of` (`src/lib/common/ui/glyph_bitmap_5x7.spl`) gated on `ch.len() == 1` and read `char_code_at(0)`. They now take the single codepoint from `text_codepoints` (rejecting an empty text or more than 4 bytes) and scan `FONT_CHARSET` by `byte_len()`. Measured on the seed `cargo-target-webrender-vk` 2026-11-17: `"•".len()` is 1 and `byte_len()` is 3, so on that seed the old gate already passed; the fix makes the lookup independent of the `len()` unit (owner decision: text slice units are bytes). Pinned by `test/01_unit/browser_engine/glyph_lookup_codepoint_chrome159_spec.spl` (4/4 on base and head on this seed; it is a guard, not a red-to-green row). No Vulkan row: the Vulkan bitmap atlas is ASCII-only. **Still open (not changed):** the Engine2D text walkers `text_render_metrics_to_buf` / `..._scale1` and `text_metrics` (`src/lib/gc_async_mut/gpu/engine2d/helpers_text.spl:52,110,150`) loop `i < text_val.len()` with the codepoint-indexed `char_code_at(i)` and size the run by `len()` cells; under a byte-unit `len()` a 3-byte `•` becomes three cells.
+- **Password disc advance** (`password_mask_advance`) — **fixed 2026-11-17.** Chrome 159 screenshot (60x16 box, 8px Arial, `ABC`): discs ink columns 3..10 with a faint 11, rows 8..9; six discs 3..18 (faint 19); at 13.33px three discs ink 3..16. `measureText('•')` 2.80. The engine stepped each disc by the 5px bitmap cell (ink 4..16). Fix: `input_text_glyph_advance` (`..._paint_raster.spl`) resolves the face's bullet advance at 10x size and rounds (3 at 8px; 13px keeps the cell advance 5), used by the raster walk, the measured width, the caret map and the overlay plan. The Draw IR `_value` command carries `bitmap-glyph-advance` when it differs from the cell, and the Engine2D executor (`_engine2d_draw_ir_bitmap_text`, `engine2d/draw_ir_adv.spl`) steps each codepoint by it, so Engine2D and the Vulkan device readback ink the raster's columns. Engine after the fix: 4..12 on software, Engine2D and lavapipe Vulkan (device pixels equal software). Pinned by `input_password_mask_chrome159_spec` AC-6 and the AC-5 Vulkan row (base 4/6 with the new rows, head 6/6). Residual: the 1-column offset (4 vs 3) is the 5x7 disc cell `01110`, whose ink starts at cell column 1.
+
+### Per-side borders on `_layout_block_node` (2026-11-17)
+
+Chrome for Testing 159.0.8154.6 (`--headless --no-sandbox --window-size=900,2000
+--dump-dom`), each case in a `display:flow-root;width:300px` wrapper W,
+`getBoundingClientRect()` relative to W:
+
+| row | P style (child `h10`, or `h10;mt10;mb10` where a sibling S `h5` follows) | Chrome | base engine |
+|-----|--------------------------------------------|--------|-------------|
+| `bw-bottom` | `border-bottom:5px solid` | P y=10 h=25, S y=35, W h=40 | shorthand ignored — **fixed** |
+| `bw-top` | `border-top:5px solid` | P y=0 h=25, C y=15, S y=35 | **fixed** |
+| `bw-4value` | `width:100px;border-style:solid;border-width:1px 2px 3px 4px` | P 106x14, C x=4 y=1 w=100 | one width — **fixed** |
+| `bw-left-right` | `width:100px;border-left:7px solid;border-right:3px solid` | P y=10 w=110 h=10, C x=7 w=100, S y=30 | **fixed** |
+| `bw-left-right-auto` | `border-left:7px solid;border-right:3px solid` | P w=300, C x=7 w=290 | **fixed** |
+| `bw-border-box` | `box-sizing:border-box;width:100px;height:40px;padding:2px;border-top:5px solid;border-left:6px solid` | P 100x40, C x=8 y=7 w=90 | **fixed** |
+| `bw-border-box-bottom-right` | border-box 100x40, `border-bottom:9px solid;border-right:4px solid` | C x=0 y=0 w=96 | **fixed** |
+| `bw-content-box` | `width:100px;height:40px;border-top:5px solid;border-bottom:2px solid;border-left:6px solid` | P 106x47, C x=6 y=5 w=100 | **fixed** |
+| `bw-no-style` | `border-width:5px` (style stays `none`) | P y=10 h=10, C x=0 w=300, S y=30 | 5px border — **fixed** |
+| `bw-style-only` | `border-style:solid` | P h=16, C x=3 y=3 w=294 (initial `medium` = 3px) | 0 — **fixed** |
+| `bw-order` | `border-width:5px;border-style:solid` and the reverse | both h=20, C x=5 w=290 | passed (guard) |
+| `bw-shorthand-no-width` | `border:solid red` | h=16, C x=3 w=294 | **fixed** |
+| `bw-shorthand-resets-style` | `border-style:solid;border:5px` | h=10, C x=0 w=300 | **fixed** |
+| `bw-side-style-none` | `border:5px solid;border-top-style:none` | h=15, C x=5 y=0 w=290 | **fixed** |
+| `bw-side-width` | `border:2px solid;border-bottom-width:8px` | h=20, C x=2 y=2 w=296 | **fixed** |
+| `bw-style-2value` | `width:100px;border-width:4px;border-style:solid none` | P w=100 h=18, C x=0 y=4 | **fixed** |
+| `bw-hidden` | `border:5px hidden` | h=10, C x=0 | **fixed** |
+| `bw-empty-left` | empty E `border-left:5px solid;mt10;mb10` between A `h10;mb10` and B `h10;mt10` | E h=0, B y=20, W h=30 (left/right borders do not stop self-collapse) | passed (guard) |
+| `bw-empty-top` / `bw-empty-bottom` | same with `border-top` / `border-bottom` | E y=20 h=5, B y=35, W h=45 | **fixed** |
+
+Fix: `StyleProps.border_width`/`border_style` are replaced by specified
+per-side `border_<side>_width` (initial 3px) and `border_<side>_style`
+(initial `none`); the used width is `border_top()` etc. (0 for none/hidden), so
+the result is independent of declaration order. `set_style` parses `border`,
+`border-<side>` (omitted parts reset to medium/none), `border-width` and
+`border-style` (1-4 values) and the per-side longhands. `layout.spl`,
+`layout_core.spl` and `BeLayoutBox` (`border_top/right/bottom/left`) use the
+per-side used widths for content offsets, content-box and border-box sizing;
+the top border blocks top collapse, the bottom border blocks bottom collapse,
+and only top/bottom borders stop self-collapse. `paint_box` keeps the single
+`stroke_rect` for a uniform border and emits one `fill_rect` per side
+otherwise. Spec `test/01_unit/browser_engine/layout_block_node_chrome159_spec.spl`:
+base 59/77 (18 red) -> head 77/77.
+
+Fixture corrections (not assertion changes): `layout_box_content_contract_spec`
+and `ui.chromium/css_spec` declared `border-width` with no `border-style`, which
+Chrome 159 resolves to a 0 width; both fixtures now add `border-style:solid`,
+and their asserted values are unchanged. The `css_spec` row ("accepts the full
+panel property set without losing values") fails on base and head for an
+unrelated reason, so that correction is not yet observed green. The same
+style-less `border-width:1px` was emitted by 10 widget producers in
+`widget_to_dom.spl`; they now also declare `border-style:solid`, keeping their
+1px borders (otherwise those widgets would lose their borders under the
+Chrome rule).
+
+Still open on this path: per-side border COLOURS (`border-<side>` colour tokens
+and `border-<side>-color` are not stored; `paint_box` paints every side with the
+one `border_color`, and only when it is set, so `currentcolor` is not
+modelled), and Chrome's device-pixel snapping of fractional border widths.
+
+
+### Floats and clearance on `_layout_block_node` (2026-11-17)
+
+Chrome for Testing 159 (`chromium-1255`, `--headless --no-sandbox --dump-dom`),
+each case in a `display:flow-root;width:300px` wrapper W, `getBoundingClientRect()`
+relative to W. `FL(w,h)` = `float:left;width:w;height:h`. Pinned in
+`test/01_unit/browser_engine/layout_block_float_clear_chrome159_spec.spl`.
+
+| row | case | Chrome 159 | engine before |
+|-----|------|-----------|---------------|
+| cl-1 | `FL(50,40)` + C `clear:left;h10` | C y=40, W 50 | C y=0, W 40 |
+| cl-3 | `float:right` 50x30 + C `clear:both` | F x=250, C y=30, W 40 | F x=0, C y=0, W 30 |
+| cl-4 | A `h10;mb10` + `FL(50,40)` + C `clear:left;mt20;mb5` + S `h5;mt8` | F y=20, C y=60, S y=78, W 83 | C y=30, S y=48, W 60 |
+| cl-5 | A `h10;mb10` + `FL(50,5)` + C `clear:left;mt-5` | C y=25, W 35 | C y=15, W 25 |
+| cl-8 | P > `FL(50,40)` + C `clear:left;mt10` | P y=0 h50, C y=40, W 50 | P y=10 h10, C y=10, W 20 |
+| cl-10 | P > `FL(50,40)`; sibling C `clear:left` | P h0, C y=40, W 50 | C y=0, W 10 |
+| cl-11 | P > `FL(50,40)` + empty `clear:both`; sibling `h10` | P h40, X y=40, sibling y=40, W 50 | P h0, X y=0, sibling y=0, W 10 |
+| cl-12 | P `mt10` > `FL(50,40)` + C `clear:left;mt20` | P y=10 h50, F y=10, C y=50, W 60 | P y=20 h10, F y=20, C y=20, W 30 |
+| cl-13 | as cl-4, C `mb20`, S `mt5` | C y=60, S y=90, W 95 | C y=30, S y=60, W 65 |
+| cl-d2 | P > `FL(50,5)` + C `clear:left;mt20` | P y=0 h15, C y=5, W 15 | P y=20 h10, C y=20, W 30 |
+| cl-d3 | `FL(50,40)` + P > C `clear:left;mt20` | P y=0 h50, C y=40, W 50 | P y=20 h10, C y=20, W 40 |
+| cl-h2 | `FL(50,40)` + P > empty `clear:both`; sibling `h10` | P h40, sibling y=40, W 50 | P h0, sibling y=0, W 40 |
+| fp-1 | `FL(100,20)` `FL(100,30)` `float:right` 50x10 | x 0/100/250, y 0 | 2nd and 3rd x=0 |
+| fp-2 | `FL(250,20)` `FL(100,10)` `FL(20,10)` | 2nd 0,20; 3rd 100,20; W 30 | 2nd 0,0; 3rd 0,0; W 20 |
+| fp-3 | two right floats 100 wide | x 200, 100 | x 0, 0 |
+| fp-4 | `FL` `mt5;ml5` + `FL` `ml7` | 5,5 and 62,0 | 2nd x=7 |
+| fp-5 | `h10` block + left and right float | both y=10, right x=250 | right x=0 |
+| fp-6 | `FL(200,20)` + right float 150 | 150,20, W 30 | 0,0, W 20 |
+| fp-7 | `FL(100,40)` `FL(150,10)` `FL(100,10)` | 2nd 100,0; 3rd 100,10 | 2nd 0,0; 3rd 0,0 |
+| bfc-1 | `FL(100,40)` + `overflow:hidden;h10` | 100,0,200 | 0,0,300 |
+| bfc-2 | `FL(100,40)` + `flow-root;width:250px` | 0,40, W 50 | 0,0, W 40 |
+| bfc-normal | `FL(100,40)` + `h10` + `overflow:hidden` | normal 0,0,300; BFC 100,10,200 | BFC 0,10,300 |
+| bfc-margin | `overflow:hidden` `ml20` / `ml120` beside `FL(100,40)` | x 100 w200 / x 120 w180 | x 20 w280 |
+| bfc-right | right float 100x40 + `overflow:hidden` | 0,0,200 | 0,0,300 |
+| bfc-drop | `FL(100,20)` + `overflow:hidden;width:250px` + `h5` | 0,20; next y=30, W 35 | 0,0; next y=10, W 20 |
+| bfc-tall / bfc-fits | BFC h50 beside `FL(100,20)`; `flow-root;width:150px` | 100,0,200 / 100,0,150 | 0,0,300 / x=0 |
+
+"Engine before" is measured: the spec was run once against base `layout.spl`
+(`77fd6530d57`), 13/40 passing; the values are the failing `expected` lines.
+
+Guards that already passed: cl-2 (`clear:right` ignores a left float), cl-6,
+cl-7, cl-d4 (the hypothetical position is already past the float, so no
+clearance), cl-9 and cl-d1 (no float, so a `clear` child still collapses
+through its parent), cl-h1 and cl-h3 (a `display:none` float is not a float:
+P > [hidden `FL`, C `clear:left;mt20`] gives P y=20; an empty `clear:both;mt10`
+after a hidden float still self-collapses, everything at y=10, W 20), and
+ef-1..ef-5: a float or abs box after an empty block sits at `cursor +
+collapsed set` (A `h10;mb10` + E `mt20;mb5` gives y=30, E `mt5;mb30` gives
+y=40). cl-h1/cl-h3 were red on the first head of this lane (a hidden float set
+the "preceding float" flag) and are kept as guards for that.
+
+Chrome rule, parent/child: a `clear` first child has clearance, so its margin
+does not collapse through the parent, when it clears a float that precedes it
+in the same parent (cl-8, cl-12, cl-d2 — even a 5px float with a 20px margin
+gives the child y=5) or when its hypothetical edge with the margin collapsed
+through is above an earlier float (cl-d3). An empty `clear:both` after a float
+has clearance, so its parent is not self-collapsing (cl-11, the clearfix; and
+cl-h2 when the float is outside the parent).
+
+Fix (`layout.spl`): `BlockFloats` holds margin-box rects per BFC (a fresh one
+per BFC root, shared by reference down other boxes); `_float_place`,
+`_bfc_place`, `_floats_bottom`; `_top_margin_set` takes the float context and
+hypothetical base; `_self_collapses` sees clearance after a box-generating
+sibling float; a child that took height in layout is never treated as
+self-collapsing (cl-h2).
+
+Still open on this path: floats are not shrink-to-fit (an auto-width float
+fills the line); a BFC root tests the float band at its top edge only; no
+inline layout, so line boxes beside floats are not shortened (only the HTML
+renderer path has `compute_style_wrap_ranges_float_band`); floats inside flex
+or grid containers are not placed; auto margins on an explicit-width BFC root
+beside a float are not pinned; a cleared self-collapsing LAST child and its
+parent's bottom margin (CSS 2.2 §8.3.1) are not pinned; the layout root's own
+margins.
+
+Regression sweep (seed `cargo-target-webrender-blend/release/simple`, serial,
+base `77fd6530d57` vs head): the 37 specs of the per-side border sweep
+(including `float_layout_spec`) gave identical per-spec counts and the same 98
+failing test names at base and head (0 new, 0 fixed); the new spec is 40/40 at
+head (13/40 at base).
+
+## 2026-11-17 — Per-layer `background-size` / `-repeat` / `-position` of gradient lists: fixed
+
+- **Was:** a gradient background list painted each layer once, stretched over the positioning area. A list with any non-default `background-size` or a px `background-position` failed closed to the box colour, by the #9970 gate. The longhands kept only their FIRST value, as scalars. Shorthand layer tails (`linear-gradient(...) 0 0 / 10px 10px repeat`) were rejected outright, and the shorthand colour then fell back to the first gradient stop.
+- **Chrome 159 model (measured at k=4):** each image layer takes entry `i mod n` of each longhand list (CSS Backgrounds 3 §2.2), or its own shorthand tail.
+  - A gradient has no intrinsic size, so `auto`, `cover` and `contain` resolve to the positioning area (padding-box), and one-value `10px` means a height of `auto`, i.e. the area.
+  - Position percentages resolve against `(area - tile)`.
+  - Tiles start at the anchor and repeat both ways. They reach into the border area under the border-box clip.
+  - The gradient is **re-evaluated at every tile origin**: pixel = the model at its centre, local to the tile.
+  - At a fractional tile edge Chrome BLENDS the straddling pixel by coverage: 13.333 px tiles give `ab0054` at device x=53, `5800a7` at x=106.
+- **Fix (CSS parsing + Draw IR geometry; pixel kernels untouched):**
+  - foundation:
+    - `gradient_layer_entries`, `gradient_layer_split` and `gradient_layer_tail_parts` parse the `<position> / <size> <repeat>` tail.
+    - `background_{size,position,repeat}_spec` resolve one entry.
+    - `gradient_layer_list_apply_longhands` rewrites a list with one tail per layer.
+  - `decl_apply` applies that rewrite after every background longhand has resolved, using the current list or this block's image text. It drops a typed single-layer projection, so the layer path paints it. Lists whose every layer keeps the default geometry (size `auto`/`100%`/`cover`/`contain`, no px offset; repeat is ignored because a full-area tile covers the clip either way) are left byte-identical.
+  - One tail-less gradient with a `no-repeat` longhand stays on the typed single-gradient path: it already places one sized tile with Chrome's ordered dither, which the layer path lacks (a first run without this guard turned 3 `browser_renderer_spec` rows red by 1 LSB).
+  - A layer needing more than 1,024 tiles (`BACKGROUND_GRADIENT_TILE_CAP`, counted as `(area/tile+2)` per repeating axis) fails closed to the colour, so a sub-pixel `background-size` cannot issue unbounded per-tile work.
+  - `background_gradient_layers` resolves each layer's tile 0 (Q10 px) and resolves its geometry against that tile.
+  - New `engine2d/gradient_tiles.spl` `gradient_tile_spans` cuts the pixel span of each tile by the pixel-centre rule. Both lanes use it.
+  - Raster `gradient_layer_tiled_pixels` evaluates whole-pixel tiles once and copies them.
+  - Draw IR adds `background-gradient-layer-tiles` (lengths, device-scaled) and `background-gradient-layer-repeat` (unscaled). It emits them only when a tile does not cover the painting area. `draw_ir_adv` then issues one `draw_radial_gradient_ellipse` / `draw_linear_gradient_line` call per tile, so on Vulkan every tile is device-evaluated (#10006) or declines to the host evaluator.
+- **Evidence, red -> green** (`test/01_unit/browser_engine/background_layer_tiling_chrome159_spec.spl`, 9 rows, head 9/9; base: see below):
+  - Six Chrome-pinned pages (`bgl_p1..p6.html`, k=4, +-2) cover:
+    - longhand lists, cyclic;
+    - shorthand tails + `%` size + final colour;
+    - default repeat into a 4 px border;
+    - a typed single linear with one-value size + `center`;
+    - `no-repeat` at `%` positions + `contain`;
+    - the old fail-closed sized list.
+  - Plus a fail-closed `background-repeat: space` row, a fail-closed tile-cap row (0.5 px tiles paint the colour) and a tile-prop scale row.
+  - Whole frame vs the Chrome PNGs, both cpu_simd k=4 and raster 4x: P2-P6 max 1-2 (0 px > 2). P1 (three-layer stack) max 3 at 1 of 20,480 px, the known stack residue.
+  - `web_device_scale_spec`'s "keeps a gradient layer list with a background-size fail-closed to its colour" (a colour-only pin, labelled "not a Chrome match") is REPLACED by "tiles a gradient layer list with a background-size on both lanes as Chrome does". That row is pinned to Chrome's `bgl_p6.png`; the page without a doctype screenshots byte-identically.
+  - Vulkan (`backend_vulkan_device_gradient_spec`, new row): P6 + P1 on lavapipe equal cpu_simd (0 mismatches). Device-gradient count plus host-eval count = 33 = every tile. P6 is +-2 of Chrome.
+- **Base vs head, failing names (blend seed, serial, rebased on `fcf511af755`, which includes #10006):** 28 background / gradient / glass / material / Draw IR specs, 0 new failures.
+  - Fixed at head: the new spec (base 1/9 -> head 9/9), the replaced `web_device_scale` row, and the new Vulkan row.
+  - Unchanged red on both sides: `simple_web_html_layout_renderer_coverage` 2, `linear_gradient_angle_draw_ir` AC-11, `linear_gradient_angle_cpu_raster` AC-4/5/6, decl_apply_coverage_closure 1, `background_gradient_wpt` 3, `draw_ir_adv` 2, `declarations_coverage_closure` 2, `wm_aetheric_web_material` 1, `selector_color_subset` 3, `simple_web_browser_engine_security` 17.
+  - `browser_renderer_spec` 131/131 at head, after the typed-path `no-repeat` guard above.
+- **Still open:**
+  - fractional tile edges (Chrome's coverage-blended seam pixel; Simple assigns the pixel whole);
+  - `space` / `round`, 3/4-value positions, per-layer `background-origin` / `-clip` lists or tail boxes, `fixed`: all fail closed (colour only);
+  - a radial layer with an explicit px/em radius on a fractional-size tile fails closed;
+  - a layer above the 1,024-tile cap paints colour only;
+  - a sized longhand in one declaration block whose image list was TYPED in another block (the typed projection kept no text) paints untiled;
+  - typed single gradients with default geometry still extrapolate into a border instead of repeating (read from the typed paths, not measured);
+  - `url()` layers keep the existing two-url / single-url path: scalar size, no per-layer lists.
+- **Perf (640x480 page, two tiled layers: 40x40 linear + 64x48 radial at 10px 10px = 313 tiles; `simple test` process wall, median of 3, `/usr/bin/time -v` under `systemd-run MemoryMax=8G`, blend seed sha256 119feb0f865390b5... (60799992 2026-11-17 16:01:56.6), host load ~13-15):**
+  - cpu_simd: base 16.0 s (colour only, fail-closed), head 64.2 s; an untiled head twin (same two layers, no size) 52.4 s. Tiling overhead is +11.8 s (+23%): one host LUT plus one evaluation per tile.
+  - Vulkan (lavapipe): base 13.4 s, head 29.4 s, untiled twin 14.5 s. Tiling overhead is +14.9 s (~2x): one device dispatch per tile, ~48 ms each.
+  - Max RSS 0.95-1.0 GB on every lane, base and head (one ~0.24 GB run in most triples).
+  - Follow-up (perf, filed here): evaluate a whole tile grid in ONE Vulkan dispatch (tile-local coordinates in `gradient_layer.comp`), and reuse one host tile on cpu_simd when tiles are pixel-aligned.
+
+## 2026-11-17 — Gradient polish: length stops, rounded gradient lists, body/html canvas propagation: fixed
+
+- **Was:** (1) `px` / `em` stop positions were unpositioned (spaced evenly) and their stop colour failed to parse (`#f00 10px`); negative percentages read as positive. (2) A gradient list on a rounded box painted only its colour (both lanes; a rounded single radial too). (3) Outside widget mode a `<body>` (or `<html>`) gradient painted the body box only; Chrome paints the canvas, positioned on the html box and repeating.
+- **Fix:** stops resolve per layer against the gradient line on its tile (`parse_gradient_stops_on_line`, linear line length / radial ray `rx`, `em` = element font size), typed single-layer projections decline length stops so they take the list path; kernels and `gradient_layer.comp` unchanged (the device tables carry the host LUT). Rounded lists: one image of colour + layers (`gradient_layer_stack_over`), alpha scaled ONCE by the solid fill's corner coverage (`gradient_pixels_round_clip`, `engine2d/gradient_tiles.spl`), shared by the raster (`fb_gradient_layers_round_clip`) and Draw IR (`draw_ir_adv`, prop `background-gradient-layer-clip-radii`); Vulkan composites the host image on the device. Chrome clips the whole background once: two opaque equal-colour layers equal the solid fill within 1 level in Chrome; per-layer coverage was 260 px off. Propagation: `canvas_gradient_source` / `canvas_gradient_layers` (paint_primitives), raster `_paint_passes` and Draw IR `_html_draw_ir_root_canvas_gradient`; widget mode unchanged.
+- **Evidence:** `test/01_unit/browser_engine/gradient_polish_chrome159_spec.spl` base 2/12 -> head 12/12 (the 2 base passes are the Vulkan == cpu_simd rows, vacuous on base). Chrome 159 k=4 sample rows +-2; full frame: length-stop and propagation pages max 1-2 at 0 px > 2, rounded page max 61 at 277 px all on the corner arcs, Vulkan == cpu_simd 0 px on all 8 pages.
+- **Base vs head** (blend seed sha256 119feb0f865390b5..., serial, base `014087fd9e3`, 31 specs incl. `opacity_group_chrome159_spec` 16/16): 0 new and 0 fixed failing names. Failing on both: `simple_web_html_layout_renderer_coverage` 2, `decl_apply_coverage_closure` 1, `background_gradient_wpt` 3, `draw_ir_adv` 2, `draw_ir_adv_branch_coverage` 1, `declarations_coverage_closure` 2, `wm_aetheric_web_material` 1, `selector_color_subset` 3, `simple_web_browser_engine_security` 17.
+- **Perf** (640x480 page: body linear with px stops propagated + 600x400 radius-24 box with a px-stop linear over a radial; raster + cpu_simd render in one `simple test` process; `/usr/bin/time -v`, `systemd-run MemoryMax=8G`, median of 3, load ~6-7): head 60.3 s (59.99-64.98), base 459 s (431-509); max RSS ~1.0 GB both (one ~0.25 GB run each). Base painted the body typed linear through its per-row typed painter and the rounded list as colour only.
+- **Still open:** Chrome's rounded-corner AA is not `_corner_coverage256` (flat rounded fill: up to 57 levels at partial pixels; exact-area, sub-row, supersample and offset-distance models all leave 34-64); the Draw IR lanes paint a per-corner-radius box's border as a square band (p6: 1705 px); the raster double-blends a translucent border's square corner (p6 bottom-left, 256 px); `rem` stops stay unpositioned. Perf (unprofiled): base took ~7x longer on the perf page (459 s vs 60 s) while painting its body gradient through the typed single-linear path; a non-root box with a typed linear (no length stops) still takes that path on head. Suspected slow typed painter, not yet measured in isolation.
+
+## 2026-11-18 — Engine2D lanes (cpu_simd, Vulkan) never painted CSS outlines
+
+- **Symptom:** every `outline` was missing on cpu_simd and Vulkan, on static and positioned boxes, at any opacity. The raster lane was right. The earlier "positioned box" scoping was a misread; a static 6x4 box lost its ring too.
+- **Cause:** the Draw IR producer already carries `outline-width` / `outline-color` / `outline-offset` on the box command (`paint_draw_ir.spl`), and device scaling scales them (`draw_ir_device_scale.spl`), but the Engine2D executor (`engine2d/draw_ir_adv.spl`) never read them.
+- **Fix:** `_engine2d_draw_ir_render_outline` in `draw_ir_adv.spl`, the twin of the raster `fb_outline_clip`: a square ring `outline-width` thick, grown `outline-width + outline-offset` past the border box, as four non-overlapping slivers (a translucent ring blends once). It is called after the borders on both box paths, glass and plain.
+- **Evidence, red -> green (Chrome 159, k=4 window 24x28, sampled at CSS pixel centres):** new `outline_engine2d_chrome159_spec`. Raster was 1/1 at base. cpu_simd, Vulkan and cpu_simd at device scale 4 were red at base; now 4/4. Pinned: 2px red ring with offset 1 (`FF0000` ring, `FFFFFF` offset gap) and a 1px `rgba(0,0,0,.5)` ring over white (`7F7F7F`). `opacity_group_chrome159_spec` now also pins the multi-root ring (26,13) (30,2) (26,8) = `5B579D`. At base those read the cell's `E6DC0A`; the spec is now 16/16.
+- **Base vs head:** 153 specs that reach the Draw IR executor, run serially: 0 new failing names. Fewer failures at head: the opacity row above, plus `web_draw_ir_engine_reuse` (7 -> 9 of 11) and `proc_draw_combo` cuda/vulkan rows (4 -> 8 of 12). Those GPU-probe rows paint no outline, so they are read as flaky device probing, not as fixed by this change.
+- **Open:** outlines paint with the box rather than in Chrome's later outline phase, so a later sibling can cover a ring on every lane. `outline-style` other than solid and outlines following `border-radius` are unpinned.
+
+## 2026-11-18 — `<img>` was never a paint defect on the Engine2D lanes
+
+- **Earlier claim:** "the `<img>` is unpainted on every lane". It was measured through `simple_web_render_html_to_pixels_with_resolved_engine2d_backend`, which passes `images: []`. Resource loading, including `data:` URL decode, belongs to the hosted session (`browser_session_loading.spl` -> `decode_image_to_argb_bounded`). The direct entries never resolve resources by design.
+- **Measured:** through `HostedWebContentSession` the data-URI image paints `7285F6`, which is exact: the PNG is uniform RGBA (30,60,240,160) over white. Through `simple_web_layout_render_html_pixels_engine2d_with_images` with the decoded resource, cpu_simd and Vulkan paint it stretched and composite it in an opacity group as Chrome does.
+- **Pinned:** a new `opacity_group_chrome159_spec` row decodes `TG_IMG` with `base64_decode_bytes` + `decode_png_to_argb` and feeds it to cpu_simd and Vulkan. It checks (18,12)=`8829A5`, (50,12)=`B8C2FB`, the yellow-over-image cells (24,12)/(29,12)=`E9A52F`, and every TG_DEV cell. 17/17.
+- **No filtering question:** the earlier note that Chrome's image values need upscale-filter matching was wrong. A uniform image interpolates to itself, so these values are pure group arithmetic.
+- **Still open:**
+  - (54,12), the image under `rgba(0,0,0,.5)`: Chrome `9A9FBC`, Engine2D `9AA0BC`. This is the same +1-green two-translucent-overlap class as (40,4).
+  - The raster (fb) lane has no image paint at all; `_html_draw_ir_image_command` exists only on the Draw IR path. This matters wherever the raster lane is the ground truth or the fallback.
+  - Scaled non-uniform images are unpinned against Chrome's filtering.
+
+## 2026-11-18 — translucent-over-translucent inside a group layer: one green level off (FIXED)
+
+- **Symptom:** where two translucent paints overlap inside an opacity group, cpu_simd and Vulkan read one green level high. Measured at `tg_page` (40,4): Chrome `E3D994`, Engine2D `E3DA94`. Also at (54,12), the image under `rgba(0,0,0,.5)`: Chrome `9A9FBC`, Engine2D `9AA0BC`.
+- **Cause:** Skia keeps the group layer premultiplied in 8 bits: `P = round(s*sa/255) + round(round(d*da/255)*(255-sa)/255)`. Engine2D's translucent-destination branch of `_blend_rule` computed straight-alpha src-over directly, so it skipped Chrome's intermediate rounding.
+  - One model fits both points with no free parameter: a premultiplied layer, then SkBlendARGB32 at A = round-half-up(opacity*255) = 128 and 179.
+  - Every standard straight-alpha rounding variant we tried predicts the Engine2D values, not Chrome's.
+- **Fix:** the translucent-destination branch computes Chrome's premultiplied P and stores it straight as `round(P*255/oa)`. The straight store round-trips exactly (error <= oa/510 < 1/2), so `css_opacity_group_composite_pixel` re-premultiplies to Chrome's P. A transparent destination returns src, bit-identical to before. Opaque destinations are untouched.
+  - The rule changed in every twin: `color.spl`, C `engine2d_blend_u32`, Rust runtime `blend_pixel`, seed interpreter `engine2d_blend_pixel_u32`, `scalar_oracle.spl`, the scalar fallback in `nogc_sync_mut/.../simd_kernels.spl`, Metal `blend_rule`, and the Vulkan `_glsl_blit`. The blit SPIR-V was regenerated with `gen-blit-spirv.shs`, and the pin check passes.
+  - **The seed must be rebuilt** for the Rust twins to take effect.
+  - The Metal twin is edited but unverified on this Linux host.
+- **Evidence:**
+  - `opacity_group_chrome159_spec` 17/17. It now pins (40,4)=`E3D994` and (54,12)=`9A9FBC` on cpu_simd and Vulkan.
+  - `simd_isa_provider_spec` 24/24: the native kernel matches the oracle at the new hash. `engine2d_color_simd_blend_parity_spec` 5/5.
+  - Three pinned random-destination hashes were re-derived by an independent FNV/LCG replica. The replica first reproduces the previous pins under the old rule.
+  - Base vs head over 353 specs, run serially: the only new failures were those three hash pins, now updated. `web_draw_ir_engine_reuse` flips between 7 and 9 of 11 on base and head alike.
+
+## 2026-11-18 — Draw IR per-corner-radius borders drawn as a square band (FIXED on cpu_simd / Vulkan)
+
+- **Symptom:** a box with differing corner radii (`border-radius: 8px 0 8px 0`), or a rounded box whose border sides differ, got a square border band on cpu_simd and Vulkan. Outside each arc it painted the border colour where Chrome shows the page; along the arc the ring showed the background. Earlier record: p6, 1705 px.
+- **Cause:** `_engine2d_draw_ir_render_borders` received `radius = 0` for non-uniform corners and fell through to square slivers or the mitred bands.
+- **Fix:** `engine2d_draw_ir_render_typed_border_ring` (`draw_ir_box_effects.spl`) paints the ring between the outer per-corner shape and the inner one.
+  - The outer shape is the same mask as the per-corner background.
+  - Each inner corner is an ellipse with radii `r - side width` per axis. Chrome's ring at (49,6) needs the ellipse.
+  - Each ring pixel takes its side's colour. The join runs from the outer box corner to the inner box corner, with ties going to the vertical side.
+  - It is composited once. The shared corner test now samples pixel centres, not indices; the index test reached half a pixel past the arc.
+  - The uniform-radius, uniform-border case keeps `draw_rounded_rect_outline`.
+- **Evidence:** new `border_per_corner_radius_chrome159_spec`, Chrome 159 k=4, 21 fully covered pixels across two boxes, one with four widths and four colours. cpu_simd and Vulkan were red at base and are now green. Base vs head over 242 border, radius and rounded specs, run serially on the same seed: only these two rows changed. The one other new name, `web_layout_cuda_live`, fails a different row on each rerun with `0 total` (the device child dies) and never reaches the border painter.
+- **Still open:**
+  - The CPU raster misses 6 of the 21 pins. Its corner AA (`_corner_coverage256`) gives partial coverage where Chrome paints full colour, it uses a circular inner corner, and a straight side next to an arc reads `FB0003`. This is the open raster corner-AA item.
+  - The Draw IR ring is not anti-aliased.
+  - Dashed, dotted and double styles on per-corner rings paint solid.
+
+## 2026-11-18 — the CPU raster lane painted nothing for `<img>` (FIXED for supplied resources)
+
+- **Symptom:** `simple_web_layout_render_html_software_pixels` took no images and `paint_raster` only counted `img` as an opacity-group item; the box stayed background-coloured on the software lane while cpu_simd and Vulkan painted it.
+- **Fix:** new entry `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)` (the no-image entries pass `[]`). The raster painter draws `<img>` right after the node's own box paint in each paint pass, so later siblings paint over it (document order). Geometry is the Draw IR geometry: content box, object-fit (`html_image_fit_size`, now the single implementation, `_html_draw_ir_fit_size` delegates), object-position, content-box clip. Pixels use the image blend rule (`color.spl` `blend`), node opacity folds into the image alpha, and group layers see the image like any other member.
+  - `ponytail:` nearest-neighbour sampling is exact only for a uniform image (the pinned `TG_IMG`); a non-uniform image needs Chrome's filtered resample.
+  - Natural size is not known to layout (it has no resources), so a bare `<img>` keeps the replaced default size; the spec uses explicit 2x2 / 6x4 sizes.
+- **Evidence:**
+  - New `img_raster_chrome159_spec` 3/3 (2x2 and 6x4 `TG_IMG` = `FF7285F6` inside, white outside; no resource paints nothing). With the paint disabled: 1/3 (both painting rows fail).
+  - `opacity_group_chrome159_spec` 18/18 with a raster row feeding the resource: (18,12) = `8829A5`, `tg_mismatches == 0`. Disabled: 17/18.
+  - Not pinned on the raster: (50,12) / (54,12). That cell's two non-opaque paints overlap, so the raster does not admit it as a group (documented at `TG_X`); with the image painted it reads `7285F6` / `39427B` where Chrome has `B8C2FB` / `9A9FBC`. Admitting overlapping groups is separate work.
+- Review note (2026-11-18): an `<img>` carrying its own `opacity:.5` (no group) reads `B8C2FA` on the raster and on cpu_simd alike. Chrome gives `B8C2FB` for the same image inside a 0.5 group: folding the opacity into the image alpha rounds blue one level low. Unpinned. `_raster_images` is module state, so the raster supports one render at a time per process.

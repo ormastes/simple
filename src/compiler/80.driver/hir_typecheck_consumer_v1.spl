@@ -12,6 +12,7 @@ use compiler.types.cfg_decl_check.{cfg_decl_check_module}
 use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1}
 use compiler.types.type_infer.api_signature_projection_v1.{project_api_signatures_v1}
 use compiler.driver.driver_unit_profile.{unit_profile_apply, unit_profile_drain_diagnostics}
+use compiler.semantics.must_use_discard.{must_use_discard_scan, must_use_finding_severity}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 
 # The only values a typecheck body lease may retain. No HIR/type/symbol roots.
@@ -67,7 +68,7 @@ pub fn typecheck_error_is_fn_value_into_data_slot_v1(ictx: HmInferContext, err: 
 
 pub fn collect_module_typecheck_receipt_v1(
     name: text, m: HirModule, severity: TypecheckPassSeverity,
-    collect_api_signatures: bool = false
+    collect_api_signatures: bool = false, script_mode: bool = false
 ) -> HirTypecheckReceiptV1:
     var warnings: [text] = []
     var errors: [text] = []
@@ -78,7 +79,9 @@ pub fn collect_module_typecheck_receipt_v1(
     # SPL-UNIT-004: the active profile's policy row picks unit_ops strict
     # mode (Deny verdicts arrive via ictx.errors); default-mode warnings are
     # drained below. Stale warnings from an earlier module are discarded.
-    unit_profile_apply(env_get("SIMPLE_TYPECHECK_PROFILE"))
+    # SPL-UNIT-002 (mixed-unit product/quotient) is an error unless
+    # script_mode (CompileMode.Interpret), where it is a warning.
+    unit_profile_apply(env_get("SIMPLE_TYPECHECK_PROFILE"), script_mode)
     val _stale_unit = unit_profile_drain_diagnostics(name)
     ictx.infer_module(m)
     for umsg in unit_profile_drain_diagnostics(name):
@@ -134,6 +137,25 @@ pub fn collect_module_typecheck_receipt_v1(
                     val _ = 0
                 case _:
                     warnings.push(fmsg)
+    # ROB-USE-01/02: discarded Result/Option/@must_use value. Error when compiled,
+    # warning in script mode (same script_mode as SPL-UNIT-002); the pass
+    # severity still bounds it (Advisory drops, Warn downgrades).
+    var scan_modules: Dict<text, HirModule> = {}
+    scan_modules[name] = m
+    val use_severity = must_use_finding_severity(script_mode)
+    for finding in must_use_discard_scan(scan_modules, []):
+        val umsg = "[must-use {finding.code}] {name}: in `{finding.function}`: value of `{finding.callee}` is discarded; consume it, or write `_ = {finding.callee}(...)`"
+        out = out.push(umsg)
+        match severity:
+            case TypecheckPassSeverity.Advisory:
+                val _ = 0
+            case TypecheckPassSeverity.Warn:
+                warnings.push(umsg)
+            case TypecheckPassSeverity.Deny:
+                if use_severity == "error":
+                    errors.push(umsg)
+                else:
+                    warnings.push(umsg)
     # Visibility diagnostics (cross-module private/friend/package access).
     val vwarnings = check_module_visibility(m, name)
     var v_idx = 0

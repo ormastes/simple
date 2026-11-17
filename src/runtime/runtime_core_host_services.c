@@ -659,8 +659,8 @@ static uint8_t* pkg_gunzip_file(const char* path, size_t* out_len) {
     pkg_inflate(&s);
     if (s.error) { free(s.out); free(data); return NULL; }
     const uint8_t* tail = data + len - 8;
-    uint32_t want_crc = (uint32_t)tail[0] | ((uint32_t)tail[1] << 8) | ((uint32_t)tail[2] << 16) | ((uint32_t)tail[3] << 24);
-    uint32_t want_size = (uint32_t)tail[4] | ((uint32_t)tail[5] << 8) | ((uint32_t)tail[6] << 16) | ((uint32_t)tail[7] << 24);
+    uint32_t want_crc = rt__shared_read_u32_le(tail);
+    uint32_t want_size = rt__shared_read_u32_le(tail + 4);
     if (pkg_crc32_update(0, s.out, s.out_len) != want_crc || (uint32_t)s.out_len != want_size) {
         free(s.out);
         free(data);

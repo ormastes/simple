@@ -168,6 +168,15 @@ tracked in the progress file's "Owner goal and lane assignment (2026-11-14)".
 | P6 opt-in runtime switching (PROF-02/03) | tracesel | Opt-in path only, default off. Previously "not scheduled by this plan"; scheduled by the owner direction above |
 | P7 | program | Includes the default-on rule: phase 3 must complete with managed storage enabled before any default flip |
 
+Reconciliation 2026-11-17: the three read-only contracts (`Immutable<T>` live
+view, `RevisionImmutable<T>` pinned revision, `FrozenImmutable<T>` permanent)
+stay distinct (owner decision 9); none is "fully complete" — IMM/ASY/REV rows
+above remain default-off and verification-pending. The revived `x->m(args)`
+operator rebinds the variable; it never writes through an `Immutable<T>` view
+(IMM-01 still applies) and a `RevisionImmutable<T>` update yields a new
+revision while old readers keep theirs. See
+`doc/05_design/language/robust_types/robustness_effects_arrow_pin_design_2026-11-17.md` §2.2, §4.
+
 
 ## 0. Executive decision
 

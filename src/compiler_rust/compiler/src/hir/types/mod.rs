@@ -115,6 +115,31 @@ mod tests {
         assert_eq!(registry.lookup("Point"), Some(id));
     }
 
+    /// Imported `unit Length: i64` aliases `Length` onto I64; a later
+    /// `struct Length` must get its own id, never rewrite I64 itself (that made
+    /// every i64 a self-referential struct and overflowed MIR to_string).
+    #[test]
+    fn update_named_over_builtin_alias_does_not_rewrite_builtin() {
+        let mut registry = TypeRegistry::new();
+        let builtin_before = registry.get(TypeId::I64).cloned();
+        registry.register_alias("Length".to_string(), TypeId::I64);
+
+        let struct_type = HirType::Struct {
+            name: "Length".to_string(),
+            fields: vec![("value".to_string(), TypeId::F64), ("unit".to_string(), TypeId::STRING)],
+            has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
+        };
+        let id = registry.update_named("Length".to_string(), struct_type.clone());
+
+        assert_ne!(id, TypeId::I64);
+        assert_eq!(registry.get(TypeId::I64).cloned(), builtin_before);
+        assert_eq!(registry.get(id), Some(&struct_type));
+        assert_eq!(registry.lookup("Length"), Some(id));
+    }
+
     #[test]
     fn optional_provenance_survives_clone_and_alias_but_not_replacement() {
         let mut registry = TypeRegistry::new();

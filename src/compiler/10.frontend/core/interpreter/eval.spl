@@ -150,7 +150,8 @@ use compiler.core.ast_expr.{EXPR_SLICE, EXPR_SPAWN, EXPR_STRING_LIT, EXPR_STRUCT
 use compiler.core.ast_expr.{EXPR_TUPLE, EXPR_UNARY, EXPR_UNIT, EXPR_UNSAFE_BLOCK, EXPR_WHILE}
 use compiler.core.ast_expr.{EXPR_YIELD, expr_kind_name, expr_owner_int, expr_owner_str}
 use compiler.core.ast_expr.{EXPR_SUFFIXED_LIT}
-use compiler.core.interpreter.eval_units.{eval_suffixed_lit}
+use compiler.core.interpreter.eval_units.{eval_suffixed_lit, eval_unit_checked_cast}
+use compiler.core.unit_constraint.{unit_constraint_find}
 use compiler.core.interpreter.env.{env_assign, env_define, env_get_local, env_has_frame, env_lookup}
 use compiler.core.interpreter.env.{env_lookup_global, env_pop_scope, env_push_scope, env_set_local}
 use compiler.core.interpreter.eval_access.{eval_try}
@@ -357,6 +358,13 @@ fn eval_integer_cast_type(type_tag: i64) -> bool:
 
 fn eval_cast_expr(eid: i64) -> i64:
     val cast_node = expr_get(eid)
+    # `raw as Port` for a constrained unit (`unit Port: u16 where ...` /
+    # `in lo..hi`): checked at the boundary, SPL-UNIT-005 out of range.
+    val cast_unit_name = type_tag_name(cast_node.i_val)
+    if unit_constraint_find(cast_unit_name) >= 0:
+        val cast_payload = eval_expr(cast_node.left)
+        if eval_had_error: return -1
+        return eval_unit_checked_cast(cast_unit_name, cast_payload)
     if not eval_integer_cast_type(cast_node.i_val):
         eval_set_error("core interpreter only supports enum/integer casts to integer types")
         return -1

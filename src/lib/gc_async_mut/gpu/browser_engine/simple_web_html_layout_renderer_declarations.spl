@@ -5,7 +5,7 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.{CSS_P
 use std.gc_async_mut.gpu.browser_engine.simple_web_box_geometry_provenance.{
     web_box_geometry_capture_tokens, web_box_geometry_tokens_reason,
     web_fractional_capture_authored_decls}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille, gradient_has_length_stop, font_milli_of, font_milli_round_px, font_milli_store}
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -60,6 +60,10 @@ fn _background_is_exact_typed_linear_layer(raw: text, gradient_from: u32, gradie
         return false
     val close = paren_matching_close(image_layer, open)
     if close != image_layer.byte_len() - 1:
+        return false
+    # A px / em stop is resolved against the box's gradient line, which the
+    # cascade does not know: the gradient layer path paints it.
+    if gradient_has_length_stop(image_layer):
         return false
     if layers.len() == 1:
         return true
@@ -752,11 +756,11 @@ fn _apply_decls_dispatch(
             st.margin_r_auto = r_tok == "auto"
             st.margin_b_auto = b_tok == "auto"
             st.margin_l_auto = l_tok == "auto"
-            st.margin_t = if t_tok == "auto": 0 else: margin_token_vh_px(t_tok)
+            st.margin_t = if t_tok == "auto": 0 else: _decl_vertical_margin_px(t_tok, st.font_size, margin_token_vh_px(t_tok))
             st.margin_r = if r_tok == "auto": 0 else: margin_token_px(r_tok)
-            st.margin_b = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
-            st.margin_t_milli = 0
-            st.margin_b_milli = 0
+            st.margin_b = if b_tok == "auto": 0 else: _decl_vertical_margin_px(b_tok, st.font_size, margin_token_vh_px(b_tok))
+            st.margin_t_milli = if t_tok == "auto": 0 else: _decl_vertical_margin_milli(t_tok, st.font_size)
+            st.margin_b_milli = if b_tok == "auto": 0 else: _decl_vertical_margin_milli(b_tok, st.font_size)
             st.margin_l = if l_tok == "auto": 0 else: margin_token_px(l_tok)
     var ml = ""
     var ml_pos: i32 = -1
@@ -1432,6 +1436,7 @@ val FORM_CONTROL_UA_LINE_HEIGHT_RATIO: i32 = -12
 fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     var display_v = st.display
     var font_size_v = st.font_size
+    var font_size_milli_v = st.font_size_milli
     var font_family_v = st.font_family
     var pad_l_v = st.pad_l
     var pad_t_v = st.pad_t
@@ -1476,36 +1481,43 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         display_v = "inline"
     if tag == "h1":
         font_size_v = 32
+        font_size_milli_v = 0
         bold_v = true
         margin_t_v = 21
         margin_b_v = 21
         margin_milli_v = 21437
     elif tag == "h2":
         font_size_v = 24
+        font_size_milli_v = 0
         bold_v = true
         margin_t_v = 20
         margin_b_v = 20
         margin_milli_v = 19906
     elif tag == "h3":
         font_size_v = 19
+        # 1.17em of 16 px = 18.72 (Chrome 159); `font_size` is the rounded px.
+        font_size_milli_v = 18720
         bold_v = true
         margin_t_v = 19
         margin_b_v = 19
         margin_milli_v = 18718
     elif tag == "h4":
         font_size_v = 16
+        font_size_milli_v = 0
         bold_v = true
         margin_t_v = 21
         margin_b_v = 21
         margin_milli_v = 21265
     elif tag == "h5":
         font_size_v = 13
+        font_size_milli_v = 13280
         bold_v = true
         margin_t_v = 22
         margin_b_v = 22
         margin_milli_v = 22171
     elif tag == "h6":
         font_size_v = 11
+        font_size_milli_v = 10720
         bold_v = true
         # 2.33em of the 10.72 px h6 font is 24.98 (Chrome 159), not 26.
         margin_t_v = 25
@@ -1515,7 +1527,10 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         # Chrome UA sheet: b/strong are font-weight:bold with no size change.
         bold_v = true
     elif tag == "small":
-        font_size_v = (st.font_size * 5 + 3) / 6
+        # `smaller` = 5/6 of the inherited size, kept fractional (16 px -> 13.333).
+        val smaller_milli = font_milli_of(st.font_size, st.font_size_milli) * 5 / 6
+        font_size_v = font_milli_round_px(smaller_milli)
+        font_size_milli_v = font_milli_store(smaller_milli)
     elif tag == "code" or tag == "kbd" or tag == "samp":
         font_family_v = "monospace"
     elif tag == "var" or tag == "em" or tag == "i" or tag == "cite" or tag == "dfn":
@@ -1533,7 +1548,10 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         # rounded half up. `line-height` is inherited like any other inline
         # box (html.css sets only vertical-align and font-size): a unitless
         # factor re-resolves against the smaller font, a px value stays.
-        font_size_v = (st.font_size * 5 + 3) / 6
+        # `smaller` = 5/6 of the inherited size, kept fractional (16 px -> 13.333).
+        val smaller_milli = font_milli_of(st.font_size, st.font_size_milli) * 5 / 6
+        font_size_v = font_milli_round_px(smaller_milli)
+        font_size_milli_v = font_milli_store(smaller_milli)
         vertical_align_v = if tag == "sub": "sub" else: "super"
     elif tag == "hr":
         var rule = st
@@ -1612,6 +1630,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         # the FORM_CONTROL_UA_* note below the `button` branch.
         display_v = if tag == "textarea": "inline-block" else: "inline"
         font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
+        font_size_milli_v = 0
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
         if tag == "textarea":
             font_family_v = "monospace"
@@ -1643,6 +1662,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         text_align_v = "center"
         # Form controls do not inherit `font` from their ancestors.
         font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
+        font_size_milli_v = 0
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
         font_family_v = "sans-serif"
         bold_v = false
@@ -1690,6 +1710,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         display_v = "block"
     st.fg = fg_v
     st.font_size = font_size_v
+    st.font_size_milli = font_size_milli_v
     st.font_family = font_family_v
     st.line_height_px = line_height_v
     st.border_box = border_box_v

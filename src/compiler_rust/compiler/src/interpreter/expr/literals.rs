@@ -23,6 +23,18 @@ pub(super) fn eval_literal_expr(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
+    if let Expr::TypedInteger(_, NumericSuffix::Unit(unit_name)) | Expr::TypedFloat(_, NumericSuffix::Unit(unit_name)) =
+        expr
+    {
+        let declared = crate::interpreter_unit::unit_suffix_declared_in_file(unit_name);
+        let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.borrow().clone());
+        let err = crate::units::scope::with_owner_scope(owner.as_deref(), || {
+            crate::units::scope::unit_suffix_scope_error(unit_name, declared)
+        });
+        if let Some(msg) = err {
+            return Err(CompileError::semantic(msg));
+        }
+    }
     match expr {
         Expr::Integer(value) => Ok(Some(Value::Int(*value))),
         Expr::TypedInteger(value, suffix) => Ok(Some(match suffix {

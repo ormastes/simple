@@ -1,6 +1,6 @@
 # Stage 3 compiler on Windows: every native-build fails admission with `directory-alias-inventory-invalid`
 
-Status: OPEN, cause UNKNOWN (an instrumented probe is in progress). Blocks Stage 3
+Status: OPEN, cause identified in `phase2_var_reassign_runtime_text_branch_lost_2026-11-17.md` (source workaround landed; confirmation by a rebuilt Stage 3 pending). Blocks Stage 3
 self-compilation on Windows.
 
 ## Symptom

@@ -23,9 +23,20 @@ class StyleProps:
     line_height: f64       # px; 0 = "normal" (resolved at layout)
     text_align: text       # "left", "center", "right"
     text_decoration: text  # CSS Text Decoration Level 3/4: "", "underline", "underline line-through", ...
-    border_width: f64
     border_color: text
-    border_style: text
+    # Specified per-side border widths (initial `medium` = 3px) and styles
+    # (initial `none`). Layout reads the USED widths through border_top() /
+    # border_right() / border_bottom() / border_left(), which are 0 while that
+    # side's style is none or hidden (CSS Backgrounds 3 §4.3), so the result
+    # does not depend on the order `border-width` and `border-style` arrive in.
+    border_top_width: f64
+    border_right_width: f64
+    border_bottom_width: f64
+    border_left_width: f64
+    border_top_style: text
+    border_right_style: text
+    border_bottom_style: text
+    border_left_style: text
     flex_direction: text   # "row", "column"
     flex_grow: f64
     position: text         # "static", "relative", "absolute", "fixed"
@@ -60,13 +71,19 @@ impl StyleProps:
             background_color: "",
             font_size: 16.0,
             font_weight: "normal",
-            font_family: "sans-serif",
+            font_family: "serif",
             line_height: 0.0,
             text_align: "left",
             text_decoration: "",
-            border_width: 0.0,
             border_color: "",
-            border_style: "none",
+            border_top_width: 3.0,
+            border_right_width: 3.0,
+            border_bottom_width: 3.0,
+            border_left_width: 3.0,
+            border_top_style: "none",
+            border_right_style: "none",
+            border_bottom_style: "none",
+            border_left_style: "none",
             flex_direction: "row",
             flex_grow: 0.0,
             position: "static",
@@ -80,6 +97,29 @@ impl StyleProps:
             box_sizing: "content-box"
         )
 
+    fn border_top() -> f64:
+        css_border_used_width(self.border_top_width, self.border_top_style)
+
+    fn border_right() -> f64:
+        css_border_used_width(self.border_right_width, self.border_right_style)
+
+    fn border_bottom() -> f64:
+        css_border_used_width(self.border_bottom_width, self.border_bottom_style)
+
+    fn border_left() -> f64:
+        css_border_used_width(self.border_left_width, self.border_left_style)
+
+    me set_border_all(width: f64, style: text):
+        """Give all four sides the same specified width and style."""
+        self.border_top_width = width
+        self.border_right_width = width
+        self.border_bottom_width = width
+        self.border_left_width = width
+        self.border_top_style = style
+        self.border_right_style = style
+        self.border_bottom_style = style
+        self.border_left_style = style
+
 # =========================================================================
 # CSS value helpers
 #
@@ -91,7 +131,7 @@ impl StyleProps:
 # Marks which CSS properties were explicitly declared on a node, so the
 # inheritance pass can tell "computed 0/empty" from "never declared".
 # StyleProps carries non-neutral defaults (font_size 16.0, font_family
-# "sans-serif", text_align "left", font_weight "normal"), so the field value
+# "serif", text_align "left", font_weight "normal"), so the field value
 # alone is an ambiguous sentinel and cannot answer that question.
 #
 # Stored under a NUL-prefixed attribute key, the convention already used by
@@ -301,6 +341,28 @@ fn css_is_border_style_token(tok: text) -> bool:
         v == "solid" or v == "double" or v == "groove" or v == "ridge" or
         v == "inset" or v == "outset"
     )
+
+fn css_border_used_width(width: f64, style: text) -> f64:
+    """Used border width of one side: 0 when its style is none or hidden
+    (CSS Backgrounds 3 §4.3), the specified width otherwise."""
+    val st = style.trim().lower()
+    if st == "" or st == "none" or st == "hidden":
+        return 0.0
+    width
+
+fn css_box_side_words(value: text) -> [text]:
+    """Expand a 1/2/3/4-keyword box shorthand (`border-style`) into
+    [top, right, bottom, left], lowercased."""
+    val parts = css_split_ws(value.lower())
+    if parts.len() == 0:
+        return ["none", "none", "none", "none"]
+    if parts.len() == 1:
+        return [parts[0], parts[0], parts[0], parts[0]]
+    if parts.len() == 2:
+        return [parts[0], parts[1], parts[0], parts[1]]
+    if parts.len() == 3:
+        return [parts[0], parts[1], parts[2], parts[1]]
+    [parts[0], parts[1], parts[2], parts[3]]
 
 fn css_box_sides(value: text, font_px: f64) -> [f64]:
     """Expand a 1/2/3/4-value box shorthand into [top, right, bottom, left]."""
@@ -1462,7 +1524,19 @@ impl BeDomNode:
         elif p == "border-color":
             self.style.border_color = v
         elif p == "border-style":
-            self.style.border_style = v
+            val bs = css_box_side_words(v)
+            self.style.border_top_style = bs[0]
+            self.style.border_right_style = bs[1]
+            self.style.border_bottom_style = bs[2]
+            self.style.border_left_style = bs[3]
+        elif p == "border-top-style":
+            self.style.border_top_style = v.trim().lower()
+        elif p == "border-right-style":
+            self.style.border_right_style = v.trim().lower()
+        elif p == "border-bottom-style":
+            self.style.border_bottom_style = v.trim().lower()
+        elif p == "border-left-style":
+            self.style.border_left_style = v.trim().lower()
         # --- font-size (its own unit rules; must precede em-relative use) --
         elif p == "font-size":
             self.style.font_size = css_font_size_px(v, fpx)
@@ -1518,31 +1592,58 @@ impl BeDomNode:
             self.style.padding_bottom = pd[2]
             self.style.padding_left = pd[3]
         # --- border ------------------------------------------------------
-        # StyleProps keeps ONE border_width, so per-side widths collapse onto
-        # it. That is lossy for asymmetric borders; noted, not fixed here.
+        # Specified widths and styles are stored per side; the used width
+        # (0 for style none/hidden) is resolved by StyleProps.border_top() etc.
+        elif p == "border-width":
+            val bw = css_box_sides(v, fpx)
+            self.style.border_top_width = bw[0]
+            self.style.border_right_width = bw[1]
+            self.style.border_bottom_width = bw[2]
+            self.style.border_left_width = bw[3]
+        elif p == "border-top-width":
+            self.style.border_top_width = css_length_px(v, fpx)
+        elif p == "border-right-width":
+            self.style.border_right_width = css_length_px(v, fpx)
+        elif p == "border-bottom-width":
+            self.style.border_bottom_width = css_length_px(v, fpx)
+        elif p == "border-left-width":
+            self.style.border_left_width = css_length_px(v, fpx)
         elif (
-            p == "border-width" or p == "border-top-width" or
-            p == "border-right-width" or p == "border-bottom-width" or
-            p == "border-left-width"
+            p == "border" or p == "border-top" or p == "border-right" or
+            p == "border-bottom" or p == "border-left"
         ):
-            self.style.border_width = css_length_px(v, fpx)
-        elif p == "border":
-            # `border: <width> || <style> || <color>` in any order.
+            # `<width> || <style> || <color>` in any order; an omitted width
+            # or style resets to its initial value (medium = 3px, none).
             val toks = css_split_ws(v)
+            var bw = 3.0
+            var bs = "none"
+            var bc = ""
             var ti = 0
             while ti < toks.len():
                 val tok = toks[ti]
                 ti = ti + 1
                 if css_is_border_style_token(tok):
-                    self.style.border_style = tok.lower()
+                    bs = tok.lower()
                 elif css_is_length_token(tok):
-                    self.style.border_width = css_length_px(tok, fpx)
+                    bw = css_length_px(tok, fpx)
                 else:
-                    self.style.border_color = tok
-            if toks.len() > 0 and self.style.border_style == "none":
-                # `border: 2px blue` with no style keyword paints nothing in
-                # CSS, and a zero width is how this engine expresses that.
-                self.style.border_width = 0.0
+                    bc = tok
+            if p == "border":
+                self.style.set_border_all(bw, bs)
+                if bc != "":
+                    self.style.border_color = bc
+            elif p == "border-top":
+                self.style.border_top_width = bw
+                self.style.border_top_style = bs
+            elif p == "border-right":
+                self.style.border_right_width = bw
+                self.style.border_right_style = bs
+            elif p == "border-bottom":
+                self.style.border_bottom_width = bw
+                self.style.border_bottom_style = bs
+            else:
+                self.style.border_left_width = bw
+                self.style.border_left_style = bs
         elif p == "line-height":
             # No dedicated slot; a unitless multiplier resolves against the
             # node's font-size, matching the CSS used-value rule.

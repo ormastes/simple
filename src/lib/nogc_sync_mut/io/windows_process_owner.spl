@@ -61,29 +61,19 @@ var _windows_process_slots_v1: [WindowsProcessStateV1] = []
 
 # MEMORYSTATUSEX is 64 bytes on Win64; physical and commit headroom are
 # distinct. JobObject memory limits account committed bytes.
-@unsafe(reason: "reads a bounded native host memory snapshot and releases its buffer", capabilities: [ffi, raw_ptr])
+# Only the registered runtime provider (GlobalMemoryStatusEx, min of free
+# physical and free commit) is used. The former raw kernel32 fallback hard-aborts
+# under the seed interpreter (unresolved extern) and re-ran the same failing
+# query natively, so a zero snapshot now fails closed with Err.
+fn windows_headroom_from_snapshot_v1(bytes: i64) -> Result<i64, text>:
+    if bytes > 0: return Ok(bytes)
+    Err("Windows available memory snapshot unavailable")
+
 fn windows_available_memory_headroom_v1() -> Result<i64, text>:
-    # Interpreter-first: the runtime-C wrapper resolves under the bootstrap
-    # seed's pure interpreter, where the raw kernel32 heap externs below have
-    # no implementation (the probe errored and the build/preflight memory
-    # admission degraded to "available: 0 via unknown", refusing native-builds
-    # including devhub/caret entry-closure builds, 2026-10-24). 0 = snapshot
-    # unavailable: fall through to the extern path for full AOT fidelity.
-    val headroom = rt_host_memory_headroom_bytes_v1()
-    if headroom > 0: return Ok(headroom)
-    val heap = GetProcessHeap()
-    if heap == 0: return Err("Windows process heap unavailable for memory check")
-    val status = HeapAlloc(heap, 8u32, 64u64)
-    if status == 0: return Err("Windows memory status allocation failed")
-    volatile_write_u32(status, 64u32)
-    val queried = GlobalMemoryStatusEx(status)
-    val available = if queried != 0: volatile_read_u64(status + 16) else: 0u64
-    val commit_available = if queried != 0: volatile_read_u64(status + 32) else: 0u64
-    val released = HeapFree(heap, 0u32, status)
-    if queried == 0 or released == 0: return Err("Windows available memory query failed")
-    if available > 9223372036854775807u64 or commit_available > 9223372036854775807u64:
-        return Err("Windows available memory exceeds supported bound")
-    Ok(windows_capacity_headroom_v1(available as i64, commit_available as i64))
+    var bytes: i64 = 0
+    unsafe(capabilities: [ffi]):
+        bytes = rt_host_memory_headroom_bytes_v1()
+    windows_headroom_from_snapshot_v1(bytes)
 
 fn windows_capacity_headroom_v1(physical_bytes: i64, commit_bytes: i64) -> i64:
     if physical_bytes < 0 or commit_bytes < 0: return 0
@@ -564,4 +554,4 @@ fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, t
 
 export windows_process_start_with_memory_v1, windows_process_peak_memory_v1
 export WindowsProcessAdmissionV1, windows_process_admit_v1, windows_process_admit_with_reserve_v1
-export windows_available_memory_headroom_v1, windows_capacity_headroom_v1
+export windows_available_memory_headroom_v1, windows_capacity_headroom_v1, windows_headroom_from_snapshot_v1

@@ -6,7 +6,7 @@
 #   - strict mode is chosen by the SPL-UNIT-004 row of
 #     config/policy/diagnostic_policy.sdn for the active profile (no profile
 #     names are hardcoded here: a `deny` baseline means strict);
-#   - the active language edition (simple.sdn [package] edition, via
+#   - the active language edition (simple.sdn project: edition, via
 #     resolve_edition) also promotes it once edition >= the row's
 #     error_since_lang_version (owner decision 5C, plan §7);
 #   - default-mode warnings are drained into typecheck diagnostics.
@@ -22,7 +22,9 @@ use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
 use std.nogc_sync_mut.io.env_ops.{cwd}
 
 val UNIT_PROFILE_RULE: text = "SPL-UNIT-004"
-# Undeclared product/quotient of two different units (owner decision 2026-11-17).
+# Undeclared product/quotient of two different units: a security-category
+# error in compiled code regardless of profile/edition; a warning only in
+# script mode (owner decision 2026-11-17, Q1=b). Not policy-driven.
 val UNIT_MIXED_RULE: text = "SPL-UNIT-002"
 
 # Loaded at most once per process (a missing/malformed file is remembered too).
@@ -80,15 +82,11 @@ pub fn unit_profile_policy() -> DiagnosticPolicySnapshot?:
 # Unknown/empty profile resolves to the policy's `default` column.
 # @allow(primitive_api) yes/no strict-mode predicate mirroring unit_ops' own bool switch; no domain type applies
 pub fn unit_profile_strict_for(policy: DiagnosticPolicySnapshot?, raw_profile: text) -> bool:
-    unit_rule_strict_for(policy, UNIT_PROFILE_RULE, raw_profile)
-
-# Same predicate for any unit rule row (SPL-UNIT-002 / SPL-UNIT-004).
-# @allow(primitive_api) yes/no strict-mode predicate mirroring unit_ops' own bool switch; no domain type applies
-pub fn unit_rule_strict_for(policy: DiagnosticPolicySnapshot?, rule: text, raw_profile: text) -> bool:
     match policy:
-        case None: rule == UNIT_PROFILE_RULE and _unit_profile_requires_strict(raw_profile)
+        # Fail closed: no policy must not downgrade an assured profile (#9965).
+        case None: _unit_profile_requires_strict(raw_profile)
         case Some(snapshot):
-            val slot = snapshot.slot_of(rule)
+            val slot = snapshot.slot_of(UNIT_PROFILE_RULE)
             if slot < 0:
                 return false
             var mode = normalize_profile_name(raw_profile)
@@ -101,39 +99,37 @@ pub fn unit_rule_strict_for(policy: DiagnosticPolicySnapshot?, rule: text, raw_p
 # "schedule" for an edition below warn_since_lang_version.
 # @allow(primitive_api) yes/no strict-mode predicate mirroring unit_ops' own bool switch; no domain type applies
 pub fn unit_profile_strict_for_edition(policy: DiagnosticPolicySnapshot?, raw_profile: text, edition: text) -> bool:
-    unit_rule_strict_for_edition(policy, UNIT_PROFILE_RULE, raw_profile, edition)
-
-# @allow(primitive_api) yes/no strict-mode predicate mirroring unit_ops' own bool switch; no domain type applies
-pub fn unit_rule_strict_for_edition(policy: DiagnosticPolicySnapshot?, rule: text, raw_profile: text, edition: text) -> bool:
-    if unit_rule_strict_for(policy, rule, raw_profile):
+    if unit_profile_strict_for(policy, raw_profile):
         return true
     match policy:
         case None: false
         case Some(snapshot):
-            if snapshot.slot_of(rule) < 0:
+            if snapshot.slot_of(UNIT_PROFILE_RULE) < 0:
                 return false
             var mode = normalize_profile_name(raw_profile)
             if mode == "":
                 mode = "default"
             val ctx = PolicyResolveContext.new(mode, edition, "")
-            val r = snapshot.resolve(rule, ctx, DiagnosticRuleLevel.Warn)
+            val r = snapshot.resolve(UNIT_PROFILE_RULE, ctx, DiagnosticRuleLevel.Warn)
             r.level.rank() >= DiagnosticRuleLevel.Deny.rank()
 
-pub fn unit_profile_apply(raw_profile: text):
-    unit_profile_apply_for_sdn(raw_profile, "simple.sdn")
+# `script_mode` is true only for interpreted script execution
+# (CompileMode.Interpret); it is the single relaxation of SPL-UNIT-002.
+pub fn unit_profile_apply(raw_profile: text, script_mode: bool = false):
+    unit_profile_apply_for_sdn(raw_profile, "simple.sdn", script_mode)
 
-# Same as unit_profile_apply, reading [package] edition from sdn_path.
-# SPL-UNIT-004 and SPL-UNIT-002 each follow their own policy row.
-pub fn unit_profile_apply_for_sdn(raw_profile: text, sdn_path: text):
+# Same as unit_profile_apply, reading project: edition from sdn_path.
+# SPL-UNIT-004 follows its policy row; SPL-UNIT-002 (mixed-unit product /
+# quotient) is strict unless script_mode.
+pub fn unit_profile_apply_for_sdn(raw_profile: text, sdn_path: text, script_mode: bool = false):
     val policy = unit_profile_policy()
     if not policy.? and _unit_profile_requires_strict(raw_profile):
         _UNIT_PROFILE_NOTICES.push(diagnostic_policy_default_path() + " not found; profile `" + raw_profile + "` applies SPL-UNIT-004 strictly (fail closed)")
-    val edition = resolve_edition_from_sdn(sdn_path)
-    if unit_rule_strict_for_edition(policy, UNIT_PROFILE_RULE, raw_profile, edition):
+    if unit_profile_strict_for_edition(policy, raw_profile, resolve_edition_from_sdn(sdn_path)):
         unit_op_robust_profile()
     else:
         unit_op_default_profile()
-    unit_op_set_mixed_strict(unit_rule_strict_for_edition(policy, UNIT_MIXED_RULE, raw_profile, edition))
+    unit_op_set_mixed_strict(not script_mode)
 
 # Drains pending unit warnings as `[unit <code>] <module>: <msg>`; the code is
 # the message's own SPL-UNIT-00N prefix.

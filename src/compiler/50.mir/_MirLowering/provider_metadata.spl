@@ -1,5 +1,7 @@
 # @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_types.{SymbolKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.mir.mir_target_hir_symbol_writes.{mir_symbol_write_record}
 # Provider HIR contains module-local SymbolIds. Never publish those IDs in a
 # consumer's field/default metadata; relocate through declaration ownership.
@@ -651,6 +653,23 @@ impl MirLowering:
         if owner == "" or self.provider_default_literal_owners_v1.has(owner): return
         self.remember_provider_default_constants_v1(provider_module.name, provider_module.constants.values())
 
+    me consumer_builtin_none_symbol_v1(span: Span) -> SymbolId:
+        """The consumer table's built-in `None` symbol, defined on first use the
+        way HIR lowering defines it. Invalid when the consumer binds `None` to
+        anything else (a module-owned symbol or a non-function): the default
+        then stays Error rather than naming an unrelated consumer symbol."""
+        val existing = self.symbols.lookup_or_invalid("None")
+        if not existing.is_valid():
+            return self.symbols.define("None", SymbolKind.Function, None, span, Visibility.Private, false, None)
+        if self.symbols.symbol_defining_module_scalar_raw(existing.id) != "":
+            return SymbolId(id: -1)
+        val optional_existing: HirSymbol? = self.symbols.get_symbol_raw(existing.id)
+        if val present_existing = optional_existing:
+            val existing_symbol: HirSymbol = present_existing
+            if existing_symbol.kind == SymbolKind.Function:
+                return existing
+        SymbolId(id: -1)
+
     me relocate_provider_default(expr: HirExpr, provider: SymbolTable, links: Dict<i64, text>) -> HirExpr:
         # Same nested-access annotation as relocate_provider_type.
         val expr_kind: HirExprKind = expr.kind
@@ -704,9 +723,20 @@ impl MirLowering:
                     var source_is_class = false
                     var source_is_struct = false
                     var source_const_key = ""
+                    var source_is_builtin_none = false
                     if val present_source = optional_source:
                         val source: HirSymbol = present_source
                         source_name = source.name
+                        # `field: Option<T> = None`: HIR spells the built-in
+                        # nullary Option variant as a module-less Function
+                        # symbol named None (expression_support.spl
+                        # is_option_variant). It has no link name, so the
+                        # callable relocation below refused it and every
+                        # consumer omitting the field failed with "unsupported
+                        # provider default". A linked or module-owned symbol
+                        # named None is a real provider callable, not this.
+                        if source.kind == SymbolKind.Function and source.name == "None" and (source.defining_module ?? "") == "" and not links.has(id.id):
+                            source_is_builtin_none = true
                         if source.kind == SymbolKind.Class:
                             source_is_class = true
                             class_identity = mir_class_identity_raw(provider, id.id)
@@ -714,7 +744,11 @@ impl MirLowering:
                             source_is_struct = true
                         elif source.kind == SymbolKind.Const:
                             source_const_key = "{mir_layout_canonical_module_name(source.defining_module ?? "")}::{source.name}"
-                    if source_const_key != "":
+                    if source_is_builtin_none:
+                        val none_target = self.consumer_builtin_none_symbol_v1(expr.span)
+                        if none_target.id < 0: HirExprKind.Error
+                        else: HirExprKind.NamedVar(none_target, "None")
+                    elif source_const_key != "":
                         # `field: i32 = OWNER_LOCAL_WEB`: an immutable literal
                         # provider constant is its value. Anything else has no
                         # consumer storage binding here and stays Error, which

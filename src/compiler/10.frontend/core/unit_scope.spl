@@ -12,7 +12,7 @@
 # `unit X: T as sfx`. Families are tracked as "<org>/<family>".
 # Callers reset scope per file (interpreter: per core_interpret run).
 
-use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at}
+use compiler.core.types.{unit_decl_count, unit_decl_short_symbol_at, UnitDeclPoolSnapshot, unit_decl_pool_save, unit_decl_pool_restore}
 use std.io_runtime.{dir_list_or_empty, file_exists}
 use compiler.core.interpreter.module_loader_resolve.{unit_library_root_get, unit_library_root_set, module_resolve_cache_reset}
 
@@ -21,10 +21,17 @@ val UNIT_DEFAULT_ORG: text = "simple-lang"
 var unit_scope_names: [text] = []
 var unit_scope_families: [text] = []
 var unit_scope_ambiguous: [text] = []
+# Library lookup caches live for ONE scope (one file / one interpreter run),
+# not the process: the driver parses each file inside a transient array scope
+# and reclaims every array and text born in it, so a cache filled while
+# parsing file N is freed memory by file N+1. Only these two flags outlive a
+# scope; the arrays are rebuilt on first use after unit_library_cache_drop().
+# doc/08_tracking/bug/unit_scope_cache_freed_by_transient_parse_scope_2026-11-17.md
 var unit_org_dirs: [text] = []
 var unit_org_dirs_loaded: bool = false
 var unit_family_cache_sfx: [text] = []
 var unit_family_cache_fam: [text] = []
+var unit_family_cache_loaded: bool = false
 # Only unit decls registered at or after this index count as declared in scope.
 var unit_scope_decl_base: i64 = 0
 
@@ -32,10 +39,13 @@ pub fn unit_library_set_base(dir: text):
     """Point the library-unit lookup at another root (tests); drops caches."""
     unit_library_root_set(dir)
     module_resolve_cache_reset()
-    unit_org_dirs = []
+    unit_library_cache_drop()
+
+fn unit_library_cache_drop():
+    """Forget the lookup caches without touching the (possibly reclaimed)
+    arrays; the next lookup allocates fresh ones."""
     unit_org_dirs_loaded = false
-    unit_family_cache_sfx = []
-    unit_family_cache_fam = []
+    unit_family_cache_loaded = false
 
 fn unit_library_orgs() -> [text]:
     """Org dir names under the unit library root, listed once per base."""
@@ -55,23 +65,32 @@ pub fn unit_scope_reset_from(decl_base: i64):
     unit_scope_families = []
     unit_scope_ambiguous = []
     unit_scope_decl_base = decl_base
+    unit_library_cache_drop()
 
 pub struct UnitScopeSnapshot:
     names: [text]
     families: [text]
     ambiguous: [text]
     decl_base: i64
+    # `decl_base` indexes the unit decl pool, so the pool travels with it:
+    # the bridge's reset_all_pools wipes the pool before it parses its own
+    # file, and a bare `decl_base` restored over an empty pool would both
+    # lose the script's `unit ... as sfx` declarations and exceed the count.
+    decls: UnitDeclPoolSnapshot
 
 pub fn unit_scope_save() -> UnitScopeSnapshot:
-    """Capture the current scope so a nested per-file reset (the flat AST
-    bridge called from an interpreted script) can hand it back afterwards."""
-    UnitScopeSnapshot(names: unit_scope_names, families: unit_scope_families, ambiguous: unit_scope_ambiguous, decl_base: unit_scope_decl_base)
+    """Capture the current scope and its unit decl pool so a nested per-file
+    reset (the flat AST bridge called from an interpreted script) can hand
+    them back afterwards. Take it BEFORE the pool reset."""
+    UnitScopeSnapshot(names: unit_scope_names, families: unit_scope_families, ambiguous: unit_scope_ambiguous, decl_base: unit_scope_decl_base, decls: unit_decl_pool_save())
 
 pub fn unit_scope_restore(snap: UnitScopeSnapshot):
+    unit_decl_pool_restore(snap.decls)
     unit_scope_names = snap.names
     unit_scope_families = snap.families
     unit_scope_ambiguous = snap.ambiguous
     unit_scope_decl_base = snap.decl_base
+    unit_library_cache_drop()
 
 pub fn unit_scope_reset():
     """Interpreter form: the decl registry is not reset between runs, so only
@@ -105,7 +124,7 @@ fn unit_import_org(segs: [text], module_path: text) -> text:
     val org_hit = unit_path_exists(cand, rest)
     val default_hit = unit_path_exists(UNIT_DEFAULT_ORG, segs[1..])
     if org_hit and default_hit:
-        unit_scope_ambiguous.push(unit_org_name(cand) + "/" + segs[segs.len() - 1] + "\t`use" + module_path + "` is ambiguous: both org '" + cand + "' and simple-lang family '" + cand + "' provide it")
+        unit_scope_ambiguous.push(unit_org_name(cand) + "/" + segs[segs.len() - 1] + "\t`use " + module_path + "` is ambiguous: both org '" + cand + "' and simple-lang family '" + cand + "' provide it")
         return ""
     if default_hit and not org_hit: return UNIT_DEFAULT_ORG
     unit_org_name(cand)
@@ -137,6 +156,10 @@ fn unit_library_families(suffix: text) -> text:
     the unit library root cannot be found (status unknown)."""
     val root = unit_library_root_get()
     if root == "": return "?"
+    if not unit_family_cache_loaded:
+        unit_family_cache_sfx = []
+        unit_family_cache_fam = []
+        unit_family_cache_loaded = true
     var i = 0
     while i < unit_family_cache_sfx.len():
         if unit_family_cache_sfx[i] == suffix: return unit_family_cache_fam[i]
@@ -160,9 +183,16 @@ fn unit_suffix_declared(suffix: text) -> bool:
         i = i + 1
     false
 
+fn unit_is_primitive_numeric_suffix(suffix: text) -> bool:
+    """Built-in numeric literal type suffixes are language primitives, never library units."""
+    (suffix == "i8" or suffix == "i16" or suffix == "i32" or suffix == "i64" or suffix == "i128" or
+        suffix == "u8" or suffix == "u16" or suffix == "u32" or suffix == "u64" or suffix == "u128" or
+        suffix == "isize" or suffix == "usize" or suffix == "f16" or suffix == "f32" or suffix == "f64")
+
 pub fn unit_suffix_scope_error(suffix: text) -> text:
     """"" when `suffix` is in scope, else the diagnostic text. Fails closed
     when the unit library root cannot be found."""
+    if unit_is_primitive_numeric_suffix(suffix): return ""
     if unit_suffix_declared(suffix): return ""
     val joined = unit_library_families(suffix)
     if joined == "?":
@@ -178,7 +208,7 @@ pub fn unit_suffix_scope_error(suffix: text) -> text:
         val org = key.substring(0, key.index_of("/"))
         val fam = key.substring(key.index_of("/") + 1)
         val prefix = if org == UNIT_DEFAULT_ORG: "" else: org + "."
-        hints.push("`use unit." + prefix + fam + ".{" + suffix + "}`")
+        hints.push("`use unit." + prefix + fam + r".{" + suffix + r"}`")
     var msg = "unit suffix '" + suffix + "' is not in scope; add " + hints.join(" or ") + " (or declare `unit X: T as " + suffix + "`)"
     for entry in unit_scope_ambiguous:
         val tab = entry.index_of("\t")

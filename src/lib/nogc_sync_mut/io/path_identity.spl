@@ -95,13 +95,16 @@ fn _path_final_existing(path: text, capacity: i64) -> Result<HostFinalPath, text
     val guid = _path_identity_query(heap, handle, capacity, 1u32)
     val closed = CloseHandle(handle)
     if closed == 0: return Err("PATH_IDENTITY_CLOSE")
-    var final_path = dos?
-    val identity = guid?
+    # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=typed match is the prescribed form for a `?`-unwrapped Result<text,_> under the frozen Phase 2 compiler
+    val dos_path: text = match dos:
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val identity: text = match guid:
+        case Ok(v): v
+        case Err(e): return Err(e)
     if not identity.starts_with("//?/Volume{"): return Err("PATH_IDENTITY_VOLUME_UNAVAILABLE")
-    if final_path.starts_with("//?/UNC/"):
-        final_path = "//" + final_path[8:final_path.len()]
-    elif final_path.starts_with("//?/"):
-        final_path = final_path[4:final_path.len()]
+    # @workaround bug=phase2_var_reassign_runtime_text_branch_lost_2026-11-17 reason=frozen Phase 2 loses a var text reassignment inside if/elif for the FFI-decoded final path; val-only if-expression
+    val final_path: text = if dos_path.starts_with("//?/UNC/"): "//" + dos_path[8:dos_path.len()] elif dos_path.starts_with("//?/"): dos_path[4:dos_path.len()] else: dos_path
     Ok(HostFinalPath(path: final_path, identity: identity))
 
 @unsafe(reason: "no-follow Windows attributes with immediate error capture and checked private-buffer release", capabilities: [ffi, raw_ptr])

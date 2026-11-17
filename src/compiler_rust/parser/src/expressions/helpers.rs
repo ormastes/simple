@@ -643,6 +643,9 @@ impl<'a> Parser<'a> {
                     TokenKind::Extend => Some("extend".to_string()),
                     TokenKind::Asm => Some("asm".to_string()),
                     TokenKind::OutErr => Some("out_err".to_string()),
+                    // `spawn` is a soft keyword (actor spawn expr); it must still
+                    // work as a named-arg label, e.g. R(spawn: X.Rejected("..")).
+                    TokenKind::Spawn => Some("spawn".to_string()),
                     _ => None,
                 }
             };

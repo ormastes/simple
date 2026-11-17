@@ -27,6 +27,10 @@ fn gap_run(src: text) -> text:
         case Ok(BackendResult.Value(Value.String(s))): "string:" + s
         case Ok(BackendResult.Value(Value.Int(n))): "int:" + n.to_text()
 
+describe "native interpreter: unsafe block value":
+    it "yields the last expression of an unsafe block":
+        expect(gap_run("fn main() -> i64:\n    val v = unsafe:\n        val t = 4\n        t + 3\n    v\n")).to_equal("int:7")
+
 describe "native interpreter: text search methods":
     it "finds the first and last index of a substring":
         expect(gap_run("fn main() -> i64:\n    val s = \"a.b.c\"\n    s.index_of(\".\") * 10 + s.last_index_of(\".\")\n")).to_equal("int:13")
@@ -39,6 +43,10 @@ describe "native interpreter: text search methods":
 
     it "reads a byte and a character at an index":
         expect(gap_run("fn main() -> i64:\n    val s = \"AB\"\n    s.byte_at(1) + s.char_at(0).len()\n")).to_equal("int:67")
+
+describe "native interpreter: enum equality":
+    it "compares unit and payload enum variants by value":
+        expect(gap_run("enum Cap:\n    Captured\n    Uncaptured\n    Code(n: i64)\n\nfn main() -> i64:\n    var r = 0\n    if Cap.Captured == Cap.Captured:\n        r = r + 1\n    if Cap.Captured != Cap.Uncaptured:\n        r = r + 10\n    if Cap.Code(3) == Cap.Code(3):\n        r = r + 100\n    if Cap.Code(3) != Cap.Code(4):\n        r = r + 1000\n    r\n")).to_equal("int:1111")
 
 describe "native interpreter: integer methods":
     it "converts, masks and compares integers":
@@ -120,3 +128,10 @@ describe "native interpreter: env and file builtins":
     it "round-trips file write, exists, read and delete":
         val src = "fn main() -> text:\n    val p = \"build/native_interpreter_gaps_tmp.txt\"\n    file_write(p, \"data\")\n    val had = file_exists(p)\n    val got = file_read(p)\n    file_delete(p)\n    val gone = file_exists(p)\n    if had and not gone:\n        got\n    else:\n        \"bad\"\n"
         expect(gap_run(src)).to_equal("string:data")
+
+describe "native interpreter: runtime io/process externs":
+    it "opens a file through the raw rt_io_file_open_read twin and refuses a null path":
+        expect(gap_run("extern fn rt_io_file_open_read(path_ptr: i64, path_len: i64) -> i64\n\nfn main() -> i64:\n    rt_io_file_open_read(0, 3)\n")).to_equal("int:-1")
+
+    it "calls rt_process_run_bounded_bytes with its four declared arguments":
+        expect(gap_run("extern fn rt_process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64)\n\nfn main() -> i64:\n    val r = rt_process_run_bounded_bytes(\"simple-no-such-command-xyz\", [], 1000, 100)\n    r.2\n")).to_equal("int:-1")

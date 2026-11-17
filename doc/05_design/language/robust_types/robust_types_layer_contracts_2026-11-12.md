@@ -345,6 +345,15 @@ Do not expose `NotInit<T>` as a public API argument or attribute simply to circu
 
 The parser already tests `val Some(inner) = value else: return ...` in `test/01_unit/compiler/parser/refutable_val_else_spec.spl`. Generalizing the proof to all enum variants and `T<State>` still needs real HIR, MIR, native and interpreter acceptance tests. Do not document untested grammar as production-complete.
 
+6. (2026-11-17) The `T<State>` typestate above is the **only** state
+   representation; effect summaries, the `x->m(args)` binding update and the
+   proposed pin/address-stability contract are layered on it, not beside it.
+   A state transition via `->` requires the target's declared type to admit
+   the new state; otherwise use a new binding. Interactions, the canonical
+   effect summary and the pin contract are in
+   `robustness_effects_arrow_pin_design_2026-11-17.md`; lanes in
+   `doc/03_plan/release/1.0.0/robustness_completion_plan_2026-11-17.md`.
+
 ## 7. Compiler architecture and exact edit points
 
 | Layer / path | Required work | Performance strategy |

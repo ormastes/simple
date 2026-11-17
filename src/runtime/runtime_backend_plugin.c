@@ -48,8 +48,7 @@ static int bridge_library_close(void *library) {
 }
 
 static uint32_t bridge_read_u32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return rt__shared_read_u32_le(p);
 }
 
 /* Strict UTF-8, no NUL. Bounded once by the enclosing packet/field limits. */

@@ -20,6 +20,15 @@ fn _hir_symbol_path_is_scv_snapshot_v1(path: text) -> bool:
     val normalized = path.replace("\\", "/")
     normalized.contains("/scv/") or normalized.contains("/scv_snapshots/") or normalized.contains("scv-revision-")
 
+# @allow(primitive_api) module/owner/path are the binder's raw source-identity texts, same as bind_declaration_origin_v1
+pub fn hir_declaration_origin_snapshot_skipped_v1(symbol_defining_module: text, owner: text, source_path: text) -> bool:
+    """True when bind_declaration_origin_v1 skips (Ok(false)) because an SCV
+    snapshot identity sits on either side of an owner mismatch. Callers use it
+    to tell that skip apart from a genuine retention failure."""
+    if _hir_symbol_owner_module(symbol_defining_module) == _hir_symbol_owner_module(owner):
+        return false
+    _hir_symbol_path_is_scv_snapshot_v1(symbol_defining_module) or _hir_symbol_path_is_scv_snapshot_v1(source_path) or _hir_symbol_path_is_scv_snapshot_v1(owner)
+
 fn _hir_module_callable_key(module_name: text, field_name: text) -> text:
     module_name + "#" + field_name
 
@@ -101,6 +110,25 @@ impl SymbolTable:
         # unset — owners match (owner == declared_owner) and the empty
         # recording made the comparison misfire on every declaration).
         if (symbol.defining_module ?? "") != "" and _hir_symbol_owner_module(symbol.defining_module ?? "") != canonical_owner:
+            # Import-cycle artifact (cycle 39 mcp rebuild): a declaration
+            # whose authority names module B can carry a defining_module
+            # recording from module A when A and B sit in an import cycle
+            # and A was lowered first — the symbol slot is materialized
+            # during whichever cycle module lowers earliest. All 28 errors
+            # in that cycle were owner == declared_owner == B with
+            # source_path in B; the recording is an order artifact, not the
+            # origin. When the declared source file's module agrees with the
+            # binding owner, adopt the authoritative origin and heal the
+            # recording (which also fixes visibility checks that key on the
+            # defining module).
+            if _hir_symbol_owner_module(source_path) == canonical_owner:
+                symbol.defining_module = canonical_owner
+                symbol.declaration_modifier_v1 = modifier
+                symbol.declaration_source_path_v1 = source_path
+                symbol.declaration_projection_key_v1 = projection_key
+                symbol.declaration_owner_v1 = canonical_owner
+                self.symbols[id.id] = symbol
+                return Ok(true)
             # The sanity SCV snapshot materializes symbols with a snapshot
             # module identity while the recorded declaration authority names
             # the logical source module (the p2_add sanity fixture is a
@@ -112,7 +140,7 @@ impl SymbolTable:
             # the snapshot identity can sit on EITHER side of the mismatch
             # (the symbol's defining_module OR the declared origin's
             # source_path/owner), so test all three.
-            if _hir_symbol_path_is_scv_snapshot_v1(symbol.defining_module ?? "") or _hir_symbol_path_is_scv_snapshot_v1(source_path) or _hir_symbol_path_is_scv_snapshot_v1(owner):
+            if hir_declaration_origin_snapshot_skipped_v1(symbol.defining_module ?? "", owner, source_path):
                 return Ok(false)
             # Robust context gate: the SCV cold-init (the stage2 sanity
             # snapshot build) runs with SIMPLE_SCV_INVENTORY_COLD_INIT=1;
@@ -792,7 +820,7 @@ impl SymbolTable:
         val type_sym = self.get_symbol(type_id)
         if not type_sym.?:
             return methods
-        var type_symbol: HirSymbol = HirSymbol(id: type_id, name: "", kind: SymbolKind.Struct, type_: nil, scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Private, is_public: false, is_mutable: false, defining_module: nil, builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0)
+        var type_symbol: HirSymbol = HirSymbol(id: type_id, name: "", kind: SymbolKind.Struct, type_: nil, scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Private, is_public: false, is_mutable: false, defining_module: nil, builtin_method_tag: BUILTIN_METHOD_NONE, generic_param_count: 0, declaration_modifier_v1: "", declaration_source_path_v1: "", declaration_projection_key_v1: "", declaration_owner_v1: "", declared_param_types_v1: None)
         if val found_type_symbol = type_sym:
             type_symbol = found_type_symbol
         else:

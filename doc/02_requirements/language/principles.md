@@ -102,6 +102,17 @@ arguments, with separate cold and warm results. Failed builds do not count as
 speedups. A formal policy model is useful evidence but does not replace native
 concurrency, memory or compiler correctness tests.
 
+Fast/deep split (owner decision 2026-11-17): normal `build`/`check`/`run` run
+low-cost checks only; default `lint` and explicit diagnostic builds run medium
+and high analyses under declared budgets, reporting `incomplete`/`timed_out`
+distinctly. Mandatory soundness checks never move into optional lint. The
+existing `x->method(args)` operator keeps its original meaning,
+`x = x.method(args)` (single evaluation, place and type rules), disambiguated
+from return-type and match-arm arrows by grammar context; it is not an
+unrelated record-update syntax. Design:
+`doc/05_design/language/robust_types/robustness_effects_arrow_pin_design_2026-11-17.md`;
+plan: `doc/03_plan/release/1.0.0/robustness_completion_plan_2026-11-17.md`.
+
 ## Migration is observable
 
 The current truthiness implementation includes implicit enum truthiness, so the

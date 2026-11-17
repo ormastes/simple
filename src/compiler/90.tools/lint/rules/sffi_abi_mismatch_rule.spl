@@ -31,9 +31,23 @@ pub fn sffi_abi_lint_triple(explicit: text, arch: text, os: text) -> text:
 
 pub fn sffi_abi_check_with_triple(unit: LintUnit, triple: text) -> [StaticLintFinding]:
     var out: [StaticLintFinding] = []
+    # One finding per declaration: on a deprecated alias line that already has a
+    # Deny mismatch, the deprecation is folded into that message instead of
+    # being emitted as a second SPL-SFFI-ABI-001 finding.
+    val notes = sffi_abi_deprecation_notes(unit.content, unit.path)
+    var note_lines: [i64] = []
+    for n in notes:
+        note_lines.push(n.line_num)
+    var deny_lines: [i64] = []
     for f in check_sffi_abi_mismatch(unit.content, unit.path, triple):
-        out.push(StaticLintFinding(f.code, StaticLintLevel.Deny, StaticLintCategory.Safety, f.message, "", f.line_num, 0))
-    for n in sffi_abi_deprecation_notes(unit.content, unit.path):
+        var msg = f.message
+        if note_lines.contains(f.line_num):
+            msg = msg + " (also: deprecated `@c_abi(Unit: \"ctype\")` form; declare the C type on the unit)"
+        out.push(StaticLintFinding(f.code, StaticLintLevel.Deny, StaticLintCategory.Safety, msg, "", f.line_num, 0))
+        deny_lines.push(f.line_num)
+    for n in notes:
+        if deny_lines.contains(n.line_num):
+            continue
         out.push(StaticLintFinding(n.code, StaticLintLevel.Warn, StaticLintCategory.Safety, n.message, "", n.line_num, 0))
     out
 

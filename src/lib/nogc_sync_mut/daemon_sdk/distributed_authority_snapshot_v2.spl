@@ -24,7 +24,8 @@ pub fn distributed_authority_snapshot_create_v2(keys: [DistributedAuthorityKeyV2
         return Err("AUTHORITY_SNAPSHOT_CAPACITY_INVALID")
     var index: Dict<text, DistributedAuthorityKeyV2> = {}
     for key in keys:
-        if key.role != "grant-issuer" and key.role != "human-approver":
+        # milestone_0030 N2-a: the execution-host signing key is published through the same admin path.
+        if key.role != "grant-issuer" and key.role != "human-approver" and key.role != "execution-host":
             return Err("AUTHORITY_KEY_ROLE_INVALID")
         if not builder_identifier_valid_v1(key.identity) or not builder_identifier_valid_v1(key.principal) or
                 not builder_identifier_valid_v1(key.project) or not builder_identifier_valid_v1(key.host_id) or
@@ -44,8 +45,21 @@ pub fn distributed_authority_snapshot_create_v2(keys: [DistributedAuthorityKeyV2
         # Retired revisions belong in audit history, never competing live keys.
         if index.contains_key(identity): return Err("AUTHORITY_KEY_DUPLICATE")
         index[identity] = key
+    # An execution-host key never shares key material with a grant authority or with another host.
+    for key in keys:
+        if key.role != "execution-host": continue
+        for other in keys:
+            if other.public_key == key.public_key and (other.role != "execution-host" or other.identity != key.identity):
+                return Err("AUTHORITY_ROLES_NOT_SEPARATE")
     Ok(DistributedAuthoritySnapshotV2(generation: generation, policy_revision: policy_revision,
         revocation_epoch: revocation_epoch, keys: index))
+
+# Exact role-scoped lookup; a key published under another role is never returned.
+pub fn distributed_authority_snapshot_key_v2(snapshot: DistributedAuthoritySnapshotV2, role: text,
+        identity: text) -> Result<DistributedAuthorityKeyV2, text>:
+    val id = distributed_authority_lookup_id_v2(role, identity)
+    if not snapshot.keys.contains_key(id): return Err("AUTHORITY_KEY_UNAVAILABLE")
+    Ok(snapshot.keys[id])
 
 pub fn distributed_verify_grant_approval_from_snapshot_v2(snapshot: DistributedAuthoritySnapshotV2,
         signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,

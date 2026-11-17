@@ -32,10 +32,11 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     engine2d_glass_corner_radius
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
-    _pack_clear_pc, _pack_rect_pc, _pack_circle_pc, _pack_line_pc,
+    _pack_clear_pc, _pack_rect_pc, _pack_affine_coverage_pc, _pack_circle_pc, _pack_line_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
     _pack_glass_material_pc, _pack_blur_rect_pc, _pack_shadow_rect_pc,
     _pack_css_group_restore_pc,
+    _pack_gradient_layer_pc,
     vulkan_dispatch_region_kernel_checked,
     _pixels_to_bytes, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
@@ -248,6 +249,7 @@ class VulkanBackend:
     # Shader module handles
     shader_clear: i64
     shader_rect_filled: i64
+    shader_affine_coverage_rect: i64
     shader_rect_outline: i64
     shader_circle_filled: i64
     shader_circle_outline: i64
@@ -259,6 +261,7 @@ class VulkanBackend:
     # Pipeline handles
     pipe_clear: i64
     pipe_rect_filled: i64
+    pipe_affine_coverage_rect: i64
     pipe_rect_outline: i64
     pipe_circle_filled: i64
     pipe_circle_outline: i64
@@ -574,6 +577,7 @@ class VulkanBackend:
             d_framebuffer: 0,
             shader_clear: 0,
             shader_rect_filled: 0,
+            shader_affine_coverage_rect: 0,
             shader_rect_outline: 0,
             shader_circle_filled: 0,
             shader_circle_outline: 0,
@@ -584,6 +588,7 @@ class VulkanBackend:
             shader_blit: 0,
             pipe_clear: 0,
             pipe_rect_filled: 0,
+            pipe_affine_coverage_rect: 0,
             pipe_rect_outline: 0,
             pipe_circle_filled: 0,
             pipe_circle_outline: 0,
@@ -981,6 +986,7 @@ impl RenderBackend for VulkanBackend:
         # Borrow shared pipeline handles from the session
         self.shader_clear         = session.shader_clear
         self.shader_rect_filled   = session.shader_rect_filled
+        self.shader_affine_coverage_rect = session.shader_affine_coverage_rect
         self.shader_rect_outline  = session.shader_rect_outline
         self.shader_circle_filled = session.shader_circle_filled
         self.shader_circle_outline = session.shader_circle_outline
@@ -992,6 +998,7 @@ impl RenderBackend for VulkanBackend:
 
         self.pipe_clear          = session.pipe_clear
         self.pipe_rect_filled    = session.pipe_rect_filled
+        self.pipe_affine_coverage_rect = session.pipe_affine_coverage_rect
         self.pipe_rect_outline   = session.pipe_rect_outline
         self.pipe_circle_filled  = session.pipe_circle_filled
         self.pipe_circle_outline = session.pipe_circle_outline
@@ -1205,6 +1212,7 @@ impl RenderBackend for VulkanBackend:
         # Destroy pipelines
         if self.pipe_clear != 0: vulkan_sffi_destroy_pipeline(self.pipe_clear)
         if self.pipe_rect_filled != 0: vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
+        if self.pipe_affine_coverage_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_affine_coverage_rect)
         if self.pipe_rect_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
         if self.pipe_circle_filled != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_filled)
         if self.pipe_circle_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_outline)
@@ -1216,6 +1224,7 @@ impl RenderBackend for VulkanBackend:
         # Destroy shader modules
         if self.shader_clear != 0: vulkan_sffi_destroy_shader(self.shader_clear)
         if self.shader_rect_filled != 0: vulkan_sffi_destroy_shader(self.shader_rect_filled)
+        if self.shader_affine_coverage_rect != 0: vulkan_sffi_destroy_shader(self.shader_affine_coverage_rect)
         if self.shader_rect_outline != 0: vulkan_sffi_destroy_shader(self.shader_rect_outline)
         if self.shader_circle_filled != 0: vulkan_sffi_destroy_shader(self.shader_circle_filled)
         if self.shader_circle_outline != 0: vulkan_sffi_destroy_shader(self.shader_circle_outline)
@@ -1270,6 +1279,36 @@ impl RenderBackend for VulkanBackend:
         val gy = (_i64(h) + 15) / 16
         self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
         self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1, "rect-outline-dispatch-failed")
+
+    fn affine_coverage_ready() -> bool:
+        (self.initialized and not self.completion_unknown and
+            self.d_framebuffer > 0 and self.pipe_affine_coverage_rect > 0 and
+            self.mask_buf.len() == 0)
+
+    me draw_affine_rect_coverage(rx: i32, ry: i32, rw: i32, rh: i32,
+        local_w: f64, local_h: f64, a: f64, b: f64, c: f64, d: f64,
+        tx: f64, ty: f64, color: u32) -> bool:
+        """Paint one opaque affine polygon by device pixel-square coverage."""
+        if (not self.affine_coverage_ready() or rw <= 0 or rh <= 0 or
+            color_a(color) != 255 or self.mask_buf.len() != 0):
+            return false
+        val pc = _pack_affine_coverage_pc(rx, ry, rw, rh, self.w, self.h,
+            color, local_w, local_h, a, b, c, d, tx, ty)
+        self.hint_damage(_i64(rx), _i64(ry), _i64(rw), _i64(rh))
+        val dispatched = self._dispatch_framebuffer_checked(
+            self.pipe_affine_coverage_rect, pc, (_i64(rw) + 15) / 16,
+            (_i64(rh) + 15) / 16, 1, "affine-coverage-dispatch-failed")
+        if dispatched <= 0:
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0:
+                self.dirty = true
+                self.host_mirror_frame_fresh = false
+                self.note_damage_full()
+            return false
+        self.dirty = true
+        self.host_mirror_frame_fresh = false
+        true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         # Timed shim: the body is unchanged in `_draw_rect_filled_impl`. Split
@@ -3182,6 +3221,99 @@ impl RenderBackend for VulkanBackend:
         self.mark_cpu_fallback("shadow-device-unavailable")
         emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
 
+    # reason: raw device kernel entry; rect in device px, mode 0 radial / 1 linear, tables are the packed u32 words from backend_emu radial/linear_gradient_device_tables
+    # @allow(primitive_api)
+    me draw_gradient_layer_device(x0: i32, y0: i32, w: i32, h: i32, mode: i32, tables: [u32]) -> bool:
+        """Evaluate one CSS gradient layer and composite it on the device.
+
+        The host used to evaluate every pixel (`radial_gradient_pixels` /
+        `linear_gradient_pixels`) and upload them for a SRC_OVER image
+        composite. Now only `tables` cross the boundary -- a 4-word header, the
+        1025-entry stop ramp and O(w + h) geometry terms built by
+        `radial_gradient_device_tables` / `linear_gradient_device_tables` --
+        and `gradient_layer.comp` evaluates t with the host's exact integer
+        math, composites with Chrome's layer rule against framebuffer content
+        and writes the result into the binding-1 buffer, which the ordinary
+        image tail copies back (same clip, damage and dirty bookkeeping).
+
+        Fail-closed: every `false` return has left the framebuffer untouched,
+        so the caller keeps the host evaluator, which paints the same t.
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
+            return false
+        if self.pipe_blit <= 0 or self.session.pipe_gradient_layer <= 0:
+            return false
+        if self.mask_buf.len() > 0:
+            return false
+        if w <= 0 or h <= 0 or (mode != 0 and mode != 1):
+            return false
+        val pixel_count = _i64(w) * _i64(h)
+        val axis_words = if mode == 0: _i64(w) + _i64(h) else: 2 * (_i64(w) + _i64(h))
+        val table_words = tables.len().to_i64()
+        if table_words != 4 + 1025 + axis_words:
+            return false
+        val total_words = pixel_count + table_words
+        if pixel_count <= 0 or total_words > 2147483647 or total_words > 9223372036854775807 / 4:
+            return false
+
+        var d_out = self._acquire_image_source(total_words * 4)
+        if d_out <= 0 and self._image_source_pool_is_fully_pending():
+            val retried = self._flush_pending_compute_at("gradient-device-retry")
+            if retried < 0:
+                self.completion_unknown = true
+                return false
+            if retried > 0:
+                d_out = self._acquire_image_source(total_words * 4)
+        if d_out <= 0:
+            return false
+
+        # Tables go to the tail, just past the pixel region the kernel writes:
+        # disjoint, so no barrier.
+        val tab_byte_off = pixel_count * 4
+        var uploaded = vulkan_sffi_copy_to_buffer_u32(d_out, tables, tab_byte_off)
+        if not uploaded:
+            val tab_bytes = _pixels_to_bytes(tables, table_words)
+            uploaded = tab_bytes.len().to_i64() == table_words * 4 and
+                vulkan_sffi_copy_to_buffer(d_out, tab_bytes, tab_byte_off)
+        if not uploaded:
+            self._release_image_source(d_out)
+            return false
+
+        val tab_off = pixel_count as i32
+        val col_off = tab_off + 4 + 1025
+        val row_off = if mode == 0: col_off + w else: col_off + 2 * w
+        val pc = _pack_gradient_layer_pc(x0, y0, w, h, self.w, self.h, mode, tab_off, col_off, row_off)
+        val gx = (_i64(w) + 15) / 16
+        val gy = (_i64(h) + 15) / 16
+        # Same frozen 2-binding descriptor layout as shadow_rect.comp /
+        # blur_rect.comp / _glsl_blit (0 = framebuffer, 1 = source), which is
+        # what lets the warm blit descriptor pool serve this pipeline. Recorded,
+        # not submitted: `rt_vulkan_dispatch` emits a full memory barrier after
+        # every dispatch, so earlier layers in this command buffer are visible.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_gradient_layer, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_gradient_layer, d_out, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("gradient-device x={x0} y={y0} w={w} h={h} mode={mode} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
+            if produced < 0:
+                self.completion_unknown = true
+            return false
+
+        val composited = self._finish_image_composite(
+            d_out, x0, y0, w, h, w, h, 1000, VK_IMAGE_COMPOSITE_COPY)
+        if composited <= 0:
+            if composited < 0:
+                self.completion_unknown = true
+            return false
+        vulkan_stat_note_device_gradient()
+        true
+
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         if self.completion_unknown: return
         emu_draw_image_transform(self, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
@@ -3196,6 +3328,7 @@ impl Engine2DExtended for VulkanBackend:
     me _clear_borrowed_pipeline_handles():
         self.shader_clear = 0
         self.shader_rect_filled = 0
+        self.shader_affine_coverage_rect = 0
         self.shader_rect_outline = 0
         self.shader_circle_filled = 0
         self.shader_circle_outline = 0
@@ -3206,6 +3339,7 @@ impl Engine2DExtended for VulkanBackend:
         self.shader_blit = 0
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
+        self.pipe_affine_coverage_rect = 0
         self.pipe_rect_outline = 0
         self.pipe_circle_filled = 0
         self.pipe_circle_outline = 0
@@ -3360,6 +3494,7 @@ pub fn vulkan_readback_count() -> i64:
 var _vk_stat_device_blur_rects: i64 = 0
 var _vk_stat_device_glass_materials: i64 = 0
 var _vk_stat_device_css_group_restores: i64 = 0
+var _vk_stat_device_gradients: i64 = 0
 
 pub fn vulkan_stat_note_device_blur_rect():
     _vk_stat_device_blur_rects = _vk_stat_device_blur_rects + 1
@@ -3383,12 +3518,23 @@ fn vulkan_stat_note_device_css_group_restore():
 pub fn vulkan_device_css_group_restore_count() -> i64:
     _vk_stat_device_css_group_restores
 
+fn vulkan_stat_note_device_gradient():
+    _vk_stat_device_gradients = _vk_stat_device_gradients + 1
+
+# CSS gradient layers evaluated AND composited by gradient_layer.comp (no host
+# gradient pixels were computed or uploaded for them).
+# reason: process-global instrumentation counter read by specs; a plain count of device gradient layers
+# @allow(primitive_api)
+pub fn vulkan_device_gradient_count() -> i64:
+    _vk_stat_device_gradients
+
 pub fn vulkan_device_material_census_line() -> text:
-    "device_blur_rects={_vk_stat_device_blur_rects} device_glass_materials={_vk_stat_device_glass_materials}"
+    "device_blur_rects={_vk_stat_device_blur_rects} device_glass_materials={_vk_stat_device_glass_materials} device_gradients={_vk_stat_device_gradients}"
 
 pub fn vulkan_device_material_census_reset():
     _vk_stat_device_blur_rects = 0
     _vk_stat_device_glass_materials = 0
+    _vk_stat_device_gradients = 0
 
 pub fn vulkan_readback_census_line() -> text:
     "readbacks={_vk_stat_readbacks} readback_pixels={_vk_stat_readback_pixels}"

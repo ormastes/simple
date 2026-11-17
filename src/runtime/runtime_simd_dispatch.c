@@ -1253,14 +1253,20 @@ static inline uint32_t engine2d_blend_u32(uint32_t s, uint32_t d, int solid) {
     if (sa == 0u) return d;
     uint32_t da = (d >> 24) & 0xFFu;
     uint32_t inv = 255u - sa;
+    if (da == 0u) return s;
     if (da != 255u) {
+        /* Skia's premultiplied 8-bit layer value, stored straight; it
+         * round-trips exactly, so a group composite sees Chrome's value. */
         uint32_t dw = (da * inv + 127u) / 255u;
         uint32_t oa = sa + dw;
-        uint32_t half = oa >> 1;
-        uint32_t r = (((s >> 16) & 0xFFu) * sa + ((d >> 16) & 0xFFu) * dw + half) / oa;
-        uint32_t g = (((s >> 8) & 0xFFu) * sa + ((d >> 8) & 0xFFu) * dw + half) / oa;
-        uint32_t b = ((s & 0xFFu) * sa + (d & 0xFFu) * dw + half) / oa;
-        return (oa << 24) | (r << 16) | (g << 8) | b;
+        uint32_t out = oa << 24;
+        for (int shift = 16; shift >= 0; shift -= 8) {
+            uint32_t p = (((s >> shift) & 0xFFu) * sa + 127u) / 255u
+                + (((((d >> shift) & 0xFFu) * da + 127u) / 255u) * inv + 127u) / 255u;
+            uint32_t v = (p * 255u + (oa >> 1)) / oa;
+            out |= (v > 255u ? 255u : v) << shift;
+        }
+        return out;
     }
     uint32_t out = 0xFF000000u;
     for (int shift = 16; shift >= 0; shift -= 8) {

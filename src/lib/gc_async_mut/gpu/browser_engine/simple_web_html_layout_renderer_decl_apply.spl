@@ -11,10 +11,10 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarat
     parse_supported_outline_shorthand_width_px, css_cascade_root_font_px
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{BoxShadowAgg, shadow_layer_alpha, shadow_length_prefix}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec, gradient_layer_list, gradient_layer_list_color_text}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec, gradient_has_length_stop, gradient_layer_entries, gradient_layer_list_color_text, gradient_layer_list_apply_longhands}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{_color_alpha_zero, _decl_transparent_color, _decl_top_level_tokens}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille, font_milli_of, font_milli_round_px, font_milli_store}
 
 fn _decl_is_current_color_token(raw: text) -> bool:
     """True when a background color declaration is the `currentColor` keyword,
@@ -91,6 +91,7 @@ fn _apply_decls_without_grid_inner(
     var background_image_uri_v = st.background_image_uri
     var fg_v = st.fg
     var font_size_v = st.font_size
+    var font_size_milli_v = st.font_size_milli
     var font_family_v = st.font_family
     var line_height_v = st.line_height_px
     var line_height_em_milli_v = st.line_height_em_milli
@@ -158,6 +159,9 @@ fn _apply_decls_without_grid_inner(
     var margin_t_v = st.margin_t
     var margin_r_v = st.margin_r
     var margin_b_v = st.margin_b
+    # Author fractional (em/rem/px) block-axis margin, milli-px; 0 = none.
+    var margin_t_milli_v = 0
+    var margin_b_milli_v = 0
     var margin_l_auto_v = st.margin_l_auto
     var margin_r_auto_v = st.margin_r_auto
     var margin_t_auto_v = st.margin_t_auto
@@ -297,6 +301,7 @@ fn _apply_decls_without_grid_inner(
         val parsed_font_size = parse_font_shorthand_size_px(font_norm)
         if parsed_font_size > 0:
             font_size_v = parsed_font_size
+            font_size_milli_v = 0
         val shorthand_family = parse_font_shorthand_family(font_raw)
         if shorthand_family != "":
             font_family_v = shorthand_family
@@ -331,6 +336,7 @@ fn _apply_decls_without_grid_inner(
     if font_decl.trim().lower() == "inherit":
         if st.inherit_font_size > 0:
             font_size_v = st.inherit_font_size
+            font_size_milli_v = st.inherit_font_size_milli
         if st.inherit_font_family != "":
             font_family_v = st.inherit_font_family
         bold_v = st.inherit_bold
@@ -428,7 +434,7 @@ fn _apply_decls_without_grid_inner(
                                 over_typed = true
                                 background_gradient_from_v = over_from
                                 background_gradient_to_v = over_to
-                            elif is_radial_gradient(over_image):
+                            elif is_radial_gradient(over_image) and not gradient_has_length_stop(over_image):
                                 over_typed = true
                                 over_radial = true
                                 # A radial layer has no meaningful 2-colour
@@ -447,7 +453,7 @@ fn _apply_decls_without_grid_inner(
                         over_typed = true
                         background_gradient_from_v = one_from
                         background_gradient_to_v = one_to
-                    elif is_radial_gradient(over_image):
+                    elif is_radial_gradient(over_image) and not gradient_has_length_stop(over_image):
                         # `background: radial-gradient(...)` alone is one
                         # typed radial layer over transparent; the raw branch
                         # painted its first stop as a flat colour.
@@ -483,7 +489,7 @@ fn _apply_decls_without_grid_inner(
                     # gradient layer painters; only its final colour layer
                     # (if any) is the background colour. `parse_color_alpha`
                     # over the whole list took the first stop instead.
-                    if gradient_layer_list(bgs).len() > 0:
+                    if gradient_layer_entries(bgs).len() > 0:
                         val list_color = gradient_layer_list_color_text(bgs)
                         bg_v = if list_color != "": parse_color_alpha(list_color) else: 0u32
                     else:
@@ -563,7 +569,7 @@ fn _apply_decls_without_grid_inner(
                 background_gradient_stop_positions_v = stop_positions
                 background_gradient_angle_deg_v = parse_gradient_angle_deg(bg_image)
                 background_gradient_is_radial_v = false
-            elif is_radial_gradient(bg_image) and split_top_level_commas(bg_image.trim()).len() <= 1:
+            elif is_radial_gradient(bg_image) and split_top_level_commas(bg_image.trim()).len() <= 1 and not gradient_has_length_stop(bg_image):
                 # GAP-2: a single radial-gradient(...) layer never satisfies
                 # `_background_is_exact_typed_linear_layer` (it requires a
                 # `linear-gradient(` prefix), so it always fell through to the
@@ -677,6 +683,32 @@ fn _apply_decls_without_grid_inner(
             background_gradient_angle_deg_v = 180
             background_gradient_is_radial_v = false
             bg_layers_raw_v = two_url_plan
+    # Per-layer background-size / -position / -repeat of a gradient list
+    # (CSS Backgrounds 3 §2.2): each image layer takes its own entry of each
+    # longhand list (cyclically) or its own shorthand tail. The list is
+    # rewritten with a `<position> / <size> <repeat>` tail per layer, the form
+    # the gradient layer painters read, and any typed single-layer projection
+    # is dropped so the layer path paints it. Lists whose every layer keeps the
+    # default geometry are left untouched.
+    val layer_size_list = if bg_size.len() > 0 and bg_size_pos > bgs_pos: bg_size else: ""
+    val layer_position_list = if bg_position.len() > 0 and bg_position_pos > bgs_pos: bg_position else: ""
+    val layer_repeat_list = if bg_repeat.len() > 0 and bg_repeat_pos > bgs_pos: bg_repeat else: ""
+    var layer_src = bg_layers_raw_v
+    if layer_src == "":
+        if bg_image.len() > 0 and bg_image_pos > bgs_pos:
+            layer_src = bg_image
+        elif bgs_pos >= 0 and bgs_pos > bg_pos:
+            layer_src = bgs
+    if layer_src != "":
+        val layer_list = gradient_layer_list_apply_longhands(layer_src, layer_size_list, layer_position_list, layer_repeat_list)
+        if layer_list != "":
+            bg_layers_raw_v = layer_list
+            background_gradient_from_v = 0u32
+            background_gradient_to_v = 0u32
+            background_gradient_stop_colors_v = []
+            background_gradient_stop_positions_v = []
+            background_gradient_angle_deg_v = 180
+            background_gradient_is_radial_v = false
     val col = decl_tbl_get_p(decl_tbl, decl_present, "color")
     if col.len() > 0:
         val cv = parse_color(col)
@@ -689,28 +721,35 @@ fn _apply_decls_without_grid_inner(
     val fs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "font-size")
     if fs.len() > 0 and (font_pos < 0 or fs_pos > font_pos):
         val fsl = fs.trim().lower()
+        # Computed size in milli-px (i64: `120.5%` of a 512 px parent overflows
+        # i32 mid-product). `font_size` keeps the rounded px for every integer
+        # reader; `font_size_milli` carries the fraction (Chrome 159: 1.17em of
+        # 16 px is 18.72, not 17 or 19).
+        val parent_milli = if st.inherit_font_size == em_base and st.inherit_font_size > 0: font_milli_of(st.inherit_font_size, st.inherit_font_size_milli) else: em_base * 1000
+        var computed_milli: i64 = 0
         if fsl == "inherit":
             if st.inherit_font_size > 0:
                 font_size_v = st.inherit_font_size
+                font_size_milli_v = st.inherit_font_size_milli
         elif fsl.ends_with("rem"):
             # rem is relative to the root (html) computed font-size.
-            val computed = (css_cascade_root_font_px() * parse_decimal_x10(fsl)) / 10
-            if computed > 0:
-                font_size_v = computed
+            computed_milli = css_cascade_root_font_px().to_i64() * svg_number_milli(fsl)
         elif fsl.ends_with("em"):
             # em is relative to the inherited (parent) font-size.
-            val computed = (em_base * parse_decimal_x10(fsl)) / 10
-            if computed > 0:
-                font_size_v = computed
+            computed_milli = parent_milli.to_i64() * svg_number_milli(fsl) / 1000
         elif fsl.ends_with("%"):
             # percent font-size is relative to the inherited font-size.
-            val computed = (em_base * parse_int(fsl)) / 100
-            if computed > 0:
-                font_size_v = computed
+            computed_milli = parent_milli.to_i64() * svg_number_milli(fsl) / 100000
+        elif fsl.ends_with("px") and fsl.contains("."):
+            computed_milli = svg_number_milli(fsl)
         else:
             val v = parse_int(fs)
             if v > 0:
                 font_size_v = v
+                font_size_milli_v = 0
+        if computed_milli > 0 and computed_milli <= 512000:
+            font_size_v = font_milli_round_px(computed_milli as i32)
+            font_size_milli_v = font_milli_store(computed_milli as i32)
     val font_size_adjust_decl = decl_tbl_get_p(decl_tbl, decl_present, "font-size-adjust")
     if font_size_adjust_decl.len() > 0:
         val font_size_adjust_norm = font_size_adjust_decl.trim().lower()
@@ -2505,9 +2544,11 @@ fn _apply_decls_without_grid_inner(
             # (-(1000+N), resolved at layout via resolve_vertical_margin_px)
             # but otherwise stay plain px (matching prior behavior — no
             # negative-margin sign flip on `margin: 5% 10%`).
-            margin_t_v = if t_tok == "auto": 0 else: margin_token_vh_px(t_tok)
+            margin_t_v = if t_tok == "auto": 0 else: _decl_vertical_margin_px(t_tok, font_size_v, margin_token_vh_px(t_tok))
             margin_r_v = if r_tok == "auto": 0 else: margin_token_px(r_tok)
-            margin_b_v = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
+            margin_b_v = if b_tok == "auto": 0 else: _decl_vertical_margin_px(b_tok, font_size_v, margin_token_vh_px(b_tok))
+            margin_t_milli_v = if t_tok == "auto": 0 else: _decl_vertical_margin_milli(t_tok, font_size_v)
+            margin_b_milli_v = if b_tok == "auto": 0 else: _decl_vertical_margin_milli(b_tok, font_size_v)
             margin_l_v = if l_tok == "auto": 0 else: margin_token_px(l_tok)
     val ml = decl_tbl_get_p(decl_tbl, decl_present, "margin-left")
     val ml_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-left")
@@ -2573,37 +2614,46 @@ fn _apply_decls_without_grid_inner(
         val apply_mb_t = margin_block_pos > margin_t_pos
         val apply_mb_b = margin_block_pos > margin_b_pos
         val mb0 = margin_block.trim()
-        val mb1_value = parse_nth_int(margin_block, 1)
         if mb0 == "auto":
             if apply_mb_t:
                 margin_t_v = 0
+                margin_t_milli_v = 0
                 margin_t_auto_v = true
                 margin_t_pos = margin_block_pos
             if apply_mb_b:
                 margin_b_v = 0
+                margin_b_milli_v = 0
                 margin_b_auto_v = true
                 margin_b_pos = margin_block_pos
         else:
-            val parsed_mb0 = parse_int(mb0)
+            val mb_toks = ws_tokens(mb0.lower())
+            val mb_start_tok = if mb_toks.len() > 0: mb_toks[0] else: mb0
+            val mb_end_tok = if mb_toks.len() > 1: mb_toks[1] else: mb_start_tok
+            val parsed_mb0 = _decl_vertical_margin_px(mb_start_tok, font_size_v, parse_int(mb0))
             if apply_mb_t:
                 margin_t_v = parsed_mb0
+                margin_t_milli_v = _decl_vertical_margin_milli(mb_start_tok, font_size_v)
                 margin_t_auto_v = false
                 margin_t_pos = margin_block_pos
             if apply_mb_b:
                 margin_b_v = parsed_mb0
+                margin_b_milli_v = _decl_vertical_margin_milli(mb_start_tok, font_size_v)
                 margin_b_auto_v = false
                 margin_b_pos = margin_block_pos
-                if mb1_value >= 0:
-                    margin_b_v = mb1_value
+                if mb_toks.len() > 1:
+                    margin_b_v = _decl_vertical_margin_px(mb_end_tok, font_size_v, parse_int(mb_end_tok))
+                    margin_b_milli_v = _decl_vertical_margin_milli(mb_end_tok, font_size_v)
     val margin_block_start = decl_tbl_get_p(decl_tbl, decl_present, "margin-block-start")
     val mbs_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-block-start")
     if margin_block_start.len() > 0 and mbs_pos > margin_t_pos:
         margin_t_pos = mbs_pos
         if margin_block_start == "auto":
             margin_t_v = 0
+            margin_t_milli_v = 0
             margin_t_auto_v = true
         else:
-            margin_t_v = parse_int(margin_block_start)
+            margin_t_v = _decl_vertical_margin_px(margin_block_start, font_size_v, parse_int(margin_block_start))
+            margin_t_milli_v = _decl_vertical_margin_milli(margin_block_start, font_size_v)
             margin_t_auto_v = false
     val margin_block_end = decl_tbl_get_p(decl_tbl, decl_present, "margin-block-end")
     val mbe_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-block-end")
@@ -2611,9 +2661,11 @@ fn _apply_decls_without_grid_inner(
         margin_b_pos = mbe_pos
         if margin_block_end == "auto":
             margin_b_v = 0
+            margin_b_milli_v = 0
             margin_b_auto_v = true
         else:
-            margin_b_v = parse_int(margin_block_end)
+            margin_b_v = _decl_vertical_margin_px(margin_block_end, font_size_v, parse_int(margin_block_end))
+            margin_b_milli_v = _decl_vertical_margin_milli(margin_block_end, font_size_v)
             margin_b_auto_v = false
     val mt = decl_tbl_get_p(decl_tbl, decl_present, "margin-top")
     val mt_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-top")
@@ -2621,9 +2673,11 @@ fn _apply_decls_without_grid_inner(
         margin_t_pos = mt_pos
         if mt == "auto":
             margin_t_v = 0
+            margin_t_milli_v = 0
             margin_t_auto_v = true
         else:
-            margin_t_v = margin_token_vh_px(mt)
+            margin_t_v = _decl_vertical_margin_px(mt, font_size_v, margin_token_vh_px(mt))
+            margin_t_milli_v = _decl_vertical_margin_milli(mt, font_size_v)
             margin_t_auto_v = false
     val mr = decl_tbl_get_p(decl_tbl, decl_present, "margin-right")
     val mr_pos = decl_tbl_last_index_p(decl_tbl, decl_present, "margin-right")
@@ -2641,9 +2695,11 @@ fn _apply_decls_without_grid_inner(
         margin_b_pos = mb_pos
         if mb == "auto":
             margin_b_v = 0
+            margin_b_milli_v = 0
             margin_b_auto_v = true
         else:
-            margin_b_v = margin_token_vh_px(mb)
+            margin_b_v = _decl_vertical_margin_px(mb, font_size_v, margin_token_vh_px(mb))
+            margin_b_milli_v = _decl_vertical_margin_milli(mb, font_size_v)
             margin_b_auto_v = false
     # CSS Color §5.2: `currentColor` on a background resolves to the element's
     # OWN computed `color`, so it can only be resolved once the whole
@@ -2677,6 +2733,8 @@ fn _apply_decls_without_grid_inner(
         outline_color_v = 0u32
         margin_l_v = 0
         margin_t_v = 0
+        margin_t_milli_v = 0
+        margin_b_milli_v = 0
         margin_r_v = 0
         margin_b_v = 0
         margin_l_auto_v = false
@@ -2686,9 +2744,9 @@ fn _apply_decls_without_grid_inner(
     # A `%` / `em` line-height declared on this element: convert against the
     # font-size as it stands after everything in this application.
     if line_height_em_milli_v > 0:
-        val own_font_line_height = (font_size_v * line_height_em_milli_v + 500) / 1000
+        val own_font_line_height = ((font_milli_of(font_size_v, font_size_milli_v).to_i64() * line_height_em_milli_v.to_i64() + 500000) / 1000000) as i32
         line_height_v = if own_font_line_height > 0: own_font_line_height else: 1
-    Style(bg: bg_v, transform_raw: transform_raw_v, translate_raw: translate_raw_v, scale_raw: scale_raw_v, rotate_raw: rotate_raw_v, border_style_t: border_style_t_v, border_style_b: border_style_b_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, background_gradient_stop_colors: background_gradient_stop_colors_v, background_gradient_stop_positions: background_gradient_stop_positions_v, background_gradient_angle_deg: background_gradient_angle_deg_v, background_gradient_is_radial: background_gradient_is_radial_v, background_repeat: background_repeat_v, background_size_w_px: background_size_w_px_v, background_size_h_px: background_size_h_px_v, background_position_x_px: background_position_x_px_v, background_position_y_px: background_position_y_px_v, background_clip: background_clip_v, background_origin: background_origin_v, background_attachment: background_attachment_v, background_image_uri: background_image_uri_v, fg: fg_v, font_size: font_size_v, font_family: font_family_v, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: line_height_v, line_height_em_milli: line_height_em_milli_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, flex_basis_zero: flex_basis_zero_v, flex_basis_permille: flex_basis_permille_v, min_width_set: min_width_set_v, width_zero: width_zero_v and width_v == 0, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, border_style_l: border_style_l_v, border_style_r: border_style_r_v, outline_w: outline_w_v, outline_color: outline_color_v, outline_offset_px: outline_offset_px_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, box_shadow_blur_px: box_shadow_blur_px_v, box_shadow_alpha: box_shadow_alpha_v, box_shadow_raw: box_shadow_raw_v, bg_layers_raw: bg_layers_raw_v, backdrop_filter_raw: backdrop_filter_raw_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_t_milli: (if margin_t_pos < 0 and margin_t_v == st.margin_t: st.margin_t_milli else: 0), margin_b_milli: (if margin_b_pos < 0 and margin_b_v == st.margin_b: st.margin_b_milli else: 0), margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, overflow_scroll_y: overflow_scroll_y_v, scrollbar_thumb_color: scrollbar_thumb_color_v, scrollbar_track_color: scrollbar_track_color_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, content_visibility_hidden: content_visibility_hidden_v, contain_size: contain_size_v, contain_intrinsic_w_px: contain_intrinsic_w_v, contain_intrinsic_h_px: contain_intrinsic_h_v, will_change: will_change_v, color_adjust: color_adjust_v, forced_color_adjust: forced_color_adjust_v, print_color_adjust: print_color_adjust_v, orphans: orphans_v, widows: widows_v, position_relative: position_relative_v, position_absolute: position_absolute_v, position_sticky: position_sticky_v, position_fixed: position_fixed_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_align_set: text_align_set_v, inherit_font_family: st.inherit_font_family, inherit_font_size: st.inherit_font_size, inherit_bold: st.inherit_bold, inherit_italic: st.inherit_italic, inherit_line_height_px: st.inherit_line_height_px, text_align_last: text_align_last_v, text_justify: text_justify_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_size_adjust: font_size_adjust_v, font_palette: font_palette_v, font_feature_settings: font_feature_settings_v, font_language_override: font_language_override_v, font_variation_settings: font_variation_settings_v, font_variant: font_variant_v, font_variant_alternates: font_variant_alternates_v, font_variant_caps: font_variant_caps_v, font_variant_east_asian: font_variant_east_asian_v, font_variant_emoji: font_variant_emoji_v, font_variant_ligatures: font_variant_ligatures_v, font_variant_numeric: font_variant_numeric_v, font_variant_position: font_variant_position_v, font_style_italic: font_style_italic_v, font_kerning: font_kerning_v, font_optical_sizing: font_optical_sizing_v, font_stretch: font_stretch_v, font_width: font_width_v, font_synthesis: font_synthesis_v, font_synthesis_small_caps: font_synthesis_small_caps_v, font_synthesis_position: font_synthesis_position_v, font_synthesis_style: font_synthesis_style_v, font_synthesis_weight: font_synthesis_weight_v, direction_rtl: direction_rtl_v, writing_mode: writing_mode_v, text_orientation: text_orientation_v, text_combine_upright: text_combine_upright_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_color: text_decoration_color_v, text_decoration_underline: text_decoration_underline_v, text_decoration_overline: text_decoration_overline_v, text_decoration_line_through: text_decoration_line_through_v, text_decoration_style: text_decoration_style_v, text_decoration_thickness_px: text_decoration_thickness_px_v, text_underline_offset_px: text_underline_offset_px_v, text_underline_position: text_underline_position_v, white_space_nowrap: white_space_nowrap_v, white_space_pre: white_space_pre_v, overflow_wrap: overflow_wrap_v, line_break: line_break_v, hyphens: hyphens_v, word_break: word_break_v, cursor: cursor_v, resize: resize_v, table_layout: table_layout_v, border_collapse: border_collapse_v, border_spacing_x_px: border_spacing_x_px_v, border_spacing_y_px: border_spacing_y_px_v, caption_side: caption_side_v, vertical_align: vertical_align_v, caret_color: caret_color_v, accent_color: accent_color_v, tab_size: tab_size_v, unicode_bidi: unicode_bidi_v, transition_property: transition_property_v, transition_duration_ms: transition_duration_ms_v, transition_delay_ms: transition_delay_ms_v, transition_timing_function: transition_timing_function_v, animation_name: animation_name_v, animation_duration_ms: animation_duration_ms_v, animation_delay_ms: animation_delay_ms_v, animation_timing_function: animation_timing_function_v, animation_iteration_count: animation_iteration_count_v, animation_direction: animation_direction_v, animation_fill_mode: animation_fill_mode_v, animation_play_state: animation_play_state_v, transform_origin: transform_origin_v, transform_box: transform_box_v, transform_style: transform_style_v, image_rendering: image_rendering_v, object_fit: object_fit_v, object_position: object_position_v, bold: bold_v, float_mode: float_mode_v, clear_mode: clear_mode_v, list_style_none: list_style_none_v)
+    Style(bg: bg_v, transform_raw: transform_raw_v, translate_raw: translate_raw_v, scale_raw: scale_raw_v, rotate_raw: rotate_raw_v, border_style_t: border_style_t_v, border_style_b: border_style_b_v, background_gradient_from: background_gradient_from_v, background_gradient_to: background_gradient_to_v, background_gradient_stop_colors: background_gradient_stop_colors_v, background_gradient_stop_positions: background_gradient_stop_positions_v, background_gradient_angle_deg: background_gradient_angle_deg_v, background_gradient_is_radial: background_gradient_is_radial_v, background_repeat: background_repeat_v, background_size_w_px: background_size_w_px_v, background_size_h_px: background_size_h_px_v, background_position_x_px: background_position_x_px_v, background_position_y_px: background_position_y_px_v, background_clip: background_clip_v, background_origin: background_origin_v, background_attachment: background_attachment_v, background_image_uri: background_image_uri_v, fg: fg_v, font_size: font_size_v, font_size_milli: font_size_milli_v, inherit_font_size_milli: st.inherit_font_size_milli, font_family: font_family_v, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: line_height_v, line_height_em_milli: line_height_em_milli_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_width_px: min_width_v, max_width_px: max_width_v, min_height_px: min_height_v, max_height_px: max_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, flex_basis_zero: flex_basis_zero_v, flex_basis_permille: flex_basis_permille_v, min_width_set: min_width_set_v, width_zero: width_zero_v and width_v == 0, order: order_v, flex_wrap: flex_wrap_v, justify_content: justify_content_v, align_items: align_items_v, align_self: align_self_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, border_style_l: border_style_l_v, border_style_r: border_style_r_v, outline_w: outline_w_v, outline_color: outline_color_v, outline_offset_px: outline_offset_px_v, box_shadow_x_px: box_shadow_x_px_v, box_shadow_y_px: box_shadow_y_px_v, box_shadow_color: box_shadow_color_v, box_shadow_blur_px: box_shadow_blur_px_v, box_shadow_alpha: box_shadow_alpha_v, box_shadow_raw: box_shadow_raw_v, bg_layers_raw: bg_layers_raw_v, backdrop_filter_raw: backdrop_filter_raw_v, border_radius_px: border_radius_px_v, border_radius_tl_px: border_radius_tl_px_v, border_radius_tr_px: border_radius_tr_px_v, border_radius_br_px: border_radius_br_px_v, border_radius_bl_px: border_radius_bl_px_v, gap_px: gap_v, row_gap_px: row_gap_v, column_gap_px: column_gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_t_milli: (if margin_t_pos >= 0: margin_t_milli_v elif margin_t_v == st.margin_t: st.margin_t_milli else: 0), margin_b_milli: (if margin_b_pos >= 0: margin_b_milli_v elif margin_b_v == st.margin_b: st.margin_b_milli else: 0), margin_l_auto: margin_l_auto_v, margin_r_auto: margin_r_auto_v, margin_t_auto: margin_t_auto_v, margin_b_auto: margin_b_auto_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, overflow_scroll_y: overflow_scroll_y_v, scrollbar_thumb_color: scrollbar_thumb_color_v, scrollbar_track_color: scrollbar_track_color_v, text_overflow_ellipsis: text_overflow_ellipsis_v, visibility_hidden: visibility_hidden_v, content_visibility_hidden: content_visibility_hidden_v, contain_size: contain_size_v, contain_intrinsic_w_px: contain_intrinsic_w_v, contain_intrinsic_h_px: contain_intrinsic_h_v, will_change: will_change_v, color_adjust: color_adjust_v, forced_color_adjust: forced_color_adjust_v, print_color_adjust: print_color_adjust_v, orphans: orphans_v, widows: widows_v, position_relative: position_relative_v, position_absolute: position_absolute_v, position_sticky: position_sticky_v, position_fixed: position_fixed_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, text_align_set: text_align_set_v, inherit_font_family: st.inherit_font_family, inherit_font_size: st.inherit_font_size, inherit_bold: st.inherit_bold, inherit_italic: st.inherit_italic, inherit_line_height_px: st.inherit_line_height_px, text_align_last: text_align_last_v, text_justify: text_justify_v, text_transform: text_transform_v, text_indent_px: text_indent_px_v, letter_spacing_px: letter_spacing_px_v, word_spacing_px: word_spacing_px_v, font_size_adjust: font_size_adjust_v, font_palette: font_palette_v, font_feature_settings: font_feature_settings_v, font_language_override: font_language_override_v, font_variation_settings: font_variation_settings_v, font_variant: font_variant_v, font_variant_alternates: font_variant_alternates_v, font_variant_caps: font_variant_caps_v, font_variant_east_asian: font_variant_east_asian_v, font_variant_emoji: font_variant_emoji_v, font_variant_ligatures: font_variant_ligatures_v, font_variant_numeric: font_variant_numeric_v, font_variant_position: font_variant_position_v, font_style_italic: font_style_italic_v, font_kerning: font_kerning_v, font_optical_sizing: font_optical_sizing_v, font_stretch: font_stretch_v, font_width: font_width_v, font_synthesis: font_synthesis_v, font_synthesis_small_caps: font_synthesis_small_caps_v, font_synthesis_position: font_synthesis_position_v, font_synthesis_style: font_synthesis_style_v, font_synthesis_weight: font_synthesis_weight_v, direction_rtl: direction_rtl_v, writing_mode: writing_mode_v, text_orientation: text_orientation_v, text_combine_upright: text_combine_upright_v, text_shadow_x_px: text_shadow_x_px_v, text_shadow_y_px: text_shadow_y_px_v, text_shadow_color: text_shadow_color_v, text_decoration_color: text_decoration_color_v, text_decoration_underline: text_decoration_underline_v, text_decoration_overline: text_decoration_overline_v, text_decoration_line_through: text_decoration_line_through_v, text_decoration_style: text_decoration_style_v, text_decoration_thickness_px: text_decoration_thickness_px_v, text_underline_offset_px: text_underline_offset_px_v, text_underline_position: text_underline_position_v, white_space_nowrap: white_space_nowrap_v, white_space_pre: white_space_pre_v, overflow_wrap: overflow_wrap_v, line_break: line_break_v, hyphens: hyphens_v, word_break: word_break_v, cursor: cursor_v, resize: resize_v, table_layout: table_layout_v, border_collapse: border_collapse_v, border_spacing_x_px: border_spacing_x_px_v, border_spacing_y_px: border_spacing_y_px_v, caption_side: caption_side_v, vertical_align: vertical_align_v, caret_color: caret_color_v, accent_color: accent_color_v, tab_size: tab_size_v, unicode_bidi: unicode_bidi_v, transition_property: transition_property_v, transition_duration_ms: transition_duration_ms_v, transition_delay_ms: transition_delay_ms_v, transition_timing_function: transition_timing_function_v, animation_name: animation_name_v, animation_duration_ms: animation_duration_ms_v, animation_delay_ms: animation_delay_ms_v, animation_timing_function: animation_timing_function_v, animation_iteration_count: animation_iteration_count_v, animation_direction: animation_direction_v, animation_fill_mode: animation_fill_mode_v, animation_play_state: animation_play_state_v, transform_origin: transform_origin_v, transform_box: transform_box_v, transform_style: transform_style_v, image_rendering: image_rendering_v, object_fit: object_fit_v, object_position: object_position_v, bold: bold_v, float_mode: float_mode_v, clear_mode: clear_mode_v, list_style_none: list_style_none_v)
 
 # min-width / max-width in font-relative units (gap C, 2026-10-05). These
 # used to go through parse_int, so `max-width: 26em` (example.com) became
@@ -2717,6 +2775,66 @@ fn _decl_font_relative_length_px(raw: text, font_px: i32) -> i32:
     if v.ends_with("em"):
         return (font_px * parse_decimal_x10(v)) / 10
     parse_int(raw)
+
+# A non-negative author vertical-margin length (`0.7em`, `1.3rem`, `10.5px`,
+# bare `12`) in milli-px floored to Chrome's LayoutUnit 1/64 px, or -1 when the
+# token is anything else (auto, %, vh, negative, other units, calc) so the
+# caller keeps its legacy whole-px parse. Whole-px results come back too (a
+# multiple of 1000); see _decl_vertical_margin_milli.
+fn _decl_vertical_margin_exact_milli(tok: text, font_px: i32) -> i64:
+    val t = tok.trim().lower()
+    val n = t.byte_len()
+    if n == 0 or t.starts_with("-") or t.starts_with("+"):
+        return -1
+    var unit_px: i64 = 1
+    if t.ends_with("rem"):
+        unit_px = css_cascade_root_font_px().to_i64()
+    elif t.ends_with("em"):
+        unit_px = font_px.to_i64()
+    elif not t.ends_with("px") and dec_val(t.substring(n - 1, n)) >= 10:
+        return -1
+    val px_milli = svg_number_milli(t) * unit_px
+    ((px_milli * 64) / 1000) * 1000 / 64
+
+# `2.5%` -> 2500 (percent x 1000); 0 for anything that is not a plain
+# non-negative percentage (`auto`, `-5%`, `calc(..)`, lengths, `0%`).
+fn _decl_vertical_margin_percent_x1000(tok: text) -> i32:
+    val t = tok.trim()
+    val n = t.byte_len()
+    if n < 2 or not t.ends_with("%") or t.starts_with("-") or t.starts_with("+"):
+        return 0
+    val body = t.substring(0, n - 1)
+    var i = 0
+    while i < body.byte_len():
+        val ch = body.substring(i, i + 1)
+        if ch != "." and dec_val(ch) >= 10:
+            return 0
+        i = i + 1
+    svg_number_milli(body) as i32
+
+# The sub-pixel part to carry in `Style.margin_t_milli` / `margin_b_milli`:
+# the floored milli-px value when it is fractional, else 0 (the whole-px
+# margin already says everything).
+fn _decl_vertical_margin_milli(tok: text, font_px: i32) -> i32:
+    # A non-negative `N%` (CSS 2.2 8.3: of the containing block WIDTH, known
+    # only at layout) is carried as a NEGATIVE milli: -(percent x 1000).
+    # block_margin_milli resolves it; `0%` is a plain zero margin.
+    val pct = _decl_vertical_margin_percent_x1000(tok)
+    if pct != 0:
+        return 0 - pct
+    val exact = _decl_vertical_margin_exact_milli(tok, font_px)
+    if exact < 0 or exact % 1000 == 0:
+        return 0
+    exact as i32
+
+# The whole-px margin that goes with `_decl_vertical_margin_milli` (round
+# half up of the exact value, so every reader that only knows whole px stays
+# within half a pixel); `legacy_px` when the token is not a plain length.
+fn _decl_vertical_margin_px(tok: text, font_px: i32, legacy_px: i32) -> i32:
+    val exact = _decl_vertical_margin_exact_milli(tok, font_px)
+    if exact < 0:
+        return legacy_px
+    ((exact + 500) / 1000) as i32
 
 # A `%` or `em` `line-height` as thousandths of the declaring element's own
 # font-size (`150%` -> 1500, `1.5em` -> 1500, `112.5%` -> 1125); 0 for any

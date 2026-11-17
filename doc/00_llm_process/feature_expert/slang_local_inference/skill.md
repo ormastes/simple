@@ -363,3 +363,36 @@ Tokens/s below is meaningless for 1-2 token answers.
 | gpu | Qwen3-ASR-0.6B Q8_0 | 95035 | 10 | 424 | 23.5 | language English<asr_text>...Paris. |
 - Device forward pass (2026-11-15): `pure/llama_forward_rocm.spl` runs the stories15M Llama forward on the Radeon 8065S: `rocm_llama_load` (F32 byte-range upload once), `llama_step_rocm` (hidden state and per-layer K/V rows stay on the device; intermediates freed every step), `rocm_generate_greedy` (same prefix-reuse rule as `kv_cache.spl`, shared via `kv_reuse_len`; counts `positions_evaluated`). New device kernels in `tensor_ops_rocm.spl`: rope, kv_write (in place), row lookup, argmax (one i32 readback, never the 32000 logits). Spec: `slang_pure_rocm_generate_spec.spl` (GPU ids == CPU ids, reference text, prefix reuse, perf table in the log; needs `--timeout 3600` because the CPU leg is minutes on the seed). KV capacity is `min(max_position_embeddings, 1024)` (attention keeps scores in shared memory). `hip_compute.rocm_kernel` now destroys the hipRTC program on every path; the code-object buffer is deliberately kept (HIP docs do not say whether `hipModuleLoadData` copies it). `env_get` returns "" when unset, not None: `?? default` never fires.
 - Integration (2026-11-16): `/v1/completions` goes through the same dispatch as chat (`engine_complete_text`) and returns real usage counts; a media request to a pure-runner model is refused (text only), never routed to ggml. Pure/dispatch/variety system specs append evidence and `SKIPPED: <why>` lines to `build/probe/*_evidence.txt` because the runner counts skip() as passed (bug records in doc/08_tracking/bug).
+
+## Host portability (Windows / Linux / macOS, 2026-11-16)
+
+One module owns every per-OS decision: `src/lib/gc_async_mut/slang/host/slang_host.spl`.
+Decisions are pure functions of an `os` text (`ggml_lib_default`, `rocm_bin_default_for`,
+`hip_lib_names`, `hiprtc_lib_names`, `host_libc_name`, `host_join`, and the parsers
+`parse_meminfo_bytes`, `parse_vm_stat_page_size`, `parse_vm_stat_available_pages`,
+`parse_int_text`, `darwin_available_bytes`), so the Linux/macOS branches are unit-tested on any host
+(`test/01_unit/lib/gc_async_mut/slang/host/slang_host_spec.spl`). The `host_*` wrappers
+route env, file exists/read, directory list and process capture through SOSIX
+(`std.nogc_async_mut.sosix.host_facade`; `sosix_host_os()` is the three-way OS accessor).
+
+- Lazy by construction: no native library is opened at import. The ggml shim is
+  dlopen'ed by `open_backend` on the first model load, ROCm by `rocm_open_at` on first GPU
+  use; `engine_backend_available()` is a file probe only (spec asserts the engine stays empty).
+- Not SOSIX (no accessor exists): `spl_dlopen`/`dlsym`/`spl_wffi_call_*`, `file_size`,
+  `is_dir`, byte reads (`file_read_bytes`), ranged text reads, sha256. They stay on
+  `std.io_runtime` / `std.nogc_sync_mut.sffi.dynamic`.
+- Library names: shim `slang_ggml.dll` / `libslang_ggml.so` / `libslang_ggml.dylib`;
+  ROCm `amdhip64_7.dll`+`hiprtc0702.dll` (bin dir) vs `/opt/rocm/lib/libamdhip64.so[.7]`+`libhiprtc.so[.7]`;
+  macOS has no ROCm (returns Err). CUDA is not loaded anywhere in slang. Windows path
+  literals must escape every backslash: `"...\ROCm\7.2\bin"` unescaped turns `\7` into a
+  control char and ROCm silently reads as absent (caught 2026-11-17 by the live ROCm spec).
+- Free memory: Linux `/proc/meminfo` MemAvailable; macOS = vm_stat free + inactive +
+  speculative pages (purgeable excluded: it overlaps active/inactive) times the page size from
+  vm_stat's OWN header (`hw.pagesize` only as fallback; Rosetta sees 4 KiB vs native 16 KiB),
+  capped at `sysctl hw.memsize` (no pipe/awk, parsed in Simple; this also removed the
+  W-STR-BRACE-001 warning); Windows
+  `Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory`. Probes run with NO timeout
+  (the CIM probe has measured 54-135 s under load).
+- Shim build (`scripts/check/build-slang-ggml-shim.shs`): Linux = clang (refuses a non-clang
+  `CC`, never GCC) + `-fuse-ld=lld`; macOS = clang `-dynamiclib` (system ld64), `nm -gU` with the
+  `_` prefix stripped; Windows lanes unchanged. Linux/macOS builds are unverified (no host).

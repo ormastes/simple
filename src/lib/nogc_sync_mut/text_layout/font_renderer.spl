@@ -348,7 +348,7 @@ use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_render_glyph_lcd, SfntLcdGlyph}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
-use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
@@ -393,6 +393,11 @@ class ResolvedFontMetrics:
     reason: text
     glyph_run: DrawIrGlyphRunPayload
     shaping_required: bool
+    # EXACT run width in milli-px (the unrounded pen end `width` snaps), or
+    # -1 when no exact pen exists (shaped runs, fractional-size rescale).
+    # A mid-line run's LCD pen phase is derived from it (Chrome 159 lays the
+    # line out fractionally; see inline_run_pen_origin_chrome159_spec).
+    width_milli: i64 = -1
 
 # ponytail: process-local 128-entry ring for pinned layout metrics; replace with
 # per-document caches only when concurrent multi-face ownership lands.
@@ -1577,9 +1582,17 @@ class FontRenderer:
             _lcd_phase_atlas_slots[key] = idx
         idx
 
-    me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32):
+    # `pen_origin_milli` is where the run REALLY starts relative to the whole
+    # pixel it is drawn at: a run laid out mid-line after fractional-width
+    # inline content (Chrome 159: `<span>ll</span> l` starts its `l` at
+    # 12.5547 while the integer layout says 13 -> origin -445). Each glyph's
+    # quarter phase and whole-pixel shift then come from origin + exact pen.
+    me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32, pen_origin_milli: i64 = 0):
         if not self._lcd_applies(font_size):
             return
+        # More than ~2 px off means the producer's model disagrees with this
+        # layout, not a sub-pixel phase; keep the integer pens.
+        val origin = if pen_origin_milli > -2000 and pen_origin_milli < 2000: pen_origin_milli else: 0
         val cps = text_codepoints(content)
         val n = cps.len()
         if n == 0 or advance_widths.len() != n:
@@ -1590,6 +1603,7 @@ class FontRenderer:
         val pens = self._text_pen_milli(cps, font_size, run_identity)
         var byte_offsets: [i64] = [0; n]
         var shifts: [i32] = [0; n]
+        var round_shifts: [i32] = [0; n]
         var phases: [i64] = [0; n]
         var any_phase = false
         var byte_offset: i64 = 0
@@ -1600,14 +1614,19 @@ class FontRenderer:
                 return
             byte_offsets[i] = byte_offset
             byte_offset = byte_offset + utf8_codepoint_byte_len(cps[i])
-            # quarter index of the exact pen relative to the whole-pixel pen
-            val q4 = (pens[i] - px * 1000 + 500 + 125) / 250 - 2
-            if q4 < 0:
-                shifts[i] = -1
-                phases[i] = q4 + 4
-            else:
-                phases[i] = q4
-            if phases[i] != 0:
+            # Nearest quarter of the exact pen (origin included) relative to
+            # the whole-pixel pen, split into a whole-pixel shift and a phase
+            # 0..3. The +16/-16 offsets keep both divisions on non-negative
+            # operands (floor division) for |delta| < 3.6 px.
+            val delta = pens[i] - px * 1000 + origin
+            val q = (delta + 125 + 4000) / 250 - 16
+            val whole = (q + 16) / 4 - 4
+            shifts[i] = whole.to_i32()
+            phases[i] = q - whole * 4
+            # Whole-pixel snap of the same pen for a glyph that gets no phase
+            # cell: 0 whenever the origin is 0 (|delta| < 0.5 px).
+            round_shifts[i] = ((delta + 500 + 4000) / 1000 - 4).to_i32()
+            if phases[i] != 0 or round_shifts[i] != 0:
                 any_phase = true
             i = i + 1
         if not any_phase:
@@ -1623,6 +1642,7 @@ class FontRenderer:
             if ci >= n:
                 break
             val phase = phases[ci]
+            var replaced = false
             if phase != 0:
                 val cp = cps[ci].to_i32()
                 val base = self.get_glyph(cp, font_size)
@@ -1648,6 +1668,12 @@ class FontRenderer:
                                 dst_x: q.dst_x - base.bearing_x + shifts[ci] + pg.bearing_x, dst_y: q.dst_y,
                                 width: self.atlas_widths[idx], height: self.atlas_heights[idx],
                                 atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color)
+                            replaced = true
+            if not replaced and round_shifts[ci] != 0:
+                quads[qi] = FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
+                    dst_x: q.dst_x + round_shifts[ci], dst_y: q.dst_y,
+                    width: q.width, height: q.height,
+                    atlas_x: q.atlas_x, atlas_y: q.atlas_y, color: q.color)
             qi = qi + 1
         if inserted.len() > 0:
             self.atlas_generation = _next_font_atlas_dependency_generation()
@@ -2555,6 +2581,20 @@ class FontRenderer:
             _run_memo_store(_run_identity, font_size, content, advances)
         advances
 
+    # Exact (unrounded) pen end of `content` in milli-px: the value whose
+    # rounding is the sum of `measure_text_advances`.
+    # reason: mirrors measure_text_advances(content: text, font_size: i32).
+    # @allow(primitive_api)
+    me measure_text_width_milli(content: text, font_size: i32) -> i64:
+        val content_cps = text_codepoints(content)
+        if content_cps.len() == 0:
+            return 0
+        var run_identity: text = ""
+        if val run_rasterizer = self.ttf_rasterizer:
+            run_identity = run_rasterizer.cache_identity()
+        val boundaries = self._text_pen_milli(content_cps, font_size, run_identity)
+        boundaries[content_cps.len()]
+
     # -----------------------------------------------------------------------
     # Render text into a pixel buffer (ARGB u32)
     # -----------------------------------------------------------------------
@@ -3151,7 +3191,7 @@ class FontRenderer:
             ci = ci + 1
         out
 
-    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> i64:
+    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64 = 0) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
@@ -3178,7 +3218,7 @@ class FontRenderer:
             self.staged_valid = false
         self.staged_quads = quads
         if self.staged_valid:
-            self._lcd_apply_pen_phases(content, advance_widths, config.size)
+            self._lcd_apply_pen_phases(content, advance_widths, config.size, pen_origin_milli)
         self._apply_staged_config(config)
         self.staged_quads.len()
 
@@ -3499,10 +3539,29 @@ var _browser_face_ascent_descent_memo: Dict<text, [i32]> = {}
 pub fn browser_face_ascent_descent_px(family: text, bold: bool, italic: bool, font_size: i32) -> [i32]:
     if font_size <= 0 or font_size > 512:
         return []
+    browser_face_ascent_descent_milli_px(family, bold, italic, font_size * 1000)
+
+# Fractional-size twin: `font_size_milli` is the computed size in thousandths
+# of a px (Chrome 159 h3 = 18720). Whole-px sizes answer exactly as above.
+# reason: family name, style flags and milli-px size are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_ascent_descent_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> [i32]:
+    browser_face_ascent_descent_device_px(family, bold, italic, font_size_milli, 1)
+
+# Device-scale twin: [ascent, descent] in whole DEVICE px at device scale `k`
+# (Chrome --force-device-scale-factor), from the face at font_size_milli * k
+# with Blink's subpixel-positioning borrow
+# (`sfnt_line_metric_units_ascent_descent_device_px`). k == 1 answers exactly
+# what `browser_face_ascent_descent_milli_px` always answered.
+# reason: family name, style flags, milli-px size and integer device scale are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: bool, font_size_milli: i32, k: i32) -> [i32]:
+    if font_size_milli <= 0 or font_size_milli > 512000 or k < 1:
+        return []
     if not browser_host_has_measured_linux_face_set():
         return []
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
-    val key = family + style_key + font_size.to_string()
+    val key = family + style_key + font_size_milli.to_string() + (if k > 1: "@" + k.to_string() else: "")
     val memoisable = browser_bundled_font_path_for_family(family) == ""
     if memoisable and _browser_face_ascent_descent_memo.has(key):
         return _browser_face_ascent_descent_memo[key]
@@ -3512,7 +3571,7 @@ pub fn browser_face_ascent_descent_px(family: text, bold: bool, italic: bool, fo
         if out.len() == 0:
             val path = font_face_spec_path(candidate)
             if file_exists(path):
-                val ad = sfnt_line_metric_units_ascent_descent_px(_browser_face_line_units(path), font_size.to_i64())
+                val ad = sfnt_line_metric_units_ascent_descent_device_px(_browser_face_line_units(path), font_size_milli.to_i64(), k.to_i64())
                 if ad.len() == 2:
                     out = [ad[0] as i32, ad[1] as i32]
     if memoisable and out.len() == 2:
@@ -3538,10 +3597,19 @@ fn _browser_face_line_units(path: text) -> [i64]:
 pub fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, font_size: i32) -> i32:
     if font_size <= 0 or font_size > 512:
         return 0
+    browser_normal_line_height_milli_px(family, bold, italic, font_size * 1000)
+
+# Fractional-size twin of `browser_normal_line_height_px` (see the ascent/descent
+# twin above); ascent, descent and gap are each rounded at the float size.
+# reason: family name, style flags and milli-px size are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_normal_line_height_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> i32:
+    if font_size_milli <= 0 or font_size_milli > 512000:
+        return 0
     if not browser_host_has_measured_linux_face_set():
         return 0
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
-    val key = family + style_key + font_size.to_string()
+    val key = family + style_key + font_size_milli.to_string()
     # A bundled family's face path depends on SIMPLE_ASSET_ROOT, which a
     # process can change, so its pixel value is never memoised (the per-path
     # units row still is, and a path is its own identity).
@@ -3555,7 +3623,7 @@ pub fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, fon
             val path = font_face_spec_path(candidate)
             if file_exists(path):
                 val units = _browser_face_line_units(path)
-                px = sfnt_line_metric_units_normal_line_height_px(units, font_size.to_i64()) as i32
+                px = sfnt_line_metric_units_normal_line_height_milli_px(units, font_size_milli.to_i64()) as i32
     # 0 is "no face answered" (a file that was not there yet, a collection):
     # never memoised, so a later call can still succeed.
     if memoisable and px > 0:
@@ -4107,6 +4175,7 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     if _WM_TRACE: print("[rfm] at=measure shaped_valid={shaped.valid}")
     val _fr_t0 = _fr_probe_now()
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
+    val width_milli: i64 = if shaped.valid: -1 else: renderer.measure_text_width_milli(content, font_size)
     _fr_probe_add_measure(_fr_probe_now() - _fr_t0, (codepoints.len() as i64))
     if _WM_TRACE: print("[rfm] at=measured advances={advances.len()}")
     var width = 0
@@ -4142,7 +4211,8 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
         line_height: if valid: line_height else: 0,
         reason: if valid and (complex_script == 0 or shaped.valid): "resolved" else if valid: "font-shaping-unavailable" else: "font-identity-unavailable",
         glyph_run: shaped.payload,
-        shaping_required: complex_script != 0
+        shaping_required: complex_script != 0,
+        width_milli: if valid: width_milli else: -1
     )
     if resolved.valid and cacheable:
         _resolved_font_metric_store(cache_key, resolved)
@@ -4187,3 +4257,40 @@ fn resolve_font_metrics_configured(config: FontRenderConfig, content: text) -> R
 # Compatibility entry point for producers without language metadata.
 fn resolve_font_metrics(family: text, content: text, font_size: i32) -> ResolvedFontMetrics:
     resolve_font_metrics_with_language(family, content, font_size, "und")
+
+# Fractional-size metrics (`font-size: 18.72px`, UA h3). Chrome 159 lays text
+# out at the float size: the run width scales linearly (Skia, no hinting).
+# The advance and kern caches are keyed on whole-px sizes, so instead of
+# widening those keys the run is resolved at a reference size `ref` (8x the
+# rounded size, at most 512) and the integer pen boundaries are rescaled to
+# `font_size_milli`. Boundaries, not advances, are rescaled, so the run total is
+# round(exact width) exactly as `measure_text_advances` does, and the error of
+# any boundary is at most half a pixel of the reference size shrunk by 1/8.
+# Shaped (complex-script) runs and whole-px sizes take the integer path.
+# reason: family, text, milli-px size and language are the web-style domain.
+# @allow(primitive_api)
+pub fn resolve_font_metrics_with_language_milli(family: text, content: text, font_size_milli: i32, language: text) -> ResolvedFontMetrics:
+    val px = (font_size_milli + 500) / 1000
+    if font_size_milli % 1000 == 0 or font_size_milli <= 0 or font_size_milli > 512000:
+        return resolve_font_metrics_with_language(family, content, px, language)
+    var ref_px = px * 8
+    if ref_px > 512:
+        ref_px = 512
+    val at_ref = resolve_font_metrics_with_language(family, content, ref_px, language)
+    if not at_ref.valid or at_ref.shaping_required:
+        return resolve_font_metrics_with_language(family, content, px, language)
+    val n = at_ref.advances.len()
+    var advances: [i32] = [0; n]
+    var cumulative_ref: i64 = 0
+    var previous: i64 = 0
+    var i = 0
+    while i < n:
+        cumulative_ref = cumulative_ref + (at_ref.advances[i] as i64)
+        val boundary = (cumulative_ref * (font_size_milli as i64) + (ref_px as i64) * 500) / ((ref_px as i64) * 1000)
+        advances[i] = (boundary - previous) as i32
+        previous = boundary
+        i = i + 1
+    val line_height = ((at_ref.line_height as i64) * (font_size_milli as i64) + (ref_px as i64) * 500) / ((ref_px as i64) * 1000)
+    ResolvedFontMetrics(valid: true, family: at_ref.family, identity: at_ref.identity, advances: advances,
+        width: previous as i32, line_height: line_height as i32, reason: at_ref.reason,
+        glyph_run: at_ref.glyph_run, shaping_required: false)

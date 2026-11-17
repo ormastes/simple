@@ -116,3 +116,69 @@ describe "protected authority snapshot publication and query":
                         fixture.approval, fixture.request, 190, 9, 4, 2, 3):
                     case Ok(grant): fail("expired signed approval was accepted")
                     case Err(reason): expect(reason).to_equal("APPROVAL_EXPIRED")
+
+describe "role-scoped snapshot key lookup (milestone_0030)":
+    it "returns a key only under the role it was published with":
+        val fixture = verification_fixture()
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver], 9, 4, 2):
+            case Err(reason): fail("expected valid protected snapshot: {reason}")
+            case Ok(snapshot):
+                expect(distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", "issuer_1")).to_equal(Ok(fixture.issuer))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "human-approver", "approver_1")).to_equal(
+                    Ok(fixture.approver))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "human-approver", "issuer_1")).to_equal(
+                    Err("AUTHORITY_KEY_UNAVAILABLE"))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", "unknown")).to_equal(
+                    Err("AUTHORITY_KEY_UNAVAILABLE"))
+# milestone_0030 N2-a: the admin-installed snapshot also carries the execution-host signing key, looked up only
+# by its own role; it can never stand in for an issuer or approver, and never shares a key with either.
+fn authority_host_key_v2(fixture: VerificationFixtureV2) -> DistributedAuthorityKeyV2:
+    var host = fixture.issuer
+    host.role = "execution-host"
+    host.identity = "execution_host_1"
+    var public_key = host.public_key
+    public_key[0] = public_key[0] ^ 1u8
+    host.public_key = public_key
+    host
+
+describe "execution-host key in the protected snapshot (milestone_0030 N2-a)":
+    it "admits an execution-host key beside issuer and approver and returns it by role":
+        val fixture = verification_fixture()
+        val host = authority_host_key_v2(fixture)
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver, host], 9, 4, 2):
+            case Err(reason): fail("expected snapshot with execution-host key: {reason}")
+            case Ok(snapshot):
+                expect(snapshot.keys.len()).to_equal(3)
+                expect(distributed_authority_snapshot_key_v2(snapshot, "execution-host", "execution_host_1")).to_equal(Ok(host))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", "execution_host_1")).to_equal(
+                    Err("AUTHORITY_KEY_UNAVAILABLE"))
+                expect(distributed_authority_snapshot_key_v2(snapshot, "receipt-signer", host.identity)).to_equal(
+                    Err("AUTHORITY_KEY_UNAVAILABLE"))
+                expect(distributed_verify_grant_approval_from_snapshot_v2(snapshot, fixture.signed,
+                    fixture.approval, fixture.request, 100, 9, 4, 2, 3).is_ok()).to_equal(true)
+
+    it "never resolves an execution-host key as the grant issuer":
+        var fixture = verification_fixture()
+        val host = authority_host_key_v2(fixture)
+        var signed = fixture.signed
+        signed.issuer_id = host.identity
+        match distributed_authority_snapshot_create_v2([fixture.issuer, fixture.approver, host], 9, 4, 2):
+            case Err(reason): fail("expected snapshot with execution-host key: {reason}")
+            case Ok(snapshot):
+                expect(distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed,
+                    fixture.approval, fixture.request, 100, 9, 4, 2, 3)).to_equal(Err("AUTHORITY_KEY_UNAVAILABLE"))
+
+    it "refuses an execution-host key that reuses the issuer or approver public key":
+        val fixture = verification_fixture()
+        var host = authority_host_key_v2(fixture)
+        host.public_key = fixture.issuer.public_key
+        expect(authority_creation_error([fixture.issuer, fixture.approver, host])).to_equal("AUTHORITY_ROLES_NOT_SEPARATE")
+        host.public_key = fixture.approver.public_key
+        expect(authority_creation_error([host, fixture.issuer, fixture.approver])).to_equal("AUTHORITY_ROLES_NOT_SEPARATE")
+
+    it "refuses two execution-host identities sharing one public key":
+        val fixture = verification_fixture()
+        val host = authority_host_key_v2(fixture)
+        var twin = host
+        twin.identity = "execution_host_2"
+        expect(authority_creation_error([fixture.issuer, fixture.approver, host, twin])).to_equal("AUTHORITY_ROLES_NOT_SEPARATE")

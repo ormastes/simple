@@ -26,6 +26,8 @@ pub struct HostAgentPaneWriteV4:
     principal: text
     nonce: text
     attempt: i64
+    # Client-supplied id of this Write, bound into the request; the agent answers an exact retry from its ledger.
+    write_id: i64
     offset: i64
     maximum: i64
     data: text
@@ -45,6 +47,12 @@ pub struct HostAgentPaneIoResultV4:
     accepted_bytes: i64 = 0
     geometry: text = ""
     error: text = ""
+    # Write only: the native input gate could not be closed after the write (the write outcome stands).
+    gate_error: text = ""
+    # Write only: the native input write was actually attempted (so the outcome belongs in the ledger).
+    write_attempted: bool = false
+    # Write only: answered from the ledger, no native write happened.
+    replayed: bool = false
 
 pub fn host_agent_pane_io_refused_v4(error: text) -> HostAgentPaneIoResultV4:
     HostAgentPaneIoResultV4(error: error)
@@ -69,6 +77,80 @@ pub fn host_agent_pane_write_check_v4(write: HostAgentPaneWriteV4) -> Result<Hos
     if write.maximum < 1 or write.maximum > HOST_AGENT_PANE_WRITE_MAX_V4: return Err("attach-pane-write-maximum")
     if write.offset < 0 or write.offset >= write.data.byte_len(): return Err("attach-pane-write-offset")
     if write.attempt < 1: return Err("attach-pane-write-attempt")
+    if write.write_id < 1: return Err("attach-pane-write-id")
     if write.principal.byte_len() == 0 or write.nonce.byte_len() == 0:
         return Err("attach-pane-write-principal")
     Ok(write)
+
+# Per-lease record of completed Writes, owned by the agent (single owner, no lock). At most
+# HOST_AGENT_PANE_WRITE_RECORDS_MAX_V4 outcomes are kept; an evicted id raises `floor`, and any id at or below it
+# is refused as stale (never guessed new), so a retry can never be written twice after its record is gone.
+const HOST_AGENT_PANE_WRITE_RECORDS_MAX_V4: i64 = 16
+
+pub struct HostAgentPaneWriteRecordV4:
+    write_id: i64
+    digest: text
+    disposition: text
+    accepted_bytes: i64
+    error: text
+    gate_error: text
+
+pub struct HostAgentPaneWriteLedgerV4:
+    records: [HostAgentPaneWriteRecordV4]
+    floor: i64
+
+pub fn host_agent_pane_write_ledger_empty_v4() -> HostAgentPaneWriteLedgerV4:
+    HostAgentPaneWriteLedgerV4(records: [], floor: 0)
+
+# What a retry must match: the byte window and bytes, not the lease/nonce (those are fresh per Write).
+pub fn host_agent_pane_write_digest_v4(write: HostAgentPaneWriteV4) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-write-body"),
+        "offset": SdnValue.Int(write.offset), "maximum": SdnValue.Int(write.maximum), "data": SdnValue.String(write.data)}
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+# Ok(Some) = exact retry of a recorded Write; Ok(None) = a new id; Err = refuse. Err when the id is reused with
+# different bytes, is at or below the eviction floor, or the ledger itself is malformed (cannot be consulted).
+pub fn host_agent_pane_write_lookup_v4(ledger: HostAgentPaneWriteLedgerV4,
+        write: HostAgentPaneWriteV4) -> Result<Option<HostAgentPaneWriteRecordV4>, text>:
+    if ledger.floor < 0 or ledger.records.len() > HOST_AGENT_PANE_WRITE_RECORDS_MAX_V4:
+        return Err("attach-pane-write-record-unavailable")
+    var seen: [i64] = []
+    for record in ledger.records:
+        if record.write_id < 1 or record.write_id <= ledger.floor or seen.contains(record.write_id):
+            return Err("attach-pane-write-record-unavailable")
+        seen.push(record.write_id)
+    val digest = host_agent_pane_write_digest_v4(write)
+    for record in ledger.records:
+        if record.write_id == write.write_id:
+            if record.digest != digest: return Err("attach-pane-write-id-reused")
+            return Ok(Some(record))
+    if write.write_id <= ledger.floor: return Err("attach-pane-write-id-stale")
+    Ok(None)
+
+pub fn host_agent_pane_write_replay_v4(record: HostAgentPaneWriteRecordV4) -> HostAgentPaneIoResultV4:
+    HostAgentPaneIoResultV4(disposition: record.disposition, accepted_bytes: record.accepted_bytes,
+        error: record.error, gate_error: record.gate_error, write_attempted: true, replayed: true)
+
+# Appends the outcome of a Write whose native write was attempted; the record with the smallest id is evicted past the bound.
+pub fn host_agent_pane_write_record_v4(ledger: HostAgentPaneWriteLedgerV4, write: HostAgentPaneWriteV4,
+        result: HostAgentPaneIoResultV4) -> HostAgentPaneWriteLedgerV4:
+    var records = ledger.records
+    var floor = ledger.floor
+    records.push(HostAgentPaneWriteRecordV4(write_id: write.write_id, digest: host_agent_pane_write_digest_v4(write),
+        disposition: result.disposition, accepted_bytes: result.accepted_bytes, error: result.error,
+        gate_error: result.gate_error))
+    # Evict the SMALLEST id, so the raised floor stays below every surviving record whatever order ids arrive in.
+    while records.len() > HOST_AGENT_PANE_WRITE_RECORDS_MAX_V4:
+        var smallest = 0
+        var index = 1
+        while index < records.len():
+            if records[index].write_id < records[smallest].write_id: smallest = index
+            index = index + 1
+        if records[smallest].write_id > floor: floor = records[smallest].write_id
+        var rest: [HostAgentPaneWriteRecordV4] = []
+        index = 0
+        while index < records.len():
+            if index != smallest: rest.push(records[index])
+            index = index + 1
+        records = rest
+    HostAgentPaneWriteLedgerV4(records: records, floor: floor)

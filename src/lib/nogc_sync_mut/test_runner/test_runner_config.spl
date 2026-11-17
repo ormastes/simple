@@ -58,14 +58,29 @@ fn get_cli_args() -> [text]:
 #
 # Takes an explicit path so it is testable; resolve_effective_profile supplies
 # the cwd-relative default.
+fn _strip_sdn_comment(line: text) -> text:
+    var quote = ""
+    var kept = ""
+    for ch in line.chars():
+        val c = ch.to_text()
+        if quote != "":
+            if c == quote:
+                quote = ""
+        elif c == "\"" or c == "'":
+            quote = c
+        elif c == "#":
+            return kept.trim()
+        kept = kept + c
+    kept.trim()
+
 pub fn read_sdn_lints_profile(sdn_path: text) -> text:
     val content = file_read(sdn_path) ?? ""
     if content == "":
         return ""
     var in_lints = false
     for line in content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
+        val trimmed = _strip_sdn_comment(line)
+        if trimmed == "":
             continue
         val indented = line.starts_with(" ") or line.starts_with("\t")
         if not indented:
@@ -172,7 +187,7 @@ fn edition_values_from_policy(content: text) -> [text]:
 fn _policy_editions() -> [text]:
     edition_values_from_policy(file_read(EDITION_POLICY_PATH) ?? "")
 
-# Tracks which unknown simple.sdn [package] edition= values have already
+# Tracks which unknown simple.sdn project: edition values have already
 # warned this process. Mirrors _warn_deprecated_profile_alias_once
 # (src/compiler/90.tools/lint/_LintMain/config_and_model.spl:60-74):
 # module-level state, not a struct field (structs are value types), keyed by
@@ -206,7 +221,7 @@ fn edition_unknown_warn_count(raw: text) -> i64:
 # scanner avoids importing a heavier sdn loader into this interpreter
 # session. See doc/01_research/language/editions_mechanism_scoping_2026-07-29.md
 # section 2 for the caveat that no simple.sdn checked into this repo
-# currently has a [package] section either -- this reader is precedent-
+# currently has a project: edition either -- this reader is precedent-
 # matching, decision-free plumbing, not proof the format is in active use.
 fn _read_sdn_package_edition(sdn_path: text) -> text:
     val content = file_read(sdn_path) ?? ""
@@ -214,8 +229,8 @@ fn _read_sdn_package_edition(sdn_path: text) -> text:
         return ""
     var in_project = false
     for line in content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
+        val trimmed = _strip_sdn_comment(line)
+        if trimmed == "":
             continue
         val indented = line.starts_with(" ") or line.starts_with("\t")
         if not indented:
@@ -232,7 +247,7 @@ fn _read_sdn_package_edition(sdn_path: text) -> text:
 # Pure resolution step (mirrors normalize_profile_name's shape: takes a raw
 # value, not a path, so specs can drive the unknown-value -> warn-once ->
 # fallback path directly without needing a real simple.sdn on disk -- this
-# repo has none with a [package] section, see scoping doc section 2). Not
+# repo has none with a project: edition, see scoping doc section 2). Not
 # underscore-prefixed since, like normalize_profile_name, it is meant to be
 # spec'd directly.
 fn resolve_edition_from_value(raw: text) -> text:
@@ -243,9 +258,9 @@ fn resolve_edition_from_value(raw: text) -> text:
     _warn_unknown_edition_once(raw)
     EDITION_DEFAULT
 
-# Resolution order (scoping doc section 3): simple.sdn [package] edition= >
-# engine default (EDITION_DEFAULT, 2027.2). No CLI flag exists
-# yet: the only consumer is driver_unit_profile.spl, so there is nothing to override --
+# Resolution order (scoping doc section 3): simple.sdn project: edition >
+# engine default (EDITION_DEFAULT, 2027.2). No CLI flag exists yet: the only
+# edition consumer is driver_unit_profile.spl, so there is nothing to override --
 # see the scoping doc for why adding one is a design decision, not plumbing.
 # Unknown values warn once and fall back to EDITION_DEFAULT rather than
 # failing -- an edition value error should never itself break `test`/`run`.
@@ -444,17 +459,31 @@ fn handle_run_management(args: [text]) -> i64:
 # MEMORY DEBUG: report free memory
 # =========================================================================
 
-fn report_free_mem(label: text):
-    val avail_line = file_read("/proc/meminfo") ?? ""
-    val lines = avail_line.split("\n")
+extern fn rt_host_memory_headroom_bytes_v1() -> i64
+
+# Pure formatter: Linux MemAvailable line when /proc/meminfo has one, else the
+# host headroom (Windows: min(free phys, free commit) via rt_host_memory_headroom_bytes_v1),
+# else an "unavailable" note. Never an error: this is a debug report.
+fn free_mem_report_line(label: text, meminfo: text, headroom_bytes: i64) -> text:
+    val lines = meminfo.split("\n")
     var i = 0
     while i < lines.len():
         val line = lines[i]
         if line.starts_with("MemAvailable"):
-            print "[MEM] {label}: {line}"
-            return
+            return "[MEM] {label}: {line}"
         i = i + 1
-    print "[MEM] {label}: (could not read /proc/meminfo)"
+    if headroom_bytes > 0:
+        val mb = headroom_bytes / 1048576
+        return "[MEM] {label}: headroom {mb} MB"
+    "[MEM] {label}: (memory info unavailable)"
+
+fn report_free_mem(label: text):
+    val meminfo = file_read("/proc/meminfo") ?? ""
+    var headroom: i64 = 0
+    if meminfo == "":
+        unsafe(capabilities: [ffi]):
+            headroom = rt_host_memory_headroom_bytes_v1()
+    print free_mem_report_line(label, meminfo, headroom)
 
 # =========================================================================
 # Exports
