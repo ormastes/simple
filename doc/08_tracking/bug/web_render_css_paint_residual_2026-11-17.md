@@ -62,7 +62,7 @@ No spec, code change, catalog run or matrix run was made (nothing to prove witho
 | rank | sub-class | mismatching px | share of probe mismatch | status |
 |------|-----------|----------------|-------------------------|--------|
 | 1 | vertical metrics: y hinting missing (cap 11 vs 12 rows, x-height 8 vs 9, blurred baseline row) | 772 | 27.7% | fixed: `sfnt_render_glyph_lcd` blue-zone fit (slight autohinter) |
-| 2 | horizontal-stem edge snapping (H/e crossbars: Chrome snaps the stem's top edge to a row) | ~1,025 | ~37% | open |
+| 2 | horizontal-stem edge snapping (H/e/A crossbars) | ~1,025 | ~37% | fixed 2026-11-17: `_hstem_knots` (glyph grid mismatch 3685 -> 3079; catalog css-paint 4.01 -> 3.67). Open: curve extrema, diagonal legs |
 | 3 | low-amplitude coverage / FIR / gamma, delta 9-16 (ink 2.9% under Chrome after the fix) | ~876 | ~31% | open |
 | 4 | advance / kerning | <1% | - | none at 16 px; 8 px pen phase is owned elsewhere |
 
