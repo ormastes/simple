@@ -1,0 +1,234 @@
+"""
+## Purpose and audience
+Purpose: Pin three CSS gradient behaviours against Chrome 159 at device scale
+4 (384 dpi) on the CPU raster, cpu_simd and Vulkan lanes:
+1. Length stop positions (`px`, `em`) in linear and radial gradients resolve
+   against the layer's gradient line on its tile (a linear line's length, a
+   radial's gradient ray), with the CSS Images 3 §3.4.3 fix-up (a stop below
+   an earlier one is raised to it) and stops outside 0..100%.
+2. Gradient lists on rounded boxes are clipped to the rounded border-box (or
+   padding-box) shape with anti-aliased corners, the same corner coverage the
+   solid rounded fill uses.
+3. Outside widget mode a `<body>` gradient background (html has none)
+   propagates to the canvas: it paints the whole canvas, positioned on the
+   root (`<html>`) box, repeating past it.
+Audience: browser-engine and Engine2D maintainers of the web renderer.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(gradient polish: length stops, rounded gradient lists, canvas propagation).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_device_gradient_count}
+use std.gc_async_mut.gpu.engine2d.engine.{engine2d_host_gradient_eval_count}
+
+# ---------------------------------------------------------------------------
+# Oracle: Chrome 159 (chromium-1255, linux-arm64)
+#   chrome --headless --no-sandbox --hide-scrollbars \
+#     --force-device-scale-factor=4 --window-size=W,H --screenshot=<png> file://<html>
+# Pages gp_doc(40, 32, gp_bg(n, 1)) for n = 1..6 (standards mode; W,H = 40,32,
+# except n = 6: 48,40 for its 4 px border) and gp_body_doc(n, 1) for n = 7, 8
+# (W,H = 40,64). Expected values are Chrome's own pixels at the listed device
+# points, tolerance +-2 per channel (the measured gradient tolerance).
+#
+# The CPU raster has no device-scale entry: it lays the same page out at 4x
+# CSS px, so every px value is multiplied by 4 there.
+#
+# Rounded corners: only fully-inside / fully-outside corner pixels are pinned.
+# Chrome's partial corner coverage differs from Simple's solid rounded fill
+# by up to ~57 levels on the same page with a flat colour (open, recorded in
+# the bug file); a gradient clip reuses the solid fill's coverage, so its
+# partial pixels carry the same residue and no new one.
+# ---------------------------------------------------------------------------
+
+fn gp_px(n: i32, k: i32) -> text:
+    val v = n * k
+    "{v}px"
+
+fn gp_doc(w: i32, h: i32, bg: text) -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><div style=\"width:" + "{w}" + "px;height:" + "{h}" + "px;" + bg + "\"></div></body></html>"
+
+fn gp_bg(n: i32, k: i32) -> text:
+    if n == 1:
+        # A typed-looking single linear layer whose stops are lengths.
+        return "background:linear-gradient(to right, #ff0000 " + gp_px(10, k) + ", #0000ff " + gp_px(30, k) + ")"
+    if n == 2:
+        # Radial px stops resolve against the gradient ray (the 20px radius).
+        return "background:radial-gradient(circle " + gp_px(20, k) + " at " + gp_px(16, k) + " " + gp_px(12, k) + ", #00ff00 " + gp_px(4, k) + ", #ff00ff " + gp_px(12, k) + ", #0000ff " + gp_px(16, k) + ")"
+    if n == 3:
+        # px stops on a 10px tile, a negative stop, an out-of-order stop
+        # (raised to the previous one) and a stop past 100%.
+        return "background-color:#ffff00;background-image:linear-gradient(90deg, #ff0000 " + gp_px(2, k) + ", rgba(0,0,255,0.7) " + gp_px(8, k) + "), linear-gradient(#00ff00 -" + gp_px(8, k) + ", #ff00ff " + gp_px(20, k) + ", #00ffff " + gp_px(10, k) + ", #000000 150%);background-size:" + gp_px(10, k) + " " + gp_px(10, k) + ", auto"
+    if n == 4:
+        # em stops (font-size 10px) and a stop past 100%, over a colour layer.
+        return "font-size:" + gp_px(10, k) + ";background:linear-gradient(to right, #ff0000 1em, #00ff00 2.5em, #0000ff 300%), #fff"
+    if n == 5:
+        # A gradient list on a uniformly rounded box.
+        return "border-radius:" + gp_px(10, k) + ";background:linear-gradient(to right, rgba(255,0,0,0.8), transparent), radial-gradient(circle, #00ff00, #0000ff)"
+    # n == 6: per-corner radii, a translucent border and a padding-box clip
+    # (inner radii = outer - border).
+    "border:" + gp_px(4, k) + " solid rgba(0,0,0,0.3);border-radius:" + gp_px(12, k) + " " + gp_px(4, k) + " " + gp_px(8, k) + " 0;background-clip:padding-box;background-image:linear-gradient(45deg, #ff0000, #0000ff), radial-gradient(#ffff00, #00ffff)"
+
+# Canvas propagation pages: html has no background, body carries the list.
+fn gp_body_doc(n: i32, k: i32) -> text:
+    val bg = if n == 7:
+        "linear-gradient(#ff0000, #0000ff)"
+    else:
+        "radial-gradient(circle at 25% 50%, rgba(0,255,0,0.8), transparent 60%), linear-gradient(to right, #ffff00, #ff00ff)"
+    "<!DOCTYPE html><html><body style=\"margin:" + gp_px(4, k) + ";height:" + gp_px(20, k) + ";background:" + bg + "\"></body></html>"
+
+fn gp_page(n: i32, k: i32) -> text:
+    if n >= 7:
+        return gp_body_doc(n, k)
+    gp_doc(40 * k, 32 * k, gp_bg(n, k))
+
+fn gp_frame_w(n: i32) -> i32:
+    if n == 6: 48 else: 40
+
+fn gp_frame_h(n: i32) -> i32:
+    if n == 6:
+        return 40
+    if n >= 7: 64 else: 32
+
+fn gp_cpu_simd_k4(n: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(gp_page(n, 1), gp_frame_w(n), gp_frame_h(n), 4, "cpu_simd")
+
+fn gp_vulkan_k4(n: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(gp_page(n, 1), gp_frame_w(n), gp_frame_h(n), 4, "vulkan")
+
+fn gp_raster_4x(n: i32) -> [u32]:
+    simple_web_layout_render_html_software_pixels(gp_page(n, 4), gp_frame_w(n) * 4, gp_frame_h(n) * 4, 600000)
+
+fn gp_channel_dev(got: u32, want: u32) -> i32:
+    var worst = 0
+    var sh = 0u32
+    while sh <= 16u32:
+        val g = ((got >> sh) & 255u32) as i32
+        val w = ((want >> sh) & 255u32) as i32
+        val d = if g > w: g - w else: w - g
+        if d > worst:
+            worst = d
+        sh = sh + 8u32
+    worst
+
+# Largest per-channel deviation from Chrome over the sample points
+# (pts = x0, y0, x1, y1, ...); 999 when a point is off the frame.
+fn gp_max_dev(px: [u32], fw: i32, pts: [i32], want: [u32]) -> i32:
+    var worst = 0
+    var i = 0
+    while i < want.len():
+        val idx = pts[2 * i + 1] * fw + pts[2 * i]
+        if idx < 0 or idx >= px.len():
+            return 999
+        val d = gp_channel_dev(px[idx], want[i])
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst
+
+fn gp_mismatches(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+val GP_PTS: [i32] = [5, 5, 27, 20, 47, 37, 66, 50, 93, 70, 118, 90, 141, 110, 155, 125, 20, 60, 130, 18]
+val GP_P1_CHROME: [u32] = [0xFFFF0000u32, 0xFFFF0000u32, 0xFFE70018u32, 0xFFAA0054u32, 0xFF5500ABu32, 0xFF0400FAu32, 0xFF0000FFu32, 0xFF0000FFu32, 0xFFFF0000u32, 0xFF0000FFu32]
+val GP_P2_CHROME: [u32] = [0xFF0000FFu32, 0xFFED13EDu32, 0xFF1CE31Cu32, 0xFF00FF00u32, 0xFFA957A9u32, 0xFF0000FFu32, 0xFF0000FFu32, 0xFF0000FFu32, 0xFFE915E9u32, 0xFF0000FFu32]
+val GP_P3_CHROME: [u32] = [0xFFFF0000u32, 0xFF4D21AFu32, 0xFFFF0000u32, 0xFF6510B5u32, 0xFFD50139u32, 0xFF0045F8u32, 0xFF701F84u32, 0xFF002DE0u32, 0xFF9B077Eu32, 0xFFE80416u32]
+val GP_P4_CHROME: [u32] = [0xFFFF0000u32, 0xFFFF0000u32, 0xFFDF2000u32, 0xFF8E7000u32, 0xFF1CE400u32, 0xFF00F20Cu32, 0xFF00E41Cu32, 0xFF00DA25u32, 0xFFFF0000u32, 0xFF00EA14u32]
+# (5,5) and (155,125) lie outside the 40 device px corner arcs (page white);
+# (14,14) and (145,113) inside them; (80,1) and (80,126) on the straight edges.
+val GP_P5_PTS: [i32] = [5, 5, 27, 20, 47, 37, 66, 50, 93, 70, 118, 90, 141, 110, 155, 125, 20, 60, 130, 18, 14, 14, 145, 113, 2, 64, 158, 64, 80, 1, 80, 126]
+val GP_P5_CHROME: [u32] = [0xFFFFFFFFu32, 0xFFA91E3Au32, 0xFF8F422Eu32, 0xFF776E19u32, 0xFF55921Au32, 0xFF356D5Cu32, 0xFF183AAFu32, 0xFFFFFFFFu32, 0xFFB1202Du32, 0xFF254890u32, 0xFFB90E38u32, 0xFF122EBDu32, 0xFFC90D29u32, 0xFF023BC2u32, 0xFF653C5Eu32, 0xFF653C5Du32]
+# Frame 192x160. (172,140) and (20,20) are inside the padding rect but
+# outside its rounded inner corners: the border, not the gradient, is there.
+val GP_P6_PTS: [i32] = [30, 30, 100, 80, 170, 20, 160, 130, 172, 140, 20, 20, 8, 80, 100, 150, 60, 120, 140, 40]
+val GP_P6_CHROME: [u32] = [0xFF8D0071u32, 0xFF7C0083u32, 0xFF0900F6u32, 0xFF73008Cu32, 0xFFB2B2B2u32, 0xFFB2B2B2u32, 0xFFB2B2B2u32, 0xFFB2B2B2u32, 0xFFC2003Cu32, 0xFF3500C9u32]
+# The same page without (172,140) and (20,20): the Draw IR lanes paint a box
+# with per-corner radii with a SQUARE border band (open, recorded in the bug
+# file, not a gradient defect), so those two border pixels stay white there.
+val GP_P6_DIR_PTS: [i32] = [30, 30, 100, 80, 170, 20, 160, 130, 8, 80, 100, 150, 60, 120, 140, 40]
+val GP_P6_DIR_CHROME: [u32] = [0xFF8D0071u32, 0xFF7C0083u32, 0xFF0900F6u32, 0xFF73008Cu32, 0xFFB2B2B2u32, 0xFFB2B2B2u32, 0xFFC2003Cu32, 0xFF3500C9u32]
+# Frame 160x256. The html box is 40x28 CSS px (112 device px): the gradient
+# repeats every 112 rows from the canvas top, across the body margins.
+val GP_BODY_PTS: [i32] = [10, 0, 30, 40, 60, 100, 90, 111, 120, 112, 150, 150, 20, 200, 140, 250, 80, 60, 5, 180]
+val GP_P7_CHROME: [u32] = [0xFFFE0001u32, 0xFFA3005Cu32, 0xFF1A00E4u32, 0xFF0100FEu32, 0xFFFD0001u32, 0xFFA70057u32, 0xFF3500C9u32, 0xFFC2003Cu32, 0xFF750089u32, 0xFF63009Cu32]
+val GP_P8_CHROME: [u32] = [0xFFD4F00Du32, 0xFF62EC12u32, 0xFFB1BC43u32, 0xFFF4758Au32, 0xFFFF3EC0u32, 0xFFFF0FEFu32, 0xFF94EB13u32, 0xFFFF1FE0u32, 0xFF9CB04Eu32, 0xFF91FA05u32]
+
+describe "gradient length stops match Chrome 159 at device scale 4":
+    it "resolves px stops of a single linear gradient against its line":
+        expect(gp_max_dev(gp_cpu_simd_k4(1), 160, GP_PTS, GP_P1_CHROME)).to_be_less_than(3)
+        expect(gp_max_dev(gp_raster_4x(1), 160, GP_PTS, GP_P1_CHROME)).to_be_less_than(3)
+
+    it "resolves px stops of a radial gradient against its gradient ray":
+        expect(gp_max_dev(gp_cpu_simd_k4(2), 160, GP_PTS, GP_P2_CHROME)).to_be_less_than(3)
+        expect(gp_max_dev(gp_raster_4x(2), 160, GP_PTS, GP_P2_CHROME)).to_be_less_than(3)
+
+    it "resolves px stops per tile, raises out-of-order stops and keeps stops outside 0..100%":
+        expect(gp_max_dev(gp_cpu_simd_k4(3), 160, GP_PTS, GP_P3_CHROME)).to_be_less_than(3)
+        expect(gp_max_dev(gp_raster_4x(3), 160, GP_PTS, GP_P3_CHROME)).to_be_less_than(3)
+
+    it "resolves em stops against the element font size":
+        expect(gp_max_dev(gp_cpu_simd_k4(4), 160, GP_PTS, GP_P4_CHROME)).to_be_less_than(3)
+        expect(gp_max_dev(gp_raster_4x(4), 160, GP_PTS, GP_P4_CHROME)).to_be_less_than(3)
+
+    it "evaluates length-stop layers on the Vulkan device exactly as cpu_simd":
+        # The stops are resolved to permille before the kernel, so the device
+        # kernel (no host evaluation) paints them; pixels equal cpu_simd.
+        var n = 1
+        while n <= 3:
+            val dev_before = vulkan_device_gradient_count()
+            val host_before = engine2d_host_gradient_eval_count()
+            val device = gp_vulkan_k4(n)
+            expect(vulkan_device_gradient_count() - dev_before >= 1).to_equal(true)
+            expect(engine2d_host_gradient_eval_count() - host_before).to_equal(0)
+            expect(gp_mismatches(device, gp_cpu_simd_k4(n))).to_equal(0)
+            n = n + 1
+
+describe "gradient lists on rounded boxes match Chrome 159 at device scale 4":
+    it "clips a gradient list to a uniformly rounded border box":
+        expect(gp_max_dev(gp_cpu_simd_k4(5), 160, GP_P5_PTS, GP_P5_CHROME)).to_be_less_than(3)
+        expect(gp_max_dev(gp_raster_4x(5), 160, GP_P5_PTS, GP_P5_CHROME)).to_be_less_than(3)
+
+    it "clips a padding-box gradient list to the inner radii of per-corner rounding":
+        expect(gp_max_dev(gp_cpu_simd_k4(6), 192, GP_P6_DIR_PTS, GP_P6_DIR_CHROME)).to_be_less_than(3)
+        expect(gp_max_dev(gp_raster_4x(6), 192, GP_P6_PTS, GP_P6_CHROME)).to_be_less_than(3)
+
+    it "gives a rounded gradient list the same corner coverage as the solid rounded fill":
+        # Two opaque equal-colour layers must paint every pixel, corners
+        # included, exactly as the same box filled with that colour.
+        val grad = gp_doc(40, 32, "border-radius:10px;background:linear-gradient(#336699, #336699), radial-gradient(#336699, #336699)")
+        val solid = gp_doc(40, 32, "border-radius:10px;background:#336699")
+        val g = simple_web_layout_render_html_pixels_engine2d_at_device_scale(grad, 40, 32, 4, "cpu_simd")
+        val s = simple_web_layout_render_html_pixels_engine2d_at_device_scale(solid, 40, 32, 4, "cpu_simd")
+        expect(gp_mismatches(g, s)).to_equal(0)
+
+    it "paints rounded gradient lists on Vulkan exactly as cpu_simd":
+        expect(gp_mismatches(gp_vulkan_k4(5), gp_cpu_simd_k4(5))).to_equal(0)
+        expect(gp_mismatches(gp_vulkan_k4(6), gp_cpu_simd_k4(6))).to_equal(0)
+
+describe "a body gradient background propagates to the canvas outside widget mode (Chrome 159, device scale 4)":
+    it "paints a body linear gradient over the whole canvas, repeating on the html box":
+        expect(gp_max_dev(gp_cpu_simd_k4(7), 160, GP_BODY_PTS, GP_P7_CHROME)).to_be_less_than(3)
+        expect(gp_max_dev(gp_raster_4x(7), 160, GP_BODY_PTS, GP_P7_CHROME)).to_be_less_than(3)
+
+    it "paints a body gradient list positioned on the html box over the canvas":
+        expect(gp_max_dev(gp_cpu_simd_k4(8), 160, GP_BODY_PTS, GP_P8_CHROME)).to_be_less_than(3)
+        expect(gp_max_dev(gp_raster_4x(8), 160, GP_BODY_PTS, GP_P8_CHROME)).to_be_less_than(3)
+
+    it "paints the propagated canvas gradient on Vulkan exactly as cpu_simd":
+        expect(gp_mismatches(gp_vulkan_k4(7), gp_cpu_simd_k4(7))).to_equal(0)
+        expect(gp_mismatches(gp_vulkan_k4(8), gp_cpu_simd_k4(8))).to_equal(0)

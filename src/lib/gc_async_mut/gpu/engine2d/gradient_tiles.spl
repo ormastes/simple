@@ -1,3 +1,5 @@
+use std.gpu.engine2d.color.{blend as _gt_blend}
+
 # Tile grid of one CSS background image layer (CSS Backgrounds 3 §3.4-3.5):
 # the tile at index 0 starts at t0 (Q10 px) and is ts long; a repeating axis
 # lays tiles at t0 + n * ts in both directions. A device pixel belongs to the
@@ -45,4 +47,125 @@ pub fn gradient_tile_spans(p0: i32, len: i32, t0: i64, ts: i64, repeat: bool) ->
             out.push(e)
             out.push(n)
         n = n + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Rounded clip of a gradient layer (CSS Backgrounds 3 §5.3: a background is
+# clipped to the rounded border / padding / content box). The corner arc uses
+# the solid rounded fill's anti-aliased coverage (Engine2D `emu_draw_rounded_rect`
+# / the raster's `_corner_coverage256`), so a gradient corner and a solid
+# corner of the same box get the same coverage, as in Chrome.
+# ---------------------------------------------------------------------------
+
+fn _gt_isqrt(v: i64) -> i64:
+    if v <= 0:
+        return 0
+    var g = v
+    var nx = (g + 1) / 2
+    while nx < g:  # cpu-lane-loop-ok: Newton iteration, O(log v) steps
+        g = nx
+        nx = (g + v / g) / 2
+    g
+
+fn _gt_corner_cov256(dx: i32, dy: i32, r: i32) -> i32:
+    val ex = (2 * dx + 1) as i64
+    val ey = (2 * dy + 1) as i64
+    val cov = ((r as i64) * 256 + 128 - _gt_isqrt((ex * ex + ey * ey) * 16384)) as i32
+    if cov < 0:
+        return 0
+    if cov > 256:
+        return 256
+    cov
+
+fn _gt_clamp_radius(r: i32, w: i32, h: i32) -> i32:
+    if r <= 0:
+        return 0
+    val m = if w < h: w / 2 else: h / 2
+    if r > m: m else: r
+
+# Coverage (0..256) of pixel (px, py) by the rect (x, y, w, h) with corner
+# radii tl, tr, br, bl (each clamped to min(w, h) / 2).
+# reason: per-pixel coverage shared by the raster and Draw IR gradient clips; device px
+# @allow(primitive_api)
+pub fn rounded_rect_coverage256(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, tl: i32, tr: i32, br: i32, bl: i32) -> i32:
+    if px < x or py < y or px >= x + w or py >= y + h:
+        return 0
+    val a = _gt_clamp_radius(tl, w, h)
+    val b = _gt_clamp_radius(tr, w, h)
+    val c = _gt_clamp_radius(br, w, h)
+    val d = _gt_clamp_radius(bl, w, h)
+    if a > 0 and px < x + a and py < y + a:
+        return _gt_corner_cov256(x + a - 1 - px, y + a - 1 - py, a)
+    if b > 0 and px >= x + w - b and py < y + b:
+        return _gt_corner_cov256(px - (x + w - b), y + b - 1 - py, b)
+    if c > 0 and px >= x + w - c and py >= y + h - c:
+        return _gt_corner_cov256(px - (x + w - c), py - (y + h - c), c)
+    if d > 0 and px < x + d and py >= y + h - d:
+        return _gt_corner_cov256(x + d - 1 - px, py - (y + h - d), d)
+    256
+
+# Straight-ARGB layer pixels over the rect (x0, y0, w, h) with each alpha
+# scaled by its coverage of `shape` = [x, y, w, h, tl, tr, br, bl] (the
+# solid fill's `a * cov / 256`); pixels outside the shape become 0.
+# reason: shared rounded clip of gradient layer pixels for the raster and Draw IR lanes; device px
+# @allow(primitive_api)
+pub fn gradient_pixels_round_clip(pixels: [u32], x0: i32, y0: i32, w: i32, h: i32, shape: [i32]) -> [u32]:
+    if shape.len() < 8 or pixels.len() != w * h:
+        return pixels
+    var out = pixels
+    val sx = shape[0]
+    val sy = shape[1]
+    val sw = shape[2]
+    val sh = shape[3]
+    val ra = _gt_clamp_radius(shape[4], sw, sh)
+    val rb = _gt_clamp_radius(shape[5], sw, sh)
+    val rc = _gt_clamp_radius(shape[6], sw, sh)
+    val rd = _gt_clamp_radius(shape[7], sw, sh)
+    # Corner bands: only pixels inside one need the arc test.
+    val left = if ra > rd: ra else: rd
+    val right = if rb > rc: rb else: rc
+    val top = if ra > rb: ra else: rb
+    val bottom = if rc > rd: rc else: rd
+    var row = 0
+    # cpu-lane-loop-ok: one coverage test per pixel of one clipped layer rect
+    while row < h:
+        val py = y0 + row
+        val row_out = py < sy or py >= sy + sh
+        val row_band = py < sy + top or py >= sy + sh - bottom
+        var col = 0
+        # cpu-lane-loop-ok: one coverage test per pixel of one row
+        while col < w:
+            val px = x0 + col
+            var cov = 256
+            if row_out or px < sx or px >= sx + sw:
+                cov = 0
+            elif row_band and (px < sx + left or px >= sx + sw - right):
+                cov = rounded_rect_coverage256(px, py, sx, sy, sw, sh, ra, rb, rc, rd)
+            if cov < 256:
+                val idx = row * w + col
+                val p = out[idx]
+                val a = ((p >> 24) & 255u32) as i32
+                out[idx] = (p & 0x00FFFFFFu32) | (((a * cov / 256) as u32) << 24)
+            col = col + 1
+        row = row + 1
+    out
+
+# `layer` (straight ARGB) composited src-over `acc`, pixel by pixel, with the
+# Engine2D image rule (`blend`; a transparent `acc` pixel takes the layer as
+# is). Builds one image of a whole gradient list so a rounded clip scales the
+# list's coverage once, as Chrome's single rounded clip of the background
+# does, not once per layer.
+# reason: shared gradient list composite for the raster and Draw IR rounded clips; straight ARGB pixel buffers
+# @allow(primitive_api)
+pub fn gradient_layer_stack_over(acc: [u32], layer: [u32]) -> [u32]:
+    if acc.len() != layer.len():
+        return acc
+    var out = acc
+    var i = 0
+    # cpu-lane-loop-ok: one composite per pixel of one clipped layer rect
+    while i < out.len():
+        val p = layer[i]
+        if (p >> 24) != 0u32:
+            out[i] = _gt_blend(p, out[i])
+        i = i + 1
     out

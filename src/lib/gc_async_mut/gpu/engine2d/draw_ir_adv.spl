@@ -32,7 +32,8 @@ use std.common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans}
+use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{radial_gradient_pixels, linear_gradient_pixels}
 use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface, css_opacity_group_surface_id}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
@@ -625,6 +626,44 @@ fn _engine2d_draw_ir_nth_int(value: text, n: i32, fallback: i64) -> i64:
             idx = idx + 1
     fallback
 
+# One gradient layer (radial: ellipse cx, cy, rx, ry; linear: line sx, sy,
+# ex, ey; Q10 px) over the rect (ax, ay, aw, ah) through the Engine2D
+# evaluators (Vulkan device kernel, or the host evaluator + image composite).
+fn _engine2d_draw_ir_gradient_layer(engine: Engine2D, radial: bool, ax: i32, ay: i32, aw: i32, ah: i32, g0: i64, g1: i64, g2: i64, g3: i64, colors: [u32], positions: [i32]) -> Engine2D:
+    var eng = engine
+    if radial:
+        eng.draw_radial_gradient_ellipse(ax, ay, aw, ah, g0, g1, g2, g3, colors, positions)
+    else:
+        eng.draw_linear_gradient_line(ax, ay, aw, ah, g0, g1, g2, g3, colors, positions)
+    eng
+
+# The same layer's host-evaluated pixels (`radial_gradient_pixels` /
+# `linear_gradient_pixels`, the raster's evaluators) over (ax, ay, aw, ah)
+# written into `buf`, the rw x rh image at (rx, ry), for a rounded gradient
+# list. The device kernel has no coverage input, so on Vulkan the finished
+# clipped image is composited on the device instead.
+fn _engine2d_draw_ir_gradient_layer_into(buf: [u32], rx: i32, ry: i32, rw: i32, rh: i32, radial: bool, ax: i32, ay: i32, aw: i32, ah: i32, g0: i64, g1: i64, g2: i64, g3: i64, colors: [u32], positions: [i32]) -> [u32]:
+    var out = buf
+    val x0 = if ax > rx: ax else: rx
+    val y0 = if ay > ry: ay else: ry
+    val x1 = if ax + aw < rx + rw: ax + aw else: rx + rw
+    val y1 = if ay + ah < ry + rh: ay + ah else: ry + rh
+    if x1 <= x0 or y1 <= y0:
+        return out
+    val w = x1 - x0
+    val pixels = if radial:
+        radial_gradient_pixels(x0, y0, w, y1 - y0, g0, g1, g2, g3, colors, positions)
+    else:
+        linear_gradient_pixels(x0, y0, w, y1 - y0, g0, g1, g2, g3, colors, positions)
+    if pixels.len() != w * (y1 - y0):
+        return out
+    var row = y0
+    # cpu-lane-loop-ok: copies one evaluated layer rect into the list image, row by row
+    while row < y1:
+        out.write_span(pixels, ((row - ry) * rw + x0 - rx) as i64, ((row - y0) * w) as i64, w as i64)
+        row = row + 1
+    out
+
 # Paint the per-side borders of a box. Emits a uniform rounded-border outline
 # when a corner radius plus four equal, same-colored, non-zero sides are present;
 # otherwise paints per-side slivers with `draw_rect_filled`. Engine2D is
@@ -942,10 +981,15 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         return Engine2dDrawIrBoxOutcome(
             engine: eng, glass_execution: glass.execution)
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
-    if typed_nonuniform:
+    # A gradient layer list on a rounded box carries its rounded clip
+    # (`background-gradient-layer-clip-radii`, the background-clip box's
+    # radii) and paints through the layer branch below on any corners.
+    val layer_clip_radii = _engine2d_draw_ir_style_value(style, "background-gradient-layer-clip-radii")
+    val layered = _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry") != "" and (layer_clip_radii != "" or (radius <= 0 and not typed_nonuniform))
+    if typed_nonuniform and not layered:
         eng = engine2d_draw_ir_render_typed_background(
             eng, command, x, y, w, h, effective_corners)
-    elif radius <= 0 and _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry") != "":
+    elif layered:
         # A CSS gradient layer list resolved by the producer
         # (`_html_draw_ir_gradient_layer_props`): the painting area, then per
         # layer an ellipse (R) or a gradient line (L), Q10 px relative to this
@@ -954,20 +998,43 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         # through the shared Engine2D evaluators and `draw_image_blend`.
         val layer_geom = _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry")
         val layer_stops = _engine2d_draw_ir_style_value(style, "background-gradient-layer-stops").split(";")
-        if _engine2d_draw_ir_has_visible_alpha(command.color):
-            eng.draw_rect_filled(x, y, w, h, command.color)
         val lox = (x as i64) * 1024
         val loy = (y as i64) * 1024
         val pax = x + (_engine2d_draw_ir_nth_int(layer_geom, 0, 0) / 1024) as i32
         val pay = y + (_engine2d_draw_ir_nth_int(layer_geom, 1, 0) / 1024) as i32
         val paw = (_engine2d_draw_ir_nth_int(layer_geom, 2, 0) / 1024) as i32
         val pah = (_engine2d_draw_ir_nth_int(layer_geom, 3, 0) / 1024) as i32
+        # Rounded clip: the painting area with the clip box radii, [] = square.
+        var shape: [i32] = []
+        if layer_clip_radii != "":
+            shape = [pax, pay, paw, pah,
+                _engine2d_draw_ir_nth_int(layer_clip_radii, 0, 0) as i32,
+                _engine2d_draw_ir_nth_int(layer_clip_radii, 1, 0) as i32,
+                _engine2d_draw_ir_nth_int(layer_clip_radii, 2, 0) as i32,
+                _engine2d_draw_ir_nth_int(layer_clip_radii, 3, 0) as i32]
+        # Rounded: the colour and every layer build ONE image of the clip
+        # rect (rx, ry, rw, rh) whose alpha takes the corner coverage once
+        # (the raster's `fb_gradient_layers_round_clip`); Chrome clips the
+        # whole background once.
+        val rx = if pax > 0: pax else: 0
+        val ry = if pay > 0: pay else: 0
+        val rx1 = if pax + paw > eng.w: eng.w else: pax + paw
+        val ry1 = if pay + pah > eng.h: eng.h else: pay + pah
+        val rw = if rx1 > rx: rx1 - rx else: 0
+        val rh = if ry1 > ry: ry1 - ry else: 0
+        val rounded = shape.len() == 8
+        val base_color = if _engine2d_draw_ir_has_visible_alpha(command.color): command.color else: 0u32
+        var acc: [u32] = [base_color; if rounded: rw * rh else: 0]
+        var layer_buf: [u32] = []
+        if not rounded and _engine2d_draw_ir_has_visible_alpha(command.color):
+            eng.draw_rect_filled(x, y, w, h, command.color)
         val layer_tiles = _engine2d_draw_ir_style_value(style, "background-gradient-layer-tiles")
         val layer_repeat = _engine2d_draw_ir_style_value(style, "background-gradient-layer-repeat").split(",")
         var li: i32 = layer_stops.len() as i32 - 1
         # cpu-lane-loop-ok: one box's own gradient layer list, bottom layer first; bound is that list
         while li >= 0:
             val fields = layer_stops[li].split(":")
+            layer_buf = [0u32; if rounded: rw * rh else: 0]
             if fields.len() == 3:
                 val stop_n = fields[1].split(",").len()
                 var lcolors: [u32] = []
@@ -1013,16 +1080,32 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
                             val sw = (xs[xi + 1] - xs[xi]) as i32
                             val sh = (ys[yi + 1] - ys[yi]) as i32
                             if fields[0] == "R":
-                                eng.draw_radial_gradient_ellipse(sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, g2, g3, lcolors, lpositions)
+                                if rounded:
+                                    layer_buf = _engine2d_draw_ir_gradient_layer_into(layer_buf, rx, ry, rw, rh, true, sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, g2, g3, lcolors, lpositions)
+                                else:
+                                    eng = _engine2d_draw_ir_gradient_layer(eng, true, sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, g2, g3, lcolors, lpositions)
                             else:
-                                eng.draw_linear_gradient_line(sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, lox + g2 + dx, loy + g3 + dy, lcolors, lpositions)
+                                if rounded:
+                                    layer_buf = _engine2d_draw_ir_gradient_layer_into(layer_buf, rx, ry, rw, rh, false, sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, lox + g2 + dx, loy + g3 + dy, lcolors, lpositions)
+                                else:
+                                    eng = _engine2d_draw_ir_gradient_layer(eng, false, sx, sy, sw, sh, lox + g0 + dx, loy + g1 + dy, lox + g2 + dx, loy + g3 + dy, lcolors, lpositions)
                             xi = xi + 3
                         yi = yi + 3
                 elif fields[0] == "R":
-                    eng.draw_radial_gradient_ellipse(pax, pay, paw, pah, lox + g0, loy + g1, g2, g3, lcolors, lpositions)
+                    if rounded:
+                        layer_buf = _engine2d_draw_ir_gradient_layer_into(layer_buf, rx, ry, rw, rh, true, pax, pay, paw, pah, lox + g0, loy + g1, g2, g3, lcolors, lpositions)
+                    else:
+                        eng = _engine2d_draw_ir_gradient_layer(eng, true, pax, pay, paw, pah, lox + g0, loy + g1, g2, g3, lcolors, lpositions)
                 else:
-                    eng.draw_linear_gradient_line(pax, pay, paw, pah, lox + g0, loy + g1, lox + g2, loy + g3, lcolors, lpositions)
+                    if rounded:
+                        layer_buf = _engine2d_draw_ir_gradient_layer_into(layer_buf, rx, ry, rw, rh, false, pax, pay, paw, pah, lox + g0, loy + g1, lox + g2, loy + g3, lcolors, lpositions)
+                    else:
+                        eng = _engine2d_draw_ir_gradient_layer(eng, false, pax, pay, paw, pah, lox + g0, loy + g1, lox + g2, loy + g3, lcolors, lpositions)
+            if rounded:
+                acc = gradient_layer_stack_over(acc, layer_buf)
             li = li - 1
+        if rounded and rw > 0 and rh > 0:
+            eng.draw_image_blend(rx, ry, rw, rh, gradient_pixels_round_clip(acc, rx, ry, rw, rh, shape))
     elif _engine2d_draw_ir_gradient_stop_count(style) >= 2 and radius <= 0:
         # GAP-2: an N-stop/angled/radial gradient was parsed at CSS-apply
         # time (simple_web_html_layout_renderer_decl_apply.spl) and threaded

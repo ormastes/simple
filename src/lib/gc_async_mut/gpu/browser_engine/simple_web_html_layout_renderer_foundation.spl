@@ -2527,7 +2527,7 @@ fn gradient_stop_color_text(part: text) -> text:
     if ls < 0:
         return part
     val after = part.substring(ls + 1, part.byte_len()).trim()
-    if parse_percent_permille(after) >= 0:
+    if parse_percent_permille(after) >= 0 or gradient_stop_token(after, 16)[0] != 0:
         return part.substring(0, ls).trim()
     part
 
@@ -2633,11 +2633,98 @@ fn parse_gradient_angle_deg(raw: text) -> i32:
         return 270
     180
 
-# Full N-stop list for a `linear-gradient(...)`/`radial-gradient(...)` value.
-# Explicit "%" stop positions are honored; stops without one default to 0 for
-# the first, 1000 for the last, and are evenly spaced in between (matching
-# plain-CSS gradient-stop defaulting).
+# Full N-stop list for a `linear-gradient(...)`/`radial-gradient(...)` value
+# with every stop position in permille of the gradient line. Length stops
+# (`px`, `em`) cannot be placed without a line; here they are unpositioned
+# (`parse_gradient_stops_on_line` resolves them against a known line).
 fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
+    parse_gradient_stops_on_line(raw, 0, 16)
+
+# One stop's position token: [kind, value]. kind 0 = no position, 1 =
+# percentage (value in permille, signed), 2 = length (value in Q10 px,
+# signed; `em` is `em_px` px).
+# reason: stop-position token scanner shared by the cascade and the gradient layer painters; value in permille or Q10 px
+# @allow(primitive_api)
+pub fn gradient_stop_token(tok: text, em_px: i32) -> [i64]:
+    val t = tok.trim().lower()
+    val n = t.byte_len()
+    if n == 0:
+        return [0, 0]
+    val neg = t.substring(0, 1) == "-"
+    val body = if neg or t.substring(0, 1) == "+": t.substring(1, n) else: t
+    val bn = body.byte_len()
+    if bn >= 2 and body.substring(bn - 1, bn) == "%":
+        val pm = parse_percent_permille(body)
+        if pm < 0:
+            return [0, 0]
+        return [1, if neg: 0 - (pm as i64) else: pm as i64]
+    var unit_len = 0
+    var scale: i64 = 0
+    if bn >= 3 and body.substring(bn - 2, bn) == "px":
+        unit_len = 2
+        scale = 1
+    elif bn >= 3 and body.substring(bn - 2, bn) == "em" and not (bn >= 4 and body.substring(bn - 3, bn) == "rem"):
+        unit_len = 2
+        scale = em_px as i64
+    if unit_len == 0:
+        return [0, 0]
+    # Decimal magnitude in 1/1000 units.
+    var int_part: i64 = 0
+    var frac: i64 = 0
+    var frac_den: i64 = 1
+    var in_frac = false
+    var seen = false
+    var i = 0
+    while i < bn - unit_len:
+        val c = body.substring(i, i + 1)
+        val d = dec_val(c)
+        if d < 10:
+            seen = true
+            if in_frac:
+                if frac_den < 1000:
+                    frac = frac * 10 + (d as i64)
+                    frac_den = frac_den * 10
+            else:
+                int_part = int_part * 10 + (d as i64)
+        elif c == "." and not in_frac:
+            in_frac = true
+        else:
+            return [0, 0]
+        i = i + 1
+    if not seen:
+        return [0, 0]
+    val milli = int_part * 1000 + frac * 1000 / frac_den
+    val q10 = (milli * scale * 1024 + 500) / 1000
+    [2, if neg: 0 - q10 else: q10]
+
+# True when any stop of the gradient function `raw` is positioned by a
+# length: such a gradient can only be resolved per box (and per tile), so
+# the cascade's typed single-layer projections must leave it to the
+# gradient layer path.
+# reason: cascade-time predicate over raw CSS gradient text
+# @allow(primitive_api)
+pub fn gradient_has_length_stop(raw: text) -> bool:
+    val inner = gradient_inner(raw)
+    if inner.len() == 0:
+        return false
+    for part in split_top_level_commas_paren_aware(inner):
+        val ls = find_last_top_level_space(part)
+        if ls >= 0:
+            if gradient_stop_token(part.substring(ls + 1, part.byte_len()), 16)[0] == 2:
+                return true
+    false
+
+# Full N-stop list resolved against a gradient line `line_q10` long (Q10 px;
+# 0 = unknown, length stops then stay unpositioned). Explicit stops are
+# honored (percentages, or lengths as a share of the line, rounded to the
+# nearest permille); CSS Images 3 §3.4.3 fix-up: an unpositioned first stop
+# is 0%, an unpositioned last stop 100%, a stop below the largest position
+# before it is raised to it, and runs of unpositioned stops are spaced
+# evenly between their positioned neighbours. Positions may lie outside
+# 0..1000.
+# reason: shared stop resolver for the cascade (line unknown) and the per-layer painters; line in Q10 px, font size in px
+# @allow(primitive_api)
+pub fn parse_gradient_stops_on_line(raw: text, line_q10: i64, em_px: i32) -> [GradientStopSpec]:
     val inner = gradient_inner(raw)
     var stops: [GradientStopSpec] = []
     if inner.len() == 0:
@@ -2660,31 +2747,46 @@ fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
         return stops
     var colors: [u32] = []
     var raw_pos: [i32] = []
+    var placed: [bool] = []
     var i2 = 0
     while i2 < n:
         val cp = color_parts[i2]
         colors.push(parse_color_any(gradient_stop_color_text(cp)))
-        raw_pos.push(gradient_stop_position_or_neg1(cp))
+        val ls = find_last_top_level_space(cp)
+        val tok = if ls >= 0: gradient_stop_token(cp.substring(ls + 1, cp.byte_len()), em_px) else: [0, 0]
+        if tok[0] == 1:
+            raw_pos.push(tok[1] as i32)
+            placed.push(true)
+        elif tok[0] == 2 and line_q10 > 0:
+            val num = tok[1] * 1000
+            val pm = if num >= 0: (num + line_q10 / 2) / line_q10 else: 0 - ((0 - num + line_q10 / 2) / line_q10)
+            raw_pos.push(pm as i32)
+            placed.push(true)
+        else:
+            raw_pos.push(0)
+            placed.push(false)
         i2 = i2 + 1
-    if raw_pos[0] < 0:
+    if not placed[0]:
         raw_pos[0] = 0
-    if raw_pos[n - 1] < 0:
-        raw_pos[n - 1] = 1000
+        placed[0] = true
+    if not placed[n - 1]:
+        raw_pos[n - 1] = if raw_pos[0] > 1000: raw_pos[0] else: 1000
+        placed[n - 1] = true
     # CSS Images 3 §3.4.3: a positioned stop below the largest position
     # before it is raised to that position (a hard edge).
     var run_max = raw_pos[0]
     var q = 1
     while q < n:
-        if raw_pos[q] >= 0:
+        if placed[q]:
             if raw_pos[q] < run_max:
                 raw_pos[q] = run_max
             run_max = raw_pos[q]
         q = q + 1
     var k = 1
     while k < n - 1:
-        if raw_pos[k] < 0:
+        if not placed[k]:
             var j = k + 1
-            while j < n - 1 and raw_pos[j] < 0:
+            while j < n - 1 and not placed[j]:
                 j = j + 1
             val prev_pos = raw_pos[k - 1]
             val next_pos = raw_pos[j]

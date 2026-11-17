@@ -12,6 +12,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_pr
     fb_border_sides_styled_clip, fb_select_chevron_clip, fb_rounded_rect_corners_opacity_clip,
     fb_text_ttf_available, fb_text_ttf_ascent_px, fb_text_ttf_line_baseline_y,
     fb_text_ttf_aa_clip_range_adv, radial_gradient_box_paintable, canvas_background_extent,
+    canvas_gradient_source, canvas_gradient_layers,
     background_gradient_layers_paintable, background_gradient_layers, fb_gradient_layers_clip
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{web_bitmap_paint_lane}
@@ -1366,6 +1367,9 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
     val has_widget_panel = widget_flags.has_widget_panel
     val chrome_widget_text = need_widget_text and widget_flags.has_nonempty_widget_text
     val clip_cache = build_ancestor_clip_cache(nodes, styles, bx, by, bw, bh, fbw, fbh)
+    # Outside widget mode a root gradient list is the canvas background: it
+    # paints the canvas (positioned on the html box) instead of its own box.
+    val canvas_src = if widget_mode: -1 else: canvas_gradient_source(nodes, styles)
     # backgrounds first (document order = back to front)
     val node_count = nodes.len()
     var i = 0
@@ -1392,8 +1396,12 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
         val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
         val non_widget_mode = not widget_mode
         if visible_box:
-            val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
+            val paint_bg = i != canvas_src and not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
             val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
+            if i == canvas_src:
+                val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
+                val root_layers = canvas_gradient_layers(nodes, styles, bx, by, bw, bh, i)
+                out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], root_layers, st.opacity_pct, paint_clip_at(clip_cache, i))
             val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
             val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
             if skip_widget_page_bg and nd.tag == "body" and st.bg_layers_raw != "":
@@ -1408,7 +1416,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                 # A gradient-only list paints every layer (linear too); any
                 # other list keeps the radial-only stack painter.
                 val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
-                val canvas_layers = background_gradient_layers(st.bg_layers_raw, 0, 0, canvas[0], canvas[1])
+                val canvas_layers = background_gradient_layers(st.bg_layers_raw, 0, 0, canvas[0], canvas[1], st.font_size)
                 if canvas_layers.len() > 0:
                     out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], canvas_layers, st.opacity_pct, clip)
                 else:
