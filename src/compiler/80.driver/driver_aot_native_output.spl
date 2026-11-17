@@ -1696,6 +1696,23 @@ fn driver_native_collection_link_inputs_cleanup_v1(directory: text) -> bool:
     if directory.len() <= 0: return true
     dir_remove(directory, true)
 
+fn driver_native_cleanup_archive_intermediates_v1(output: text, object_files: [text]):
+    """Remove loose aot-* objects alongside an archive and any .go-to-end-trial
+    marker once emit-archive succeeds; preserves objects under external cache dirs."""
+    if (env_get_nullable("SIMPLE_KEEP_ARCHIVE_OBJECTS") ?? "") == "1":
+        return
+    val out_dir = dirname(output)
+    val prefix = out_dir + "/aot-"
+    for obj_path in object_files:
+        if obj_path.starts_with(prefix) and (obj_path.ends_with(".o") or obj_path.ends_with(".obj")):
+            val _obj_deleted = file_delete(obj_path)
+            val receipt = obj_path + ".capsule-receipt"
+            if file_exists(receipt):
+                val _rcpt_deleted = file_delete(receipt)
+    val trial_path = output + ".go-to-end-trial"
+    if file_exists(trial_path):
+        val _trial_deleted = file_delete(trial_path)
+
 fn driver_native_collection_link_input_directory_v1(output: text) -> text:
     val parent = dirname(output)
     if parent.len() <= 0 or not dir_create_all(parent): return ""
@@ -3356,7 +3373,12 @@ impl CompilerDriver:
                     collection_link_input_dir,
                     CompileResult.CodegenError("emit-archive failed: {stderr}"))
             driver_log_info(log, "Native archive written to {output}")
-            return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
+            val archive_result = driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
+            match archive_result:
+                case CompileResult.Success(_):
+                    driver_native_cleanup_archive_intermediates_v1(output, object_files)
+                case _: ()
+            return archive_result
 
         if emit_shared_requested:
             # The LLVM stage-1 adapter rejects packed DSO IDs; never claim that
