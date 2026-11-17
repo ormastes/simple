@@ -1,16 +1,20 @@
 # SPL-BOUND-002 boundary-return autofix (plan section 7.3, single-file case).
 #
 # Detection is owned by check_bound_late_casts (35.semantics/lint/bound_late_cast.spl).
-# For a finding whose cast argument is exactly one raw extern call with literal
-# (or no) arguments, `Unit(ext(args))`, this proposes ONE review-required
-# FixCandidate that (a) creates or reuses the boundary adapter
-# `<extern>_as_<unit>` annotated @unsafe(... capabilities: [ffi]) returning
-# `Unit(ext(...))`, and (b) rewrites the late cast sites to call the adapter.
+# For a finding whose cast argument is exactly one raw extern call whose
+# arguments are literals or plain locals/params, `Unit(ext(args))`, this
+# proposes ONE review-required FixCandidate that (a) creates or reuses the
+# boundary adapter `<extern>_as_<unit>(<extern params>)` annotated
+# @unsafe(... capabilities: [ffi]) returning `Unit(ext(...))`, and (b) rewrites
+# the late cast sites to call the adapter, passing the args through.
+# Move form: `val r = ext(args)` then a later `Unit(r)` / `r as Unit` in the
+# same function becomes `val r = <adapter>(args)` and the cast becomes `r` --
+# only when `r` has no other use in that function.
 #
 # Never Safe (confidence Uncertain -> ReviewRequired) and never a no-op edit.
-# It aborts with NO fix when the cast argument is not a plain extern call, when
-# the extern's arguments are anything but literals (locals make the origin
-# ambiguous), or when the line is not ASCII (byte spans are not trusted).
+# It aborts with NO fix when the cast argument is neither such a call nor such
+# a local, when an extern argument is a nested expression, when the local has
+# another raw use, or when a line is not ASCII (byte spans are not trusted).
 # Edits carry preconditions, so they only apply through the revision/hash
 # checked EditTransaction (std.common.diagnostics.fix_transaction).
 
@@ -30,6 +34,15 @@ struct BoundSite:
     start: i64
     end: i64
     old_text: text
+    # Move-to-boundary form (`val local = ext(args)` then a late cast of
+    # `local`): mv_line > 0, the val's rhs span is rewritten to the adapter
+    # call and the cast is replaced by `local`.
+    local: text
+    mv_line: i64
+    mv_col: i64
+    mv_start: i64
+    mv_end: i64
+    mv_old: text
 
 fn _bf_unit_of(f: BoundLateCastFinding) -> text:
     val a = f.message.find("`")
@@ -73,13 +86,28 @@ fn _bf_literal(part: text) -> bool:
         i = i + 1
     true
 
-# Literal-only argument list; empty is fine. Anything else (a local, a nested
-# call, text) makes the origin ambiguous.
-fn _bf_args_literal(args: text) -> bool:
+fn _bf_ident(part: text) -> bool:
+    val p = part.trim()
+    if p == "":
+        return false
+    val c0 = p.substring(0, 1)
+    if c0 >= "0" and c0 <= "9":
+        return false
+    var i = 0
+    while i < p.byte_len():
+        if not _bf_ident_char(p.substring(i, i + 1)):
+            return false
+        i = i + 1
+    p != "true" and p != "false"
+
+# Argument list of literals and plain locals/params (passed through to the
+# adapter unchanged); empty is fine. A nested call or other expression is
+# ambiguous and yields no fix.
+fn _bf_args_simple(args: text) -> bool:
     if args.trim() == "":
         return true
     for part in args.split(","):
-        if not _bf_literal(part):
+        if not _bf_literal(part) and not _bf_ident(part):
             return false
     true
 
@@ -168,7 +196,7 @@ fn _bf_site(lines: [text], externs: [text], f: BoundLateCastFinding) -> BoundSit
     while from < line.byte_len():
         val k = line.substring(from, line.byte_len()).find(needle)
         if k < 0:
-            return None
+            break
         val at = from + k
         from = at + needle.byte_len()
         if at > 0:
@@ -180,28 +208,147 @@ fn _bf_site(lines: [text], externs: [text], f: BoundLateCastFinding) -> BoundSit
         if close < 0:
             return None
         val arg = line.substring(open + 1, close).trim()
-        for e in externs:
-            if not arg.starts_with(e + "(") or not arg.ends_with(")"):
-                continue
-            if _bf_close(arg, e.byte_len()) != arg.byte_len() - 1:
-                continue
-            val call_args = arg.substring(e.byte_len() + 1, arg.byte_len() - 1)
-            if not _bf_args_literal(call_args):
+        if _bf_ident(arg):
+            return _bf_move_site(lines, externs, f.line_num, unit_name, arg, at, close + 1)
+        val base = _bf_line_offset(lines, f.line_num - 1)
+        match _bf_ext_call(externs, arg):
+            Some(ec):
+                return Some(BoundSite(
+                    adapter: ec.0 + "_as_" + unit_name,
+                    extern_name: ec.0,
+                    unit_name: unit_name,
+                    call_args: ec.1,
+                    line: f.line_num,
+                    col: at + 1,
+                    start: base + at,
+                    end: base + close + 1,
+                    old_text: line.substring(at, close + 1),
+                    local: "",
+                    mv_line: 0,
+                    mv_col: 0,
+                    mv_start: 0,
+                    mv_end: 0,
+                    mv_old: ""
+                ))
+            None:
                 return None
-            val base = _bf_line_offset(lines, f.line_num - 1)
-            return Some(BoundSite(
-                adapter: e + "_as_" + unit_name,
-                extern_name: e,
-                unit_name: unit_name,
-                call_args: call_args.trim(),
-                line: f.line_num,
-                col: at + 1,
-                start: base + at,
-                end: base + close + 1,
-                old_text: line.substring(at, close + 1)
-            ))
+    # `local as Unit`: only the move-to-boundary form applies.
+    val as_needle = " as " + unit_name
+    val k = line.find(as_needle)
+    if k <= 0:
         return None
+    val after = k + as_needle.byte_len()
+    if after < line.byte_len() and _bf_ident_char(line.substring(after, after + 1)):
+        return None
+    var b = k
+    while b > 0 and _bf_ident_char(line.substring(b - 1, b)):
+        b = b - 1
+    if b > 0 and line.substring(b - 1, b) == ".":
+        return None
+    val local = line.substring(b, k)
+    if not _bf_ident(local):
+        return None
+    _bf_move_site(lines, externs, f.line_num, unit_name, local, b, after)
+
+# `ext(args)` with simple args -> (extern name, trimmed args); else None.
+fn _bf_ext_call(externs: [text], expr: text) -> (text, text)?:
+    val arg = expr.trim()
+    for e in externs:
+        if not arg.starts_with(e + "(") or not arg.ends_with(")"):
+            continue
+        if _bf_close(arg, e.byte_len()) != arg.byte_len() - 1:
+            continue
+        val call_args = arg.substring(e.byte_len() + 1, arg.byte_len() - 1)
+        if not _bf_args_simple(call_args):
+            return None
+        return Some((e, call_args.trim()))
     None
+
+# Whole-identifier occurrences of `w` in `s`.
+fn _bf_count_word(s: text, w: text) -> i64:
+    var n = 0
+    var from = 0
+    while from < s.byte_len():
+        val k = s.substring(from, s.byte_len()).find(w)
+        if k < 0:
+            return n
+        val at = from + k
+        val end = at + w.byte_len()
+        val left_ok = at == 0 or not (_bf_ident_char(s.substring(at - 1, at)) or s.substring(at - 1, at) == ".")
+        val right_ok = end >= s.byte_len() or not _bf_ident_char(s.substring(end, end + 1))
+        if left_ok and right_ok:
+            n = n + 1
+        from = end
+    n
+
+fn _bf_indent(s: text) -> i64:
+    var i = 0
+    while i < s.byte_len() and s.substring(i, i + 1) == " ":
+        i = i + 1
+    i
+
+# `val local = ext(args)` earlier in the same function, then the late cast
+# `[cast_start, cast_end)` of `local` on line `line_num`: move the conversion to
+# the boundary (adapter call at the val) and drop the late cast. Only when
+# `local` has no other use in the function (else the raw value escapes).
+fn _bf_move_site(lines: [text], externs: [text], line_num: i64, unit_name: text, local: text, cast_start: i64, cast_end: i64) -> BoundSite?:
+    val ci = line_num - 1
+    var h = ci - 1
+    while h >= 0:
+        var t = lines[h].trim()
+        for p in ["pub ", "static ", "async ", "unsafe "]:
+            if t.starts_with(p):
+                t = t.substring(p.byte_len(), t.byte_len())
+        if (t.starts_with("fn ") or t.starts_with("me ")) and _bf_indent(lines[h]) < _bf_indent(lines[ci]):
+            break
+        h = h - 1
+    if h < 0:
+        return None
+    val hind = _bf_indent(lines[h])
+    var vi = -1
+    var uses = 0
+    var i = h + 1
+    while i < lines.len():
+        val l = lines[i]
+        if l.trim() != "" and _bf_indent(l) <= hind:
+            break
+        if l.trim().starts_with("val " + local + " = ") or l.trim().starts_with("var " + local + " "):
+            if vi >= 0 or i > ci or l.trim().starts_with("var "):
+                return None
+            vi = i
+        uses = uses + _bf_count_word(l, local)
+        i = i + 1
+    if vi < 0 or uses != 2 or _bf_count_word(lines[ci], local) != 1:
+        return None
+    val vl = lines[vi]
+    if vl.byte_len() != vl.len():
+        return None
+    val eq = vl.find(" = ")
+    val rhs_at = eq + 3
+    match _bf_ext_call(externs, vl.substring(rhs_at, vl.byte_len())):
+        Some(ec):
+            val rhs_end = rhs_at + vl.substring(rhs_at, vl.byte_len()).trim().byte_len()
+            val vbase = _bf_line_offset(lines, vi)
+            val base = _bf_line_offset(lines, ci)
+            return Some(BoundSite(
+                adapter: ec.0 + "_as_" + unit_name,
+                extern_name: ec.0,
+                unit_name: unit_name,
+                call_args: ec.1,
+                line: line_num,
+                col: cast_start + 1,
+                start: base + cast_start,
+                end: base + cast_end,
+                old_text: lines[ci].substring(cast_start, cast_end),
+                local: local,
+                mv_line: vi + 1,
+                mv_col: rhs_at + 1,
+                mv_start: vbase + rhs_at,
+                mv_end: vbase + rhs_end,
+                mv_old: vl.substring(rhs_at, rhs_end)
+            ))
+        None:
+            return None
 
 fn _bf_has_adapter(lines: [text], adapter: text) -> bool:
     for line in lines:
@@ -253,7 +400,11 @@ pub fn bound_late_cast_fix_candidates(source: text, file: text, version: i64) ->
             c = c.with_replacement(file, Span.new(at, at, el + 1, lines[el].byte_len() + 1), "\n" + _bf_adapter_text(first, decl), "")
         for s in sites:
             if s.adapter == first.adapter and _bf_arg_count(s.call_args) == _bf_arg_count(decl):
-                c = c.with_replacement(file, Span.new(s.start, s.end, s.line, s.col), s.adapter + "(" + s.call_args + ")", s.old_text)
+                if s.mv_line > 0:
+                    c = c.with_replacement(file, Span.new(s.mv_start, s.mv_end, s.mv_line, s.mv_col), s.adapter + "(" + s.call_args + ")", s.mv_old)
+                    c = c.with_replacement(file, Span.new(s.start, s.end, s.line, s.col), s.local, s.old_text)
+                else:
+                    c = c.with_replacement(file, Span.new(s.start, s.end, s.line, s.col), s.adapter + "(" + s.call_args + ")", s.old_text)
         out.push(c)
     out
 
