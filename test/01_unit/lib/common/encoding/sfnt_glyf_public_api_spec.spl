@@ -1,0 +1,149 @@
+# Public sfnt_glyf API coverage: byte readers, table lookup, cmap ids, outline
+# parse, codepoint advances, baseline-aligned and LCD rasterizers.
+# Oracles are independent raw-byte reads of the pinned font (table directory,
+# head.unitsPerEm, hhea.numberOfHMetrics, hmtx), so every expected number is
+# exact, not an engine-value pin.
+use std.spec
+use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYF_MOVE,
+    sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be,
+    sfnt_glyf_read_i16_be, sfnt_glyf_cmap_ids_into, sfnt_glyf_parse_outline,
+    sfnt_glyf_measure_codepoint_advances, sfnt_rasterize_glyph_baseline_aligned,
+    sfnt_render_glyph_lcd}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val PINNED_FONT: text = "assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf"
+
+fn _u16(b: [u8], o: i64) -> i64:
+    (b[o] as i64) * 256 + (b[o + 1] as i64)
+
+fn _u32(b: [u8], o: i64) -> i64:
+    _u16(b, o) * 65536 + _u16(b, o + 2)
+
+# Raw table-directory scan: (offset, length) of a table tag, or [-1, -1].
+fn _dir_entry(b: [u8], tag: i64) -> [i64]:
+    val n = _u16(b, 4)
+    var i: i64 = 0
+    while i < n:
+        val rec = 12 + i * 16
+        if _u32(b, rec) == tag:
+            return [_u32(b, rec + 8), _u32(b, rec + 12)]
+        i = i + 1
+    [-1, -1]
+
+# Oracle advance in font units from raw hmtx bytes.
+fn _hmtx_advance(b: [u8], gid: i64) -> i64:
+    val hhea = _dir_entry(b, 1751672161)[0]
+    val hmtx = _dir_entry(b, 1752003704)[0]
+    val nlong = _u16(b, hhea + 34)
+    val idx = if gid < nlong: gid else: nlong - 1
+    _u16(b, hmtx + idx * 4)
+
+describe "sfnt_glyf public API":
+    it "reads big-endian u16 and sign-extends i16":
+        val b: [u8] = [0x12, 0x34, 0xFF, 0xFE, 0x80, 0x00]
+        expect(sfnt_glyf_read_u16_be(b, 0) as i64).to_equal(4660)
+        expect(sfnt_glyf_read_u16_be(b, 2) as i64).to_equal(65534)
+        expect(sfnt_glyf_read_i16_be(b, 2) as i64).to_equal(-2)
+        expect(sfnt_glyf_read_i16_be(b, 4) as i64).to_equal(-32768)
+        expect(sfnt_glyf_read_i16_be(b, 0) as i64).to_equal(4660)
+
+    it "rejects a blob that is not an sfnt":
+        val junk: [u8] = [1, 2, 3, 4]
+        expect(sfnt_glyf_parse_offset_table(junk)).to_equal(None)
+
+    it "finds head, hhea, hmtx, glyf at the directory offsets and misses unknown tags":
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = sfnt_glyf_parse_offset_table(blob).unwrap()
+        val tags: [i64] = [1751474532, 1751672161, 1752003704, 1735162214]
+        for tag in tags:
+            val want = _dir_entry(blob, tag)
+            val got = sfnt_glyf_find_table(font, tag as u32).unwrap()
+            expect(got.offset as i64).to_equal(want[0])
+            expect(got.length as i64).to_equal(want[1])
+        expect(sfnt_glyf_find_table(font, 0x5A5A5A5A)).to_equal(None)
+
+    it "batch cmap ids equal per-codepoint lookups, with .notdef for unmapped":
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = sfnt_glyf_parse_offset_table(blob).unwrap()
+        val cps: [i64] = [65, 66, 97, 32, 48, 1114109]
+        var out: [i64] = [0; 6]
+        sfnt_glyf_cmap_ids_into(font, cps, out)
+        var i: i64 = 0
+        while i < 6:
+            expect(out[i]).to_equal(sfnt_cmap_glyph_id(font, cps[i] as u32) as i64)
+            i = i + 1
+        expect(out[0]).to_be_greater_than(0)
+        expect(out[5]).to_equal(0)
+
+    it "parses an A outline starting with a move and non-empty contours":
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = sfnt_glyf_parse_offset_table(blob).unwrap()
+        val gid = sfnt_cmap_glyph_id(font, 65)
+        val outline = sfnt_glyf_parse_outline(font, gid).unwrap()
+        expect(outline.commands.len()).to_be_greater_than(3)
+        expect(outline.commands[0].verb).to_equal(SFNT_GLYF_MOVE)
+
+    it "measures codepoint advances as hmtx advance * size / unitsPerEm":
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = sfnt_glyf_parse_offset_table(blob).unwrap()
+        val upem = _u16(blob, _dir_entry(blob, 1751474532)[0] + 18)
+        val cps: [i64] = [65, 86, 87, 97, 32]
+        val sizes: [i64] = [16, 32]
+        for size in sizes:
+            val advs = sfnt_glyf_measure_codepoint_advances(blob, cps, size as f64)
+            expect(advs.len()).to_equal(5)
+            var i: i64 = 0
+            while i < 5:
+                val gid = sfnt_cmap_glyph_id(font, cps[i] as u32) as i64
+                val want = (_hmtx_advance(blob, gid) as f64) * (size as f64) / (upem as f64)
+                expect(advs[i]).to_be_greater_than(want - 0.0001)
+                expect(advs[i]).to_be_less_than(want + 0.0001)
+                i = i + 1
+
+    it "returns no advances for empty input, empty blob or non-positive size":
+        val blob = file_read_bytes(PINNED_FONT)
+        val empty_cps: [i64] = []
+        val empty_blob: [u8] = []
+        expect(sfnt_glyf_measure_codepoint_advances(blob, empty_cps, 16.0).len()).to_equal(0)
+        expect(sfnt_glyf_measure_codepoint_advances(empty_blob, [65], 16.0).len()).to_equal(0)
+        expect(sfnt_glyf_measure_codepoint_advances(blob, [65], 0.0).len()).to_equal(0)
+        expect(sfnt_glyf_measure_codepoint_advances(blob, [65], -4.0).len()).to_equal(0)
+
+    it "baseline rasterizer boxes match its pixel buffer and reject size <= 0":
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = sfnt_glyf_parse_offset_table(blob).unwrap()
+        val gid = sfnt_cmap_glyph_id(font, 65)
+        val g = sfnt_rasterize_glyph_baseline_aligned(font, gid, 32.0, 0.0).unwrap()
+        expect(g.width as i64).to_be_greater_than(0)
+        expect(g.pixels.len()).to_equal((g.width as i64) * (g.height as i64))
+        expect((g.x1_px - g.x0_px) as i64).to_equal(g.width as i64)
+        expect((g.y1_px - g.y0_px) as i64).to_equal(g.height as i64)
+        val upem = _u16(blob, _dir_entry(blob, 1751474532)[0] + 18)
+        val want_adv = (_hmtx_advance(blob, gid as i64) as f64) * 32.0 / (upem as f64)
+        expect(g.advance_px).to_be_greater_than(want_adv - 0.0001)
+        expect(g.advance_px).to_be_less_than(want_adv + 0.0001)
+        expect(sfnt_rasterize_glyph_baseline_aligned(font, gid, 0.0, 0.0)).to_equal(None)
+
+    it "LCD glyph carries 3 subpixels per pixel and a gray plane equal to their mean":
+        val blob = file_read_bytes(PINNED_FONT)
+        val g = sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 32, 0).unwrap()
+        val px = g.slg_width * g.slg_height
+        expect(px).to_be_greater_than(0)
+        expect(g.slg_gray.len()).to_equal(px)
+        expect(g.slg_rgb.len()).to_equal(px * 3)
+        var i: i64 = 0
+        while i < px:
+            val sum = (g.slg_rgb[i * 3] as i64) + (g.slg_rgb[i * 3 + 1] as i64) + (g.slg_rgb[i * 3 + 2] as i64)
+            val d = (g.slg_gray[i] as i64) * 3 - sum
+            expect(d).to_be_greater_than(-4)
+            expect(d).to_be_less_than(4)
+            i = i + 1
+
+    it "LCD rejects out-of-range phase, size and unmapped codepoint":
+        val blob = file_read_bytes(PINNED_FONT)
+        expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 32, 4)).to_equal(None)
+        expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 32, -1)).to_equal(None)
+        expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 0, 0)).to_equal(None)
+        expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 513, 0)).to_equal(None)
+        expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 1114109, 32, 0)).to_equal(None)
