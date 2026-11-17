@@ -163,4 +163,22 @@ entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
 
 ## Implementation log
 
+- 2026-11-18 P0-1 slice (verification-pending): `35.semantics/must_use_discard.spl`
+  is the typed-HIR discard authority (SPL-USE-001 Result/Option discard,
+  SPL-USE-002 `@must_use` name; `must_use_finding_severity` = error compiled /
+  warning script). Spec `test/01_unit/compiler/semantics/must_use_discard_spec.spl`
+  10/10 (was 0 executed, module missing). Existing specs unchanged:
+  must_use_spec 4/5 (1 pre-existing failure), ignored_return_warning 4/4,
+  must_use_streaming_scan 4/4.
+  TODO (open): interpreter `eval_stmt_expr` still emits its own `error[R9]`
+  strings and does not consume this check; method-call return types and
+  imported callees are not resolved (only `@must_use` method names match);
+  `80.driver` admission projection and TLDR/SMF obligation metadata not wired.
+- 2026-11-18 P0-1 review fixes: only the exact `_ = f()` shape (unit Block, one
+  Expr stmt, NilLit tail) is skipped; other blocks are scanned; with/try/lambda
+  block bodies walked; callees resolve per module (no cross-module name match;
+  unresolved calls are not flagged, TODO in source for import-table
+  resolution); `MUST_USE_CODE_*`/`MustUseFinding` are `pub`; unused severity
+  `code` param removed. Spec now 18/18. with/try/lambda walkers have no spec
+  case yet (source syntax not confirmed).
 - 2026-11-18 P0-5 slice 1: `90.tools/lint/_LintMain/rule_cost_tier.spl` adds LintCostTier (Low/Medium/High; unlisted = High), registry covering all `all_lint_names()`, LintCompleteness, `lint_rules_for_profile`, `lint_completeness_reduce` (exhausted budget -> incomplete). Spec `rule_cost_tier_registry_spec.spl` 6/6. Remaining: `lint --fast` / `--diagnostic` wiring, timed_out enforcement per rule, warm-build wall/RSS evidence.
