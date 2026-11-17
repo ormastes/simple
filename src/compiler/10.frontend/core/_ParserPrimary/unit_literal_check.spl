@@ -1,0 +1,48 @@
+# Parse-time rejection of an out-of-range literal for a constrained unit:
+#   70000 as Port      (cast of an int/float literal)
+#   Port(70000)        (construction call with one literal argument)
+#   70000_pt           (suffixed literal whose suffix names a constrained unit)
+# Each is an SPL-UNIT-005 parser error. Non-literal operands are checked at
+# the boundary by the core interpreter (eval_units.spl); the shared predicate
+# lives in compiler.core.unit_constraint.
+
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_float, expr_get_str, EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_IDENT}
+use compiler.core.parser.{parser_error}
+use compiler.core.types.{type_tag_name, unit_decl_find_by_suffix, unit_decl_name_at, int_to_str}
+use compiler.core.unit_constraint.{unit_constraint_find, unit_constraint_predicate, unit_constraint_eval_literal, unit_constraint_violation_message}
+
+# Literal text of an int/float literal expression, "" for anything else.
+fn parser_unit_literal_text(eid: i64) -> text:
+    if eid < 0: return ""
+    val tag = expr_get_tag(eid)
+    if tag == EXPR_INT_LIT: return int_to_str(expr_get_int(eid))
+    if tag == EXPR_FLOAT_LIT: return expr_get_float(eid)
+    ""
+
+fn parser_unit_literal_reject(unit_name: text, literal: text):
+    if unit_constraint_find(unit_name) < 0: return
+    val pred = unit_constraint_predicate(unit_name)
+    if unit_constraint_eval_literal(pred, literal) == 0:
+        parser_error(unit_constraint_violation_message(unit_name, literal, pred))
+
+# `lit as Port`
+pub fn parser_unit_literal_cast_check(operand_eid: i64, type_tag: i64):
+    val literal = parser_unit_literal_text(operand_eid)
+    if literal == "": return
+    parser_unit_literal_reject(type_tag_name(type_tag), literal)
+
+# `Port(lit)`
+pub fn parser_unit_literal_call_check(callee_eid: i64, args: [i64]):
+    if args.len() != 1 or callee_eid < 0: return
+    if expr_get_tag(callee_eid) != EXPR_IDENT: return
+    val literal = parser_unit_literal_text(args[0])
+    if literal == "": return
+    parser_unit_literal_reject(expr_get_str(callee_eid), literal)
+
+# `lit_sfx`
+pub fn parser_unit_literal_suffix_check(literal: text, suffix: text):
+    val idx = unit_decl_find_by_suffix(suffix)
+    if idx < 0: return
+    parser_unit_literal_reject(unit_decl_name_at(idx), literal)
+
+export parser_unit_literal_cast_check, parser_unit_literal_call_check, parser_unit_literal_suffix_check

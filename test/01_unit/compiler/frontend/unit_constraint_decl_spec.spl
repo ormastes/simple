@@ -1,0 +1,123 @@
+# @cover src/compiler/10.frontend/core/unit_constraint.spl 70%
+"""
+## Purpose and audience
+Executable contract for constrained units (owner decision 2026-11-17, plan gap
+C1b): `unit Port: u16 where <predicate on self>` and the range sugar
+`unit Port: u16 in lo..=hi` / `lo..hi` lower to ONE `where` predicate that is
+registered through the refinement machinery. An out-of-range literal
+(`70000 as Port`, `Port(70000)`, `70000_pt`) is a parse error. `newunit` is a
+deprecated spelling and does NOT accept the new constraint syntax.
+## Operator workflow
+bin/simple test test/01_unit/compiler/frontend/unit_constraint_decl_spec.spl
+## Compatibility and limitations
+Parses through the pure-Simple parser (`parse_module_body`); the registry is
+process-global and reset per probe with `reset_all_pools`.
+## Verification guidance and troubleshooting
+A probe that must fail asserts both `parser_has_errors()` and the error text.
+"""
+
+use std.spec
+use compiler.core.types.{reset_all_pools, unit_decl_find, refinement_type_predicate, refinement_tag_to_id, is_refinement_tag}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors, parser_get_errors, parser_diagnostics_suppressed_set}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.unit_constraint.{unit_constraint_find, unit_constraint_predicate, unit_constraint_ref_tag}
+use compiler.core.unit_constraint.{unit_constraint_eval, unit_range_predicate, unit_constraint_min_text, unit_constraint_max_text}
+
+fn declare(src: text):
+    reset_all_pools()
+    parser_init_with_path(src, "unit_constraint_world.spl")
+    parser_diagnostics_suppressed_set(true)
+    parse_module_body()
+
+fn errors_joined() -> text:
+    parser_get_errors().join(" | ")
+
+describe "constrained unit declarations (where / in)":
+    it "registers `unit Port: u16 where 1 <= self <= 65535` as a predicate on self":
+        declare("unit Port: u16 as pt where 1 <= self <= 65535\n")
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_decl_find("Port") >= 0).to_equal(true)
+        expect(unit_constraint_predicate("Port")).to_equal("1 <= self <= 65535")
+
+    it "reuses the refinement registry: the ref tag carries the same predicate":
+        declare("unit Port: u16 where 1 <= self <= 65535\n")
+        val tag = unit_constraint_ref_tag("Port")
+        expect(is_refinement_tag(tag)).to_equal(true)
+        expect(refinement_type_predicate(refinement_tag_to_id(tag))).to_equal("1 <= self <= 65535")
+
+    it "lowers `in 1..=65535` to the same `where` predicate system":
+        declare("unit Port: u16 as pt in 1..=65535\n")
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_constraint_predicate("Port")).to_equal("1 <= self and self <= 65535")
+        expect(unit_constraint_min_text("Port")).to_equal("1")
+        expect(unit_constraint_max_text("Port")).to_equal("65535")
+        expect(is_refinement_tag(unit_constraint_ref_tag("Port"))).to_equal(true)
+
+    it "lowers the exclusive form `in 0..256` with a strict upper bound":
+        declare("unit Byte: i64 in 0..256\n")
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_constraint_predicate("Byte")).to_equal("0 <= self and self < 256")
+        expect(unit_range_predicate("", "10", true)).to_equal("self <= 10")
+        expect(unit_range_predicate("3", "", false)).to_equal("3 <= self")
+
+    it "accepts a predicate other than a range":
+        declare("unit Even: i64 where self % 2 == 0\n")
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_constraint_eval(unit_constraint_predicate("Even"), 4.0)).to_equal(1)
+        expect(unit_constraint_eval(unit_constraint_predicate("Even"), 5.0)).to_equal(0)
+
+    it "evaluates the chained comparison at both edges":
+        val p = "1 <= self <= 65535"
+        expect(unit_constraint_eval(p, 1.0)).to_equal(1)
+        expect(unit_constraint_eval(p, 65535.0)).to_equal(1)
+        expect(unit_constraint_eval(p, 0.0)).to_equal(0)
+        expect(unit_constraint_eval(p, 65536.0)).to_equal(0)
+        expect(unit_constraint_eval("self > 0 and not self == 7", 7.0)).to_equal(0)
+        expect(unit_constraint_eval("len(self) > 0", 1.0)).to_equal(-1)
+
+    it "rejects an unsupported predicate shape at the declaration":
+        declare("unit Odd: i64 where frobnicate(self)\n")
+        expect(parser_has_errors()).to_equal(true)
+        expect(errors_joined()).to_contain("unsupported constraint predicate")
+        expect(unit_constraint_find("Odd")).to_equal(-1)
+
+    it "an unconstrained unit registers no predicate":
+        declare("unit FreeBytes: i64 as fbytes\n")
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_constraint_find("FreeBytes")).to_equal(-1)
+
+describe "out-of-range literals are compile errors":
+    it "rejects `70000 as Port`":
+        declare("unit Port: u16 in 1..=65535\nfn f() -> Port:\n    70000 as Port\n")
+        expect(parser_has_errors()).to_equal(true)
+        expect(errors_joined()).to_contain("SPL-UNIT-005")
+        expect(errors_joined()).to_contain("70000")
+
+    it "accepts `80 as Port`":
+        declare("unit Port: u16 in 1..=65535\nfn f() -> Port:\n    80 as Port\n")
+        expect(parser_has_errors()).to_equal(false)
+
+    it "rejects `Port(0)` under the where form":
+        declare("unit Port: u16 where 1 <= self <= 65535\nfn f():\n    val p = Port(0)\n")
+        expect(parser_has_errors()).to_equal(true)
+        expect(errors_joined()).to_contain("SPL-UNIT-005")
+
+    it "rejects a suffixed literal `70000_pt`":
+        declare("unit Port: u16 as pt in 1..=65535\nfn f():\n    val p = 70000_pt\n")
+        expect(parser_has_errors()).to_equal(true)
+        expect(errors_joined()).to_contain("SPL-UNIT-005")
+
+    it "accepts a suffixed literal inside the range":
+        declare("unit Port: u16 as pt in 1..=65535\nfn f():\n    val p = 8080_pt\n")
+        expect(parser_has_errors()).to_equal(false)
+
+describe "`newunit` is not new syntax":
+    it "does not accept a constraint on the deprecated `newunit` spelling":
+        declare("newunit Port: u16 as pt in 1..=65535\n")
+        expect(parser_has_errors()).to_equal(true)
+        expect(unit_constraint_find("Port")).to_equal(-1)
+
+    it "does not accept `where` on `newunit` either":
+        declare("newunit Port: u16 as pt where self > 0\n")
+        expect(parser_has_errors()).to_equal(true)
+        expect(unit_constraint_find("Port")).to_equal(-1)
