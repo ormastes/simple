@@ -51,6 +51,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_draw_census_line, vulka
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
 use common.ui.draw_ir_device_scale.{draw_ir_composition_at_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{layout_device_scale, layout_device_scale_set}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 
 # Shared clock for the perf-instrumentation start/end pairs below (phase
@@ -672,12 +673,16 @@ fn _web_document_cache_key(
         animation_time_ms.to_text() + ";retry=" + (if retry_degraded: "1" else: "0") +
         ";scroll=" + scroll_y.to_text() +
         ";floor=" + simple_web_layout_render_budget_floor_ms().to_text() +
-        # No device-scale or font-set term: `vector_fonts` is a hardcoded
-        # `true` at every entry this funnel reaches
+        # The device scale the layout ran at (`layout_device_scale`, set only
+        # by the at_device_scale entry): at k > 1 line metrics are device px,
+        # so a 4x composition must never be served to a 1x render.
+        ";dsf=" + layout_device_scale().to_text() +
+        # No font-set term: `vector_fonts` is a hardcoded `true` at every
+        # entry this funnel reaches
         # (simple_web_layout_render_html_draw_ir_result_with_images and its
-        # at_time siblings), and no device-scale input reaches the compose at
-        # all. Naming env vars nothing reads would be false coverage; a font
-        # set that IS swapped at runtime must call web_document_cache_drain().
+        # at_time siblings). Naming env vars nothing reads would be false
+        # coverage; a font set that IS swapped at runtime must call
+        # web_document_cache_drain().
         ";budget=" + _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_WEB_RENDER_BUDGET_MS")) +
         ";len=" + html_len_key.to_text()
     )
@@ -1345,8 +1350,12 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_device_scale(
     if css_width <= 0 or css_height <= 0 or device_scale < 1:
         return []
     val _phase_on = (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
+    # Layout and compose see k (device-px line metrics); restored before the
+    # paint so nothing after this call, and no 1x render, runs at k.
+    layout_device_scale_set(device_scale)
     val layout_result = _simple_web_layout_draw_ir_cached(
         html, css_width, css_height, -1, [], [], true)
+    layout_device_scale_set(1)
     if _phase_on:
         print "[web-phase] phase=document elapsed_ms={web_document_pipeline_ms()} cache_hit={web_document_cache_hit()}"
     val _phase_scale_start_us = _fast_clock.now_micros()

@@ -1,0 +1,203 @@
+# @gc — module uses GC runtime
+#
+# slang host portability: per-OS names and probes in ONE module.
+#
+# Every decision is a pure function of an `os` text ("windows" | "macos" |
+# "linux" | ...) so the Linux and macOS branches are unit-testable on any host;
+# the thin `host_*` wrappers at the bottom bind the real OS and route host
+# access (env, file, dir, process) through SOSIX. Nothing else in slang
+# branches on the OS or calls a host primitive for those four.
+#
+# NOT routed through SOSIX because SOSIX has no accessor for it (see the
+# routing table in doc/00_llm_process/feature_expert/slang_local_inference):
+# dynamic library load (spl_dlopen/dlsym), file size, directory test, ranged
+# and byte reads, sha256.
+
+use std.nogc_async_mut.sosix.host_facade.{sosix_host_os, sosix_env_get, sosix_file_exists, sosix_file_read, sosix_dir_list_checked, sosix_run_bounded_checked}
+
+# ---------------------------------------------------------------- pure -----
+
+# Shim name build-slang-ggml-shim.shs emits for `os`.
+fn ggml_lib_default(os: text) -> text:
+    if os == "windows":
+        return "build/sffi/slang_ggml.dll"
+    if os == "macos":
+        return "build/sffi/libslang_ggml.dylib"
+    "build/sffi/libslang_ggml.so"
+
+# ROCm directory holding HIP/hipRTC. Windows ships a versioned bin dir; Linux
+# keeps the libraries in /opt/rocm/lib. "" = no ROCm on this OS (macOS).
+fn rocm_bin_default_for(os: text) -> text:
+    if os == "windows":
+        # Backslashes escaped: an unescaped "\7" is a control escape and turned
+        # this into "...ROCm<BEL>.2\bin", so ROCm was never found on Windows.
+        return "C:\\Program Files\\AMD\\ROCm\\7.2\\bin"
+    if os == "linux":
+        return "/opt/rocm/lib"
+    ""
+
+# Candidate file names, most specific first. The unversioned Linux name is a
+# dev symlink that runtime-only installs lack, so the .so.7 soname follows.
+fn hip_lib_names(os: text) -> [text]:
+    if os == "windows":
+        return ["amdhip64_7.dll"]
+    if os == "linux":
+        return ["libamdhip64.so", "libamdhip64.so.7"]
+    []
+
+fn hiprtc_lib_names(os: text) -> [text]:
+    if os == "windows":
+        return ["hiprtc0702.dll"]
+    if os == "linux":
+        return ["libhiprtc.so", "libhiprtc.so.7"]
+    []
+
+# C library that provides malloc/free/memcpy for the byte-copy helpers.
+# FreeBSD's libc soname is .7; glibc's is .6.
+fn host_libc_name(os: text) -> text:
+    if os == "windows":
+        return "ucrtbase.dll"
+    if os == "macos":
+        return "libSystem.B.dylib"
+    if os == "freebsd":
+        return "libc.so.7"
+    "libc.so.6"
+
+# Directory + name with the OS separator, without doubling an existing one.
+fn host_join(os: text, dir: text, name: text) -> text:
+    if dir == "":
+        return name
+    if os == "windows":
+        if dir.ends_with("\\") or dir.ends_with("/"):
+            return dir + name
+        return dir + "\\" + name
+    if dir.ends_with("/"):
+        return dir + name
+    dir + "/" + name
+
+# `Key:   123 kB` from /proc/meminfo content -> bytes, -1 when absent/garbled.
+@allow(primitive_api)  # reason: returns a raw byte count parsed from /proc/meminfo text; memory_budget's whole contract is i64 bytes
+fn parse_meminfo_bytes(content: text, key: text) -> i64:
+    val prefix = key + ":"
+    for line in content.split("\n"):
+        if line.starts_with(prefix):
+            for part in line.split(" "):
+                val t = part.trim()
+                if t != "" and t != prefix and t != "kB":
+                    if t.to_i64() <= 0:
+                        return -1
+                    return t.to_i64() * 1024
+    -1
+
+# Leading positive integer of a probe's output, -1 otherwise. Leading blanks
+# are skipped, the first non-digit after the digits ends it (so "16384 bytes)"
+# reads 16384), and the CR a Windows tool emits is trimmed.
+@allow(primitive_api)  # reason: integer parsed from external tool stdout (sysctl, CIM, vm_stat); the unit is the caller's
+fn parse_int_text(out: text) -> i64:
+    val t = out.trim()
+    var digits = ""
+    var i = 0
+    while i < t.len():
+        val ch = t[i:i + 1]
+        if ch >= "0" and ch <= "9":
+            digits = digits + ch
+        elif digits != "" or ch != " ":
+            break
+        i = i + 1
+    if digits == "":
+        return -1
+    val v = digits.to_i64()
+    if v <= 0:
+        return -1
+    v
+
+# Page size stated in `vm_stat`'s own header ("(page size of 16384 bytes)").
+# Every count vm_stat prints is in THIS unit, which can differ from the
+# caller's hw.pagesize (an x86_64 process under Rosetta sees 4096 while the
+# native vm_stat counts 16 KiB pages). -1 when the header is absent.
+@allow(primitive_api)  # reason: page size in bytes parsed from vm_stat text; feeds darwin_available_bytes
+fn parse_vm_stat_page_size(out: text) -> i64:
+    val marker = "page size of "
+    for line in out.split("\n"):
+        if line.contains(marker):
+            val parts = line.split(marker)
+            if parts.len() >= 2:
+                return parse_int_text(parts[1])
+    -1
+
+# `vm_stat` output -> free + inactive + speculative pages: the pages the
+# kernel can hand out or reclaim without compressing or swapping anything
+# resident. vm_stat's "Pages free" already excludes speculative pages, so the
+# three do not overlap. Purgeable is NOT added: those pages sit inside the
+# active/inactive queues and adding them would double-count. -1 when none of
+# the three labels is present. Counts end in '.'.
+@allow(primitive_api)  # reason: page count parsed from vm_stat text; feeds darwin_available_bytes
+fn parse_vm_stat_available_pages(out: text) -> i64:
+    var total: i64 = 0
+    var seen = 0
+    for line in out.split("\n"):
+        val parts = line.split(":")
+        if parts.len() == 2:
+            val label = parts[0].trim()
+            if label == "Pages free" or label == "Pages inactive" or label == "Pages speculative":
+                val n = parse_int_text(parts[1].replace(".", ""))
+                if n >= 0:
+                    total = total + n
+                    seen = seen + 1
+    if seen == 0:
+        return -1
+    total
+
+# Reclaimable pages in bytes, capped at physical memory (hw.memsize). -1 when
+# any input is unknown, which check_fit turns into a refusal.
+@allow(primitive_api)  # reason: byte/page arithmetic over host probe results; memory_budget's contract is i64 bytes
+fn darwin_available_bytes(total: i64, page_size: i64, available_pages: i64) -> i64:
+    if total <= 0 or page_size <= 0 or available_pages < 0:
+        return -1
+    val bytes = available_pages * page_size
+    if bytes >= total:
+        return total
+    bytes
+
+# ------------------------------------------------------ SOSIX wrappers -----
+
+fn host_os_name() -> text:
+    sosix_host_os()
+
+# "" when unset (same contract as the io_runtime env_get it replaces).
+fn host_env(key: text) -> text:
+    sosix_env_get(key)
+
+@allow(primitive_api)  # reason: yes/no existence probe forwarded from SOSIX sosix_file_exists
+fn host_file_exists(path: text) -> bool:
+    sosix_file_exists(path)
+
+# "" when absent or unreadable (same contract as read_file).
+fn host_file_read(path: text) -> text:
+    sosix_file_read(path)
+
+# None when the directory cannot be listed (same contract as dir_list_optional).
+fn host_dir_list(path: text) -> [text]?:
+    match sosix_dir_list_checked(path):
+        case Ok(entries): entries
+        case Err(_): None
+
+# Runs `cmd args` with no timeout; stdout, or "" on a non-zero exit or any
+# failure. No timeout on purpose: the Windows CIM probe has measured 54-135 s
+# under load, and a tight bound would turn a slow probe into a refusal.
+fn host_run_text(cmd: text, args: [text]) -> text:
+    match sosix_run_bounded_checked(cmd, args, 0, 65536):
+        case Ok(run):
+            if run.exit_code != 0:
+                return ""
+            run.stdout
+        case Err(_): ""
+
+# `host_run_text` stdout as a positive integer, -1 on any failure.
+@allow(primitive_api)  # reason: integer stdout of a host probe (sysctl, CIM); the unit is the caller's
+fn host_run_int(cmd: text, args: [text]) -> i64:
+    parse_int_text(host_run_text(cmd, args))
+
+export ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name
+export host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes
+export host_os_name, host_env, host_file_exists, host_file_read, host_dir_list, host_run_text, host_run_int

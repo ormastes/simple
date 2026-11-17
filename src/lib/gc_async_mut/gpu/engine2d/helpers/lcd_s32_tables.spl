@@ -10,8 +10,32 @@ use std.common.math.math.{math_pow}
 # white-on-black vs black-on-white (identical phases): mask steps 2->3, 8->10.5,
 # 17->19, 24->26, 28->29 of 32; red #c00000 R 2->3; navy #172033 B 17->18.
 # Modelled as cov' = cov^(1 - 0.22 * L / 255) for channel value L; black
-# (L = 0) is the identity, which is what the FIR fit above was measured on.
+# (L = 0) keeps the exponent 1, which is what the FIR fit above was measured on.
 var _engine2d_lcd_preblend_tables: Dict<i64, [i64]> = {}
+
+# Dark text is still light at low and mid coverage. On the forms-media body text
+# (#172033), Chrome is one LCD16 step heavier for engine mask steps 2..17 of 32
+# and equal from about step 19 up. That is about 3.5% more ink in all.
+# Before the colour exponent, the coverage gets a cubic lift that peaks at
+# 2/3 END and vanishes at both ends:
+#   c + LIFT * (1 - L / 255) * 6.75 c^2 (END - c) / END^3   for c < END, else c.
+# It has two fitted constants: LIFT = 7.5 and END = 136 (8-bit coverage).
+# - The c^2 keeps the faintest fringe pixels as they were. A parabola (peak at
+#   c = END / 2) inked raw coverage 6..7 and pushed the device-scale 1x ink
+#   count from 186 to 199, away from Chrome's 146.
+# - Both are capped by Chrome-exact pins: the 16 px H stem `efbf67` has raw
+#   G 65, which must stay below 72, and the 8 px l stem `77bfef` has raw R
+#   133..135, which must stay below 136. A larger lift breaks one of them.
+# - The `(1 - L / 255)` weight, which adds no constant, keeps light text on the
+#   measured exponent: an unweighted lift made white-on-dark text worse.
+val _LCD_LIFT: f64 = 7.5
+val _LCD_LIFT_END: f64 = 136.0
+
+fn _engine2d_lcd_lift(i: i64, level: i64) -> f64:
+    val c = i as f64
+    if c >= _LCD_LIFT_END:
+        return c
+    c + _LCD_LIFT * (1.0 - (level as f64) / 255.0) * 6.75 * c * c * (_LCD_LIFT_END - c) / (_LCD_LIFT_END * _LCD_LIFT_END * _LCD_LIFT_END)
 
 fn _engine2d_lcd_preblend(level: i64) -> [i64]:
     if val Some(hit) = _engine2d_lcd_preblend_tables.get(level):
@@ -20,10 +44,10 @@ fn _engine2d_lcd_preblend(level: i64) -> [i64]:
     val exponent = 1.0 - 0.22 * (level as f64) / 255.0
     var i: i64 = 0
     while i < 256:
-        if level == 0 or i == 0 or i == 255:
+        if i == 0 or i == 255:
             table[i] = i
         else:
-            val v = math_pow((i as f64) / 255.0, exponent) * 255.0 + 0.5
+            val v = math_pow(_engine2d_lcd_lift(i, level) / 255.0, exponent) * 255.0 + 0.5
             table[i] = if v > 255.0: 255 else: v as i64
         i = i + 1
     _engine2d_lcd_preblend_tables[level] = table

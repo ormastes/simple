@@ -13,8 +13,9 @@
  *     src/lib/common/trace/xray_native_trampoline_x86_64_v1.spl encodes the
  *     same bytes; the x86-64 e2e check compares them with this object's
  *     disassembly byte for byte.
- *  2. The registration sled leaf: activation word OFF (`EB 0B`) or ON
- *     (`66 90`), `E8 rel32` to this TU's trampoline, `EB 04`, and the imm32
+ *  2. The registration sled leaf (body shared with win64 in
+ *     xray_native_registry_v1.h under XMAP_X64_REL32_SLED_LEAF): activation
+ *     word OFF (`EB 0B`) or ON (`66 90`), `E8 rel32` to this TU's trampoline, `EB 04`, and the imm32
  *     site id equal to the row's dense id.
  *
  * Sled contract (trace_native_off_template_v1, X64Rel32), 13 bytes, 2-aligned:
@@ -62,25 +63,12 @@
 #define XMAP_ON_WORD 0x9066u  /* 66 90  2-byte nop */
 /* The CALL at +2 returns to +7. */
 #define XMAP_RETURN_TO_SLED 7
+/* xray_isa_sled_calls_trampoline comes from xray_native_registry_v1.h. */
+#define XMAP_X64_REL32_SLED_LEAF 1
 
 #ifdef SIMPLE_XRAY_NATIVE_SUPPORTED
 
 extern void __simple_xray_trampoline_v1(void);
-
-/* Registration leaf: activation word OFF or ON, `E8 rel32` at +2 reaching
- * THIS runtime's trampoline, `EB 04` at +7, imm32 at +9 == the row's id. */
-static int xray_isa_sled_calls_trampoline(uintptr_t sled, uint32_t site_id) {
-    const volatile uint8_t *bytes = (const volatile uint8_t *)sled;
-    uint32_t word = __atomic_load_n((const uint16_t *)sled, __ATOMIC_RELAXED);
-    if (word != XMAP_OFF_WORD && word != XMAP_ON_WORD) return 0;
-    if (bytes[2] != 0xE8 || bytes[7] != 0xEB || bytes[8] != 0x04) return 0;
-    uint32_t rel = (uint32_t)bytes[3] | ((uint32_t)bytes[4] << 8) | ((uint32_t)bytes[5] << 16) |
-                   ((uint32_t)bytes[6] << 24);
-    uint32_t id = (uint32_t)bytes[9] | ((uint32_t)bytes[10] << 8) | ((uint32_t)bytes[11] << 16) |
-                  ((uint32_t)bytes[12] << 24);
-    if (id != site_id) return 0;
-    return sled + 7 + (uintptr_t)(int64_t)(int32_t)rel == (uintptr_t)&__simple_xray_trampoline_v1;
-}
 
 /* Frame below the realigned rsp: xmm0-15 at 0..255, MXCSR at 256, 12 bytes
  * pad (272 total, 16-aligned). Above it, from rbp down: rbp+16 = sled return

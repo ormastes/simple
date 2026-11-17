@@ -1,0 +1,148 @@
+"""
+## Purpose and audience
+Purpose: `x->m(args)` is the functional-update arrow: a binding update that
+means exactly `x = x.m(args)` (ROB-ARR-01..07, owner decision 2026-11-17).
+The self-hosted parser must desugar it to an assignment of a method call,
+require a `var` (or field/index) place, and leave match-arm arrows and
+function return-type arrows untouched.
+Audience: compiler frontend engineers.
+"""
+# @req: REQ-COMPILER-FRONTEND-001 — stable requirement identity for this spec.
+
+use std.spec.*
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name, decl_get_body}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right,
+    EXPR_ASSIGN, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_MATCH, EXPR_BLOCK, EXPR_CALL, EXPR_TRY, expr_get_stmts, expr_get_span}
+use compiler.core.ast_stmt.{stmt_get_expr}
+use compiler.core.parser.{parse_module, parser_has_errors}
+
+fn arrow_parse(source: text, path: text) -> bool:
+    ast_reset()
+    parse_module(source, path)
+    parser_has_errors()
+
+fn arrow_body_expr(source: text, path: text, wanted: text) -> i64:
+    ast_reset()
+    parse_module(source, path)
+    if parser_has_errors():
+        fail("unexpected parser errors for {path}")
+        return -1
+    for decl in module_get_decls():
+        if decl_get_name(decl) == wanted:
+            val body = decl_get_body(decl)
+            if body.len() < 2:
+                fail("body too short for {wanted}")
+                return -1
+            return stmt_get_expr(body[1])
+    fail("missing function {wanted}")
+    -1
+
+describe "arrow functional update (self-hosted parser)":
+    it "desugars x->m(args) into an assignment of x.m(args)":
+        val e = arrow_body_expr("fn f():\n    var x = [1]\n    x->concat([2])\n", "arrow_basic.spl", "f")
+        expect(e >= 0).to_equal(true)
+        expect(expr_get_tag(e)).to_equal(EXPR_ASSIGN)
+        val target = expr_get_left(e)
+        expect(expr_get_tag(target)).to_equal(EXPR_IDENT)
+        expect(expr_get_str(target)).to_equal("x")
+        val call = expr_get_right(e)
+        expect(expr_get_tag(call)).to_equal(EXPR_METHOD_CALL)
+        expect(expr_get_str(call)).to_equal("concat")
+
+    it "accepts a zero-argument arrow call":
+        expect(arrow_parse("fn f():\n    var x = [1]\n    x->reverse()\n", "arrow_noargs.spl")).to_equal(false)
+
+    it "rejects a val target with a named error":
+        expect(arrow_parse("fn f():\n    val x = [1]\n    x->concat([2])\n", "arrow_val.spl")).to_equal(true)
+
+    it "allows a val shadowed by a later var":
+        expect(arrow_parse("fn f():\n    val x = [1]\n    var x = [2]\n    x->concat([3])\n", "arrow_shadow.spl")).to_equal(false)
+
+    it "rejects a temporary target":
+        expect(arrow_parse("fn f():\n    make()->concat([2])\n", "arrow_temp.spl")).to_equal(true)
+
+    it "does not treat a match-arm arrow as a functional update":
+        val src = "fn f(o: i64) -> i64:\n    match o:\n        1 -> g(2)\n        _ -> g(3)\n"
+        expect(arrow_parse(src, "arrow_match.spl")).to_equal(false)
+
+    it "does not treat a guard arrow as a functional update":
+        val src = "fn f(o: i64) -> i64:\n    match o:\n        n if n > 1 -> g(2)\n        _ -> g(3)\n"
+        expect(arrow_parse(src, "arrow_guard.spl")).to_equal(false)
+
+    it "keeps function return-type arrows intact":
+        expect(arrow_parse("fn f(a: i64) -> i64:\n    a\n", "arrow_ret.spl")).to_equal(false)
+
+describe "arrow update val scoping and place restrictions":
+    it "allows x->m() after an inner block's val x went out of scope":
+        val src = "fn f(c: bool):\n    var x = [1]\n    if c:\n        val x = [2]\n        print(x)\n    x->concat([3])\n"
+        expect(arrow_parse(src, "arrow_scope_ok.spl")).to_equal(false)
+
+    it "rejects x->m() inside the block that declares val x":
+        val src = "fn f(c: bool):\n    var x = [1]\n    if c:\n        val x = [2]\n        x->concat([3])\n"
+        expect(arrow_parse(src, "arrow_scope_val.spl")).to_equal(true)
+
+    it "does not let a nested fn clear the outer val list":
+        val src = "fn f():\n    val x = [1]\n    fn g():\n        print(1)\n    x->concat([2])\n"
+        expect(arrow_parse(src, "arrow_nested_fn.spl")).to_equal(true)
+
+    it "rejects a destructured val target":
+        val src = "fn f():\n    val (a, b) = ([1], [2])\n    a->concat([3])\n"
+        expect(arrow_parse(src, "arrow_tuple_val.spl")).to_equal(true)
+
+    it "accepts a destructured var target":
+        val src = "fn f():\n    var (a, b) = ([1], [2])\n    a->concat([3])\n"
+        expect(arrow_parse(src, "arrow_tuple_var.spl")).to_equal(false)
+
+
+    it "accepts plain field and literal-index targets":
+        expect(arrow_parse("fn f():\n    var a = [[1]]\n    a[0]->concat([2])\n    self.items->concat([3])\n", "arrow_plain.spl")).to_equal(false)
+
+fn arrow_count_calls(e: i64, callee: text) -> i64:
+    if e <= 0:
+        return 0
+    var n = 0
+    if expr_get_tag(e) == EXPR_CALL and expr_get_str(expr_get_left(e)) == callee:
+        n = 1
+    n = n + arrow_count_calls(expr_get_left(e), callee) + arrow_count_calls(expr_get_right(e), callee)
+    for s in expr_get_stmts(e):
+        n = n + arrow_count_calls(stmt_get_expr(s), callee)
+    n
+
+describe "arrow update single evaluation (ROB-ARR-05) and ? ordering (ROB-ARR-06)":
+    it "evaluates an index-call target exactly once":
+        val e = arrow_body_expr("fn f():\n    var a = [[1]]\n    a[g()]->concat([2])\n", "arrow_idx_call.spl", "f")
+        expect(e >= 0).to_equal(true)
+        expect(expr_get_tag(e)).to_equal(EXPR_BLOCK)
+        expect(arrow_count_calls(e, "g")).to_equal(1)
+
+    it "rejects a non-lvalue root (call result field)":
+        expect(arrow_parse("fn f():\n    g().x->concat([2])\n", "arrow_field_call.spl")).to_equal(true)
+
+    it "rejects a non-lvalue root (call result index)":
+        expect(arrow_parse("fn f():\n    g()[0]->concat([2])\n", "arrow_idx_root_call.spl")).to_equal(true)
+
+    it "evaluates a call index under a field of a var root exactly once":
+        val e = arrow_body_expr("fn f():\n    var a = 1\n    a.items[g()]->concat([2])\n", "arrow_field_idx.spl", "f")
+        expect(e >= 0).to_equal(true)
+        expect(expr_get_tag(e)).to_equal(EXPR_BLOCK)
+        expect(arrow_count_calls(e, "g")).to_equal(1)
+
+    it "gives the generated assign the arrow span":
+        val e = arrow_body_expr("fn f():\n    var a = [[1]]\n    a[g()]->concat([2])\n", "arrow_span.spl", "f")
+        expect(e >= 0).to_equal(true)
+        val stmts = expr_get_stmts(e)
+        val assign = stmt_get_expr(stmts[stmts.len() - 1])
+        val call_span = expr_get_span(expr_get_right(assign))
+        expect(expr_get_span(assign)).to_equal(call_span)
+        expect(call_span > 0).to_equal(true)
+
+    it "keeps a plain place a bare assignment":
+        val e = arrow_body_expr("fn f():\n    var a = [[1]]\n    a[0]->concat([2])\n", "arrow_plain_assign.spl", "f")
+        expect(e >= 0).to_equal(true)
+        expect(expr_get_tag(e)).to_equal(EXPR_ASSIGN)
+
+    it "propagates ? before the store: x = (x.f())?":
+        val e = arrow_body_expr("fn f():\n    var x = [1]\n    x->concat([2])?\n", "arrow_try.spl", "f")
+        expect(e >= 0).to_equal(true)
+        expect(expr_get_tag(e)).to_equal(EXPR_ASSIGN)
+        expect(expr_get_tag(expr_get_right(e))).to_equal(EXPR_TRY)

@@ -1,0 +1,46 @@
+# Entry for scripts/check/check-library-unit-drift.shs: runs the Simple
+# library_unit_drift_v1 over <dir>/source_inventory.lock vs the scanned sources.
+# Usage: bin/simple run scripts/check/library_unit_drift_entry.spl -- <lib dir>
+# Last stdout line is the verdict; exit 0 PASS / 1 FAIL / 2 ERROR.
+
+use compiler.driver.driver_build.library_unit_drift_v1.{
+    library_unit_drift_v1, library_unit_drift_exit_code_v1, library_unit_drift_verdict_v1}
+use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_v1}
+use app.io.mod.{is_dir, file_exists, file_read}
+use std.io_runtime.{get_args}
+
+fn _user_args() -> [text]:
+    var out: [text] = []
+    var seen = false
+    for a in get_args():
+        if seen:
+            if not (out.len() == 0 and a == "--"):
+                out.push(a)
+        elif a.ends_with("library_unit_drift_entry.spl"):
+            seen = true
+    out
+
+fn _recorded(content: text) -> [text]:
+    var out: [text] = []
+    for raw in content.replace("\r", "").split("\n"):
+        val line = raw.trim()
+        if line != "" and not line.starts_with("#"):
+            out.push(line)
+    out
+
+fn main() -> i64:
+    val args = _user_args()
+    if args.len() != 1:
+        print("ERROR — nothing was checked (usage: library_unit_drift_entry.spl <lib dir>)")
+        return 2
+    val dir = args[0]
+    if not is_dir(dir):
+        print("ERROR — nothing was checked (not a directory: {dir})")
+        return 2
+    val lock = dir + "/source_inventory.lock"
+    if not file_exists(lock):
+        print("ERROR — nothing was checked (no recorded inventory: {lock})")
+        return 2
+    val d = library_unit_drift_v1(_recorded(file_read(lock) ?? ""), source_inventory_scan_v1(dir))
+    print(library_unit_drift_verdict_v1(d))
+    library_unit_drift_exit_code_v1(d)

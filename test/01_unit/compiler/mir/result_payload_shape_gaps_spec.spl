@@ -17,7 +17,7 @@ use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instruction_graph.{MirFunction}
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, MirConstValue}
-use compiler.mir.mir_instruction_support.{MirOperandKind, MirTerminator}
+use compiler.mir.mir_instruction_support.{MirOperandKind, MirTerminator, mir_operand_copy}
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity_raw}
@@ -187,3 +187,75 @@ describe "Result tuple payload collection slots":
         lowering.enum_runtime_id_index_q[mir_class_identity_raw(symbols, kind_symbol.id)] = 0
         expect(lowering.result_try_tuple_payload_type(payload) != nil).to_equal(true)
         expect(lowering.result_tuple_rejected_element(payload)).to_equal("all slots admitted")
+
+fn optional_slot_lowering() -> MirLowering:
+    var symbols = SymbolTable.new()
+    val deadline = symbols.define("Deadline", SymbolKind.Struct, nil, Span.empty(),
+        Visibility.Public, false, Some("payload_gap"))
+    symbols.bind_qualified_type("payload_gap", "Deadline", deadline)
+    MirLowering.new(symbols)
+
+fn optional_slot_payload(lowering: MirLowering) -> HirType:
+    # Phase 4 machine_fresh_workload_lifecycle_v2 workflow_current_v3 shape:
+    # Result<(i64, text, Option<Struct>), text>.
+    val deadline_id = lowering.symbols.lookup_qualified_type_raw("payload_gap", "Deadline")
+    val deadline = gap_type(HirTypeKind.Named(SymbolId(id: deadline_id), []))
+    gap_type(HirTypeKind.Tuple([gap_type(HirTypeKind.Int(64, true)), gap_text(),
+        gap_type(HirTypeKind.Optional(deadline))]))
+
+describe "Result tuple payload Optional slots":
+    it "admits an Option<Struct> slot as one Option-handle word":
+        var lowering = optional_slot_lowering()
+        val payload = optional_slot_payload(lowering)
+        expect(lowering.result_tuple_rejected_element(payload)).to_equal("all slots admitted")
+        val admitted = lowering.result_try_tuple_payload_type(payload)
+        expect(admitted != nil).to_equal(true)
+        var slot_is_word = false
+        if val tuple_type = admitted:
+            match tuple_type.kind:
+                case MirTypeKind.Tuple(fields):
+                    if fields.len() == 3:
+                        match fields[2].kind:
+                            case MirTypeKind.I64: slot_is_word = true
+                            case _: ()
+                case _: ()
+        expect(slot_is_word).to_equal(true)
+
+    it "admits scalar and text Option slots":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val payload = gap_type(HirTypeKind.Tuple([gap_type(HirTypeKind.Optional(gap_text())),
+            gap_type(HirTypeKind.Optional(gap_type(HirTypeKind.Int(64, true)))),
+            gap_type(HirTypeKind.Optional(gap_type(HirTypeKind.Bool)))]))
+        expect(lowering.result_tuple_rejected_element(payload)).to_equal("all slots admitted")
+
+    it "still rejects an Option slot whose payload has no proven representation":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val erased = gap_type(HirTypeKind.Tuple([gap_type(HirTypeKind.Bool),
+            gap_type(HirTypeKind.Optional(gap_type(HirTypeKind.Any)))]))
+        expect(lowering.result_tuple_rejected_element(erased)).to_equal("slot 1 is Optional")
+        expect(lowering.result_try_tuple_payload_type(erased) == nil).to_equal(true)
+        val nested = gap_type(HirTypeKind.Tuple([gap_type(HirTypeKind.Optional(
+            gap_type(HirTypeKind.Optional(gap_text()))))]))
+        expect(lowering.result_tuple_rejected_element(nested)).to_equal("slot 0 is Optional")
+
+    it "marks a projected Option slot as an Option handle, not a scalar":
+        var lowering = optional_slot_lowering()
+        val payload = optional_slot_payload(lowering)
+        var builder = lowering.builder
+        builder.begin_function(SymbolId(id: 74), "optional_slot_probe",
+            MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        val raw = builder.emit_const_int(74)
+        lowering.builder = builder
+        val tuple_type = lowering.result_try_tuple_payload_type(payload) ?? MirType.i64()
+        val base = lowering.recover_result_tuple_payload(raw, tuple_type)
+        lowering.remember_local_hir_type(base.id, payload, 0, 0)
+        var projector = lowering.builder
+        val slot = projector.emit_get_field(mir_operand_copy(base), 2, MirType.i64())
+        val count = projector.emit_get_field(mir_operand_copy(base), 0, MirType.i64())
+        lowering.builder = projector
+        lowering.remember_result_try_tuple_projection(base, 2, slot)
+        lowering.remember_result_try_tuple_projection(base, 0, count)
+        expect(lowering.option_value_locals.contains(slot.id)).to_equal(true)
+        expect(lowering.is_runtime_value_local(slot.id)).to_equal(true)
+        expect(lowering.option_value_locals.contains(count.id)).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)

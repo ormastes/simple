@@ -160,3 +160,36 @@ A feature is complete only when parser/type/HIR/MIR/runtime requirements,
 negative tests, imported/generated-code behaviour, native/interpreter parity,
 diagnostic severity, documentation and the performance gate agree. A registry
 entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
+
+
+## Implementation log
+
+- 2026-11-18 P0-3 slice: `inference_effects.spl` — non-function callee type and
+  trait-method calls now infer Unknown (incomplete row); `Await` has an explicit
+  Async arm; `effect_region_admission` rejects Unknown in pure/nogc/nonblocking
+  regions with `EFF-E0301`. Spec `effect_admission_spec.spl` 6/6 (was 1/6 red).
+  Remaining: loader/versioned summary + stale-summary rejection, wiring the
+  admission check into the driver region checks, imported-function summaries.
+- 2026-11-18 P0-1 slice (verification-pending): `35.semantics/must_use_discard.spl`
+  is the typed-HIR discard authority (SPL-USE-001 Result/Option discard,
+  SPL-USE-002 `@must_use` name; `must_use_finding_severity` = error compiled /
+  warning script). Spec `test/01_unit/compiler/semantics/must_use_discard_spec.spl`
+  10/10 (was 0 executed, module missing). Existing specs unchanged:
+  must_use_spec 4/5 (1 pre-existing failure), ignored_return_warning 4/4,
+  must_use_streaming_scan 4/4.
+  TODO (open): interpreter `eval_stmt_expr` still emits its own `error[R9]`
+  strings and does not consume this check; method-call return types and
+  imported callees are not resolved (only `@must_use` method names match);
+  `80.driver` admission projection and TLDR/SMF obligation metadata not wired.
+- 2026-11-18 P0-1 review fixes: only the exact `_ = f()` shape (unit Block, one
+  Expr stmt, NilLit tail) is skipped; other blocks are scanned; with/try/lambda
+  block bodies walked; callees resolve per module (no cross-module name match;
+  unresolved calls are not flagged, TODO in source for import-table
+  resolution); `MUST_USE_CODE_*`/`MustUseFinding` are `pub`; unused severity
+  `code` param removed. Spec now 18/18. with/try/lambda walkers have no spec
+  case yet (source syntax not confirmed).
+- 2026-11-18 P0-5 slice 1: `90.tools/lint/_LintMain/rule_cost_tier.spl` adds LintCostTier (Low/Medium/High; unlisted = High), registry covering all `all_lint_names()`, LintCompleteness, `lint_rules_for_profile`, `lint_completeness_reduce` (exhausted budget -> incomplete). Spec `rule_cost_tier_registry_spec.spl` 6/6. Remaining: `lint --fast` / `--diagnostic` wiring, timed_out enforcement per rule, warm-build wall/RSS evidence.
+- 2026-11-18 P0-4 (ROB-ARR-01/03/04 slice): self-hosted parser now parses postfix `x->m(args)` and desugars it to `x = x.m(args)` (`parser_expr.spl` `parse_arrow_update`); match patterns/guards parse with the arrow suppressed so arm and return-type arrows are unchanged; `val` and temporary targets are named parser errors. Spec `arrow_functional_update_spec.spl` 16/16 (block-scoped val tracking, nested-fn hide/restore, `val (a, b)`); `functional_update_spec.spl` titles corrected; non-simple field/index bases are a named error until ROB-ARR-05 single-evaluation. Open: module-level `val` not parser-checked, `->f()?` ordering, type-mismatch error, `a->b()->c()` chains, native MIR parity evidence.
+- 2026-11-18 P0-4 (ROB-ARR-05/06): `x->m()` places with non-simple base/index (`a[f()]`, `g().x`) now desugar to a block binding fresh `val __arrow_<off>_<n>` temps first, so each is evaluated once (named error dropped for index operands; a non-lvalue root such as `g().x` or `g()[i]` and a bare call target stay a named error); `x->f()?` desugars to `x = (x.f())?` so propagation precedes the store. `arrow_functional_update_spec` 21/21; functional_update 11/11; match_arrow_arm_parse 16/16, match_pipe_arrow_arm_parse 5/5, match_case_fat_arrow 9/9, optional_member_call_parser 5/5. Runtime-counter proof is structural (AST call count), not executed.
+- 2026-11-18 drvwire (ROB-EFF-03, ROB-USE-01/02 wiring): `collect_module_typecheck_receipt_v1` (hir_typecheck_consumer_v1.spl) now runs `must_use_discard_scan` (error compiled / warning when `script_mode`, bounded by pass severity: Advisory drops, Warn downgrades; default profile is Advisory so existing repo code is not newly failing) and `infer_function` calls `check_effect_region` -> `effect_region_admission` (EFF-E0301) for functions with an `@pure`/`@nogc`/`@nonblocking` attribute (new trailing `HirFunction.effect_region`, set in declaration_lowering). Spec `test/01_unit/compiler/driver/robust_checks_wired_spec.spl` 5/5 (was 2/5 before wiring); effect_admission 9/9, must_use_discard 18/18, compiler_core/must_use 4/5 unchanged. Remaining: `@must_use` name set is passed empty (HirFunction carries no attributes); cross-module callees and method return types still unresolved; EFF-E0301 treats any non-local callee as Unknown (by design of ROB-EFF-01).
+- 2026-11-18 P0-5 slice 2: `simple lint --fast` wired (`lint_entry.spl` -> `cli_lint_commands`; `LintCliPolicy.fast`; `lint_apply_fast_profile` silences every non-Low rule via config level Allow) and a `lint completeness: pass|fail|incomplete|timed_out` status line (also `completeness` in `--json` summary) via `lint_completeness_reduce`. Spec `lint_fast_profile_spec.spl` 4/4; `rule_cost_tier_registry_spec` 7/7, `collection_index_mutation_spec` 6/6 unchanged. CLI-verified: COLL019 shown by default, absent with `--fast`. Open: fast mode filters output but does not yet skip executing non-Low rules (no wall-time saving claimed); `--diagnostic=medium|high` and per-rule timed_out enforcement not done; warm-build wall/RSS evidence still missing.

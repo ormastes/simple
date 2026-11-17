@@ -299,3 +299,55 @@ pub fn sfnt_line_metric_units_ascent_descent_px(units: [i64], size_px: i64) -> [
 
 pub fn sfnt_blob_normal_line_height_px(blob: [u8], size_px: i64) -> i64:
     sfnt_line_metric_units_normal_line_height_px(sfnt_blob_line_metric_units(blob), size_px)
+
+# Fractional-size twins of the two line-metric functions above: `size_milli` is
+# the computed font-size in thousandths of a px (UA h3 = 18720). Chrome (Skia)
+# scales at the float size and still rounds ascent, descent and gap each on
+# its own. A whole-px size answers exactly what the `_px` function answers.
+# reason: font-unit scalars and a milli-px size are the SFNT table domain.
+# @allow(primitive_api)
+pub fn sfnt_line_metric_units_normal_line_height_milli_px(units: [i64], size_milli: i64) -> i64:
+    if size_milli % 1000 == 0:
+        return sfnt_line_metric_units_normal_line_height_px(units, size_milli / 1000)
+    if units.len() != 4 or size_milli <= 0 or size_milli > 512000: return 0
+    val upem = units[3]
+    if upem <= 0: return 0
+    (
+        _sfnt_round_scaled_units_milli(units[0], size_milli, upem) +
+        _sfnt_round_scaled_units_milli(units[1], size_milli, upem) +
+        _sfnt_round_scaled_units_milli(units[2], size_milli, upem)
+    )
+
+# reason: font-unit scalars and a milli-px size are the SFNT table domain.
+# @allow(primitive_api)
+pub fn sfnt_line_metric_units_ascent_descent_milli_px(units: [i64], size_milli: i64) -> [i64]:
+    if size_milli % 1000 == 0:
+        return sfnt_line_metric_units_ascent_descent_px(units, size_milli / 1000)
+    if units.len() != 4 or size_milli <= 0 or size_milli > 512000: return []
+    val upem = units[3]
+    if upem <= 0: return []
+    [_sfnt_round_scaled_units_milli(units[0], size_milli, upem), _sfnt_round_scaled_units_milli(units[1], size_milli, upem)]
+
+# Device-pixel strut at device scale `k` (Chrome --force-device-scale-factor):
+# [ascent, descent] in whole DEVICE px of the face at size_milli * k, each
+# rounded on its own, then Blink's subpixel-positioning borrow (on at dsf > 1,
+# SimpleFontData::PlatformInit): when the rounded descent is below the raw one
+# and the ascent is at least 1, one device px moves from ascent to descent.
+# DejaVu Sans at 64 device px: 59.41 / 15.09 -> 59 / 15 -> 58 / 16. k == 1 is
+# exactly `sfnt_line_metric_units_ascent_descent_milli_px` (no borrow: 1x
+# Linux text is hinted, without subpixel positioning).
+# reason: font-unit scalars, a milli-px size and an integer device scale are the SFNT table domain.
+# @allow(primitive_api)
+pub fn sfnt_line_metric_units_ascent_descent_device_px(units: [i64], size_milli: i64, k: i64) -> [i64]:
+    if k <= 1:
+        return sfnt_line_metric_units_ascent_descent_milli_px(units, size_milli)
+    val ad = sfnt_line_metric_units_ascent_descent_milli_px(units, size_milli * k)
+    if ad.len() != 2:
+        return ad
+    # rounded descent < raw descent  <=>  desc * upem * 1000 < units * size
+    if ad[1] * units[3] * 1000 < units[1] * size_milli * k and ad[0] >= 1:
+        return [ad[0] - 1, ad[1] + 1]
+    ad
+
+fn _sfnt_round_scaled_units_milli(units: i64, size_milli: i64, upem: i64) -> i64:
+    (units * size_milli + upem * 500) / (upem * 1000)

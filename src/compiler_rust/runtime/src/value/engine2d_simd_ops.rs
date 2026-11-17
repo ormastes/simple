@@ -155,8 +155,9 @@ pub extern "C" fn rt_engine2d_simd_copy_span_u32(
 /// Chrome 159 (Skia) source-over of one straight-alpha 0xAARRGGBB pixel.
 /// Opaque destination (fitted exactly against Chrome screenshots):
 /// solid fill `round(s*a/255) + ((d*(256-a)) >> 8)` (SkPMSrcOver), image /
-/// shader `round(s*a/255) + div255r(d*(255-a))`. Translucent destination (no
-/// Chrome equivalent observed): rounded straight-alpha src-over. Twin of
+/// shader `round(s*a/255) + div255r(d*(255-a))`. Translucent destination
+/// (an opacity-group layer): Skia's premultiplied 8-bit value stored
+/// straight; transparent destination returns src. Twin of
 /// `engine2d_blend_u32` in `src/runtime/runtime_simd_dispatch.c` and
 /// `interpreter_extern/simd.rs`, and of `blend` / `blend_solid` in color.spl.
 #[inline]
@@ -170,10 +171,19 @@ fn blend_pixel(src: u32, dst: u32, solid: bool) -> u32 {
     }
     let da = dst >> 24;
     let inv = 255 - sa;
+    if da == 0 {
+        return src;
+    }
     if da != 255 {
+        // Skia's premultiplied 8-bit layer value, stored straight; it
+        // round-trips exactly, so a group composite sees Chrome's value.
         let dw = (da * inv + 127) / 255;
         let oa = sa + dw;
-        let channel = |shift| (((src >> shift) & 0xff_u32) * sa + ((dst >> shift) & 0xff_u32) * dw + oa / 2) / oa;
+        let channel = |shift: u32| {
+            let p = (((src >> shift) & 0xff_u32) * sa + 127) / 255
+                + (((((dst >> shift) & 0xff_u32) * da + 127) / 255) * inv + 127) / 255;
+            ((p * 255 + oa / 2) / oa).min(255)
+        };
         return (oa << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0);
     }
     let channel = |shift: u32| {

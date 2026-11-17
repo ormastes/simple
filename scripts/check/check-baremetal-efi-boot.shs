@@ -1,5 +1,5 @@
 #!/bin/sh
-# Baremetal build + REAL-FIRMWARE boot check (x86_64, aarch64, riscv64).
+# Baremetal build + REAL-FIRMWARE boot check (x86_64, aarch64, riscv64, riscv32).
 #
 # Builds examples/09_embedded/freestanding_hello/main.spl (or $BM_SRC) for
 # <arch>-unknown-none with the Simple compiler (--emit-object), links it with
@@ -11,6 +11,9 @@
 #   x86_64  OVMF pflash   -> FAT ESP BOOTX64.EFI  -> flat image
 #   aarch64 AAVMF pflash  -> FAT ESP BOOTAA64.EFI -> flat image
 #   riscv64 OpenSBI fw_payload (v1.4, built with clang LLVM=1) via -bios
+#   riscv32 OpenSBI 1.7 fw_payload (XLEN=32, clang LLVM=1) via -bios; uses the
+#           32-bit runtime bm_rt32.spl (bm_rt.spl declares i64 params, which the
+#           32-bit backend does not pass that way)
 # PASS needs the exact transcript on serial, in order:
 #   hello from Simple bare metal / n=42 / ints 0 -7 MAX MIN / panic: boom
 # and NOT "after panic" (proves rt_panic halted).
@@ -21,7 +24,7 @@
 # riscv64 flash fw_payload.bin per the board's OpenSBI flow (BM_RV_UART).
 # Board run not yet evidenced.
 #
-# Usage: sh scripts/check/check-baremetal-efi-boot.shs [--arch x86_64|aarch64|riscv64|all] [--keep]
+# Usage: sh scripts/check/check-baremetal-efi-boot.shs [--arch x86_64|aarch64|riscv64|riscv32|all] [--keep]
 # Env:   SIMPLE_BIN (default bin/simple), BM_SRC, BM_WORK, BM_TIMEOUT_S (30),
 #        CLANG (clang), OVMF_CODE/OVMF_VARS, AAVMF_CODE/AAVMF_VARS, BM_A64_UART,
 #        BM_RV_UART, OPENSBI_SRC (default ~/.cache/simple/opensbi-v1.4).
@@ -46,6 +49,7 @@ RT_DIR=$repo_root/src/lib/nogc_async_mut_noalloc/baremetal/freestanding
 BM_TIMEOUT_S=${BM_TIMEOUT_S:-30}
 CLANG=${CLANG:-clang}
 OPENSBI_SRC=${OPENSBI_SRC:-$HOME/.cache/simple/opensbi-v1.4}
+OPENSBI32_SRC=${OPENSBI32_SRC:-$HOME/.simple/firmware/src/opensbi-1.7}
 OPENSBI_TAG=v1.4
 OPENSBI_SHA=a2b255b88918715173942f2c5e1f97ac9e90c877  # same pin as check-simpleos-riscv64-opensbi-guest-boot.shs
 work=${BM_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/bm-efi-boot.XXXXXX")}
@@ -78,6 +82,10 @@ firmware_for() {
             command -v qemu-system-riscv64 >/dev/null 2>&1 && command -v make >/dev/null 2>&1 \
                 && echo "opensbi - qemu-system-riscv64"
             return ;;
+        riscv32)
+            [ -f "$OPENSBI32_SRC/Makefile" ] && command -v qemu-system-riscv32 >/dev/null 2>&1 \
+                && command -v make >/dev/null 2>&1 && echo "opensbi32 - qemu-system-riscv32"
+            return ;;
     esac
     [ -f "$c" ] && [ -f "$v" ] && command -v "$q" >/dev/null 2>&1 && echo "$c $v $q"
 }
@@ -94,12 +102,13 @@ compile_obj() {
 build_image() {
     a=$1; d=$2; base=$3
     compile_obj "$BM_SRC" "$a" "$d/main.o" "$d/build.log" || { why=compile; return 1; }
-    compile_obj "$RT_DIR/bm_rt.spl" "$a" "$d/bm_rt.o" "$d/rt-build.log" || { why=rt-compile; return 1; }
+    rtm=bm_rt; [ "$a" = riscv32 ] && rtm=bm_rt32   # 32-bit ABI widths, see bm_rt32.spl header
+    compile_obj "$RT_DIR/$rtm.spl" "$a" "$d/bm_rt.o" "$d/rt-build.log" || { why=rt-compile; return 1; }
     # The compiler module-prefixes definitions (<module path>.bm_rt.<name>);
     # bind the plain ABI names. Every runtime symbol must be found.
     redef=""
     for s in $RT_SYMS; do
-        m=$(llvm-nm --defined-only "$d/bm_rt.o" | awk -v s="$s" '{ n=$NF; if (n ~ ("\\.bm_rt\\." s "$") || n == ("bm_rt." s)) print n }' | head -1)
+        m=$(llvm-nm --defined-only "$d/bm_rt.o" | awk -v s="$s" -v m="$rtm" '{ n=$NF; if (n ~ ("\\." m "\\." s "$") || n == (m "." s)) print n }' | head -1)
         [ -n "$m" ] || { why="rt-missing-$s"; return 1; }
         redef="$redef --redefine-sym $m=$s"
     done
@@ -108,6 +117,7 @@ build_image() {
         x86_64) cflags="--target=x86_64-unknown-elf" ;;
         aarch64) cflags="--target=aarch64-unknown-elf -DBM_UART=${BM_A64_UART:-0x09000000}" ;;
         riscv64) cflags="--target=riscv64-unknown-elf -march=rv64imac -mabi=lp64 -DBM_UART=${BM_RV_UART:-0x10000000}" ;;
+        riscv32) cflags="--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -DBM_UART=${BM_RV_UART:-0x10000000}" ;;
     esac
     "$CLANG" $cflags -c "$RT_DIR/crt0_$a.S" -o "$d/crt0.o" > "$d/crt0.log" 2>&1 || { why=crt0; return 1; }
     printf '%s\n' 'ENTRY(_start)' \
@@ -119,7 +129,7 @@ build_image() {
     # x86_64/aarch64 images are linked at 0 but run wherever AllocatePages put
     # them, so any absolute relocation would point at the wrong address. Fail
     # closed rather than boot a silently mis-relocated image.
-    if [ "$a" != riscv64 ]; then
+    if [ "$a" != riscv64 ] && [ "$a" != riscv32 ]; then
         llvm-readelf -r "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/relocs.txt" 2>&1 || {
             why=readelf; return 1; }
         if grep -E -q 'R_X86_64_(32S?|64) |R_AARCH64_(ABS(16|32|64)|MOVW_UABS)' "$d/relocs.txt"; then
@@ -196,8 +206,8 @@ booted=0
 failed=""
 checked=0
 case "$arch_sel" in
-    all) arches="x86_64 aarch64 riscv64" ;;
-    x86_64|aarch64|riscv64) arches="$arch_sel" ;;
+    all) arches="x86_64 aarch64 riscv64 riscv32" ;;
+    x86_64|aarch64|riscv64|riscv32) arches="$arch_sel" ;;
     *) echo "ERROR -- nothing was checked (unsupported --arch $arch_sel)"; exit 2 ;;
 esac
 
@@ -209,7 +219,7 @@ for a in $arches; do
     set -- $fw; fw_code=$1; fw_vars=$2; qemu=$3
     d="$work/$a"; rm -rf "$d"; mkdir -p "$d"
     why=""
-    if [ "$a" = riscv64 ]; then base=0x80200000; else base=0; fi
+    case "$a" in riscv64) base=0x80200000 ;; riscv32) base=0x80400000 ;; *) base=0 ;; esac
     build_image "$a" "$d" "$base" || { echo "[$a] image build failed: $why ($d)"; failed="$failed $a($why)"; continue; }
 
     rm -f "$d/serial.log"
@@ -233,6 +243,15 @@ for a in $arches; do
         riscv64)
             build_opensbi "$d/image.bin" "$d" || { echo "[$a] OpenSBI fw_payload build failed ($d)"; failed="$failed $a(opensbi)"; continue; }
             set -- -machine virt -cpu rv64 -smp 1 -m 256M \
+                -bios "$d/opensbi-build/platform/generic/firmware/fw_payload.bin" ;;
+        riscv32)
+            # OpenSBI 1.7 XLEN=32 fw_payload; rv32 default payload offset 0x400000
+            # => payload at 0x80400000 (the link base above). Never -kernel.
+            make -C "$OPENSBI32_SRC" O="$d/opensbi-build" PLATFORM=generic PLATFORM_RISCV_XLEN=32 LLVM=1 \
+                FW_PAYLOAD=y FW_PAYLOAD_PATH="$d/image.bin" -j4 > "$d/opensbi.log" 2>&1 \
+                && [ -s "$d/opensbi-build/platform/generic/firmware/fw_payload.bin" ] \
+                || { echo "[$a] OpenSBI fw_payload build failed ($d/opensbi.log)"; failed="$failed $a(opensbi)"; continue; }
+            set -- -machine virt -smp 1 -m 256M \
                 -bios "$d/opensbi-build/platform/generic/firmware/fw_payload.bin" ;;
     esac
     set -- "$@" -display none -no-reboot -net none -serial file:"$d/serial.log" -monitor none

@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Purpose: Pin that an inline-block with `vertical-align: top | bottom | text-top
+| text-bottom` is aligned by its MARGIN box (CSS 2.2 10.8) and grows the line by
+that margin box. Before, only baseline-aligned items had their margins applied,
+so `margin-top:6px; vertical-align:top` sat at y=0.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + getBoundingClientRect(),
+default serif 16px, `body{margin:0}`, `<div id=c style=width:300px>x<span
+id=s style="display:inline-block;width:20px;height:10px;vertical-align:V;M">
+</span></div>`, 2026-11-18; y relative to the div, h = div height):
+
+| margin           | top    | bottom | text-top | text-bottom |
+|------------------|--------|--------|----------|-------------|
+| margin-top:6px   | 6, 18  | 8, 18  | 6, 18    | 7, 18       |
+| margin-bottom:6px| 0, 18  | 2, 18  | 0, 18    | 1, 18       |
+| margin:6px 0     | 6, 22  | 6, 22  | 6, 22    | 6, 23       |
+| margin:3px 0 9px | 3, 22  | 3, 22  | 3, 22    | 3, 23       |
+| margin-top:30px  | 30, 40 | 30, 40 | 30, 40   | 30, 41      |
+| margin-bottom:30px| 0, 40 | 0, 40  | 0, 40    | 0, 41       |
+
+`middle` is NOT covered: Chrome centres the margin box on baseline + x-height/2
+and lands on fractional y (8.328 for margin-top:6px); this engine has no
+x-height metric. See doc/08_tracking/bug/inline_block_vertical_align_middle_ignores_margin_2026-11-18.md.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-VALIGN-MARGIN-001 — top/bottom/text-top/text-bottom aligned atomic inlines place and size the line by their margin box.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+fn _page(va: text, margin: text) -> text:
+    "<html><head><style>body{{margin:0}} .c{{width:300px}} span{{display:inline-block;width:20px;height:10px}}</style></head><body><div class=c id=c>x<span id=s style=\"vertical-align:{va};{margin}\"></span></div></body></html>"
+
+fn _rel_y(page: text) -> i32:
+    simple_web_layout_debug_layout_by_id(page, 900, 2000, "s", "y").to_i32() - simple_web_layout_debug_layout_by_id(page, 900, 2000, "c", "y").to_i32()
+
+fn _line_h(page: text) -> i32:
+    simple_web_layout_debug_layout_by_id(page, 900, 2000, "c", "h").to_i32()
+
+fn _pin(va: text, margin: text, y: i32, h: i32):
+    val page = _page(va, margin)
+    expect(_rel_y(page)).to_equal(y)
+    expect(_line_h(page)).to_equal(h)
+
+describe "inline-block vertical-align margin box":
+    it "top":
+        step("Chrome 159 (y, h): mt6 6,18  mb6 0,18  6/0 6,22  3/9 3,22  mt30 30,40  mb30 0,40")
+        _pin("top", "margin-top:6px", 6, 18)
+        _pin("top", "margin-bottom:6px", 0, 18)
+        _pin("top", "margin:6px 0", 6, 22)
+        _pin("top", "margin:3px 0 9px", 3, 22)
+        _pin("top", "margin-top:30px", 30, 40)
+        _pin("top", "margin-bottom:30px", 0, 40)
+
+    it "bottom":
+        step("Chrome 159 (y, h): mt6 8,18  mb6 2,18  6/0 6,22  3/9 3,22  mt30 30,40  mb30 0,40")
+        _pin("bottom", "margin-top:6px", 8, 18)
+        _pin("bottom", "margin-bottom:6px", 2, 18)
+        _pin("bottom", "margin:6px 0", 6, 22)
+        _pin("bottom", "margin:3px 0 9px", 3, 22)
+        _pin("bottom", "margin-top:30px", 30, 40)
+        _pin("bottom", "margin-bottom:30px", 0, 40)
+
+    it "text-top":
+        step("Chrome 159 (y, h): mt6 6,18  mb6 0,18  6/0 6,22  3/9 3,22  mt30 30,40  mb30 0,40")
+        _pin("text-top", "margin-top:6px", 6, 18)
+        _pin("text-top", "margin-bottom:6px", 0, 18)
+        _pin("text-top", "margin:6px 0", 6, 22)
+        _pin("text-top", "margin:3px 0 9px", 3, 22)
+        _pin("text-top", "margin-top:30px", 30, 40)
+        _pin("text-top", "margin-bottom:30px", 0, 40)
+
+    it "text-bottom":
+        step("Chrome 159 (y, h): mt6 7,18  mb6 1,18  6/0 6,23  3/9 3,23  mt30 30,41  mb30 0,41")
+        _pin("text-bottom", "margin-top:6px", 7, 18)
+        _pin("text-bottom", "margin-bottom:6px", 1, 18)
+        _pin("text-bottom", "margin:6px 0", 6, 23)
+        _pin("text-bottom", "margin:3px 0 9px", 3, 23)
+        _pin("text-bottom", "margin-top:30px", 30, 41)
+        _pin("text-bottom", "margin-bottom:30px", 0, 41)

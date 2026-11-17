@@ -249,6 +249,17 @@ impl TypeRegistry {
             if Self::is_canonical_builtin_name(&name) {
                 return self.register(ty);
             }
+            // The name is an alias onto a builtin (e.g. imported `unit Length: i64`
+            // then a local `struct Length`). Updating in place would rewrite the
+            // builtin itself (TypeId::I64 -> Struct Length{..: i64}), and every
+            // later i64 became a self-referential struct: MIR to_string recursed
+            // until stack overflow building src/app/cli (2026-11-18). Rebind the
+            // name to a fresh id instead.
+            if existing_id.0 <= TypeId::CHAR.0 || existing_id == TypeId::UNKNOWN {
+                let id = self.register(ty);
+                self.name_to_id.insert(name, id);
+                return id;
+            }
             // Update in place - keep the same TypeId
             self.optional_type_ids.remove(&existing_id);
             self.merged_enum_ids.remove(&existing_id);

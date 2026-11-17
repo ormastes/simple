@@ -209,11 +209,7 @@ const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
 }
 
 void rt_dir_list_free(const char** entries, int64_t count) {
-    if (!entries) return;
-    for (int64_t i = 0; i < count; i++) {
-        free((void*)entries[i]);
-    }
-    free((void*)entries);
+    rt__shared_dir_list_free(entries, count);
 }
 
 /* Shared UTF-8/long-path cleanup; retain full-runtime absent-path failure. */
@@ -349,24 +345,7 @@ const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size)
 }
 
 static inline const char* rt_file_text_at_string_data(int64_t value, int64_t* len_out) {
-    const uint64_t tag_mask = 0x7ULL;
-    const uint64_t heap_tag = 0x1ULL;
-    uint64_t raw = (uint64_t)value;
-    if ((raw & tag_mask) == heap_tag) {
-        const uint8_t* data = rt_string_data(value);
-        int64_t len = rt_string_len(value);
-        if (data) {
-            *len_out = len;
-            return (const char*)data;
-        }
-    }
-    if (raw > 4096) {
-        const char* s = (const char*)(uintptr_t)raw;
-        *len_out = (int64_t)strlen(s);
-        return s;
-    }
-    *len_out = 0;
-    return NULL;
+    return rt__shared_file_text_at_string_data(value, len_out);
 }
 
 static inline int64_t rt_file_text_at_int(int64_t value) {
@@ -502,24 +481,7 @@ int64_t rt_munmap_raw(int64_t addr, int64_t length) {
 }
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
-    if (!addr || length <= 0) return -1;
-    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
-    DWORD protect;
-    if (prot == 0x0) protect = PAGE_NOACCESS;
-    else if (prot == 0x1) protect = PAGE_READONLY;
-    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
-    else if (prot == 0x4) protect = PAGE_EXECUTE;
-    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-    else return -1;
-    DWORD old_protect;
-    if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
-    if ((prot & 0x4) != 0 &&
-        !FlushInstructionCache(GetCurrentProcess(), (void*)(uintptr_t)addr, (SIZE_T)length)) {
-        DWORD ignored;
-        (void)VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, old_protect, &ignored);
-        return -1;
-    }
-    return 0;
+    return spl_windows_mprotect_raw(addr, length, prot);
 }
 
 int64_t rt_madvise_raw(int64_t addr, int64_t length, int64_t advice) {

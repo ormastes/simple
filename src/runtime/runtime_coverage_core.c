@@ -157,6 +157,14 @@ static void coverage_append(char *out, size_t capacity, size_t *offset, const ch
     *offset += length;
 }
 
+static void coverage_append_row_tail(char *out, size_t capacity, size_t *offset, const CoverageRow *row) {
+    *offset += coverage_write_escaped_file(out + *offset, row->file);
+    int written = snprintf(out + *offset, capacity - *offset, ", %u, %u, %llu, %llu\n", row->line, row->column,
+                           (unsigned long long)row->true_count, (unsigned long long)row->false_count);
+    if (written < 0 || (size_t)written >= capacity - *offset) abort();
+    *offset += (size_t)written;
+}
+
 /* Raw producer. `rt_coverage_dump_sdn` itself is DECLARED as a Simple `text`
  * return in every Simple declaration (src/lib/nogc_sync_mut/{ffi,sffi,io,
  * test_runner}/coverage*.spl, compiler_rust/lib/std/src/tooling/coverage.spl)
@@ -206,11 +214,7 @@ char *rt_coverage_dump_sdn_cstr(void) {
         int written = snprintf(out + offset, capacity - offset, "    %u, ", row->decision_id);
         if (written < 0 || (size_t)written >= capacity - offset) abort();
         offset += (size_t)written;
-        offset += coverage_write_escaped_file(out + offset, row->file);
-        written = snprintf(out + offset, capacity - offset, ", %u, %u, %llu, %llu\n", row->line, row->column,
-                           (unsigned long long)row->true_count, (unsigned long long)row->false_count);
-        if (written < 0 || (size_t)written >= capacity - offset) abort();
-        offset += (size_t)written;
+        coverage_append_row_tail(out, capacity, &offset, row);
     }
     coverage_append(out, capacity, &offset, condition_header);
     for (size_t i = 0; i < g_condition_count; ++i) {
@@ -218,11 +222,7 @@ char *rt_coverage_dump_sdn_cstr(void) {
         int written = snprintf(out + offset, capacity - offset, "    %u, %u, ", row->decision_id, row->condition_id);
         if (written < 0 || (size_t)written >= capacity - offset) abort();
         offset += (size_t)written;
-        offset += coverage_write_escaped_file(out + offset, row->file);
-        written = snprintf(out + offset, capacity - offset, ", %u, %u, %llu, %llu\n", row->line, row->column,
-                           (unsigned long long)row->true_count, (unsigned long long)row->false_count);
-        if (written < 0 || (size_t)written >= capacity - offset) abort();
-        offset += (size_t)written;
+        coverage_append_row_tail(out, capacity, &offset, row);
     }
     out[offset] = '\0';
     free(decisions); free(conditions); coverage_unlock();

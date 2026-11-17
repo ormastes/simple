@@ -1,0 +1,1436 @@
+# Text measurement, line wrapping and intrinsic (min/max-content) sizing for
+# the Simple web renderer layout, including replaced-element and form-control
+# intrinsic boxes. Split out of simple_web_html_layout_renderer_layout_foundation.spl,
+# which re-exports every name defined here.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{web_glyph_scale, fb_text_thin_scaled_clip_range}
+use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
+use std.common.encoding.utf8.{text_codepoints}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_is_monospace}
+use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px, browser_normal_line_height_milli_px}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli, font_milli_of}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+
+class IntrinsicWidthResult:
+    width: i32
+    widths: [i32]
+
+class LineWrapRanges:
+    starts: [i32]
+    ends: [i32]
+
+fn char_w(fs: i32) -> i32:
+    if fs <= 8:
+        return 5
+    6 * web_glyph_scale(fs)
+
+pub fn text_advance(fs: i32) -> i32:
+    # The framebuffer rasterizer paints the built-in 5x7 bitmap cell scaled
+    # by web_glyph_scale(fs) (=1 here), i.e. glyphs 5 px wide; a 4 px
+    # advance made neighbors overwrite each other, so the inked pixel count
+    # depended on the overlap phase (layout and paint must both use >= the
+    # cell width).
+    if fs <= 8:
+        return 5
+    5 * web_glyph_scale(fs)
+
+fn style_char_w(st: Style) -> i32:
+    var out = char_w(st.font_size) + st.letter_spacing_px
+    if out < 1:
+        out = 1
+    out
+
+fn style_text_advance(st: Style) -> i32:
+    var out = text_advance(st.font_size) + st.letter_spacing_px
+    if out < 1:
+        out = 1
+    out
+
+fn style_space_advance(st: Style) -> i32:
+    var out = style_text_advance(st) / 2 + st.word_spacing_px
+    if out < 1:
+        out = 1
+    out
+
+fn line_h(fs: i32) -> i32:
+    9 * web_glyph_scale(fs)
+
+fn style_line_h(st: Style) -> i32:
+    if st.line_height_px > 0:
+        return st.line_height_px
+    if st.line_height_px < 0:
+        # negative sentinel = unitless line-height multiplier * 10 (e.g. 1.6 -> -16),
+        # resolved here against the element's final font-size.
+        val lh = font_milli_of(st.font_size, st.font_size_milli) * (0 - st.line_height_px) / 10000
+        if lh > 0:
+            return lh
+    # `line-height: normal`. One source for #text and element styles: the
+    # face's own normal line height (font_renderer.spl § `line-height:
+    # normal`). It answers 0 off the measured host, where each kind of style
+    # keeps the value it had: the resolved metric for text, 9 * scale for
+    # elements.
+    val normal = browser_normal_line_height_milli_px(st.font_family, st.bold, st.font_style_italic, font_milli_of(st.font_size, st.font_size_milli))
+    if normal > 0:
+        return normal
+    if st.resolved_font_line_height > 0:
+        return st.resolved_font_line_height
+    line_h(st.font_size)
+
+# --- ONE advance table, shared by layout and paint -------------------------
+#
+# Round 4 made LAYOUT size an inline run from the resolved per-glyph metrics
+# while PAINT kept stepping glyphs by the flat `style_text_advance` estimate
+# (`fb_text_thin_scaled_clip_range`'s `advance`/`space_advance` arguments), and
+# the aligned line width (`style_text_line_advance_width`) used a THIRD rule:
+# it indexed `resolved_font_advances` with BYTE offsets as if bytes and
+# codepoints were the same thing. A centred or right-aligned run was therefore
+# positioned from real metrics and then drawn with wider flat advances, so its
+# glyphs walked out of the box the layout had sized. That is the `forms-media`
+# pixel regression recorded in
+# doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md.
+#
+# `style_run_byte_advances` is the single source of truth that closes it: one
+# advance per BYTE of the string that is actually painted, carrying the
+# codepoint's measured advance on its lead byte and 0 on every UTF-8
+# continuation byte (which draw no glyph). Summing it over a byte range gives
+# the same number the paint loop walks, by construction. It returns an EMPTY
+# array whenever the measured metrics do not describe this exact string
+# (no resolved face, or an arity mismatch) so both sides fall back to the flat
+# estimate TOGETHER rather than one side at a time.
+fn _lay_style_run_byte_advances_inner(st: Style, s: text) -> [i32]:
+    var out: [i32] = []
+    if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
+        return out
+    val cps = text_codepoints(s)
+    val adv = st.resolved_font_advances
+    if adv.len() != cps.len() or adv.len() == 0:
+        return out
+    # Expand codepoint -> bytes from the CODEPOINT VALUES, not by classifying
+    # `char_code_at` results as lead/continuation bytes. `char_code_at` decodes
+    # — it never answers a value in 128..191 — so the byte classifier could
+    # never recognise a continuation byte, over-ran `adv` on the first
+    # multi-byte codepoint and returned an EMPTY table. That made this whole
+    # helper dead on exactly the runs it exists for (any `&mdash;`, accent or
+    # `×`), silently sending both wrap and paint back to the flat estimate.
+    var i = 0
+    val cn = cps.len()
+    while i < cn:
+        out.push(adv[i])
+        var k = 1
+        val w = utf8_encoded_len(cps[i])
+        while k < w:
+            out.push(0)
+            k = k + 1
+        i = i + 1
+    # Fail closed: if the expansion does not describe this exact string, both
+    # sides must fall back together rather than one at a time.
+    val s_blen = s.byte_len()
+    if out.len() != s_blen:
+        return []
+    out
+
+# Number of UTF-8 bytes a codepoint occupies.
+# reason: moved verbatim from simple_web_html_layout_renderer_layout_foundation.spl by the parser-input split; signature unchanged
+# @allow(primitive_api)
+pub fn utf8_encoded_len(cp: i64) -> i32:
+    if cp < 0x80:
+        return 1
+    if cp < 0x800:
+        return 2
+    if cp < 0x10000:
+        return 3
+    4
+
+# First byte offset strictly after `start` that begins a codepoint. Used by the
+# wrap loops for the degenerate "not even one glyph fits" step, so that forcing
+# progress never splits a multi-byte codepoint across two lines.
+#
+# Reads `s.bytes()`, like `skip_wrap_spaces`, and NOT `char_code_at`: this
+# renderer's text API is mixed — `len()` and `substring` are BYTE-indexed while
+# `char_code_at`/`char_at` are CODEPOINT-indexed — so a byte offset handed to
+# `char_code_at` silently reads the wrong character on any non-ASCII run.
+# reason: moved verbatim from simple_web_html_layout_renderer_layout_foundation.spl by the parser-input split; signature unchanged
+# @allow(primitive_api)
+pub fn next_codepoint_start(s: text, start: i32) -> i32:
+    val n = s.byte_len() as i32
+    val b = s.bytes()
+    var i = start + 1
+    while i < n:
+        if b[i] < 128 or b[i] >= 192:
+            return i
+        i = i + 1
+    n
+
+fn byte_advances_range_width(by: [i32], start: i32, endv: i32) -> i32:
+    var width = 0
+    var i = start
+    while i < endv:
+        width = width + by[i]
+        i = i + 1
+    width
+
+# Line width from an already-built byte-advance table (the paint loop builds it
+# once per text node and hands the SAME array to the width call and to the
+# glyph stepper).
+fn style_text_line_advance_width_with(by: [i32], txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+    val txt_bytes = txt.byte_len()
+    if by.len() == txt_bytes and start >= 0 and endv <= txt_bytes:
+        return byte_advances_range_width(by, start, endv)
+    text_line_advance_width(txt, start, endv, advance, space_advance)
+
+# Height of the CONTENT AREA of an inline non-replaced box: the font's own
+# ascent+descent, NOT the line-height. CSS 2.1 SS10.6.1 — `line-height` sizes
+# the LINE box; the inline box inside it is the content area, centred in the
+# line by half-leading. Simple used to give an inline element the whole
+# line-height and place it at the line's top edge, which is why every
+# `<strong>`/`<em>/<code>/<a>` in the catalog measured 6 px too tall and 3-4 px
+# too high against Chrome (measured: Chrome `<strong>` y=195 h=18 inside a
+# y=192 h=24 line; Simple gave y=192 h=24 for the same element).
+#
+# 9/8 of the font size (18 px at 16 px) is the normal-metrics approximation this
+# renderer already uses elsewhere for vertical font geometry. That is the SANS
+# stack's number. Chrome measures 19 px, not 18, for the monospace `<code>`
+# stack at the same 16 px — the note here already said so, and the code never
+# implemented the second half of its own sentence. Measured against headless
+# Chrome (round 10, fixture in doc/10_metrics/ui/web_chrome_parity_round10_
+# 2026-09-13.md): `<code>` h=19 vs `<span>` h=18 at font-size 16. So the
+# monospace content area is 19/16 of the font size. A real per-family
+# ascent+descent would need font metrics this layout path does not carry; these
+# two ratios are what Chrome reports for the two stacks the catalog uses.
+#
+# The family is classified by the ONE per-name resolver the candidate lists use
+# (font_provider.spl § Family-LIST resolution): the first SERVED name of the
+# list decides. This was a third copy of a substring test over the whole value,
+# which called `"Source Code Pro", Arial` monospace because it contains "code".
+fn style_font_is_monospace(st: Style) -> bool:
+    browser_font_family_is_monospace(st.font_family)
+
+fn grid_item_is_replaced(node: HNode) -> bool:
+    val tag = node.tag
+    (
+        tag == "audio" or tag == "button" or tag == "canvas" or
+        tag == "embed" or tag == "iframe" or tag == "img" or
+        tag == "input" or tag == "meter" or tag == "object" or
+        tag == "progress" or tag == "select" or tag == "textarea" or
+        tag == "video" or tag == "svg"
+    )
+
+fn replaced_default_box_w(tag: text) -> i32:
+    """UA default BORDER-BOX width for a replaced element that has no intrinsic
+    media size, or 0 for a tag that is not sized this way.
+
+    CSS 2.1 §10.3.2 gives a replaced element with no intrinsic width and no
+    specified width a used width of 300px. Chrome's `<audio controls>` widget
+    is 300px wide by the same rule; its height is the widget default (below),
+    not the §10.6.2 fallback. `<img>` and `<input>` are deliberately absent:
+    they are sized from real intrinsic/UA metrics further down this function's
+    caller, and giving them a 300px default would be a regression.
+    """
+    if tag == "iframe" or tag == "video" or tag == "canvas" or tag == "embed" or tag == "object" or tag == "audio" or tag == "svg":
+        return 300
+    0
+
+# The UA control font is `13.3333px` = 40/3 px (10 pt). The cascade carries
+# integer px, so a control's `font_size` is 13 (FORM_CONTROL_UA_FONT_SIZE_PX in
+# ..._declarations.spl); a label is MEASURED at the real size by resolving its
+# run at an integer multiple of 40/3 and dividing, which keeps the sub-pixel
+# part that decides `ceil` (`Alpha`: 34.09 px -> 35, 33 at a truncated 13 px).
+val FORM_CONTROL_UA_FONT_TRUNCATED_PX: i32 = 13
+val FORM_CONTROL_UA_FONT_NUM: i32 = 40
+val FORM_CONTROL_UA_FONT_DEN: i32 = 3
+# Largest size the font resolver accepts is 512 px.
+val FORM_CONTROL_MEASURE_MAX_PX: i32 = 512
+val FORM_CONTROL_MEASURE_OVERSAMPLE: i32 = 10
+
+fn form_control_label_width_px(st: Style, label: text) -> i32:
+    """Width, in whole px rounded UP, of one control label (`<option>` or
+    `<button>` text) at the control's real font size. `st` is the label text
+    node's style. Chrome sizes a control from the ceiling of its label's
+    fractional width."""
+    if label.len() == 0:
+        return 0
+    if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
+        # The style stage resolved no face for this run (font-less host, or a
+        # lane that lays out without vector fonts): keep the bitmap-cell
+        # estimate every other width in that lane uses, and do not reach for
+        # the font resolver from layout.
+        val glyph_w = style_char_w(st)
+        val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+        return (text_cell_width(label) as i32) * ink_w
+    var num = st.font_size
+    var den = 1
+    if st.font_size == FORM_CONTROL_UA_FONT_TRUNCATED_PX:
+        num = FORM_CONTROL_UA_FONT_NUM
+        den = FORM_CONTROL_UA_FONT_DEN
+    var over = FORM_CONTROL_MEASURE_OVERSAMPLE
+    if num * over > FORM_CONTROL_MEASURE_MAX_PX:
+        over = FORM_CONTROL_MEASURE_MAX_PX / num
+    if over < 1:
+        return st.resolved_font_width
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val metrics = resolve_font_metrics_with_language(family, label, num * over, "")
+    if not metrics.valid or metrics.width <= 0:
+        return st.resolved_font_width
+    val scale = den * over
+    (metrics.width + scale - 1) / scale
+
+fn form_control_text_children_label_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+    """Sum of the real-size label widths of `i`'s direct text children."""
+    var total = 0
+    var t = child_index.first_child[i]
+    while t >= 0:  # cpu-lane-loop-ok: one pass over one option/button's direct children; bound is that child list
+        if nodes[t].tag == "#text":
+            total = total + form_control_label_width_px(styles[t], nodes[t].text_trimmed)
+        t = child_index.next_sibling[t]
+    total
+
+fn form_control_button_label_correction_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, button_i: i32) -> i32:
+    """What a `<button>`'s shrink-to-fit width gains when its direct text is
+    measured at the real control font size instead of the truncated integer
+    size the run is painted at. Chrome 159: `Exercise controls` is 101.48 px at
+    13.3333 px, 99 at 13."""
+    var extra = 0
+    var t = child_index.first_child[button_i]
+    while t >= 0:  # cpu-lane-loop-ok: one pass over one button's direct children; bound is that child list
+        if nodes[t].tag == "#text" and styles[t].resolved_font_width > 0:
+            val real_w = form_control_label_width_px(styles[t], nodes[t].text_trimmed)
+            if real_w > styles[t].resolved_font_width:
+                extra = extra + real_w - styles[t].resolved_font_width
+        t = child_index.next_sibling[t]
+    extra
+
+fn form_control_first_text_child(nodes: [HNode], child_index: HtmlChildIndex, i: i32) -> i32:
+    var t = child_index.first_child[i]
+    while t >= 0:  # cpu-lane-loop-ok: one pass over one control's direct children; bound is that child list
+        if nodes[t].tag == "#text" and nodes[t].text_trimmed.len() > 0:
+            return t
+        t = child_index.next_sibling[t]
+    -1
+
+fn form_control_label_text_node(nodes: [HNode], child_index: HtmlChildIndex, i: i32) -> i32:
+    """The one text node a `<textarea>` or `<select>` shows inside its own box:
+    a textarea's value, or the label of a select's `selected` option (else its
+    first option). -1 when there is none. Every OTHER descendant stays without
+    a box -- a select's options live in a popup, not in flow."""
+    if nodes[i].tag == "textarea":
+        return form_control_first_text_child(nodes, child_index, i)
+    if nodes[i].tag != "select":
+        return -1
+    var first_option = -1
+    var c = child_index.first_child[i]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over a select's own option children; bound is that child list
+        if nodes[c].tag == "option":
+            if attr_present(nodes[c].attrs_raw, "selected"):
+                return form_control_first_text_child(nodes, child_index, c)
+            if first_option < 0:
+                first_option = c
+        c = child_index.next_sibling[c]
+    if first_option < 0:
+        return -1
+    form_control_first_text_child(nodes, child_index, first_option)
+
+fn replaced_default_is_content_size(tag: text) -> bool:
+    """True when the tag's UA default box is its CONTENT size.
+
+    The 300x150 fallback is an intrinsic (object) size, so the element's own
+    padding and border are added around it even under `box-sizing:border-box`
+    -- an auto axis has no specified size for border-box to apply to. Chrome
+    159: `<video style="border:2px solid;padding:3px">`, the same `<canvas>`
+    and the same `<svg>` are all 310x160. `<audio controls>` is the exception:
+    its 300x54 comes from the UA sheet's explicit `width`/`height`, and Chrome
+    159 keeps it 300x54 with that border and padding under border-box.
+    """
+    tag != "audio" and replaced_default_box_w(tag) > 0
+
+fn replaced_specified_box_h(st: Style) -> i32:
+    """BORDER-BOX height CSS gave a replaced element (the `height` attribute
+    arrives as CSS through `presentational_attr_decls`), or 0 when the height
+    is auto -- which includes a percentage the caller could not resolve."""
+    if st.height_px <= 0:
+        return 0
+    if st.border_box:
+        return st.height_px
+    st.height_px + st.pad_t + st.pad_b + st.border_t + st.border_b
+
+# Largest box size a viewBox ratio may derive. Chrome 159 stops at its
+# largest layout unit: `viewBox="0 0 1000000 0.001" height=100` is
+# 33554432x100. Unbounded, the product wrapped in `.to_i32()`.
+val SVG_RATIO_MAX_BOX_PX: i64 = 33554432
+
+fn svg_ratio_view_box_milli(attrs_raw: text) -> [i64]:
+    """`svg_view_box_milli` for SIZING, empty when Chrome 159 does not use the
+    ratio: a viewBox narrower than one unit whose height is more than 10^7
+    times its width (`viewBox="0 0 0.001 1000000" width=100` is 100x150 and
+    with no size 300x150, the plain defaults). A wide ratio is always used
+    (`0 0 1000000 0.001` saturates the width), and so is a tall one at least
+    one unit wide (`0 0 1 10000000000`)."""
+    val view_box = svg_view_box_milli(attrs_raw)
+    if view_box.len() != 4:
+        return []
+    if view_box[2] < 1000 and view_box[3] / 10000000 >= view_box[2]:
+        return []
+    view_box
+
+fn svg_ratio_scaled_px(len: i32, num: i64, den: i64) -> i32:
+    """`len * num / den` rounded, saturated at `SVG_RATIO_MAX_BOX_PX`; `num`
+    and `den` are the positive milli-units of `svg_view_box_milli`."""
+    if len <= 0:
+        return 0
+    var l = len.to_i64()
+    if l > SVG_RATIO_MAX_BOX_PX:
+        l = SVG_RATIO_MAX_BOX_PX
+    # Keep `l * n + d / 2` inside i64: reduce both terms together until
+    # n <= 2^37 (so l * n <= 2^62) and d <= 2^62 (so d / 2 <= 2^61).
+    var n = num
+    var d = den
+    while n > 137438953472 or d > 4611686018427387904:
+        n = n / 1024
+        d = d / 1024
+    if n <= 0:
+        return 0
+    if d <= 0:
+        return SVG_RATIO_MAX_BOX_PX.to_i32()
+    val scaled = (l * n + d / 2) / d
+    if scaled > SVG_RATIO_MAX_BOX_PX:
+        return SVG_RATIO_MAX_BOX_PX.to_i32()
+    scaled.to_i32()
+
+fn replaced_auto_box_w(node: HNode, st: Style, available_w: i32) -> i32:
+    """BORDER-BOX width of a replaced element whose CSS width is auto. Shared
+    by the final box and the inline pen prediction so they cannot disagree.
+
+    An `<svg>` with a valid viewBox has a ratio and no size (Chrome 159): a
+    specified height derives the width on the CONTENT box (`viewBox="0 0 24
+    24" style="height:1em"` is 16x16), and with the height auto too the width
+    is the available width (`viewBox="0 0 200 50"` in 900 px is 900x225).
+    Everything else: the `width` attribute, else the UA default, plus the
+    element's own horizontal padding and border when that default is a
+    content size.
+    """
+    val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+    if attr_w > 0 and not attr_value(node.attrs_raw, "width").trim().ends_with("%"):
+        return attr_w
+    val inset_x = st.pad_l + st.pad_r + st.border_l + st.border_r
+    if node.tag == "svg":
+        val view_box = svg_ratio_view_box_milli(node.attrs_raw)
+        if view_box.len() == 4:
+            val box_h = replaced_specified_box_h(st)
+            if box_h > 0:
+                var content_h = box_h - st.pad_t - st.pad_b - st.border_t - st.border_b
+                if content_h < 0:
+                    content_h = 0
+                return svg_ratio_scaled_px(content_h, view_box[2], view_box[3]) + inset_x
+            # Ratio only: fill the available width, even when a shrink-to-fit
+            # container resolved it to 0 (Chrome 159: 0x0 in an empty
+            # inline-block, button, float or abspos box).
+            if available_w > inset_x:
+                return available_w
+            return inset_x
+    val default_w = replaced_default_box_w(node.tag)
+    if replaced_default_is_content_size(node.tag):
+        return default_w + inset_x
+    default_w
+
+
+
+# Per-column advance and content-box intercept Chrome's UA uses to turn a text
+# control's `size`/`cols` attribute into an intrinsic CONTENT width. These are
+# NOT this engine's text metrics: `style_char_w` is the 6 px bitmap cell the
+# glyph rasteriser draws into, and using it here is what made every sized
+# control too narrow (measured: `<input size=20>` 138 px against Chrome's 163).
+#
+# A control's width is NOT `columns x text advance`. Chrome adds a fixed
+# font-derived intercept on top of the per-column term, so dividing a single
+# measured width by its `size` recovers neither number. Both were fitted
+# against Chrome 152 at the UA control font size (13.3333 px), on sizes
+# 1,2,3,4,5,6,10,20,40, on two independent pages (the catalog's forms-media,
+# whose author CSS adds 18 px of padding+border, and a bare page with the UA's
+# own 8 px) -- the CONTENT width agreed at 145 px on both, which is what makes
+# these content-box numbers rather than a fit to one page's padding:
+#
+#   <input size=N>     content = N * 7 + 5      exact on every size measured
+#   <textarea cols=N>  content = N * 8 + 17     exact at 10/20/30, 1 px at 40
+#
+# The two differ because Chrome gives them different UA fonts -- `input` is
+# proportional (Arial), `textarea` is monospace, whose '0' advance is 8.0253 --
+# and because a textarea reserves a ~15 px vertical scrollbar gutter, which is
+# the bulk of its larger intercept.
+#
+# Scaled by `glyph_scale` so a control at another font size stays consistent
+# with the rest of this engine's metrics; `glyph_scale` is 1 at the UA control
+# size, so the measured numbers above are reproduced exactly.
+val INPUT_COL_ADVANCE_PX: i32 = 7
+val INPUT_CONTENT_INTERCEPT_PX: i32 = 5
+val TEXTAREA_COL_ADVANCE_PX: i32 = 8
+val TEXTAREA_CONTENT_INTERCEPT_PX: i32 = 17
+
+# The numbers above are the Helvetica / Menlo ones. They are FACE metrics, not
+# browser constants: Chrome's rule (LayoutTextControl) is
+#
+#   <input size=N>     content = (N - 1) * round(avgCharWidth) + round(maxCharWidth)
+#   <textarea cols=N>  content = N * round(avgCharWidth) + scrollbar(15)
+#
+# with `avgCharWidth` the face's OS/2 xAvgCharWidth and `maxCharWidth` its
+# bounding-box width. On Linux Chrome's `Arial` is Liberation Sans
+# (xAvgCharWidth 1187/2048 em -> 7.73 px at 13.3333 -> 8; bbox 3780/2048 em ->
+# 24.6 -> 25), so `<input>` content is `8N + 17`; its `monospace` is DejaVu
+# Sans Mono (1233/2048 em -> 8.03 -> 8), so `<textarea>` content is `8N + 15`.
+# Chrome 159 fits both exactly on N = 1, 5, 10, 20, 40. This engine has no
+# OS/2 / head table reader, so the two faces are keyed by resolved identity.
+val INPUT_COL_ADVANCE_LIBERATION_SANS_PX: i32 = 8
+val INPUT_CONTENT_INTERCEPT_LIBERATION_SANS_PX: i32 = 17
+val TEXTAREA_COL_ADVANCE_DEJAVU_MONO_PX: i32 = 8
+val TEXTAREA_CONTENT_INTERCEPT_DEJAVU_MONO_PX: i32 = 15
+
+fn form_control_face_identity(st: Style) -> text:
+    """Resolved identity of the face a text control's own font selects."""
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val metrics = resolve_font_metrics_with_language(family, "0", st.font_size, "")
+    if metrics.valid: metrics.identity else: ""
+
+fn form_control_intrinsic_content_w(node: HNode, st: Style, cols: i32) -> i32:
+    """Content-box width Chrome's UA gives a text control from its `size` /
+    `cols` attribute: a per-column advance plus a fixed font-derived
+    intercept. `<textarea>` and `<input>` carry different UA fonts and a
+    different intercept, so they are separate arms rather than one formula."""
+    form_control_content_w_for_face(
+        node.tag, form_control_face_identity(st), cols, web_glyph_scale(st.font_size)
+    )
+
+fn form_control_content_w_for_face(tag: text, face_identity: text, cols: i32, scale: i32) -> i32:
+    """The face-keyed table behind `form_control_intrinsic_content_w`, split
+    out so it can be checked without loading a font. Liberation Sans and DejaVu
+    Sans Mono (Chrome's Linux control faces) take their own numbers; EVERY
+    other identity -- Helvetica, Menlo, an unresolved face -- keeps the
+    original `7N + 5` / `8N + 17`, so a macOS host is unchanged."""
+    if tag == "textarea":
+        if face_identity.contains("DejaVuSansMono"):
+            return cols * TEXTAREA_COL_ADVANCE_DEJAVU_MONO_PX * scale + TEXTAREA_CONTENT_INTERCEPT_DEJAVU_MONO_PX * scale
+        return cols * TEXTAREA_COL_ADVANCE_PX * scale + TEXTAREA_CONTENT_INTERCEPT_PX * scale
+    if face_identity.contains("LiberationSans"):
+        return cols * INPUT_COL_ADVANCE_LIBERATION_SANS_PX * scale + INPUT_CONTENT_INTERCEPT_LIBERATION_SANS_PX * scale
+    cols * INPUT_COL_ADVANCE_PX * scale + INPUT_CONTENT_INTERCEPT_PX * scale
+
+fn form_control_cols(node: HNode) -> i32:
+    """Visible character columns of a text control: `size` for <input>, `cols`
+    for <textarea>, else the HTML default of 20 for both."""
+    val attr_name = if node.tag == "textarea": "cols" else: "size"
+    val attr_cols = parse_int(attr_value(node.attrs_raw, attr_name))
+    if attr_cols > 0:
+        return attr_cols
+    20
+
+# Width an inline replaced box (img/svg/video/input/...) will take on its
+# line: its CSS width, else its `width` attribute, else the UA default box,
+# clamped by min/max-width. 0 for anything that is not an inline replaced box.
+fn inline_replaced_predicted_width(node: HNode, st: Style) -> i32:
+    if st.display != "inline" or not grid_item_is_replaced(node):
+        return 0
+    if st.width_px > 0:
+        return css_outer_width(node, st, st.width_px)
+    if st.width_px < 0:
+        return 0
+    val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+    if attr_w <= 0 and node.tag == "svg" and svg_ratio_view_box_milli(node.attrs_raw).len() == 4:
+        # An svg with a ratio and no width contributes its height-derived
+        # width, or nothing: `replaced_auto_box_w` with no available width.
+        return constrained_outer_width(node, st, replaced_auto_box_w(node, st, 0))
+    constrained_outer_width(
+        node, st, if attr_w > 0: attr_w else: replaced_default_box_w(node.tag)
+    )
+
+fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
+    if widths[i] >= 0:
+        return IntrinsicWidthResult(width: widths[i], widths: widths)
+    var out_widths = widths
+    var width = 0
+    # One collapsed space separates two inline items when the white space
+    # between them survives collapsing (`ab <img> ef`): it sits at neither
+    # line edge, so it has an advance. `gap_pending` remembers that the
+    # content so far ENDED in such a space; a run that STARTS with one after
+    # earlier content charges it directly. Chrome 159: `<legend>ab
+    # <code>cd</code> ef</legend>` is 63 px, and 54 without the two spaces.
+    var gap_pending = false
+    var c = child_index.first_child[i]
+    while c >= 0:
+        if nodes[c].tag == "#text":
+            val txt: text = nodes[c].text_trimmed
+            if txt.len() > 0:
+                if width > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not styles[c].white_space_nowrap:
+                    width = width + resolved_space_advance(styles[c], text_codepoints(txt))
+                gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not styles[c].white_space_nowrap
+                val resolved = styles[c].resolved_font_width
+                if resolved > 0:
+                    width = width + resolved
+                else:
+                    val glyph_w = style_char_w(styles[c])
+                    val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+                    # CELL width, not byte length: a CJK glyph is drawn double
+                    # width and is charged exactly two cells, and a combining
+                    # mark is charged none.
+                    width = width + (text_cell_width(txt) as i32) * ink_w
+        elif (
+            styles[c].display == "inline" or
+            styles[c].display == "inline-block"
+        ):
+            val child = intrinsic_text_width(nodes, styles, child_index, c, out_widths)
+            out_widths = child.widths
+            # An inline REPLACED child is as wide as its own box, which the
+            # text walk never sees (it has no text). Chrome 159:
+            # `<legend>ab <img width=40> ef</legend>` is 84 px; Simple
+            # measured 35 and wrapped the image onto its own line.
+            var child_w = child.width
+            # ... unless it is out of flow inside an inline box: a floated or
+            # absolutely positioned box never widens the span around it
+            # (Chrome 159: `<span>a<canvas style="position:absolute">
+            # </canvas>b</span>` is 17.8 px wide).
+            val out_of_flow_in_span = styles[i].display == "inline" and (
+                styles[c].float_mode != 0 or styles[c].position_absolute or
+                styles[c].position_fixed
+            )
+            val replaced_w = if out_of_flow_in_span: 0 else: inline_replaced_predicted_width(nodes[c], styles[c])
+            if replaced_w > child_w:
+                child_w = replaced_w
+            if child_w > 0:
+                if gap_pending and width > 0:
+                    width = width + style_space_advance(styles[i])
+                gap_pending = false
+            width = width + child_w
+        c = child_index.next_sibling[c]
+    if nodes[i].tag != "#text":
+        width = width + styles[i].pad_l + styles[i].pad_r + styles[i].border_l + styles[i].border_r
+    if nodes[i].tag == "button":
+        # The label is painted at the truncated 13 px control size but Chrome
+        # sizes the button from it at 13.3333 px.
+        width = width + form_control_button_label_correction_px(nodes, styles, child_index, i)
+    out_widths[i] = width
+    IntrinsicWidthResult(width: width, widths: out_widths)
+
+# True when the inline content of `i` starts (`leading`) or ends with a
+# collapsible space: the first / last text reached through its inline
+# descendants. A block, replaced or empty descendant ends the search.
+fn inline_subtree_edge_is_space(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, leading: bool) -> bool:
+    var c = child_index.first_child[i]
+    if not leading:
+        # Last child: walk the sibling list to its end.
+        var last = c
+        while last >= 0:
+            c = last
+            last = child_index.next_sibling[last]
+    if c < 0:
+        return false
+    if nodes[c].tag == "#text":
+        if styles[c].white_space_pre:
+            return false
+        return if leading: text_starts_with_collapsible_space(nodes[c].text_data) else: text_ends_with_collapsible_space(nodes[c].text_data)
+    if styles[c].display != "inline" or grid_item_is_replaced(nodes[c]):
+        return false
+    inline_subtree_edge_is_space(nodes, styles, child_index, c, leading)
+
+# Outer width of an `<input>` / `<textarea>` whose `width` is auto, as the
+# layout sizes it: `size` / `cols` columns in the control's UA font plus its
+# padding and border, clamped by min-width / max-width; 13 px for a checkbox
+# or radio. 0 for anything else.
+fn text_control_auto_outer_w(node: HNode, st: Style) -> i32:
+    if st.width_px != 0 or (node.tag != "input" and node.tag != "textarea"):
+        return 0
+    if node.tag == "input":
+        val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+        if input_type == "checkbox" or input_type == "radio":
+            return constrained_outer_width(node, st, 13)
+        if input_type == "hidden":
+            return 0
+    # min-width / max-width clamp it, as they clamp the laid-out control.
+    constrained_outer_width(node, st, form_control_intrinsic_content_w(node, st, form_control_cols(node)) + st.pad_l + st.pad_r + st.border_l + st.border_r)
+
+# Max-content width of a flex item, used as its flex base size when it has
+# neither `flex-basis` nor a `width` (CSS: `flex-basis: content`).
+#
+# `intrinsic_text_width` above cannot serve here: it descends only into inline
+# and inline-block children, so a block container such as `<ol>` measures as
+# nothing but its own padding. This walks EVERY in-flow child — inline children
+# accumulate along the current line, each block child starts a new one — and the
+# widest line wins, which is the max-content rule.
+fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+    var inline_run = 0
+    var widest = 0
+    # A collapsible space ended the previous inline piece: it is part of the
+    # line when another piece follows (`ab <span>cd</span> ef` is three pieces
+    # and two spaces), as in `intrinsic_text_width`.
+    var gap_pending = false
+    var c = child_index.first_child[i]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over this item's children during flex base sizing, bounded by the child list, not on any paint path
+        val cst = styles[c]
+        val ctag = nodes[c].tag
+        val kept_breaks = html_kept_newlines(nodes[c], cst.white_space_newline)
+        if ctag == "#text" and kept_breaks == 0:
+            val txt: text = nodes[c].text_trimmed
+            if txt.len() > 0:
+                if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_pre:
+                    inline_run = inline_run + resolved_space_advance(cst, text_codepoints(txt))
+                gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not cst.white_space_pre
+                val resolved = cst.resolved_font_width
+                if resolved > 0:
+                    inline_run = inline_run + resolved
+                else:
+                    val glyph_w = style_char_w(cst)
+                    val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+                    inline_run = inline_run + (text_cell_width(txt) as i32) * ink_w
+            elif nodes[c].text_data.byte_len() > 0 and not cst.white_space_pre and inline_run > 0:
+                # A whitespace-only text node between two inline boxes
+                # (`<a>Edit</a> <a>Del</a>`) is one collapsible space.
+                gap_pending = true
+        elif (ctag == "br" or kept_breaks > 0) and cst.display == "inline":
+            # A forced break ends the line being measured.
+            if inline_run > widest:
+                widest = inline_run
+            inline_run = 0
+            gap_pending = false
+        elif cst.display != "none" and cst.display != "marker":
+            var child_w = if cst.width_px > 0:
+                cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+            else:
+                flex_item_max_content_width(nodes, styles, child_index, c)
+            # A replaced inline child (img, input, ...) has an intrinsic or
+            # default width the text walk above knows nothing about.
+            val replaced_w = inline_replaced_predicted_width(nodes[c], cst)
+            if replaced_w > child_w:
+                child_w = replaced_w
+            # A text control with no `width` is as wide as its `size` / `cols`
+            # columns in its own UA font (the layout's own rule).
+            val control_w = text_control_auto_outer_w(nodes[c], cst)
+            if control_w > child_w:
+                child_w = control_w
+            # Atomic inline boxes carry their horizontal margins on the line
+            # (the run loop's `inline_takes_margin`): a checkbox's 3 + 4 px.
+            if child_w > 0 and (cst.display == "inline-block" or ctag == "input" or ctag == "select" or ctag == "textarea"):
+                if cst.margin_l > 0:
+                    child_w = child_w + cst.margin_l
+                if cst.margin_r > 0:
+                    child_w = child_w + cst.margin_r
+            if cst.display == "inline" or cst.display == "inline-block":
+                if child_w > 0:
+                    # A space may also sit INSIDE the neighbour: `<span>ab
+                    # </span>cd` ends with one, `ab<span> cd</span>` starts
+                    # with one. Either way it is one space on this line. An
+                    # atomic box (inline-block, button, replaced) is not:
+                    # `ab<button> cd </button>ef` collapses those spaces INSIDE
+                    # the button, so they add nothing to this line.
+                    val edge_open = cst.display == "inline" and not grid_item_is_replaced(nodes[c])
+                    if inline_run > 0 and (gap_pending or (edge_open and inline_subtree_edge_is_space(nodes, styles, child_index, c, true))):
+                        inline_run = inline_run + style_space_advance(styles[i])
+                    gap_pending = edge_open and inline_subtree_edge_is_space(nodes, styles, child_index, c, false)
+                inline_run = inline_run + child_w
+            else:
+                if inline_run > widest:
+                    widest = inline_run
+                inline_run = 0
+                gap_pending = false
+                if child_w > widest:
+                    widest = child_w
+        c = child_index.next_sibling[c]
+    if inline_run > widest:
+        widest = inline_run
+    if nodes[i].tag == "button":
+        # Same real-size label rule as `intrinsic_text_width`, for a button
+        # that is a flex / grid / table-cell item.
+        widest = widest + form_control_button_label_correction_px(nodes, styles, child_index, i)
+    widest + styles[i].pad_l + styles[i].pad_r + styles[i].border_l + styles[i].border_r
+
+# Min-content width of one text run: its longest unbreakable word. Character
+# counting rather than `text_cell_width` is deliberate and approximate — a word
+# is measured in glyph cells, which is the same unit the max-content walk uses
+# for its per-character advance, so the two stay on one scale.
+fn _table_text_min_content_width(txt: text, cst: Style) -> i32:
+    val glyph_w = style_char_w(cst)
+    val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+    var longest = 0
+    var cur = 0
+    # `txt.len()` is a BYTE count and `char_at` is CODEPOINT-indexed, so the
+    # old single cursor read past the end of a non-ASCII cell and counted each
+    # multi-byte character several times, over-sizing the column. `cur` counts
+    # CHARACTERS (it is multiplied by a per-glyph width below), so step by
+    # codepoint and test the word break on the BYTE.
+    val tb = txt.bytes()
+    val nb = txt.byte_len()
+    var i = 0
+    while i < nb:  # cpu-lane-loop-ok: one pass over a cell's text during table column sizing, not on any paint path
+        val b = tb[i]
+        if b == 32 or b == 9 or b == 10:
+            cur = 0
+        else:
+            cur = cur + 1
+            if cur > longest:
+                longest = cur
+        i = next_codepoint_start(txt, i)
+    longest * ink_w
+
+# Flex base size for ONE item of a wrapping row. Items that state a basis, a
+# width, a percentage width (`width_px < 0`) or a non-zero `flex-grow` keep the
+# width the caller computed; only an item that states nothing at all is sized to
+# its max-content width, capped at the container's inner width.
+#
+# Without this, such an item was given `iw` — the whole container — so every
+# auto-width item wrapped onto a line of its own. The NON-wrapping branch of the
+# same layout already measured its items; only the wrap branch did not. See
+# doc/08_tracking/bug/web_flex_wrap_auto_width_item_fills_line_2026-09-12.md.
+fn _lay_flex_wrap_auto_base_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
+    if cst.flex_basis_px > 0 or cst.width_px != 0 or cst.flex_grow != 0:
+        return caller_base_w
+    val max_content = flex_item_max_content_width(nodes, styles, child_index, item)
+    if max_content <= 0 or max_content >= iw:
+        return caller_base_w
+    max_content
+
+# Advance width of a WHOLE text run, in the face the metrics were measured with.
+#
+# `resolved_font_advances` carries one advance per CODEPOINT; `txt_len` and
+# every wrap offset in this renderer are BYTE indices. On any non-ASCII run the
+# two disagree, so the old per-codepoint range helper bailed out and the flat
+# per-character estimate was compared against a `node_w` that had already been
+# sized from the REAL measured width. A one-glyph em dash therefore "overflowed"
+# its own box and wrapped to one line per BYTE: measured h=72 (3 lines) for
+# `<div>&mdash;</div>` where Chrome reports 24, and the same for any run
+# containing a single accented letter. That inflated every catalog `<li>` whose
+# text carries an `&mdash;`.
+fn _lay_style_measured_run_advance_inner(txt: text, txt_len: i32, st: Style) -> i32:
+    if st.resolved_font_width > 0 and st.resolved_font_advances.len() == text_codepoints(txt).len():
+        return st.resolved_font_width
+    style_text_line_advance_width(txt, 0, txt_len, st, style_text_advance(st), style_space_advance(st))
+
+fn codepoint_is_space(ch: i64) -> bool:
+    ch == 32 or ch == 9 or ch == 10 or ch == 13
+
+# True when normal white-space processing would collapse a leading run of
+# white space in this raw text node. BYTE-indexed on purpose: every ASCII
+# white-space byte is its own codepoint, and no UTF-8 continuation byte can
+# equal one, so reading the first byte is exact and needs no decode.
+# reason: moved verbatim from simple_web_html_layout_renderer_layout_foundation.spl by the parser-input split; signature unchanged
+# @allow(primitive_api)
+pub fn text_starts_with_collapsible_space(raw: text) -> bool:
+    if raw.len() == 0:
+        return false
+    val b = raw.bytes()[0]
+    b == 32 or b == 9 or b == 10 or b == 13
+
+# The trailing-edge twin of `text_starts_with_collapsible_space`.
+# reason: moved verbatim from simple_web_html_layout_renderer_layout_foundation.spl by the parser-input split; signature unchanged
+# @allow(primitive_api)
+pub fn text_ends_with_collapsible_space(raw: text) -> bool:
+    val tb = raw.bytes()
+    val n = tb.len()
+    if n == 0:
+        return false
+    val b = tb[n - 1]
+    b == 32 or b == 9 or b == 10 or b == 13
+
+# Advance of ONE space in the face the resolved metrics were measured with.
+# Prefer a real space advance out of the measured array; only when the measured
+# string carries no space at all does the flat estimate stand in.
+fn resolved_space_advance(st: Style, measured_cps: [i64]) -> i32:
+    var i = 0
+    val n = measured_cps.len()
+    while i < n:
+        # The table is in VISUAL order (reversed under direction:rtl, see the
+        # metric-text resolve in ..._core.spl); `measured_cps` is logical.
+        val ai = if st.direction_rtl: n - 1 - i else: i
+        if measured_cps[i] == 32 and ai >= 0 and ai < st.resolved_font_advances.len():
+            return st.resolved_font_advances[ai]
+        i = i + 1
+    # No space inside the measured run (`<b>ab</b> <b>`, ` l`): the face's
+    # own space (Chrome 159: 4.4453 px at Liberation Sans 16), not the flat
+    # half-cell fallback, which is 5.
+    if st.resolved_space_milli > 0:
+        return ((st.resolved_space_milli + 500) / 1000) as i32
+    style_space_advance(st)
+
+fn _lay_inline_text_advance_width_inner(node: HNode, st: Style) -> i32:
+    if node.tag != "#text":
+        return 0
+    val raw = node.text_data
+    # `lay_cps` (round 13): this decode runs on EVERY call, including the ones
+    # that then return `st.resolved_font_width` in O(1) from the arity check
+    # below -- so if the inline bucket is dominated by it, the repeat is the
+    # decode, not the measurement. Timed to decide that from data rather than
+    # from code reading; default-off like every counter here.
+    val _cps_t0 = if _wsc_on: _wsc_now_us() else: 0
+    val cps = text_codepoints(raw)
+    if _wsc_on:
+        _wlay_add(9, _wsc_now_us() - _cps_t0, 1)
+    # `resolved_font_advances` carries ONE advance per codepoint (see
+    # font_renderer.measure_text_advances), so the arity check is against the
+    # codepoint count. Comparing it against `raw.len()` matched only by
+    # accident on ASCII and matched a byte-per-byte advance array on non-ASCII.
+    if st.resolved_font_width > 0 and st.resolved_font_advances.len() == cps.len():
+        return st.resolved_font_width
+    # The metrics were measured over the TRIMMED text unless white-space:nowrap
+    # (see the `metric_text` binding in ..._core.spl's style stage), so on any
+    # run with leading/trailing whitespace — which is most prose, e.g.
+    # `<p>Paragraph with <strong>` — the arity check above could never match and
+    # the whole real-metrics path was dead. It fell back to the flat
+    # `text_advance` below, which over-measured plain 16 px text by ~25 %
+    # (Chrome 112 px for "Paragraph with ", Simple ~140 px) and, because the
+    # over-wide runs wrap sooner, also inflated wrapped-block heights.
+    # Charge the trimmed-off edge whitespace separately: CSS collapses a run of
+    # white space to a single space, so at most one space per edge.
+    val trimmed = node.text_trimmed
+    if st.resolved_font_width > 0 and trimmed.len() > 0:
+        val trimmed_cps = text_codepoints(trimmed)
+        if st.resolved_font_advances.len() == trimmed_cps.len():
+            var edges = 0
+            if cps.len() > 0 and codepoint_is_space(cps[0]):
+                edges = edges + 1
+            if cps.len() > 1 and codepoint_is_space(cps[cps.len() - 1]):
+                edges = edges + 1
+            # Round the exact run plus its exact edge spaces once: `, ` is
+            # 4.4453 + 4.4453 = 8.89 -> 9 in Chrome 159, not 4 + 4.
+            if edges > 0 and st.resolved_font_width_milli >= 0 and st.resolved_space_milli > 0:
+                return ((st.resolved_font_width_milli + (edges as i64) * st.resolved_space_milli + 500) / 1000) as i32
+            return st.resolved_font_width + edges * resolved_space_advance(st, trimmed_cps)
+    if raw == " " and node.text_trimmed == "":
+        # The inline loop already charges this space as the next run's lead
+        # space (mid-line) or drops it (line start); with the face known the
+        # node adds nothing more (Chrome 159: one 4.4453 px space in total).
+        if st.resolved_space_milli > 0:
+            return 0
+        var whitespace_advance = style_space_advance(st) / 3
+        if whitespace_advance < 1:
+            whitespace_advance = 1
+        return whitespace_advance
+    var width = 0
+    var i = 0
+    val n = cps.len()
+    val advance = style_text_advance(st)
+    val space_advance = style_space_advance(st)
+    while i < n:
+        val ch = cps[i]
+        if ch == 32:
+            width = width + space_advance
+        elif ch == 9 or ch == 10 or ch == 13:
+            if node.text_trimmed != "":
+                width = width + space_advance
+        else:
+            width = width + (codepoint_cells(ch) as i32) * advance
+        i = i + 1
+    width
+
+fn text_ink_y_offset(fs: i32) -> i32:
+    val scale = web_glyph_scale(fs)
+    if scale > 1:
+        return scale + 1
+    1
+
+fn text_ink_x_offset(fs: i32) -> i32:
+    1
+
+# `off` and the returned offset are BYTE indices, but `cpl` is a CHARACTER
+# budget (cells per line). Adding the two — and then probing with the
+# CODEPOINT-indexed `char_code_at` — meant a non-ASCII run both got a short
+# line (each multi-byte codepoint spent 2-3 of its character budget) and broke
+# at the wrong place. Spend the budget one CODEPOINT at a time, and test for a
+# space on the BYTE, which is exact: no continuation byte can equal 32.
+# reason: moved verbatim from simple_web_html_layout_renderer_layout_foundation.spl by the parser-input split; signature unchanged
+# @allow(primitive_api)
+pub fn web_wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
+    val n = txt.byte_len()
+    val tb = txt.bytes()
+    var last_space = -1
+    var i = off
+    var taken = 0
+    while i < n and taken < cpl:
+        if tb[i] == 32:
+            last_space = i
+        i = next_codepoint_start(txt, i)
+        taken = taken + 1
+    if i >= n:
+        return n
+    if last_space > off:
+        return last_space
+    i
+
+# `skip_wrap_spaces` now lives in ..._foundation.spl (reached here through the
+# export chain). It was defined HERE but also called from ..._style.spl, which
+# sits BELOW this module in the import order and therefore cannot see it. The
+# interpreter's flat function registry resolved that anyway; HIR lowering did
+# not, so the whole renderer module failed JIT compilation with
+# "Unknown variable: skip_wrap_spaces while lowering parse_font_shorthand_family"
+# and silently ran interpreted (~1000x slower).
+
+# `start`/`endv` are BYTE offsets; `char_code_at` is CODEPOINT-indexed. Read
+# with one cursor this charged one flat advance per BYTE, so a 3-byte em dash
+# cost three glyph widths, and it read the wrong character to decide "is this a
+# space". Walk the bytes and charge once per CODEPOINT — i.e. on a lead byte,
+# never on a UTF-8 continuation byte (128..191).
+# reason: moved verbatim from simple_web_html_layout_renderer_layout_foundation.spl by the parser-input split; signature unchanged
+# @allow(primitive_api)
+pub fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+    val tb = txt.bytes()
+    var width = 0
+    var i = start
+    while i < endv:
+        if tb[i] < 128 or tb[i] >= 192:
+            width = width + if tb[i] == 32: space_advance else: advance
+        i = i + 1
+    width
+
+fn style_text_line_advance_width(txt: text, start: i32, endv: i32, st: Style, advance: i32, space_advance: i32) -> i32:
+    style_text_line_advance_width_with(
+        style_run_byte_advances(st, txt), txt, start, endv, advance, space_advance
+    )
+
+# A #text run whose color is fully transparent (alpha 0, e.g.
+# `color: transparent`, the classic "text hidden behind a sprite" pattern)
+# paints nothing (gap L, 2026-10-05). The glyph painters ignore color alpha, so
+# both paint lanes skip the run here instead. A run with a text-shadow still
+# paints as before (CSS draws the shadow of transparent text; not modelled).
+fn html_text_paint_fully_transparent(nd: HNode, st: Style) -> bool:
+    nd.tag == "#text" and (st.fg >> 24) == 0u32 and st.text_shadow_color == 0u32
+
+fn text_line_aligned_x(base_x: i32, line_box_w: i32, line_w: i32, st: Style, line_i: i32, line_count: i32) -> i32:
+    var align = st.text_align
+    if line_i == line_count - 1 and st.text_align_last != "auto":
+        align = st.text_align_last
+    if align == "start":
+        align = if st.direction_rtl: "right" else: "left"
+    elif align == "end":
+        align = if st.direction_rtl: "left" else: "right"
+    if align == "center":
+        return base_x + (line_box_w - line_w) / 2
+    if align == "right":
+        return base_x + line_box_w - line_w
+    base_x
+
+fn text_line_needs_paint_width(st: Style, line_i: i32, line_count: i32) -> bool:
+    if st.text_decoration_underline:
+        return true
+    var align = st.text_align
+    if line_i == line_count - 1 and st.text_align_last != "auto":
+        align = st.text_align_last
+    if align == "center" or align == "right":
+        return true
+    if align == "start":
+        return st.direction_rtl
+    if align == "end":
+        return not st.direction_rtl
+    false
+
+fn _lay_ellipsize_text_for_width_inner(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
+    if max_width <= 0:
+        return ""
+    val full_width = style_text_line_advance_width(txt, start, endv, st, advance, space_advance)
+    if full_width <= max_width:
+        return txt.substring(start, endv)
+    val ellipsis = "..."
+    val ellipsis_w = text_line_advance_width(ellipsis, 0, ellipsis.byte_len(), advance, space_advance)
+    if max_width <= ellipsis_w:
+        return ellipsis
+    val content_limit = max_width - ellipsis_w
+    # `start`/`endv` are BYTE offsets (they are cut on with `substring` just
+    # above), so every step of this loop must be byte-indexed too. It used to
+    # mix three index spaces at once: `resolved_text_range_width(st, i, i+1)`
+    # indexed the per-CODEPOINT advance array with a byte offset, and
+    # `char_code_at(i)` / `char_at(i)` are CODEPOINT-indexed in this text API.
+    # On any run past its first non-ASCII codepoint all three disagreed, so an
+    # ellipsized run was measured with one character's advance and built from a
+    # different character. `style_run_byte_advances` is the per-BYTE table that
+    # answers this exactly (the codepoint's advance on its lead byte, 0 on every
+    # continuation byte), which also makes a cut inside a codepoint impossible.
+    val by = style_run_byte_advances(st, txt)
+    val txt_blen = txt.byte_len()
+    val use_by = by.len() == txt_blen
+    val tb = txt.bytes()
+    var out = ""
+    var used = 0
+    var i = start
+    while i < endv:
+        val nexti = next_codepoint_start(txt, i)
+        val char_w = if use_by: by[i] elif tb[i] == 32: space_advance else: advance
+        if used + char_w > content_limit:
+            break
+        out = out + txt.substring(i, nexti)
+        used = used + char_w
+        i = nexti
+    out + ellipsis
+
+fn text_first_line_dx_at(table: [i32], i: i32) -> i32:
+    if i < 0 or i >= table.len():
+        return 0
+    table[i]
+
+# THE decode for where a wrapped line starts and how wide its line box is.
+# Every reader of `first_line_dx` / `line_boxes` -- both raster loops, the
+# Draw IR commands, the geometry probe and the CPU layout execution port --
+# goes through these two functions.
+fn text_line_box_dx(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32) -> i32:
+    if i >= 0 and i < line_boxes.len() and line_boxes[i].len() > 0:
+        val pairs = line_boxes[i]
+        if line >= 0 and line * 2 + 1 < pairs.len():
+            return pairs[line * 2]
+        return 0
+    if line == 0: text_first_line_dx_at(first_dx, i) else: 0
+
+fn text_line_box_w(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32, box_w: i32) -> i32:
+    if i >= 0 and i < line_boxes.len() and line_boxes[i].len() > 0:
+        val pairs = line_boxes[i]
+        if line >= 0 and line * 2 + 1 < pairs.len():
+            return pairs[line * 2 + 1]
+        return box_w
+    box_w - text_line_box_dx(first_dx, line_boxes, i, line)
+
+# A run whose lines start at the line box's left edge: the only alignment for
+# which the mid-line first-line inset is modelled. Centred / right-aligned /
+# justified and RTL runs keep their existing placement.
+fn text_run_aligns_line_left(st: Style) -> bool:
+    if st.direction_rtl:
+        return false
+    if st.text_align == "center" or st.text_align == "right" or st.text_align == "end" or st.text_align == "justify":
+        return false
+    if st.text_align_last == "center" or st.text_align_last == "right" or st.text_align_last == "end" or st.text_align_last == "justify":
+        return false
+    true
+
+# Advance of the LAST wrapped line of a run -- where the pen sits for the
+# inline sibling that follows the run on that line.
+fn text_last_line_advance(txt: text, st: Style, starts: [i32], ends: [i32]) -> i32:
+    val n = starts.len()
+    if n == 0:
+        return 0
+    style_text_line_advance_width_with(
+        style_run_byte_advances(st, txt), txt, starts[n - 1], ends[n - 1],
+        style_text_advance(st), style_space_advance(st)
+    )
+
+# Wrap a run into per-line boxes: line `k` is as wide as `line_boxes[2k+1]`
+# (a line floats shorten), lines past the list as wide as `full_w`. A
+# shortened line that cannot take the next word stays EMPTY -- the word moves
+# down to the first line that fits it (CSS 2.2 9.5: a line box that does not
+# fit beside the floats is shifted downward). Font-advance path with a
+# cell-width fallback, like compute_style_wrap_ranges.
+fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, line_boxes: [i32], st: Style) -> LineWrapRanges:
+    val n = txt.byte_len()
+    if n == 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    val by = style_run_byte_advances(st, txt)
+    val tb = txt.bytes()
+    val use_font = st.resolved_font_identity != "" and by.len() == n and full_w > 0
+    val cw = style_char_w(st)
+    val shortened_lines = (line_boxes.len() as i32) / 2
+    val may_break_in_word = st.overflow_wrap == "break-word" or st.overflow_wrap == "anywhere" or st.word_break == "break-all"
+    var starts: [i32] = []
+    var ends: [i32] = []
+    var start = 0
+    var line = 0
+    while start < n:
+        val shortened = line < shortened_lines and line_boxes[line * 2 + 1] < full_w
+        val max_width = if line < shortened_lines: line_boxes[line * 2 + 1] else: full_w
+        var endv = start
+        if use_font:
+            if shortened and not may_break_in_word:
+                # Width of the word that would open this line.
+                var word_w = 0
+                var word_i = start
+                while word_i < n and tb[word_i] != 32:
+                    word_w = word_w + by[word_i]
+                    word_i = word_i + 1
+                if word_w > max_width:
+                    starts.push(start)
+                    ends.push(start)
+                    line = line + 1
+                    continue
+            var used = 0
+            var last_space = -1
+            while endv < n and used + by[endv] <= max_width:
+                used = used + by[endv]
+                if tb[endv] == 32:
+                    last_space = endv
+                endv = endv + 1
+            # As in the normal wrap: break at the last space that fits; with
+            # no break opportunity on the line the whole word is taken and
+            # OVERFLOWS (overflow-wrap: normal), it is not chopped.
+            if endv < n and last_space > start:
+                endv = last_space
+            elif not may_break_in_word and endv < n:
+                endv = word_end_byte(tb, start, n)
+            if endv == start:
+                endv = next_codepoint_start(txt, start)
+        else:
+            var cpl = max_width / cw
+            if cpl < 1:
+                if shortened:
+                    starts.push(start)
+                    ends.push(start)
+                    line = line + 1
+                    continue
+                cpl = 1
+            endv = web_wrap_line_end(txt, start, cpl)
+            if endv <= start:
+                endv = start + 1
+        starts.push(start)
+        ends.push(endv)
+        start = skip_wrap_spaces(txt, endv)
+        line = line + 1
+    if starts.len() == 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    LineWrapRanges(starts: starts, ends: ends)
+
+fn _lay_compute_wrap_ranges_inner(txt: text, cpl: i32) -> LineWrapRanges:
+    val txt_len = txt.byte_len()
+    if txt_len == 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    var line_count = 0
+    var count_off = 0
+    while count_off < txt_len:
+        val endc = web_wrap_line_end(txt, count_off, cpl)
+        line_count = line_count + 1
+        count_off = skip_wrap_spaces(txt, endc)
+    if line_count <= 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    var starts: [i32] = [0; line_count]
+    var ends: [i32] = [0; line_count]
+    var off = 0
+    var line = 0
+    while off < txt_len:
+        val endc = web_wrap_line_end(txt, off, cpl)
+        starts[line] = off
+        ends[line] = endc
+        off = skip_wrap_spaces(txt, endc)
+        line = line + 1
+    LineWrapRanges(starts: starts, ends: ends)
+
+# `resolved_font_advances` carries ONE advance per CODEPOINT, while every wrap
+# offset in this renderer is a BYTE index. Comparing its length against
+# `txt.len()` (bytes) therefore matched only on pure-ASCII runs: a single em
+# dash, accented letter or `×` made the arity check fail and dropped the whole
+# wrap onto `compute_wrap_ranges`, the flat cells-per-line estimate
+# (`style_char_w` = 12 px at 16 px against a real ~7.8 px average). The
+# estimate is wide, so such a run wrapped one line too early and every
+# following box inherited the 24 px step — measured as the accumulating
+# vertical drift on `css-layout`/`css-paint`/`html`, all of whose catalog
+# `<li>`s carry an `&mdash;`.
+#
+# `style_run_byte_advances` is the table that already answers this correctly:
+# one advance per BYTE, carrying the codepoint's measured advance on its lead
+# byte and 0 on every UTF-8 continuation byte. Indexing it with the byte
+# offsets this loop already uses is exact, and a break can never land inside a
+# codepoint — a continuation byte adds 0 and therefore always fits.
+fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    _lay_compute_style_wrap_ranges_first_inner(txt, max_width, max_width, st, fallback_cpl)
+
+# `first_width` is the width available to line 0 -- the remainder of a line
+# box the run shares with the inline siblings before it. Every later line gets
+# `max_width`, the whole line box (Chrome: `<li><code>x</code> long text</li>`
+# continues at the li's content-left, not under the text's own start).
+# The caller must have checked that the run has a per-byte advance table
+# (`style_run_byte_advances`); without one this degrades to the uniform wrap.
+fn compute_style_wrap_ranges_first_line(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    _lay_compute_style_wrap_ranges_first_inner(txt, first_width, max_width, st, fallback_cpl)
+
+fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    # Cheap gates first: building `by` decodes the whole run, so it must not run
+    # for a style that cannot use it anyway.
+    if st.resolved_font_identity == "" or max_width <= 0:
+        return compute_wrap_ranges(txt, fallback_cpl)
+    val by = style_run_byte_advances(st, txt)
+    val txt_bytes = txt.byte_len()
+    if by.len() != txt_bytes:
+        return compute_wrap_ranges(txt, fallback_cpl)
+    var starts: [i32] = []
+    var ends: [i32] = []
+    var start = 0
+    val n = txt.byte_len()
+    # BYTE-indexed space test. `char_code_at` is CODEPOINT-indexed in this text
+    # API while `endv` is a byte offset (it is cut on with `substring`), so on
+    # any run past its first non-ASCII codepoint the two disagree and the break
+    # landed some bytes away from the space it meant to break at.
+    val tb = txt.bytes()
+    while start < n:
+        var endv = start
+        var used = 0
+        var last_space = -1
+        val line_width = if start == 0: first_width else: max_width
+        while endv < n and used + by[endv] <= line_width:
+            used = used + by[endv]
+            if tb[endv] == 32:
+                last_space = endv
+            endv = endv + 1
+        # CSS Text 3 `overflow-wrap: normal` (the initial value) forbids a break
+        # INSIDE a word: a word wider than the line OVERFLOWS it, it is not
+        # chopped. Measured against Chrome on an 80 px box:
+        # `LongWordBreakHere` is ONE line that overflows, and
+        # `LongWord<wbr>BreakHere` is exactly two. Before this arm the loop cut
+        # at whatever byte stopped fitting, and — when the run started
+        # mid-line, so `max_width` was a small pen remainder — at `endv ==
+        # start` it emitted a single CODEPOINT per line: 9 lines for
+        # "BreakHere" against Chrome's 1. Intra-word breaking stays available
+        # where CSS actually asks for it (`overflow-wrap: break-word` /
+        # `anywhere`, `word-break: break-all`), which is why this is a
+        # condition and not a deletion.
+        val may_break_in_word = st.overflow_wrap == "break-word" or st.overflow_wrap == "anywhere" or st.word_break == "break-all"
+        if endv < n and last_space > start:
+            endv = last_space
+        elif not may_break_in_word and endv < n:
+            # No break opportunity inside this line: take the whole word, even
+            # though it overflows, and break at the space that ends it.
+            endv = word_end_byte(tb, start, n)
+        if endv == start:
+            # Progress guard: `start` is a space whose own advance already
+            # exceeds `max_width` (a pen remainder of a pixel or two), so the
+            # word arm above has nothing to take. Emit one codepoint so the
+            # outer loop always advances; without it the line list would grow
+            # forever on a 1 px box.
+            endv = next_codepoint_start(txt, start)
+        starts.push(start)
+        ends.push(endv)
+        start = skip_wrap_spaces(txt, endv)
+    LineWrapRanges(starts: starts, ends: ends)
+
+# Advance of the FIRST unbreakable piece of a text run: everything up to the
+# first collapsible space, or the whole run when it has none. Used by the
+# `<wbr>` soft-break arm in the block loop, which may take a break opportunity
+# only when the piece that FOLLOWS it does not fit the line remainder. Using
+# the whole run's advance there instead would break at a `<wbr>` whose next
+# word still fits and only a later word does not — measured against Chrome,
+# `Long<wbr>Word<wbr>BreakHere` in an 80 px box is TWO lines, not three,
+# because Chrome is greedy and uses only the last opportunity that is needed.
+fn first_word_advance_width(node: HNode, st: Style) -> i32:
+    if node.tag != "#text":
+        return 0
+    val txt = node.text_trimmed
+    val n = txt.byte_len()
+    if n == 0:
+        return 0
+    val by = style_run_byte_advances(st, txt)
+    if by.len() != n:
+        # No per-byte table for this style: fall back to the whole-run advance
+        # rather than guessing. That is wider, so it can only make the arm more
+        # conservative about breaking, never less.
+        return inline_text_advance_width(node, st)
+    val tb = txt.bytes()
+    val stop = word_end_byte(tb, 0, n)
+    var w = 0
+    var k = 0
+    while k < stop:  # cpu-lane-loop-ok: scans one word of one text run, bounded by that run's byte length
+        w = w + by[k]
+        k = k + 1
+    w
+
+# Byte offset one past the last byte of the word that starts at `start`, i.e.
+# the next ASCII space at or after `start`, or `n` when the run has none. Used
+# by the `overflow-wrap: normal` arm above, where a word that does not fit the
+# line must overflow it whole rather than be cut.
+fn word_end_byte(tb: [u8], start: i32, n: i32) -> i32:
+    var k = start
+    while k < n:  # cpu-lane-loop-ok: scans one word of one text run, bounded by that run's byte length
+        if tb[k] == 32:
+            return k
+        k = k + 1
+    n
+
+fn css_outer_width(node: HNode, st: Style, css_width: i32) -> i32:
+    val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
+    if legacy_widget_box or st.border_box:
+        return css_width
+    css_width + st.pad_l + st.pad_r + st.border_l + st.border_r
+
+fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
+    # CSS 2.1 10.4: max-width first, then min-width, so min wins a conflict.
+    var out = candidate_width
+    if st.max_width_px > 0:
+        val max_outer = css_outer_width(node, st, st.max_width_px)
+        if out > max_outer:
+            out = max_outer
+    if st.min_width_px > 0:
+        val min_outer = css_outer_width(node, st, st.min_width_px)
+        if out < min_outer:
+            out = min_outer
+    if out < 1:
+        # `width:0` (no padding/border) is a definite 0-wide box.
+        out = if st.width_zero and out == 0: 0 else: 1
+    out
+
+# The block cursor is the ROUNDED y (cy, what boxes store) plus a residual
+# `frac` in [-500, 500) milli-px, so true y = cy*1000 + frac. Advancing by a
+# milli margin moves cy by the rounded whole pixels and keeps the remainder.
+fn cursor_advance_px(frac: i32, milli: i32) -> i32:
+    val s = frac + milli + 500
+    if s >= 0:
+        return s / 1000
+    0 - ((0 - s + 999) / 1000)
+
+fn cursor_advance_frac(frac: i32, milli: i32) -> i32:
+    frac + milli - cursor_advance_px(frac, milli) * 1000
+
+fn style_run_byte_advances(st: Style, s: text) -> [i32]:
+    if not _wsc_on:
+        return _lay_style_run_byte_advances_inner(st, s)
+    val t0 = _wsc_now_us()
+    val out = _lay_style_run_byte_advances_inner(st, s)
+    _wlay_add(0, _wsc_now_us() - t0, 1)
+    out
+
+fn style_measured_run_advance(txt: text, txt_len: i32, st: Style) -> i32:
+    if not _wsc_on:
+        return _lay_style_measured_run_advance_inner(txt, txt_len, st)
+    val t0 = _wsc_now_us()
+    val out = _lay_style_measured_run_advance_inner(txt, txt_len, st)
+    _wlay_add(0, _wsc_now_us() - t0, 1)
+    out
+
+fn inline_text_advance_width(node: HNode, st: Style) -> i32:
+    if not _wsc_on:
+        return _lay_inline_text_advance_width_inner(node, st)
+    val t0 = _wsc_now_us()
+    val out = _lay_inline_text_advance_width_inner(node, st)
+    _wlay_add(1, _wsc_now_us() - t0, 1)
+    out
+
+fn compute_style_wrap_ranges(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    if not _wsc_on:
+        return _lay_compute_style_wrap_ranges_inner(txt, max_width, st, fallback_cpl)
+    val t0 = _wsc_now_us()
+    val out = _lay_compute_style_wrap_ranges_inner(txt, max_width, st, fallback_cpl)
+    _wlay_add(2, _wsc_now_us() - t0, 1)
+    out
+
+fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
+    if not _wsc_on:
+        return _lay_compute_wrap_ranges_inner(txt, cpl)
+    val t0 = _wsc_now_us()
+    val out = _lay_compute_wrap_ranges_inner(txt, cpl)
+    _wlay_add(2, _wsc_now_us() - t0, 1)
+    out
+
+fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
+    if not _wsc_on:
+        return _lay_intrinsic_text_width_inner(nodes, styles, child_index, i, widths)
+    val t0 = _wsc_now_us()
+    val out = _lay_intrinsic_text_width_inner(nodes, styles, child_index, i, widths)
+    _wlay_add(3, _wsc_now_us() - t0, 1)
+    out
+
+fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+    if not _wsc_on:
+        return _lay_flex_item_max_content_width_inner(nodes, styles, child_index, i)
+    val t0 = _wsc_now_us()
+    val out = _lay_flex_item_max_content_width_inner(nodes, styles, child_index, i)
+    _wlay_add(4, _wsc_now_us() - t0, 1)
+    out
+
+fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
+    if not _wsc_on:
+        return _lay_flex_wrap_auto_base_width_inner(nodes, styles, child_index, item, cst, iw, caller_base_w)
+    val t0 = _wsc_now_us()
+    val out = _lay_flex_wrap_auto_base_width_inner(nodes, styles, child_index, item, cst, iw, caller_base_w)
+    _wlay_add(4, _wsc_now_us() - t0, 1)
+    out
+
+fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
+    if not _wsc_on:
+        return _lay_ellipsize_text_for_width_inner(txt, start, endv, max_width, st, advance, space_advance)
+    val t0 = _wsc_now_us()
+    val out = _lay_ellipsize_text_for_width_inner(txt, start, endv, max_width, st, advance, space_advance)
+    _wlay_add(7, _wsc_now_us() - t0, 1)
+    out

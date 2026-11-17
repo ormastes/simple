@@ -22,13 +22,15 @@ Traceability: REQ-BROWSER-ENGINE-OPACITY-GROUP-CHROME159-001 — CSS opacity gro
 use std.spec.*
 use std.io_runtime.{file_read_bytes_result}
 use std.common.image.png_decode.{PngImage, decode_png_to_argb}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_readback_count, vulkan_readback_census_reset, vulkan_readback_census_line, vulkan_device_css_group_restore_count}
 use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_pixel, css_opacity_group_alpha8}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
-    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale, simple_web_layout_render_html_pixels_engine2d_with_images
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_render_html_software_pixels
+    simple_web_layout_render_html_software_pixels, simple_web_layout_render_html_software_pixels_with_images
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_resolved_engine2d_backend
@@ -219,8 +221,8 @@ fn tg_page() -> text:
 # Chrome 159 colours of tg_page() (k=4, `--window-size=64,16`). The raster
 # admits every cell except (34..46, 4) and (50..60, 12), whose two non-opaque
 # paints overlap (Chrome there: B7DBFF E3D994 FFE793 / B8C2FB 9A9FBC BFBFBF).
-# The image pixel (18,12) (Chrome 8829A5) is not pinned: the raster lane does
-# not paint a plain <img> at all, group or not.
+# The image pixel (18,12) (Chrome 8829A5) is pinned on the raster only when the
+# image resource is supplied (simple_web_layout_render_html_software_pixels_with_images).
 val TG_X: [i32] = [2, 8, 13, 18, 24, 29, 50, 50, 54, 56, 61, 8, 13, 24, 29, 33, 37, 41, 45]
 val TG_Y: [i32] = [4, 4, 4, 4, 4, 4, 2, 6, 6, 6, 4, 12, 12, 12, 12, 12, 12, 12, 12]
 val TG_CHROME: [u32] = [
@@ -277,18 +279,18 @@ fn mr_page() -> text:
 
 # Chrome 159 colours of mr_page() (k=4, `--window-size=96,16`): text-root
 # background away from the glyphs, outlined box / sibling, shadow box /
-# background / sibling, two-box group. Not pinned (open, see the bug record):
-# the outline ring (Chrome 5B579D at (26,13) (30,2) (26,8)) -- no lane paints
-# an outline on a positioned box, opacity or not -- and the shadow-only
+# background / sibling, two-box group, and the outline ring (Chrome 5B579D at
+# (26,13) (30,2) (26,8)). Not pinned (open, see the bug record): the shadow-only
 # pixels (Chrome 5F5F5F at (59,9) (52,10) (60,5), 606060 for the same shadow
 # on tg_page's 8x5 box; Simple paints 606060 on both).
-val MR_X: [i32] = [21, 22, 12, 29, 35, 38, 41, 50, 51, 62, 66, 74, 81, 89]
-val MR_Y: [i32] = [13, 2, 13, 5, 8, 13, 13, 2, 6, 12, 8, 8, 8, 8]
+val MR_X: [i32] = [21, 22, 12, 29, 35, 38, 41, 50, 51, 62, 66, 74, 81, 89, 26, 30, 26]
+val MR_Y: [i32] = [13, 2, 13, 5, 8, 13, 13, 2, 6, 12, 8, 8, 8, 8, 13, 2, 8]
 val MR_CHROME: [u32] = [
     0xFF942C63u32, 0xFF942C63u32, 0xFF942C63u32,
     0xFF5BA403u32, 0xFF5BA403u32, 0xFFF5F19Du32, 0xFFF5F19Du32,
     0xFFBF3F3Fu32, 0xFFBF3F3Fu32, 0xFF808080u32, 0xFF3FBF3Fu32,
-    0xFF4B4BFFu32, 0xFF4B4BFFu32, 0xFFFFA54Bu32
+    0xFF4B4BFFu32, 0xFF4B4BFFu32, 0xFFFFA54Bu32,
+    0xFF5B579Du32, 0xFF5B579Du32, 0xFF5B579Du32
 ]
 
 fn mr_mismatches(px: [u32], fw: i32) -> i32:
@@ -305,13 +307,15 @@ fn mr_mismatches(px: [u32], fw: i32) -> i32:
     bad
 
 # Chrome colours of tg_page() cells the raster declines: the Engine2D lanes
-# composite layers with real alpha. Open (bug record): (40,4), where two
-# translucent paints overlap (Chrome E3D994, Engine2D +1 green), and every
-# <img> pixel -- no lane paints this <img> (Chrome 8829A5 B8C2FB 9A9FBC at
-# (18,12) (50,12) (54,12)), which also skips tg cells 13 and 14.
-val TG_DEV_X: [i32] = [34, 37, 46, 60]
-val TG_DEV_Y: [i32] = [4, 4, 4, 12]
-val TG_DEV_CHROME: [u32] = [0xFFB7DBFFu32, 0xFFB7DBFFu32, 0xFFFFE793u32, 0xFFBFBFBFu32]
+# composite layers with real alpha. (40,4) is two translucent paints
+# overlapping inside the group layer (Chrome E3D994): the layer pixel follows
+# Skia's premultiplied 8-bit value (color.spl `_blend_premul_over`). The direct
+# html->pixels entries resolve no resources, so the <img> is absent there and
+# tg cells 13 and 14 are skipped; the image itself is pinned by the
+# resource-fed row below (TG_IMG_*).
+val TG_DEV_X: [i32] = [34, 37, 40, 46, 60]
+val TG_DEV_Y: [i32] = [4, 4, 4, 4, 12]
+val TG_DEV_CHROME: [u32] = [0xFFB7DBFFu32, 0xFFB7DBFFu32, 0xFFE3D994u32, 0xFFFFE793u32, 0xFFBFBFBFu32]
 
 fn tg_dev_mismatches(px: [u32], fw: i32) -> i32:
     var bad = tg_mismatches(px, fw, false)
@@ -325,6 +329,24 @@ fn tg_dev_mismatches(px: [u32], fw: i32) -> i32:
             bad = bad + 1
         n = n + 1
     bad
+
+# The <img> of tg_page() fed as a decoded resource, as the hosted session
+# does after loading the data: URL. The PNG is uniform RGBA (30,60,240,160),
+# so Chrome's values are pure group arithmetic, not image filtering.
+fn tg_img_resources() -> [SimpleOsHostGpuImageResource]:
+    val png = decode_png_to_argb(base64_decode_bytes(TG_IMG.substring(22, TG_IMG.len())))
+    if val Err(reason) = png:
+        print "tg image decode failed: {reason}"
+        return []
+    val img = png.unwrap()
+    [simpleos_host_gpu_image_resource(TG_IMG, img.width, img.height, img.pixels)]
+
+# Chrome 159 at the image pixels: (18,12) image alone in the 0.6 group over
+# rgb(200,30,120); (50,12) image alone and (54,12) image under
+# rgba(0,0,0,.5), both in the 0.5 group over white.
+val TG_IMG_X: [i32] = [18, 50, 54]
+val TG_IMG_Y: [i32] = [12, 12, 12]
+val TG_IMG_CHROME: [u32] = [0xFF8829A5u32, 0xFFB8C2FBu32, 0xFF9A9FBCu32]
 
 describe "CSS opacity groups composite as Chrome 159 does":
     it "restores an opaque layer pixel with SkBlendARGB32 at alpha round(opacity*255)":
@@ -407,10 +429,48 @@ describe "CSS opacity groups composite as Chrome 159 does":
         val px = simple_web_layout_render_html_software_pixels(tg_page(), 64, 16)
         expect(tg_mismatches(px, 64, true)).to_equal(0)
 
+    it "composites an <img> group member on the CPU raster as Chrome does when the image resource is supplied":
+        val res = tg_img_resources()
+        expect(res.len()).to_equal(1)
+        val px = simple_web_layout_render_html_software_pixels_with_images(tg_page(), 64, 16, res)
+        var bad = tg_mismatches(px, 64, true)
+        # Only (18,12): the raster does not admit the overlapping-paint cell
+        # holding (50,12)/(54,12) as a group (see the TG_X comment), so those
+        # stay pinned on the Engine2D lanes alone.
+        if px.len() >= 64 * 16:
+            var k = 0
+            while k < 1:
+                val got = px[TG_IMG_Y[k] * 64 + TG_IMG_X[k]]
+                if got != TG_IMG_CHROME[k]:
+                    print "raster image pixel ({TG_IMG_X[k]},{TG_IMG_Y[k]}) got {got} want {TG_IMG_CHROME[k]}"
+                    bad = bad + 1
+                k = k + 1
+        expect(bad).to_equal(0)
+
     it "composites a multi-root page with shadow, translucent, gradient and image members on cpu_simd and Vulkan as Chrome does":
         for lane in ["cpu_simd", "vulkan"]:
             val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(tg_page(), 64, 16, lane)
             expect(tg_dev_mismatches(px, 64)).to_equal(0)
+
+    it "composites an <img> group member on cpu_simd and Vulkan as Chrome does when the image resource is supplied":
+        val res = tg_img_resources()
+        expect(res.len()).to_equal(1)
+        for lane in ["cpu_simd", "vulkan"]:
+            val px = simple_web_layout_render_html_pixels_engine2d_with_images(tg_page(), 64, 16, lane, res)
+            var bad = tg_dev_mismatches(px, 64)
+            if px.len() >= 64 * 16:
+                for n in [13, 14]:
+                    if px[TG_Y[n] * 64 + TG_X[n]] != TG_CHROME[n]:
+                        print "{lane} image-group cell {n} got {px[TG_Y[n] * 64 + TG_X[n]]} want {TG_CHROME[n]}"
+                        bad = bad + 1
+                var k = 0
+                while k < TG_IMG_CHROME.len():
+                    val got = px[TG_IMG_Y[k] * 64 + TG_IMG_X[k]]
+                    if got != TG_IMG_CHROME[k]:
+                        print "{lane} image pixel ({TG_IMG_X[k]},{TG_IMG_Y[k]}) got {got} want {TG_IMG_CHROME[k]}"
+                        bad = bad + 1
+                    k = k + 1
+            expect(bad).to_equal(0)
 
     it "composites a multi-root page with text, outline and shadow roots on cpu_simd and Vulkan as Chrome does":
         for lane in ["cpu_simd", "vulkan"]:

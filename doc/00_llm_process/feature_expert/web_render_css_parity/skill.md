@@ -2369,6 +2369,40 @@ Gates and remaining gaps:
   added to the `names` list in
   `simple_web_html_layout_renderer_module_split_spec` (it compares the
   directory walk count to that list).
+## File layout: paint / facade parser-input splits (2026-11-17)
+
+Pure moves, no logic edits. Each original keeps its name and `export use`s
+every moved name, so importers are unchanged. A moved set never imports its
+original file (no cycles), and it carries no module `var`, no `nil` and no
+`extern fn`.
+- `simple_web_html_layout_renderer.spl` (facade, 179,572 -> 110,660 B) ->
+  `_compose_support.spl`: hit-test index, scrolled layout, material
+  witnesses, CSS animation scheduling, opacity nesting, GPU paint state.
+  These stay in the facade: the nil-returning `_animation_computed_value` /
+  `_animation_progress` and every function that calls them, the result
+  classes, `SimpleWebRetainedLayoutPreparation`,
+  `_simple_web_layout_compose_retained`..`simple_web_layout_compose_prepared`
+  and `_simple_web_draw_ir_translate_command`. Contract specs read all of
+  these by path.
+- `_paint_primitives.spl` (179,717 -> 101,730 B) -> `_paint_gradients_text.spl`:
+  gradient layers, border mitre, thin and TTF text raster, bidi, widget
+  chrome. The `_ttf_*` cache `var`s and both `_isqrt_i64` copies stay.
+  Re-exports now chain through three hops (facade -> paint_layout ->
+  paint_primitives -> paint_gradients_text). The chain resolves:
+  `simple_web_renderer_spec` passes 123/123.
+- `_paint_layout.spl` (158,898 -> 84,286 B) -> `_paint_draw_ir.spl`: style
+  props, text commands, gradient and background layers, replaced media, SVG
+  shapes, checkables. `_html_draw_ir_commands` and `_html_draw_ir_visible`
+  stay (path-read contract specs).
+- **Not split:** `_decl_apply.spl` (164,991 B). `_apply_decls_without_grid_inner`
+  is a single 153,985 B function, so any split cuts its body, which is a
+  logic change.
+- **When moving code, also move its path-keyed rows:**
+  - `cpu_lane_hotpath_files.txt`: a new file joins the list next to its original.
+  - `cpu_lane_hotloop_baseline.txt`
+  - `fail_open_baseline.txt`
+  - `text_len_unit_mix_baseline.txt`
+
 ## 2026-11-17 — selector rule admission, strict (four Chrome-drop cases)
 
 - **Where:** `_selector_range_has_unknown_pseudo(sel, start, end, element,
@@ -2636,3 +2670,223 @@ Follow-up to the four 2026-11-16 behaviours. Each item has a `*_chrome159_spec.s
 - **Measured (blend seed, 1x catalog):** overview 1.29, html 4.66 -> 3.65 (row lowered), css-layout 3.12, css-paint 3.67, forms-media 4.04, animation 3.59, evidence 0.77, tab-bar 0.42. Animation 3.59 vs its 3.52 row is PRE-EXISTING (same 3.59 on a base worktree run side by side), not this change. css-layout simple_ms 57.1 s (base) vs 57.3 s (head). Regression: simple_web_renderer 123, browser_renderer 131 + 4 (two files), no grid chrome159 spec exists, box_geometry 68, round4 53, block-fractional 8, author-fractional 10, line-strut 8, percent-margin 11, every margin/collapse/abs/flex/float/grid chrome159 spec, web_device_scale 22, background_layer_tiling 9: identical pass counts on base and head, 0 failing; combo matrix 154 baselined ids unchanged, no new, no stale.
 
 - Face ascent vs baseline (2026-11-18): Chrome's `line-height: normal` baseline = rounded ascent + floor(rounded line gap / 2). Serif/sans 48px: ascent 43, baseline 44. `browser_face_ascent_descent_px` returns the face ascent (43) and the strut adds the half-leading; do not "fix" the rounding. Pinned by `line_strut_baseline_large_chrome159_spec`.
+
+
+## 2026-11-17 — parser-input file splits (foundation, layout_foundation, webgl_context)
+
+Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap 128 KiB): Sizes are post-#10061 (gradient polish).
+
+| original (before -> after, bytes) | new file (bytes) | what moved |
+|---|---|---|
+| `simple_web_html_layout_renderer_foundation.spl` 172,172 -> 109,515 | `..._foundation_values.spl` 66,197 | position-aware string find, nil-free CSS value parsers (color tokens, lengths, gradient stop pieces, transforms, line-height, nth-box, margin tokens, object-position), declaration-table readers, `decl_get`, `ws_tokens` (107 decls) |
+| `simple_web_html_layout_renderer_layout_foundation.spl` 171,862 -> 105,686 | `..._layout_text.spl` 70,863 | text measurement, wrapping, intrinsic widths, replaced / form-control intrinsic boxes (92 decls) |
+| `webgl_context.spl` 186,715 -> 93,867 | `webgl_context_objects.spl` 49,016 and `webgl_context_pipeline.spl` 50,610 | `WebGLContext` methods moved into `impl WebGLContext:` extension files |
+
+- **Re-export pattern.** The original keeps its name and gains one `export use <new>.{every moved name}`. This binds locally and re-exports, so importers don't change. Re-exporting private (`fn`) names is accepted by the `cargo-target-webrender-blend` seed: verified on specs that import moved private names through the facade, with no new failing names.
+- **The moved set must be dependency-closed.** Nothing moved may reference a declaration left behind, so the new file never imports the old one. Module `var`s stay with every writer. `g_text_first_line_dx*` / `g_text_line_boxes*` remain in layout_foundation, because layout_engine assigns them through its import.
+- **WebGL uses the JsInterpreter precedent** (`nogc_sync_mut/js/engine/interpreter.spl`). Extension files `use webgl_context.{WebGLContext, ...}`, and webgl_context.spl ends with `use webgl_context_<x>.{WebGLContext}`.
+- **Push gates count moved code as NEW** (base 0 for a new file). `check-nil-outside-unsafe-added` cannot be annotated, so declarations with `nil` outside `unsafe`, and every moved declaration that reaches them, stay in the old file. That is why the animation/transition validators, `parse_color*` and the gradient parsers are still in foundation. `check-primitive-api-added` takes `# reason: ...` + `# @allow(primitive_api)` above each moved `pub fn` that has bare primitives. Run both with `--changed origin/release/1.0.0..HEAD` before pushing.
+- **Bookkeeping a move touches.** List every new `simple_web_html_layout_renderer_*` file in the `module_split_spec` names list, because the walk count must equal the list. Repoint source-contract specs that read a file by path (`web_jit_unique_names_contract_spec`, `baremetal_string_split_abi_spec`), keeping negative checks over both halves. Prune `private_import_baseline.txt` rows whose fn left the file (`check-private-import-baseline.shs --prune`). Relocate `cow_alias_hotpath_baseline.txt` rows by file and line.
+- **Blocked: `simple_web_html_layout_renderer_layout_engine.spl` (233 KB).** `layout_with_style_flow` is a single 184,361 B function (line 960). It cannot go under the cap without cutting the function body into helpers, which is a logic refactor.
+- **Still over 128 KiB:** layout_engine, the main facade, paint_primitives, decl_apply, paint_layout and core_selectors (other lanes).
+## 2026-11-18 — inline-block `vertical-align: top | bottom | text-top | text-bottom` aligns the margin box
+
+- **Was:** only baseline-aligned items entered `align_inline_line_baselines`; a top/bottom/text-* aligned inline-block stayed at its natural y and never grew the line, so `margin-top:6px; vertical-align:top` sat at y=0 (Chrome 6) and `margin-top:30px` left the line 18 px (Chrome 40).
+- **Fix** (`simple_web_html_layout_renderer_layout_foundation.spl`, `inline_atomic_valign` + `align_inline_line_baselines`; caller in `..._layout_engine.spl` near the inline contribution): atomic inlines (display != inline, not text) with those four keywords join the line's alignment list with their resolved margins and are placed by MARGIN box (CSS 2.2 10.8). `top`/`bottom` hang from the line box and grow it by their margin-box height (a taller `bottom` box pushes the baseline down); `text-top`/`text-bottom` hang from the parent content area (`inline_content_area_ascent` / height) and enter ascent/descent. The border-box height no longer inflates `inline_line_h` for them.
+- **Chrome 159 matrix** (default serif 16px, 20x10 box after "x"; y, line h): top mt6 6,18 mb6 0,18 6/0 6,22 mt30 30,40; bottom mt6 8,18 mb6 2,18; text-top same as top; text-bottom mt6 7,18 mb6 1,18 6/0 6,23 mt30 30,41. All 24 match.
+- **Spec:** `inline_block_vertical_align_margin_chrome159_spec` (4 cases, 0/4 on base, 4/4 now).
+- **Not done:** `middle` (needs x-height, Chrome lands on fractional y) — `doc/08_tracking/bug/inline_block_vertical_align_middle_ignores_margin_2026-11-18.md`. Plain `display:inline` elements with these keywords are untouched. A top item and a taller bottom item in the same line use `max` for the line and drop the baseline by the bottom growth only; not measured against Chrome.
+## 2026-11-18 — Default font family is serif (Chrome 159)
+- **Rule:** a page with no `font-family` computes "Times New Roman", which fontconfig maps to Liberation Serif. Form controls compute to Arial (Liberation Sans); code, kbd and textarea to monospace.
+- **Change:** the default `Style.font_family` is now `serif`. The UA overrides are unchanged.
+- **Pin:** `default_font_family_chrome159_spec`.
+- **Trap:** any spec page that sets no family was being compared against Chrome's serif glyphs with our sans glyphs. Re-measure such pins against Chrome before reading their whole-image metric. On the 8 px wrapped page, mismatch went from 426 to 149 px.
+
+## 2026-11-18 — Fractional computed font-size (Chrome 159)
+- **Rule:** Chrome keeps `font-size` as a float. The UA h3 is 18.72 px, and `1.17em` or `117%` stay fractional. Run width, the `normal` line height and the strut all scale from the float.
+- **Change:**
+  - `Style.font_size` stays whole px, for the raster. `Style.font_size_milli` carries the fraction; 0 means whole px.
+  - Helpers live in `foundation_values.spl`: `font_milli_of`, `font_milli_round_px` and `font_milli_store`.
+  - Run advances are rescaled from an 8x reference size (`resolve_font_metrics_with_language_milli`).
+  - Ascent, descent and gap are each rounded at the float size (`sfnt_line_metric_units_*_milli_px`).
+- **Trap:** an exact .5 px size rounds DOWN for raster rows. Chrome's 13.5 px ink rows equal its 13 px rows.
+- **Pin:** `fractional_font_size_chrome159_spec`.
+- **Catalog 1x:**
+
+| page | before | after |
+|---|---|---|
+| html | 3.65 | 3.51 |
+| css-layout | 3.12 | 3.00 |
+| css-paint | 3.67 | 3.55 |
+| forms-media | 4.05 | 3.93 |
+
+- **Rows tightened:** the four rows above. The animation row is untouched, because its measurement is noisy at 3.47-3.59.
+
+## 2026-11-18 — Mid-line text run keeps Chrome's fractional pen origin (LCD phase)
+- **Rule:** Chrome 159 lays a line out in fractional units. A `#text` run after an inline element starts at the exact sum of what precedes it. `<span>ll</span> l` at left:1 starts at `1 + 7.1094 + 4.4453 = 12.5547`, so its first glyph takes the 12.5 quarter phase. The inline loop is whole-pixel (pen 12 or 13), so every glyph in the run was painted at the wrong LCD phase. Chrome alone repaints 4,329 px of one forms-media `<li>` when its origin moves from .617 to .0.
+- **Change:**
+  - `Style.resolved_font_width_milli` / `resolved_space_milli` hold exact widths. They are set only for an unadjusted run.
+  - The inline loop carries `inline_err_milli`, the exact-minus-integer error. It stays valid only while the cursor sits at the recorded (x, line); a line start is 0. See `inline_pen_err` and `inline_item_width_err_milli` in layout_foundation.
+  - An exact advance is a one-line `#text` run, or a plain inline element with one such run. Anything else makes the error unknown, and the run keeps today's integer pen.
+  - Each `#text` records `LayoutResult.pen_origin_milli` (`g_text_pen_origin_milli`, same lifecycle as `g_text_first_line_dx`). It is recorded only on left-aligned lines.
+  - Draw IR carries the origin as the `pen-origin-milli` style prop on the single-line or first-line command.
+  - `_lcd_apply_pen_phases(..., pen_origin_milli)` folds the origin into each glyph's quarter phase. A glyph with no phase cell takes a whole-pixel round shift, which is 0 when the origin is 0. The draw band widens by `ceil(|origin|)`.
+- **Pin:** `inline_run_pen_origin_chrome159_spec`: AC-1 frac 12.5547 and AC-2 whole 9.0. Both fail on base (0/2) and pass now (2/2).
+- **Catalog 1x:** forms-media 3.93 -> 2.84. Each `<li><code>` line dropped from ~4.3k to ~1.8k mismatched px.
+- **Not done:**
+  - Wrapped runs (lines 2+ start at a line-box edge, so they are exact anyway).
+  - Centred, right-aligned and RTL lines.
+  - Letter- or word-spacing-adjusted runs.
+  - The integer cursor itself still drifts: `<span>l</span> l` places at 10, where Chrome places at 9. The origin corrects the paint, not the box.
+- **Catalog 1x, measured on base 9368a4df112 and head (rows lowered to head):**
+
+| page | before | after |
+|---|---|---|
+| html | 3.51 | 2.62 |
+| css-layout | 3.00 | 2.52 |
+| css-paint | 3.55 | 2.80 |
+| forms-media | 3.93 | 2.84 |
+| animation | 3.47 | 2.91 |
+
+  overview, evidence and tab-bar are unchanged at 1.29, 0.77 and 0.42.
+
+
+## Outline (2026-11-18)
+- Engine2D executor paints the outline ring in `_engine2d_draw_ir_render_outline` (`engine2d/draw_ir_adv.spl`); its raster twin is `fb_outline_clip` (`paint_primitives`). Keep them in step. Pinned by `outline_engine2d_chrome159_spec` plus the opacity spec ring points.
+- Trap: a missing paint on the Engine2D lanes often means the executor ignores a Draw IR style prop the producer already emits. Grep `draw_ir_adv.spl` for the prop key before suspecting layout.
+
+
+## Images (2026-11-18)
+- Trap: the direct `html -> pixels` entries pass `images: []` and resolve no `data:` URLs. Resource loading is the hosted session's job. To test image paint, decode the resource and call a `*_with_images` entry (`simple_web_layout_render_html_pixels_engine2d_with_images`). "Image unpainted" through a direct entry is not a renderer bug.
+- The raster (fb) lane has no image paint; only Draw IR has `_html_draw_ir_image_command`.
+## 2026-11-18 — A collapsible space between inline boxes advances one face space
+- **Rule:** Chrome 159 advances exactly one space of the face between two inline boxes. For Liberation Sans 16 that is 4.4453, so inline-block 120 + space puts the next box at 124.45, and the catalog button (119.48) + newline puts `<output>` at 123.94.
+- **Bug:** Simple advanced 6 px:
+  - a flat 5 px fallback lead space (`style_space_advance`, half the fixed cell);
+  - plus a 1 px box that the `" "` node kept from a June heuristic (`space/3`, min 1). That heuristic predates the lead-space charge.
+  - On forms-media this pushed "Not exercised" 2 px right.
+- **Change:**
+  - `resolved_space_advance` falls back to the face space (`Style.resolved_space_milli`, rounded) when the run has no interior space.
+  - A collapsible whitespace-only run measures 0 once the face is known, and the inline loop zeroes its box after layout (`collapsed_space_run`), because `layout_with_style` floors a `#text` box at 1 px.
+  - A run's edge spaces round together with the run: `round(width_milli + edges*space_milli)`. Rounding each piece put `, ` at 4+4 instead of Chrome's 8.89 -> 9, which drifted the overview paragraph 3 px left until this was added.
+- **Pin:** `inline_space_between_elements_advance_chrome159_spec` (6 ACs). It fails on base (0/6) and passes now (6/6).
+- **Matrix:** 5 button cells now match Chrome and left the baseline (154 -> 149 ids): `tt-td-button-{w,p}`, `ln-tt-td-button-{w,p}`, `tt-legend-button-p`.
+- **Catalog 1x** (base b974addb1b0 -> head, both measured; rows lowered): overview 1.29 -> 1.21, html 2.62 -> 2.57, forms-media 2.84 -> 2.74, animation 2.84 -> 2.77 (row 2.91). css-layout 2.52, css-paint 2.80, evidence 0.77 and tab-bar 0.42 are unchanged.
+
+## 2026-11-18 — `<summary>` disclosure marker: Chrome's advance and filled triangle
+- **Rule (Chrome 159, list_marker.cc / list_marker_painter.cc):**
+  - The disclosure symbol is a `0.66em` square, and an inside marker adds a `0.4em` end margin. Each is truncated to a LayoutUnit (1/64 px) separately, so 16 px is 675/64 + 409/64 = 16.9375.
+  - The advance is identical for sans-serif, serif and monospace.
+  - The symbol is a filled path in the unit square, painted with analytic AA: closed (0,0) (0.86,0.5) (0,1); open (0,0.07) (0.5,0.93) (1,0.07).
+  - The square sits at the content start and ends on the baseline: top = text top + ascent − size.
+- **Was:** a fixed 16 px advance (`SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH`, now deleted), and a `▶` / `▼` text command whose glyph Liberation Sans lacks, which painted a missing-glyph box.
+- **Change:**
+  - `summary_marker_symbol_64` and `summary_marker_inline_width` (layout_foundation) replace the constant.
+  - The marker is a Draw IR `path` command carrying `path-fill` (ARGB) and `path-units: 64`, with its pixel bbox as the command box. Without that box, a 0x0 command paints nothing.
+  - `_engine2d_draw_ir_path_fill` (draw_ir_adv) fills it with exact per-pixel area coverage: each pixel is clipped by Sutherland-Hodgman and measured by shoelace. Full spans use `draw_rect_filled` and edge pixels use `draw_rect_blend`.
+  - The strict-Vulkan preflight accepts a filled path, which its fill loop clamps to the surface.
+- **Pin:** `summary_disclosure_marker_chrome159_spec` (label x at 16/13 px plus closed and open triangle cells, TOL 16). It fails on base (0/3) and passes now (3/3).
+- **Re-pinned toward Chrome:**
+  - `details_summary_rendering_spec`: label x 16 -> 17; the marker is a `path` with exact points and box [0,3]. That spec's `-1 to equal 7` / `[0,12,0,0]` failures are pre-existing on base.
+  - The paint_layout coverage-closure marker `it`.
+- **Catalog 1x:** forms-media 2.74 -> 2.65.
+- **Trap:** a page with no `<p>`/`<span>`/`<h1-3>`/`<button>`/`<code>`/`<label>`/`<a ` takes the CPU raster lane (`_simple_web_engine2d_text_document`), not Draw IR. Wrap a probe's label in a `<span>`.
+- **Residue:** the vertical placement uses the sans ascent (0.905em). That matches Liberation Serif at 16 px (both ascents are 14), but it is not the resolved face's ascent at every size.
+
+## 2026-11-18 — Summary marker sits on the face baseline
+- **Rule (Chrome 159):** the disclosure square ends on the summary strut's baseline. That baseline uses the resolved face's own rounded ascent and descent, with the floored half-leading above: `inline_line_strut_baseline_offset`, the same function layout uses.
+- **Was:** the sans approximation, ascent 0.905em and descent 0.212em (`_html_draw_ir_chrome_text_top` + `_html_draw_ir_chrome_ascent`). It is right for Liberation Sans, but for serif 24px with `line-height: normal` (27) it gives a baseline of 22 where Chrome has 21, so the marker sat one row low.
+- **Pin:** `summary_disclosure_marker_chrome159_spec` AC-4. At x=4 the closed triangle's ink spans rows 5..20 (Chrome). Base gives [6, 21] (3/4); now 4/4.
+- **Residue:** at serif 24 the triangle's top edge is about 0.07 px higher than Chrome's (first-row grey 0x76 vs 0x88). The 0.66em square size has not been re-derived for that face.
+- **Investigation note (forms-media 1x, not fixed):**
+  - Body-text bands have 0 vertical offset (row ink centroids within 0.05 px) and matching per-glyph x.
+  - The residue is per-glyph LCD coverage: Simple has about 3.5% less ink, with a +5..+8 grey bias on Chrome-coverage 1/8..1/2 pixels, plus two-signed shape noise.
+  - Smaller separate classes:
+    - h3 18.72px text, which is rasterised at an integer size;
+    - the list disc's AA (about 14 px per bullet);
+    - the inline-block control x at 92/99/91, already equal to Chrome since #10113.
+## 2026-11-18 — device-px line metrics at dpr4, stage 1: text sits on Chrome's device strut baseline
+
+- **Chrome rule (Chrome 159, `--force-device-scale-factor=4`):** line metrics are DEVICE px (zoom-for-dsf). The strut ascent and descent come from the face at size x k, each rounded on its own. Blink's subpixel-positioning borrow is on at dsf > 1 and off at 1x (hinted). It applies when the rounded descent is below the raw one and the ascent is at least 1: it moves 1 device px from ascent to descent. The half-leading is floored in device px.
+  - DejaVu Sans 64 device px: 59.41 / 15.09 → 58 / 16.
+  - Liberation Sans 44: 40 / 9 → 39 / 10.
+  - Liberation Sans 56 and 60 take no borrow, because their descent rounds up.
+- **Where k reaches layout:** `layout_device_scale_set(k)`, in `layout_foundation`.
+  - It is set only by `simple_web_layout_render_html_pixels_engine2d_at_device_scale`, around layout + compose, and restored to 1 before paint.
+  - The document cache key carries `;dsf=k`.
+  - At k == 1 nothing is computed or recorded, and every table stays empty.
+- **Strut:** `sfnt_line_metric_units_ascent_descent_device_px` (`sfnt_kern.spl`) and `browser_face_ascent_descent_device_px` (`font_renderer.spl`). k == 1 is the old milli function, with the same memo key.
+- **Per-line delta:** `align_inline_line_device_dy` mirrors the baseline pass of `align_inline_line_baselines` in device px.
+  - Strut items use the device strut. Atomic, bottom-edge and widget baselines use k x their CSS value, because boxes stay CSS-snapped.
+  - The plain-inline recursion and sub/super are mirrored.
+  - A line with a top/bottom/text-top/text-bottom box gets no correction.
+  - `line delta = device ascent - k x CSS ascent`.
+- **Per-text dy:** each `#text` gets `dy = line delta + (k x css ascent - round(device ascent, no borrow))`. The second term is the painter: it adds the face ascent rounded at the device size to the command top.
+  - Lines 2..n of a wrapped run use the max of the line style's strut and the run's own strut.
+  - Tables: `LayoutResult.device_dy` / `device_dy_rest`.
+  - **Trap:** the compose rebuilds `LayoutResult` in `compose_support.spl` twice. A new per-node field must be copied there too, or it never reaches paint.
+- **Wire:** the text command carries the Draw IR prop `device-y-offset` (device px). `draw_ir_composition_at_device_scale` adds it to the scaled y and strips it. It is never scaled.
+- **Not moved:** text-decoration rects. The `<a href>` underline was already 2 device px above Chrome's on base (rows 60-63 vs 62-67 below the line top), so shifting it by the glyph dy would make it worse.
+- **Pin:** `device_px_line_metrics_chrome159_spec`. Base 4/11, head 11/11.
+  - AC-1..7 are red → green at k=4: DejaVu 16/13/12, Liberation Serif 16, Liberation Sans 11, a 24px span line, and a span with `line-height:40px`.
+  - AC-8/9 are guards.
+  - AC-10 holds every case at its Chrome 1x value.
+  - AC-11 checks that a 4x render does not leak into a later 1x render.
+- **Left for stage 2 (line-box geometry):** line-box HEIGHTS are still k x CSS px.
+  - DejaVu 16px: 76 device px vs Chrome 74.
+  - Liberation Sans/Serif 16px: 72 vs 74.
+  - Lines and block tops therefore still drift by about 2 device px per line. Inline-block and replaced baselines are still k x CSS.
+- **Residual not in this lane:** for Liberation Sans 14/15/18/20px and DejaVu 20px, the painter's own baseline sits 1 row above round(device ascent). This comes from glyph raster anchoring (the parked grayhint lane). It shows at 1x 64px Liberation Sans too: glyph ink ends at row 57 vs Chrome's 58, while the box baseline matches.
+- **Catalog, stage 1 (measured 2026-11-18, blend seed, aarch64).**
+  - **1x:** byte-identical code path. Every page is at its baseline row; animation is 3.40 vs its 3.52 row (noisy page).
+  - **dpr4, base 9368a4df112 → head:**
+
+    | Page | Base | Head |
+    |---|---|---|
+    | overview | 0.81 | 0.82 |
+    | html | 2.96 | 2.87 |
+    | css-layout | 4.07 | 4.02 |
+    | css-paint | 4.93 | 4.87 |
+    | forms-media | 5.35 | 5.27 |
+    | animation | 4.16 | 4.09 / 4.06 (two runs) |
+    | evidence | 0.58 | 0.57 |
+    | tab-bar | 0.30 | 0.30 |
+
+  - css-paint is still above its 4.49 row (the #9951 regression), so stage 1 alone does not close it.
+  - Re-measured after rebasing onto 84ebb6ebf1b, base and head are the same numbers. The dpr4 rows lowered are html, forms-media and animation (to the worse of the two head runs). evidence (-0.01) is not a clear margin, so it is left alone.
+  - The two bands that got worse are the bold h1 (overview) and the bold h3 (css-paint): their block tops are still CSS px x 4 (h1 top 66.44 CSS px lands at device row 264; Chrome puts it at 266), so the correct borrow moves the glyph 1 px further from Chrome there. Stage 2 (fractional block y and line-box height in device px) is the follow-up.
+
+
+- Group layers (2026-11-18): Chrome keeps an opacity-group layer premultiplied in 8 bits. Engine2D stores it straight, so its translucent-destination blend must compute the premultiplied value first (`_blend_premul_over`), then store it straight. The round trip is exact. The rule has 8 twins (C, Rust runtime, seed interpreter, oracle, scalar fallback, Metal, Vulkan GLSL+SPIR-V); change all of them together and rebuild the seed.
+
+- Per-corner borders (2026-11-18): Engine2D paints them with `engine2d_draw_ir_render_typed_border_ring` (outer per-corner mask minus elliptical inner corners, side colour by the outer-to-inner-corner join). The corner mask samples pixel centres. The raster lane keeps its own corner AA; it is unpinned.
+
+## 2026-11-18 — LCD low/mid coverage lift for dark text
+- **Measured:** on forms-media body text (#172033), Simple's LCD mask level per channel against Chrome's, for 76.7k channel samples in rows 476..760 (tool: a per-level histogram of `round((255 - v) * 32 / (255 - L))`).
+  - Chrome is one LCD16 step heavier for engine steps 2..17 of 32 and equal from about step 19 up.
+  - Glyph positions and row offsets already match (see the earlier entry).
+- **Change** (`lcd_s32_tables.spl`): before the colour exponent, `cov + LIFT (1 - L/255) 6.75 c^2 (END - c) / END^3` for c < END.
+  - Two fitted constants: LIFT 7.5 and END 136.
+  - Both are capped by Chrome-exact pins: the 16 px H stem `efbf67` has raw G 65 (< 72), and the 8 px l stem `77bfef` has raw R 133..135 (< 136).
+  - Raw coverage of a pin pixel: `sfnt_render_glyph_lcd(blob, CODEPOINT, cp, size, phase)` `slg_rgb`; the bucket is `raw >> 3`.
+- **Rejected shapes:**
+  - The earlier exponent 0.95 for black: B 149 crosses to bucket 19 and breaks `efbf67`.
+  - A parabola: it inks raw 6..7, so the device-scale 1x ink count went 186 -> 199, away from Chrome's 146.
+  - An unweighted lift: light-on-dark text got worse.
+- **Re-pinned toward Chrome:** in `small_text_vertical_hint_chrome159_spec`, x=4 is now Chrome's exact `CF8F5F` (was `D7975F`), and the H bar is `777777` (was `778787`; Chrome `6F7777`).
+- **Hold-out** (not used to fit LIFT or END, but the `(1 - L/255)` weight was added after its white-on-dark row regressed; serif #000, serif #0f172a, sans/serif #c00000, #ddd on #101820): mismatch 2069/2252/2042/1386/1684 -> 1744/2080/1810/1248/1677.
+- **Catalog 1x:**
+
+  | page | before | after |
+  |---|---|---|
+  | overview | 1.21 | 1.14 |
+  | html | 2.57 | 2.44 |
+  | css-layout | 2.52 | 2.29 |
+  | css-paint | 2.80 | 2.50 |
+  | forms-media | 2.65 | 2.40 |
+  | animation | 2.77 | 2.46 |
+  | evidence | 0.77 | 0.68 |
+
+## Images
+
+- Raster (software) lane paints `<img>` only via `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)`; the plain entries paint none. The painter (`_fb_paint_img_clip`, paint_raster) runs in document order right after the node's box paint, with Draw IR geometry via the shared `html_image_fit_size`. Nearest-neighbour is exact only for uniform images (`# ponytail:`); overlapping-paint opacity cells (`tg_page` (50,12)) stay un-admitted on the raster. Spec: `test/01_unit/browser_engine/img_raster_chrome159_spec.spl`.

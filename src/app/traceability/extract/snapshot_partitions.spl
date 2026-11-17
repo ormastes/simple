@@ -81,9 +81,9 @@ fn partition_fact_digest(facts: TraceFacts) -> text:
     var origins: [SdnValue] = []
     for item in facts.origins: origins.push(partition_sdn_strings(["id", "kind", "owner_path", "locator", "rule_version"], [item.id.value, origin_kind_name(item.kind), item.owner_path.value, item.locator, item.rule_version.value]))
     var locators: [SdnValue] = []
-    for item in facts.locators: locators.push(partition_sdn_strings(["entity_id", "path", "locator_kind", "locator", "blob_id"], [item.entity_id, item.path, item.locator_kind, item.locator, item.blob_id]))
+    for item in facts.locators: locators.push(partition_sdn_strings(["entity_id", "path", "locator_kind", "locator", "blob_id"], [item.entity_id, item.path, locator_kind_name(item.locator_kind), item.locator, item.blob_id]))
     var diagnostics: [SdnValue] = []
-    for item in facts.diagnostics: diagnostics.push(partition_sdn_strings(["code", "subject_id", "rule_id", "entity_id", "origin_id", "message", "severity"], [item.code, item.subject_id, item.rule_id, item.entity_id, item.origin_id, item.message, item.severity]))
+    for item in facts.diagnostics: diagnostics.push(partition_sdn_strings(["code", "subject_id", "rule_id", "entity_id", "origin_id", "message", "severity"], [item.code, item.subject_id, item.rule_id, item.entity_id, item.origin_id, item.message, trace_diagnostic_severity_name(item.severity)]))
     var fields: Dict<text, SdnValue> = {}
     fields["complete"] = SdnValue.Bool(facts.complete)
     fields["input_manifest_id"] = SdnValue.String(facts.input_manifest_id)
@@ -209,7 +209,7 @@ fn identity_signature(facts: TraceFacts, identity: text) -> [text]:
     # when its node rows are byte-identical.
     for locator in facts.locators:
         if locator.entity_id == identity:
-            rows.push(sdn_encode_canonical(partition_sdn_strings(["path", "locator_kind", "locator"], [locator.path, locator.locator_kind, locator.locator])))
+            rows.push(sdn_encode_canonical(partition_sdn_strings(["path", "locator_kind", "locator"], [locator.path, locator_kind_name(locator.locator_kind), locator.locator])))
     trace_sorted_ids(rows)
 
 fn changed_identity_keys(before: TraceFacts, after: TraceFacts) -> [text]:
@@ -307,7 +307,7 @@ fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifac
         facts.complete = false
         facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
             rule_id: "snapshot-extraction-v1", entity_id: "", origin_id: "",
-            message: "invalid policy extraction budgets", severity: "error"))
+            message: "invalid policy extraction budgets", severity: TraceDiagnosticSeverity.Error))
         return facts
     var artifact_by_path: Dict<text, SnapshotArtifact> = {}
     for artifact in artifacts: artifact_by_path[artifact.path] = artifact
@@ -317,30 +317,30 @@ fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifac
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
                 rule_id: "snapshot-extraction-v1", entity_id: partition.artifact.path, origin_id: "",
-                message: "extraction policy budget exhausted", severity: "error"))
+                message: "extraction policy budget exhausted", severity: TraceDiagnosticSeverity.Error))
             return facts
         if partition.declaration_registered != declarations.contains(partition.artifact.path):
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
                 rule_id: "declarations", entity_id: partition.artifact.path, origin_id: "",
-                message: "partition declaration membership differs from frozen registration", severity: "error"))
+                message: "partition declaration membership differs from frozen registration", severity: TraceDiagnosticSeverity.Error))
     # Same per-path diagnostic identity and order as extract_snapshot_trace_facts_cold.
     var registered: [text] = []
     for path in declarations:
         if registered.contains(path) or trace_path_parse_v1(path).is_none():
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-AUTHORITY-CONFLICT", subject_id: subject.snapshot_id,
-                rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "invalid or repeated declaration registration", severity: "error"))
+                rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "invalid or repeated declaration registration", severity: TraceDiagnosticSeverity.Error))
         registered.push(path)
         if not artifact_by_path.contains_key(path):
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-MISSING-ENDPOINT", subject_id: subject.snapshot_id,
-                rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "registered declaration is absent from exact snapshot", severity: "error"))
+                rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "registered declaration is absent from exact snapshot", severity: TraceDiagnosticSeverity.Error))
     var declared_kinds: Dict<text, TraceNodeKind> = {}
     for node in facts.nodes: declared_kinds[node.id] = node.kind
     var declared_files: Dict<text, bool> = {}
     for locator in facts.locators:
-        if locator.locator_kind == "file" and declared_kinds.contains_key(locator.entity_id):
+        if locator.locator_kind == TraceLocatorKind.File and declared_kinds.contains_key(locator.entity_id):
             val kind = declared_kinds[locator.entity_id]
             if kind == TraceNodeKind.SourceFile or kind == TraceNodeKind.TestSuite or kind == TraceNodeKind.Document:
                 declared_files[locator.path] = true
@@ -351,29 +351,29 @@ fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifac
         elif artifact.path.starts_with("test/") and artifact.path.ends_with(".spl"): kind = TraceNodeKind.TestSuite
         val node_id = partition_artifact_node_id(artifact.path)
         facts.nodes.push(TraceNode(id: node_id, kind: kind, title: artifact.path))
-        facts.locators.push(TraceLocator(entity_id: node_id, path: artifact.path, locator_kind: "file", locator: "", blob_id: artifact.blob_id))
+        facts.locators.push(TraceLocator(entity_id: node_id, path: artifact.path, locator_kind: TraceLocatorKind.File, locator: "", blob_id: artifact.blob_id))
         if facts.nodes.len() > policy.max_nodes.value:
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
                 rule_id: "snapshot-extraction-v1", entity_id: artifact.path, origin_id: "",
-                message: "inventory node budget exhausted", severity: "error"))
+                message: "inventory node budget exhausted", severity: TraceDiagnosticSeverity.Error))
             return facts
     var pinned: [TraceLocator] = []
     for locator in facts.locators:
         if not artifact_by_path.contains_key(locator.path):
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-MISSING-ENDPOINT", subject_id: subject.snapshot_id,
-                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "locator path is absent from exact snapshot", severity: "error"))
+                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "locator path is absent from exact snapshot", severity: TraceDiagnosticSeverity.Error))
             continue
         val artifact = artifact_by_path[locator.path]
         if locator.blob_id != "" and locator.blob_id != artifact.blob_id:
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-MISSING-ENDPOINT", subject_id: subject.snapshot_id,
-                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "declared locator blob differs from snapshot", severity: "error"))
-        if locator.locator_kind != "file":
+                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "declared locator blob differs from snapshot", severity: TraceDiagnosticSeverity.Error))
+        if locator.locator_kind != TraceLocatorKind.File:
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
-                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "non-file locator requires an admitted symbol/section extractor", severity: "error"))
+                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "non-file locator requires an admitted symbol/section extractor", severity: TraceDiagnosticSeverity.Error))
         pinned.push(TraceLocator(entity_id: locator.entity_id, path: locator.path, locator_kind: locator.locator_kind,
             locator: locator.locator, blob_id: artifact.blob_id))
     facts.locators = pinned

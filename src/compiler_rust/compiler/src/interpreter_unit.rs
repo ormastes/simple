@@ -100,6 +100,12 @@ pub(crate) fn decompose_si_prefix_user(suffix: &str) -> Option<(f64, String, Str
     })
 }
 
+/// A file-declared unit suffix, or an SI prefix on a file-declared base unit
+/// (`unit length(base: f64): m = 1.0` then `5_km`): in library-unit scope.
+pub(crate) fn unit_suffix_declared_in_file(suffix: &str) -> bool {
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|c| c.borrow().contains_key(suffix)) || decompose_si_prefix_user(suffix).is_some()
+}
+
 /// Check if a type name is a registered unit family or compound unit
 /// Returns true if the type name refers to a unit type that can be used for type checking
 pub(crate) fn is_unit_type(type_name: &str) -> bool {
@@ -806,5 +812,16 @@ mod standalone_unit_ctor_tests {
         declare("FreeBytesR", "fbytes_r");
         let err = construct_standalone_unit("FreeBytesR", "fbytes_r", Value::text("x")).unwrap_err();
         assert!(err.contains("cannot construct unit FreeBytesR"), "{err}");
+    }
+
+    #[test]
+    fn si_prefix_on_file_declared_base_counts_as_declared() {
+        USER_SI_BASE_UNITS.with(|c| c.borrow_mut().insert("m".to_string(), "length".to_string()));
+        assert!(unit_suffix_declared_in_file("km"));
+        assert!(unit_suffix_declared_in_file("mm"));
+        assert!(!unit_suffix_declared_in_file("kmph_not_declared"));
+        crate::units::scope::unit_scope_reset();
+        assert_eq!(crate::units::scope::unit_suffix_scope_error("km", unit_suffix_declared_in_file("km")), None);
+        USER_SI_BASE_UNITS.with(|c| c.borrow_mut().remove("m"));
     }
 }

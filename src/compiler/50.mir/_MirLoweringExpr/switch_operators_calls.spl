@@ -2746,7 +2746,7 @@ impl MirLowering:
                             case HirTypeKind.Infer(_, _): ()
                             case HirTypeKind.Error: ()
                             case _: return Some(found_type)
-            case Call(callee, _, _):
+            case Call(callee, call_args, _):
                 # Try RTI first
                 val (rti_answered, rti_type) = self.rti_enum_match_subject_type(expr, None)
                 if rti_answered:
@@ -2755,7 +2755,8 @@ impl MirLowering:
                 if callee_type != None:
                     val found_callee_type = callee_type ?? HirType(kind: HirTypeKind.Error, span: callee.span)
                     match found_callee_type.kind:
-                        case HirTypeKind.Function(_, ret, _): return Some(ret)
+                        case HirTypeKind.Function(params, ret, _):
+                            return Some(self.generic_call_instantiated_return(params, ret, call_args))
                         case _: ()
                 # A generic free function's callee carries no Function type
                 # (its symbol type is the unsubstituted scheme): use the
@@ -2974,6 +2975,45 @@ impl MirLowering:
         if val declared_type = self.receiver_declared_type(receiver):
             return enum_match_unwrap_inner_type(declared_type)
         None
+
+    me generic_call_instantiated_return(params: [HirType], ret: HirType, call_args: [HirCallArg]) -> HirType:
+        """Return type of a call to a generic callee, instantiated from the
+        positional argument types (`stored<T>(r: Result<T, text>)` called with
+        `Result<text, text>` returns `Result<text, text>`). Generics are
+        erased, so this types the use site only. Same representation rule as
+        infer_erased_call_result_instance: a scalar binder keeps the declared
+        type (its word may be tagged by the erased body). Fails closed to the
+        declared `ret` when an argument is named, the arity differs, two
+        arguments bind a parameter differently, or a parameter stays unbound."""
+        if not self.hir_type_mentions_type_param(ret, self.symbols): return ret
+        if params.len() != call_args.len(): return ret
+        val names: [text] = self.hir_type_param_names_into(ret, self.symbols, [])
+        if names.len() == 0: return ret
+        var merged: Dict<text, HirType> = {}
+        var i = 0
+        while i < params.len():
+            val arg: HirCallArg = call_args[i]
+            if arg.has_name: return ret
+            if val actual = self.enum_match_expr_type(arg.value):
+                val single = self.bind_struct_type_params(params[i], actual, names, {})
+                for name in names:
+                    val bound_name: text = name
+                    if single.has(bound_name):
+                        if merged.has(bound_name):
+                            if not hir_types_equal(merged[bound_name], single[bound_name]): return ret
+                        else:
+                            merged[bound_name] = single[bound_name]
+            i = i + 1
+        var bound_args: [HirType] = []
+        for name in names:
+            val wanted: text = name
+            if not merged.has(wanted): return ret
+            val bound: HirType = merged[wanted]
+            if hir_type_is_plain_scalar(bound): return ret
+            bound_args.push(bound)
+        val instantiated = self.substitute_struct_type_params(ret, names, bound_args)
+        if self.hir_type_mentions_type_param(instantiated, self.symbols): return ret
+        instantiated
 
     me rti_enum_match_subject_type(expr: HirExpr, receiver_type: HirType?) -> (bool, HirType?):
         """Try to recover a match scrutinee type via RTI. Returns (answered, type):
@@ -8446,6 +8486,9 @@ impl MirLowering:
         match return_hir.kind:
             case HirTypeKind.Named(_, return_args):
                 if return_args.len() == 0: return
+            # `fn stored<T>(r: Result<T, E>) -> Result<T, E>` / `-> T?`: the
+            # same one-representation rule types the use site's payload.
+            case HirTypeKind.Result(_, _) | HirTypeKind.Optional(_): ()
             case _: return
         val names: [text] = self.hir_type_param_names_into(return_hir, self.symbols, [])
         if names.len() == 0: return

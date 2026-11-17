@@ -1125,6 +1125,13 @@ impl MirLowering:
                         return self.bind_struct_type_params(d_inner, a_inner, names, bindings)
                     case _:
                         return self.bind_struct_type_params(d_inner, actual, names, bindings)
+            case HirTypeKind.Result(d_ok, d_err):
+                match actual.kind:
+                    case HirTypeKind.Result(a_ok, a_err):
+                        val with_ok = self.bind_struct_type_params(d_ok, a_ok, names, bindings)
+                        return self.bind_struct_type_params(d_err, a_err, names, with_ok)
+                    case _: ()
+                bindings
             case HirTypeKind.Dict(d_key, d_value):
                 match actual.kind:
                     case HirTypeKind.Dict(a_key, a_value):
@@ -4380,6 +4387,35 @@ impl MirLowering:
             if self.current_mir_signature_returns_unit():
                 self.lower_expr(unit_rv)
                 return_value = None
+        # A bare `return` against a declared value return must not reach the
+        # backend as an operand-less Ret: Cranelift rejects it ("arguments of
+        # return must match function signature") and LLVM fabricates
+        # `ret i64 0`. In an Optional function it is `return nil`; anywhere
+        # else it is the explicit twin of the implicit-tail E-SFFI-016
+        # (function_lowering.spl). `main` keeps its backend-owned i64 exit.
+        # bug=cranelift_bare_return_in_valued_fn_verifier_2026-11-18
+        var bare_return = true
+        if val present_rv = value:
+            bare_return = false
+        if bare_return and not self.current_mir_signature_returns_unit():
+            var bare_builder = self.builder
+            match bare_builder.current_function:
+                case Some(bare_fn):
+                    if bare_fn.name != "main":
+                        val bare_declared: HirType? = self.resolved_call_hir_return_type(bare_fn.symbol)
+                        if val bare_type = bare_declared:
+                            match bare_type.kind:
+                                case HirTypeKind.Optional(_):
+                                    return_value = Some(HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: bare_type, span: bare_fn.span))
+                                case HirTypeKind.Unit:
+                                    ()
+                                case _:
+                                    self.error_fatal(
+                                        "E-SFFI-016: bare `return` in non-unit function '" + bare_fn.name + "'; return a value of the declared type",
+                                        Some(bare_fn.span)
+                                    )
+                case None:
+                    ()
         if val rv = return_value:
             var br = self.builder
             # Lower for the DECLARED return slot, so a conditional returned

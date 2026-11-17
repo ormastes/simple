@@ -1,0 +1,39 @@
+# @req REQ-SSPEC-UNIT
+# Regression: a call argument whose MIR local is Unit/void typed (a value whose
+# type was lost through a diverging match/if arm) used to print
+# `call i64 @f(void %l0)`; llc rejects that with no name. It is now a recorded
+# codegen error.
+
+use std.spec.step
+
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn void_arg_translator(arg_type: text) -> MirToLlvm:
+    var translator = MirToLlvm.create("test.llvm.void_call_arg", CodegenTarget.X86_64, nil)
+    translator.local_types[0] = arg_type
+    translator.value_types["%l0"] = arg_type
+    translator.defined_locals[0] = true
+    val func = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("take_value"),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+    ))
+    val call = MirInst(kind: MirInstKind.Call(Some(LocalId(id: 1)), func, [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))]), span: nil)
+    translator.translate_call_at([call], 0, -1)
+    translator
+
+describe "LLVM call operand with a void-typed local":
+    it "records a codegen error and never prints a void operand":
+        step("translate a call whose argument local is typed void")
+        val translator = void_arg_translator("void")
+        expect(translator.codegen_errors.len()).to_equal(1)
+        expect(translator.codegen_errors.join("|")).to_contain("passes a void-typed value as argument 0")
+        expect(translator.builder.build().contains("(void ")).to_equal(false)
+
+    it "records no error for an i64-typed argument local":
+        step("same call with an i64 local")
+        val translator = void_arg_translator("i64")
+        expect(translator.codegen_errors.len()).to_equal(0)
+        expect(translator.builder.build()).to_contain("i64 %l0")

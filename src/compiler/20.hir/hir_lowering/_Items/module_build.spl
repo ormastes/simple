@@ -10,6 +10,7 @@ use compiler.hir.hir_lowering._Items.module_lowering.*
 
 use compiler.hir.hir_types.*
 use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.hir_symbol_table_methods.{hir_symbol_declaration_category_v1, hir_declaration_origin_snapshot_skipped_v1}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
 use compiler.frontend.declaration_intent_v1.{parser_declaration_intent_index_v1}
 use compiler.hir.hir_definitions.*
@@ -115,7 +116,27 @@ impl HirLowering:
             # error for unexpected skips.
             if hir_module_path_is_scv_snapshot_v1(self.module_filename) or (hir_module_env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1":
                 return
-            self.error("typed declaration did not retain its source identity: " + key, Span.empty())
+            # Diagnostic for native_hir_defining_module_empty_local_decls_2026-11-17:
+            # Ok(false) has three causes (empty modifier, key/name mismatch,
+            # snapshot skip); name every input so a native boot shows which.
+            var sym_name = "<missing>"
+            var sym_category = "<missing>"
+            var sym_defining = "<missing>"
+            if self.symbols.symbols.has(id.id):
+                val sym = self.symbols.symbols[id.id]
+                # The SCV-snapshot skip (bootstrap-mode Stage 2) is not a
+                # retention failure; only a genuine Ok(false) reports.
+                if hir_declaration_origin_snapshot_skipped_v1(sym.defining_module ?? "", owner,
+                        module_surface_canonical_path(self.module_filename)):
+                    return
+                sym_name = sym.name
+                sym_category = hir_symbol_declaration_category_v1(sym)
+                sym_defining = sym.defining_module ?? "<none>"
+            self.error("typed declaration did not retain its source identity: " + key +
+                " [symbol.name=" + sym_name + " category=" + sym_category +
+                " defining_module=" + sym_defining + " owner=" + owner +
+                " modifier=" + intents[key] + " source_path=" +
+                module_surface_canonical_path(self.module_filename) + "]", Span.empty())
 
     # Sub-plan P1 wiring (immutable_views_async_init_revisions_2026-11-13.md
     # section 3.2). Gate SIMPLE_REQUIRED_INIT_CHECK: off (default) | warning |

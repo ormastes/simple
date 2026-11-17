@@ -18,14 +18,26 @@ use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 
 fn workspace_workflow_reply_v3(state: MachineFreshWorkloadLifecycleV2, action: text,
-        phase: text, result: MachineFreshWorkloadActionResultV2) -> Result<Option<RuntimeOperationV1>, text>:
+        phase: text, result: MachineFreshWorkloadActionResultV2, exit: RuntimeExitStatusV1) -> Result<Option<RuntimeOperationV1>, text>:
     val record = state.record_v3()?
     val identity = machine_fresh_record_runtime_v3(record, state.native_id_v2()?)?
     val finished = state.workflow_finish_v3()?
     Ok(Some(RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: action,
         command: RuntimeCommandV1(action, result.program, result.arguments),
-        state: RuntimeStateV1(phase, identity, -1, "actual-fresh-workspace"),
+        state: RuntimeStateV1(phase, identity, -1, "actual-fresh-workspace", exit),
         exit_code: result.exit_code, stdout: result.output, stderr: "", reason: "actual-fresh-workspace")))
+
+# N7: the typed exit of the single engine-native read taken before Stop. No
+# completed read is Unobserved; an undecodable or engine-failed read is Unknown.
+# Neither is ever Exited(0). A helper timeout or spawn failure on the read still
+# latches the lifecycle Unknown like any other effect (same as a failed stop).
+fn workspace_workflow_exit_v3(state: MachineFreshWorkloadLifecycleV2) -> Result<RuntimeExitStatusV1, text>:
+    val read = state.action_state_v2("inspect-exit")
+    if read.is_err() or read.unwrap().state != "completed": return Ok(RuntimeExitStatusV1.Unobserved)
+    val result = state.completed_result_v3("inspect-exit")?
+    match machine_fresh_record_exit_status_v3(state.record_v3()?, state.native_id_v2()?, result.exit_code, result.output):
+        case Ok(found): Ok(found)
+        case Err(reason): Ok(RuntimeExitStatusV1.Unknown(reason))
 
 # Internal exact effect mapping. Callers cannot choose argv, format or permit.
 fn workspace_workflow_effect_v3(action: ContainerWorkspaceActionV3, stage: i64) -> Option<(LinuxFreshWorkloadActionV2, text)>:
@@ -49,12 +61,15 @@ fn workspace_workflow_effect_v3(action: ContainerWorkspaceActionV3, stage: i64) 
             if stage == 0: return Some((LinuxFreshWorkloadActionV2.InputConfigurationBefore, "input-configuration-before"))
             if stage == 1: return Some((LinuxFreshWorkloadActionV2.InputConfigurationImage, "input-configuration-image"))
             if stage == 2: return Some((LinuxFreshWorkloadActionV2.InputConfigurationAfter, "input-configuration-after"))
+        # N7: the exit read precedes the engine stop, which would overwrite ExitCode with the stop signal.
         case ContainerWorkspaceActionV3.Stop:
-            if stage == 0: return Some((LinuxFreshWorkloadActionV2.Stop, "stop"))
+            if stage == 0: return Some((LinuxFreshWorkloadActionV2.Inspect, "inspect-exit"))
+            if stage == 1: return Some((LinuxFreshWorkloadActionV2.Stop, "stop"))
         case ContainerWorkspaceActionV3.Destroy:
-            if stage == 0: return Some((LinuxFreshWorkloadActionV2.Stop, "stop"))
-            if stage == 1: return Some((LinuxFreshWorkloadActionV2.Remove, "remove"))
-            if stage == 2: return Some((LinuxFreshWorkloadActionV2.Absence, "absence"))
+            if stage == 0: return Some((LinuxFreshWorkloadActionV2.Inspect, "inspect-exit"))
+            if stage == 1: return Some((LinuxFreshWorkloadActionV2.Stop, "stop"))
+            if stage == 2: return Some((LinuxFreshWorkloadActionV2.Remove, "remove"))
+            if stage == 3: return Some((LinuxFreshWorkloadActionV2.Absence, "absence"))
         case _: pass
     nil
 
@@ -76,8 +91,12 @@ fn workspace_workflow_step_inner_v3(storage: MachineStorageOwnerV1,
     if val selected = effect:
         # Destroy may follow an independently completed signed Stop; this does
         # not manufacture a second Stop result or reconsume its native permit.
+        # The single-use exit read is likewise reused, never re-taken after Stop.
         val prior = state.action_state_v2(selected.1)
-        if action == ContainerWorkspaceActionV3.Destroy and stage == 0 and prior.is_ok() and prior.unwrap().state == "completed":
+        val reusable = selected.1 == "inspect-exit" or (action == ContainerWorkspaceActionV3.Destroy and selected.1 == "stop")
+        # After any engine stop (e.g. a legacy run_action_v2 Stop) ExitCode is the stop signal: no read, stays Unobserved.
+        val stopped_first = selected.1 == "inspect-exit" and prior.is_err() and state.action_state_v2("stop").is_ok()
+        if stopped_first or (reusable and prior.is_ok() and prior.unwrap().state == "completed"):
             val advanced = state.workflow_advance_v3()?
             return Ok(nil)
         val name = state.name_v2(selected.1)?
@@ -87,15 +106,15 @@ fn workspace_workflow_step_inner_v3(storage: MachineStorageOwnerV1,
             return Err(begun.unwrap_err())
         return Ok(nil)
     if action == ContainerWorkspaceActionV3.Prepare:
-        return workspace_workflow_reply_v3(state, "prepare", RUNTIME_PHASE_PREPARED, MachineFreshWorkloadActionResultV2(true, "", 0, ""))
+        return workspace_workflow_reply_v3(state, "prepare", RUNTIME_PHASE_PREPARED, MachineFreshWorkloadActionResultV2(true, "", 0, ""), RuntimeExitStatusV1.Unobserved)
     if action == ContainerWorkspaceActionV3.Create:
-        val verified = state.configuration_v2(LinuxFreshWorkloadActionV2.ConfigurationAfter, state.history_v2()?.epoch)?
-        return workspace_workflow_reply_v3(state, "create", RUNTIME_PHASE_CREATED, state.completed_result_v3("create")?)
+        val verified = state.configuration_v2(LinuxFreshWorkloadActionV2.ConfigurationAfter, (state.history_v2()?).epoch)?
+        return workspace_workflow_reply_v3(state, "create", RUNTIME_PHASE_CREATED, state.completed_result_v3("create")?, RuntimeExitStatusV1.Unobserved)
     if action == ContainerWorkspaceActionV3.Configuration or action == ContainerWorkspaceActionV3.InputConfiguration:
         val kind = if action == ContainerWorkspaceActionV3.InputConfiguration: LinuxFreshWorkloadActionV2.InputConfigurationAfter else: LinuxFreshWorkloadActionV2.ConfigurationAfter
-        val actual = state.configuration_v2(kind, state.history_v2()?.epoch)?
+        val actual = state.configuration_v2(kind, (state.history_v2()?).epoch)?
         return workspace_workflow_reply_v3(state, container_workspace_action_name_v3(action), RUNTIME_PHASE_CREATED,
-            MachineFreshWorkloadActionResultV2(true, actual, 0, ""))
+            MachineFreshWorkloadActionResultV2(true, actual, 0, ""), RuntimeExitStatusV1.Unobserved)
     if action == ContainerWorkspaceActionV3.Start:
         val id = state.native_id_v2()?
         val before = machine_fresh_record_inspect_v3(record, id, state.output_v2("inspect")?)?
@@ -117,7 +136,7 @@ fn workspace_workflow_step_inner_v3(storage: MachineStorageOwnerV1,
         val current_command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, id)?
         val current = state.running_v2(custody, current_command)?
         if current.state != LinuxContainerContainmentPopulationV1.Populated: return Err("machine-fresh-workspace-running-unproven")
-        return workspace_workflow_reply_v3(state, "start", RUNTIME_PHASE_RUNNING, state.completed_result_v3("start")?)
+        return workspace_workflow_reply_v3(state, "start", RUNTIME_PHASE_RUNNING, state.completed_result_v3("start")?, RuntimeExitStatusV1.Unobserved)
     val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, state.native_id_v2()?)?
     if action == ContainerWorkspaceActionV3.Inspect or action == ContainerWorkspaceActionV3.Stop:
         val native = state.running_v2(custody, command)?
@@ -125,14 +144,16 @@ fn workspace_workflow_step_inner_v3(storage: MachineStorageOwnerV1,
         if action == ContainerWorkspaceActionV3.Stop and populated: return Err("machine-fresh-workspace-stop-unproven")
         return workspace_workflow_reply_v3(state, container_workspace_action_name_v3(action),
             if populated: RUNTIME_PHASE_RUNNING else: RUNTIME_PHASE_STOPPED,
-            if action == ContainerWorkspaceActionV3.Stop: state.completed_result_v3("stop")? else: MachineFreshWorkloadActionResultV2(true, "", 0, ""))
+            if action == ContainerWorkspaceActionV3.Stop: state.completed_result_v3("stop")? else: MachineFreshWorkloadActionResultV2(true, "", 0, ""),
+            workspace_workflow_exit_v3(state)?)
     if action == ContainerWorkspaceActionV3.Destroy:
         val absent = machine_fresh_absence_observe_v3(custody, record, state.workspace_binding_option_v3()?,
             machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Absence, state.native_id_v2()?)?)?
         val correlated = state.validate_closure_v2(absent)?
         # OCI absence is observed; execution/storage settlement remains a
         # separate genuine retained-source transaction. No charge is refunded.
-        return workspace_workflow_reply_v3(state, "destroy", RUNTIME_PHASE_DESTROYED, state.completed_result_v3("remove")?)
+        return workspace_workflow_reply_v3(state, "destroy", RUNTIME_PHASE_DESTROYED, state.completed_result_v3("remove")?,
+            workspace_workflow_exit_v3(state)?)
     Err("machine-fresh-workspace-workflow-stage")
 
 pub(package) fn machine_workspace_workflow_step_v3(storage: MachineStorageOwnerV1,

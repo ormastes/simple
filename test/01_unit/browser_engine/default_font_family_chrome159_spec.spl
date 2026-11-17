@@ -1,0 +1,50 @@
+# A page that sets no `font-family` is drawn in the UA default family, which is
+# SERIF on Chrome 159 / Linux: getComputedStyle(body).fontFamily is
+# "Times New Roman" (fontconfig -> Liberation Serif). Form controls
+# (input/button/select) compute to Arial (Liberation Sans) and textarea/code/
+# pre/kbd to monospace; those UA-sheet overrides must survive the change.
+#
+# Oracle: Chrome 159 --dump-dom, width of "Hamburgefonstiv 0123" at 16px in an
+# inline-block span (see font_family_list_resolution_spec for the face table):
+#   unstyled p/h1 span      147.69 (Liberation Serif)   Simple before 161 -> after 148
+#   input/button/select     160.98 (Liberation Sans)    161 -> 161 (button box 177 = +12 padding +4 border)
+#   code/kbd                192.66 (DejaVu Sans Mono)   193 -> 193
+# Ink: Chrome renders no-font-family byte-identically to `font-family:serif`.
+use std.spec.*
+use std.nogc_sync_mut.text_layout.font_provider.{browser_host_has_measured_linux_face_set}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+fn _w(tag: text, style: text) -> text:
+    val html = (
+        "<html><body style='margin:0'><" + tag + " id='probe' style='display:inline-block;font-size:16px;" +
+        style + "'>Hamburgefonstiv 0123</" + tag + "></body></html>"
+    )
+    simple_web_layout_debug_layout_by_id(html, 800, 900, "probe", "w")
+
+fn _page(family: text) -> [u32]:
+    val html = (
+        "<html><body style='margin:0;background:#fff;font-size:24px;" + family + "'>Hamburgefonstiv 0123</body></html>"
+    )
+    simple_web_render_html_to_pixels(html, 240, 40)
+
+describe "default font family (Chrome 159)":
+    it "uses the serif face when no font-family is set":
+        if browser_host_has_measured_linux_face_set():
+            expect(_w("span", "")).to_equal("148")
+            expect(_w("p", "margin:0")).to_equal("148")
+            expect(_w("span", "")).to_equal(_w("span", "font-family:serif"))
+    it "keeps sans on form controls and mono on code":
+        if browser_host_has_measured_linux_face_set():
+            # 160.98 Liberation Sans + 12 padding + 4 border; the serif face would give 148 + 16.
+            expect(_w("button", "")).to_equal("177")
+            expect(_w("code", "")).to_equal("193")
+    it "paints the default family with the same ink as font-family:serif":
+        if browser_host_has_measured_linux_face_set():
+            val unset = _page("")
+            val serif = _page("font-family:serif")
+            val sans = _page("font-family:sans-serif")
+            expect(unset == serif).to_equal(true)
+            expect(unset == sans).to_equal(false)
