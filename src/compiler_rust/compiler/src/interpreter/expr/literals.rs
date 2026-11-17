@@ -27,7 +27,11 @@ pub(super) fn eval_literal_expr(
         expr
     {
         let declared = crate::interpreter_unit::unit_suffix_declared_in_file(unit_name);
-        if let Some(msg) = crate::units::scope::unit_suffix_scope_error(unit_name, declared) {
+        let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.borrow().clone());
+        let err = crate::units::scope::with_owner_scope(owner.as_deref(), || {
+            crate::units::scope::unit_suffix_scope_error(unit_name, declared)
+        });
+        if let Some(msg) = err {
             return Err(CompileError::semantic(msg));
         }
     }
