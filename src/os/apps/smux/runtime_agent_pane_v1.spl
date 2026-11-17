@@ -1,0 +1,61 @@
+# The smux consumer of a V4 agent primary attach (milestone_0024 PR3c, DESIGN 9.1/11.1). The pane holds ONLY a
+# HostAgentPaneLeaseV4 (operation id, epoch, fingerprint), claims it once and relays Read through the agent owner;
+# it never holds the session or an fd and never cleans native state (the agent owns custody, retirement and
+# settlement). smux/pane state is never authority: every answer comes from the agent, and when the agent says the
+# lease is no longer valid the record is dropped. Pure data; the owner calls live in runtime_host_continuation_v6.
+# SOURCE_AUTHORED / NOT_RUN.
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneIoResultV4}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct SmuxAgentPaneTurnV1:
+    lease: Option<HostAgentPaneLeaseV4>
+    response: text
+    error: text
+
+# "" when a claim may reach the agent. The agent hands the lease out once; a held lease never asks twice.
+pub fn smux_agent_pane_claim_gate_v1(held: Option<HostAgentPaneLeaseV4>) -> text:
+    if held.is_some(): return "runtime-agent-pane-held"
+    ""
+
+# The agent's lease answer. The fingerprint stays inside the record; the reply names only operation and epoch.
+# allow(primitive_api): reviewed pane lease epoch DATA word (milestone_0024 PR3c)
+pub fn smux_agent_pane_claimed_v1(lease: Option<HostAgentPaneLeaseV4>, error: text) -> SmuxAgentPaneTurnV1:
+    if error != "": return SmuxAgentPaneTurnV1(lease: None, response: "", error: error)
+    if lease.is_none(): return SmuxAgentPaneTurnV1(lease: None, response: "", error: "runtime-agent-pane-no-lease")
+    val held = lease.unwrap()
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-lease"),
+        "operationId": SdnValue.String(held.operation_id), "epoch": SdnValue.Int(held.epoch)}
+    SmuxAgentPaneTurnV1(lease: lease, response: sdn_encode_canonical(SdnValue.Dict(fields)), error: "")
+
+pub fn smux_agent_pane_read_gate_v1(held: Option<HostAgentPaneLeaseV4>) -> text:
+    if held.is_none(): return "runtime-agent-pane-not-claimed"
+    ""
+
+# The record is kept only on success and on `attach-not-ready` (still opening). Every other refusal (revoked,
+# stopping, wedged/failed/detach -> attach-stage, an expired or revoked approval, a binding mismatch of a changed
+# service) drops it (a wrong binding uid keeps it: the agent was never reached): the owner gate masks the agent's own lease-terminal errors, so dropping is the safe default.
+# allow(primitive_api): reviewed agent refusal code word (milestone_0024 PR3c)
+pub fn smux_agent_pane_keeps_lease_v1(error: text) -> bool:
+    error == "" or error == "attach-not-ready" or error == "attach-binding-mismatch"
+
+pub fn smux_agent_pane_read_done_v1(held: Option<HostAgentPaneLeaseV4>, result: HostAgentPaneIoResultV4) -> SmuxAgentPaneTurnV1:
+    if result.error != "":
+        val kept = if smux_agent_pane_keeps_lease_v1(result.error): held else: None
+        return SmuxAgentPaneTurnV1(lease: kept, response: "", error: result.error)
+    var chunks: [SdnValue] = []
+    for chunk in result.chunks:
+        var bytes: [SdnValue] = []
+        for byte in chunk.bytes:
+            bytes.push(SdnValue.Int(byte as i64))
+        val row: Dict<text, SdnValue> = {"stream": SdnValue.String(chunk.stream), "bytes": SdnValue.Array(bytes)}
+        chunks.push(SdnValue.Dict(row))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("host-agent-pane-read"),
+        "eof": SdnValue.Bool(result.eof), "chunks": SdnValue.Array(chunks)}
+    SmuxAgentPaneTurnV1(lease: held, response: sdn_encode_canonical(SdnValue.Dict(fields)), error: "")
+
+# Actions of the pane family this slice does not serve. Resize needs an installed-policy source the V4 service
+# does not have; Write needs the smux control lease/target and is the next slice.
+pub fn smux_agent_pane_op_refusal_v1(action: text) -> text:
+    if action == "host-agent-pane-resize": return "runtime-agent-pane-resize-refused"
+    "runtime-agent-pane-write-unsupported"

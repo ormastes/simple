@@ -6,7 +6,9 @@ use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartCons
 use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, host_linux_service_close_v4,
     host_linux_service_dispatch_installed_v4,
-    host_linux_service_open_installed_v4}
+    host_linux_service_open_installed_v4, host_linux_service_attachment_lease_v4, host_linux_service_pane_io_v4}
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4,
+    host_agent_pane_io_refused_v4}
 use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.*
 use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
 use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
@@ -211,6 +213,32 @@ fn service_linux_agent_action_v3(local: HostLinuxServiceCurrentV4, request: Host
     if reply.response.byte_len() > HOST_SERVICE_MAX_RESPONSE_BYTES_V2:
         return HostServiceTurnV3(domain, 2, host_service_error_payload_v2(request, "host-service-response-size", true))
     HostServiceTurnV3(domain, 0, reply.response)
+
+# ---- milestone_0024 PR3c S0: pane lease and brokered pane io through the domain ----
+
+pub struct HostServiceLeaseTurnV3:
+    owner: HostServiceDomainV3
+    lease: Option<HostAgentPaneLeaseV4>
+    error: text
+
+pub struct HostServicePaneIoTurnV3:
+    owner: HostServiceDomainV3
+    result: HostAgentPaneIoResultV4
+
+pub fn host_service_domain_attachment_lease_v3(owner: HostServiceDomainV3, expected_binding_uid: text) -> HostServiceLeaseTurnV3:
+    match owner.local:
+        case HostLocalRootV3.LinuxService(local):
+            val turn = host_linux_service_attachment_lease_v4(local, expected_binding_uid)
+            HostServiceLeaseTurnV3(owner: HostServiceDomainV3(HostLocalRootV3.LinuxService(turn.owner)), lease: turn.lease, error: turn.error)
+        case _: HostServiceLeaseTurnV3(owner: owner, lease: None, error: "host-linux-service-action-route")
+
+pub fn host_service_domain_pane_io_v3(owner: HostServiceDomainV3, expected_binding_uid: text,
+        lease: HostAgentPaneLeaseV4, op: HostAgentPaneOpV4) -> HostServicePaneIoTurnV3:
+    match owner.local:
+        case HostLocalRootV3.LinuxService(local):
+            val turn = host_linux_service_pane_io_v4(local, expected_binding_uid, lease, op)
+            HostServicePaneIoTurnV3(owner: HostServiceDomainV3(HostLocalRootV3.LinuxService(turn.owner)), result: turn.result)
+        case _: HostServicePaneIoTurnV3(owner: owner, result: host_agent_pane_io_refused_v4("host-linux-service-action-route"))
 
 pub fn host_service_domain_turn_v3(owner: HostServiceDomainV3, request: HostServiceRequestV2) -> HostServiceTurnV3:
     match owner.local:
