@@ -2,7 +2,7 @@
 
 - id: `baremetal_riscv32_no_firmware_boot_lane_2026_11_17`
 - severity: P3
-- status: open (blocker filed)
+- status: verification-pending (riscv32 boots; exact transcript PASS 2026-11-17)
 
 ## What works
 `native-build examples/09_embedded/freestanding_hello/main.spl --target riscv32-unknown-none --emit-object`
@@ -46,3 +46,11 @@ FW_PAYLOAD=y`. Add `crt0_riscv32.S` and a `riscv32` case (`qemu-system-riscv32
 - Environment blocker hit mid-lane: C: reached 100% (2.2 GB free) and the WSL
   `Ubuntu-24.04` vhdx went `WSL_E_DISK_CORRUPTED`; no further builds possible
   until the owner repairs it. Not touched by this lane (shared with other lanes).
+
+## RESOLVED 2026-11-17
+`check-baremetal-efi-boot.shs --arch riscv32` -> `PASS -- 1 arch(es) booted through real firmware`:
+`hello from Simple bare metal | n=42 | ints 0 -7 9223372036854775807 -9223372036854775808 | panic: boom`
+(OpenSBI 1.7 XLEN=32 fw_payload built with clang, `qemu-system-riscv32 -machine virt -bios`, no -kernel).
+The NUL-padding/panic defects above were the 32-bit pair-ABI mismatch, fixed in the runtime by
+`bm_rt32.spl`; see `baremetal_32bit_i64_pair_abi_mismatch_2026-11-17.md`. The WSL disk blocker
+noted above was transient and cleared. Board run not yet evidenced (riscv32 board needs its own OpenSBI platform).

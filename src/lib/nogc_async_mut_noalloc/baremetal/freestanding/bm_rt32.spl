@@ -1,0 +1,168 @@
+"""
+# Freestanding bare-metal runtime, 32-bit (ilp32) variant (pure Simple)
+
+Same job and same exported `rt_*` ABI names as `bm_rt.spl`, but with the
+parameter widths the native backend really emits on 32-bit targets
+(measured with llvm-objdump on riscv32 `main.o`, 2026-11-17):
+
+- pointers and text handles are ONE 32-bit register (`rt_string_new(ptr, len)`
+  passes ptr in a0);
+- an i64 argument that follows is packed into the NEXT two registers
+  (len = a1:a2), without the even-register alignment the ilp32 psABI wants;
+- `rt_string_len` returns i64 in a0:a1.
+
+`bm_rt.spl` declares every parameter i64, so on a 32-bit target it reads
+`ptr` as a0:a1 (hi word = the length) and `len` as a2:a3 (garbage): NUL-padded
+text and a panic that prints garbage. This file declares the widths the
+caller really uses. Tracked in
+`doc/08_tracking/bug/baremetal_32bit_i64_pair_abi_mismatch_2026-11-17.md`.
+
+Text value layout in the arena: `[len: 4 bytes LE][pad 4][bytes...]`; the value
+is the header address. Bump allocator, first 4 arena bytes = next-free offset.
+Per-arch `crt0_<arch>.S` supplies bm_putc/bm_load8/bm_store8/bm_halt and the
+arena, with 32-bit arguments (store8 value in a1).
+"""
+
+extern fn bm_putc(ch: i32)
+extern fn bm_load8(addr: i32) -> i32
+extern fn bm_store8(addr: i32, value: i32)
+extern fn bm_halt()
+extern fn bm_arena_base() -> i32
+extern fn bm_arena_size() -> i32
+
+fn bm_load32(addr: i32) -> i32:
+    bm_load8(addr) | (bm_load8(addr + 1) << 8) | (bm_load8(addr + 2) << 16) | (bm_load8(addr + 3) << 24)
+
+fn bm_store32(addr: i32, value: i32):
+    bm_store8(addr, value & 255)
+    bm_store8(addr + 1, (value >> 8) & 255)
+    bm_store8(addr + 2, (value >> 16) & 255)
+    bm_store8(addr + 3, (value >> 24) & 255)
+
+fn bm_copy(dst: i32, src: i32, len: i32):
+    var i = 0
+    while i < len:
+        bm_store8(dst + i, bm_load8(src + i))
+        i = i + 1
+
+fn bm_write(ptr: i32, len: i32):
+    var i = 0
+    while i < len:
+        bm_putc(bm_load8(ptr + i))
+        i = i + 1
+
+fn bm_put_nz(ch: i32):
+    if ch != 0:
+        bm_putc(ch)
+
+fn bm_alloc_text(len: i32) -> i32:
+    val base = bm_arena_base()
+    var off = bm_load32(base)
+    if off == 0:
+        off = 8
+    val need = (len + 8 + 7) & (0 - 8)
+    if off + need > bm_arena_size():
+        bm_put_nz(0x4F)
+        bm_put_nz(0x4F)
+        bm_put_nz(0x4D)
+        bm_put_nz(0x0A)
+        bm_halt()
+    val v = base + off
+    bm_store32(base, off + need)
+    bm_store32(v, len)
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_string_new(bytes: i32, len: i32, len_hi: i32) -> i32:
+    val v = bm_alloc_text(len)
+    bm_copy(v + 8, bytes, len)
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_string_new_literal(bytes: i32, len: i32, len_hi: i32) -> i32:
+    rt_string_new(bytes, len, len_hi)
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_string_data(v: i32) -> i32:
+    v + 8
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_string_len(v: i32) -> i64:
+    bm_load32(v) as i64
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_raw_i64_to_string(n: i64) -> i32:
+    val tmp = bm_alloc_text(24)
+    # NEGATIVE domain (x <= 0) so i64::MIN needs no negation; digits by
+    # repeated addition of powers of ten (no division/multiply helper needed).
+    val neg = n < 0
+    var x = n
+    if not neg:
+        x = 0 - n
+    var pos = 0
+    var p = 1000000000000000000
+    var started = false
+    while p > 0:
+        var digit = 0
+        while x <= 0 - p:
+            x = x + p
+            digit = digit + 1
+        if digit > 0 or started or p == 1:
+            started = true
+            bm_store8(tmp + 8 + pos, 0x30 + digit)
+            pos = pos + 1
+        p = bm_div10(p)
+    if neg:
+        return bm_neg_text(tmp + 8, pos)
+    rt_string_new(tmp + 8, pos, 0)
+
+# p divided by ten, for p an exact power of ten, using shifts and adds only.
+fn bm_div10(p: i64) -> i64:
+    if p == 1:
+        return 0
+    var q = 1
+    while (q << 3) + (q << 1) < p:
+        q = (q << 3) + (q << 1)
+    q
+
+fn bm_neg_text(digits: i32, n: i32) -> i32:
+    val v = bm_alloc_text(n + 1)
+    bm_store8(v + 8, 0x2D)
+    bm_copy(v + 9, digits, n)
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_strcat_tagged(a: i32, b: i32) -> i32:
+    val la = bm_load32(a)
+    val lb = bm_load32(b)
+    val v = bm_alloc_text(la + lb)
+    bm_copy(v + 8, a + 8, la)
+    bm_copy(v + 8 + la, b + 8, lb)
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_interp_cstr(v: i32) -> i32:
+    v
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_println_str(ptr: i32, len: i32, len_hi: i32):
+    bm_write(ptr, len)
+    bm_putc(0x0A)
+
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_println(v: i32):
+    rt_println_str(v + 8, bm_load32(v), 0)
+
+# Prints "panic: <msg>" and halts forever; never returns.
+@allow(primitive_api)  # C-ABI runtime boundary: 32-bit handles the backend emits
+pub fn rt_panic(ptr: i32, len: i32, len_hi: i32):
+    bm_put_nz(0x70)
+    bm_put_nz(0x61)
+    bm_put_nz(0x6E)
+    bm_put_nz(0x69)
+    bm_put_nz(0x63)
+    bm_put_nz(0x3A)
+    bm_put_nz(0x20)
+    bm_write(ptr, len)
+    bm_putc(0x0A)
+    bm_halt()

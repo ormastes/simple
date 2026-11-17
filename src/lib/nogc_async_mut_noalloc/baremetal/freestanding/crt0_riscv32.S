@@ -2,10 +2,8 @@
  * a0 = hartid, a1 = dtb, no stack). Only what Simple cannot express: entry/
  * stack setup, byte load/store, wfi. Serial: 16550 at BM_UART (default
  * 0x10000000 = QEMU virt).
- *
- * ABI (ilp32): the backend lowers Simple i64 to a register pair (lo in the
- * even register, hi in the odd one), so bm_load8(addr: i64) -> i64 takes the
- * address in a0:a1 and returns a0:a1; bm_store8(addr, value) is a0:a1, a2:a3. */
+ * ABI: bm_rt32.spl declares the 32-bit widths the backend emits, so every
+ * argument is one register (bm_store8 value in a1). */
 #ifndef BM_UART
 #define BM_UART 0x10000000
 #endif
@@ -32,13 +30,12 @@ bm_putc:
 
     .globl bm_load8
 bm_load8:
-    lbu a0, 0(a0)            /* address low word; high word a1 is 0 on rv32 */
-    li a1, 0
+    lbu a0, 0(a0)
     ret
 
     .globl bm_store8
 bm_store8:
-    sb a2, 0(a0)             /* value low word is a2 */
+    sb a1, 0(a0)             /* value: 32-bit arg in a1 */
     ret
 
     .globl bm_halt
@@ -50,13 +47,11 @@ bm_halt:
     .globl bm_arena_base
 bm_arena_base:
     la a0, bm_arena
-    li a1, 0
     ret
 
     .globl bm_arena_size
 bm_arena_size:
     li a0, 65536
-    li a1, 0
     ret
 
     .data
