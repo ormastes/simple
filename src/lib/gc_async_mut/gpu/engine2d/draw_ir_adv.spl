@@ -149,6 +149,11 @@ struct Engine2dDrawIrAdvResult:
     async_admission_reason: text = ""
     async_packet_checksum: i64 = 0
     async_claim: bool = false
+    # Monotonic completed Vulkan fence generation linked to this readback.
+    # Zero means the strict submission/readback pair was not authenticated.
+    submission_generation: i64 = 0
+    frame_width: i32 = 0
+    frame_height: i32 = 0
 
 # Explicit continuation boundary for ordinary rendering. Callers retain engine
 # for subsequent frames; result.pixels is evidence from this execution rather
@@ -176,6 +181,7 @@ struct Engine2dDrawIrAdvSubmitResult:
     no_readback: bool
     readback_bytes: i64
     font_evidence_valid: bool
+    submission_generation: i64 = 0
 
 # Owner-result boundary for strict DrawIR followed by visible presentation.
 # The returned Engine2D is the sole mutable owner after both operations; callers
@@ -3679,9 +3685,11 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                 evidence.device_executed and evidence.promotion_ready and
                 evidence.readback_source == "device_readback"))
     val expected = _engine2d_draw_ir_strict_vulkan_command_count(composition)
+    val submission_generation = eng.vulkan_submission_generation()
     val completed = (submitted and finalized and observed.valid and completion_known and
         no_readback and readback_bytes == 0 and backend_handle > 0 and
-        device_identity > 0 and rendered == expected and skipped == 0 and
+        device_identity > 0 and submission_generation > 0 and
+        rendered == expected and skipped == 0 and
         font_valid)
     Engine2dDrawIrAdvSubmitResult(
         engine: eng,
@@ -3698,7 +3706,8 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
         completion_known: completed,
         no_readback: completed,
         readback_bytes: if completed: 0 else: readback_bytes,
-        font_evidence_valid: font_valid)
+        font_evidence_valid: font_valid,
+        submission_generation: if completed: submission_generation else: 0)
 
 fn _engine2d_draw_ir_strict_vulkan_submit_rejected(engine: Engine2D, composition: DrawIrComposition, reason: text) -> Engine2dDrawIrAdvSubmitResult:
     Engine2dDrawIrAdvSubmitResult(
@@ -3748,6 +3757,7 @@ fn engine2d_draw_ir_adv_strict_vulkan_submit_with_images(engine: Engine2D, compo
     result.completion_known = false
     result.no_readback = false
     result.readback_bytes = 0
+    result.submission_generation = 0
     result
 
 fn engine2d_draw_ir_adv_strict_vulkan_window_present_with_images(
@@ -3808,15 +3818,54 @@ fn engine2d_draw_ir_adv_strict_vulkan_window_present_with_images(
 
 fn engine2d_draw_ir_adv_strict_vulkan_readback(submission: Engine2dDrawIrAdvSubmitResult) -> Engine2dDrawIrAdvResult:
     """Read back one successful strict submission without replaying DrawIR."""
-    if submission.fallback_required or not submission.completion_known:
+    if submission.fallback_required or not submission.completion_known or
+        submission.submission_generation <= 0:
+        val reason = if submission.submission_generation <= 0 and
+            not submission.fallback_required:
+            "strict-vulkan-submission-generation-required"
+        else:
+            submission.fallback_reason
         return _engine2d_draw_ir_strict_vulkan_rejected(
-            submission.composition, submission.fallback_reason)
+            submission.composition, reason)
     var eng = submission.engine
+    val generation_before = eng.vulkan_submission_generation()
     val readback = eng.read_pixels_with_source()
-    _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(
+    val generation_after = eng.vulkan_submission_generation()
+    var linked = (generation_before == submission.submission_generation and
+        generation_after == submission.submission_generation and
+        readback.source == "device_readback" and
+        readback.backend_handle == submission.backend_handle and
+        readback.device_identity == submission.device_identity and
+        readback.pixel_count == eng.width().to_i64() * eng.height().to_i64())
+    if val Some(frame) = eng.latest_vulkan_frame_receipt():
+        linked = linked and frame.completion_known and not frame.cpu_fallback_used and
+            frame.backend_handle == submission.backend_handle and
+            frame.device_identity == submission.device_identity and
+            frame.device_fence_count == submission.submission_generation
+    else:
+        linked = false
+    var result = _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(
         submission.composition, submission.rendered_command_count,
         submission.skipped_command_count, readback, eng,
         submission.device_submit_count, submission.device_fence_count)
+    if not linked:
+        result.fallback_required = true
+        result.fallback_reason = "strict-vulkan-readback-submission-mismatch"
+        result.rendered_command_count = 0
+        result.skipped_command_count = _engine2d_draw_ir_strict_vulkan_command_count(
+            submission.composition)
+        result.pixels = []
+        result.readback_source = "device_evidence_rejected"
+        result.backend_handle = 0
+        result.device_identity = 0
+        result.readback_checksum = 0
+        result.device_submit_count = 0
+        result.device_fence_count = 0
+        return result
+    result.submission_generation = submission.submission_generation
+    result.frame_width = eng.width()
+    result.frame_height = eng.height()
+    result
 
 fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Execute only device-attested Vulkan DrawIR primitives.
@@ -3837,6 +3886,7 @@ fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, c
     val font_required = _engine2d_draw_ir_composition_has_text(composition)
     val readback_valid = (result.readback_source == "device_readback" and
         result.backend_handle > 0 and result.device_identity > 0 and
+        result.submission_generation > 0 and
         result.pixels.len() == engine.width().to_i64() * engine.height().to_i64())
     val commands_valid = (result.rendered_command_count == expected and
         result.skipped_command_count == 0 and not result.fallback_required)
@@ -3859,6 +3909,9 @@ fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, c
     # submit/readback receipt computed before font and command validation.
     result.device_submit_count = 0
     result.device_fence_count = 0
+    result.submission_generation = 0
+    result.frame_width = 0
+    result.frame_height = 0
     result
 
 fn _engine2d_draw_ir_composition_has_text(composition: DrawIrComposition) -> bool:
