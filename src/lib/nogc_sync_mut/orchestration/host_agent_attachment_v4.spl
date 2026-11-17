@@ -245,7 +245,8 @@ pub struct HostAgentAttachmentReleaseStepV4:
 
 # What the production port needs that is not attachment state (13.5): the service's capacity owner (the journal
 # writer), the helper store `HostHelperStoreV1(helper_store, Some(capacity.journal))`, and the monotonic clock
-# of the prepared-receipt deadlines (D2: `prepare_deadline_ms` is on the monotonic clock, not `grant_clock`).
+# of the prepared-receipt expire (the receipt's deadline is monotonic). The attachment's own `prepare_deadline_ms`
+# is stored on the GRANT clock (host_agent_attach_grant_deadline_v4), the clock every attachment bound runs on.
 # Built by the caller for ONE call, captured by the port closure, never stored.
 pub struct HostAgentReleaseContextV4:
     capacity: HostCapacityOwnerV1
@@ -745,8 +746,8 @@ pub fn host_agent_action_archive_v4(journal: DistributedOperationJournalV2, rela
 
 # ---- the pure attach facts check (13.2, D2a, F8, 14B, 14C) ----
 
-# Everything the pure check reads that is not agent state. `now` is on the clock of `prepare_deadline_ms`
-# and `not_after` (the glue passes the agent clock); live incarnation/epoch come from the service's OWN state.
+# Everything the pure check reads that is not agent state. TWO clocks (m23 P2-5): `now` is the grant clock of
+# `not_after`; `monotonic_ms` is the clock of the receipt's `prepare_deadline_ms`. The glue passes both; live incarnation/epoch come from the service's OWN state.
 # 14C: `plan.identity.binding_digest` is the control-target binding digest (primary_input_v1), NOT the pane
 # binding digest, so it is not a fact here; the plan<->binding pairing is the signed digests' job
 # (host_agent_attach_binding_plan_check_v4).
@@ -759,13 +760,23 @@ pub struct HostAgentAttachFactsV4:
     prepare_deadline_ms: i64
     not_after: i64
     now: i64
+    monotonic_ms: i64
 
 # allow(primitive_api): reviewed live epoch + clock DATA words (milestone_0021 14B, D2a)
-pub fn host_agent_attach_facts_v4(parts: HostAgentAttachPartsV4, live_incarnation: text, live_epoch: i64, not_after: i64, now: i64) -> HostAgentAttachFactsV4:
+pub fn host_agent_attach_facts_v4(parts: HostAgentAttachPartsV4, live_incarnation: text, live_epoch: i64, not_after: i64, now: i64,
+        monotonic_ms: i64) -> HostAgentAttachFactsV4:
     HostAgentAttachFactsV4(helper_kind: parts.helper.plan.helper_kind,
         plan_parent_operation_id: parts.plan.identity.parent_operation_id, binding: parts.binding,
         live_incarnation: live_incarnation, live_epoch: live_epoch,
-        prepare_deadline_ms: parts.helper.intent.reservation.prepare_deadline_ms, not_after: not_after, now: now)
+        prepare_deadline_ms: parts.helper.intent.reservation.prepare_deadline_ms, not_after: not_after, now: now,
+        monotonic_ms: monotonic_ms)
+
+# The receipt's monotonic prepare deadline expressed on the grant clock the attachment machine runs on (m23 P2-5):
+# the remaining prepare budget added to the grant clock now. Stored once at attach; the expire core still reads the
+# receipt's own monotonic deadline.
+# allow(primitive_api): reviewed clock DATA words (m23 P2-5)
+pub fn host_agent_attach_grant_deadline_v4(prepare_deadline_ms: i64, now: i64, monotonic_ms: i64) -> i64:
+    now + (prepare_deadline_ms - monotonic_ms)
 
 # The facts half of the pure transition check; the agent half (stage, consumed, pending, holder, stop) runs
 # first in host_agent_attach_check_core_v4. A prepare that already expired (P3-3) can only fail after the archive,
@@ -775,8 +786,8 @@ pub fn host_agent_attach_facts_check_v4(facts: HostAgentAttachFactsV4, operation
     if facts.helper_kind != "attach-broker": return Err("attach-helper-kind")
     if facts.plan_parent_operation_id != operation_id: return Err("attach-plan-parent")
     if facts.now >= facts.not_after: return Err("attach-stopping")
-    if (facts.prepare_deadline_ms <= facts.now or
-            facts.prepare_deadline_ms - facts.now > HOST_AGENT_ATTACH_PREPARE_TTL_MS_V4):
+    if (facts.prepare_deadline_ms <= facts.monotonic_ms or
+            facts.prepare_deadline_ms - facts.monotonic_ms > HOST_AGENT_ATTACH_PREPARE_TTL_MS_V4):
         return Err("attach-prepare-window")
     host_agent_pane_binding_live_check_v4(facts.binding, facts.live_incarnation, facts.live_epoch)
 
