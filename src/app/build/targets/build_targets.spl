@@ -35,6 +35,7 @@
 # driver-side target graph owned by another lane.
 
 use std.io_runtime.{file_exists, file_read}
+use compiler.common.backend_plugin.model.{BACKEND_PLUGIN_ABI_VERSION_V1, BackendCapability}
 
 struct BuildTarget:
     name: text
@@ -510,7 +511,10 @@ pub fn default_group_targets(ts: TargetSet) -> [text]:
 # that any backend provider is production-ready. Default selection
 # (`default_group_targets`) never consults it, so the host build is unaffected.
 
-pub val BACKEND_PROVIDER_ABI_VERSION: i64 = 1
+# ABI version and capability vocabulary come from the compiler-side V1 backend
+# plugin contract (70.backend/backend_plugin/admission.spl uses the same model),
+# so both admission paths accept/refuse the same ABI and capability names.
+pub val BACKEND_PROVIDER_ABI_VERSION: i64 = BACKEND_PLUGIN_ABI_VERSION_V1
 
 pub struct BackendProviderDescriptor:
     group: text
@@ -518,12 +522,35 @@ pub struct BackendProviderDescriptor:
     host_triple: text
     capabilities: [text]
 
+pub fn backend_provider_capability_names() -> [text]:
+    [
+        BackendCapability.JitExecute.name(), BackendCapability.ObjectEmit.name(),
+        BackendCapability.DebugInfo.name(), BackendCapability.Optimization.name(),
+        BackendCapability.CrossTarget.name(), BackendCapability.IncrementalCompilation.name()
+    ]
+
+fn _unknown_capability(caps: [text]) -> text:
+    val known = backend_provider_capability_names()
+    for c in caps:
+        if not known.contains(c):
+            return c
+    ""
+
+fn _unknown_capability_refusal(group: text, cap: text) -> text:
+    "SPL-PROVIDER-ABI-001: backend-admission: unknown-capability: " + group + ": " + cap
+
 pub fn admit_backend_provider(d: BackendProviderDescriptor, host_triple: text, required_caps: [text]) -> text:
     """Empty text = admitted; otherwise the first stable refusal code."""
     if d.abi_version != BACKEND_PROVIDER_ABI_VERSION:
         return "SPL-PROVIDER-ABI-001: backend-admission: abi-mismatch: " + d.group + ": " + d.abi_version.to_string() + " != " + BACKEND_PROVIDER_ABI_VERSION.to_string()
     if d.host_triple != host_triple:
         return "SPL-PROVIDER-ABI-001: backend-admission: triple-mismatch: " + d.group + ": " + d.host_triple + " != " + host_triple
+    val bad_decl = _unknown_capability(d.capabilities)
+    if bad_decl.len() > 0:
+        return _unknown_capability_refusal(d.group, bad_decl)
+    val bad_req = _unknown_capability(required_caps)
+    if bad_req.len() > 0:
+        return _unknown_capability_refusal(d.group, bad_req)
     var i = 0
     while i < required_caps.len():
         var found = false
