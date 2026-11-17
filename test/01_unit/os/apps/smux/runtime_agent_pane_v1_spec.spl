@@ -19,7 +19,7 @@ use std.common.contracts.container.primary_connection_v2.ContainerTerminalChunkV
 use os.apps.smux.runtime_agent_pane_v1.{smux_agent_pane_claim_gate_v1, smux_agent_pane_claimed_v1,
     smux_agent_pane_read_gate_v1, smux_agent_pane_read_done_v1, smux_agent_pane_keeps_lease_v1,
     smux_agent_pane_resize_refusal_v1, smux_agent_pane_write_done_v1, smux_agent_pane_write_decode_v1,
-    smux_agent_pane_control_token_v1, smux_agent_pane_write_revoke_merge_v1,
+    smux_agent_pane_control_token_v1, smux_agent_pane_write_revoke_report_v1,
     smux_agent_pane_registry_match_v1, smux_agent_pane_attach_supersedes_v1}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
 use std.common.sdn.value.SdnValue
@@ -156,13 +156,40 @@ describe "smux agent pane consumer":
         expect(turn.revoked).to_equal(false)
         val refused = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-write-offset",
             gate_error: "attach-pane-input-gate-revoke:boom"))
-        expect(refused.error).to_equal("attach-pane-write-offset")
+        expect(refused.error).to_equal("attach-pane-write-offset;gate:attach-pane-input-gate-revoke:boom")
+        expect(refused.lease.is_some()).to_equal(true)
+        step("a lease-terminal write error with a gate failure still drops the lease and names both"):
+            val terminal = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-lease-revoked",
+                gate_error: "attach-pane-input-gate-revoke:boom"))
+            expect(terminal.error).to_equal("attach-lease-revoked;gate:attach-pane-input-gate-revoke:boom")
+            expect(terminal.lease.is_none()).to_equal(true)
+            expect(terminal.revoked).to_equal(true)
 
     it "merges a control-lease revoke error without hiding the write outcome (PR4 follow-up)":
         # @req PR4-WRITE-08
-        expect(smux_agent_pane_write_revoke_merge_v1("", "")).to_equal("")
-        expect(smux_agent_pane_write_revoke_merge_v1("", "control-revision-conflict")).to_equal("runtime-agent-pane-write-revoke:control-revision-conflict")
-        expect(smux_agent_pane_write_revoke_merge_v1("attach-pane-write-offset", "control-revision-conflict")).to_equal("attach-pane-write-offset")
+        val done = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(disposition: "completed", accepted_bytes: 2))
+        step("no revoke error leaves the report unchanged"):
+            val same = smux_agent_pane_write_revoke_report_v1(done.response, done.error, "")
+            expect(same.response).to_equal(done.response)
+            expect(same.error).to_equal("")
+        step("a revoke error after a completed write rides in the response, never the error (no retry)"):
+            val report = smux_agent_pane_write_revoke_report_v1(done.response, done.error, "control-revision-conflict")
+            expect(report.error).to_equal("")
+            expect(report.response.contains("completed")).to_equal(true)
+            expect(report.response.contains("revokeError")).to_equal(true)
+            expect(report.response.contains("control-revision-conflict")).to_equal(true)
+        step("a revoke error alongside a gate close failure keeps both in the response"):
+            val gated = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(disposition: "completed",
+                accepted_bytes: 2, gate_error: "attach-pane-input-gate-revoke:boom"))
+            val both = smux_agent_pane_write_revoke_report_v1(gated.response, gated.error, "control-revision-conflict")
+            expect(both.error).to_equal("")
+            expect(both.response.contains("gateError")).to_equal(true)
+            expect(both.response.contains("revokeError")).to_equal(true)
+        step("when the write itself failed the error stays the turn error and the revoke error is appended, not dropped"):
+            val failed = smux_agent_pane_write_revoke_report_v1("", "attach-pane-write-offset", "control-revision-conflict")
+            expect(failed.error).to_equal("attach-pane-write-offset;control-revoke:control-revision-conflict")
+            expect(failed.response).to_equal("")
+            expect(smux_agent_pane_write_revoke_report_v1("", "attach-pane-write-offset", "").error).to_equal("attach-pane-write-offset")
 
     it "builds the issue token the control owner accepts from signed data only (PR4 follow-up)":
         # @req PR4-WRITE-06
