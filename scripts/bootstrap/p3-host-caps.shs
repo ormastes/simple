@@ -6,39 +6,117 @@
 #      host-env.shs --get is skipped), P3_HOST_RAM_GB (override RAM detection).
 # Port of C:/dev/p3new/tools/hostcfg.ps1. No hardcoded caps: missing keys fail.
 
-p3_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "$0" in
+    */*) p3_script_dir=${0%/*} ;;
+    *) p3_script_dir=. ;;
+esac
+p3_script_dir=$(CDPATH= cd -- "${p3_script_dir:-.}" && pwd)
 p3_repo_root=$(CDPATH= cd -- "$p3_script_dir/../.." && pwd)
-p3_host_sdn=${P3_HOST_SDN:-$HOME/.config/simple/host.sdn}
+p3_host_sdn=${P3_HOST_SDN:-${SIMPLE_HOST_CONFIG:-${HOME:-${USERPROFILE:-}}/.config/simple/host.sdn}}
+p3_cr=$(printf '\r')
 
-# p3_cfg KEY -> value on stdout, exit 1 if missing.
-p3_cfg() {
-    key=$1
-    if [ -z "${P3_HOST_SDN:-}" ] && [ -f "$p3_repo_root/scripts/setup/host-env.shs" ]; then
-        v=$(sh "$p3_repo_root/scripts/setup/host-env.shs" --get "$key" 2>/dev/null) || v=""
-        v=$(printf '%s' "$v" | tr -d '\r' | sed 's/[[:space:]].*$//')
-        if [ -n "$v" ]; then printf '%s\n' "$v"; return 0; fi
+# Pure POSIX SDN scalar lookup ("  key: value") to avoid MSYS2 fork contention.
+p3_cfg_sdn() {
+    _file=$1 _key=$2
+    [ -f "$_file" ] || return 1
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line=${_line%%#*}
+        while :; do
+            case "$_line" in
+                *"$p3_cr") _line=${_line%"$p3_cr"} ;;
+                *' '|*'	') _line=${_line%?} ;;
+                *) break ;;
+            esac
+        done
+        while :; do
+            case "$_line" in
+                ' '*|'	'*) _line=${_line#?} ;;
+                *) break ;;
+            esac
+        done
+        case "$_line" in
+            "$_key":*)
+                _val=${_line#"$_key":}
+                while :; do
+                    case "$_val" in
+                        ' '*|'	'*) _val=${_val#?} ;;
+                        *) break ;;
+                    esac
+                done
+                _val=${_val%%[[:space:]]*}
+                if [ -n "$_val" ]; then
+                    _p3_out=$_val
+                    return 0
+                fi
+                ;;
+        esac
+    done < "$_file"
+    return 1
+}
+
+# p3_cfg_into KEY -> stores value in _p3_out, exit 1 if missing (zero forks when in host.sdn / env).
+p3_cfg_into() {
+    _p3_out=""
+    _key=$1
+    if [ -z "${P3_HOST_SDN:-}" ]; then
+        case "$_key" in
+            probe_max_mib) _p3_out=${SIMPLE_HOST_PROBE_MAX_MIB:-} ;;
+            tree_rss_host_pct) _p3_out=${SIMPLE_HOST_TREE_RSS_HOST_PCT:-} ;;
+            mem_reserve_free_mib) _p3_out=${SIMPLE_HOST_MEM_RESERVE_FREE_MIB:-} ;;
+            max_threads) _p3_out=${SIMPLE_HOST_MAX_THREADS:-} ;;
+            worker_mem_mib) _p3_out=${SIMPLE_HOST_WORKER_MEM_MIB:-} ;;
+            max_build_jobs) _p3_out=${SIMPLE_HOST_MAX_BUILD_JOBS:-} ;;
+        esac
+        _p3_out=${_p3_out%"$p3_cr"}
+        _p3_out=${_p3_out%%[[:space:]]*}
+        case "$_p3_out" in
+            ''|*[!0-9]*) _p3_out="" ;;
+            *) return 0 ;;
+        esac
     fi
-    if [ -f "$p3_host_sdn" ]; then
-        v=$(sed -n "s/^[[:space:]]*$key:[[:space:]]*\([^#[:space:]]*\).*/\1/p" "$p3_host_sdn" | tr -d '\r' | head -n 1)
-        if [ -n "$v" ]; then printf '%s\n' "$v"; return 0; fi
+    if [ -f "$p3_host_sdn" ] && p3_cfg_sdn "$p3_host_sdn" "$_key"; then
+        return 0
+    fi
+    if [ -z "${P3_HOST_SDN:-}" ] && [ -f "$p3_repo_root/scripts/setup/host-env.shs" ]; then
+        _v=$(sh "$p3_repo_root/scripts/setup/host-env.shs" --get "$_key" 2>/dev/null) || _v=""
+        _v=${_v%"$p3_cr"}
+        _v=${_v%%[[:space:]]*}
+        if [ -n "$_v" ]; then _p3_out=$_v; return 0; fi
     fi
     return 1
 }
 
-p3_need() {
-    v=$(p3_cfg "$1") || { echo "p3-host-caps: host.sdn key $1 missing" >&2; exit 2; }
-    printf '%s' "$v"
+p3_cfg() {
+    p3_cfg_into "$1" || return 1
+    printf '%s\n' "$_p3_out"
 }
 
-p3_ram_gb() {
-    if [ -n "${P3_HOST_RAM_GB:-}" ]; then printf '%s' "$P3_HOST_RAM_GB"; return 0; fi
+p3_need_into() {
+    p3_cfg_into "$1" || { echo "p3-host-caps: host.sdn key $1 missing" >&2; exit 2; }
+}
+
+p3_ram_gb_into() {
+    _p3_ram=""
+    if [ -n "${P3_HOST_RAM_GB:-}" ]; then _p3_ram=$P3_HOST_RAM_GB; return 0; fi
     if [ -r /proc/meminfo ]; then
-        kb=$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo)
-        if [ -n "$kb" ]; then echo $(( (kb + 524288) / 1048576 )); return 0; fi
+        while IFS= read -r _mk _mv _; do
+            case "$_mk" in
+                MemTotal:)
+                    case "$_mv" in
+                        ''|*[!0-9]*) ;;
+                        *) _p3_ram=$(( (_mv + 524288) / 1048576 )); return 0 ;;
+                    esac
+                    ;;
+            esac
+        done < /proc/meminfo
     fi
-    b=$(powershell.exe -NoProfile -Command "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory" 2>/dev/null | tr -d '\r')
-    if [ -z "$b" ]; then b=$(sysctl -n hw.physmem 2>/dev/null); fi
-    if [ -n "$b" ]; then echo $(( (b + 536870912) / 1073741824 )); return 0; fi
+    _b=$(powershell.exe -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory" < /dev/null 2>/dev/null || true)
+    _b=${_b%"$p3_cr"}
+    if [ -z "$_b" ]; then _b=$(sysctl -n hw.physmem 2>/dev/null || true); fi
+    case "$_b" in
+        ''|*[!0-9]*) ;;
+        *) _p3_ram=$(( (_b + 536870912) / 1073741824 )); return 0 ;;
+    esac
     echo "p3-host-caps: cannot detect RAM (set P3_HOST_RAM_GB)" >&2
     return 1
 }
@@ -48,11 +126,12 @@ if [ "${1:-}" = "--get" ]; then
     exit 0
 fi
 
-probe_mib=$(p3_need probe_max_mib) || exit 2
-pct=$(p3_need tree_rss_host_pct) || exit 2
-reserve_mib=$(p3_need mem_reserve_free_mib) || exit 2
-threads=$(p3_cfg max_threads) || threads=0
-ram=$(p3_ram_gb) || exit 2
+p3_need_into probe_max_mib; probe_mib=$_p3_out
+p3_need_into tree_rss_host_pct; pct=$_p3_out
+p3_need_into mem_reserve_free_mib; reserve_mib=$_p3_out
+if p3_cfg_into max_threads; then threads=$_p3_out; else threads=0; fi
+p3_ram_gb_into || exit 2
+ram=$_p3_ram
 
 echo "probe_cap_gb=$(( probe_mib / 1024 ))"
 echo "heavy_cap_gb=$(( (ram * pct + 50) / 100 ))"
