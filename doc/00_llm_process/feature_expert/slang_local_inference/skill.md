@@ -415,6 +415,7 @@ Tokens/s below is meaningless for 1-2 token answers.
 - Device forward pass (2026-11-15): `pure/llama_forward_rocm.spl` runs the stories15M Llama forward on the Radeon 8065S: `rocm_llama_load` (F32 byte-range upload once), `llama_step_rocm` (hidden state and per-layer K/V rows stay on the device; intermediates freed every step), `rocm_generate_greedy` (same prefix-reuse rule as `kv_cache.spl`, shared via `kv_reuse_len`; counts `positions_evaluated`). New device kernels in `tensor_ops_rocm.spl`: rope, kv_write (in place), row lookup, argmax (one i32 readback, never the 32000 logits). Spec: `slang_pure_rocm_generate_spec.spl` (GPU ids == CPU ids, reference text, prefix reuse, perf table in the log; needs `--timeout 3600` because the CPU leg is minutes on the seed). KV capacity is `min(max_position_embeddings, 1024)` (attention keeps scores in shared memory). `hip_compute.rocm_kernel` now destroys the hipRTC program on every path; the code-object buffer is deliberately kept (HIP docs do not say whether `hipModuleLoadData` copies it). `env_get` returns "" when unset, not None: `?? default` never fires.
 - Integration (2026-11-16): `/v1/completions` goes through the same dispatch as chat (`engine_complete_text`) and returns real usage counts; a media request to a pure-runner model is refused (text only), never routed to ggml. Pure/dispatch/variety system specs append evidence and `SKIPPED: <why>` lines to `build/probe/*_evidence.txt` because the runner counts skip() as passed (bug records in doc/08_tracking/bug).
 
+
 ## Host portability (Windows / Linux / macOS, 2026-11-16)
 
 One module owns every per-OS decision: `src/lib/gc_async_mut/slang/host/slang_host.spl`.
@@ -447,3 +448,31 @@ route env, file exists/read, directory list and process capture through SOSIX
 - Shim build (`scripts/check/build-slang-ggml-shim.shs`): Linux = clang (refuses a non-clang
   `CC`, never GCC) + `-fuse-ld=lld`; macOS = clang `-dynamiclib` (system ld64), `nm -gU` with the
   `_` prefix stripped; Windows lanes unchanged. Linux/macOS builds are unverified (no host).
+
+## Image generation: /v1/images/generations (L6, 2026-11-17)
+
+- `serving/serving_images.spl` -> `model_executor/runners/sd_runner.spl`
+  (`sd_runner_open/run/close`, `engine/kind_dispatch.kind_open` has the
+  `StableDiffusion` arm) -> `src/runtime/slang_sd_shim.c` (stable-diffusion.cpp
+  opaque-options C API, **ggml statically linked** into `slang_sd.dll`).
+- Body `{model, prompt, n<=4, size, response_format:"b64_json", steps, seed}`;
+  reply `{created, data:[{b64_json}]}` (PNG via `common/image/png_encode.spl`,
+  stored deflate). `url` format = 400. `size` = WIDTHxHEIGHT, both multiples of
+  64, <= 768, default 512x512; defaults steps 4, seed 42 (cfg 1.0, sd-turbo).
+  No `SLANG_SD_LIB` / missing DLL = 503 `runner_unavailable`; wrong kind = 400.
+- Build: `sh scripts/check/build-slang-sd-shim.shs` (CPU,
+  `build/sffi/sd-cpu/slang_sd.dll`) and `SLANG_SD_VARIANT=vulkan
+  SD_VULKAN_SDK_DIR=... VULKAN_GLSLC=... sh ...` (`sd-vulkan/`). Needs
+  stable-diffusion.cpp at `SD_ROOT` (default `/c/dev/tools/stable-diffusion.cpp`),
+  llvm-mingw clang, cmake, ninja. Vulkan needs `-DSPIRV-Headers_DIR` (the script
+  derives it from the SDK dir). The runtime DLLs are copied beside the shim.
+- Model: `stabilityai/sd-turbo` `sd_turbo.safetensors` (5.2 GB, fp32 all-in-one)
+  in `C:/dev/model/sd-turbo/`; the resolver sniffs `model.diffusion_model.`.
+- ABI: prompt/path in via `spl_wffi_call_i64_with_bytes`, RGB8 out via
+  `spl_wffi_call_i64_into_bytes`; the zero buffer and ARGB conversion are local
+  loops (replace with L2's `bytes_zeroed`).
+- Specs: `test/01_unit/lib/gc_async_mut/slang/sd_runner_spec.spl` (no model),
+  `test/03_system/lib/slang/feature/slang_sd_image_live_spec.spl` (live, env
+  `SLANG_LIVE=1 SLANG_MODEL_ROOT SLANG_SD_LIB SLANG_SD_STEPS SLANG_SD_SIZE`).
+- Needs ~10 GiB free for the load; run one image at a time.
+- Host access in the runner goes through `host/slang_host` (`host_env`, `host_file_exists`).
