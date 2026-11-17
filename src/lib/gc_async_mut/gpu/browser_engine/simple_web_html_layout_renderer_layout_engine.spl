@@ -17,7 +17,7 @@ use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, block_margin_milli, cursor_advance_px, cursor_advance_frac}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -2835,6 +2835,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     var cy = y + st.border_t + st.pad_t
     var child_count = 0
     var prev_margin_b = 0
+    # Residual of the block cursor in milli-px: true y = cy*1000 + cy_frac.
+    # prev_margin_b, trailing_margin_b and leading_margin_t are milli-px too.
+    var cy_frac = 0
     var trailing_margin_b = 0
     var leading_margin_t = 0
     var in_inline_run = false
@@ -2901,6 +2904,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             out_intrinsic_widths = legend.intrinsic_widths
             val legend_top_h = if out_bh[c] > st.border_t: out_bh[c] else: st.border_t
             cy = y + legend_top_h + st.pad_t
+            cy_frac = 0
             in_inline_run = false
             inline_line_h = 0
             prev_margin_b = 0
@@ -2914,7 +2918,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # i.e. the flow cursor after the pending sibling margin. ponytail:
             # block flow only; an inline run and position:fixed keep the old y.
             val static_y = cst.top_auto and cst.bottom_px < 0 and not cst.position_fixed and not in_inline_run
-            val ay = if static_y: cy + prev_margin_b + absolute_margin_t(cst) else: absolute_child_y(nodes, styles, c, y, st, nodes[c], cst, absolute_containing_h, viewport_h)
+            val ay = if static_y: cy + cursor_advance_px(cy_frac, prev_margin_b) + absolute_margin_t(cst) else: absolute_child_y(nodes, styles, c, y, st, nodes[c], cst, absolute_containing_h, viewport_h)
             var absolute_w = absolute_outer_width(nodes, styles, child_index, c, st, nodes[c], cst, iw)
             var resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h, nodes[c].tag)
             if st.display == "inline" and not cst.position_fixed and replaced_default_box_w(nodes[c].tag) > 0:
@@ -3005,7 +3009,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # In an open line the float joins that line when it fits
                 # beside what the line holds, else it starts below the line.
                 # Between blocks it starts below the pending bottom margin.
-                var float_min_y = cy + prev_margin_b
+                var float_min_y = cy + cursor_advance_px(cy_frac, prev_margin_b)
                 if in_inline_run:
                     float_min_y = cy
                     if inline_x > inline_start_x and inline_x + float_outer_w > line_iw:
@@ -3052,7 +3056,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # lost: `<div><p>A</p>text</div>` came out 48 against Chrome's
                 # 64, and the catalog's `x<hr>y` sample 58 against 66.
                 if not in_inline_run and prev_margin_b != 0:
-                    cy = cy + prev_margin_b
+                    val flushed_px = cursor_advance_px(cy_frac, prev_margin_b)
+                    cy_frac = cursor_advance_frac(cy_frac, prev_margin_b)
+                    cy = cy + flushed_px
                     prev_margin_b = 0
                 # A newline kept by white-space breaks the line like `<br>`.
                 val kept_breaks = html_kept_newlines(nodes[c], cst.white_space_newline)
@@ -3641,17 +3647,20 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             if child_count > 0:
                 cy = cy + st.gap_px
             val prev_margin_b_before_child = prev_margin_b
-            val resolved_cst_margin_t = resolve_vertical_margin_px(cst.margin_t, viewport_h)
+            val resolved_cst_margin_t = block_margin_milli(cst, true, viewport_h)
             val collapsed_margin = collapse_margins_signed(prev_margin_b, resolved_cst_margin_t)
-            var child_top_advance = 0
+            val cy_frac_before_top = cy_frac
+            var top_frac_restore = cy_frac_before_top
+            var child_top_milli = 0
             if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
-                val resolved_st_margin_t = resolve_vertical_margin_px(st.margin_t, viewport_h)
+                val resolved_st_margin_t = block_margin_milli(st, true, viewport_h)
                 val collapsed_body_top = collapse_margins_signed(resolved_st_margin_t, resolved_cst_margin_t)
-                child_top_advance = collapsed_body_top - resolved_st_margin_t
-                cy = cy + child_top_advance
+                child_top_milli = collapsed_body_top - resolved_st_margin_t
             else:
-                child_top_advance = collapsed_margin
-                cy = cy + collapsed_margin
+                child_top_milli = collapsed_margin
+            var child_top_advance = cursor_advance_px(cy_frac, child_top_milli)
+            cy_frac = cursor_advance_frac(cy_frac, child_top_milli)
+            cy = cy + child_top_advance
             # `clear` (CSS 2.2 9.5.2): the block's border top goes below the
             # margin box of every float it names; that clearance replaces
             # whatever part of the collapsed top margin it covers.
@@ -3660,6 +3669,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 clearance_y = float_ctx_clear_bottom(cst.clear_mode)
                 if clearance_y > cy:
                     cy = clearance_y
+                    cy_frac = 0
+                    top_frac_restore = 0
             var child_inner_w = iw
             if st.overflow_auto_y and content_height_limit > 0:
                 child_inner_w = child_inner_w - scrollbar_gutter
@@ -3814,14 +3825,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # mechanics offset_layout_subtree already serves elsewhere.
             val effective_cst_margin_t = collapse_margins_signed(
                 resolved_cst_margin_t, child_leading_margin_t)
-            var corrected_top_advance = child_top_advance
+            var corrected_top_milli = child_top_milli
             if child_leading_margin_t != 0:
                 if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
-                    val body_margin_t = resolve_vertical_margin_px(st.margin_t, viewport_h)
-                    corrected_top_advance = collapse_margins_signed(
+                    val body_margin_t = block_margin_milli(st, true, viewport_h)
+                    corrected_top_milli = collapse_margins_signed(
                         body_margin_t, effective_cst_margin_t) - body_margin_t
                 else:
-                    corrected_top_advance = collapse_margins_signed(
+                    corrected_top_milli = collapse_margins_signed(
                         prev_margin_b_before_child, effective_cst_margin_t)
             # When THIS block also lets a top margin through, the whole
             # effective leading margin leaves the box: the first in-flow child
@@ -3833,18 +3844,22 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             )
             if escapes_top:
                 leading_margin_t = effective_cst_margin_t
-                corrected_top_advance = 0
-            if corrected_top_advance != child_top_advance:
-                val retopped = offset_layout_subtree(
-                    child_index, c, 0, corrected_top_advance - child_top_advance,
-                    out_bx, out_by)
-                out_bx = retopped.bx
-                out_by = retopped.by
-                cy = cy + (corrected_top_advance - child_top_advance)
-                float_ctx_shift(floats_before_child, 0, corrected_top_advance - child_top_advance)
-                child_top_advance = corrected_top_advance
+                corrected_top_milli = 0
+            if corrected_top_milli != child_top_milli:
+                val corrected_top_advance = cursor_advance_px(top_frac_restore, corrected_top_milli)
+                cy_frac = cursor_advance_frac(top_frac_restore, corrected_top_milli)
+                if corrected_top_advance != child_top_advance:
+                    val retopped = offset_layout_subtree(
+                        child_index, c, 0, corrected_top_advance - child_top_advance,
+                        out_bx, out_by)
+                    out_bx = retopped.bx
+                    out_by = retopped.by
+                    cy = cy + (corrected_top_advance - child_top_advance)
+                    float_ctx_shift(floats_before_child, 0, corrected_top_advance - child_top_advance)
+                    child_top_advance = corrected_top_advance
+                child_top_milli = corrected_top_milli
             cy = cy + child_height
-            val resolved_cst_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+            val resolved_cst_margin_b = block_margin_milli(cst, false, viewport_h)
             # CSS 2.2 §8.3.1 self-collapsing block: an in-flow block with no
             # border, padding, height, or content collapses its own top and
             # bottom margins into ONE margin that then collapses with the
@@ -3864,6 +3879,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # Pull back the top-margin advance and carry the collapsed
                 # (prev_bottom, own top, own bottom) margin to the next sibling.
                 cy = cy - child_top_advance - child_height
+                cy_frac = top_frac_restore
                 if cy < clearance_y:
                     cy = clearance_y
                 out_by[c] = cy
@@ -3902,7 +3918,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         if block_bottom_margin_collapses_through(nodes, styles, i, st):
             trailing_margin_b = prev_margin_b
         else:
-            cy = cy + prev_margin_b
+            val tail_px = cursor_advance_px(cy_frac, prev_margin_b)
+            cy_frac = cursor_advance_frac(cy_frac, prev_margin_b)
+            cy = cy + tail_px
     # The auto height of a formatting-context root encloses the floats placed
     # inside it (CSS 2.2 10.6.7); any other block lets them overflow.
     if float_ctx_count() > g_float_base and float_ctx_establishes_bfc(nodes, styles, i, st):
