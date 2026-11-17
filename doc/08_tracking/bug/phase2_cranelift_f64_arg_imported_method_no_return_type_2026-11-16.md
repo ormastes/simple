@@ -1,6 +1,6 @@
 # Phase-2 Cranelift: f64 argument to an imported method without `->` aborts the codegen worker (2026-11-16)
 
-**Status:** FIXED in current source (both defects); frozen Phase-2 pin `18a1f28937c2` still carries them.
+**Status:** OPEN on frozen Phase-2 pin `18a1f28937c2`. Defect 2 is fixed in the current AOT source; the fix for defect 1 is unverified for this exact call.
 **Area:** MIR call lowering (`symbol_to_operand`) + Cranelift AOT call-ABI check
 **Context:** Stage 3 compiler built by the frozen Phase-2 compiler with `--backend cranelift`.
 
@@ -24,7 +24,7 @@ modules): give the f64/f32-taking methods without `->` an explicit `-> i64`
 (`put_f64`; `semantic_canonical_write_f32_v1` / `semantic_canonical_write_f64_v1`
 in `src/compiler/00.common/cache_contract/semantic_canonical_stream_v1.spl`).
 
-## Defect 1: missing callee param types (fixed in source)
+## Defect 1: missing callee param types
 
 `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:6513-6538`
 (`symbol_to_operand`): when the imported symbol has no callable type
@@ -32,11 +32,17 @@ in `src/compiler/00.common/cache_contract/semantic_canonical_stream_v1.spl`).
 params via `bootstrap_method_receiver_tail_params_lookup_v1(name)`
 (`src/compiler/50.mir/mir_data.spl:2864`), builds
 `[i64 receiver handle] + tail params` with return `i64`, and marks
-`declared_params_known: true`. The shape in this bug (method with `me`
-receiver, f64 tail param, no return annotation, imported from another module)
-is exactly the shape covered. Static/UFCS callables fall to
+`declared_params_known: true`. This mechanism is intended to cover the shape
+in this bug (method with `me` receiver, f64 tail param, no return annotation,
+imported from another module). Static/UFCS callables fall to
 `callable_abi_declared_params_v1`; a later block (`declared_param_types_v1`)
 outranks both when the importer retained exact param types.
+
+The frozen pin already contains the receiver-tail lookup, yet the failure
+occurred on it. The registry may not have been populated for this call, or the
+generated-module call may have taken another path. The later ABI-declared and
+`declared_param_types_v1` branches have not been verified to fix this exact call;
+the build-tree workaround remains the only verified cure.
 
 Spec pinning: `test/01_unit/compiler/mir/method_receiver_tail_params_spec.spl`
 ("answers an f64 tail for a method whose surface type is nil", header cites
