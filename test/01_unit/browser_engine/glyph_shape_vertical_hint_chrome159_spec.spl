@@ -1,0 +1,110 @@
+"""
+## Purpose and audience
+Purpose: Pin the vertical glyph shape of 16 px Liberation Sans on the Engine2D
+CPU text path against Chrome 159. Chrome on Linux rasterises with FreeType
+"slight" hinting (the autohinter, y direction only): the y scale is fitted so
+the x-height covers a whole number of pixels, and the baseline, x-height, cap
+height, ascender and descender are snapped to whole rows with overshoot
+collapsed onto them. At 16 px that makes the cap height 12 rows (unhinted:
+11.0) and the x-height 9 rows (unhinted: 8.45).
+Audience: web renderer / font rasteriser maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new
+--disable-gpu --force-device-scale-factor=1`, Liberation Sans 16 px, `color:#000`
+on white, `<p style="margin:0;position:absolute;left:4px;top:4px;line-height:20px">Hxgl</p>`):
+
+| glyph | window x | ink rows (inclusive) |
+|-------|----------|----------------------|
+| H     | 5..12    | 7..18 (12 rows)      |
+| x     | 15..23   | 10..18 (9 rows)      |
+| g     | 24..31   | 10..21               |
+| l     | 33       | 7..18 (12 rows)      |
+
+The H right stem, column x=12, is `efbf67` on rows 7..11 and 14..18; column
+x=13 is `1f071f` on the same rows. Rows 6 and 19 above and below the H are
+white. Horizontal-stem edge snapping (the H crossbar rows 12-13) is NOT pinned:
+Chrome snaps the crossbar's top edge to a row boundary and this engine does not
+yet.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-HINT-001 - Draw IR LCD text takes Chrome's slight (y-only) autohinter blue-zone fit.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 64
+val H: i32 = 32
+
+val PAGE_HXGL: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:4px;top:4px;font-size:16px;line-height:20px;color:#000\">Hxgl</p></body></html>"
+
+fn _is_white(p: u32) -> bool:
+    (p & 0xFFFFFFu32) == 0xFFFFFFu32
+
+# First and last row (inclusive) holding any non-white pixel in columns x0..x1.
+fn _ink_rows(px: [u32], x0: i32, x1: i32) -> [i32]:
+    var first = -1
+    var last = -1
+    var y = 0
+    while y < H:
+        var x = x0
+        while x <= x1:
+            if not _is_white(px[y * W + x]):
+                if first < 0:
+                    first = y
+                last = y
+            x = x + 1
+        y = y + 1
+    [first, last]
+
+fn _rgb(px: [u32], x: i32, y: i32) -> u32:
+    px[y * W + x] & 0xFFFFFFu32
+
+describe "vertical glyph shape against Chrome 159 (slight hinting)":
+    it "AC-1: H spans Chrome's 12 rows (cap height fitted from 11.0 to 12 px)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_HXGL, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome H ink rows 7..18, rows 6 and 19 white")
+        val rows = _ink_rows(px, 5, 12)
+        expect(rows[0]).to_equal(7)
+        expect(rows[1]).to_equal(18)
+
+    it "AC-2: x-height covers Chrome's 9 rows and the g descender ends on Chrome's row":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_HXGL, W, H, "cpu_simd")
+        step("Chrome x ink rows 10..18, g ink rows 10..21, l stem rows 7..18")
+        val xr = _ink_rows(px, 15, 23)
+        expect(xr[0]).to_equal(10)
+        expect(xr[1]).to_equal(18)
+        val gr = _ink_rows(px, 24, 31)
+        expect(gr[0]).to_equal(10)
+        expect(gr[1]).to_equal(21)
+        val lr = _ink_rows(px, 33, 33)
+        expect(lr[0]).to_equal(7)
+        expect(lr[1]).to_equal(18)
+
+    it "AC-3: the H right stem has Chrome's exact bytes on every row it covers":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_HXGL, W, H, "cpu_simd")
+        step("Chrome x=12 efbf67 and x=13 1f071f on rows 7..11 and 14..18; rows 6, 19 white")
+        var y = 7
+        while y <= 18:
+            if y != 12 and y != 13:
+                expect(_rgb(px, 12, y)).to_equal(0xefbf67u32)
+                expect(_rgb(px, 13, y)).to_equal(0x1f071fu32)
+            y = y + 1
+        expect(_rgb(px, 12, 6)).to_equal(0xFFFFFFu32)
+        expect(_rgb(px, 12, 19)).to_equal(0xFFFFFFu32)

@@ -2,7 +2,7 @@
 
 - Date: 2026-11-15
 - Severity: P2 (OpenAI clients rely on all three)
-- Status: open (filed, not fixed); specs in `slang_openai_conformance_in_development_spec.spl`
+- Status: FIXED 2026-11-16 (see "Resolution" below); cases moved into `slang_openai_conformance_live_spec.spl`
 - Host: Windows 11, CPU ggml shim, Qwen2.5-1.5B-Instruct-Q4_K_M, server on port 47732
 
 ## Observed (log `build/probe/conf_dev.log`)
@@ -26,3 +26,18 @@ fixes `slang_openai_usage_counts_always_zero_2026-11-15.md`), derive `finish_rea
 `stop` by truncating the stream of decoded text, then add an incremental generate API for SSE.
 `serving_chat.spl` usage code and `engine/llm_engine.spl` were being edited by another agent when
 this was filed, so nothing was changed there.
+
+## Resolution (2026-11-16)
+All three gaps closed on the ggml lane; no C shim change was needed because slang's own decode loop
+(`backend.spl`) already samples one token at a time.
+- `finish_reason`: `GenStream`/`gen_stream_step` report "length" when the token budget ended generation and
+  "stop" for an end-of-generation token or a stop sequence; carried through `BackendGeneration` and
+  `EngineChatResult` into both response envelopes.
+- `stop`: parsed as string or array (`json_stop_sequences`), applied per token with `stop_scan` (partial matches
+  are held back), pure runner applies it to its finished text.
+- `stream:true`: `serving_stream.spl` + `SimpleHttpServer.with_stream_handler` write SSE frames to the socket as
+  tokens are produced (chat and completions). Live cases 2, 3, 3b, 5, 5b in
+  `slang_openai_conformance_live_spec.spl`.
+Remaining gaps: the pure runner and a shared-context backend stream as one content frame (valid SSE, not
+incremental); image/audio requests with `stream:true` get 400 `unsupported_modality`; `usage` is not sent in
+stream frames; sampling params (`temperature`, `top_p`, `seed`, `n`) are still ignored.
