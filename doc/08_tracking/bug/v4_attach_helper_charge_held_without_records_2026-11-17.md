@@ -46,3 +46,11 @@ operator command exists yet.
 ## Next step
 Design an operator-signed helper settlement for these rows, or a native proof of absence
 that can authorize a cancel without R.
+
+## Update 2026-11-17 (milestone_0026): spawn-carrier charge is no longer in this class
+Release sequences F (spawn only) and B (session and spawn) previously answered Blocked
+(`...-fallback-release-unbound`) because `quiesce_fallback_core_v3` / `settle_retired_core_v3`
+did not exist. Both cores now exist and are called by the release port, so a held spawn
+carrier is classified as releasable (not charged forever) and released through the container-side
+retirement and settle_retired (NOT_RUN: no runnable binary; never compiled). The eight no-record states above are unchanged and this row stays open; only a
+`Rejected` spawn (no owner, absence unprovable) still ends Blocked.
