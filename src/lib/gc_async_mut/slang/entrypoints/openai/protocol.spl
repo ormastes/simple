@@ -26,6 +26,7 @@ struct ChatRequest:
     message_count: i64
     max_tokens: i64
     stream: bool
+    stop: [text]
 
 fn _escape_json_text(s: text) -> text:
     var out = ""
@@ -140,6 +141,70 @@ fn json_bool_field_is_true(source: text, key: text) -> bool:
     val i = _skip_ws(source, after)
     source.slice(i, source.byte_len()).starts_with("true")
 
+# The JSON string literal starting at `from` (which must be a quote), decoded
+# like json_string_field. Returns the text and the index just past the closing
+# quote, or ("", -1) when the literal is unterminated.
+fn _read_json_string_at(source: text, from: i64) -> (text, i64):
+    var i = from + 1
+    var out = ""
+    var escaped = false
+    while i < source.len():
+        val ch = source.char_at(i)
+        if escaped:
+            if ch == "n":
+                out = out + "\n"
+            elif ch == "t":
+                out = out + "\t"
+            elif ch == "r":
+                out = out + "\r"
+            else:
+                out = out + ch
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return (out, i + 1)
+        else:
+            out = out + ch
+        i = i + 1
+    ("", -1)
+
+# The OpenAI `stop` field: a string or an array of strings. Empty strings are
+# dropped (they would match everywhere); anything else yields no sequences.
+fn json_stop_sequences(source: text) -> [text]:
+    var stops: [text] = []
+    val after = _value_start(source, "stop")
+    if after < 0:
+        return stops
+    var i = _skip_ws(source, after)
+    if i >= source.len():
+        return stops
+    if source.char_at(i) == "\"":
+        val one = _read_json_string_at(source, i)
+        if one.1 >= 0 and one.0 != "":
+            stops.push(one.0)
+        return stops
+    if source.char_at(i) != "[":
+        return stops
+    i = i + 1
+    while i < source.len():
+        i = _skip_ws(source, i)
+        if i >= source.len():
+            return stops
+        val ch = source.char_at(i)
+        if ch == "\"":
+            val item = _read_json_string_at(source, i)
+            if item.1 < 0:
+                return stops
+            if item.0 != "":
+                stops.push(item.0)
+            i = item.1
+        elif ch == "]":
+            return stops
+        else:
+            i = i + 1
+    stops
+
 # Count the objects directly inside the array value of `key`. Returns -1 when
 # `key` is absent or its value is not an array.
 fn json_array_object_count(source: text, key: text) -> i64:
@@ -196,13 +261,12 @@ fn parse_chat_request(body: text) -> Result<ChatRequest, text>:
         return Err("missing required field: messages (must be an array)")
     if count == 0:
         return Err("field messages must contain at least one message")
-    if json_bool_field_is_true(body, "stream"):
-        return Err("streaming is not supported by this slang build; send stream=false")
     Ok(ChatRequest(
         model: model,
         message_count: count,
         max_tokens: json_int_field(body, "max_tokens", 0),
-        stream: false
+        stream: json_bool_field_is_true(body, "stream"),
+        stop: json_stop_sequences(body)
     ))
 
 # One typed piece of a message's content. `kind` is "text", "image", "audio"
@@ -221,6 +285,8 @@ struct CompletionRequest:
     model: text
     prompt: text
     max_tokens: i64
+    stream: bool
+    stop: [text]
 
 # Parse a /v1/completions body. `prompt` must be a JSON string; Err carries the
 # client-facing reason.
@@ -238,9 +304,8 @@ fn parse_completion_request(body: text) -> Result<CompletionRequest, text>:
     val prompt = json_string_field(body, "prompt")
     if prompt == "":
         return Err("missing or empty required field: prompt (must be a string)")
-    if json_bool_field_is_true(body, "stream"):
-        return Err("streaming is not supported by this slang build; send stream=false")
-    Ok(CompletionRequest(model: model, prompt: prompt, max_tokens: json_int_field(body, "max_tokens", 0)))
+    Ok(CompletionRequest(model: model, prompt: prompt, max_tokens: json_int_field(body, "max_tokens", 0),
+        stream: json_bool_field_is_true(body, "stream"), stop: json_stop_sequences(body)))
 
 struct ChatMessage:
     role: text
@@ -403,14 +468,34 @@ fn chat_message_media_count(message: ChatMessage) -> i64:
 # produced: nothing in this file fabricates a completion, and the stub path in
 # serving_chat.spl still returns an error rather than calling this.
 fn openai_chat_completion_response(model: text, content: text, prompt_tokens: i64, completion_tokens: i64) -> ApiResponse:
-    val body = "{\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + _escape_json_text(content) + "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}}}"
+    openai_chat_completion_response_finish(model, content, prompt_tokens, completion_tokens, "stop")
+
+# Same envelope with the real stop cause: "stop" (end of turn or a stop
+# sequence) or "length" (the max_tokens cap ended generation).
+fn openai_chat_completion_response_finish(model: text, content: text, prompt_tokens: i64, completion_tokens: i64, finish_reason: text) -> ApiResponse:
+    val body = "{\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + _escape_json_text(content) + "\"},\"finish_reason\":\"" + finish_reason + "\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}}}"
     ApiResponse(status: 200, body: body)
 
 # OpenAI legacy text-completion envelope, with the real token counts the
 # runner reported.
-fn openai_text_completion_response(model: text, content: text, prompt_tokens: i64, completion_tokens: i64) -> ApiResponse:
-    val body = "{\"id\":\"cmpl-slang\",\"object\":\"text_completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"text\":\"" + _escape_json_text(content) + "\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}}}"
+fn openai_text_completion_response(model: text, content: text, prompt_tokens: i64, completion_tokens: i64, finish_reason: text) -> ApiResponse:
+    val body = "{\"id\":\"cmpl-slang\",\"object\":\"text_completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"text\":\"" + _escape_json_text(content) + "\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"" + finish_reason + "\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}}}"
     ApiResponse(status: 200, body: body)
+
+# One server-sent-event frame of a streamed chat completion. `delta_json` is
+# the inside of the delta object (e.g. "\"content\":\"x\""); `finish_reason` ""
+# means null (generation continues).
+fn openai_chat_chunk_sse(model: text, delta_json: text, finish_reason: text) -> text:
+    val finish = if finish_reason == "": "null" else: "\"" + finish_reason + "\""
+    "data: {\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"delta\":{" + delta_json + "},\"finish_reason\":" + finish + "}]}\n\n"
+
+fn openai_chat_delta_json(content: text) -> text:
+    "\"content\":\"" + _escape_json_text(content) + "\""
+
+# One server-sent-event frame of a streamed legacy text completion.
+fn openai_text_chunk_sse(model: text, piece: text, finish_reason: text) -> text:
+    val finish = if finish_reason == "": "null" else: "\"" + finish_reason + "\""
+    "data: {\"id\":\"cmpl-slang\",\"object\":\"text_completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"text\":\"" + _escape_json_text(piece) + "\",\"index\":0,\"logprobs\":null,\"finish_reason\":" + finish + "}]}\n\n"
 
 # OpenAI error envelope: {"error":{"message","type","param","code"}}.
 # `detail_json` is appended verbatim inside the error object when non-empty so
@@ -436,5 +521,6 @@ export ApiResponse, ChatRequest
 export json_string_field, json_int_field, json_bool_field_is_true, json_array_object_count
 export parse_chat_request, openai_error_response, openai_models_response
 export ChatMessage, chat_messages_from_body, openai_chat_completion_response
+export json_stop_sequences, openai_chat_completion_response_finish, openai_chat_chunk_sse, openai_chat_delta_json, openai_text_chunk_sse
 export ChatPart, ChatPartError, chat_messages_parse, chat_message_media_count, base64_payload_is_strict
 export CompletionRequest, parse_completion_request, openai_text_completion_response

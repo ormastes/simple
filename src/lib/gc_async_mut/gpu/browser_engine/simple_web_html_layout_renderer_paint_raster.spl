@@ -11,7 +11,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{S
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
     fb_border_sides_styled_clip, fb_select_chevron_clip, fb_rounded_rect_corners_opacity_clip,
     fb_text_ttf_available, fb_text_ttf_ascent_px, fb_text_ttf_line_baseline_y,
-    fb_text_ttf_aa_clip_range_adv
+    fb_text_ttf_aa_clip_range_adv, radial_gradient_box_paintable, canvas_background_extent,
+    background_gradient_layers_paintable, background_gradient_layers, fb_gradient_layers_clip
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{web_bitmap_paint_lane}
 export use std.gc_async_mut.gpu.browser_engine.layout_insets.{ancestor_bottom_inset}
@@ -922,7 +923,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
         val non_widget_mode = not widget_mode
         if visible_box:
-            val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
+            val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
             val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
             val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
             val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
@@ -933,7 +934,16 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 val clip = paint_clip_at(clip_cache, i)
                 if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32:
                     out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
-                out = fb_background_radial_stack_clip(out, fbw, fbh, x, y, w, h, st.bg_layers_raw, st.opacity_pct, clip)
+                # Chrome propagates the body background to the canvas: its
+                # radial layers are positioned on, and paint, the canvas.
+                # A gradient-only list paints every layer (linear too); any
+                # other list keeps the radial-only stack painter.
+                val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
+                val canvas_layers = background_gradient_layers(st.bg_layers_raw, 0, 0, canvas[0], canvas[1])
+                if canvas_layers.len() > 0:
+                    out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], canvas_layers, st.opacity_pct, clip)
+                else:
+                    out = fb_background_radial_stack_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], st.bg_layers_raw, st.opacity_pct, clip)
             if paint_shadow or paint_bg or paint_border or paint_outline:
                 val clip = paint_clip_at(clip_cache, i)
                 if paint_shadow:
@@ -978,7 +988,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val visible_box = visible_node and nd.tag != "#text" and y < fbh
             val non_widget_mode = not widget_mode
             if visible_box:
-                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
+                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
                 val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
                 val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
                 val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
@@ -1030,7 +1040,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 val visible_box = visible_node and nd.tag != "#text" and y < fbh
                 val non_widget_mode = not widget_mode
                 if visible_box:
-                    val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
+                    val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
                     val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
                     val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
                     val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
@@ -1093,7 +1103,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val visible_box = visible_node and nd.tag != "#text" and y < fbh
             val non_widget_mode = not widget_mode
             if visible_box:
-                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
+                val paint_bg = not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
                 val paint_border = not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
                 val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
                 val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
@@ -1369,7 +1379,7 @@ fn _tile_box_op(
     val visible_box = visible_node and nd.tag != "#text" and y < fbh
     val paint_bg = (
         not skip_widget_page_bg and
-        (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
+        (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
     )
     val paint_border = st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0
     val paint_outline = st.outline_w > 0 and st.outline_color != 0u32
@@ -1402,6 +1412,13 @@ fn _tile_box_op(
         iy0 = iy0 - spread
         ix1 = ix1 + spread
         iy1 = iy1 + spread
+    if paint_body_radial:
+        # The body radial stack is the propagated canvas background: it
+        # paints the whole viewport (bounded by the clip below).
+        ix0 = 0
+        iy0 = 0
+        ix1 = 1073741823
+        iy1 = fbh
     # Panel/button fills paint through fb_rect (no clip); everything else
     # honors the ancestor clip, so clip-intersecting the rect keeps the bins
     # tight while staying conservative.

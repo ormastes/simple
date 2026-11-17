@@ -143,24 +143,29 @@ fn resolve_mcdc_mode_for_profile(
 
 val EDITION_DEFAULT = "2026"
 
-# Recognized editions = EDITION_DEFAULT plus every *_lang_version value the
-# diagnostic policy schedules. The policy file is the single source; there is
-# no second hardcoded list. Self-contained line scan like the readers below.
+# Recognized editions = EDITION_DEFAULT plus every edition-promotion value
+# (warn_since_lang_version / error_since_lang_version) the diagnostic policy
+# schedules. Other *_lang_version keys (e.g. remove_since_lang_version) are
+# not editions. The policy file is the single source; no second list.
 val EDITION_POLICY_PATH = "config/policy/diagnostic_policy.sdn"
+val EDITION_POLICY_KEYS = ["warn_since_lang_version", "error_since_lang_version"]
 
-fn _policy_editions() -> [text]:
+fn edition_values_from_policy(content: text) -> [text]:
     var out: [text] = [EDITION_DEFAULT]
-    val content = file_read(EDITION_POLICY_PATH) ?? ""
     for line in content.split("\n"):
         val trimmed = line.trim()
-        if trimmed.starts_with("#") or not trimmed.contains("_lang_version:"):
+        if trimmed.starts_with("#"):
             continue
-        val parts = trimmed.split(":")
-        if parts.len() >= 2:
-            val v = parts[1].replace("\"", "").trim()
-            if v != "" and not out.contains(v):
-                out.push(v)
+        val sep = trimmed.index_of(":") ?? -1
+        if sep <= 0 or not EDITION_POLICY_KEYS.contains(trimmed.substring(0, sep).trim()):
+            continue
+        val v = trimmed.substring(sep + 1).replace("\"", "").trim()
+        if v != "" and not out.contains(v):
+            out.push(v)
     out
+
+fn _policy_editions() -> [text]:
+    edition_values_from_policy(file_read(EDITION_POLICY_PATH) ?? "")
 
 # Tracks which unknown simple.sdn [package] edition= values have already
 # warned this process. Mirrors _warn_deprecated_profile_alias_once
@@ -174,8 +179,11 @@ fn _warn_unknown_edition_once(raw: text):
     if _EDITION_UNKNOWN_WARN_COUNTS.contains_key(raw):
         return
     _EDITION_UNKNOWN_WARN_COUNTS[raw] = 1
+    if (file_read(EDITION_POLICY_PATH) ?? "") == "":
+        print "warning: simple.sdn project.edition \"{raw}\" cannot be validated: edition policy {EDITION_POLICY_PATH} is unreadable or empty; using the default edition \"{EDITION_DEFAULT}\" instead of the requested one."
+        return
     val valid = _policy_editions().join(", ")
-    print "warning: simple.sdn [package] edition=\"{raw}\" is not a recognized edition; using the default edition \"{EDITION_DEFAULT}\". Valid: {valid}."
+    print "warning: simple.sdn project.edition \"{raw}\" is not a recognized edition; using the default edition \"{EDITION_DEFAULT}\". Valid: {valid}."
 
 # Test-support accessor: how many times has the unknown-edition warning
 # actually fired for this raw value (0 or 1, never more)? Mirrors
@@ -187,7 +195,8 @@ fn edition_unknown_warn_count(raw: text) -> i64:
         return 1
     0
 
-# Minimal, self-contained [package] section scan -- mirrors
+# Reads `edition:` from the SDN `project:` block (same block simple.sdn uses
+# for name/version). Minimal, self-contained scan -- mirrors
 # _read_sdn_lints_profile above for the same reason: a self-contained
 # scanner avoids importing a heavier sdn loader into this interpreter
 # session. See doc/01_research/language/editions_mechanism_scoping_2026-07-29.md
@@ -198,25 +207,21 @@ fn _read_sdn_package_edition(sdn_path: text) -> text:
     val content = file_read(sdn_path) ?? ""
     if content == "":
         return ""
-    var in_package = false
+    var in_project = false
     for line in content.split("\n"):
         val trimmed = line.trim()
         if trimmed == "" or trimmed.starts_with("#"):
             continue
-        if trimmed == "[package]":
-            in_package = true
+        val indented = line.starts_with(" ") or line.starts_with("\t")
+        if not indented:
+            in_project = trimmed == "project:"
             continue
-        if trimmed.starts_with("[") and trimmed.ends_with("]"):
-            in_package = false
-            continue
-        if in_package and trimmed.starts_with("edition") and trimmed.contains("="):
-            val parts = trimmed.split("=")
-            if parts.len() >= 2:
-                var val_str = parts[1].trim()
-                val_str = val_str.replace("\"", "")
-                val_str = val_str.replace("'", "")
-                val_str = val_str.trim()
-                return val_str
+        val sep = trimmed.index_of(":") ?? -1
+        if in_project and sep > 0 and trimmed.substring(0, sep).trim() == "edition":
+            var val_str = trimmed.substring(sep + 1).trim()
+            val_str = val_str.replace("\"", "")
+            val_str = val_str.replace("'", "")
+            return val_str.trim()
     ""
 
 # Pure resolution step (mirrors normalize_profile_name's shape: takes a raw

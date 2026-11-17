@@ -1,5 +1,5 @@
 #!/bin/sh
-# @workaround bug=stage2_whole_program_mir_memory_growth_2026-11-01 (entry groups; fallback to the 32-shard whole-program run)
+# Split stage3 build into entry-closure groups (fallback to 32-shard whole-program run).
 #
 # Build the stage3 compiler (entry src/app/cli/bootstrap_main.spl) with the
 # frozen stage2 as K small entry-closure groups instead of one whole-program
@@ -34,6 +34,7 @@
 # (reported). The bootstrap_main entry object (--emit-entry-object, last step)
 # supplies __simple_main. scripts/bootstrap/p3-manual-link-stage3.shs links the
 # list with the #5760 ptree-shadow runtime.
+# @workaround bug=stage2_whole_program_mir_memory_growth_2026-11-01 reason=entry_groups_split_whole_program_mir_memory_growth
 set -eu
 
 if [ "$#" -lt 2 ]; then
@@ -48,12 +49,29 @@ here=$(cd "$(dirname "$0")" && pwd)
 stage2=${P3G_STAGE2:-C:/dev/p3new/stage2.exe}
 measure=${P3G_MEASURE:-}
 cache=${P3G_CACHE_DIR:-$out/cache}
-cap=${P3G_CAP_GB:-28}
+cap=${P3G_CAP_GB:-}
+threads=${P3G_THREADS:-}
+if [ -z "$cap" ] || [ -z "$threads" ]; then
+    caps=$(sh "$here/p3-host-caps.shs" 2>/dev/null || true)
+    if [ -z "$cap" ]; then
+        cap=$(printf '%s\n' "$caps" | awk -F= '$1=="heavy_cap_gb"{print $2; exit}')
+    fi
+    if [ -z "$threads" ]; then
+        threads=$(printf '%s\n' "$caps" | awk -F= '$1=="max_threads"{print $2; exit}')
+        case "$threads" in ''|*[!0-9]*) threads=24 ;; esac
+        if [ "$threads" -gt 32 ]; then threads=32; fi
+    fi
+fi
+case "$cap" in ''|*[!0-9]*) cap=48 ;; esac
+case "$threads" in ''|*[!0-9]*) threads=24 ;; esac
 limit=${P3G_LIMIT_S:-7200}
-threads=${P3G_THREADS:-26}
 ptree=${P3G_PTREE_SHADOW:-none}
 go_to_end_groups=${P3G_GO_TO_END_GROUPS:-1}
 full_backends=${P3G_FULL_BACKENDS:-0}
+parse_worker_kb=${P3G_PARSE_WORKER_KB:-}
+hir_worker_kb=${P3G_HIR_WORKER_KB:-}
+mir_worker_kb=${P3G_MIR_WORKER_KB:-}
+mir_shards=${P3G_MIR_SHARDS:-}
 lm=${SIMPLE_LLVM_MINGW_ROOT:-C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64}
 ar="$lm/bin/llvm-ar.exe"; [ -x "$ar" ] || ar="$lm/bin/llvm-ar"
 nm="$lm/bin/llvm-nm.exe"; [ -x "$nm" ] || nm="$lm/bin/llvm-nm"
@@ -93,14 +111,15 @@ fi
 # One stage2 run under the RSS-capped wrapper. $1=name $2=entry $3=emit flag $4=output
 run_stage2() {
     name=$1; entry=$2; emit=$3; o=$4
-    o_win=$(win_path "$o")
+    work_dir="$out/work_$name"
+    stage_o="$work_dir/$(basename "$o")"
+    stage_o_win=$(win_path "$stage_o")
+    tree_budget_kib=$((cap * 1048576))
     git -C "$checkout" ls-files --error-unmatch "$entry" >/dev/null 2>&1 ||
         { echo "error: $entry is not tracked in $checkout (SCV needs a tracked entry)" >&2; return 1; }
+    rm -rf "$work_dir"
+    mkdir -p "$work_dir"
     rm -f "$o" "$out/$name.result.txt"
-    entry_mir_line=""
-    if [ "$name" = "entry" ]; then
-        entry_mir_line="\$env:SIMPLE_MIR_SHARD_COUNT=\"${P3G_ENTRY_MIR_SHARDS:-1}\""
-    fi
     ps1="$out/$name.run.ps1"
     cat > "$ps1" <<EOF
 \$env:SIMPLE_P3_RUN="P3-GROUPS-$name"
@@ -111,25 +130,121 @@ run_stage2() {
 \$env:SIMPLE_FILE_WORKERS="${P3G_FILE_WORKERS:-0}"; \$env:SIMPLE_FILE_FIBERS="0"; \$env:SIMPLE_PARSE_SHARDING="${P3G_PARSE_SHARDING:-0}"; \$env:SIMPLE_COMPILE_FAIL_FAST="0"; \$env:SIMPLE_NATIVE_BUILD_THREADS="$threads"
 \$env:SIMPLE_NATIVE_INCREMENTAL="1"; \$env:SIMPLE_COMPILER_TRACE="${P3G_TRACE:-0}"
 \$env:SIMPLE_SCV_INVENTORY_COLD_INIT="1"; \$env:SIMPLE_SCV_FREEZE_FALLBACK="1"
-$entry_mir_line
+\$env:SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB="$tree_budget_kib"
+EOF
+    if [ -n "$parse_worker_kb" ]; then
+        printf '$env:SIMPLE_PARSE_SHARD_WORKER_KB="%s"\n' "$parse_worker_kb" >> "$ps1"
+    fi
+    if [ -n "$hir_worker_kb" ]; then
+        printf '$env:SIMPLE_HIR_SHARD_WORKER_KB="%s"\n' "$hir_worker_kb" >> "$ps1"
+    fi
+    if [ -n "$mir_worker_kb" ]; then
+        printf '$env:SIMPLE_MIR_SHARD_WORKER_KB="%s"\n' "$mir_worker_kb" >> "$ps1"
+    fi
+    if [ "$name" = "entry" ]; then
+        printf '$env:SIMPLE_MIR_SHARD_COUNT="%s"\n' "${P3G_ENTRY_MIR_SHARDS:-1}" >> "$ps1"
+    elif [ -n "$mir_shards" ]; then
+        printf '$env:SIMPLE_MIR_SHARD_COUNT="%s"\n' "$mir_shards" >> "$ps1"
+    fi
+    cat >> "$ps1" <<EOF
 Remove-Item Env:LIB -EA SilentlyContinue
 Remove-Item Env:INCLUDE -EA SilentlyContinue
 Remove-Item Env:LIBPATH -EA SilentlyContinue
 \$lm="$lm_win"
 \$env:PATH=\$env:PATH+";\$lm\\bin"; \$env:CC="\$lm\\bin\\clang.exe"; \$env:SIMPLE_LLVM_MINGW_ROOT=\$lm
-# @workaround bug=stage2_runtime_list_missing_process_tree (#5760)
+# @workaround bug=stage2_runtime_list_missing_process_tree_2026_11_01 reason=frozen_stage2_runtime_c_list_shadow_5760
 $ptree_env_line
 Set-Location "$checkout_win"
 EOF
     if [ -n "$measure" ] && [ -f "$measure" ]; then
         cat >> "$ps1" <<EOF
-& "$measure_win" -Exe "$stage2_win" -Cache "$cache_win" -Log "$out_win/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$o_win') | Tee-Object "$out_win/$name.result.txt"
+& "$measure_win" -Exe "$stage2_win" -Cache "$cache_win" -Log "$out_win/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$stage_o_win') | Tee-Object "$out_win/$name.result.txt"
 EOF
     else
         cat >> "$ps1" <<EOF
+\$p3TreeSrc = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+public static class P3ProcTree {
+    private const uint TH32CS_SNAPPROCESS = 0x00000002;
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct PROCESSENTRY32 {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern bool Process32First(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern bool Process32Next(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    public static long TreeWorkingSet(int rootPid) {
+        var children = new Dictionary<int, List<int>>();
+        IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != IntPtr.Zero && snap != new IntPtr(-1)) {
+            try {
+                var pe = new PROCESSENTRY32();
+                pe.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+                if (Process32First(snap, ref pe)) {
+                    do {
+                        int pid = (int)pe.th32ProcessID;
+                        int ppid = (int)pe.th32ParentProcessID;
+                        List<int> list;
+                        if (!children.TryGetValue(ppid, out list)) {
+                            list = new List<int>();
+                            children[ppid] = list;
+                        }
+                        list.Add(pid);
+                    } while (Process32Next(snap, ref pe));
+                }
+            } finally {
+                CloseHandle(snap);
+            }
+        }
+        var seen = new HashSet<int>();
+        var queue = new Queue<int>();
+        seen.Add(rootPid);
+        queue.Enqueue(rootPid);
+        long total = 0;
+        while (queue.Count > 0) {
+            int pid = queue.Dequeue();
+            try {
+                using (var p = Process.GetProcessById(pid)) {
+                    total += p.WorkingSet64;
+                }
+            } catch {}
+            List<int> kids;
+            if (children.TryGetValue(pid, out kids)) {
+                foreach (int k in kids) {
+                    if (seen.Add(k)) queue.Enqueue(k);
+                }
+            }
+        }
+        return total;
+    }
+}
+'@
+if (-not ([System.Management.Automation.PSTypeName]'P3ProcTree').Type) {
+    Add-Type -TypeDefinition \$p3TreeSrc -ErrorAction SilentlyContinue
+}
 \$pOut = "$out_win/$name.build.log"
 \$pErr = "$out_win/$name.build.err"
-\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$o_win')
+\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$stage_o_win')
 \$proc = Start-Process -FilePath "$stage2_win" -ArgumentList \$stageArgs -NoNewWindow -PassThru -RedirectStandardOutput \$pOut -RedirectStandardError \$pErr
 \$null = \$proc.Handle
 \$sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -140,21 +255,11 @@ while (-not \$proc.HasExited) {
     for (\$i = 0; \$i -lt 10 -and -not \$proc.HasExited; \$i++) { Start-Sleep -Seconds 1 }
     if (\$proc.HasExited) { break }
     try {
-        \$all = Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,WorkingSetSize -EA SilentlyContinue
-        \$ids = @([int]\$proc.Id)
-        \$k = 0
-        while (\$k -lt \$ids.Count) {
-            \$cur = \$ids[\$k]
-            foreach (\$p in \$all) {
-                if ([int]\$p.ParentProcessId -eq \$cur -and (\$ids -notcontains [int]\$p.ProcessId)) {
-                    \$ids += [int]\$p.ProcessId
-                }
-            }
-            \$k++
-        }
-        \$sum = [int64]0
-        foreach (\$p in \$all) {
-            if (\$ids -contains [int]\$p.ProcessId) { \$sum += [int64]\$p.WorkingSetSize }
+        if (([System.Management.Automation.PSTypeName]'P3ProcTree').Type) {
+            \$sum = [int64][P3ProcTree]::TreeWorkingSet([int]\$proc.Id)
+        } else {
+            \$sum = [int64]0
+            try { \$sum = [int64](Get-Process -Id \$proc.Id -EA SilentlyContinue).WorkingSet64 } catch {}
         }
         if (\$sum -gt \$peakBytes) { \$peakBytes = \$sum }
         if (\$sum -gt \$capBytes -or \$sw.Elapsed.TotalSeconds -gt $limit) {
@@ -178,10 +283,14 @@ EOF
     echo "[p3g] start $name ($entry $emit) $(date +%H:%M:%S)"
     "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ps1" > "$out/$name.wrapper.log" 2>&1 || true
     echo "[p3g] done  $name: $(tail -n 1 "$out/$name.result.txt" 2>/dev/null)"
-    [ -s "$o" ] && grep -qE '(^| )rc=0($| )' "$out/$name.result.txt" 2>/dev/null || {
-        echo "error: $name failed or produced incomplete $o" >&2
-        return 1
-    }
+    if [ -s "$stage_o" ] && grep -qE '(^| )rc=0($| )' "$out/$name.result.txt" 2>/dev/null; then
+        mv -f "$stage_o" "$o"
+        rm -rf "$work_dir"
+        return 0
+    fi
+    rm -f "$work_dir"/aot-*.o "$work_dir"/aot-*.o.capsule-receipt "$work_dir"/*.go-to-end-trial 2>/dev/null || true
+    echo "error: $name failed or produced incomplete $o" >&2
+    return 1
 }
 
 # ---- groups -----------------------------------------------------------------
@@ -233,28 +342,108 @@ fi
 # ---- merge + dedupe ---------------------------------------------------------
 objs="$out/objs"
 rm -rf "$objs"; mkdir -p "$objs"
+: > "$out/obj-list.txt"; : > "$out/dedupe.log"
+seen="$out/inits.seen"; : > "$seen"
+total=0
 for g in $(seq 1 7); do
     a="$out/group_$g.a"
     [ -s "$a" ] || { echo "error: missing $a" >&2; exit 1; }
     "$ar" t "$a" | tr -d '\r' > "$out/group_$g.members"
-    (cd "$objs" && "$ar" x "$a")
+    g_n=$(wc -l < "$out/group_$g.members" | tr -d ' ')
+    total=$((total + g_n))
+    gtmp="$objs/.tmp_g$g"
+    rm -rf "$gtmp"; mkdir -p "$gtmp"
+    (cd "$gtmp" && "$ar" x "$a")
+    nm_out="$out/group_$g.nm"
+    sorted_members="$out/group_$g.members.sorted"
+    : > "$nm_out"
+    LC_ALL=C sort "$out/group_$g.members" > "$sorted_members"
+    if [ "$g_n" -gt 0 ]; then
+        (cd "$gtmp" && awk 'NF && /\.o$/' "$sorted_members" | tr '\n' '\0' |
+            xargs -0 "$nm" -A --defined-only --extern-only 2>/dev/null || true) > "$nm_out"
+    fi
+    keep_file="$out/group_$g.keep"
+    new_seen="$out/group_$g.new_seen"
+    : > "$keep_file"; : > "$new_seen"
+    awk -v dedupe_log="$out/dedupe.log" -v keep_out="$keep_file" -v new_seen_out="$new_seen" '
+        FILENAME == ARGV[1] {
+            gsub(/\r/, "", $0)
+            if (NF >= 1) seen[$1] = 1
+            next
+        }
+        FILENAME == ARGV[2] {
+            if (NF < 3) next
+            obj = $1
+            sub(/:$/, "", obj)
+            sub(/^.*[\/\\]/, "", obj)
+            sym = $NF
+            gsub(/\r/, "", sym)
+            if (sym ~ /^_{1,3}simple_main$/) sym = "__simple_main"
+            else if (sym ~ /^___module_init/) sub(/^___module_init/, "__module_init", sym)
+            else if (sym ~ /^_simple_empty_module_/) sub(/^_simple_empty_module_/, "simple_empty_module_", sym)
+            if (sym == "__simple_main") {
+                has_main[obj] = 1
+            } else if (sym ~ /^__module_init/ || sym ~ /^simple_empty_module_/) {
+                key = obj "\t" sym
+                if (!(key in obj_sym_seen)) {
+                    obj_sym_seen[key] = 1
+                    obj_syms[obj] = (obj in obj_syms ? obj_syms[obj] "\n" sym : sym)
+                }
+            }
+            next
+        }
+        {
+            gsub(/\r/, "", $0)
+            o = $0
+            if (o !~ /\.o$/) next
+            if (o in seen_member) next
+            seen_member[o] = 1
+            if (o in has_main) {
+                printf "drop %s: group entry (__simple_main)\n", o >> dedupe_log
+                next
+            }
+            dup = ""
+            if (o in obj_syms) {
+                n = split(obj_syms[o], arr, "\n")
+                for (i = 1; i <= n; i++) {
+                    if (arr[i] in seen) {
+                        dup = arr[i]
+                        break
+                    }
+                }
+                if (dup != "") {
+                    printf "drop %s: duplicate %s\n", o, dup >> dedupe_log
+                    next
+                }
+                for (i = 1; i <= n; i++) {
+                    seen[arr[i]] = 1
+                    print arr[i] >> new_seen_out
+                }
+            }
+            print o >> keep_out
+        }
+    ' "$seen" "$nm_out" "$sorted_members"
+    if [ -s "$new_seen" ]; then
+        cat "$new_seen" >> "$seen"
+    fi
+    if [ -s "$keep_file" ]; then
+        gtmp_win=$(win_path "$gtmp")
+        objs_win=$(win_path "$objs")
+        keep_win=$(win_path "$keep_file")
+        "$ps" -NoProfile -Command "
+            \$src = '$gtmp_win'
+            \$dst = '$objs_win'
+            foreach (\$f in [System.IO.File]::ReadAllLines('$keep_win')) {
+                \$t = \$f.Trim()
+                if (\$t) { [System.IO.File]::Move((Join-Path \$src \$t), (Join-Path \$dst ('g${g}_' + \$t))) }
+            }
+        "
+        sed "s/^/g${g}_/" "$keep_file" >> "$out/obj-list.txt"
+    fi
+    rm -rf "$gtmp" "$nm_out" "$sorted_members" "$keep_file" "$new_seen"
 done
-total=$(cat "$out"/group_*.members | wc -l | tr -d ' ')
 uniq_n=$(cat "$out"/group_*.members | sort -u | wc -l | tr -d ' ')
 echo "[p3g] archive members: $total total, $uniq_n unique by name ($((total - uniq_n)) shared deduped)"
-: > "$out/obj-list.txt"; : > "$out/dedupe.log"
-seen="$out/inits.seen"; : > "$seen"
-for o in $(ls "$objs" | LC_ALL=C sort); do
-    case "$o" in *.o) ;; *) continue ;; esac
-    syms=$("$nm" --defined-only --extern-only "$objs/$o" 2>/dev/null | awk 'NF>=3{print $3}' | sed 's/^_\{1,3\}simple_main$/__simple_main/')
-    if echo "$syms" | grep -qx '__simple_main'; then echo "drop $o: group entry (__simple_main)" >> "$out/dedupe.log"; continue; fi
-    inits=$(echo "$syms" | sed 's/^___module_init/__module_init/' | grep -E '^__module_init' || true)
-    dup=""
-    for s in $inits; do grep -qxF "$s" "$seen" && dup=$s; done
-    if [ -n "$dup" ]; then echo "drop $o: duplicate $dup" >> "$out/dedupe.log"; continue; fi
-    for s in $inits; do echo "$s" >> "$seen"; done
-    echo "$o" >> "$out/obj-list.txt"
-done
 cp "$entry_o" "$objs/bootstrap_main_entry.o"
 echo bootstrap_main_entry.o >> "$out/obj-list.txt"
 echo "[p3g] link objects: $(wc -l < "$out/obj-list.txt" | tr -d ' '); dropped: $(wc -l < "$out/dedupe.log" | tr -d ' ') (see $out/dedupe.log)"
