@@ -1,0 +1,56 @@
+"""
+## Purpose and audience
+Purpose: Prove the fast/deep lint rule cost-tier registry (ROB-COST-01/02):
+every rule has a tier, the normal build profile runs Low rules only, the
+default lint profile runs every rule, and an exhausted budget never reduces
+to pass.
+Audience: compiler and tooling engineers maintaining lint profiles.
+## Operator workflow
+Run this spec with the test runner and read the SPEC FILE VERDICT line.
+## Compatibility and limitations
+Registry and pure selection/reduction only; the `lint --fast` CLI flag and
+build-profile wiring are later slices of P0-5.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use compiler.tools.lint._LintMain.config_and_model.{all_lint_names}
+use compiler.tools.lint._LintMain.rule_cost_tier.{LintCostTier, LintCompleteness, LintTierProfile, lint_rule_cost_tier, lint_registered_rule_names, lint_rules_for_profile, lint_completeness_reduce}
+
+# @manual_section: rule_cost_tier
+describe "lint rule cost tier registry":
+    it "assigns a tier to every registered rule and covers all canonical lint names":
+        val registered = lint_registered_rule_names()
+        for name in all_lint_names():
+            expect(registered.contains(name)).to_equal(true)
+        expect(registered.len() > 0).to_equal(true)
+
+    it "defaults an unlisted rule to High (fail closed)":
+        expect(lint_rule_cost_tier("no_such_rule_xyz") == LintCostTier.High).to_equal(true)
+
+    it "normal build profile runs only Low rules":
+        val picked = lint_rules_for_profile(LintTierProfile.NormalBuild, all_lint_names())
+        expect(picked.len() > 0).to_equal(true)
+        expect(picked.len() < all_lint_names().len()).to_equal(true)
+        for name in picked:
+            expect(lint_rule_cost_tier(name) == LintCostTier.Low).to_equal(true)
+
+    it "default lint profile runs all rules":
+        val picked = lint_rules_for_profile(LintTierProfile.DefaultLint, all_lint_names())
+        expect(picked.len()).to_equal(all_lint_names().len())
+
+    it "exhausted budget yields incomplete, never pass":
+        val r = lint_completeness_reduce([LintCompleteness.Pass, LintCompleteness.Pass], true)
+        expect(r == LintCompleteness.Incomplete).to_equal(true)
+        expect(r == LintCompleteness.Pass).to_equal(false)
+
+    it "reduces a timed-out rule to timed_out and clean runs to pass":
+        expect(lint_completeness_reduce([LintCompleteness.Pass, LintCompleteness.TimedOut], false) == LintCompleteness.TimedOut).to_equal(true)
+        expect(lint_completeness_reduce([LintCompleteness.Pass, LintCompleteness.Fail], true) == LintCompleteness.Fail).to_equal(true)
+        expect(lint_completeness_reduce([LintCompleteness.Pass], false) == LintCompleteness.Pass).to_equal(true)
+        expect(lint_completeness_reduce([], false) == LintCompleteness.NotApplicable).to_equal(true)
+
+    it "registers only canonical rule names (reverse coverage)":
+        val canonical = all_lint_names()
+        for name in lint_registered_rule_names():
+            expect(canonical.contains(name)).to_equal(true)
