@@ -2369,6 +2369,40 @@ Gates and remaining gaps:
   added to the `names` list in
   `simple_web_html_layout_renderer_module_split_spec` (it compares the
   directory walk count to that list).
+## File layout: paint / facade parser-input splits (2026-11-17)
+
+Pure moves, no logic edits. Each original keeps its name and `export use`s
+every moved name, so importers are unchanged. A moved set never imports its
+original file (no cycles), and it carries no module `var`, no `nil` and no
+`extern fn`.
+- `simple_web_html_layout_renderer.spl` (facade, 179,572 -> 110,660 B) ->
+  `_compose_support.spl`: hit-test index, scrolled layout, material
+  witnesses, CSS animation scheduling, opacity nesting, GPU paint state.
+  These stay in the facade: the nil-returning `_animation_computed_value` /
+  `_animation_progress` and every function that calls them, the result
+  classes, `SimpleWebRetainedLayoutPreparation`,
+  `_simple_web_layout_compose_retained`..`simple_web_layout_compose_prepared`
+  and `_simple_web_draw_ir_translate_command`. Contract specs read all of
+  these by path.
+- `_paint_primitives.spl` (179,717 -> 101,730 B) -> `_paint_gradients_text.spl`:
+  gradient layers, border mitre, thin and TTF text raster, bidi, widget
+  chrome. The `_ttf_*` cache `var`s and both `_isqrt_i64` copies stay.
+  Re-exports now chain through three hops (facade -> paint_layout ->
+  paint_primitives -> paint_gradients_text). The chain resolves:
+  `simple_web_renderer_spec` passes 123/123.
+- `_paint_layout.spl` (158,898 -> 84,286 B) -> `_paint_draw_ir.spl`: style
+  props, text commands, gradient and background layers, replaced media, SVG
+  shapes, checkables. `_html_draw_ir_commands` and `_html_draw_ir_visible`
+  stay (path-read contract specs).
+- **Not split:** `_decl_apply.spl` (164,991 B). `_apply_decls_without_grid_inner`
+  is a single 153,985 B function, so any split cuts its body, which is a
+  logic change.
+- **When moving code, also move its path-keyed rows:**
+  - `cpu_lane_hotpath_files.txt`: a new file joins the list next to its original.
+  - `cpu_lane_hotloop_baseline.txt`
+  - `fail_open_baseline.txt`
+  - `text_len_unit_mix_baseline.txt`
+
 ## 2026-11-17 — selector rule admission, strict (four Chrome-drop cases)
 
 - **Where:** `_selector_range_has_unknown_pseudo(sel, start, end, element,
