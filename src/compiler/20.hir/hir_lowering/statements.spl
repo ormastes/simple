@@ -1,6 +1,6 @@
 use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_binding_index_element, hir_const_type_settled}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_binding_index_element, hir_const_type_settled, hir_binding_tuple_elements}
 # HIR Lowering - Statement Lowering
 #
 # This module handles lowering of statements from AST to HIR.
@@ -941,6 +941,10 @@ impl HirLowering:
             if ta_callee_name != "" and self.fn_tuple_returns.has(ta_callee_name):
                 for ta_return_type in self.fn_tuple_returns[ta_callee_name]:
                     ta_elem_types = ta_elem_types.push(ta_return_type)
+        if ta_elem_types.len() == 0:
+            # `(a, b) = f()?`: see lower_tuple_destructure's same fallback.
+            val ta_typed = hir_binding_tuple_elements(value_type, span)
+            if ta_typed.len() == targets.len(): ta_elem_types = ta_typed
         var i = 0
         while i < targets.len():
             # A bare `_` target discards its element, matching the `pname != "_"`
@@ -998,6 +1002,14 @@ impl HirLowering:
             if td_callee_name != "" and self.fn_tuple_returns.has(td_callee_name):
                 for td_return_type in self.fn_tuple_returns[td_callee_name]:
                     td_elem_types = td_elem_types.push(td_return_type)
+        # Any other typed initializer (`f()?`, `r.unwrap()`, a field): the temp
+        # already carries the resolved tuple type. Without this every name of
+        # `val (n, note) = f()?` was Infer, so `if val s = note` on a `text?`
+        # slot never decoded the payload (printed the raw word natively) and
+        # `note.unwrap()` was an unresolved method call.
+        if td_elem_types.len() == 0:
+            val td_typed = hir_binding_tuple_elements(value_type, span)
+            if td_typed.len() == parts.len(): td_elem_types = td_typed
         var i = 0
         while i < parts.len():
             val pname = parts[i]
