@@ -1,0 +1,1516 @@
+# Draw-IR lowering helpers for the Simple web renderer: style props, text,
+# gradient / background layers, replaced media, SVG shapes and checkable
+# controls. Split out of simple_web_html_layout_renderer_paint_layout.spl,
+# which re-exports every name defined here.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, SELECT_ARROW_WIDTH_PX, text_line_aligned_x, text_line_needs_paint_width, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{HNode, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
+use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.common.encoding.utf8.{text_codepoint_len}
+use common.string_builder.{StringBuilder}
+use std.gc_async_mut.io.mod_stub.{env_get}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
+
+fn _html_draw_ir_component_id(node: HNode, i: i32) -> text:
+    if node.id_attr != "":
+        return node.id_attr
+    if node.tag == "#text":
+        return "text_{i}"
+    "{node.tag}_{i}"
+
+fn _html_draw_ir_non_negative(value: i32) -> i32:
+    if value < 0:
+        return 0
+    value
+
+fn _html_draw_ir_shadow_layer_count(value: text) -> i32:
+    if value == "":
+        return 0
+    split_top_level_commas(value).len() as i32
+
+fn _html_draw_ir_clamp_i64(value: i64, low: i64, high: i64) -> i64:
+    if value < low:
+        return low
+    if value > high:
+        return high
+    value
+
+fn _html_draw_ir_wm_fallback_color(node: HNode, st: Style) -> u32:
+    val wm_fallback = attr_value(
+        node.attrs_raw, "data-wm-theme-fallback").trim().lower()
+    if wm_fallback != "solid-material":
+        return st.bg
+    val declared = parse_color_any(attr_value(node.attrs_raw, "data-wm-theme-bg").trim())
+    if ((declared >> 24) & 255u32) == 255u32:
+        return declared
+    if ((st.bg >> 24) & 255u32) == 255u32:
+        return st.bg
+    # Incomplete contracts still need native-safe opaque transport. They do
+    # not receive a material capability or any realized witness.
+    0xFF000000u32 | (st.bg & 0x00FFFFFFu32)
+
+# CSS `text-decoration-line` serialization: space-separated in canonical order,
+# or "none". Keeps the DrawIR metadata in lock-step with what the raster path
+# actually paints - the two disagreeing was the original defect here.
+fn _text_decoration_line_text(st: Style) -> text:
+    var out = ""
+    if st.text_decoration_underline:
+        out = "underline"
+    if st.text_decoration_overline:
+        out = if out == "": "overline" else: "{out} overline"
+    if st.text_decoration_line_through:
+        out = if out == "": "line-through" else: "{out} line-through"
+    if out == "":
+        return "none"
+    out
+
+
+fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
+    # Level-gated consumption-site trace (default off), joining the
+    # SIMPLE_TRACE_FONT_STYLE family already landed in
+    # simple_web_html_layout_renderer_core.spl. This is the CONSUMER named in
+    # doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md 16.5: the
+    # sole style source (renderer.spl:1482) is proven correct, so the
+    # divergence must be between computation and consumption. Printing the
+    # node's identity next to the Style it was PAIRED WITH answers whether the
+    # marker node receives a wrong Style, or a different node's Style entry
+    # (an index/ordering mismatch in the paint-order/visible-node filters).
+    if (env_get("SIMPLE_TRACE_FONT_STYLE") ?? "") == "1":
+        val trace_id: text = attr_value(node.attrs_raw, "id")
+        val trace_class: text = attr_value(node.attrs_raw, "class")
+        val trace_is_marker: bool = trace_id.contains("vector-font-evidence")
+        if trace_is_marker or st.font_family.contains("Bungee") or st.resolved_font_identity.contains("Bungee"):
+            print "draw_ir_style_props_pairing tag={node.tag} id={trace_id} class={trace_class} marker={trace_is_marker} font_family={st.font_family} font_size={st.font_size} identity={st.resolved_font_identity}"
+    val wm_fallback = attr_value(node.attrs_raw, "data-wm-theme-fallback")
+    val wm_solid_fallback = wm_fallback == "solid-material"
+    val material_mode_attr = attr_value(node.attrs_raw, "data-wm-theme-material-mode")
+    val material_mode = material_mode_attr == "engine2d-cpu-composited-material-v1"
+    val declared_fallback_attr = attr_value(node.attrs_raw, "data-wm-theme-bg")
+    val declared_fallback_color = parse_color_any(declared_fallback_attr)
+    val declared_fallback_opaque = (
+        declared_fallback_attr != "" and
+        ((declared_fallback_color >> 24) & 255u32) == 255u32
+    )
+    val bg_alpha = (st.bg >> 24) & 255u32
+    val backdrop_requested = st.backdrop_filter_raw != ""
+    val has_gradient = (
+        st.background_gradient_from != 0u32 and
+        st.background_gradient_to != 0u32
+    )
+    val typed_stops_absent = (
+        st.background_gradient_from == 0u32 and
+        st.background_gradient_to == 0u32
+    )
+    val typed_stops_present = (
+        st.background_gradient_from != 0u32 and
+        st.background_gradient_to != 0u32
+    )
+    val typed_stops_valid = typed_stops_absent or typed_stops_present
+    val raw_layers_empty = st.bg_layers_raw == ""
+    val backdrop = simple_web_backdrop_admission(st.backdrop_filter_raw)
+    # The CPU material path supports a translucent base with at most one
+    # normalized linear-gradient layer. Extra/radial stacks remain fail-closed
+    # on the opaque command fallback instead of overstating layered parity.
+    val material_ready = (
+        material_mode and wm_solid_fallback and
+        declared_fallback_opaque and backdrop.admitted and
+        bg_alpha > 0u32 and bg_alpha < 255u32 and
+        raw_layers_empty and typed_stops_valid
+    )
+    if material_mode_attr != "" and not material_ready:
+        # Bounded defect receipt (contract nodes only): this duplicated
+        # admission re-derivation disagreeing with compute_styles_with_material
+        # is exactly how a realized material executes zero cpu-composited
+        # commands (witness-unconverted). Name the failing conjunct.
+        print "[web-paint] material-not-ready mode={material_mode} solid={wm_solid_fallback} declared_opaque={declared_fallback_opaque} declared_attr_len={declared_fallback_attr.len()} backdrop_admitted={backdrop.admitted} backdrop_len={st.backdrop_filter_raw.len()} bg_alpha={bg_alpha} layers_empty={raw_layers_empty} stops_valid={typed_stops_valid} gf={st.background_gradient_from} gt={st.background_gradient_to}"
+    val realized_blur = backdrop.realized_blur_px
+    val realized_saturation = backdrop.realized_saturation_milli
+    # GAP-2: project the N-stop / angled / radial gradient model onto flat
+    # Draw IR props. Without these the stop-list branch in
+    # engine2d/draw_ir_adv.spl (`_engine2d_draw_ir_gradient_stop_count >= 2`)
+    # can never fire, because nothing else in the tree writes them. A
+    # radial-gradient sets background_gradient_from/to to 0 by design
+    # (decl_apply), so the legacy 2-color "background-image" prop below
+    # renders it as "none" and the element painted no pixels at all.
+    val gradient_stop_count = st.background_gradient_stop_colors.len()
+    # Accumulate through StringBuilder rather than `raw = raw + piece`: this
+    # runs once per gradient-bearing node per frame, and repeated `+` on text
+    # recopies the whole accumulated prefix on every stop.
+    var gradient_stops_builder = StringBuilder.new()
+    var gsi = 0
+    while gsi < gradient_stop_count:
+        if gsi > 0:
+            gradient_stops_builder.push(",")
+        gradient_stops_builder.push("{st.background_gradient_stop_colors[gsi]}")
+        gsi = gsi + 1
+    gsi = 0
+    while gsi < st.background_gradient_stop_positions.len():
+        gradient_stops_builder.push(",")
+        gradient_stops_builder.push("{st.background_gradient_stop_positions[gsi]}")
+        gsi = gsi + 1
+    val gradient_stops_raw = gradient_stops_builder.build()
+    val shadow_parse = parse_box_shadow_layers(
+        st.box_shadow_raw, st.fg
+    )
+    val eff_style_l = _html_draw_ir_effective_border_style(node, st.border_style_l, st.border_l)
+    val eff_style_t = _html_draw_ir_effective_border_style(node, st.border_style_t, st.border_t)
+    val eff_style_r = _html_draw_ir_effective_border_style(node, st.border_style_r, st.border_r)
+    val eff_style_b = _html_draw_ir_effective_border_style(node, st.border_style_b, st.border_b)
+    val ir_border_l = _html_draw_ir_rendered_border_width(eff_style_l, st.border_l)
+    val ir_border_t = _html_draw_ir_rendered_border_width(eff_style_t, st.border_t)
+    val ir_border_r = _html_draw_ir_rendered_border_width(eff_style_r, st.border_r)
+    val ir_border_b = _html_draw_ir_rendered_border_width(eff_style_b, st.border_b)
+    var props = [
+        draw_ir_style_prop("background-gradient-stop-count", "{gradient_stop_count}"),
+        draw_ir_style_prop("background-gradient-stops", gradient_stops_raw),
+        draw_ir_style_prop("background-gradient-angle-deg", "{st.background_gradient_angle_deg}"),
+        draw_ir_style_prop("background-gradient-is-radial", if st.background_gradient_is_radial: "1" else: "0"),
+        draw_ir_style_prop("tag", node.tag),
+        draw_ir_style_prop("id", node.id_attr),
+        draw_ir_style_prop("class", node.class_attr),
+        draw_ir_style_prop("display", st.display),
+        draw_ir_style_prop(
+            "grid-template-columns", st.grid_template_columns
+        ),
+        draw_ir_style_prop("grid-template-rows", st.grid_template_rows),
+        draw_ir_style_prop("grid-column", st.grid_column),
+        draw_ir_style_prop("grid-row", st.grid_row),
+        draw_ir_style_prop("flex-direction", st.flex_direction),
+        draw_ir_style_prop("flex-wrap", st.flex_wrap),
+        draw_ir_style_prop("justify-content", st.justify_content),
+        draw_ir_style_prop("align-items", st.align_items),
+        draw_ir_style_prop("align-self", st.align_self),
+        draw_ir_style_prop("background-clip", st.background_clip),
+        draw_ir_style_prop("background-attachment", st.background_attachment),
+        draw_ir_style_prop("background-repeat", st.background_repeat),
+        draw_ir_style_prop("background-size-width", "{st.background_size_w_px}"),
+        draw_ir_style_prop("background-size-height", "{st.background_size_h_px}"),
+        draw_ir_style_prop("background-position-x", "{st.background_position_x_px}"),
+        draw_ir_style_prop("background-position-y", "{st.background_position_y_px}"),
+        draw_ir_style_prop("background-color", "{st.bg}"),
+        draw_ir_style_prop("background-image", if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32: "linear-gradient({st.background_gradient_from},{st.background_gradient_to})" else: "none"),
+        draw_ir_style_prop("background-layers-raw", st.bg_layers_raw),
+        draw_ir_style_prop("background-origin", st.background_origin),
+        # Preserve the legacy aggregate projection and authored CSS for
+        # consumers that do not admit the ordered typed layer schema below.
+        draw_ir_style_prop("box-shadow", if st.box_shadow_color != 0u32: "{st.box_shadow_x_px}px {st.box_shadow_y_px}px {st.box_shadow_color}" else: "none"),
+        draw_ir_style_prop("box-shadow-raw", st.box_shadow_raw),
+        draw_ir_style_prop("box-shadow-layer-count", "{_html_draw_ir_shadow_layer_count(st.box_shadow_raw)}"),
+        draw_ir_style_prop("box-shadow-blur-radius", "{st.box_shadow_blur_px}"),
+        draw_ir_style_prop("backdrop-filter", if backdrop_requested: st.backdrop_filter_raw else: "none"),
+        draw_ir_style_prop("backdrop-filter-capability", if material_ready: "engine2d-cpu-composited-material-v1" elif wm_solid_fallback or backdrop_requested: "unavailable" else: "not-requested"),
+        draw_ir_style_prop("backdrop-filter-fallback", if material_ready: "cpu-composited-material" elif wm_solid_fallback and material_mode_attr == "": "solid-material" else: "none"),
+        draw_ir_style_prop("backdrop-filter-fallback-reason", if material_ready: "native-device-backdrop-path-pending" elif material_mode_attr != "": "incomplete-wm-material-contract" elif wm_solid_fallback: "cpu-raster-backdrop-sampling-unavailable" elif backdrop_requested: "incomplete-wm-material-contract" else: "none"),
+        draw_ir_style_prop("color", "{st.fg}"),
+        draw_ir_style_prop("direction", if st.direction_rtl: "rtl" else: "ltr"),
+        draw_ir_style_prop("font-size", "{st.font_size}"),
+        draw_ir_style_prop("font-family", st.font_family),
+        draw_ir_style_prop("font-identity", st.resolved_font_identity),
+        draw_ir_style_prop("font-size-adjust", st.font_size_adjust),
+        draw_ir_style_prop("font-palette", st.font_palette),
+        draw_ir_style_prop("font-feature-settings", st.font_feature_settings),
+        draw_ir_style_prop("font-language-override", st.font_language_override),
+        draw_ir_style_prop("font-variation-settings", st.font_variation_settings),
+        draw_ir_style_prop("font-variant", st.font_variant),
+        draw_ir_style_prop("font-variant-alternates", st.font_variant_alternates),
+        draw_ir_style_prop("font-variant-caps", st.font_variant_caps),
+        draw_ir_style_prop("font-variant-east-asian", st.font_variant_east_asian),
+        draw_ir_style_prop("font-variant-emoji", st.font_variant_emoji),
+        draw_ir_style_prop("font-variant-ligatures", st.font_variant_ligatures),
+        draw_ir_style_prop("font-variant-numeric", st.font_variant_numeric),
+        draw_ir_style_prop("font-variant-position", st.font_variant_position),
+        draw_ir_style_prop("font-style", if st.font_style_italic: "italic" else: "normal"),
+        draw_ir_style_prop("font-kerning", st.font_kerning),
+        draw_ir_style_prop("font-optical-sizing", st.font_optical_sizing),
+        draw_ir_style_prop("font-stretch", st.font_stretch),
+        draw_ir_style_prop("font-width", st.font_width),
+        draw_ir_style_prop("font-synthesis", st.font_synthesis),
+        draw_ir_style_prop("font-synthesis-small-caps", st.font_synthesis_small_caps),
+        draw_ir_style_prop("font-synthesis-position", st.font_synthesis_position),
+        draw_ir_style_prop("font-synthesis-style", st.font_synthesis_style),
+        draw_ir_style_prop("font-synthesis-weight", st.font_synthesis_weight),
+        draw_ir_style_prop("font-weight", if st.bold: "bold" else: "normal"),
+        draw_ir_style_prop("width", "{st.width_px}"),
+        draw_ir_style_prop("height", "{st.height_px}"),
+        draw_ir_style_prop("min-width", "{st.min_width_px}"),
+        draw_ir_style_prop("max-width", "{st.max_width_px}"),
+        draw_ir_style_prop("min-height", "{st.min_height_px}"),
+        draw_ir_style_prop("max-height", "{st.max_height_px}"),
+        draw_ir_style_prop(
+            "position",
+            if st.position_sticky:
+                "sticky"
+            elif st.position_absolute:
+                "absolute"
+            elif st.position_relative:
+                "relative"
+            else:
+                "static"
+        ),
+        draw_ir_style_prop("left", "{st.left_px}"),
+        draw_ir_style_prop(
+            "top",
+            if (
+                st.position_sticky and
+                st.top_px == SIMPLE_WEB_STICKY_TOP_AUTO
+            ):
+                "auto"
+            else:
+                "{st.top_px}"
+        ),
+        draw_ir_style_prop("right", "{st.right_px}"),
+        draw_ir_style_prop("bottom", "{st.bottom_px}"),
+        draw_ir_style_prop("line-height", "{style_line_h(st)}"),
+        draw_ir_style_prop("letter-spacing", "{st.letter_spacing_px}"),
+        draw_ir_style_prop("caret-color", if st.caret_color != 0u32: "{st.caret_color}" else: "auto"),
+        draw_ir_style_prop("accent-color", if st.accent_color != 0u32: "{st.accent_color}" else: "auto"),
+        draw_ir_style_prop("cursor", st.cursor),
+        draw_ir_style_prop("hyphens", st.hyphens),
+        draw_ir_style_prop("line-break", st.line_break),
+        draw_ir_style_prop("overflow-wrap", st.overflow_wrap),
+        draw_ir_style_prop("resize", st.resize),
+        draw_ir_style_prop("table-layout", st.table_layout),
+        draw_ir_style_prop("border-collapse", st.border_collapse),
+        draw_ir_style_prop(
+            "border-spacing",
+            if st.border_spacing_x_px == st.border_spacing_y_px:
+                "{st.border_spacing_x_px}px"
+            else:
+                (
+                    "{st.border_spacing_x_px}px " +
+                    "{st.border_spacing_y_px}px"
+                )
+        ),
+        draw_ir_style_prop("caption-side", st.caption_side),
+        draw_ir_style_prop("vertical-align", st.vertical_align),
+        draw_ir_style_prop("tab-size", "{st.tab_size}"),
+        draw_ir_style_prop("unicode-bidi", st.unicode_bidi),
+        draw_ir_style_prop("word-break", st.word_break),
+        draw_ir_style_prop("word-wrap", st.overflow_wrap),
+        draw_ir_style_prop("writing-mode", st.writing_mode),
+        draw_ir_style_prop("text-orientation", st.text_orientation),
+        draw_ir_style_prop("text-combine-upright", st.text_combine_upright),
+        draw_ir_style_prop("word-spacing", "{st.word_spacing_px}"),
+        draw_ir_style_prop("text-decoration-color", if st.text_decoration_color != 0u32: "{st.text_decoration_color}" else: "currentColor"),
+        draw_ir_style_prop("text-decoration-line", _text_decoration_line_text(st)),
+        draw_ir_style_prop("text-indent", "{st.text_indent_px}"),
+        draw_ir_style_prop("text-overflow", if st.text_overflow_ellipsis: "ellipsis" else: "clip"),
+        draw_ir_style_prop("text-shadow", if st.text_shadow_color != 0u32: "{st.text_shadow_x_px}px {st.text_shadow_y_px}px {st.text_shadow_color}" else: "none"),
+        draw_ir_style_prop("text-transform", st.text_transform),
+        draw_ir_style_prop("text-decoration-style", st.text_decoration_style),
+        draw_ir_style_prop("text-decoration-thickness", if st.text_decoration_thickness_px > 0: "{st.text_decoration_thickness_px}px" else: "auto"),
+        draw_ir_style_prop("text-underline-offset", "{st.text_underline_offset_px}px"),
+        draw_ir_style_prop("text-underline-position", st.text_underline_position),
+        draw_ir_style_prop("text-align", st.text_align),
+        draw_ir_style_prop("text-align-all", st.text_align),
+        draw_ir_style_prop("text-align-last", st.text_align_last),
+        draw_ir_style_prop("text-justify", st.text_justify),
+        draw_ir_style_prop("transition-property", st.transition_property),
+        draw_ir_style_prop("transition-duration", "{st.transition_duration_ms}ms"),
+        draw_ir_style_prop("transition-delay", "{st.transition_delay_ms}ms"),
+        draw_ir_style_prop("transition-timing-function", st.transition_timing_function),
+        draw_ir_style_prop("animation-name", st.animation_name),
+        draw_ir_style_prop("animation-duration", "{st.animation_duration_ms}ms"),
+        draw_ir_style_prop("animation-delay", "{st.animation_delay_ms}ms"),
+        draw_ir_style_prop("animation-timing-function", st.animation_timing_function),
+        draw_ir_style_prop("animation-iteration-count", st.animation_iteration_count),
+        draw_ir_style_prop("animation-direction", st.animation_direction),
+        draw_ir_style_prop("animation-fill-mode", st.animation_fill_mode),
+        draw_ir_style_prop("animation-play-state", st.animation_play_state),
+        draw_ir_style_prop("transform-origin", st.transform_origin),
+        draw_ir_style_prop("transform-box", st.transform_box),
+        draw_ir_style_prop("transform-style", st.transform_style),
+        draw_ir_style_prop("transform", st.transform_raw),
+        draw_ir_style_prop("translate", st.translate_raw),
+        draw_ir_style_prop("scale", st.scale_raw),
+        draw_ir_style_prop("rotate", st.rotate_raw),
+        draw_ir_style_prop("box-geometry-raw-tokens",
+            st.box_geometry_raw_tokens.join("|")),
+        draw_ir_style_prop("box-geometry-unresolved",
+            if st.box_geometry_unresolved: "true" else: "false"),
+        draw_ir_style_prop("image-rendering", st.image_rendering),
+        draw_ir_style_prop("object-fit", st.object_fit),
+        draw_ir_style_prop("object-position", st.object_position),
+        draw_ir_style_prop("padding-left", "{st.pad_l}"),
+        draw_ir_style_prop("padding-top", "{st.pad_t}"),
+        draw_ir_style_prop("padding-right", "{st.pad_r}"),
+        draw_ir_style_prop("padding-bottom", "{st.pad_b}"),
+        draw_ir_style_prop("margin-left", "{st.margin_l}"),
+        draw_ir_style_prop("margin-right", "{st.margin_r}"),
+        draw_ir_style_prop("margin-top", "{st.margin_t}"),
+        draw_ir_style_prop("margin-bottom", "{st.margin_b}"),
+        draw_ir_style_prop("border-left-width", "{ir_border_l}"),
+        draw_ir_style_prop("border-left-style", eff_style_l),
+        draw_ir_style_prop("border-radius", "{st.border_radius_px}"),
+        draw_ir_style_prop("border-top-left-radius", "{st.border_radius_tl_px}"),
+        draw_ir_style_prop("border-top-right-radius", "{st.border_radius_tr_px}"),
+        draw_ir_style_prop("border-bottom-right-radius", "{st.border_radius_br_px}"),
+        draw_ir_style_prop("border-bottom-left-radius", "{st.border_radius_bl_px}"),
+        draw_ir_style_prop("border-top-width", "{ir_border_t}"),
+        draw_ir_style_prop("border-right-width", "{ir_border_r}"),
+        draw_ir_style_prop("border-right-style", eff_style_r),
+        draw_ir_style_prop("border-bottom-width", "{ir_border_b}"),
+        draw_ir_style_prop("border-top-color", "{st.border_color_t}"),
+        draw_ir_style_prop("border-right-color", "{st.border_color_r}"),
+        draw_ir_style_prop("border-bottom-color", "{st.border_color_b}"),
+        draw_ir_style_prop("border-left-color", "{st.border_color_l}"),
+        draw_ir_style_prop("outline-width", "{st.outline_w}"),
+        draw_ir_style_prop("outline-color", "{st.outline_color}"),
+        draw_ir_style_prop("outline-offset", "{st.outline_offset_px}"),
+        draw_ir_style_prop("z-index", "{st.z_index}"),
+        draw_ir_style_prop("visibility", if st.visibility_hidden: "hidden" else: "visible"),
+        draw_ir_style_prop("content-visibility", if st.content_visibility_hidden: "hidden" else: "visible"),
+        draw_ir_style_prop("will-change", st.will_change),
+        draw_ir_style_prop("color-adjust", st.color_adjust),
+        draw_ir_style_prop("forced-color-adjust", st.forced_color_adjust),
+        draw_ir_style_prop("print-color-adjust", st.print_color_adjust),
+        draw_ir_style_prop("orphans", "{st.orphans}"),
+        draw_ir_style_prop("widows", "{st.widows}")
+    ]
+    # A malformed or unsupported declaration omits the schema completely so
+    # Engine2D cannot mistake a partial typed projection for authoritative
+    # paint data. The parser preserves CSS source order; consumers paint the
+    # admitted layers in the order required by their box-paint phases.
+    if shadow_parse.valid and shadow_parse.layers.len() <= 24:
+        props.push(draw_ir_style_prop(
+            "box-shadow-layer-schema", "web-box-shadow-layers-v1"
+        ))
+        var shadow_index = 0
+        # cpu-lane-loop-ok: emits the typed box-shadow layer props; the enclosing if caps shadow_parse.layers.len() at 24, so the bound is a literal constant, not an element count - detector false positive
+        while shadow_index < shadow_parse.layers.len():
+            val shadow_layer = shadow_parse.layers[shadow_index]
+            val shadow_prefix = "box-shadow-layer-{shadow_index}"
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-kind", shadow_layer.kind
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-offset-x", "{shadow_layer.offset_x_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-offset-y", "{shadow_layer.offset_y_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-blur-radius",
+                "{shadow_layer.blur_radius_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-spread-radius",
+                "{shadow_layer.spread_radius_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-color", "{shadow_layer.color_rgba}"
+            ))
+            shadow_index = shadow_index + 1
+    if backdrop_requested:
+        props.push(draw_ir_style_prop(
+            "backdrop-filter-fallback-material-hash", ""
+        ))
+    if material_ready:
+        props.push(draw_ir_style_prop("wm-material-request", "window-surface-glass"))
+        props.push(draw_ir_style_prop(
+            "wm-material-surface-alpha-milli",
+            "{(bg_alpha as i64) * 1000 / 255}"
+        ))
+        props.push(draw_ir_style_prop("backdrop-filter-realized", "blur({realized_blur}px) saturate({realized_saturation / 10}%)"))
+        props.push(draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "{realized_blur}"))
+        props.push(draw_ir_style_prop("backdrop-filter-realized-saturation-milli", "{realized_saturation}"))
+        if st.backdrop_filter_raw != "blur({realized_blur}px) saturate({realized_saturation / 10}%)":
+            props.push(draw_ir_style_prop("backdrop-filter-reduction-reason", "cpu-blur-radius-bounded-to-4"))
+        if has_gradient:
+            props.push(draw_ir_style_prop(
+                "background-image-composite-mode",
+                "surface-then-alpha-gradient"
+            ))
+    props
+
+# Validate that `cp_advances` describes `txt` in per-CODEPOINT arity and hand
+# it back unchanged. Round 5 used to re-express this array per BYTE here (the
+# codepoint's advance on its lead byte, 0 on each UTF-8 continuation byte)
+# because the Engine2D consumer indexed its staged quads in byte space; that
+# consumer defect is fixed (`font_advances_codepoint_arity` now resolves the
+# index space once per batch and accepts both conventions), so the producer
+# emits the CANONICAL per-codepoint array and declares it with the
+# `font-advance-arity: codepoint` style prop. Returns an empty array when the
+# array does not describe `txt`, so the caller falls back to the flat styled
+# command rather than emitting a mis-sized array.
+# The framebuffer painter keeps its own BYTE view of the same numbers
+# (`style_run_byte_advances`, ..._layout.spl) derived from the identical
+# per-codepoint `resolved_font_advances`, so layout, paint and Draw IR still
+# measure a run identically -- only the wire arity differs.
+fn _html_draw_ir_codepoint_advances(txt: text, cp_advances: [i32]) -> [i32]:
+    var out: [i32] = []
+    if cp_advances.len() == 0:
+        return out
+    if cp_advances.len() != text_codepoint_len(txt) as i32:
+        return out
+    cp_advances
+
+# Emit ONE Draw IR text command for `txt`, carrying the resolved per-glyph
+# advances the layout path measured the same string with. Factored out of
+# `_html_draw_ir_command` in round 5 so the WRAPPED-line emitters can use the
+# identical code rather than a second, flat-advance measurement model; before
+# that, a wrapped run was drawn with `draw_ir_text_styled_clipped` (no
+# advances) while layout had already sized its lines from real metrics.
+# Falls back to the styled/flat command when vector fonts are off or the
+# resolver returns nothing usable -- in which case BOTH sides are flat, which
+# is consistent, rather than one side each.
+fn _html_draw_ir_resolved_text_command(
+    nodes: [HNode], i: i32, node: HNode, st: Style, cid: text,
+    tx: i32, ty: i32, txt: text, computed_style: [DrawIrStyleProp],
+    clip_rect: DrawIrRect, vector_fonts: bool
+) -> DrawIrCommand:
+    if not vector_fonts:
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    # Compose-stage font resolve (round 13 target C). This is the SECOND
+    # `resolve_font_metrics_with_language` per #text node -- style resolves the
+    # same family/size over the node's metric text during the cascade
+    # (`sec_resolve`), and this one resolves again over the painted string.
+    # Timed into `lay_compose_resolve` so the compose window has a named
+    # bucket; the timer is the same default-off `SIMPLE_WEB_STYLE_COUNTERS=1`
+    # gate as every counter around it and reads no clock when unarmed.
+    val _cr_t0 = if _wsc_on: _wsc_now_us() else: 0
+    val metrics = resolve_font_metrics_with_language(
+        browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic), txt, st.font_size,
+        _html_text_language(nodes, i, st)
+    )
+    if _wsc_on:
+        _wlay_add(8, _wsc_now_us() - _cr_t0, 1)
+    # ADVANCE ARITY (round 5 follow-up). `metrics.advances` carries one advance
+    # per CODEPOINT and that is exactly what now goes on the wire: the Engine2D
+    # consumer resolves the quads' index space per batch and normalises to
+    # codepoint arity (`font_advances_codepoint_arity`), so the round-5
+    # byte-expansion shim this call replaced is no longer needed. The command
+    # states its convention with `font-advance-arity: codepoint` below; a
+    # declaration that disagrees with what arrives makes the consumer take the
+    # flat fallback instead of silently reinterpreting the array. History and
+    # the incident this closes:
+    # doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md.
+    val cp_advances = _html_draw_ir_codepoint_advances(txt, metrics.advances)
+    if cp_advances.len() == 0:
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    var resolved = if metrics.shaping_required:
+        draw_ir_text_shaped_font(
+            cid, tx, ty, txt, st.fg,
+            metrics.family, metrics.identity, cp_advances, metrics.width,
+            metrics.line_height, st.font_size, metrics.glyph_run
+        )
+    else:
+        draw_ir_text_resolved_font(
+            cid, tx, ty, txt, st.fg,
+            metrics.family, metrics.identity, cp_advances, metrics.width,
+            metrics.line_height, st.font_size
+        )
+    if resolved.computed_style.len() == 0:
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    var merged: [DrawIrStyleProp] = []
+    # cpu-lane-loop-ok: per-node style-prop merge that drops the four font-* keys the resolved font metrics supersede; bound is this node's own declared prop list
+    for prop in computed_style:
+        if (prop.key != "font-family" and prop.key != "font-identity" and
+            prop.key != "font-size" and prop.key != "font-shaping"):
+            merged.push(prop)
+    # cpu-lane-loop-ok: appends the resolved font-metric props onto the merged list; bound is the small fixed prop set returned by draw_ir_text_shaped_font / _resolved_font
+    for prop in resolved.computed_style:
+        # `line-height` stays the computed CSS value (style_line_h answers the
+        # face normal metric for `normal`); the face metric must not replace
+        # an author `line-height: 20px`.
+        if prop.key != "line-height":
+            merged.push(prop)
+    # Declare the wire arity of `advance_widths` for the Engine2D gate.
+    merged.push(draw_ir_style_prop("font-advance-arity", "codepoint"))
+    resolved.computed_style = merged
+    resolved.clip_rect = clip_rect
+    resolved
+
+# `background-gradient-radial-geometry`: the resolved CSS radial gradient
+# (centre, radii, paint rect) as Q10 px offsets from the command origin
+# (x, y). Device scale multiplies every field; draw_ir_adv adds the origin
+# back and paints it with the shared Engine2D evaluator.
+fn _html_draw_ir_radial_geometry_prop(rg: [i64], x: i32, y: i32) -> DrawIrStyleProp:
+    val cx = rg[0] - (x as i64) * 1024
+    val cy = rg[1] - (y as i64) * 1024
+    val rx = rg[2]
+    val ry = rg[3]
+    val px = (rg[4] - (x as i64)) * 1024
+    val py = (rg[5] - (y as i64)) * 1024
+    val pw = rg[6] * 1024
+    val ph = rg[7] * 1024
+    draw_ir_style_prop("background-gradient-radial-geometry", "{cx},{cy},{rx},{ry},{px},{py},{pw},{ph}")
+
+# `background-gradient-layer-geometry` + `background-gradient-layer-stops`:
+# a gradient layer list resolved against the gradient box. Geometry is Q10
+# px offsets from the command origin (x, y), every field a length (device
+# scale multiplies it): the painting area px,py,pw,ph, then per layer in CSS
+# order (first = top) cx,cy,rx,ry (radial; rx, ry are radii) or sx,sy,ex,ey
+# (linear). Stops are
+# not lengths and travel unscaled: per layer `R|L:<colours>:<permille>`,
+# layers joined by `;`. draw_ir_adv paints them bottom-up with the shared
+# Engine2D evaluators.
+fn _html_draw_ir_gradient_layer_props(layers: [BackgroundGradientLayer], x: i32, y: i32, px: i32, py: i32, pw: i32, ph: i32) -> [DrawIrStyleProp]:
+    val ox = (x as i64) * 1024
+    val oy = (y as i64) * 1024
+    var geom = StringBuilder.new()
+    val rpx = ((px - x) as i64) * 1024
+    val rpy = ((py - y) as i64) * 1024
+    val rpw = (pw as i64) * 1024
+    val rph = (ph as i64) * 1024
+    geom.push("{rpx},{rpy},{rpw},{rph}")
+    var stops = StringBuilder.new()
+    var li = 0
+    # cpu-lane-loop-ok: encodes one box's own gradient layer list; bound is that list
+    while li < layers.len():
+        val g = layers[li].geom
+        val g0 = g[0] - ox
+        val g1 = g[1] - oy
+        # A radial layer's [2], [3] are radii (lengths), a linear one's the
+        # line end point (a position).
+        val g2 = if layers[li].radial: g[2] else: g[2] - ox
+        val g3 = if layers[li].radial: g[3] else: g[3] - oy
+        geom.push(",{g0},{g1},{g2},{g3}")
+        if li > 0:
+            stops.push(";")
+        stops.push(if layers[li].radial: "R:" else: "L:")
+        var k = 0
+        # cpu-lane-loop-ok: one layer's stop colours; bound is its stop count
+        while k < layers[li].colors.len():
+            if k > 0:
+                stops.push(",")
+            val stop_color = layers[li].colors[k]
+            stops.push("{stop_color}")
+            k = k + 1
+        stops.push(":")
+        k = 0
+        # cpu-lane-loop-ok: one layer's stop positions; bound is its stop count
+        while k < layers[li].positions.len():
+            if k > 0:
+                stops.push(",")
+            val stop_pos = layers[li].positions[k]
+            stops.push("{stop_pos}")
+            k = k + 1
+        li = li + 1
+    var props = [
+        draw_ir_style_prop("background-gradient-layer-geometry", geom.build()),
+        draw_ir_style_prop("background-gradient-layer-stops", stops.build())
+    ]
+    # Tiled layers (a sized / offset / no-repeat tile that does not cover
+    # the painting area) add each layer's tile 0 rect, Q10 px relative to
+    # (x, y), and its repeat axes `<x><y>` (1 = repeat). Absent: every layer
+    # paints untiled, as before.
+    if _html_draw_ir_gradient_layers_tiled(layers, px, py, pw, ph):
+        var tiles = StringBuilder.new()
+        var repeat = StringBuilder.new()
+        li = 0
+        # cpu-lane-loop-ok: encodes one box's own gradient layer list; bound is that list
+        while li < layers.len():
+            val t = layers[li].tile
+            val tx = t[0] - ox
+            val ty = t[1] - oy
+            val tw = t[2]
+            val th = t[3]
+            if li > 0:
+                tiles.push(",")
+                repeat.push(",")
+            tiles.push("{tx},{ty},{tw},{th}")
+            repeat.push(if layers[li].repeat_x: "1" else: "0")
+            repeat.push(if layers[li].repeat_y: "1" else: "0")
+            li = li + 1
+        props.push(draw_ir_style_prop("background-gradient-layer-tiles", tiles.build()))
+        props.push(draw_ir_style_prop("background-gradient-layer-repeat", repeat.build()))
+    props
+
+# True when some layer's tile 0 does not cover the painting area (px, py,
+# pw, ph): only then do tile rects change any pixel.
+fn _html_draw_ir_gradient_layers_tiled(layers: [BackgroundGradientLayer], px: i32, py: i32, pw: i32, ph: i32) -> bool:
+    val x0 = (px as i64) * 1024
+    val y0 = (py as i64) * 1024
+    val x1 = ((px + pw) as i64) * 1024
+    val y1 = ((py + ph) as i64) * 1024
+    for layer in layers:
+        val t = layer.tile
+        if t.len() == 4 and (t[0] > x0 or t[1] > y0 or t[0] + t[2] < x1 or t[1] + t[3] < y1):
+            return true
+    false
+
+fn _html_draw_ir_command(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
+    clip: ClipRect, vector_fonts: bool
+) -> DrawIrCommand:
+    val node = nodes[i]
+    val st = styles[i]
+    val x = boxes.bx[i]
+    val y = boxes.by[i]
+    val w = boxes.bw[i]
+    val h = boxes.bh[i]
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val content_w = _html_draw_ir_non_negative(w - st.border_l - st.border_r - st.pad_l - st.pad_r)
+    val content_h = _html_draw_ir_non_negative(h - st.border_t - st.border_b - st.pad_t - st.pad_b)
+    val border_rect = draw_ir_rect_bounds(x, y, w, h)
+    val content_rect = draw_ir_rect_bounds(content_x, content_y, content_w, content_h)
+    val hit_rect = draw_ir_rect_bounds(x, y, w, h)
+    val clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
+    var computed_style = _html_draw_ir_style_props(node, st)
+    if radial_gradient_box_paintable(st):
+        val rg = radial_gradient_box_geometry(st, x, y, w, h)
+        if rg.len() == 8:
+            computed_style.push(_html_draw_ir_radial_geometry_prop(rg, x, y))
+    elif background_gradient_layers_paintable(st):
+        val r = background_gradient_box_rects(st, x, y, w, h)
+        if r.len() == 8:
+            val layers = background_gradient_layers(st.bg_layers_raw, r[0], r[1], r[2], r[3], st.font_size)
+            for prop in _html_draw_ir_gradient_layer_props(layers, x, y, r[4], r[5], r[6], r[7]):
+                computed_style.push(prop)
+            # Rounded clip of the painting area (lengths, device-scaled).
+            val shape = background_gradient_clip_shape(st, r[4], r[5], r[6], r[7])
+            if shape.len() == 8:
+                val rtl = shape[4]
+                val rtr = shape[5]
+                val rbr = shape[6]
+                val rbl = shape[7]
+                computed_style.push(draw_ir_style_prop("background-gradient-layer-clip-radii", "{rtl},{rtr},{rbr},{rbl}"))
+    # Text-run nodes carry no background of their own; emitting them as a
+    # (transparent) box makes the Draw IR executor paint an opaque zero-color
+    # fill that reads back as a solid bar over the parent's background. Emit a
+    # real text command instead so the executor rasterizes glyphs (on Metal fast
+    # mode this routes to the GPU glyph blit) in the node's foreground color.
+    # white-space:pre/nowrap runs are measured and wrapped by layout over the
+    # RAW text (node.text_data, which keeps leading/trailing spaces and
+    # newlines); emitting node.text_trimmed here republished the trimmed run,
+    # so a <pre> block's Draw IR drew "X" at the left edge of a box layout had
+    # sized for "    X" (browser_engine_missing_ua_defaults_2026-07-11).
+    val paint_text = if st.white_space_nowrap:
+        node.text_data
+    else:
+        node.text_trimmed
+    if node.tag == "#text" and paint_text != "":
+        val transformed_text = apply_text_transform_for_paint(
+            paint_text, st.text_transform
+        )
+        val visual_text_rtl = if st.direction_rtl:
+            bidi_visual_text_for_rtl(transformed_text)
+        else:
+            transformed_text
+        # `_html_draw_ir_command` is the only text-command builder reachable
+        # from the Draw IR tree; `ellipsize_text_for_width` is otherwise only
+        # wired into the CPU-framebuffer raster loops above, so a Draw IR text
+        # run with `text-overflow:ellipsis` always carried the full untruncated
+        # string and its full measured width regardless of the content box.
+        # Bound to the fixed-advance width model already used by those raster
+        # loops (style_text_advance/style_space_advance), so it does not
+        # disturb the vector-font measurement path below when ellipsis is off.
+        #
+        # overflow-wrap (2026-08-08): layout already computes per-node
+        # word-wrap break points (boxes.wrap_starts[i]/boxes.wrap_ends[i]) for
+        # the CPU-framebuffer raster loop above (`wrap_cache`, :999-1035);
+        # this Draw IR builder used to ignore that pre-computed line list
+        # entirely and always emit the full node.text_trimmed as one command
+        # (doc/08_tracking/bug/web_css_overflow_wrap_zero_consumer_2026-08-07.md).
+        # `wrap_active` reuses that line list as-is instead of re-deriving
+        # break points conditioned on `st.overflow_wrap`: layout's own wrap
+        # computation (compute_style_wrap_ranges/compute_wrap_ranges) is not
+        # conditioned on `overflow_wrap` either — it always falls back to a
+        # one-character hard split when a single word cannot fit a line — so
+        # this keeps Draw IR consistent with the raster path's existing
+        # (already-hard-splitting) wrap model rather than adding a second,
+        # differently-gated one. Only the first wrapped line is returned here
+        # (byte-identical to the old single-command shape when unwrapped);
+        # `_html_draw_ir_wrap_extra_line_commands` below emits the rest. A
+        # wrapped node always uses the fixed-advance measurement model (same
+        # as the ellipsis path) rather than the vector/shaped-font metrics
+        # path further down — line-by-line glyph shaping is not implemented,
+        # noted here as a scope simplification.
+        val wrap_line_starts = boxes.wrap_starts[i]
+        val wrap_line_ends = boxes.wrap_ends[i]
+        val wrap_active = (
+            wrap_line_starts.len() > 1 and not st.text_overflow_ellipsis
+        )
+        val visual_text = if st.text_overflow_ellipsis:
+            ellipsize_text_for_width(
+                visual_text_rtl, 0, visual_text_rtl.byte_len(), content_w, st,
+                style_text_advance(st), style_space_advance(st)
+            )
+        elif wrap_active:
+            visual_text_rtl.substring(wrap_line_starts[0], wrap_line_ends[0])
+        else:
+            visual_text_rtl
+        if wrap_active:
+            # Round 5: a wrapped run no longer falls back to the flat
+            # fixed-advance model. LAYOUT sized every one of these lines with
+            # the resolved per-glyph metrics (round 4), so emitting them here
+            # without advances made paint and layout measure the same text two
+            # different ways -- the `forms-media` pixel regression recorded in
+            # doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md.
+            # Metrics are resolved for THIS line's substring, which is exactly
+            # the string the command draws, and the resolver is cached per
+            # (family, content, size, identity, language) so the per-line calls
+            # collapse onto repeated text.
+            # A run that starts mid-line insets its FIRST line only; the
+            # `_line{n}` commands below start at the line box's left edge
+            # (LayoutResult.first_line_dx), as in the CPU raster loop.
+            val first_dx = text_line_box_dx(boxes.first_line_dx, boxes.line_boxes, i, 0)
+            val first_x = _html_draw_ir_aligned_line_x(
+                st, visual_text_rtl, wrap_line_starts[0], wrap_line_ends[0],
+                content_x + st.text_indent_px + first_dx,
+                text_line_box_w(boxes.first_line_dx, boxes.line_boxes, i, 0, content_w) - st.text_indent_px,
+                0, wrap_line_starts.len()
+            )
+            return _html_draw_ir_resolved_text_command(
+                nodes, i, node, st, _html_draw_ir_component_id(node, i),
+                first_x, content_y, visual_text, computed_style, clip_rect,
+                vector_fonts
+            )
+        # text-indent shifts the first line, as in the CPU raster loop
+        # (`line_base_x = text_x + st.text_indent_px` for line 0); a large
+        # negative indent moves the run off the box (image-replacement idiom).
+        val single_x = if st.text_overflow_ellipsis:
+            content_x + st.text_indent_px
+        else:
+            _html_draw_ir_aligned_line_x(
+                st, visual_text, 0, visual_text.byte_len(),
+                content_x + st.text_indent_px, content_w - st.text_indent_px,
+                0, 1
+            )
+        return _html_draw_ir_resolved_text_command(
+            nodes, i, node, st, _html_draw_ir_component_id(node, i),
+            single_x, content_y, visual_text, computed_style, clip_rect,
+            vector_fonts
+        )
+    val command = draw_ir_box_with_style(
+        _html_draw_ir_component_id(node, i),
+        x,
+        y,
+        w,
+        h,
+        _html_draw_ir_wm_fallback_color(node, st),
+        border_rect,
+        content_rect,
+        hit_rect,
+        clip_rect,
+        computed_style
+    )
+    command
+
+# text-align for a Draw IR text line (gap A, 2026-10-05). The CPU raster
+# path has always placed each wrapped line with `text_line_aligned_x`; the
+# Draw IR emitters drew every line at the content-box left edge, so
+# `text-align: center|right` (inherited or not) was ignored whenever the page
+# went through Draw IR. Same width model as the raster loop
+# (`style_run_byte_advances` + `style_text_line_advance_width_with`), and a
+# left-aligned line returns `base_x` untouched, so left text is unchanged.
+fn _html_draw_ir_aligned_line_x(
+    st: Style, txt: text, start: i32, endv: i32, base_x: i32, box_w: i32,
+    line_i: i32, line_count: i32
+) -> i32:
+    if not text_line_needs_paint_width(st, line_i, line_count):
+        return base_x
+    val line_w = style_text_line_advance_width_with(
+        style_run_byte_advances(st, txt), txt, start, endv,
+        style_text_advance(st), style_space_advance(st)
+    )
+    text_line_aligned_x(base_x, box_w, line_w, st, line_i, line_count)
+
+# Companion to `_html_draw_ir_command`'s `wrap_active` branch: that function
+# returns only the first wrapped line (to keep its single-`DrawIrCommand`
+# return shape byte-identical to the unwrapped case); this emits the Draw IR
+# text commands for the remaining lines using layout's precomputed
+# boxes.wrap_starts[i]/boxes.wrap_ends[i], one command per line, offset by
+# style_line_h(st) per line. Returns an empty list when the node is not a
+# wrapped `#text` node, so callers can push its result unconditionally.
+fn _html_draw_ir_wrap_extra_line_commands(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
+    clip: ClipRect, vector_fonts: bool
+) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = []
+    val node = nodes[i]
+    val st = styles[i]
+    val paint_text = if st.white_space_nowrap:
+        node.text_data
+    else:
+        node.text_trimmed
+    if node.tag != "#text" or paint_text == "" or st.text_overflow_ellipsis:
+        return out
+    val wrap_line_starts = boxes.wrap_starts[i]
+    val wrap_line_ends = boxes.wrap_ends[i]
+    val wrap_line_count = wrap_line_starts.len()
+    if wrap_line_count <= 1:
+        return out
+    val x = boxes.bx[i]
+    val y = boxes.by[i]
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val content_w = _html_draw_ir_non_negative(
+        boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
+    )
+    val transformed_text = apply_text_transform_for_paint(
+        paint_text, st.text_transform
+    )
+    val visual_text_rtl = if st.direction_rtl:
+        bidi_visual_text_for_rtl(transformed_text)
+    else:
+        transformed_text
+    val clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
+    val computed_style = _html_draw_ir_style_props(node, st)
+    val lh = style_line_h(st)
+    var line_i = 1
+    # cpu-lane-loop-ok: emits the wrapped lines beyond the first for one
+    # #text node's Draw IR command; bound is wrap_line_count from layout's
+    # precomputed boxes.wrap_starts[i], the same per-node line list the
+    # CPU-framebuffer raster loop (:999-1035) iterates over.
+    while line_i < wrap_line_count:
+        val line_text = visual_text_rtl.substring(
+            wrap_line_starts[line_i], wrap_line_ends[line_i]
+        )
+        val line_y = content_y + line_i * lh
+        # Lines a left float shortened are inset as layout wrapped them.
+        val line_dx = text_line_box_dx(boxes.first_line_dx, boxes.line_boxes, i, line_i)
+        val line_x = _html_draw_ir_aligned_line_x(
+            st, visual_text_rtl, wrap_line_starts[line_i], wrap_line_ends[line_i],
+            content_x + line_dx, text_line_box_w(boxes.first_line_dx, boxes.line_boxes, i, line_i, content_w), line_i, wrap_line_count
+        )
+        out.push(_html_draw_ir_resolved_text_command(
+            nodes, i, node, st,
+            _html_draw_ir_component_id(node, i) + "_line{line_i}",
+            line_x, line_y, line_text, computed_style, clip_rect,
+            vector_fonts
+        ))
+        line_i = line_i + 1
+    out
+
+fn _html_draw_ir_image_index(
+    image_index: Dict<text, i32>, image_uri: text
+) -> i32:
+    image_index.get(image_uri) ?? -1
+
+fn _html_draw_ir_fit_size(
+    object_fit: text, box_w: i32, box_h: i32,
+    image_w: i32, image_h: i32
+) -> (i32, i32):
+    if object_fit == "fill":
+        return (box_w, box_h)
+    if object_fit == "none":
+        return (image_w, image_h)
+    val box_w64 = box_w.to_i64()
+    val box_h64 = box_h.to_i64()
+    val image_w64 = image_w.to_i64()
+    val image_h64 = image_h.to_i64()
+    val contain_by_width = box_w64 * image_h64 <= box_h64 * image_w64
+    var contain_w = box_w
+    var contain_h = (
+        (box_w64 * image_h64) / image_w64
+    ).to_i32()
+    if not contain_by_width:
+        contain_h = box_h
+        contain_w = ((box_h64 * image_w64) / image_h64).to_i32()
+    if object_fit == "contain":
+        return (contain_w, contain_h)
+    if object_fit == "scale-down":
+        if image_w <= box_w and image_h <= box_h:
+            return (image_w, image_h)
+        return (contain_w, contain_h)
+    val cover_by_width = box_w64 * image_h64 >= box_h64 * image_w64
+    if cover_by_width:
+        return (
+            box_w, ((box_w64 * image_h64) / image_w64).to_i32()
+        )
+    (((box_h64 * image_w64) / image_h64).to_i32(), box_h)
+
+fn _html_draw_ir_background_edge(
+    edge: text, box_start: i32, box_size: i32, border_start: i32,
+    border_end: i32, padding_start: i32, padding_end: i32
+) -> (i32, i32):
+    if edge == "border-box":
+        return (box_start, box_size)
+    if edge == "content-box":
+        val inset_start = border_start + padding_start
+        return (
+            box_start + inset_start,
+            _html_draw_ir_non_negative(
+                box_size - inset_start - border_end - padding_end
+            )
+        )
+    (
+        box_start + border_start,
+        _html_draw_ir_non_negative(box_size - border_start - border_end)
+    )
+
+fn _html_draw_ir_background_offset(value: i32, free_space: i32) -> i32:
+    if value <= -1000:
+        return (free_space.to_i64() * (-1000 - value).to_i64() / 100).to_i32()
+    value
+
+class HtmlDrawIrBackgroundLayer:
+    image_uri: text
+    repeat: text
+    size_w: i32
+    size_h: i32
+    position_x: i32
+    position_y: i32
+    origin: text
+    clip: text
+    attachment: text
+    index: i32
+
+fn _html_draw_ir_two_url_background_layers(st: Style) -> [HtmlDrawIrBackgroundLayer]:
+    val fields = st.bg_layers_raw.split("\n")
+    if fields.len() != 11 or fields[0] != "two-url-v1":
+        return []
+    var layers: [HtmlDrawIrBackgroundLayer] = []
+    var index = 0
+    # cpu-lane-loop-ok: iterates the two layers of the two-url-v1 background encoding; bound is the literal constant 2, so this is a detector false positive
+    while index < 2:
+        val repeat = fields[3]
+        val origin = fields[8]
+        val clip = fields[9]
+        val attachment = fields[10]
+        if (fields[index + 1] == "" or
+            (repeat != "repeat" and repeat != "repeat-x" and
+             repeat != "repeat-y" and repeat != "no-repeat") or
+            (origin != "border-box" and origin != "padding-box" and
+             origin != "content-box") or
+            (clip != "border-box" and clip != "padding-box" and
+             clip != "content-box") or
+            (attachment != "scroll" and attachment != "fixed")):
+            return []
+        val size_w = parse_int(fields[4])
+        val size_h = parse_int(fields[5])
+        if size_w < 0 or size_h < 0:
+            return []
+        layers.push(HtmlDrawIrBackgroundLayer(
+            image_uri: fields[index + 1], repeat: repeat, size_w: size_w,
+            size_h: size_h, position_x: parse_int(fields[6]),
+            position_y: parse_int(fields[7]), origin: origin,
+            clip: clip, attachment: attachment, index: index
+        ))
+        index = index + 1
+    layers
+
+# A lone `background-image:url(...)` longhand keeps its authored text in
+# `bg_layers_raw` as the css-cascade rejection witness (13f95dfa511). That one
+# exact url layer is still the typed image, so it lowers; any other raw text
+# (multi-layer, radial, unsupported) stays fail-closed.
+fn _html_draw_ir_single_url_witness(st: Style) -> bool:
+    val raw = st.bg_layers_raw.trim()
+    st.background_image_uri != "" and raw.lower().starts_with("url(") and
+        split_top_level_commas(raw).len() == 1
+
+fn _html_draw_ir_background_layers(st: Style) -> [HtmlDrawIrBackgroundLayer]:
+    val layered = _html_draw_ir_two_url_background_layers(st)
+    if layered.len() == 2:
+        return layered
+    if (
+        (st.bg_layers_raw != "" and not _html_draw_ir_single_url_witness(st)) or
+        st.background_image_uri == "" or st.background_attachment == "local"
+    ):
+        return []
+    [HtmlDrawIrBackgroundLayer(
+        image_uri: st.background_image_uri, repeat: st.background_repeat,
+        size_w: st.background_size_w_px, size_h: st.background_size_h_px,
+        position_x: st.background_position_x_px,
+        position_y: st.background_position_y_px,
+        origin: st.background_origin, clip: st.background_clip,
+        attachment: st.background_attachment, index: -1
+    )]
+
+fn _html_draw_ir_background_border_overlay(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
+    clip: ClipRect, vector_fonts: bool
+) -> DrawIrCommand:
+    var command = _html_draw_ir_command(
+        nodes, styles, boxes, i, clip, vector_fonts
+    )
+    command.component_id = (
+        _html_draw_ir_component_id(nodes[i], i) + "_background_border_overlay"
+    )
+    command.color = 0u32
+    var props: [DrawIrStyleProp] = [
+        draw_ir_style_prop("image-role", "css-background-border-overlay")
+    ]
+    # cpu-lane-loop-ok: filters one node's computed style down to the border-* / outline-* keys for the background border overlay; bound is that one node's prop list
+    for prop in command.computed_style:
+        if prop.key.starts_with("border-") or prop.key.starts_with("outline-"):
+            props.push(prop)
+    command.computed_style = props
+    command
+
+fn _html_draw_ir_effective_border_style(node: HNode, raw_style: text, width: i32) -> text:
+    if (node.tag == "hr" or node.tag == "fieldset") and raw_style == "none" and width > 0:
+        return "solid"
+    raw_style
+
+fn _html_draw_ir_rendered_border_width(effective_style: text, width: i32) -> i32:
+    if width <= 0:
+        return 0
+    if (
+        effective_style == "none" or effective_style == "hidden" or
+        effective_style == "dashed" or effective_style == "dotted" or
+        effective_style == "double"
+    ):
+        return 0
+    width
+
+fn _html_draw_ir_scale_color_opacity(color: u32, opacity_pct: i32) -> u32:
+    if opacity_pct >= 100 or color == 0u32:
+        return color
+    if opacity_pct <= 0:
+        return 0u32
+    val a = ((color >> 24) & 255u32) as i32
+    val na = (a * opacity_pct) / 100
+    if na <= 0:
+        return 0u32
+    ((na as u32) << 24) | (color & 0x00FFFFFFu32)
+
+fn _html_draw_ir_styled_span_commands(
+    base_id: text,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    horizontal: bool,
+    style_name: text,
+    color: u32,
+    clip: ClipRect
+) -> [DrawIrCommand]:
+    var cmds: [DrawIrCommand] = []
+    if w <= 0 or h <= 0 or color == 0u32:
+        return cmds
+    if style_name == "double":
+        val thickness = if horizontal: h else: w
+        if thickness >= 3:
+            val line_w = (thickness + 2) / 3
+            if horizontal:
+                cmds.push(_html_draw_ir_overlay_rect(base_id + "_d0", ClipRect(x0: x, y0: y, x1: x + w, y1: y + line_w), color, clip))
+                cmds.push(_html_draw_ir_overlay_rect(base_id + "_d1", ClipRect(x0: x, y0: y + h - line_w, x1: x + w, y1: y + h), color, clip))
+            else:
+                cmds.push(_html_draw_ir_overlay_rect(base_id + "_d0", ClipRect(x0: x, y0: y, x1: x + line_w, y1: y + h), color, clip))
+                cmds.push(_html_draw_ir_overlay_rect(base_id + "_d1", ClipRect(x0: x + w - line_w, y0: y, x1: x + w, y1: y + h), color, clip))
+            return cmds
+        cmds.push(_html_draw_ir_overlay_rect(base_id + "_s0", ClipRect(x0: x, y0: y, x1: x + w, y1: y + h), color, clip))
+        return cmds
+    if style_name == "dashed" or style_name == "dotted":
+        val thickness = if horizontal: h else: w
+        val stroke_t = if thickness > 0: thickness else: 1
+        val dash_len = if style_name == "dotted": stroke_t else: stroke_t * 3
+        val gap_len = if style_name == "dotted": stroke_t else: stroke_t * 2
+        val span_len = if horizontal: w else: h
+        var p = 0
+        var idx = 0
+        # cpu-lane-loop-ok: emits bounded per-dash overlay rects along one border edge; bound is span_len / (dash_len + gap_len)
+        while p < span_len and idx < 4096:
+            var seg = dash_len
+            if p + seg > span_len:
+                seg = span_len - p
+            val seg_rect = if horizontal:
+                ClipRect(x0: x + p, y0: y, x1: x + p + seg, y1: y + h)
+            else:
+                ClipRect(x0: x, y0: y + p, x1: x + w, y1: y + p + seg)
+            cmds.push(_html_draw_ir_overlay_rect("{base_id}_{idx}", seg_rect, color, clip))
+            p = p + dash_len + gap_len
+            idx = idx + 1
+    cmds
+
+fn _html_draw_ir_side_is_custom_style(eff_style: text) -> bool:
+    eff_style == "dashed" or eff_style == "dotted" or eff_style == "double"
+
+fn _html_draw_ir_styled_border_commands(
+    node: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, i: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    var cmds: [DrawIrCommand] = []
+    if w <= 0 or h <= 0 or node.tag == "#text" or st.display == "none" or st.visibility_hidden:
+        return cmds
+    val eff_l = _html_draw_ir_effective_border_style(node, st.border_style_l, st.border_l)
+    val eff_t = _html_draw_ir_effective_border_style(node, st.border_style_t, st.border_t)
+    val eff_r = _html_draw_ir_effective_border_style(node, st.border_style_r, st.border_r)
+    val eff_b = _html_draw_ir_effective_border_style(node, st.border_style_b, st.border_b)
+    if (
+        not _html_draw_ir_side_is_custom_style(eff_l) and
+        not _html_draw_ir_side_is_custom_style(eff_t) and
+        not _html_draw_ir_side_is_custom_style(eff_r) and
+        not _html_draw_ir_side_is_custom_style(eff_b)
+    ):
+        return cmds
+    val tl = clamp_corner_radius(st.border_radius_tl_px, w, h)
+    val tr = clamp_corner_radius(st.border_radius_tr_px, w, h)
+    val br_rad = clamp_corner_radius(st.border_radius_br_px, w, h)
+    val bl_rad = clamp_corner_radius(st.border_radius_bl_px, w, h)
+    val base_id = _html_draw_ir_component_id(node, i) + "_styled_border"
+    if _html_draw_ir_side_is_custom_style(eff_t) and st.border_t > 0 and st.border_color_t != 0u32:
+        val ct = _html_draw_ir_scale_color_opacity(st.border_color_t, st.opacity_pct)
+        for cmd in _html_draw_ir_styled_span_commands(base_id + "_t", x + tl, y, w - tl - tr, st.border_t, true, eff_t, ct, clip):
+            cmds.push(cmd)
+    if _html_draw_ir_side_is_custom_style(eff_b) and st.border_b > 0 and st.border_color_b != 0u32:
+        val cb = _html_draw_ir_scale_color_opacity(st.border_color_b, st.opacity_pct)
+        for cmd in _html_draw_ir_styled_span_commands(base_id + "_b", x + bl_rad, y + h - st.border_b, w - bl_rad - br_rad, st.border_b, true, eff_b, cb, clip):
+            cmds.push(cmd)
+    if _html_draw_ir_side_is_custom_style(eff_l) and st.border_l > 0 and st.border_color_l != 0u32:
+        val cl = _html_draw_ir_scale_color_opacity(st.border_color_l, st.opacity_pct)
+        for cmd in _html_draw_ir_styled_span_commands(base_id + "_l", x, y + tl, st.border_l, h - tl - bl_rad, false, eff_l, cl, clip):
+            cmds.push(cmd)
+    if _html_draw_ir_side_is_custom_style(eff_r) and st.border_r > 0 and st.border_color_r != 0u32:
+        val cr = _html_draw_ir_scale_color_opacity(st.border_color_r, st.opacity_pct)
+        for cmd in _html_draw_ir_styled_span_commands(base_id + "_r", x + w - st.border_r, y + tr, st.border_r, h - tr - br_rad, false, eff_r, cr, clip):
+            cmds.push(cmd)
+    cmds
+
+fn _html_draw_ir_select_arrow_commands(
+    node: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, i: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    if node.tag != "select" or w < 10 or h < 8 or SELECT_ARROW_WIDTH_PX <= 0 or st.display == "none" or st.visibility_hidden:
+        return []
+    var ax1 = x + w - st.border_r - st.pad_r
+    if ax1 > x + w - st.border_r:
+        ax1 = x + w - st.border_r
+    var ax0 = ax1 - SELECT_ARROW_WIDTH_PX
+    if ax0 < x + 2:
+        ax0 = x + 2
+    if ax1 - ax0 < 6:
+        ax1 = x + w - st.border_r
+        ax0 = ax1 - SELECT_ARROW_WIDTH_PX
+        if ax0 < x + 2:
+            ax0 = x + 2
+    if ax1 - ax0 < 5:
+        return []
+    val cx = (ax0 + ax1) / 2
+    val cy = (y + st.border_t + y + h - st.border_b) / 2
+    val chevron_col = _html_draw_ir_scale_color_opacity(
+        if st.fg != 0u32: st.fg else: web_argb(55, 65, 81),
+        st.opacity_pct
+    )
+    val base_id = _html_draw_ir_component_id(node, i) + "_select_chevron"
+    [
+        _html_draw_ir_overlay_rect(base_id + "_0", ClipRect(x0: cx - 3, y0: cy - 2, x1: cx + 4, y1: cy - 1), chevron_col, clip),
+        _html_draw_ir_overlay_rect(base_id + "_1", ClipRect(x0: cx - 2, y0: cy - 1, x1: cx + 3, y1: cy), chevron_col, clip),
+        _html_draw_ir_overlay_rect(base_id + "_2", ClipRect(x0: cx - 1, y0: cy, x1: cx + 2, y1: cy + 1), chevron_col, clip),
+        _html_draw_ir_overlay_rect(base_id + "_3", ClipRect(x0: cx, y0: cy + 1, x1: cx + 1, y1: cy + 2), chevron_col, clip)
+    ]
+
+fn _html_draw_ir_has_input_text(
+    node: HNode, st: Style, box_width: i32
+) -> bool:
+    if (
+        node.tag != "input" or input_uses_accent_color(node) or
+        not input_paints_text(node)
+    ):
+        return false
+    val content_w = (
+        box_width - st.border_l - st.border_r - st.pad_l - st.pad_r
+    )
+    if content_w <= 0:
+        return false
+    input_text_for_paint(node) != ""
+
+fn _html_draw_ir_input_text_command_from_plan(
+    node: HNode, st: Style, i: i32, plan: InputTextPaintPlan
+) -> DrawIrCommand:
+    var props = _html_draw_ir_style_props(node, st)
+    # A password mask steps by the face's bullet advance (Chrome 159: 2.80 at
+    # 8px Arial), not the bitmap cell; the executor reads it as
+    # `bitmap-glyph-advance` so Engine2D/Vulkan paint the raster's columns.
+    val glyph_advance = input_text_glyph_advance(node, st)
+    if glyph_advance != style_text_advance(st):
+        props.push(draw_ir_style_prop("bitmap-glyph-advance", "{glyph_advance}"))
+    draw_ir_text_styled_clipped(
+        _html_draw_ir_component_id(node, i) + "_value",
+        plan.baseline_x,
+        plan.baseline_y,
+        plan.text_value,
+        plan.color,
+        props,
+        draw_ir_rect_bounds(
+            plan.clip.x0, plan.clip.y0,
+            plan.clip.x1 - plan.clip.x0, plan.clip.y1 - plan.clip.y0
+        )
+    )
+
+fn _html_draw_ir_overlay_rect(
+    component_id: text, rect: ClipRect, color: u32, clip: ClipRect
+) -> DrawIrCommand:
+    draw_ir_rect_clipped(
+        component_id,
+        rect.x0,
+        rect.y0,
+        rect.x1 - rect.x0,
+        rect.y1 - rect.y0,
+        color,
+        draw_ir_rect_bounds(
+            clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+        )
+    )
+
+# --- Replaced media painting -------------------------------------------------
+# Chrome paints three of the media elements even with no media loaded: an
+# inline <svg>'s shapes, the dark controls panel of <video controls> and the
+# #f1f3f4 pill of <audio controls>. A <canvas> and a controls-less <video> are
+# transparent, and the fallback children of all four never get a box (layout
+# does not recurse into a replaced element).
+#
+# The shapes are lowered to ordinary Draw IR rects rather than routed through
+# the skia SVG document rasteriser (`std.skia.feature.codec.svg_render`): that
+# decoder yields an image RESOURCE, and resources reach a compositor only as a
+# caller-supplied list -- the Draw IR result has no channel to return one, and
+# three of the four engine2d composition routes pass an empty list. A rect in
+# the composition itself paints on every route and backend.
+
+fn _html_svg_round_milli(value: i64) -> i32:
+    if value >= 0:
+        return ((value + 500) / 1000).to_i32()
+    (0 - ((0 - value + 500) / 1000)).to_i32()
+
+fn _html_draw_ir_svg_shape_commands(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    i: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    """Draw IR rects for the `<rect>` children of the inline `<svg>` at `i`,
+    in user units mapped through the viewBox (preserveAspectRatio's default
+    `xMidYMid meet`) and clipped to the svg content box (the svg viewport)."""
+    var commands: [DrawIrCommand] = []
+    val node = nodes[i]
+    val st = styles[i]
+    val box_x = boxes.bx[i] + st.border_l + st.pad_l
+    val box_y = boxes.by[i] + st.border_t + st.pad_t
+    val box_w = boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
+    val box_h = boxes.bh[i] - st.border_t - st.border_b - st.pad_t - st.pad_b
+    if box_w <= 0 or box_h <= 0:
+        return commands
+    val viewport = clip_intersect(
+        clip, box_x, box_y, box_x + box_w, box_y + box_h
+    )
+    if viewport.x1 <= viewport.x0 or viewport.y1 <= viewport.y0:
+        return commands
+    # User unit -> px: px_milli = (user_milli - view_min) * scale_num / scale_den + offset.
+    var view_x: i64 = 0
+    var view_y: i64 = 0
+    var scale_num: i64 = 1
+    var scale_den: i64 = 1
+    var offset_x: i64 = 0
+    var offset_y: i64 = 0
+    val view_parts = svg_view_box_milli(node.attrs_raw)
+    if view_parts.len() == 4:
+        val view_w = view_parts[2]
+        val view_h = view_parts[3]
+        view_x = view_parts[0]
+        view_y = view_parts[1]
+        if box_w.to_i64() * view_h <= box_h.to_i64() * view_w:
+            scale_num = box_w.to_i64() * 1000
+            scale_den = view_w
+        else:
+            scale_num = box_h.to_i64() * 1000
+            scale_den = view_h
+        offset_x = (box_w.to_i64() * 1000 - view_w * scale_num / scale_den) / 2
+        offset_y = (box_h.to_i64() * 1000 - view_h * scale_num / scale_den) / 2
+    val component_id = _html_draw_ir_component_id(node, i)
+    val node_count = nodes.len() as i32
+    var j = i + 1
+    # cpu-lane-loop-ok: walks the preorder descendant range of one <svg> (every later node whose parent index is >= the svg's) to find its direct <rect> children; bound is the svg subtree size, once per painted svg
+    while j < node_count and nodes[j].parent >= i.to_i64():
+        val shape = nodes[j]
+        if shape.parent == i.to_i64() and shape.tag == "rect":
+            var fill = decl_get(shape.style_attr, "fill").trim()
+            if fill == "":
+                fill = attr_value(shape.attrs_raw, "fill").trim()
+            # `currentColor` is the shape's own computed `color` (inherited
+            # through the svg from the surrounding text, or set on the shape).
+            val color = if fill == "":
+                web_argb(0, 0, 0)
+            elif fill.lower() == "currentcolor":
+                styles[j].fg
+            else:
+                parse_color(fill)
+            val shape_w = svg_number_milli(attr_value(shape.attrs_raw, "width"))
+            val shape_h = svg_number_milli(attr_value(shape.attrs_raw, "height"))
+            if color != 0u32 and shape_w > 0 and shape_h > 0:
+                val shape_x = svg_number_milli(attr_value(shape.attrs_raw, "x"))
+                val shape_y = svg_number_milli(attr_value(shape.attrs_raw, "y"))
+                var radius_raw = attr_value(shape.attrs_raw, "rx")
+                if radius_raw == "":
+                    radius_raw = attr_value(shape.attrs_raw, "ry")
+                val x0 = box_x + _html_svg_round_milli(
+                    (shape_x - view_x) * scale_num / scale_den + offset_x)
+                val y0 = box_y + _html_svg_round_milli(
+                    (shape_y - view_y) * scale_num / scale_den + offset_y)
+                val x1 = box_x + _html_svg_round_milli(
+                    (shape_x + shape_w - view_x) * scale_num / scale_den + offset_x)
+                val y1 = box_y + _html_svg_round_milli(
+                    (shape_y + shape_h - view_y) * scale_num / scale_den + offset_y)
+                val radius = _html_svg_round_milli(
+                    svg_number_milli(radius_raw) * scale_num / scale_den)
+                if x1 > x0 and y1 > y0:
+                    var rect = _html_draw_ir_overlay_rect(
+                        component_id + "_svg_rect_{j}",
+                        ClipRect(x0: x0, y0: y0, x1: x1, y1: y1),
+                        color, viewport
+                    )
+                    rect.parent_id = component_id
+                    rect.computed_style = [
+                        draw_ir_style_prop("replaced-media-part", "svg-rect")
+                    ]
+                    if radius > 0:
+                        rect.computed_style.push(draw_ir_style_prop(
+                            "border-radius", "{radius}"
+                        ))
+                    commands.push(rect)
+        j = j + 1
+    commands
+
+fn _html_draw_ir_replaced_media_commands(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    i: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    val node = nodes[i]
+    if node.tag == "svg":
+        return _html_draw_ir_svg_shape_commands(nodes, styles, boxes, i, clip)
+    var commands: [DrawIrCommand] = []
+    if node.tag != "video" and node.tag != "audio":
+        return commands
+    val st = styles[i]
+    val box_x = boxes.bx[i] + st.border_l + st.pad_l
+    val box_y = boxes.by[i] + st.border_t + st.pad_t
+    val box_w = boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
+    val box_h = boxes.bh[i] - st.border_t - st.border_b - st.pad_t - st.pad_b
+    if box_w <= 0 or box_h <= 0:
+        return commands
+    val component_id = _html_draw_ir_component_id(node, i)
+    val surface_rect = ClipRect(
+        x0: box_x, y0: box_y, x1: box_x + box_w, y1: box_y + box_h
+    )
+    if not attr_present(node.attrs_raw, "controls"):
+        # Chrome 159: without the controls widget both elements paint nothing
+        # (a media-less <video> is transparent; a bare <audio> has no box).
+        return commands
+    if node.tag == "video":
+        # Chrome 159 media controls over a video with no video data: a solid
+        # #333333 panel for the top 30% of the box, darkening to black by 92%
+        # (measured on a 120x150 box: #333333 down to y=44, #272727 at y=75,
+        # #000000 from y=137). The scrim is lowered to 16 flat bands on a
+        # linear ramp -- within 5/255 of Chrome's eased curve. Buttons and
+        # timeline are not drawn.
+        val ramp_top = box_y + box_h * 30 / 100
+        val ramp_bottom = box_y + box_h * 92 / 100
+        var panel = _html_draw_ir_overlay_rect(
+            component_id + "_video_controls", surface_rect,
+            web_argb(51, 51, 51), clip
+        )
+        panel.parent_id = component_id
+        panel.computed_style = [
+            draw_ir_style_prop("replaced-media-part", "video-controls")
+        ]
+        commands.push(panel)
+        var band = 0
+        # cpu-lane-loop-ok: emits the 16 fixed scrim bands of one <video controls>; bound is the constant 16, once per painted video
+        while band < 16:
+            val band_y0 = ramp_top + (ramp_bottom - ramp_top) * band / 16
+            val band_y1 = if band == 15: box_y + box_h else: ramp_top + (ramp_bottom - ramp_top) * (band + 1) / 16
+            val level = if band == 15: 0 else: 51 - 51 * (band * 2 + 1) / 32
+            if band_y1 > band_y0:
+                var scrim = _html_draw_ir_overlay_rect(
+                    component_id + "_video_scrim_{band}",
+                    ClipRect(x0: box_x, y0: band_y0, x1: box_x + box_w, y1: band_y1),
+                    web_argb(level, level, level), clip
+                )
+                scrim.parent_id = component_id
+                scrim.computed_style = [
+                    draw_ir_style_prop("replaced-media-part", "video-scrim")
+                ]
+                commands.push(scrim)
+            band = band + 1
+        return commands
+    if node.tag == "audio":
+        # Chrome 159 media controls panel: #f1f3f4 with fully rounded ends
+        # (27 px on the 54 px default strip). Icons and timeline are not drawn.
+        var pill = _html_draw_ir_overlay_rect(
+            component_id + "_audio_controls", surface_rect,
+            web_argb(241, 243, 244), clip
+        )
+        pill.parent_id = component_id
+        pill.computed_style = [
+            draw_ir_style_prop("replaced-media-part", "audio-controls"),
+            draw_ir_style_prop("border-radius", "{box_h / 2}")
+        ]
+        commands.push(pill)
+    commands
+
+fn _html_draw_ir_checkable_commands(
+    node: HNode, st: Style, i: i32,
+    x: i32, y: i32, width: i32, height: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    var commands: [DrawIrCommand] = []
+    # Chrome 159 draws the glyph as a square of side min(w, h), centred in
+    # the border box: a 40x16 checkbox at (4,3) inks columns 16..31, rows
+    # 3..18. A 13x13 box is unchanged.
+    val side = if width < height: width else: height
+    val control_w = side
+    val control_h = side
+    val gx = x + (width - side) / 2
+    val gy = y + (height - side) / 2
+    if control_w <= 0 or control_h <= 0:
+        return commands
+    val component_id = _html_draw_ir_component_id(node, i)
+    val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+    val checked = input_is_checked(node)
+    val accent = if st.accent_color != 0u32:
+        st.accent_color
+    else:
+        web_argb(37, 99, 235)
+    val surface = web_argb(248, 250, 252)
+    val radio = input_type == "radio"
+
+    var frame = _html_draw_ir_overlay_rect(
+        component_id + "_checkable_frame",
+        ClipRect(x0: gx, y0: gy, x1: gx + control_w, y1: gy + control_h),
+        surface, clip
+    )
+    frame.parent_id = component_id
+    frame.computed_style = [
+        draw_ir_style_prop("form-control-part", "frame"),
+        draw_ir_style_prop("input-type", input_type),
+        draw_ir_style_prop("checked", if checked: "true" else: "false"),
+        draw_ir_style_prop("accent-color", "{accent}"),
+        draw_ir_style_prop("border-top-width", "1"),
+        draw_ir_style_prop("border-right-width", "1"),
+        draw_ir_style_prop("border-bottom-width", "1"),
+        draw_ir_style_prop("border-left-width", "1"),
+        draw_ir_style_prop("border-top-color", "{accent}"),
+        draw_ir_style_prop("border-right-color", "{accent}"),
+        draw_ir_style_prop("border-bottom-color", "{accent}"),
+        draw_ir_style_prop("border-left-color", "{accent}")
+    ]
+    if radio:
+        frame.computed_style.push(draw_ir_style_prop(
+            "border-radius", "{control_w / 2}"
+        ))
+    commands.push(frame)
+
+    if checked and control_w > 6 and control_h > 6:
+        var indicator = _html_draw_ir_overlay_rect(
+            component_id + "_checked_indicator",
+            ClipRect(
+                x0: gx + 3, y0: gy + 3,
+                x1: gx + control_w - 3, y1: gy + control_h - 3
+            ),
+            accent, clip
+        )
+        indicator.parent_id = component_id
+        indicator.computed_style = [
+            draw_ir_style_prop("form-control-part", "checked-indicator"),
+            draw_ir_style_prop("input-type", input_type),
+            draw_ir_style_prop("checked", "true"),
+            draw_ir_style_prop("accent-color", "{accent}")
+        ]
+        if radio:
+            indicator.computed_style.push(draw_ir_style_prop(
+                "border-radius", "{(control_w - 6) / 2}"
+            ))
+        commands.push(indicator)
+    commands
