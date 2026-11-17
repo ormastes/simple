@@ -27,3 +27,7 @@ Redaction: 6.3 MB all-trigger-lines 802 ms; no-trigger fast path 44 ms.
 ## Not done
 Per-goal caps / automatic retention policy; incremental postings on append; redaction of
 bare high-entropy strings; purge is not lock-protected against a racing append.
+
+## Append re-check (purge lost-write window)
+
+`ctx_index_text` appends through `_ctx_append_chunks_settled`: after the write it re-checks the store generation (size must equal before + bytes written). On a mismatch it verifies the last row is still in the store and otherwise re-appends (max 4 attempts, lockless). Spec: `test/01_unit/app/mcp/ctx_append_recheck_spec.spl` (seam: `ctx_index_text_observed`).
