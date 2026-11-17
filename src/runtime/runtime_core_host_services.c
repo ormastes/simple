@@ -24,6 +24,7 @@
 #endif
 
 #include "runtime.h"
+#include "runtime_core_text_arg.h"
 
 #include <errno.h>
 #include <math.h>
@@ -859,17 +860,6 @@ static void core_host_micros_to_civil(int64_t micros, CoreHostCivilTime* out) {
     out->microsecond = tod % 1000000LL;
 }
 
-/* Copy a tagged text argument into buf as a NUL-terminated C string.
- * Returns 0 when the value is not a text or does not fit. */
-static int core_host_text_arg(int64_t value, char* buf, size_t buf_size) {
-    int64_t len = rt_string_len(value);
-    if (len < 0 || (uint64_t)len >= buf_size) return 0;
-    const uint8_t* data = rt_string_data(value);
-    if (!data && len != 0) return 0;
-    if (len != 0) memcpy(buf, data, (size_t)len);
-    buf[(size_t)len] = '\0';
-    return 1;
-}
 
 /* Snapshot links use tagged text so their extern ABI needs no raw-text MIR
  * exception. All paths here are private absolute paths emitted by the snapshot
@@ -1363,7 +1353,7 @@ static int64_t core_host_parse_timestamp(const char* s) {
 
 int64_t rt_timestamp_from_iso(int64_t iso_value) {
     char buf[128];
-    if (!core_host_text_arg(iso_value, buf, sizeof(buf))) return -1;
+    if (!core_text_arg(iso_value, buf, sizeof(buf))) return -1;
     return core_host_parse_timestamp(buf);
 }
 
@@ -1384,7 +1374,7 @@ int64_t rt_timestamp_diff_seconds(int64_t a, int64_t b) {
  * fails closed to the empty string. */
 int64_t rt_time_format(int64_t ts_seconds, int64_t fmt_value) {
     char fmt[256];
-    if (!core_host_text_arg(fmt_value, fmt, sizeof(fmt))) return rt_string_new(NULL, 0);
+    if (!core_text_arg(fmt_value, fmt, sizeof(fmt))) return rt_string_new(NULL, 0);
     if (ts_seconds > INT64_MAX / 1000000LL || ts_seconds < INT64_MIN / 1000000LL)
         return rt_string_new(NULL, 0);
     CoreHostCivilTime ct;

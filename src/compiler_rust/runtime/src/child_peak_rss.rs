@@ -11,15 +11,28 @@ use std::cell::Cell;
 
 thread_local! {
     static LAST_CHILD_PEAK_RSS_KIB: Cell<i64> = const { Cell::new(-1) };
+    static LAST_CHILD_CPU_MS: Cell<i64> = const { Cell::new(-1) };
 }
 
 /// Forget the previous measurement; call before spawning a new child.
 pub fn reset() {
     LAST_CHILD_PEAK_RSS_KIB.with(|cell| cell.set(-1));
+    LAST_CHILD_CPU_MS.with(|cell| cell.set(-1));
 }
 
 fn record(kib: i64) {
     LAST_CHILD_PEAK_RSS_KIB.with(|cell| cell.set(kib));
+}
+
+fn record_cpu_ms(ms: i64) {
+    LAST_CHILD_CPU_MS.with(|cell| cell.set(ms));
+}
+
+/// User+system CPU time in ms of the last child reaped on this thread, or -1.
+/// Twin of the C runtime's `rt_process_last_child_cpu_ms`.
+#[no_mangle]
+pub extern "C" fn rt_process_last_child_cpu_ms() -> i64 {
+    LAST_CHILD_CPU_MS.with(|cell| cell.get())
 }
 
 /// Peak RSS in KiB of the last child reaped on this thread, or -1.
@@ -56,6 +69,10 @@ pub fn reap(child: &mut std::process::Child, nohang: bool) -> std::io::Result<Op
         #[cfg(not(target_os = "macos"))]
         let kib = max_rss;
         record(if kib > 0 { kib } else { -1 });
+        let micros = (usage.ru_utime.tv_sec as i64 + usage.ru_stime.tv_sec as i64) * 1_000_000
+            + usage.ru_utime.tv_usec as i64
+            + usage.ru_stime.tv_usec as i64;
+        record_cpu_ms(micros / 1000);
         return Ok(Some(std::process::ExitStatus::from_raw(raw_status)));
     }
 }
@@ -67,8 +84,24 @@ pub fn reap(child: &mut std::process::Child, nohang: bool) -> std::io::Result<Op
     let status = if nohang { child.try_wait()? } else { Some(child.wait()?) };
     if status.is_some() {
         record(windows_peak_working_set_kib(child));
+        record_cpu_ms(windows_cpu_ms(child));
     }
     Ok(status)
+}
+
+#[cfg(windows)]
+fn windows_cpu_ms(child: &std::process::Child) -> i64 {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    let mut t: [FILETIME; 4] = unsafe { std::mem::zeroed() };
+    let [c, e, k, u] = &mut t;
+    let ok = unsafe { GetProcessTimes(child.as_raw_handle() as *mut _, c, e, k, u) };
+    if ok == 0 {
+        return -1;
+    }
+    let ticks = |f: &FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+    ((ticks(&t[2]) + ticks(&t[3])) / 10_000) as i64
 }
 
 #[cfg(windows)]

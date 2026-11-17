@@ -53,6 +53,7 @@
  */
 
 #include "runtime.h"
+#include "runtime_core_text_arg.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,44 +75,9 @@
 /* ---- tagged-text decode helper (static; same shape as
  *      runtime_core_io_exports.c's core_io_text_arg) ---- */
 
-static int core_exp_text_arg(int64_t value, char* buf, size_t buf_size) {
-    int64_t len = rt_string_len(value);
-    if (len < 0 || (uint64_t)len >= buf_size) return 0;
-    const uint8_t* data = rt_string_data(value);
-    if (!data && len != 0) return 0;
-    if (len != 0) memcpy(buf, data, (size_t)len);
-    buf[(size_t)len] = '\0';
-    return 1;
-}
 
-/* Heap copy for values too long for a stack buffer (shell command lines).
- * NULL on failure; caller frees. */
-static char* core_exp_text_arg_dup(int64_t value) {
-    int64_t len = rt_string_len(value);
-    if (len < 0) return NULL;
-    const uint8_t* data = rt_string_data(value);
-    if (!data && len != 0) return NULL;
-    char* buf = (char*)malloc((size_t)len + 1u);
-    if (!buf) return NULL;
-    if (len != 0) memcpy(buf, data, (size_t)len);
-    buf[(size_t)len] = '\0';
-    return buf;
-}
 
 #ifdef _WIN32
-/* UTF-8 -> UTF-16 for filesystem calls. Returns a malloc'd wide string,
- * NULL on failure; caller frees. */
-static wchar_t* core_exp_utf8_to_wide(const char* utf8) {
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
-    if (wlen <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc(sizeof(wchar_t) * (size_t)wlen);
-    if (!wide) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, wlen) <= 0) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
-}
 
 /* UTF-16 -> UTF-8 into a malloc'd buffer, NULL on failure. */
 static char* core_exp_wide_to_utf8(const wchar_t* wide) {
@@ -161,9 +127,9 @@ static void rt_core_dir_listing_push(rt_core_dir_listing* dl, const char* name) 
 /* tagged text path -> opaque listing handle; 0 on any failure. */
 int64_t rt_readdir(int64_t path_value) {
     char path[4096];
-    if (!core_exp_text_arg(path_value, path, sizeof(path))) return 0;
+    if (!core_text_arg(path_value, path, sizeof(path))) return 0;
 #ifdef _WIN32
-    wchar_t* wpath = core_exp_utf8_to_wide(path);
+    wchar_t* wpath = core_utf8_to_wide(path);
     if (!wpath) return 0;
     size_t wlen = wcslen(wpath);
     wchar_t* pattern = (wchar_t*)malloc(sizeof(wchar_t) * (wlen + 3));
@@ -231,10 +197,10 @@ void rt_readdir_free(int64_t handle) {
 
 int64_t rt_mkdir(int64_t path_value, int64_t mode) {
     char path[4096];
-    if (!core_exp_text_arg(path_value, path, sizeof(path))) return -(int64_t)EINVAL;
+    if (!core_text_arg(path_value, path, sizeof(path))) return -(int64_t)EINVAL;
 #ifdef _WIN32
     (void)mode;
-    wchar_t* wpath = core_exp_utf8_to_wide(path);
+    wchar_t* wpath = core_utf8_to_wide(path);
     if (!wpath) return -(int64_t)EINVAL;
     int rc = _wmkdir(wpath);
     free(wpath);
@@ -294,7 +260,7 @@ int64_t rt_shell_output(int64_t cmd_value) {
 #define RT_CORE_POPEN popen
 #define RT_CORE_PCLOSE pclose
 #endif
-    char* cmd = core_exp_text_arg_dup(cmd_value);
+    char* cmd = core_text_arg_dup(cmd_value);
     if (!cmd) return rt_string_new(NULL, 0);
     FILE* pipe = RT_CORE_POPEN(cmd, "r");
     free(cmd);
