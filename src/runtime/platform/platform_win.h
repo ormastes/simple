@@ -209,11 +209,7 @@ const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
 }
 
 void rt_dir_list_free(const char** entries, int64_t count) {
-    if (!entries) return;
-    for (int64_t i = 0; i < count; i++) {
-        free((void*)entries[i]);
-    }
-    free((void*)entries);
+    rt__shared_dir_list_free(entries, count);
 }
 
 /* Shared UTF-8/long-path cleanup; retain full-runtime absent-path failure. */
@@ -349,24 +345,7 @@ const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size)
 }
 
 static inline const char* rt_file_text_at_string_data(int64_t value, int64_t* len_out) {
-    const uint64_t tag_mask = 0x7ULL;
-    const uint64_t heap_tag = 0x1ULL;
-    uint64_t raw = (uint64_t)value;
-    if ((raw & tag_mask) == heap_tag) {
-        const uint8_t* data = rt_string_data(value);
-        int64_t len = rt_string_len(value);
-        if (data) {
-            *len_out = len;
-            return (const char*)data;
-        }
-    }
-    if (raw > 4096) {
-        const char* s = (const char*)(uintptr_t)raw;
-        *len_out = (int64_t)strlen(s);
-        return s;
-    }
-    *len_out = 0;
-    return NULL;
+    return rt__shared_file_text_at_string_data(value, len_out);
 }
 
 static inline int64_t rt_file_text_at_int(int64_t value) {

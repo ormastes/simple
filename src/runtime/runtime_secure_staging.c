@@ -172,10 +172,8 @@ static BOOL rt_secure_create_directory_long(const char* path,
  * staging unavailable". Name the failing step and the Win32 error.
  * SIMPLE_QUIET_SECURE_TEMP_DIAG=1 silences. */
 static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
-    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
-    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
-            stage, (unsigned long)GetLastError(), detail ? detail : "");
-    fflush(stderr);
+    unsigned long err = (unsigned long)GetLastError(); /* before the env probe can clobber it */
+    rt__shared_secure_temp_dir_diag(stage, err, getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG") != NULL, detail);
 }
 #endif
 

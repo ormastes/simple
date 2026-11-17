@@ -34,6 +34,9 @@ extern "C" {
 #error "selected SIMPLE_ABI_VERSION must be positive"
 #endif
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
 
 /* Include threading library */
@@ -2498,6 +2501,94 @@ void     rt_str_cache_cp_count(struct RtCoreString* s, uint64_t count);
 int64_t  rt_str_cached_cp_count(struct RtCoreString* s);
 void     rt_str_set_ascii_flag(struct RtCoreString* s, int is_ascii);
 int      rt_str_is_ascii_cached(struct RtCoreString* s);
+
+/* ---- Shared static-inline bodies (dedup of per-lane runtime copies) --------
+ * Several runtime TUs are compiled into different, mutually exclusive build
+ * lanes and each must keep defining its own exported symbols. The bodies that
+ * were byte-identical copies live here instead; each TU keeps a one-line
+ * wrapper so symbol provision per lane is unchanged. */
+
+/* Hex digit value, or -1. Used by runtime.c and runtime_tls_hosted.c. */
+static inline int rt__shared_hex_digit_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode 2*blen hex chars into out[blen]; 0 on success, -1 on a bad digit. */
+static inline int rt__shared_hex_decode_into(const char* hex, size_t blen, uint8_t* out) {
+    for (size_t i = 0; i < blen; i++) {
+        int hi = rt__shared_hex_digit_value(hex[2 * i]);
+        int lo = rt__shared_hex_digit_value(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* Encode n bytes as lowercase hex plus NUL into out[2n+1]. */
+static inline void rt__shared_hex_encode_into(const uint8_t* data, size_t n, char* out) {
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[2 * i] = digits[(data[i] >> 4) & 0x0F];
+        out[2 * i + 1] = digits[data[i] & 0x0F];
+    }
+    out[2 * n] = '\0';
+}
+
+/* FNV-1a 64-bit; NULL hashes to the offset basis. */
+static inline uint64_t rt__shared_str_hash(const char* s) {
+    uint64_t h = 14695981039346656037ULL;
+    if (!s) return h;
+    while (*s) {
+        h ^= (uint64_t)(unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* Free a rt_dir_list result: each entry, then the array. */
+static inline void rt__shared_dir_list_free(const char** entries, int64_t count) {
+    if (!entries) return;
+    for (int64_t i = 0; i < count; i++) free((void*)entries[i]);
+    free((void*)entries);
+}
+
+/* Text bytes of a tagged heap string or a raw char* (> 4096); NULL otherwise. */
+static inline const char* rt__shared_file_text_at_string_data(int64_t value, int64_t* len_out) {
+    const uint64_t tag_mask = 0x7ULL;
+    const uint64_t heap_tag = 0x1ULL;
+    uint64_t raw = (uint64_t)value;
+    if ((raw & tag_mask) == heap_tag) {
+        const uint8_t* data = rt_string_data(value);
+        int64_t len = rt_string_len(value);
+        if (data) {
+            *len_out = len;
+            return (const char*)data;
+        }
+    }
+    if (raw > 4096) {
+        const char* s = (const char*)(uintptr_t)raw;
+        *len_out = (int64_t)strlen(s);
+        return s;
+    }
+    *len_out = 0;
+    return NULL;
+}
+
+#if defined(_WIN32)
+/* rt_secure_temp_dir failure diagnostic (stderr). Caller passes the Win32
+ * error captured at the failure site and whether the quiet env knob is set;
+ * each TU reads that knob its own way (getenv vs rt_env_present). */
+static inline void rt__shared_secure_temp_dir_diag(const char* stage, unsigned long err,
+                                                   int quiet, const char* detail) {
+    if (quiet) return;
+    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
+            stage, err, detail ? detail : "");
+    fflush(stderr);
+}
+#endif
 
 #ifdef __cplusplus
 }
