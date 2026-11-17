@@ -621,7 +621,8 @@ fn _glsl_blit() -> text:
 
     Framebuffer at binding 0, source pixels at binding 1.
     Push constants: x, y, destination w/h, fb_w/fb_h, clip x/y/w/h,
-                    clip enabled, opacity milli, composite mode, source w/h
+                    clip enabled, opacity milli, composite mode
+                    (0 copy, 1 src-over image, 2 src-over solid), source w/h
     Dispatch: 2D, ceil(w/16) x ceil(h/16) workgroups
     """
     r"""#version 450
@@ -676,7 +677,9 @@ void main() {
         return;
     }
 
-    uint sa = ((s >> 24u) * uint(pc.opacity_milli)) / 1000u;
+    // Layer opacity scales the source alpha with rounding (CPU twin:
+    // engine2d_composite_region_milli); 1000 leaves it unchanged.
+    uint sa = ((s >> 24u) * uint(pc.opacity_milli) + 500u) / 1000u;
     if (sa == 0u) return;
     if (sa == 255u) {
         fb.data[dst_idx] = s;
@@ -684,17 +687,38 @@ void main() {
     }
     uint d = fb.data[dst_idx];
     uint inv = 255u - sa;
-    // Frozen CPU parity: src/lib/**/engine2d/color.spl blend(). Composite in
-    // premultiplied space and unpremultiply by the resulting out_a. dst_weight
-    // is dst's premultiplied contribution on the same 0..255 basis as sa, and
-    // is reused for the alpha accumulation AND every channel numerator --
-    // using `inv` in the channel numerators (the pre-unpremultiply formula)
-    // disagrees with the CPU for any dst alpha < 255.
-    uint dst_weight = ((d >> 24u) * inv) / 255u;
-    uint out_a = sa + dst_weight;
-    uint out_r = ((((s >> 16u) & 255u) * sa) + (((d >> 16u) & 255u) * dst_weight)) / out_a;
-    uint out_g = ((((s >> 8u) & 255u) * sa) + (((d >> 8u) & 255u) * dst_weight)) / out_a;
-    uint out_b = (((s & 255u) * sa) + ((d & 255u) * dst_weight)) / out_a;
-    fb.data[dst_idx] = (out_a << 24u) | (out_r << 16u) | (out_g << 8u) | out_b;
+    uint da = d >> 24u;
+    // CPU parity: src/lib/**/engine2d/color.spl blend() (Chrome 159 image
+    // rule; composite mode 1) and blend_solid() (solid fill; mode 2). Opaque
+    // dst: round(s*a/255) + div255r(d*(255-a)) resp. (d*(256-a))>>8.
+    // Translucent dst (both modes): straight-alpha src-over, every division
+    // rounded.
+    if (da != 255u) {
+        uint dw = (da * inv + 127u) / 255u;
+        uint oa = sa + dw;
+        uint half_oa = oa / 2u;
+        uint tr = ((((s >> 16u) & 255u) * sa) + (((d >> 16u) & 255u) * dw) + half_oa) / oa;
+        uint tg = ((((s >> 8u) & 255u) * sa) + (((d >> 8u) & 255u) * dw) + half_oa) / oa;
+        uint tb = (((s & 255u) * sa) + ((d & 255u) * dw) + half_oa) / oa;
+        fb.data[dst_idx] = (oa << 24u) | (tr << 16u) | (tg << 8u) | tb;
+        return;
+    }
+    uint out_r = (((s >> 16u) & 255u) * sa + 127u) / 255u;
+    uint out_g = (((s >> 8u) & 255u) * sa + 127u) / 255u;
+    uint out_b = ((s & 255u) * sa + 127u) / 255u;
+    if (pc.composite_mode == 2) {
+        // Solid colour fill (color.blend_solid, SkPMSrcOver): (d*(256-a))>>8.
+        out_r += (((d >> 16u) & 255u) * (inv + 1u)) >> 8u;
+        out_g += (((d >> 8u) & 255u) * (inv + 1u)) >> 8u;
+        out_b += ((d & 255u) * (inv + 1u)) >> 8u;
+    } else {
+        uint vr = ((d >> 16u) & 255u) * inv + 128u;
+        uint vg = ((d >> 8u) & 255u) * inv + 128u;
+        uint vb = (d & 255u) * inv + 128u;
+        out_r += (vr + (vr >> 8u)) >> 8u;
+        out_g += (vg + (vg >> 8u)) >> 8u;
+        out_b += (vb + (vb >> 8u)) >> 8u;
+    }
+    fb.data[dst_idx] = 0xFF000000u | (out_r << 16u) | (out_g << 8u) | out_b;
 }
 """

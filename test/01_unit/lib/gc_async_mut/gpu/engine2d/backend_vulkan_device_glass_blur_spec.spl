@@ -56,9 +56,14 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassMaterialConfig, engine2d_draw_ir_glass_material_pixels}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
     vulkan_readback_count, vulkan_device_blur_rect_count,
-    vulkan_device_material_census_reset, vulkan_device_glass_material_count}
+    vulkan_device_material_census_reset, vulkan_device_glass_material_count,
+    vulkan_image_reason_count}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_engine2d_result_with_images,
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_image_resource}
 
 # The WM Web material fixture's own surface (simple_web_renderer_spec):
 # rgba(31,31,33,0.80) projects "wm-material-surface-alpha-milli" 800 and
@@ -113,6 +118,9 @@ fn glass_config() -> Engine2dGlassMaterialConfig:
         surface_alpha_milli: 300, surface_color: 0xFFFFFFFFu32,
         gradient_from: 0x40FFFFFFu32, gradient_to: 0x10202020u32,
         gradient_enabled: true, gradient_layered_over_surface: true)
+
+fn radial_dev_doc(w: i32, h: i32, bg: text) -> text:
+    "<html><body style=\"margin:0;background:#fff\"><div style=\"width:" + "{w}" + "px;height:" + "{h}" + "px;" + bg + "\"></div></body></html>"
 
 fn mismatch_count(want: [u32], got: [u32]) -> i64:
     if want.len() != got.len():
@@ -347,3 +355,104 @@ describe "The Vulkan backdrop blur and glass material run on the device, pixel-f
         expect(mismatch_count(cpu_body, device_body)).to_equal(0)
         expect(mismatch_count(cpu_frame, device_frame)).to_equal(0)
         expect(mismatch_count(cpu_img, device_img)).to_equal(0)
+
+    it "paints no widget-mode inline svg, input text or scrollbar on the device, as cpu_simd does":
+        # Legacy widget mode paints the page base where an inline svg, an
+        # input value and an overflow-y:scroll scrollbar sit: Draw IR now
+        # emits none of them, so the Vulkan device matches cpu_simd and the
+        # raster at the same pixels.
+        val svg_page = "<html><body><section class='widget-panel'><svg width='20' height='10'><rect width='20' height='10' fill='#ff0000'></rect></svg></section></body></html>"
+        val input_page = "<html><body><section class='widget-panel'><input type='text' value='ABCD'></section></body></html>"
+        val scroll_page = "<html><body><div style='overflow-y:scroll;height:20px;width:30px'></div><section class='widget-panel'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_svg = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(svg_page, 40, 64, "vulkan")
+        val device_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(input_page, 40, 64, "vulkan")
+        val device_scroll = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(scroll_page, 40, 64, "vulkan")
+        val readbacks_after = vulkan_readback_count()
+        val cpu_svg = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(svg_page, 40, 64, "cpu_simd")
+        val cpu_input = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(input_page, 40, 64, "cpu_simd")
+        val cpu_scroll = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(scroll_page, 40, 64, "cpu_simd")
+        expect(readbacks_after - readbacks_before >= 3).to_equal(true)
+        expect(device_svg[13 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(device_input[15 * 40 + 13]).to_equal(0xFFF5F5F5u32)
+        expect(device_scroll[8 * 40 + 23]).to_equal(0xFFF5F5F5u32)
+        expect(mismatch_count(cpu_svg, device_svg)).to_equal(0)
+        expect(mismatch_count(cpu_input, device_input)).to_equal(0)
+        expect(mismatch_count(cpu_scroll, device_scroll)).to_equal(0)
+
+    it "paints no widget-node URL background or its border overlay on the device in widget mode, as cpu_simd does":
+        # A box-suppressed widget node lowers no URL background image and no
+        # border overlay, so the device paints the page base where the
+        # node's border and tile sat, as cpu_simd and the raster do.
+        val tile = simpleos_host_gpu_image_resource("image://tile", 4, 2, [0xFFFF0000u32; 8])
+        val url_page = "<html><body><section class='widget-panel' style='width:20px;height:12px;border:2px solid #0000ff;background-image:url(image://tile);background-repeat:no-repeat'></section></body></html>"
+        val readbacks_before = vulkan_readback_count()
+        val device_url = simple_web_layout_render_html_engine2d_result_with_images(url_page, 40, 64, "vulkan", [tile]).pixels
+        val readbacks_after = vulkan_readback_count()
+        val cpu_url = simple_web_layout_render_html_engine2d_result_with_images(url_page, 40, 64, "cpu_simd", [tile]).pixels
+        expect(readbacks_after - readbacks_before >= 1).to_equal(true)
+        expect(device_url[10 * 40 + 8]).to_equal(0xFFF5F5F5u32)
+        expect(device_url[10 * 40 + 11]).to_equal(0xFFF5F5F5u32)
+        expect(mismatch_count(cpu_url, device_url)).to_equal(0)
+
+    it "composites CSS radial gradients on the device at device scale 4 exactly as cpu_simd does":
+        # The radial colour is evaluated once on the host by the shared
+        # evaluator (backend_emu radial_gradient_pixels) and composited
+        # src-over on the device (`_draw_image_blend_native`), so device and
+        # cpu_simd share the math. Chrome 159 pixels for these pages are
+        # pinned in web_device_scale_spec (tolerance +-2); here the device
+        # must equal cpu_simd exactly, read back from the device, with the
+        # gradient image composited by the device.
+        val pages = [
+            radial_dev_doc(40, 24, "background:radial-gradient(#ff0000,#0000ff)"),
+            radial_dev_doc(40, 32, "background:radial-gradient(circle closest-side at 25% 75%, #00ff00, #0000ff)"),
+            radial_dev_doc(40, 40, "background:radial-gradient(circle, #ff0000 0%, #ffff00 30%, #00ff00 60%, #0000ff 100%)"),
+            radial_dev_doc(40, 24, "background-color:#ffff00;background-image:radial-gradient(circle, #0000ff, transparent)"),
+            "<html><body style=\"background-image:radial-gradient(circle,#ff0000 0%,#0000ff 100%)\"><section class=\"widget-panel\"></section></body></html>"
+        ]
+        val heights = [24, 32, 40, 24, 64]
+        var i = 0
+        while i < pages.len():
+            val readbacks_before = vulkan_readback_count()
+            # reason 0 = VK_IMG_R_OK: an image composite completed on the device
+            val composites_before = vulkan_image_reason_count(0)
+            val device = simple_web_layout_render_html_pixels_engine2d_at_device_scale(pages[i], 40, heights[i], 4, "vulkan")
+            val composites_after = vulkan_image_reason_count(0)
+            val readbacks_after = vulkan_readback_count()
+            val cpu = simple_web_layout_render_html_pixels_engine2d_at_device_scale(pages[i], 40, heights[i], 4, "cpu_simd")
+            expect(readbacks_after - readbacks_before >= 1).to_equal(true)
+            expect(composites_after - composites_before >= 1).to_equal(true)
+            expect(device.len()).to_equal(160 * heights[i] * 4)
+            expect(mismatch_count(cpu, device)).to_equal(0)
+            i = i + 1
+
+    it "composites CSS gradient layer stacks on the device at device scale 4 exactly as cpu_simd does":
+        # Each linear / radial layer is evaluated once on the host by the
+        # shared evaluators (backend_emu linear_gradient_pixels /
+        # radial_gradient_pixels) and composited src-over on the device,
+        # bottom layer first. Chrome 159 pixels for these pages are pinned in
+        # web_device_scale_spec (tolerance +-2); here the device must equal
+        # cpu_simd exactly, read back from the device.
+        val pages = [
+            radial_dev_doc(40, 24, "background-color:#ffff00;background-image:linear-gradient(to right, rgba(0,0,255,0.6), transparent)"),
+            radial_dev_doc(40, 32, "background:radial-gradient(circle at 30% 40%, #ff0000, transparent 50%), linear-gradient(to bottom, #00ff00, #0000ff)"),
+            radial_dev_doc(40, 32, "background-color:#ffff00;background-image:linear-gradient(90deg, rgba(255,0,0,0.8), transparent 60%), radial-gradient(circle, transparent 20%, #0000ff)"),
+            "<html><body style=\"background-image:radial-gradient(circle at 30% 30%, rgba(255,0,0,0.8), transparent 60%), linear-gradient(#ffffff,#0000ff)\"><section class=\"widget-panel\"></section></body></html>",
+            radial_dev_doc(40, 24, "background-color:#ffff00;background-image:linear-gradient(to right, rgba(0,0,255,0.6), rgba(0,0,255,0.1))"),
+            radial_dev_doc(40, 24, "background:linear-gradient(45deg, #ff0000, #00ff00 40%, #0000ff)")
+        ]
+        val heights = [24, 32, 32, 64, 24, 24]
+        var i = 0
+        while i < pages.len():
+            val readbacks_before = vulkan_readback_count()
+            # reason 0 = VK_IMG_R_OK: an image composite completed on the device
+            val composites_before = vulkan_image_reason_count(0)
+            val device = simple_web_layout_render_html_pixels_engine2d_at_device_scale(pages[i], 40, heights[i], 4, "vulkan")
+            val composites_after = vulkan_image_reason_count(0)
+            val readbacks_after = vulkan_readback_count()
+            val cpu = simple_web_layout_render_html_pixels_engine2d_at_device_scale(pages[i], 40, heights[i], 4, "cpu_simd")
+            expect(readbacks_after - readbacks_before >= 1).to_equal(true)
+            expect(composites_after - composites_before >= 1).to_equal(true)
+            expect(device.len()).to_equal(160 * heights[i] * 4)
+            expect(mismatch_count(cpu, device)).to_equal(0)
+            i = i + 1

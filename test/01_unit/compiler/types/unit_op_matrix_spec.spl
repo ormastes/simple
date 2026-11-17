@@ -27,7 +27,8 @@ use compiler.core.types.{reset_all_pools, TYPE_U64, TYPE_I64, TYPE_F64, unit_dec
 use compiler.core.parser.{parser_init_with_path, parser_has_errors}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.types.units.unit_ops.{
-    UnitOpVerdict, unit_op_verdict, UnitValueResult, unit_value_binop
+    UnitOpVerdict, unit_op_verdict, UnitValueResult, unit_value_binop,
+    unit_op_robust_profile, unit_op_default_profile, unit_op_take_warnings
 }
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
@@ -137,8 +138,14 @@ describe "Unit operator matrix (section 3.1)":
             expect(allow_of("mul", "ByteCount", "ByteCount")).to_equal("allow:u64")
             expect(allow_of("mul", "Meters", "Meters")).to_equal("allow:f64")
             expect(allow_of("div", "Meters", "Meters")).to_equal("allow:f64")
+            # owner decision 2026-11-17: distinct-unit product/quotient warns (SPL-UNIT-002) by default
+            expect(allow_of("mul", "ByteCount", "BitCount")).to_equal("allow:u64")
+            expect(allow_of("div", "ByteCount", "BitCount")).to_equal("allow:u64")
+            unit_op_take_warnings()
+            unit_op_robust_profile()
             expect(allow_of("mul", "ByteCount", "BitCount")).to_equal("deny")
             expect(allow_of("div", "ByteCount", "BitCount")).to_equal("deny")
+            unit_op_default_profile()
             expect(allow_of("mul", "ByteIndex", "ByteIndex")).to_equal("deny")
             expect(allow_of("div", "Timestamp", "Timestamp")).to_equal("deny")
             expect(allow_of("pow", "ByteCount", "ByteCount")).to_equal("deny")
@@ -198,7 +205,12 @@ describe "Unit operator matrix (section 3.1)":
             expect(infer_text(ctx, HirBinOp.Mul, tys[0], tys[0])).to_equal("ok:int64u")
             expect(infer_text(ctx, HirBinOp.Div, tys[0], tys[0])).to_equal("ok:int64u")
             expect(infer_text(ctx, HirBinOp.Div, tys[4], tys[4])).to_equal("ok:Width")
+            # owner decision 2026-11-17: distinct-unit product warns by default, denies in robust
+            expect(infer_text(ctx, HirBinOp.Mul, tys[0], tys[1])).to_equal("ok:int64u")
+            unit_op_take_warnings()
+            unit_op_robust_profile()
             expect(infer_text(ctx, HirBinOp.Mul, tys[0], tys[1])).to_equal("deny")
+            unit_op_default_profile()
             expect(infer_text(ctx, HirBinOp.Mod, tys[0], tys[0])).to_equal("deny")
             step("a unit plus a raw int is denied, not unified")
             val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
@@ -246,7 +258,9 @@ describe "Unit operator matrix (section 3.1)":
             expect(value_text(unit_value_binop("div", "", "ByteCount", 5, "int", 0))).to_equal("deny")
             expect(value_text(unit_value_binop("div", "", "ByteCount", 5, "ByteCount", 0))).to_equal("deny")
             expect(value_text(unit_value_binop("mul", "", "ByteCount", big, "ByteCount", 2))).to_equal("deny")
+            unit_op_robust_profile()
             expect(value_text(unit_value_binop("mul", "", "ByteCount", 6, "BitCount", 7))).to_equal("deny")
+            unit_op_default_profile()
 
         it "compiler and interpreter agree on every matrix row":
             # @req REQ-UNIT-OPS-05

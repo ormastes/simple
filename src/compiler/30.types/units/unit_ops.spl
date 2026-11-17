@@ -89,13 +89,26 @@ fn unit_op_role(name: text) -> text:
 # the default profile (result = the underlying scalar, as before), an error
 # when the robust profile sets strict mode.
 var unit_op_strict: bool = false
+# SPL-UNIT-002 strictness for an undeclared product/quotient of two different
+# units (owner decision 2026-11-17); driven by its own policy row.
+var unit_op_mixed_strict: bool = false
 var unit_op_warnings: [text] = []
 
 pub fn unit_op_robust_profile():
     unit_op_strict = true
+    unit_op_mixed_strict = true
 
 pub fn unit_op_default_profile():
     unit_op_strict = false
+    unit_op_mixed_strict = false
+
+# @allow(primitive_api) on/off switch paired with the profile setters above
+pub fn unit_op_set_mixed_strict(on: bool):
+    unit_op_mixed_strict = on
+
+# @allow(primitive_api) yes/no strict-mode query for SPL-UNIT-002
+pub fn unit_op_is_mixed_strict() -> bool:
+    unit_op_mixed_strict
 
 # @allow(primitive_api) yes/no strict-mode query paired with the setters above
 pub fn unit_op_is_strict() -> bool:
@@ -217,13 +230,21 @@ pub fn unit_op_verdict(op: text, lhs_in: text, rhs_in: text) -> UnitOpVerdict:
                 return UnitOpVerdict.Allow(rhs)
             return unit_op_deny(op, lhs, rhs, "a delta and a point combine only by +")
         if lrole == "nominal" and rrole == "nominal" and (op == UNIT_OP_MUL or op == UNIT_OP_DIV):
-            # Distinct units were never implicitly combinable, so an undeclared
-            # product stays an error; the message names the missing declaration.
+            # Owner decision 2026-11-17 (5C): an undeclared product/quotient of
+            # two DIFFERENT units is SPL-UNIT-002 — a recorded warning in the
+            # default profile (result = lhs's underlying scalar), an error when
+            # the SPL-UNIT-002 policy row is strict (robust profile / 2027.2).
             val derived = unit_op_find_derived(op, lhs, rhs)
             if derived != "":
                 return UnitOpVerdict.Allow(derived)
             val sym = if op == UNIT_OP_MUL: "*" else: "/"
-            return unit_op_deny(op, lhs, rhs, "no derived-unit declaration; declare `unit <Name> = " + lhs + " " + sym + " " + rhs + "` (SPL-UNIT-004)")
+            val verdict = unit_op_deny(op, lhs, rhs, "no derived-unit declaration; declare `unit <Name> = " + lhs + " " + sym + " " + rhs + "`")
+            if unit_op_mixed_strict:
+                return verdict
+            match verdict:
+                case Deny(msg): unit_op_warnings.push(msg)
+                case _: pass
+            return UnitOpVerdict.Allow(unit_op_scalar_name(lhs))
         return unit_op_deny(op, lhs, rhs, "distinct units never mix implicitly")
 
     # Exactly one unit operand.
