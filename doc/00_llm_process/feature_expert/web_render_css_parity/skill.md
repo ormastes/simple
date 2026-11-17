@@ -2511,3 +2511,20 @@ Follow-up to the four 2026-11-16 behaviours. Each item has a `*_chrome159_spec.s
 - **Raster** (`paint_raster.spl`): `_raster_layer_passes` paints a group's layer. If the layer holds nested groups, it holds back the nested groups plus every positioned box after a nested group that overlaps it ("late" subtrees). It paints the rest, then interleaves the nested restores (`_raster_restore_group`, recursive) and the late subtrees in tree order. Inside a layer, one painted item is already a nested layer (`min_painted` 1). A group whose subtree mixes nested roots with text or z-index stays on the per-element path.
 - **Pins** (`opacity_group_chrome159_spec`): 37 Chrome cells × raster, cpu_simd and Vulkan, including 3 levels, overlapping sibling inner groups and a box after an inner group that overlaps it. The k=4 full frame of 3 blocks is pinned exactly (dev 0): this page has no tile-seam deviation in Chrome.
 
+## 2026-11-17 — Raster opacity groups with translucent, shadow and gradient members (two-pass layer)
+
+- **Mechanism.** The raster blenders ignore destination alpha and write 255. A layer with non-opaque members is therefore painted twice, both times with the members' positions intact:
+  - **B** over opaque black. Its colour channels are exactly Chrome's premultiplied layer colour, for every Chrome rule (solid, image, coverage).
+  - **W** over opaque white.
+  - Layer alpha = `255 - (W - B)` (green channel), and colour = B divided back out (`_raster_group_layer_from_passes`).
+  - Opaque-only layers keep the single zero-initialised pass. The 12-group page does not change.
+- **Exact only for disjoint non-opaque paint.** Each rule's white-backdrop term is exactly `255 - a`, so alpha is exact for one non-opaque paint per not-yet-opaque pixel, plus any number of opaque paints. A model checked this: 40000/40000 random restricted sequences exact; unrestricted, 12% are off by ±1 after the restore.
+  - Admission (`_raster_group_node_translucent_items`): a layer's non-opaque paint rects (shadow extent, translucent bg/border/outline, non-opaque gradient or image layer, img) must be pairwise disjoint, at most one per node.
+  - A two-pass layer may not hold nested groups.
+  - Otherwise the group stays on the per-element path. Open: two translucent boxes overlapping (Chrome `E3D994`) and image plus translucent black (`9A9FBC`). The general fix is a white-forced alpha pass at every raster pixel-write site.
+- **Trap: B must start opaque black, not 0.** Gradient layers go through Engine2D `blend`, which honours a transparent destination and leaves straight colour (measured `1ca569` vs Chrome `24b05e`).
+- **Trap: shadow extent.** The tile pad `_paint_shadow_pad` (+8, symmetric) made a shadow group overlap the next row of cells and fail the overlap rule. `_raster_group_shadow_extent` is directional: offset + spread + 2*blur per edge.
+- **Ops now counted like Chrome:** shadow, img and gradient or image layers are paint ops of their own.
+- **Gap, not caused here:** the raster lane paints a plain `<img>` only with the widget image class, so image members contribute nothing on the raster. The pin for that pixel is left out.
+- **Pins:** `opacity_group_chrome159_spec` row "translucent, shadow, gradient and image members on the CPU raster", 19 exact cells plus the dithered gradient block (Chrome's own `24b05e`/`24b15e`).
+

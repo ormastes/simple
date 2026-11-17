@@ -189,6 +189,68 @@ fn ng_mismatches(px: [u32], fw: i32) -> i32:
         n = n + 1
     bad
 
+# Non-opaque members (raster two-pass layer): translucent colours, a hard
+# translucent shadow, a translucent gradient, a translucent image, each over a
+# layer pixel no other non-opaque paint touches. Cells (16x8 each):
+#   row 0: translucent+opaque, opaque+translucent, two translucent overlapping
+#          (declines on the raster), shadow+boxes
+#   row 1: translucent gradient+opaque, image+opaque, opaque gradient+
+#          translucent, image+translucent overlapping (declines on the raster)
+val TG_IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGOUs/mwgIGBgYGJAQoAHMQB7tXVXUgAAAAASUVORK5CYII="
+
+fn tg_box(left: i32, w: i32, h: i32, paint: text) -> text:
+    "<div style=\"position:absolute;left:" + "{left}" + "px;top:0;width:" + "{w}" + "px;height:" + "{h}" + "px;" + paint + "\"></div>"
+
+fn tg_img(left: i32, w: i32) -> text:
+    "<img src=\"" + TG_IMG + "\" style=\"position:absolute;left:" + "{left}" + "px;top:0;width:" + "{w}" + "px;height:8px\">"
+
+fn tg_page() -> text:
+    var body = ""
+    body = body + grp_cell(0, 0, "rgb(40,90,200)", grp_group("0.5", tg_box(0, 10, 8, "background:rgba(255,0,0,0.5)") + tg_box(6, 10, 8, "background:rgb(0,0,255)")))
+    body = body + grp_cell(16, 0, "rgb(230,220,10)", grp_group("0.6", tg_box(0, 10, 8, "background:rgb(20,20,20)") + tg_box(6, 10, 8, "background:rgba(0,255,128,0.4)")))
+    body = body + grp_cell(32, 0, "rgb(255,255,255)", grp_group("0.7", tg_box(0, 10, 8, "background:rgba(0,128,255,0.4)") + tg_box(6, 10, 8, "background:rgba(255,200,0,0.6)")))
+    body = body + grp_cell(48, 0, "rgb(128,128,128)", grp_group("0.5", tg_box(0, 8, 5, "background:rgb(255,0,0);box-shadow:3px 3px 0 rgba(0,0,0,0.5)") + tg_box(12, 4, 8, "background:rgb(0,255,0)")))
+    body = body + grp_cell(0, 8, "rgb(60,160,90)", grp_group("0.8", tg_box(0, 10, 8, "background:linear-gradient(rgba(0,200,100,0.5),rgba(0,200,100,0.5))") + tg_box(6, 10, 8, "background:rgb(255,255,255)")))
+    body = body + grp_cell(16, 8, "rgb(200,30,120)", grp_group("0.6", tg_img(0, 10) + tg_box(6, 10, 8, "background:rgb(255,255,0)")))
+    body = body + grp_cell(32, 8, "rgb(10,10,10)", grp_group("0.75", tg_box(0, 16, 8, "background:linear-gradient(rgb(250,120,0),rgb(250,120,0))") + tg_box(4, 8, 8, "background:rgba(255,255,255,0.3)")))
+    body = body + grp_cell(48, 8, "rgb(255,255,255)", grp_group("0.5", tg_img(0, 10) + tg_box(6, 10, 8, "background:rgba(0,0,0,0.5)")))
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
+
+# Chrome 159 colours of tg_page() (k=4, `--window-size=64,16`). The raster
+# admits every cell except (34..46, 4) and (50..60, 12), whose two non-opaque
+# paints overlap (Chrome there: B7DBFF E3D994 FFE793 / B8C2FB 9A9FBC BFBFBF).
+# The image pixel (18,12) (Chrome 8829A5) is not pinned: the raster lane does
+# not paint a plain <img> at all, group or not.
+val TG_X: [i32] = [2, 8, 13, 18, 24, 29, 50, 50, 54, 56, 61, 8, 13, 24, 29, 33, 37, 41, 45]
+val TG_Y: [i32] = [4, 4, 4, 4, 4, 4, 2, 6, 6, 6, 4, 12, 12, 12, 12, 12, 12, 12, 12]
+val TG_CHROME: [u32] = [
+    0xFF5E4396u32, 0xFF132CE3u32, 0xFF132CE3u32,
+    0xFF676310u32, 0xFF629C29u32, 0xFFAFE426u32,
+    0xFFBF3F3Fu32, 0xFF808080u32, 0xFF606060u32, 0xFF606060u32, 0xFF3FBF3Fu32,
+    0xFFD8ECDEu32, 0xFFD8ECDEu32,
+    0xFFE9A52Fu32, 0xFFE9A52Fu32,
+    0xFFBE5C02u32, 0xFFBE7A3Cu32, 0xFFBE7A3Cu32, 0xFFBE5C02u32
+]
+
+fn tg_mismatches(px: [u32], fw: i32) -> i32:
+    if px.len() < fw * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < TG_CHROME.len():
+        val got = px[TG_Y[n] * fw + TG_X[n]]
+        if got != TG_CHROME[n]:
+            print "translucent-group cell {n} ({TG_X[n]},{TG_Y[n]}) got {got} want {TG_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    # (2,12): translucent gradient; Chrome dithers this block between
+    # 24B05E and 24B15E, so either observed value is Chrome's.
+    val grad = px[12 * fw + 2]
+    if grad != 0xFF24B05Eu32 and grad != 0xFF24B15Eu32:
+        print "translucent-group gradient cell (2,12) got {grad}"
+        bad = bad + 1
+    bad
+
 describe "CSS opacity groups composite as Chrome 159 does":
     it "restores an opaque layer pixel with SkBlendARGB32 at alpha round(opacity*255)":
         expect(css_opacity_group_alpha8(50)).to_equal(128)
@@ -265,3 +327,7 @@ describe "CSS opacity groups composite as Chrome 159 does":
         for lane in ["cpu_simd", "vulkan"]:
             val got = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ng_page(3), 192, 16, 4, lane)
             expect(grp_frame_max_dev(got, want)).to_equal(0)
+
+    it "composites groups with translucent, shadow, gradient and image members on the CPU raster as Chrome does":
+        val px = simple_web_layout_render_html_software_pixels(tg_page(), 64, 16)
+        expect(tg_mismatches(px, 64)).to_equal(0)

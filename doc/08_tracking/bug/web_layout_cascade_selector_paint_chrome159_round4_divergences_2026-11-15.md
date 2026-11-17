@@ -274,6 +274,16 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
 
   The 12-group page takes the same code path at base and head, so its spread (2.9-10.4 s across runs) is host noise. The nested page's added cost is the extra layer per group.
 
+## 2026-11-17 — raster `opacity` groups with translucent / shadow / gradient members: fixed (disjoint case)
+
+- **Was:** any translucent colour, shadow, gradient or image member kept the group on the raster's per-element path. Measured at base, 21 of 21 probe cells were off, e.g. a translucent red child gave `942d64` where Chrome gives `5e4396`.
+- **Fix:** a two-pass layer (B over opaque black, W over opaque white; alpha `255-(W-B)`), admitted when the layer's non-opaque paint rects are pairwise disjoint. Chrome's ops now include shadow, img and gradient layers. The shadow extent is directional.
+- **Pinned:** `opacity_group_chrome159_spec`, 20 cells (one is Chrome-dithered).
+- **Still open (raster):**
+  - Overlapping non-opaque members decline to the per-element path. Chrome values: `B7DBFF E3D994 FFE793` (two translucent boxes) and `B8C2FB 9A9FBC BFBFBF` (image + translucent black).
+  - Plain `<img>` is not painted by the raster lane at all (pre-existing).
+- **Base vs head:** the same 25 specs as the nested-group entry showed 0 new and 0 fixed failing names. **Perf** (median of 3, same pages; opaque-only layers keep one pass): raster 12 groups 6.00 s and nested 6.87 s, cpu_simd 7.50 / 6.77 s, Vulkan 5.49 / 8.45 s, max RSS 728 MB. All of these are within the host-noise spread of the item-1 runs (2.9-10.4 s). A two-pass layer costs one extra bounded layer paint.
+
 ## 2026-11-17 — `layout.spl` `_layout_block_node` margin collapse, round 2
 
 Chrome 159.0.8154.6, `--headless --no-sandbox --window-size=900,2000 --dump-dom`,
