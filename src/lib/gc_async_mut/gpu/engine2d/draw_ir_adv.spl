@@ -454,6 +454,120 @@ fn _engine2d_draw_ir_pen_origin_pad(origin_milli: i64) -> i32:
     val mag = if origin_milli < 0: 0 - origin_milli else: origin_milli
     ((mag + 999) / 1000).to_i32()
 
+# A polygon in device px, clipped against one axis-aligned bound.
+struct Engine2dPathPoly:
+    xs: [f64]
+    ys: [f64]
+
+# Sutherland-Hodgman against `x >= bound` (keep_ge) / `x <= bound` on the X
+# axis, or the same on Y. Clipping a (possibly concave) polygon by a convex
+# window keeps its signed area exact, which is all the coverage needs.
+fn _engine2d_path_clip(poly: Engine2dPathPoly, on_x: bool, bound: f64, keep_ge: bool) -> Engine2dPathPoly:
+    var xs: [f64] = []
+    var ys: [f64] = []
+    val n = poly.xs.len()
+    var k = 0
+    while k < n:
+        val ax = poly.xs[k]
+        val ay = poly.ys[k]
+        val bx = poly.xs[(k + 1) % n]
+        val by = poly.ys[(k + 1) % n]
+        val av = if on_x: ax else: ay
+        val bv = if on_x: bx else: by
+        val a_in = if keep_ge: av >= bound else: av <= bound
+        val b_in = if keep_ge: bv >= bound else: bv <= bound
+        if a_in:
+            xs.push(ax)
+            ys.push(ay)
+        if a_in != b_in:
+            val t = (bound - av) / (bv - av)
+            xs.push(ax + (bx - ax) * t)
+            ys.push(ay + (by - ay) * t)
+        k = k + 1
+    Engine2dPathPoly(xs: xs, ys: ys)
+
+# Exact covered area (0..1) of pixel (px, py) by the polygon.
+fn _engine2d_path_pixel_coverage(poly: Engine2dPathPoly, px: i64, py: i64) -> f64:
+    val x0 = px as f64
+    val y0 = py as f64
+    var c = _engine2d_path_clip(poly, true, x0, true)
+    c = _engine2d_path_clip(c, true, x0 + 1.0, false)
+    c = _engine2d_path_clip(c, false, y0, true)
+    c = _engine2d_path_clip(c, false, y0 + 1.0, false)
+    val n = c.xs.len()
+    if n < 3:
+        return 0.0
+    var twice = 0.0
+    var k = 0
+    while k < n:
+        val j = (k + 1) % n
+        twice = twice + c.xs[k] * c.ys[j] - c.xs[j] * c.ys[k]
+        k = k + 1
+    val area = if twice < 0.0: (0.0 - twice) / 2.0 else: twice / 2.0
+    if area > 1.0: 1.0 else: area
+
+# A `path-fill` path command (Chrome's filled disclosure triangle): the
+# closed polygon, in 1/`path-units` px, filled with exact per-pixel area
+# coverage -- whole covered spans as one rect, edge pixels blended at their
+# covered fraction (Skia's analytic AA). False when the command is not a fill.
+fn _engine2d_draw_ir_path_fill(eng: Engine2D, command: DrawIrCommand, offset_x: i32, offset_y: i32) -> bool:
+    if command.kind != DRAW_IR_COMMAND_PATH or command.points.len() < 3:
+        return false
+    val fill_text = _engine2d_draw_ir_style_value(command.computed_style, "path-fill")
+    if fill_text == "":
+        return false
+    val color_i64 = _engine2d_draw_ir_nth_int(fill_text, 0, -1)
+    if color_i64 < 0 or color_i64 > 4294967295:
+        return false
+    val color = color_i64 as u32
+    val units_i64 = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(command.computed_style, "path-units"), 0, 1)
+    val units = if units_i64 > 0: units_i64 as f64 else: 1.0
+    var xs: [f64] = []
+    var ys: [f64] = []
+    var min_x = 1.0e18
+    var min_y = 1.0e18
+    var max_x = -1.0e18
+    var max_y = -1.0e18
+    for p in command.points:
+        val x = (p.x as f64) / units + (offset_x as f64)
+        val y = (p.y as f64) / units + (offset_y as f64)
+        xs.push(x)
+        ys.push(y)
+        if x < min_x:
+            min_x = x
+        if x > max_x:
+            max_x = x
+        if y < min_y:
+            min_y = y
+        if y > max_y:
+            max_y = y
+    val poly = Engine2dPathPoly(xs: xs, ys: ys)
+    val col0 = if min_x > 0.0: min_x as i64 else: 0
+    val row0 = if min_y > 0.0: min_y as i64 else: 0
+    val col1 = if (max_x as i64) + 1 < (eng.width() as i64): (max_x as i64) + 1 else: eng.width() as i64
+    val row1 = if (max_y as i64) + 1 < (eng.height() as i64): (max_y as i64) + 1 else: eng.height() as i64
+    val src_a = ((color >> 24) & 0xFFu32).to_i64()
+    val rgb = color & 0xFFFFFFu32
+    var py = row0
+    while py < row1:
+        var span_x: i64 = -1
+        var px = col0
+        while px <= col1:
+            val cov = if px < col1: _engine2d_path_pixel_coverage(poly, px, py) else: 0.0
+            val a = ((cov * (src_a as f64)) + 0.5) as i64
+            if a >= 255:
+                if span_x < 0:
+                    span_x = px
+            else:
+                if span_x >= 0:
+                    eng.draw_rect_filled(span_x as i32, py as i32, (px - span_x) as i32, 1, color)
+                    span_x = -1
+                if a > 0:
+                    eng.draw_rect_blend(px as i32, py as i32, 1, 1, ((a as u32) << 24u32) | rgb)
+            px = px + 1
+        py = py + 1
+    true
+
 struct Engine2dDrawIrLinearStroke:
     valid: bool
     color: u32
@@ -1739,6 +1853,10 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
                 if not _engine2d_draw_ir_fresh_device_command_supported(
                     command, images, engine.width(), engine.height(), false, false):
                     return "strict-vulkan-font-preflight-required"
+            elif command.kind == DRAW_IR_COMMAND_PATH and _engine2d_draw_ir_style_value(command.computed_style, "path-fill") != "":
+                # A filled path is clamped to the surface by its own fill loop.
+                if command.points.len() < 3:
+                    return "strict-vulkan-path-fill-required"
             elif command.kind == DRAW_IR_COMMAND_EDGE or command.kind == DRAW_IR_COMMAND_PATH:
                 val stroke = _engine2d_draw_ir_linear_stroke(command, 0, 0)
                 if not stroke.valid:
@@ -2803,6 +2921,8 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
             else:
                 skipped = skipped + 1
                 unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
+        elif command_kind == DRAW_IR_COMMAND_PATH and _engine2d_draw_ir_path_fill(eng, command, offset_x, offset_y):
+            rendered = rendered + 1
         elif command_kind == DRAW_IR_COMMAND_EDGE or command_kind == DRAW_IR_COMMAND_PATH:
             val stroke = _engine2d_draw_ir_linear_stroke(command, offset_x, offset_y)
             if not stroke.valid:

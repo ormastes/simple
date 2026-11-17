@@ -2772,3 +2772,23 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Pin:** `inline_space_between_elements_advance_chrome159_spec` (6 ACs). It fails on base (0/6) and passes now (6/6).
 - **Matrix:** 5 button cells now match Chrome and left the baseline (154 -> 149 ids): `tt-td-button-{w,p}`, `ln-tt-td-button-{w,p}`, `tt-legend-button-p`.
 - **Catalog 1x** (base b974addb1b0 -> head, both measured; rows lowered): overview 1.29 -> 1.21, html 2.62 -> 2.57, forms-media 2.84 -> 2.74, animation 2.84 -> 2.77 (row 2.91). css-layout 2.52, css-paint 2.80, evidence 0.77 and tab-bar 0.42 are unchanged.
+
+## 2026-11-18 — `<summary>` disclosure marker: Chrome's advance and filled triangle
+- **Rule (Chrome 159, list_marker.cc / list_marker_painter.cc):**
+  - The disclosure symbol is a `0.66em` square, and an inside marker adds a `0.4em` end margin. Each is truncated to a LayoutUnit (1/64 px) separately, so 16 px is 675/64 + 409/64 = 16.9375.
+  - The advance is identical for sans-serif, serif and monospace.
+  - The symbol is a filled path in the unit square, painted with analytic AA: closed (0,0) (0.86,0.5) (0,1); open (0,0.07) (0.5,0.93) (1,0.07).
+  - The square sits at the content start and ends on the baseline: top = text top + ascent − size.
+- **Was:** a fixed 16 px advance (`SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH`, now deleted), and a `▶` / `▼` text command whose glyph Liberation Sans lacks, which painted a missing-glyph box.
+- **Change:**
+  - `summary_marker_symbol_64` and `summary_marker_inline_width` (layout_foundation) replace the constant.
+  - The marker is a Draw IR `path` command carrying `path-fill` (ARGB) and `path-units: 64`, with its pixel bbox as the command box. Without that box, a 0x0 command paints nothing.
+  - `_engine2d_draw_ir_path_fill` (draw_ir_adv) fills it with exact per-pixel area coverage: each pixel is clipped by Sutherland-Hodgman and measured by shoelace. Full spans use `draw_rect_filled` and edge pixels use `draw_rect_blend`.
+  - The strict-Vulkan preflight accepts a filled path, which its fill loop clamps to the surface.
+- **Pin:** `summary_disclosure_marker_chrome159_spec` (label x at 16/13 px plus closed and open triangle cells, TOL 16). It fails on base (0/3) and passes now (3/3).
+- **Re-pinned toward Chrome:**
+  - `details_summary_rendering_spec`: label x 16 -> 17; the marker is a `path` with exact points and box [0,3]. That spec's `-1 to equal 7` / `[0,12,0,0]` failures are pre-existing on base.
+  - The paint_layout coverage-closure marker `it`.
+- **Catalog 1x:** forms-media 2.74 -> 2.65.
+- **Trap:** a page with no `<p>`/`<span>`/`<h1-3>`/`<button>`/`<code>`/`<label>`/`<a ` takes the CPU raster lane (`_simple_web_engine2d_text_document`), not Draw IR. Wrap a probe's label in a `<span>`.
+- **Residue:** the vertical placement uses the sans ascent (0.905em). That matches Liberation Serif at 16 px (both ascents are 14), but it is not the resolved face's ascent at every size.
