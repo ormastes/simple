@@ -650,6 +650,20 @@ static int64_t db_get_int_by_pk_cstr(int64_t handle_in, const char* pk, int64_t 
     return (r->int_values[col]);
 }
 
+/* Resolve (handle, pk, col) to a live row. Returns NULL on any miss. */
+static DbRow* db_live_row_by_pk(int64_t handle, const char* pk, int64_t col) {
+    if (handle < 0 || handle >= DB_MAX_TABLES) return NULL;
+    DbTable* t = &g_tables[handle];
+    if (!t->in_use) return NULL;
+
+    int64_t row = pk_lookup(t, pk ? pk : "");
+    if (row < 0 || row >= t->row_count) return NULL;
+    if (col < 0 || col >= t->num_cols) return NULL;
+    DbRow* r = &t->rows[row];
+    if (!r->alive) return NULL;
+    return r;
+}
+
 /* Update an int column by PK in one call. Returns 1 on success, 0 on not found. */
 static int64_t db_update_int_cstr(int64_t handle_in, const char* pk, int64_t col_in,
                          int64_t value_in) {
@@ -657,15 +671,8 @@ static int64_t db_update_int_cstr(int64_t handle_in, const char* pk, int64_t col
     int64_t handle = (handle_in);
     int64_t col = (col_in);
     int64_t value = (value_in);
-    if (handle < 0 || handle >= DB_MAX_TABLES) return (0);
-    DbTable* t = &g_tables[handle];
-    if (!t->in_use) return (0);
-
-    int64_t row = pk_lookup(t, pk ? pk : "");
-    if (row < 0 || row >= t->row_count) return (0);
-    if (col < 0 || col >= t->num_cols) return (0);
-    DbRow* r = &t->rows[row];
-    if (!r->alive) return (0);
+    DbRow* r = db_live_row_by_pk(handle, pk, col);
+    if (!r) return (0);
     if (r->col_types[col] == COL_TEXT) {
         free(r->text_values[col]);
         r->text_values[col] = NULL;
@@ -681,15 +688,8 @@ static int64_t db_update_text_cstr(int64_t handle_in, const char* pk, int64_t co
     ensure_init();
     int64_t handle = (handle_in);
     int64_t col = (col_in);
-    if (handle < 0 || handle >= DB_MAX_TABLES) return (0);
-    DbTable* t = &g_tables[handle];
-    if (!t->in_use) return (0);
-
-    int64_t row = pk_lookup(t, pk ? pk : "");
-    if (row < 0 || row >= t->row_count) return (0);
-    if (col < 0 || col >= t->num_cols) return (0);
-    DbRow* r = &t->rows[row];
-    if (!r->alive) return (0);
+    DbRow* r = db_live_row_by_pk(handle, pk, col);
+    if (!r) return (0);
     char* value_copy = strdup(value ? value : "");
     if (!value_copy) return (0);
     if (r->text_values[col]) free(r->text_values[col]);
