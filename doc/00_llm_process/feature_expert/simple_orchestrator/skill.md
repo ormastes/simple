@@ -376,9 +376,15 @@ available. These source paths and their manuals remain NOT_RUN.
   CONSUMES it (`service-handoff/adopted-<n>.sdn`, no-replace, exact verified digest) only after the reconcile flip.
   The handoff never flips continuity; the reconcile re-proves exclusion. An approval that expired while the service
   was down is refused at the successor (APPROVAL_EXPIRED).
-- OPEN owner decision: a pending record the successor cannot verify (expired approval, policy bump) quarantines every
-  restart and cannot be superseded; implemented as option (c) operator journal repair. Options (a) signed abandon
-  record, (b) signed supersede: see milestone_0029_ops01_drain_handoff/DESIGN_AND_DECISION.md.
-- The installed policy's controller key must list the `service-handoff` operation.
+- Recovery (coordinator decision 2026-11-18, option a): a pending record the successor cannot verify (expired
+  approval, policy bump) quarantines the start. A controller-signed ABANDON (operation kind `service-handoff-abandon`,
+  payload names the pending sequence + digest + host; wire route `host-service-handoff-abandon`, dispatch
+  `host_service_handoff_abandon_v1`, NOT gated on the quarantine) is verified through the same V4 path and published
+  no-replace as `service-handoff/abandoned-<n>.sdn`; the pending record is kept as evidence and never adopted. After
+  the unit restarts, the sequence is consumed and the start is fresh (the reconcile re-proves exclusion). Operator
+  journal repair stays the last resort. Unsigned or mismatched abandons are refused.
+- INSTALL REQUIREMENT: the installed authority policy's controller key must list BOTH operation kinds,
+  `service-handoff` and `service-handoff-abandon` (the policy `operations` list), or every handoff/abandon is refused
+  with `OPERATION_DENIED`.
 - Specs: `test/01_unit/lib/orchestration/host_service_handoff_v1_spec.spl`; live env-gated, two-process
   `test/03_system/tools/host_service_handoff_live_spec.spl` (pending until its fixture env exists).

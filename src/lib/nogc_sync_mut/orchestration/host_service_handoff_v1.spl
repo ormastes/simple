@@ -8,7 +8,7 @@
 # Neither step touches continuity: the successor's startup reconcile still re-proves exclusion before any flip.
 # This module never imports the service owner (no cycle); the service passes its pieces in.
 use std.common.contracts.orchestration.host_service_handoff_v1.{HostServiceHandoffProofV1, host_service_handoff_proof_decode_v1,
-    host_service_handoff_match_v1}
+    host_service_handoff_match_v1, host_service_handoff_abandon_proof_decode_v1, host_service_handoff_abandon_match_v1}
 use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_scope_fence_id_v2}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
@@ -31,9 +31,20 @@ fn host_service_handoff_pending_relative_v1(sequence: i64) -> text:
 fn host_service_handoff_adopted_relative_v1(sequence: i64) -> text:
     "service-handoff/adopted-" + sequence.to_text() + ".sdn"
 
+fn host_service_handoff_abandoned_relative_v1(sequence: i64) -> text:
+    "service-handoff/abandoned-" + sequence.to_text() + ".sdn"
+
+# Keyed by the proof's digest: an orphan left by a crash before the marker is harmless, and a freshly signed abandon
+# (the old bytes may no longer verify) writes its own evidence instead of colliding with the orphan.
+fn host_service_handoff_abandon_evidence_relative_v1(sequence: i64, digest: text) -> text:
+    "service-handoff/abandon-proof-" + sequence.to_text() + "-" + digest + ".sdn"
+
+# A sequence is consumed once it was adopted OR abandoned; consumed sequences stay contiguous from 1.
 fn service_handoff_adopted_v1(journal: DistributedOperationJournalV2, sequence: i64) -> Result<bool, text>:
-    val marker = distributed_operation_journal_read_v3(journal, host_service_handoff_adopted_relative_v1(sequence), 4096)?
-    Ok(marker.is_some())
+    val adopted = distributed_operation_journal_read_v3(journal, host_service_handoff_adopted_relative_v1(sequence), 4096)?
+    if adopted.is_some(): return Ok(true)
+    val abandoned = distributed_operation_journal_read_v3(journal, host_service_handoff_abandoned_relative_v1(sequence), 4096)?
+    Ok(abandoned.is_some())
 
 # The first sequence whose adoption marker does not exist: the only one a handoff may name. Adopted markers are
 # contiguous from 1, so the head is found by doubling then bisecting (O(log n) reads; a plain start never grows linearly).
@@ -148,3 +159,42 @@ pub fn host_service_handoff_consume_v1(journal: DistributedOperationJournalV2, c
     val readback = distributed_operation_journal_read_required_v3(journal, marker_path, 4096)?
     if readback != marker: return Err("service-handoff-adoption-readback")
     Ok(digest)
+
+# RECOVERY (coordinator decision 2026-11-18, option a): a controller-signed abandon of the ONE pending record the
+# successor cannot verify. Same V4 verification as the handoff itself (issuer == controller_ref, signatures at this
+# clock, policy generation/revocation). It must name the pending record's sequence and digest, and the host; it is
+# published no-replace on the single journal as `abandoned-<n>.sdn`. The pending record is kept as evidence and never
+# adopted: the next start finds the sequence consumed and starts fresh, re-proving exclusion through the normal reconcile.
+pub fn host_service_handoff_abandon_v1(journal: DistributedOperationJournalV2, scope: ContainerHostScopeV2,
+        policy: LocalAuthorityPolicyV1, controller_ref: text, context: HostReservationAuthorizationContextV1,
+        source: text) -> Result<text, text>:
+    val proof = host_service_handoff_abandon_proof_decode_v1(source)?
+    if proof.signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    val matched = host_service_handoff_abandon_match_v1(proof.abandon, proof.operation)?
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, proof.signed, proof.approval, proof.operation,
+        context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)?
+    val sequence = service_handoff_next_v1(journal)?
+    val pending = distributed_operation_journal_read_v3(journal, host_service_handoff_pending_relative_v1(sequence),
+        HOST_SERVICE_HANDOFF_READ_MAX_V1)?
+    if pending.is_none(): return Err("service-handoff-abandon-nothing-pending")
+    if (proof.abandon.sequence != sequence or proof.abandon.pending_digest != sha256_text(pending.unwrap()) or
+            proof.abandon.physical_host_id != scope.physical_host_id):
+        return Err("service-handoff-abandon-mismatch")
+    # The signed proof is kept as evidence in its own record; the marker the sequence probe reads stays small (4096 cap).
+    # The pending digest is the binding to the exact record (it carries the scope); host id is checked above.
+    val evidence_path = host_service_handoff_abandon_evidence_relative_v1(sequence, sha256_text(source))
+    val evidence = distributed_operation_journal_publish_v3(journal, evidence_path, source)?
+    if not evidence:
+        val existing = distributed_operation_journal_read_required_v3(journal, evidence_path, HOST_SERVICE_HANDOFF_READ_MAX_V1)?
+        if existing != source: return Err("service-handoff-abandon-exists")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("service-handoff-abandoned"),
+        "sequence": SdnValue.Int(sequence), "pendingDigest": SdnValue.String(proof.abandon.pending_digest),
+        "abandonDigest": SdnValue.String(sha256_text(source))}
+    val marker = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    val marker_path = host_service_handoff_abandoned_relative_v1(sequence)
+    val saved = distributed_operation_journal_publish_v3(journal, marker_path, marker)?
+    if not saved: return Err("service-handoff-abandon-exists")
+    val readback = distributed_operation_journal_read_required_v3(journal, marker_path, 4096)?
+    if readback != marker: return Err("service-handoff-abandon-readback")
+    Ok(service_handoff_reply_v1("service-handoff-abandoned", sequence, proof.abandon.pending_digest))
