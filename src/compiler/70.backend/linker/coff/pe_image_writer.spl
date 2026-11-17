@@ -225,6 +225,11 @@ fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
     (0, 0)
 
 fn _pe_base_of_data(sections: [PeImageSection]) -> i64:
+    # Prefer a real data section (initialized 0x40 / uninitialized 0x80).
+    for section in sections:
+        if (section.characteristics & 0x20) == 0 and (section.characteristics & 0xc0) != 0 and
+                section.name != ".reloc":
+            return section.virtual_address
     for section in sections:
         if (section.characteristics & 0x20) == 0: return section.virtual_address
     0
@@ -281,6 +286,9 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     val last_size = if last.virtual_size > last.data.len(): last.virtual_size else: last.data.len()
     val size_of_image = pe_align_up(
         last.virtual_address + last_size, policy.section_alignment)
+    val image_end = image_base + size_of_image
+    if pe32 and image_end > 4294967296:
+        return Err("PE32 image base plus image size crosses 4 GiB")
     val relocation_directory = _pe_directory(sections, 5)
     # ASLR flags are only truthful when the image carries base relocations.
     var dll_characteristics: i64 = 0
@@ -408,7 +416,10 @@ fn pe_write_arm64_console(sections: [PeImageSection], entry_rva: i64) -> Result<
 fn pe_write_efi_application(sections: [PeImageSection], entry_rva: i64,
         machine: i64, image_base: i64) -> Result<[u8], text>:
     """Emit an EFI application (subsystem 10): PE32+ for 0x8664/0xAA64, PE32
-    for 0x14c/0x1c2. image_base 0 picks the conventional default."""
+    for 0x14c/0x1c2. image_base 0 picks the conventional default.
+    RELOCS_STRIPPED is never set, so EDK2 loads the image at any address: a
+    caller whose code is not position independent must supply a .reloc
+    section (pe_build_base_relocations: DIR64 for PE32+, HIGHLOW for PE32)."""
     var base = image_base
     if base == 0:
         base = if pe_machine_is_pe32(machine): 0x400000 else: 0x140000000

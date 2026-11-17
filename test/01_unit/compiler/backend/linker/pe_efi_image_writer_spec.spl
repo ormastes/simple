@@ -5,6 +5,7 @@ use compiler.backend.linker.coff.pe_image_writer.{
     PE_MACHINE_ARM_THUMB, PE_SUBSYSTEM_EFI_APPLICATION, pe_write_efi_application}
 use compiler.backend.linker.coff.pe_base_relocation.{
     PE_BASE_RELOCATION_HIGHLOW, PE_BASE_RELOCATION_DIR64, pe_build_base_relocations}
+use compiler.backend.linker.coff.pe_efi_blob.{pe_efi_wrap_blob}
 
 # Shared PE32 / PE32+ EFI application emitter (lanes sbm-a64, sbm-x64,
 # sbm-arm32, sbm-i686). Header offsets: COFF at 0x84, optional header at 0x98.
@@ -43,6 +44,28 @@ describe "PE EFI application emitter":
         expect(_u32_at(bytes, 0xb4)).to_equal(0x400000)
         expect(_u16_at(bytes, 0xdc)).to_equal(10)
         expect(_u16_at(bytes, 0x96) & 0x0100).to_equal(0x0100)
+        step("32-bit stack/heap reserve+commit at optional+0x48..0x57")
+        expect(_u32_at(bytes, 0xe0)).to_equal(0x100000)
+        expect(_u32_at(bytes, 0xe4)).to_equal(0x1000)
+        expect(_u32_at(bytes, 0xe8)).to_equal(0x100000)
+        expect(_u32_at(bytes, 0xec)).to_equal(0x1000)
+        expect(_u32_at(bytes, 0xf4)).to_equal(16)
+
+    it "points PE32 BaseOfData at the first data section, not .reloc":
+        val reloc = PeImageSection(name: ".reloc", virtual_address: 0x2000,
+            virtual_size: 12, data: pe_build_base_relocations([0x1000], PE_BASE_RELOCATION_HIGHLOW).unwrap(),
+            characteristics: 0x42000040)
+        val data = PeImageSection(name: ".data", virtual_address: 0x3000,
+            virtual_size: 4, data: [1 as u8, 2 as u8, 3 as u8, 4 as u8], characteristics: 0xc0000040)
+        val bytes = pe_write_efi_application([_text(), reloc, data], 0x1000, PE_MACHINE_I386, 0x400000).unwrap()
+        expect(_u32_at(bytes, 0xb0)).to_equal(0x3000)
+
+    it "rejects a PE32 image whose base plus size crosses 4 GiB":
+        step("0xffff0000 + 0x21000 (128 KiB .text at 0x1000) ends past 4 GiB")
+        val big = PeImageSection(name: ".text", virtual_address: 0x1000, virtual_size: 0x20000,
+            data: [0 as u8], characteristics: 0xe0000020)
+        expect(pe_write_efi_application([big], 0x1000, PE_MACHINE_I386, 0xffff0000).is_err()).to_equal(true)
+        expect(pe_write_efi_application([_text()], 0x1000, PE_MACHINE_I386, 0xffff0000).is_ok()).to_equal(true)
 
     it "emits a PE32 ARM EFI application with machine 0x01c2 and a Thumb entry":
         step("EDK2 ARM accepts only 0x01c2; the entry RVA keeps its Thumb bit")
@@ -74,3 +97,24 @@ describe "PE EFI application emitter":
     it "keeps DIR64 blocks for PE32+":
         val relocs = pe_build_base_relocations([0x1008], PE_BASE_RELOCATION_DIR64).unwrap()
         expect(_u16_at(relocs, 8)).to_equal(0xa008)
+
+describe "PE EFI blob wrapper":
+    it "patches the blob length at offset 8 and wraps it as an AArch64 EFI app":
+        step("A 32-byte blob gets len=32 at offset 8 and one RWX .text at RVA 0x1000")
+        var blob: [u8] = []
+        while blob.len() < 32: blob = blob.push(0x11 as u8)
+        val bytes = pe_efi_wrap_blob(blob, PE_MACHINE_ARM64, 0).unwrap()
+        expect(_u16_at(bytes, 0x84)).to_equal(0xaa64)
+        expect(_u16_at(bytes, 0xdc)).to_equal(10)
+        expect(_u32_at(bytes, 0xa8)).to_equal(0x1000)
+        val raw = _u32_at(bytes, 0x188 + 20)
+        expect(_u32_at(bytes, 0x188 + 36)).to_equal(0xe0000020)
+        expect(bytes[raw] as i64).to_equal(0x11)
+        expect(_u32_at(bytes, raw + 8)).to_equal(32)
+        expect(_u32_at(bytes, raw + 12)).to_equal(0)
+        expect(bytes[raw + 16] as i64).to_equal(0x11)
+
+    it "rejects a blob too short for the entry header":
+        var blob: [u8] = []
+        while blob.len() < 15: blob = blob.push(0 as u8)
+        expect(pe_efi_wrap_blob(blob, PE_MACHINE_ARM64, 0).is_err()).to_equal(true)
