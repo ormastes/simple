@@ -72,6 +72,10 @@ parse_worker_kb=${P3G_PARSE_WORKER_KB:-}
 hir_worker_kb=${P3G_HIR_WORKER_KB:-}
 mir_worker_kb=${P3G_MIR_WORKER_KB:-}
 mir_shards=${P3G_MIR_SHARDS:-}
+low_memory=${P3G_LOW_MEMORY:-0}
+reserve_bytes=${P3G_RESERVE_BYTES:-${SIMPLE_BUILD_MEMORY_RESERVE_BYTES:-}}
+min_commit_gb=${P3G_MIN_FREE_COMMIT_GB:-8}
+case "$min_commit_gb" in ''|*[!0-9]*) min_commit_gb=8 ;; esac
 lm=${SIMPLE_LLVM_MINGW_ROOT:-C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64}
 ar="$lm/bin/llvm-ar.exe"; [ -x "$ar" ] || ar="$lm/bin/llvm-ar"
 nm="$lm/bin/llvm-nm.exe"; [ -x "$nm" ] || nm="$lm/bin/llvm-nm"
@@ -100,6 +104,10 @@ if [ "$full_backends" = "1" ]; then
     ps_sources="'--source','src/compositions/cuda_static','--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib','--source','src/plugins'"
 else
     ps_sources="'--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib'"
+fi
+ps_low_mem=""
+if [ "$low_memory" = "1" ]; then
+    ps_low_mem="'--low-memory',"
 fi
 
 ptree_env_line="Remove-Item Env:SIMPLE_PROJECT_ROOT -EA SilentlyContinue"
@@ -141,6 +149,9 @@ EOF
     if [ -n "$mir_worker_kb" ]; then
         printf '$env:SIMPLE_MIR_SHARD_WORKER_KB="%s"\n' "$mir_worker_kb" >> "$ps1"
     fi
+    if [ -n "$reserve_bytes" ]; then
+        printf '$env:SIMPLE_BUILD_MEMORY_RESERVE_BYTES="%s"\n' "$reserve_bytes" >> "$ps1"
+    fi
     if [ "$name" = "entry" ]; then
         printf '$env:SIMPLE_MIR_SHARD_COUNT="%s"\n' "${P3G_ENTRY_MIR_SHARDS:-1}" >> "$ps1"
     elif [ -n "$mir_shards" ]; then
@@ -158,7 +169,7 @@ Set-Location "$checkout_win"
 EOF
     if [ -n "$measure" ] && [ -f "$measure" ]; then
         cat >> "$ps1" <<EOF
-& "$measure_win" -Exe "$stage2_win" -Cache "$cache_win" -Log "$out_win/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$stage_o_win') | Tee-Object "$out_win/$name.result.txt"
+& "$measure_win" -Exe "$stage2_win" -Cache "$cache_win" -Log "$out_win/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads',$ps_low_mem'--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$stage_o_win') | Tee-Object "$out_win/$name.result.txt"
 EOF
     else
         cat >> "$ps1" <<EOF
@@ -192,6 +203,27 @@ public static class P3ProcTree {
     private static extern bool Process32Next(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr hObject);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    public static long FreeCommitBytes() {
+        var ms = new MEMORYSTATUSEX();
+        ms.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+        if (!GlobalMemoryStatusEx(ref ms)) return -1;
+        return (long)ms.ullAvailPageFile;
+    }
 
     public static long TreeWorkingSet(int rootPid) {
         var children = new Dictionary<int, List<int>>();
@@ -244,7 +276,15 @@ if (-not ([System.Management.Automation.PSTypeName]'P3ProcTree').Type) {
 }
 \$pOut = "$out_win/$name.build.log"
 \$pErr = "$out_win/$name.build.err"
-\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads','--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$stage_o_win')
+\$minCommitBytes = [int64]$min_commit_gb * 1073741824
+if (\$minCommitBytes -gt 0 -and (([System.Management.Automation.PSTypeName]'P3ProcTree').Type)) {
+    for (\$w = 0; \$w -lt 180; \$w++) {
+        \$freeCommit = [int64][P3ProcTree]::FreeCommitBytes()
+        if (\$freeCommit -lt 0 -or \$freeCommit -ge \$minCommitBytes) { break }
+        Start-Sleep -Seconds 10
+    }
+}
+\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads',$ps_low_mem'--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$stage_o_win')
 \$proc = Start-Process -FilePath "$stage2_win" -ArgumentList \$stageArgs -NoNewWindow -PassThru -RedirectStandardOutput \$pOut -RedirectStandardError \$pErr
 \$null = \$proc.Handle
 \$sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -451,3 +491,4 @@ echo "[p3g] link objects: $(wc -l < "$out/obj-list.txt" | tr -d ' '); dropped: $
 # ---- link -------------------------------------------------------------------
 P3_OBJ_LIST="$out/obj-list.txt" SIMPLE_LLVM_MINGW_ROOT="$lm" \
     sh "$here/p3-manual-link-stage3.shs" "$objs" "$checkout" "$out/simple_stage3.exe"
+rm -f "$out"/aot-*.o "$out"/aot-*.o.capsule-receipt "$out"/*.go-to-end-trial 2>/dev/null || true
