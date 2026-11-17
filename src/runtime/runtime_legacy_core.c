@@ -506,8 +506,8 @@ char* spl_file_read(const char* path) {
     return out;
 }
 
-int rt_file_write(const char* path, const char* content) {
-    FILE* f = path ? rt_crt_fopen(path, "wb") : NULL;
+static int legacy_file_put(const char* path, const char* content, const char* mode) {
+    FILE* f = path ? rt_crt_fopen(path, mode) : NULL;
     if (!f) return 0;
     if (!content) content = "";
     size_t len = strlen(content);
@@ -516,14 +516,12 @@ int rt_file_write(const char* path, const char* content) {
     return n == len ? 1 : 0;
 }
 
+int rt_file_write(const char* path, const char* content) {
+    return legacy_file_put(path, content, "wb");
+}
+
 int rt_file_append(const char* path, const char* content) {
-    FILE* f = path ? rt_crt_fopen(path, "ab") : NULL;
-    if (!f) return 0;
-    if (!content) content = "";
-    size_t len = strlen(content);
-    size_t n = fwrite(content, 1, len, f);
-    fclose(f);
-    return n == len ? 1 : 0;
+    return legacy_file_put(path, content, "ab");
 }
 
 /* This copy had the right ARITY (2), so the extern ABI signature gate never

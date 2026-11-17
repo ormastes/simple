@@ -45,6 +45,7 @@
 #include <wchar.h>
 #include <time.h>
 #include "runtime_process_utf8_private.h"
+#include "runtime_capture_splice_private.h"
 
 /* Versioned value receipt: [1, state, exit_code, native_error].
  * state 0=pending (including output not drained), 1=exited with actual status,
@@ -346,19 +347,8 @@ static void win_capture_finish(struct WinCapture* capture) {
         win_reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
         win_reverse_bytes(tail, capture->tail_len);
     }
-    size_t marker_len = 0;
-    if (capture->total > capture->head_len + capture->tail_len) {
-        char marker[WIN_CAPTURE_MARKER_MAX];
-        uint64_t omitted = capture->total - capture->head_len - capture->tail_len;
-        int written = snprintf(marker, sizeof(marker), "\n[output truncated: %llu bytes omitted]\n",
-                               (unsigned long long)omitted);
-        if (written > 0) marker_len = (size_t)written;
-        memmove(capture->data + capture->head_len + marker_len, tail, capture->tail_len);
-        memcpy(capture->data + capture->head_len, marker, marker_len);
-    } else {
-        memmove(capture->data + capture->head_len, tail, capture->tail_len);
-    }
-    capture->len = capture->head_len + marker_len + capture->tail_len;
+    capture->len = rt_capture_splice_tail(capture->data, capture->head_len, tail,
+                                          capture->tail_len, capture->total);
     capture->data[capture->len] = '\0';
 }
 
