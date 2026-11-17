@@ -2,6 +2,11 @@
 
 Status: open (investigation). The diagnostic has landed. The root cause is not confirmed.
 
+Related: `stage2_sanity_origin_check_p2_add_2026-11-17.md` landed a tagged
+workaround on `release/1.0.0`. It skips the binding when any side is an SCV
+snapshot path. The diagnostic message below also applies to the mismatches
+that workaround still lets through.
+
 ## Symptom
 The p2 Stage 2 sanity build of `src/compiler/bootstrap_admission/p2_add.spl`
 reported 27 errors with the message `source declaration origin mismatches the

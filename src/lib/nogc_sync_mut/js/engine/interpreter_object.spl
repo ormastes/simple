@@ -37,7 +37,7 @@ impl JsInterpreter:
         var hi = self.native_id_map.len() - 1
         while lo <= hi:
             val mid = (lo + hi) / 2
-            val mapping = self.native_id_map.get(mid)
+            val mapping = self.native_id_map[mid]
             if mapping.first == fn_id:
                 return mapping.second
             if mapping.first < fn_id:
@@ -47,9 +47,12 @@ impl JsInterpreter:
         0
 
     # Define a native function in the global scope
-    me _define_global_native(name: text, native_id: i64):
+    me define_global_native_fn(name: text, native_id: i64):
         val fn_idx = self._register_native(name, native_id)
         self.define_global_value(name, JsValue.Function(id: fn_idx))
+
+    me _define_global_native(name: text, native_id: i64):
+        self.define_global_native_fn(name, native_id)
 
     me define_global_value(name: text, value: JsValue):
         var global_var_names: [text] = self.global_var_names
@@ -82,14 +85,14 @@ impl JsInterpreter:
         var shadowed_globals: [text] = []
         var global_i = self.global_var_names.len() - 1
         while global_i >= 0:
-            val global_name = self.global_var_names.get(global_i)
+            val global_name = self.global_var_names[global_i]
             var already_shadowed = false
             for seen in shadowed_globals:
                 if seen == global_name:
                     already_shadowed = true
             if not already_shadowed:
                 shadowed_globals.push(global_name)
-                match self.global_var_values.get(global_i):
+                match self.global_var_values[global_i]:
                     JsValue.Object(id):
                         roots.push(id)
                     JsValue.Array(id):
@@ -99,7 +102,7 @@ impl JsInterpreter:
             global_i = global_i - 1
         for env_frame in self.env_stack.frames:
             for binding_name in env_frame.bindings.keys():
-                match env_frame.bindings.get(binding_name):
+                match env_frame.bindings[binding_name]:
                     Some(JsValue.Object(id)):
                         roots.push(id)
                     Some(JsValue.Array(id)):
@@ -377,7 +380,7 @@ impl JsInterpreter:
         self.object_store.sync_prop_slots()
         val existing_i = self.object_store.find_prop_slot(obj_id, key)
         if existing_i >= 0:
-            if self.object_store.prop_enumerables.get(existing_i) or self.object_store.prop_configurables.get(existing_i):
+            if self.object_store.prop_enumerables[existing_i] or self.object_store.prop_configurables[existing_i]:
                 self.object_store.update_slot(existing_i, stored_value)
                 return
         self.object_store.append_slot(obj_id, key, stored_value)
@@ -418,7 +421,7 @@ impl JsInterpreter:
                     if is_buffer:
                         val early_i = self.object_store.find_prop_slot(obj_id, key)
                         if early_i >= 0:
-                            return self.object_store.prop_values.get(early_i)
+                            return self.object_store.prop_values[early_i]
                         match self.get_object_property(obj_id, "byteLength"):
                             JsValue.Number(byte_length):
                                 if indexed_key < f64_to_i64(byte_length):
@@ -429,7 +432,7 @@ impl JsInterpreter:
                     pass_dn
         val slot = self.object_store.find_prop_slot(obj_id, key)
         if slot >= 0:
-            return self.object_store.prop_values.get(slot)
+            return self.object_store.prop_values[slot]
         if indexed_key >= 0:
             match self.get_object_property(obj_id, "__simple_array_buffer"):
                 JsValue.Boolean(is_buffer):
@@ -451,7 +454,7 @@ impl JsInterpreter:
         var i = slots.len() - 1
         while i >= 0:
             val s = slots[i]
-            val prop_key = self.object_store.prop_keys.get(s)
+            val prop_key = self.object_store.prop_keys[s]
             if prop_key.len() == key.len():
                 var exact = true
                 var j = 0
@@ -460,7 +463,7 @@ impl JsInterpreter:
                         exact = false
                     j = j + 1
                 if exact:
-                    return self.object_store.prop_values.get(s)
+                    return self.object_store.prop_values[s]
             i = i - 1
         JsValue.Undefined
 
@@ -506,15 +509,18 @@ impl JsInterpreter:
             return Some(found)
         var i = self.global_var_names.len() - 1
         while i >= 0:
-            if self.global_var_names.get(i) == name:
-                return Some(self.global_var_values.get(i))
+            if self.global_var_names[i] == name:
+                return Some(self.global_var_values[i])
             i = i - 1
         nil
 
     # Define a native method on an object
-    me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
+    me define_method_on_object(obj_id: i64, method_name: text, native_id: i64):
         val fn_idx = self._register_native(method_name, native_id)
         self.set_object_property(obj_id, method_name, JsValue.Function(id: fn_idx))
+
+    me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
+        self.define_method_on_object(obj_id, method_name, native_id)
 
     # Initialize global environment with built-in objects and functions.
     # Must be a `me` method on JsInterpreter — JsRuntime wrapper hits copy-semantics bug.

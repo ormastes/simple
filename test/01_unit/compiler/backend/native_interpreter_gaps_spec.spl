@@ -1,0 +1,105 @@
+# As a Simple user running code through the native pure-Simple interpreter
+# (engine behind `run`/`test`), I expect module constants, field/index
+# assignment, block values, text/array methods, primitive trait impls and
+# env/file builtins to behave exactly as they do in compiled code.
+#
+# @cover src/compiler/70.backend/backend/interpreter.spl
+# @cover src/compiler/70.backend/backend/interpreter_calls.spl
+# @cover src/compiler/70.backend/backend/interpreter_control.spl
+# @cover src/compiler/70.backend/backend/interpreter_expr.spl
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.backend.backend_types.*
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.common.config.{Logger}
+
+fn gap_run(src: text) -> text:
+    val module = parse_full_frontend(src, "gap_main.spl", "gap_main", Logger(level: 0))
+    var lowering = HirLowering.with_filename("gap_main.spl")
+    val hir = lowering.lower_module(module)
+    var backend = InterpreterBackendImpl.new()
+    match backend.interpret_hir_module(hir):
+        case Ok(BackendResult.Value(Value.String(s))): "string:" + s
+        case Ok(BackendResult.Value(Value.Int(n))): "int:" + n.to_text()
+
+describe "native interpreter: module constants":
+    it "binds a constant that refers to a constant declared later in the file":
+        expect(gap_run("val A = B + 1\nval B = 41\n\nfn main() -> i64:\n    A\n")).to_equal("int:42")
+
+describe "native interpreter: field and index assignment":
+    it "assigns a class field":
+        expect(gap_run("class P:\n    x: i64\n\nfn main() -> i64:\n    val o = P(x: 0)\n    o.x = 1\n    o.x\n")).to_equal("int:1")
+
+    it "adds into a class field with compound assignment":
+        expect(gap_run("class P:\n    x: i64\n\nfn main() -> i64:\n    val o = P(x: 1)\n    o.x += 2\n    o.x\n")).to_equal("int:3")
+
+    it "assigns a struct field":
+        expect(gap_run("struct S:\n    x: i64\n\nfn main() -> i64:\n    var o = S(x: 0)\n    o.x = 5\n    o.x\n")).to_equal("int:5")
+
+    it "adds into a struct field with compound assignment":
+        expect(gap_run("struct S:\n    x: i64\n\nfn main() -> i64:\n    var o = S(x: 4)\n    o.x += 2\n    o.x\n")).to_equal("int:6")
+
+    it "assigns an array element by index":
+        expect(gap_run("fn main() -> i64:\n    var a = [1, 2, 3]\n    a[1] = 9\n    a[0] + a[1] + a[2]\n")).to_equal("int:13")
+
+    it "assigns a dict entry by key":
+        expect(gap_run("fn main() -> i64:\n    var d = {\"j\": 1}\n    d[\"k\"] = 3\n    d[\"k\"]\n")).to_equal("int:3")
+
+describe "native interpreter: block expression value":
+    it "yields the last expression of a multi-statement block":
+        expect(gap_run("fn main() -> i64:\n    val v = if true:\n        val t = 2\n        t * 3\n    else:\n        0\n    v\n")).to_equal("int:6")
+
+describe "native interpreter: text methods":
+    it "reports the byte length":
+        expect(gap_run("fn main() -> i64:\n    \"abc\".byte_len()\n")).to_equal("int:3")
+
+    it "upper-cases text":
+        expect(gap_run("fn main() -> text:\n    \"aBc\".to_upper()\n")).to_equal("string:ABC")
+
+    it "lower-cases text":
+        expect(gap_run("fn main() -> text:\n    \"aBc\".to_lower()\n")).to_equal("string:abc")
+
+    it "takes a substring between two indexes":
+        expect(gap_run("fn main() -> text:\n    \"hello\".substring(1, 3)\n")).to_equal("string:el")
+
+    it "takes a slice between two indexes":
+        expect(gap_run("fn main() -> text:\n    \"hello\".slice(1, 4)\n")).to_equal("string:ell")
+
+    it "replaces every occurrence of a pattern":
+        expect(gap_run("fn main() -> text:\n    \"a-b-c\".replace(\"-\", \"+\")\n")).to_equal("string:a+b+c")
+
+    it "repeats text n times":
+        expect(gap_run("fn main() -> text:\n    \"ab\".repeat(3)\n")).to_equal("string:ababab")
+
+    it "takes a substring from an index to the end":
+        expect(gap_run("fn main() -> text:\n    \"hello\".substring(2)\n")).to_equal("string:llo")
+
+describe "native interpreter: array methods":
+    it "empties an array with clear":
+        expect(gap_run("fn main() -> i64:\n    var a = [1, 2, 3]\n    a.clear()\n    a.len()\n")).to_equal("int:0")
+
+    it "removes and returns the last element with pop":
+        expect(gap_run("fn main() -> i64:\n    var a = [1, 2, 3]\n    val p = a.pop()\n    p * 10 + a.len()\n")).to_equal("int:32")
+
+    it "reverses element order":
+        expect(gap_run("fn main() -> i64:\n    val r = [1, 2, 3].reverse()\n    r[0] * 100 + r[1] * 10 + r[2]\n")).to_equal("int:321")
+
+    it "joins text elements with a separator":
+        expect(gap_run("fn main() -> text:\n    [\"a\", \"b\", \"c\"].join(\"-\")\n")).to_equal("string:a-b-c")
+
+describe "native interpreter: trait method on a primitive":
+    it "calls a trait method implemented for i64":
+        expect(gap_run("trait T:\n    fn twice() -> i64\n\nimpl T for i64:\n    fn twice() -> i64:\n        self * 2\n\nfn main() -> i64:\n    5.twice()\n")).to_equal("int:10")
+
+describe "native interpreter: env and file builtins":
+    it "reads back an environment variable that was set":
+        expect(gap_run("fn main() -> text:\n    env_set(\"GAP_SPEC_VAR\", \"hello\")\n    env_get(\"GAP_SPEC_VAR\")\n")).to_equal("string:hello")
+
+    it "round-trips file write, exists, read and delete":
+        val src = "fn main() -> text:\n    val p = \"build/native_interpreter_gaps_tmp.txt\"\n    file_write(p, \"data\")\n    val had = file_exists(p)\n    val got = file_read(p)\n    file_delete(p)\n    val gone = file_exists(p)\n    if had and not gone:\n        got\n    else:\n        \"bad\"\n"
+        expect(gap_run(src)).to_equal("string:data")

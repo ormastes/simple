@@ -30,11 +30,6 @@ flagged, but they break the "no primitive in public API" requirement:
   the replaced file and is lost (`src/app/mcp/main_lazy_ctx_tools.spl`,
   `ctx_purge_commit`). Unblock: an OS compare-and-rename, or appends that
   re-check the generation after writing.
-- CLI `trace missing` ignores `--profile`: `run_trace_query_v1`
-  (`src/app/traceability/query_main.spl`) hardcodes `TraceProfile.Worktree` for
-  the missing path, while the MCP `simple_trace` applies the requested profile
-  through `trace_command_verdict_v1`. Unblock: parse `--profile` in the legacy
-  query options and pass it to `trace_query_completion_exit_v1`.
 
 ## 4. Test query and harness
 
