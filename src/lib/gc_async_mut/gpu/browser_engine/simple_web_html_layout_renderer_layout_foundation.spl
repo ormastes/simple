@@ -15,7 +15,7 @@ use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signe
 use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_is_monospace}
-use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px}
+use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px, browser_face_ascent_descent_px}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli}
@@ -246,7 +246,19 @@ class InlineLineAlignment:
     by: [i32]
     height: i32
 
+# Distance from the top of a line box (of this style's strut) to its baseline.
+# Chrome (Blink FontHeight::AddLeading): ascent and descent are the face's own,
+# each rounded to whole px; half-leading = (line-height - (ascent + descent)) / 2
+# is FLOORED and goes above, the remainder below. Chrome 159, Liberation Serif
+# 16px (14/3): line-height 24 -> baseline 17, 20 -> 15, 17 -> 14, normal -> 14.
+# Without a measured face the old estimate (font_size * 7/8, leading split on
+# font_size) stays.
 fn inline_line_strut_baseline_offset(st: Style) -> i32:
+    val ad = style_face_ascent_descent(st)
+    if ad.len() == 2:
+        val leading = style_line_h(st) - (ad[0] + ad[1])
+        val above = if leading >= 0: leading / 2 else: 0 - (1 - leading) / 2
+        return above + ad[0]
     val half_leading = (style_line_h(st) - st.font_size) / 2
     half_leading + style_baseline_offset(st)
 
@@ -309,6 +321,9 @@ fn vertical_align_baseline_shift(st: Style, parent_font_size: i32) -> i32:
 
 # Distance from the top of an inline box's content area to its baseline.
 fn inline_content_area_ascent(st: Style) -> i32:
+    val ad = style_face_ascent_descent(st)
+    if ad.len() == 2 and ad[0] > 0:
+        return ad[0]
     (inline_content_area_height(st) - st.font_size + 1) / 2 + style_baseline_offset(st)
 
 # Extent of an inline element's line-height box ABOVE its own baseline,
@@ -746,7 +761,12 @@ fn style_text_line_advance_width_with(by: [i32], txt: text, start: i32, endv: i3
 fn style_font_is_monospace(st: Style) -> bool:
     browser_font_family_is_monospace(st.font_family)
 
+# Content area of an inline box = the face's rounded ascent + descent (Chrome 159:
+# 17px for Liberation Serif 16px, where the estimate below gives 18).
 fn inline_content_area_height(st: Style) -> i32:
+    val ad = style_face_ascent_descent(st)
+    if ad.len() == 2 and ad[0] > 0:
+        return ad[0] + ad[1]
     var h = if style_font_is_monospace(st):
         st.font_size * 19 / 16
     else:
@@ -765,7 +785,14 @@ fn style_decoration_thickness_px(st: Style) -> i32:
     val auto_px = (st.font_size * 733 + 5000) / 10000
     if auto_px < 1: 1 else: auto_px
 
+# [ascent, descent] of the style's face in whole px, or [] without a measured face.
+fn style_face_ascent_descent(st: Style) -> [i32]:
+    browser_face_ascent_descent_px(st.font_family, st.bold, st.font_style_italic, st.font_size)
+
 fn style_baseline_offset(st: Style) -> i32:
+    val ad = style_face_ascent_descent(st)
+    if ad.len() == 2 and ad[0] > 0:
+        return ad[0]
     var baseline = st.font_size * 7 / 8
     if baseline < 1:
         baseline = 1
