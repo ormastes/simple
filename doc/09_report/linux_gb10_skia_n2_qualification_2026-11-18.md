@@ -178,9 +178,9 @@ any worktree, under `/home/yoon/skia-n2/artifacts/`:
 | Provider build, `affine_v3=1`, receipt + digests | PASS (build-only) |
 | Failing-assertion control (seed) | PASS |
 | Native qualification executable | BLOCKED (see above) |
-| `01-solid-boxes` Engine2D/Skia exact RGBA on GB10 | not-run (blocked: runner `not callable` fixed; now web admission `background-position-x`, see bug doc Blocker 3) |
-| `06-rectangular-clip` Engine2D/Skia exact RGBA on GB10 | not-run (blocked) |
-| `02-fractional-edges` vs declared tolerance on GB10 | not-run (blocked) |
+| `01-solid-boxes` Engine2D/Skia exact RGBA on GB10 | not-run: Engine2D BLOCKED (capture producer half lost, bug doc Blocker 4), Skia BLOCKED (seed interpreter lacks `rt_gpu_provider_loaded`, Blocker 5); 0 pixels compared |
+| `06-rectangular-clip` Engine2D/Skia exact RGBA on GB10 | not-run (case 01 has no readback; Blockers 1, 4, 5) |
+| `02-fractional-edges` vs declared tolerance on GB10 | not-run (case 01 has no readback; Blockers 1, 4, 5) |
 | RenderDoc capture on GB10 (generic Engine2D scene) | PASS (2 of 3 tries; regenerated 1 of 1 attempted) |
 | RenderDoc capture of N2 case workers | BLOCKED (no in-app capture hook) |
 | `31-latin-shaping`, GUI input, SPipe/docgen gates | not-run |

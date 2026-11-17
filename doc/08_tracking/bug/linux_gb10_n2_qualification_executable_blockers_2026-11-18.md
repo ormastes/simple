@@ -1,7 +1,7 @@
 # Linux GB10 N2: no runnable qualification executable (seed native-build stall + interpreter "value is not callable")
 
 - **Filed:** 2026-11-18
-- **Status:** open, not attempted (filed only)
+- **Status:** open (2 and 3 fixed; 1, 4 and 5 open)
 - **Blocks:** `doc/08_tracking/todo/simple_2d_skia_renderdoc_linux_n2_2026-09-27.md`
   (cases 01/06/02 on the NVIDIA GB10 have no worker readbacks)
 - **Host:** physical aarch64 Ubuntu 24.04.4 LTS, NVIDIA GB10. There is no
@@ -126,15 +126,89 @@ The same reason also fails the two existing `it`s in
 `corpus_case01_physical_capture_spec.spl`, so the problem is not specific to
 the runner. `01-solid-boxes.html` sets no `background-position`, which means
 the layout producer (`simple_web_html_layout_renderer_paint_draw_ir.spl:193`)
-emits command 1 with a non-`0` `background-position-x`. The
-`_web_style_neutral` check in `web_opaque_box_checks.spl` is right to reject
-it. This is not fixed here: it belongs to web-render, and loosening the
-neutral check would weaken the gate. Log:
+emits command 1 with a non-`0` `background-position-x`. (The first diagnosis
+was that the producer was wrong. That was corrected the same day; see the root
+cause below.) Log:
 `/home/yoon/skia-n2/artifacts/seed_worker_engine2d_case01_after_fix.log`.
 No readback was obtained, so cases 06 and 02 were not run.
 
+### Blocker 3 root cause (fixed 2026-11-18): the admission reader, not the engine
+
+The engine is right. CSS initial `background-position` is `0% 0%`. The
+producer encodes percentages as `-1000 - pct` (`_background_position_value`,
+`simple_web_html_layout_renderer_declarations.spl:325`), and the `background`
+shorthand resets the longhands to that initial value: `-1000`, in
+`simple_web_html_layout_renderer_decl_apply.spl:367`. `_web_style_neutral`
+accepted only `"0"`, so it misread the 0% encoding as an offset. Any Web
+fixture that uses the shorthand was rejected, including the pinned
+`web_opaque_box_v1.html`.
+
+The fix accepts exactly `"0"` and `"-1000"`. Center (`-1050`) and every other
+offset are still rejected; a new `it` in `web_opaque_box_stage1_spec.spl` pins
+both cases. Red on base: 5 `it`s across `web_opaque_box_stage1_spec` and
+`corpus_case01_physical_capture_spec` fail with this reason. Green on head:
+5/5 and 4/4.
+
+## Blocker 4 — Engine2D strict capture producer half lost in merge `e5b290e42a0`
+
+With admission fixed, the case 01 Engine2D worker on the GB10 gets further.
+`vkCreateDevice` returned `VK_ERROR_INITIALIZATION_FAILED` 4 times and then
+succeeded on attempt 5. The worker then fails:
+
+```
+error: semantic: src/app/test/vulkan_2d_qualification/main.spl:2258:17: class `Engine2dDrawIrAdvSubmitResult` has no field named `submission_generation`
+```
+
+`main.spl` has 864 lines. The real site is
+`src/lib/gc_async_mut/gpu/engine2d/final_output_capture.spl`
+(`engine2d_strict_vulkan_capture_completed_submission`), which reads
+`submission.submission_generation` and `result.submission_generation`. This is
+the second case of the interpreter reporting the wrong file and line.
+
+Neither `Engine2dDrawIrAdvSubmitResult` nor `Engine2dDrawIrAdvResult`
+(`draw_ir_adv.spl`) has `submission_generation`, and the result struct also
+lacks `frame_width` and `frame_height`. This holds on `release/1.0.0` and on
+`origin/main`. Those fields, and the strict-Vulkan producer code that sets
+them, were added by wip commit `ef35100f1d4` (2026-09-24).
+
+Merge `e5b290e42a0` ("converge session fixes onto origin/release_phase3",
+2026-10-22) took the consumers from that commit: `final_output_capture.spl`,
+the `*_capture_artifact.spl` files, and `final_output_capture_spec.spl` and
+`physical_capture_artifact_spec.spl`, which construct both structs with those
+fields. It kept parent 1's `draw_ir_adv.spl`, which has none of them. Parent
+`8484154793` has 0 occurrences of `submission_generation: i64 = 0`; parent
+`ef35100f1d4` has 2.
+
+Measured on head: 227 of the 344 non-trivial lines that the wip added to
+`draw_ir_adv.spl` are absent. That includes the fractional and affine
+strict-Vulkan pixel helpers. `Engine2D.latest_vulkan_frame_receipt()` and
+`vulkan_submission_generation()` do exist (`engine.spl:4598`, `:2330`).
+
+Not restored here. It is a 3-week-stale lost-half backport into a hot file,
+and it needs its own lane and review. Log:
+`/home/yoon/skia-n2/artifacts/w-engine2d-corpus-case01.log`.
+
+## Blocker 5 — seed interpreter has no `rt_gpu_provider_loaded`
+
+The case 01 Skia worker, under the seed interpreter on the GB10 with the
+provider env set, fails with:
+
+```
+error: semantic: unknown extern function: rt_gpu_provider_loaded
+```
+
+The symbol is declared in `src/lib/nogc_sync_mut/gpu/provider.spl:8`. Its
+backing exists in `src/runtime/runtime_dynload.c:1477` and in the seed's
+`runtime/src/gpu_provider_twins.rs`, but the seed interpreter's extern dispatch
+does not register it. This is a seed gap and is not patched here. The Skia leg
+therefore needs the native executable (Blocker 1). Log:
+`/home/yoon/skia-n2/artifacts/w-skia-corpus-case01.log`.
+
+No readback was obtained on either leg, so cases 06 and 02 were not run.
+
 ## Not done here
 
-Blocker 2 is fixed (one-token runner fix). Blockers 1 and 3 are not fixed. A pure-Simple self-hosted aarch64
-release binary would bypass both blockers for the N2 run. The interpreter error
+Blockers 2 (runner) and 3 (admission reader) are fixed. Blockers 1, 4 and 5
+are open. A pure-Simple self-hosted aarch64 release binary would bypass
+Blockers 1 and 5, but not Blocker 4. The interpreter error
 and the `getpid` ambiguity are defects in their own right.

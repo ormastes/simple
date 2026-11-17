@@ -121,4 +121,18 @@ under `/home/yoon/skia-n2/artifacts/` (same provider digest `758f717f…bc89`,
 new GB10 capture `ab1bd6af…e3a9`). Executable blockers are filed in
 `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`.
 
+Later the same day (evidence update only; **STATUS unchanged: FAIL**), two
+blockers were fixed:
+- the runner's `value is not callable` defect (PR #10122);
+- the Web admission check misreading the 0% `background-position` encoding.
+
+Case 01 was then run on the GB10 through the seed interpreter, with the
+following results:
+- **Engine2D leg: BLOCKED.** The Vulkan device opened, but the strict-capture
+  producer half was lost in merge `e5b290e42a0` (bug doc Blocker 4).
+- **Skia leg: BLOCKED.** The seed interpreter has no `rt_gpu_provider_loaded`
+  (Blocker 5).
+
+0 pixels were compared, so cases 06 and 02 were not run.
+
 **STATUS: FAIL** — release and physical N2 qualification are not admitted.
