@@ -81,7 +81,8 @@ use std.common.sdn.encode.sdn_encode_canonical
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4, HostAgentPaneWriteV4,
-    host_agent_pane_io_refused_v4, host_agent_pane_lease_v4, host_agent_pane_write_check_v4}
+    host_agent_pane_io_refused_v4, host_agent_pane_lease_v4, host_agent_pane_write_check_v4, host_agent_pane_write_ledger_empty_v4,
+    host_agent_pane_write_lookup_v4, host_agent_pane_write_replay_v4, host_agent_pane_write_record_v4}
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachmentV4, HostAgentAttachmentSummaryV4,
     HostAgentReleaseOutcomeV4, HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, HostAgentPaneIoCallV4,
     HostAgentPaneIoPortTurnV4, HostAgentAttachFactsV4, HostAgentReleaseContextV4, host_agent_attachment_live_v4, host_agent_attachment_in_flight_v4,
@@ -1647,9 +1648,23 @@ pub fn host_agent_pane_io_core_v4(agent: HostLinuxServiceAgentV4, lease: HostAge
         return host_agent_pane_refused_v4(state, "attach-stopping")
     val shape = host_agent_pane_shape_v4(op, att)
     if shape != "": return host_agent_pane_refused_v4(state, shape)
+    # A Write is answered from the ledger when its id was already attempted: an exact retry gets the recorded outcome
+    # WITHOUT a second native write; a reused id with other bytes, a stale id or an unreadable ledger is refused.
+    val ledger = if att.pane_writes.is_some(): att.pane_writes.unwrap() else: host_agent_pane_write_ledger_empty_v4()
+    match op:
+        case HostAgentPaneOpV4.Write(write):
+            match host_agent_pane_write_lookup_v4(ledger, write):
+                case Err(reason): return host_agent_pane_refused_v4(state, reason)
+                case Ok(Some(record)): return HostAgentPaneIoTurnV4(agent: state, result: host_agent_pane_write_replay_v4(record))
+                case Ok(None): pass
+        case _: pass
     val turn = io(HostAgentPaneIoCallV4(attachment: att, op: op, now: state.clock_ms, container: state.container))
     att = turn.attachment
     var result = turn.result
+    match op:
+        case HostAgentPaneOpV4.Write(write):
+            if result.write_attempted: att.pane_writes = Some(host_agent_pane_write_record_v4(ledger, write, result))
+        case _: pass
     if result.eof: att.eof = true
     result.eof = att.eof
     if result.error == "":

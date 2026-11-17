@@ -25,13 +25,33 @@ use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
 use std.common.sdn.value.SdnValue
 use os.apps.smux.client_leases.client_lease_token_valid
 use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 
 fn write_body_v1(extra: Dict<text, SdnValue>) -> text:
     var fields: Dict<text, SdnValue> = {"bindingUid": SdnValue.String("bind1"), "attempt": SdnValue.Int(1),
-        "offset": SdnValue.Int(0), "maximum": SdnValue.Int(2), "data": SdnValue.String("hi")}
+        "writeId": SdnValue.Int(5), "offset": SdnValue.Int(0), "maximum": SdnValue.Int(2), "data": SdnValue.String("hi")}
     for key in extra.keys():
         fields[key] = extra[key]
     sdn_encode_canonical(SdnValue.Dict(fields))
+
+# The response SDN parsed back into its fields, so specs check VALUES, not substrings.
+fn response_fields_v1(response: text) -> Dict<text, SdnValue>:
+    val parsed = sdn_parse_strict_v1(response, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8))
+    match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: {}
+
+fn field_text_v1(fields: Dict<text, SdnValue>, key: text) -> text:
+    match fields[key]:
+        case SdnValue.String(value): value
+        case _: "<not text>"
+
+fn field_bool_v1(fields: Dict<text, SdnValue>, key: text) -> bool:
+    match fields[key]:
+        case SdnValue.Bool(value): value
+        case _: false
 
 fn lease_of(epoch: i64) -> HostAgentPaneLeaseV4:
     host_agent_pane_lease_v4("op-1", epoch, "digest")
@@ -107,6 +127,14 @@ describe "smux agent pane consumer":
             val decoded = smux_agent_pane_write_decode_v1(write_body_v1({}))
             expect(decoded.unwrap().data).to_equal("hi")
             expect(decoded.unwrap().binding_uid).to_equal("bind1")
+            expect(decoded.unwrap().write_id).to_equal(5)
+        step("a body without a write id is refused, and a non-positive or non-integer id is refused"):
+            val bare: Dict<text, SdnValue> = {"bindingUid": SdnValue.String("bind1"), "attempt": SdnValue.Int(1),
+                "offset": SdnValue.Int(0), "maximum": SdnValue.Int(2), "data": SdnValue.String("hi")}
+            expect(smux_agent_pane_write_decode_v1(sdn_encode_canonical(SdnValue.Dict(bare))).unwrap_err()).to_equal("runtime-agent-pane-write-payload")
+            expect(smux_agent_pane_write_decode_v1(write_body_v1({"writeId": SdnValue.Int(0)})).unwrap_err()).to_equal("runtime-agent-pane-write-id")
+            expect(smux_agent_pane_write_decode_v1(write_body_v1({"writeId": SdnValue.Int(-3)})).unwrap_err()).to_equal("runtime-agent-pane-write-id")
+            expect(smux_agent_pane_write_decode_v1(write_body_v1({"writeId": SdnValue.String("5")})).unwrap_err()).to_equal("runtime-agent-pane-write-payload")
         step("a body with an extra field (principal) is refused"):
             expect(smux_agent_pane_write_decode_v1(write_body_v1({"principal": SdnValue.String("root")})).is_err()).to_equal(true)
         step("a body missing a field is refused"):
@@ -151,7 +179,7 @@ describe "smux agent pane consumer":
             accepted_bytes: 2, gate_error: "attach-pane-input-gate-revoke:boom"))
         expect(turn.error).to_equal("")
         expect(turn.response.contains("completed")).to_equal(true)
-        expect(turn.response.contains("gateError")).to_equal(true)
+        expect(field_text_v1(response_fields_v1(turn.response), "gateError")).to_equal("attach-pane-input-gate-revoke:boom")
         expect(turn.lease.is_some()).to_equal(true)
         expect(turn.revoked).to_equal(false)
         val refused = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-write-offset",
@@ -176,15 +204,20 @@ describe "smux agent pane consumer":
             val report = smux_agent_pane_write_revoke_report_v1(done.response, done.error, "control-revision-conflict")
             expect(report.error).to_equal("")
             expect(report.response.contains("completed")).to_equal(true)
-            expect(report.response.contains("revokeError")).to_equal(true)
-            expect(report.response.contains("control-revision-conflict")).to_equal(true)
+            val parsed = response_fields_v1(report.response)
+            expect(field_text_v1(parsed, "revokeError")).to_equal("control-revision-conflict")
+            expect(field_text_v1(parsed, "disposition")).to_equal("completed")
+            expect(field_text_v1(parsed, "kind")).to_equal("host-agent-pane-write")
+            expect(parsed.contains_key("gateError")).to_equal(false)
         step("a revoke error alongside a gate close failure keeps both in the response"):
             val gated = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(disposition: "completed",
                 accepted_bytes: 2, gate_error: "attach-pane-input-gate-revoke:boom"))
             val both = smux_agent_pane_write_revoke_report_v1(gated.response, gated.error, "control-revision-conflict")
             expect(both.error).to_equal("")
-            expect(both.response.contains("gateError")).to_equal(true)
-            expect(both.response.contains("revokeError")).to_equal(true)
+            val both_fields = response_fields_v1(both.response)
+            expect(field_text_v1(both_fields, "gateError")).to_equal("attach-pane-input-gate-revoke:boom")
+            expect(field_text_v1(both_fields, "revokeError")).to_equal("control-revision-conflict")
+            expect(field_text_v1(both_fields, "disposition")).to_equal("completed")
         step("when the write itself failed the error stays the turn error and the revoke error is appended, not dropped"):
             val failed = smux_agent_pane_write_revoke_report_v1("", "attach-pane-write-offset", "control-revision-conflict")
             expect(failed.error).to_equal("attach-pane-write-offset;control-revoke:control-revision-conflict")
@@ -202,5 +235,26 @@ describe "smux agent pane consumer":
     it "pins the native attempt to 1 per Write (PR4 follow-up)":
         # @req PR4-WRITE-09
         val body: Dict<text, SdnValue> = {"bindingUid": SdnValue.String("bind1"), "attempt": SdnValue.Int(2),
-            "offset": SdnValue.Int(0), "maximum": SdnValue.Int(2), "data": SdnValue.String("hi")}
+            "writeId": SdnValue.Int(5), "offset": SdnValue.Int(0), "maximum": SdnValue.Int(2), "data": SdnValue.String("hi")}
         expect(smux_agent_pane_write_decode_v1(sdn_encode_canonical(SdnValue.Dict(body))).unwrap_err()).to_equal("runtime-agent-pane-write-attempt")
+
+    it "marks an answer served from the agent's record as replayed and a fresh answer as not (replay protection)":
+        # @req agent-pane-write-unknown-replay
+        val fresh = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(disposition: "unknown", accepted_bytes: 2))
+        expect(response_fields_v1(fresh.response).contains_key("replayed")).to_equal(false)
+        val replay = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(disposition: "unknown",
+            accepted_bytes: 2, replayed: true))
+        expect(replay.error).to_equal("")
+        expect(field_bool_v1(response_fields_v1(replay.response), "replayed")).to_equal(true)
+        expect(field_text_v1(response_fields_v1(replay.response), "disposition")).to_equal("unknown")
+        step("the replay refusals keep the lease (the agent was reached only to refuse)"):
+            expect(smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-write-id-reused")).lease.is_some()).to_equal(true)
+            expect(smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-write-id-stale")).lease.is_some()).to_equal(true)
+            expect(smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-write-record-unavailable")).lease.is_some()).to_equal(true)
+
+    it "appends the gate and control-revoke suffixes in the documented order for client parsers":
+        # @req agent-pane-write-unknown-replay
+        val failed = smux_agent_pane_write_done_v1(Some(lease_of(1)), HostAgentPaneIoResultV4(error: "attach-pane-write-offset",
+            gate_error: "attach-pane-input-gate-revoke:boom"))
+        val both = smux_agent_pane_write_revoke_report_v1("", failed.error, "control-revision-conflict")
+        expect(both.error).to_equal("attach-pane-write-offset;gate:attach-pane-input-gate-revoke:boom;control-revoke:control-revision-conflict")

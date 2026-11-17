@@ -58,7 +58,7 @@ use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSess
     host_agent_attach_adopt_v4}
 use std.nogc_async_mut.container.terminal_primary_input_v2.{container_primary_input_gate_v2,
     container_primary_input_install_v2, container_primary_input_revoke_v2}
-use std.common.contracts.orchestration.host_agent_pane_v4.HostAgentPaneWriteV4
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneWriteV4, HostAgentPaneWriteLedgerV4}
 use std.common.contracts.mux.session_runtime_control_v1.{SessionRuntimeControlTargetV1, session_runtime_control_target_validate_v1,
     session_runtime_control_target_match_v1}
 use std.common.contracts.container.primary_input_v1.container_primary_input_plan_match_v1
@@ -145,6 +145,8 @@ pub struct HostAgentAttachmentV4:
     # D8: an open/cleanup/settle core step is in flight (not an attach_stage).
     attach_pending: bool = false
     eof: bool = false
+    # Per-lease ledger of attempted pane Writes (the agent is its single owner); None = no Write yet.
+    pane_writes: Option<HostAgentPaneWriteLedgerV4> = None
     attach_stage: text = "opening"
     lease_epoch: i64 = 0
     # The pane lease is handed out once per attachment (13.1 lease-once).
@@ -782,10 +784,12 @@ pub fn host_agent_pane_io_port_v4(call: HostAgentPaneIoCallV4) -> HostAgentPaneI
                 ContainerOwnedTerminalSessionV1.PrimaryAttach(session)), request)
             val gate_error = host_agent_pane_input_close_v4(session)
             if written.is_err():
-                return host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(error: written.unwrap_err(), gate_error: gate_error))
+                return host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(error: written.unwrap_err(), gate_error: gate_error,
+                    write_attempted: true))
             host_agent_pane_io_turn_v4(att, HostAgentPaneIoResultV4(
                 disposition: host_agent_pane_disposition_v4(written.unwrap().disposition),
-                accepted_bytes: written.unwrap().accepted_bytes, error: written.unwrap().error, gate_error: gate_error))
+                accepted_bytes: written.unwrap().accepted_bytes, error: written.unwrap().error, gate_error: gate_error,
+                write_attempted: true))
         case HostAgentPaneOpV4.Resize(request):
             if call.container.is_none(): return host_agent_pane_io_turn_v4(att, host_agent_pane_io_refused_v4("attach-container-missing"))
             host_agent_pane_geometry_v4(att, simple_container_primary_geometry_begin_v1(call.container.unwrap(), session,
