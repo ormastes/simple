@@ -1,0 +1,88 @@
+# Regression (bug rti004-reexport-nominal-type): a struct reached only through
+# a `pub use` re-export facade, constructed inside `Some(...)` for an
+# `Option<T>` field, must lower to MIR without E-RTI-004 ("symbol ... is not a
+# nominal type with a defining module"). Shape of
+# app.orchestrator.host_identity_profile_template_v2:117. Mirrors the real
+# import graph (multi-item pub use before the Paths re-export, field-dependency
+# pre-binding through a store module). GREEN on the seed interpreter: the Stage 2
+# native failure was not reproduced here; this pins the interpreter-path shape.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+val reexp_types = "pub struct Paths:\n    identity_path: text\n    known_hosts_path: text\n"
+val reexp_store = "use lib.io.paths_types.Paths\n\npub struct Store:\n    root: text\n\npub struct ProjA:\n    x: text\n\npub struct ProjB:\n    y: text\n\npub fn store_paths(o: ProjA, s: Store) -> Result<Paths, text>:\n    Ok(Paths(identity_path: o.x, known_hosts_path: s.root))\n"
+val reexp_facade = "pub use lib.io.store.{ProjA,\n    ProjB}\npub use lib.io.paths_types.Paths\nuse lib.io.store.{Store, store_paths}\n\npub fn paths_of(o: ProjA, s: Store) -> Result<Paths, text>:\n    store_paths(o, s)\n"
+val reexp_profile = "use lib.io.store.Store\n\npub struct Profile:\n    store: Store\n    identity_path: text\n\nexport Profile\n"
+val reexp_consumer = "use app.profile.Profile\nuse lib.io.paths_facade.Paths\n\npub struct Tmpl:\n    user: text\n\npub struct Sel:\n    template: Tmpl\n    expected_paths: Option<Paths>\n\npub fn select(kind: text, p: Profile) -> Result<Sel, text>:\n    val selected = match kind:\n        case \"t\":\n            Sel(template: Tmpl(user: p.identity_path), expected_paths: nil)\n        case \"p\":\n            Sel(template: Tmpl(user: p.identity_path),\n                expected_paths: Some(Paths(identity_path: p.identity_path, known_hosts_path: p.identity_path)))\n        case _: return Err(\"kind\")\n    if selected.template.user == \"\": return Err(\"empty\")\n    Ok(selected)\n"
+
+fn reexp_kind_text(k: SymbolKind) -> text:
+    match k:
+        case SymbolKind.Struct: "Struct"
+        case SymbolKind.Class: "Class"
+        case SymbolKind.Function: "Function"
+        case SymbolKind.Const: "Const"
+        case SymbolKind.Variable: "Variable"
+        case SymbolKind.Import: "Import"
+        case SymbolKind.TypeAlias: "TypeAlias"
+        case _: "other"
+
+fn reexp_paths_symbols(symbols: SymbolTable) -> text:
+    """Every symbol spelled `Paths` in the consumer table: kind@module."""
+    var out = ""
+    for sym in symbols.symbols.values():
+        if sym.name == "Paths" or sym.name.ends_with(".Paths") or sym.name.ends_with("::Paths"):
+            out = out + reexp_kind_text(sym.kind) + "@" + (sym.defining_module ?? "") + ";"
+    out
+
+fn reexp_lower_errors() -> text:
+    val logger = Logger(level: 0)
+    val names = ["lib.io.paths_types", "lib.io.store", "lib.io.paths_facade", "app.profile", "app.sel"]
+    val paths = ["lib/io/paths_types.spl", "lib/io/store.spl", "lib/io/paths_facade.spl", "app/profile.spl", "app/sel.spl"]
+    val srcs = [reexp_types, reexp_store, reexp_facade, reexp_profile, reexp_consumer]
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var i = 0
+    while i < names.len():
+        val ast = parse_full_frontend(srcs[i], paths[i], names[i], logger)
+        modules[names[i]] = ast
+        asts.push(ast)
+        sources.push(SourceFile(path: paths[i], content: srcs[i], module_name: names[i]))
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var deps: [HirModule] = []
+    var joined = ""
+    i = 0
+    while i < 4:
+        var dep_lowering = hirlowering_for_module(paths[i], surfaces)
+        deps.push(dep_lowering.lower_module(asts[i]))
+        i = i + 1
+    var consumer_lowering = hirlowering_for_module(paths[4], surfaces)
+    val consumer_hir = consumer_lowering.lower_module(asts[4])
+    for e in consumer_lowering.errors: joined = joined + "HIR:" + e.message + "|"
+    print "paths-symbols={reexp_paths_symbols(consumer_hir.symbols)}"
+    var lowering = MirLowering.new(consumer_hir.symbols)
+    lowering.lower_module(consumer_hir, deps)
+    for e in lowering.errors: joined = joined + "MIR:" + e.message + "|"
+    joined
+
+describe "RTI re-exported nominal constructor":
+    it "lowers a re-exported struct ctor inside Some(...) without E-RTI-004":
+        val errors = reexp_lower_errors()
+        print "errors={errors}"
+        expect(errors.contains("E-RTI-004")).to_equal(false)
+        expect(errors).to_equal("")
