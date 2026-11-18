@@ -650,7 +650,7 @@ pub class WebGLContext:
     me clear(mask: i32) -> bool:
         if not self.ensure_context_available():
             return false
-        if not webgl_valid_clear_mask(mask):
+        if webgl_valid_clear_mask(mask) == WebGLCheck.Invalid:
             self.last_error = WEBGL_INVALID_VALUE
             return false
         # GPU-runnable wave 2: record without a .push() growth call.
@@ -919,7 +919,7 @@ pub class WebGLContext:
     me depth_func(func: i32) -> bool:
         if not self.ensure_context_available():
             return false
-        if not webgl_valid_depth_func(func):
+        if webgl_valid_depth_func(func) == WebGLCheck.Invalid:
             self.last_error = WEBGL_INVALID_ENUM
             return false
         self.depth_func_value = func
@@ -1057,7 +1057,7 @@ pub class WebGLContext:
         if not webgl_valid_blend_factor(src_rgb) or not webgl_valid_blend_factor(dst_rgb) or not webgl_valid_blend_factor(src_alpha) or not webgl_valid_blend_factor(dst_alpha):
             self.last_error = WEBGL_INVALID_ENUM
             return false
-        if webgl_blend_factor_mixes_constant_color_and_alpha(src_rgb, dst_rgb, src_alpha, dst_alpha):
+        if webgl_blend_constant_factor_check(src_rgb, dst_rgb, src_alpha, dst_alpha) == WebGLCheck.Invalid:
             self.last_error = WEBGL_INVALID_OPERATION
             return false
         self.blend_src_factor = src_rgb
@@ -1073,7 +1073,7 @@ pub class WebGLContext:
     me blend_equation_separate(mode_rgb: i32, mode_alpha: i32) -> bool:
         if not self.ensure_context_available():
             return false
-        if not webgl_valid_blend_equation(mode_rgb) or not webgl_valid_blend_equation(mode_alpha):
+        if webgl_valid_blend_equation(mode_rgb) == WebGLCheck.Invalid or webgl_valid_blend_equation(mode_alpha) == WebGLCheck.Invalid:
             self.last_error = WEBGL_INVALID_ENUM
             return false
         self.blend_equation_rgb = mode_rgb
@@ -1638,9 +1638,24 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         render_commands: []
     )
 
-pub fn webgl_is_supported_context_name(name: text) -> bool:
+pub enum WebGLCheck:
+    Valid
+    Invalid
+
+pub enum WebGLConstantUse:
+    Uses
+    DoesNotUse
+
+pub enum WebGLTextureSize:
+    PowerOfTwo
+    NonPowerOfTwo
+
+fn webgl_check(ok: bool) -> WebGLCheck:
+    if ok: WebGLCheck.Valid else: WebGLCheck.Invalid
+
+pub fn webgl_is_supported_context_name(name: text) -> WebGLCheck:
     val lower = name.lower()
-    lower == "webgl" or lower == "experimental-webgl" or lower == "webgl2"
+    webgl_check(lower == "webgl" or lower == "experimental-webgl" or lower == "webgl2")
 
 pub fn webgl_context_version_for_name(name: text) -> i32:
     val lower = name.lower()
@@ -1668,7 +1683,7 @@ pub fn webgl_validate_shader_source_for_version(shader_type: i32, source: text, 
         return "fragment shader must write a color output"
     ""
 
-pub fn webgl_parameter_bool(value: bool) -> WebGLParameterValue:
+pub(package) fn webgl_parameter_bool(value: bool) -> WebGLParameterValue:
     WebGLParameterValue(value_kind: "bool", bool_value: value, bool_values: [], int_value: 0, int_values: [], float_value: 0.0, float_values: [], text_value: "")
 
 pub fn webgl_parameter_bool_list(values: [bool]) -> WebGLParameterValue:
@@ -1752,16 +1767,16 @@ pub fn webgl_empty_active_info() -> WebGLActiveInfo:
 pub fn webgl_invalid_texture_handle(error: text) -> WebGLTextureHandle:
     webgl_default_texture_handle(-1, false, error)
 
-pub fn webgl_default_texture_handle(id: i32, valid: bool, error: text) -> WebGLTextureHandle:
+pub(package) fn webgl_default_texture_handle(id: i32, valid: bool, error: text) -> WebGLTextureHandle:
     WebGLTextureHandle(id: id, valid: valid, error: error, target: 0, width: 0, height: 0, level: 0, internal_format: 0, format: 0, pixel_type: 0, initialized: false, min_filter: WEBGL_LINEAR_MIPMAP_LINEAR, mag_filter: WEBGL_LINEAR, wrap_s: WEBGL_REPEAT, wrap_t: WEBGL_REPEAT, mipmap_generated: false, pixels: [])
 
 pub fn webgl_invalid_sampler_handle(error: text) -> WebGLSamplerHandle:
     webgl_default_sampler_handle(-1, false, error)
 
-pub fn webgl_default_sampler_handle(id: i32, valid: bool, error: text) -> WebGLSamplerHandle:
+pub(package) fn webgl_default_sampler_handle(id: i32, valid: bool, error: text) -> WebGLSamplerHandle:
     WebGLSamplerHandle(id: id, valid: valid, error: error, min_filter: WEBGL_NEAREST_MIPMAP_LINEAR, mag_filter: WEBGL_LINEAR, wrap_s: WEBGL_REPEAT, wrap_t: WEBGL_REPEAT)
 
-pub fn webgl_default_framebuffer_handle(id: i32, valid: bool, error: text) -> WebGLFramebufferHandle:
+pub(package) fn webgl_default_framebuffer_handle(id: i32, valid: bool, error: text) -> WebGLFramebufferHandle:
     WebGLFramebufferHandle(id: id, valid: valid, error: error, color_texture_id: -1, color_texture_face: 0, color_renderbuffer_id: -1, depth_renderbuffer_id: -1, stencil_renderbuffer_id: -1, depth_stencil_renderbuffer_id: -1)
 
 pub fn webgl_attached_shader_count(program: WebGLProgramHandle) -> i32:
@@ -1806,7 +1821,7 @@ pub fn webgl_collect_uniforms_from_source(source: text, active: [WebGLActiveInfo
         i = i + 1
     result
 
-pub fn webgl_has_active_info(active: [WebGLActiveInfo], name: text) -> bool:
+fn webgl_has_active_info(active: [WebGLActiveInfo], name: text) -> bool:
     var i = 0
     while i < active.len():
         if active[i].name == name:
@@ -1904,7 +1919,7 @@ pub fn webgl_canonical_extension_name(name: text) -> text:
         i = i + 1
     ""
 
-pub fn webgl_text_list_contains(values: [text], needle: text) -> bool:
+pub(package) fn webgl_text_list_contains(values: [text], needle: text) -> bool:
     var i = 0
     while i < values.len():
         if values[i] == needle:
@@ -1937,7 +1952,7 @@ pub fn webgl_default_texture_units() -> [WebGLTextureUnitState]:
         i = i + 1
     units
 
-pub fn webgl_texture_cube_face_target(target: i32) -> bool:
+pub(package) fn webgl_texture_cube_face_target(target: i32) -> bool:
     target == WEBGL_TEXTURE_CUBE_MAP_POSITIVE_X or target == WEBGL_TEXTURE_CUBE_MAP_NEGATIVE_X or target == WEBGL_TEXTURE_CUBE_MAP_POSITIVE_Y or target == WEBGL_TEXTURE_CUBE_MAP_NEGATIVE_Y or target == WEBGL_TEXTURE_CUBE_MAP_POSITIVE_Z or target == WEBGL_TEXTURE_CUBE_MAP_NEGATIVE_Z
 
 pub fn webgl_texture_binding_target(target: i32) -> i32:
@@ -1947,47 +1962,56 @@ pub fn webgl_texture_binding_target(target: i32) -> i32:
         return WEBGL_TEXTURE_CUBE_MAP
     0
 
-pub fn webgl_valid_attrib_index(index: i32) -> bool:
+pub(package) fn webgl_valid_attrib_index(index: i32) -> bool:
     index >= 0 and index < WEBGL_MAX_VERTEX_ATTRIBS
 
-pub fn webgl_valid_buffer_usage(usage: i32) -> bool:
+pub(package) fn webgl_valid_buffer_usage(usage: i32) -> bool:
     usage == WEBGL_STATIC_DRAW or usage == WEBGL_DYNAMIC_DRAW or usage == WEBGL_STREAM_DRAW
 
-pub fn webgl_valid_draw_mode(mode: i32) -> bool:
-    mode == WEBGL_POINTS or mode == WEBGL_LINES or mode == WEBGL_LINE_LOOP or mode == WEBGL_LINE_STRIP or mode == WEBGL_TRIANGLES or mode == WEBGL_TRIANGLE_STRIP or mode == WEBGL_TRIANGLE_FAN
+pub fn webgl_valid_draw_mode(mode: i32) -> WebGLCheck:
+    webgl_check(mode == WEBGL_POINTS or mode == WEBGL_LINES or mode == WEBGL_LINE_LOOP or mode == WEBGL_LINE_STRIP or mode == WEBGL_TRIANGLES or mode == WEBGL_TRIANGLE_STRIP or mode == WEBGL_TRIANGLE_FAN)
 
-pub fn webgl_valid_clear_mask(mask: i32) -> bool:
+pub fn webgl_valid_clear_mask(mask: i32) -> WebGLCheck:
     val allowed = WEBGL_COLOR_BUFFER_BIT + WEBGL_DEPTH_BUFFER_BIT + WEBGL_STENCIL_BUFFER_BIT
-    mask != 0 and (mask & allowed) == mask
+    webgl_check(mask != 0 and (mask & allowed) == mask)
 
-pub fn webgl_valid_depth_func(func: i32) -> bool:
-    webgl_valid_stencil_func(func)
+pub fn webgl_valid_depth_func(func: i32) -> WebGLCheck:
+    webgl_check(webgl_valid_stencil_func(func))
 
-pub fn webgl_valid_stencil_func(func: i32) -> bool:
+fn webgl_valid_stencil_func(func: i32) -> bool:
     func == WEBGL_NEVER or func == WEBGL_LESS or func == WEBGL_EQUAL or func == WEBGL_LEQUAL or func == WEBGL_GREATER or func == WEBGL_NOTEQUAL or func == WEBGL_GEQUAL or func == WEBGL_ALWAYS
 
-pub fn webgl_valid_stencil_op(op: i32) -> bool:
+fn webgl_valid_stencil_op(op: i32) -> bool:
     op == WEBGL_KEEP or op == WEBGL_ZERO or op == WEBGL_REPLACE or op == WEBGL_INCR or op == WEBGL_INCR_WRAP or op == WEBGL_DECR or op == WEBGL_DECR_WRAP or op == WEBGL_INVERT
 
-pub fn webgl_valid_blend_factor(factor: i32) -> bool:
+fn webgl_valid_blend_factor(factor: i32) -> bool:
     factor == WEBGL_ZERO or factor == WEBGL_ONE or factor == WEBGL_SRC_ALPHA or factor == WEBGL_ONE_MINUS_SRC_ALPHA or factor == WEBGL_CONSTANT_COLOR or factor == WEBGL_ONE_MINUS_CONSTANT_COLOR or factor == WEBGL_CONSTANT_ALPHA or factor == WEBGL_ONE_MINUS_CONSTANT_ALPHA
 
-pub fn webgl_blend_factor_uses_constant_color(factor: i32) -> bool:
+fn webgl_constant_use(uses: bool) -> WebGLConstantUse:
+    if uses: WebGLConstantUse.Uses else: WebGLConstantUse.DoesNotUse
+
+fn webgl_factor_constant_color(factor: i32) -> bool:
     factor == WEBGL_CONSTANT_COLOR or factor == WEBGL_ONE_MINUS_CONSTANT_COLOR
 
-pub fn webgl_blend_factor_uses_constant_alpha(factor: i32) -> bool:
+fn webgl_factor_constant_alpha(factor: i32) -> bool:
     factor == WEBGL_CONSTANT_ALPHA or factor == WEBGL_ONE_MINUS_CONSTANT_ALPHA
 
+pub fn webgl_blend_factor_uses_constant_color(factor: i32) -> WebGLConstantUse:
+    webgl_constant_use(webgl_factor_constant_color(factor))
+
+pub fn webgl_blend_factor_uses_constant_alpha(factor: i32) -> WebGLConstantUse:
+    webgl_constant_use(webgl_factor_constant_alpha(factor))
+
 # @tag(src_rgb=rgb_src_factor, dst_rgb=rgb_dst_factor, src_alpha=alpha_src_factor, dst_alpha=alpha_dst_factor)
-pub fn webgl_blend_factor_mixes_constant_color_and_alpha(src_rgb: i32, dst_rgb: i32, src_alpha: i32, dst_alpha: i32) -> bool:
-    val uses_color = webgl_blend_factor_uses_constant_color(src_rgb) or webgl_blend_factor_uses_constant_color(dst_rgb) or webgl_blend_factor_uses_constant_color(src_alpha) or webgl_blend_factor_uses_constant_color(dst_alpha)
-    val uses_alpha = webgl_blend_factor_uses_constant_alpha(src_rgb) or webgl_blend_factor_uses_constant_alpha(dst_rgb) or webgl_blend_factor_uses_constant_alpha(src_alpha) or webgl_blend_factor_uses_constant_alpha(dst_alpha)
-    uses_color and uses_alpha
+pub fn webgl_blend_constant_factor_check(src_rgb: i32, dst_rgb: i32, src_alpha: i32, dst_alpha: i32) -> WebGLCheck:
+    val uses_color = webgl_factor_constant_color(src_rgb) or webgl_factor_constant_color(dst_rgb) or webgl_factor_constant_color(src_alpha) or webgl_factor_constant_color(dst_alpha)
+    val uses_alpha = webgl_factor_constant_alpha(src_rgb) or webgl_factor_constant_alpha(dst_rgb) or webgl_factor_constant_alpha(src_alpha) or webgl_factor_constant_alpha(dst_alpha)
+    webgl_check(not (uses_color and uses_alpha))
 
-pub fn webgl_valid_blend_equation(mode: i32) -> bool:
-    mode == WEBGL_FUNC_ADD or mode == WEBGL_FUNC_SUBTRACT or mode == WEBGL_FUNC_REVERSE_SUBTRACT or mode == WEBGL_MIN or mode == WEBGL_MAX
+pub fn webgl_valid_blend_equation(mode: i32) -> WebGLCheck:
+    webgl_check(mode == WEBGL_FUNC_ADD or mode == WEBGL_FUNC_SUBTRACT or mode == WEBGL_FUNC_REVERSE_SUBTRACT or mode == WEBGL_MIN or mode == WEBGL_MAX)
 
-pub fn webgl_valid_shader_precision_type(precision_type: i32) -> bool:
+pub(package) fn webgl_valid_shader_precision_type(precision_type: i32) -> bool:
     precision_type == WEBGL_LOW_FLOAT or precision_type == WEBGL_MEDIUM_FLOAT or precision_type == WEBGL_HIGH_FLOAT or precision_type == WEBGL_LOW_INT or precision_type == WEBGL_MEDIUM_INT or precision_type == WEBGL_HIGH_INT
 
 pub fn webgl_shader_precision_format_invalid(error: text) -> WebGLShaderPrecisionFormat:
@@ -2008,20 +2032,20 @@ pub fn webgl_shader_precision_format_for(precision_type: i32) -> WebGLShaderPrec
         return WebGLShaderPrecisionFormat(range_min: 31, range_max: 31, precision: 0, valid: true, error: "")
     webgl_shader_precision_format_invalid("invalid precision type")
 
-pub fn webgl_valid_texture_min_filter(param: i32) -> bool:
+pub(package) fn webgl_valid_texture_min_filter(param: i32) -> bool:
     param == WEBGL_NEAREST or param == WEBGL_LINEAR or param == WEBGL_NEAREST_MIPMAP_NEAREST or param == WEBGL_LINEAR_MIPMAP_NEAREST or param == WEBGL_NEAREST_MIPMAP_LINEAR or param == WEBGL_LINEAR_MIPMAP_LINEAR
 
-pub fn webgl_valid_texture_wrap(param: i32) -> bool:
+pub(package) fn webgl_valid_texture_wrap(param: i32) -> bool:
     param == WEBGL_CLAMP_TO_EDGE or param == WEBGL_REPEAT or param == WEBGL_MIRRORED_REPEAT
 
-pub fn webgl_valid_renderbuffer_format(format: i32) -> bool:
+pub(package) fn webgl_valid_renderbuffer_format(format: i32) -> bool:
     format == WEBGL_RGBA4 or format == WEBGL_RGB565 or format == WEBGL_DEPTH_COMPONENT16 or format == WEBGL_STENCIL_INDEX8 or format == WEBGL_DEPTH_STENCIL
 
-pub fn webgl_valid_renderbuffer_attachment(attachment: i32) -> bool:
+pub(package) fn webgl_valid_renderbuffer_attachment(attachment: i32) -> bool:
     attachment == WEBGL_COLOR_ATTACHMENT0 or attachment == WEBGL_DEPTH_ATTACHMENT or attachment == WEBGL_STENCIL_ATTACHMENT or attachment == WEBGL_DEPTH_STENCIL_ATTACHMENT
 
 # @tag(format=pixel_format, attachment=framebuffer_attachment)
-pub fn webgl_renderbuffer_format_matches_attachment(format: i32, attachment: i32) -> bool:
+fn webgl_renderbuffer_format_matches_attachment(format: i32, attachment: i32) -> bool:
     if attachment == WEBGL_COLOR_ATTACHMENT0:
         return format == WEBGL_RGBA4 or format == WEBGL_RGB565
     if attachment == WEBGL_DEPTH_ATTACHMENT:
@@ -2032,7 +2056,7 @@ pub fn webgl_renderbuffer_format_matches_attachment(format: i32, attachment: i32
         return format == WEBGL_DEPTH_STENCIL
     false
 
-pub fn webgl_framebuffer_has_attachment(framebuffer: WebGLFramebufferHandle) -> bool:
+pub(package) fn webgl_framebuffer_has_attachment(framebuffer: WebGLFramebufferHandle) -> bool:
     framebuffer.color_texture_id >= 0 or framebuffer.color_renderbuffer_id >= 0 or framebuffer.depth_renderbuffer_id >= 0 or framebuffer.stencil_renderbuffer_id >= 0 or framebuffer.depth_stencil_renderbuffer_id >= 0
 
 pub fn webgl_framebuffer_attachment_object_type(framebuffer: WebGLFramebufferHandle, attachment: i32) -> i32:
@@ -2100,13 +2124,11 @@ pub fn webgl_clear_renderbuffer_attachment(framebuffer: WebGLFramebufferHandle, 
         result.depth_stencil_renderbuffer_id = -1
     result
 
-pub fn webgl_power_of_two(value: i32) -> bool:
-    if value <= 0:
-        return false
+pub fn webgl_texture_size_class(value: i32) -> WebGLTextureSize:
     var candidate = 1
     while candidate < value:
         candidate = candidate * 2
-    candidate == value
+    if value > 0 and candidate == value: WebGLTextureSize.PowerOfTwo else: WebGLTextureSize.NonPowerOfTwo
 
 # @tag(value=stored_value, low=range_start, high=range_end)
 pub fn webgl_clamp_f64(value: f64, low: f64, high: f64) -> f64:
@@ -2136,7 +2158,7 @@ pub fn webgl_texture_pixel_bytes(format: i32, pixel_type: i32) -> i32:
 pub fn webgl_supported_compressed_texture_formats() -> [i32]:
     []
 
-pub fn webgl_supported_compressed_texture_format(format: i32) -> bool:
+pub(package) fn webgl_supported_compressed_texture_format(format: i32) -> bool:
     val formats = webgl_supported_compressed_texture_formats()
     var i = 0
     while i < formats.len():
