@@ -41,6 +41,52 @@ fn quote_cl_response_arg(arg: &str) -> String {
     format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Windows CreateProcess rejects command lines over 32 KiB (os error 206). A
+/// freestanding kernel link passes ~800 object paths plus defsyms, so spill
+/// every argument, in order, into `@rsp` once the joined argv nears the limit.
+/// `direct_lld` adds `--rsp-quoting=posix` so ld.lld decodes the escaped
+/// backslashes the same way on every host; the clang driver already accepts
+/// this quoting (hosted owner-member link, measured 2026-11-13).
+const RESPONSE_FILE_ARGV_LIMIT: usize = 24 * 1024;
+
+fn spill_args_to_response_file(
+    cmd: &std::process::Command,
+    rsp_path: &Path,
+    direct_lld: bool,
+) -> Result<Option<std::process::Command>, String> {
+    let total: usize = cmd.get_args().map(|a| a.len() + 3).sum();
+    if total <= RESPONSE_FILE_ARGV_LIMIT {
+        return Ok(None);
+    }
+    let mut body = String::with_capacity(total * 2);
+    for arg in cmd.get_args() {
+        let arg = arg
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 link argument {:?}", arg))?;
+        if arg.contains('\n') {
+            return Err(format!("unsupported newline in link argument {:?}", arg));
+        }
+        body.push_str(&quote_cl_response_arg(arg));
+        body.push(' ');
+    }
+    std::fs::write(rsp_path, body).map_err(|e| format!("write link response file {}: {e}", rsp_path.display()))?;
+    let mut spilled = std::process::Command::new(cmd.get_program());
+    if let Some(dir) = cmd.get_current_dir() {
+        spilled.current_dir(dir);
+    }
+    for (key, value) in cmd.get_envs() {
+        match value {
+            Some(v) => spilled.env(key, v),
+            None => spilled.env_remove(key),
+        };
+    }
+    if direct_lld {
+        spilled.arg("--rsp-quoting=posix");
+    }
+    spilled.arg(format!("@{}", rsp_path.display()));
+    Ok(Some(spilled))
+}
+
 fn hosted_elf_link_args(target: Target, exact_stage4: bool) -> &'static [&'static str] {
     match target.os {
         TargetOS::Linux | TargetOS::FreeBSD if exact_stage4 => &["-no-pie"],
@@ -3913,6 +3959,11 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         }
 
         let mut cmd = super::tools::respell_args_for_external_tool(&cmd);
+        if let Some(spilled) =
+            spill_args_to_response_file(&cmd, &temp_dir.join("freestanding_link.rsp"), use_direct_lld.is_some())?
+        {
+            cmd = spilled;
+        }
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
@@ -4011,6 +4062,52 @@ pub(crate) fn normalize_windows_pe_metadata(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod linker_tests {
     use super::*;
+
+    // Bug: doc/08_tracking/bug/windows_seed_freestanding_link_cmdline_too_long_2026-11-19.md
+    #[test]
+    fn freestanding_link_spills_long_argv_into_response_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("ld.lld");
+        cmd.arg("--gc-sections");
+        let long_dir = "C:\\dev\\wt\\deep\\worktree\\.simple\\native-objects-XXXXXX";
+        for i in 0..800 {
+            cmd.arg(format!("{long_dir}\\mod_{i:04}.o"));
+        }
+        cmd.arg("with space.o");
+        let rsp = temp.path().join("freestanding_link.rsp");
+        let spilled = spill_args_to_response_file(&cmd, &rsp, true).unwrap().expect("argv over limit must spill");
+        let args: Vec<String> = spilled.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec!["--rsp-quoting=posix".to_string(), format!("@{}", rsp.display())]);
+        assert_eq!(spilled.get_program(), "ld.lld");
+        let body = std::fs::read_to_string(&rsp).unwrap();
+        // Order preserved, every arg quoted, backslashes escaped for posix quoting.
+        assert!(body.starts_with("\"--gc-sections\" \"C:\\\\dev\\\\wt"));
+        assert!(body.trim_end().ends_with("\"with space.o\""));
+        assert_eq!(body.matches(".o\"").count(), 801);
+    }
+
+    #[test]
+    fn freestanding_link_keeps_short_argv_inline() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("clang");
+        cmd.arg("-o").arg("k.elf").arg("a.o");
+        let rsp = temp.path().join("freestanding_link.rsp");
+        assert!(spill_args_to_response_file(&cmd, &rsp, false).unwrap().is_none());
+        assert!(!rsp.exists());
+    }
+
+    #[test]
+    fn freestanding_link_clang_spill_has_no_lld_quoting_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("clang");
+        for i in 0..2000 {
+            cmd.arg(format!("obj_with_a_reasonably_long_name_{i:05}.o"));
+        }
+        let rsp = temp.path().join("freestanding_link.rsp");
+        let spilled = spill_args_to_response_file(&cmd, &rsp, false).unwrap().unwrap();
+        let args: Vec<String> = spilled.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec![format!("@{}", rsp.display())]);
+    }
 
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
