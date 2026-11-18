@@ -40,6 +40,7 @@ struct ElfSharedLib:
     export_sizes: {text: i64}
     export_values: {text: i64}
     export_versions: {text: text} # reference spelling -> required version name
+    needs: [text] = []   # undefined GLOBAL/WEAK dynamic symbols this object references
 
 fn elf_shared_effective_soname(embedded: text, fallback_name: text) -> Result<text, text>:
     if embedded != "": return Ok(embedded)
@@ -296,6 +297,7 @@ fn elf_parse_shared_dynamic(bytes: [u8], header: ElfHeader,
     var export_sizes: {text: i64} = {}
     var export_values: {text: i64} = {}
     var export_versions: {text: text} = {}
+    var needs: [text] = []
     var k: i64 = 1
     while k < symbol_count:
         val e = symtab_offset + k * 24
@@ -304,6 +306,11 @@ fn elf_parse_shared_dynamic(bytes: [u8], header: ElfHeader,
         val shndx = elf_read_u16_le(bytes, e + 6)
         val linkable = (shndx != 0 and elf_shared_symbol_binding_linkable(info >> 4) and
             elf_shared_symbol_visible(other))
+        if shndx == 0 and ((info >> 4) == 1 or (info >> 4) == 2):
+            match elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e), "dynamic symbol name"):
+                case Ok(v):
+                    if v != "": needs = needs.push(v)
+                case Err(err): return Err(err)
         if linkable:
             # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
             val name: text = match elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e),
@@ -346,7 +353,7 @@ fn elf_parse_shared_dynamic(bytes: [u8], header: ElfHeader,
     soname = trytext_59
     Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports,
         export_sizes: export_sizes, export_values: export_values,
-        export_versions: export_versions))
+        export_versions: export_versions, needs: needs))
 
 fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedLib, text>:
     """Parse an ET_DYN shared object's SONAME and dynamic exports."""
@@ -429,6 +436,7 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
     var export_sizes: {text: i64} = {}
     var export_values: {text: i64} = {}
     var export_versions: {text: text} = {}
+    var needs: [text] = []
     val count = symsec.sh_size / syment
     if versym_i >= 0:
         val versymsec = elf_so_checked_section(bytes, shoff, shnum, versym_i,
@@ -445,6 +453,11 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
         val bind = info >> 4
         val linkable = (shndx != 0 and elf_shared_symbol_binding_linkable(bind) and
             elf_shared_symbol_visible(other))
+        if shndx == 0 and (bind == 1 or bind == 2):
+            match elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e), "dynamic symbol name"):
+                case Ok(v):
+                    if v != "": needs = needs.push(v)
+                case Err(err): return Err(err)
         if linkable:
             # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
             val name: text = match elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e),
@@ -509,7 +522,7 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
     soname = trytext_61
     Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports,
         export_sizes: export_sizes, export_values: export_values,
-        export_versions: export_versions))
+        export_versions: export_versions, needs: needs))
 
 fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     """Strict byte-only parser; callers with an input filename use the named form."""

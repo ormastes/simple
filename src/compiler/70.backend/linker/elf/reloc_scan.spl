@@ -203,6 +203,7 @@ struct ElfScan:
     copy_size: [i64]
     copy_align: [i64]
     copy_idx: {text: i64}
+    exports: [text] = []   # executable definitions a DSO references (hashed .dynsym tail)
 
 fn elf_reloc_what(r: ElfScanRef) -> text:
     "relocation type {r.rtype} against '{r.name}'"
@@ -411,8 +412,53 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
 # ============================================================================
 
 export ElfScanRef, ElfScan
-export elf_reloc_scan, elf_reloc_class, elf_target_is_a64
+export elf_reloc_scan, elf_scan_add_exports, elf_reloc_class, elf_target_is_a64
 export elf_raw_dynamic_tls_relocation, elf_mode_pie, elf_mode_dynamic, elf_got_key
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 export SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS
 export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD, RC_PLTOFF, RC_TLS_GD, RC_TLS_LDM
+
+fn elf_scan_add_exports(sc: ElfScan, names: [text], weak: [bool], types: [i64]) -> ElfScan:
+    """Append executable-defined symbols that a shared object references (e.g.
+    FreeBSD libc's `environ`) to .dynsym, as ld.lld does. They join the COPY
+    names in the GNU-hashed tail, so that tail is re-sorted and import_idx
+    rebuilt; undefined imports keep their order and indices."""
+    if names.len() == 0: return sc
+    var weak_of: {text: bool} = {}
+    var type_of: {text: i64} = {}
+    var ordered: [text] = []
+    var ordered_weak: [bool] = []
+    var ordered_type: [i64] = []
+    var tail: [text] = []
+    var i: i64 = 0
+    while i < sc.imports.len():
+        val n = sc.imports[i]
+        weak_of[n] = sc.import_weak[i]
+        type_of[n] = sc.import_type[i]
+        if sc.copy_idx.has(n):
+            tail = tail.push(n)
+        else:
+            ordered = ordered.push(n)
+            ordered_weak = ordered_weak.push(sc.import_weak[i])
+            ordered_type = ordered_type.push(sc.import_type[i])
+        i = i + 1
+    i = 0
+    while i < names.len():
+        weak_of[names[i]] = weak[i]
+        type_of[names[i]] = types[i]
+        tail = tail.push(names[i])
+        i = i + 1
+    for n in elf_gnu_hash_sort(tail):
+        ordered = ordered.push(n)
+        ordered_weak = ordered_weak.push(weak_of[n])
+        ordered_type = ordered_type.push(type_of[n])
+    var import_idx: {text: i64} = {}
+    i = 0
+    while i < ordered.len():
+        import_idx[ordered[i]] = i + 1
+        i = i + 1
+    ElfScan(got_keys: sc.got_keys, got_ref: sc.got_ref, got_idx: sc.got_idx, plt_names: sc.plt_names, plt_idx: sc.plt_idx,
+        imports: ordered, import_idx: import_idx, import_weak: ordered_weak, import_type: ordered_type,
+        sym_abs: sc.sym_abs, tls_dynamic: sc.tls_dynamic, relative: sc.relative,
+        copy_names: sc.copy_names, copy_size: sc.copy_size,
+        copy_align: sc.copy_align, copy_idx: sc.copy_idx, exports: names)
