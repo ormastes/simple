@@ -1,0 +1,180 @@
+# @gc -- one fresh-process real-model sample for the tree (radix) KV cache perf diff.
+#
+# Lanes: none (cache off), snapshot (whole-state snapshots, the default), and the
+# tree modes: tree = mode 1 (unified KV, whole-micro-batch reuse), tree_max =
+# mode 2 (unified, every matched token), tree_stream = mode 3 (per-sequence KV
+# streams, whole-micro-batch reuse). tree_nocache = mode 1 with capacity 0 (no
+# insertion, so no reuse): isolates the cost/exactness of the shared context.
+# Workloads:
+#   branching        8 requests: 4 users sharing one long system prompt, then the
+#                    same 4 users again with a follow-up appended.
+#   branching_seeded the system prompt alone first, then the same 8 requests.
+#   multiturn        6-turn chat; each prompt = previous prompt + reply + next user line.
+# Prints SLANG_KV_TREE_TEXTS (every generated text) and one SLANG_KV_TREE_RESULT line.
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationRequest, engine_set_lib_path, engine_set_n_ctx_text, engine_set_prefix_cache_limits, engine_set_prefix_cache_mode, engine_tree_cache_stats, engine_ensure_loaded, engine_generate_observed_request, engine_prefix_cache_stats, engine_unload}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.cli.cli_util.{get_cli_args}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_size, time_now_monotonic_ms}
+
+fn argument(args: [text], name: text, fallback: text) -> text:
+    val prefix = "--" + name + "="
+    for item in args:
+        if item.starts_with(prefix):
+            return item.substring(prefix.len())
+    fallback
+
+fn blocked(reason: text):
+    print "SLANG_KV_TREE_RESULT status=BLOCKED reason={reason}"
+
+# About 700 tokens: long enough that prefill dominates a 16-token decode.
+fn system_prompt() -> text:
+    val owners = ["alpha", "bravo", "charlie", "delta", "echo"]
+    var doc = "You are the KV cache ledger assistant. The ledger records which serving request owns each cache page"
+    var i = 1
+    while i <= 40:
+        doc = doc + ". Page " + i.to_text() + " belongs to request " + owners[i % 5] +
+            " and holds " + (i * 16).to_text() + " tokens of sealed attention state"
+        i = i + 1
+    doc + ". Answer briefly."
+
+fn user_turn(k: i64) -> text:
+    val topics = ["page seven", "page twelve", "page nineteen", "page thirty"]
+    " Question " + k.to_text() + ": which request owns " + topics[k % 4]
+
+fn follow_up(k: i64) -> text:
+    " Follow-up " + k.to_text() + ": and how many tokens does it hold"
+
+struct Observed:
+    texts: text
+    count: i64
+    gen_tokens: i64
+
+fn ask(prompt: text, tokens: text, acc: Observed) -> Result<Observed, text>:
+    match engine_generate_observed_request(EngineGenerationRequest(prompt: prompt, max_tokens: tokens)):
+        Err(reason): Err(reason)
+        Ok(generated):
+            val n = generated.generated_tokens.parse_i64() ?? 0
+            Ok(Observed(texts: acc.texts + generated.output.len().to_text() + ":" + generated.output + "|",
+                count: acc.count + 1, gen_tokens: acc.gen_tokens + n))
+
+fn run_branching(seeded: bool, tokens: text) -> Result<Observed, text>:
+    var acc = Observed(texts: "", count: 0, gen_tokens: 0)
+    val sys = system_prompt()
+    if seeded:
+        acc = ask(sys, tokens, acc)?
+    var k: i64 = 1
+    while k <= 4:
+        acc = ask(sys + user_turn(k), tokens, acc)?
+        k = k + 1
+    k = 1
+    while k <= 4:
+        acc = ask(sys + user_turn(k) + follow_up(k), tokens, acc)?
+        k = k + 1
+    Ok(acc)
+
+fn run_multiturn(tokens: text) -> Result<Observed, text>:
+    var acc = Observed(texts: "", count: 0, gen_tokens: 0)
+    var prompt = system_prompt() + "\nUser: hello, who owns page one"
+    var turn: i64 = 1
+    while turn <= 6:
+        match engine_generate_observed_request(EngineGenerationRequest(prompt: prompt, max_tokens: tokens)):
+            Err(reason): return Err(reason)
+            Ok(generated):
+                val n = generated.generated_tokens.parse_i64() ?? 0
+                acc = Observed(texts: acc.texts + generated.output.len().to_text() + ":" + generated.output + "|",
+                    count: acc.count + 1, gen_tokens: acc.gen_tokens + n)
+                prompt = prompt + generated.output + "\nUser: and page " + (turn + 1).to_text()
+        turn = turn + 1
+    Ok(acc)
+
+fn run_workload(workload: text, tokens: text) -> Result<Observed, text>:
+    if workload == "branching":
+        return run_branching(false, tokens)
+    if workload == "branching_seeded":
+        return run_branching(true, tokens)
+    if workload == "multiturn":
+        return run_multiturn(tokens)
+    Err("unknown-workload")
+
+fn lane_mode(lane: text) -> i64:
+    if lane == "tree" or lane == "tree_nocache":
+        return 1
+    if lane == "tree_max":
+        return 2
+    if lane == "tree_stream":
+        return 3
+    0
+
+fn main():
+    val args = get_cli_args()
+    val model_path = argument(args, "model-path", "")
+    val model_id = argument(args, "model-id", "")
+    val lib_path = argument(args, "lib", "build/sffi/slang_ggml.dll")
+    val lane = argument(args, "lane", "")
+    val workload = argument(args, "workload", "")
+    val tokens = argument(args, "tokens", "16")
+    val n_ctx = argument(args, "n-ctx", "4096")
+    val known = ["none", "snapshot", "tree", "tree_nocache", "tree_max", "tree_stream"]
+    var lane_ok = false
+    for k in known:
+        if k == lane:
+            lane_ok = true
+    if model_path == "" or model_id == "" or not lane_ok:
+        blocked("invalid-arguments")
+        return
+    engine_set_lib_path(lib_path)
+    if not engine_set_n_ctx_text(n_ctx):
+        blocked("context-configuration-rejected")
+        return
+    var entries: i64 = 4
+    var bytes: i64 = 2147483648
+    if lane == "none" or lane == "tree_nocache":
+        entries = 0
+        bytes = 0
+    engine_set_prefix_cache_limits(entries, bytes)
+    if not engine_set_prefix_cache_mode(lane_mode(lane), 0):
+        blocked("mode-rejected")
+        return
+    val model = NativeModel(id: model_id, root: model_path, format: "gguf",
+        bytes: file_size(model_path), entry_path: model_path, runnable: true,
+        reason: "", mmproj_path: "")
+    match engine_ensure_loaded(model):
+        Err(reason):
+            blocked("load:" + reason)
+            return
+        Ok(_): ()
+    # Load and a disjoint one-token warmup are outside resident timing.
+    match engine_generate_observed_request(EngineGenerationRequest(
+          prompt: "Zebra.", max_tokens: "1")):
+        Err(reason):
+            blocked("warmup:" + reason)
+            return
+        Ok(_): ()
+    val before = engine_prefix_cache_stats()
+    if before == nil:
+        blocked("telemetry-unavailable")
+        return
+    val started_ms = time_now_monotonic_ms()
+    val generated = run_workload(workload, tokens)
+    val elapsed_ms = time_now_monotonic_ms() - started_ms
+    match generated:
+        Err(reason):
+            engine_unload()
+            blocked("request:" + reason)
+            return
+        Ok(observed):
+            val after = engine_prefix_cache_stats()
+            val tree = engine_tree_cache_stats()
+            if after == nil or tree == nil:
+                engine_unload()
+                blocked("telemetry-unavailable")
+                return
+            val a = after!
+            val b = before!
+            val t = tree!
+            engine_unload()
+            print "SLANG_KV_TREE_TEXTS {observed.texts}"
+            print "SLANG_KV_TREE_RESULT status=PASS lane={lane} workload={workload} model={model_id} requests={observed.count} gen_tokens={observed.gen_tokens} resident_elapsed_ms={elapsed_ms} output_digest={sha256_text(observed.texts)} prefilled_tokens={a.tokens_prefilled - b.tokens_prefilled} reused_tokens={a.tokens_reused - b.tokens_reused} hits={a.hits - b.hits} misses={a.misses - b.misses} admissions={a.admissions - b.admissions} evictions={a.evictions - b.evictions} resident_entries={a.resident_entries} restore_failures={a.restore_failures} tree_mode={t.mode} tree_nodes={t.nodes} tree_cached_tokens={t.cached_tokens} tree_shared_tokens={t.shared_tokens} ttft_status=unavailable"
+
+main()
