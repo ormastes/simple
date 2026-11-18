@@ -21,7 +21,7 @@ Build pinned OpenSBI v1.4 with `PLATFORM=generic PLATFORM_RISCV_XLEN=32 LLVM=1
 FW_PAYLOAD=y`. Add `crt0_riscv32.S` and a `riscv32` case (`qemu-system-riscv32
 -machine virt -bios fw_payload.bin`, payload at 0x80400000). Never `-kernel`.
 
-## Progress 2026-11-17 (nbm-rv32 lane) -- status: open, partially booted
+## Progress 2026-11-17 -- SUPERSEDED by RESOLVED below (store8 value in a2 was the i64 runtime; now a1)
 - Firmware: `~/.simple/firmware/src/opensbi-1.7` builds a clang (`LLVM=1`)
   rv32 `fw_payload.bin` with `PLATFORM=generic PLATFORM_RISCV_XLEN=32
   FW_PAYLOAD=y FW_PAYLOAD_PATH=image.bin` (payload at 0x80400000, S-mode).

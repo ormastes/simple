@@ -30,3 +30,4 @@
   words) and arm32 (AAPCS: even r-pair) lanes must reuse `bm_rt32.spl` or hit the same defect;
   per-arch crt0 must use 32-bit arguments.
 - Similar-pattern tests: the transcript includes i64 0, -7, MAX, MIN and a text concat chain.
+Note: bm_rt32.spl encodes the backend current i64 packing (len in a1:a2); if the compiler aligns i64 pairs, update bm_rt32.spl and the other 32-bit lanes in the same change.
