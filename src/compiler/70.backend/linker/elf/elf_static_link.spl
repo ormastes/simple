@@ -77,7 +77,7 @@ use compiler.backend.linker.elf.reloc_scan.{
     elf_mode_pie, elf_mode_dynamic, elf_target_is_a64, elf_got_key,
     ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE,
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
-    RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE, RC_PLTOFF
+    RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE, RC_PLTOFF, RC_TLS_GD, RC_TLS_LDM
 }
 use compiler.backend.linker.veneer.{veneer_table_new, ARM_VENEER_SLOT, arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry, arm_veneer_offset, arm_veneer_key,
     ARM_VENEER_TO_ARM_PIC, arm_veneer_bytes_at, arm_veneer_pic_fits}
@@ -2091,11 +2091,13 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     var n_got_glob: i64 = 0     # GOT slots needing GLOB_DAT (imports)
     var n_tls_ie_import: i64 = 0 # GOT slots needing TPOFF64 (imported TLS)
     for j in sc.got_ref:
-        if refs[j].kind == SYMREF_IMPORT and refs[j].rclass == RC_TLS_IE:
+        if refs[j].kind == SYMREF_IMPORT and (refs[j].rclass == RC_TLS_IE or refs[j].rclass == RC_TLS_GD):
             n_tls_ie_import = n_tls_ie_import + 1
         else if refs[j].kind == SYMREF_IMPORT and not sc.copy_idx.has(refs[j].name):
             n_got_glob = n_got_glob + 1
-        else if pie and refs[j].kind == SYMREF_DEFINED and refs[j].rclass != RC_TLS_IE:
+        else if pie and refs[j].kind == SYMREF_DEFINED and refs[j].rclass != RC_TLS_IE and
+                refs[j].rclass != RC_TLS_GD and refs[j].rclass != RC_TLS_LDM:
+            # (local GD/LDM pairs are link-time constants in an executable)
             n_got_rel = n_got_rel + 1
     val n_rela_dyn = sc.relative.len() + n_got_rel + n_got_glob +
         n_tls_ie_import + sc.sym_abs.len() + sc.tls_dynamic.len() +
@@ -2340,6 +2342,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 return Err("local-dynamic DTPREL relocation requires a local TLS definition: {r.name}")
             s = elf_tls_dtprel(plan, s + a)?
             a = 0
+            if target == RelocArch.Arm32: rtype = 2  # R_ARM_TLS_LDO32 writes the word
         else if r.rclass == RC_TLS_MOD:
             if r.kind != SYMREF_DEFINED:
                 return Err("TLS module relocation requires a local TLS definition: {r.name}")
@@ -2372,6 +2375,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 rtype = 1   # R_X86_64_64 applies Z + A
             else:
                 rtype = 10  # R_X86_64_32 applies Z + A with width checking
+        else if r.rclass == RC_TLS_GD or r.rclass == RC_TLS_LDM:
+            s = got_v + sc.got_idx[elf_got_key(r)] * got_ws
+            rtype = 3  # R_ARM_TLS_GD32/LDM32 = GOT pair + A - P (R_ARM_REL32 shape)
         else if r.rclass == RC_TLS_IE:
             s = got_v + sc.got_idx[elf_got_key(r)] * got_ws
             if elf_target_is_riscv(target):
@@ -2532,7 +2538,20 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     while gi < sc.got_keys.len():
         val r = refs[sc.got_ref[gi]]
         val slot = got_v + gi * got_ws
-        if r.rclass == RC_TLS_IE and r.kind == SYMREF_IMPORT:
+        if r.rclass == RC_TLS_GD or r.rclass == RC_TLS_LDM:
+            # ld.lld (executable): the module index is 1 and the offset is
+            # static unless the symbol is imported (DTPMOD32/DTPOFF32).
+            val second = sc.got_keys[gi].ends_with("#2")
+            if r.kind == SYMREF_IMPORT:
+                got.extend(elf_got_word(w32, 0))
+                rela_sym.extend(elf_dyn_rel_entry(w32, slot, sc.import_idx[r.name], if second: 18 else: 17, 0))
+            else if not second:
+                got.extend(elf_got_word(w32, 1))
+            else if r.rclass == RC_TLS_LDM:
+                got.extend(elf_got_word(w32, 0))
+            else:
+                got.extend(elf_got_word(w32, elf_tls_dtprel(plan, elf_ref_addr(ctx, lay, r)?)?))
+        else if r.rclass == RC_TLS_IE and r.kind == SYMREF_IMPORT:
             got.extend(elf_got_word(w32, 0))
             rela_sym.extend(elf_dyn_rel_entry(w32, slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0))
         else if r.rclass == RC_TLS_IE:

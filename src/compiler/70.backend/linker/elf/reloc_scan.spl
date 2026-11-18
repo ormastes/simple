@@ -63,6 +63,8 @@ pub val RC_SIZE: i64 = 9         # link-time symbol extent plus addend
 pub val RC_TLS_LD: i64 = 10      # local-dynamic offset from the PT_TLS block start
 pub val RC_TLS_MOD: i64 = 11     # statically known TLS module identifier
 val RC_PLTOFF: i64 = 12      # function/PLT address relative to the GOT base
+pub val RC_TLS_GD: i64 = 13       # general-dynamic GOT pair (DTPMOD, DTPOFF) for one symbol
+pub val RC_TLS_LDM: i64 = 14      # local-dynamic GOT pair (DTPMOD, 0) for the executable's module
 
 fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
     if target == RelocArch.Riscv64 or target == RelocArch.Riscv32:
@@ -88,6 +90,9 @@ fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
         if rtype == 26 or rtype == 96: return RC_GOT  # GOT_BREL: G + A - GOT_ORG; GOT_PREL: G + A - P
         if rtype == 108: return RC_TLS_LE  # R_ARM_TLS_LE32: S + A - TP (variant I)
         if rtype == 107: return RC_TLS_IE  # R_ARM_TLS_IE32: GOT(S) + A - P
+        if rtype == 104: return RC_TLS_GD  # R_ARM_TLS_GD32: GOT pair(S) + A - P
+        if rtype == 105: return RC_TLS_LDM # R_ARM_TLS_LDM32: module GOT pair + A - P
+        if rtype == 106: return RC_TLS_LD  # R_ARM_TLS_LDO32: S + A - TLS block start
         if rtype == 2 or rtype == 5 or rtype == 8 or rtype == 38 or rtype == 43 or rtype == 44 or
                 rtype == 47 or rtype == 48:
             return RC_ABS_NARROW
@@ -217,6 +222,8 @@ fn elf_got_key(reference: ElfScanRef) -> text:
     # Both domains are tagged, so arbitrary symbol names cannot impersonate
     # another relocation domain. Address and TP-offset slots never alias.
     if reference.rclass == RC_TLS_IE: return "tls-ie:" + reference.key
+    if reference.rclass == RC_TLS_GD: return "tls-gd:" + reference.key
+    if reference.rclass == RC_TLS_LDM: return "tls-ldm:" 
     "address:" + reference.key
 
 fn elf_raw_dynamic_tls_relocation(target: RelocArch, rtype: i64) -> bool:
@@ -275,15 +282,30 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
     while j < refs.len():
         val r = refs[j]
         val c = r.rclass
-        val got_key = if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE:
+        val got_key = if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE or c == RC_TLS_GD or c == RC_TLS_LDM:
             elf_got_key(r)
         else:
             ""
         if c == RC_NONE:
             j = j + 1
             continue
-        if target == RelocArch.Arm32 and r.rtype >= 104 and r.rtype <= 106:
-            return Err("UnsupportedFeature: {elf_reloc_what(r)}: ARM TLS GD/LDM/LDO needs a DTPMOD32/DTPOFF32 GOT pair, not implemented")
+        if c == RC_TLS_GD or c == RC_TLS_LDM:
+            # Two adjacent slots: [DTPMOD, DTPOFF]; the second key is "<key>#2".
+            if c == RC_TLS_LDM and r.kind == SYMREF_IMPORT:
+                return Err("{elf_reloc_what(r)}: local-dynamic TLS needs a local definition")
+            if r.kind == SYMREF_IMPORT and not import_idx.has(r.name):
+                imports = imports.push(r.name)
+                import_idx[r.name] = imports.len()
+                import_weak = import_weak.push(r.weak)
+                import_type = import_type.push(r.stype)
+            if not got_idx.has(got_key):
+                got_idx[got_key] = got_keys.len()
+                got_keys = got_keys.push(got_key)
+                got_ref = got_ref.push(j)
+                got_keys = got_keys.push(got_key + "#2")
+                got_ref = got_ref.push(j)
+            j = j + 1
+            continue
         if r.kind == SYMREF_IMPORT:
             if not import_idx.has(r.name):
                 imports = imports.push(r.name)
@@ -393,4 +415,4 @@ export elf_reloc_scan, elf_reloc_class, elf_target_is_a64
 export elf_raw_dynamic_tls_relocation, elf_mode_pie, elf_mode_dynamic, elf_got_key
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 export SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS
-export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD, RC_PLTOFF
+export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD, RC_PLTOFF, RC_TLS_GD, RC_TLS_LDM

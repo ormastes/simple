@@ -1,6 +1,6 @@
 # armv7 dynamic: Thumb B.W to imports and ARM TLS GD/LDM/LDO
 
-- **status:** verification-pending (fail-closed only; feature not implemented)
+- **status:** verification-pending. Both cases are now implemented: a PIC Thumb->ARM veneer to the PLT, and GD/LDM GOT pairs with DTPMOD32/DTPOFF32 plus LDO32. Verified under qemu-arm against ld.lld.
 - **found by:** Opus review of the armv7 dynamic linker commit (lane c)
 
 ## Defect
@@ -13,6 +13,3 @@
 ## Repro and prevention
 `test/01_unit/compiler/backend/linker/elf_dynamic_tls_scan_spec.spl`, section "armv7 dynamic scan fail-closed".
 
-## Open
-- Implement the interworking thunk to the PLT.
-- Implement the ARM TLS GD/LD GOT pairs.

@@ -263,3 +263,20 @@ ld.lld -shared --soname libadd_arm.so --hash-style=both -o libadd_arm.so.1 dyn_l
 
 dyn_start_arm.o: R_ARM_THM_CALL add_val (import -> ARM PLT, BLX), R_ARM_GOT_PREL msg (GLOB_DAT).
 Runs under `qemu-arm-static -L /usr/arm-linux-gnueabihf`: `hi`, exit 42, same as ld.lld.
+
+## armv7 Thumb B.W thunk and GD/LDM TLS fixtures
+
+Uses the same `PIC` flags and `T=--target=armv7-linux-gnueabihf`:
+
+```
+clang $T $PIC dyn_tail_arm.c -o dyn_tail_arm.o
+clang $T $PIC dyn_tls_arm.c -o t1.o && clang $T -c dyn_tlsld_arm.s -o t2.o && ld.lld -r -o dyn_tls_arm.o t1.o t2.o
+clang $T $PIC dyn_tlslib_arm.c -o tl.o && ld.lld -shared --soname libtls_arm.so --hash-style=both -o libtls_arm.so.1 tl.o
+clang $T $PIC ldstub_arm.c -o ls.o && ld.lld -shared --soname ld-linux-armhf.so.3 --hash-style=both -o ldstub_arm.so.1 ls.o
+```
+
+- **dyn_tail_arm.o** has `R_ARM_THM_JUMP24` to `add_val`, which is imported. Its Thumb `B.W` reaches the ARM-state PLT through a PIC veneer.
+- **dyn_tls_arm.o** has `R_ARM_TLS_GD32` for `tv` (imported from libtls) and for `lv` (local). It also has `R_ARM_TLS_LDM32` and `R_ARM_TLS_LDO32` for `lv3`. The program exits with 37 + 3 + 2 = 42.
+- **ldstub_arm.so.1** is a link-time stand-in for `ld-linux-armhf.so.3` and exports only `__tls_get_addr`. The runtime uses the real loader, plus `libc.so.6`.
+
+Under `qemu-arm-static -L /usr/arm-linux-gnueabihf`, the Simple linker and ld.lld give the same results in both dynamic and PIE modes: `hi`/rc=42 for the tail-call fixture and rc=42 for the TLS fixture.
