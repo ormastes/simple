@@ -18,7 +18,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -763,6 +763,7 @@ pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlCh
     text_line_boxes_reset()
     text_device_dy_reset()
     box_device_top_reset()
+    box_device_extra_h_reset()
     val flow = layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
     # ::marker box post-pass (bug browser_engine_no_list_marker_boxes_
     # 2026-08-19). list-style-position outside default: the marker box sits
@@ -1259,6 +1260,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         val control_inner_pad = if node.tag == "select": SELECT_INNER_BLOCK_PADDING_PX else: 0
         val auto_control_h = control_rows * control_line_h + control_inner_pad + st.pad_t + st.pad_b + border_y
         val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_control_h else: auto_control_h)
+        if st.height_px <= 0 and h == auto_control_h:
+            box_device_extra_h_record(nodes.len() as i32, i, form_control_device_extra_h(node, st, control_rows))
         out_bh[i] = h
         if st.width_px == 0 and not st.width_zero:
             # Intrinsic width: `size` columns for <input>, `cols` for
@@ -3394,7 +3397,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     )
                     out_bx = aligned.bx
                     out_by = aligned.by
-                    cy = cy + aligned.height
+                    cy = cy + aligned.height + cursor_advance_px(cy_frac, aligned.height_frac_milli)
+                    cy_frac = cursor_advance_frac(cy_frac, aligned.height_frac_milli)
                     # `\n\n` kept by white-space: each further newline is an
                     # empty line (Chrome 159: b 48 below a).
                     if kept_breaks > 1:
@@ -3458,7 +3462,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             )
                             out_bx = wbr_aligned.bx
                             out_by = wbr_aligned.by
-                            cy = cy + wbr_aligned.height
+                            cy = cy + wbr_aligned.height + cursor_advance_px(cy_frac, wbr_aligned.height_frac_milli)
+                            cy_frac = cursor_advance_frac(cy_frac, wbr_aligned.height_frac_milli)
                             inline_start_x = float_ctx_left_edge(cy, cy + line_probe_h, ix + inline_base_x) - ix
                             line_iw = float_ctx_right_edge(cy, cy + line_probe_h, ix + iw) - ix
                             inline_x = inline_start_x
@@ -3692,7 +3697,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             )
                             out_bx = broken.bx
                             out_by = broken.by
-                            cy = cy + broken.height
+                            cy = cy + broken.height + cursor_advance_px(cy_frac, broken.height_frac_milli)
+                            cy_frac = cursor_advance_frac(cy_frac, broken.height_frac_milli)
                             inline_start_x = float_ctx_left_edge(cy, cy + line_probe_h, ix + inline_base_x) - ix
                             line_iw = float_ctx_right_edge(cy, cy + line_probe_h, ix + iw) - ix
                             inline_x = inline_start_x
@@ -3761,7 +3767,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     )
                     out_bx = aligned.bx
                     out_by = aligned.by
-                    cy = cy + aligned.height
+                    cy = cy + aligned.height + cursor_advance_px(cy_frac, aligned.height_frac_milli)
+                    cy_frac = cursor_advance_frac(cy_frac, aligned.height_frac_milli)
                     inline_start_x = float_ctx_left_edge(cy, cy + line_probe_h, ix + inline_base_x) - ix
                     line_iw = float_ctx_right_edge(cy, cy + line_probe_h, ix + iw) - ix
                     inline_x = inline_start_x
@@ -3884,7 +3891,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         )
                         out_bx = run_first.bx
                         out_by = run_first.by
-                        cy = cy + run_first.height + (text_lines - 2) * run_line_h
+                        cy = cy + run_first.height + (text_lines - 2) * run_line_h + cursor_advance_px(cy_frac, run_first.height_frac_milli)
+                        cy_frac = cursor_advance_frac(cy_frac, run_first.height_frac_milli)
                         var run_tail_x = text_last_line_advance(
                             nodes[c].text_trimmed, cst,
                             out_wrap_starts[c], out_wrap_ends[c]
@@ -3989,7 +3997,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 )
                 out_bx = aligned.bx
                 out_by = aligned.by
-                cy = cy + aligned.height
+                cy = cy + aligned.height + cursor_advance_px(cy_frac, aligned.height_frac_milli)
+                cy_frac = cursor_advance_frac(cy_frac, aligned.height_frac_milli)
                 in_inline_run = false
                 inline_start_x = float_ctx_left_edge(cy, cy + line_probe_h, ix + inline_base_x) - ix
                 line_iw = float_ctx_right_edge(cy, cy + line_probe_h, ix + iw) - ix
@@ -4294,7 +4303,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             )
             out_bx = aligned.bx
             out_by = aligned.by
-            cy = cy + aligned.height
+            cy = cy + aligned.height + cursor_advance_px(cy_frac, aligned.height_frac_milli)
+            cy_frac = cursor_advance_frac(cy_frac, aligned.height_frac_milli)
         if block_bottom_margin_collapses_through(nodes, styles, i, st):
             trailing_margin_b = prev_margin_b
         else:
@@ -4344,6 +4354,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # An authored or clamped height makes the bottom edge start + h exactly, so the
     # residual is the start fraction; a content height ends where the cursor did.
     val end_frac = if h == content_h and st.height_px <= 0 and not st.contain_size: cy_frac else: origin_frac
+    box_device_extra_h_record(nodes.len() as i32, i, box_device_top_px((end_frac - origin_frac) * layout_device_scale()))
     LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b, leading_margin_t: leading_margin_t, end_frac_milli: end_frac, end_frac_valid: true)
 
 # ---------------------------------------------------------------------------

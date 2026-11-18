@@ -3118,3 +3118,39 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Still open** (`doc/08_tracking/bug/web_percent_padding_unparsed_and_grid_bare_span_2026-11-18.md`): `grid-auto-columns` / implicit columns; an empty auto-height block is 1 px (Chrome 0); fractional layout units; percent `margin-top` on a grid container in a flow root; textarea percent padding; px-level paint gaps (input background ignores `padding-left`; a flex item's `background-clip:content-box` in the draw-IR lane).
 - **Spec:** `test/01_unit/browser_engine/grid_auto_rows_stretch_paint_padding_chrome159_spec.spl` (31 cases; 0/31 on base, 31/31 now).
 - **Gates (blend seed):** catalog 1x base rows = head on all 8 pages (1.14 / 2.35 / 2.19 / 2.43 / 2.33 / 2.40 / 0.68 / 0.42); dpr4 base = head on all 8 (0.65 / 2.60 / 3.42 / 4.06 / 5.16 / 3.81 / 0.50 / 0.30) — no catalog page has a content sized grid row with unequal items, `grid-auto-rows` or percent padding, so no row moved. Matrix PASS (979 cells, 82 mismatching, 146 ids, none new, none stale). Mandatory specs 123 / 131 / 68 / 22 green; the three coverage specs fail the same 5 names on base and head. css-layout 1x wall / RSS, 2 runs: base 45.2 s / 769 MB, 46.5 s / 754 MB; head 43.8 s / 770 MB, 43.8 s / 772 MB.
+## 2026-11-18 — Lines and form controls take their device-px height at device scale > 1 (Chrome 159)
+
+- **Rule:** at `--force-device-scale-factor=k` Chrome lays out in device px, so a box is a whole number of DEVICE px tall. Measured (`getBoundingClientRect`, CSS px, k = 1 / 2 / 3 / 4, `padding:8px;border:1px` controls in a 16px/1.5 Liberation Sans page):
+  - text `<input>` and `<button>`: 33 / 33.5 / 33 / 33.25. The `normal` line of the 13.333 px UA font is the face's per-part rounded sum at 13.333k px: 15, 31, 45, 61.
+  - `<select>`: 35 / 35 / 34.667 / 34.75. Its inner block padding is round(1.5k) device px (2, 3, 5, 6), not k x 2.
+  - `<textarea>` (2 rows, monospace): 48 / 49 / 48.667 / 49.5; its label 55 / 55.5 / 55.667 / 56 (the textarea plus the strut's device descent, 26 at k=4).
+  - a 16px/1.5 line holding a 13 px monospace `code` / `kbd`: 24 / 24 / 24.333 / 24.25 (97 device px at k=4: ascent 70, descent 27).
+- **Was:** every height stayed whole CSS px x k, so each block below such a box was up to 2 device px off and the offsets added up: the forms-media h3 under the form sat 5 device rows high (Chrome top 429.80 at k=4, 428.53 at 1x).
+- **Fix (`simple_web_html_layout_renderer_layout_foundation.spl`):**
+  - `align_inline_line_device_dy` now mirrors the DESCENT too and returns the line's device height minus k x (CSS ascent + descent). `align_inline_line_baselines` hands it back as `InlineLineAlignment.height_frac_milli` (milli CSS px), only where the baseline pass set the line height and no `middle` / top / bottom box is on the line.
+  - The block cursor adds it to `cy_frac` at its seven line-advance sites (`..._layout_engine.spl`), so it reaches the parent through `end_frac_milli` like every other residual.
+  - `g_box_device_extra_h` (device px per node, k > 1 only): the form-control branch records `form_control_device_extra_h`, the block path records its own end residual. A line reads it for its atomic boxes: above the baseline for a bottom-edge box (textarea, checkbox), below it otherwise.
+  - `style_device_font_milli` / `style_is_ua_control_font`: the UA control font is carried as 13 px with a 1.2 ratio; device metrics use the real 13.333 px / `normal` (61 device px at k=4, where 13 x 4 x 1.2 gave 62).
+- **Trap — an inline container must not take the fraction.** A `<small>` runs its own text through the same line pass; adding its 0.75 px excess to its cursor made the inline box 20 px instead of 19 and moved its run 8 device rows up (`inline_box_baseline_alignment_chrome159_spec` AC-4: 25/60 against Chrome 33/69). `height_frac_milli` is 0 when the line's container is `display:inline`; the line around it reads the box's device reach from its struts.
+- **Re-pins toward Chrome** (that spec, AC-4, second run first/last row, Chrome / was / now): Sans `<small>` 33/69 / 33/68 / 34/69; Serif `<small>` 34/68 / 33/66 / 34/68; Sans `<b>` 10.72 px 41/69 / 40/70 / 41/69. The 12 px span stays 37/69.
+- **Matrix:** PASS, 979 cells, 82 mismatching, no new and no stale id. Catalog 1x equals every row.
+- **Boxes stay CSS-snapped:** only the cursor moves. An input's own border box still paints 132 device rows, not 133. Lines 2..n of a wrapped run and later lines of the same block keep k x CSS.
+- **Device font size, landed with it** (the patch held by #10262): `draw_ir_device_scale` scales `font-size` from `font-size-milli` (14.4 px -> 58 device px), `text_device_painter_dy` reads the ascent at that whole size, and `vertical_align_baseline_shift_device` is `k * size / 5 + 1` (sub) / `k * size / 3 + 1` (super) device px.
+- **Pin:** `test/01_unit/browser_engine/device_px_block_height_chrome159_spec.spl`. Base 1/3 (the 1x guard), head 3/3.
+  - AC-1 marker rows at k=4, Chrome = head / base: R197-236 G440-479 R768-807 G941-980 R1078-1117 G1215-1254 / R196-235 G440-479 R764-803 G936-975 R1072-1111 G1208-1247.
+  - AC-3 first/last ink row, Chrome / base / head: 14.4 px 23/61 / 23/60 / 22/61 (only the baseline row is pinned); 15.5 px 24/66 / 24/64 / 24/66; 17.6 px 29/76 / 29/77 / 29/76; `sub` 48/83 / 49/84 / 48/83.
+- **Catalog dpr4, base 5bd3ff5651b / heights only / heights + font size:**
+
+  | Page | Base | Heights | + font size |
+  |---|---|---|---|
+  | overview | 0.65 | 0.62 | 0.62 |
+  | html | 2.60 | 2.39 | 2.37 |
+  | css-layout | 3.42 | 3.27 | 3.25 |
+  | css-paint | 4.06 | 3.56 | 3.54 |
+  | forms-media | 5.16 | 3.30 | 3.28 |
+  | animation (time-sampled) | 3.81 | 3.39 | 3.34 to 3.37 |
+  | evidence | 0.50 | 0.50 | 0.50 |
+  | tab-bar | 0.30 | 0.30 | 0.30 |
+
+- **Perf** (forms-media at dpr4, 2 runs): base 114.1 / 112.5 s, 2903 / 2924 MB; head 104.9 / 117.6 s, 2919 / 2928 MB.
+- **Open:** device-px HEIGHT of the painted control box (bottom border 1 row high at k=4); the 14.4 px cap top (22, Chrome 23); a `<select>` padding split (top / bottom) was not measured, only its sum.

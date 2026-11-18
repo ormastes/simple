@@ -282,6 +282,10 @@ class InlineLineAlignment:
     bx: [i32]
     by: [i32]
     height: i32
+    # Device scale k > 1: the line's device-px height minus k x `height`, in
+    # milli CSS px (Chrome lays the line out in device px). The block cursor
+    # carries it in its residual. 0 at k == 1.
+    height_frac_milli: i32 = 0
 
 # Distance from the top of a line box (of this style's strut) to its baseline.
 # Chrome (Blink FontHeight::AddLeading): ascent and descent are the face's own,
@@ -356,6 +360,18 @@ fn vertical_align_baseline_shift(st: Style, parent_font_size: i32) -> i32:
         return (parent_font_size * 2 + 15) / 10
     if st.vertical_align == "super":
         return 0 - (parent_font_size * 2 + 9) / 6
+    0
+
+# Device twin at device scale k > 1: Blink adds the 1 px in ZOOMED layout
+# units, so the shift is `k * size / 5 + 1` DEVICE px, not k times the CSS
+# shift. Chrome 159 at k=4 in a 16 px line: sub 14 rows down (13.8), super 22
+# rows up (22.33); k x the CSS shift is 16 and 24.
+fn vertical_align_baseline_shift_device(st: Style, parent: Style, k: i32) -> i32:
+    val size_milli = font_milli_of(parent.font_size, parent.font_size_milli) * k
+    if st.vertical_align == "sub":
+        return (size_milli / 5 + 1500) / 1000
+    if st.vertical_align == "super":
+        return 0 - (size_milli / 3 + 1500) / 1000
     0
 
 # Distance from the top of an inline box's content area to its baseline.
@@ -517,8 +533,9 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     var line_descent64 = descent * 64
     if middle_descent64 > line_descent64:
         line_descent64 = middle_descent64
+    var device_excess = 0
     if g_layout_device_scale > 1:
-        align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, any_valign, middle_ascent64)
+        device_excess = align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, descent, any_valign, middle_ascent64)
     var resolved_height = (line_ascent64 + line_descent64 + 32) / 64
     if line_height > resolved_height:
         resolved_height = line_height
@@ -647,7 +664,12 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
             out_bx = shifted.bx
             out_by = shifted.by
         baseline_i = baseline_i + 1
-    InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height)
+    # The device excess holds only where the baseline pass set the height, and
+    # only for a block container: an inline box keeps its whole CSS px height,
+    # which the line around it aligns by (its device reach is read from its
+    # struts there).
+    val height_frac_milli = if line_style.display != "inline" and resolved_height == ascent + descent and middle_ascent64 == 0 and middle_descent64 == 0: device_excess * 1000 / g_layout_device_scale else: 0
+    InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height, height_frac_milli: height_frac_milli)
 
 fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
     val node = nodes[i]
@@ -1418,14 +1440,29 @@ pub fn box_device_top_shift(child_index: HtmlChildIndex, node_index: i32, delta_
 fn _floor_div_i32(a: i32, b: i32) -> i32:
     if a >= 0: a / b else: 0 - ((0 - a + b - 1) / b)
 
+# The UA control font stands in the cascade as 13px with a 1.2 line-height
+# ratio (FORM_CONTROL_UA_FONT_SIZE_PX / FORM_CONTROL_UA_LINE_HEIGHT_RATIO in
+# ..._declarations.spl) for Chrome's `13.3333px` / `normal`. Device metrics take
+# the real pair: at k=4 the Liberation Sans line is 61 device px (48 + 11 + 2
+# at 53.33px), where 13px x 4 x 1.2 gives 62.
+val FORM_CONTROL_UA_LINE_HEIGHT_TENTHS: i32 = -12
+
+fn style_is_ua_control_font(st: Style) -> bool:
+    st.font_size == FORM_CONTROL_UA_FONT_TRUNCATED_PX and st.font_size_milli == 0 and st.line_height_px == FORM_CONTROL_UA_LINE_HEIGHT_TENTHS
+
+fn style_device_font_milli(st: Style) -> i32:
+    if style_is_ua_control_font(st):
+        return FORM_CONTROL_UA_FONT_NUM * 1000 / FORM_CONTROL_UA_FONT_DEN
+    font_milli_of(st.font_size, st.font_size_milli)
+
 # Used line-height of `st` in milli DEVICE px at device scale k: Chrome zooms
 # the computed value, so `20px` is 20k, a number multiplies the device font
 # size, and `normal` is the face's per-part rounded sum at size * k.
 fn style_device_line_h_milli(st: Style, k: i32) -> i32:
-    val size_milli = font_milli_of(st.font_size, st.font_size_milli)
+    val size_milli = style_device_font_milli(st)
     if st.line_height_px > 0:
         return st.line_height_px * k * 1000
-    if st.line_height_px < 0:
+    if st.line_height_px < 0 and not style_is_ua_control_font(st):
         val lh = size_milli * k * (0 - st.line_height_px) / 10
         if lh > 0:
             return lh
@@ -1441,7 +1478,7 @@ fn style_device_line_h_milli(st: Style, k: i32) -> i32:
 # leading 0); line-height 23px: 9 + 58 = 67. Without a measured face this is
 # k times the CSS offset.
 fn inline_line_strut_baseline_offset_device(st: Style, k: i32) -> i32:
-    val ad = browser_face_ascent_descent_device_px(st.font_family, st.bold, st.font_style_italic, font_milli_of(st.font_size, st.font_size_milli), k)
+    val ad = browser_face_ascent_descent_device_px(st.font_family, st.bold, st.font_style_italic, style_device_font_milli(st), k)
     if ad.len() != 2:
         return k * inline_line_strut_baseline_offset(st)
     _floor_div_i32(style_device_line_h_milli(st, k) - (ad[0] + ad[1]) * 1000, 2000) + ad[0]
@@ -1449,10 +1486,12 @@ fn inline_line_strut_baseline_offset_device(st: Style, k: i32) -> i32:
 # The painter puts a text command's baseline at its top plus the face ascent
 # rounded at the DEVICE size (no borrow), while layout placed the top
 # `k * css ascent` above the CSS baseline: this is what that costs, in device px.
+# The painter's device size is the whole px `draw_ir_device_scale` hands it:
+# 17.6 px at k=4 paints at 70, ascent 63, where 70.4 would round to 64.
 fn text_device_painter_dy(st: Style, k: i32) -> i32:
     val css = style_face_ascent_descent(st)
     val size_milli = font_milli_of(st.font_size, st.font_size_milli)
-    val dev = browser_face_ascent_descent_milli_px(st.font_family, st.bold, st.font_style_italic, size_milli * k)
+    val dev = browser_face_ascent_descent_milli_px(st.font_family, st.bold, st.font_style_italic, font_milli_round_px(size_milli * k) * 1000)
     if css.len() != 2 or dev.len() != 2:
         return 0
     k * css[0] - dev[0]
@@ -1464,7 +1503,7 @@ fn inline_box_shifted_ascent_device(child_index: HtmlChildIndex, html_nodes: [HN
     var child = child_index.first_child[node_index]
     while child >= 0:
         if inline_box_is_plain_element(html_nodes[child], styles[child]):
-            val child_ascent = inline_box_shifted_ascent_device(child_index, html_nodes, styles, child, k) - k * vertical_align_baseline_shift(styles[child], st.font_size)
+            val child_ascent = inline_box_shifted_ascent_device(child_index, html_nodes, styles, child, k) - vertical_align_baseline_shift_device(styles[child], st, k)
             if child_ascent > ascent:
                 ascent = child_ascent
         child = child_index.next_sibling[child]
@@ -1474,7 +1513,7 @@ fn inline_box_shifted_ascent_device(child_index: HtmlChildIndex, html_nodes: [HN
 # line's own baseline delta (device baseline minus k x CSS baseline) plus the
 # painter term. Lines 2..n of a wrapped run hold only that run on the line
 # style's strut, so they take the delta of those two struts.
-fn _text_device_dy_record_subtree(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32, line_style: Style, k: i32, line_delta: i32):
+fn _text_device_dy_record_subtree(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32, line_style: Style, parent_style: Style, k: i32, line_delta: i32, shift_delta: i32):
     val st = styles[node_index]
     if html_nodes[node_index].tag == "#text":
         var css_rest = inline_line_strut_baseline_offset(line_style)
@@ -1486,25 +1525,87 @@ fn _text_device_dy_record_subtree(child_index: HtmlChildIndex, html_nodes: [HNod
         if dev_own > dev_rest:
             dev_rest = dev_own
         val painter = text_device_painter_dy(st, k)
-        text_device_dy_record(html_nodes.len() as i32, node_index, line_delta + painter, dev_rest - k * css_rest + painter)
+        text_device_dy_record(html_nodes.len() as i32, node_index, line_delta + shift_delta + painter, dev_rest - k * css_rest + shift_delta + painter)
         return
     if not inline_box_is_plain_element(html_nodes[node_index], st):
         return
+    # A sub/super box was moved by its CSS shift; its runs take the difference
+    # to the device shift.
+    val own_shift = shift_delta + vertical_align_baseline_shift_device(st, parent_style, k) - k * vertical_align_baseline_shift(st, parent_style.font_size)
     var child = child_index.first_child[node_index]
     while child >= 0:
-        _text_device_dy_record_subtree(child_index, html_nodes, styles, child, line_style, k, line_delta)
+        _text_device_dy_record_subtree(child_index, html_nodes, styles, child, line_style, st, k, line_delta, own_shift)
         child = child_index.next_sibling[child]
 
+# Device mirror of `inline_box_shifted_descent`.
+fn inline_box_shifted_descent_device(child_index: HtmlChildIndex, html_nodes: [HNode], styles: [Style], node_index: i32, k: i32) -> i32:
+    val st = styles[node_index]
+    var descent = style_device_line_h_milli(st, k) / 1000 - inline_line_strut_baseline_offset_device(st, k)
+    var child = child_index.first_child[node_index]
+    while child >= 0:
+        if inline_box_is_plain_element(html_nodes[child], styles[child]):
+            val child_descent = inline_box_shifted_descent_device(child_index, html_nodes, styles, child, k) + vertical_align_baseline_shift_device(styles[child], st, k)
+            if child_descent > descent:
+                descent = child_descent
+        child = child_index.next_sibling[child]
+    descent
+
+# Device-px height of each box minus k x its CSS height, at device scale k > 1.
+# Chrome lays out in device px, so a text `<input>` whose `normal` line is 61
+# device px at k=4 is 133 tall where 4 x the CSS box is 132. Boxes stay
+# CSS-snapped; the line that holds such a box reads this to find its own device
+# height (`align_inline_line_device_dy`). Recorded by the form-control branch
+# and by the block path; allocated by the first non-zero record, empty at
+# k == 1.
+var g_box_device_extra_h: [i32] = []
+
+pub fn box_device_extra_h_reset():
+    g_box_device_extra_h = []
+
+# reason: node index, node count and a device-px delta are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_device_extra_h_record(node_count: i32, i: i32, extra_device_px: i32):
+    if g_layout_device_scale <= 1 or i < 0 or i >= node_count:
+        return
+    if g_box_device_extra_h.len() != node_count:
+        if extra_device_px == 0:
+            return
+        g_box_device_extra_h = zero_i32_list(node_count)
+    g_box_device_extra_h[i] = extra_device_px
+
+fn box_device_extra_h_at(i: i32) -> i32:
+    if i < 0 or i >= g_box_device_extra_h.len(): 0 else: g_box_device_extra_h[i]
+
+# Device-px height of an auto-height form control minus k x its CSS height
+# (Chrome 159, 13.333px Liberation Sans, k = 1..4): the `normal` line is the
+# face's per-part rounded sum at the DEVICE size (15, 31, 45, 61), a textarea
+# has `rows` of them, and a `<select>` adds round(1.5k) of inner block padding
+# (2, 3, 5, 6) where the CSS box has k x SELECT_INNER_BLOCK_PADDING_PX.
+# reason: row count in, device-px delta out; both are layout scalars.
+# @allow(primitive_api)
+pub fn form_control_device_extra_h(node: HNode, st: Style, rows: i32) -> i32:
+    val k = g_layout_device_scale
+    if k <= 1:
+        return 0
+    val line_extra = style_device_line_h_milli(st, k) / 1000 - k * style_line_h(st)
+    val pad_extra = if node.tag == "select": (3 * k + 1) / 2 - k * SELECT_INNER_BLOCK_PADDING_PX else: 0
+    rows * line_extra + pad_extra
+
 # Device mirror of the baseline pass of `align_inline_line_baselines` (k > 1):
-# the line ascent from device struts, atomic and widget baselines at k x their
-# CSS value (boxes stay CSS-snapped). A line holding a top/bottom/text-top/
-# text-bottom box gets no correction: its baseline also depends on the line
-# height, which stays in CSS px. A `middle` box has no baseline of its own; it
-# only raises the line ascent to `middle_ascent64` (1/64 CSS px) when its
-# margin box reaches above everything else.
-fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, has_valign: bool, middle_ascent64: i32):
+# the line ascent and descent from device struts, atomic and widget baselines
+# at k x their CSS value (boxes stay CSS-snapped) plus the box's device extra
+# height: above the baseline for a box that aligns on its bottom edge, below it
+# otherwise. A line holding a top/bottom/text-top/text-bottom box gets no
+# correction: its baseline also depends on the line height, which stays in CSS
+# px. A `middle` box has no baseline of its own; it only raises the line ascent
+# to `middle_ascent64` (1/64 CSS px) when its margin box reaches above
+# everything else.
+# Returns the line's device height minus k x (css_ascent + css_descent), 0 for
+# a line with a valign box.
+fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, css_descent: i32, has_valign: bool, middle_ascent64: i32) -> i32:
     val k = g_layout_device_scale
     var ascent = inline_line_strut_baseline_offset_device(line_style, k)
+    var descent = style_device_line_h_milli(line_style, k) / 1000 - ascent
     var i = 0
     while i < nodes.len():
         val node_index = nodes[i]
@@ -1514,17 +1615,29 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
             continue
         val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
         val widget_baseline = inline_widget_baseline_from_top(child_index, html_nodes, styles, node_index, bh)
+        val extra_h = box_device_extra_h_at(node_index)
         var node_ascent = 0
+        var node_descent = 0
         if widget_baseline >= 0:
             node_ascent = k * (margin_ts[i] + widget_baseline)
+            node_descent = k * (bh[node_index] - widget_baseline + margin_bs[i])
+            if widget_baseline >= bh[node_index]:
+                node_ascent = node_ascent + extra_h
+            else:
+                node_descent = node_descent + extra_h
         elif bottom_edge_baseline(child_index, node_index, node_style, node_replaced):
-            node_ascent = k * (margin_ts[i] + bh[node_index] + margin_bs[i])
+            node_ascent = k * (margin_ts[i] + bh[node_index] + margin_bs[i]) + extra_h
         elif inline_box_is_plain_element(html_nodes[node_index], node_style):
-            node_ascent = inline_box_shifted_ascent_device(child_index, html_nodes, styles, node_index, k) - k * vertical_align_baseline_shift(node_style, line_style.font_size)
+            val node_line_shift = vertical_align_baseline_shift_device(node_style, line_style, k)
+            node_ascent = inline_box_shifted_ascent_device(child_index, html_nodes, styles, node_index, k) - node_line_shift
+            node_descent = inline_box_shifted_descent_device(child_index, html_nodes, styles, node_index, k) + node_line_shift
         else:
             node_ascent = inline_line_strut_baseline_offset_device(node_style, k)
+            node_descent = style_device_line_h_milli(node_style, k) / 1000 - node_ascent
         if node_ascent > ascent:
             ascent = node_ascent
+        if node_descent > descent:
+            descent = node_descent
         i = i + 1
     val middle_ascent = (k * middle_ascent64 + 32) / 64
     if middle_ascent > ascent:
@@ -1532,8 +1645,9 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
     val line_delta = if has_valign: 0 else: ascent - k * css_ascent
     i = 0
     while i < nodes.len():
-        _text_device_dy_record_subtree(child_index, html_nodes, styles, nodes[i], line_style, k, line_delta)
+        _text_device_dy_record_subtree(child_index, html_nodes, styles, nodes[i], line_style, line_style, k, line_delta, 0)
         i = i + 1
+    if has_valign: 0 else: ascent + descent - k * (css_ascent + css_descent)
 
 # Line ranges for a `white-space: pre` run: every U+000A is a forced break.
 # Two HTML rules are folded in, both harvested from Chrome rather than recalled:
