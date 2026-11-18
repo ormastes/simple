@@ -22,15 +22,28 @@ and the graph wire DTO `TraceGraphLocatorV1.locator_kind` are now the closed enu
 
 ## 3. MCP / ctx
 
-- `simple_ctx_purge` lost-write window is narrowed, not closed. Appends now
-  re-check the store size after writing (`_ctx_append_chunks_settled`,
-  `src/app/mcp/main_lazy_ctx_tools.spl`), which catches a purge rename landing
-  between an append's write and its re-check. Still lost: an append whose size
-  read, write and re-check all land between `ctx_purge_commit`'s final key check
-  and its rename; and a same-size false pass (a purge that shrinks the file by
-  exactly the appended bytes). Unblock: an OS compare-and-rename, or the purge
-  re-reading the store after its rename and replaying rows appended since its
-  snapshot.
+- `simple_ctx_purge` lost-write window is closed except one preemption gap
+  (2026-11-18). `ctx_purge_commit` writes a temp file, then replays the tail:
+  it re-reads the store, appends every row whose id it has not carried to the
+  temp file, and loops (max 8 rounds, else StoreMoved with nothing deleted)
+  until a read finds nothing new at an unchanged size, then renames. Replay
+  dedupes on the full serialized row (ids come from an unlocked read-modify-write
+  of `stats.sdn`, so two processes can share an id) and ignores an unterminated
+  final segment (a torn row). Appenders
+  (`_ctx_append_chunks_settled`) verify row presence by id after writing, not
+  by byte size (the same-size false pass is gone), and re-apply if absent.
+  Rows landing before the last read are replayed; rows landing after the
+  rename are caught by the presence check. Still lost (honest): an append whose
+  write AND presence check both fall between the purge's last stable read and
+  its rename (`src/app/mcp/main_lazy_ctx_tools.spl`, the `file_rename` call in
+  `ctx_purge_commit`); the writer then holds the old inode and sees its row
+  present. Also pre-existing: two concurrent purges can resurrect rows the other
+  dropped (each snapshots, the later rename wins). The presence check reads only
+  the bytes written since the pre-write size (full read as fallback), so it is
+  O(new bytes) per append. `std.io_runtime` offers only unconditional `file_rename` and the
+  create-only `file_hardlink`; neither is a rename-if-unchanged. Unblock: an OS
+  compare-and-rename (renameat2 RENAME_EXCHANGE then drain the old inode's
+  tail). Specs: `test/01_unit/app/mcp/ctx_append_recheck_spec.spl`.
 
 ## 4. Test query and harness
 

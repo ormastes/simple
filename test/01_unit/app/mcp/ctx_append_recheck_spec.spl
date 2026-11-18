@@ -17,6 +17,15 @@ the new store (bounded, no lock).
 
 - An append whose store is replaced by an older copy between write and re-check
   still ends with its chunk in the store, exactly once.
+- An append landing between the purge's snapshot and its rename is replayed
+  into the purged store (tail replay), exactly once.
+- An append whose store is replaced by a same-length file is still re-applied
+  (presence check, not size).
+- Two appended rows that share one id (unlocked id reservation) both survive a
+  purge: replay dedupes on the serialized row, not the id.
+- A torn (unterminated) row seen by the purge is not replayed.
+- A kept row re-serializes byte-for-byte through a purge (parse -> write
+  round trip), which the append presence check relies on.
 - An undisturbed append writes its chunk exactly once (no duplicate re-apply).
 """
 
@@ -24,9 +33,10 @@ the new store (bounded, no lock).
 # tag: unit
 
 use std.spec
-use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_read, file_write, time_now_unix_micros}
-use app.mcp.ctx_append_observer.{ctx_append_observer_register, ctx_append_observer_clear}
-use app.mcp.main_lazy_ctx_tools.{ctx_index_text, ctx_store_dir, handle_simple_ctx_search}
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_read, file_write, file_append_text, time_now_unix_micros}
+use app.mcp.ctx_append_observer.{ctx_append_observer_register, ctx_append_observer_clear, ctx_purge_observer_register, ctx_purge_observer_clear}
+use app.mcp.ctx_retention.{CtxSourceLabel, CtxPurgeMode, ctx_retention_policy}
+use app.mcp.main_lazy_ctx_tools.{ctx_index_text, ctx_store_dir, handle_simple_ctx_search, ctx_purge_store}
 
 var _SNAPSHOT: text = ""
 var _HOOK_FIRED: bool = false
@@ -80,3 +90,101 @@ describe "ctx append generation re-check":
         step("no generation change during the write: nothing is re-applied")
         assert_equal(ctx_index_text("beta quietappend notes", "doc:quiet").count, 1)
         assert_equal(_count_of(_store_text(), "quietappend"), 1)
+
+var _LATE_FIRED: bool = false
+
+fn _append_late_row():
+    if _LATE_FIRED:
+        return
+    _LATE_FIRED = true
+    ctx_index_text("gamma tailrow notes", "doc:tail")
+
+# A purge-sized rewrite that keeps the length: same bytes count, row missing.
+fn _replace_with_same_length():
+    if _HOOK_FIRED:
+        return
+    _HOOK_FIRED = true
+    val cur = _store_text()
+    file_write(ctx_store_dir() + "/chunks.sdn", cur.replace("lateappend", "xxxxxxxxxx"))
+
+describe "ctx purge tail replay":
+    it "an append landing between the purge snapshot and its rename survives the purge":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("old dropme notes", "cmd:old").count, 1)
+        assert_equal(ctx_index_text("alpha linker notes", "doc:keep").count, 1)
+        _LATE_FIRED = false
+        ctx_purge_observer_register(_append_late_row)
+        val report = ctx_purge_store(ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), None, None), CtxPurgeMode.Apply)
+        ctx_purge_observer_clear()
+        assert_equal(report.rewritten, true)
+        step("the dropped chunk is gone, the kept and the raced rows are present once")
+        assert_equal(_count_of(_store_text(), "dropme"), 0)
+        assert_equal(_count_of(_store_text(), "linker"), 1)
+        assert_equal(_count_of(_store_text(), "tailrow"), 1)
+
+    it "adverse: a same-length replacement of the store is not mistaken for success":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("alpha linker notes", "doc:keep").count, 1)
+        _HOOK_FIRED = false
+        ctx_append_observer_register(_replace_with_same_length)
+        val late = ctx_index_text("beta lateappend notes", "doc:late")
+        ctx_append_observer_clear()
+        assert_equal(late.count, 1)
+        assert_equal(_count_of(_store_text(), "lateappend"), 1)
+
+fn _append_colliding_ids():
+    if _LATE_FIRED:
+        return
+    _LATE_FIRED = true
+    file_append_text(ctx_store_dir() + "/chunks.sdn", "    9, doc:c1, 1000, 6, c1body\n")
+    file_append_text(ctx_store_dir() + "/chunks.sdn", "    9, doc:c2, 1000, 6, c2body\n")
+
+fn _append_torn_row():
+    if _LATE_FIRED:
+        return
+    _LATE_FIRED = true
+    file_append_text(ctx_store_dir() + "/chunks.sdn", "    9, doc:torn, 1000, 20, trunc")
+
+fn _purge_cmd_prefix():
+    ctx_purge_store(ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), None, None), CtxPurgeMode.Apply)
+
+describe "ctx purge replay hardening":
+    it "adverse: two appended rows sharing an id both survive the purge":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("old dropme notes", "cmd:old").count, 1)
+        _LATE_FIRED = false
+        ctx_purge_observer_register(_append_colliding_ids)
+        val report = ctx_purge_store(ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), None, None), CtxPurgeMode.Apply)
+        ctx_purge_observer_clear()
+        assert_equal(report.rewritten, true)
+        assert_equal(_count_of(_store_text(), "c1body"), 1)
+        assert_equal(_count_of(_store_text(), "c2body"), 1)
+
+    it "adverse: a torn unterminated row is not replayed as a truncated row":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("old dropme notes", "cmd:old").count, 1)
+        _LATE_FIRED = false
+        ctx_purge_observer_register(_append_torn_row)
+        val report = ctx_purge_store(ctx_retention_policy(Some(CtxSourceLabel(value: "cmd:")), None, None), CtxPurgeMode.Apply)
+        ctx_purge_observer_clear()
+        assert_equal(report.rewritten, true)
+        assert_equal(_count_of(_store_text(), "doc:torn"), 0)
+
+    it "a kept row with commas and quotes round-trips byte-for-byte through a purge":
+        # @req CTX-008
+        _fresh_store()
+        assert_equal(ctx_index_text("old dropme notes", "cmd:old").count, 1)
+        assert_equal(ctx_index_text("a, b \"q\" c,d tail", "doc:rt,x").count, 1)
+        val before = _store_text()
+        _purge_cmd_prefix()
+        val after = _store_text()
+        var kept = 0
+        for line in before.split("\n"):
+            if line.starts_with("    ") and not line.contains("cmd:old"):
+                kept = kept + 1
+                assert_equal(after.contains(line + "\n"), true)
+        assert_equal(kept, 1)
