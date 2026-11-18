@@ -102,6 +102,7 @@ struct BootLayoutPlan:
     assertions: [BootAssertion]
     gc_roots: [text]     # union of all KEEP globs, in order
     extern_symbols: [text]   # EXTERN(...) — forced-undefined symbols (link roots)
+    input_files: [text]      # top-level INPUT(...) — extra object inputs, script order
     discard_patterns: [text]
     ops: [BootOp]        # SECTIONS commands in source order: SECTION / DOT / SYMBOL / ASSERT
     top_ops: [BootOp]    # statements outside SECTIONS (SYMBOL / ASSERT), evaluated after layout
@@ -442,12 +443,16 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
     var pending_dot = ""
 
     var externs: [text] = []
+    var input_files: [text] = []
     for st in script.top_stmts:
         if st.kind == LdStmtKind.Include:
             return Err("boot layout: INCLUDE \"{st.message}\" is not resolved; plan the expanded script")
         if st.kind == LdStmtKind.Extern:
             for sym in st.patterns:
                 externs = externs.push(sym)
+        else if st.kind == LdStmtKind.InputFiles:
+            for f in st.patterns:
+                input_files = input_files.push(f)
         else if st.kind == LdStmtKind.Assert:
             top_ops = top_ops.push(_boot_op(BOOT_OP_ASSERT, assertions.len()))
             assertions = assertions.push(BootAssertion(expr: st.expr, message: st.message))
@@ -566,7 +571,7 @@ fn boot_layout_from_script(script: LdScript) -> Result<BootLayoutPlan, text>:
     Ok(BootLayoutPlan(output_format: script.output_format, output_arch: script.output_arch,
         entry: script.entry, start_expr: start_expr, regions: regions, segments: segments,
         sections: sections, symbols: symbols, assertions: assertions, gc_roots: gc_roots,
-        extern_symbols: externs, discard_patterns: discard, ops: ops, top_ops: top_ops))
+        extern_symbols: externs, input_files: input_files, discard_patterns: discard, ops: ops, top_ops: top_ops))
 
 fn boot_layout_add_defsym(plan: BootLayoutPlan, name: text, expr: text) -> BootLayoutPlan:
     """`--defsym=name=expr`: a top-level assignment evaluated after layout."""
@@ -576,7 +581,7 @@ fn boot_layout_add_defsym(plan: BootLayoutPlan, name: text, expr: text) -> BootL
         entry: plan.entry, start_expr: plan.start_expr, regions: plan.regions, segments: plan.segments,
         sections: plan.sections, symbols: plan.symbols.push(BootSymbol(name: name, expr: expr, provide: false, section: "")),
         assertions: plan.assertions, gc_roots: plan.gc_roots, extern_symbols: plan.extern_symbols,
-        discard_patterns: plan.discard_patterns, ops: plan.ops, top_ops: top)
+        input_files: plan.input_files, discard_patterns: plan.discard_patterns, ops: plan.ops, top_ops: top)
 
 
 fn boot_layout_from_text(input: text) -> Result<BootLayoutPlan, text>:

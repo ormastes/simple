@@ -347,6 +347,7 @@ enum LdStmtKind:
     Assert       # ASSERT(expr, "message")
     Include      # INCLUDE "file" (kept unresolved; `message` holds the path)
     Extern       # EXTERN(sym ...) (`patterns` holds the symbols)
+    InputFiles   # top-level INPUT(file ...) (`patterns` holds the paths)
 
 struct LdStmt:
     """A statement inside SECTIONS or inside an output section body."""
@@ -746,6 +747,28 @@ fn _ld_parse_stmt(parser: LdParser, allow_input: bool) -> (LdParser, LdStmt):
                 p3 = _ld_advance(p3)
         val (p5, _rp) = _ld_expect_kind(p3, LdTokenKind.RParen)
         return (p5, _ld_stmt(LdStmtKind.Extern, "", syms, "", "", ""))
+    if not allow_input and tok.kind == LdTokenKind.Word and tok.value == "INPUT" and next.kind == LdTokenKind.LParen:
+        # Top-level INPUT(file, ...): extra link inputs named by the script.
+        # Tokens carry no spacing, and the lexer splits paths at '/', so one
+        # file is every token up to ',' or ')'. A space-separated list
+        # therefore merges into one path that does not exist and fails as
+        # unreadable; it is never silently linked.
+        var p3 = _ld_advance(_ld_advance(p))
+        var files: [text] = []
+        var cur = ""
+        while _ld_live(p3) and not _ld_at_kind(p3, LdTokenKind.RParen):
+            val ft = _ld_peek(p3)
+            if ft.kind == LdTokenKind.Comma:
+                if cur != "": files = files.push(cur)
+                cur = ""
+            else:
+                cur = cur + ft.value
+            p3 = _ld_advance(p3)
+        if cur != "": files = files.push(cur)
+        if files.len() == 0:
+            return (_ld_fail(p3, "INPUT expects file names"), _ld_stmt(LdStmtKind.InputFiles, "", [], "", "", ""))
+        val (p5, _rp) = _ld_expect_kind(p3, LdTokenKind.RParen)
+        return (p5, _ld_stmt(LdStmtKind.InputFiles, "", files, "", "", ""))
     if tok.kind == LdTokenKind.Word and tok.value == "ASSERT":
         val (p2, _lp) = _ld_expect_kind(_ld_advance(p), LdTokenKind.LParen)
         val (p3, e) = ld_parse_expr(p2)
@@ -1006,6 +1029,8 @@ fn _ld_print_stmt(st: LdStmt) -> text:
         return "INCLUDE \"" + st.message + "\""
     if st.kind == LdStmtKind.Extern:
         return "EXTERN(" + st.patterns.join(" ") + ")"
+    if st.kind == LdStmtKind.InputFiles:
+        return "INPUT(" + st.patterns.join(", ") + ")"
     "ASSERT(" + st.expr + ", \"" + st.message + "\")"
 
 fn _ld_print_section(sec: LdOutputSection) -> [text]:
