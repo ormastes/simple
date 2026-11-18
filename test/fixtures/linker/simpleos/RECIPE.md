@@ -56,3 +56,13 @@ Cross-check from the repo root: `ld.lld -m elf64lriscv --no-relax -T
 simpleos_user_rv64.ld -nostdlib -static --gc-sections main_rv64.o` reports
 `Machine: RISC-V`, `Entry point address: 0x100000000`, `main` at
 `0x100000018`, `base` at `0x100001000`.
+
+## Search path and archive
+
+- `simpleos_user_rv64_bare.ld` — `simpleos_user_rv64.ld` with a bare
+  `INPUT(crt0_rv64.o)`. ld.lld finds the file through `-L`.
+- `libsosmain.a` — `llvm-ar rcs libsosmain.a main_x64.o` (llvm-ar 18).
+  Cross-check: `ld.lld -T simpleos_user.ld -nostdlib -static --gc-sections
+  crt0_x64.o -L. --start-group -lsosmain --end-group` gives entry
+  `0x10000000` with `main` at `0x10000020`. Without `-lsosmain` it fails with
+  `undefined symbol: main`.

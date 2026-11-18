@@ -27,3 +27,18 @@ matching the ld.lld reference in `test/fixtures/linker/simpleos/RECIPE.md`.
 
 ## Open
 - OpenSBI in-guest boot of an internally linked riscv64 user ELF: not run.
+
+## Follow-up (2026-11-18)
+- A bare `INPUT(name)` is now looked up through `config.library_paths` (`-L`)
+  after the path as given, as ld.lld does. RED before the fix: `SimpleOS script
+  INPUT crt0_rv64.o cannot be read`.
+- New coverage in `simpleos_internal_entry_spec.spl`:
+  - linking a `-l` static archive through the in-house SimpleOS path, with a
+    negative case where the archive is missing;
+  - the bare-INPUT miss case.
+
+  The archive cases pin behaviour that already worked, so they passed on the
+  first run.
+- Removed the unused `InternalSimpleOsFlags.archive_group` field. Archive
+  closure always runs to a fixpoint (`archive_closure.spl`), so group flags are
+  only checked for balance.

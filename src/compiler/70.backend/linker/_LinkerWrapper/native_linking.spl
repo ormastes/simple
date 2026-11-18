@@ -660,7 +660,6 @@ struct InternalSimpleOsFlags:
     gc_sections: bool
     nostdlib: bool
     static_link: bool
-    archive_group: bool
     wraps: [text]
 
 struct InternalCoffFlags:
@@ -696,7 +695,6 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
     var nostdlib = false
     var static_link = false
     var group_depth: i64 = 0
-    var archive_group = false
     var wraps: [text] = []
     var i: i64 = 0
     while i < extra_flags.len():
@@ -720,8 +718,9 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
             i = i + 1
             continue
         elif flag == "--start-group":
+            # Archives always resolve to a fixpoint (group semantics), so
+            # the group is only checked for balance.
             group_depth = group_depth + 1
-            archive_group = true
             i = i + 1
             continue
         elif flag == "--end-group":
@@ -796,7 +795,7 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
         return Err("internal SimpleOS archive group is not closed")
     Ok(InternalSimpleOsFlags(script: script, defsym_names: names,
         defsym_exprs: exprs, gc_sections: gc_sections, nostdlib: nostdlib,
-        static_link: static_link, archive_group: archive_group, wraps: wraps))
+        static_link: static_link, wraps: wraps))
 
 fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # ELF consumes user libraries/search paths and the selected runtime
@@ -1432,8 +1431,15 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
         # ld.lld reads script INPUT() files where -T appears, ahead of the
         # command-line objects.
         var script_objects: [[i64]] = []
-        for path in boot_plan.input_files:
-            if not file_exists(path): return Err("internal engine: SimpleOS script INPUT {path} cannot be read")
+        for name in boot_plan.input_files:
+            # ld.lld: the path as given first, then each -L directory.
+            var path = name
+            if not file_exists(path):
+                path = ""
+                for directory in config.library_paths:
+                    if path == "" and file_exists(directory + "/" + name):
+                        path = directory + "/" + name
+            if path == "": return Err("internal engine: SimpleOS script INPUT {name} cannot be read")
             script_objects = script_objects.push(internal_link_native_read_i64(path))
         for obj in objects: script_objects = script_objects.push(obj)
         objects = script_objects
