@@ -15,7 +15,7 @@ use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signe
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
@@ -975,6 +975,81 @@ fn inline_parent_containing_block(nodes: [HNode], styles: [Style], i: i32, posit
         explicit_h
     ]
 
+# Paint reads `styles[i]`, where a percent padding is still unresolved (px 0),
+# so every content-box reader (background-clip / -origin, a replaced element's
+# content box, a control's text inset, the overflow clip) saw padding 0.
+# Returns `styles` with each percent padding resolved against the containing
+# block inline size layout used: the parent's content width (past inline
+# ancestors), the parent's padding box for an absolutely positioned box, the
+# grid area for a grid item (its column is the last track starting at or
+# before its left edge). Returns `styles` itself when nothing is a percent.
+pub fn web_styles_with_painted_percent_padding(nodes: [HNode], styles: [Style], bx: [i32], bw: [i32]) -> [Style]:
+    var first_percent = -1
+    var scan = 0
+    while scan < styles.len() as i32 and first_percent < 0:
+        val sst = styles[scan]
+        if sst.pad_l_pct != 0 or sst.pad_t_pct != 0 or sst.pad_r_pct != 0 or sst.pad_b_pct != 0:
+            first_percent = scan
+        scan = scan + 1
+    if first_percent < 0:
+        return styles
+    # Parents precede their children in the node arena, so `out[p]` is final.
+    var out: [Style] = []
+    var i = 0
+    while i < styles.len() as i32:
+        val st = styles[i]
+        if i < first_percent or (st.pad_l_pct == 0 and st.pad_t_pct == 0 and st.pad_r_pct == 0 and st.pad_b_pct == 0):
+            out.push(st)
+            i = i + 1
+            continue
+        var p = nodes[i].parent as i32
+        var basis = bw[i]
+        if p >= 0 and p < i and st.position_absolute:
+            basis = bw[p] - out[p].border_l - out[p].border_r
+        elif p >= 0 and p < i:
+            while out[p].display == "inline" and nodes[p].parent >= 0:
+                p = nodes[p].parent as i32
+            val pst = out[p]
+            basis = bw[p] - pst.border_l - pst.border_r - pst.pad_l - pst.pad_r
+            val columns = if pst.display == "grid": grid_track_sizes(pst.grid_template_columns, basis, pst.column_gap_px) else: []
+            if columns.len() > 0:
+                val left = bx[i] - bx[p] - pst.border_l - pst.pad_l
+                var column = 0
+                while column + 1 < columns.len() as i32 and grid_track_offset(columns, pst.column_gap_px, column + 1) <= left:
+                    column = column + 1
+                var span = grid_placement_span(st.grid_column)
+                if st.grid_area != "":
+                    for rect in grid_template_area_rects(pst.grid_template_areas):
+                        if rect.area == st.grid_area:
+                            span = rect.col_span
+                basis = grid_track_span_size(columns, pst.column_gap_px, column, span)
+        # A full copy: the layout clone behind style_with_resolved_percent_padding
+        # keeps only what layout reads.
+        val padded = style_with_resolved_percent_padding(st, if basis > 0: basis else: 0)
+        var painted = renderer_default_style()
+        painted.copy_from(st)
+        painted.pad_l = padded.pad_l
+        painted.pad_t = padded.pad_t
+        painted.pad_r = padded.pad_r
+        painted.pad_b = padded.pad_b
+        painted.pad_l_pct = 0
+        painted.pad_t_pct = 0
+        painted.pad_r_pct = 0
+        painted.pad_b_pct = 0
+        out.push(painted)
+        i = i + 1
+    out
+
+# Used style of a grid item stretched to `outer_h`, the border-box height its
+# row span leaves it after its block margins.
+fn grid_stretched_item_style(node: HNode, authored: Style, resolved: Style, outer_h: i32) -> Style:
+    var style_h = if outer_h < 1: 1 else: outer_h
+    if not (node.has_widget_class or node.has_icon_image_class or authored.border_box):
+        style_h = style_h - resolved.pad_t - resolved.pad_b - authored.border_t - authored.border_b
+    if style_h < 1:
+        style_h = 1
+    style_with_height(resolved, style_h)
+
 fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], st: Style) -> LayoutResult:
     var out_bx = bx
     var out_by = by
@@ -1590,10 +1665,39 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # scope notes.
         val area_rects = grid_template_area_rects(st.grid_template_areas)
         var grid_rows: [i32] = [0; grid_row_capacity]
+        # A FIXED row (explicit, or a `grid-auto-rows` length) never grows with
+        # its items; every other implicit row is content sized from its
+        # `grid-auto-rows` floor, and `fr` implicit rows are equalized below.
+        var grid_row_fixed: [bool] = [false; grid_row_capacity]
+        var grid_row_fr: [i32] = [0; grid_row_capacity]
+        val grid_auto_tracks = if st.grid_auto_rows == "": [] else: st.grid_auto_rows.split(" ")
         var explicit_row_index = 0
-        while explicit_row_index < explicit_rows.len():
-            grid_rows[explicit_row_index] = explicit_rows[explicit_row_index]
+        while explicit_row_index < grid_row_capacity:
+            if explicit_row_index < explicit_rows.len() as i32:
+                grid_rows[explicit_row_index] = explicit_rows[explicit_row_index]
+                grid_row_fixed[explicit_row_index] = true
+            elif grid_auto_tracks.len() > 0:
+                val auto_track = grid_auto_tracks[(explicit_row_index - explicit_rows.len() as i32) % (grid_auto_tracks.len() as i32)]
+                if auto_track.ends_with("fr"):
+                    grid_row_fr[explicit_row_index] = parse_int(auto_track)
+                elif auto_track != "auto":
+                    grid_rows[explicit_row_index] = parse_int(auto_track)
+                    grid_row_fixed[explicit_row_index] = auto_track.ends_with("px")
             explicit_row_index = explicit_row_index + 1
+        # Items are laid out once in source order, then re-laid in a second
+        # pass when the final row sizes move or stretch them.
+        var grid_item_nodes: [i32] = []
+        var grid_item_rows: [i32] = []
+        var grid_item_row_spans: [i32] = []
+        var grid_item_xs: [i32] = []
+        var grid_item_ys: [i32] = []
+        var grid_item_ws: [i32] = []
+        var grid_item_margin_ts: [i32] = []
+        var grid_item_margin_ys: [i32] = []
+        var grid_item_heights: [i32] = []
+        var grid_item_stretch: [bool] = []
+        var grid_item_aligns: [text] = []
+        var grid_item_styles: [Style] = []
         var occupied: [bool] = [
             false; grid_row_capacity * grid_column_count
         ]
@@ -1798,40 +1902,29 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 grid_item_w = 0
             if grid_auto_w and (grid_child_style.min_width_px < 0 or grid_child_style.max_width_px < 0):
                 grid_item_w = constrained_outer_width(nodes[grid_child], resolved_grid_child_style, grid_item_w)
-            # This bounded Grid slice does not size implicit rows for a
-            # spanning item. Stretch only an auto-size, non-replaced item in
-            # one column whose rows are all explicit, when block-axis auto
-            # margins do not own the free space.
-            if (
-                grid_row + grid_row_span <= explicit_rows.len() and
-                grid_column_span == 1 and
+            # Stretch only an auto-size, non-replaced item (in one column or
+            # spanning several), when block-axis auto margins do not own the
+            # free space. Rows that are all FIXED are already final, so the
+            # item stretches now; a content sized row is only known after
+            # every item, so it stretches in the second pass.
+            val grid_stretches = (
                 (grid_explicit_stretch or grid_normal_stretch) and
                 grid_child_style.height_auto and
                 not grid_child_style.margin_t_auto and
                 not grid_child_style.margin_b_auto and
                 not grid_child_is_replaced
-            ):
-                var grid_stretch_outer_h = (
+            )
+            var grid_rows_final = true
+            var grid_final_index = 0
+            while grid_final_index < grid_row_span:
+                if not grid_row_fixed[grid_row + grid_final_index]:
+                    grid_rows_final = false
+                grid_final_index = grid_final_index + 1
+            if grid_stretches and grid_rows_final:
+                resolved_grid_child_style = grid_stretched_item_style(
+                    nodes[grid_child], grid_child_style, resolved_grid_child_style,
                     grid_track_span_size(grid_rows, st.row_gap_px, grid_row, grid_row_span) -
-                    grid_margin_t - grid_margin_b
-                )
-                if grid_stretch_outer_h < 1:
-                    grid_stretch_outer_h = 1
-                var grid_stretch_style_h = grid_stretch_outer_h
-                if not (
-                    nodes[grid_child].has_widget_class or
-                    nodes[grid_child].has_icon_image_class or
-                    grid_child_style.border_box
-                ):
-                    grid_stretch_style_h = (
-                        grid_stretch_outer_h - resolved_grid_child_style.pad_t -
-                        resolved_grid_child_style.pad_b - grid_child_style.border_t -
-                        grid_child_style.border_b
-                    )
-                if grid_stretch_style_h < 1:
-                    grid_stretch_style_h = 1
-                resolved_grid_child_style = style_with_height(
-                    resolved_grid_child_style, grid_stretch_style_h
+                        grid_margin_t - grid_margin_b
                 )
             val grid_result = layout_with_style(
                 nodes, styles, child_index, grid_child,
@@ -1848,13 +1941,114 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             out_wrap_ends = grid_result.wrap_ends
             out_intrinsic_widths = grid_result.intrinsic_widths
             if (
-                grid_row >= explicit_rows.len() and
+                grid_row_span == 1 and not grid_row_fixed[grid_row] and
                 grid_result.height + grid_margin_t + grid_margin_b > grid_rows[grid_row]
             ):
                 grid_rows[grid_row] = grid_result.height + grid_margin_t + grid_margin_b
-            if grid_row + 1 > max_grid_row:
-                max_grid_row = grid_row + 1
+            if grid_row + grid_row_span > max_grid_row:
+                max_grid_row = grid_row + grid_row_span
+            grid_item_nodes.push(grid_child)
+            grid_item_rows.push(grid_row)
+            grid_item_row_spans.push(grid_row_span)
+            grid_item_xs.push(grid_child_x)
+            grid_item_ys.push(grid_child_y)
+            grid_item_ws.push(grid_item_w)
+            grid_item_margin_ts.push(grid_margin_t)
+            grid_item_margin_ys.push(grid_margin_t + grid_margin_b)
+            grid_item_heights.push(grid_result.height)
+            grid_item_stretch.push(grid_stretches and not grid_rows_final)
+            grid_item_aligns.push(if grid_stretches: "stretch" else: grid_item_align)
+            grid_item_styles.push(resolved_grid_child_style)
             grid_child = child_index.next_sibling[grid_child]
+        # A row-spanning item shares what its rows still lack equally among
+        # the content sized rows it spans (CSS Grid 12.5 step 3; Chrome 159).
+        var grid_span_item = 0
+        while grid_span_item < grid_item_nodes.len() as i32:
+            val span_row = grid_item_rows[grid_span_item]
+            val span_count = grid_item_row_spans[grid_span_item]
+            var span_growable = 0
+            var span_index = 0
+            while span_index < span_count:
+                if not grid_row_fixed[span_row + span_index]:
+                    span_growable = span_growable + 1
+                span_index = span_index + 1
+            val span_deficit = (
+                grid_item_heights[grid_span_item] + grid_item_margin_ys[grid_span_item] -
+                grid_track_span_size(grid_rows, st.row_gap_px, span_row, span_count)
+            )
+            if span_count > 1 and span_growable > 0 and span_deficit > 0:
+                var span_given = 0
+                span_index = 0
+                while span_index < span_count:
+                    if not grid_row_fixed[span_row + span_index]:
+                        span_given = span_given + 1
+                        grid_rows[span_row + span_index] = (
+                            grid_rows[span_row + span_index] +
+                            span_deficit * span_given / span_growable -
+                            span_deficit * (span_given - 1) / span_growable
+                        )
+                    span_index = span_index + 1
+            grid_span_item = grid_span_item + 1
+        # `fr` implicit rows of an auto-height grid share one flex fraction:
+        # the largest content size per `fr` among them (CSS Grid 12.7.1).
+        var grid_fr_unit = 0
+        var grid_fr_row = 0
+        while grid_fr_row < max_grid_row:
+            if grid_row_fr[grid_fr_row] > 0:
+                val fr_unit = (grid_rows[grid_fr_row] + grid_row_fr[grid_fr_row] - 1) / grid_row_fr[grid_fr_row]
+                if fr_unit > grid_fr_unit:
+                    grid_fr_unit = fr_unit
+            grid_fr_row = grid_fr_row + 1
+        grid_fr_row = 0
+        while grid_fr_row < max_grid_row:
+            if grid_row_fr[grid_fr_row] > 0:
+                grid_rows[grid_fr_row] = grid_fr_unit * grid_row_fr[grid_fr_row]
+            grid_fr_row = grid_fr_row + 1
+        # Second pass: the rows are final. Re-lay an item whose row offset
+        # moved, that stretches to a content sized row, or that `align-self`
+        # / `align-items` centres or end-aligns in its rows.
+        var grid_final_item = 0
+        while grid_final_item < grid_item_nodes.len() as i32:
+            val final_node = grid_item_nodes[grid_final_item]
+            val final_row = grid_item_rows[grid_final_item]
+            val final_free = (
+                grid_track_span_size(grid_rows, st.row_gap_px, final_row, grid_item_row_spans[grid_final_item]) -
+                grid_item_margin_ys[grid_final_item]
+            )
+            val final_align = grid_item_aligns[grid_final_item]
+            var final_style = grid_item_styles[grid_final_item]
+            val final_restretch = grid_item_stretch[grid_final_item] and final_free != grid_item_heights[grid_final_item]
+            if final_restretch:
+                final_style = grid_stretched_item_style(
+                    nodes[final_node], styles[final_node], final_style, final_free
+                )
+            var final_y = (
+                y + st.border_t + st.pad_t +
+                grid_track_offset(grid_rows, st.row_gap_px, final_row) +
+                grid_item_margin_ts[grid_final_item]
+            )
+            if final_free > grid_item_heights[grid_final_item]:
+                if final_align == "center":
+                    final_y = final_y + (final_free - grid_item_heights[grid_final_item]) / 2
+                elif final_align == "end" or final_align == "flex-end":
+                    final_y = final_y + final_free - grid_item_heights[grid_final_item]
+            if final_restretch or final_y != grid_item_ys[grid_final_item]:
+                val final_result = layout_with_style(
+                    nodes, styles, child_index, final_node,
+                    grid_item_xs[grid_final_item], final_y, grid_item_ws[grid_final_item],
+                    viewport_w, viewport_h,
+                    out_bx, out_by, out_bw, out_bh,
+                    out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
+                    final_style
+                )
+                out_bx = final_result.bx
+                out_by = final_result.by
+                out_bw = final_result.bw
+                out_bh = final_result.bh
+                out_wrap_starts = final_result.wrap_starts
+                out_wrap_ends = final_result.wrap_ends
+                out_intrinsic_widths = final_result.intrinsic_widths
+            grid_final_item = grid_final_item + 1
         var grid_content_height = 0
         var grid_height_index = 0
         while grid_height_index < max_grid_row:
