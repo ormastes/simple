@@ -352,7 +352,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_render_glyph_lcd_milli, SfntLcdGlyph}
+use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_render_glyph_lcd_milli, SfntLcdGlyph}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
@@ -1545,6 +1545,22 @@ class FontRenderer:
     fn _lcd_applies(font_size: i32) -> bool:
         self.lcd_text and font_size <= FONT_LCD_MAX_SIZE_PX and self.selected_outline_blob.len() > 0
 
+    # Glyph id of `codepoint` in the selected outline face, read from the
+    # per-face ASCII table (`_gid_warm`: one cmap parse per face). The cold
+    # glyph path resolved the same id by codepoint three times -- `has_glyph`,
+    # the measure pass and the phased LCD cell -- and each one re-parsed the
+    # whole cmap (about 3 ms each on the interpreter lane). 0 = the face has no
+    # such glyph; -1 = not answerable here (no selected blob, a foreign
+    # provider answers `has_glyph`, or a non-ASCII codepoint), and the caller
+    # keeps its by-codepoint path for both.
+    fn _selected_outline_gid(codepoint: i32) -> i64:
+        if self.selected_outline_blob.len() == 0:
+            return -1
+        if val Some(rasterizer) = self.ttf_rasterizer:
+            if rasterizer.has_glyph_reads_selected_blob():
+                return _gid_lookup(_gid_warm(rasterizer.cache_identity(), self.selected_outline_blob), codepoint)
+        -1
+
     # LCD variant of a selected-outline glyph; `fallback` is returned when the
     # outline cannot be rasterised.
     fn _lcd_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, glyph_index: i32, face_generation: i64, font_size: i32, fallback: CachedGlyph, phase_q: i64 = 0, x_milli: i64 = 0) -> CachedGlyph:
@@ -1702,7 +1718,12 @@ class FontRenderer:
                     if val Some(hit) = _lcd_phase_glyphs.get(key):
                         pg = hit
                     else:
-                        pg = self._lcd_glyph(SFNT_GLYPH_SELECTOR_CODEPOINT, cp.to_i64(), cp, cell_index, 0, font_size, base, phase, x_milli)
+                        # By glyph index when the face table knows it: the
+                        # same outline without another cmap parse.
+                        val phase_gid = self._selected_outline_gid(cp)
+                        val phase_kind = if phase_gid > 0: SFNT_GLYPH_SELECTOR_INDEX else: SFNT_GLYPH_SELECTOR_CODEPOINT
+                        val phase_value = if phase_gid > 0: phase_gid else: cp.to_i64()
+                        pg = self._lcd_glyph(phase_kind, phase_value, cp, cell_index, 0, font_size, base, phase, x_milli)
                         _lcd_phase_glyphs[key] = pg
                     if pg.glyph_index == cell_index:
                         var idx = self._lcd_phase_atlas_index(key, pg.glyph_index, cp, font_size)
@@ -2150,7 +2171,11 @@ class FontRenderer:
         # `!= nil` rather than `if val Some(x) =` destructuring.
         var handled = false
         val rast = active_rasterizer
-        val rast_has_glyph = rast != nil and rast.has_glyph(codepoint.to_i64())
+        # A positive id from the face table is what `has_glyph` reports true
+        # for over the same blob, and lets the measure pass below select by
+        # index; 0 and -1 keep the original `has_glyph` path.
+        val known_gid = self._selected_outline_gid(codepoint)
+        val rast_has_glyph = known_gid > 0 or (rast != nil and rast.has_glyph(codepoint.to_i64()))
         if rast_has_glyph:
             self.glyph_phase_rasterizer_maps = true
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
@@ -2159,9 +2184,41 @@ class FontRenderer:
         if rast_has_glyph:
             if self.selected_outline_blob.len() > 0:
                 var direct_meta: [i64] = [0; 20]
-                sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta)
+                # The selector only decides how the glyph id is found; slots
+                # [15]/[16] (the selector receipt) are re-pointed at the index
+                # below before the render reads them.
+                if known_gid > 0:
+                    sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX, known_gid, font_size.to_i64(), direct_meta)
+                else:
+                    sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta)
                 val direct_count = direct_meta[5]
-                if direct_meta[7] == 310031 and direct_count >= 0 and direct_count <= 16777216:
+                # LCD first (2026-11-18). An LCD-size glyph keeps nothing of the
+                # grayscale render below except its two receipts: the advance,
+                # which the measure pass already holds, and "the bitmap has
+                # ink" (`direct_meta[9] > 0`). `sfnt_glyph_gray_row_has_ink`
+                # proves the second from one pixel row, so the whole-glyph
+                # grayscale raster (13 ms per cold glyph on the interpreter
+                # lane, discarded) is skipped. No proof, or no LCD glyph, and
+                # the original path below runs unchanged.
+                if direct_meta[7] == 310031 and direct_count > 0 and direct_count <= 16777216 and direct_meta[6] > 0 and self._lcd_applies(font_size):
+                    val lcd_width = direct_meta[0] as i32
+                    val lcd_height = direct_meta[1] as i32
+                    if direct_count == lcd_width.to_i64() * lcd_height.to_i64() and sfnt_glyph_gray_row_has_ink(self.selected_outline_blob, direct_meta[6], font_size.to_i64()):
+                        val lcd_advance_raw = direct_meta[2] as i32
+                        val lcd_advance = if lcd_advance_raw > 0: lcd_advance_raw else: lcd_width + 1
+                        val lcd_seed = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: lcd_width, height: lcd_height, advance: lcd_advance, bearing_x: direct_meta[3] as i32, bearing_y: direct_meta[4] as i32, pixels: [])
+                        val lcd_first = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, direct_meta[6], codepoint, -1, 0, font_size, lcd_seed)
+                        if lcd_first.lcd_pixels.len() > 0:
+                            self.glyph_phase_bitmap_non_nil = true
+                            if lcd_width > 0 and lcd_height > 0:
+                                self.glyph_phase_bitmap_positive = true
+                                self.glyph_phase_adapter_positive = true
+                                self.glyph_phase_reconstructed_positive = true
+                            self.glyph_phase_bitmap_pixels_match = true
+                            self.glyph_phase_adapter_pixels_match = true
+                            glyph = lcd_first
+                            handled = true
+                if not handled and direct_meta[7] == 310031 and direct_count >= 0 and direct_count <= 16777216:
                     var direct_pixels: [u8] = [0u8; direct_count]
                     # Render by the glyph id the measure pass just resolved
                     # (direct_meta[6]) instead of by codepoint. The codepoint

@@ -9,7 +9,8 @@ use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYF_MOVE
     sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be,
     sfnt_glyf_read_i16_be, sfnt_glyf_cmap_ids_into, sfnt_glyf_parse_outline,
     sfnt_glyf_measure_codepoint_advances, sfnt_rasterize_glyph_baseline_aligned,
-    sfnt_render_glyph_lcd}
+    sfnt_render_glyph_lcd, sfnt_glyph_gray_row_has_ink, sfnt_measure_glyph_into,
+    sfnt_render_glyph_into, SFNT_GLYPH_SELECTOR_INDEX}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 val PINNED_FONT: text = "assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf"
@@ -147,3 +148,44 @@ describe "sfnt_glyf public API":
         expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 0, 0)).to_equal(None)
         expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 513, 0)).to_equal(None)
         expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 1114109, 32, 0)).to_equal(None)
+
+    # `sfnt_glyph_gray_row_has_ink` stands in for the grayscale render's "any
+    # ink" receipt (meta[9] > 0) on the LCD glyph path, so a `true` must never
+    # be given for a bitmap the render leaves empty. Every printable ASCII
+    # glyph at a tiny, a small and a text size.
+    it "gray row ink proof is never true for a bitmap the render leaves empty":
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = sfnt_glyf_parse_offset_table(blob).unwrap()
+        var unsound: i64 = 0
+        var proven: i64 = 0
+        var inked: i64 = 0
+        for size in [1, 3, 16]:
+            var cp: i64 = 33
+            while cp < 127:
+                val gid = sfnt_cmap_glyph_id(font, cp as u32) as i64
+                var meta: [i64] = [0; 20]
+                sfnt_measure_glyph_into(blob, SFNT_GLYPH_SELECTOR_INDEX, gid, size, meta)
+                if meta[7] == 310031:
+                    var pixels: [u8] = [0u8; meta[5]]
+                    sfnt_render_glyph_into(blob, SFNT_GLYPH_SELECTOR_INDEX, gid, size, meta, pixels)
+                    val has_ink = meta[8] == 310032 and meta[9] > 0
+                    if has_ink: inked = inked + 1
+                    if sfnt_glyph_gray_row_has_ink(blob, gid, size):
+                        proven = proven + 1
+                        if not has_ink: unsound = unsound + 1
+                cp = cp + 1
+        expect(unsound).to_equal(0)
+        expect(inked).to_be_greater_than(150)
+        # the proof answers for most glyphs (a `:` or `=` has no ink in its
+        # middle row and takes the full render instead)
+        expect(proven * 4).to_be_greater_than(inked * 3)
+
+    it "gray row ink proof rejects an unmapped glyph id, a bad size and a non-sfnt blob":
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = sfnt_glyf_parse_offset_table(blob).unwrap()
+        val gid = sfnt_cmap_glyph_id(font, 65u32) as i64
+        expect(sfnt_glyph_gray_row_has_ink(blob, gid, 16)).to_equal(true)
+        expect(sfnt_glyph_gray_row_has_ink(blob, 0, 16)).to_equal(false)
+        expect(sfnt_glyph_gray_row_has_ink(blob, gid, 0)).to_equal(false)
+        expect(sfnt_glyph_gray_row_has_ink(blob, gid, 513)).to_equal(false)
+        expect(sfnt_glyph_gray_row_has_ink([1u8, 2u8, 3u8], gid, 16)).to_equal(false)
