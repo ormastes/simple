@@ -1084,48 +1084,188 @@ fn _ceil_glyf(value: f64) -> i64:
     val whole = value as i64
     if (whole as f64) < value: whole + 1 else: whole
 
+# --- LCD edge list -------------------------------------------------------------
+# The LCD kernel reads an edge only on its sample scanlines: sample t (pixel
+# row t / 4, sample t % 4, t >= 0) is sy = (2t + 1) / 8, and the kernel's test
+# `y_top < sy and sy <= y_bottom` is t > 4 * y_top - 0.5 and
+# t <= 4 * y_bottom - 0.5. A curve is always 16 chords, most of them shorter
+# than a quarter row at text sizes: of the ~200 edges of a 16 px glyph about 70%
+# lie between two sample scanlines (76% at 12 px, 49% at 40 px) and were built
+# and indexed without ever being read. `_lcd_outline_edges` is `_outline_edges`
+# without them: the kept edges are the same values in the same order.
+
+# True when no sample scanline t >= 0 lies in (lo, hi]. `v * 4.0 - 0.5` is
+# exact for v >= 0 (the difference is no larger than `v * 4.0` there, so it
+# needs no extra bits); for v < 0 it can round across an integer, which only
+# moves a bound that is below sample 0 already.
+fn _lcd_no_sample(lo: f64, hi: f64) -> bool:
+    val below = hi * 4.0 - 0.5
+    var last = below as i64
+    if (last as f64) > below: last = last - 1
+    if last < 0: return true
+    val above = lo * 4.0 - 0.5
+    var first = above as i64
+    if (first as f64) > above: first = first - 1
+    last <= first
+
+fn _lcd_add_edge(edges: [_SfntEdge], ax: f64, ay: f64, bx: f64, by: f64) -> [_SfntEdge]:
+    if ay == by: return edges
+    if ay < by:
+        if _lcd_no_sample(ay, by): return edges
+        return edges.push(_SfntEdge(y_top: ay, y_bottom: by, x_top: ax, dx_dy: (bx - ax) / (by - ay), direction: 1))
+    if _lcd_no_sample(by, ay): return edges
+    edges.push(_SfntEdge(y_top: by, y_bottom: ay, x_top: bx, dx_dy: (ax - bx) / (ay - by), direction: -1))
+
+# `_quad_edges` (depth >= 1) with the unread chords left out. A split point is
+# the midpoint of two points of its curve, and a rounded midpoint stays between
+# its operands, so every chord below a node lies inside the y range of the
+# node's three control points: no sample scanline in that range, no edge.
+fn _lcd_quad_edges(edges: [_SfntEdge], ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64, depth: i64) -> [_SfntEdge]:
+    var lo = ay
+    var hi = ay
+    if cy < lo: lo = cy
+    if cy > hi: hi = cy
+    if by < lo: lo = by
+    if by > hi: hi = by
+    if _lcd_no_sample(lo, hi): return edges
+    val lx = (ax + cx) / 2.0
+    val ly = (ay + cy) / 2.0
+    val rx = (cx + bx) / 2.0
+    val ry = (cy + by) / 2.0
+    val mx = (lx + rx) / 2.0
+    val my = (ly + ry) / 2.0
+    if depth == 1:
+        return _lcd_add_edge(_lcd_add_edge(edges, ax, ay, mx, my), mx, my, bx, by)
+    val left = _lcd_quad_edges(edges, ax, ay, lx, ly, mx, my, depth - 1)
+    _lcd_quad_edges(left, mx, my, rx, ry, bx, by, depth - 1)
+
+fn _lcd_outline_edges(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64) -> [_SfntEdge]:
+    var edges: [_SfntEdge] = []
+    var pen_x = 0.0
+    var pen_y = 0.0
+    var move_x = 0.0
+    var move_y = 0.0
+    for command in commands:
+        val x1 = command.x1 * scale - left
+        val y1 = -command.y1 * scale - top
+        if command.verb == SFNT_GLYF_MOVE:
+            pen_x = x1
+            pen_y = y1
+            move_x = x1
+            move_y = y1
+        elif command.verb == SFNT_GLYF_LINE:
+            edges = _lcd_add_edge(edges, pen_x, pen_y, x1, y1)
+            pen_x = x1
+            pen_y = y1
+        elif command.verb == SFNT_GLYF_QUAD:
+            val x2 = command.x2 * scale - left
+            val y2 = -command.y2 * scale - top
+            edges = _lcd_quad_edges(edges, pen_x, pen_y, x1, y1, x2, y2, 4)
+            pen_x = x2
+            pen_y = y2
+        elif command.verb == SFNT_GLYF_CLOSE:
+            edges = _lcd_add_edge(edges, pen_x, pen_y, move_x, move_y)
+            pen_x = move_x
+            pen_y = move_y
+    edges
+
+# Per-SAMPLE-row edge index for the LCD kernel: `bins[t] .. bins[t + 1]`
+# (t < height * 4) is the slice of `bins` holding the indices, ascending, of
+# the edges that sample scanline t can cross (the range in the section header
+# above). Indexing by pixel row (`_edge_row_index`) made the kernel test each
+# of a row's edges four times. The kernel keeps its exact test, and the
+# ascending order keeps the insertion sort's tie order, so every coverage
+# value is unchanged.
+fn _edge_sample_index(edges: [_SfntEdge], height: i64) -> [i64]:
+    val count = edges.len()
+    val bin_count = height * 4
+    var firsts: [i64] = [0; count]
+    var lasts: [i64] = [0; count]
+    var cursor: [i64] = [0; bin_count + 1]
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < count:
+        val edge = edges[i]
+        val above = edge.y_top * 4.0 - 0.5
+        var first = above as i64
+        if (first as f64) > above: first = first - 1
+        first = first + 1
+        val below = edge.y_bottom * 4.0 - 0.5
+        var last = below as i64
+        if (last as f64) > below: last = last - 1
+        if first < 0: first = 0
+        if last > bin_count - 1: last = bin_count - 1
+        firsts[i] = first
+        lasts[i] = last
+        var span = first
+        while span <= last:
+            cursor[span] = cursor[span] + 1
+            total = total + 1
+            span = span + 1
+        i = i + 1
+    var bins: [i64] = [0; bin_count + 1 + total]
+    var at: i64 = bin_count + 1
+    var t: i64 = 0
+    while t < bin_count:
+        bins[t] = at
+        at = at + cursor[t]
+        cursor[t] = bins[t]
+        t = t + 1
+    bins[bin_count] = at
+    i = 0
+    while i < count:
+        var k = firsts[i]
+        while k <= lasts[i]:
+            bins[cursor[k]] = i
+            cursor[k] = cursor[k] + 1
+            k = k + 1
+        i = i + 1
+    bins
+
 # Adds the exact horizontal span coverage of one sample row to `acc`, in
 # subpixel units (one full subpixel = 1.0). Crossings are sorted and walked
-# with the same non-zero winding rule as _glyf_raster_alpha. `rows` is the
-# `_edge_row_index` of `edges` and `row` the pixel row that holds `sy`.
-fn _lcd_accumulate_row(edges: [_SfntEdge], rows: [i64], row: i64, sy: f64, subpixels: i64, mut acc: [f64]):
-    var xs: [f64] = []
-    var dirs: [i64] = []
-    val row_end = rows[row + 1]
-    var k = rows[row]
-    while k < row_end:
-        val edge = edges[rows[k]]
+# with the same non-zero winding rule as _glyf_raster_alpha. `bins` is the
+# `_edge_sample_index` of `edges` and `bin` the sample row at `sy`. `xs` and
+# `dirs` are the caller's crossing scratch (at least edges.len() long), and
+# `span` grows to cover every subpixel written: [span[0], span[1]).
+fn _lcd_accumulate_row(edges: [_SfntEdge], bins: [i64], bin: i64, sy: f64, subpixels: i64, mut xs: [f64], mut dirs: [i64], mut acc: [f64], mut span: [i64]):
+    var n: i64 = 0
+    val bin_end = bins[bin + 1]
+    var k = bins[bin]
+    while k < bin_end:
+        val edge = edges[bins[k]]
         k = k + 1
         if edge.y_top < sy and sy <= edge.y_bottom:
             val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
             # insertion sort: a glyph row has a handful of crossings
-            var at = xs.len()
-            xs.push(crossing)
-            dirs.push(edge.direction)
+            var at = n
             while at > 0 and xs[at - 1] > crossing:
                 xs[at] = xs[at - 1]
                 dirs[at] = dirs[at - 1]
                 at = at - 1
             xs[at] = crossing
             dirs[at] = edge.direction
+            n = n + 1
     var winding: i64 = 0
     var i: i64 = 0
     val limit = subpixels as f64
-    while i < xs.len():
+    while i < n:
         winding = winding + dirs[i]
-        if winding != 0 and i + 1 < xs.len():
+        if winding != 0 and i + 1 < n:
             var a = xs[i] * 3.0
             var b = xs[i + 1] * 3.0
             if a < 0.0: a = 0.0
             if b > limit: b = limit
             if b > a:
                 var j = _floor_glyf(a)
+                if j < span[0]: span[0] = j
                 while (j as f64) < b and j < subpixels:
                     val lo = if a > (j as f64): a else: j as f64
                     val hi = if b < ((j + 1) as f64): b else: (j + 1) as f64
                     if hi > lo:
                         acc[j] = acc[j] + (hi - lo)
                     j = j + 1
+                if j > span[1]: span[1] = j
         i = i + 1
 
 # --- Slight (y-only) autohinter approximation ---------------------------------
@@ -1522,7 +1662,33 @@ pub fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64
 # consumed by text_layout/font_renderer.spl, so it must be public.
 # @allow(primitive_api)
 pub fn sfnt_render_glyph_lcd_milli(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64, phase_q: i64) -> Option<SfntLcdGlyph>:
-    if size_px <= 0 or size_px > 512 or phase_q < 0 or phase_q > 3:
+    if phase_q < 0 or phase_q > 3:
+        return None
+    val outline = match sfnt_lcd_glyph_outline(blob, selector_kind, selector_value, size_px, x_milli):
+        Some(value): value
+        None: return None
+    sfnt_lcd_outline_raster(outline, phase_q)
+
+# The half of an LCD glyph that does not depend on the quarter-pixel phase:
+# the hinted outline, its scale, the unhinted x extent the phase shifts, the
+# vertical frame and the advance. A glyph drawn at several phases (a text run
+# uses up to four per glyph) parses, hints and frames once, and
+# `sfnt_lcd_outline_frame` answers a cell's metrics without rastering it.
+class SfntLcdOutline:
+    slo_commands: [SfntGlyfCommand]
+    slo_scale: f64
+    slo_left: f64
+    slo_right: f64
+    slo_height: i64
+    slo_raster_top: f64
+    slo_bearing_y: i64
+    slo_advance: i64
+
+# reason: SFNT selector/size scalars are the font-table domain; consumed by
+# text_layout/font_renderer.spl, so it must be public.
+# @allow(primitive_api)
+pub fn sfnt_lcd_glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64) -> Option<SfntLcdOutline>:
+    if size_px <= 0 or size_px > 512:
         return None
     if x_milli < 0 or x_milli > 512000:
         return None
@@ -1563,7 +1729,6 @@ pub fn sfnt_render_glyph_lcd_milli(blob: [u8], selector_kind: i64, selector_valu
         Some(value): value
         None: return None
     val scale = size_px as f64 / units_per_em as f64
-    val phase = phase_q as f64 / 4.0
     var height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
     var raster_top = -bounds.bottom * scale
     var bearing_y = _round_glyf_metric(bounds.top * scale)
@@ -1579,50 +1744,91 @@ pub fn sfnt_render_glyph_lcd_milli(blob: [u8], selector_kind: i64, selector_valu
         height = if top_px > bottom_px: top_px - bottom_px else: 1
         raster_top = 0.0 - (bottom_px + height) as f64
         bearing_y = bottom_px
-    val x0 = _floor_glyf(bounds.left * scale + phase) - 1
-    val x1 = _ceil_glyf(bounds.right * scale + phase) + 1
+    Some(SfntLcdOutline(
+        slo_commands: draw_commands, slo_scale: scale,
+        slo_left: bounds.left, slo_right: bounds.right,
+        slo_height: height, slo_raster_top: raster_top, slo_bearing_y: bearing_y,
+        slo_advance: _round_glyf_metric(horizontal[0] as f64 * scale * x_ratio)))
+
+# Metrics of the cell `sfnt_lcd_outline_raster` builds at `phase_q`, without
+# the raster: [width, height, bearing_x, bearing_y], or [] where the raster
+# answers None.
+# reason: the phase is Skia's quarter-pixel index and the frame is four pixel
+# scalars; consumed by text_layout/font_renderer.spl, so it must be public.
+# @allow(primitive_api)
+pub fn sfnt_lcd_outline_frame(outline: SfntLcdOutline, phase_q: i64) -> [i64]:
+    if phase_q < 0 or phase_q > 3:
+        return []
+    val phase = phase_q as f64 / 4.0
+    val x0 = _floor_glyf(outline.slo_left * outline.slo_scale + phase) - 1
+    val x1 = _ceil_glyf(outline.slo_right * outline.slo_scale + phase) + 1
     val width = x1 - x0
+    val height = outline.slo_height
     if width <= 0 or height <= 0 or width > 4096 or height > 4096:
+        return []
+    [width, height, x0, outline.slo_bearing_y]
+
+# reason: the phase is Skia's quarter-pixel index; consumed by
+# text_layout/font_renderer.spl, so it must be public.
+# @allow(primitive_api)
+pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<SfntLcdGlyph>:
+    val frame = sfnt_lcd_outline_frame(outline, phase_q)
+    if frame.len() != 4:
         return None
+    val width = frame[0]
+    val height = frame[1]
+    val x0 = frame[2]
+    val phase = phase_q as f64 / 4.0
     val subpixels = width * 3
-    val edges = _outline_edges(draw_commands, scale, x0 as f64 - phase, raster_top)
-    val rows = _edge_row_index(edges, height)
+    val edges = _lcd_outline_edges(outline.slo_commands, outline.slo_scale, x0 as f64 - phase, outline.slo_raster_top)
+    val bins = _edge_sample_index(edges, height)
     var gray: [u8] = [0u8; width * height]
     var rgb: [u8] = [0u8; width * height * 3]
+    var xs: [f64] = [0.0; edges.len() + 1]
+    var dirs: [i64] = [0; edges.len() + 1]
+    var span: [i64] = [0, 0]
     var y: i64 = 0
     while y < height:
         var acc: [f64] = [0.0; subpixels]
+        span[0] = subpixels
+        span[1] = 0
         var s: i64 = 0
         while s < _SFNT_LCD_SAMPLE_ROWS:
             val sy = y as f64 + (s as f64 * 2.0 + 1.0) / (2.0 * _SFNT_LCD_SAMPLE_ROWS as f64)
-            _lcd_accumulate_row(edges, rows, y, sy, subpixels, acc)
+            _lcd_accumulate_row(edges, bins, y * _SFNT_LCD_SAMPLE_ROWS + s, sy, subpixels, xs, dirs, acc, span)
             s = s + 1
-        var j: i64 = 0
-        while j < subpixels:
-            # Measured FIR [0.090, 0.225, 0.370, 0.225, 0.090] over neighbouring
-            # subpixels (see the header comment).
-            var f = _SFNT_LCD_TAP0 * acc[j]
-            if j >= 1: f = f + _SFNT_LCD_TAP1 * acc[j - 1]
-            if j + 1 < subpixels: f = f + _SFNT_LCD_TAP1 * acc[j + 1]
-            if j >= 2: f = f + _SFNT_LCD_TAP2 * acc[j - 2]
-            if j + 2 < subpixels: f = f + _SFNT_LCD_TAP2 * acc[j + 2]
-            var v = _round_glyf_metric(f * 255.0 / _SFNT_LCD_SAMPLE_ROWS as f64)
-            if v > 255: v = 255
-            if v < 0: v = 0
-            rgb[y * subpixels + j] = v as u8
-            j = j + 1
-        var x: i64 = 0
-        while x < width:
-            val base = y * subpixels + x * 3
-            val sum = rgb[base] as i64 + rgb[base + 1] as i64 + rgb[base + 2] as i64
-            gray[y * width + x] = ((sum + 1) / 3) as u8
-            x = x + 1
+        # Subpixels further than the filter's 2-subpixel reach from any
+        # coverage, and pixels holding none of them, stay the 0 they were
+        # allocated as: every tap there multiplies 0.0.
+        if span[1] > span[0]:
+            var j: i64 = if span[0] > 2: span[0] - 2 else: 0
+            val j_end: i64 = if span[1] + 2 < subpixels: span[1] + 2 else: subpixels
+            val x_end: i64 = (j_end + 2) / 3
+            var x: i64 = j / 3
+            while j < j_end:
+                # Measured FIR [0.090, 0.225, 0.370, 0.225, 0.090] over neighbouring
+                # subpixels (see the header comment).
+                var f = _SFNT_LCD_TAP0 * acc[j]
+                if j >= 1: f = f + _SFNT_LCD_TAP1 * acc[j - 1]
+                if j + 1 < subpixels: f = f + _SFNT_LCD_TAP1 * acc[j + 1]
+                if j >= 2: f = f + _SFNT_LCD_TAP2 * acc[j - 2]
+                if j + 2 < subpixels: f = f + _SFNT_LCD_TAP2 * acc[j + 2]
+                var v = _round_glyf_metric(f * 255.0 / _SFNT_LCD_SAMPLE_ROWS as f64)
+                if v > 255: v = 255
+                if v < 0: v = 0
+                rgb[y * subpixels + j] = v as u8
+                j = j + 1
+            while x < x_end:
+                val base = y * subpixels + x * 3
+                val sum = rgb[base] as i64 + rgb[base + 1] as i64 + rgb[base + 2] as i64
+                gray[y * width + x] = ((sum + 1) / 3) as u8
+                x = x + 1
         y = y + 1
     Some(SfntLcdGlyph(
         slg_width: width, slg_height: height,
-        slg_advance: _round_glyf_metric(horizontal[0] as f64 * scale * x_ratio),
+        slg_advance: outline.slo_advance,
         slg_bearing_x: x0,
-        slg_bearing_y: bearing_y,
+        slg_bearing_y: outline.slo_bearing_y,
         slg_gray: gray, slg_rgb: rgb))
 
 # Blob-level batch glyph-id resolution: one table-directory parse and one cmap
