@@ -18,7 +18,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, block_margin_milli, style_with_resolved_percent_margins, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -467,7 +467,7 @@ fn col_flex_target_heights(nodes: [HNode], styles: [Style], child_index: HtmlChi
     var items = 0
     var c = child_index.first_child[i]
     while c >= 0:
-        val kst = style_with_resolved_percent_min_max(style_with_resolved_percent_margins(styles[c], iw, 0), iw, content_height_limit)
+        val kst = style_with_resolved_percent_min_max(style_with_resolved_percent_margins(style_with_resolved_percent_padding(styles[c], iw), iw, 0), iw, content_height_limit)
         if kst.position_absolute or simple_web_style_hot_is_display_none(computed_style_hot_from(kst)):
             base = base.push(-1)
             grow = grow.push(0)
@@ -574,7 +574,7 @@ fn col_flex_target_heights(nodes: [HNode], styles: [Style], child_index: HtmlChi
 fn flex_item_percent_style(cst: Style, container_w: i32, container_h: i32) -> Style:
     if cst.position_absolute:
         return cst
-    val out = style_with_resolved_percent_min_max(style_with_resolved_percent_margins(cst, container_w, 0), container_w, container_h)
+    val out = style_with_resolved_percent_min_max(style_with_resolved_percent_margins(style_with_resolved_percent_padding(cst, container_w), container_w, 0), container_w, container_h)
     if cst.flex_basis_permille < 0 or container_w <= 0:
         return out
     # A percentage flex-basis is of the container content width (Flexbox 7.2.3).
@@ -716,18 +716,19 @@ fn row_flex_item_auto_intrinsic_w(
                 widths: out_widths
             )
     val intrinsic = intrinsic_text_width(nodes, styles, child_index, item, widths)
+    val pct_pad_w = percent_padding_extra_w(styles[item], st)
     if intrinsic.width > 0:
         val inline_margins_w = inline_subtree_horizontal_margins_w(nodes, styles, child_index, item, iw)
-        if inline_margins_w > 0:
+        if inline_margins_w > 0 or pct_pad_w > 0:
             return IntrinsicWidthResult(
-                width: constrained_outer_width(node, st, intrinsic.width + inline_margins_w),
+                width: constrained_outer_width(node, st, intrinsic.width + inline_margins_w + pct_pad_w),
                 widths: intrinsic.widths
             )
         return intrinsic
     val max_content_w = flex_item_max_content_width(nodes, styles, child_index, item)
     if max_content_w > 0:
         return IntrinsicWidthResult(
-            width: constrained_outer_width(node, st, max_content_w),
+            width: constrained_outer_width(node, st, max_content_w + pct_pad_w),
             widths: intrinsic.widths
         )
     intrinsic
@@ -1597,6 +1598,35 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             false; grid_row_capacity * grid_column_count
         ]
         var max_grid_row = explicit_rows.len() as i32
+        # Sparse packing (CSS Grid 8.5): an auto-row item is searched from the
+        # auto-placement cursor, never back-filling cells an earlier item skipped.
+        var grid_auto_cursor = 0
+        # Items with a definite row AND column claim their cells before any
+        # auto-placed item, whatever the source order (CSS Grid 8.5 step 1).
+        var grid_definite = child_index.first_child[i]
+        while grid_definite >= 0:
+            val definite_style = styles[grid_definite]
+            val definite_column = grid_placement_start(definite_style.grid_column)
+            val definite_row = grid_placement_start(definite_style.grid_row)
+            val definite_column_span = grid_placement_span(definite_style.grid_column)
+            var definite_row_span = grid_placement_span(definite_style.grid_row)
+            if (
+                definite_column >= 0 and definite_row >= 0 and
+                definite_style.grid_area == "" and
+                definite_row < grid_row_capacity and
+                definite_column + definite_column_span <= grid_column_count and
+                not simple_web_style_hot_is_display_none(computed_style_hot_from(definite_style))
+            ):
+                if definite_row + definite_row_span > grid_row_capacity:
+                    definite_row_span = grid_row_capacity - definite_row
+                var definite_mark = 0
+                while definite_mark < definite_column_span * definite_row_span:
+                    occupied[
+                        (definite_row + definite_mark / definite_column_span) * grid_column_count +
+                        definite_column + definite_mark % definite_column_span
+                    ] = true
+                    definite_mark = definite_mark + 1
+            grid_definite = child_index.next_sibling[grid_definite]
         var grid_child = child_index.first_child[i]
         while grid_child >= 0:
             val grid_child_style = styles[grid_child]
@@ -1627,6 +1657,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     grid_row_span = area_rects[area_found].row_span
             if grid_column_span > grid_column_count:
                 grid_column_span = grid_column_count
+            if grid_row_span > grid_row_capacity:
+                grid_row_span = grid_row_capacity
             # A declared line beyond this bounded layout pass cannot index the
             # occupancy/row arrays. Treat it as auto-placement, preserving the
             # same fail-closed behavior as unsupported/invalid placement.
@@ -1657,7 +1689,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     flow_row_bound * grid_column_count
                 else:
                     grid_row_capacity * grid_column_count
-                var candidate = 0
+                val grid_cursor_item = grid_row < 0 and not st.grid_auto_flow_column
+                var candidate = if grid_cursor_item: grid_auto_cursor else: 0
                 var placed = false
                 while (
                     candidate < candidate_limit and not placed
@@ -1674,13 +1707,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         (grid_row < 0 or candidate_row == grid_row) and
                         (grid_column < 0 or candidate_column == grid_column) and
                         candidate_column + grid_column_span <=
-                            grid_column_count
+                            grid_column_count and
+                        candidate_row + grid_row_span <= grid_row_capacity
                     )
                     var span_index = 0
-                    while admitted and span_index < grid_column_span:
+                    while admitted and span_index < grid_column_span * grid_row_span:
                         if occupied[
-                            candidate_row * grid_column_count +
-                            candidate_column + span_index
+                            (candidate_row + span_index / grid_column_span) * grid_column_count +
+                            candidate_column + span_index % grid_column_span
                         ]:
                             admitted = false
                         span_index = span_index + 1
@@ -1689,15 +1723,19 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         grid_column = candidate_column
                         placed = true
                     candidate = candidate + 1
+                if placed and grid_cursor_item:
+                    grid_auto_cursor = grid_row * grid_column_count + grid_column + grid_column_span
             if grid_row < 0:
                 grid_row = 0
             if grid_column < 0:
                 grid_column = 0
+            if grid_row + grid_row_span > grid_row_capacity:
+                grid_row_span = grid_row_capacity - grid_row
             var mark_index = 0
-            while mark_index < grid_column_span:
+            while mark_index < grid_column_span * grid_row_span:
                 occupied[
-                    grid_row * grid_column_count +
-                    grid_column + mark_index
+                    (grid_row + mark_index / grid_column_span) * grid_column_count +
+                    grid_column + mark_index % grid_column_span
                 ] = true
                 mark_index = mark_index + 1
             # The grid AREA is the item's containing block (CSS Grid 6.1 / 11.1):
@@ -1751,7 +1789,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 grid_child_style.height_px == 0
             )
             # Percentage min-/max- sizes are of the grid area.
-            var resolved_grid_child_style = style_with_resolved_percent_min_max(style_with_resolved_percent_margins(grid_child_style, grid_child_width, viewport_h), grid_child_width, 0)
+            var resolved_grid_child_style = style_with_resolved_percent_min_max(style_with_resolved_percent_margins(style_with_resolved_percent_padding(grid_child_style, grid_child_width), grid_child_width, viewport_h), grid_child_width, 0)
             # An auto-width item's margin box fills the area; a specified
             # (px or percent) width still resolves against the whole area.
             val grid_auto_w = grid_child_style.width_px == 0 and not grid_child_style.width_zero
@@ -1760,13 +1798,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 grid_item_w = 0
             if grid_auto_w and (grid_child_style.min_width_px < 0 or grid_child_style.max_width_px < 0):
                 grid_item_w = constrained_outer_width(nodes[grid_child], resolved_grid_child_style, grid_item_w)
-            # This bounded Grid slice does not size spanning rows. Stretch
-            # only an auto-size, non-replaced item occupying one row and one
-            # column, when block-axis auto margins do not own the free space.
+            # This bounded Grid slice does not size implicit rows for a
+            # spanning item. Stretch only an auto-size, non-replaced item in
+            # one column whose rows are all explicit, when block-axis auto
+            # margins do not own the free space.
             if (
-                grid_row < explicit_rows.len() and
+                grid_row + grid_row_span <= explicit_rows.len() and
                 grid_column_span == 1 and
-                grid_row_span == 1 and
                 (grid_explicit_stretch or grid_normal_stretch) and
                 grid_child_style.height_auto and
                 not grid_child_style.margin_t_auto and
@@ -1774,7 +1812,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 not grid_child_is_replaced
             ):
                 var grid_stretch_outer_h = (
-                    grid_rows[grid_row] - grid_margin_t - grid_margin_b
+                    grid_track_span_size(grid_rows, st.row_gap_px, grid_row, grid_row_span) -
+                    grid_margin_t - grid_margin_b
                 )
                 if grid_stretch_outer_h < 1:
                     grid_stretch_outer_h = 1
@@ -1785,8 +1824,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     grid_child_style.border_box
                 ):
                     grid_stretch_style_h = (
-                        grid_stretch_outer_h - grid_child_style.pad_t -
-                        grid_child_style.pad_b - grid_child_style.border_t -
+                        grid_stretch_outer_h - resolved_grid_child_style.pad_t -
+                        resolved_grid_child_style.pad_b - grid_child_style.border_t -
                         grid_child_style.border_b
                     )
                 if grid_stretch_style_h < 1:
@@ -2378,7 +2417,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var pb_i = 0
             while pb_i < ordered_flex_child_count:
                 val pb = ordered_flex_children[pb_i]
-                val pcst = styles[pb]
+                val pcst = style_with_resolved_percent_padding(styles[pb], iw)
                 if not pcst.position_absolute:
                     val baseline = pcst.margin_t + style_baseline_offset(pcst)
                     if baseline > max_baseline:
@@ -2388,7 +2427,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var pb_self_i = 0
             while pb_self_i < ordered_flex_child_count:
                 val pb_self = ordered_flex_children[pb_self_i]
-                val pcst_self = styles[pb_self]
+                val pcst_self = style_with_resolved_percent_padding(styles[pb_self], iw)
                 if not pcst_self.position_absolute and effective_item_align(st, pcst_self) == "baseline":
                     val baseline_self = pcst_self.margin_t + style_baseline_offset(pcst_self)
                     if baseline_self > max_baseline:
@@ -2753,7 +2792,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var flex_child_count_col = 0
         while flex_c >= 0:
             # ponytail: a column percent basis needs a definite height; it stays auto.
-            val cst = if styles[flex_c].position_absolute: styles[flex_c] else: style_with_resolved_percent_min_max(style_with_resolved_percent_margins(styles[flex_c], iw, 0), iw, content_height_limit)
+            val cst = if styles[flex_c].position_absolute: styles[flex_c] else: style_with_resolved_percent_min_max(style_with_resolved_percent_margins(style_with_resolved_percent_padding(styles[flex_c], iw), iw, 0), iw, content_height_limit)
             if simple_web_style_hot_is_display_none(computed_style_hot_from(cst)):
                 # No flex item (whitespace-only text included): no gap either.
                 out_bw[flex_c] = 0
@@ -2923,7 +2962,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     var inline_baseline_margin_bs: [i32] = []
     var c = child_index.first_child[i]
     while c >= 0:
-        val cst = styles[c]
+        # Percent padding is of this content box; an abspos child resolves its
+        # own against the padding box in absolute_child_style.
+        val cst = if styles[c].position_absolute: styles[c] else: style_with_resolved_percent_padding(styles[c], iw)
         if simple_web_style_hot_is_display_none(computed_style_hot_from(cst)):
             out_bx[c] = ix + inline_x
             out_by[c] = cy
@@ -3063,6 +3104,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     out_intrinsic_widths = float_inline_fit.widths
                     if float_inline_fit.width > float_fit:
                         float_fit = float_inline_fit.width
+                    float_fit = float_fit + percent_padding_extra_w(styles[c], cst)
                     if float_fit > iw - fml - fmr:
                         float_fit = iw - fml - fmr
                     constrained_outer_width(nodes[c], fcst, float_fit)
@@ -3264,6 +3306,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 val intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
                 out_intrinsic_widths = intrinsic.widths
                 var inline_w = intrinsic.width
+                # The intrinsic walk reads the authored style, where a percent
+                # padding is still 0; add what resolved against this line box.
+                inline_w = inline_w + percent_padding_extra_w(styles[c], cst)
                 # A span holding an in-flow ratio-only svg is wider than its
                 # intrinsic width. Each inline subtree is scanned once, from
                 # its nearest non-inline ancestor: inside an inline box the
