@@ -1,0 +1,58 @@
+# @manual_section: array-at-native-lowering
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "unit_div_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+describe "Native constrained unit boundary check (SPL-UNIT-005)", tag: ["only-compiled"]:
+    it "range-checks `raw as Port` at run time":
+        # @req RB-UNIT-C1b
+        step("Lower a non-literal cast to a constrained unit")
+        val mir = lower_function("unit Port: i32 as pt in 1..=65535\n\nfn mk(raw: i32) -> Port:\n    raw as Port\n", "mk")
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir).to_contain("SPL-UNIT-005")
+        expect(mir).to_contain("rt_panic")
+        expect(mir).to_contain("\"op\":\"Lt\"")
+        expect(mir).to_contain("\"op\":\"Gt\"")
+
+    it "range-checks `Port(raw)` at run time":
+        # @req RB-UNIT-C1b
+        step("Lower a non-literal constructor call of a constrained unit")
+        val mir = lower_function("unit Port: i32 as pt in 1..=65535\n\nfn mk(raw: i32) -> Port:\n    Port(raw)\n", "mk")
+        expect(mir).to_contain("SPL-UNIT-005")
+
+    it "checks only the declared side of a half-open range":
+        # @req RB-UNIT-C1b
+        step("Lower a cast to a minimum-only unit")
+        val mir = lower_function("unit Count: i64 as cn in 0..\n\nfn mk(raw: i64) -> Count:\n    raw as Count\n", "mk")
+        expect(mir).to_contain("SPL-UNIT-005")
+        expect(mir.contains("\"op\":\"Gt\"")).to_equal(false)
+
+    it "leaves an unconstrained unit cast unchecked":
+        # @req RB-UNIT-C1b
+        step("Lower a cast to an unconstrained unit")
+        val mir = lower_function("unit Fd: i32 as fd\n\nfn mk(raw: i32) -> Fd:\n    raw as Fd\n", "mk")
+        expect(mir.contains("SPL-UNIT-005")).to_equal(false)

@@ -1,0 +1,41 @@
+# @req: RB-SFFI-02
+# Executes the generated SFFI facade source itself (not a hand-copied shape).
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_write, process_run, env_get}
+use compiler.tools.sffi_gen.constrained_unit_scan.{generate_constrained_unit_facades}
+
+val UNIT_DECL = "unit Port: i32 as Pt\n"
+val DECLS = UNIT_DECL + "# @unit_range Port 1..65535\nextern fn rt_net_port(fd: i32) -> Port\n"
+# Replace the private raw extern with a Simple stub returning `ret`, keep the
+# generated facade body verbatim, and run the result through the interpreter.
+fn run_facade(name: text, ret: i64) -> text:
+    val gen = generate_constrained_unit_facades(DECLS)
+    var lines: [text] = []
+    for line in gen.source.split("\n"):
+        if line.starts_with("extern fn __raw_rt_net_port"):
+            lines.push("fn __raw_rt_net_port(fd: i32) -> i32:\n    {ret}")
+        else:
+            lines.push(line)
+    val body = UNIT_DECL + lines.join("\n")
+    val main_src = "\nfn main():\n    match rt_net_port(3):\n        case Ok(p):\n            print(\"OK\")\n        case Err(e):\n            print(\"ERR \" + e.message)\n"
+    val path = "build/test-artifacts/sffi_facade_exec_" + name + ".spl"
+    file_write(path, body + main_src)
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val out = process_run("sh", ["-c", bin + " run " + path + " 2>&1"])
+    out.0
+
+describe "SFFI generated facade executes":
+    it "returns Ok for an in-range raw value":
+        step("Run generated facade with raw=8080")
+        expect(run_facade("ok", 8080)).to_contain("OK")
+
+    it "returns Err for an out-of-range raw value":
+        step("Run generated facade with raw=0")
+        expect(run_facade("lo", 0)).to_contain("ERR")
+
+    it "returns Err above the maximum":
+        step("Run generated facade with raw=70000")
+        expect(run_facade("hi", 70000)).to_contain("ERR")

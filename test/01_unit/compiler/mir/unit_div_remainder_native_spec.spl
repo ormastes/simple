@@ -1,0 +1,53 @@
+# @manual_section: array-at-native-lowering
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "unit_div_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+describe "Native unit division remainder check (SPL-UNIT-002)", tag: ["only-compiled"]:
+    it "guards inexact integer unit division with a remainder check":
+        # @req RB-UNIT-02
+        step("Lower Dist / Dist and look for the remainder test and its panic")
+        val source = "unit Dist: i64 as dd\n\nfn ratio(a: Dist, b: Dist) -> i64:\n    a / b\n"
+        val mir = lower_function(source, "ratio")
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir).to_contain("\"op\":\"Rem\"")
+        expect(mir).to_contain("SPL-UNIT-002")
+        expect(mir).to_contain("rt_panic")
+
+    it "guards unit divided by a plain integer":
+        # @req RB-UNIT-02
+        step("Lower Dist / i64")
+        val source = "unit Dist: i64 as dd\n\nfn half(a: Dist, n: i64) -> Dist:\n    a / n\n"
+        val mir = lower_function(source, "half")
+        expect(mir).to_contain("SPL-UNIT-002")
+
+    it "adds no check to plain integer division":
+        # @req RB-UNIT-02
+        step("Lower i64 / i64")
+        val mir = lower_function("fn q(a: i64, b: i64) -> i64:\n    a / b\n", "q")
+        expect(mir.contains("SPL-UNIT-002")).to_equal(false)
+        expect(mir.contains("\"op\":\"Rem\"")).to_equal(false)
