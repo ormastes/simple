@@ -1,0 +1,141 @@
+"""
+## Purpose and audience
+Purpose: Pin where blocks with a FRACTIONAL CSS y land at device scale 4,
+against Chrome 159. At `--force-device-scale-factor=4` Chrome lays out in
+DEVICE px with sub-pixel LayoutUnits and pixel-snaps each painted edge: a box
+whose true top is 10.61 CSS px paints from round(42.44) = device row 42. This
+engine keeps the block cursor rounded to whole CSS px (with the milli residual
+carried in `cy_frac`) and scaled the Draw IR by 4, so the same box painted
+from 4 x round(10.61) = 44: up to 2 device px off Chrome on every block whose
+y has a fraction (em margins: an h1's 0.67em top margin is 21.44 px).
+Audience: web renderer layout / Draw IR device-scale maintainers.
+
+Measured values, device px: the non-white background runs in the right-edge
+column (`R` = `#ffd0d0`, `G` = `#d0ffd0`), and the glyph baseline rows (last
+ink row + 1 of each `H` ink run in the first 10 CSS px).
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K
+--window-size=60,300 --screenshot`, fonts /usr/share/fonts/truetype/{dejavu,
+liberation}, body margin 0, the page below):
+
+| block                                     | true CSS top | K=4 rows | K=1 rows |
+|-------------------------------------------|--------------|----------|----------|
+| DejaVu 16px lh24, margin-top 10.61px      | 10.61        | 42-137   | 11-34    |
+| Liberation Sans bold 32px lh48, mt 21.44  | 56.05        | 224-415  | 56-103   |
+| DejaVu 16px lh1.5, 2 lines, mt 5.37       | 109.42       | 438-629  | 109-156  |
+| DejaVu 16px lh24, mt 0.3                  | 157.72       | 631-726  | 158-181  |
+| height 4px                                | 181.72       | 727-742  | 182-185  |
+
+K=4 baselines: 111, 507, 603, 700 (the bold 32px `H` is left out: its glyph
+keeps the 1-row Liberation Sans raster-anchoring residual filed in
+doc/08_tracking/bug/web_render_glyph_baseline_one_row_high_liberation_sans_64px_2026-11-18.md).
+Base (97518ab11cc) at K=4: R44-139 G224-415 R436-627 G632-727 R728-743,
+baselines 113 505 601 701. K=1 is Simple's own current output (here equal to
+Chrome) and must stay byte-identical.
+"""
+
+"""
+Traceability: REQ-WEB-DPR4-BLOCK-Y-001 — at device scale k>1 a box paints from round(k x its true CSS y).
+"""
+# @tag: unit, browser_engine, layout, device_scale, chrome159
+# @cover src/lib/common/ui/draw_ir_device_scale.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 60
+val CSS_H: i32 = 200
+
+val PAGE: text = "<!doctype html><html><head><style>body{margin:0;background:#fff} div{margin:0;color:#000}</style></head><body style=\"width:60px\">" +
+    "<div style=\"font:16px 'DejaVu Sans';line-height:24px;margin-top:10.61px;background:#ffd0d0\">H</div>" +
+    "<div style=\"font:bold 32px 'Liberation Sans';line-height:48px;margin-top:21.44px;background:#d0ffd0\">H</div>" +
+    "<div style=\"font:16px 'DejaVu Sans';line-height:1.5;margin-top:5.37px;background:#ffd0d0\">H<br>H</div>" +
+    "<div style=\"font:16px 'DejaVu Sans';line-height:24px;margin-top:0.3px;background:#d0ffd0\">H</div>" +
+    "<div style=\"height:4px;background:#ffd0d0\"></div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32) as i32
+
+fn _kind(px: u32) -> text:
+    val r = _chan(px, 16u32)
+    val g = _chan(px, 8u32)
+    val b = _chan(px, 0u32)
+    if r > 240 and g > 190 and g < 220 and b > 190 and b < 220:
+        return "R"
+    if g > 240 and r > 190 and r < 220 and b > 190 and b < 220:
+        return "G"
+    "W"
+
+fn _is_ink(px: u32) -> bool:
+    _chan(px, 8u32) < 100 and _chan(px, 0u32) < 100
+
+fn _render(k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, k, "cpu_simd")
+
+# Non-white runs of the right-edge column, e.g. "R42-137 G224-415".
+fn _bg_runs(px: [u32], k: i32) -> text:
+    val w = CSS_W * k
+    val h = CSS_H * k
+    if px.len() != (w * h) as i64:
+        return "size-mismatch"
+    var out = ""
+    var prev = "W"
+    var start = 0
+    var y = 0
+    while y <= h:
+        val kd = if y < h: _kind(px[y * w + w - 2]) else: "W"
+        if kd != prev:
+            if prev != "W":
+                out = out + (if out == "": "" else: " ") + prev + start.to_text() + "-" + (y - 1).to_text()
+            prev = kd
+            start = y
+        y = y + 1
+    out
+
+# Last ink row + 1 of each ink run in the first 10 CSS px columns.
+fn _baselines(px: [u32], k: i32) -> [i32]:
+    val w = CSS_W * k
+    val h = CSS_H * k
+    var out: [i32] = []
+    if px.len() != (w * h) as i64:
+        return out
+    var inside = false
+    var y = 0
+    while y < h:
+        var dark = false
+        var x = 0
+        while x < 10 * k:
+            if _is_ink(px[y * w + x]):
+                dark = true
+            x = x + 1
+        if inside and not dark:
+            out.push(y)
+        inside = dark
+        y = y + 1
+    out
+
+describe "Fractional block y at device scale 4 (Chrome 159)":
+    it "AC-1: every block paints from round(4 x its true CSS top)":
+        expect(_bg_runs(_render(4), 4)).to_equal("R42-137 G224-415 R438-629 G631-726 R727-742")
+
+    it "AC-2: text moves with its block: baselines 111, 507, 603, 700":
+        val b = _baselines(_render(4), 4)
+        expect(b.len()).to_equal(5)
+        expect(b[0]).to_equal(111)
+        expect(b[2]).to_equal(507)
+        expect(b[3]).to_equal(603)
+        expect(b[4]).to_equal(700)
+
+describe "Fractional block y leaves scale 1 alone":
+    it "AC-3 (guard): the 1x render keeps its current rows and baselines":
+        val px = _render(1)
+        expect(_bg_runs(px, 1)).to_equal("R11-34 G56-103 R109-156 G158-181 R182-185")
+        val b = _baselines(px, 1)
+        expect(b.len()).to_equal(5)
+        expect(b[0]).to_equal(28)
+        expect(b[1]).to_equal(91)
+        expect(b[2]).to_equal(126)
+        expect(b[3]).to_equal(150)
+        expect(b[4]).to_equal(175)

@@ -18,7 +18,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, block_margin_milli, style_with_resolved_percent_margins, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, block_margin_milli, style_with_resolved_percent_margins, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -761,6 +761,7 @@ pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlCh
     text_pen_origin_reset()
     text_line_boxes_reset()
     text_device_dy_reset()
+    box_device_top_reset()
     val flow = layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
     # ::marker box post-pass (bug browser_engine_no_list_marker_boxes_
     # 2026-08-19). list-style-position outside default: the marker box sits
@@ -785,7 +786,7 @@ pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlCh
                 out_bw[marker_i] = if marker_ordered: 16 else: 6
                 out_bh[marker_i] = out_bh[marker_li]
         marker_i = marker_i + 1
-    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: flow.wrap_starts, wrap_ends: flow.wrap_ends, intrinsic_widths: flow.intrinsic_widths, height: flow.height, first_line_dx: g_text_first_line_dx, line_boxes: g_text_line_boxes, pen_origin_milli: g_text_pen_origin_milli, device_dy: text_device_dy_first_table(), device_dy_rest: text_device_dy_rest_table())
+    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: flow.wrap_starts, wrap_ends: flow.wrap_ends, intrinsic_widths: flow.intrinsic_widths, height: flow.height, first_line_dx: g_text_first_line_dx, line_boxes: g_text_line_boxes, pen_origin_milli: g_text_pen_origin_milli, device_dy: text_device_dy_first_table(), device_dy_rest: text_device_dy_rest_table(), device_top: box_device_top_table())
 
 # =========================================================================
 # `contain: layout` fast path for layout_selected. See containment.spl for
@@ -903,6 +904,7 @@ pub fn layout_selected(
             g_text_line_boxes_pending = []
             text_pen_origin_restore(retained.pen_origin_milli)
             text_device_dy_restore(retained.device_dy, retained.device_dy_rest)
+            box_device_top_restore(retained.device_top)
             val sub = layout_with_style(
                 nodes, styles, child_index, boundary,
                 retained.bx[boundary], retained.by[boundary], retained.bw[boundary],
@@ -921,7 +923,8 @@ pub fn layout_selected(
                         line_boxes: g_text_line_boxes,
                         pen_origin_milli: g_text_pen_origin_milli,
                         device_dy: text_device_dy_first_table(),
-                        device_dy_rest: text_device_dy_rest_table()
+                        device_dy_rest: text_device_dy_rest_table(),
+                        device_top: box_device_top_table()
                     ),
                     fault: ""
                 )
@@ -2584,6 +2587,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     child_y = y + st.border_t + st.pad_t + cursor_advance_px(origin_frac, item_top_milli)
                     item_origin = cursor_advance_frac(origin_frac, item_top_milli)
                 g_origin_frac_milli = item_origin
+                box_device_top_record(nodes.len() as i32, fc, item_origin)
                 val child = layout_with_style(nodes, styles, child_index, fc, draw_x, child_y, draw_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
@@ -3857,6 +3861,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         else:
                             val beside_try_w = if cst.width_px == 0 and not cst.width_zero: top_right - top_left else: beside_w0
                             g_origin_frac_milli = if cy == cy_before_beside: cy_frac else: 0
+                            box_device_top_record(nodes.len() as i32, c, g_origin_frac_milli)
                             val beside_try = layout_with_style(nodes, styles, child_index, c, top_left, cy, beside_try_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                             out_bx = beside_try.bx
                             out_by = beside_try.by
@@ -3907,6 +3912,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             val child_start_frac = if cy == cy_before_beside: cy_frac else: 0
             if not (trial_valid and trial_x == child_x and trial_y == cy and trial_w == child_w):
                 g_origin_frac_milli = child_start_frac
+                box_device_top_record(nodes.len() as i32, c, child_start_frac)
                 val child = layout_with_style(nodes, styles, child_index, c, child_x, cy, child_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
@@ -3952,6 +3958,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             if corrected_top_milli != child_top_milli:
                 val corrected_top_advance = cursor_advance_px(top_frac_restore, corrected_top_milli)
                 cy_frac = cursor_advance_frac(top_frac_restore, corrected_top_milli)
+                if layout_device_scale() > 1:
+                    box_device_top_shift(child_index, c, cy_frac - child_start_frac)
                 if corrected_top_advance != child_top_advance:
                     val retopped = offset_layout_subtree(
                         child_index, c, 0, corrected_top_advance - child_top_advance,
