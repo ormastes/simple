@@ -30,7 +30,7 @@
 #
 # Usage: sh scripts/check/check-baremetal-efi-boot.shs [--arch x86_64|i686|aarch64|riscv64|riscv32|all]
 #            [--linker lld|simple] [--keep]
-#   --linker simple (i686): in-house Simple linker + PE32 emitter.
+#   --linker simple (i686, arm32): in-house Simple linker + PE32 emitter (arm32: Thumb-2 stub, machine 0x01c2).
 #   --linker simple (x86_64/aarch64/riscv64): use elf_boot_link and FAIL unless
 #   allocated-section layout equals lld's for the same inputs (layout.diff); x86_64/aarch64
 #   link efi_stub_<arch>.S first and are wrapped by the in-house PE32+ emitter.
@@ -93,6 +93,18 @@ pe_patch_machine() {
     [ "$(od -An -tx1 -j$((lfa + 4)) -N2 "$pf" | tr -d ' \n')" = c201 ]
 }
 
+# pe_machine_is_thumb <file>: read-only check for the Simple-linker lane, whose
+# PE emitter already writes 0x01c2 (nothing to patch); fails closed otherwise.
+pe_machine_is_thumb() {
+    pf=$1
+    [ -s "$pf" ] || return 1
+    [ "$(od -An -tx1 -N2 "$pf" | tr -d ' \n')" = 4d5a ] || return 1
+    lfa=$(od -An -tu4 -j60 -N4 "$pf" | tr -d ' \n')
+    [ -n "$lfa" ] && [ "$lfa" -ge 64 ] || return 1
+    [ "$(od -An -tx1 -j"$lfa" -N4 "$pf" | tr -d ' \n')" = 50450000 ] || return 1
+    [ "$(od -An -tx1 -j$((lfa + 4)) -N2 "$pf" | tr -d ' \n')" = c201 ]
+}
+
 # Fixture proof: a good ARMNT header is rewritten (and nothing else changes);
 # wrong magic, wrong signature, already-patched and wrong-machine files are all
 # refused. Returns non-zero on any mismatch.
@@ -116,6 +128,9 @@ pe_selftest() {
     pe_patch_machine "$t/amd64" && { echo "selftest: amd64 machine accepted"; rm -rf "$t"; return 1; }
     : > "$t/empty"
     pe_patch_machine "$t/empty" && { echo "selftest: empty file accepted"; rm -rf "$t"; return 1; }
+    pe_machine_is_thumb "$t/good" || { echo "selftest: thumb check refused a 0x01c2 header"; rm -rf "$t"; return 1; }
+    pe_machine_is_thumb "$t/good.orig" && { echo "selftest: thumb check accepted 0x01c4"; rm -rf "$t"; return 1; }
+    pe_machine_is_thumb "$t/amd64" && { echo "selftest: thumb check accepted amd64"; rm -rf "$t"; return 1; }
     rm -rf "$t"
     return 0
 }
@@ -179,6 +194,15 @@ layout_of() {
 }
 
 # Builds <d>/image.bin (flat) linked at <base>. Returns non-zero with $why set.
+reloc_guard() {
+    # reloc_guard <dir> <obj>...: fail closed on absolute relocations (sets why).
+    d=$1; shift
+    llvm-readelf -r "$@" > "$d/relocs.txt" 2>&1 || { why=readelf; return 1; }
+    if grep -E -q 'R_X86_64_(32S?|64) |R_386_(32|16|8) |R_AARCH64_(ABS(16|32|64)|MOVW_UABS)|R_ARM_(ABS32|MOVW_ABS_NC|MOVT_ABS|THM_MOVW_ABS_NC|THM_MOVT_ABS|TARGET1) ' "$d/relocs.txt"; then
+        why=absolute-reloc; return 1
+    fi
+}
+
 build_image() {
     a=$1; d=$2; base=$3
     compile_obj "$BM_SRC" "$a" "$d/main.o" "$d/build.log" || { why=compile; return 1; }
@@ -206,6 +230,18 @@ build_image() {
         # In-house Simple linker: IA32 EFI stub first, flat image at $base,
         # wrapped by the in-house PE32 emitter (no ld.lld, no lld-link).
         "$CLANG" $cflags -c "$RT_DIR/efi_stub_$a.S" -o "$d/efi_stub.o" > "$d/stub.log" 2>&1 || { why=efi-stub; return 1; }
+        "${SIMPLE_LINK_BIN:-$SIMPLE_BIN}" run "$repo_root/scripts/check/baremetal-elf32-link.spl" -- "$a" "$base" efi_entry \
+            "$d/image.bin" "$d/efi_stub.o" "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/link.log" 2>&1 || {
+            why=link; return 1; }
+        return 0
+    fi
+    if [ "$linker" = simple ] && [ "$a" = arm32 ]; then
+        # In-house Simple linker: Thumb-2 EFI stub first, ARM crt0, flat image
+        # at $base, wrapped by the in-house PE32 emitter as machine 0x01c2.
+        # Same absolute-relocation guard as the lld path (image runs wherever
+        # AllocatePages put it).
+        "$CLANG" $cflags -c "$RT_DIR/efi_stub_$a.S" -o "$d/efi_stub.o" > "$d/stub.log" 2>&1 || { why=efi-stub; return 1; }
+        reloc_guard "$d" "$d/efi_stub.o" "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" || return 1
         "${SIMPLE_LINK_BIN:-$SIMPLE_BIN}" run "$repo_root/scripts/check/baremetal-elf32-link.spl" -- "$a" "$base" efi_entry \
             "$d/image.bin" "$d/efi_stub.o" "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/link.log" 2>&1 || {
             why=link; return 1; }
@@ -248,11 +284,7 @@ build_image() {
     # them, so any absolute relocation would point at the wrong address. Fail
     # closed rather than boot a silently mis-relocated image.
     if [ "$a" != riscv64 ] && [ "$a" != riscv32 ]; then
-        llvm-readelf -r "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/relocs.txt" 2>&1 || {
-            why=readelf; return 1; }
-        if grep -E -q 'R_X86_64_(32S?|64) |R_386_(32|16|8) |R_AARCH64_(ABS(16|32|64)|MOVW_UABS)|R_ARM_(ABS32|MOVW_ABS_NC|MOVT_ABS|THM_MOVW_ABS_NC|THM_MOVT_ABS|TARGET1) ' "$d/relocs.txt"; then
-            why=absolute-reloc; return 1
-        fi
+        reloc_guard "$d" "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" || return 1
     fi
     llvm-objcopy -O binary "$d/image.elf" "$d/image.bin" || { why=objcopy; return 1; }
 }
@@ -268,7 +300,8 @@ build_efi() {
     esac
     mkdir -p "$d/esp/EFI/BOOT"
     if [ "$linker" = simple ]; then
-        "${SIMPLE_LINK_BIN:-$SIMPLE_BIN}" run "$repo_root/scripts/check/baremetal-efi-wrap.spl" -- "$a" \
+        wa=$a; [ "$a" = arm32 ] && wa=arm   # emitter arch name (PE machine 0x01c2, Thumb entry)
+        "${SIMPLE_LINK_BIN:-$SIMPLE_BIN}" run "$repo_root/scripts/check/baremetal-efi-wrap.spl" -- "$wa" \
             "$d/image.bin" "$d/esp/EFI/BOOT/$boot" > "$d/efi.log" 2>&1
         return $?
     fi
@@ -360,13 +393,13 @@ transcript_ok() {
 }
 
 if ! pe_selftest; then echo "FAIL -- pe_patch_machine selftest"; exit 1; fi
-if [ $selftest_only -eq 1 ]; then echo "PASS -- pe_patch_machine selftest (6 fixtures)"; exit 0; fi
+if [ $selftest_only -eq 1 ]; then echo "PASS -- pe_patch_machine selftest (9 fixtures)"; exit 0; fi
 
 booted=0
 failed=""
 checked=0
 case "$arch_sel" in
-    arm32) [ "$linker" = simple ] && { echo "ERROR -- nothing was checked (--linker simple has no arm32 lane yet: needs efi_stub_arm32.S)"; exit 2; }; arches=arm32 ;;
+    arm32) arches=arm32 ;;
     all) arches="x86_64 aarch64 riscv64" ;;   # riscv32/i686/arm32 are opt-in (--arch): need OPENSBI32_SRC / OVMF32 firmware
     x86_64|i686|aarch64|riscv64|riscv32|arm32) arches="$arch_sel" ;;
     *) echo "ERROR -- nothing was checked (unsupported --arch $arch_sel)"; exit 2 ;;
@@ -404,7 +437,8 @@ for a in $arches; do
         arm32)
             build_efi "$a" "$d" || { echo "[$a] EFI wrap failed ($d/efi.log)"; failed="$failed $a(efi)"; continue; }
             # EDK2 ARM accepts only machine 0x01c2; lld-link emits 0x01c4.
-            pe_patch_machine "$d/esp/EFI/BOOT/BOOTARM.EFI" || { echo "[$a] PE machine patch failed"; failed="$failed $a(pe-patch)"; continue; }
+            if [ "$linker" = simple ]; then pe_fix=pe_machine_is_thumb; else pe_fix=pe_patch_machine; fi
+            $pe_fix "$d/esp/EFI/BOOT/BOOTARM.EFI" || { echo "[$a] PE machine check/patch failed"; failed="$failed $a(pe-patch)"; continue; }
             # Real vfat ESP image on virtio-blk-pci (AAVMF32 ignores QEMU vvfat).
             truncate -s 64M "$d/esp.img"
             mkfs.vfat -F 32 "$d/esp.img" > "$d/mkfs.log" 2>&1 \
