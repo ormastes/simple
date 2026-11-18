@@ -30,7 +30,7 @@
 #
 # Usage: sh scripts/check/check-baremetal-efi-boot.shs [--arch x86_64|i686|aarch64|riscv64|riscv32|all]
 #            [--linker lld|simple] [--keep]
-#   --linker simple (i686, arm32): in-house Simple linker + PE32 emitter (arm32: Thumb-2 stub, machine 0x01c2).
+#   --linker simple (i686, arm32, riscv32): in-house Simple linker + PE32 emitter (arm32: Thumb-2 stub, machine 0x01c2).
 #   --linker simple (x86_64/aarch64/riscv64): use elf_boot_link and FAIL unless
 #   allocated-section layout equals lld's for the same inputs (layout.diff); x86_64/aarch64
 #   link efi_stub_<arch>.S first and are wrapped by the in-house PE32+ emitter.
@@ -232,6 +232,16 @@ build_image() {
         "$CLANG" $cflags -c "$RT_DIR/efi_stub_$a.S" -o "$d/efi_stub.o" > "$d/stub.log" 2>&1 || { why=efi-stub; return 1; }
         "${SIMPLE_LINK_BIN:-$SIMPLE_BIN}" run "$repo_root/scripts/check/baremetal-elf32-link.spl" -- "$a" "$base" efi_entry \
             "$d/image.bin" "$d/efi_stub.o" "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/link.log" 2>&1 || {
+            why=link; return 1; }
+        return 0
+    fi
+    if [ "$linker" = simple ] && [ "$a" = riscv32 ]; then
+        # In-house Simple linker, raw ELF32 core (shared RISC-V pcrel hi/lo pairing):
+        # flat image at $base for the OpenSBI payload, no EFI stub, no ELF. Relaxation
+        # is off (R_RISCV_RELAX ignored). The lld layout-equality gate does not apply:
+        # the raw core lays sections out in input order, not by output-section pattern.
+        "${SIMPLE_LINK_BIN:-$SIMPLE_BIN}" run "$repo_root/scripts/check/baremetal-elf32-link.spl" -- "$a" "$base" _start \
+            "$d/image.bin" "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/link.log" 2>&1 || {
             why=link; return 1; }
         return 0
     fi
