@@ -82,3 +82,24 @@ ls scripts/os | grep sysroot                 # aarch64 and riscv64 only
 - Not booted: there is no i686 user-mode filesystem-launch boot lane yet.
 
 riscv32 and arm32 remain open.
+
+## Update 2026-11-19: riscv32 built
+
+- crt0 `simpleos_crt0_riscv32.S` is 4 instructions into the shared `__simpleos_start32`.
+  The syscall stub `simpleos_syscall_riscv32.S` moves the ILP32 int64 register pairs and
+  stack words into the kernel's a7 = id, a0..a4 = args map (`riscv32/user_entry_v1.spl`),
+  issues `ecall`, then sign-widens into a1.
+- Sysroot: `sh scripts/os/simpleos-sysroot-32.shs riscv32` uses
+  `-march=rv32imac -mabi=ilp32 -mno-relax`. One libc fix was needed:
+  `simpleos_softfloat_builtins.c` used `unsigned __int128` for binary128 `long double`, and
+  rv32 has binary128 long double but no `__int128`. That path is now also gated on
+  `__SIZEOF_INT128__`, so rv32 has no `__extenddftf2` until it gets a 32-bit-word
+  implementation.
+- lld args: `-m elf32lriscv --no-relax --image-base=0x400000 --build-id=sha1` plus crt0.
+- Simple linker: `internal_link_simpleos` admits riscv32 through the static ELF32 engine. A
+  C hello links with both linkers: `.text` is 0x274 bytes in both, and RW filesz/memsz is
+  4/0x410 in both. The engine bug found here (.sdata merged into .data) is fixed in this PR;
+  see `elf_static_riscv_sdata_merged_into_data_gp_wrong_2026-11-19.md`.
+- The kernel's own `rv32_real_exec_payload.spl` loads at 0x400000, which confirms the base.
+
+arm32 remains open.

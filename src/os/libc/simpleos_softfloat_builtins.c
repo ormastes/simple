@@ -28,7 +28,7 @@
  * where long double == double) the compiler does not emit __extenddftf2 at all,
  * and defining it would be both unnecessary and wrong.
  */
-#if defined(__LDBL_MANT_DIG__) && __LDBL_MANT_DIG__ == 113
+#if defined(__LDBL_MANT_DIG__) && __LDBL_MANT_DIG__ == 113 && defined(__SIZEOF_INT128__)
 
 #define SPL_F64_MANT_BITS 52
 #define SPL_F64_EXP_MASK 0x7FFu
