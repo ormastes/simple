@@ -1,0 +1,101 @@
+# Backend contracts as data (plan §6, owner decisions 2026-11-18).
+#
+# `config/build/backend_contracts.sdn` records: HIP is the ROCm backend of
+# record, the CUDA PTX ISA version the builder emits, and that SVE/RVV code is
+# vector-length-agnostic with the length queried at runtime. This module loads
+# that data and checks it against the files that implement it. Opt-in only.
+
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.nogc_sync_mut.io_runtime.{file_read, file_exists, dir_exists}
+
+pub struct BackendContracts:
+    rocm_backend: text
+    rocm_group: text
+    rocm_target: text
+    ptx_isa_version: text
+    ptx_default_sm: text
+    ptx_source: text
+    vl_mode: text
+    vl_query: text
+    vl_aarch64_tier: text
+    vl_riscv64_tier: text
+
+fn _field(v: SdnValue, section: text, key: text) -> text?:
+    val s = v.get(section)
+    if not s.?: return None
+    val f = s.unwrap().get(key)
+    if not f.?: return None
+    f.unwrap().as_str()
+
+pub fn load_backend_contracts(source: text) -> Result<BackendContracts, text>:
+    """Fail closed: any missing or mistyped field is an error."""
+    val parsed = parse(source)
+    if parsed.is_err(): return Err("backend-contract: parse: " + parsed.unwrap_err())
+    val v = parsed.unwrap()
+    val keys: [text] = [
+        "rocm.backend_of_record", "rocm.group", "rocm.target",
+        "cuda_ptx.isa_version", "cuda_ptx.default_sm", "cuda_ptx.source",
+        "vector_length.mode", "vector_length.query",
+        "vector_length.aarch64_tier", "vector_length.riscv64_tier"
+    ]
+    var vals: [text] = []
+    for k in keys:
+        val parts = k.split(".")
+        val f = _field(v, parts[0], parts[1])
+        if not f.?: return Err("backend-contract: missing or mistyped field: " + k)
+        vals.push(f.unwrap())
+    Ok(BackendContracts(rocm_backend: vals[0], rocm_group: vals[1], rocm_target: vals[2],
+        ptx_isa_version: vals[3], ptx_default_sm: vals[4], ptx_source: vals[5],
+        vl_mode: vals[6], vl_query: vals[7], vl_aarch64_tier: vals[8], vl_riscv64_tier: vals[9]))
+
+fn _read_or_empty(path: text) -> text:
+    if file_exists(path): file_read(path) else: ""
+
+pub fn check_backend_contracts_text(source: text, repo_root: text) -> [text]:
+    """Violations of the contract data against the repo; empty = all hold."""
+    var out: [text] = []
+    val loaded = load_backend_contracts(source)
+    if loaded.is_err():
+        out.push(loaded.unwrap_err())
+        return out
+    val c = loaded.unwrap()
+    # HIP is the ROCm backend of record: opt-in group exists and names the HIP target.
+    val rocm = _read_or_empty(repo_root + "/config/build/backends_rocm.sdn")
+    if c.rocm_backend != "hip" or not rocm.contains("group " + c.rocm_group + ":") or not rocm.contains("target " + c.rocm_target + ":") or not rocm.contains("backend_hip"):
+        out.push("backend-contract: rocm-backend-of-record: " + c.rocm_backend + " is not HIP-backed by config/build/backends_rocm.sdn")
+    if dir_exists(repo_root + "/src/compiler/70.backend/backend_rocm"):
+        out.push("backend-contract: rocm-backend-of-record: a separate backend_rocm directory exists beside HIP")
+    # PTX ISA version equals the version the builder emits.
+    val ptx = _read_or_empty(repo_root + "/" + c.ptx_source)
+    if not ptx.contains("val PTX_ISA_VERSION: text = \"" + c.ptx_isa_version + "\""):
+        out.push("backend-contract: ptx-isa-version: " + c.ptx_isa_version + " != PTX_ISA_VERSION in " + c.ptx_source)
+    val emit = _read_or_empty(repo_root + "/src/compiler/70.backend/backend/unified_kernel_emit.spl")
+    if not emit.contains("\"" + c.ptx_default_sm + "\""):
+        out.push("backend-contract: ptx-default-sm: " + c.ptx_default_sm + " not used by unified_kernel_emit.spl")
+    # SVE/RVV: vector-length-agnostic, queried at runtime, tiers exist in cpu_tiers.sdn.
+    if c.vl_mode != "vl_agnostic":
+        out.push("backend-contract: vector-length-mode: " + c.vl_mode + " (must be vl_agnostic)")
+    if c.vl_query != "runtime":
+        out.push("backend-contract: vector-length-query: " + c.vl_query + " (must be runtime)")
+    val tiers = _read_or_empty(repo_root + "/config/build/cpu_tiers.sdn")
+    if not tiers.contains(c.vl_aarch64_tier):
+        out.push("backend-contract: vector-length-tier: " + c.vl_aarch64_tier + " missing from cpu_tiers.sdn")
+    if not tiers.contains(c.vl_riscv64_tier):
+        out.push("backend-contract: vector-length-tier: " + c.vl_riscv64_tier + " missing from cpu_tiers.sdn")
+    # Opt-in: every backends_* group in config/build stays default: false.
+    for name in ["backends_c", "backends_cuda", "backends_rocm", "backends_vhdl", "backends_vulkan"]:
+        val body = _read_or_empty(repo_root + "/config/build/" + name + ".sdn")
+        if body == "" or not body.contains("default: false"):
+            out.push("backend-contract: opt-in: " + name + " must exist and declare default: false")
+    out
+
+pub fn backend_contracts_check(repo_root: text) -> [text]:
+    check_backend_contracts_text(_read_or_empty(repo_root + "/config/build/backend_contracts.sdn"), repo_root)
+
+pub fn vector_length_tier_error(tier: text) -> text:
+    """Refuse tier spellings that pin a fixed SVE/RVV vector length."""
+    val fixed = tier.contains("sve128") or tier.contains("sve256") or tier.contains("sve512") or tier.contains("sve1024") or tier.contains("sve2048") or tier.contains("zvl")
+    if fixed:
+        return "target-error: fixed-vector-length: " + tier + ": SVE/RVV code is vector-length-agnostic, query VL at runtime"
+    ""
