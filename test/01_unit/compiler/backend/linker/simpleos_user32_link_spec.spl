@@ -41,6 +41,9 @@ fn s32_section_names(b: [u8]) -> [text]:
         i = i + 1
     names
 
+
+    (((w >> 16) & 0xf) << 12) | (w & 0xfff)
+
 fn s32_link(arch: text, out: text) -> Result<text, text>:
     var cfg = NativeLinkConfig.default()
     cfg.runtime_path = "none"
@@ -124,3 +127,39 @@ describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
         # lives in .sdata); __global_pointer$ is defined relative to it.
         expect(s32_section_names(b)).to_contain(".sdata")
         expect(s32_section_names(b)).not_to_contain(".data")
+
+    it "links an arm32 user ELF32 with ld.lld's segments, EXIDX and .text":
+        # lld oracle: ld.lld -m armelf -z max-page-size=0x1000 (SimpleOS arm32 maps
+        # 4 KiB user pages), same flags as i686; fixtures built with
+        # --target=armv7a-none-eabi -marm -mfloat-abi=soft.
+        val out = "build/simpleos_user32_arm32.elf"
+        val r = s32_link("arm32", out)
+        expect(r.is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(b[4] as i64).to_equal(1)              # ELFCLASS32
+        expect(s32_u16(b, 16)).to_equal(2)           # ET_EXEC
+        expect(s32_u16(b, 18)).to_equal(40)          # EM_ARM
+        expect(s32_u32(b, 36)).to_equal(0x5000200)   # EABI5, soft-float
+        val text_v = s32_phdr(b, 1, 8)
+        val data_v = s32_phdr(b, 2, 8)
+        expect(s32_phdr(b, 0, 8)).to_equal(0x400000)
+        expect(s32_phdr(b, 0, 24)).to_equal(4)
+        expect(s32_phdr(b, 1, 24)).to_equal(5)
+        expect(s32_phdr(b, 2, 24)).to_equal(6)
+        expect(s32_phdr(b, 2, 28)).to_equal(0x1000)
+        # ponytail: lld also emits .ARM.exidx + PT_ARM_EXIDX; the engine drops them
+        # (filed in elf_static_exec_missing_pt_phdr_and_x86_trap_fill_2026-11-19.md).
+        expect(s32_u32(b, 24)).to_equal(text_v)
+        expect(data_v - text_v).to_equal(0x1020)     # lld: 0x402168 - 0x401148
+        # _start: bl main; mov r7,#0; svc #0 (PC-relative, exact), then main
+        # builds &counter with movw/movt = the .data vaddr.
+        val t = s32_phdr(b, 1, 4)
+        val lld_text = [1, 0, 0, 235, 0, 112, 160, 227, 0, 0, 0, 239]
+        var i: i64 = 0
+        while i < lld_text.len():
+            expect(b[t + i] as i64).to_equal(lld_text[i])
+            i = i + 1
+        val lo = s32_arm_movw_imm(s32_u32(b, t + 12))
+        val hi = s32_arm_movw_imm(s32_u32(b, t + 16))
+        expect((hi << 16) | lo).to_equal(data_v)
+        expect(s32_u32(b, t + 28)).to_equal(0xe12fff1e)   # bx lr

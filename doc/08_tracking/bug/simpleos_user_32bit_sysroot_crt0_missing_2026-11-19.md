@@ -103,3 +103,17 @@ riscv32 and arm32 remain open.
 - The kernel's own `rv32_real_exec_payload.spl` loads at 0x400000, which confirms the base.
 
 arm32 remains open.
+
+## Update 2026-11-19: arm32 built (all three 32-bit cells now link)
+
+- crt0 `simpleos_crt0_arm32.S` is 4 instructions. The syscall stub `simpleos_syscall_arm32.S`
+  maps the AAPCS int64 arguments (id r0:r1, a0 r2:r3, a1..a4 as stack doublewords) to the
+  kernel's r7 = id, r0..r4 = args, `svc #0` (`loader/arm32_real_exec_payload.spl`).
+- Sysroot: `sh scripts/os/simpleos-sysroot-32.shs arm32` (`armv7a-none-eabi -marm -mfloat-abi=soft`).
+- lld args: `-m armelf -z max-page-size=0x1000 --image-base=0x400000 --build-id=sha1`. lld's
+  armelf default page size is 64 KiB.
+- C hello: `.text` is 0x350 bytes in both outputs and RW is 4/0x408 in both. Divergences
+  are items 1-7 of `elf_static_exec_missing_pt_phdr_and_x86_trap_fill_2026-11-19.md`
+  (arm32 adds .ARM.exidx/PT_ARM_EXIDX and .ARM.attributes).
+- Still no 32-bit boot: there is no user-mode filesystem-launch boot lane for i686,
+  riscv32 or arm32, so the board-runnable rule is unmet for all three.
