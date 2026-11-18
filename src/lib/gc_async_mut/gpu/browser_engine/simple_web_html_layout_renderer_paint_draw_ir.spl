@@ -4,7 +4,7 @@
 # which re-exports every name defined here.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{html_image_fit_size, input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_value_vector_x, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, text_line_aligned_x, text_line_needs_paint_width, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape}
@@ -516,19 +516,11 @@ fn _html_draw_ir_resolved_text_command(
     # letter-spacing follows EVERY codepoint (the last one too), word-spacing
     # each space; same fold as layout's `resolved_font_advances`.
     var run_width = metrics.width
-    if st.letter_spacing_px != 0 or st.word_spacing_px != 0:
-        val spacing_cps = text_codepoints(txt)
-        var spaced: [i32] = []
-        var si = 0
+    if st.letter_spacing_milli != 0 or st.word_spacing_milli != 0:
+        cp_advances = spaced_advances_milli(cp_advances, text_codepoints(txt), st.letter_spacing_milli, st.word_spacing_milli)
         run_width = 0
-        while si < cp_advances.len():  # cpu-lane-loop-ok: one pass over THIS text command's per-codepoint advances; bound is its codepoint count
-            var a = cp_advances[si] + st.letter_spacing_px
-            if spacing_cps[si] == 32:
-                a = a + st.word_spacing_px
-            spaced.push(a)
-            run_width = run_width + a
-            si = si + 1
-        cp_advances = spaced
+        for sa in cp_advances:  # cpu-lane-loop-ok: one pass over THIS text command's per-codepoint advances; bound is its codepoint count
+            run_width = run_width + sa
     var resolved = if metrics.shaping_required:
         draw_ir_text_shaped_font(
             cid, tx, ty, txt, st.fg,
@@ -760,6 +752,12 @@ fn _html_draw_ir_command(
         val run_size_milli = font_milli_of(st.font_size, st.font_size_milli)
         if st.font_size_milli > 0 and run_size_milli % 1000 != 0:
             computed_style.push(draw_ir_style_prop("font-size-milli", "{run_size_milli}"))
+        # Exact fractional letter/word spacing: the advances above carry its
+        # rounded pens; the glyph raster takes the exact pen phase from these.
+        if st.letter_spacing_milli != 0:
+            computed_style.push(draw_ir_style_prop("letter-spacing-milli", "{st.letter_spacing_milli}"))
+        if st.word_spacing_milli != 0:
+            computed_style.push(draw_ir_style_prop("word-spacing-milli", "{st.word_spacing_milli}"))
         # `_html_draw_ir_command` is the only text-command builder reachable
         # from the Draw IR tree; `ellipsize_text_for_width` is otherwise only
         # wired into the CPU-framebuffer raster loops above, so a Draw IR text

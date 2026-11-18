@@ -1694,7 +1694,10 @@ class FontRenderer:
     # rasterises every glyph at it: each glyph is swapped for a cell whose
     # outline x is scaled to `size_milli` (`sfnt_render_glyph_lcd_milli`), at
     # the quarter phase of its exact float pen.
-    me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32, pen_origin_milli: i64 = 0, size_milli: i64 = 0):
+    # `letter_milli` / `word_milli` are the run's exact CSS spacing: the producer
+    # rounded each advance from its pen, so the staged pen is the running sum of
+    # `advance_widths` and the exact pen adds the spacing before each glyph.
+    me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32, pen_origin_milli: i64 = 0, size_milli: i64 = 0, letter_milli: i64 = 0, word_milli: i64 = 0):
         if not self._lcd_applies(font_size):
             return
         val frac = size_milli > 0 and size_milli < 512000 and size_milli % 1000 != 0
@@ -1731,6 +1734,22 @@ class FontRenderer:
             var k: i64 = 0
             while k <= n:
                 whole[k] = _milli_px_to_px_i64(pens[k])
+                k = k + 1
+        if letter_milli != 0 or word_milli != 0:
+            var extra: i64 = 0
+            var placed: i64 = 0
+            var k: i64 = 0
+            while k <= n:
+                pens[k] = pens[k] + extra
+                whole[k] = placed
+                val gap = pens[k] - placed * 1000
+                if gap > 3000 or gap < -3000:
+                    return
+                if k < n:
+                    extra = extra + letter_milli
+                    if cps[k] == 32 or cps[k] == 9 or cps[k] == 10 or cps[k] == 13:
+                        extra = extra + word_milli
+                    placed = placed + advance_widths[k].to_i64()
                 k = k + 1
         var byte_offsets: [i64] = [0; n]
         var shifts: [i32] = [0; n]
@@ -3530,7 +3549,7 @@ class FontRenderer:
             ci = ci + 1
         out
 
-    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64 = 0, size_milli: i64 = 0) -> i64:
+    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64 = 0, size_milli: i64 = 0, letter_milli: i64 = 0, word_milli: i64 = 0) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
@@ -3539,18 +3558,18 @@ class FontRenderer:
         # staging pass rastered for each of them first (about 13 ms per cold
         # glyph on the interpreter lane) was never drawn.
         self.lcd_defer_cells = self._lcd_applies(config.size)
-        self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli)
+        self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli, letter_milli, word_milli)
         if self.lcd_defer_cells:
             self.lcd_defer_cells = false
             if not self._lcd_resolve_deferred_cells(config.size):
                 # Atlas full: start it over and stage with every cell up
                 # front, as `_stage_text_active` does on its own overflow.
                 self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
-                self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli)
+                self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli, letter_milli, word_milli)
         self._apply_staged_config(config)
         self.staged_quads.len()
 
-    me _stage_text_with_advances_active(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64, size_milli: i64):
+    me _stage_text_with_advances_active(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64, size_milli: i64, letter_milli: i64, word_milli: i64):
         # `natural_advances` must describe the pen the quads were ACTUALLY
         # staged at, or the re-layout shift carries the difference into the
         # quads. When the rasterizer has no layout of its own,
@@ -3574,7 +3593,7 @@ class FontRenderer:
             self.staged_valid = false
         self.staged_quads = quads
         if self.staged_valid:
-            self._lcd_apply_pen_phases(content, advance_widths, config.size, pen_origin_milli, size_milli)
+            self._lcd_apply_pen_phases(content, advance_widths, config.size, pen_origin_milli, size_milli, letter_milli, word_milli)
 
     # Single-aggregate return (was `(CachedGlyph, GlyphCache)`); the cache half
     # now updates `self.cache` in place — see get_glyph above for the channel

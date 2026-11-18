@@ -458,6 +458,14 @@ fn _engine2d_draw_ir_text_pen_origin_milli(command: DrawIrCommand) -> i64:
         return 0
     raw.to_i64()
 
+# `letter-spacing-milli` / `word-spacing-milli`: the exact CSS spacing the run's
+# whole-px advances were rounded from (signed milli-px; 0 when absent).
+fn _engine2d_draw_ir_text_spacing_milli(command: DrawIrCommand, key: text) -> i64:
+    val raw = _engine2d_draw_ir_style_value(command.computed_style, key)
+    if raw == "":
+        return 0
+    raw.to_i64()
+
 # `font-size-milli`: the computed fractional font size in milli-px (device
 # scaled with `font-size`); 0 when absent, which is every whole-px run. The
 # glyph raster scales x to it (Chrome 159 rasterises at the float size).
@@ -2943,15 +2951,18 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         if command.width > 0:
                             # The band widens by the pixels a fractional pen
                             # origin can move the glyphs past the box.
-                            val origin_pad = _engine2d_draw_ir_pen_origin_pad(pen_origin)
+                            # A negative letter-spacing pulls the box end in past the
+                            # last glyph's ink; the band widens by that overhang.
+                            val letter_milli = _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli")
+                            val origin_pad = _engine2d_draw_ir_pen_origin_pad(pen_origin) + (if letter_milli < 0: _engine2d_draw_ir_pen_origin_pad(letter_milli) else: 0)
                             val band = draw_ir_rect_intersection(
                                 text_paint_clip,
                                 draw_ir_rect_bounds(x - origin_pad, 0, command.width + 2 * origin_pad, eng.height()))
                             eng.set_clip(band.x, band.y, band.width, band.height)
-                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli)
+                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli, _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli"), _engine2d_draw_ir_text_spacing_milli(command, "word-spacing-milli"))
                             _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
                         else:
-                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli)
+                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli, _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli"), _engine2d_draw_ir_text_spacing_milli(command, "word-spacing-milli"))
                     if probe_this:
                         _e2d_text_probe_count = _e2d_text_probe_count + 1
                         val branch_kind = if shaped and payload_valid: "shaped" else if not shaped: "resolved" else: "shaped-invalid"
@@ -3814,7 +3825,9 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                             command.color,
                             _engine2d_draw_ir_text_font_size(command.computed_style),
                             _engine2d_draw_ir_text_pen_origin_milli(command),
-                            _engine2d_draw_ir_text_size_milli(command))
+                            _engine2d_draw_ir_text_size_milli(command),
+                            _engine2d_draw_ir_text_spacing_milli(command, "letter-spacing-milli"),
+                            _engine2d_draw_ir_text_spacing_milli(command, "word-spacing-milli"))
                 if drawn:
                     rendered = rendered + 1
                 else:
