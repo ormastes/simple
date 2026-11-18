@@ -1,0 +1,96 @@
+"""
+## Purpose and audience
+Purpose: Prove SPL-BOUND-003 catches the `as` cast form and follows a unit
+erased inside a helper function (same file and across files via summaries).
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Text-level summaries: a function returning a primitive whose tail expression
+erases a unit exports (function, unit). Call chains resolve to depth 2 in-file.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_unit_reassert.{check_bound_unit_reasserts, check_bound_unit_reasserts_cross, bound_unit_erasure_summary, BoundUnitSummary}
+
+val UNITS = "unit Meters: f64 as m\nunit Seconds: f64 as s\n"
+
+# @manual_section: bound_unit_reassert_summary
+describe "SPL-BOUND-003: as-cast form":
+    """`x as Unit` reasserts like `Unit(x)`."""
+
+    it "reports a direct erasure cast with as":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint d.value as Seconds")
+        val src = UNITS + "fn bad(d: Meters) -> Seconds:\n    d.value as Seconds\n"
+        val fs = check_bound_unit_reasserts(src, "app/phys.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(4)
+
+    it "reports an erased local cast with as":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint raw as Seconds")
+        val src = UNITS + "fn bad(d: Meters) -> Seconds:\n    val raw = d.to_f64()\n    raw as Seconds\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(1)
+
+    it "allows the same-unit as cast and a plain number":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint as casts that keep the unit or start from a number")
+        val src = UNITS + "fn ok(d: Meters, n: f64) -> Meters:\n    val a = n as Seconds\n    d.value as Meters\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(0)
+
+describe "SPL-BOUND-003: cross-function summaries":
+    """A helper that returns an erased unit keeps the origin for its callers."""
+
+    it "follows a same-file helper that erases a unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint Seconds(strip(d)) where strip returns d.value")
+        val src = UNITS + "fn strip(d: Meters) -> f64:\n    d.value\nfn bad(d: Meters) -> Seconds:\n    Seconds(strip(d))\n"
+        val fs = check_bound_unit_reasserts(src, "app/phys.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(6)
+        expect(fs[0].message).to_contain("Meters")
+
+    it "follows a helper through a local and the as form":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a local bound from the helper then cast with as")
+        val src = UNITS + "fn strip(d: Meters) -> f64:\n    val r = d.raw()\n    return r * 2.0\nfn bad(d: Meters) -> Seconds:\n    val x = strip(d)\n    x as Seconds\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(1)
+
+    it "follows a helper that calls another erasing helper":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a depth-2 helper chain")
+        val src = UNITS + "fn a(d: Meters) -> f64:\n    d.value\nfn b(d: Meters) -> f64:\n    a(d)\nfn bad(d: Meters) -> Seconds:\n    Seconds(b(d))\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(1)
+
+    it "allows recasting a helper result to the same unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint Meters(strip(d))")
+        val src = UNITS + "fn strip(d: Meters) -> f64:\n    d.value\nfn ok(d: Meters) -> Meters:\n    Meters(strip(d))\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(0)
+
+    it "ignores a helper that does not erase a unit":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint Seconds(plain(2.0))")
+        val src = UNITS + "fn plain(n: f64) -> f64:\n    n * 2.0\nfn ok() -> Seconds:\n    Seconds(plain(2.0))\n"
+        expect(check_bound_unit_reasserts(src, "app/phys.spl").len()).to_equal(0)
+
+    it "summarises only pub primitive-returning erasers":
+        # @req: REQ-DIAG-POLICY-001
+        step("Summarise a module")
+        val src = UNITS + "pub fn strip(d: Meters) -> f64:\n    d.value\nfn hidden(d: Meters) -> f64:\n    d.value\npub fn keep(d: Meters) -> Meters:\n    d\n"
+        val s = bound_unit_erasure_summary(src, "app/phys.spl")
+        expect(s.fns.contains("strip")).to_equal(true)
+        expect(s.fns.contains("hidden")).to_equal(false)
+        expect(s.fns.contains("keep")).to_equal(false)
+        expect(s.units[s.fns.index_of("strip")]).to_equal("Meters")
+
+    it "reports a cast of an imported eraser in the importing file":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint importer with a dependency summary")
+        val dep = BoundUnitSummary(module: "app.phys", fns: ["strip"], units: ["Meters"])
+        val src = "use unit.length.{{Meters}\nuse unit.time.{{Seconds}\nuse app.phys.{{strip}\nfn bad(d: Meters) -> Seconds:\n    Seconds(strip(d))\n"
+        expect(check_bound_unit_reasserts_cross(src, "app/use.spl", [dep]).len()).to_equal(1)
+        expect(check_bound_unit_reasserts(src, "app/use.spl").len()).to_equal(0)
