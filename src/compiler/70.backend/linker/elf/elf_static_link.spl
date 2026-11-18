@@ -105,7 +105,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     GOTPLT_RESERVED
 }
 use compiler.backend.linker.elf.elf_exec_writer.{
-    ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_find, elf_exec_plan_class, elf_write_image32_bytes,
+    ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_find, elf_exec_plan_class, elf_exec_plan_class_x, elf_write_image32_bytes,
     ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOTE_E, SHT_NOBITS_E
 }
@@ -2340,8 +2340,13 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         e_type = ET_DYN_T
     # ELF32 images use the class-aware planner and writer directly: the sealed
     # layout/write_image operations validate the ELF64 header contract.
+    # ld.lld emits PT_RISCV_ATTRIBUTES over .riscv.attributes: reserve its phdr slot now,
+    # patch it after the section is appended. ELF32 only: it already uses the class-aware
+    # planner; ELF64 stays on the sealed operations.layout (with _elf_plan_shape).
+    # ponytail: riscv64 lacks PT_RISCV_ATTRIBUTES until the sealed layout grows a slot.
+    val attr_phdrs: i64 = if w32 and riscv_attributes.len() > 0: 1 else: 0
     val plan = if w32:
-        elf_exec_plan_class(secs, base, elf_static_page(target), true)?
+        elf_exec_plan_class_x(secs, base, elf_static_page(target), w32, attr_phdrs)?
     else:
         operations.layout(secs, base, elf_static_page(target))?
     # A selected layout may move the image. Synthetic header symbols must
@@ -2870,8 +2875,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         val symtab = elf_build_symtab(ctx, lay, w32, ifunc_at)?
         image = if w32: elf_append_symtab32(image, symtab)? else: elf_append_symtab(image, symtab)?
     if riscv_attributes.len() > 0:
+        val attr_off = image.len()
         image = elf_append_nonalloc_section_bytes(image,
             ".riscv.attributes", 0x70000003, riscv_attributes)?
+        if attr_phdrs > 0:
+            image = elf_patch_attr_phdr(image, w32, attr_off, riscv_attributes.len())
     elf_link_trace("symtab appended")
     val digest = elf_build_id_digest(image)
     val note_off = note_start + 16
@@ -2893,3 +2901,31 @@ export elf_static_link, elf_link, elf_link_stripped, elf_link_configured, elf_li
 export elf_link_with_operations, ElfComposedImageV1
 export ELF_STATIC_BASE, elf_arm_float_flags, elf_sort_outs, elf_got_base_sec
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+
+fn elf_patch_attr_phdr(image: [u8], w32: bool, off: i64, size: i64) -> [u8]:
+    """Fill the reserved PT_RISCV_ATTRIBUTES slot (the last phdr) with the appended
+    section's file range."""
+    var out = image
+    val phoff = if w32: elf_rd(image, 28, 4) else: elf_rd(image, 32, 8)
+    val phentsize = elf_rd(image, if w32: 42 else: 54, 2)
+    val phnum = elf_rd(image, if w32: 44 else: 56, 2)
+    val e = phoff + (phnum - 1) * phentsize
+    val fields = if w32: [4, 16, 20] else: [8, 32, 40]
+    val word: i64 = if w32: 4 else: 8
+    val vals = [off, size, size]
+    var fi: i64 = 0
+    while fi < 3:
+        var k: i64 = 0
+        while k < word:
+            out[e + fields[fi] + k] = ((vals[fi] >> (k * 8)) & 255) as u8
+            k = k + 1
+        fi = fi + 1
+    out
+
+fn elf_rd(b: [u8], at: i64, n: i64) -> i64:
+    var v: i64 = 0
+    var k: i64 = n - 1
+    while k >= 0:
+        v = (v << 8) | (b[at + k] as i64)
+        k = k - 1
+    v

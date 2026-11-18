@@ -69,6 +69,25 @@ fn s32_sym_info(b: [u8], name: text) -> i64:
         i = i + 1
     -1
 
+fn s32_phdr_index(b: [u8], p_type: i64) -> i64:
+    var i: i64 = 0
+    while i < s32_u16(b, 44):
+        if s32_phdr(b, i, 0) == p_type:
+            return i
+        i = i + 1
+    -1
+
+fn s32_sec_field(b: [u8], name: text, field: i64) -> i64:
+    """Field (byte offset in the Shdr) of the named section, or -1."""
+    val shoff = s32_u32(b, 32)
+    val str_off = s32_u32(b, shoff + s32_u16(b, 50) * 40 + 16)
+    var i: i64 = 1
+    while i < s32_u16(b, 48):
+        if s32_cstr(b, str_off + s32_u32(b, shoff + i * 40)) == name:
+            return s32_u32(b, shoff + i * 40 + field)
+        i = i + 1
+    -1
+
 fn s32_link(arch: text, out: text) -> Result<text, text>:
     var cfg = NativeLinkConfig.default()
     cfg.runtime_path = "none"
@@ -144,7 +163,15 @@ describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
         val data_v = s32_phdr(b, 3, 8)
         expect(s32_phdr(b, 0, 0)).to_equal(6)        # PT_PHDR first, as ld.lld
         expect(s32_phdr(b, 0, 8)).to_equal(0x400034)
-        # ponytail: exact 0x401138 needs PT_RISCV_ATTRIBUTES (one more phdr)
+        expect(text_v).to_equal(0x401138)              # exact lld .text vaddr
+        # PT_RISCV_ATTRIBUTES (last, as lld) covers the .riscv.attributes bytes.
+        val ai = s32_phdr_index(b, 0x70000003)
+        expect(ai).to_equal(s32_u16(b, 44) - 1)
+        expect(s32_phdr(b, ai, 4)).to_equal(s32_sec_field(b, ".riscv.attributes", 16))
+        expect(s32_phdr(b, ai, 16)).to_equal(s32_sec_field(b, ".riscv.attributes", 20))
+        expect(s32_phdr(b, ai, 8)).to_equal(0)
+        expect(s32_phdr(b, ai, 24)).to_equal(4)
+        expect(s32_phdr(b, ai, 28)).to_equal(1)
         expect(s32_phdr(b, 1, 8)).to_equal(0x400000)
         expect(s32_phdr(b, 1, 24)).to_equal(4)
         expect(s32_phdr(b, 2, 24)).to_equal(5)

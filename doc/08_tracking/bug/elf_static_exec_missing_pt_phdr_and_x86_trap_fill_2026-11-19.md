@@ -92,3 +92,20 @@ this fix, a weak reference resolved to 0, so the SimpleOS C start silently skipp
 bss. The repro is the `i686_bss.s` fixture in `simpleos_user32_link_spec`, which checks
 lld's 0x402124, the movl immediate and the STB_GLOBAL binding. The regression counts are
 unchanged against the base.
+
+## Fix 4 (PT_RISCV_ATTRIBUTES): verification-pending
+
+`elf_exec_plan_class_x` reserves a PT_RISCV_ATTRIBUTES slot as the last program header (where
+ld.lld puts it) whenever `.riscv.attributes` is produced. After the non-alloc section is
+appended, `elf_patch_attr_phdr` fills in its file range, before the build-id digest is taken.
+ELF32 only: riscv64 stays on the sealed `operations.layout` (which runs `_elf_plan_shape`) and
+still has no PT_RISCV_ATTRIBUTES. That is filed: the sealed layout needs an extra-phdr slot.
+riscv32 now matches lld exactly: PHDR, 3 LOADs, NOTE and ATTRIBUTES, with .text at 0x401138.
+The repro is the riscv32 case in `simpleos_user32_link_spec`: the phdr range must equal the
+section's sh_offset/sh_size, plus the exact lld .text vaddr.
+
+New item, filed and not fixed: the merged `.riscv.attributes` payload differs from lld 18's.
+`elf_riscv_attributes` writes the expanded arch string
+(`..._zmmul1p0_zaamo1p0_zalrsc1p0_zca1p0`) and tag 14 (`Tag_RISCV_atomic_abi`). lld 18
+writes `rv32i2p1_m2p0_a2p1_c2p0` with no tag 14, and llvm-readelf 18 reports "invalid tag
+0xe". This predates fix 4; it looks like the engine follows newer LLVM merge rules.
