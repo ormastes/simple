@@ -20,7 +20,7 @@
     .thumb_func
     .balign 8
 efi_entry:
-0:  b       1f
+0:  b.n     1f
     .short  0
     .word   0
 efi_blob_len:
