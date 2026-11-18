@@ -31,10 +31,13 @@ in which the directive was not blanked.
 - PR #9884 touches only `_ParserDecls/enum_module_body.spl` (`pub unit`), not the preprocessor.
 
 ## Open suspects (next steps)
-1. Native-only text compares in `parser_preprocessor.spl` that use `line[i] == "("`
-   (`_pp_extract_paren_condition`, `_pp_target_indent`, `_pp_leading_ws`): `text[i]`
-   yields `char` (ADR-005). These do not by themselves leave the directive line, but make
-   conditions evaluate wrongly natively.
+1. **Closed (2026-11-18):** Native-only text compares in `parser_preprocessor.spl` that used
+   `text[i]` (`_pp_tokenize_condition`, `_pp_extract_paren_condition`, `_pp_target_indent`,
+   `_pp_leading_ws`, and the `@cfg` skip indent/brace scans): `text[i]` yields `char`
+   (ADR-005). Replaced every `text[i]` indexing site with byte-bounded `.byte_len()` +
+   `.substring(i, i + 1)` comparisons against single-char `"..."` text literals (and shared
+   `_pp_target_indent` / `_pp_line_brace_delta` helpers) so interpreter and compiled native
+   LLVM/Cranelift engines agree.
 2. A parse in the worker child that bypasses `_pp_preprocess_conditionals` (child-process
    route, not the parent's): reproduce with the full phase-3 env and
    `SIMPLE_COMPILER_TRACE=1 SIMPLE_FRONTEND_CACHE_BOUNDARY_PROFILE=1` and a cold
@@ -68,6 +71,21 @@ expression: : ':'` -- the exact native symptom. The worker unit child log
 non-empty empty module (`"\n"`); mode 2 parses it, so the lexer never touches the disk.
 Spec: `test/01_unit/compiler/80.driver/hir_worker_placeholder_parse_text_spec.spl`
 (red before: helper missing / `""` control reproduces 2:20; green after).
+
+Additional fix (2026-11-18, `src/compiler/10.frontend/core/parser_preprocessor.spl`):
+- Replaced all remaining `text[i]` character indexing sites in `_pp_tokenize_condition`,
+  `_pp_extract_paren_condition`, `_pp_target_indent`, `_pp_leading_ws`, and the second-pass
+  `@cfg` skip indentation / `{}` brace-counting loops (consolidated into `_pp_target_indent`
+  and `_pp_line_brace_delta`) with `.byte_len()` + `.substring(i, i + 1)` comparisons so
+  native LLVM/Cranelift and interpreter builds share identical text-comparison semantics.
+- Regression spec: `test/01_unit/compiler/10.frontend/parser_preprocessor_byte_slice_spec.spl`
+  (7/7 examples passing under `simple.exe test --mode=interpreter`), plus
+  `test/01_unit/compiler/80.driver/hir_worker_placeholder_parse_text_spec.spl` (2/2) and
+  existing preprocessor specs.
+- Verified zero `nil` outside `unsafe:` via
+  `sh scripts/check/check-nil-outside-unsafe-added.shs --rank`.
+- Native compilation / phase-3 workers-on cold-cache gate remains `verification-pending`
+  (not run in this interpreter-only lane).
 
 Behaviour change to watch: placeholder surfaces are now truly empty. If
 `worker_admitted_closure_v1` misses a module a worker needs, phase 3 may now surface
