@@ -1,0 +1,62 @@
+# Bug stage3_selfbuild_raw_text_strict_extern_2026-11-18 (defect 2, OPEN).
+# A `for` binder over `[text]` is a raw char* borrowed from the array element.
+# Returned out of a transient scratch scope it cannot be promoted (the generic
+# `T` boundary boxes a copy), so the caller reads freed memory. Stage 2 native
+# output on 2026-11-18 printed `plain=junk-...-1 spl=false`. Expected:
+#   plain=/some/long/path/number/3/file_name_that_is_rather_long.spl spl=true
+#   owned=/some/long/path/number/4/file_name_that_is_rather_long.spl spl=true
+# Native only: the externs are runtime scratch-scope owners.
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+fn scratch_begin():
+    var ok = false
+    unsafe(capabilities: [ffi]):
+        ok = rt_transient_array_scope_begin()
+    if not ok: panic("scratch begin failed")
+
+fn scratch_end_text(answer: text):
+    var ok = false
+    unsafe(capabilities: [ffi]):
+        ok = rt_transient_array_scope_pause()
+        ok = ok and rt_transient_heap_promote(answer)
+        ok = ok and rt_transient_array_scope_end()
+    if not ok: panic("scratch end failed")
+
+fn pick_scratch(n: i64) -> text:
+    var candidates: [text] = []
+    candidates = candidates.push("/some/long/path/number/{n}/file_name_that_is_rather_long.spl")
+    var resolved = ""
+    for candidate in candidates:
+        if candidate.ends_with(".spl"): resolved = candidate
+    resolved
+
+fn pick_plain(n: i64) -> text:
+    scratch_begin()
+    val resolved = pick_scratch(n)
+    scratch_end_text(resolved)
+    resolved
+
+fn pick_owned(n: i64) -> text:
+    scratch_begin()
+    val resolved = pick_scratch(n) + ""
+    scratch_end_text(resolved)
+    resolved
+
+fn churn() -> i64:
+    var junk: [text] = []
+    var i = 0
+    while i < 2000:
+        junk = junk.push("junk-junk-junk-junk-junk-junk-junk-junk-junk-junk-junk-{i}")
+        i = i + 1
+    junk.len()
+
+fn main():
+    val plain = pick_plain(3)
+    val owned = pick_owned(4)
+    val count = churn()
+    print "plain={plain} spl={plain.ends_with(".spl")}"
+    print "owned={owned} spl={owned.ends_with(".spl")}"

@@ -891,3 +891,16 @@ plain parameters still accept the same value silently. Red/green in about 30 s o
   2026-11-18 by `hir_binding_tuple_elements` (binding_types.spl): settled elements of the
   temp's own tuple type (also used by `lower_hir_tuple_destructure_assign`).
   `test/01_unit/compiler/mir/result_tuple_destructure_optional_slot_spec.spl`.
+- Native `text` is tagged-or-raw: a `for x in [text]` binder, an indexed local `[text]`
+  element and literals are raw `char*`, and a `text` parameter is whatever the caller
+  passed. Externs in `tagged_text_value_arg_indices` (`text_extern_abi.spl`) skip the
+  `rt_interp_cstr` bridge; until 2026-11-18 the operand then crossed unchanged, so strict
+  decoders (`rt_core_as_string`) rejected a raw one: `rt_hash_text(key)` was 0, the
+  selected-export key table missed every lookup and Stage 3 died `bounds_check
+  index=-1` on hello world. `lower_call_with_value` now runs `ensure_tagged_str` on those
+  operands (identity owners excluded: `tagged_text_value_arg_is_identity`).
+  `test/01_unit/compiler/mir/tagged_text_extern_raw_operand_spec.spl`,
+  `test/fixtures/native_tagged_text_extern_raw_operand/`. OPEN: a raw text returned out of
+  a transient scratch scope cannot be promoted and dangles
+  (`test/fixtures/native_transient_scope_raw_text_escape/`); see
+  `doc/08_tracking/bug/stage3_selfbuild_raw_text_strict_extern_2026-11-18.md`.

@@ -56,7 +56,7 @@ use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError, MirAdaptedFileWriteBytesExternReceiptV1, mir_error_is_fatal}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
-use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, boxed_text_arg_indices, tagged_text_value_arg_indices, file_write_bytes_array_alias_target}
+use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, boxed_text_arg_indices, tagged_text_value_arg_indices, tagged_text_value_arg_is_identity, file_write_bytes_array_alias_target}
 use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_profile_is_critical, match_coverage_critical_missing_ids, match_coverage_requires_hard_error}
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_name}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
@@ -9814,19 +9814,24 @@ impl MirLowering:
         var direct_text_pointer_bridge = false
         var direct_pair_text_indices: [i64] = []
         var direct_boxed_text_indices: [i64] = []
+        var direct_tagged_text_indices: [i64] = []
         if is_direct and not self.provider_callable_accepts_text_value(direct_symbol):
             val text_boundary_name = self.provider_callable_symbol_name(direct_symbol, direct_name)
             # These registered externs already derive ptr+len or box the whole
             # text value at emit_resolved_direct_call. Do not strip it first.
             direct_pair_text_indices = text_arg_indices(text_boundary_name) ?? []
             direct_boxed_text_indices = boxed_text_arg_indices(text_boundary_name) ?? []
-            # Tagged-value consumers take the text handle as-is; skipping
-            # the pointer bridge is the whole adaptation.
+            # Tagged-value consumers take the text handle, never the pointer
+            # bridge. Their operand is still normalized below: a text local of
+            # unknown representation may hold a raw char*.
             # Tagged-value rows are valid only for an extern whose declaration
             # provenance is recorded in the provider registry. Unknown or
             # source-defined same-name symbols must keep their own ABI.
             if self.provider_callable_call_origin_v1(direct_symbol) == MirCallOrigin.Foreign:
+                val tagged_identity_only = tagged_text_value_arg_is_identity(text_boundary_name)
                 for tagged_index in tagged_text_value_arg_indices(text_boundary_name) ?? []:
+                    if not tagged_identity_only and not int_list_contains(direct_boxed_text_indices, tagged_index):
+                        direct_tagged_text_indices = direct_tagged_text_indices.push(tagged_index)
                     direct_boxed_text_indices = direct_boxed_text_indices.push(tagged_index)
             # Match the pair expander's applicability guards, including raw
             # machine-word overloads with a different semantic arity.
@@ -9952,6 +9957,18 @@ impl MirLowering:
                 # dedicated extern pair/boxed argument expansion stays intact.
                 if direct_runtime_value_abi == 0 and direct_text_pointer_bridge and not int_list_contains(direct_pair_text_indices, current_arg_index) and not int_list_contains(direct_boxed_text_indices, current_arg_index):
                     arg_local = self.bridge_tagged_text_direct_arg(arg_local, declared_param_type)
+                # Bug stage3_selfbuild_raw_text_strict_extern_2026-11-18: a
+                # `for key in keys` binder, a literal, or a `text` parameter
+                # fed from either holds a RAW char*. Strict tagged decoders
+                # (rt_core_as_string) reject it: rt_hash_text returned 0
+                # for every key and the Stage 3 compiler's selected-export
+                # table missed every lookup. Keep a tagged handle (statically
+                # proven: no code; otherwise one rt_interp_cstr word compare)
+                # and box only a raw operand.
+                if direct_runtime_value_abi == 0 and int_list_contains(direct_tagged_text_indices, current_arg_index):
+                    match declared_param_type.kind:
+                        case HirTypeKind.Str: arg_local = self.ensure_tagged_str(arg_local)
+                        case _: ()
                 match declared_param_type.kind:
                     case HirTypeKind.Float(_):
                         boundary_transfer_mode = MirTransferMode.Copy
