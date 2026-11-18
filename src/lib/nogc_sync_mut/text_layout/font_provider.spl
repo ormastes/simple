@@ -1,6 +1,7 @@
-use std.nogc_sync_mut.sffi.io.{dir_create_all, file_exists}
+use std.nogc_sync_mut.sffi.io.{dir_create_all, file_exists, file_read_bytes}
 use std.common.encoding.sfnt.{font_face_spec_path}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_physical_path}
+use std.common.encoding.sfnt_kern.{sfnt_blob_x_height_units}
 
 # `rt_process_run_timeout` is declared here rather than imported through
 # `std.nogc_sync_mut.sffi.system.{process_run_timeout}` ON PURPOSE.
@@ -755,3 +756,25 @@ fn browser_family_has_host_face(family: text) -> bool:
     if resolved.category == "sans":
         return browser_platform_sans_faces().len() > 0
     false
+
+var _browser_face_x_height_units_memo: Dict<text, [i64]> = {}
+
+# [sxHeight, upem] in font units of the face a style resolves to -- the same
+# first-existing candidate walk as the face's ascent/descent -- or [] off the
+# measured host and for a face without an OS/2 x-height. Read once per face
+# file: the units depend on nothing but the file.
+# reason: family name and style flags are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_x_height_units(family: text, bold: bool, italic: bool) -> [i64]:
+    if not browser_host_has_measured_linux_face_set():
+        return []
+    val candidates = browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic))
+    for candidate in candidates:
+        val path = font_face_spec_path(candidate)
+        if file_exists(path):
+            if not _browser_face_x_height_units_memo.has(path):
+                if _browser_face_x_height_units_memo.len() >= 256:
+                    _browser_face_x_height_units_memo = {}
+                _browser_face_x_height_units_memo[path] = sfnt_blob_x_height_units(file_read_bytes(path))
+            return _browser_face_x_height_units_memo[path]
+    []
