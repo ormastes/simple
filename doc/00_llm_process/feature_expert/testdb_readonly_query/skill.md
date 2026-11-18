@@ -19,6 +19,7 @@ See `doc/08_tracking/bug/testdb_query_cli_mcp_not_implemented_2026-11-14.md`.
 
 ## CLI: `simple test query` / `simple test explain`
 - Module: `src/app/test_runner_new/test_query_cli.spl` (pure `parse_test_query_args`, `render_test_query_page`, `render_test_explain_page`, `render_test_query_outcome`; I/O only in `open_test_db_read_only` / `execute_test_query`). Hooked at the top of `run_test_cli` in `test_runner_main.spl` via `test_query_subcommand_args` (accepts the dispatcher's leading `test` token); plain `test <path>` is untouched.
+- Scoped (TESTDB-010): `--bug <id>` / `--requirement <id>` [+ `--levels`] resolve through `app.traceability.test_query_scope_v1` (bug -> `reproducible_by`; requirement -> `# @req` headers of the TestDB's planned spec paths) into `RunnerTestDb.query_scoped_attempts`; `TestLevel` is derived from the `test/NN_<level>/` path (`test_level_of_path`), carried on `TestQueryRow.level`.
 - Usage: `simple test query <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]`, `simple test explain <path>::<case> [--run <id>]`. Defaults: table, limit 50 (explain 1000, no cursor).
 - Exit codes (plan silent, chosen here): 0 rows found, 1 no rows, 2 usage error / unknown run / missing, corrupt or unsealed DB. Typed `TestQueryExitDecision` -> `TestQueryExitCode`.
 - Read-only: `open_test_db_read_only` requires the file to exist (no cold-start create, no `load_with_migration`), calls `load_test_database_extended`, never `save`. Spec compares bytes, mtime, `.wal` presence and directory listing before/after.

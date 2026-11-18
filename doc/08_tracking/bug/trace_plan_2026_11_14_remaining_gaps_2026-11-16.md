@@ -43,20 +43,30 @@ and the graph wire DTO `TraceGraphLocatorV1.locator_kind` are now the closed enu
   separate, 008 skipped/cached/expired never PASS, 009 CLI/MCP parity
   with `RunnerTestDb`, 010 requirement/bug-scoped queries. 001-009 each have a
   tagged scenario.
-- `TESTDB-010` is only defended fail-closed: `simple test query` has no
-  `--bug`, `--requirement` or `--levels` (unknown-flag usage error,
-  `src/app/test_runner_new/test_query_cli.spl:143`), and `simple_test_query` has no
-  bug/requirement/levels field (`src/app/mcp/main_lazy_trace_tools.spl:301`). Plan 3.2 and
-  acceptance item 2 (`--bug=<id>` returns case definitions, run attempts,
-  executable/source identity, missing evidence) are not implemented. Unblock: a
-  bug/requirement -> case resolver over the traceability graph feeding
-  `RunnerTestDb.query_case_attempts`.
-- Plan 3.5 return fields beyond the current row (`test_definition_digest`,
-  `binary_digest`, `host/backend`, `started_at`, `duration`, `failure_code`,
-  `artifact_refs`, `level`) are not in `TestQueryRow`; rows carry run, planned
-  case, attempt, status, qualification and provenance only
-  (`std.common.traceability.test_query`). Unblock: the runner must first record
-  those facts per attempt.
+- `TESTDB-010` is implemented (2026-11-18): `simple test query|explain --bug <id>`,
+  `--requirement <id>` and `--levels a,b` (`src/app/test_runner_new/test_query_cli.spl`) and the
+  MCP `simple_test_query` fields `bug` / `requirement` / `levels`
+  (`src/app/mcp/main_lazy_trace_tools.spl`) share one resolver,
+  `src/app/traceability/test_query_scope_v1.spl`, feeding
+  `RunnerTestDb.query_scoped_attempts`. Linkage uses data that already exists, no
+  graph build: a bug resolves to its legacy bug-DB `reproducible_by` spec path
+  (`legacy_bugs_v1.spl`), a requirement to the `# @req` headers
+  (`annotations_v1.spl`) of the spec paths the TestDB has planned cases for (the
+  test tree is ~21k specs, far over the 4096-file scan budget of
+  `spec_annotations_v1.spl`, so it is not scanned). Remaining limits: a requirement
+  is found only if a recorded run planned its spec; linkage is spec-file granular,
+  not case granular (every recorded case of a linked spec is returned); plan 3.2
+  acceptance item 2's "case definitions" and "executable/source identity" are not
+  in the rows (see next item).
+- Plan 3.5 return fields: `level` is now on `TestQueryRow` (`TestLevel`, derived from the
+  `test/NN_<level>/` path), and rows carry `case_key`. Still absent because the runner
+  records only `case_name`/`phase`/`outcome` per event (`TraceCaseEvent`,
+  `std.common.traceability.case_events`): `test_definition_digest`, `binary_digest`,
+  `host/backend`, `started_at`, `duration`, `failure_code`, `artifact_refs`. Unblock:
+  the runner must first record those facts per attempt.
+- Perf (scoped query): `query_scoped_attempts` (`src/lib/nogc_sync_mut/test_runner/test_db_compat.spl:337`) calls `get_trace_case_events` once per (run, path), and each call re-decodes the whole `trace_case_events` table (`src/lib/nogc_sync_mut/database/test_extended/database.spl:380`), so cost is runs x paths x table size. Fix needs a per-run grouped read on `TestDatabaseExtended` (decode once, group by path); not done here because it adds a new DB API.
+- `expired` has no `TestQueryStatus` variant; it parses as `Unknown` and is
+  never PASS (TESTDB-008), which is safe but not a distinct typed outcome.
 
 ## Already recorded elsewhere
 

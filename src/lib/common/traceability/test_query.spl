@@ -71,8 +71,35 @@ pub struct TestQuery:
     limit: TestQueryLimit
     cursor: TestQueryCursor?
 
+# Test level, derived from the numbered `test/NN_<level>/` tree of the case path.
+pub enum TestLevel:
+    Unit
+    Integration
+    System
+    Smoke
+    Perf
+    Security
+    Other
+
+pub struct TestScopeId:
+    value: text
+
+# Bug- or requirement-scoped query: the scope resolves to spec paths (see
+# app.traceability.test_query_scope_v1), `levels` narrows them, [] means all.
+pub enum TestQueryScope:
+    Bug(id: TestScopeId)
+    Requirement(id: TestScopeId)
+
+pub struct TestScopedQuery:
+    scope: TestQueryScope
+    levels: [TestLevel]
+    run_id: TestRunId?
+    limit: TestQueryLimit
+    cursor: TestQueryCursor?
+
 pub struct TestQueryRow:
     case_key: TestCaseKey
+    level: TestLevel
     run_id: TestRunId
     planned_case: TestPlannedCaseIdentity
     attempt: TestAttemptIdentity
@@ -119,6 +146,72 @@ pub fn parse_test_query_status(raw: text) -> TestQueryStatus:
         case "expired": TestQueryStatus.Expired
         case _: TestQueryStatus.Unknown(raw: raw)
 
+pub fn test_level_of_path(path: TestCasePath) -> TestLevel:
+    val p = path.value
+    val at = p.index_of("test/") ?? -1
+    if at < 0 or (at > 0 and p.substring(at - 1, at) != "/"):
+        return TestLevel.Other
+    val rest = p.substring(at + 5, p.byte_len())
+    if rest.starts_with("01_unit/") or rest.starts_with("00_unit/") or rest.starts_with("00_quick/"): TestLevel.Unit
+    elif rest.starts_with("02_integration/"): TestLevel.Integration
+    elif rest.starts_with("03_system/"): TestLevel.System
+    elif rest.starts_with("04_smoke/"): TestLevel.Smoke
+    elif rest.starts_with("05_perf/"): TestLevel.Perf
+    elif rest.starts_with("07_security/"): TestLevel.Security
+    else: TestLevel.Other
+
+pub fn parse_test_level(raw: text) -> TestLevel?:
+    match raw:
+        case "unit": Some(TestLevel.Unit)
+        case "integration": Some(TestLevel.Integration)
+        case "system": Some(TestLevel.System)
+        case "smoke": Some(TestLevel.Smoke)
+        case "perf": Some(TestLevel.Perf)
+        case "security": Some(TestLevel.Security)
+        case "other": Some(TestLevel.Other)
+        case _: None
+
+pub fn test_level_name(level: TestLevel) -> text:
+    match level:
+        case TestLevel.Unit: "unit"
+        case TestLevel.Integration: "integration"
+        case TestLevel.System: "system"
+        case TestLevel.Smoke: "smoke"
+        case TestLevel.Perf: "perf"
+        case TestLevel.Security: "security"
+        case TestLevel.Other: "other"
+
+# Comma-separated `--levels` / `levels` value; unknown names are rejected.
+pub fn parse_test_levels(raw: text) -> Result<[TestLevel], text>:
+    var levels: [TestLevel] = []
+    for part in raw.split(","):
+        val name = part.trim()
+        if name == "":
+            continue
+        match parse_test_level(name):
+            case Some(level):
+                if not levels.contains(level):
+                    levels.push(level)
+            case None: return Err("unknown test level: " + name + " (one of unit, integration, system, smoke, perf, security, other)")
+    if levels.len() == 0:
+        return Err("levels needs at least one level name")
+    Ok(levels)
+
+pub fn test_path_in_levels(path: TestCasePath, levels: [TestLevel]) -> bool:
+    levels.len() == 0 or levels.contains(test_level_of_path(path))
+
+# Synthetic exact-query identity that binds a scoped query's cursor to its
+# scope, levels and run, so pagination reuses the exact-query paginator.
+pub fn scoped_test_query_identity(scoped: TestScopedQuery) -> TestQuery:
+    val label = match scoped.scope:
+        case TestQueryScope.Bug(id): "scope:bug:" + id.value
+        case TestQueryScope.Requirement(id): "scope:requirement:" + id.value
+    var names: [text] = []
+    for level in scoped.levels:
+        names.push(test_level_name(level))
+    TestQuery(case_key: TestCaseKey(path: TestCasePath(value: label), name: TestCaseName(value: "levels:" + names.join(","))),
+        run_id: scoped.run_id, limit: scoped.limit, cursor: scoped.cursor)
+
 # Only an executed-and-passed observation qualifies; skipped, gated, blocked,
 # cached and unrecognised statuses are never PASS.
 pub fn qualify_test_query_status(status: TestQueryStatus) -> TestQualification:
@@ -128,7 +221,7 @@ pub fn qualify_test_query_status(status: TestQueryStatus) -> TestQualification:
 
 fn _row(key: TestCaseKey, run_id: TestRunId, planned: TestPlannedCaseIdentity,
         attempt: TestAttemptIdentity, status: TestQueryStatus) -> TestQueryRow:
-    TestQueryRow(case_key: key, run_id: run_id, planned_case: planned, attempt: attempt,
+    TestQueryRow(case_key: key, level: test_level_of_path(key.path), run_id: run_id, planned_case: planned, attempt: attempt,
         status: status, qualification: qualify_test_query_status(status),
         provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
 
@@ -194,7 +287,7 @@ fn _row_label(row: TestQueryRow) -> text:
     val attempt = match row.attempt:
         case TestAttemptIdentity.StreamOrder(ordinal): ordinal.value.to_text()
         case TestAttemptIdentity.Missing: "-"
-    row.run_id.value + "|" + planned + "|" + attempt + "|" + _status_label(row.status)
+    row.case_key.path.value + "::" + row.case_key.name.value + "|" + row.run_id.value + "|" + planned + "|" + attempt + "|" + _status_label(row.status)
 
 fn _cursor_prefix(rows: [TestQueryRow], query: TestQuery) -> text:
     var labels: [text] = []

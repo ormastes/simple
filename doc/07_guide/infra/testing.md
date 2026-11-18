@@ -1422,7 +1422,8 @@ the test database (no cold-start create, no save, no migration).
 
 ```bash
 bin/simple test query   <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
-bin/simple test explain <path>::<case> [--run <id>]
+bin/simple test query   --bug <id> | --requirement <id> [--levels unit,system] [--run <id>] [--limit N] [--cursor C]
+bin/simple test explain <path>::<case> | --bug <id> | --requirement <id> [--levels ...] [--run <id>]
 # direct form: bin/simple run src/app/test_runner_new/main.spl query ...
 ```
 
@@ -1431,6 +1432,18 @@ previous page. The token is bound to the case, `--run`, `--limit` and the result
 rows it was issued over; a plain integer, an edited token, a token from another
 query, or one issued before a new attempt was recorded is rejected with exit 2
 (`invalid query`). Restart without `--cursor` to re-page.
+
+Scoped queries (TESTDB-010): `--bug <id>` resolves the bug's `reproducible_by` spec path in
+`doc/08_tracking/bug/bug_db.sdn` (an unknown bug, or one with no reproducer path, is a usage
+error, not an empty result); `--requirement <id>` resolves the spec files whose `# @req` header
+claims it, among the spec paths the TestDB has planned cases for. Every recorded case under the
+resolved paths is returned, attempts kept separate. `--levels unit,integration,system,smoke,perf,security,other`
+narrows by the `test/NN_<level>/` tree of the path (`--levels` needs `--bug` or `--requirement`;
+scope flags exclude a `<path>::<case>`). Each row carries `case` and `level`; the cursor is bound
+to the scope, levels and run. A requirement no recorded spec claims is exit 1 (no rows).
+Not yet recorded per attempt, so not returned: test-definition digest, binary digest,
+host/backend, started_at, duration, failure_code, artifact refs
+(`doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md` section 4).
 
 Defaults: table format, `--limit 50` (explain 1000). The database path is fixed
 at `doc/08_tracking/test/test_db.sdn`.
@@ -1447,7 +1460,7 @@ no rows: no recorded attempts for test/01_unit/app/traceability/trace_matrix_spe
 (exit 1)
 
 $ bin/simple test query nocolon
-usage: simple test query <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
+usage: simple test query (<path>::<case> | --bug <id> | --requirement <id> [--levels unit,integration,...]) [--run <id>] [--limit N] [--cursor C] [--format table|sdn]
        simple test explain <path>::<case> [--run <id>]
 exit codes: 0 rows found, 1 no rows, 2 usage error or unreadable/corrupt test database
 (exit 2)
