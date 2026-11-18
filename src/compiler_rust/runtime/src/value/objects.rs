@@ -1445,3 +1445,30 @@ pub extern "C" fn rt_handle_is_valid(handle: RuntimeValue) -> RuntimeValue {
 #[cfg(test)]
 #[path = "object_tests.rs"]
 mod tests;
+
+// ============================================================================
+// Enum display-name registry (bug dupcheck_enum_interpolation_erased_value)
+// ============================================================================
+
+/// `(enum_id, discriminant)` -> `Enum::Variant` text plus payload arity, used
+/// only to render a `RuntimeEnum` in string interpolation. Lockless
+/// (`DashMap`, entry-or-insert: the first registration wins).
+fn enum_display_names() -> &'static dashmap::DashMap<(u32, u32), (std::sync::Arc<str>, u32)> {
+    static NAMES: std::sync::OnceLock<dashmap::DashMap<(u32, u32), (std::sync::Arc<str>, u32)>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(dashmap::DashMap::new)
+}
+
+/// Record the display name of one enum variant. `arity` is the payload element
+/// count: 0 = unit, 1 = single value, n > 1 = payload boxed as an array.
+pub fn register_enum_display_name(enum_id: u32, discriminant: u32, enum_name: &str, variant: &str, arity: u32) {
+    let simple = enum_name.rsplit(['.', ':']).next().unwrap_or(enum_name);
+    enum_display_names()
+        .entry((enum_id, discriminant))
+        .or_insert_with(|| (std::sync::Arc::from(format!("{simple}::{variant}")), arity));
+}
+
+/// Look up a registered variant: `(Enum::Variant, payload arity)`.
+pub fn enum_display_name(enum_id: u32, discriminant: u32) -> Option<(std::sync::Arc<str>, u32)> {
+    enum_display_names().get(&(enum_id, discriminant)).map(|e| e.value().clone())
+}
