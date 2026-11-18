@@ -1,5 +1,6 @@
 use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
 use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new, hir_snapshot_id_equals}
 use compiler.hir.target_hir.hir_freeze.{
@@ -120,3 +121,14 @@ describe "HirSnapshot deep freeze (TargetHIR PR-B)":
         val bad_codec = HirSnapshot(id: snap.id, frozen_bytes: snap.frozen_bytes, codec: "bogus")
         expect(cache.read(bad_codec).unwrap_err()).to_equal("hir_snapshot_codec_unknown: bogus")
         expect(hir_snapshot_read(bad_codec).unwrap_err()).to_equal("hir_snapshot_codec_unknown: bogus")
+
+    it "does not retain transient-scope frozen_bytes in HirSnapshotSessionCacheV1":
+        """Verify HirSnapshotSessionCacheV1.read skips storing verified_bytes when transient_array_scope_state_v1() == 1."""
+        var cache = HirSnapshotSessionCacheV1.new()
+        val snap = hir_snapshot_freeze(fixture("app.transient_mod", "t.spl"), 5).unwrap()
+        val entered = transient_scope_begin()
+        val decoded = cache.read(snap).unwrap()
+        expect(decoded.path).to_equal("t.spl")
+        if entered:
+            transient_scope_end()
+            expect(cache.verified_bytes.keys().len()).to_equal(0)

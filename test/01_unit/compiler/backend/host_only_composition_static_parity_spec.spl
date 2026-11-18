@@ -52,6 +52,9 @@ use plugins.backend_registry.full_static_backend_registry.{
 use app.cli.bootstrap_essential_backend_request.{
     bootstrap_essential_backend_request_error_v1,
     bootstrap_essential_dynamic_backend_request_v1}
+use app.io._CliCompile.compile_targets.{
+    cli_native_build_option_error,
+    cli_native_build_parse_options_v1}
 
 fn host_only_overlay_roots() -> [text]:
     ["src/compositions/kernel_llvm_cranelift",
@@ -236,3 +239,44 @@ describe "Host-only Phase-3 backend composition and static BackendSession parity
         expect(backend_target_list_supports_v1(
             ["x86_64-unknown-linux-gnu"], "x86_64-pc-windows-gnu")).to_equal(false)
         expect(cl_session.close()).to_equal(true)
+
+    it "validates --backend-plugin CLI flags fail-closed and forwards backend_plugin_path":
+        """Accept non-empty --backend-plugin forms in cli_native_build_option_error and cli_native_build_parse_options_v1 while rejecting missing or whitespace-only values."""
+        step("Accept split and inline --backend-plugin flags with non-empty provider paths")
+        val split_args = [
+            "native-build", "--entry", "src/app/cli/main.spl",
+            "--backend", "c", "--backend-plugin", "build/plugins/backend_c.dll",
+            "-o", "build/out"
+        ]
+        val inline_args = [
+            "native-build", "--entry=src/app/cli/main.spl",
+            "--backend=c", "--backend-plugin=build/plugins/backend_c.so",
+            "--output=build/out"
+        ]
+        expect(cli_native_build_option_error(split_args, true)).to_equal("")
+        expect(cli_native_build_option_error(inline_args, true)).to_equal("")
+
+        val parsed_split = cli_native_build_parse_options_v1(split_args)
+        expect(parsed_split.ok).to_equal(true)
+        expect(parsed_split.backend_plugin_path).to_equal("build/plugins/backend_c.dll")
+
+        val parsed_inline = cli_native_build_parse_options_v1(inline_args)
+        expect(parsed_inline.ok).to_equal(true)
+        expect(parsed_inline.backend_plugin_path).to_equal("build/plugins/backend_c.so")
+
+        step("Reject missing, flag-swallowing, empty, and whitespace-only --backend-plugin values")
+        expect(cli_native_build_option_error(
+            ["native-build", "--entry", "a.spl", "--backend-plugin"], true)).to_contain(
+            "--backend-plugin requires")
+        expect(cli_native_build_option_error(
+            ["native-build", "--entry", "a.spl", "--backend-plugin", "--strip"], true)).to_contain(
+            "--backend-plugin requires")
+        expect(cli_native_build_option_error(
+            ["native-build", "--entry", "a.spl", "--backend-plugin="], true)).to_contain(
+            "--backend-plugin requires")
+        expect(cli_native_build_option_error(
+            ["native-build", "--entry", "a.spl", "--backend-plugin=   "], true)).to_contain(
+            "--backend-plugin requires")
+        expect(cli_native_build_option_error(
+            ["native-build", "--entry", "a.spl", "--backend-plugin", "   "], true)).to_contain(
+            "--backend-plugin requires")

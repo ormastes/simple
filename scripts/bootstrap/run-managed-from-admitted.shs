@@ -102,6 +102,12 @@ trap - EXIT HUP INT TERM
   # grouped runner publishes completion only after five binary receipts and
   # both backend module ledgers pass their compiled admission gates.
   managed_producer_sha=$(bootstrap_stage3_manifest_value candidate_sha256 "${stage2_admission_receipt_absolute}") || exit 1
+  phase4_profile=${PHASE4_PROFILE:-prod}
+  case "${phase4_profile}" in
+    prod) phase4_suffix= ;;
+    dev) phase4_suffix=-dev ;;
+    *) die "invalid PHASE4_PROFILE: ${phase4_profile} (expected prod or dev)" ;;
+  esac
   managed_phase_root="$(absolute_path "${output_dir}/managed/task3-run4-phase3-roles-v3-both-binaries/${PLATFORM}/${managed_producer_sha}")"
   managed_shared_parse_cas_root=${SIMPLE_BOOTSTRAP_SHARED_PARSE_CAS_ROOT:-}
   managed_shared_parse_cas_root=$(sh "${repo_root}/scripts/bootstrap/lib/shared-parse-cas-root.shs" "${managed_shared_parse_cas_root}") || {
@@ -181,7 +187,7 @@ trap - EXIT HUP INT TERM
       exit 1
     }
   done
-  managed_authority_root="${managed_phase_root}/authority"
+  managed_authority_root="${managed_phase_root}/authority${phase4_suffix}"
   managed_authority_receipt="${managed_authority_root}/authority.receipt"
   managed_canonical_snapshot="${managed_authority_root}/canonical-source.$$.txt"
   mkdir -p "${managed_authority_root}" || exit 1
@@ -191,13 +197,13 @@ trap - EXIT HUP INT TERM
     cmp -s "${managed_canonical_snapshot}" "${managed_admitted_snapshot}" || {
       echo "error: resumed private source differs from admitted Stage 2 bytes" >&2; exit 1;
     }
-    managed_authority_report=$("${managed_authority_program}" phase2-native-authority \
+    managed_authority_report=$(PHASE4_PROFILE="${phase4_profile}" "${managed_authority_program}" phase2-native-authority \
       --producer-receipt "${stage2_admission_receipt_absolute}" \
       --source-checkout "${repo_root}" --output-root "${managed_authority_root}" \
       --target "${PLATFORM}" --receipt "${managed_authority_receipt}" \
       --canonical-snapshot "${managed_canonical_snapshot}") || exit 1
   else
-    managed_authority_report=$("${managed_authority_program}" phase2-native-authority \
+    managed_authority_report=$(PHASE4_PROFILE="${phase4_profile}" "${managed_authority_program}" phase2-native-authority \
       --producer-receipt "${stage2_admission_receipt_absolute}" \
       --source-checkout "${repo_root}" --output-root "${managed_authority_root}" \
       --target "${PLATFORM}" --receipt "${managed_authority_receipt}") || exit 1
@@ -249,7 +255,7 @@ trap - EXIT HUP INT TERM
     echo "error: authority producer or target differs from Stage 2" >&2; exit 1;
   }
   rm -f "${managed_canonical_snapshot}"
-  sh "${managed_runner}" \
+  PHASE4_PROFILE="${phase4_profile}" sh "${managed_runner}" \
     "--producer-receipt=${stage2_admission_receipt_absolute}" \
     "--scv-receipt=${managed_scv_receipt}" \
     "--source-root=${managed_source_root}" \
@@ -289,12 +295,12 @@ trap - EXIT HUP INT TERM
     "--estimated-group-disk-bytes=${managed_estimated_disk}" \
     "--minimum-free-disk-bytes=${managed_minimum_disk}" \
     || { echo "error: managed Phase 3/4 handoff failed; receipts retained" >&2; exit 1; }
-  managed_completion="${managed_phase_root}/completion.env"
+  managed_completion="${managed_phase_root}/completion${phase4_suffix}.env"
   managed_completion_verifier="${repo_root}/scripts/bootstrap/verify-managed-phase-completion.shs"
   [ -f "${managed_completion_verifier}" ] || {
     echo "error: tracked managed completion verifier unavailable" >&2; exit 1;
   }
-  sh "${managed_completion_verifier}" \
+  PHASE4_PROFILE="${phase4_profile}" sh "${managed_completion_verifier}" \
     "--receipt=${managed_completion}" "--root=${managed_phase_root}" \
     "--inventory=${managed_module_inventory}" "--producer-sha=${managed_producer_sha}" \
     "--excluded-inventory=${managed_excluded_inventory}" \

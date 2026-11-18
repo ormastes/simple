@@ -2,10 +2,28 @@
 # Persistent index-free diagnostics: one admitted source epoch per partition.
 # Only small config inputs are staged; source authority is replayed by the
 # compiled adapter and every consumed entry/import buffer by its source owner.
+managed_smf_phase_namespace() {
+  case "${PHASE4_PROFILE:-prod}" in
+    prod) printf '%s\n' "$1" ;;
+    dev)
+      if [ "$1" = phase4 ]; then
+        printf '%s\n' phase4-dev
+      else
+        printf '%s\n' "$1"
+      fi
+      ;;
+    *)
+      echo "managed-smf-diagnostics: invalid PHASE4_PROFILE: ${PHASE4_PROFILE:-}" >&2
+      return 2
+      ;;
+  esac
+}
+
 managed_smf_diagnostic_task() (
   phase=$1 backend=$2 partition=$3 reservation=$4 config=$5 partitions=$6
+  phase_ns=$(managed_smf_phase_namespace "$phase") || exit 2
   task_id="diagnostic-$phase-$backend-$partition"
-  job_root="$root/$phase/diagnostic-smf/$backend/partition-$partition"
+  job_root="$root/$phase_ns/diagnostic-smf/$backend/partition-$partition"
   inputs="$job_root/inputs"
   mkdir -p "$inputs" "$job_root/state" "$job_root/cache" || exit 2
   disk_preflight "$job_root"
@@ -101,8 +119,9 @@ managed_smf_diagnostic_cancel() {
 
 run_index_independent_diagnostics() (
   diagnostic_phase=$1 diagnostic_backend=$2 diagnostic_config=$3
+  diagnostic_phase_ns=$(managed_smf_phase_namespace "$diagnostic_phase") || return 2
   diagnostic_pids=
-  diagnostic_wave_states="$root/$diagnostic_phase/diagnostic-smf/$diagnostic_backend/wave.states"
+  diagnostic_wave_states="$root/$diagnostic_phase_ns/diagnostic-smf/$diagnostic_backend/wave.states"
   mkdir -p "$(dirname -- "$diagnostic_wave_states")" || return 2
   : >"$diagnostic_wave_states" || return 2
   trap 'code=$?; trap - EXIT HUP INT TERM; managed_smf_diagnostic_cancel || code=2; exit "$code"' EXIT
@@ -116,7 +135,7 @@ run_index_independent_diagnostics() (
   diagnostic_control=$(mktemp -d "$(dirname -- "$diagnostic_wave_states")/dispatch.XXXXXX") || return 2
   partition=0
   while [ "$partition" -lt "$diagnostic_workers" ]; do
-    printf '%s\n' "$root/$diagnostic_phase/diagnostic-smf/$diagnostic_backend/partition-$partition/state" >>"$diagnostic_wave_states" || return 2
+    printf '%s\n' "$root/$diagnostic_phase_ns/diagnostic-smf/$diagnostic_backend/partition-$partition/state" >>"$diagnostic_wave_states" || return 2
     (
       code=0
       (managed_smf_diagnostic_task "$diagnostic_phase" "$diagnostic_backend" "$partition" \
