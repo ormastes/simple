@@ -153,6 +153,7 @@ foreach cmd [list \
   "echo '$pub' > /root/.ssh/authorized_keys" \
   "chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys" \
   "echo 'PermitRootLogin prohibit-password' >> /etc/ssh/sshd_config" \
+  "ssh-keygen -A" \
   "service sshd restart" \
   "echo PROV''ISION_OK" ] {
   send "$cmd\r"
@@ -173,7 +174,12 @@ until tr -d '\r' <"$CONSOLE" 2>/dev/null | grep -q '^PROVISION_OK'; do
     [ "$waited" -lt 3600 ] || fail "provisioning timed out (see $CONSOLE)"
     sleep 15; waited=$((waited + 15))
 done
-UNAME="$(guest 'uname -mrs')" || fail "SSH into guest failed"
+# The first-boot image has no sshd host keys ("No host key files found"), so
+# provisioning runs ssh-keygen -A; sshd may still be coming up, so retry.
+tries=0
+until UNAME="$(guest 'uname -mrs' 2>/dev/null)"; do
+    tries=$((tries + 1)); [ "$tries" -lt 20 ] || fail "SSH into guest failed"; sleep 15
+done
 case "$UNAME" in *"FreeBSD ${VER}-RELEASE"*riscv*) ;; *) fail "unexpected guest: $UNAME" ;; esac
 pass "guest: $UNAME"
 [ "$MODE" = --smoke ] && { printf 'PASS — FreeBSD %s riscv64 boot + SSH\n' "$VER"; exit 0; }
