@@ -1,0 +1,136 @@
+"""
+## Purpose and audience
+Purpose: Pin where an inline element of another font size sits in a line. An
+inline non-replaced box sits on the line's baseline (CSS 2.2 10.8.1): its
+content-area top is the line ascent minus its own face ascent. The renderer
+centred the content area in the line box instead. That is the same place for
+the line's own font, but a smaller font (`<small>`, a 12 px span, a 10.72 px
+`<b>`) ended one CSS px too high at 1x and four device rows too high at device
+scale 4.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, 2026-11-18, Liberation Sans / Serif on both
+sides).
+
+Geometry at 1x (`--dump-dom`, getBoundingClientRect top of X in
+`<div style="font:F"><span>H</span><X>H</X></div>`, div at top 0):
+
+| font F          | X                         | Chrome | base |
+|-----------------|---------------------------|--------|------|
+| 16px/1.5 Sans   | small (13.33 px)          | 5      | 4    |
+| 16px/1.5 Sans   | span font-size:12px       | 6      | 5    |
+| 16px Sans       | small                     | 2      | 1    |
+| 16px Sans       | span font-size:12px       | 3      | 2    |
+| 16px/1.5 Sans   | span Liberation Serif     | 3      | 3    |
+| 16px Sans       | span Liberation Serif     | 0      | 0    |
+
+Ink at device scale 4 (`--force-device-scale-factor=4 --screenshot`): absolute
+200 px wide divs at top 50 x row, `font:16px/1.5`, `H<X style="margin-left:
+20px">HHHH</X>`. First / last ink row (green < 110) below the cell top of the
+second run (device columns from 100):
+
+| cell                   | Chrome | base  | head  |
+|------------------------|--------|-------|-------|
+| Sans small             | 33/69  | 29/64 | 33/68 |
+| Serif small            | 34/68  | 29/62 | 33/66 |
+| Sans b 10.72px         | 41/69  | 36/66 | 40/70 |
+| Sans span 12px         | 37/69  | 33/65 | 37/69 |
+
+The rows left over are the device font size: a fractional size is still
+painted at round(css) x 4 device px (13.33 px -> 52, Chrome 53.33; 10.72 ->
+44, Chrome 42.88). The parent H is 26/69 (Sans) and 27/68 (Serif) on all three.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-BOX-BASELINE-001 -- an inline non-replaced box sits on the line baseline, not centred in the line box.
+"""
+# @tag: unit, browser_engine, layout, inline, baseline, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val K: i32 = 4
+
+fn _second_top(font: text, open: text, close: text) -> text:
+    val page = "<!DOCTYPE html><html><head><style>body{{margin:0}}div{{position:absolute;left:0;top:0;width:200px;font:" + font +
+        "}}</style></head><body><div><span>H</span><" + open + " id=s>H</" + close + "></div></body></html>"
+    simple_web_layout_debug_layout_by_id(page, 900, 600, "s", "y")
+
+fn _cell(row: i32, family: text, body: text) -> text:
+    "<div style=\"top:" + (row * 50).to_text() + "px;font:16px/1.5 '" + family + "'\">H" + body + "</div>"
+
+fn _ink_page() -> text:
+    "<!DOCTYPE html><html><head><style>body{{margin:0;background:#fff}}" +
+        "div{{position:absolute;left:0;width:200px;margin:0;color:#000}}" +
+        "small,b,span{{margin-left:20px}}</style></head><body>" +
+        _cell(0, "Liberation Sans", "<small>HHHH</small>") +
+        _cell(1, "Liberation Serif", "<small>HHHH</small>") +
+        _cell(2, "Liberation Sans", "<b style=\"font-size:10.72px\">HHHH</b>") +
+        _cell(3, "Liberation Sans", "<span style=\"font-size:12px\">HHHH</span>") +
+        "</body></html>"
+
+fn _is_ink(px: u32) -> bool:
+    (((px >> 8u32) & 0xFFu32) as i32) < 110
+
+# "first/last" ink row of device columns [x0, x1) of cell `row`, below its top.
+fn _rows(px: [u32], row: i32, x0: i32, x1: i32) -> text:
+    val w = 200 * K
+    var lo = -1
+    var hi = -1
+    var y = row * 50 * K
+    while y < (row + 1) * 50 * K:
+        var x = x0
+        while x < x1:
+            if _is_ink(px[y * w + x]):
+                if lo < 0:
+                    lo = y - row * 50 * K
+                hi = y - row * 50 * K
+            x = x + 1
+        y = y + 1
+    lo.to_text() + "/" + hi.to_text()
+
+# "parent second" rows of the four cells: the parent H is left of device
+# column 80, the second run right of 100.
+fn _ink_rows() -> [text]:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_ink_page(), 200, 200, K, "cpu_simd")
+    var out: [text] = []
+    if px.len() != (200 * K * 200 * K) as i64:
+        return out
+    var r = 0
+    while r < 4:
+        out.push(_rows(px, r, 0, 80) + " " + _rows(px, r, 100, 200 * K))
+        r = r + 1
+    out
+
+describe "an inline box of another font size sits on the line baseline (Chrome 159)":
+    it "AC-1: a smaller font in a 16px/1.5 line is not centred":
+        step("Chrome 159: small 5, 12px span 6 (centring gave 4 and 5)")
+        expect(_second_top("16px/1.5 'Liberation Sans'", "small", "small")).to_equal("5")
+        expect(_second_top("16px/1.5 'Liberation Sans'", "span style=\"font-size:12px\"", "span")).to_equal("6")
+
+    it "AC-2: a smaller font in a normal line-height line is not centred":
+        step("Chrome 159: small 2, 12px span 3 (centring gave 1 and 2)")
+        expect(_second_top("16px 'Liberation Sans'", "small", "small")).to_equal("2")
+        expect(_second_top("16px 'Liberation Sans'", "span style=\"font-size:12px\"", "span")).to_equal("3")
+
+    it "AC-3 (guard): a span of the line's own size keeps its half-leading top":
+        step("Chrome 159: same-size serif span 3 in 16px/1.5, 0 in a normal line")
+        expect(_second_top("16px/1.5 'Liberation Sans'", "span style=\"font-family:'Liberation Serif'\"", "span")).to_equal("3")
+        expect(_second_top("16px 'Liberation Sans'", "span style=\"font-family:'Liberation Serif'\"", "span")).to_equal("0")
+
+    it "AC-4: at device scale 4 the smaller run ends within two rows of Chrome's baseline":
+        step("Chrome 159 second run: 33/69, 34/68, 41/69, 37/69 (base 29/64, 29/62, 36/66, 33/65)")
+        val r = _ink_rows()
+        expect(r.len()).to_equal(4)
+        # Chrome 26/69 33/69: 13.33 px is still painted at 52 device px (53.33).
+        expect(r[0]).to_equal("26/69 33/68")
+        # Chrome 27/68 34/68.
+        expect(r[1]).to_equal("27/68 33/66")
+        # Chrome 26/69 41/69: 10.72 px is painted at 44 device px (42.88).
+        expect(r[2]).to_equal("26/69 40/70")
+        expect(r[3]).to_equal("26/69 37/69")
