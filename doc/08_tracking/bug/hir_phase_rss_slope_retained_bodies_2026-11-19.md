@@ -29,7 +29,7 @@ Setup:
 - **Where RSS moves, per module.**
   - `hir-file-start -> hir-post-lowering`: +16.6 MiB per module.
   - Ending the transient scope at `post-diagnostics`: -7 MiB.
-  - Net retained: ~7.9 MiB per module.
+  - Plus `post-store -> next file-start`: -1.6 MiB. Net retained: ~7.9 MiB per module, endpoint average over the boot run. The least-squares fit is 5.5-6.0 MiB per module.
 - **What the retained size tracks.** It correlates with source bytes (r=0.59, ~0.5 KiB RSS per source byte, about 26x the
   source size) more than with `use` count (r=0.42). Function bodies dominate.
   - Largest single costs: `hir_codec.spl` 330 MiB, `driver_aot_native_output.spl` 178 MiB.
@@ -38,7 +38,7 @@ Setup:
 - **`heap_live_bytes` in the snapshot cannot be used here.** It counts heap-registry header bytes only
   (`interpreter_extern/memory.rs` bit0). It moved about 1 MB per module.
 - **Model check.** HIR-start floor 7.5 GB + 6 MiB x 1808 = 18.1 GB, against 18.4 GB measured.
-  **Projected for 3998 modules: ~31 GB.** Fitting 16 GB needs a slope of 2.2 MiB per module or less.
+  The 7.5 GB floor is the 3998-module closure, inferred from this check. The 3.59 GB in the table is the 1713-module probe closure. **Projected for 3998 modules: ~31 GB.** Fitting 16 GiB needs a slope of 2.2 MiB per module or less.
 
 ## Root cause
 
