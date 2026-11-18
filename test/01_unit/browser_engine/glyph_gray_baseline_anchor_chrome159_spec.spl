@@ -1,0 +1,99 @@
+"""
+## Purpose and audience
+Purpose: Pin the vertical placement of GRAYSCALE glyphs (above 48 device px, e.g.
+16 CSS px at device scale 4 = 64 px) against Chrome 159. Chrome does NOT hint
+there (subpixel positioning is on at dpr >= 2): the x-height, ascender and
+crossbar rows keep fractional coverage. It does put every glyph on its true
+baseline, on integer rows. Simple used to anchor each bitmap on its own ink
+edge, which put `H` one row too high (rows 41..84) and left the `l` bottom row
+partial.
+Audience: web renderer / font rasteriser maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new --disable-gpu
+--force-device-scale-factor=4`, Liberation Sans 16 px CSS, `color:#000` on white,
+`<p style="margin:0;position:absolute;left:4px;top:4px;font-size:16px;line-height:24px">`
+holding one glyph, 40x48 CSS px = 160x192 device px). Row = device row, ink =
+sum of (255 - blue) over the row:
+
+| glyph | first ink row | last ink row | notes                                    |
+|-------|---------------|--------------|------------------------------------------|
+| H     | 42 (3038)     | 85 (3038)    | crossbar rows 60 (6019) .. 65 (6019)     |
+| x     | 52 (2326)     | 85 (3120)    | top row partial (x-height 33.74 px)      |
+| l     | 39 (529)      | 85 (1424)    | top row partial (37% of a stem row)      |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-HINT-003 - grayscale text sits on Chrome's baseline rows without hinting.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_at_device_scale
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val CSS_W: i32 = 40
+val CSS_H: i32 = 48
+val DW: i64 = 160
+val DH: i64 = 192
+
+fn _page(glyph: text) -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:4px;top:4px;font-size:16px;line-height:24px;color:#000\">" + glyph + "</p></body></html>"
+
+fn _row_ink(px: [u32], y: i64) -> i64:
+    var sum: i64 = 0
+    var x: i64 = 0
+    while x < DW:
+        sum = sum + (255 - ((px[y * DW + x] & 255u32) as i64))
+        x = x + 1
+    sum
+
+fn _first_ink(px: [u32]) -> i64:
+    var y: i64 = 0
+    while y < DH:
+        if _row_ink(px, y) > 0: return y
+        y = y + 1
+    -1
+
+fn _last_ink(px: [u32]) -> i64:
+    var y = DH - 1
+    while y >= 0:
+        if _row_ink(px, y) > 0: return y
+        y = y - 1
+    -1
+
+describe "grayscale glyph baseline anchoring against Chrome 159 (dpr 4, unhinted)":
+    it "AC-1: H spans rows 42..85 with a full-ink last row (Chrome 42..85)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_at_device_scale(_page("H"), CSS_W, CSS_H, 4)
+        expect(px.len()).to_equal(DW * DH)
+        step("Chrome H: first ink row 42, last ink row 85, both full stem rows")
+        expect(_first_ink(px)).to_equal(42)
+        expect(_last_ink(px)).to_equal(85)
+        expect(_row_ink(px, 85) > 3000).to_equal(true)
+        step("crossbar is NOT snapped: row 60 and 65 are partial (Chrome 6019), 61..64 full (9112)")
+        expect(_row_ink(px, 60) > 5000 and _row_ink(px, 60) < 7000).to_equal(true)
+        expect(_row_ink(px, 62) > 8500).to_equal(true)
+
+    it "AC-2: x spans rows 52..85 with a partial top row (Chrome 52..85, top 2326 of 3143)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_at_device_scale(_page("x"), CSS_W, CSS_H, 4)
+        expect(_first_ink(px)).to_equal(52)
+        expect(_last_ink(px)).to_equal(85)
+        expect(_row_ink(px, 52) < _row_ink(px, 53) - 400).to_equal(true)
+
+    it "AC-3: l spans rows 39..85, partial top row, full bottom row (Chrome 39 = 529, 85 = 1424)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_at_device_scale(_page("l"), CSS_W, CSS_H, 4)
+        expect(_first_ink(px)).to_equal(39)
+        expect(_last_ink(px)).to_equal(85)
+        expect(_row_ink(px, 39) < _row_ink(px, 40)).to_equal(true)
+        expect(_row_ink(px, 85) > 1300).to_equal(true)
