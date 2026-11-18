@@ -16,6 +16,7 @@ use std.nogc_sync_mut.io_runtime.{file_delete, file_hash_sha256_or_empty}
 pub val TEST_RESULT_CACHE_VERSION: i64 = 3
 pub val MAX_SHARED_TEST_CACHE_ENTRIES: i64 = 8192
 val MAX_DEP_HASH_MEMO_ENTRIES: i64 = 16384
+val RACELESS_MEMO_MIN_AGE_SECS: i64 = 2
 
 # ============================================================================
 # Process-local (mtime, size)-validated SHA-256 memo
@@ -111,38 +112,54 @@ fn _entry_last_run_ms(e: TestCacheEntry) -> i64:
         return e.cached_at / 1000
     0
 
+fn _current_unix_secs() -> i64:
+    val raw_us = time_sample_unix_micros_or_failure()
+    if raw_us <= 0:
+        return 0
+    raw_us / 1000000
+
+fn _is_raceless_memo_eligible(mtime: i64, size: i64, now_s: i64) -> bool:
+    mtime > 0 and size >= 0 and now_s > 0 and (now_s - mtime) >= RACELESS_MEMO_MIN_AGE_SECS
+
 fn _dep_fingerprint(path: text) -> text:
     # mtime alone has one-second resolution, so a same-size rewrite within
     # that second kept the old fingerprint and served a stale cached result.
-    # The content digest decides. A missing path, a directory, or an open/read
-    # failure has no 64-hex digest; all of those fingerprint as "unreadable",
-    # which never matches a real digest. Within a process, reuse the digest
-    # when live (mtime > 0, size >= 0) matches the memoized entry.
+    # Git-index raceless stat memoization: only serve or store a memoized
+    # SHA-256 digest when mtime > 0 and the file's mtime is strictly older
+    # than the racy window (now_s - mtime >= 2). Files modified within < 2s
+    # of now_s evict any prior memo entry and are always hashed fresh from disk.
+    val now_s = _current_unix_secs()
     val mtime = file_stat(path)
     val size = file_size(path)
     val key = _memo_key(path)
-    if mtime > 0 and size >= 0 and _dep_hash_memo.contains_key(key):
-        val cached = _dep_hash_memo[key]
-        if cached != "":
-            val parts = cached.split(":")
-            if parts.len() == 3 and parts[0] == "{mtime}" and parts[1] == "{size}" and parts[2].len() == 64:
-                return "{mtime}@{parts[2]}"
+    if _is_raceless_memo_eligible(mtime, size, now_s):
+        if _dep_hash_memo.contains_key(key):
+            val cached = _dep_hash_memo[key]
+            if cached != "":
+                val parts = cached.split(":")
+                if parts.len() == 3 and parts[0] == "{mtime}" and parts[1] == "{size}" and parts[2].len() == 64:
+                    return "{mtime}@{parts[2]}"
+    elif _dep_hash_memo.contains_key(key):
+        _dep_hash_memo[key] = ""
     _dep_hash_compute_count = _dep_hash_compute_count + 1
     val digest = file_hash_sha256_or_empty(path)
     if digest.len() != 64:
         if _dep_hash_memo.contains_key(key):
             _dep_hash_memo[key] = ""
         return "unreadable"
-    val live_mtime = if mtime > 0: mtime else: file_stat(path)
-    val live_size = if size >= 0: size else: file_size(path)
-    if live_mtime > 0 and live_size >= 0:
+    val post_mtime = file_stat(path)
+    val post_size = file_size(path)
+    if post_mtime == mtime and post_size == size and _is_raceless_memo_eligible(post_mtime, post_size, now_s):
         if _dep_hash_memo_count >= MAX_DEP_HASH_MEMO_ENTRIES:
             _dep_hash_memo = {}
             _dep_hash_memo_count = 0
         if not _dep_hash_memo.contains_key(key):
             _dep_hash_memo_count = _dep_hash_memo_count + 1
-        _dep_hash_memo[key] = "{live_mtime}:{live_size}:{digest}"
-    "{live_mtime}@{digest}"
+        _dep_hash_memo[key] = "{post_mtime}:{post_size}:{digest}"
+    elif _dep_hash_memo.contains_key(key):
+        _dep_hash_memo[key] = ""
+    val reported_mtime = if post_mtime > 0: post_mtime else: mtime
+    "{reported_mtime}@{digest}"
 
 fn _dep_hash(test_path: text, dep_paths: [text]) -> text:
     """Build a fingerprint from file mtimes and content digests."""
@@ -151,7 +168,7 @@ fn _dep_hash(test_path: text, dep_paths: [text]) -> text:
         h = h + ":" + _dep_fingerprint(p)
     h
 
-fn _select_entries_to_save(entries: {text: TestCacheEntry}) -> [TestCacheEntry]:
+fn _select_entries_to_save(entries: {text: TestCacheEntry}) -> ([text], [TestCacheEntry]):
     var kept_entries: [TestCacheEntry] = []
     var kept_ms: [i64] = []
     var kept_keys: [text] = []
@@ -164,7 +181,7 @@ fn _select_entries_to_save(entries: {text: TestCacheEntry}) -> [TestCacheEntry]:
         kept_keys.push(key)
     val n = kept_entries.len()
     if n <= MAX_SHARED_TEST_CACHE_ENTRIES:
-        return kept_entries
+        return (kept_keys, kept_entries)
 
     # Shell sort indices descending by last_run_ms (newest first), tie-broken by key.
     var idx: [i64] = []
@@ -195,12 +212,30 @@ fn _select_entries_to_save(entries: {text: TestCacheEntry}) -> [TestCacheEntry]:
             i = i + 1
         gap = gap / 2
 
-    var capped: [TestCacheEntry] = []
+    var capped_keys: [text] = []
+    var capped_entries: [TestCacheEntry] = []
     var out_i = 0
     while out_i < MAX_SHARED_TEST_CACHE_ENTRIES:
-        capped.push(kept_entries[idx[out_i]])
+        val chosen = idx[out_i]
+        capped_keys.push(kept_keys[chosen])
+        capped_entries.push(kept_entries[chosen])
         out_i = out_i + 1
-    capped
+    (capped_keys, capped_entries)
+
+fn _entries_map_from_selected(selected_keys: [text], selected_entries: [TestCacheEntry]) -> {text: TestCacheEntry}:
+    var pruned: {text: TestCacheEntry} = {}
+    var i = 0
+    while i < selected_keys.len():
+        pruned[selected_keys[i]] = selected_entries[i]
+        i = i + 1
+    pruned
+
+# reason: cache owners pass path-keyed entry maps for missing-file and capacity pruning
+@allow(primitive_api)
+pub fn shared_cache_prune_entries(entries: {text: TestCacheEntry}) -> {text: TestCacheEntry}:
+    """Return a pruned copy of entries with missing test_path rows and overflow past 8192 removed."""
+    val (selected_keys, selected_entries) = _select_entries_to_save(entries)
+    _entries_map_from_selected(selected_keys, selected_entries)
 
 # ============================================================================
 # Shared cache operations
@@ -235,9 +270,10 @@ fn shared_cache_build_entry(test_path: text, dep_paths: [text], status: i64, pas
         last_run_ms: now_ms
     )
 
-fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text):
-    """Serialize live, bounded entries to a line-based cache file."""
-    val selected = _select_entries_to_save(entries)
+fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text) -> {text: TestCacheEntry}:
+    """Serialize live, bounded entries to a line-based cache file and return the pruned map."""
+    val (selected_keys, selected) = _select_entries_to_save(entries)
+    val pruned = _entries_map_from_selected(selected_keys, selected)
     var lines: [text] = []
     lines = lines.push("version:{TEST_RESULT_CACHE_VERSION}")
     for e in selected:
@@ -251,6 +287,7 @@ fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text):
             file_delete(tmp)
     elif file_exists(tmp):
         file_delete(tmp)
+    pruned
 
 fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
     """Load entries from a cache file. Returns empty dict on any error."""

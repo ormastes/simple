@@ -1,6 +1,6 @@
 # Parent-only parse-selection transaction. The worker consumes durable files;
 # no inventory, source text, or source-scan container crosses this boundary.
-use app.io.env_ops.{env_set, env_get}
+use app.io.env_ops.{env_set, env_get, env_unset}
 use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
 use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1}
 use std.io_runtime.{dir_create_all, dir_exists, dir_remove_all, file_exists, getpid, time_now_monotonic_ms}
@@ -210,12 +210,14 @@ pub fn native_build_parse_closure_reuse_decision_v1(shard_child: bool,
 fn _parse_closure_request_root_from_path_v1(path: text) -> text:
     val canonical = path.replace("\\", "/")
     var root = canonical
+    while root.ends_with("/"):
+        root = root.substring(0, root.byte_len() - 1)
     val req_suffix = "/request.v1"
     val sel_suffix = "/selection.v1"
-    if canonical.ends_with(req_suffix):
-        root = canonical.substring(0, canonical.byte_len() - req_suffix.byte_len())
-    elif canonical.ends_with(sel_suffix):
-        root = canonical.substring(0, canonical.byte_len() - sel_suffix.byte_len())
+    if root.ends_with(req_suffix):
+        root = root.substring(0, root.byte_len() - req_suffix.byte_len())
+    elif root.ends_with(sel_suffix):
+        root = root.substring(0, root.byte_len() - sel_suffix.byte_len())
     if root == "" or root.contains("..") or root.contains("\n") or root.contains("\r") or root.contains("\0"):
         return ""
     val slash = root.last_index_of("/")
@@ -247,6 +249,22 @@ pub fn native_build_parse_closure_retire_request_v1(request_or_selection_path: t
     if not file_exists(request_root + "/selection.v1") and not file_exists(request_root + "/request.v1"):
         return false
     dir_remove_all(request_root)
+
+# Coordinator teardown: retire the active closure-request-* directory (when not
+# running inside a shard child and SIMPLE_KEEP_CLOSURE_REQUEST != "1") right
+# before unsetting all published closure-request environment variables.
+# reason: shard-role guard and boolean retirement status match coordinator CLI flags
+@allow(primitive_api)
+pub fn native_build_parse_closure_teardown_env_v1(shard_child_run: bool) -> bool:
+    val retired = if not shard_child_run:
+        native_build_parse_closure_retire_request_v1("")
+    else:
+        false
+    env_unset("SIMPLE_PARSE_CLOSURE_REQUEST")
+    env_unset("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST")
+    env_unset(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1)
+    env_unset(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1)
+    retired
 
 fn native_build_parse_closure_clear_v1() -> bool:
     # Evaluate both setters even when the first fails. An absent request path
