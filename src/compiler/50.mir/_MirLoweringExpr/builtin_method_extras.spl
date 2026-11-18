@@ -433,7 +433,8 @@ impl MirLowering:
             (method == "enumerate" and args.len() == 0) or
             (method == "index_of" and args.len() == 1) or
             (method == "find" and args.len() == 1) or
-            (method == "reduce" and args.len() == 2)
+            (method == "reduce" and args.len() == 2) or
+            ((method == "min" or method == "max") and args.len() == 0)
         if not shape:
             return None
         if not self.builtin_array_receiver_proven(receiver, arr):
@@ -519,6 +520,9 @@ impl MirLowering:
         if not self.builtin_elem_mir_is_primitive(elem_type):
             return Some(self.builtin_extra_fail_closed("unsupported in stage2: array.{method}() over a non-primitive element type (only integer, float, bool and text elements are lowered); write the loop", Some(receiver.span)))
 
+        if method == "min" or method == "max":
+            return Some(self.lower_array_min_max_inline(receiver, arr, elem_type, elem_hir, method))
+
         if method == "find":
             if elem_hir == None:
                 return Some(self.builtin_extra_fail_closed("unsupported in stage2: array.find() needs the declared element type to build its Option result; annotate the array type", Some(receiver.span)))
@@ -536,6 +540,77 @@ impl MirLowering:
                     return self.lower_array_reduce_inline(receiver, arr, elem_type, args[0].value, reduce_params, reduce_body)
             case _: ()
         Some(self.builtin_extra_fail_closed("unsupported in stage2: array.reduce(init, combiner) with a combiner that is not a two-parameter lambda literal; pass `\\acc, x: ...` or write the loop", Some(receiver.span)))
+
+    me lower_array_min_max_inline(receiver: HirExpr, arr: LocalId, elem_type: MirType, elem_hir: HirType?, method: text) -> LocalId:
+        """`arr.min()` / `arr.max()` -- the zero-argument array builtin
+        (interpreter `collections.rs` "min"/"max"; the seed lowers it too).
+        Every element is decoded by the ELEMENT's MIR type and compared in that
+        type, so unsigned elements pick ult/ugt (an ARGB pixel
+        `0xFF000000u32` ranks above `3u32`) and floats compare as floats.
+        The binary `a.min(b)` stays with try_lower_numeric_builtin.
+
+        Only integer and float elements are lowered: a raw compare of text or
+        bool words would order pointers/tags, so those fail closed. The
+        interpreter answers nil for an empty array; a typed scalar has no nil,
+        so an empty receiver panics loudly instead of yielding an undefined
+        element."""
+        val elem_class = self.builtin_mir_value_class(elem_type)
+        if elem_class != 1 and elem_class != 3:
+            return self.builtin_extra_fail_closed("unsupported in stage2: array.{method}() over a non-numeric element type (only integer and float elements are lowered); write the loop", Some(receiver.span))
+        val loop_ty = MirType.i64()
+        val pick_op = if method == "min": MirBinOp.Lt else: MirBinOp.Gt
+
+        var b_len = self.builder
+        val len_local = b_len.emit_call_value(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
+        val zero = b_len.emit_const_int(0)
+        val one = b_len.emit_const_int(1)
+        val empty_block = b_len.new_block(Some("{method}_empty"))
+        val first_block = b_len.new_block(Some("{method}_first"))
+        val is_empty = b_len.emit_binop(MirBinOp.Le, mir_operand_copy(len_local), mir_operand_copy(zero), MirType.bool())
+        b_len.terminate_if(mir_operand_copy(is_empty), empty_block, first_block)
+        b_len.switch_to_block(empty_block)
+        val empty_message = b_len.emit_const_str("array.{method}() of an empty array")
+        b_len.emit_call(builtin_extra_rt_operand("rt_panic", [], MirType.unit()), [mir_operand_copy(empty_message)], MirType.unit())
+        b_len.terminate_abort("array.{method}() of an empty array")
+        b_len.switch_to_block(first_block)
+        val first_tagged = b_len.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(zero)], MirType.i64())
+        self.builder = b_len
+
+        val first_raw = self.decode_runtime_value(first_tagged, elem_type)
+        var b_init = self.builder
+        val best = b_init.new_local(None, elem_type, LocalKind.Var)
+        b_init.emit_copy(best, first_raw)
+        val counter = b_init.new_local(None, loop_ty, LocalKind.Var)
+        b_init.emit_copy(counter, one)
+        val cond_block = b_init.new_block(Some("{method}_cond"))
+        val body_block = b_init.new_block(Some("{method}_body"))
+        val pick_block = b_init.new_block(Some("{method}_pick"))
+        val inc_block = b_init.new_block(Some("{method}_inc"))
+        val exit_block = b_init.new_block(Some("{method}_exit"))
+        b_init.terminate_goto(cond_block)
+        b_init.switch_to_block(cond_block)
+        val in_range = b_init.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b_init.terminate_if(mir_operand_copy(in_range), body_block, exit_block)
+        b_init.switch_to_block(body_block)
+        val elem_tagged = b_init.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(counter)], MirType.i64())
+        self.builder = b_init
+
+        val elem_raw = self.decode_runtime_value(elem_tagged, elem_type)
+        var b_body = self.builder
+        val better = b_body.emit_binop(pick_op, mir_operand_copy(elem_raw), mir_operand_copy(best), MirType.bool())
+        b_body.terminate_if(mir_operand_copy(better), pick_block, inc_block)
+        b_body.switch_to_block(pick_block)
+        b_body.emit_copy(best, elem_raw)
+        b_body.terminate_goto(inc_block)
+        b_body.switch_to_block(inc_block)
+        val incremented = b_body.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
+        b_body.emit_copy(counter, incremented)
+        b_body.terminate_goto(cond_block)
+        b_body.switch_to_block(exit_block)
+        self.builder = b_body
+        if val known_elem_hir = elem_hir:
+            self.remember_local_hir_type(best.id, known_elem_hir, 0, 0)
+        best
 
     me lower_array_find_inline(receiver: HirExpr, arr: LocalId, elem_type: MirType, elem_hir: HirType, params: [HirParam], body: HirExpr) -> LocalId:
         """`arr.find(\\x: pred)` -> Option<T>: the FIRST element whose

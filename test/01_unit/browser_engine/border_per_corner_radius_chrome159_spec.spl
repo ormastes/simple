@@ -1,0 +1,46 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+# A border on a box whose corner radii differ must follow each corner's arc.
+# Box 1: one 2px red border, radii 8 0 8 0. Box 2: four widths and colours,
+# radii 0 6 0 6.
+val PC_PAGE = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><div style=\"margin:2px;width:20px;height:12px;background:#0000ff;border:2px solid #ff0000;border-radius:8px 0 8px 0\"></div><div style=\"position:absolute;left:30px;top:2px;width:16px;height:12px;background:#00ff00;border-style:solid;border-width:3px 1px 2px 4px;border-color:#ff0000 #000000 #ffff00 #ff00ff;border-radius:0 6px 0 6px\"></div></body></html>"
+
+# Chrome 159 (k=4, --window-size=52,20, sampled at CSS pixel centres). Only
+# pixels with full coverage are pinned: no arc-edge or colour-join AA pixel.
+# (2,2) (3,3) (25,17) (24,16) (30,16): outside a rounded corner; (25,2) (2,17):
+# square corners keep the band; (4,4) (5,5) (22,15) (23,14): on the arcs' ring.
+val PC_X: [i32] = [2, 3, 25, 24, 25, 2, 4, 5, 6, 22, 23, 15, 2, 30, 40, 31, 40, 40, 33, 48, 49]
+val PC_Y: [i32] = [2, 3, 17, 16, 2, 17, 4, 5, 6, 15, 14, 9, 9, 16, 3, 9, 9, 17, 16, 3, 6]
+val PC_CHROME: [u32] = [
+    0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+    0xFFFF0000u32, 0xFFFF0000u32, 0xFFFF0000u32, 0xFFFF0000u32,
+    0xFF0000FFu32, 0xFFFF0000u32, 0xFFFF0000u32, 0xFF0000FFu32, 0xFFFF0000u32,
+    0xFFFFFFFFu32, 0xFFFF0000u32, 0xFFFF00FFu32, 0xFF00FF00u32, 0xFFFFFF00u32,
+    0xFFFF00FFu32, 0xFFFF0000u32, 0xFF000000u32
+]
+
+fn pc_mismatches(px: [u32], fw: i32, lane: text) -> i32:
+    if px.len() < fw * 20:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < PC_CHROME.len():
+        val got = px[PC_Y[n] * fw + PC_X[n]] | 0xFF000000u32
+        if got != PC_CHROME[n]:
+            print "{lane} ({PC_X[n]},{PC_Y[n]}) got {got} want {PC_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+# The CPU raster lane is not pinned here: its corner AA (`_corner_coverage256`)
+# leaves partial coverage where Chrome paints full colour and uses a circular
+# inner corner (bug record, 2026-11-18 per-corner borders).
+describe "borders follow per-corner radii as Chrome 159 does":
+    it "on cpu_simd":
+        val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(PC_PAGE, 52, 20, "cpu_simd")
+        expect(pc_mismatches(px, 52, "cpu_simd")).to_equal(0)
+
+    it "on Vulkan":
+        val px = simple_web_render_html_to_pixels_with_resolved_engine2d_backend(PC_PAGE, 52, 20, "vulkan")
+        expect(pc_mismatches(px, 52, "vulkan")).to_equal(0)

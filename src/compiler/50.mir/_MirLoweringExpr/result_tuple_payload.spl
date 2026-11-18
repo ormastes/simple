@@ -228,6 +228,15 @@ impl MirLowering:
                 if val lowered = self.result_try_tuple_collection_element(value, false):
                     Some(MirType(kind: MirTypeKind.Dict(self.lower_type(key), lowered)))
                 else: None
+            case HirTypeKind.Optional(inner):
+                # A native Option value is one word: the canonical Option
+                # handle or the nil sentinel (option_value_locals), exactly as
+                # an Optional struct field is stored. Never lower_type's inline
+                # (Bool, T) pair, which is not what the producer wrote. Inner
+                # admission is the same one Result<Option<T>>.unwrap() uses
+                # to keep a canonical Option handle intact.
+                if not self.result_optional_inner_supported(inner): return None
+                Some(MirType.i64())
             case _: None
 
     me result_try_tuple_payload_type(type_: HirType) -> MirType?:
@@ -303,6 +312,12 @@ impl MirLowering:
                                 self.runtime_elem_value_type[destination.id] = self.lower_type(element)
                                 val owner = self.result_try_tuple_nominal_owner(element, true)
                                 if owner != "": self.array_element_struct_syms[destination.id] = owner
+                            case HirTypeKind.Optional(_):
+                                # Same contract as an Optional struct field
+                                # projection: the loaded word is an Option
+                                # handle or nil, decoded only by `if val`.
+                                self.option_value_locals[destination.id] = true
+                                self.mark_runtime_value_local(destination.id)
                             case _: ()
                 case _: ()
 

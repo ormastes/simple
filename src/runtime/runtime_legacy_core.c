@@ -121,22 +121,7 @@ int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
     if (!addr || length <= 0) return -1;
     if ((prot & 0x6) == 0x6) return -1; /* PROT_WRITE | PROT_EXEC */
 #if defined(_WIN32)
-    DWORD protect;
-    if (prot == 0x0) protect = PAGE_NOACCESS;
-    else if (prot == 0x1) protect = PAGE_READONLY;
-    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
-    else if (prot == 0x4) protect = PAGE_EXECUTE;
-    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-    else return -1;
-    DWORD old_protect;
-    if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
-    if ((prot & 0x4) != 0 &&
-        !FlushInstructionCache(GetCurrentProcess(), (void*)(uintptr_t)addr, (SIZE_T)length)) {
-        DWORD ignored;
-        (void)VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, old_protect, &ignored);
-        return -1;
-    }
-    return 0;
+    return spl_windows_mprotect_raw(addr, length, prot);
 #else
     if (mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot) != 0) return -1;
     if ((prot & 0x4) != 0 && !rt_legacy_sync_instruction_cache(addr, length)) {
@@ -253,6 +238,7 @@ int64_t rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
     return result;
 }
 
+/* Not shared with runtime.c: plain malloc, no memtrack tag (see runtime.c spl_strdup). */
 char* spl_strdup(const char* s) {
     return spl_str_new(s);
 }
@@ -334,13 +320,7 @@ char* spl_str_replace(const char* s, const char* old_s, const char* new_s) {
 }
 
 uint64_t spl_str_hash(const char* s) {
-    uint64_t hash = 14695981039346656037ULL;
-    if (!s) return hash;
-    while (*s) {
-        hash ^= (unsigned char)*s++;
-        hash *= 1099511628211ULL;
-    }
-    return hash;
+    return rt__shared_str_hash(s); /* FNV-1a 64, NULL -> offset basis */
 }
 
 int64_t rt_str_hash(const char* s) {
@@ -511,8 +491,8 @@ char* spl_file_read(const char* path) {
     return out;
 }
 
-int rt_file_write(const char* path, const char* content) {
-    FILE* f = path ? rt_crt_fopen(path, "wb") : NULL;
+static int legacy_file_put(const char* path, const char* content, const char* mode) {
+    FILE* f = path ? rt_crt_fopen(path, mode) : NULL;
     if (!f) return 0;
     if (!content) content = "";
     size_t len = strlen(content);
@@ -521,14 +501,12 @@ int rt_file_write(const char* path, const char* content) {
     return n == len ? 1 : 0;
 }
 
+int rt_file_write(const char* path, const char* content) {
+    return legacy_file_put(path, content, "wb");
+}
+
 int rt_file_append(const char* path, const char* content) {
-    FILE* f = path ? rt_crt_fopen(path, "ab") : NULL;
-    if (!f) return 0;
-    if (!content) content = "";
-    size_t len = strlen(content);
-    size_t n = fwrite(content, 1, len, f);
-    fclose(f);
-    return n == len ? 1 : 0;
+    return legacy_file_put(path, content, "ab");
 }
 
 /* This copy had the right ARITY (2), so the extern ABI signature gate never

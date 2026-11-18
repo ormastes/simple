@@ -91,6 +91,7 @@ int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
 
 #include "runtime_fork_capture_fd_private.h"
 #include "runtime_fork_capture_context_private.h"
+#include "runtime_capture_splice_private.h"
 
 /* Each stream retains at most 4 MiB of child output, split head/tail. */
 #define FORK_CAPTURE_LIMIT (4U * 1024U * 1024U)
@@ -190,19 +191,8 @@ static size_t capture_finish(ForkCapture* capture) {
         capture->tail_start = 0;
     }
 
-    size_t marker_len = 0;
-    if (capture->total > capture->head_len + capture->tail_len) {
-        char marker[FORK_CAPTURE_MARKER_MAX];
-        uint64_t omitted = capture->total - capture->head_len - capture->tail_len;
-        int written = snprintf(marker, sizeof(marker), "\n[output truncated: %llu bytes omitted]\n",
-                               (unsigned long long)omitted);
-        if (written > 0) marker_len = (size_t)written;
-        memmove(capture->data + capture->head_len + marker_len, tail, capture->tail_len);
-        memcpy(capture->data + capture->head_len, marker, marker_len);
-    } else {
-        memmove(capture->data + capture->head_len, tail, capture->tail_len);
-    }
-    size_t result_len = capture->head_len + marker_len + capture->tail_len;
+    size_t result_len = rt_capture_splice_tail(capture->data, capture->head_len, tail,
+                                               capture->tail_len, capture->total);
     capture->data[result_len] = '\0';
     return result_len;
 }

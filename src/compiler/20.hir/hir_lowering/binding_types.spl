@@ -8,6 +8,7 @@ marker. This does not infer an owner from an untyped expression.
 
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolKind}
+use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_symbol_table_methods.*
 
 pub fn hir_binding_type_or_infer(initializer: HirExpr, bind_optional_payload: bool = false) -> HirType:
@@ -64,6 +65,23 @@ pub fn hir_binding_index_element(base: HirType) -> HirType?:
             if hir_const_type_settled(dict_value): return dict_value
             nil
         case _: nil
+
+# Element types of a non-literal tuple destructure (`val (a, b) = f()?`) read
+# off the initializer's own resolved type. Only a tuple whose elements are all
+# settled counts (callers also require the arity to match); anything else
+# returns [] (elements stay untyped, the pre-existing behavior). Each element
+# is re-rooted at `span` (frozen stage2 packed-span hazard, same as
+# field_tuple_element_type).
+pub fn hir_binding_tuple_elements(value_type: HirType, span: Span) -> [HirType]:
+    var out: [HirType] = []
+    match value_type.kind:
+        case HirTypeKind.Tuple(elements):
+            val tuple_elements: [HirType] = elements
+            for element in tuple_elements:
+                if not hir_const_type_settled(element): return []
+                out = out.push(HirType(kind: element.kind, span: span))
+        case _: ()
+    out
 
 # A direct call carries its declaration's return type in the caller symbol
 # table even when the expression itself is not yet attributed. This is type

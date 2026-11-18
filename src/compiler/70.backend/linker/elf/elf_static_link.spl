@@ -60,7 +60,7 @@ use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.link_trace.{elf_link_trace}
 use compiler.backend.linker.elf.elf_par.{elf_par_acquire, elf_par_release, elf_par_jobs, elf_par_run}
 use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros, elf_u8_from_i64, elf_i64_from_u8, elf_u8_read_le}
-use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags, elf_riscv_hi_index}
+use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags_xlen, elf_riscv_hi_index}
 use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
 use compiler.backend.linker.elf.riscv_attributes.{elf_riscv_attributes}
 use compiler.backend.linker.elf.elf_nonalloc_section.{elf_append_nonalloc_section_bytes}
@@ -188,7 +188,11 @@ fn elf_static_machine(target: RelocArch) -> Result<i64, text>:
         case Arm32:
             Ok(40)
         case Riscv32:
-            Err("elf_static_link: RV32 ELF driver is not supported")
+            Ok(243)
+
+fn elf_target_is_riscv(target: RelocArch) -> bool:
+    """RV32 and RV64 share the static RISC-V relocation path; XLEN only picks the ELF class."""
+    target == RelocArch.Riscv64 or target == RelocArch.Riscv32
 
 fn elf_got_word(w32: bool, value: i64) -> [i64]:
     """One GOT slot: 4 bytes for ELFCLASS32 targets, 8 otherwise."""
@@ -966,11 +970,11 @@ fn elf_collect_obj_refs(ctx: ElfLinkCtx, contents: [[u8]], oi: i64) -> Result<[E
                 continue
             val o = inputs.outs[k]
             val rtype = elf_reloc_type(r)
-            if ctx.target == RelocArch.Riscv64 and rtype == 20 and r.r_addend != 0:
+            if elf_target_is_riscv(ctx.target) and rtype == 20 and r.r_addend != 0:
                 return Err("object {oi}: RISC-V GOT_HI20 addend must be zero")
-            if ctx.target == RelocArch.Riscv64 and rtype == 21 and r.r_addend != 0:
+            if elf_target_is_riscv(ctx.target) and rtype == 21 and r.r_addend != 0:
                 return Err("object {oi}: RISC-V TLS_GOT_HI20 addend must be zero")
-            if ctx.target == RelocArch.Riscv64 and (rtype == 24 or rtype == 25):
+            if elf_target_is_riscv(ctx.target) and (rtype == 24 or rtype == 25):
                 if r.r_addend != 0: return Err("object {oi}: RISC-V PCREL_LO12 addend must be zero")
                 val symbol = elf_reloc_sym(r)
                 if symbol < 0 or symbol >= obj.symbols.len():
@@ -986,7 +990,7 @@ fn elf_collect_obj_refs(ctx: ElfLinkCtx, contents: [[u8]], oi: i64) -> Result<[E
                 return Err("object {oi}: relocation type {rtype} patch [{r.r_offset}, {r.r_offset + patch_width}) exceeds target section size {obj.sections[tsec].sh_size}")
             val seed = elf_symref(ctx, oi, elf_reloc_sym(r))
             if seed.kind == SYMREF_ERR: return Err(seed.key)
-            if ctx.target == RelocArch.Riscv64 and (rtype == 21 or (rtype >= 29 and rtype <= 32)):
+            if elf_target_is_riscv(ctx.target) and (rtype == 21 or (rtype >= 29 and rtype <= 32)):
                 elf_riscv_validate_tls_definition(ctx, seed)?
             # target is never a merge section (rejected above), so elf_placed_offset reduces to this
             val place = inputs.sec_off[oi][tsec] + r.r_offset
@@ -1125,7 +1129,7 @@ fn elf_tls_tprel(plan: ElfExecPlan, target: RelocArch, address: i64) -> Result<i
     val end = elf_tls_end(plan)
     if start < 0 or end < 0:
         return Err("TLS relocation has no PT_TLS image")
-    if target == RelocArch.Riscv64:
+    if elf_target_is_riscv(target):
         # TP precedes the TLS block's alignment residue, not necessarily its
         # first byte. STT_TLS values remain block-relative in the symbol table.
         val offset = elf_symtab_address(plan, 6, address)?
@@ -1811,13 +1815,13 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     val target = req.target
     val machine = elf_static_machine(target)?
     val mode = req.mode
-    # ELFCLASS32 targets (i386, armv7): static ET_EXEC only. Their PLT/GOT
+    # ELFCLASS32 targets (i386, armv7, rv32): static ET_EXEC only. Their PLT/GOT
     # dynamic relocations, PIE self-relocation and .symtab emission are not
     # implemented, so every other mode fails closed here.
-    val w32 = target == RelocArch.I386 or target == RelocArch.Arm32
+    val w32 = target == RelocArch.I386 or target == RelocArch.Arm32 or target == RelocArch.Riscv32
     val got_ws: i64 = if w32: 4 else: 8
     if w32 and mode != ELF_LINK_STATIC_EXEC:
-        return Err("unsupported ELF32 output mode: only static ET_EXEC is admitted for i386/armv7")
+        return Err("unsupported ELF32 output mode: only static ET_EXEC is admitted for i386/armv7/rv32")
     if target == RelocArch.Riscv64 and mode != ELF_LINK_STATIC_EXEC:
         return Err("unsupported RISC-V output mode: only static ET_EXEC is admitted (RV64 PLT/GOT/dynamic relocations are not implemented)")
     val dynamic = elf_mode_dynamic(mode)
@@ -1895,10 +1899,19 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     elf_link_trace("archive closure")
     var riscv_flags: i64 = 0
     var riscv_attributes: [i64] = []
-    if target == RelocArch.Riscv64:
-        riscv_flags = elf_riscv_flags(all)?
+    if elf_target_is_riscv(target):
+        val xlen: i64 = if target == RelocArch.Riscv32: 32 else: 64
+        riscv_flags = elf_riscv_flags_xlen(all, xlen)?
         riscv_attributes = elf_riscv_attributes(all)?
-        all = elf_riscv_align_objects(all)?
+        if xlen == 64:
+            all = elf_riscv_align_objects(all)?
+        else:
+            # R_RISCV_ALIGN padding removal rewrites ELF64 symtab/RELA tables
+            # only; RV32 inputs carrying ALIGN fail closed until it is ported.
+            for obj in all:
+                for relocation in obj.relocations:
+                    if elf_reloc_type(relocation) == 43:
+                        return Err("RISC-V RV32 R_RISCV_ALIGN is not supported yet (assemble with -mno-relax)")
     all = elf_relax_tls(all, target)?
 
     elf_link_trace("tls relaxed")
@@ -2108,7 +2121,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     # --- relocate input sections ---
     var riscv_highs: {text: i64} = {}
     var riscv_uleb_widths: {i64: i64} = {}
-    if target == RelocArch.Riscv64:
+    if elf_target_is_riscv(target):
         var bases: [i64] = []
         for index in in_to_plan:
             bases = bases.push(plan.vaddrs[index])
@@ -2132,7 +2145,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             ri = ri + 1
     # RISC-V pairs (ADD/SUB, SET/SUB ULEB128) read and rewrite the same field
     # in order, so RISC-V keeps the in-loop apply; every other target defers.
-    val defer_apply = target != RelocArch.Riscv64
+    val defer_apply = not elf_target_is_riscv(target)
     val fast_s = elf_ref_values_fast(ctx, lay, refs, req.jobs)
     var apply_jobs: [i64] = []
     var j: i64 = 0
@@ -2159,7 +2172,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             val ref_value = elf_ref_value(ctx, lay, r)?
             s = ref_value.address
             a = ref_value.addend
-        if target == RelocArch.Riscv64 and r.rtype == 60:
+        if elf_target_is_riscv(target) and r.rtype == 60:
             if j + 1 >= refs.len(): return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations")
             val sub = refs[j + 1]
             if sub.rtype != 61 or sub.oi != r.oi or sub.out_sec != r.out_sec or sub.out_off != r.out_off:
@@ -2196,7 +2209,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             s = 1 # Main executable/static link unit is module 1 in the Linux TLS ABI.
             a = 0
         else if r.rclass == RC_TLS_LE:
-            if target == RelocArch.Riscv64:
+            if elf_target_is_riscv(target):
                 if r.stype != 6 or r.kind != SYMREF_DEFINED:
                     return Err("RISC-V local-exec relocation requires a defined TLS symbol: {r.name}")
                 val tls_offset = elf_tls_tprel(plan, target, s)?
@@ -2204,7 +2217,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             else:
                 s = elf_tls_tprel(plan, target, s + a)?
             a = 0
-            if target == RelocArch.Riscv64:
+            if elf_target_is_riscv(target):
                 if r.rtype == 29: rtype = 26
                 else if r.rtype == 30: rtype = 27
                 else if r.rtype == 31: rtype = 28
@@ -2220,7 +2233,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 rtype = 10  # R_X86_64_32 applies Z + A with width checking
         else if r.rclass == RC_TLS_IE:
             s = got_v + sc.got_idx[elf_got_key(r)] * got_ws
-            if target == RelocArch.Riscv64:
+            if elf_target_is_riscv(target):
                 a = 0
                 rtype = 23 # TLS_GOT_HI20 addresses the slot using AUIPC.
             else if a64:
@@ -2266,7 +2279,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             if r.rtype == 3 or r.rtype == 43:
                 val no_base = r.out_off >= 1 and ((contents[k][r.out_off - 1] as i64) & 0xc7) == 0x05
                 p = if no_base: 0 else: gotplt_v
-        if target == RelocArch.Riscv64 and (r.rtype == 24 or r.rtype == 25):
+        if elf_target_is_riscv(target) and (r.rtype == 24 or r.rtype == 25):
             val key = "{r.oi}#{s}"
             if not riscv_highs.has(key):
                 return Err("object {r.oi}: RISC-V PCREL_LO12 '{r.name}' has no matching HI20")
@@ -2480,10 +2493,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     if w32:
         # EM_ARM loaders check e_flags (EABI version, float ABI): carry the
         # first input's EABI flags plus the float-ABI bit ld.lld derives from
-        # .ARM.attributes. i386 defines no e_flags.
-        val e_flags = if target == RelocArch.Arm32:
-            elf_u8_read_le(roots[0].raw, 36, 4) | elf_arm_float_flags(all)
-        else: 0
+        # .ARM.attributes. RV32 carries the merged RVC/float-ABI flags.
+        # i386 defines no e_flags.
+        var e_flags: i64 = riscv_flags
+        if target == RelocArch.Arm32:
+            e_flags = elf_u8_read_le(roots[0].raw, 36, 4) | elf_arm_float_flags(all)
         image = elf_write_image32_bytes(e_type, machine, e_flags, entry_addr, plan, out)
     else:
         image = operations.write_image(e_type, machine, entry_addr, plan, out)?

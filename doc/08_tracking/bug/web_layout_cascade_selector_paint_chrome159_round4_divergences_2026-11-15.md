@@ -291,8 +291,8 @@ only through the older `layout.spl` engine, not the main HTML layout renderer.
 - **Pinned** (cpu_simd and Vulkan, exact): `mr_page` 14 cells (`942C63` ×3, `5BA403` ×2, `F5F19D` ×2, `BF3F3F` ×2, `808080`, `3FBF3F`, `4B4BFF` ×2, `FFA54B`). `tg_page` 17 raster cells plus (34,4) (37,4) `B7DBFF`, (46,4) `FFE793`, (60,12) `BFBFBF`. Also: a text root on the multi-root page equals the same root alone.
 - **Open:**
   - A root holding a real glyph run (`glyph_run.valid`) still declines surfaces for the whole page. No pinned page produces one.
-  - The outline ring on a positioned box is unpainted on every lane, at opacity 1 too (Chrome `5B579D`).
-  - The `<img>` is unpainted on every lane (Chrome `8829A5`, `B8C2FB`, `9A9FBC`). The yellow-over-image cells (24,12) and (29,12) fold on the Engine2D lanes as a result (`e9a530` vs `e9a52f`).
+  - ~~The outline ring on a positioned box is unpainted on every lane~~ FIXED 2026-11-18: the raster lane already painted it; cpu_simd and Vulkan painted NO outline at all (see "Engine2D lanes never painted CSS outlines" below). The ring is now pinned at `5B579D`.
+  - ~~The `<img>` is unpainted on every lane~~ CORRECTED 2026-11-18: an artefact of the direct html->pixels entries, which resolve no resources (see "`<img>` was never a paint defect" below). Fed the resource, the Engine2D lanes match Chrome at `8829A5` and `B8C2FB` and at cells (24,12) and (29,12); (54,12) is the open +1-green overlap.
   - Chrome's shadow-only pixel is `5F5F5F` on a 10x8 box but `606060` on an 8x5 box with the same shadow. Simple gives `606060` on both.
   - Engine2D gives +1 green where two translucent paints overlap (40,4): `e3d995` vs `e3d994`.
 - **Needs:** `sfnt_render_glyph_lcd` must be `pub` (upstream `08486feffd2`), or small text on the Engine2D lanes errors out.
@@ -550,3 +550,67 @@ head (13/40 at base).
 - **Base vs head** (blend seed sha256 119feb0f865390b5..., serial, base `014087fd9e3`, 31 specs incl. `opacity_group_chrome159_spec` 16/16): 0 new and 0 fixed failing names. Failing on both: `simple_web_html_layout_renderer_coverage` 2, `decl_apply_coverage_closure` 1, `background_gradient_wpt` 3, `draw_ir_adv` 2, `draw_ir_adv_branch_coverage` 1, `declarations_coverage_closure` 2, `wm_aetheric_web_material` 1, `selector_color_subset` 3, `simple_web_browser_engine_security` 17.
 - **Perf** (640x480 page: body linear with px stops propagated + 600x400 radius-24 box with a px-stop linear over a radial; raster + cpu_simd render in one `simple test` process; `/usr/bin/time -v`, `systemd-run MemoryMax=8G`, median of 3, load ~6-7): head 60.3 s (59.99-64.98), base 459 s (431-509); max RSS ~1.0 GB both (one ~0.25 GB run each). Base painted the body typed linear through its per-row typed painter and the rounded list as colour only.
 - **Still open:** Chrome's rounded-corner AA is not `_corner_coverage256` (flat rounded fill: up to 57 levels at partial pixels; exact-area, sub-row, supersample and offset-distance models all leave 34-64); the Draw IR lanes paint a per-corner-radius box's border as a square band (p6: 1705 px); the raster double-blends a translucent border's square corner (p6 bottom-left, 256 px); `rem` stops stay unpositioned. Perf (unprofiled): base took ~7x longer on the perf page (459 s vs 60 s) while painting its body gradient through the typed single-linear path; a non-root box with a typed linear (no length stops) still takes that path on head. Suspected slow typed painter, not yet measured in isolation.
+
+## 2026-11-18 — Engine2D lanes (cpu_simd, Vulkan) never painted CSS outlines
+
+- **Symptom:** every `outline` was missing on cpu_simd and Vulkan, on static and positioned boxes, at any opacity. The raster lane was right. The earlier "positioned box" scoping was a misread; a static 6x4 box lost its ring too.
+- **Cause:** the Draw IR producer already carries `outline-width` / `outline-color` / `outline-offset` on the box command (`paint_draw_ir.spl`), and device scaling scales them (`draw_ir_device_scale.spl`), but the Engine2D executor (`engine2d/draw_ir_adv.spl`) never read them.
+- **Fix:** `_engine2d_draw_ir_render_outline` in `draw_ir_adv.spl`, the twin of the raster `fb_outline_clip`: a square ring `outline-width` thick, grown `outline-width + outline-offset` past the border box, as four non-overlapping slivers (a translucent ring blends once). It is called after the borders on both box paths, glass and plain.
+- **Evidence, red -> green (Chrome 159, k=4 window 24x28, sampled at CSS pixel centres):** new `outline_engine2d_chrome159_spec`. Raster was 1/1 at base. cpu_simd, Vulkan and cpu_simd at device scale 4 were red at base; now 4/4. Pinned: 2px red ring with offset 1 (`FF0000` ring, `FFFFFF` offset gap) and a 1px `rgba(0,0,0,.5)` ring over white (`7F7F7F`). `opacity_group_chrome159_spec` now also pins the multi-root ring (26,13) (30,2) (26,8) = `5B579D`. At base those read the cell's `E6DC0A`; the spec is now 16/16.
+- **Base vs head:** 153 specs that reach the Draw IR executor, run serially: 0 new failing names. Fewer failures at head: the opacity row above, plus `web_draw_ir_engine_reuse` (7 -> 9 of 11) and `proc_draw_combo` cuda/vulkan rows (4 -> 8 of 12). Those GPU-probe rows paint no outline, so they are read as flaky device probing, not as fixed by this change.
+- **Open:** outlines paint with the box rather than in Chrome's later outline phase, so a later sibling can cover a ring on every lane. `outline-style` other than solid and outlines following `border-radius` are unpinned.
+
+## 2026-11-18 — `<img>` was never a paint defect on the Engine2D lanes
+
+- **Earlier claim:** "the `<img>` is unpainted on every lane". It was measured through `simple_web_render_html_to_pixels_with_resolved_engine2d_backend`, which passes `images: []`. Resource loading, including `data:` URL decode, belongs to the hosted session (`browser_session_loading.spl` -> `decode_image_to_argb_bounded`). The direct entries never resolve resources by design.
+- **Measured:** through `HostedWebContentSession` the data-URI image paints `7285F6`, which is exact: the PNG is uniform RGBA (30,60,240,160) over white. Through `simple_web_layout_render_html_pixels_engine2d_with_images` with the decoded resource, cpu_simd and Vulkan paint it stretched and composite it in an opacity group as Chrome does.
+- **Pinned:** a new `opacity_group_chrome159_spec` row decodes `TG_IMG` with `base64_decode_bytes` + `decode_png_to_argb` and feeds it to cpu_simd and Vulkan. It checks (18,12)=`8829A5`, (50,12)=`B8C2FB`, the yellow-over-image cells (24,12)/(29,12)=`E9A52F`, and every TG_DEV cell. 17/17.
+- **No filtering question:** the earlier note that Chrome's image values need upscale-filter matching was wrong. A uniform image interpolates to itself, so these values are pure group arithmetic.
+- **Still open:**
+  - (54,12), the image under `rgba(0,0,0,.5)`: Chrome `9A9FBC`, Engine2D `9AA0BC`. This is the same +1-green two-translucent-overlap class as (40,4).
+  - The raster (fb) lane has no image paint at all; `_html_draw_ir_image_command` exists only on the Draw IR path. This matters wherever the raster lane is the ground truth or the fallback.
+  - Scaled non-uniform images are unpinned against Chrome's filtering.
+
+## 2026-11-18 — translucent-over-translucent inside a group layer: one green level off (FIXED)
+
+- **Symptom:** where two translucent paints overlap inside an opacity group, cpu_simd and Vulkan read one green level high. Measured at `tg_page` (40,4): Chrome `E3D994`, Engine2D `E3DA94`. Also at (54,12), the image under `rgba(0,0,0,.5)`: Chrome `9A9FBC`, Engine2D `9AA0BC`.
+- **Cause:** Skia keeps the group layer premultiplied in 8 bits: `P = round(s*sa/255) + round(round(d*da/255)*(255-sa)/255)`. Engine2D's translucent-destination branch of `_blend_rule` computed straight-alpha src-over directly, so it skipped Chrome's intermediate rounding.
+  - One model fits both points with no free parameter: a premultiplied layer, then SkBlendARGB32 at A = round-half-up(opacity*255) = 128 and 179.
+  - Every standard straight-alpha rounding variant we tried predicts the Engine2D values, not Chrome's.
+- **Fix:** the translucent-destination branch computes Chrome's premultiplied P and stores it straight as `round(P*255/oa)`. The straight store round-trips exactly (error <= oa/510 < 1/2), so `css_opacity_group_composite_pixel` re-premultiplies to Chrome's P. A transparent destination returns src, bit-identical to before. Opaque destinations are untouched.
+  - The rule changed in every twin: `color.spl`, C `engine2d_blend_u32`, Rust runtime `blend_pixel`, seed interpreter `engine2d_blend_pixel_u32`, `scalar_oracle.spl`, the scalar fallback in `nogc_sync_mut/.../simd_kernels.spl`, Metal `blend_rule`, and the Vulkan `_glsl_blit`. The blit SPIR-V was regenerated with `gen-blit-spirv.shs`, and the pin check passes.
+  - **The seed must be rebuilt** for the Rust twins to take effect.
+  - The Metal twin is edited but unverified on this Linux host.
+- **Evidence:**
+  - `opacity_group_chrome159_spec` 17/17. It now pins (40,4)=`E3D994` and (54,12)=`9A9FBC` on cpu_simd and Vulkan.
+  - `simd_isa_provider_spec` 24/24: the native kernel matches the oracle at the new hash. `engine2d_color_simd_blend_parity_spec` 5/5.
+  - Three pinned random-destination hashes were re-derived by an independent FNV/LCG replica. The replica first reproduces the previous pins under the old rule.
+  - Base vs head over 353 specs, run serially: the only new failures were those three hash pins, now updated. `web_draw_ir_engine_reuse` flips between 7 and 9 of 11 on base and head alike.
+
+## 2026-11-18 — Draw IR per-corner-radius borders drawn as a square band (FIXED on cpu_simd / Vulkan)
+
+- **Symptom:** a box with differing corner radii (`border-radius: 8px 0 8px 0`), or a rounded box whose border sides differ, got a square border band on cpu_simd and Vulkan. Outside each arc it painted the border colour where Chrome shows the page; along the arc the ring showed the background. Earlier record: p6, 1705 px.
+- **Cause:** `_engine2d_draw_ir_render_borders` received `radius = 0` for non-uniform corners and fell through to square slivers or the mitred bands.
+- **Fix:** `engine2d_draw_ir_render_typed_border_ring` (`draw_ir_box_effects.spl`) paints the ring between the outer per-corner shape and the inner one.
+  - The outer shape is the same mask as the per-corner background.
+  - Each inner corner is an ellipse with radii `r - side width` per axis. Chrome's ring at (49,6) needs the ellipse.
+  - Each ring pixel takes its side's colour. The join runs from the outer box corner to the inner box corner, with ties going to the vertical side.
+  - It is composited once. The shared corner test now samples pixel centres, not indices; the index test reached half a pixel past the arc.
+  - The uniform-radius, uniform-border case keeps `draw_rounded_rect_outline`.
+- **Evidence:** new `border_per_corner_radius_chrome159_spec`, Chrome 159 k=4, 21 fully covered pixels across two boxes, one with four widths and four colours. cpu_simd and Vulkan were red at base and are now green. Base vs head over 242 border, radius and rounded specs, run serially on the same seed: only these two rows changed. The one other new name, `web_layout_cuda_live`, fails a different row on each rerun with `0 total` (the device child dies) and never reaches the border painter.
+- **Still open:**
+  - The CPU raster misses 6 of the 21 pins. Its corner AA (`_corner_coverage256`) gives partial coverage where Chrome paints full colour, it uses a circular inner corner, and a straight side next to an arc reads `FB0003`. This is the open raster corner-AA item.
+  - The Draw IR ring is not anti-aliased.
+  - Dashed, dotted and double styles on per-corner rings paint solid.
+
+## 2026-11-18 — the CPU raster lane painted nothing for `<img>` (FIXED for supplied resources)
+
+- **Symptom:** `simple_web_layout_render_html_software_pixels` took no images and `paint_raster` only counted `img` as an opacity-group item; the box stayed background-coloured on the software lane while cpu_simd and Vulkan painted it.
+- **Fix:** new entry `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)` (the no-image entries pass `[]`). The raster painter draws `<img>` right after the node's own box paint in each paint pass, so later siblings paint over it (document order). Geometry is the Draw IR geometry: content box, object-fit (`html_image_fit_size`, now the single implementation, `_html_draw_ir_fit_size` delegates), object-position, content-box clip. Pixels use the image blend rule (`color.spl` `blend`), node opacity folds into the image alpha, and group layers see the image like any other member.
+  - `ponytail:` nearest-neighbour sampling is exact only for a uniform image (the pinned `TG_IMG`); a non-uniform image needs Chrome's filtered resample.
+  - Natural size is not known to layout (it has no resources), so a bare `<img>` keeps the replaced default size; the spec uses explicit 2x2 / 6x4 sizes.
+- **Evidence:**
+  - New `img_raster_chrome159_spec` 3/3 (2x2 and 6x4 `TG_IMG` = `FF7285F6` inside, white outside; no resource paints nothing). With the paint disabled: 1/3 (both painting rows fail).
+  - `opacity_group_chrome159_spec` 18/18 with a raster row feeding the resource: (18,12) = `8829A5`, `tg_mismatches == 0`. Disabled: 17/18.
+  - Not pinned on the raster: (50,12) / (54,12). That cell's two non-opaque paints overlap, so the raster does not admit it as a group (documented at `TG_X`); with the image painted it reads `7285F6` / `39427B` where Chrome has `B8C2FB` / `9A9FBC`. Admitting overlapping groups is separate work.
+- Review note (2026-11-18): an `<img>` carrying its own `opacity:.5` (no group) reads `B8C2FA` on the raster and on cpu_simd alike. Chrome gives `B8C2FB` for the same image inside a 0.5 group: folding the opacity into the image alpha rounds blue one level low. Unpinned. `_raster_images` is module state, so the raster supports one render at a time per process.

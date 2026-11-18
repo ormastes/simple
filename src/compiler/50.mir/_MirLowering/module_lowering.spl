@@ -2122,6 +2122,7 @@ impl MirLowering:
         psi = 0
         while psi < prescan_class_values.len():
             val class_def: HirClass = prescan_class_values[psi]
+            self.register_erased_dict_class_v1(module_symbols, class_def)
             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
             val optional_class_symbol: HirSymbol? = module_symbols.get_symbol_raw(class_def.symbol.id)
             if val present_class_symbol = optional_class_symbol:
@@ -2424,11 +2425,122 @@ impl MirLowering:
             # a static method or free function. What the table does not prove
             # stays symbol-bearing, rejected, and fails loudly.
             val prescan_instance_method = fn_is_method and not fn_is_static
+            if prescan_instance_method:
+                self.register_erased_method_params_v1(module_symbols, fn_symbol, prescan_call_name, fn_params, fn_return_type)
             var prescan_receiver_is_handle_word = false
             if prescan_instance_method and fn_params.len() > 0:
                 prescan_receiver_is_handle_word = mir_method_receiver_is_handle_word_v1(fn_params[0], module_symbols)
             mir_register_callable_abi_params_v1(prescan_call_name, prescan_instance_method,
                 prescan_receiver_is_handle_word, prescan_param_tys, module_symbols)
+    me hir_type_mentions_type_param_v1(ty: HirType, symbols: SymbolTable) -> bool:
+        match ty.kind:
+            case HirTypeKind.TypeParam(_, _): return true
+            case HirTypeKind.Named(sym, args):
+                if val info = symbols.get_symbol_raw(sym.id):
+                    if info.kind == SymbolKind.TypeParam: return true
+                for arg in args:
+                    if self.hir_type_mentions_type_param_v1(arg, symbols): return true
+                return false
+            case HirTypeKind.Optional(inner) | HirTypeKind.Array(inner, _) | HirTypeKind.Slice(inner):
+                return self.hir_type_mentions_type_param_v1(inner, symbols)
+            case HirTypeKind.Dict(key, value) | HirTypeKind.Result(key, value):
+                return self.hir_type_mentions_type_param_v1(key, symbols) or self.hir_type_mentions_type_param_v1(value, symbols)
+            case HirTypeKind.Tuple(items):
+                for item in items:
+                    if self.hir_type_mentions_type_param_v1(item, symbols): return true
+                return false
+            case _: return false
+
+    me hir_type_is_bare_type_param_v1(ty: HirType, symbols: SymbolTable) -> bool:
+        match ty.kind:
+            case HirTypeKind.TypeParam(_, _): return true
+            case HirTypeKind.Named(sym, _):
+                if val info = symbols.get_symbol_raw(sym.id):
+                    return info.kind == SymbolKind.TypeParam
+                return false
+            case _: return false
+
+    me register_erased_dict_class_v1(symbols: SymbolTable, class_def: HirClass):
+        """Mark a generic class whose only `T`-bearing fields are `Dict<K, T>`
+        values (K free of `T`). Only such classes get call-site encoding of
+        bare `T` method params (register_erased_method_params_v1): a `Dict`
+        value is written encoded by concrete code and DECODED by the erased
+        body's read, so the method's own write must encode too. A bare `T`,
+        `T?` or `[T]` field is still raw in/raw out end to end; encoding the
+        param there would turn a coherent field round-trip into a x8."""
+        if class_def.type_params.len() == 0: return
+        var has_dict_t = false
+        for field in class_def.fields:
+            if not self.hir_type_mentions_type_param_v1(field.type_, symbols): continue
+            match field.type_.kind:
+                case HirTypeKind.Dict(key, value):
+                    if self.hir_type_mentions_type_param_v1(key, symbols): return
+                    if not self.hir_type_is_bare_type_param_v1(value, symbols): return
+                    has_dict_t = true
+                case HirTypeKind.Named(dict_sym, dict_args):
+                    # `Dict<K, V>` may arrive as a generic Named type.
+                    var is_dict_named = false
+                    if val dict_info = symbols.get_symbol_raw(dict_sym.id):
+                        is_dict_named = dict_info.name == "Dict" and dict_args.len() == 2
+                    if not is_dict_named: return
+                    if self.hir_type_mentions_type_param_v1(dict_args[0], symbols): return
+                    if not self.hir_type_is_bare_type_param_v1(dict_args[1], symbols): return
+                    has_dict_t = true
+                case _: return
+        if has_dict_t:
+            # Key by defining module + class name, so a same-named class in
+            # another module is distinct (see erased_method_owner_key_v1).
+            if val class_info = symbols.get_symbol_raw(class_def.symbol.id):
+                bootstrap_fn_ret_err_shape_register((class_info.defining_module ?? "") + "|" + class_info.name + "#erased-dict-class", "1")
+
+    me erased_method_owner_name_v1(method_symbol_name: text) -> text:
+        """Module-qualified owner class of a method symbol name
+        (`mod.Class::method` -> `mod.Class`); "" when unqualified."""
+        if method_symbol_name.contains("::"):
+            val parts = method_symbol_name.split("::")
+            return parts[0]
+        ""
+
+    me register_erased_method_params_v1(module_symbols: SymbolTable, fn_symbol: SymbolId, call_name: text,
+            fn_params: [HirParam], fn_return_type: HirType):
+        """Erased-generic ABI (native_erased_generic_optional_return bug doc,
+        scope item 1): the param registries reject a TypeParam-bearing list, so
+        a generic-class method's bare `T` params were invisible to the caller
+        and arrived raw while the erased body's readers decode. Publish which
+        params are bare `T` ('1' per slot, receiver first) so the call site
+        can encode them. A method returning `T` / `T?` (anything but
+        `Result<T, E>`) vetoes its whole class: its tail re-boxes the decoded
+        word and no caller decodes it yet (scope item 2), so an encoded
+        argument would read back x8."""
+        var owner = ""
+        var class_marker = ""
+        if val owner_info = module_symbols.get_symbol_raw(fn_symbol.id):
+            owner = self.erased_method_owner_name_v1(owner_info.name)
+            val owner_parts = owner.split(".")
+            class_marker = (owner_info.defining_module ?? "") + "|" + owner_parts[owner_parts.len() - 1] + "#erased-dict-class"
+        if owner == "": return
+        var returns_bare_t = false
+        match fn_return_type.kind:
+            case HirTypeKind.Result(_, _): ()
+            case _: returns_bare_t = self.hir_type_mentions_type_param_v1(fn_return_type, module_symbols)
+        if returns_bare_t:
+            bootstrap_fn_ret_err_shape_register(owner + "#erased-ret-veto", "1")
+        if (bootstrap_fn_ret_err_shape_lookup(class_marker) ?? "") != "1":
+            return
+        var erased_flags = ""
+        var erased_any = false
+        for erased_param in fn_params:
+            if self.hir_type_is_bare_type_param_v1(erased_param.type_, module_symbols):
+                erased_any = true
+                erased_flags = erased_flags + "1"
+            else:
+                erased_flags = erased_flags + "0"
+        if erased_any:
+            val dotted = call_name.replace("::", ".")
+            bootstrap_fn_ret_err_shape_register(mir_method_erased_params_key_v1(call_name), erased_flags)
+            bootstrap_fn_ret_err_shape_register(mir_method_erased_params_key_v1(dotted), erased_flags)
+            bootstrap_fn_ret_err_shape_register(mir_method_erased_params_key_v1(dotted.replace("-", "_")), erased_flags)
+
     me register_builtin_enum_seeds():
         """Register the built-in Result/Option variant and runtime-identity
         seeds. Extracted from lower_module's tail (2026-10-17) so lanes that
@@ -3000,6 +3112,10 @@ impl MirLowering:
         mir_section_profile_mark("p2_exact_externs", module.name)
         self.lowering_entry_module = is_entry_module
         var function_names: [text] = []
+        val erased_class_values: [HirClass] = module.classes.values()
+        for raw_erased_class in erased_class_values:
+            val erased_class: HirClass = raw_erased_class
+            self.register_erased_dict_class_v1(module.symbols, erased_class)
         val function_keys_36_values: [HirFunction] = module.functions.values()
         for raw_func in function_keys_36_values:
             val func: HirFunction = raw_func
@@ -3007,7 +3123,10 @@ impl MirLowering:
             self.register_provider_callable_link_fields_v1(module.name, module.symbols,
                 func.symbol, func.name, func.is_extern, func.is_method,
                 func.is_static, func.has_export_attr, func.func_attr, is_entry_module)
-            function_names.push(mir_provider_function_name(module.name, module.symbols, func, is_entry_module))
+            val provider_call_name = mir_provider_function_name(module.name, module.symbols, func, is_entry_module)
+            function_names.push(provider_call_name)
+            if func.is_method and not func.is_static:
+                self.register_erased_method_params_v1(module.symbols, func.symbol, provider_call_name, func.params, func.return_type)
         self.current_function_names = function_names
         mir_section_profile_mark("p3_links", module.name)
         # Cross-module prescans keep the first definition. The module being

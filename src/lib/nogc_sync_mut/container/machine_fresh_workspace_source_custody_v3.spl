@@ -1,6 +1,8 @@
 # Actual acquisition custody, stored ONLY in the original lifecycle slot. This
 # capsule has no writer, registry, launch permit or raw source/lease getter.
 use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
+use std.nogc_sync_mut.io.linux_fresh_workload_subject_v2.LinuxFreshWorkspaceNativeRetirementV3
+use std.common.contracts.storage.linux_workspace_retention_v3.LinuxWorkspaceRetainedMetadataV3
 use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.{LinuxWorkspaceSourceLoanV3, linux_workspace_source_loan_v3}
 use std.nogc_async_mut.container.providers.linux.workspace_mount_owner_v1.*
 use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.*
@@ -80,6 +82,7 @@ pub(package) class MachineFreshWorkspaceSourceCustodyV3:
     pub(package) fn cleanup_v3() -> MachineFreshWorkspaceSourceCustodyTurnV3:
         var retained = self
         if self.phase == "returned" or self.phase == "native-absent": return MachineFreshWorkspaceSourceCustodyTurnV3(retained, "")
+        if self.phase == "native-retired-retained" or self.phase == "retained-returned": return MachineFreshWorkspaceSourceCustodyTurnV3(retained, "workspace-source-retained-requires-authorized-cleanup")
         if val source = self.source:
             val closed = source.close_v1()
             retained.source = closed.owner
@@ -114,6 +117,46 @@ pub(package) class MachineFreshWorkspaceSourceCustodyV3:
         retained.phase = "release-published"
         Ok(retained)
 
+    # Terminal retention (doc/05_design/agent_workspace_retention_v3.md). The genuine
+    # native token proves absence ONLY; the source re-proves it and commits
+    # native-retired-retained. Source (root/parent/exclusion) and the storage lease
+    # stay held here: no close, deletion or quota release. The invocation is the
+    # custody's own retained context, never a caller value.
+    pub(package) fn return_retained_v3(token: LinuxFreshWorkspaceNativeRetirementV3) -> MachineFreshWorkspaceSourceRetainedTurnV3:
+        var retained = self
+        if self.phase != "observed" or self.source.is_none() or self.lease.is_none() or self.full_invocation == "":
+            return MachineFreshWorkspaceSourceRetainedTurnV3(retained, "workspace-source-retained-return-phase")
+        val turn = self.source.unwrap().retire_native_v3(token, self.full_invocation)
+        # Capture the returned owner before inspecting the outcome.
+        retained.source = Some(turn.owner)
+        if not turn.retired or turn.error != "":
+            val reason = if turn.error != "": turn.error else: "workspace-source-native-retirement-unproven"
+            return MachineFreshWorkspaceSourceRetainedTurnV3(retained, reason)
+        retained.phase = "native-retired-retained"
+        MachineFreshWorkspaceSourceRetainedTurnV3(retained, "")
+
+    pub(package) fn retirement_committed_v3() -> bool: self.phase == "native-retired-retained" and self.source.is_some() and self.lease.is_some()
+
+    # Canonical event from the actual source owner (re-checks live root/quota identities).
+    pub(package) fn retained_metadata_v3() -> Result<LinuxWorkspaceRetainedMetadataV3, text>:
+        if self.phase != "native-retired-retained" or self.source.is_none() or self.lease.is_none():
+            return Err("workspace-source-retention-evidence-required")
+        self.source.unwrap().retained_metadata_v3()
+
+    # Only the sealed original authority calls this after its same-WAL retention
+    # row commit. A failed publication leaves native-retired-retained (all held).
+    pub(package) fn retained_published_v3() -> Result<MachineFreshWorkspaceSourceCustodyV3, text>:
+        val actual = self.retained_metadata_v3()?
+        var retained = self
+        retained.phase = "retained-returned"
+        Ok(retained)
+
+    pub(package) fn retained_returned_v3() -> bool: self.phase == "retained-returned" and self.source.is_some() and self.lease.is_some()
+
+    pub(package) fn staging_effect_attempted_v3() -> Result<bool, text>:
+        if self.source.is_none(): return Ok(false)
+        self.source.unwrap().staging_effect_attempted_v3()
+
     pub(package) fn returned_v3() -> bool: self.phase == "returned" and self.source.is_none() and self.lease.is_none()
     pub(package) fn has_lease_v3() -> bool: self.lease.is_some()
     pub(package) fn request_digest_v3() -> text: self.request.plan.request_digest
@@ -124,6 +167,10 @@ pub(package) class MachineFreshWorkspaceSourceCustodyV3:
         retained
 
 pub(package) struct MachineFreshWorkspaceSourceCustodyTurnV3:
+    owner: MachineFreshWorkspaceSourceCustodyV3
+    error: text
+
+pub(package) struct MachineFreshWorkspaceSourceRetainedTurnV3:
     owner: MachineFreshWorkspaceSourceCustodyV3
     error: text
 

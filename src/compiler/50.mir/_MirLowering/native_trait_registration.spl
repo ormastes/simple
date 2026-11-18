@@ -304,7 +304,7 @@ impl MirLowering:
                         parameter_mutability: parameter_mutability,
                         result: self.relocate_provider_type(method.return_type, module.symbols),
                         mutable_receiver: method.is_mutable,
-                        declared_result: self.relocate_provider_type(self.native_trait_declared_optional_result(method.symbol, method.return_type, module.symbols), module.symbols)))
+                        declared_result: self.relocate_provider_type(self.native_trait_declared_result(method.symbol, method.return_type, module.symbols), module.symbols)))
             var type_param_names: [text] = []
             for type_param in declaration.type_params:
                 type_param_names.push(type_param.name)
@@ -360,10 +360,16 @@ impl MirLowering:
                 ""
             case _: ""
 
-    fn native_trait_declared_optional_result(symbol: SymbolId, erased: HirType, provider: SymbolTable) -> HirType:
-        """The method symbol's declared `X?` result when bootstrap HIR erased
-        the method's return_type to the i64 default; `erased` otherwise. Only
-        an Int erasure is replaced, so no other declared shape changes."""
+    fn native_trait_declared_result(symbol: SymbolId, erased: HirType, provider: SymbolTable) -> HirType:
+        """The method symbol's declared result when bootstrap HIR erased the
+        method's return_type to the i64 default; `erased` otherwise. Only an
+        Int erasure is replaced, and only by a shape whose runtime word IS
+        that i64 slot: `X?` (Option handle), a trait object, `[T]` (runtime
+        array handle) or a struct/class record (pointer word). The slot's
+        machine `result` stays erased; this is call-site metadata only, so
+        `self.raw()` / `core.region(..)` keep their `[u32]` mark and record
+        owner for a later `.slice` / `.pixels` (bootstrap HIR keeps arrays
+        and records on the i64 fallback, declaration_lowering.spl)."""
         match erased.kind:
             case HirTypeKind.Int(_, _): ()
             case _: return erased
@@ -374,9 +380,12 @@ impl MirLowering:
                         match declared.kind:
                             case HirTypeKind.Optional(_): return declared
                             case HirTypeKind.DynTrait(_): return declared
+                            case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): return declared
                             case HirTypeKind.Named(declared_sym_id, _):
                                 if val declared_sym = provider.get_symbol_raw(declared_sym_id.id):
                                     if declared_sym.kind == SymbolKind.Trait:
+                                        return declared
+                                    if declared_sym.kind == SymbolKind.Struct or declared_sym.kind == SymbolKind.Class:
                                         return declared
                                     val decl_owner_key = native_trait_qualified_owner(declared_sym)
                                     if decl_owner_key != "" and self.native_trait_layout_index(decl_owner_key) >= 0:
@@ -499,7 +508,7 @@ impl MirLowering:
                                 parameter_mutability: parameter_mutability,
                                 result: self.relocate_provider_type(declaration.return_type, module.symbols),
                                 mutable_receiver: declaration.is_mutable,
-                                declared_result: self.relocate_provider_type(self.native_trait_declared_optional_result(declaration.symbol, declaration.return_type, module.symbols), module.symbols)))
+                                declared_result: self.relocate_provider_type(self.native_trait_declared_result(declaration.symbol, declaration.return_type, module.symbols), module.symbols)))
                         else:
                             methods.push("")
                     else:

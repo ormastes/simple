@@ -1,0 +1,40 @@
+# milestone_0030 D1: the pre-authorized remote build/test task class. ONE predicate shared by the controller issuer
+# (before it signs) and the Host remote-build route (before it admits), so the class is never only a controller-side
+# convention. Returns "" when the approver's enrolled scope covers the grant, the grant names exactly one of
+# build/test plus only route actions, the request is one of the grant's operations, the environment is the
+# native-container class bound by digest to both grant and request, and the approval cannot outlive the grant.
+# `approver` must be the snapshot's `human-approver` key (distributed_authority_snapshot_key_v2). Key separation is a
+# snapshot invariant (distributed_authority_snapshot_create_v2); a host route takes its execution-host key from the
+# same snapshot by role so the invariant applies to it.
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+
+# Route actions a remote build grant may carry beside its one build/test action (controller_dispatch_authority_v3).
+val REMOTE_BUILD_ROUTE_ACTIONS_V1 = ["controller_assignment_v1", "controller_execute_v1", "host_reservation_v1",
+    "host_execute_v1"]
+
+pub fn remote_build_task_class_v1(approver: DistributedAuthorityKeyV2, grant: ExecutionGrantV2,
+        request: OperationEnvelopeV2, requested: ExecutionEnvironmentV2, approval_expires_at: i64, now: i64) -> text:
+    if approver.role != "human-approver" or approver.revoked: return "remote-build-approver-key"
+    if requested.isolation_class != "native-container": return "remote-build-isolation-class"
+    if requested.host_id != grant.host_id: return "remote-build-environment-host"
+    val digest = distributed_environment_digest_v2(requested)
+    if digest.is_err() or digest.unwrap() != grant.environment_digest or digest.unwrap() != request.environment_digest:
+        return "remote-build-environment-digest"
+    if approver.principal != grant.principal or approver.project != grant.project or approver.host_id != grant.host_id:
+        return "remote-build-approver-scope"
+    if grant.maximum_memory_bytes > approver.maximum_memory_bytes or
+            grant.maximum_duration_ms > approver.maximum_duration_ms or grant.expires_at > approver.expires_at:
+        return "remote-build-approver-budget"
+    var actions = 0
+    for operation in grant.operations:
+        if not approver.operations.contains(operation): return "remote-build-approver-operations"
+        if operation == "build" or operation == "test": actions = actions + 1
+        elif not REMOTE_BUILD_ROUTE_ACTIONS_V1.contains(operation): return "remote-build-grant-operations"
+    if actions != 1: return "remote-build-grant-operations"
+    if not grant.operations.contains(request.operation): return "remote-build-request-operation"
+    if approval_expires_at <= now or approval_expires_at > grant.expires_at: return "remote-build-approval-expiry"
+    ""
+
+export remote_build_task_class_v1

@@ -3,16 +3,17 @@
 # controls. Split out of simple_web_html_layout_renderer_paint_layout.spl,
 # which re-exports every name defined here.
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, SELECT_ARROW_WIDTH_PX, text_line_aligned_x, text_line_needs_paint_width, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{HNode, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{html_image_fit_size, input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, SELECT_ARROW_WIDTH_PX, text_line_aligned_x, text_line_needs_paint_width, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape}
-use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.common.encoding.utf8.{text_codepoint_len}
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.io.mod_stub.{env_get}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 
 fn _html_draw_ir_component_id(node: HNode, i: i32) -> text:
@@ -458,6 +459,21 @@ fn _html_draw_ir_codepoint_advances(txt: text, cp_advances: [i32]) -> [i32]:
 # Falls back to the styled/flat command when vector fonts are off or the
 # resolver returns nothing usable -- in which case BOTH sides are flat, which
 # is consistent, rather than one side each.
+# At device scale k > 1 layout records, per `#text` run, how far (device px)
+# Chrome's device-px strut puts the baseline from where k x CSS layout put it
+# (LayoutResult.device_dy / device_dy_rest). The command carries it as
+# `device-y-offset`, which `draw_ir_composition_at_device_scale` adds to the
+# scaled y and strips. At k == 1 both tables are empty: the command is untouched.
+fn _html_draw_ir_text_with_device_dy(command: DrawIrCommand, boxes: LayoutResult, i: i32, line_i: i32) -> DrawIrCommand:
+    val table = if line_i == 0: boxes.device_dy else: boxes.device_dy_rest
+    if i < 0 or i >= table.len() or table[i] == 0:
+        return command
+    var out = command
+    var style = command.computed_style
+    style.push(draw_ir_style_prop("device-y-offset", table[i].to_text()))
+    out.computed_style = style
+    out
+
 fn _html_draw_ir_resolved_text_command(
     nodes: [HNode], i: i32, node: HNode, st: Style, cid: text,
     tx: i32, ty: i32, txt: text, computed_style: [DrawIrStyleProp],
@@ -475,8 +491,8 @@ fn _html_draw_ir_resolved_text_command(
     # bucket; the timer is the same default-off `SIMPLE_WEB_STYLE_COUNTERS=1`
     # gate as every counter around it and reads no clock when unarmed.
     val _cr_t0 = if _wsc_on: _wsc_now_us() else: 0
-    val metrics = resolve_font_metrics_with_language(
-        browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic), txt, st.font_size,
+    val metrics = resolve_font_metrics_with_language_milli(
+        browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic), txt, font_milli_of(st.font_size, st.font_size_milli),
         _html_text_language(nodes, i, st)
     )
     if _wsc_on:
@@ -701,6 +717,17 @@ fn _html_draw_ir_command(
             bidi_visual_text_for_rtl(transformed_text)
         else:
             transformed_text
+        # A mid-line run's real pen origin (LayoutResult.pen_origin_milli) for
+        # its single or first line; the `_line{n}` commands start at a line
+        # box edge and carry none.
+        val run_pen_origin = text_pen_origin_at(boxes.pen_origin_milli, i)
+        if run_pen_origin != 0:
+            computed_style.push(draw_ir_style_prop("pen-origin-milli", "{run_pen_origin}"))
+        # A fractional computed size (UA h3 18.72 px): the glyph raster takes
+        # the float size. Whole-px runs carry no prop.
+        val run_size_milli = font_milli_of(st.font_size, st.font_size_milli)
+        if st.font_size_milli > 0 and run_size_milli % 1000 != 0:
+            computed_style.push(draw_ir_style_prop("font-size-milli", "{run_size_milli}"))
         # `_html_draw_ir_command` is the only text-command builder reachable
         # from the Draw IR tree; `ellipsize_text_for_width` is otherwise only
         # wired into the CPU-framebuffer raster loops above, so a Draw IR text
@@ -765,11 +792,11 @@ fn _html_draw_ir_command(
                 text_line_box_w(boxes.first_line_dx, boxes.line_boxes, i, 0, content_w) - st.text_indent_px,
                 0, wrap_line_starts.len()
             )
-            return _html_draw_ir_resolved_text_command(
+            return _html_draw_ir_text_with_device_dy(_html_draw_ir_resolved_text_command(
                 nodes, i, node, st, _html_draw_ir_component_id(node, i),
                 first_x, content_y, visual_text, computed_style, clip_rect,
                 vector_fonts
-            )
+            ), boxes, i, 0)
         # text-indent shifts the first line, as in the CPU raster loop
         # (`line_base_x = text_x + st.text_indent_px` for line 0); a large
         # negative indent moves the run off the box (image-replacement idiom).
@@ -781,11 +808,11 @@ fn _html_draw_ir_command(
                 content_x + st.text_indent_px, content_w - st.text_indent_px,
                 0, 1
             )
-        return _html_draw_ir_resolved_text_command(
+        return _html_draw_ir_text_with_device_dy(_html_draw_ir_resolved_text_command(
             nodes, i, node, st, _html_draw_ir_component_id(node, i),
             single_x, content_y, visual_text, computed_style, clip_rect,
             vector_fonts
-        )
+        ), boxes, i, 0)
     val command = draw_ir_box_with_style(
         _html_draw_ir_component_id(node, i),
         x,
@@ -880,12 +907,12 @@ fn _html_draw_ir_wrap_extra_line_commands(
             st, visual_text_rtl, wrap_line_starts[line_i], wrap_line_ends[line_i],
             content_x + line_dx, text_line_box_w(boxes.first_line_dx, boxes.line_boxes, i, line_i, content_w), line_i, wrap_line_count
         )
-        out.push(_html_draw_ir_resolved_text_command(
+        out.push(_html_draw_ir_text_with_device_dy(_html_draw_ir_resolved_text_command(
             nodes, i, node, st,
             _html_draw_ir_component_id(node, i) + "_line{line_i}",
             line_x, line_y, line_text, computed_style, clip_rect,
             vector_fonts
-        ))
+        ), boxes, i, line_i))
         line_i = line_i + 1
     out
 
@@ -898,34 +925,7 @@ fn _html_draw_ir_fit_size(
     object_fit: text, box_w: i32, box_h: i32,
     image_w: i32, image_h: i32
 ) -> (i32, i32):
-    if object_fit == "fill":
-        return (box_w, box_h)
-    if object_fit == "none":
-        return (image_w, image_h)
-    val box_w64 = box_w.to_i64()
-    val box_h64 = box_h.to_i64()
-    val image_w64 = image_w.to_i64()
-    val image_h64 = image_h.to_i64()
-    val contain_by_width = box_w64 * image_h64 <= box_h64 * image_w64
-    var contain_w = box_w
-    var contain_h = (
-        (box_w64 * image_h64) / image_w64
-    ).to_i32()
-    if not contain_by_width:
-        contain_h = box_h
-        contain_w = ((box_h64 * image_w64) / image_h64).to_i32()
-    if object_fit == "contain":
-        return (contain_w, contain_h)
-    if object_fit == "scale-down":
-        if image_w <= box_w and image_h <= box_h:
-            return (image_w, image_h)
-        return (contain_w, contain_h)
-    val cover_by_width = box_w64 * image_h64 >= box_h64 * image_w64
-    if cover_by_width:
-        return (
-            box_w, ((box_w64 * image_h64) / image_w64).to_i32()
-        )
-    (((box_h64 * image_w64) / image_h64).to_i32(), box_h)
+    html_image_fit_size(object_fit, box_w, box_h, image_w, image_h)
 
 fn _html_draw_ir_background_edge(
     edge: text, box_start: i32, box_size: i32, border_start: i32,

@@ -1,0 +1,54 @@
+# Pure-Simple core interpreter: a constrained unit (`unit Port: u16 in 1..=65535`
+# or `where 1 <= self <= 65535`) is checked at its boundary. `Port(raw)` returns
+# `Ok(port)` / `Err(ConstraintError)` (panic-free safe code); `raw as Port`
+# yields the unit in range and an SPL-UNIT-005 error out of range; a suffixed
+# literal is checked the same way at runtime.
+# Runtime: src/compiler/10.frontend/core/interpreter/eval_units.spl.
+use std.spec.{describe, it, expect}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int, val_to_text, val_get_struct_name, val_struct_get_field, val_get_text}
+use compiler.frontend.core.interpreter.eval.{eval_get_error}
+
+fn probe(src: text) -> text:
+    val result = core_interpret(src + "\n", "unit_constraint_runtime_probe.spl")
+    val err = eval_get_error()
+    if err != "": return "ERR:" + err
+    "" + val_get_int(result)
+
+fn probe_text(src: text) -> text:
+    val result = core_interpret(src + "\n", "unit_constraint_runtime_probe.spl")
+    val err = eval_get_error()
+    if err != "": return "ERR:" + err
+    val_to_text(result)
+
+val PORT_IN: text = "unit Port: u16 as prt in 1..=65535\n"
+val PORT_WHERE: text = "unit Port: u16 as prt where 1 <= self <= 65535\n"
+
+describe "constrained unit boundary checks (core interpreter)":
+    it "`Port(raw)` in range is Ok carrying the unit":
+        expect(probe_text(PORT_IN + "val raw = 8080\nval p = Port(raw)\np.is_ok()")).to_equal("true")
+        expect(probe(PORT_IN + "val raw = 8080\nval p = Port(raw)\np.unwrap().value()")).to_equal("8080")
+
+    it "`Port(raw)` out of range is Err(ConstraintError) with the range in its message":
+        expect(probe_text(PORT_IN + "val raw = 70000\nval p = Port(raw)\np.is_err()")).to_equal("true")
+        val msg = probe_text(PORT_IN + "val raw = 70000\nval p = Port(raw)\np.unwrap_err().message")
+        expect(msg).to_contain("70000")
+        expect(msg).to_contain("Port")
+        expect(probe_text(PORT_IN + "val raw = 0\nval p = Port(raw)\np.unwrap_err().max_text")).to_equal("65535")
+
+    it "`raw as Port` in range builds the unit":
+        expect(probe(PORT_WHERE + "val raw = 443\nval p = raw as Port\np.value()")).to_equal("443")
+
+    it "`raw as Port` out of range is an SPL-UNIT-005 error, not a value":
+        expect(probe(PORT_WHERE + "val raw = 70000\nval p = raw as Port\np.value()")).to_start_with("ERR:SPL-UNIT-005")
+
+    it "a non-range predicate is checked the same way":
+        val even = "unit Even: i64 where self % 2 == 0\n"
+        expect(probe_text(even + "val raw = 4\nEven(raw).is_ok()")).to_equal("true")
+        expect(probe_text(even + "val raw = 5\nEven(raw).is_err()")).to_equal("true")
+
+    it "a suffixed literal inside the range evaluates to the unit":
+        expect(probe(PORT_IN + "val p = 8080_prt\np.value()")).to_equal("8080")
+
+    it "an unconstrained unit keeps its existing construction behaviour":
+        expect(probe("unit FreeBytes: i64 as fbytes\nval b = 12_fbytes\nb.value()")).to_equal("12")
