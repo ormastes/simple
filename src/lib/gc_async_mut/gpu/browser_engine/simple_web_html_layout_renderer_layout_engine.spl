@@ -1700,25 +1700,31 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     grid_column + mark_index
                 ] = true
                 mark_index = mark_index + 1
+            # The grid AREA is the item's containing block (CSS Grid 6.1 / 11.1):
+            # percent margins on all four sides are of its inline size, and the
+            # item's margin box fills it (Chrome 159). Auto inline margins
+            # keep the legacy 0 here.
+            val grid_child_width = grid_track_span_size(
+                grid_columns, st.column_gap_px,
+                grid_column, grid_column_span
+            )
+            val grid_margin_l = if grid_child_style.margin_l_auto: 0 else: resolve_horizontal_margin_px(grid_child_style.margin_l, grid_child_width)
+            val grid_margin_r = if grid_child_style.margin_r_auto: 0 else: resolve_horizontal_margin_px(grid_child_style.margin_r, grid_child_width)
             val grid_child_x = (
                 ix + grid_track_offset(
                     grid_columns, st.column_gap_px, grid_column
-                )
+                ) + grid_margin_l
             )
-            val grid_margin_t = resolve_vertical_margin_px(
-                grid_child_style.margin_t, viewport_h
+            val grid_margin_t = vertical_margin_px_in(
+                grid_child_style, true, viewport_h, grid_child_width
             )
-            val grid_margin_b = resolve_vertical_margin_px(
-                grid_child_style.margin_b, viewport_h
+            val grid_margin_b = vertical_margin_px_in(
+                grid_child_style, false, viewport_h, grid_child_width
             )
             val grid_child_y = (
                 y + st.border_t + st.pad_t +
                 grid_track_offset(grid_rows, st.row_gap_px, grid_row) +
                 grid_margin_t
-            )
-            val grid_child_width = grid_track_span_size(
-                grid_columns, st.column_gap_px,
-                grid_column, grid_column_span
             )
             val grid_item_align = effective_item_align(
                 st, grid_child_style
@@ -1745,10 +1751,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 grid_child_style.height_px == 0
             )
             # Percentage min-/max- sizes are of the grid area.
-            var resolved_grid_child_style = style_with_resolved_percent_min_max(grid_child_style, grid_child_width, 0)
-            var grid_item_w = grid_child_width
-            if grid_child_style.width_px == 0 and (grid_child_style.min_width_px < 0 or grid_child_style.max_width_px < 0):
-                grid_item_w = constrained_outer_width(nodes[grid_child], resolved_grid_child_style, grid_child_width)
+            var resolved_grid_child_style = style_with_resolved_percent_min_max(style_with_resolved_percent_margins(grid_child_style, grid_child_width, viewport_h), grid_child_width, 0)
+            # An auto-width item's margin box fills the area; a specified
+            # (px or percent) width still resolves against the whole area.
+            val grid_auto_w = grid_child_style.width_px == 0 and not grid_child_style.width_zero
+            var grid_item_w = if grid_auto_w: grid_child_width - grid_margin_l - grid_margin_r else: grid_child_width
+            if grid_item_w < 0:
+                grid_item_w = 0
+            if grid_auto_w and (grid_child_style.min_width_px < 0 or grid_child_style.max_width_px < 0):
+                grid_item_w = constrained_outer_width(nodes[grid_child], resolved_grid_child_style, grid_item_w)
             # This bounded Grid slice does not size spanning rows. Stretch
             # only an auto-size, non-replaced item occupying one row and one
             # column, when block-axis auto margins do not own the free space.
@@ -1799,9 +1810,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             out_intrinsic_widths = grid_result.intrinsic_widths
             if (
                 grid_row >= explicit_rows.len() and
-                grid_result.height > grid_rows[grid_row]
+                grid_result.height + grid_margin_t + grid_margin_b > grid_rows[grid_row]
             ):
-                grid_rows[grid_row] = grid_result.height
+                grid_rows[grid_row] = grid_result.height + grid_margin_t + grid_margin_b
             if grid_row + 1 > max_grid_row:
                 max_grid_row = grid_row + 1
             grid_child = child_index.next_sibling[grid_child]
