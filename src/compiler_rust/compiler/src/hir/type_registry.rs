@@ -179,8 +179,14 @@ impl TypeRegistry {
     /// Feed enum declarations to the runtime's positional discriminant
     /// registry so variant-name-only sites use the declaration index.
     fn note_enum_positions(ty: &HirType) {
-        if let HirType::Enum { variants, .. } = ty {
+        if let HirType::Enum { name, variants, .. } = ty {
             simple_runtime::value::register_enum_variants(variants.iter().map(|(name, _)| name.as_str()));
+            // Display names for string interpolation of runtime enum values.
+            let enum_id = crate::codegen::shared::enum_runtime_type_id(name);
+            for (index, (variant, fields)) in variants.iter().enumerate() {
+                let arity = fields.as_ref().map_or(0, |f| f.len() as u32);
+                simple_runtime::value::register_enum_display_name(enum_id, index as u32, name, variant, arity);
+            }
         }
     }
 
