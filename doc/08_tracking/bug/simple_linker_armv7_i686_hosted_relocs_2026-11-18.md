@@ -56,3 +56,11 @@ interpreting linker source): ~9 s, ~505 MB peak RSS.
 - `sym_resolver`: a strong definition replacing a weak one now updates the COMDAT mark (stale mark could mask a real duplicate).
 - `reloc_engine`: an existing BLX relocated against an ARM-mode target is rewritten to BL.
 - Still open: item 1 (dedup by group signature + discard losing group), item 4 (THM_JUMP19 to ARM-mode target should error), armv7 interworking veneers, ELF32 dynamic/PIE.
+
+## Follow-up 2026-11-18 (COMDAT signature, JUMP19 interwork)
+- COMDAT dedup now keys on the SHT_GROUP signature symbol (`elf_group_signature`),
+  not merely SHF_GROUP membership: same-name strong definitions in groups with
+  different signatures are a duplicate error (ld.lld). Specs in sym_resolver_spec.
+- R_ARM_THM_JUMP19 to an even (ARM-mode) target is now an error instead of a
+  silent mis-branch. Spec in reloc_engine_spec.
+- Status: verification-pending.
