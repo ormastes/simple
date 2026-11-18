@@ -13,7 +13,6 @@
 # worker process); updates are value transitions, no locks, no shared counter.
 use std.io_runtime.{file_write_bytes, file_read_bytes_result, file_delete, dir_create_all,
     getpid, env_get_nullable}
-use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
 
 pub struct SmfObjectSpoolV1:
     dir: text
@@ -108,8 +107,15 @@ pub fn smf_object_spool_assemble_v1(spool: SmfObjectSpoolV1) -> Result<[u8], tex
         val part = smf_object_spool_get_v1(spool, name)
         if part.is_err():
             return Err(part.unwrap_err())
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        out = bytes_concat_copy_v1(out, part.unwrap())
+        # Append in place. `out = bytes_concat_copy_v1(out, bytes)` re-copied the
+        # whole prefix per module into a fresh array that is never reclaimed:
+        # N modules retained ~N/2 copies of the image
+        # (smf_package_quadratic_assembly_oom_2026-11-18.md).
+        val bytes = part.unwrap()
+        var index: i64 = 0
+        while index < bytes.len():
+            out.push(bytes[index])
+            index = index + 1
     Ok(out)
 
 # Delete this spool's own files (never the whole directory: shard workers may

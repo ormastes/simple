@@ -25,7 +25,8 @@ deletes every spool file. A 200-module stress run keeps live bytes bounded.
 use std.spec.step
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use std.io_runtime.{file_exists, dir_create_all}
-use compiler.driver.driver_build.smf_staged_parts_v1.{smf_parts_assemble_objects_v1}
+use compiler.driver.driver_build.smf_staged_parts_v1.{smf_parts_assemble_objects_v1,
+    smf_parts_assemble_manifests_v1}
 use compiler.driver.driver_build.smf_object_spool_v1.{
     smf_object_spool_begin_v1, smf_object_spool_put_v1, smf_object_spool_get_v1,
     smf_object_spool_assemble_v1, smf_object_spool_release_v1,
@@ -136,3 +137,42 @@ describe "Staged codegen state owns an object spool":
         assert_equal(state.smf_part_objects.live_bytes, 0)
         assert_equal(smf_object_spool_count_v1(state.smf_part_objects), 1)
         state.smf_part_objects = smf_object_spool_release_v1(state.smf_part_objects)
+
+describe "SMF object spool assembles in one pass":
+    it "appends uneven and empty objects in sorted order, byte-identical to the whole-prefix fold":
+        # @req REQ-SSPEC-COMPILER
+        # Bug: doc/08_tracking/bug/smf_package_quadratic_assembly_oom_2026-11-18.md
+        step("record uneven parts out of sorted order, one of them empty")
+        var objects: {text: [u8]} = {}
+        var spool = smf_object_spool_begin_v1(spool_dir("onepass"))
+        val names = ["pkg.zeta", "pkg.alpha", "pkg.mid", "pkg.empty", "pkg.beta"]
+        val sizes = [300, 1, 77, 0, 4096]
+        var i = 0
+        while i < names.len():
+            objects[names[i]] = object_of(i * 7, sizes[i])
+            spool = smf_object_spool_put_v1(spool, names[i], object_of(i * 7, sizes[i]))
+            i = i + 1
+        step("the in-place assembly equals the reference fold byte for byte")
+        val assembled = smf_object_spool_assemble_v1(spool)
+        assert_true(assembled.is_ok())
+        val bytes = assembled.unwrap()
+        assert_equal(bytes.len(), 4474)
+        assert_equal(bytes, smf_parts_assemble_objects_v1(objects))
+        step("sorted order: pkg.alpha (1 byte, seed 7) leads, pkg.zeta (seed 0) ends")
+        assert_equal(bytes[0] as i64, 7)
+        assert_equal(bytes[4473] as i64, 299 % 251)
+        spool = smf_object_spool_release_v1(spool)
+
+    it "assembles manifests in one pass with the same bytes as the reference fold":
+        # @req REQ-SSPEC-COMPILER
+        step("manifests of uneven size, recorded out of order")
+        var manifests: {text: [u8]} = {}
+        manifests["pkg.c"] = object_of(3, 60)
+        manifests["pkg.a"] = []
+        manifests["pkg.b"] = object_of(9, 5)
+        manifests["pkg.d"] = object_of(1, 131)
+        val all = smf_parts_assemble_manifests_v1(manifests)
+        assert_equal(all.len(), 196)
+        assert_equal(all, smf_parts_assemble_objects_v1(manifests))
+        assert_equal(all[0] as i64, 9)
+        assert_equal(all[5] as i64, 3)
