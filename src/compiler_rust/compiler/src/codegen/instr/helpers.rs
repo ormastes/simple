@@ -474,7 +474,7 @@ pub(crate) fn adapted_call(
 
 /// Resolve a runtime call to its local body when one is declared, otherwise
 /// use the predeclared runtime import.
-fn resolve_runtime_func<M: Module>(ctx: &InstrContext<'_, M>, func_name: &str) -> cranelift_module::FuncId {
+pub(crate) fn resolve_runtime_func<M: Module>(ctx: &InstrContext<'_, M>, func_name: &str) -> cranelift_module::FuncId {
     ctx.func_ids
         .get(func_name)
         .copied()

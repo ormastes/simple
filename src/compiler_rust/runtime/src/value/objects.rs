@@ -497,6 +497,23 @@ pub(crate) fn rt_option_some(payload: RuntimeValue) -> RuntimeValue {
     rt_enum_new(OPTION_ENUM_ID, hash_variant_discriminant("Some"), payload)
 }
 
+/// Record `Enum::Variant` display text for compiled (JIT/native) enum values.
+/// Codegen emits this next to each user-enum construction; `name` points at
+/// static module data. First registration wins, so the hot path is one lookup.
+#[no_mangle]
+pub extern "C" fn rt_enum_register_name(enum_id: u32, discriminant: u32, name_ptr: *const u8, name_len: i64, arity: i64) {
+    if name_ptr.is_null() || name_len <= 0 || enum_display_names().contains_key(&(enum_id, discriminant)) {
+        return;
+    }
+    // SAFETY: codegen passes a pointer/length pair into immutable module data.
+    let bytes = unsafe { std::slice::from_raw_parts(name_ptr, name_len as usize) };
+    if let Ok(name) = std::str::from_utf8(bytes) {
+        enum_display_names()
+            .entry((enum_id, discriminant))
+            .or_insert_with(|| (std::sync::Arc::from(name), arity.max(0) as u32));
+    }
+}
+
 /// Allocate a new enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue {

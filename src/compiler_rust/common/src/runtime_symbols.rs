@@ -744,6 +744,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_enum_check_variant",
     "rt_try_is_absent",
     "rt_enum_new",
+    "rt_enum_register_name",
     "rt_enum_id",
     "rt_enum_discriminant",
     "rt_enum_payload",

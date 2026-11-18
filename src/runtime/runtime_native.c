@@ -5325,6 +5325,53 @@ static int64_t rt_core_format_dict(RtCoreDict* dict) {
  * "Option::Some(3)", None -> "Option::None", Result Ok(7) -> "Result::Ok(7)",
  * Err("bad") -> "Result::Err(bad)". Returns rt_core_nil() to signal "not
  * handled, fall through" (nil is never a real formatted string result). */
+/* User-enum display names, registered by codegen next to each enum
+ * construction (rt_enum_register_name). Lockless open-addressed table: a slot
+ * is claimed by CAS on its key, then its name is published with a release
+ * store; readers acquire-load the name and skip slots whose name is not yet
+ * published. Names point into immutable module data and are never freed. */
+#define RT_ENUM_NAME_SLOTS 4096
+typedef struct RtEnumNameSlot {
+    _Atomic uint64_t key;          /* (enum_id << 32 | disc) + 1; 0 = empty */
+    _Atomic(const uint8_t*) name;
+    int64_t len;
+    int64_t arity;
+} RtEnumNameSlot;
+static RtEnumNameSlot rt_enum_name_slots[RT_ENUM_NAME_SLOTS];
+
+static RtEnumNameSlot* rt_enum_name_find(uint64_t key, int claim) {
+    uint64_t h = key * 0x9E3779B97F4A7C15ull;
+    for (uint32_t i = 0; i < RT_ENUM_NAME_SLOTS; i++) {
+        RtEnumNameSlot* slot = &rt_enum_name_slots[(h + i) & (RT_ENUM_NAME_SLOTS - 1)];
+        uint64_t cur = atomic_load_explicit(&slot->key, memory_order_acquire);
+        if (cur == key) return slot;
+        if (cur == 0) {
+            if (!claim) return NULL;
+            uint64_t expected = 0;
+            if (atomic_compare_exchange_strong_explicit(&slot->key, &expected, key,
+                    memory_order_acq_rel, memory_order_acquire)) {
+                return slot;
+            }
+            if (expected == key) return slot;
+        }
+    }
+    return NULL;
+}
+
+void rt_enum_register_name(int32_t enum_id, int32_t discriminant, const uint8_t* name, int64_t len, int64_t arity) {
+    if (!name || len <= 0) return;
+    uint64_t key = (((uint64_t)(uint32_t)enum_id << 32) | (uint32_t)discriminant) + 1;
+    RtEnumNameSlot* slot = rt_enum_name_find(key, 0);
+    if (slot && atomic_load_explicit(&slot->name, memory_order_acquire)) return;
+    slot = rt_enum_name_find(key, 1);
+    if (!slot) return;
+    const uint8_t* expected = NULL;
+    slot->len = len;
+    slot->arity = arity;
+    atomic_compare_exchange_strong_explicit(&slot->name, &expected, name,
+        memory_order_release, memory_order_relaxed);
+}
+
 static int64_t rt_core_format_enum(RtCoreEnum* e) {
     int64_t id = (int64_t)e->enum_id;
     int64_t disc = (int64_t)e->discriminant;
@@ -5351,9 +5398,29 @@ static int64_t rt_core_format_enum(RtCoreEnum* e) {
         rt_string_builder_push(sb, rt_string_new((const uint8_t*)")", 1));
         return rt_string_builder_finish(sb);
     }
-    /* Custom user enum: no name metadata reaches the runtime -- fall through
-     * (caller must treat rt_core_nil() as "not handled"). */
-    return rt_core_nil();
+    /* Custom user enum: use the codegen-registered name when present,
+     * otherwise fall through (caller treats rt_core_nil() as "not handled"). */
+    uint64_t key = (((uint64_t)(uint32_t)id << 32) | (uint32_t)disc) + 1;
+    RtEnumNameSlot* slot = rt_enum_name_find(key, 0);
+    const uint8_t* name = slot ? atomic_load_explicit(&slot->name, memory_order_acquire) : NULL;
+    if (!name) return rt_core_nil();
+    int64_t name_str = rt_string_new(name, (uint64_t)slot->len);
+    if (slot->arity <= 0) return name_str;
+    int64_t sb = rt_string_builder_new();
+    rt_string_builder_push(sb, name_str);
+    rt_string_builder_push(sb, rt_string_new((const uint8_t*)"(", 1));
+    SplArray* items = slot->arity > 1 ? (SplArray*)(uintptr_t)e->payload : NULL;
+    if (items && rt_core_array_ptr(items)) {
+        int64_t n = rt_array_len(items);
+        for (int64_t i = 0; i < n; i++) {
+            if (i > 0) rt_string_builder_push(sb, rt_string_new((const uint8_t*)", ", 2));
+            rt_string_builder_push(sb, rt_to_string(rt_array_get(items, i)));
+        }
+    } else {
+        rt_string_builder_push(sb, rt_to_string(e->payload));
+    }
+    rt_string_builder_push(sb, rt_string_new((const uint8_t*)")", 1));
+    return rt_string_builder_finish(sb);
 }
 
 int64_t rt_raw_u64_to_string(int64_t raw) {
