@@ -63,3 +63,15 @@ both outputs and the LOAD flags match. On top of the PT_PHDR shift, the engine:
    affected. `simpleos_user32_link_spec` carries a ponytail note at the spot where the
    assertion would go.
 7. **`.ARM.attributes` dropped** (non-alloc SHT_ARM_ATTRIBUTES); lld keeps it.
+
+## Fix 1 (PT_PHDR): verification-pending
+
+`elf_exec_writer.spl` now always emits PT_PHDR first, as ld.lld does. Probed with ld.lld
+18 on x86_64 and aarch64, with no script and with an ENTRY-only script: every static
+executable has PT_PHDR. Before this fix it was gated on `has_interp`. The repro is
+`simpleos_user32_link_spec`, which asserts PT_PHDR at 0x400034 and the exact lld i686
+`.text` vaddr 0x401120. Exact riscv32/arm32 vaddrs wait on fixes 4/5 (the
+PT_RISCV_ATTRIBUTES and PT_ARM_EXIDX headers). The ELF regression set shows the same
+pass/fail counts as release/1.0.0 (elf_dynamic_link 0/8, elf_exec_writer 19/32,
+elf_x64_dynamic 29/32, elf_gnu_hash 4/6, elf_symtab 6/7 and elf_archive_closure 8/9 were
+already failing). Every other ELF spec is green.
