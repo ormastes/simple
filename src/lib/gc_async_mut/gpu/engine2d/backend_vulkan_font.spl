@@ -54,12 +54,14 @@ val VULKAN_FONT_PACKED_GLYPH_WORDS: i64 = 7
 val VULKAN_FONT_FRAME_GLYPH_CAP: i64 = 4096
 val VULKAN_FONT_PACKED_MAX_BYTES: i64 = (VULKAN_FONT_PACKED_HEADER_WORDS + VULKAN_FONT_FRAME_GLYPH_CAP * VULKAN_FONT_PACKED_GLYPH_WORDS) * 4
 # LCD trailer (opt-in, after the glyph records; header word 7 bit 31 marks it):
-# one table index word per glyph, then one 3 x 256 word s32 table per distinct
-# LCD text colour. The glyph record stays 7 words, so the Metal packer's byte
-# parity and VULKAN_FONT_PACKED_MAX_BYTES are untouched; only the pooled
-# params buffer is allocated large enough for the trailer.
+# one word per glyph (low half = table index, VULKAN_FONT_LCD_NO_TABLE = gray;
+# high half = chain length, see vulkan_font_chain_lens), then one 3 x 256 word
+# s32 table per distinct LCD text colour. The glyph record stays 7 words, so the
+# Metal packer's byte parity and VULKAN_FONT_PACKED_MAX_BYTES are untouched; only
+# the pooled params buffer is allocated large enough for the trailer.
 val VULKAN_FONT_LCD_TABLE_WORDS: i64 = 768
 val VULKAN_FONT_LCD_MAX_COLORS: i64 = 32
+val VULKAN_FONT_LCD_NO_TABLE: i64 = 65535
 val VULKAN_FONT_PACKED_POOL_BYTES: i64 = VULKAN_FONT_PACKED_MAX_BYTES + (VULKAN_FONT_FRAME_GLYPH_CAP + VULKAN_FONT_LCD_MAX_COLORS * VULKAN_FONT_LCD_TABLE_WORDS) * 4
 val _VULKAN_STORAGE_BUFFER: i64 = 0x80
 
@@ -131,7 +133,8 @@ fn vulkan_font_dispatch_groups(pixel_count: i64) -> i64:
 fn vulkan_font_packed_params(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
                              dst_width: i32, dst_height: i32) -> [u8]:
     val no_veto: [text] = []
-    vulkan_font_packed_params_lcd(batch, origin_x, origin_y, dst_width, dst_height, false, no_veto)
+    val no_chains: [i64] = []
+    vulkan_font_packed_params_lcd(batch, origin_x, origin_y, dst_width, dst_height, false, no_veto, no_chains)
 
 fn _vulkan_font_quad_has_lcd_cell(batch: FontRenderBatch, q: FontRenderQuad) -> bool:
     """Does this quad's atlas rect hold a cell the CPU LCD composite treats as
@@ -202,6 +205,19 @@ fn vulkan_font_lcd_veto_keys(quads: [FontRenderQuad], kept: [FontRenderQuad], or
         ki = ki + 1
     keys
 
+fn vulkan_font_lcd_color_count(batch: FontRenderBatch, veto_keys: [text]) -> i64:
+    """Distinct text colours among the quads `vulkan_font_packed_params_lcd`
+    would give an LCD table (same quad test, no cap). 0 = no LCD trailer."""
+    var colors: [i64] = []
+    if batch.render_config_identity == VULKAN_BITMAP_FONT_CONFIG_IDENTITY:
+        return 0
+    for q in batch.quads:
+        if (_vulkan_font_quad_has_lcd_cell(batch, q) and
+            not veto_keys.contains(vulkan_font_quad_key(q)) and
+            not colors.contains(q.color.to_i64())):
+            colors.push(q.color.to_i64())
+    colors.len().to_i64()
+
 # reason: reads header word 7 bit 31 of the packed params bytes
 # @allow(primitive_api)
 fn vulkan_font_packed_has_lcd_trailer(packed: [u8]) -> bool:
@@ -211,14 +227,16 @@ fn vulkan_font_packed_has_lcd_trailer(packed: [u8]) -> bool:
 # @allow(primitive_api)
 fn vulkan_font_packed_params_lcd(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
                                  dst_width: i32, dst_height: i32, lcd: bool,
-                                 veto_keys: [text]) -> [u8]:
+                                 veto_keys: [text], chain_lens: [i64]) -> [u8]:
     """Packed params for the font batch kernel. With `lcd`, quads that hold an
     LCD cell get a table index into a trailer of per-colour s32 tables (same
     tables as the CPU composite); no LCD quad means the legacy layout byte for
     byte. More than VULKAN_FONT_LCD_MAX_COLORS distinct LCD colours in one
     batch is refused (empty result), not silently drawn gray. A quad whose
     `vulkan_font_quad_key` is in `veto_keys` is drawn gray (see
-    `vulkan_font_lcd_veto_keys`)."""
+    `vulkan_font_lcd_veto_keys`). `chain_lens` (from `vulkan_font_chain_lens`,
+    parallel to the quads) goes into the high half of each trailer word; empty
+    means every quad is a chain of one."""
     val glyph_count = batch.quads.len()
     val glyph_words = VULKAN_FONT_PACKED_HEADER_WORDS + glyph_count * VULKAN_FONT_PACKED_GLYPH_WORDS
     if glyph_count <= 0 or glyph_count > VULKAN_FONT_FRAME_GLYPH_CAP or glyph_words > 2147483647 / 4:
@@ -273,8 +291,13 @@ fn vulkan_font_packed_params_lcd(batch: FontRenderBatch, origin_x: i32, origin_y
     _vulkan_font_pack_i32_le(packed, 28, max_pixels as i32)
     if trailer:
         packed[31] = (packed[31].to_i64() | 128) as u8
+        val chained = chain_lens.len() == glyph_count
+        var slot: i64 = 0
         for t in glyph_table:
-            off = _vulkan_font_pack_i32_le(packed, off, t as i32)
+            val chain_len = if chained: chain_lens[slot] else: 1
+            val index = if t < 0: VULKAN_FONT_LCD_NO_TABLE else: t
+            off = _vulkan_font_pack_i32_le(packed, off, (chain_len * 65536 + index) as i32)
+            slot = slot + 1
         for key in lcd_colors:
             val table = engine2d_lcd_s32_tables(key as u32)
             if table.len() != VULKAN_FONT_LCD_TABLE_WORDS: return []
@@ -424,6 +447,80 @@ fn vulkan_font_partition_quads(quads: [FontRenderQuad]) -> [i64]:
         buckets[i] = want
         i = i + 1
     buckets
+
+fn vulkan_font_chain_ids(quads: [FontRenderQuad]) -> [i64]:
+    """Chain id per quad: the index of the first quad of its chain.
+
+    A chain is a connected group of quads under "destination rects overlap".
+    Two quads of different chains never share a pixel, so chains may blend
+    concurrently; inside a chain the kernel blends in painter order (see
+    `shaders/font_atlas_batch.comp`). LCD glyphs carry 1 px of padding, so the
+    glyphs of a word form one chain, and `vulkan_font_partition_quads` would
+    cost one dispatch per glyph of the longest word.
+    """
+    val n = quads.len().to_i64()
+    var ids: [i64] = [0; n]
+    var i: i64 = 0
+    while i < n:
+        ids[i] = i
+        val a = quads[i]
+        val al = a.dst_x.to_i64()
+        val at = a.dst_y.to_i64()
+        val ar = al + a.width.to_i64()
+        val ab = at + a.height.to_i64()
+        var j: i64 = 0
+        while j < i:
+            val b = quads[j]
+            val bl = b.dst_x.to_i64()
+            val bt = b.dst_y.to_i64()
+            if (ids[j] != ids[i] and al < bl + b.width.to_i64() and bl < ar and
+                at < bt + b.height.to_i64() and bt < ab):
+                val keep = if ids[j] < ids[i]: ids[j] else: ids[i]
+                val drop = if ids[j] < ids[i]: ids[i] else: ids[j]
+                var k: i64 = 0
+                while k <= i:
+                    if ids[k] == drop: ids[k] = keep
+                    k = k + 1
+            j = j + 1
+        i = i + 1
+    ids
+
+fn vulkan_font_chain_lens(ids: [i64]) -> [i64]:
+    """Chain length at the slot where each chain starts once the quads are
+    sorted by `vulkan_font_chain_order`, 0 at every other slot."""
+    val n = ids.len().to_i64()
+    var sizes: [i64] = [0; n]
+    for id in ids:
+        sizes[id] = sizes[id] + 1
+    var lens: [i64] = [0; n]
+    var slot: i64 = 0
+    for size in sizes:
+        if size > 0:
+            lens[slot] = size
+            slot = slot + size
+    lens
+
+fn vulkan_font_chain_order(ids: [i64]) -> [i64]:
+    """Source quad index per output slot: chains in order of their first quad,
+    each chain's quads consecutive and in their original (painter) order."""
+    val n = ids.len().to_i64()
+    var next_slot: [i64] = [0; n]
+    for id in ids:
+        next_slot[id] = next_slot[id] + 1
+    var slot: i64 = 0
+    var r: i64 = 0
+    while r < n:
+        val size = next_slot[r]
+        next_slot[r] = slot
+        slot = slot + size
+        r = r + 1
+    var order: [i64] = [0; n]
+    var k: i64 = 0
+    while k < n:
+        order[next_slot[ids[k]]] = k
+        next_slot[ids[k]] = next_slot[ids[k]] + 1
+        k = k + 1
+    order
 
 fn _vulkan_font_status_is_failure(status: text) -> bool:
     """Did a composite fail to draw? Named as a DENY-list, deliberately.
@@ -1376,7 +1473,25 @@ impl VulkanBackend:
             _vulkan_font_batch_with_quads(batch, drawn_quads, batch.dirty_rects)
         val buckets = vulkan_font_partition_quads(drawn.quads)
         val bucket_count = vulkan_font_partition_bucket_count(buckets)
-        var evidence = if bucket_count > 1:
+        # An overlapping batch that will carry the LCD trailer stays ONE
+        # dispatch: the pinned kernel blends each chain of overlapping quads in
+        # painter order inside one workgroup. Gray batches and the
+        # `runtime-glsl` kernel have no chain loop and keep the split below.
+        self.font_lcd_chain_lens = []
+        var chained = false
+        if bucket_count > 1 and self.font_atlas_pipeline_evidence().artifact_mode == "precompiled-spirv":
+            val lcd_colors = vulkan_font_lcd_color_count(drawn, self.font_lcd_veto_keys)
+            chained = lcd_colors > 0 and lcd_colors <= VULKAN_FONT_LCD_MAX_COLORS
+        var chain_quads: [FontRenderQuad] = []
+        if chained:
+            val ids = vulkan_font_chain_ids(drawn.quads)
+            for source in vulkan_font_chain_order(ids):
+                chain_quads.push(drawn.quads[source])
+            self.font_lcd_chain_lens = vulkan_font_chain_lens(ids)
+        var evidence = if chained:
+            self._composite_font_batch_impl(origin_x, origin_y,
+                _vulkan_font_batch_with_quads(drawn, chain_quads, drawn.dirty_rects), clock)
+        elif bucket_count > 1:
             self._composite_font_sub_batches(origin_x, origin_y, drawn, buckets,
                 bucket_count, clock)
         else:
@@ -1858,7 +1973,7 @@ impl VulkanBackend:
             # The `runtime-glsl` kernel is the common gray source (one 64-wide
             # group per glyph, no stride loop): it would draw 64 pixels per glyph.
             val lcd_kernel = pipeline.artifact_mode == "precompiled-spirv"
-            val packed = vulkan_font_packed_params_lcd(batch, origin_x, origin_y, width, height, lcd_kernel, self.font_lcd_veto_keys)
+            val packed = vulkan_font_packed_params_lcd(batch, origin_x, origin_y, width, height, lcd_kernel, self.font_lcd_veto_keys, self.font_lcd_chain_lens)
             vulkan_timing_add(VK_T_FONT_PACKED_PARAMS, _t_packed)
             val pool_index = self.pending_font_params.len()
             val use_packed_pool = self.frame_batching_enabled and not self.font_oracle_mode
