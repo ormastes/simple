@@ -114,6 +114,28 @@ describe "elf_link - riscv64 static":
             i = i + 1
         expect(found).to_equal(true)
 
+    it "writes ld.lld 18's .riscv.attributes bytes and PT_RISCV_ATTRIBUTES":
+        # Oracle: ld.lld --no-relax -static dyn_start_rv64.o dyn_lib_rv64.o (LLD 18.1.3):
+        # 74-byte payload, ATTRIBUTES phdr last (R, align 1) over the section.
+        val b = link_rv(["dyn_start_rv64.o", "dyn_lib_rv64.o"], [], ELF_LINK_STATIC_EXEC)
+        expect(b.len() > 0).to_equal(true)
+        var want: [i64] = [0x41, 0x49, 0, 0, 0, 0x72, 0x69, 0x73, 0x63, 0x76, 0, 1, 0x3f, 0, 0, 0, 4, 0x10, 5]
+        for ch in "rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_zicsr2p0_zifencei2p0".bytes(): want.push(ch as i64)
+        want.push(0)
+        val off = sec_off(b, ".riscv.attributes")
+        expect(sec_size(b, ".riscv.attributes")).to_equal(want.len())
+        var got: [i64] = []
+        for k in 0..want.len(): got.push(b[off + k])
+        expect(got).to_equal(want)
+        val ph = rd64(b, 0x20) + (rd16(b, 0x38) - 1) * 56
+        expect(rd32(b, ph)).to_equal(0x70000003)
+        expect(rd32(b, ph + 4)).to_equal(4)
+        expect(rd64(b, ph + 8)).to_equal(off)
+        expect(rd64(b, ph + 16)).to_equal(0)
+        expect(rd64(b, ph + 32)).to_equal(want.len())
+        expect(rd64(b, ph + 40)).to_equal(want.len())
+        expect(rd64(b, ph + 48)).to_equal(1)
+
 describe "elf_link - riscv64 dynamic":
     it "writes ld.lld's PLT0 and PLT1 against .got.plt":
         val b = link_rv(["dyn_start_rv64.o"], ["libadd_rv64.so.1"], ELF_LINK_DYNAMIC_EXEC)

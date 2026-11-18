@@ -110,6 +110,24 @@ New item, filed and not fixed: the merged `.riscv.attributes` payload differs fr
 writes `rv32i2p1_m2p0_a2p1_c2p0` with no tag 14, and llvm-readelf 18 reports "invalid tag
 0xe". This predates fix 4; it looks like the engine follows newer LLVM merge rules.
 
+## Fix 5 (`.riscv.attributes` payload + riscv64 PT_RISCV_ATTRIBUTES): verification-pending
+
+Measured with lld 18.1.3 (`llvm-readelf -A`/`-x .riscv.attributes`) on simpleos32 riscv32,
+`dyn_start_rv64.o`+`dyn_lib_rv64.o`, and the item4 `attr_start.o`+`attr_provider.o`: lld writes
+only the int tags some input carried, nonzero, in tag order (stack_align, unaligned_access
+ORed, priv_spec), then the arch. The arch is the union of the extensions listed in the inputs,
+in canonical order, with no implied extensions. Tags 14/16 are dropped ("invalid tag").
+`elf_riscv_attributes` now matches that byte for byte. `riscv_isa_merge` still uses the
+implications for its conflict checks, but no longer emits them.
+
+riscv64: the layout provider gets an optional `layout_reserving` companion. It is bound from
+the same sealed LAYOUT slot, and the builtin binds `elf_exec_plan_class_x(..., attr_phdrs)`.
+`ElfSealedOperationsV1.layout_reserving` runs `_elf_plan_shape` and checks that the trailing
+slots are empty PT_RISCV_ATTRIBUTES/PF_R/align-1 entries. A custom provider without the
+companion falls back to plain `layout()` with no slot. Repros: exact-bytes asserts in
+`simpleos_user32_link_spec` (riscv32) and `elf_riscv64_dynamic_spec` (riscv64 bytes + phdr),
+plus `item4_riscv_attributes_spec`, which now expects tags 14/16 to be absent.
+
 ## Fix 2 follow-up: bulk int3 fill
 
 `elf_u8_filled(count, byte)` (byte_buffers.spl) builds the buffer by doubling, with log2(n)
