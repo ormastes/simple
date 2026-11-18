@@ -17,4 +17,4 @@ R_RISCV_32 data word (`data_ptr`). The trailing `lui %hi(data_ptr)` keeps
 LLD oracle (`-Ttext=0x80200000`): `_start=0x80200000`, `data_ptr=0x8020104c`
 holding `data_value=0x80201050`. The spec checks the same
 relations layout-relatively against the Simple linker's image.
-Generator: `C:/dev/wt/xc-wsl-scripts/sbm-rv32_fix.sh` (lane script, not tracked).
+Generator: `sh test/fixtures/linker/riscv32/rebuild_fixtures.shs [--oracle]`.
