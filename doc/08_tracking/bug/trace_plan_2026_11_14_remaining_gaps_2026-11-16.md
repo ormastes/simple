@@ -61,10 +61,24 @@ and the graph wire DTO `TraceGraphLocatorV1.locator_kind` are now the closed enu
 - Plan 3.5 return fields: `level` is now on `TestQueryRow` (`TestLevel`, derived from the
   `test/NN_<level>/` path), and rows carry `case_key`. Still absent because the runner
   records only `case_name`/`phase`/`outcome` per event (`TraceCaseEvent`,
-  `std.common.traceability.case_events`): `test_definition_digest`, `binary_digest`,
-  `host/backend`, `started_at`, `duration`, `failure_code`, `artifact_refs`. Unblock:
-  the runner must first record those facts per attempt.
-- Perf (scoped query): `query_scoped_attempts` (`src/lib/nogc_sync_mut/test_runner/test_db_compat.spl:337`) calls `get_trace_case_events` once per (run, path), and each call re-decodes the whole `trace_case_events` table (`src/lib/nogc_sync_mut/database/test_extended/database.spl:380`), so cost is runs x paths x table size. Fix needs a per-run grouped read on `TestDatabaseExtended` (decode once, group by path); not done here because it adds a new DB API.
+  `std.common.traceability.case_events`). Closed 2026-11-18: events now carry optional facts
+  (`at_micros`, `failure`, `host`, `backend`), stored in the sidecar table
+  `trace_case_event_facts` (the strict 9-column event table and legacy databases are untouched; old
+  rows decode with every fact absent). `TestQueryRow` gains `started_at`, `duration` (finished minus
+  started event time), `failure`, `host`, `backend` as typed newtypes/`Option`, shown by CLI, MCP and
+  `explain`. Still absent: `test_definition_digest`, `binary_digest` (no cheap helper; hashing the
+  executable per event would dominate small cases), `artifact_refs`; `failure` is a clipped message
+  summary, there is no failure code. `level` of Windows backslash paths is recognised (char-loop
+  normalisation; `replace` of a backslash misbehaves on the seed, and a spec literal with a
+  backslash followed by a digit is lexed as an octal escape, so specs build such paths with `\`).
+  **Open gap (recording path):** `simple test` exits 2 when `SIMPLE_TRACE_CASE_EVENTS=1`
+  (`src/app/test_runner_new/test_runner_main.spl:1578-1583`, a deliberate fail-closed gate: frozen
+  source bytes and effective options are not yet bound to preparation). Facts are therefore recorded
+  only via the buildrunner path (`remote_test_runner_v1.spl`) or direct DB calls, not by a local
+  `simple test`; I verified emission by calling `emit_trace_case_event` directly. Unblock: bind the
+  frozen source and worker options to the preparation receipt and lift the gate. The failure
+  summary is clipped to 240 bytes on a character boundary.
+- Perf (scoped query), closed 2026-11-18: `TestDatabaseExtended.get_trace_case_events_by_path(run_id)` decodes the table once per run and groups by path; `query_scoped_attempts` now decodes once per run instead of once per (run, path), and `get_trace_case_events` reuses it. Equality with the per-path read is pinned in `test_query_cli_spec.spl`.
 - `expired` has no `TestQueryStatus` variant; it parses as `Unknown` and is
   never PASS (TESTDB-008), which is safe but not a distinct typed outcome.
 

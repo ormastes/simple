@@ -10,7 +10,7 @@ use std.io_runtime.{file_exists, dir_create_all, dir_remove_all, dir_list_or_emp
 use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_modified_time}
 use std.database.test_extended.database.{TestDatabaseExtended}
 use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
-use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName}
 use app.test_runner_new.test_query_cli.{TestDbFilePath, parse_test_query_args, execute_test_query, execute_test_query_with_bug_db}
 use app.traceability.test_query_scope_v1.{TestScopeBugDbPath, run_scoped_test_query}
 use std.common.traceability.run_request.{TraceRunRequest}
@@ -393,4 +393,37 @@ describe "simple_test_query scoped by bug, requirement and levels":
         expect(file_read(base + ".sdn") == bytes_before).to_equal(true)
         expect(file_modified_time(base + ".sdn")).to_equal(mtime_before)
         expect(dir_list_or_empty(dir).len()).to_equal(listing_before)
+        dir_remove_all(dir)
+
+describe "simple_test_query attempt facts":
+    it "shapes started_at, duration, host, backend and failure from the saved TestDB, with the absent marker for legacy rows":
+        # @req TESTDB-009 TESTDB-003
+        val dir = "build/testdb_facts_probe"
+        dir_remove_all(dir)
+        dir_create_all(dir)
+        val base = dir + "/test_db"
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(base + ".sdn"), current_run_id: "")
+        val run_id = owner.start_run()
+        val facts_start = TraceCaseFacts(at: Some(TestEventAtMicros(value: 2000)), host: Some(TestHostTriple(value: "x86_64-windows")), backend: Some(TestBackendName(value: "interpreter")))
+        val facts_end = TraceCaseFacts(at: Some(TestEventAtMicros(value: 2750)), failure: Some(TestFailureSummary(value: "boom")))
+        val events = [TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished", facts: Some(facts_start)),
+            TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "failed", facts: Some(facts_end))]
+        match owner.db.record_trace_case_events(run_id, "t/a_spec.spl", events):
+            case Ok(_): pass
+            case Err(reason): fail("fixture events rejected: {reason}")
+        match owner.db.record_trace_case_events(run_id, "t/b_spec.spl", [TraceCaseEvent("old", "started", "not_finished"), TraceCaseEvent("old", "finished", "passed")]):
+            case Ok(_): pass
+            case Err(reason): fail("fixture events rejected: {reason}")
+        match owner.save():
+            case Ok(_): pass
+            case Err(reason): fail("fixture save failed: {reason}")
+        val shaped = match test_query_tool_run_at(test_query_tool_parse_request(_body("\"path\":\"t/a_spec.spl\",\"name\":\"adds\"")).unwrap(), base):
+            case Ok(page): test_query_shape_result(page)
+            case Err(error): fail("tool query failed: {test_query_error_text(error)}")
+        expect(shaped).to_contain("started_at_micros\tduration_micros\thost\tbackend\tfailure")
+        expect(shaped).to_contain("\t2000\t750\tx86_64-windows\tinterpreter\tboom")
+        val legacy = match test_query_tool_run_at(test_query_tool_parse_request(_body("\"path\":\"t/b_spec.spl\",\"name\":\"old\"")).unwrap(), base):
+            case Ok(page): test_query_shape_result(page)
+            case Err(error): fail("tool query failed: {test_query_error_text(error)}")
+        expect(legacy).to_contain("\t-\t-\t-\t-\t-")
         dir_remove_all(dir)

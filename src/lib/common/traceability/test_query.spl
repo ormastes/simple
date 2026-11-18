@@ -1,7 +1,7 @@
 # Pure read-only TestDB query model: typed rows, qualification and pagination.
 # Rows describe unverified framework observations; only a Passed status can
 # qualify, and every absent identity is an explicit Missing variant.
-use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestFailureSummary, TestHostTriple, TestBackendName}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
@@ -97,6 +97,14 @@ pub struct TestScopedQuery:
     limit: TestQueryLimit
     cursor: TestQueryCursor?
 
+# Plan 3.5 attempt facts. Absent (None) for events recorded before the runner
+# captured them. binary_digest and test_definition_digest are not recorded.
+pub struct TestStartedAtMicros:
+    value: i64
+
+pub struct TestDurationMicros:
+    value: i64
+
 pub struct TestQueryRow:
     case_key: TestCaseKey
     level: TestLevel
@@ -106,6 +114,11 @@ pub struct TestQueryRow:
     status: TestQueryStatus
     qualification: TestQualification
     provenance: TestEvidenceProvenance
+    started_at: TestStartedAtMicros? = None
+    duration: TestDurationMicros? = None
+    failure: TestFailureSummary? = None
+    host: TestHostTriple? = None
+    backend: TestBackendName? = None
 
 pub enum TestQueryTruncation:
     Complete
@@ -146,8 +159,17 @@ pub fn parse_test_query_status(raw: text) -> TestQueryStatus:
         case "expired": TestQueryStatus.Expired
         case _: TestQueryStatus.Unknown(raw: raw)
 
+fn _slash_normalised(raw: text) -> text:
+    var out = ""
+    for ch in raw.chars():
+        if ch == "\\":
+            out = out + "/"
+        else:
+            out = out + ch
+    out
+
 pub fn test_level_of_path(path: TestCasePath) -> TestLevel:
-    val p = path.value
+    val p = _slash_normalised(path.value)
     val at = p.index_of("test/") ?? -1
     if at < 0 or (at > 0 and p.substring(at - 1, at) != "/"):
         return TestLevel.Other
@@ -226,9 +248,38 @@ pub fn qualify_test_query_status(status: TestQueryStatus) -> TestQualification:
         case TestQueryStatus.Passed: TestQualification.Pass
         case _: TestQualification.NotPass
 
+fn _fact_at(facts: TraceCaseFacts?) -> i64:
+    match facts:
+        case Some(found):
+            match found.at:
+                case Some(at): at.value
+                case None: -1
+        case None: -1
+
+# Started facts own host/backend; the finished event owns the failure summary.
 fn _row(key: TestCaseKey, run_id: TestRunId, planned: TestPlannedCaseIdentity,
-        attempt: TestAttemptIdentity, status: TestQueryStatus) -> TestQueryRow:
-    TestQueryRow(case_key: key, level: test_level_of_path(key.path), run_id: run_id, planned_case: planned, attempt: attempt,
+        attempt: TestAttemptIdentity, status: TestQueryStatus,
+        start: TraceCaseFacts? = None, finish: TraceCaseFacts? = None) -> TestQueryRow:
+    val began = _fact_at(start)
+    val ended = _fact_at(finish)
+    var started_at: TestStartedAtMicros? = None
+    if began >= 0:
+        started_at = Some(TestStartedAtMicros(value: began))
+    var duration: TestDurationMicros? = None
+    if began >= 0 and ended >= began:
+        duration = Some(TestDurationMicros(value: ended - began))
+    var failure: TestFailureSummary? = None
+    var host: TestHostTriple? = None
+    var backend: TestBackendName? = None
+    match finish:
+        case Some(facts): failure = facts.failure
+        case None: pass
+    match start:
+        case Some(facts):
+            host = facts.host
+            backend = facts.backend
+        case None: pass
+    TestQueryRow(started_at: started_at, duration: duration, failure: failure, host: host, backend: backend, case_key: key, level: test_level_of_path(key.path), run_id: run_id, planned_case: planned, attempt: attempt,
         status: status, qualification: qualify_test_query_status(status),
         provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
 
@@ -239,26 +290,65 @@ pub fn project_run_case_rows(key: TestCaseKey, run_id: TestRunId,
         planned: TestPlannedCaseIdentity, events: [TraceCaseEvent]) -> [TestQueryRow]:
     var rows: [TestQueryRow] = []
     var open = false
+    var open_facts: TraceCaseFacts? = None
     var ordinal = 0
     for event in events:
         if event.case_name != key.name.value:
             continue
         if event.phase == "started":
             if open:
-                rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), TestQueryStatus.NotFinished))
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), TestQueryStatus.NotFinished, open_facts, None))
                 ordinal = ordinal + 1
             open = true
+            open_facts = event.facts
         else:
             val status = parse_test_query_status(event.outcome)
             if open:
-                rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), status))
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), status, open_facts, event.facts))
                 ordinal = ordinal + 1
                 open = false
+                open_facts = None
             else:
-                rows.push(_row(key, run_id, planned, TestAttemptIdentity.Missing, status))
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.Missing, status, None, event.facts))
     if open:
-        rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), TestQueryStatus.NotFinished))
+        rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), TestQueryStatus.NotFinished, open_facts, None))
     rows
+
+fn _fact_or_dash(value: text) -> text:
+    if value == "":
+        return "-"
+    var out = ""
+    for ch in value.chars():
+        if ch == "\n" or ch == "\r" or ch == "\t" or ch == "|" or ch == ",":
+            out = out + " "
+        else:
+            out = out + ch
+    out
+
+# CLI/MCP share these five cells, in order: started_at_micros, duration_micros,
+# host, backend, failure. "-" marks an absent fact.
+pub fn test_query_row_fact_cells(row: TestQueryRow) -> [text]:
+    var started = "-"
+    match row.started_at:
+        case Some(at): started = at.value.to_text()
+        case None: pass
+    var duration = "-"
+    match row.duration:
+        case Some(span): duration = span.value.to_text()
+        case None: pass
+    var host = "-"
+    match row.host:
+        case Some(found): host = _fact_or_dash(found.value)
+        case None: pass
+    var backend = "-"
+    match row.backend:
+        case Some(found): backend = _fact_or_dash(found.value)
+        case None: pass
+    var failure = "-"
+    match row.failure:
+        case Some(found): failure = _fact_or_dash(found.value)
+        case None: pass
+    [started, duration, host, backend, failure]
 
 fn _test_query_invalid(detail: text) -> TestQueryError:
     TestQueryError(kind: TestQueryErrorKind.InvalidQuery, detail: detail)

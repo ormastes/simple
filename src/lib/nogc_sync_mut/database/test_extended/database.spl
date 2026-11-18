@@ -5,7 +5,7 @@
 # (bootstrap runtime cannot resolve impl block methods from separate modules)
 
 use std.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
-use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName}
 use std.common.traceability.run_plan.{TraceRunPlan}
 use std.common.traceability.run_plan_codec.{encode_trace_run_plan, decode_trace_run_plan}
 use std.common.traceability.run_request.{materialize_trace_run_plan}
@@ -90,6 +90,70 @@ fn decode_trace_stored_event(row: SdnRow) -> Result<TraceStoredEvent, text>:
         return Err("invalid stored framework outcome")
     Ok(TraceStoredEvent(event_id: event_id, run_id: run_id, test_path: test_path,
         ordinal: ordinal, event: TraceCaseEvent(case_name: name, phase: phase, outcome: outcome)))
+
+# Facts live in a sidecar table so the strict 9-column event table (and every
+# legacy database) keeps its exact schema. Absent table or row = absent facts.
+fn trace_fact_columns() -> [text]:
+    ["event_id", "at_micros", "failure", "host", "backend"]
+
+fn trace_fact_row(event_id: text, facts: TraceCaseFacts) -> Result<SdnRow, text>:
+    val row = SdnRow.empty()
+    row.set("event_id", event_id)
+    var at_text = ""
+    match facts.at:
+        case Some(at): at_text = at.value.to_text()
+        case None: pass
+    row.set("at_micros", at_text)
+    var failure = ""
+    match facts.failure:
+        case Some(found): failure = encode_trace_storage_scalar(found.value)?
+        case None: pass
+    row.set("failure", failure)
+    var host = ""
+    match facts.host:
+        case Some(found): host = encode_trace_storage_scalar(found.value)?
+        case None: pass
+    row.set("host", host)
+    var backend = ""
+    match facts.backend:
+        case Some(found): backend = encode_trace_storage_scalar(found.value)?
+        case None: pass
+    row.set("backend", backend)
+    Ok(row)
+
+fn trace_fact_row_decode(row: SdnRow) -> Result<TraceCaseFacts, text>:
+    var at: TestEventAtMicros? = None
+    val at_text = row.get("at_micros") ?? ""
+    if at_text != "":
+        val micros = at_text.parse_int() ?? -1
+        if micros < 0 or micros.to_text() != at_text:
+            return Err("stored trace event fact at_micros is invalid")
+        at = Some(TestEventAtMicros(value: micros))
+    var failure: TestFailureSummary? = None
+    val failure_text = row.get("failure") ?? ""
+    if failure_text != "":
+        failure = Some(TestFailureSummary(value: decode_trace_storage_scalar(failure_text)?))
+    var host: TestHostTriple? = None
+    val host_text = row.get("host") ?? ""
+    if host_text != "":
+        host = Some(TestHostTriple(value: decode_trace_storage_scalar(host_text)?))
+    var backend: TestBackendName? = None
+    val backend_text = row.get("backend") ?? ""
+    if backend_text != "":
+        backend = Some(TestBackendName(value: decode_trace_storage_scalar(backend_text)?))
+    Ok(TraceCaseFacts(at: at, failure: failure, host: host, backend: backend))
+
+fn trace_fact_index(db: SdnDatabase) -> Result<Dict<text, TraceCaseFacts>, text>:
+    var index: Dict<text, TraceCaseFacts> = {}
+    match db.get_table("trace_case_event_facts"):
+        case Some(table):
+            for row in table.rows:
+                val fact_id = row.get("event_id") ?? ""
+                if index.contains_key(fact_id):
+                    return Err("duplicate stored trace event fact identity")
+                index[fact_id] = trace_fact_row_decode(row)?
+        case None: pass
+    Ok(index)
 
 # One decoder for reads, append ordering and frozen-plan ordering. Decode keys
 # before duplicate detection so v1/v2 representations cannot evade replay guards.
@@ -364,24 +428,54 @@ class TestDatabaseExtended:
             # bounds and event semantics, before changing table rows or indexes.
             decode_trace_stored_event(row)?
             pending.push(row)
+        var fact_table = match self.db.get_table("trace_case_event_facts"):
+            case Some(existing): existing
+            case None: SdnTable.new("trace_case_event_facts", trace_fact_columns())
+        var fact_rows: [SdnRow] = []
+        for i in 0..events.len():
+            match events[i].facts:
+                case Some(facts): fact_rows.push(trace_fact_row(encode_trace_storage_scalar(prefix + "{i}")?, facts)?)
+                case None: pass
         for row in pending:
             table.add_row(row)
         self.db.set_table("trace_case_events", table)
+        if fact_rows.len() > 0:
+            for row in fact_rows:
+                fact_table.add_row(row)
+            self.db.set_table("trace_case_event_facts", fact_table)
         Ok(())
 
     # Read framework observations without upgrading their evidence validity.
     fn get_trace_case_events(run_id: text, test_path: text) -> Result<[TraceCaseEvent], text>:
         if run_id == "" or test_path == "":
             return Err("trace event lookup identity is incomplete")
-        var events: [TraceCaseEvent] = []
+        val grouped = self.get_trace_case_events_by_path(run_id)?
+        match grouped.get(test_path):
+            case Some(events): Ok(events)
+            case None: Ok([])
+
+    # One decode of the whole table for a run, grouped by test path. Scoped
+    # queries use this instead of one full-table decode per (run, path).
+    fn get_trace_case_events_by_path(run_id: text) -> Result<Dict<text, [TraceCaseEvent]>, text>:
+        if run_id == "":
+            return Err("trace event lookup identity is incomplete")
+        var grouped: Dict<text, [TraceCaseEvent]> = {}
         val table = match self.db.get_table("trace_case_events"):
             case Some(existing): existing
-            case None: return Ok(events)
+            case None: return Ok(grouped)
         val stored_events = decode_trace_stored_events(table)?
+        val facts = trace_fact_index(self.db)?
         for stored in stored_events:
-            if stored.run_id == run_id and stored.test_path == test_path:
-                events.push(stored.event)
-        Ok(events)
+            if stored.run_id != run_id:
+                continue
+            var event = stored.event
+            match facts.get(encode_trace_storage_scalar(stored.event_id)?):
+                case Some(found): event = TraceCaseEvent(case_name: event.case_name, phase: event.phase, outcome: event.outcome, facts: Some(found))
+                case None: pass
+            var bucket = grouped.get(stored.test_path) ?? []
+            bucket.push(event)
+            grouped[stored.test_path] = bucket
+        Ok(grouped)
     interner: StringInterner
     next_file_id: i64
     next_suite_id: i64

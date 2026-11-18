@@ -3,12 +3,48 @@
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.spec.evidence_path.{test_evidence_path_v1}
 use std.nogc_sync_mut.io.file_ops.{file_append}
-use std.common.traceability.case_events.{TraceCaseEvent, encode_trace_case_event}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName, encode_trace_case_event}
+use std.nogc_sync_mut.io.env_ops.{host_arch, host_os}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
+use std.nogc_sync_mut.spec.env_detect.{get_runtime_mode}
 
-pub fn emit_trace_case_event(case_name: text, phase: text, outcome: text):
+# host/backend are process constants: resolve once (host_arch/host_os may shell out).
+var _trace_host_cache: text = ""
+var _trace_backend_cache: text = ""
+
+# At most 240 bytes, cut on a character boundary so a multibyte character is
+# dropped whole instead of leaving invalid UTF-8 that would corrupt the stream.
+pub fn clip_failure_summary(failure: text) -> text:
+    var out = ""
+    for ch in failure.chars():
+        if out.byte_len() + ch.byte_len() > 240:
+            break
+        out = out + ch
+    out
+
+# binary_digest is deliberately not recorded: no cheap helper exists (hashing
+# the running executable per event would dominate small cases).
+fn _trace_facts(failure: text) -> TraceCaseFacts:
+    if _trace_host_cache == "":
+        _trace_host_cache = host_arch() + "-" + host_os()
+        _trace_backend_cache = get_runtime_mode()
+        if _trace_backend_cache == "":
+            _trace_backend_cache = "unknown"
+    var at: TestEventAtMicros? = None
+    val micros = time_sample_unix_micros_or_failure()
+    if micros >= 0:
+        at = Some(TestEventAtMicros(value: micros))
+    var summary: TestFailureSummary? = None
+    if failure != "":
+        summary = Some(TestFailureSummary(value: clip_failure_summary(failure)))
+    TraceCaseFacts(at: at, failure: summary, host: Some(TestHostTriple(value: _trace_host_cache)),
+        backend: Some(TestBackendName(value: _trace_backend_cache)))
+
+# `failure` is the failed attempt's error summary; "" when there is none.
+pub fn emit_trace_case_event(case_name: text, phase: text, outcome: text, failure: text = ""):
     if (env_get("SIMPLE_TRACE_CASE_EVENTS") ?? "") != "1":
         return
-    val payload = encode_trace_case_event(TraceCaseEvent(case_name, phase, outcome))
+    val payload = encode_trace_case_event(TraceCaseEvent(case_name: case_name, phase: phase, outcome: outcome, facts: Some(_trace_facts(failure))))
     # The runner already gives each native/interpreter child its own result
     # file. Append independently parseable canonical SDN documents beside it;
     # this retains earlier events if the child crashes or stdout is truncated.

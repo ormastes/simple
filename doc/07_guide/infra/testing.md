@@ -1441,9 +1441,15 @@ resolved paths is returned, attempts kept separate. `--levels unit,integration,s
 narrows by the `test/NN_<level>/` tree of the path (`--levels` needs `--bug` or `--requirement`;
 scope flags exclude a `<path>::<case>`). Each row carries `case` and `level`; the cursor is bound
 to the scope, levels and run. A requirement no recorded spec claims is exit 1 (no rows).
-Not yet recorded per attempt, so not returned: test-definition digest, binary digest,
-host/backend, started_at, duration, failure_code, artifact refs
-(`doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md` section 4).
+Per-attempt facts (plan 3.5), appended after `provenance` in table, sdn and MCP output and
+shown by `explain`: `started_at_micros`, `duration_micros` (finished minus started event time),
+`host` (`<arch>-<os>`), `backend` (runtime mode of the test process) and `failure` (the failed
+attempt's error summary, clipped to 240 bytes). The runner records them on each trace case event
+(`SIMPLE_TRACE_CASE_EVENTS=1`) and the TestDB keeps them in the sidecar table
+`trace_case_event_facts`; `-` marks a fact that was not recorded (events written before this, or a
+clock that failed), never zero. **Open gap:** `simple test` currently exits 2 when `SIMPLE_TRACE_CASE_EVENTS=1` (`src/app/test_runner_new/test_runner_main.spl:1578-1583`, frozen source bytes and effective options are not yet bound to preparation), so facts are today recorded only through the buildrunner path (`remote_test_runner_v1.spl`) or direct `record_trace_case_events` calls, not by a local `simple test`. Unblock: bind the frozen source bytes and worker options to the preparation receipt and lift that gate. Still not recorded, so not returned: test-definition digest,
+binary digest (no cheap helper: hashing the executable per event would dominate small cases),
+artifact refs (`doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md` section 4).
 
 Defaults: table format, `--limit 50` (explain 1000). The database path is fixed
 at `doc/08_tracking/test/test_db.sdn`.
