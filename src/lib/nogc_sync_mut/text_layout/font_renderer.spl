@@ -1198,7 +1198,16 @@ class GlyphCache:
 # never `self.atlas_parks[i].field = x` -- because in-place mutation of a
 # nested place clones the container on the interpreter lane (see
 # doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md).
-pub val FONT_ATLAS_PARK_MAX: i64 = 4
+#
+# 11 parks plus the active atlas is 12 owners: three generic families (sans,
+# serif, monospace) in regular, bold, italic and bold italic. It was 4, and a
+# page that cycles through more than five faces then wiped an owner on every
+# return: the sequence re-seeded, every glyph was inserted again, and the
+# Vulkan lane repacked the whole atlas per run (36 full packs for 36
+# paragraphs in nine faces, 190 s of a 219 s render; 9 full packs after).
+# Keep `VULKAN_FONT_ATLAS_MIRROR_MAX` at least this large: an owner the
+# producer still holds but the consumer has dropped repacks in full too.
+pub val FONT_ATLAS_PARK_MAX: i64 = 11
 
 class FontAtlasPark:
     key: text
@@ -1827,10 +1836,22 @@ class FontRenderer:
 
     # Atlas cells inserted after `_stage_text_active` published its batch: name
     # them in the staged dirty rects under a new atlas generation.
+    #
+    # The per-owner sequence moves ONCE per staged batch, however many passes
+    # add cells to it. One LCD run can publish three times (the staging pass,
+    # the phase cells of `_lcd_apply_pen_phases`, the phase-0 cells of
+    # `_lcd_resolve_deferred_cells`), and a second step made the batch read
+    # `host + 2` to a consumer, which is its "a dirty batch never reached me"
+    # signal: the Vulkan lane repacked all 1,048,576 atlas pixels for every
+    # run that had both a phased and a phase-0 cell. A batch that already
+    # carries dirty rects at the current sequence has taken its step; its
+    # rects simply grow.
     me _lcd_publish_cells(inserted: [FontRenderQuad]):
         if inserted.len() > 0:
+            val stepped = self.staged_dirty_rects.len() > 0 and self.staged_atlas_owner_sequence == self.atlas_owner_sequence
             self.atlas_generation = _next_font_atlas_dependency_generation()
-            self.atlas_owner_sequence = self.atlas_owner_sequence + 1
+            if not stepped:
+                self.atlas_owner_sequence = self.atlas_owner_sequence + 1
             self.atlas_unpublished_mutation = false
             self.staged_atlas_generation = self.atlas_generation
             self.staged_atlas_owner_sequence = self.atlas_owner_sequence
