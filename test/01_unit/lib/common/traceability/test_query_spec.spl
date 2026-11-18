@@ -1,7 +1,8 @@
 # Purpose and audience: read-only TestDB query contract for CLI/MCP facade authors and evidence reviewers.
 # @req TESTDB-001 TESTDB-002 TESTDB-003 TESTDB-004 TESTDB-007 TESTDB-008 TESTDB-010
 use std.spec.*
-use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName, decode_trace_case_events, encode_trace_case_event}
+use std.nogc_sync_mut.spec.trace_events.{clip_failure_summary}
 use std.common.traceability.test_query.{
     TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseId,
     TestPlannedCaseIdentity, TestAttemptIdentity, TestQueryStatus, TestQualification,
@@ -9,7 +10,7 @@ use std.common.traceability.test_query.{
     TestQueryTruncation, TestQueryCoverage, TestQueryErrorKind, TestLevel, TestScopeId, TestQueryScope,
     TestScopedQuery, test_level_of_path, parse_test_levels, test_level_name, test_path_in_levels, TestLevelMatch,
     scoped_test_query_identity, parse_test_query_status, qualify_test_query_status, project_run_case_rows,
-    paginate_test_query_rows
+    paginate_test_query_rows, test_query_row_fact_cells
 }
 
 """
@@ -328,3 +329,94 @@ describe "TestDB scoped query levels":
         expect(a.case_key.path.value).to_equal("scope:bug:b1")
         expect(scoped_test_query_identity(other_scope).case_key.path.value).to_equal("scope:requirement:b1")
         expect(scoped_test_query_identity(other_levels).case_key.name.value == a.case_key.name.value).to_equal(false)
+
+fn _facts(at: i64, failure: text) -> TraceCaseFacts:
+    var summary: TestFailureSummary? = None
+    if failure != "":
+        summary = Some(TestFailureSummary(value: failure))
+    TraceCaseFacts(at: Some(TestEventAtMicros(value: at)), failure: summary,
+        host: Some(TestHostTriple(value: "x86_64-windows")), backend: Some(TestBackendName(value: "interpreter")))
+
+describe "TestDB query attempt facts":
+    it "derives started_at, duration, host, backend and failure from the recorded events":
+        # @req TESTDB-001
+        step("Project a failed attempt whose events carry timestamps and a failure summary")
+        val events = [
+            TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished", facts: Some(_facts(1000, ""))),
+            TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "failed", facts: Some(_facts(4500, "expected 2 got 3")))]
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), events)
+        step("The row carries start, duration (finish minus start), host/backend and failure")
+        expect(rows.len()).to_equal(1)
+        val cells = test_query_row_fact_cells(rows[0])
+        expect(cells[0]).to_equal("1000")
+        expect(cells[1]).to_equal("3500")
+        expect(cells[2]).to_equal("x86_64-windows")
+        expect(cells[3]).to_equal("interpreter")
+        expect(cells[4]).to_equal("expected 2 got 3")
+
+    it "leaves every fact absent for events recorded without facts":
+        # @req TESTDB-003
+        step("Legacy events have no facts")
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), [_started("adds"), _finished("adds", "passed")])
+        step("Each fact cell is the explicit absent marker, never a zero")
+        expect(test_query_row_fact_cells(rows[0]).join("|")).to_equal("-|-|-|-|-")
+
+    it "reports no duration for an unfinished attempt and keeps retries separate":
+        # @req TESTDB-007
+        val events = [
+            TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished", facts: Some(_facts(10, ""))),
+            TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished", facts: Some(_facts(20, ""))),
+            TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "passed", facts: Some(_facts(25, "")))]
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), events)
+        expect(rows.len()).to_equal(2)
+        expect(test_query_row_fact_cells(rows[0])[1]).to_equal("-")
+        expect(test_query_row_fact_cells(rows[1])[1]).to_equal("5")
+
+    it "round-trips facts through the event codec and decodes old events without them":
+        # @req TESTDB-003
+        val event = TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "failed", facts: Some(_facts(77, "boom")))
+        val decoded = match decode_trace_case_events("[" + encode_trace_case_event(event) + "]"):
+            case Ok(items): items
+            case Err(reason): fail("decode failed: {reason}")
+        match decoded[0].facts:
+            case Some(facts):
+                match facts.at:
+                    case Some(at): expect(at.value).to_equal(77)
+                    case None: fail("at_micros lost")
+                match facts.failure:
+                    case Some(failure): expect(failure.value).to_equal("boom")
+                    case None: fail("failure lost")
+            case None: fail("facts lost")
+        val legacy = match decode_trace_case_events("[" + encode_trace_case_event(TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished")) + "]"):
+            case Ok(items): items
+            case Err(reason): fail("legacy decode failed: {reason}")
+        expect(legacy[0].facts.?).to_equal(false)
+        step("A wrongly typed or unknown extra field is rejected")
+        expect(decode_trace_case_events("[{schema: \"simple.trace.case-event/v1\", case_name: \"a\", phase: \"started\", outcome: \"not_finished\", failure: 5}]").?).to_equal(false)
+        expect(decode_trace_case_events("[{schema: \"simple.trace.case-event/v1\", case_name: \"a\", phase: \"started\", outcome: \"not_finished\", bogus: \"x\"}]").?).to_equal(false)
+        expect(decode_trace_case_events("[{schema: \"simple.trace.case-event/v1\", case_name: \"a\", phase: \"started\", outcome: \"not_finished\", at_micros: \"x\"}]").?).to_equal(false)
+
+describe "TestDB scoped query Windows paths":
+    it "recognises the level of a backslash path":
+        # @req TESTDB-010
+        step("Build backslash paths with \x5c: the seed lexes a literal backslash-zero as an octal escape")
+        val bs = "\x5c"
+        expect(test_level_of_path(TestCasePath(value: "C:" + bs + "dev" + bs + "simple" + bs + "test" + bs + "01_unit" + bs + "lib" + bs + "a_spec.spl"))).to_equal(TestLevel.Unit)
+        expect(test_level_of_path(TestCasePath(value: "test" + bs + "03_system" + bs + "a_spec.spl"))).to_equal(TestLevel.System)
+        expect(test_level_of_path(TestCasePath(value: "C:" + bs + "dev" + bs + "contest" + bs + "01_unit" + bs + "a_spec.spl"))).to_equal(TestLevel.Other)
+
+describe "failure summary clipping":
+    it "cuts on a character boundary so a multibyte character straddling byte 240 is dropped whole":
+        # @req TESTDB-003
+        val e_acute = "\xc3\xa9"
+        step("239 ASCII bytes then a 2-byte character: bytes 239..240 straddle the 240-byte limit")
+        val straddle = "a".repeat(239) + e_acute + "tail"
+        val clipped = clip_failure_summary(straddle)
+        expect(clipped.byte_len()).to_equal(239)
+        expect(clipped).to_equal("a".repeat(239))
+        step("The clipped text survives the event codec (valid UTF-8)")
+        val event = TraceCaseEvent(case_name: "c", phase: "finished", outcome: "failed", facts: Some(_facts(1, clipped)))
+        expect(decode_trace_case_events("[" + encode_trace_case_event(event) + "]").?).to_equal(true)
+        step("A character ending exactly at byte 240 is kept; short text is untouched")
+        expect(clip_failure_summary("a".repeat(238) + e_acute).byte_len()).to_equal(240)
+        expect(clip_failure_summary("short")).to_equal("short")

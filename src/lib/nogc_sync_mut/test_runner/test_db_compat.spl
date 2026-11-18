@@ -331,12 +331,14 @@ class RunnerTestDb:
         var rows: [TestQueryRow] = []
         for run_id in run_ids:
             val plan = self.run_plan_for_query(run_id)?
+            # One decode of the trace table per run, grouped by path.
+            val by_path = match self.db.get_trace_case_events_by_path(run_id):
+                case Ok(grouped): grouped
+                case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
             for path in paths:
                 if test_path_in_levels(path, scoped.levels) == TestLevelMatch.Outside:
                     continue
-                val events = match self.db.get_trace_case_events(run_id, path.value):
-                    case Ok(items): items
-                    case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+                val events = by_path.get(path.value) ?? []
                 var names: [text] = []
                 for event in events:
                     if not names.contains(event.case_name):

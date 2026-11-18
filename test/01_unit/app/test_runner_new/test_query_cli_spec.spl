@@ -29,7 +29,7 @@ use std.database.test_extended.database.{TestDatabaseExtended}
 use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write, file_modified_time}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, dir_list}
-use std.common.traceability.case_events.{TraceCaseEvent}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName}
 use std.common.traceability.test_query.{
     TestLevel, TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit, TestQueryCursor, TestQuery,
     TestQueryStatus, TestQualification, TestQueryRow, TestQueryPage, TestQueryTruncation,
@@ -175,7 +175,7 @@ describe "test query rendering":
         val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())],
             TestQueryTruncation.Complete, TestQueryCoverage.Full)
         val out = render_test_query_page(page, TestQueryFormat.Sdn)
-        expect(out).to_contain("test_query_rows |case, level, run, planned_case, attempt, status, qualification, provenance|")
+        expect(out).to_contain("test_query_rows |case, level, run, planned_case, attempt, status, qualification, provenance, started_at_micros, duration_micros, host, backend, failure|")
         expect(out).to_contain("    test/a_spec.spl::adds, other, run_1, case_9, 0, passed, pass")
 
     it "announces truncation with a partial marker and the next cursor":
@@ -463,4 +463,86 @@ describe "scoped test query against a real database file":
         expect(file_read(db.value) == before).to_equal(true)
         expect(file_modified_time(db.value)).to_equal(mtime)
         expect(dir_list(SCRATCH_DIR).len()).to_equal(listing)
+        dir_remove_all(SCRATCH_DIR)
+
+fn _facts(at: i64, failure: text) -> TraceCaseFacts:
+    var summary: TestFailureSummary? = None
+    if failure != "":
+        summary = Some(TestFailureSummary(value: failure))
+    TraceCaseFacts(at: Some(TestEventAtMicros(value: at)), failure: summary,
+        host: Some(TestHostTriple(value: "x86_64-windows")), backend: Some(TestBackendName(value: "interpreter")))
+
+# unit_a carries facts; unit_c is a legacy path recorded without any.
+fn _write_facts_fixture() -> RunnerTestDb:
+    dir_remove_all(SCRATCH_DIR)
+    dir_create_all(SCRATCH_DIR)
+    var owner = RunnerTestDb(db: TestDatabaseExtended.create(SCRATCH_DIR + "/test_db.sdn"), current_run_id: "")
+    val request = TraceRunRequest(subject_id: "subject", configuration_id: "config", expectation_id: "expect", binary_id: "binary", cases: [
+        TracePlannedCase(case_id: "c1", test_path: "test/01_unit/f_a_spec.spl", case_name: "adds", test_definition_id: "d1", lane_id: "lane"),
+        TracePlannedCase(case_id: "c3", test_path: "test/01_unit/f_c_spec.spl", case_name: "plain", test_definition_id: "d3", lane_id: "lane")])
+    val plan = match owner.prepare_trace_request(request):
+        case Ok(planned): planned
+        case Err(reason): fail("fixture plan rejected: {reason}")
+    val with_facts = [
+        TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished", facts: Some(_facts(1000, ""))),
+        TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "failed", facts: Some(_facts(4500, "expected 2 got 3")))]
+    match owner.db.record_trace_case_events(plan.run_id, "test/01_unit/f_a_spec.spl", with_facts):
+        case Ok(_): pass
+        case Err(reason): fail("fixture events rejected: {reason}")
+    match owner.db.record_trace_case_events(plan.run_id, "test/01_unit/f_c_spec.spl", [TraceCaseEvent(case_name: "plain", phase: "started", outcome: "not_finished"), TraceCaseEvent(case_name: "plain", phase: "finished", outcome: "passed")]):
+        case Ok(_): pass
+        case Err(reason): fail("fixture events rejected: {reason}")
+    match owner.save():
+        case Ok(_): pass
+        case Err(reason): fail("fixture save failed: {reason}")
+    owner
+
+describe "test query attempt facts against a real database file":
+    it "persists facts beside the event table and shows them in table, sdn and explain output":
+        # @req TESTDB-001 TESTDB-003
+        val owner = _write_facts_fixture()
+        val db = TestDbFilePath(value: SCRATCH_DIR + "/test_db.sdn")
+        step("Query the facted case from the reloaded file")
+        val table = execute_test_query_with_bug_db(_request(["query", "test/01_unit/f_a_spec.spl::adds"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
+        expect(table.text).to_contain("started_at_micros | duration_micros | host | backend | failure")
+        expect(table.text).to_contain("| 1000 | 3500 | x86_64-windows | interpreter | expected 2 got 3")
+        val sdn = execute_test_query_with_bug_db(_request(["query", "test/01_unit/f_a_spec.spl::adds", "--format", "sdn"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
+        expect(sdn.text).to_contain(", 1000, 3500, x86_64-windows, interpreter, expected 2 got 3")
+        val explain = execute_test_query_with_bug_db(_request(["explain", "test/01_unit/f_a_spec.spl::adds"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
+        expect(explain.text).to_contain("facts: started_at_micros=1000 duration_micros=3500 host=x86_64-windows backend=interpreter failure=expected 2 got 3")
+        step("A legacy case recorded without facts shows the absent marker, not zeros")
+        val legacy = execute_test_query_with_bug_db(_request(["query", "test/01_unit/f_c_spec.spl::plain"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
+        expect(legacy.text).to_contain("| - | - | - | - | -")
+        dir_remove_all(SCRATCH_DIR)
+
+    it "reads a run's events grouped by path with one decode and the same result as the per-path read":
+        # @req TESTDB-010
+        val owner = _write_facts_fixture()
+        val run_id = owner.db.list_runs("")[0].run_id
+        val grouped = match owner.db.get_trace_case_events_by_path(run_id):
+            case Ok(items): items
+            case Err(reason): fail("grouped read failed: {reason}")
+        expect(grouped.len()).to_equal(2)
+        for path in ["test/01_unit/f_a_spec.spl", "test/01_unit/f_c_spec.spl"]:
+            val single = match owner.db.get_trace_case_events(run_id, path):
+                case Ok(items): items
+                case Err(reason): fail("per-path read failed: {reason}")
+            val together = grouped.get(path) ?? []
+            expect(together.len()).to_equal(single.len())
+            expect(together.len()).to_equal(2)
+        step("A path with no events is absent from the grouped read")
+        expect(grouped.contains_key("test/01_unit/none_spec.spl")).to_equal(false)
+        dir_remove_all(SCRATCH_DIR)
+
+describe "test query attempt facts integrity":
+    it "rejects a duplicate fact row instead of overwriting the first":
+        # @req TESTDB-006
+        var owner = _write_facts_fixture()
+        val run_id = owner.db.list_runs("")[0].run_id
+        var table = match owner.db.db.get_table("trace_case_event_facts"):
+            case Some(existing): existing
+            case None: fail("facts table missing")
+        table.add_row(table.rows[0])
+        owner.db.db.set_table("trace_case_event_facts", table)
+        expect(owner.db.get_trace_case_events_by_path(run_id).is_err()).to_equal(true)
         dir_remove_all(SCRATCH_DIR)
