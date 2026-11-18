@@ -14,7 +14,7 @@ use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signe
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
-use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_is_monospace}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_is_monospace, browser_face_x_height_units}
 use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px, browser_face_ascent_descent_px, browser_normal_line_height_milli_px, browser_face_ascent_descent_milli_px, browser_face_ascent_descent_device_px}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
@@ -393,16 +393,32 @@ fn inline_box_shifted_descent(child_index: HtmlChildIndex, html_nodes: [HNode], 
         child = child_index.next_sibling[child]
     descent
 
-# `vertical-align: top | bottom | text-top | text-bottom` on an ATOMIC inline
-# (inline-block, replaced, widget): returns the keyword, or "" for every other
-# box. CSS 2.2 10.8 aligns the MARGIN box, so the margins are part of what is
-# placed and of the line height. Plain inline elements are not handled here.
+# `vertical-align: middle | top | bottom | text-top | text-bottom` on an ATOMIC
+# inline (inline-block, replaced, widget): returns the keyword, or "" for every
+# other box. CSS 2.2 10.8 aligns the MARGIN box, so the margins are part of what
+# is placed and of the line height. Plain inline elements are not handled here;
+# a replaced element or form control is atomic even where this engine still
+# carries `display: inline` for it.
 fn inline_atomic_valign(node: HNode, st: Style) -> text:
-    if node.tag == "#text" or st.display == "inline":
+    if node.tag == "#text" or (st.display == "inline" and not grid_item_is_replaced(node)):
         return ""
-    if st.vertical_align == "top" or st.vertical_align == "bottom" or st.vertical_align == "text-top" or st.vertical_align == "text-bottom":
+    if st.vertical_align == "middle" or st.vertical_align == "top" or st.vertical_align == "bottom" or st.vertical_align == "text-top" or st.vertical_align == "text-bottom":
         return st.vertical_align
     ""
+
+# Half the x-height of the line's own font in 1/64 px, rounded half up: the
+# distance above the baseline at which `vertical-align: middle` centres a
+# margin box. Blink: LayoutUnit::FromFloatRound(XHeight() / 2), with Skia's
+# x-height (OS/2 sxHeight; 0.56 of the ascent for a face without one).
+# Chrome 159: Liberation Sans 16px 271/64, 24px 406/64; Liberation Serif 16px
+# 235/64.
+fn inline_middle_half_x_height_64(st: Style) -> i32:
+    val units = browser_face_x_height_units(st.font_family, st.bold, st.font_style_italic)
+    if units.len() == 2:
+        val scaled = units[0] * (font_milli_of(st.font_size, st.font_size_milli) as i64) * 32
+        val per_px = units[1] * 1000
+        return ((scaled + per_px / 2) / per_px) as i32
+    (style_baseline_offset(st) * 56 * 32 + 50) / 100
 
 fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
     var out_bx = bx
@@ -421,13 +437,28 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     var bottom_margin_box_h = 0
     var baseline_i = 0
     var any_valign = false
+    # `middle` boxes: half the parent's x-height, and the furthest any margin
+    # box reaches above / below the baseline, all in 1/64 px (Chrome lands on
+    # fractions: a 10 px box in 16px Liberation Sans sits at y 4.765625).
+    var middle_half_x64 = -1
+    var middle_ascent64 = 0
+    var middle_descent64 = 0
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
         val node_valign = inline_atomic_valign(html_nodes[node_index], node_style)
         if node_valign != "":
-            any_valign = true
             val margin_box_h = margin_ts[baseline_i] + bh[node_index] + margin_bs[baseline_i]
+            if node_valign == "middle":
+                if middle_half_x64 < 0:
+                    middle_half_x64 = inline_middle_half_x_height_64(line_style)
+                if margin_box_h * 32 + middle_half_x64 > middle_ascent64:
+                    middle_ascent64 = margin_box_h * 32 + middle_half_x64
+                if margin_box_h * 32 - middle_half_x64 > middle_descent64:
+                    middle_descent64 = margin_box_h * 32 - middle_half_x64
+                baseline_i = baseline_i + 1
+                continue
+            any_valign = true
             if node_valign == "top":
                 if margin_box_h > top_margin_box_h:
                     top_margin_box_h = margin_box_h
@@ -474,9 +505,21 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         if node_descent > descent:
             descent = node_descent
         baseline_i = baseline_i + 1
+    # A `middle` margin box reaching past the strut and the baseline-aligned
+    # boxes sets the line's ascent / descent at its own fraction. The baseline
+    # every other box hangs from is that ascent snapped to a whole px; the
+    # line height is the snapped sum (Chrome 159, 16px serif, `margin:5px 0`
+    # on a 10 px box: ascent 14, descent 6.328, height 20.328 -> 20).
+    var line_ascent64 = ascent * 64
+    if middle_ascent64 > line_ascent64:
+        line_ascent64 = middle_ascent64
+        ascent = (middle_ascent64 + 32) / 64
+    var line_descent64 = descent * 64
+    if middle_descent64 > line_descent64:
+        line_descent64 = middle_descent64
     if g_layout_device_scale > 1:
-        align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, any_valign)
-    var resolved_height = ascent + descent
+        align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, any_valign, middle_ascent64)
+    var resolved_height = (line_ascent64 + line_descent64 + 32) / 64
     if line_height > resolved_height:
         resolved_height = line_height
     # A top-aligned box taller than the rest grows the line downwards; a
@@ -493,7 +536,14 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val node_index = nodes[baseline_i]
         val node_valign = inline_atomic_valign(html_nodes[node_index], styles[node_index])
         if node_valign != "":
-            val box_top = if node_valign == "top":
+            # middle: the margin box's midpoint sits half an x-height above
+            # the baseline; the fractional top is snapped half up, as Chrome
+            # snaps the box when painting.
+            val box_top = if node_valign == "middle":
+                aligned_line_y + margin_ts[baseline_i] + _floor_div_i32(
+                    line_ascent64 - middle_half_x64 - (margin_ts[baseline_i] + bh[node_index] + margin_bs[baseline_i]) * 32 + 32, 64
+                )
+            elif node_valign == "top":
                 line_y + margin_ts[baseline_i]
             elif node_valign == "bottom":
                 line_y + resolved_height - margin_bs[baseline_i] - bh[node_index]
@@ -1433,14 +1483,19 @@ fn _text_device_dy_record_subtree(child_index: HtmlChildIndex, html_nodes: [HNod
 # the line ascent from device struts, atomic and widget baselines at k x their
 # CSS value (boxes stay CSS-snapped). A line holding a top/bottom/text-top/
 # text-bottom box gets no correction: its baseline also depends on the line
-# height, which stays in CSS px.
-fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, has_valign: bool):
+# height, which stays in CSS px. A `middle` box has no baseline of its own; it
+# only raises the line ascent to `middle_ascent64` (1/64 CSS px) when its
+# margin box reaches above everything else.
+fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, has_valign: bool, middle_ascent64: i32):
     val k = g_layout_device_scale
     var ascent = inline_line_strut_baseline_offset_device(line_style, k)
     var i = 0
     while i < nodes.len():
         val node_index = nodes[i]
         val node_style = styles[node_index]
+        if inline_atomic_valign(html_nodes[node_index], node_style) == "middle":
+            i = i + 1
+            continue
         val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
         val widget_baseline = inline_widget_baseline_from_top(child_index, html_nodes, styles, node_index, bh)
         var node_ascent = 0
@@ -1455,6 +1510,9 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
         if node_ascent > ascent:
             ascent = node_ascent
         i = i + 1
+    val middle_ascent = (k * middle_ascent64 + 32) / 64
+    if middle_ascent > ascent:
+        ascent = middle_ascent
     val line_delta = if has_valign: 0 else: ascent - k * css_ascent
     i = 0
     while i < nodes.len():
