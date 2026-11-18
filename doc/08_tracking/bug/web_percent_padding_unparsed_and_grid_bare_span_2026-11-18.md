@@ -5,7 +5,10 @@ Found 2026-11-18 while fixing grid item margins (Chrome 159 oracle, 900x2000,
 `test/01_unit/browser_engine/percent_padding_grid_span_chrome159_spec.spl`),
 gaps 3 to 7 on 2026-11-19 (spec
 `test/01_unit/browser_engine/grid_auto_rows_stretch_paint_padding_chrome159_spec.spl`,
-0/31 on base, 31/31 now). The residue is listed at the end.
+0/31 on base, 31/31 now), gaps 8 and 9 on 2026-11-19 (spec
+`test/01_unit/browser_engine/layout_residuals_chrome159_spec.spl`). Section
+10 records two residue entries that measurement did not confirm. The residue
+is listed at the end.
 
 ## 1. Percent padding is dropped engine-wide — RESOLVED
 
@@ -173,24 +176,117 @@ so a grid container with `padding:5%` or `max-width:75%` was laid out as a
 block (children 360 px wide and stacked; Chrome 100 px side by side). It now
 restores them, as `style_with_height` already did.
 
+## 8. An empty auto-height box is 1 px high — RESOLVED (2026-11-19)
+
+Was: the block path ended with `if h < 1: h = 1`, and so did the three flex
+paths (row, wrapping row, column), so every empty auto-height box was 1 px
+high and pushed what followed down by 1 px. The self-collapsing test relied on
+that floor (`child_height <= 1`), so a block with 1 px of real content also
+lost its margins.
+
+Now (`..._layout_engine.spl`): the four floors are gone; a self-collapsing
+block is one of height 0.
+
+| case (x y w h in a 400 px container)                       | Chrome 159   | base         | head    |
+|------------------------------------------------------------|--------------|--------------|---------|
+| empty block before a 10 px block                           | 0 0 400 0    | 0 0 400 1    | =Chrome |
+| the container                                              | 400 x 10     | 400 x 11     | =Chrome |
+| empty `align-self:start` grid item beside `height:40px`    | 200 0 200 0  | 200 0 200 1  | =Chrome |
+| flex container of two empty `width:50px` items             | 400 x 0      | 400 x 1      | =Chrome |
+| grid of two empty items, then a 10 px item                 | 0 0 200 10   | 0 1 200 10   | =Chrome |
+| column flex: 10 px item after an empty item                | 0 0 400 10   | 0 1 400 10   | =Chrome |
+| empty float / abspos, `width:30px`                         | 30 x 0       | 30 x 1       | =Chrome |
+| empty `inline-block;width:30px` after an empty float       | 0 14 30 0    | 30 13 30 1   | =Chrome |
+| block holding only a 30 px float                           | 400 x 0      | 400 x 1      | =Chrome |
+| 5 px block after `margin:8px 0` around 1 px of content     | 0 18 400 5   | 0 9 400 5    | =Chrome |
+
+## 9. `grid-auto-columns` and implicit columns — RESOLVED (2026-11-19)
+
+Was: not parsed. The column count was the template: a grid without
+`grid-template-columns` was a block, column flow without template rows put
+every item in column 1, and a definite column or a span past the template was
+clamped into it.
+
+Now: `Style.grid_auto_columns` (`normalized_grid_auto_tracks`, as for rows,
+plus a whole-number percentage kept as `<N>%` of the grid width). Placement
+is its own pass (`grid_item_placements`, the former in-loop code) and runs
+before the columns are sized: row flow over max(template, furthest definite
+column or span), column flow over one spare column per item, filling the
+template rows (else the rows the items name, else one) per column. The grid
+keeps the columns it used. `grid_column_sizes_with_implicit` sizes them:
+template tracks, then the cycled `grid-auto-columns` tracks (`auto` when
+unset). An `auto` column is the widest margin box lying in it alone; `fr`
+implicit columns, else the `auto` ones, share the free width equally
+(`justify-content: normal`; any authored `start` / `center` / `end` leaves
+`auto` columns at their content). A grid whose columns all come from the
+template takes the old path unchanged.
+
+| case (x y w h; items 10 px high unless noted)                     | Chrome 159    | base          | head    |
+|-------------------------------------------------------------------|---------------|---------------|---------|
+| `grid-auto-flow:column;grid-auto-columns:100px`, third item       | 200 0 100 10  | 0 20 400 10   | =Chrome |
+| template `100px`, column flow, `grid-auto-columns:50px`, third    | 150 0 50 10   | 0 20 100 10   | =Chrome |
+| `grid-auto-columns:40px 80px`, items 2 and 3                      | 40 0 80 / 120 0 40 | stacked 400 | =Chrome |
+| template `100px`, `grid-auto-columns:60px`, `grid-column:3`       | 160 0 60 10   | 0 10 100 10   | =Chrome |
+| column flow, no `grid-auto-columns`, two items                    | 200 wide each | stacked 400   | =Chrome |
+| rows `20px 20px`, column flow, `100px` columns, fifth item        | 200 0 100 20  | 0 0 400 1     | =Chrome |
+| `grid-auto-columns:2em;font-size:10px;column-gap:5px`, second     | 25 0 20 10    | 0 10 400 10   | =Chrome |
+| row flow, no template, `grid-auto-columns:100px`, second          | 0 10 100 10   | 0 10 400 10   | =Chrome |
+| `grid-auto-columns:25%`, second                                   | 100 0 100 10  | 0 10 400 10   | =Chrome |
+| `auto` columns around 30 px and 70 px boxes                       | 180 / 220     | 400 / 400     | =Chrome |
+| same, `justify-content:start`                                     | 30 / 70       | 400 / 400     | =Chrome |
+| template `100px`, `grid-column:3`, no `grid-auto-columns`         | 250 0 150 10  | 0 10 100 10   | =Chrome |
+| template `100px`, `grid-column:span 2`, `grid-auto-columns:60px`  | 0 0 160 10    | 0 0 100 10    | =Chrome |
+| column flow, `grid-row:2` on the second of three items            | 0 10 200 / 200 0 200 | stacked 400 | =Chrome |
+| `padding:10%` item in a `100px` implicit column                   | 115 5 100 30  | 5 19 400 90   | =Chrome |
+
+Free width is shared in whole px: three `1fr` implicit columns of 380 px are
+126 / 126 / 126 here, 126.66 in Chrome.
+
+## 10. Two residue entries were not gaps (measured 2026-11-19)
+
+- `<textarea style="padding:10%;width:100px;height:40px">` in a 400 px
+  container: Chrome 159 **182 x 122**, Simple 182 x 122 on base. The
+  "Chrome 100x80" of the earlier residue list was wrong. `padding:10px`
+  (122 x 62) and `display:block;padding:5%` (142 x 82) match too.
+- A percent `margin-top` on a grid container IS applied: 20 px for 5% of 400
+  inside `overflow:hidden`, below `padding-top:1px`, and after a sibling, as
+  in Chrome. The failing case had `display:flow-root` on the parent, which is
+  not parsed (the parent stays a plain block and the child margin collapses
+  through it, with a px margin and a block child just the same). Listed below.
+
 ## Residue still open
 
-- `grid-auto-columns` and implicit columns: `grid-auto-flow:column;
-  grid-auto-columns:100px` with no template is a block here (three stacked
-  400 px rows; Chrome three 100 px columns); with `grid-template-columns:100px`
-  the second and third item go to rows 2 and 3 (Chrome: 50 px columns).
-- An empty auto-height block is 1 px high (Chrome 0), so an empty
-  `align-self:start` grid item is 1 px.
+- `display:flow-root` is not parsed: the box does not stop margin collapsing
+  (first-child `margin-top:20px`: Chrome child y 20 / box 30 high, Simple
+  0 / 10), does not enclose floats (Chrome 30, Simple 0) and does not avoid a
+  float beside it. `contain:layout` does not stop margin collapsing either.
+- `<div><span></span></div>`: the empty inline box opens an 18 px line
+  (Chrome 0).
+- An empty block with `margin:7px 0` after an empty block: its margin should
+  collapse through the parent (Chrome: next sibling at y 0), Simple keeps it
+  inside (y 7).
+- An empty `<li>` is 0 px high (Chrome 18: the marker makes a line).
+- Grid columns: free width is shared in whole px; an implicit `fr` column
+  beside a template `fr` column gets no share; `justify-content`
+  distribution (`center`, `space-between`, ...) is not applied to tracks; an
+  auto inline margin on a grid item (`margin-left:auto;width:20px`: Chrome
+  x 80 in a 100 px column, Simple 0); explicit `auto` tracks in
+  `grid-template-columns`; paint-side percent padding
+  (`web_styles_with_painted_percent_padding`) reads the template tracks only,
+  so `background-clip:content-box` on a percent-padded item in an IMPLICIT
+  column clips against the wrong basis (layout is right).
 - Fractional layout units (sub-px padding, 1/64 px in Chrome).
-- A percent `margin-top` on a grid container inside a flow root is not
-  applied (Chrome 20 px for 5% of 400).
-- `<textarea style="padding:10%;width:100px;height:40px">`: Chrome 100x80,
-  here 180x120.
+- Form controls: `<input style="padding:10px;width:100px;height:20px">` is
+  124 x 44 in Chrome, 100 x 20 here (padding, px or percent, does not size an
+  `<input>`, `<select>` or `<button>`); a border-box `<textarea>` whose
+  padding exceeds its height (`padding:20px;height:30px`) is 42 high in
+  Chrome, 30 here.
 - px padding too (not a percent issue): an `<input>` with `padding-left`
   paints its background only `width` wide (layout box is right); a flex
   item's `background-clip:content-box` paints the whole border box on a page
   routed through the draw-IR lane.
-- `minmax(<length>, <length>)` and `fit-content()` in `grid-auto-rows`.
+- `minmax(<length>, <length>)` and `fit-content()` in `grid-auto-rows` /
+  `grid-auto-columns`.
 - An auto-width inline-block whose only content is an empty sized box
   shrinks to its padding (px padding too): Chrome 90x50 for `padding:5%`
   around a 50x10 box, Simple 40 wide. Not a percent issue.
