@@ -283,14 +283,15 @@ Under `qemu-arm-static -L /usr/arm-linux-gnueabihf`, the Simple linker and ld.ll
 
 ## riscv64 dynamic fixtures (elf_riscv64_dynamic_spec)
 
-Built in WSL by `C:/dev/wt/xc-wsl-scripts/slk_rv64_fix.sh` with clang only:
+Rebuilt by `sh test/fixtures/linker/elf/rebuild_rv64_dynamic.shs [--oracle]` (clang 18 + ld.lld only):
 
-    T="--target=riscv64-linux-gnu -march=rv64gc -mabi=lp64d -mno-relax -O2"
-    clang $T -fPIC -c dyn_lib_rv64.c -o dyn_lib_rv64.o
-    ld.lld --no-relax -shared -soname libadd_rv64.so dyn_lib_rv64.o -o libadd_rv64.so.1
-    clang $T -fno-pic -ffreestanding -c dyn_start_rv64.c -o dyn_start_rv64.o
+    T="--target=riscv64-linux-gnu -march=rv64gc -mabi=lp64d"
+    P="-c -O1 -ffreestanding -fPIC -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib -mno-relax"
+    clang $T $P dyn_start_rv64.c -o dyn_start_rv64.o; clang $T $P dyn_lib_rv64.c -o dyn_lib_rv64.o
+    ld.lld -shared --soname libadd_rv64.so --hash-style=both -o libadd_rv64.so.1 dyn_lib_rv64.o
     # oracle: ld.lld --no-relax --dynamic-linker /lib/ld-linux-riscv64-lp64d.so.1 [-pie] \
     #         dyn_start_rv64.o libadd_rv64.so.1   -> prints "hi", exit 42 under qemu-riscv64
+
 ## weak_dynamic_rv32.o (elf_riscv32_static_spec)
 
     clang --target=riscv32-linux-musl -march=rv32gc -mabi=ilp32d -mno-relax -fno-pic -O1 \
