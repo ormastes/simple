@@ -6,45 +6,67 @@ for both the native linker (lld) and the Simple linker
 
 Legend: ✅ linked and ran · ⏳ not done · 🔧 in progress · ❌ unsupported yet · — not planned
 
-## Native linker (lld), as of 2026-11-17
+## Native linker (lld), as of 2026-11-19
 
 | OS | x86_64 | x86 32 (i686) | arm64 | arm32 (armv7) | riscv64 | riscv32 |
 |----|--------|---------------|-------|---------------|---------|---------|
-| Linux | ✅ | ⏳ | ⏳ | ⏳ | ⏳ | — |
-| Windows | ✅ (x64) | — | ✅ (#9999, #10051) | — | — | — |
-| FreeBSD | ⏳ | — | ⏳ | — | — | — |
+| Linux | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Windows | ✅ | 🔧 | ✅ | — | — | — |
+| FreeBSD | ✅ | — | ✅ | — | ✅ | — |
 | SimpleOS | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
-| Bare-metal EFI | ✅ (#9879) | ⏳ | ✅ (#9879) | 🔧 (PE machine 0x01c4 vs 0x01c2) | ✅ (#9879) | ✅ (#10024) |
+| Bare-metal EFI | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-## Simple linker, as of 2026-11-17
+## Simple linker, as of 2026-11-19
 
 | OS | x86_64 | x86 32 (i686) | arm64 | arm32 (armv7) | riscv64 | riscv32 |
 |----|--------|---------------|-------|---------------|---------|---------|
-| Linux | ✅ (3.4 s, #10037; was 4.5 s / 820 MB; target < 2 s / < 500 MB) | ❌ | ⏳ | ❌ (raw only) | ❌ | — |
-| Windows (PE/COFF) | 🔧 (shared PE EFI emitter #10098) | — | 🔧 (#10098) | — | — | — |
-| FreeBSD | 🔧 (cross-link via --sysroot, #10193; run pending) | — | ⏳ | — | — | — |
-| SimpleOS | ⏳ | ❌ | ⏳ | ❌ | ❌ | ❌ |
-| Bare-metal EFI (new row) | 🔧 (--linker simple check, #10165; boot run pending) | 🔧 | ✅ (#10102) | 🔧 | 🔧 | 🔧 |
+| Linux | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Windows (PE/COFF) | ✅ | 🔧 (C ok, Simple program needs redeploy) | ✅ (structural) | — | — | — |
+| FreeBSD | ✅ | — | ✅ | — | ✅ | — |
+| SimpleOS | ✅ | ⏳ (sysroot being built) | 🔧 (links, boot needs user-mode launch) | ⏳ (sysroot being built) | 🔧 (links, boot needs user-mode launch) | ⏳ (sysroot being built) |
+| Bare-metal EFI | 🔧 (boot transcript pending) | ✅ | ✅ | ✅ | 🔧 (boot transcript pending) | 🔧 (boot transcript pending) |
+
+FreeBSD cells: FreeBSD 14.4 VMs (arm64/amd64 cloud-init, riscv64 via
+`check-freebsd-riscv64-bootstrap-qemu.shs --smoke`), dynamic, PIE and static hello
+all rc=42 with both linkers. Windows arm64 is a structural compare against lld
+(`check-windows-pe-internal-link.shs`); no arm64 Windows guest is available.
+
+### PRs since #10219
+
+- #10225, #10226 — COMDAT mark on weak replacement / dedup by group signature; ARM BLX->BL, THM_JUMP19 errors
+- #10227, #10232 — SimpleOS riscv64 user link via internal ELF engine, script INPUT() and -L search
+- #10230, #10237 — i686 bare-metal EFI boots on OVMF IA32 (Simple linker, lld)
+- #10238, #10240 — ARM interworking veneers (.veneer section, keyed by symbol + offset)
+- #10239 — arm32 Simple-linker EFI lane
+- #10252 — i386 (i686-w64-windows-gnu) in the PE/COFF linker
+- #10254, #10261 — static IFUNC (IPLT/IGOT/IRELATIVE) for all ELF targets
+- #10256 — boot linker SHF_MERGE/SHF_STRINGS pooling like ld.lld
+- #10258, #10265, #10266 — armv7 static glibc, dynamic/PIE, Thumb B.W veneer, ARM TLS GD/LDM/LDO
+- #10263 — riscv32 raw ELF32 + Simple-linker riscv32 OpenSBI boot
+- #10264 — i386 dynamic ET_EXEC/PIE
+- #10268, #10269, #10270 — riscv64 glibc static/dynamic/PIE; rv32 musl static; bug docs
+- #10273 — FreeBSD aarch64/riscv64 cross-link (symver @@, COMDAT dedup)
+- #10274, #10275 — riscv64 undefined-weak PC-rel; script .got, lld PT_LOAD split
+- #10279, #10286, #10290 — SimpleOS 32-bit userland (i686, riscv32 sysroot/crt0/syscall + links)
+- #10281 — export executable definitions referenced by DSOs (FreeBSD `environ`)
+- #10289 — FreeBSD riscv64 lane generates sshd host keys
+- #10291, #10292 — PE/COFF: no forced mingw tlssup; i386 `__load_config_used`
 
 Notes:
-- Windows (Simple linker) is a new PE/COFF lane covering x64 and arm64.
-- Bare-metal (Simple linker): lanes started; arm64 boots on AAVMF (#10102). The shared PE32/PE32+ EFI emitter landed in #10098.
-- arm32 EFI root cause: `lld-link -machine:arm` writes PE machine 0x01c4, but
-  EDK2 ARM accepts only 0x01c2. With those 2 bytes patched, AAVMF32 booted a
-  test app from a vfat image on virtio-blk-pci.
+- Windows (Simple linker): in-house PE/COFF linker covers x64, arm64 and i386 (#10252); i686 C links run, the Simple program needs a compiler redeploy.
+- Bare-metal EFI (Simple linker): shared PE32/PE32+ emitter (#10098); arm64 (#10102), i686 (#10230) and arm32 (#10239) boot; x86_64/riscv64/riscv32 link but the boot transcript is pending.
+- arm32 EFI (lld): `lld-link -machine:arm` writes PE machine 0x01c4 while EDK2 ARM accepts only 0x01c2; the lane patches those 2 bytes and AAVMF32 boots the app.
+- SimpleOS: x86_64 runs; arm64/riscv64 link (#10227) but boot needs a user-mode launch; i686/arm32/riscv32 sysroots are being built (#10279, #10286, #10290).
 
 ## Lanes
 
-One lane per gap.
+Open gaps only.
 
-- Native bare-metal: i686, arm32 (riscv32 landed, #10024).
-- Simple bare-metal: x86_64, i686, arm32, riscv64, riscv32 (arm64 landed, #10102).
-- Native FreeBSD x86_64.
-- Native SimpleOS x86_64.
-- Simple FreeBSD.
-- Simple SimpleOS.
-- Simple Windows PE.
-- Linux hosted lane (both linkers).
+- Native Windows i686.
+- Native SimpleOS (all CPUs).
+- Simple Windows i686 (redeploy).
+- Simple SimpleOS arm64/riscv64 boot; i686/arm32/riscv32 sysroots.
+- Simple bare-metal EFI boot transcripts: x86_64, riscv64, riscv32.
 
 ## Lint and test-runner matrix
 
