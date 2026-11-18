@@ -1,8 +1,8 @@
 # Relocation-graph section garbage collection for internal ELF executable links.
 
 use compiler.backend.linker.elf_parser.{
-    ElfObject, ElfRelocation, elf_section_name, elf_reloc_sym, elf_symbol_binding,
-    SHN_UNDEF, STB_LOCAL, STB_GLOBAL
+    ElfObject, ElfRelocation, elf_section_name, elf_reloc_sym, elf_reloc_type, elf_symbol_binding,
+    elf_section_link, SHN_UNDEF, STB_LOCAL, STB_GLOBAL
 }
 use compiler.backend.linker.sym_resolver.{SymResolution}
 
@@ -268,6 +268,17 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
         oi = 0
         while oi < objects.len():
             state.mark_eh_frame(objects[oi], oi, res)
+            # ARM .ARM.exidx (SHF_LINK_ORDER) is never a root: lld keeps an
+            # exidx input exactly when the section its sh_link names is live.
+            if objects[oi].header.e_machine == 40:
+                var xi: i64 = 1
+                while xi < objects[oi].sections.len():
+                    if objects[oi].sections[xi].sh_type == 0x70000001 and
+                            not state.marks[state.bases[oi] + xi]:
+                        val ln = elf_section_link(objects[oi], xi)
+                        if ln > 0 and ln < objects[oi].sections.len() and state.marks[state.bases[oi] + ln]:
+                            state.mark(oi, xi)
+                    xi = xi + 1
             oi = oi + 1
         scanning = state.work_obj.len() > before
     ElfSectionGc(live: state.rows(), common_live: state.commons)
@@ -296,6 +307,8 @@ fn elf_gc_undefined(objects: [ElfObject], live: [[bool]], res: SymResolution) ->
             val si = reloc.target_section_idx
             if si < 0 or si >= live[oi].len() or not live[oi][si]:
                 continue
+            if elf_reloc_type(reloc) == 0:
+                continue  # R_*_NONE (e.g. ARM exidx -> __aeabi_unwind_cpp_pr0) only orders GC
             val sym_idx = elf_reloc_sym(reloc)
             if sym_idx <= 0 or sym_idx >= obj.symbols.len():
                 continue

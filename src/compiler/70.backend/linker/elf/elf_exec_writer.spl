@@ -42,6 +42,7 @@ val PT_TLS: i64 = 7
 val PT_GNU_EH_FRAME: i64 = 0x6474e550
 val PT_GNU_STACK: i64 = 0x6474e551
 val PT_RISCV_ATTRIBUTES: i64 = 0x70000003
+val PT_ARM_EXIDX: i64 = 0x70000001
 val PT_GNU_RELRO: i64 = 0x6474e552
 val PF_X: i64 = 1
 val PF_W: i64 = 2
@@ -155,6 +156,7 @@ fn elf_exec_plan_class_x(secs: [ElfOutSec], base: i64, page: i64, class32: bool,
     var has_tls = false
     var has_eh_frame_hdr = false
     var notes: i64 = 0
+    var exidx: i64 = -1
     var prev_seg: i64 = 0
     var seen_nobits = false
     for s in secs:
@@ -182,6 +184,8 @@ fn elf_exec_plan_class_x(secs: [ElfOutSec], base: i64, page: i64, class32: bool,
             has_eh_frame_hdr = true
         if s.sh_type == SHT_NOTE_E:
             notes = notes + 1
+        if class32 and s.sh_type == PT_ARM_EXIDX and s.name == ".ARM.exidx":
+            exidx = 0
 
     # ld.lld always emits PT_PHDR (static or dynamic, script or not).
     var phnum: i64 = 3 + notes + attr_phdrs  # PHDR + R load + GNU_STACK + notes + attributes
@@ -199,6 +203,8 @@ fn elf_exec_plan_class_x(secs: [ElfOutSec], base: i64, page: i64, class32: bool,
         phnum = phnum + 1
     if has_eh_frame_hdr:
         phnum = phnum + 1
+    if exidx >= 0:
+        phnum = phnum + 1       # PT_ARM_EXIDX (EM_ARM, ELF32 only)
 
     var offsets: [i64] = []
     var vaddrs: [i64] = []
@@ -331,6 +337,14 @@ fn elf_exec_plan_class_x(secs: [ElfOutSec], base: i64, page: i64, class32: bool,
     while k < secs.len():
         if secs[k].sh_type == SHT_NOTE_E:
             segs = segs.push(ElfExecSegment(p_type: PT_NOTE, p_flags: PF_R, p_offset: offsets[k],
+                p_vaddr: vaddrs[k], p_paddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: secs[k].align))
+        k = k + 1
+
+    # ld.lld appends PT_ARM_EXIDX after the notes (addPhdrForSection).
+    k = 0
+    while k < secs.len():
+        if exidx >= 0 and secs[k].name == ".ARM.exidx":
+            segs = segs.push(ElfExecSegment(p_type: PT_ARM_EXIDX, p_flags: PF_R, p_offset: offsets[k],
                 p_vaddr: vaddrs[k], p_paddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: secs[k].align))
         k = k + 1
 

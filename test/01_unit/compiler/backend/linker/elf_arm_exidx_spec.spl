@@ -1,0 +1,135 @@
+# .ARM.exidx in the internal static ELF linker (EM_ARM, ELFCLASS32).
+#
+# Fixtures: test/fixtures/linker/elf/exidx/exidx_{a,b}.{c,o}, built by
+# C:/dev/wt/xc-wsl-scripts/ssos_fxexidx.sh (clang-20 --target=armv7a-none-eabi
+# -marm -mfloat-abi=soft -O1 -funwind-tables -ffunction-sections
+# -fomit-frame-pointer). Every expected value is llvm-readelf of
+#   ld.lld -m armelf -z max-page-size=0x1000 --image-base=0x400000 \
+#     --build-id=sha1 -static -nostdlib --gc-sections -e _start exidx_b.o exidx_a.o
+# (the engine always emits a 36-byte build-id note, so the oracle does too):
+#   .ARM.exidx 0x400138 size 0x18 (Lk = .text, AL, align 4), .text 0x401150
+#   size 0x3c, PT_ARM_EXIDX last (after PT_NOTE), table words
+#   0x1018 0x808408b0 | 0x1030 0x80b0b0b0 | 0x1044 1 (LE words; sentinel = end of .text).
+#   fdead and its exidx entry are garbage-collected.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl
+# @cover src/compiler/70.backend/linker/elf/section_gc.spl
+
+use std.spec.*
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val EX_FIX: text = "test/fixtures/linker/elf/exidx"
+
+fn ex_load(name: text) -> [i64]:
+    val raw = file_read_bytes("{EX_FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn ex_u16(b: [i64], off: i64) -> i64:
+    b[off] | (b[off + 1] << 8)
+
+fn ex_u32(b: [i64], off: i64) -> i64:
+    ex_u16(b, off) | (ex_u16(b, off + 2) << 16)
+
+fn ex_phdr(b: [i64], idx: i64, field: i64) -> i64:
+    ex_u32(b, ex_u32(b, 28) + idx * 32 + field)
+
+fn ex_cstr(b: [i64], at: i64) -> text:
+    var s = ""
+    var p = at
+    while b[p] != 0:
+        s = s + b[p].to_char()
+        p = p + 1
+    s
+
+fn ex_sec_index(b: [i64], name: text) -> i64:
+    val shoff = ex_u32(b, 32)
+    val str_off = ex_u32(b, shoff + ex_u16(b, 50) * 40 + 16)
+    var i: i64 = 1
+    while i < ex_u16(b, 48):
+        if ex_cstr(b, str_off + ex_u32(b, shoff + i * 40)) == name:
+            return i
+        i = i + 1
+    -1
+
+fn ex_sec(b: [i64], name: text, field: i64) -> i64:
+    """Field (byte offset in the Elf32_Shdr) of the named section, or -1."""
+    val i = ex_sec_index(b, name)
+    if i < 0: return -1
+    ex_u32(b, ex_u32(b, 32) + i * 40 + field)
+
+fn ex_phdr_index(b: [i64], p_type: i64) -> i64:
+    var i: i64 = 0
+    while i < ex_u16(b, 44):
+        if ex_phdr(b, i, 0) == p_type:
+            return i
+        i = i + 1
+    -1
+
+fn ex_prel31(word: i64, place: i64) -> i64:
+    """Decode a PREL31 table word at place to an absolute address."""
+    var off = word & 0x7fffffff
+    if off & 0x40000000 != 0:
+        off = off - 0x80000000
+    place + off
+
+fn ex_link() -> [i64]:
+    val r = elf_static_link([ex_load("exidx_b.o"), ex_load("exidx_a.o")], [], "_start", RelocArch.Arm32)
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "ARM .ARM.exidx (internal static linker vs ld.lld)":
+    it "links an EM_ARM object pair whose exidx references __aeabi_unwind_cpp_pr0 via R_ARM_NONE":
+        val r = elf_static_link([ex_load("exidx_b.o"), ex_load("exidx_a.o")], [], "_start", RelocArch.Arm32)
+        expect(r.is_ok()).to_equal(true)
+
+    it "emits one .ARM.exidx output section with lld's header":
+        val b = ex_link()
+        expect(b.len() > 0).to_equal(true)
+        expect(ex_sec(b, ".ARM.exidx", 4)).to_equal(0x70000001)    # SHT_ARM_EXIDX
+        expect(ex_sec(b, ".ARM.exidx", 8)).to_equal(0x82)          # SHF_ALLOC | SHF_LINK_ORDER
+        expect(ex_sec(b, ".ARM.exidx", 12)).to_equal(0x400138)
+        expect(ex_sec(b, ".ARM.exidx", 20)).to_equal(0x18)
+        expect(ex_sec(b, ".ARM.exidx", 24)).to_equal(ex_sec_index(b, ".text"))
+        expect(ex_sec(b, ".ARM.exidx", 32)).to_equal(4)
+        # lld order: note, exidx, then .text in the RX segment.
+        expect(ex_sec_index(b, ".ARM.exidx")).to_equal(ex_sec_index(b, ".note.gnu.build-id") + 1)
+        expect(ex_sec(b, ".text", 12)).to_equal(0x401150)
+        expect(ex_sec(b, ".text", 20)).to_equal(0x3c)              # fdead GC'd
+        expect(ex_u32(b, 24)).to_equal(0x401150)                   # e_entry = _start
+
+    it "emits PT_ARM_EXIDX last, covering the section":
+        val b = ex_link()
+        val pi = ex_phdr_index(b, 0x70000001)
+        expect(pi).to_equal(ex_u16(b, 44) - 1)
+        expect(ex_u16(b, 44)).to_equal(7)
+        expect(ex_phdr(b, pi - 1, 0)).to_equal(4)                  # after PT_NOTE
+        expect(ex_phdr(b, pi, 4)).to_equal(ex_sec(b, ".ARM.exidx", 16))
+        expect(ex_phdr(b, pi, 8)).to_equal(0x400138)
+        expect(ex_phdr(b, pi, 16)).to_equal(0x18)
+        expect(ex_phdr(b, pi, 20)).to_equal(0x18)
+        expect(ex_phdr(b, pi, 24)).to_equal(4)                     # PF_R
+        expect(ex_phdr(b, pi, 28)).to_equal(4)
+
+    it "writes lld's table: sorted entries, PREL31 words, trailing CANTUNWIND sentinel":
+        val b = ex_link()
+        val t = ex_sec(b, ".ARM.exidx", 16)
+        # llvm-readelf -x bytes: 18100000 b0088480 30100000 b0b0b080 44100000 01000000
+        val words = [0x1018, 0x808408b0, 0x1030, 0x80b0b0b0, 0x1044, 1]
+        var i: i64 = 0
+        while i < words.len():
+            expect(ex_u32(b, t + i * 4)).to_equal(words[i])
+            i = i + 1
+        val v = ex_sec(b, ".ARM.exidx", 12)
+        expect(ex_prel31(ex_u32(b, t), v)).to_equal(0x401150)        # _start
+        expect(ex_prel31(ex_u32(b, t + 8), v + 8)).to_equal(0x401170) # fa
+        expect(ex_prel31(ex_u32(b, t + 16), v + 16)).to_equal(0x40118c) # end of .text

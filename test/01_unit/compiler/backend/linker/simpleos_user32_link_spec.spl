@@ -206,14 +206,24 @@ describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
         val data_v = s32_phdr(b, 3, 8)
         expect(s32_phdr(b, 0, 0)).to_equal(6)        # PT_PHDR first, as ld.lld
         expect(s32_phdr(b, 0, 8)).to_equal(0x400034)
-        # ponytail: exact 0x401148 needs PT_ARM_EXIDX (one more phdr)
+        expect(text_v).to_equal(0x401148)              # exact lld .text vaddr
         expect(s32_phdr(b, 1, 8)).to_equal(0x400000)
         expect(s32_phdr(b, 1, 24)).to_equal(4)
         expect(s32_phdr(b, 2, 24)).to_equal(5)
         expect(s32_phdr(b, 3, 24)).to_equal(6)
         expect(s32_phdr(b, 3, 28)).to_equal(0x1000)
-        # ponytail: lld also emits .ARM.exidx + PT_ARM_EXIDX; the engine drops them
-        # (filed in elf_static_exec_missing_pt_phdr_and_x86_trap_fill_2026-11-19.md).
+        # lld: .ARM.exidx = _start CANTUNWIND (synthesized, merged with main's
+        # CANTUNWIND) + the end-of-.text sentinel; PT_ARM_EXIDX covers it.
+        val xi = s32_phdr_index(b, 0x70000001)
+        expect(xi).to_equal(s32_u16(b, 44) - 1)
+        expect(s32_phdr(b, xi, 16)).to_equal(0x10)
+        expect(s32_sec_field(b, ".ARM.exidx", 20)).to_equal(0x10)
+        expect(s32_sec_field(b, ".ARM.exidx", 12)).to_equal(s32_phdr(b, xi, 8))
+        val xo = s32_sec_field(b, ".ARM.exidx", 16)
+        expect(s32_sec_field(b, ".ARM.exidx", 12) + s32_u32(b, xo)).to_equal(text_v)   # _start
+        expect(s32_u32(b, xo + 4)).to_equal(1)                         # EXIDX_CANTUNWIND
+        expect(s32_u32(b, xo + 12)).to_equal(1)                        # sentinel
+        expect(s32_sec_field(b, ".ARM.exidx", 12) + 8 + s32_u32(b, xo + 8)).to_equal(0x401168)
         expect(s32_u32(b, 24)).to_equal(text_v)
         expect(data_v - text_v).to_equal(0x1020)     # lld: 0x402168 - 0x401148
         # _start: bl main; mov r7,#0; svc #0 (PC-relative, exact), then main
