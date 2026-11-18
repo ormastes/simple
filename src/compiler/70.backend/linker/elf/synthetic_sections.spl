@@ -81,6 +81,8 @@ val A64_PLT_ENTRY_SIZE: i64 = 16
 val X64_PLT0_SIZE: i64 = 16
 val X64_PLT_ENTRY_SIZE: i64 = 16
 val GOTPLT_RESERVED: i64 = 3
+val ARM_PLT0_SIZE: i64 = 32
+val ARM_PLT_ENTRY_SIZE: i64 = 16
 
 # ============================================================================
 # Dynamic relocation type by target
@@ -523,8 +525,56 @@ fn elf_build_gotplt_i386(n: i64, plt_addr: i64, dynamic_addr: i64) -> [i64]:
         i = i + 1
     b
 
+fn elf_arm_plt_fits(plt_addr: i64, gotplt_addr: i64, n: i64) -> bool:
+    """ld.lld's short ARM PLT reaches .got.plt with 27-bit (PLT0) / 28-bit
+    (PLTn) positive offsets; the long form is not implemented."""
+    if gotplt_addr - plt_addr - 4 < 0 or gotplt_addr - plt_addr - 4 >= (1 << 27):
+        return false
+    val last = gotplt_addr + (GOTPLT_RESERVED + n) * 4 - (plt_addr + ARM_PLT0_SIZE) - 8
+    last >= 0 and last < (1 << 28)
+
+fn elf_build_plt_arm(plt_addr: i64, gotplt_addr: i64, n: i64) -> [i64]:
+    """ld.lld's ARM lazy PLT (short form). PLT0: str lr,[sp,#-4]!; add lr,pc,#hi;
+    add lr,lr,#mid; ldr pc,[lr,#lo]! (lr = &.got.plt[2]) + 4 trap words.
+    PLTn: add ip,pc,#hi; add ip,ip,#mid; ldr pc,[ip,#lo]! + 1 trap word."""
+    if n == 0:
+        return []
+    val h = gotplt_addr - plt_addr - 4
+    var b = write_u32_le([], 0xe52de004)
+    b = write_u32_le(b, 0xe28fe600 | ((h >> 20) & 0xff))
+    b = write_u32_le(b, 0xe28eea00 | ((h >> 12) & 0xff))
+    b = write_u32_le(b, 0xe5bef000 | (h & 0xfff))
+    var t: i64 = 0
+    while t < 4:
+        b = write_u32_le(b, 0xd4d4d4d4)
+        t = t + 1
+    var i: i64 = 0
+    while i < n:
+        val e = plt_addr + ARM_PLT0_SIZE + i * ARM_PLT_ENTRY_SIZE
+        val off = gotplt_addr + (GOTPLT_RESERVED + i) * 4 - e - 8
+        b = write_u32_le(b, 0xe28fc600 | ((off >> 20) & 0xff))
+        b = write_u32_le(b, 0xe28cca00 | ((off >> 12) & 0xff))
+        b = write_u32_le(b, 0xe5bcf000 | (off & 0xfff))
+        b = write_u32_le(b, 0xd4d4d4d4)
+        i = i + 1
+    b
+
+fn elf_build_gotplt_arm(n: i64, plt_addr: i64) -> [i64]:
+    """ARM .got.plt: 3 reserved zero words (ld.so fills [1]/[2]), then one word
+    per PLT entry initialised to PLT0 for lazy binding (ld.lld)."""
+    if n == 0:
+        return []
+    var b = write_zeros([], GOTPLT_RESERVED * 4)
+    var i: i64 = 0
+    while i < n:
+        b = write_u32_le(b, plt_addr)
+        i = i + 1
+    b
+
 fn elf_plt0_size(target: RelocArch) -> i64:
     match target:
+        case Arm32:
+            ARM_PLT0_SIZE
         case AArch64:
             A64_PLT0_SIZE
         case _:
@@ -532,6 +582,8 @@ fn elf_plt0_size(target: RelocArch) -> i64:
 
 fn elf_plt_entry_size(target: RelocArch) -> i64:
     match target:
+        case Arm32:
+            ARM_PLT_ENTRY_SIZE
         case AArch64:
             A64_PLT_ENTRY_SIZE
         case _:
@@ -621,6 +673,7 @@ export elf_plt0_size, elf_plt_entry_size, elf_plt_size, elf_gotplt_size, elf_bui
 export elf_build_plt_x64, elf_build_gotplt_x64, elf_build_dynamic, elf_build_interp
 export elf_rel_entry32, elf_dyn_rel_entry, elf_build_dynsym_class, elf_gnu_hash_size_class, elf_build_gnu_hash_class
 export elf_build_dynamic_class, elf_gotplt_size_class, elf_build_plt_i386, elf_build_gotplt_i386
+export elf_arm_plt_fits, elf_build_plt_arm, elf_build_gotplt_arm
 export elf_a64_adrp_ldr_add
 export R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE
 export R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE
