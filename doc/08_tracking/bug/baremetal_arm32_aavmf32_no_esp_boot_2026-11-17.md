@@ -41,3 +41,24 @@ make the backend pass i64 pairs). Repro: remove the shims -> abort at 2nd print.
 `check-baremetal-efi-boot.shs --arch arm32`: `PASS -- 1 arch(es) booted through real
 firmware`; serial: `hello from Simple bare metal | n=42 | ints 0 -7
 9223372036854775807 -9223372036854775808 | panic: boom`, no "after panic".
+
+## Simple-linker lane (2026-11-18)
+
+`--linker simple --arch arm32` now works: `efi_stub_arm32.S` (Thumb-2; AllocatePages
+AnyPages, copy, ARMv7 cache maintenance by MVA, `bx` to ARM-state `_start`) is linked
+first by `elf_arm32_link_raw` (`scripts/check/baremetal-elf32-link.spl arm32`), and
+`baremetal-efi-wrap.spl arm` wraps the flat blob with the shared PE emitter
+(machine 0x01c2, Thumb entry), so no `lld-link` and no machine patch are needed
+(`pe_machine_is_thumb` verifies it, fail closed; `--selftest` now has 9 fixtures).
+
+Evidence: objects compiled in WSL (simple-p2), link + wrap run on Windows
+`bin/simple.exe` (`elf32-link: 134428 bytes at 0 entry 1`), boot on AAVMF32 pflash
+(virt, cortex-a15, vfat ESP on virtio-blk-pci, no -kernel, no isa-debug-exit):
+
+    hello from Simple bare metal
+    n=42
+    ints 0 -7 9223372036854775807 -9223372036854775808
+    panic: boom
+
+Limit: WSL binaries have no `run` command, so link/wrap needs a Windows (or other
+full-CLI) SIMPLE_LINK_BIN. Board run not evidenced.

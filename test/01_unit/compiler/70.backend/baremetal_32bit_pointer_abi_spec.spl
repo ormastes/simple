@@ -1,0 +1,43 @@
+# @tag:in-development
+# @req REQ-SSPEC-COMPILER
+# bug: baremetal_32bit_pointer_abi_backend_2026-11-18
+# Expected RED until the 32-bit native backend and the runtime extern table agree on
+# pointer/handle width. Repro for the arm32 + riscv32 workarounds (crt0_arm32.S shims,
+# bm_rt32.spl): bm_rt.spl declares `rt_println_str(ptr: i64, len: i64)`, so a caller built
+# for an i64 pointer must set the high word of the pointer register pair; today the
+# backend passes the pointer as ONE 32-bit register and leaves the next register unset.
+#
+# Subprocess spec: needs bin/simple (SIMPLE_BIN) native-build and llvm-objdump.
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val HELLO: text = "examples/09_embedded/freestanding_hello/main.spl"
+
+fn sh(cmd: text) -> text:
+    process_run("sh", ["-c", cmd]).0
+
+fn simple_bin() -> text:
+    val b = env_get("SIMPLE_BIN")
+    if b == "": return "bin/simple"
+    b
+
+# Number of instructions in the 8 lines before the call to rt_println_str that
+# write `reg` (the register holding the HIGH word of an i64 pointer argument).
+fn high_word_writes(target: text, reg: text) -> i64:
+    val obj = "/tmp/bm32_ptr_abi_{target}.o"
+    val build = sh("SIMPLE_FILE_WORKERS=0 {simple_bin()} native-build {HELLO} --target {target} --emit-object -o {obj} >/dev/null 2>&1; test -s {obj} && echo built")
+    if not build.contains("built"): return -1
+    val n = sh("llvm-objdump -dr --no-show-raw-insn {obj} | grep -B8 -m1 'rt_println_str' | grep -cE '(mov|li|addi|lui)[a-z]*[[:space:]]+{reg}[,[:space:]]'")
+    n.trim().to_int()
+
+describe "32-bit pointer ABI between backend and runtime extern table":
+    it "arm32 call site sets r1 (high word of an i64 pointer) before rt_println_str":
+        step("build the freestanding hello for armv7-unknown-none")
+        assert(high_word_writes("armv7-unknown-none", "r1") >= 1)
+    it "riscv32 call site sets a1 (high word of an i64 pointer) before rt_println_str":
+        step("build the freestanding hello for riscv32-unknown-none")
+        # backend currently passes len in a1:a2 (no even-pair alignment); a pointer-high
+        # write to a1 distinct from the len write needs the len moved to a2:a3
+        assert(high_word_writes("riscv32-unknown-none", "a3") >= 1)
