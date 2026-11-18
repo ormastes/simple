@@ -1,0 +1,239 @@
+"""
+## Purpose and audience
+Purpose: Verify Wave B5 Tiered JIT negative compile cache, honest Tier-2
+promotion accounting, checked native i64 calls, std HotFunction write-back, and
+driver K1 JIT entry-module ordering.
+Audience: compiler, interpreter, and JIT maintainers.
+## Operator workflow
+Run this spec with `phase1_artifacts/simple.exe test ... --mode=interpreter` and
+inspect per-scenario verdicts.
+## Compatibility and limitations
+Exercises real in-process JIT compilation/failure paths and pure MIR module
+ordering fixtures without external files or processes.
+# @manual: primary
+REQ-COMPILER-INTERP-001
+doc/08_tracking/bug/interp_tiered_jit_hotfunction_compiled_and_call_count_lost_2026-08-18.md
+"""
+# @req: REQ-COMPILER-INTERP-001
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.interp.execution.tiered_jit.{TieredJitConfig, JitTier}
+use compiler.interp.execution.tiered_jit_manager.{TieredJitManager}
+use std.jit.tiered_jit.{HotFunction, std_tiered_jit_manager_create}
+use compiler.driver.driver_pipeline_execution.{ordered_jit_mir_modules_v1}
+use compiler.mir.mir_instructions.{MirModule}
+
+fn quiet_tiered_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 3, tier2_threshold: 6, debug_mode: false)
+
+fn valid_minus_one_src() -> text:
+    "fn jit_dec_one(x: i64) -> i64:\n    x - 1\n"
+
+fn broken_parse_src() -> text:
+    "fn broken_jit_target(x: i64) -> i64:\n    @@@\n"
+
+fn mismatched_symbol_src() -> text:
+    "fn some_other_exported_name(x: i64) -> i64:\n    x + 7\n"
+
+fn empty_mir_module(module_name: text) -> MirModule:
+    MirModule(name: module_name, functions: {}, statics: {}, constants: {}, types: {})
+
+fn probe_interp_negative_cache() -> [bool]:
+    var m = TieredJitManager.create(quiet_tiered_config())
+    m.register_function("broken_jit_target", broken_parse_src())
+    var i = 0
+    var last_tier = JitTier.Interpreted
+    while i < 60:
+        last_tier = m.record_call("broken_jit_target")
+        i = i + 1
+    val single_failure = m.compile_failures == 1
+    val failed_recorded = m.compile_failed.has("broken_jit_target")
+    val non_empty_err = m.compile_failure_error("broken_jit_target") != ""
+    val stayed_interpreted = last_tier == JitTier.Interpreted and m.get_tier("broken_jit_target") == JitTier.Interpreted
+    val zero_tier1 = m.get_stats().tier1_compilations == 0
+    val checked_res = m.call_i64_checked("broken_jit_target", 5)
+    val checked_is_err = checked_res.is_err()
+    m.cleanup()
+    [single_failure, failed_recorded, non_empty_err, stayed_interpreted, zero_tier1, checked_is_err]
+
+fn probe_interp_missing_symbol_cache() -> [bool]:
+    var m = TieredJitManager.create(quiet_tiered_config())
+    m.register_function("registered_but_missing", mismatched_symbol_src())
+    var i = 0
+    while i < 55:
+        m.record_call("registered_but_missing")
+        i = i + 1
+    val single_failure = m.compile_failures == 1
+    val failed_recorded = m.compile_failed.has("registered_but_missing")
+    val stayed_interpreted = m.get_tier("registered_but_missing") == JitTier.Interpreted
+    m.cleanup()
+    [single_failure, failed_recorded, stayed_interpreted]
+
+fn probe_interp_honest_tier2_and_checked_call() -> [bool]:
+    var m = TieredJitManager.create(quiet_tiered_config())
+    m.register_function("jit_dec_one", valid_minus_one_src())
+    m.record_call("jit_dec_one")
+    val cold_checked = m.call_i64_checked("jit_dec_one", 0)
+    val cold_rejected = cold_checked.is_err()
+
+    var i = 1
+    while i < 15:
+        m.record_call("jit_dec_one")
+        i = i + 1
+
+    val tier_stays_fast = m.get_tier("jit_dec_one") == JitTier.Fast
+    val stats = m.get_stats()
+    val tier1_once = stats.tier1_compilations == 1
+    val tier2_zero = stats.tier2_compilations == 0
+    val zero_failures = m.compile_failures == 0
+
+    val neg_one_res = m.call_i64_checked("jit_dec_one", 0)
+    val neg_one_ok = match neg_one_res:
+        case Ok(v): v == -1
+        case Err(_): false
+
+    val forty_two_res = m.call_i64_checked("jit_dec_one", 43)
+    val forty_two_ok = match forty_two_res:
+        case Ok(v): v == 42
+        case Err(_): false
+
+    m.cleanup()
+    [cold_rejected, tier_stays_fast, tier1_once, tier2_zero, zero_failures, neg_one_ok, forty_two_ok]
+
+fn probe_std_hotfunction_negative_cache() -> [bool]:
+    var mgr = std_tiered_jit_manager_create()
+    mgr.register("broken_jit_target", broken_parse_src(), 3)
+    var i = 0
+    while i < 55:
+        mgr.call_i64("broken_jit_target", 10)
+        i = i + 1
+    val hf: HotFunction = mgr.functions[0]
+    val count_preserved = hf.call_count == 55
+    val not_compiled = hf.compiled == false
+    val marked_failed = hf.compile_failed == true
+    val has_error = hf.last_error != ""
+    val failed_once = mgr.compile_failures == 1
+    val compiled_zero = mgr.compile_count == 0
+    val checked_err = mgr.call_i64_checked("broken_jit_target", 10).is_err()
+    val count_after_checked = mgr.functions[0].call_count == 56 and mgr.compile_failures == 1
+    mgr.cleanup()
+    [count_preserved, not_compiled, marked_failed, has_error, failed_once, compiled_zero, checked_err, count_after_checked]
+
+fn probe_std_hotfunction_promotion_and_writeback() -> [bool]:
+    var mgr = std_tiered_jit_manager_create()
+    mgr.register("jit_dec_one", valid_minus_one_src(), 3)
+    val r1 = mgr.call_i64_checked("jit_dec_one", 0)
+    val r2 = mgr.call_i64_checked("jit_dec_one", 0)
+    val r3 = mgr.call_i64_checked("jit_dec_one", 0)
+    val r4 = mgr.call_i64("jit_dec_one", 43)
+    val cold_err = r1.is_err() and r2.is_err()
+    val promoted_neg_one = match r3:
+        case Ok(v): v == -1
+        case Err(_): false
+    val steady_val = r4 == 42
+    val hf = mgr.functions[0]
+    val state_persisted = hf.call_count == 4 and hf.compiled == true and hf.compile_failed == false and hf.last_error == ""
+    val counts_exact = mgr.compile_count == 1 and mgr.compile_failures == 0
+    mgr.cleanup()
+    [cold_err, promoted_neg_one, steady_val, state_persisted, counts_exact]
+
+fn probe_driver_entry_module_order() -> [bool]:
+    var mir_modules: Dict<text, MirModule> = {}
+    mir_modules["app.entry"] = empty_mir_module("app.entry")
+    mir_modules["app.dep_alpha"] = empty_mir_module("app.dep_alpha")
+    mir_modules["app.dep_beta"] = empty_mir_module("app.dep_beta")
+
+    val ordered = ordered_jit_mir_modules_v1(
+        mir_modules,
+        ["app.entry", "app.dep_alpha", "app.dep_beta"]
+    )
+    val three_mods = ordered.len() == 3
+    val deps_first = ordered[0].name == "app.dep_alpha" and ordered[1].name == "app.dep_beta"
+    val entry_last = ordered[ordered.len() - 1].name == "app.entry"
+
+    mir_modules["std.synth_helper"] = empty_mir_module("std.synth_helper")
+    val with_extra = ordered_jit_mir_modules_v1(
+        mir_modules,
+        ["app.entry", "app.dep_alpha", "app.entry", "app.dep_alpha"]
+    )
+    val dedup_and_complete = with_extra.len() == 4
+    val extra_entry_still_last = with_extra[with_extra.len() - 1].name == "app.entry"
+
+    var single_map: Dict<text, MirModule> = {}
+    single_map["solo.entry"] = empty_mir_module("solo.entry")
+    val solo = ordered_jit_mir_modules_v1(single_map, ["solo.entry"])
+    val solo_ok = solo.len() == 1 and solo[0].name == "solo.entry"
+
+    val empty_map: Dict<text, MirModule> = {}
+    val empty_ordered = ordered_jit_mir_modules_v1(empty_map, ["solo.entry"])
+    val empty_ok = empty_ordered.len() == 0
+
+    [three_mods, deps_first, entry_last, dedup_and_complete, extra_entry_still_last, solo_ok, empty_ok]
+
+describe "Wave B5 tiered JIT negative cache, honest Tier-2, and entry order":
+    it "caches interpreter TieredJitManager compile failures so _compile_function runs once across 60 calls":
+        # @req: REQ-COMPILER-INTERP-001
+        step("Verify negative compile cache caps compile_failures at 1 across 60 calls")
+        val probe = probe_interp_negative_cache()
+        expect probe[0] == true
+        expect probe[1] == true
+        expect probe[2] == true
+        expect probe[3] == true
+        expect probe[4] == true
+        expect probe[5] == true
+
+    it "records missing exported JIT symbols in compile_failed to prevent repeated compilation":
+        # @req: REQ-COMPILER-INTERP-001
+        step("Verify missing exported symbol is negative-cached on first compile attempt")
+        val probe = probe_interp_missing_symbol_cache()
+        expect probe[0] == true
+        expect probe[1] == true
+        expect probe[2] == true
+
+    it "keeps Tier-1 functions at JitTier.Fast with tier2_compilations == 0 and disambiguates -1 via call_i64_checked":
+        # @req: REQ-COMPILER-INTERP-001
+        step("Verify honest Tier-2 accounting and unambiguous Result<i64, text> from call_i64_checked")
+        val probe = probe_interp_honest_tier2_and_checked_call()
+        expect probe[0] == true
+        expect probe[1] == true
+        expect probe[2] == true
+        expect probe[3] == true
+        expect probe[4] == true
+        expect probe[5] == true
+        expect probe[6] == true
+
+    it "persists std HotFunction compile_failed and call_count write-backs and skips try_compile after failure":
+        # @req: REQ-COMPILER-INTERP-001
+        step("Verify std HotFunction write-back and negative cache across 55+ calls")
+        val probe = probe_std_hotfunction_negative_cache()
+        expect probe[0] == true
+        expect probe[1] == true
+        expect probe[2] == true
+        expect probe[3] == true
+        expect probe[4] == true
+        expect probe[5] == true
+        expect probe[6] == true
+        expect probe[7] == true
+
+    it "persists std HotFunction compiled state and call_count across promotion":
+        # @req: REQ-COMPILER-INTERP-001
+        step("Verify std HotFunction write-back and re-read on successful native promotion")
+        val probe = probe_std_hotfunction_promotion_and_writeback()
+        expect probe[0] == true
+        expect probe[1] == true
+        expect probe[2] == true
+        expect probe[3] == true
+        expect probe[4] == true
+
+    it "places source_module_names[0] last in ordered_jit_mir_modules_v1 for K1 JIT execution":
+        # @req: REQ-COMPILER-INTERP-001
+        step("Verify ordered_jit_mir_modules_v1 places entry module last across multi-module maps")
+        val probe = probe_driver_entry_module_order()
+        expect probe[0] == true
+        expect probe[1] == true
+        expect probe[2] == true
+        expect probe[3] == true
+        expect probe[4] == true
+        expect probe[5] == true
+        expect probe[6] == true

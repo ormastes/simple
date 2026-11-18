@@ -1,4 +1,5 @@
 #![allow(REQC004)]
+#![allow(primitive_api)]
 #!/usr/bin/env simple
 # JIT/Execution Manager SFFI Wrapper (single shared surface)
 #
@@ -13,31 +14,50 @@
 # Tier 1: Soft in-process exec_manager (interpreter-backed)
 # ============================================================================
 # Provides a functional fallback when native JIT symbols are unavailable.
-# “Compilation” stores source; execution interprets in-process via CompilerDriver
-# (no subprocess needed). Good enough for demos/tests.
+# Compilation lowers Simple source to HIR and caches handle state in memory;
+# execution evaluates directly in-process via InterpreterBackendImpl.
 
 use std.log.{debug}
-use std.nogc_sync_mut.io.time_ops.{current_time_ms}
-use std.path as path
 
-# Pure Simple compiler driver for in-process interpretation
-use compiler.driver.driver.{interpret_file, CompilerDriver}
-use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult}
+# Pure Simple frontend + HIR + tree-walking interpreter for in-process execution
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, HirSymbol}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.backend.backend_types.{
+    Value,
+    FunctionValue,
+    backend_value_int_v1,
+    backend_value_string_v1,
+    backend_value_function_v1
+}
+use compiler.backend.env.{EvalContext, Environment}
+use compiler.backend.interpreter.{InterpreterBackendImpl}
 
 # File I/O through canonical typed owners (no shell dependency and no local
 # duplicate SFFI declarations).
-use std.io_runtime.{file_write, read_file_text_result, file_exists, file_delete}
-use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.io_runtime.{file_write}
+use std.io_runtime.{read_file_text_result, file_exists, file_delete}
+
+# Monotonic handle allocator and in-memory handle state tables.
+var _next_exec_handle: i64 = 1
+var _global_jit_backend: text = "interpreter"
+var _exec_valid_handles: Dict<i64, bool> = {}
+var _exec_backend_names: Dict<i64, text> = {}
+var _exec_opt_levels: Dict<i64, i64> = {}
+var _exec_sources: Dict<i64, text> = {}
+var _exec_hir_modules: Dict<i64, HirModule> = {}
+var _exec_has_hir: Dict<i64, bool> = {}
+var _exec_fn_lists: Dict<i64, [text]> = {}
+var _exec_fn_lookup: Dict<text, bool> = {}
 
 fn _write_file(fpath: text, content: text) -> bool:
     file_write(fpath, content)
-
-fn _ensure_jit_dir():
-    dir_create("tmp/jit", true)
-
-fn _cleanup_old_jit_files():
-    # No-op: rely on cleanup at session end instead of shelling out
-    pass
 
 fn _read_file(fpath: text) -> text:
     match read_file_text_result(fpath):
@@ -47,14 +67,11 @@ fn _read_file(fpath: text) -> text:
 fn _delete_file(fpath: text):
     file_delete(fpath)
 
-fn rt_set_jit_backend(backend: text) -> bool:
-    backend == "auto" or backend == "interpreter"
-
-fn rt_get_jit_backend() -> text:
-    "interpreter"
-
 fn _handle_path(handle: i64) -> text:
     "tmp/jit/simple_soft_jit_{handle}.spl"
+
+fn _parse_int_output_or_neg_one(out: text) -> i64:
+    out.to_int() ?? -1
 
 fn _dedent(src: text) -> text:
     """
@@ -82,100 +99,20 @@ fn _dedent(src: text) -> text:
             out_lines.push(ln)
     out_lines.join("\n")
 
-fn rt_exec_manager_create(backend: text) -> i64:
-    if backend != "auto" and backend != "interpreter":
-        return 0
-    # Use timestamp for a reasonably unique interpreter handle.
-    _ensure_jit_dir()
-    _cleanup_old_jit_files()
-    current_time_ms()
-
-fn rt_exec_manager_cleanup(handle: i64) -> i64:
-    _delete_file(_handle_path(handle))
-    0
-
-fn rt_exec_manager_compile_source(handle: i64, source: text) -> text:
-    val p = _handle_path(handle)
-    val normalized = _dedent(source.trim())
-    if not _write_file(p, normalized):
-        return "failed to write source"
-    ""
-
-fn rt_exec_manager_compile(handle: i64, source: text) -> text:
-    rt_exec_manager_compile_source(handle, source)
-
-fn rt_exec_manager_compile_mir(handle: i64, mir_data: text) -> text:
-    rt_exec_manager_compile_source(handle, mir_data)
-
-fn rt_exec_manager_compile_file(handle: i64, file_path: text) -> text:
-    val content = _read_file(file_path)
-    if content == "":
-        return "empty or unreadable file"
-    rt_exec_manager_compile_source(handle, content)
-
-fn _build_code(source: text, name: text, args: [i64]) -> text:
-    var args_txt: [text] = []
-    for a in args:
-        args_txt.push("{a}")
-    val arg_str = args_txt.join(", ")
-    "{source}\nprint {name}({arg_str})"
-
-fn _run_code(code: text) -> (text, i64):
-    # Write code to a temp file and interpret in-process via CompilerDriver
-    val tmp_path = "tmp/jit/_jit_run_{current_time_ms()}.spl"
-    if not _write_file(tmp_path, code):
-        return ("", 1)
-
-    val result = interpret_file(tmp_path)
-    _delete_file(tmp_path)
-
-    match result:
-        case CompileResult.Success(output):
-            val out_text = if output.?:
-                "{output}"
-            else:
-                ""
-            return (out_text, 0)
-        case _:
-            return ("", 1)
-
-fn _exec_manager_execute_checked(handle: i64, name: text, args: [i64]) -> (bool, i64, text):
-    val stored = _read_file(_handle_path(handle))
-    if stored == "":
-        return (false, 0, "No compiled source")
-    val code = _build_code(stored, name, args)
-    val (out, code_ec) = _run_code(code)
-    if code_ec != 0:
-        return (false, 0, "Execution failed")
-    val parsed = out.to_int()
-    if parsed == nil:
-        return (false, 0, "Execution returned non-integer output")
-    (true, parsed, "")
-
-fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64:
-    val (success, value, _) = _exec_manager_execute_checked(handle, name, args)
-    if success: value else: -1
-
-fn _exec_manager_execute_string_checked(handle: i64, name: text, args: [text]) -> Result<text, text>:
-    val stored = _read_file(_handle_path(handle))
-    if stored == "":
-        return Err("No compiled source")
-    var arg_txt: [text] = []
-    for a in args:
-        arg_txt.push("\"" + a.replace("\"", "\\\"") + "\"")
-    val arg_str = arg_txt.join(", ")
-    val code = "{stored}\nprint {name}({arg_str})"
-    val (out, code_ec) = _run_code(code)
-    if code_ec != 0:
-        return Err("Execution failed")
-    Ok(out)
-
-fn rt_exec_manager_execute_void(handle: i64, name: text) -> bool:
-    val stored = _read_file(_handle_path(handle))
-    if stored == "":
+fn _looks_like_serialized_mir(payload: text) -> bool:
+    """Detect raw serialized MIR JSON or textual MIR dumps."""
+    val trimmed = payload.trim()
+    if trimmed == "":
         return false
-    val (_, code_ec) = _run_code(_build_code(stored, name, []))
-    code_ec == 0
+    if trimmed.starts_with("{{") or trimmed.starts_with("["):
+        return true
+    if trimmed.contains("\"blocks\":") and trimmed.contains("\"locals\":"):
+        return true
+    if trimmed.contains("\"functions\":") and trimmed.contains("\"name\":"):
+        return true
+    if trimmed.starts_with("mir ") or trimmed.starts_with("MIR "):
+        return true
+    false
 
 fn _parse_function_names(src: text) -> [text]:
     var names: [text] = []
@@ -188,33 +125,301 @@ fn _parse_function_names(src: text) -> [text]:
             val idx = rest.find("(")
             if idx >= 0:
                 names.push(rest.slice(0, idx).trim())
+        elif t.starts_with("pub fn "):
+            val rest = t.slice(7, t.byte_len())
+            val idx = rest.find("(")
+            if idx >= 0:
+                names.push(rest.slice(0, idx).trim())
     names
 
-fn rt_exec_manager_has_function(handle: i64, name: text) -> bool:
-    val stored = _read_file(_handle_path(handle))
-    if stored == "":
-        false
-    else:
-        _parse_function_names(stored).contains(name)
+fn _clear_handle_functions(handle: i64):
+    if _exec_fn_lists.has(handle):
+        val prev_names = _exec_fn_lists[handle]
+        for prev_fn in prev_names:
+            _exec_fn_lookup["{handle}:{prev_fn}"] = false
+    _exec_fn_lists[handle] = []
 
-fn rt_exec_manager_list_functions(handle: i64) -> [text]:
-    val stored = _read_file(_handle_path(handle))
-    if stored == "":
-        []
-    else:
-        _parse_function_names(stored)
+fn _compile_source_to_hir(handle: i64, source: text) -> Result<HirModule, text>:
+    val vpath = "soft_jit/soft_jit_{handle}.spl"
+    val mod_name = "soft_jit.soft_jit_{handle}"
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, vpath, mod_name, log)
+    var modules: Dict<text, Module> = {}
+    modules[mod_name] = ast
+    val sources = [SourceFile(path: vpath, content: source, module_name: mod_name)]
+    match module_surfaces_from_modules(modules, sources):
+        case Err(err):
+            Err("Failed to build module surface: {err}")
+        case Ok(surfaces):
+            var hl = hirlowering_for_module(vpath, surfaces)
+            val hir = hl.lower_module(ast)
+            if hl.errors.len() > 0:
+                return Err(hl.errors[0].message)
+            Ok(hir)
 
-fn rt_exec_manager_backend_name(handle: i64) -> text:
-    if handle > 0: "interpreter" else: "unknown"
+fn _execute_compiled_hir_fn(hir: HirModule, name: text, val_args: [Value]) -> Result<Value, text>:
+    val interp = InterpreterBackendImpl.new()
+    val env = Environment.new()
+    var names_map: Dict<i64, text> = {}
+    for nsym_ in hir.symbols.symbols.values():
+        val ns: HirSymbol = nsym_
+        val ns_id: i64 = ns.id.id
+        names_map[ns_id] = ns.name
+    var fn_index: Dict<text, HirFunction> = {}
+    var target_fn: HirFunction? = None
+    for fidx_fn_ in hir.functions.values():
+        val fidx_f: HirFunction = fidx_fn_
+        fn_index[fidx_f.name] = fidx_f
+        val g_fv: FunctionValue = FunctionValue(symbol: fidx_f.symbol, name: fidx_f.name)
+        env.define_global(fidx_f.name, backend_value_function_v1(g_fv))
+        if fidx_f.name == name:
+            target_fn = Some(fidx_f)
+    if not target_fn.?:
+        return Err("Function '{name}' not found")
+    val ctx = EvalContext(
+        env: env,
+        module: hir,
+        backend: interp,
+        names: names_map,
+        fn_by_name: fn_index,
+        has_fn_index: true,
+        strict_mem: false
+    )
+    match interp.call_hir_function(target_fn.unwrap(), val_args, ctx):
+        case Ok(v):
+            Ok(v)
+        case Err(err):
+            Err(err.message)
 
-fn rt_exec_manager_is_valid(handle: i64) -> bool:
-    _read_file(_handle_path(handle)) != ""
+# reason: low-level JIT runtime SFFI configuration takes backend name text and returns admission boolean
+@allow(primitive_api)
+pub fn rt_set_jit_backend(backend: text) -> bool:
+    if backend == "auto" or backend == "interpreter":
+        _global_jit_backend = "interpreter"
+        return true
+    false
 
-fn rt_exec_manager_set_opt_level(handle: i64, level: i64) -> bool:
-    handle > 0 and level == 0
+# reason: low-level JIT runtime SFFI query returns active backend identifier text
+@allow(primitive_api)
+pub fn rt_get_jit_backend() -> text:
+    _global_jit_backend
 
-fn rt_exec_manager_get_opt_level(handle: i64) -> i64:
-    if handle > 0: 0 else: -1
+# reason: low-level execution manager SFFI handle check takes scalar handle id and returns validity boolean
+@allow(primitive_api)
+pub fn rt_exec_manager_is_valid(handle: i64) -> bool:
+    if handle <= 0:
+        return false
+    if _exec_valid_handles.has(handle):
+        return _exec_valid_handles[handle]
+    false
+
+# reason: low-level execution manager SFFI constructor takes backend name text and returns monotonic scalar handle
+@allow(primitive_api)
+pub fn rt_exec_manager_create(backend: text) -> i64:
+    if backend != "auto" and backend != "interpreter":
+        return 0
+    val handle = _next_exec_handle
+    _next_exec_handle = _next_exec_handle + 1
+    _exec_valid_handles[handle] = true
+    _exec_backend_names[handle] = "interpreter"
+    _exec_opt_levels[handle] = 0
+    _exec_sources[handle] = ""
+    _exec_has_hir[handle] = false
+    _exec_fn_lists[handle] = []
+    handle
+
+# reason: low-level execution manager SFFI cleanup takes scalar handle and returns status code
+@allow(primitive_api)
+pub fn rt_exec_manager_cleanup(handle: i64) -> i64:
+    if handle > 0:
+        _clear_handle_functions(handle)
+        _exec_valid_handles[handle] = false
+        _exec_sources[handle] = ""
+        _exec_has_hir[handle] = false
+        val p = _handle_path(handle)
+        if file_exists(p):
+            _delete_file(p)
+    0
+
+# reason: low-level execution manager SFFI source compilation takes scalar handle and source text and returns error text
+@allow(primitive_api)
+pub fn rt_exec_manager_compile_source(handle: i64, source: text) -> text:
+    if not rt_exec_manager_is_valid(handle):
+        return "Invalid execution manager handle"
+    val trimmed = source.trim()
+    if trimmed == "":
+        return "Empty source"
+    if _looks_like_serialized_mir(trimmed):
+        return "Soft JIT backend cannot compile raw serialized MIR payload"
+    val normalized = _dedent(trimmed)
+    match _compile_source_to_hir(handle, normalized):
+        case Err(err_msg):
+            err_msg
+        case Ok(hir):
+            _clear_handle_functions(handle)
+            var names: [text] = []
+            for fn_item in hir.functions.values():
+                val f: HirFunction = fn_item
+                val key = "{handle}:{f.name}"
+                val already = if _exec_fn_lookup.has(key): _exec_fn_lookup[key] else: false
+                if not already:
+                    names.push(f.name)
+                    _exec_fn_lookup[key] = true
+            if names.len() == 0:
+                return "No functions found in source"
+            _exec_sources[handle] = normalized
+            _exec_hir_modules[handle] = hir
+            _exec_has_hir[handle] = true
+            _exec_fn_lists[handle] = names
+            ""
+
+# reason: low-level execution manager SFFI compile entry takes scalar handle and payload text and returns error text
+@allow(primitive_api)
+pub fn rt_exec_manager_compile(handle: i64, source: text) -> text:
+    rt_exec_manager_compile_source(handle, source)
+
+# reason: low-level execution manager SFFI MIR compile entry takes scalar handle and MIR text and returns error text
+@allow(primitive_api)
+pub fn rt_exec_manager_compile_mir(handle: i64, mir_data: text) -> text:
+    if not rt_exec_manager_is_valid(handle):
+        return "Invalid execution manager handle"
+    val trimmed = mir_data.trim()
+    if trimmed == "":
+        return "Empty MIR payload"
+    if _looks_like_serialized_mir(trimmed):
+        return "Soft JIT backend cannot compile raw serialized MIR payload"
+    val normalized = _dedent(trimmed)
+    if _parse_function_names(normalized).len() == 0:
+        return "Soft JIT backend cannot compile raw MIR payload"
+    rt_exec_manager_compile_source(handle, normalized)
+
+# reason: low-level execution manager SFFI file compile entry takes scalar handle and path text and returns error text
+@allow(primitive_api)
+pub fn rt_exec_manager_compile_file(handle: i64, file_path: text) -> text:
+    if not rt_exec_manager_is_valid(handle):
+        return "Invalid execution manager handle"
+    val content = _read_file(file_path)
+    if content == "":
+        return "empty or unreadable file"
+    rt_exec_manager_compile_source(handle, content)
+
+# reason: low-level execution manager SFFI checked execution separates valid -1 return values from execution errors
+@allow(primitive_api)
+pub fn rt_exec_manager_execute_checked(handle: i64, name: text, args: [i64]) -> (bool, i64, text):
+    if not rt_exec_manager_is_valid(handle):
+        return (false, 0, "Invalid execution manager handle")
+    if not rt_exec_manager_has_function(handle, name):
+        return (false, 0, "Function '{name}' not found")
+    val has_hir = if _exec_has_hir.has(handle): _exec_has_hir[handle] else: false
+    if not has_hir:
+        return (false, 0, "No compiled source")
+    val hir = _exec_hir_modules[handle]
+    var val_args: [Value] = []
+    for a in args:
+        val_args = val_args.push(backend_value_int_v1(a))
+    match _execute_compiled_hir_fn(hir, name, val_args):
+        case Err(err_msg):
+            (false, 0, err_msg)
+        case Ok(v):
+            match v:
+                case Value.Int(i):
+                    (true, i, "")
+                case Value.Bool(b):
+                    (true, if b: 1 else: 0, "")
+                case _:
+                    (false, 0, "Execution returned non-integer output")
+
+# reason: legacy execution manager SFFI scalar entry preserves i64 return ABI for existing callers
+@allow(primitive_api)
+pub fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64:
+    val (success, value, _) = rt_exec_manager_execute_checked(handle, name, args)
+    if success: value else: -1
+
+fn _exec_manager_execute_string_checked(handle: i64, name: text, args: [text]) -> Result<text, text>:
+    if not rt_exec_manager_is_valid(handle):
+        return Err("Invalid execution manager handle")
+    if not rt_exec_manager_has_function(handle, name):
+        return Err("Function '{name}' not found")
+    val has_hir = if _exec_has_hir.has(handle): _exec_has_hir[handle] else: false
+    if not has_hir:
+        return Err("No compiled source")
+    val hir = _exec_hir_modules[handle]
+    var val_args: [Value] = []
+    for a in args:
+        val_args = val_args.push(backend_value_string_v1(a))
+    match _execute_compiled_hir_fn(hir, name, val_args):
+        case Err(err_msg):
+            Err(err_msg)
+        case Ok(v):
+            match v:
+                case Value.String(s):
+                    Ok(s)
+                case Value.Int(i):
+                    Ok("{i}")
+                case Value.Bool(b):
+                    Ok(if b: "true" else: "false")
+                case _:
+                    Err("Execution returned non-string output")
+
+# reason: low-level execution manager SFFI void entry takes scalar handle and function name and returns success boolean
+@allow(primitive_api)
+pub fn rt_exec_manager_execute_void(handle: i64, name: text) -> bool:
+    if not rt_exec_manager_is_valid(handle):
+        return false
+    if not rt_exec_manager_has_function(handle, name):
+        return false
+    val has_hir = if _exec_has_hir.has(handle): _exec_has_hir[handle] else: false
+    if not has_hir:
+        return false
+    val hir = _exec_hir_modules[handle]
+    match _execute_compiled_hir_fn(hir, name, []):
+        case Ok(_): true
+        case Err(_): false
+
+# reason: low-level execution manager SFFI O(1) function membership query takes scalar handle and symbol name
+@allow(primitive_api)
+pub fn rt_exec_manager_has_function(handle: i64, name: text) -> bool:
+    if not rt_exec_manager_is_valid(handle):
+        return false
+    val key = "{handle}:{name}"
+    if _exec_fn_lookup.has(key):
+        return _exec_fn_lookup[key]
+    false
+
+# reason: low-level execution manager SFFI function listing takes scalar handle and returns function name list
+@allow(primitive_api)
+pub fn rt_exec_manager_list_functions(handle: i64) -> [text]:
+    if not rt_exec_manager_is_valid(handle):
+        return []
+    if _exec_fn_lists.has(handle):
+        return _exec_fn_lists[handle]
+    []
+
+# reason: low-level execution manager SFFI backend query takes scalar handle and returns backend name text
+@allow(primitive_api)
+pub fn rt_exec_manager_backend_name(handle: i64) -> text:
+    if not rt_exec_manager_is_valid(handle):
+        return "unknown"
+    if _exec_backend_names.has(handle):
+        return _exec_backend_names[handle]
+    "interpreter"
+
+# reason: low-level execution manager SFFI optimization level setter takes scalar handle and level
+@allow(primitive_api)
+pub fn rt_exec_manager_set_opt_level(handle: i64, level: i64) -> bool:
+    if not rt_exec_manager_is_valid(handle) or level != 0:
+        return false
+    _exec_opt_levels[handle] = level
+    true
+
+# reason: low-level execution manager SFFI optimization level getter takes scalar handle and returns level
+@allow(primitive_api)
+pub fn rt_exec_manager_get_opt_level(handle: i64) -> i64:
+    if not rt_exec_manager_is_valid(handle):
+        return -1
+    if _exec_opt_levels.has(handle):
+        return _exec_opt_levels[handle]
+    0
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -222,86 +427,96 @@ fn rt_exec_manager_get_opt_level(handle: i64) -> i64:
 
 # --- Core Types ---
 
-enum JitBackend:
-    Default    # Automatic selection; interpreter in this soft manager
-    Interpreter # In-process CompilerDriver execution
-    Cranelift  # Fast compilation, decent runtime
-    LLVM       # Slower compilation, best runtime
+pub enum JitBackend:
+    Default     # Automatic selection; interpreter in this soft manager
+    Interpreter # In-process InterpreterBackendImpl execution
+    Cranelift   # Fast compilation, decent runtime
+    LLVM        # Slower compilation, best runtime
     Unknown
 
-fn backend_to_string(backend: JitBackend) -> text:
+# reason: backend wire-name conversion maps JitBackend enum to canonical runtime identifier text
+@allow(primitive_api)
+pub fn backend_to_string(backend: JitBackend) -> text:
     if backend == JitBackend.Default: "auto"
     elif backend == JitBackend.Interpreter: "interpreter"
     elif backend == JitBackend.Cranelift: "cranelift"
     elif backend == JitBackend.LLVM: "llvm"
     else: "unknown"
 
-fn string_to_backend(s: text) -> JitBackend:
+# reason: backend wire-name parser maps runtime identifier text to JitBackend enum
+@allow(primitive_api)
+pub fn string_to_backend(s: text) -> JitBackend:
     if s == "auto": JitBackend.Default
     elif s == "interpreter": JitBackend.Interpreter
     elif s == "cranelift": JitBackend.Cranelift
     elif s == "llvm": JitBackend.LLVM
     else: JitBackend.Unknown
 
-struct ExecManager:
+pub struct ExecManager:
     handle: i64
     backend: JitBackend
     is_valid: bool
     opt_level: i64  # Soft interpreter supports only 0 (no native optimization)
 
-enum JitCompileResult:
+pub enum JitCompileResult:
     Success
     Error
 
-struct CompileStatus:
+pub struct CompileStatus:
     result: JitCompileResult
     error_message: text
 
-struct ExecutionResult:
+pub struct ExecutionResult:
     success: bool
     return_value: i64
     error_message: text
 
 # --- Global JIT Backend Control ---
 
-fn jit_set_backend(backend: JitBackend) -> bool:
+# reason: global JIT backend setter reports admission as boolean
+@allow(primitive_api)
+pub fn jit_set_backend(backend: JitBackend) -> bool:
     """Set the global JIT backend for new execution managers."""
     rt_set_jit_backend(backend_to_string(backend))
 
-fn jit_get_backend() -> JitBackend:
+pub fn jit_get_backend() -> JitBackend:
     """Get the current global JIT backend."""
     val backend_str = rt_get_jit_backend()
     string_to_backend(backend_str)
 
 # --- Capability detection ---
 
-fn jit_available() -> bool:
+# reason: capability probe returns availability boolean
+@allow(primitive_api)
+pub fn jit_available() -> bool:
     debug("jit", "jit_available() -> true (in-process interpreter)")
     true  # In-process interpreter always available
 
-fn jit_native_available() -> bool:
-    debug("jit", "Native JIT unavailable: using in-process CompilerDriver")
+# reason: native JIT capability probe returns availability boolean
+@allow(primitive_api)
+pub fn jit_native_available() -> bool:
+    debug("jit", "Native JIT unavailable: using in-process interpreter")
     false
 
 # --- Execution Manager Creation ---
 
-fn exec_manager_new() -> ExecManager:
+pub fn exec_manager_new() -> ExecManager:
     """
     Create a new execution manager with auto-selected backend.
     Integrates with compiler infrastructure.
     """
     val handle = rt_exec_manager_create("auto")
     val backend = JitBackend.Default
-    val is_valid = handle != 0
+    val valid = rt_exec_manager_is_valid(handle)
 
     ExecManager(
         handle: handle,
         backend: backend,
-        is_valid: is_valid,
+        is_valid: valid,
         opt_level: 0
     )
 
-fn exec_manager_with_backend(backend: JitBackend) -> ExecManager:
+pub fn exec_manager_with_backend(backend: JitBackend) -> ExecManager:
     """
     Create a new execution manager with specific backend.
 
@@ -312,35 +527,29 @@ fn exec_manager_with_backend(backend: JitBackend) -> ExecManager:
     """
     val backend_str = backend_to_string(backend)
     val handle = rt_exec_manager_create(backend_str)
-    val is_valid = handle != 0
+    val valid = rt_exec_manager_is_valid(handle)
 
     ExecManager(
         handle: handle,
         backend: backend,
-        is_valid: is_valid,
+        is_valid: valid,
         opt_level: 0
     )
 
-fn exec_manager_destroy(manager: ExecManager):
+pub fn exec_manager_destroy(manager: ExecManager):
     """Release resources for execution manager."""
     if manager.is_valid:
         rt_exec_manager_cleanup(manager.handle)
 
 # --- Compilation Functions ---
 
-fn exec_manager_compile_source(manager: ExecManager, source: text) -> CompileStatus:
+# reason: execution manager source compile facade accepts Simple source text
+@allow(primitive_api)
+pub fn exec_manager_compile_source(manager: ExecManager, source: text) -> CompileStatus:
     """
     Compile Simple source code to executable code.
-    Shares code with src/app/compile/ infrastructure.
-
-    Example:
-        val mgr = exec_manager_new()
-        val status = exec_manager_compile_source(mgr, "fn add(x, y): x + y")
-        if status.result == JitCompileResult.Success:
-            # Execute compiled function
-            val result = exec_manager_call(mgr, "add", [10, 32])
     """
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         CompileStatus(
             result: JitCompileResult.Error,
             error_message: "Invalid execution manager"
@@ -352,12 +561,13 @@ fn exec_manager_compile_source(manager: ExecManager, source: text) -> CompileSta
         else:
             CompileStatus(result: JitCompileResult.Error, error_message: error)
 
-fn exec_manager_compile_mir(manager: ExecManager, mir_data: text) -> CompileStatus:
+# reason: execution manager MIR compile facade accepts serialized MIR payload text
+@allow(primitive_api)
+pub fn exec_manager_compile_mir(manager: ExecManager, mir_data: text) -> CompileStatus:
     """
     Compile MIR (Mid-level IR) to executable code.
-    Uses existing compiler backend infrastructure.
     """
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         CompileStatus(
             result: JitCompileResult.Error,
             error_message: "Invalid execution manager"
@@ -369,12 +579,13 @@ fn exec_manager_compile_mir(manager: ExecManager, mir_data: text) -> CompileStat
         else:
             CompileStatus(result: JitCompileResult.Error, error_message: error)
 
-fn exec_manager_compile_file(manager: ExecManager, file_path: text) -> CompileStatus:
+# reason: execution manager file compile facade accepts source file path text
+@allow(primitive_api)
+pub fn exec_manager_compile_file(manager: ExecManager, file_path: text) -> CompileStatus:
     """
     Compile a .spl file to executable code.
-    Shares code with src/app/compile/ and loader infrastructure.
     """
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         CompileStatus(
             result: JitCompileResult.Error,
             error_message: "Invalid execution manager"
@@ -388,23 +599,19 @@ fn exec_manager_compile_file(manager: ExecManager, file_path: text) -> CompileSt
 
 # --- Execution Functions ---
 
-fn exec_manager_call(manager: ExecManager, function_name: text, args: [i64]) -> ExecutionResult:
+# reason: execution manager call facade accepts function name text and i64 ABI argument array
+@allow(primitive_api)
+pub fn exec_manager_call(manager: ExecManager, function_name: text, args: [i64]) -> ExecutionResult:
     """
     Execute a compiled function with integer arguments.
-
-    Example:
-        val result = exec_manager_call(mgr, "add", [10, 32])
-        if result.success:
-            print "Result: {result.return_value}"
     """
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         ExecutionResult(
             success: false,
             return_value: 0,
             error_message: "Invalid execution manager"
         )
     else:
-        # Check if function exists
         if not rt_exec_manager_has_function(manager.handle, function_name):
             ExecutionResult(
                 success: false,
@@ -412,22 +619,20 @@ fn exec_manager_call(manager: ExecManager, function_name: text, args: [i64]) -> 
                 error_message: "Function '{function_name}' not found"
             )
         else:
-            val (success, return_val, error) = _exec_manager_execute_checked(
+            val (success, return_val, error) = rt_exec_manager_execute_checked(
                 manager.handle, function_name, args)
             if success:
                 ExecutionResult(success: true, return_value: return_val, error_message: "")
             else:
                 ExecutionResult(success: false, return_value: 0, error_message: error)
 
-fn exec_manager_call_void(manager: ExecManager, function_name: text) -> ExecutionResult:
+# reason: execution manager void call facade accepts function name text
+@allow(primitive_api)
+pub fn exec_manager_call_void(manager: ExecManager, function_name: text) -> ExecutionResult:
     """
     Execute a compiled function with no arguments (void).
-
-    Example:
-        exec_manager_compile_source(mgr, "fn hello(): print 'Hello, JIT!'")
-        exec_manager_call_void(mgr, "hello")
     """
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         ExecutionResult(
             success: false,
             return_value: 0,
@@ -439,44 +644,48 @@ fn exec_manager_call_void(manager: ExecManager, function_name: text) -> Executio
         else:
             ExecutionResult(success: false, return_value: 0, error_message: "Execution failed")
 
-fn exec_manager_call_string(manager: ExecManager, function_name: text, args: [text]) -> Result<text, text>:
+# reason: execution manager string call facade accepts function name and string arguments and returns text result
+@allow(primitive_api)
+pub fn exec_manager_call_string(manager: ExecManager, function_name: text, args: [text]) -> Result<text, text>:
     """
     Execute a compiled function that returns text.
-
-    Example:
-        exec_manager_compile_source(mgr, "fn greet(name): 'Hello, ' + name")
-        val greeting = exec_manager_call_string(mgr, "greet", ["World"])
     """
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         Err("Invalid execution manager")
     else:
         _exec_manager_execute_string_checked(manager.handle, function_name, args)
 
 # --- Introspection Functions ---
 
-fn exec_manager_has_function(manager: ExecManager, name: text) -> bool:
+# reason: execution manager introspection checks function name text and returns membership boolean
+@allow(primitive_api)
+pub fn exec_manager_has_function(manager: ExecManager, name: text) -> bool:
     """Check if a function has been compiled."""
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         false
     else:
         rt_exec_manager_has_function(manager.handle, name)
 
-fn exec_manager_list_functions(manager: ExecManager) -> [text]:
+# reason: execution manager introspection returns compiled function name list
+@allow(primitive_api)
+pub fn exec_manager_list_functions(manager: ExecManager) -> [text]:
     """List all compiled function names."""
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         []
     else:
         rt_exec_manager_list_functions(manager.handle)
 
-fn exec_manager_backend(manager: ExecManager) -> JitBackend:
+pub fn exec_manager_backend(manager: ExecManager) -> JitBackend:
     """Get the backend used by this execution manager."""
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         JitBackend.Unknown
     else:
         val backend_str = rt_exec_manager_backend_name(manager.handle)
         string_to_backend(backend_str)
 
-fn exec_manager_is_valid(manager: ExecManager) -> bool:
+# reason: execution manager validity check returns boolean state
+@allow(primitive_api)
+pub fn exec_manager_is_valid(manager: ExecManager) -> bool:
     """Check if execution manager is valid."""
     if not manager.is_valid:
         false
@@ -485,35 +694,37 @@ fn exec_manager_is_valid(manager: ExecManager) -> bool:
 
 # --- Optimization Control ---
 
-fn exec_manager_set_opt_level(manager: ExecManager, level: i64) -> bool:
+# reason: execution manager optimization setter takes scalar optimization level and returns admission boolean
+@allow(primitive_api)
+pub fn exec_manager_set_opt_level(manager: ExecManager, level: i64) -> bool:
     """
     Set optimization level (0-3).
 
     This interpreter-backed manager accepts only level 0. Native optimization
     requests fail rather than being reported as applied.
     """
-    if not manager.is_valid or level < 0 or level > 3:
+    if not exec_manager_is_valid(manager) or level < 0 or level > 3:
         false
     else:
         rt_exec_manager_set_opt_level(manager.handle, level)
 
-fn exec_manager_get_opt_level(manager: ExecManager) -> i64:
+# reason: execution manager optimization getter returns scalar optimization level
+@allow(primitive_api)
+pub fn exec_manager_get_opt_level(manager: ExecManager) -> i64:
     """Get current optimization level."""
-    if not manager.is_valid:
+    if not exec_manager_is_valid(manager):
         -1
     else:
         rt_exec_manager_get_opt_level(manager.handle)
 
 # --- High-Level Helper Functions ---
 
-fn jit_eval(source: text) -> ExecutionResult:
+# reason: convenience JIT evaluator accepts Simple expression text
+@allow(primitive_api)
+pub fn jit_eval(source: text) -> ExecutionResult:
     """
     Compile and execute Simple source code immediately.
     Creates a temporary execution manager.
-
-    Example:
-        val result = jit_eval("21 + 21")
-        print "Result: {result.return_value}"
     """
     val mgr = exec_manager_new()
 
@@ -533,14 +744,11 @@ fn jit_eval(source: text) -> ExecutionResult:
         exec_manager_destroy(mgr)
         result
 
-fn jit_compile_and_run(source: text, function_name: text, args: [i64]) -> ExecutionResult:
+# reason: convenience JIT compile-and-run helper accepts source text, function name, and i64 args
+@allow(primitive_api)
+pub fn jit_compile_and_run(source: text, function_name: text, args: [i64]) -> ExecutionResult:
     """
     Compile source and execute a specific function.
-
-    Example:
-        val source = "fn factorial(n): if n <= 1: 1 else: n * factorial(n - 1)"
-        val result = jit_compile_and_run(source, "factorial", [5])
-        print "5! = {result.return_value}"
     """
     val mgr = exec_manager_new()
     val compile_status = exec_manager_compile_source(mgr, source)
@@ -557,13 +765,11 @@ fn jit_compile_and_run(source: text, function_name: text, args: [i64]) -> Execut
         exec_manager_destroy(mgr)
         result
 
-fn jit_load_and_run(file_path: text, function_name: text, args: [i64]) -> ExecutionResult:
+# reason: convenience JIT file runner accepts file path, function name, and i64 args
+@allow(primitive_api)
+pub fn jit_load_and_run(file_path: text, function_name: text, args: [i64]) -> ExecutionResult:
     """
     Load a .spl file, compile it, and execute a function.
-    Integrates with loader infrastructure.
-
-    Example:
-        val result = jit_load_and_run("math_utils.spl", "fibonacci", [10])
     """
     val mgr = exec_manager_new()
     val compile_status = exec_manager_compile_file(mgr, file_path)
@@ -582,26 +788,12 @@ fn jit_load_and_run(file_path: text, function_name: text, args: [i64]) -> Execut
 
 # --- Integration with Compiler Infrastructure ---
 
-fn jit_compile_with_compiler(manager: ExecManager, source: text) -> CompileStatus:
+# reason: compiler-integrated JIT compile helper accepts source text
+@allow(primitive_api)
+pub fn jit_compile_with_compiler(manager: ExecManager, source: text) -> CompileStatus:
     """
-    Compile using the full compiler pipeline (shares code with src/app/compile/).
-
-    Pipeline:
-    1. Parse source → AST (uses src/app/parser/)
-    2. Lower AST → HIR (uses src/app/hir/)
-    3. Lower HIR → MIR (uses src/app/mir/)
-    4. Compile MIR → Machine code (Cranelift/LLVM)
-    5. Load into execution manager
-
-    This ensures JIT compilation is consistent with ahead-of-time compilation.
+    Compile using the frontend + HIR pipeline.
     """
-    # This function will be implemented by calling into:
-    # - src/app/parser/ for parsing
-    # - src/app/hir/ for HIR generation
-    # - src/app/mir/ for MIR generation
-    # - Backend (Cranelift/LLVM) for machine code
-
-    # For now, delegate to runtime which has the full pipeline
     exec_manager_compile_source(manager, source)
 
 # ============================================================================

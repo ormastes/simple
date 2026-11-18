@@ -10,6 +10,7 @@ use compiler.backend.interpreter.{
     InterpreterBackendImpl,
     interp_hir_expr_unsigned,
     itrace,
+    interp_trace_enabled,
     resolve_sym_name,
     interp_enum_discriminant_raw
 }
@@ -64,7 +65,8 @@ impl InterpreterBackendImpl:
 
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
         val ee_disc: i64 = interp_enum_discriminant_raw(expr.kind)
-        itrace("[EE] eval_expr entry disc={ee_disc}")
+        if interp_trace_enabled():
+            itrace("[EE] eval_expr entry disc={ee_disc}")
         # DISC PRE-DISPATCH for struct-shadowed variant `Field` (bug doc
         # iteration 21, target (c)). `struct Field` (parser_types.spl:232) exists,
         # so a `case HirExprKind.Field(...)` TEST compiles ALWAYS-TRUE on stage4
@@ -149,7 +151,8 @@ impl InterpreterBackendImpl:
                 # Env is name-keyed (iteration 21, target (a)); resolve the
                 # SymbolId to its name via ctx.names.
                 val var_name = resolve_sym_name(symbol, ctx)
-                itrace("[EE] Var arm name={var_name}")
+                if interp_trace_enabled():
+                    itrace("[EE] Var arm name={var_name}")
                 val value = ctx.env.lookup(var_name)
                 if value.?:
                     # M5 strict-mem (SIMPLE_STRICT_MEM): trap a read of a
@@ -167,7 +170,8 @@ impl InterpreterBackendImpl:
             case HirExprKind.NamedVar(symbol, name):
                 # Typed rebinds (stage4 extracted-payload hazard, iteration 18).
                 val nv_name_t: text = name
-                itrace("[EE] NamedVar arm name={nv_name_t}")
+                if interp_trace_enabled():
+                    itrace("[EE] NamedVar arm name={nv_name_t}")
                 # `None` is the empty Option. Test it before the lookup: the
                 # env was seen answering it with a Function value.
                 if nv_name_t == "None":
@@ -194,7 +198,8 @@ impl InterpreterBackendImpl:
                     # payload on stage4 ([CF] f_nil=true, iteration 18).
                     itrace("[EE] NamedVar fallback")
                     val nv_fv: FunctionValue = FunctionValue(symbol: symbol, name: nv_name_t)
-                    itrace("[EE] NamedVar fv_nil={nv_fv == nil}")
+                    if interp_trace_enabled():
+                        itrace("[EE] NamedVar fv_nil={nv_fv == nil}")
                     # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
                     val nv_fn_value: Value = backend_value_function_v1(nv_fv)
                     Ok(nv_fn_value)
@@ -314,7 +319,8 @@ impl InterpreterBackendImpl:
                 val bin_right_t: HirExpr = right
                 val lv = self.eval_expr(bin_left_t, ctx)?
                 val rv = self.eval_expr(bin_right_t, ctx)?
-                itrace("[EE] Binary lv_nil={lv == nil} rv_nil={rv == nil}")
+                if interp_trace_enabled():
+                    itrace("[EE] Binary lv_nil={lv == nil} rv_nil={rv == nil}")
                 # Thread each operand's static unsigned-ness so a mixed
                 # int/float compare/arith promotes a high-bit u64 via an
                 # UNSIGNED int->float conversion (bug
@@ -322,7 +328,8 @@ impl InterpreterBackendImpl:
                 val left_unsigned = interp_hir_expr_unsigned(bin_left_t)
                 val right_unsigned = interp_hir_expr_unsigned(bin_right_t)
                 val bo_res = self.eval_binop(bin_op_t, lv, rv, expr.span, left_unsigned, right_unsigned)
-                itrace("[EE] Binary eval_binop returned nil={bo_res == nil}")
+                if interp_trace_enabled():
+                    itrace("[EE] Binary eval_binop returned nil={bo_res == nil}")
                 bo_res
 
             case HirExprKind.Unary(op, operand):
@@ -382,7 +389,8 @@ impl InterpreterBackendImpl:
                 match callee_kind_v:
                     case HirExprKind.NamedVar(_cs, cname):
                         val cname_t: text = cname
-                        itrace("[EE] Call builtin fast-path name={cname_t}")
+                        if interp_trace_enabled():
+                            itrace("[EE] Call builtin fast-path name={cname_t}")
                         val builtin_result = self.try_call_builtin(cname_t, arg_values)
                         if builtin_result.?:
                             return builtin_result.unwrap()
@@ -403,7 +411,8 @@ impl InterpreterBackendImpl:
                         # matches the old no-break loop.
                         val cf_named_hit = self.resolve_function_by_name(cname_t, ctx)
                         if cf_named_hit.?:
-                            itrace("[EE] Call user-fn fast-path name={cname_t}")
+                            if interp_trace_enabled():
+                                itrace("[EE] Call user-fn fast-path name={cname_t}")
                             return self.call_hir_function(cf_named_hit.unwrap(), arg_values, ctx)
                         # Struct/class construction (bug doc iteration 21, target
                         # (b)): `P(x: 5)` lowers to a Call whose callee names a
@@ -411,7 +420,8 @@ impl InterpreterBackendImpl:
                         # build a Value.Struct from the args.
                         val struct_result = self.try_construct_struct(cname_t, call_args_t, arg_values, ctx)
                         if struct_result.?:
-                            itrace("[EE] Call struct-construct name={cname_t}")
+                            if interp_trace_enabled():
+                                itrace("[EE] Call struct-construct name={cname_t}")
                             return Ok(struct_result.unwrap())
                     case _:
                         pass

@@ -12,6 +12,45 @@ use compiler.common.driver_core_types.{CompileResult}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug, log_warn}
 
+# Order lowered MIR modules for K1 JIT execution so the entry module
+# (`source_module_names[0]`) is always placed last, matching
+# `_cranelift_jit_run` (`static_backend_cranelift_jit_lane.spl:35`), which
+# executes `modules[modules.len() - 1]` after checking externs in all modules.
+# reason: source_module_names carries plain module-key text from CompileContext.source_module_names_owner
+@allow(primitive_api)
+pub fn ordered_jit_mir_modules_v1(mir_modules: Dict<text, MirModule>, source_module_names: [text]) -> [MirModule]:
+    var modules: [MirModule] = []
+    var seen: Dict<text, bool> = {}
+    val has_entry = source_module_names.len() > 0
+    val entry_name = if has_entry: source_module_names[0] else: ""
+
+    var i = 1
+    while i < source_module_names.len():
+        val name = source_module_names[i]
+        if (not has_entry or name != entry_name) and not seen.contains_key(name):
+            if mir_modules.contains_key(name):
+                seen[name] = true
+                if mir_modules.has(name):
+                    val dep_mod: MirModule = mir_modules[name]
+                    modules.push(dep_mod)
+        i = i + 1
+
+    for key in mir_modules.keys():
+        if (not has_entry or key != entry_name) and not seen.contains_key(key):
+            seen[key] = true
+            if mir_modules.has(key):
+                val extra_mod: MirModule = mir_modules[key]
+                modules.push(extra_mod)
+
+    if has_entry and not seen.contains_key(entry_name):
+        if mir_modules.contains_key(entry_name):
+            seen[entry_name] = true
+            if mir_modules.has(entry_name):
+                val entry_mod: MirModule = mir_modules[entry_name]
+                modules.push(entry_mod)
+
+    modules
+
 impl CompilerDriver:
     me jit_compile_and_run() -> CompileResult:
         if not self.lower_to_mir():
@@ -35,9 +74,8 @@ impl CompilerDriver:
         if self.ctx.has_errors():
             return CompileResult.CodegenError(self.ctx.error_message_at(0))
 
-        var modules: [MirModule] = []
-        for name in self.ctx.mir_modules.keys():
-            modules.push(self.ctx.mir_modules[name])
+        val modules = ordered_jit_mir_modules_v1(
+            self.ctx.mir_modules, self.ctx.source_module_names_owner)
         k1_jit_lane_run_modules_v1(modules)
 
     me execute_smf() -> CompileResult:

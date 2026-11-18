@@ -12,7 +12,7 @@ use compiler.core.interpreter.eval_builtins.{eval_builtin_call}
 use compiler.core.interpreter.eval_units.{eval_unit_method, val_is_unit}
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
 use compiler.core.interpreter.eval_tables.{enum_table_lookup, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller, func_table_lookup, struct_table_lookup}
-use compiler.core.interpreter.eval_tables.{FUNC_LOOKUP_AMBIGUOUS, func_ambiguous_call_message, func_owners_of}
+use compiler.core.interpreter.eval_tables.{FUNC_LOOKUP_AMBIGUOUS, func_ambiguous_call_message, func_owners_of, func_yield_cache_get, func_yield_cache_set}
 use compiler.core.types.{TYPE_I16, TYPE_I32, TYPE_I8, TYPE_U16, TYPE_U32}
 use compiler.core.types.{TYPE_U64, TYPE_U8}
 use compiler.frontend.core.interpreter.eval_ops.*
@@ -41,9 +41,6 @@ use compiler.core.interpreter.eval_calls.{val_copy_for_parameter, val_copy_if_va
     eval_prepare_call_arguments, InterpreterCallArguments}
 use compiler.core.interpreter.value_places.{eval_prepare_value_place, InterpreterValuePlace}
 use std.common.string_core.{char_from_code_inline}
-
-
-var _yield_cache: {} = {}
 
 # ===== Float Parsing Utilities =====
 
@@ -342,9 +339,9 @@ pub fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i
                 raw_args.push(val_get_int(av))
             else:
                 raw_args.push(av)
-        val jit_result = jit_try_execute(fn_name, raw_args)
-        if jit_result != -1:
-            return val_make_int(jit_result)
+        val jit_exec = jit_try_execute_checked(fn_name, raw_args)
+        if jit_exec.0:
+            return val_make_int(jit_exec.1)
 
     # Fall back to tree-walking
     val local_count = resolve_cached_local_count(decl_id)
@@ -370,14 +367,13 @@ pub fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i
         pi = pi + 1
 
     # Generator detection: push yield accumulator if body contains yield
-    val yield_key = "{decl_id}"
     var is_gen = false
-    val cached_yield = _yield_cache[yield_key]
-    if cached_yield.?:
-        is_gen = cached_yield == "y"
+    val cached_yield = func_yield_cache_get(decl_id)
+    if cached_yield >= 0:
+        is_gen = cached_yield == 1
     else:
         is_gen = stmts_contain_yield(body_stmts)
-        _yield_cache[yield_key] = if is_gen: "y" else: "n"
+        func_yield_cache_set(decl_id, is_gen)
     if is_gen:
         eval_yield_stack.push([])
 
@@ -684,12 +680,14 @@ pub fn eval_method_call(eid: i64) -> i64:
     # and its "flat registry lets one module's symbol hijack another" family).
     # Mirror the EXPR_CALL field-access path in eval_call below: enum variants
     # first, then Type__method in the function table.
-    if expr_get(receiver_eid).tag == EXPR_IDENT:
-        val type_name = expr_get(receiver_eid).s_val
+    val receiver_node = expr_get(receiver_eid)
+    if receiver_node.tag == EXPR_IDENT and expr_owner_int(receiver_eid) < 0:
+        val type_name = receiver_node.s_val
+        val receiver_struct_decl = struct_table_lookup(type_name)
         # `use mod as ns` namespace: `ns.member(args)` is a call on the
         # provider's member, not a method call on a value named `ns`.
-        if expr_owner_int(receiver_eid) < 0 and env_lookup(type_name) < 0 and
-           struct_table_lookup(type_name) < 0 and
+        if env_lookup(type_name) < 0 and
+           receiver_struct_decl < 0 and
            func_module_namespace_lookup(eval_caller_file(), type_name) != "":
             val member_decl = func_resolve_module_member_for_caller(
                 eval_caller_file(), type_name, method_name)
@@ -710,7 +708,7 @@ pub fn eval_method_call(eid: i64) -> i64:
                     break
             if is_variant:
                 return eval_enum_variant_call(type_name, method_name, arg_eids)
-        if struct_table_lookup(type_name) >= 0:
+        if receiver_struct_decl >= 0:
             val static_decl = func_table_lookup(type_name + "__" + method_name)
             if static_decl >= 0:
                 return eval_function_call(static_decl, arg_eids, arg_names)

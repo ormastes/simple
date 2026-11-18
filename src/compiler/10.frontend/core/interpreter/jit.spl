@@ -1,9 +1,48 @@
-# Core Interpreter — JIT Engine (runtime-compatible, file-backed state)
+# Core Interpreter — JIT Engine (process-owned in-memory hash-table state)
 
-use std.io_runtime.{file_read_result, file_delete, getpid}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use compiler.core.interpreter.hashmap.{HM_SIZE, hm_hash_text, hm_make_global_buckets}
 
-var _jit_enabled_cached: i64 = -1
+var _jit_threshold: i64 = 10
+var _jit_enabled: i64 = 0
+var _jit_epoch: i64 = 0
+var _jit_verbose: i64 = 0
+var _jit_backend: text = "auto"
+var _jit_compile_attempts: i64 = 0
+
+# Call-count table: fn_name -> count (chained hash map, HM_SIZE = 256)
+var _jit_call_keys: [text] = []
+var _jit_call_vals: [i64] = []
+var _jit_call_buckets: [i64] = []
+var _jit_call_nexts: [i64] = []
+
+# Compiled set: fn_name -> live flag (1 = live, 0 = swept/cleaned; HM_SIZE = 256)
+var _jit_compiled_keys: [text] = []
+var _jit_compiled_live: [i64] = []
+var _jit_compiled_buckets: [i64] = []
+var _jit_compiled_nexts: [i64] = []
+var _jit_compiled_live_count: i64 = 0
+
+# Negative compile cache: fn_name -> failed flag (1 = failed, 0 = cleared; HM_SIZE = 256)
+var _jit_failed_keys: [text] = []
+var _jit_failed_live: [i64] = []
+var _jit_failed_buckets: [i64] = []
+var _jit_failed_nexts: [i64] = []
+var _jit_failed_live_count: i64 = 0
+
+# Symbol last-used epoch table: fn_name -> epoch (chained hash map, HM_SIZE = 256)
+var _jit_used_keys: [text] = []
+var _jit_used_vals: [i64] = []
+var _jit_used_buckets: [i64] = []
+var _jit_used_nexts: [i64] = []
+
+# Explicit native callable return table: fn_name -> (live flag, raw i64 return word).
+# Empty unless an execution backend registers a real native callable; prevents
+# marking unbacked functions as compiled or returning a fake 0 result.
+var _jit_native_keys: [text] = []
+var _jit_native_live: [i64] = []
+var _jit_native_vals: [i64] = []
+var _jit_native_buckets: [i64] = []
+var _jit_native_nexts: [i64] = []
 
 class JitState:
     threshold: i64
@@ -15,250 +54,399 @@ class JitState:
     used_keys: [text]
     used_vals: [i64]
 
+class JitThresholdView:
+    threshold: i64
+
 fn _state_path() -> text:
-    val pid = getpid()
-    "/tmp/simple_jit_{pid}.sdn"
+    "memory://simple_jit"
 
-fn _find_idx(keys: [text], key: text) -> i64:
-    for i in range(0, keys.len()):
-        if keys[i] == key:
-            return i
-    -1
+fn _jit_reset_tables():
+    _jit_call_keys = []
+    _jit_call_vals = []
+    _jit_call_buckets = hm_make_global_buckets()
+    _jit_call_nexts = []
 
-fn _split_nonempty(s: text, sep: text) -> [text]:
-    if s == "":
-        return []
-    val parts = s.split(sep)
-    var out: [text] = []
-    for p in parts:
-        if p != "":
-            out.push(p)
-    out
+    _jit_compiled_keys = []
+    _jit_compiled_live = []
+    _jit_compiled_buckets = hm_make_global_buckets()
+    _jit_compiled_nexts = []
+    _jit_compiled_live_count = 0
 
-fn _parse_pairs(line: text) -> ([text], [i64]):
-    var keys: [text] = []
-    var vals: [i64] = []
-    val items = _split_nonempty(line, ";")
-    for item in items:
-        val eq = item.index_of("=")
-        if eq > 0:
-            val k = item.substring(0, eq)
-            val v_str = item.substring(eq + 1)
-            val v = v_str.to_int()
-            keys.push(k)
-            vals.push(v)
-    (keys, vals)
+    _jit_failed_keys = []
+    _jit_failed_live = []
+    _jit_failed_buckets = hm_make_global_buckets()
+    _jit_failed_nexts = []
+    _jit_failed_live_count = 0
 
-fn _encode_pairs(keys: [text], vals: [i64]) -> text:
-    var parts: [text] = []
-    for i in range(0, keys.len()):
-        parts.push(keys[i] + "=" + vals[i].to_string())
-    parts.join(";")
+    _jit_used_keys = []
+    _jit_used_vals = []
+    _jit_used_buckets = hm_make_global_buckets()
+    _jit_used_nexts = []
+
+    _jit_native_keys = []
+    _jit_native_live = []
+    _jit_native_vals = []
+    _jit_native_buckets = hm_make_global_buckets()
+    _jit_native_nexts = []
+
+    _jit_compile_attempts = 0
 
 fn _load_state() -> JitState:
-    val raw = match file_read_result(_state_path()):
-        case Ok(content): content
-        case Err(_): ""
-    if raw == "":
-        return JitState(
-            threshold: 10,
-            enabled: 0,
-            epoch: 0,
-            call_keys: [],
-            call_vals: [],
-            compiled: [],
-            used_keys: [],
-            used_vals: []
-        )
-
-    val lines = raw.split("\n")
-    var threshold: i64 = 10
-    var enabled: i64 = 0
-    var epoch: i64 = 0
-    var calls_line = ""
-    var compiled_line = ""
-    var used_line = ""
-
-    if lines.len() > 0 and lines[0] != "":
-        threshold = lines[0].to_int()
-    if lines.len() > 1 and lines[1] != "":
-        enabled = lines[1].to_int()
-    if lines.len() > 2 and lines[2] != "":
-        epoch = lines[2].to_int()
-    if lines.len() > 3:
-        calls_line = lines[3]
-    if lines.len() > 4:
-        compiled_line = lines[4]
-    if lines.len() > 5:
-        used_line = lines[5]
-
-    val call_parsed = _parse_pairs(calls_line)
-    val used_parsed = _parse_pairs(used_line)
-
+    var compiled_list: [text] = []
+    var i: i64 = 0
+    while i < _jit_compiled_keys.len():
+        if _jit_compiled_live[i] == 1:
+            compiled_list.push(_jit_compiled_keys[i])
+        i = i + 1
     JitState(
-        threshold: threshold,
-        enabled: enabled,
-        epoch: epoch,
-        call_keys: call_parsed[0],
-        call_vals: call_parsed[1],
-        compiled: _split_nonempty(compiled_line, ","),
-        used_keys: used_parsed[0],
-        used_vals: used_parsed[1]
+        threshold: _jit_threshold,
+        enabled: _jit_enabled,
+        epoch: _jit_epoch,
+        call_keys: _jit_call_keys,
+        call_vals: _jit_call_vals,
+        compiled: compiled_list,
+        used_keys: _jit_used_keys,
+        used_vals: _jit_used_vals
     )
 
 fn _save_state(s: JitState):
-    val content = s.threshold.to_string() + "\n" +
-        s.enabled.to_string() + "\n" +
-        s.epoch.to_string() + "\n" +
-        _encode_pairs(s.call_keys, s.call_vals) + "\n" +
-        s.compiled.join(",") + "\n" +
-        _encode_pairs(s.used_keys, s.used_vals)
-    val ok = file_atomic_write(_state_path(), content)
-    ok
+    _jit_threshold = s.threshold
+    _jit_enabled = s.enabled
+    _jit_epoch = s.epoch
+    _jit_reset_tables()
+    var ci: i64 = 0
+    while ci < s.call_keys.len() and ci < s.call_vals.len():
+        _jit_set_call_count(s.call_keys[ci], s.call_vals[ci])
+        ci = ci + 1
+    for name in s.compiled:
+        jit_mark_compiled(name)
+    var ui: i64 = 0
+    while ui < s.used_keys.len() and ui < s.used_vals.len():
+        _jit_set_used_epoch(s.used_keys[ui], s.used_vals[ui])
+        ui = ui + 1
+
+fn _jit_set_call_count(fn_name: text, count: i64):
+    if _jit_call_buckets.len() == 0:
+        _jit_call_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_call_buckets[bucket]
+    while idx != -1:
+        if _jit_call_keys[idx] == fn_name:
+            _jit_call_vals[idx] = count
+            return
+        idx = _jit_call_nexts[idx]
+    val new_idx = _jit_call_keys.len()
+    _jit_call_keys.push(fn_name)
+    _jit_call_vals.push(count)
+    _jit_call_nexts.push(_jit_call_buckets[bucket])
+    _jit_call_buckets[bucket] = new_idx
+
+fn _jit_set_used_epoch(fn_name: text, epoch: i64):
+    if _jit_used_buckets.len() == 0:
+        _jit_used_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_used_buckets[bucket]
+    while idx != -1:
+        if _jit_used_keys[idx] == fn_name:
+            _jit_used_vals[idx] = epoch
+            return
+        idx = _jit_used_nexts[idx]
+    val new_idx = _jit_used_keys.len()
+    _jit_used_keys.push(fn_name)
+    _jit_used_vals.push(epoch)
+    _jit_used_nexts.push(_jit_used_buckets[bucket])
+    _jit_used_buckets[bucket] = new_idx
+
+fn _jit_used_lookup_idx(fn_name: text) -> i64:
+    if _jit_used_buckets.len() == 0:
+        return -1
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_used_buckets[bucket]
+    while idx != -1:
+        if _jit_used_keys[idx] == fn_name:
+            return idx
+        idx = _jit_used_nexts[idx]
+    -1
+
+fn _jit_mark_compile_failed(fn_name: text):
+    if _jit_failed_buckets.len() == 0:
+        _jit_failed_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_failed_buckets[bucket]
+    while idx != -1:
+        if _jit_failed_keys[idx] == fn_name:
+            if _jit_failed_live[idx] == 0:
+                _jit_failed_live[idx] = 1
+                _jit_failed_live_count = _jit_failed_live_count + 1
+            return
+        idx = _jit_failed_nexts[idx]
+    val new_idx = _jit_failed_keys.len()
+    _jit_failed_keys.push(fn_name)
+    _jit_failed_live.push(1)
+    _jit_failed_nexts.push(_jit_failed_buckets[bucket])
+    _jit_failed_buckets[bucket] = new_idx
+    _jit_failed_live_count = _jit_failed_live_count + 1
+
+fn _jit_clear_compile_failed(fn_name: text):
+    if _jit_failed_live_count == 0 or _jit_failed_buckets.len() == 0:
+        return
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_failed_buckets[bucket]
+    while idx != -1:
+        if _jit_failed_keys[idx] == fn_name:
+            if _jit_failed_live[idx] == 1:
+                _jit_failed_live[idx] = 0
+                _jit_failed_live_count = _jit_failed_live_count - 1
+            return
+        idx = _jit_failed_nexts[idx]
 
 fn jit_init(threshold: i64, verbose: i64):
     var enabled: i64 = 0
     if threshold < 999999:
         enabled = 1
-    val ok = _save_state(JitState(
-        threshold: threshold,
-        enabled: enabled,
-        epoch: 0,
-        call_keys: [],
-        call_vals: [],
-        compiled: [],
-        used_keys: [],
-        used_vals: []
-    ))
-    _jit_enabled_cached = enabled
+    _jit_threshold = threshold
+    _jit_enabled = enabled
+    _jit_epoch = 0
+    _jit_verbose = verbose
+    _jit_backend = "auto"
+    _jit_reset_tables()
     if verbose == 1:
-        print "jit_init save={ok}"
+        print "jit_init enabled={enabled} threshold={threshold}"
 
 fn jit_init_with_backend(threshold: i64, verbose: i64, backend: text):
     jit_init(threshold, verbose)
+    _jit_backend = backend
 
 fn jit_cleanup():
-    file_delete(_state_path())
+    _jit_threshold = 10
+    _jit_enabled = 0
+    _jit_epoch = 0
+    _jit_verbose = 0
+    _jit_backend = "auto"
+    _jit_reset_tables()
 
 pub fn jit_record_call(fn_name: text):
-    if _jit_enabled_cached == 0:
-        return
-    if _jit_enabled_cached == -1:
-        val s = _load_state()
-        _jit_enabled_cached = s.enabled
-        if _jit_enabled_cached == 0:
-            return
-    var s = _load_state()
-    if s.enabled == 0:
-        _jit_enabled_cached = 0
+    if _jit_enabled == 0:
         return
     jit_mark_symbol_used(fn_name)
-    s = _load_state()
-    val idx = _find_idx(s.call_keys, fn_name)
-    if idx >= 0:
-        s.call_vals[idx] = s.call_vals[idx] + 1
-    else:
-        s.call_keys.push(fn_name)
-        s.call_vals.push(1)
-    _save_state(s)
+    if _jit_call_buckets.len() == 0:
+        _jit_call_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_call_buckets[bucket]
+    while idx != -1:
+        if _jit_call_keys[idx] == fn_name:
+            _jit_call_vals[idx] = _jit_call_vals[idx] + 1
+            return
+        idx = _jit_call_nexts[idx]
+    val new_idx = _jit_call_keys.len()
+    _jit_call_keys.push(fn_name)
+    _jit_call_vals.push(1)
+    _jit_call_nexts.push(_jit_call_buckets[bucket])
+    _jit_call_buckets[bucket] = new_idx
 
 fn jit_get_call_count(fn_name: text) -> i64:
-    val s = _load_state()
-    val idx = _find_idx(s.call_keys, fn_name)
-    if idx >= 0:
-        return s.call_vals[idx]
+    if _jit_call_buckets.len() == 0:
+        return 0
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_call_buckets[bucket]
+    while idx != -1:
+        if _jit_call_keys[idx] == fn_name:
+            return _jit_call_vals[idx]
+        idx = _jit_call_nexts[idx]
     0
 
-fn jit_should_compile(fn_name: text) -> bool:
-    val s = _load_state()
-    if s.enabled == 0:
+# reason: core-interpreter JIT negative-cache query returns raw bool status
+@allow(primitive_api) # reason: core-interpreter JIT negative-cache query returns raw bool status
+pub fn jit_is_compile_failed(fn_name: text) -> bool:
+    if _jit_failed_live_count == 0 or _jit_failed_buckets.len() == 0:
         return false
-    jit_get_call_count(fn_name) >= s.threshold
-
-pub fn jit_is_compiled(fn_name: text) -> bool:
-    if _jit_enabled_cached == 0:
-        return false
-    val s = _load_state()
-    s.compiled.contains(fn_name)
-
-fn jit_mark_compiled(fn_name: text):
-    var s = _load_state()
-    if not s.compiled.contains(fn_name):
-        s.compiled.push(fn_name)
-    _save_state(s)
-
-fn jit_try_compile(fn_name: text, mir_data: text) -> bool:
-    val s = _load_state()
-    if s.enabled == 0:
-        return false
-    if jit_should_compile(fn_name):
-        jit_mark_compiled(fn_name)
-        return true
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_failed_buckets[bucket]
+    while idx != -1:
+        if _jit_failed_keys[idx] == fn_name:
+            return _jit_failed_live[idx] == 1
+        idx = _jit_failed_nexts[idx]
     false
 
-pub fn jit_try_execute(fn_name: text, args: [i64]) -> i64:
+# reason: core-interpreter JIT negative-cache count returns raw i64 counter
+@allow(primitive_api) # reason: core-interpreter JIT negative-cache count returns raw i64 counter
+pub fn jit_compile_failed_count() -> i64:
+    _jit_failed_live_count
+
+# reason: core-interpreter JIT compile-attempt telemetry returns raw i64 counter
+@allow(primitive_api) # reason: core-interpreter JIT compile-attempt telemetry returns raw i64 counter
+pub fn jit_compile_attempt_count() -> i64:
+    _jit_compile_attempts
+
+# reason: core-interpreter JIT native callable registration uses raw i64 return word
+@allow(primitive_api) # reason: core-interpreter JIT native callable registration uses raw i64 return word
+pub fn jit_register_native_return(fn_name: text, result: i64):
+    if _jit_native_buckets.len() == 0:
+        _jit_native_buckets = hm_make_global_buckets()
+    _jit_clear_compile_failed(fn_name)
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_native_buckets[bucket]
+    while idx != -1:
+        if _jit_native_keys[idx] == fn_name:
+            _jit_native_live[idx] = 1
+            _jit_native_vals[idx] = result
+            return
+        idx = _jit_native_nexts[idx]
+    val new_idx = _jit_native_keys.len()
+    _jit_native_keys.push(fn_name)
+    _jit_native_live.push(1)
+    _jit_native_vals.push(result)
+    _jit_native_nexts.push(_jit_native_buckets[bucket])
+    _jit_native_buckets[bucket] = new_idx
+
+# reason: core-interpreter JIT native callable check returns raw bool status
+@allow(primitive_api) # reason: core-interpreter JIT native callable check returns raw bool status
+pub fn jit_has_native_callable(fn_name: text) -> bool:
+    if _jit_native_buckets.len() == 0:
+        return false
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_native_buckets[bucket]
+    while idx != -1:
+        if _jit_native_keys[idx] == fn_name:
+            return _jit_native_live[idx] == 1
+        idx = _jit_native_nexts[idx]
+    false
+
+fn jit_should_compile(fn_name: text) -> bool:
+    if _jit_enabled == 0:
+        return false
     if jit_is_compiled(fn_name):
-        return 0
+        return false
+    if jit_is_compile_failed(fn_name):
+        return false
+    val s = JitThresholdView(threshold: _jit_threshold)
+    jit_get_call_count(fn_name) >= s.threshold
+
+# reason: core-interpreter JIT compilation query returns raw bool status
+@allow(primitive_api) # reason: core-interpreter JIT compilation query returns raw bool status
+pub fn jit_is_compiled(fn_name: text) -> bool:
+    if _jit_enabled == 0 or _jit_compiled_live_count == 0:
+        return false
+    if _jit_compiled_buckets.len() == 0:
+        return false
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_compiled_buckets[bucket]
+    while idx != -1:
+        if _jit_compiled_keys[idx] == fn_name:
+            return _jit_compiled_live[idx] == 1
+        idx = _jit_compiled_nexts[idx]
+    false
+
+fn jit_mark_compiled(fn_name: text):
+    if _jit_compiled_buckets.len() == 0:
+        _jit_compiled_buckets = hm_make_global_buckets()
+    _jit_clear_compile_failed(fn_name)
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_compiled_buckets[bucket]
+    while idx != -1:
+        if _jit_compiled_keys[idx] == fn_name:
+            if _jit_compiled_live[idx] == 0:
+                _jit_compiled_live[idx] = 1
+                _jit_compiled_live_count = _jit_compiled_live_count + 1
+            return
+        idx = _jit_compiled_nexts[idx]
+    val new_idx = _jit_compiled_keys.len()
+    _jit_compiled_keys.push(fn_name)
+    _jit_compiled_live.push(1)
+    _jit_compiled_nexts.push(_jit_compiled_buckets[bucket])
+    _jit_compiled_buckets[bucket] = new_idx
+    _jit_compiled_live_count = _jit_compiled_live_count + 1
+
+fn jit_try_compile(fn_name: text, mir_data: text) -> bool:
+    if _jit_enabled == 0:
+        return false
+    if not jit_should_compile(fn_name):
+        return false
+    _jit_compile_attempts = _jit_compile_attempts + 1
+    if jit_has_native_callable(fn_name):
+        jit_mark_compiled(fn_name)
+        return true
+    _jit_mark_compile_failed(fn_name)
+    false
+
+# reason: core-interpreter JIT execution boundary uses raw i64 args and (bool, i64) result word
+@allow(primitive_api) # reason: core-interpreter JIT execution boundary uses raw i64 args and (bool, i64) result word
+pub fn jit_try_execute_checked(fn_name: text, args: [i64]) -> (bool, i64):
+    if not jit_is_compiled(fn_name):
+        return (false, 0)
+    if _jit_native_buckets.len() == 0:
+        return (false, 0)
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = _jit_native_buckets[bucket]
+    while idx != -1:
+        if _jit_native_keys[idx] == fn_name:
+            if _jit_native_live[idx] == 1:
+                return (true, _jit_native_vals[idx])
+            return (false, 0)
+        idx = _jit_native_nexts[idx]
+    (false, 0)
+
+# reason: core-interpreter legacy JIT execution hook uses raw i64 args and i64 sentinel return
+@allow(primitive_api) # reason: core-interpreter legacy JIT execution hook uses raw i64 args and i64 sentinel return
+pub fn jit_try_execute(fn_name: text, args: [i64]) -> i64:
+    val exec = jit_try_execute_checked(fn_name, args)
+    if exec.0:
+        return exec.1
     -1
 
 fn jit_is_enabled() -> bool:
-    if _jit_enabled_cached == 0:
-        return false
-    val s = _load_state()
-    s.enabled == 1
+    _jit_enabled == 1
 
 fn jit_compiled_count() -> i64:
-    val s = _load_state()
-    s.compiled.len()
+    _jit_compiled_live_count
 
 fn jit_total_tracked() -> i64:
-    val s = _load_state()
-    s.call_keys.len()
+    _jit_call_keys.len()
 
 fn jit_mark_symbol_used(fn_name: text):
-    var s = _load_state()
-    val idx = _find_idx(s.used_keys, fn_name)
-    if idx >= 0:
-        s.used_vals[idx] = s.epoch
-    else:
-        s.used_keys.push(fn_name)
-        s.used_vals.push(s.epoch)
-    _save_state(s)
+    _jit_set_used_epoch(fn_name, _jit_epoch)
 
 fn jit_advance_epoch() -> i64:
-    var s = _load_state()
-    s.epoch = s.epoch + 1
-    _save_state(s)
-    s.epoch
+    _jit_epoch = _jit_epoch + 1
+    _jit_epoch
 
 fn jit_get_epoch() -> i64:
-    val s = _load_state()
-    s.epoch
+    _jit_epoch
 
 fn jit_sweep_stale(max_age: i64) -> i64:
-    var s = _load_state()
-    val threshold = s.epoch - max_age
+    val cutoff = _jit_epoch - max_age
     var removed: i64 = 0
-    var kept: [text] = []
-    for name in s.compiled:
-        val idx = _find_idx(s.used_keys, name)
-        if idx >= 0 and s.used_vals[idx] < threshold:
-            removed = removed + 1
-        else:
-            kept.push(name)
-    s.compiled = kept
-    _save_state(s)
+    var i: i64 = 0
+    while i < _jit_compiled_keys.len():
+        if _jit_compiled_live[i] == 1:
+            val used_idx = _jit_used_lookup_idx(_jit_compiled_keys[i])
+            if used_idx >= 0 and _jit_used_vals[used_idx] < cutoff:
+                _jit_compiled_live[i] = 0
+                _jit_compiled_live_count = _jit_compiled_live_count - 1
+                removed = removed + 1
+        i = i + 1
     removed
 
 fn jit_cleanup_symbol(fn_name: text):
-    var s = _load_state()
-    var kept: [text] = []
-    for name in s.compiled:
-        if name != fn_name:
-            kept.push(name)
-    s.compiled = kept
-    _save_state(s)
+    if _jit_compiled_live_count > 0 and _jit_compiled_buckets.len() > 0:
+        val bucket = hm_hash_text(fn_name) % HM_SIZE
+        var idx = _jit_compiled_buckets[bucket]
+        while idx != -1:
+            if _jit_compiled_keys[idx] == fn_name:
+                if _jit_compiled_live[idx] == 1:
+                    _jit_compiled_live[idx] = 0
+                    _jit_compiled_live_count = _jit_compiled_live_count - 1
+                break
+            idx = _jit_compiled_nexts[idx]
+    _jit_clear_compile_failed(fn_name)
+    if _jit_native_buckets.len() > 0:
+        val nbucket = hm_hash_text(fn_name) % HM_SIZE
+        var nidx = _jit_native_buckets[nbucket]
+        while nidx != -1:
+            if _jit_native_keys[nidx] == fn_name:
+                _jit_native_live[nidx] = 0
+                break
+            nidx = _jit_native_nexts[nidx]
 
 fn jit_sweep_tracked_count() -> i64:
-    val s = _load_state()
-    s.used_keys.len()
+    _jit_used_keys.len()

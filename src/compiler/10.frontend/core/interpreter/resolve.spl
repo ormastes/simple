@@ -13,7 +13,8 @@
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{DECL_FN, decl_count, decl_get, expr_get, stmt_get}
-use compiler.core.ast_expr.{EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_IDENT, EXPR_LAMBDA, expr_owner_int_set}
+use compiler.core.ast_expr.{EXPR_ASSIGN, EXPR_BLOCK, EXPR_COMPOUND_ASSIGN, EXPR_DO_BLOCK, EXPR_FOR}
+use compiler.core.ast_expr.{EXPR_IDENT, EXPR_IF, EXPR_LAMBDA, EXPR_UNSAFE_BLOCK, EXPR_WHILE, expr_owner_int_set}
 use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_BLOCK, STMT_COMPOUND_ASSIGN, STMT_EXPR, STMT_FOR}
 use compiler.core.ast_stmt.{STMT_IF, STMT_RETURN, STMT_VAL_DECL, STMT_VAR_DECL, STMT_WHILE}
 use compiler.core.interpreter.eval.{EVAL_STMT_LAZY_VAL_DECL}
@@ -91,6 +92,14 @@ var fn_slot_nexts: [[i64]] = []
 var fn_slot_counts: [i64] = []
 var fn_slot_shadowed: [[bool]] = []
 
+fn fn_slot_reset_all():
+    fn_slot_keys = []
+    fn_slot_vals = []
+    fn_slot_buckets = []
+    fn_slot_nexts = []
+    fn_slot_counts = []
+    fn_slot_shadowed = []
+
 fn fn_slot_ensure(decl_id: i64):
     while fn_slot_keys.len() <= decl_id:
         fn_slot_keys.push([])
@@ -118,28 +127,24 @@ pub fn resolve_cached_local_count(decl_id: i64) -> i64:
 
 pub fn resolve_is_fast_local(decl_id: i64, name: text) -> i64:
     if decl_id < 0: return -1
-    if decl_id >= fn_slot_keys.len(): return -1
-    val keys = fn_slot_keys[decl_id]
-    val vals = fn_slot_vals[decl_id]
-    val buckets = fn_slot_buckets[decl_id]
-    val nexts = fn_slot_nexts[decl_id]
-    val shadowed = fn_slot_shadowed[decl_id]
-    if buckets.len() == 0: return -1
+    if decl_id >= fn_slot_buckets.len(): return -1
+    # Read directly through the 2D owner tables so lookups do not clone 5 rows per call.
+    if fn_slot_buckets[decl_id].len() == 0: return -1
     val bucket = hm_hash_text(name) % RL_HM_SIZE
-    var idx = buckets[bucket]
+    var idx = fn_slot_buckets[decl_id][bucket]
     while idx != -1:
-        if keys[idx] == name:
-            if shadowed[idx]: return -1
-            return vals[idx]
-        idx = nexts[idx]
+        if fn_slot_keys[decl_id][idx] == name:
+            if fn_slot_shadowed[decl_id][idx]: return -1
+            return fn_slot_vals[decl_id][idx]
+        idx = fn_slot_nexts[decl_id][idx]
     -1
 
 pub fn resolve_is_slot_shadowed(decl_id: i64, slot: i64) -> bool:
     if decl_id < 0: return true
     if decl_id >= fn_slot_shadowed.len(): return true
-    val shadowed = fn_slot_shadowed[decl_id]
-    if slot >= shadowed.len(): return true
-    shadowed[slot]
+    if slot < 0: return true
+    if slot >= fn_slot_shadowed[decl_id].len(): return true
+    fn_slot_shadowed[decl_id][slot]
 
 # ===== Resolution Pass =====
 
@@ -349,8 +354,14 @@ fn esc_walk_expr(eid: i64):
             esc_walk_expr(beid)
         esc_in_lambda = prev
         return
+    if tag == EXPR_BLOCK or tag == EXPR_DO_BLOCK or tag == EXPR_UNSAFE_BLOCK or tag == EXPR_FOR or tag == EXPR_WHILE:
+        if e.left >= 0: esc_walk_expr(e.left)
+        for cs in e.stmts:
+            esc_walk_stmt(cs)
+        return
     if e.left >= 0: esc_walk_expr(e.left)
     if e.right >= 0: esc_walk_expr(e.right)
+    if tag == EXPR_IF and e.extra >= 0: esc_walk_expr(e.extra)
     for arg_eid in e.args:
         esc_walk_expr(arg_eid)
     for seid in e.stmts:
@@ -366,6 +377,8 @@ fn esc_walk_stmt(sid: i64):
             esc_walk_expr(veid)
         return
     if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == EVAL_STMT_LAZY_VAL_DECL:
+        if s_node.expr_idx >= 0:
+            esc_walk_expr(s_node.expr_idx)
         for veid in s_node.body:
             esc_walk_expr(veid)
         return
@@ -401,6 +414,7 @@ fn esc_analyze_module():
         did = did + 1
 
 fn resolve_module_locals():
+    fn_slot_reset_all()
     # Pass 0: collect names captured-and-mutated across function/lambda
     # boundaries so they can be kept off the LOAD_FAST fast path.
     esc_analyze_module()

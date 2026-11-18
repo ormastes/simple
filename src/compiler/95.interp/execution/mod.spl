@@ -1,41 +1,53 @@
+#![allow(primitive_api)]
 # Execution Manager - Unified JIT Execution Interface
 #
-# Provides a Simple-side interface to the Rust ExecutionManager trait.
-# Supports Cranelift and LLVM JIT backends through SFFI wrappers.
+# Provides a Simple-side interface to the ExecutionManager contract.
+# Supports Cranelift, LLVM, and soft interpreter JIT backends through SFFI wrappers.
 #
 # Usage:
-#   val em = LocalExecutionManager.auto_select()
+#   var em = LocalExecutionManager.auto_select()
 #   val info = em.compile(mir_module)
 #   val result = em.execute("main", [])
 #   em.cleanup()
 
-use app.io.jit_sffi (rt_exec_manager_create, rt_exec_manager_compile,
-    rt_exec_manager_execute, rt_exec_manager_has_function,
-    rt_exec_manager_backend_name, rt_exec_manager_cleanup,
-    rt_set_jit_backend, rt_get_jit_backend)
+use app.io.jit_sffi.{
+    rt_exec_manager_create,
+    rt_exec_manager_compile,
+    rt_exec_manager_compile_mir,
+    rt_exec_manager_execute,
+    rt_exec_manager_execute_checked,
+    rt_exec_manager_has_function,
+    rt_exec_manager_is_valid,
+    rt_exec_manager_backend_name,
+    rt_exec_manager_cleanup,
+    rt_set_jit_backend,
+    rt_get_jit_backend
+}
 
 # ============================================================================
 # ExecutionManager Trait
 # ============================================================================
 
-trait ExecutionManager:
+pub trait ExecutionManager:
     """Unified interface for JIT execution backends."""
-    fn compile(mir_data: text) -> text:
-        pass
-    fn execute(name: text, args: [i64]) -> text:
-        pass
+    fn compile(mir_data: text) -> Result<text, text>:
+        Err("not implemented")
+    fn execute(name: text, args: [i64]) -> Result<i64, text>:
+        Err("not implemented")
+    fn is_valid() -> bool:
+        false
     fn has_function(name: text) -> bool:
-        pass
+        false
     fn backend_name() -> text:
-        pass
+        "unknown"
     fn cleanup():
-        pass
+        ()
 
 # ============================================================================
 # CodeInfo - Result of compilation
 # ============================================================================
 
-struct CodeInfo:
+pub struct CodeInfo:
     """Information about a compiled module."""
     name: text
     entry_point: text
@@ -45,58 +57,117 @@ struct CodeInfo:
 # LocalExecutionManager - SFFI-backed JIT execution
 # ============================================================================
 
-class LocalExecutionManager:
-    """Local JIT execution manager backed by Rust ExecutionManager.
+pub class LocalExecutionManager:
+    """Local JIT execution manager backed by the runtime ExecutionManager SFFI.
 
-    Wraps the Rust-side LocalExecutionManager via SFFI handle.
-    Supports Cranelift and LLVM JIT backends.
+    Tracks handle validity and per-function return types while routing
+    execution through `rt_exec_manager_execute_checked` so valid `-1`
+    results are never conflated with execution errors.
     """
     handle: i64
+    return_types: Dict<text, text>
 
-    static fn cranelift() -> LocalExecutionManager:
+    pub static fn cranelift() -> LocalExecutionManager:
         """Create with Cranelift JIT backend."""
         val h = rt_exec_manager_create("cranelift")
-        LocalExecutionManager(handle: h)
+        LocalExecutionManager(handle: h, return_types: {})
 
-    static fn llvm() -> LocalExecutionManager:
+    pub static fn llvm() -> LocalExecutionManager:
         """Create with LLVM JIT backend."""
         val h = rt_exec_manager_create("llvm")
-        LocalExecutionManager(handle: h)
+        LocalExecutionManager(handle: h, return_types: {})
 
-    static fn auto_select() -> LocalExecutionManager:
+    pub static fn auto_select() -> LocalExecutionManager:
         """Create with auto-selected JIT backend."""
         val h = rt_exec_manager_create("auto")
-        LocalExecutionManager(handle: h)
+        LocalExecutionManager(handle: h, return_types: {})
 
-    fn compile(mir_data: text) -> text:
+    # reason: execution manager validity query returns boolean state for the underlying runtime handle
+    @allow(primitive_api)
+    pub fn is_valid() -> bool:
+        """Check whether this execution manager owns a live valid runtime handle."""
+        self.handle > 0 and rt_exec_manager_is_valid(self.handle)
+
+    # reason: JIT calling convention metadata associates function symbol names with return type tags
+    @allow(primitive_api)
+    pub me set_return_type(name: text, ret_type: text):
+        """Record the return type tag for a compiled function."""
+        self.return_types[name] = ret_type
+
+    # reason: JIT calling convention metadata returns the return type tag text for a function symbol
+    @allow(primitive_api)
+    pub fn get_return_type(name: text) -> text:
+        """Get the recorded return type tag for a function (defaults to 'i64')."""
+        if self.return_types.has(name):
+            self.return_types[name]
+        else:
+            "i64"
+
+    # reason: JIT compilation boundary accepts serialized MIR or source text and returns text diagnostics
+    @allow(primitive_api)
+    pub fn compile(mir_data: text) -> Result<text, text>:
         """Compile MIR data. Returns Ok("") on success, Err(message) on failure."""
-        val result = rt_exec_manager_compile(self.handle, mir_data)
+        if not self.is_valid():
+            return Err("Invalid execution manager")
+        val result = rt_exec_manager_compile_mir(self.handle, mir_data)
         if result == "":
             Ok("")
         else:
             Err(result)
 
-    fn execute(name: text, args: [i64]) -> text:
-        """Execute a compiled function by name."""
-        val result = rt_exec_manager_execute(self.handle, name, args)
-        Ok(result)
+    # reason: JIT source compilation boundary accepts Simple source text and returns text diagnostics
+    @allow(primitive_api)
+    pub fn compile_source(source: text) -> Result<text, text>:
+        """Compile Simple source code. Returns Ok("") on success, Err(message) on failure."""
+        if not self.is_valid():
+            return Err("Invalid execution manager")
+        val result = rt_exec_manager_compile(self.handle, source)
+        if result == "":
+            Ok("")
+        else:
+            Err(result)
 
-    fn has_function(name: text) -> bool:
+    # reason: JIT execution boundary takes function name and i64 ABI registers and returns i64 or error text
+    @allow(primitive_api)
+    pub fn execute(name: text, args: [i64]) -> Result<i64, text>:
+        """Execute a compiled function by name via checked SFFI."""
+        if not self.is_valid():
+            return Err("Invalid execution manager")
+        val (ok, result, err_msg) = rt_exec_manager_execute_checked(self.handle, name, args)
+        if ok:
+            Ok(result)
+        else:
+            val detail = if err_msg != "": err_msg else: "Execution failed"
+            Err(detail)
+
+    # reason: JIT symbol table query checks function name text and returns membership boolean
+    @allow(primitive_api)
+    pub fn has_function(name: text) -> bool:
         """Check if a function is available."""
+        if not self.is_valid():
+            return false
         rt_exec_manager_has_function(self.handle, name)
 
-    fn backend_name() -> text:
+    # reason: JIT backend query returns backend identifier text
+    @allow(primitive_api)
+    pub fn backend_name() -> text:
         """Get the name of the underlying JIT backend."""
+        if not self.is_valid():
+            return "unknown"
         rt_exec_manager_backend_name(self.handle)
 
-    fn cleanup():
+    pub me cleanup():
         """Release all compiled code and free resources."""
-        rt_exec_manager_cleanup(self.handle)
+        if self.handle > 0:
+            rt_exec_manager_cleanup(self.handle)
+            self.handle = 0
 
 # ============================================================================
 # Global JIT Backend Control
 # ============================================================================
 
+# Keep bare `fn` visibility on set_jit_backend / get_jit_backend to preserve
+# private_import_baseline.txt (`src/compiler/95.interp/execution/mod.spl|get_jit_backend`).
 fn set_jit_backend(backend: text) -> bool:
     """Set the global JIT backend preference: 'auto', 'cranelift', or 'llvm'."""
     rt_set_jit_backend(backend)

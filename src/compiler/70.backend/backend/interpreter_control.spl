@@ -16,6 +16,16 @@ use compiler.backend.backend_types.*
 use compiler.backend.env.{EvalContext}
 use compiler.backend.interpreter.{InterpreterBackendImpl, resolve_sym_name}
 
+var _interp_range_array_alloc_count: i64 = 0
+
+# reason: diagnostic counter exposing materialized range array allocations to hotpath unit specs
+@allow(primitive_api)
+pub fn interp_range_array_alloc_count() -> i64:
+    _interp_range_array_alloc_count
+
+pub fn interp_reset_range_array_alloc_count():
+    _interp_range_array_alloc_count = 0
+
 fn interp_is_ctl(err: BackendError, signal: text) -> bool:
     err.kind == BackendErrorKind.ControlFlow and err.message == signal
 
@@ -47,9 +57,11 @@ impl InterpreterBackendImpl:
 
     fn eval_for(var_: SymbolId, iter: HirExpr, body: HirBlock, ctx: EvalContext) -> Result<Value, BackendError>:
         match iter.kind:
-            case HirExprKind.Range(r_start, r_end, _, r_step):
+            case HirExprKind.Range(r_start, r_end, inclusive, r_step):
                 if r_start.? and not r_end.?:
                     return self.eval_for_open(var_, r_start.unwrap(), r_step, body, ctx, iter.span)
+                if r_start.? and r_end.?:
+                    return self.eval_for_bounded_range(var_, r_start.unwrap(), r_end.unwrap(), inclusive, r_step, body, ctx, iter.span)
             case _:
                 pass
         val name = resolve_sym_name(var_, ctx)
@@ -75,9 +87,47 @@ impl InterpreterBackendImpl:
                 break
         Ok(Value.Nil)
 
+    fn eval_for_bounded_range(var_: SymbolId, start: HirExpr, end: HirExpr, inclusive: bool, step: HirExpr?, body: HirBlock, ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        """Stream a bounded integer range in `for` without materializing `[Value]`."""
+        val name = resolve_sym_name(var_, ctx)
+        val lo = self.eval_expr(start, ctx)?
+        val hi = self.eval_expr(end, ctx)?
+        var by: i64 = 1
+        if step.?:
+            match self.eval_expr(step.unwrap(), ctx)?:
+                case Value.Int(n): by = n
+                case _: return Err(BackendError.type_error("range step must be an integer", Some(span)))
+        if by == 0:
+            return Err(BackendError.runtime_error("range step must not be zero", Some(span)))
+        match lo:
+            case Value.Int(a):
+                match hi:
+                    case Value.Int(b):
+                        var i = a
+                        if by > 0:
+                            while (if inclusive: i <= b else: i < b):
+                                ctx.env.push_scope()
+                                ctx.env.define(name, backend_value_int_v1(i))
+                                val keep = self.run_loop_body(body, ctx)
+                                ctx.env.pop_scope()
+                                if not keep?:
+                                    break
+                                i = i + by
+                        else:
+                            while (if inclusive: i >= b else: i > b):
+                                ctx.env.push_scope()
+                                ctx.env.define(name, backend_value_int_v1(i))
+                                val keep = self.run_loop_body(body, ctx)
+                                ctx.env.pop_scope()
+                                if not keep?:
+                                    break
+                                i = i + by
+                        Ok(Value.Nil)
+                    case _: Err(BackendError.type_error("range bounds must be integers", Some(span)))
+            case _: Err(BackendError.type_error("range bounds must be integers", Some(span)))
+
     fn eval_range(start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?, span: Span, ctx: EvalContext) -> Result<Value, BackendError>:
-        # Ranges materialize as an int array: the walker only consumes them in
-        # `for`, and a bounded range is all std.spec needs.
+        # Ranges outside `for` (e.g. list comprehensions) materialize as an int array.
         if not start.? or not end.?:
             return Err(BackendError.not_implemented("open-ended range"))
         val lo = self.eval_expr(start.unwrap(), ctx)?
@@ -93,6 +143,7 @@ impl InterpreterBackendImpl:
             case Value.Int(a):
                 match hi:
                     case Value.Int(b):
+                        _interp_range_array_alloc_count = _interp_range_array_alloc_count + 1
                         var out: [Value] = []
                         var i = a
                         val last = if inclusive: b else: b - by
