@@ -1301,8 +1301,7 @@ fn _driver_resolver_observed_children_v1(path: text,
 fn _driver_numbered_child_dir_observed_v1(parent: text, segment: text,
         observation: DriverEntryResolverObservationV1) -> SourceRootResolutionV1:
     if parent == "": return SourceRootResolutionV1.Missing
-    if not _driver_resolver_observed_dir_v1(parent, observation) and
-            not _driver_resolver_observed_file_v1(parent, observation):
+    if not _driver_resolver_observed_dir_v1(parent, observation):
         return SourceRootResolutionV1.Missing
     var matched = SourceRootResolutionV1.Missing
     val entries_opt = _driver_resolver_observed_children_v1(parent, observation)
@@ -1472,13 +1471,169 @@ pub fn driver_resolve_relative_entry_import_indexed_v1(module_path: text,
         case DriverEntryResolverOutcomeV1.Ambiguous(reason):
             Ok(DriverEntryResolverOutcomeV1.Ambiguous(reason))
 
-fn _driver_resolve_rewritten_import(module_path: text, prefix: text, rel_prefix: text, entry_dir: text) -> text:
+fn _driver_windows_app_symlink_entries_v1() -> [[text]]:
+    # All four git mode-120000 directory symlinks under src/app/:
+    # [app_dir_name, default_target_rel_from_checkout]
+    [
+        ["t32_cli", "examples/10_tooling/trace32_tools/t32_cli"],
+        ["mcp_t32", "examples/10_tooling/trace32_tools/t32_mcp"],
+        ["t32_lsp_mcp", "examples/10_tooling/trace32_tools/t32_lsp_mcp"],
+        ["cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp"]
+    ]
+
+fn _driver_windows_app_symlink_match_v1(module_path: text) -> [text]:
+    for entry in _driver_windows_app_symlink_entries_v1():
+        val app_name = entry[0]
+        val default_target = entry[1]
+        val app_prefix = "app." + app_name
+        if module_path == app_prefix or module_path.starts_with(app_prefix + "."):
+            return [app_name, app_prefix, default_target]
+        if module_path == app_name or module_path.starts_with(app_name + "."):
+            return [app_name, app_name, default_target]
+    []
+
+fn _driver_text_matches_bytes_at_v1(haystack: text, pos: i64, needle: text) -> bool:
+    val h_len = haystack.byte_len()
+    val n_len = needle.byte_len()
+    if pos < 0 or pos + n_len > h_len:
+        return false
+    var i: i64 = 0
+    while i < n_len:
+        if haystack.byte_at(pos + i) != needle.byte_at(i):
+            return false
+        i = i + 1
+    true
+
+fn _driver_byte_slice_v1(content: text, byte_start: i64, byte_end: i64) -> text:
+    if byte_end <= byte_start:
+        return ""
+    if _driver_substring_is_byte_based_v1():
+        return content.substring(byte_start, byte_end)
+    val char_start = _driver_byte_to_char_advance_v1(content, 0, 0, byte_start)
+    val char_end = _driver_byte_to_char_advance_v1(content, byte_start, char_start, byte_end)
+    content.substring(char_start, char_end)
+
+fn _driver_entry_inferred_checkout_prefix_v1(entry_dir: text) -> text:
+    var norm = entry_dir.replace("\\", "/")
+    while norm.starts_with("./"):
+        norm = _driver_byte_slice_v1(norm, 2, norm.byte_len())
+    if norm == "" or norm == "." or norm == "src" or norm.starts_with("src/") or
+            norm == "examples" or norm.starts_with("examples/"):
+        return ""
+    val n_len = norm.byte_len()
+    var fallback = ""
+    var pos = n_len - 1
+    while pos >= 0:
+        if norm.byte_at(pos) == 47:
+            val is_marker = (pos + 4 == n_len and _driver_text_matches_bytes_at_v1(norm, pos, "/src")) or
+                (pos + 9 == n_len and _driver_text_matches_bytes_at_v1(norm, pos, "/examples")) or
+                _driver_text_matches_bytes_at_v1(norm, pos, "/src/") or
+                _driver_text_matches_bytes_at_v1(norm, pos, "/examples/")
+            if is_marker:
+                val cand = _driver_byte_slice_v1(norm, 0, pos + 1)
+                val has_src = dir_exists(cand + "src")
+                val has_examples = dir_exists(cand + "examples")
+                if has_src and has_examples:
+                    return cand
+                if fallback == "" and (has_src or has_examples):
+                    fallback = cand
+        pos = pos - 1
+    fallback
+
+fn _driver_entry_checkout_prefix_active_v1(entry_dir: text) -> text:
+    val strict = _driver_entry_import_checkout_prefix(entry_dir)
+    if strict != "":
+        return strict
+    _driver_entry_inferred_checkout_prefix_v1(entry_dir)
+
+pub fn driver_detect_git_symlink_stub_text_v1(content: text) -> text?:
+    """Recognize a git core.symlinks=false single-line symlink text stub."""
+    var end: i64 = content.byte_len()
+    while end > 0:
+        val last = content.byte_at(end - 1)
+        if last == 10 or last == 13:
+            end = end - 1
+        else:
+            break
+    if end == 0 or end > 512:
+        return None
+    var i: i64 = 0
+    while i < end:
+        val b = content.byte_at(i)
+        val ok = (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or
+            (b >= 48 and b <= 57) or b == 95 or b == 45 or b == 46 or b == 47
+        if not ok:
+            return None
+        i = i + 1
+    val candidate = content.substring(0, end)
+    if not candidate.contains("/") or candidate.starts_with("/") or
+            candidate.ends_with("/") or candidate.contains("//"):
+        return None
+    Some(candidate)
+
+fn _driver_app_symlink_target_rel_v1(checkout_prefix: text, app_name: text, default_target_rel: text) -> text:
+    val app_entry = checkout_prefix + "src/app/" + app_name
+    if driver_admitted_epoch_active_v1() or dir_exists(app_entry):
+        return default_target_rel
+    var file_present = false
+    unsafe(capabilities: [ffi]):
+        file_present = rt_file_exists(app_entry)
+    if not file_present:
+        return default_target_rel
+    val stub_raw = file_read_nullable(app_entry) ?? ""
+    match driver_detect_git_symlink_stub_text_v1(stub_raw):
+        case Some(stub_target):
+            val resolved = _driver_canonical_source_path(checkout_prefix + "src/app/" + stub_target)
+            var rel = resolved
+            if checkout_prefix != "":
+                val prefix_canon = _driver_canonical_source_path(checkout_prefix)
+                if prefix_canon != "":
+                    val prefix_slash = if prefix_canon == "/": "/" else: prefix_canon + "/"
+                    if not resolved.starts_with(prefix_slash):
+                        return default_target_rel
+                    rel = _driver_byte_slice_v1(resolved, prefix_slash.byte_len(), resolved.byte_len())
+            if scv_worktree_path_safe(rel) and (rel.starts_with("examples/") or rel.starts_with("src/")):
+                return rel
+            default_target_rel
+        case None:
+            default_target_rel
+
+fn _driver_resolve_rewritten_import_for_prefix_v1(
+    module_path: text, prefix: text, rel_prefix: text, checkout_prefix: text
+) -> text:
     if module_path != prefix and not module_path.starts_with(prefix + "."):
         return ""
     var rel = rel_prefix
-    if module_path.len() > prefix.len():
-        rel = rel + "/" + module_path.substring(prefix.len() + 1).replace(".", "/")
-    _driver_try_entry_import_rel(rel, entry_dir)
+    val mp_bytes = module_path.byte_len()
+    val p_bytes = prefix.byte_len()
+    if mp_bytes > p_bytes:
+        val suffix = _driver_byte_slice_v1(module_path, p_bytes + 1, mp_bytes)
+        rel = rel + "/" + suffix.replace(".", "/")
+    match _driver_resolve_entry_rel_observed_v1(rel, [checkout_prefix], DriverEntryResolverObservationV1.Live):
+        case DriverEntryResolverOutcomeV1.Found(selection): selection.path
+        case DriverEntryResolverOutcomeV1.Missing: ""
+        case DriverEntryResolverOutcomeV1.Ambiguous(_): ""
+
+fn _driver_resolve_rewritten_import(module_path: text, prefix: text, rel_prefix: text, entry_dir: text) -> text:
+    if module_path != prefix and not module_path.starts_with(prefix + "."):
+        return ""
+    val checkout_prefix = _driver_entry_checkout_prefix_active_v1(entry_dir)
+    var effective_rel_prefix = rel_prefix
+    val app_name = if prefix.starts_with("app."): prefix.substring(4) else: prefix
+    for entry in _driver_windows_app_symlink_entries_v1():
+        if entry[0] == app_name:
+            effective_rel_prefix = _driver_app_symlink_target_rel_v1(
+                checkout_prefix, app_name, rel_prefix)
+            break
+    _driver_resolve_rewritten_import_for_prefix_v1(
+        module_path, prefix, effective_rel_prefix, checkout_prefix)
+
+pub fn driver_rewrite_windows_app_symlink_import_v1(module_path: text, entry_dir: text) -> text:
+    """Resolve app.<name> or bare <name> imports for the four git mode-120000 app symlinks."""
+    val matched = _driver_windows_app_symlink_match_v1(module_path)
+    if matched.len() < 3:
+        return ""
+    _driver_resolve_rewritten_import(module_path, matched[1], matched[2], entry_dir)
 
 fn _driver_entry_import_parent(module_path: text) -> text:
     # Preserve the leading-dot relative-import marker and remove only a real
@@ -1569,6 +1724,14 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
     # stale `mod` declaration to an unrelated `src/lib//string_core.spl`.
     if module_path.starts_with("."):
         return ""
+
+    val early_match = _driver_windows_app_symlink_match_v1(module_path)
+    if early_match.len() >= 3 and early_match[1].starts_with("app."):
+        val early_prefix = _driver_entry_checkout_prefix_active_v1(entry_dir)
+        if not dir_exists(early_prefix + "src/app/" + early_match[0]):
+            val early_rewritten = driver_rewrite_windows_app_symlink_import_v1(module_path, entry_dir)
+            if early_rewritten != "":
+                return early_rewritten
 
     val rel = module_path.replace(".", "/")
     val direct = _driver_try_entry_import_rel(rel, entry_dir)
@@ -1682,20 +1845,9 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         val mapped = _driver_try_entry_import_rel(candidate, entry_dir)
         if mapped != "": return mapped
     # Git may materialize the TRACE32 app symlinks as plain files on Windows.
-    # Resolve their physical owners only after ordinary module probes fail.
-    val t32_mapped = _driver_resolve_rewritten_import(module_path, "app.t32_cli", "examples/10_tooling/trace32_tools/t32_cli", entry_dir)
-    if t32_mapped != "":
-        return t32_mapped
-    val mcp_t32_mapped = _driver_resolve_rewritten_import(module_path, "app.mcp_t32", "examples/10_tooling/trace32_tools/t32_mcp", entry_dir)
-    if mcp_t32_mapped != "":
-        return mcp_t32_mapped
-    val t32_lsp_mcp_mapped = _driver_resolve_rewritten_import(module_path, "app.t32_lsp_mcp", "examples/10_tooling/trace32_tools/t32_lsp_mcp", entry_dir)
-    if t32_lsp_mcp_mapped != "":
-        return t32_lsp_mcp_mapped
-    val cmm_app_mapped = _driver_resolve_rewritten_import(module_path, "app.cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp", entry_dir)
-    if cmm_app_mapped != "":
-        return cmm_app_mapped
-    _driver_resolve_rewritten_import(module_path, "cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp", entry_dir)
+    # Resolve their physical owners (both app.<name> and bare <name>) after
+    # ordinary module probes fail.
+    driver_rewrite_windows_app_symlink_import_v1(module_path, entry_dir)
 
 fn _driver_nested_compiler_owner_rel_v1(module_path: text) -> text:
     # These declared compiler families retain same-name nested owners behind
