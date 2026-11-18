@@ -404,7 +404,7 @@ pub fn ctx_index_text(raw_content: text, source: text) -> CtxChunkCount:
 
 # `ctx_index_text` with a hook that runs between the append write and its
 # generation re-check (spec seam for a purge rename landing in that window).
-pub fn ctx_index_text_observed(raw_content: text, source: text, after_write: fn()) -> CtxChunkCount:
+fn ctx_index_text_observed(raw_content: text, source: text, after_write: fn()) -> CtxChunkCount:
     # Secrets are masked BEFORE chunking: the raw value is never stored.
     val content = ctx_redact(CtxRawContent(body: raw_content)).body
     if content.trim() == "":
@@ -1611,9 +1611,14 @@ fn _ctx_retention_rows(chunks: [CtxChunk]) -> [CtxRetentionRow]:
 # commits. A moved store is re-snapshotted (an append that completed before the
 # commit is therefore always included in what is kept); after
 # `_CTX_PURGE_MAX_ATTEMPTS` moved attempts the purge fails closed with nothing
-# deleted. A purge rename that lands under an in-flight append is covered on the
-# append side: `_ctx_append_chunks_settled` re-checks the store generation after
-# writing and re-applies rows the replaced file lost. See doc/07_guide/app/mcp/mcp.md.
+# deleted. Residual window (narrowed, NOT closed): the append-side re-check in
+# `_ctx_append_chunks_settled` catches a rename landing between an append's write
+# and its re-check, but an append whose size read, write and re-check all land
+# between `ctx_purge_commit`'s final key check and its rename is still lost (and
+# a purge that shrinks the file by exactly the appended bytes passes the size
+# test). Unblock: OS compare-and-rename, or the purge re-reading the store after
+# its rename and replaying rows appended since its snapshot. See
+# doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md.
 pub fn ctx_purge_snapshot(policy: CtxRetentionPolicy) -> CtxPurgeSnapshot:
     val key = _ctx_store_generation_key()
     val chunks = _ctx_load_chunks()
