@@ -1,7 +1,7 @@
 use std.spec.*
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1,
     driver_mir_owner_disposition_v1, driver_mir_schedule_name_v1, driver_mir_placeholder_owner_v1,
-    driver_mir_unit_scoped_v1}
+    driver_mir_unit_scoped_v1, driver_mir_excluded_owner_v1}
 
 val MIR_ALIAS_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val MIR_OTHER_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -160,3 +160,30 @@ describe "MIR physical ownership in a module-scoped per-file unit":
         expect(driver_mir_unit_scoped_v1(true, "/q")).to_equal(true)
         expect(driver_mir_unit_scoped_v1(true, "")).to_equal(false)
         expect(driver_mir_unit_scoped_v1(false, "/q")).to_equal(false)
+
+describe "go-to-end excluded alias rows share one physical owner":
+    # `app.io` and `app.io.__init__` are two inventory rows of one file. Both
+    # were excluded as dependents of a module whose HIR failed.
+    it "conflicts when each excluded row stands its logical name in":
+        val result = driver_mir_physical_source_indices_v1(
+            ["src/app/io/__init__.spl", "src/app/io/__init__.spl", "src/app/main.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST, MIR_OTHER_DIGEST],
+            ["app.io.__init__", "app.io", "src/app/main.spl"])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("conflicting owners")
+
+    it "folds excluded alias rows onto the row path":
+        val path = "src/app/io/__init__.spl"
+        val owners = [driver_mir_excluded_owner_v1(path, "app.io.__init__"),
+            driver_mir_excluded_owner_v1(path, "app.io"), "src/app/main.spl"]
+        val result = driver_mir_physical_source_indices_v1(
+            [path, path, "src/app/main.spl"],
+            [MIR_ALIAS_DIGEST, MIR_ALIAS_DIGEST, MIR_OTHER_DIGEST], owners)
+        expect(result.is_ok()).to_equal(true)
+        val selected = result.unwrap()
+        expect(selected.len()).to_equal(2)
+        expect(selected[0]).to_equal(0)
+        expect(selected[1]).to_equal(2)
+
+    it "keeps the logical name when the row has no admitted path":
+        expect(driver_mir_excluded_owner_v1("", "app.io")).to_equal("app.io")
