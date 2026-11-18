@@ -2614,12 +2614,30 @@ class FontRenderer:
         # crashed on cache hits and bare field access crashed on wrapped
         # values. Pattern-match narrowing handles both. See doc/08_tracking/
         # bug/font_renderer_cached_glyph_unwrap_semantic_crash_2026-08-15.md.
+        # The selected-outline blob is read BEFORE the glyph-cache answer is
+        # used: on that backend the cache may not answer at all (below).
+        val _gb_t0 = _fr_probe_now()
+        val _blob = self.selected_outline_blob
+        _fr_probe_add_gadv_blob(_fr_probe_now() - _gb_t0)
+        # Whole-pixel advance of an already rasterised glyph, x1000; -1 = none.
+        var _cached_whole_milli: i32 = -1
         if val Some(cached_adv) = cached:
             # A rasterized CachedGlyph carries only a whole-pixel advance; x1000
             # is the honest widening of it, not a fresh fractional measurement.
+            # So it answers directly only where nothing better exists. With a
+            # selected outline blob the index / direct lanes below read the
+            # exact `hmtx` milli advance (`meta[18]`) without a raster; taking
+            # the cached whole pixel there refilled an EVICTED advance slot
+            # (more than 8 (face, size) pairs on a page) with round(advance),
+            # and every later pen of that pair lost its fraction: Chrome 159
+            # advances `H` at 13 px by 9.39 px, the refill said 9. The cached
+            # value is kept only as the fallback for a glyph the blob lanes
+            # cannot answer.
             val _cached_milli = cached_adv.advance * 1000
-            _adv_cache_store(_adv_identity, font_size, codepoint, _cached_milli)
-            return _cached_milli
+            if _blob.len() == 0 or _adv_identity == "":
+                _adv_cache_store(_adv_identity, font_size, codepoint, _cached_milli)
+                return _cached_milli
+            _cached_whole_milli = _cached_milli
 
         # Selected-blob fast lane, ahead of `has_glyph`: on this backend
         # `has_glyph` IS `sfnt_blob_glyph_exists`, i.e. the same cmap parse the
@@ -2628,9 +2646,6 @@ class FontRenderer:
         # single parse, and a non-zero id is exactly what `has_glyph` reports
         # true for over the same blob. A `-1` (face not warmed, or non-ASCII)
         # falls through to the original path untouched.
-        val _gb_t0 = _fr_probe_now()
-        val _blob = self.selected_outline_blob
-        _fr_probe_add_gadv_blob(_fr_probe_now() - _gb_t0)
         if _blob.len() > 0 and _adv_identity != "":
             val _gw_t0 = _fr_probe_now()
             val _gid_s = _gid_warm(_adv_identity, _blob)
@@ -2708,6 +2723,9 @@ class FontRenderer:
             _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result)
             return _gfp_result
 
+        if _cached_whole_milli >= 0:
+            _adv_cache_store(_adv_identity, font_size, codepoint, _cached_whole_milli)
+            return _cached_whole_milli
         if self.has_ttf():
             val _gfp_result2 = rt_font_glyph_advance(self.ttf_handle, codepoint.to_i64(), font_size.to_f64()).to_i32() * 1000
             _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result2)
