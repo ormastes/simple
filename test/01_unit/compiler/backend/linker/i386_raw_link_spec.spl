@@ -77,3 +77,41 @@ describe "i386 raw ELF linker (shared ELF32 core)":
         val linked = elf_i386_link_parsed([i386_main(EM_386), i386_target(EM_386)],
             0x1_0000_0000, "_start")
         expect(linked.is_err()).to_equal(true)
+
+# PIC i386 code (clang -fPIC default for i686-unknown-elf objects): the GOT is
+# only an anchor (GOTPC + GOTOFF, no GOT slots), anchored at the image base.
+fn i386_pic_main() -> ElfObject:
+    val syms = [i386_sym("", STB_LOCAL, 0, 0), i386_sym("_start", STB_GLOBAL, 1, 0),
+        i386_sym("target", STB_GLOBAL, 0, 0),
+        i386_sym("_GLOBAL_OFFSET_TABLE_", STB_GLOBAL, 0, 0)]
+    val rels = [
+        ElfRelocation(r_offset: 0, r_info: (3 << 32) | 10, r_addend: 0,
+            section_idx: 0, target_section_idx: 1),
+        ElfRelocation(r_offset: 4, r_info: (2 << 32) | 9, r_addend: 0,
+            section_idx: 0, target_section_idx: 1)
+    ]
+    i386_obj(EM_386, syms, rels, [0, 0, 0, 0, 0, 0, 0, 0])
+
+fn i386_got32_main() -> ElfObject:
+    val syms = [i386_sym("", STB_LOCAL, 0, 0), i386_sym("_start", STB_GLOBAL, 1, 0),
+        i386_sym("target", STB_GLOBAL, 0, 0)]
+    val rels = [ElfRelocation(r_offset: 0, r_info: (2 << 32) | 3, r_addend: 0,
+        section_idx: 0, target_section_idx: 1)]
+    i386_obj(EM_386, syms, rels, [0, 0, 0, 0, 0, 0, 0, 0])
+
+describe "i386 raw ELF linker: PIC GOT anchor":
+    it "resolves R_386_GOTPC and R_386_GOTOFF against a GOT anchored at the base":
+        val linked = elf_i386_link_parsed([i386_pic_main(), i386_target(EM_386)],
+            0x1000000, "_start")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        # GOTPC: GOT + A - P = 0x1000000 + 0 - 0x1000000 = 0
+        expect(image.bytes[0:4]).to_equal([0, 0, 0, 0])
+        # GOTOFF: S + A - GOT = 0x1000008 - 0x1000000 = 8
+        expect(image.bytes[4:8]).to_equal([8, 0, 0, 0])
+
+    it "still rejects R_386_GOT32, which needs a real GOT slot":
+        val linked = elf_i386_link_parsed([i386_got32_main(), i386_target(EM_386)],
+            0x1000000, "_start")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("needs a GOT")

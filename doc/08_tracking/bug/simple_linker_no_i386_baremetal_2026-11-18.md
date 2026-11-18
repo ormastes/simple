@@ -31,3 +31,33 @@ with `ld.lld` + `lld-link`.
   both ways, 32-bit overflow is an error rather than a truncation).
 - `arm32_raw_link_spec.spl` unchanged: 10/13; the 3 failures are pre-existing
   (`test/fixtures/linker/arm32` is not in the tree).
+
+## Boot follow-up (2026-11-18, PR after #10172)
+Three defects stood between #10172 and a real boot; all fixed here:
+1. `elf_i386_link_*` were not exported, so `bin/simple run` rejected
+   `baremetal-elf32-link.spl` (the spec runner did not enforce visibility).
+2. Compiled i686 objects are PIC: `main.o`/`bm_rt32.o` use `R_386_GOTPC` +
+   `R_386_GOTOFF` (no GOT slots). The raw linker now anchors the GOT at the
+   image base; `R_386_GOT32`/`GOT32X` (real slots) stay rejected.
+3. OVMF IA32 has no free memory at 16 MiB: AllocatePages(AllocateAddress)
+   returned EFI_NOT_FOUND (EAX=0x8000000E, stub spinning). crt0_i686 is now
+   position independent (GOTPC/GOTOFF) and both stubs use AnyPages.
+4. i686 used `bm_rt.spl` (i64 params) -> text printed NUL-padded into rodata,
+   the known 32-bit pair-ABI mismatch
+   (`baremetal_32bit_i64_pair_abi_mismatch_2026-11-17.md`); i686 now uses
+   `bm_rt32.spl`, and crt0 `bm_store8` reads its value at 8(%esp).
+
+Evidence: Simple linker (`elf_i386_link_raw`, 5.2 s on Windows bin/simple.exe)
++ shared PE32 emitter -> BOOTIA32.EFI on OVMF32 pflash (q35, 256M, FAT ESP,
+no -kernel, no isa-debug-exit), serial:
+
+    hello from Simple bare metal
+    n=42
+    ints 0 -7 9223372036854775807 -9223372036854775808
+    panic: boom
+
+`bm_rt32.spl` native-build for i686 (simple-p2): see PR body for time/RSS.
+Limit: `check-baremetal-efi-boot.shs --linker simple` needs SIMPLE_LINK_BIN
+with a `run` command; neither WSL binary (simple-p2, sosrt2) has one today, so
+the link + wrap ran on Windows with the WSL-built objects. Board run not
+evidenced.

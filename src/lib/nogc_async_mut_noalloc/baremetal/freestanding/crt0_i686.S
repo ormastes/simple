@@ -1,15 +1,19 @@
 /* Freestanding crt0, i686 (IA32 protected mode, entered from a UEFI IA32 loader stub).
  * Only what Simple cannot express: entry/stack switch, port I/O, byte
- * load/store, hlt. Everything else lives in bm_rt.spl.
+ * load/store, hlt. Everything else lives in bm_rt32.spl.
  * Serial: 16550 COM1 at I/O port 0x3f8.
- * ABI: cdecl; every runtime i64 is two stack words (low first) and an i64
- * result is returned in edx:eax. The image is linked at a fixed address, so
- * absolute addressing is fine (the stub allocates exactly that address). */
+ * ABI: cdecl with bm_rt32.spl widths: every runtime argument is one 32-bit
+ * stack word (pointers, bytes, bm_store8 value). Position independent: the loader stub copies
+ * the image wherever AllocatePages(AnyPages) put it, so data is reached via
+ * GOTPC/GOTOFF (the GOT is only an anchor; no GOT slots are used). */
     .section .text.boot,"ax"
     .globl _start
 _start:
     cli
-    mov $bm_stack_top, %esp
+    call 1f
+1:  pop %eax
+    addl $_GLOBAL_OFFSET_TABLE_+(.-1b), %eax
+    lea bm_stack_top@GOTOFF(%eax), %esp
     and $-16, %esp
     call __simple_main
     jmp bm_halt
@@ -36,7 +40,7 @@ bm_load8:
     .globl bm_store8
 bm_store8:
     mov 4(%esp), %eax
-    mov 12(%esp), %edx
+    mov 8(%esp), %edx         /* value: 32-bit arg (bm_rt32.spl ABI) */
     mov %dl, (%eax)
     ret
 
@@ -48,7 +52,10 @@ bm_halt:
 
     .globl bm_arena_base
 bm_arena_base:
-    mov $bm_arena, %eax
+    call 2f
+2:  pop %eax
+    addl $_GLOBAL_OFFSET_TABLE_+(.-2b), %eax
+    lea bm_arena@GOTOFF(%eax), %eax
     xor %edx, %edx
     ret
 

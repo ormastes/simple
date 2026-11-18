@@ -14,14 +14,15 @@ use compiler.backend.linker.reloc_engine.{
     RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_width, R_ARM_NONE,
     R_ARM_ABS8, R_ARM_ABS16, R_ARM_THM_PC8, R_ARM_THM_JUMP11, R_ARM_THM_JUMP8,
     R_386_NONE, R_386_32, R_386_PC32, R_386_PLT32, R_386_16, R_386_PC16,
-    R_386_8, R_386_PC8
+    R_386_8, R_386_PC8, R_386_GOTPC, R_386_GOTOFF
 }
 
-# i386 raw images have no GOT: only direct absolute/PC-relative forms link.
+# i386 raw images have no GOT slots: direct absolute/PC-relative forms link,
+# plus GOTPC/GOTOFF, which only need a GOT anchor (the image base).
 fn i386_raw_reloc_supported(rtype: i64) -> bool:
     rtype == R_386_32 or rtype == R_386_PC32 or rtype == R_386_PLT32 or
         rtype == R_386_16 or rtype == R_386_PC16 or rtype == R_386_8 or
-        rtype == R_386_PC8
+        rtype == R_386_PC8 or rtype == R_386_GOTPC or rtype == R_386_GOTOFF
 
 val ARM32_RAW_SHF_ALLOC: i64 = 2
 val ARM32_RAW_SHN_ABS: i64 = 0xfff1
@@ -265,14 +266,19 @@ fn elf32_raw_link_parsed(objects: [ElfObject], base_addr: i64,
                 continue
             if is_386 and not i386_raw_reloc_supported(rtype):
                 return Err("ELF32 raw link: R_386 type {rtype} needs a GOT, which a raw image does not have")
-            val symbol = arm32_raw_reloc_symbol(obj, oi, elf_reloc_sym(reloc),
-                layout, base_addr, globals)?
+            # GOT anchor = image base: GOTPC takes S = GOT (its symbol is
+            # _GLOBAL_OFFSET_TABLE_), GOTOFF takes P = GOT (reloc_engine contract).
+            val got_pc = is_386 and rtype == R_386_GOTPC
+            val got_off = is_386 and rtype == R_386_GOTOFF
+            val symbol = if got_pc: base_addr else: arm32_raw_reloc_symbol(obj, oi,
+                elf_reloc_sym(reloc), layout, base_addr, globals)?
+            val p = if got_off: base_addr else: place
             val applied = reloc_apply(arch, image, patch_offset,
-                rtype, symbol, reloc.r_addend, place)
+                rtype, symbol, reloc.r_addend, p)
             if not applied.success:
                 return Err("ELF32 raw link: relocation type {rtype} at {place}: {applied.error}")
             image = reloc_patch_bytes(arch, image, patch_offset,
-                rtype, symbol, reloc.r_addend, place)
+                rtype, symbol, reloc.r_addend, p)
         oi = oi + 1
 
     Ok(Arm32RawImage(bytes: image, base_addr: base_addr, entry_addr: globals[entry]))
@@ -297,3 +303,6 @@ fn elf_i386_link_raw(objects: [[i64]], base_addr: i64,
     for bytes in objects:
         parsed = parsed.push(elf_parse_object(bytes)?)
     elf_i386_link_parsed(parsed, base_addr, entry)
+
+export Arm32RawImage
+export elf_arm32_link_parsed, elf_arm32_link_raw, elf_i386_link_parsed, elf_i386_link_raw
