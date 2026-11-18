@@ -972,8 +972,55 @@ pub fn simple_web_html_background_color(html: text) -> u32:
 # first-block rect) and never painted text, so a plain `<div>` page with a
 # background rendered blank -- a fake output path (see
 # doc/08_tracking/bug/browser_static_lane_heuristic_fake_2026-10-05.md).
-fn _simple_web_engine2d_text_document(lower: text) -> bool:
+fn _simple_web_engine2d_text_tag_document(lower: text) -> bool:
     lower.contains("<p") or lower.contains("<h1") or lower.contains("<h2") or lower.contains("<h3") or lower.contains("<button") or lower.contains("<span") or lower.contains("<small") or lower.contains("<code") or lower.contains("<label") or lower.contains("<a ")
+
+# Elements whose character data is not flow text: raw-text containers and
+# the form controls that paint their own value.
+fn _simple_web_engine2d_non_flow_text_tag(lower: text, open: i64) -> text:
+    for name in ["style", "script", "title", "textarea", "select"]:
+        if lower.substring(open + 1, open + 1 + name.byte_len()) == name:
+            return name
+    ""
+
+# Character data in the body outside every tag: `<div>text</div>` paints
+# text exactly like `<p>text</p>` and Chrome 159 draws both with the same
+# pixels. Without this a page whose only text sat bare in a `<div>` took the
+# software raster lane: grayscale glyphs, one px right of and one row below
+# Chrome's LCD run.
+fn _simple_web_engine2d_has_flow_text(lower: text) -> bool:
+    val total = lower.byte_len()
+    val body = _find_text_from(lower, "<body", 0)
+    var pos = if body < 0: 0 else: body
+    while pos < total:
+        val open = _find_char_from(lower, "<", pos)
+        val run_end = if open < 0: total else: open
+        if lower.substring(pos, run_end).trim() != "":
+            return true
+        if open < 0:
+            return false
+        val skip = _simple_web_engine2d_non_flow_text_tag(lower, open)
+        val from = if skip == "": open else: _find_text_from(lower, "</" + skip, open)
+        if from < 0:
+            return false
+        val close = _find_char_from(lower, ">", from)
+        if close < 0:
+            return false
+        pos = close + 1
+    false
+
+# `letter-spacing`, `word-spacing` and `text-shadow` are painted by the raster
+# lane only: the Draw IR text lane ignores all three (measured 2026-11-19, a
+# `<p>` page paints the same pixels with and without them). A bare-text page
+# that authors one keeps the raster lane until Draw IR paints them.
+fn _simple_web_engine2d_raster_only_text_property(lower: text) -> bool:
+    lower.contains("letter-spacing") or lower.contains("word-spacing") or lower.contains("text-shadow")
+
+fn _simple_web_engine2d_bare_text_document(lower: text) -> bool:
+    _simple_web_engine2d_has_flow_text(lower) and not _simple_web_engine2d_raster_only_text_property(lower)
+
+fn _simple_web_engine2d_text_document(lower: text) -> bool:
+    _simple_web_engine2d_text_tag_document(lower) or _simple_web_engine2d_bare_text_document(lower)
 
 # Page-lane twin of `simple_web_engine2d_render_html_pixels`: identical pixels
 # whenever that strict entry produces a frame. Only when the text-document
@@ -990,8 +1037,15 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
     if width <= 0 or height <= 0:
         return []
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
-    if _simple_web_engine2d_text_document(html.lower()):
+    val lower = html.lower()
+    if _simple_web_engine2d_text_tag_document(lower):
         return simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
+    if _simple_web_engine2d_bare_text_document(lower):
+        # A bare-text page whose Draw IR frame is discarded (skipped commands)
+        # keeps the raster-lane frame it had before it was routed here.
+        val text_pixels = simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
+        if text_pixels.len() > 0:
+            return text_pixels
     simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
 
 pub fn simple_web_engine2d_render_html_pixels_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> [u32]:

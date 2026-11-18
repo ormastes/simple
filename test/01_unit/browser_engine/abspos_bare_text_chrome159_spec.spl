@@ -1,0 +1,173 @@
+"""
+## Purpose and audience
+Purpose: Pin bare text -- character data directly inside a `<div>`, with no
+`<p>` / `<span>` around it -- against Chrome 159's headless screenshot.
+Chrome paints `<div>text</div>`, `<div><span>text</span></div>` and
+`<p>text</p>` with byte-identical pixels (compared as PNG files). Here a page
+without one of the "text document" tags took the software raster lane:
+grayscale glyphs (no LCD fringe), drawn one px to the right and reaching one
+row lower than Chrome's run. The flow position (absolute, fixed, static) made
+no difference; an absolutely positioned `<div>` is only where it was noticed.
+Audience: web renderer text / lane-routing maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, `body{margin:0;background:#fff;font:16px
+Liberation Sans;color:#000}`, text `Hamburgefonstiv Qy`, Range client rect
+145.84375 x 17). "ink" is a pixel with a channel under 200, "fringe" a pixel
+whose red and blue differ by more than 16.
+
+| page                                           | ink bbox x0,y0..x1,y1 | fringe | base bbox / fringe      |
+|------------------------------------------------|-----------------------|--------|-------------------------|
+| `position:absolute;left:20px;top:30px`         | 21,32..165,46         | 970    | 22,32..166,47 / 0       |
+| static, `margin:30px 0 0 20px`                 | 21,32..165,46         | 970    | 22,32..166,47 / 0       |
+| `position:fixed;left:20px;top:30px`            | 21,32..165,46         | 0      | 22,32..166,47 / 0       |
+| absolute, `width:90px` (two lines)             | 20,32..140,64         | 965    | 21,32..141,65 / 0       |
+| absolute in a 60 px relative box at 15,10      | 35,42..155,74         | 965    | 36,42..156,75 / 0       |
+
+Chrome draws the `position:fixed` run in grayscale (no opaque background in
+its layer); this engine has no per-run LCD decision, so only the position of
+that run is pinned.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-BARE-001 — bare text in a `<div>` paints on the Draw IR text lane, like the same text in a `<span>`.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    _simple_web_engine2d_has_flow_text,
+    _simple_web_engine2d_bare_text_document
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 120
+val HEAD: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\">"
+val TAIL: text = "</body></html>"
+val WORDS: text = "Hamburgefonstiv Qy"
+
+val PAGE_ABS: text = HEAD + "<div style=\"position:absolute;left:20px;top:30px\">" + WORDS + "</div>" + TAIL
+val PAGE_ABS_SPAN: text = HEAD + "<div style=\"position:absolute;left:20px;top:30px\"><span>" + WORDS + "</span></div>" + TAIL
+val PAGE_STATIC: text = HEAD + "<div style=\"margin:30px 0 0 20px\">" + WORDS + "</div>" + TAIL
+val PAGE_FIXED: text = HEAD + "<div style=\"position:fixed;left:20px;top:30px\">" + WORDS + "</div>" + TAIL
+val PAGE_ABS_W90: text = HEAD + "<div style=\"position:absolute;left:20px;top:30px;width:90px\">" + WORDS + "</div>" + TAIL
+val PAGE_REL60: text = HEAD + "<div style=\"position:relative;margin:10px 0 0 15px;width:60px;height:80px\"><div style=\"position:absolute;left:20px;top:30px\">" + WORDS + "</div></div>" + TAIL
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+# "x0,y0..x1,y1" of the pixels with a channel under 200.
+fn _ink_bbox(px: [u32]) -> text:
+    var x0 = W
+    var y0 = H
+    var x1 = -1
+    var y1 = -1
+    var y = 0
+    while y < H:
+        var x = 0
+        while x < W:
+            val p = px[y * W + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+            x = x + 1
+        y = y + 1
+    x0.to_text() + "," + y0.to_text() + ".." + x1.to_text() + "," + y1.to_text()
+
+# Pixels whose red and blue differ by more than 16: an LCD colour fringe.
+fn _fringe_count(px: [u32]) -> i32:
+    var n = 0
+    for p in px:
+        if _abs(_chan(p, 16u32) - _chan(p, 0u32)) > 16:
+            n = n + 1
+    n
+
+fn _render(page: text) -> [u32]:
+    simple_web_render_html_to_pixels_with_engine2d_backend(page, W, H, "cpu_simd")
+
+describe "bare text in a div against Chrome 159":
+    it "AC-1: bare text in an absolutely positioned div sits on Chrome's pixels with LCD fringes":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render(PAGE_ABS)
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome ink bbox 21,32..165,46 (base 22,32..166,47)")
+        expect(_ink_bbox(px)).to_equal("21,32..165,46")
+        step("Chrome 970 fringe pixels (base 0: grayscale)")
+        expect(_fringe_count(px) > 800).to_be(true)
+
+    it "AC-2: the bare run paints the same pixels as the run in a span, as in Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val bare = _render(PAGE_ABS)
+        val span = _render(PAGE_ABS_SPAN)
+        var differing = 0
+        var i = 0
+        while i < W * H:
+            if bare[i] != span[i]:
+                differing = differing + 1
+            i = i + 1
+        step("Chrome: the two screenshots are byte-identical")
+        expect(differing).to_equal(0)
+
+    it "AC-3: bare text in a static div takes the same lane":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render(PAGE_STATIC)
+        step("Chrome ink bbox 21,32..165,46, 970 fringe pixels")
+        expect(_ink_bbox(px)).to_equal("21,32..165,46")
+        expect(_fringe_count(px) > 800).to_be(true)
+
+    it "AC-4: bare text in a fixed div sits on Chrome's box":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render(PAGE_FIXED)
+        step("Chrome ink bbox 21,32..165,46 (base 22,32..166,47)")
+        expect(_ink_bbox(px)).to_equal("21,32..165,46")
+
+    it "AC-5: bare text wraps in an absolutely positioned div with a width":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render(PAGE_ABS_W90)
+        step("Chrome: lines at y 30 and 48, ink bbox 20,32..140,64 (base 21,32..141,65)")
+        expect(_ink_bbox(px)).to_equal("20,32..140,64")
+        expect(_fringe_count(px) > 800).to_be(true)
+
+    it "AC-6: a shrink-to-fit absolute div in a 60 px relative box wraps at its min-content width":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = _render(PAGE_REL60)
+        step("Chrome: box 35,40 120.95 x 36, ink bbox 35,42..155,74 (base 36,42..156,75)")
+        expect(_ink_bbox(px)).to_equal("35,42..155,74")
+        expect(_fringe_count(px) > 800).to_be(true)
+
+    it "AC-7: only character data in the flow counts as text":
+        step("bare text in a div, with or without a body tag")
+        expect(_simple_web_engine2d_has_flow_text("<body><div>x</div></body>")).to_be(true)
+        expect(_simple_web_engine2d_has_flow_text("<div style=\"color:red\"> x </div>")).to_be(true)
+        step("style, script, title, textarea and select content, and whitespace, are not flow text")
+        expect(_simple_web_engine2d_has_flow_text("<html><head><title>t</title><style>div{{color:red}}</style></head><body>\n<div></div> <script>var a = 1 < 2;</script><textarea>v</textarea><select><option>o</option></select>\n</body></html>")).to_be(false)
+        expect(_simple_web_engine2d_has_flow_text("<body><div style=\"width:10px;height:10px;background:#000\"></div></body>")).to_be(false)
+
+    it "AC-8: a bare-text page with a raster-only text property keeps the raster lane":
+        step("letter-spacing, word-spacing and text-shadow are not painted by the Draw IR text lane")
+        expect(_simple_web_engine2d_bare_text_document("<body><div>x</div></body>")).to_be(true)
+        expect(_simple_web_engine2d_bare_text_document("<body><div style=\"letter-spacing:2px\">x</div></body>")).to_be(false)
+        expect(_simple_web_engine2d_bare_text_document("<body><div style=\"word-spacing:6px\">x y</div></body>")).to_be(false)
+        expect(_simple_web_engine2d_bare_text_document("<body><div style=\"text-shadow:4px 3px #dc2626\">x</div></body>")).to_be(false)
