@@ -593,13 +593,17 @@ fn elf_is_synth(name: text) -> bool:
         name == "__preinit_array_start" or name == "__preinit_array_end" or
         name == "__rela_iplt_start" or name == "__rela_iplt_end" or
         name == "__rel_iplt_start" or name == "__rel_iplt_end" or
-        name == "__global_pointer$"
+        name == "__global_pointer$" or name == "__bss_start"
 
 fn elf_got_base_sec(target: RelocArch) -> text:
     """Section _GLOBAL_OFFSET_TABLE_ marks: .got on ARM (lld gotBaseSymInGotPlt=false), else .got.plt."""
     if target == RelocArch.Arm32: ".got" else: ".got.plt"
 
 fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text, target: RelocArch) -> Result<i64, text>:
+    if name == "__bss_start":
+        # ld.lld: start of the .bss output section (after .sbss), STV_DEFAULT
+        val bs = elf_exec_find(plan, ".bss")
+        return Ok(if bs < 0: 0 else: plan.vaddrs[bs])
     if name == "__ehdr_start" or name == "__executable_start":
         return Ok(base)
     if name == "_DYNAMIC":
@@ -1323,6 +1327,9 @@ fn elf_is_definer(ctx: ElfLinkCtx, oi: i64, sym: ElfSymbol) -> bool:
 
 fn elf_synth_shndx(plan: ElfExecPlan, name: text, target: RelocArch) -> i64:
     """Header index of the section a linker-defined symbol points into, or -1."""
+    if name == "__bss_start":
+        val bs = elf_exec_find(plan, ".bss")
+        return if bs < 0: -1 else: bs + 1
     if name == "__ehdr_start" or name == "__executable_start":
         return 1
     if name == "__global_pointer$":
@@ -1412,7 +1419,7 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text:
             si = si + 1
         oi = oi + 1
     for n in order:
-        if elf_is_synth(n) and not ctx.res.defined.has(n):
+        if elf_is_synth(n) and n != "__bss_start" and not ctx.res.defined.has(n):
             val sh = elf_synth_shndx(lay.plan, n, ctx.target)
             if sh > 0:
                 rows.add(n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n, ctx.target)?, 0)
@@ -1423,6 +1430,12 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text:
         rows.add("_DYNAMIC", 0, 2, dyn + 1, lay.plan.vaddrs[dyn], 0)
     val first_global = rows.names.len()
     for n in order:
+        if n == "__bss_start" and not ctx.res.defined.has(n):
+            # ld.lld defines __bss_start GLOBAL DEFAULT, not hidden like the other synthetics
+            val bsh = elf_synth_shndx(lay.plan, n, ctx.target)
+            if bsh > 0:
+                rows.add(n, STB_GLOBAL << 4, 0, bsh, elf_synth_addr(lay.plan, lay.base, n, ctx.target)?, 0)
+            continue
         if demoted.has(n) or elf_is_synth(n):
             continue
         if ctx.copy_offsets.has(n):

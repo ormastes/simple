@@ -83,3 +83,12 @@ EM_X86_64 before copying the inputs, the same way `elf_boot_link` does and as ld
 The repro is the i686 case in `simpleos_user32_link_spec`: `.text+11..15` is the alignment
 gap before `main`, and it must be 0xCC. The x86 regression counts are unchanged
 (x64_dynamic 29/32 and exec_writer 19/32 were already failing on the base).
+
+## Fix 3 (`__bss_start`): verification-pending
+
+`__bss_start` is now a linker-synthesized symbol at the start of the `.bss` output section
+(after `.sbss`), written to the symtab as GLOBAL DEFAULT the way ld.lld writes it. Before
+this fix, a weak reference resolved to 0, so the SimpleOS C start silently skipped clearing
+bss. The repro is the `i686_bss.s` fixture in `simpleos_user32_link_spec`, which checks
+lld's 0x402124, the movl immediate and the STB_GLOBAL binding. The regression counts are
+unchanged against the base.

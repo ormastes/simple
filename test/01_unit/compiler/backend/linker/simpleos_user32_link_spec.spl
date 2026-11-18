@@ -44,6 +44,31 @@ fn s32_section_names(b: [u8]) -> [text]:
 fn s32_arm_movw_imm(w: i64) -> i64:
     (((w >> 16) & 0xf) << 12) | (w & 0xfff)
 
+fn s32_cstr(b: [u8], at: i64) -> text:
+    var s = ""
+    var p = at
+    while b[p] != 0:
+        s = s + (b[p] as i64).to_char()
+        p = p + 1
+    s
+
+fn s32_sym_info(b: [u8], name: text) -> i64:
+    """st_info of the named .symtab entry, or -1."""
+    val shoff = s32_u32(b, 32)
+    var i: i64 = 1
+    while i < s32_u16(b, 48):
+        val sh = shoff + i * 40
+        if s32_u32(b, sh + 4) == 2:
+            val str_off = s32_u32(b, shoff + s32_u32(b, sh + 24) * 40 + 16)
+            var e = s32_u32(b, sh + 16)
+            val end = e + s32_u32(b, sh + 20)
+            while e < end:
+                if s32_cstr(b, str_off + s32_u32(b, e)) == name:
+                    return b[e + 12] as i64
+                e = e + 16
+        i = i + 1
+    -1
+
 fn s32_link(arch: text, out: text) -> Result<text, text>:
     var cfg = NativeLinkConfig.default()
     cfg.runtime_path = "none"
@@ -176,3 +201,19 @@ describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
         val hi = s32_arm_movw_imm(s32_u32(b, t + 16))
         expect((hi << 16) | lo).to_equal(data_v)
         expect(s32_u32(b, t + 28)).to_equal(0xe12fff1e)   # bx lr
+
+    it "defines __bss_start at .bss as a GLOBAL symbol, as ld.lld does":
+        # lld oracle: __bss_start = .bss = 0x402124, GLOBAL DEFAULT; the weak
+        # reference in _start must resolve to it (the SimpleOS C start clears bss).
+        val out = "build/simpleos_user32_bss.elf"
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.extra_flags = ["-T", "{S32_FIX}/simpleos_user32.ld", "-nostdlib", "-static"]
+        val r = link_simpleos_internal(["{S32_FIX}/i686_bss.o"], out, "simpleos-i686", cfg)
+        expect(r.is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        val bss_v = s32_phdr(b, 3, 8)
+        expect(s32_phdr(b, 3, 16)).to_equal(0)        # RW filesz 0: only .bss
+        expect(bss_v).to_equal(0x402124)              # lld .bss and __bss_start
+        expect(s32_u32(b, s32_phdr(b, 2, 4) + 1)).to_equal(bss_v)   # movl $__bss_start
+        expect(s32_sym_info(b, "__bss_start")).to_equal(0x10)       # STB_GLOBAL, NOTYPE
