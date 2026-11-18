@@ -857,6 +857,19 @@ impl ModuleResolver {
                     }
                 }
 
+                // Strategy 4b: a single-segment name ("use trust_cfg.{...}") may be
+                // a module file directly under a source root, e.g. a build-generated
+                // module passed as `--source <gendir>`. Native discovery already
+                // finds it there (discovery.rs source-root fallback); resolve it the
+                // same way. Runs after the importer-directory attempt, so siblings win.
+                if segments[0] != "crate" && segments.len() == 1 {
+                    for root in ordered_source_roots(self) {
+                        if let Ok(resolved) = self.resolve_from_base(&root, &segments[..], path) {
+                            return Ok(resolved);
+                        }
+                    }
+                }
+
                 // Strategy 5: Try project_root for top-level dirs not under source_root
                 // e.g., "use examples.browser.*" → project_root/examples/browser/
                 if segments[0] != "crate" && segments.len() > 1 {

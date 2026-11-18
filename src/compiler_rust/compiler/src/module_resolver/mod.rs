@@ -62,6 +62,46 @@ mod tests {
         );
     }
 
+    /// A generated module passed as `--source <gendir>` and imported by bare
+    /// name (`use rv64_auth_trust_config.{...}`) from a file in another root
+    /// must resolve: discovery already finds it via the source-root fallback,
+    /// so the resolver rejecting it (E1034) broke the riscv64 kernel build.
+    #[test]
+    fn single_segment_import_resolves_from_extra_source_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let gen = dir.path().join("gen");
+        fs::create_dir_all(src.join("os/loader")).unwrap();
+        fs::create_dir_all(&gen).unwrap();
+        let importer = src.join("os/loader/fixture.spl");
+        fs::write(&importer, "use trust_cfg.{key}\n").unwrap();
+        fs::write(gen.join("trust_cfg.spl"), "pub fn key() -> text: \"k\"\n").unwrap();
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone())
+            .with_extra_source_roots(vec![gen.clone()]);
+        let path = ModulePath::new(vec!["trust_cfg".to_string()]);
+        let resolved = resolver.resolve(&path, &importer).expect("bare generated import");
+        assert_eq!(resolved.path, gen.join("trust_cfg.spl"));
+    }
+
+    /// The importer's own directory still wins over a source root.
+    #[test]
+    fn single_segment_import_prefers_importer_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let gen = dir.path().join("gen");
+        fs::create_dir_all(src.join("os")).unwrap();
+        fs::create_dir_all(&gen).unwrap();
+        let importer = src.join("os/a.spl");
+        fs::write(&importer, "use b.{x}\n").unwrap();
+        fs::write(src.join("os/b.spl"), "pub fn x() -> i64: 1\n").unwrap();
+        fs::write(gen.join("b.spl"), "pub fn x() -> i64: 2\n").unwrap();
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone())
+            .with_extra_source_roots(vec![gen]);
+        let path = ModulePath::new(vec!["b".to_string()]);
+        let resolved = resolver.resolve(&path, &importer).expect("sibling import");
+        assert_eq!(resolved.path, src.join("os/b.spl"));
+    }
+
     #[test]
     fn test_single_file_mode() {
         // Platform-portable: a hardcoded Unix-absolute path such as
