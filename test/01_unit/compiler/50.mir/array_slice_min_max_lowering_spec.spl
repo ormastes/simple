@@ -146,6 +146,50 @@ val trait_array_result_src = "trait Src:\n" +
     "    var b = Buf(data: [4u32, 2u32])\n" +
     "    print(g(b))\n"
 
+# Instance-method `[T]` results (bootstrap erases the method's HirFunction
+# return to i64; the declared `[u32]` reaches MIR only through the method
+# symbol). `self.raw()` inside a trait DEFAULT body called on the concrete
+# implementor (`canvas.count()` -> injected `Canvas::count`, self: Canvas),
+# the chained form, an inherent impl, and an external receiver: each result
+# must carry the runtime-array mark or `.slice` falls to the runtime fallback.
+val canvas_impl_tail = "class Canvas:\n" +
+    "    data: [u32]\n" +
+    "impl PixelSource for Canvas:\n" +
+    "    me raw() -> [u32]:\n" +
+    "        self.data\n" +
+    "fn main():\n" +
+    "    var canvas = Canvas(data: [7u32, 3u32, 9u32])\n" +
+    "    print(canvas.count())\n"
+
+val default_self_bound_src = "trait PixelSource:\n" +
+    "    me raw() -> [u32]\n" +
+    "    me count() -> i64:\n" +
+    "        val all = self.raw()\n" +
+    "        all.slice(0, 2).len()\n" + canvas_impl_tail
+
+val default_self_chained_src = "trait PixelSource:\n" +
+    "    me raw() -> [u32]\n" +
+    "    me count() -> i64:\n" +
+    "        self.raw().slice(0, 2).len()\n" + canvas_impl_tail
+
+val default_self_len_src = "trait PixelSource:\n" +
+    "    me raw() -> [u32]\n" +
+    "    me count() -> i64:\n" +
+    "        self.raw().len()\n" + canvas_impl_tail
+
+val inherent_self_src = "class Canvas:\n" +
+    "    data: [u32]\n" +
+    "impl Canvas:\n" +
+    "    me raw() -> [u32]:\n" +
+    "        self.data\n" +
+    "    me count() -> i64:\n" +
+    "        val all = self.raw()\n" +
+    "        all.slice(0, 2).len()\n" +
+    "fn main():\n" +
+    "    var canvas = Canvas(data: [7u32, 3u32, 9u32])\n" +
+    "    val outside = canvas.raw()\n" +
+    "    print(canvas.count() + outside.slice(1, 3).len())\n"
+
 val text_min_src = "fn f(xs: [text]) -> text:\n" +
     "    xs.min()\n"
 
@@ -194,3 +238,15 @@ describe "array slice/min/max MIR lowering":
 
     it "bootstrap: unannotated binding of a trait-typed parameter's [u32] result":
         expect(arr_bootstrap_unresolved(trait_array_result_src)).to_equal(0)
+
+    it "bootstrap: `val all = self.raw()` then `.slice` in a trait default body called on the implementor":
+        expect(arr_bootstrap_unresolved(default_self_bound_src)).to_equal(0)
+
+    it "bootstrap: chained `self.raw().slice(..)` in a trait default body":
+        expect(arr_bootstrap_unresolved(default_self_chained_src)).to_equal(0)
+
+    it "bootstrap: `self.raw().len()` in a trait default body":
+        expect(arr_bootstrap_unresolved(default_self_len_src)).to_equal(0)
+
+    it "bootstrap: inherent-method and external-receiver `[u32]` results reach `.slice`":
+        expect(arr_bootstrap_unresolved(inherent_self_src)).to_equal(0)
