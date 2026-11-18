@@ -12,6 +12,7 @@ use std.common.pe.pe_image_v1.{pe_coff_header_v1, pe_section_header_v1, pe_coff_
 pub val COFF_MACHINE_UNKNOWN: i64 = 0
 pub val COFF_MACHINE_AMD64: i64 = 0x8664
 pub val COFF_MACHINE_ARM64: i64 = 0xaa64
+pub val COFF_MACHINE_I386: i64 = 0x14c
 val COFF_HEADER_SIZE: i64 = 20
 val COFF_SECTION_HEADER_SIZE: i64 = 40
 val COFF_RELOCATION_SIZE: i64 = 10
@@ -28,6 +29,17 @@ val COFF_SECTION_LNK_REMOVE: i64 = 0x00000800
 val COFF_SECTION_LNK_COMDAT: i64 = 0x00001000
 val COFF_SECTION_LNK_NRELOC_OVFL: i64 = 0x01000000
 
+val COFF_REL_I386_ABSOLUTE: i64 = 0x0000
+val COFF_REL_I386_DIR16: i64 = 0x0001
+val COFF_REL_I386_REL16: i64 = 0x0002
+val COFF_REL_I386_DIR32: i64 = 0x0006
+val COFF_REL_I386_DIR32NB: i64 = 0x0007
+val COFF_REL_I386_SEG12: i64 = 0x0009
+val COFF_REL_I386_SECTION: i64 = 0x000a
+val COFF_REL_I386_SECREL: i64 = 0x000b
+val COFF_REL_I386_TOKEN: i64 = 0x000c
+val COFF_REL_I386_SECREL7: i64 = 0x000d
+val COFF_REL_I386_REL32: i64 = 0x0014
 val COFF_REL_AMD64_ADDR64: i64 = 0x0001
 val COFF_REL_AMD64_ABSOLUTE: i64 = 0x0000
 val COFF_REL_AMD64_ADDR32: i64 = 0x0002
@@ -221,7 +233,7 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
         return Err("invalid COFF bigobj signature, version, or class identifier")
     val machine = header.machine
     if machine != COFF_MACHINE_AMD64 and machine != COFF_MACHINE_ARM64 and
-            machine != COFF_MACHINE_UNKNOWN:
+            machine != COFF_MACHINE_I386 and machine != COFF_MACHINE_UNKNOWN:
         return Err("unsupported COFF machine {machine}")
     if bigobj and _coff_u16(data, 4) < 2:
         return Err("COFF bigobj version must be at least 2")
@@ -438,6 +450,25 @@ fn coff_apply_amd64_relocation(relocation_type: i64, symbol_address: i64,
     CoffRelocationValue(success: false, value: 0, width: 0,
         error: "unsupported AMD64 COFF relocation type {relocation_type}")
 
+fn coff_apply_i386_relocation(relocation_type: i64, symbol_address: i64,
+        addend: i64, place_address: i64, image_base: i64) -> CoffRelocationValue:
+    """Compute one i386 COFF relocation (DIR32 absolute VA, DIR32NB RVA, REL32)."""
+    if relocation_type == COFF_REL_I386_DIR32:
+        # Implicit addends are 32-bit; wrap modulo 2^32 like lld (a negative
+        # addend reads back as 0xFFFFFFxx).
+        val value = (symbol_address + addend) & 0xffffffff
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    if relocation_type == COFF_REL_I386_DIR32NB:
+        val value = (symbol_address + addend - image_base) & 0xffffffff
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    if relocation_type == COFF_REL_I386_REL32:
+        val value = symbol_address + addend - (place_address + 4)
+        if value < -2147483648 or value > 2147483647:
+            return CoffRelocationValue(success: false, value: 0, width: 4, error: "IMAGE_REL_I386_REL32 out of range")
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    CoffRelocationValue(success: false, value: 0, width: 0,
+        error: "unsupported i386 COFF relocation type {relocation_type}")
+
 fn _coff_arm64_sign_extend(value: i64, bits: i64) -> i64:
     val sign = 1 << (bits - 1)
     val modulus = 1 << bits
@@ -609,7 +640,10 @@ fn coff_apply_arm64_section_relocation(relocation_type: i64, instruction: i64,
         error: "unsupported ARM64 section-relative relocation type {relocation_type}")
 
 export CoffRelocation, CoffSection, CoffSymbol, CoffObject, CoffRelocationValue
-export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64, COFF_MACHINE_UNKNOWN
+export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64, COFF_MACHINE_I386, COFF_MACHINE_UNKNOWN
+export COFF_REL_I386_ABSOLUTE, COFF_REL_I386_DIR16, COFF_REL_I386_REL16, COFF_REL_I386_DIR32
+export COFF_REL_I386_DIR32NB, COFF_REL_I386_SEG12, COFF_REL_I386_SECTION, COFF_REL_I386_SECREL
+export COFF_REL_I386_TOKEN, COFF_REL_I386_SECREL7, COFF_REL_I386_REL32
 export COFF_STORAGE_CLASS_EXTERNAL, COFF_STORAGE_CLASS_STATIC, COFF_STORAGE_CLASS_WEAK_EXTERNAL
 export COFF_WEAK_SEARCH_NOLIBRARY, COFF_WEAK_SEARCH_LIBRARY, COFF_WEAK_SEARCH_ALIAS
 export COFF_SECTION_CNT_UNINITIALIZED_DATA, COFF_SECTION_LNK_INFO
@@ -629,6 +663,6 @@ export coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_nam
 export coff_is_bigobj
 export coff_is_weak_alias, coff_weak_primary_map
 export coff_weak_primary_searches_library_for_fallback, coff_symbol_is_relocated
-export coff_apply_amd64_relocation
+export coff_apply_amd64_relocation, coff_apply_i386_relocation
 export coff_apply_arm64_relocation
 export coff_apply_arm64_section_relocation
