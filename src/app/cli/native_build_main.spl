@@ -57,7 +57,7 @@ use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims}
 use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1, PARSE_SHARD_DEATH_GRACE_MS_V1,
     shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1}
-use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1}
+use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1, native_build_is_dll_init_failed_v1}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_pool_addressable_budget_kb_v1,
     file_worker_pool_hir_budget_kb_v1, file_worker_pool_mir_budget_kb_v1, file_worker_pool_host_pointer_bits_v1,
     file_worker_pool_serial_memory_admits_v1}
@@ -2507,18 +2507,50 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     val old_ice_skip_saved = native_build_env_saved_v1("SIMPLE_ICE_SKIP_MODULES")
     val old_ice_skip = old_ice_skip_saved ?? ""
     val ice_owned = ice_boundary_claim_run(requested_output)
-    val (first_stdout, first_stderr, first_code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
-    val (stdout, stderr, code_raw) = native_build_relaunch_past_ice_crashes(
-        simple_bin, worker_args, native_build_timeout_ms(args),
-        ice_crash_retry_budget(), first_stdout, first_stderr, first_code)
-    val worker_code = native_build_normalize_exit_code(code_raw as i64)
-    # A re-launch stepped over a module the worker died in. The re-launched
-    # worker normally records it and fails, but a module that takes a codegen
-    # path the boundary does not bracket would be compiled silently: a build
-    # that needed a re-launch never passes, whatever the last worker reports.
-    val ice_skip_now = env_get("SIMPLE_ICE_SKIP_MODULES") ?? ""
-    val ice_relaunched = ice_skip_now != old_ice_skip
-    val code = if ice_relaunched and worker_code == 0: 1 else: worker_code
+    val output_path = requested_output
+    # Parse/HIR/MIR shard children exit before link by design; a missing -o
+    # there is not a failure (it marked every successful parse shard FAILED).
+    val shard_child_run = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+        (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
+    val worker_timeout_ms = native_build_timeout_ms(args)
+    var dll_init_attempt: i64 = 0
+    val dll_init_max_retries: i64 = 2
+    var stdout = ""
+    var stderr = ""
+    var code_raw: i32 = 0
+    var worker_code: i64 = 0
+    var ice_skip_now = old_ice_skip
+    var ice_relaunched = false
+    var code: i64 = 0
+    var output_ok = false
+    while true:
+        val (attempt_stdout, attempt_stderr, attempt_code) = process_run_timeout_live(simple_bin, worker_args, worker_timeout_ms)
+        val (relaunch_stdout, relaunch_stderr, relaunch_code) = native_build_relaunch_past_ice_crashes(
+            simple_bin, worker_args, worker_timeout_ms,
+            ice_crash_retry_budget(), attempt_stdout, attempt_stderr, attempt_code)
+        stdout = relaunch_stdout
+        stderr = relaunch_stderr
+        code_raw = relaunch_code
+        worker_code = native_build_normalize_exit_code(code_raw as i64)
+        # A re-launch stepped over a module the worker died in. The re-launched
+        # worker normally records it and fails, but a module that takes a codegen
+        # path the boundary does not bracket would be compiled silently: a build
+        # that needed a re-launch never passes, whatever the last worker reports.
+        ice_skip_now = env_get("SIMPLE_ICE_SKIP_MODULES") ?? ""
+        ice_relaunched = ice_skip_now != old_ice_skip
+        code = if ice_relaunched and worker_code == 0: 1 else: worker_code
+        output_ok = native_build_output_exists(
+            output_path, native_build_worker_success_receipt(output_path, stdout, stderr))
+        if not native_build_should_retry_dll_init_v1(code, shard_child_run, output_ok, dll_init_attempt, dll_init_max_retries):
+            break
+        val delay_ms = native_build_dll_init_retry_delay_ms_v1(dll_init_attempt)
+        dll_init_attempt = dll_init_attempt + 1
+        stderr_write("warning: native-build worker exited with code {code} (0xC0000142 STATUS_DLL_INIT_FAILED); retrying ({dll_init_attempt}/{dll_init_max_retries}) after {delay_ms}ms.\n")
+        if build_trace_enabled():
+            log_build_trace("coordinator:worker:dll_init_retry attempt={dll_init_attempt}/{dll_init_max_retries} delay_ms={delay_ms}")
+        sleep_ms(delay_ms)
+        if ice_owned:
+            ice_boundary_begin_run()
     # A module still open in the breadcrumbs is where the worker died. Record
     # it while the run directory is still ours, then hand the directory back.
     var ice_dead_lines: [text] = []
@@ -2550,9 +2582,6 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     env_unset(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1)
     native_build_env_restore_v1("SIMPLE_MIR_SHARD_LINK", old_mir_link)
     native_build_env_restore_v1("SIMPLE_MIR_SHARD_EXPORT_DIR", old_mir_export_dir)
-    val output_path = requested_output
-    val output_ok = native_build_output_exists(
-        output_path, native_build_worker_success_receipt(output_path, stdout, stderr))
     val strict_no_stub = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
     if native_build_strict_stub_violation(strict_no_stub, stdout, stderr):
         if output_ok:
@@ -2565,10 +2594,6 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     val _warm_promoted = native_build_warm_receipt_finish(
         warm_receipt, stdout, code == 0, output_ok)
     native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
-    # Parse/HIR/MIR shard children exit before link by design; a missing -o
-    # there is not a failure (it marked every successful parse shard FAILED).
-    val shard_child_run = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
-        (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
     native_build_record_postbuild_v1(code == 0 and output_ok, output_path)
     if native_build_missing_output_is_failure_v1(code, output_path, output_ok, shard_child_run):
         # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
@@ -2613,12 +2638,47 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
             eprint_bounded(stdout)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
-        for tail_line in native_build_worker_failure_lines_v1(code, stderr, simple_bin, native_build_timeout_ms(args) / 1000):
+        for tail_line in native_build_worker_failure_lines_for_output_v1(code, stderr, simple_bin, worker_timeout_ms / 1000, output_path):
             stderr_write(tail_line)
     code as i64
 
+# reason: internal CLI DLL-init retry/diagnostic helper exported for unit specs
+@allow(primitive_api)
+pub fn native_build_should_retry_dll_init_v1(code: i64, shard_child_run: bool, output_ok: bool, attempt: i64, max_retries: i64) -> bool:
+    """True when a final (non-shard) worker failed with 0xC0000142 without an artifact and retry budget remains."""
+    if shard_child_run or output_ok:
+        return false
+    if attempt < 0 or attempt >= max_retries:
+        return false
+    native_build_is_dll_init_failed_v1(code)
+
+# reason: internal CLI DLL-init retry/diagnostic helper exported for unit specs
+@allow(primitive_api)
+pub fn native_build_dll_init_retry_delay_ms_v1(attempt: i64) -> i64:
+    """Backoff delay in milliseconds before retrying after STATUS_DLL_INIT_FAILED (1000ms, 2000ms, ...)."""
+    if attempt <= 0:
+        return 1000
+    (attempt + 1) * 1000
+
+pub fn native_build_dll_init_recovery_lines_v1(output_path: text) -> [text]:
+    """Manual recovery guidance after 0xC0000142 so existing aot-*.o objects can be linked directly."""
+    val target = if output_path != "": output_path else: "<output>"
+    val link_cmd_path = "{target}.link-command.txt"
+    [
+        "  hint: 0xC0000142 (STATUS_DLL_INIT_FAILED) indicates a transient Windows process/DLL startup failure (desktop-heap, console owner, or memory pressure).\n",
+        "  hint: any already-emitted aot-*.o objects remain on disk; check {link_cmd_path} if the link step recorded one.\n",
+        "  hint: to recover existing aot-*.o work without rerunning codegen, run:\n",
+        "    sh scripts/bootstrap/p3-manual-link-stage3.shs <obj_dir> <checkout> {target}\n"
+    ]
+
 pub fn native_build_worker_failure_lines_v1(code: i64, stderr: text, simple_bin: text, timeout_secs: i64) -> [text]:
     """Tail diagnostic lines for a failed (non-zero) worker, by exit-status class."""
+    native_build_worker_failure_lines_for_output_v1(code, stderr, simple_bin, timeout_secs, "")
+
+# reason: internal CLI DLL-init retry/diagnostic helper exported for unit specs
+@allow(primitive_api)
+pub fn native_build_worker_failure_lines_for_output_v1(code: i64, stderr: text, simple_bin: text, timeout_secs: i64, output_path: text) -> [text]:
+    """Tail diagnostic lines for a failed (non-zero) worker, including output-aware recovery hints."""
     var lines: [text] = []
     val windows_status = native_build_windows_status_label(code)
     if code == -1 and (stderr.contains("dumped core") or stderr.contains("core dumped")):
@@ -2640,6 +2700,9 @@ pub fn native_build_worker_failure_lines_v1(code: i64, stderr: text, simple_bin:
         lines.push("    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address\n")
     elif windows_status != "":
         lines.push("error: native-build worker terminated with Windows native status {windows_status} before producing a binary.\n")
+        if native_build_is_dll_init_failed_v1(code):
+            for recovery_line in native_build_dll_init_recovery_lines_v1(output_path):
+                lines.push(recovery_line)
     elif native_build_posix_signal(code) > 0:
         val signo = native_build_posix_signal(code)
         lines.push("error: native-build worker terminated with signal {signo} ({native_build_signal_name(signo)}) before producing a binary; NOT a compile failure.\n")
