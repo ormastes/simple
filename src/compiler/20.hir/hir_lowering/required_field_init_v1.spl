@@ -25,7 +25,7 @@
 # fix suggestions; no suggestion ever inserts nil/None.
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.hir.generated.hir_visit.{HirVisitor, hir_visit_block, hir_visit_expr}
+use compiler.hir.generated.hir_visit.{HirVisitor, hir_visit_block, hir_visit_expr, hir_visit_stmt}
 use compiler.hir.hir_lowering.attr_access_sites.{hir_node_tree_attr_v1}
 use compiler.frontend.parser_types.*
 use compiler.common.attributes.{extract_string_arg}
@@ -273,6 +273,9 @@ class RequiredInitCollectorV1:
     pending_class: Dict<i64, RequiredInitClassV1> = {}
     pending_names: Dict<i64, [text]> = {}
     awaited_operand_next: bool = false
+    # Pending fields already awaited by a dominating top-level statement of the
+    # function body: a phase cell is write-once, so they stay ready.
+    ready_names: Dict<i64, [text]> = {}
     # The function being visited is a `me` method: its `self` is mutable state.
     in_me_method: bool = false
 
@@ -424,6 +427,30 @@ class RequiredInitCollectorV1:
                 (Some(cls), pending)
             case _: (None, [])
 
+    fn note_await_of(e: HirExpr):
+        match e.kind:
+            case HirExprKind.Await(inner):
+                match inner.kind:
+                    case HirExprKind.Field(base, field_name, _):
+                        val id = self.local_symbol_of(base)
+                        if id >= 0 and self.pending_class.contains_key(id):
+                            var names: [text] = []
+                            if self.ready_names.contains_key(id):
+                                names = self.ready_names[id]
+                            names.push(field_name)
+                            self.ready_names[id] = names
+                    case _: ()
+            case _: ()
+
+    # Called after a TOP-LEVEL statement of a function body was visited: an
+    # `await local.f` there dominates every later statement. Awaits nested in
+    # branches/loops never reach this, so they prove nothing.
+    fn note_dominating_await(stmt: HirStmt):
+        match stmt.kind:
+            case HirStmtKind.Expr(e): self.note_await_of(e)
+            case HirStmtKind.Let(_, _, init): self.note_await_of(init)
+            case _: ()
+
     fn local_symbol_of(e: HirExpr) -> i64:
         match e.kind:
             case HirExprKind.Var(symbol): symbol.id
@@ -465,7 +492,9 @@ impl HirVisitor for RequiredInitCollectorV1:
                     return
                 val local_id = self.local_symbol_of(base)
                 if local_id >= 0 and self.pending_class.contains_key(local_id) and
-                        required_init_contains_v1(self.pending_names[local_id], field_name):
+                        required_init_contains_v1(self.pending_names[local_id], field_name) and
+                        not (self.ready_names.contains_key(local_id) and
+                             required_init_contains_v1(self.ready_names[local_id], field_name)):
                     val cls = self.pending_class[local_id]
                     self.report(E_ATTR_NOT_READY, cls, field_name, node.span,
                         "`{cls.name}.{field_name}` is bound to an async producer and is read here without `await`; it is not proven ready",
@@ -480,6 +509,7 @@ impl HirVisitor for RequiredInitCollectorV1:
             case HirStmtKind.Let(symbol, _, init):
                 val found = self.pending_fields_of_call(init)
                 self.pending_class.remove(symbol.id)
+                self.ready_names.remove(symbol.id)
                 if val cls = found.0:
                     if found.1.len() > 0:
                         self.pending_class[symbol.id] = cls
@@ -489,6 +519,7 @@ impl HirVisitor for RequiredInitCollectorV1:
                 val target_id = self.local_symbol_of(target)
                 if target_id >= 0:
                     self.pending_class.remove(target_id)
+                    self.ready_names.remove(target_id)
             case _: ()
 
     me on_type(node: HirType):
@@ -572,6 +603,11 @@ pub fn hir_required_field_init_check_v1(module_name: text, module_path: text, sy
             i = i - 1
     for f in order:
         collector.in_me_method = f.is_mutable
-        hir_visit_block(f.body, collector)
+        collector.ready_names = {}
+        for stmt in f.body.stmts:
+            hir_visit_stmt(stmt, collector)
+            collector.note_dominating_await(stmt)
+        if f.body.has:
+            hir_visit_expr(f.body.value, collector)
     RequiredInitReportV1(rows: collector.rows, sites_judged: collector.sites_judged,
         sites_unjudged: collector.sites_unjudged)
