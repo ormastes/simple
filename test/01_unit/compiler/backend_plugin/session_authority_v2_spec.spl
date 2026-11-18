@@ -3,13 +3,19 @@
 use std.spec.*
 use std.spec.step
 use compiler.common.backend_plugin.model.{
-    BackendRole, BackendCapability, BackendPluginRequestV1
+    BackendRole, BackendCapability, BackendPluginRequestV1,
+    backend_capability_attestation_confirmed_baseline_v2,
+    backend_plugin_descriptor_with_attestation_v2
 }
-use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.backend.backend_plugin.registry.{
+    BUILTIN_MIR_ABI_DIGEST_V1, llvm_builtin_descriptor
+}
 use compiler.backend.backend_plugin.session_authority_v2.{
     BackendSessionAuthorityV2, BackendSessionAuthorityErrorV2,
     BackendSessionAuthorityStateV2, BackendSessionOwnedLeaseV2,
-    backend_session_authority_open_v2, backend_session_authority_project_v2,
+    backend_session_authority_open_v2,
+    backend_session_authority_open_with_descriptor_v2,
+    backend_session_authority_project_v2,
     backend_session_authority_use_acquire_v2,
     backend_session_authority_compile_module_v2,
     backend_session_authority_use_release_v2,
@@ -401,3 +407,60 @@ describe "backend session generation and compile-use authority V2":
             authority_probe_module(), false, 0, "generic", [],
             object_path, diagnostic_path)).to_equal(1)
         _ = shell("rm -rf '{stage_dir}'")
+
+    it "binds provider-confirmed baseline attestation into session receipts and result envelopes":
+        # @req REQ-010
+        expect(install_authority_k1_table()).to_equal(true)
+        var owner = BackendSessionAuthorityV2.create()
+
+        step("Unattested descriptor still refuses feature requests")
+        val unattested = llvm_builtin_descriptor()
+        expect(backend_session_authority_open_with_descriptor_v2(
+            owner, authority_feature_request(), unattested)).to_equal(
+            Err(BackendSessionAuthorityErrorV2.LoadRejected(
+                "backend feature acceptance is unavailable for V2 sessions")))
+
+        step("Compare Unknown vs ConfirmedBaseline receipt and envelope hashes")
+        val unknown_token = backend_session_authority_open_v2(
+            owner, authority_request()).ok().unwrap()
+        val unknown_use = backend_session_authority_use_acquire_v2(
+            owner, unknown_token).ok().unwrap()
+        val unknown_res = backend_session_authority_compile_module_result_v2(
+            owner, unknown_token, unknown_use, authority_probe_module()).ok().unwrap()
+        val unknown_proj = backend_session_authority_result_project_v2(
+            owner, unknown_token, unknown_use, unknown_res).ok().unwrap()
+        expect(unknown_proj.feature_acceptance).to_equal(
+            BackendSessionFeatureAcceptanceV2.Unknown)
+
+        val attested_desc = backend_plugin_descriptor_with_attestation_v2(
+            unattested,
+            backend_capability_attestation_confirmed_baseline_v2(
+                ["host"], ["generic"]))
+        val confirmed_token = backend_session_authority_open_with_descriptor_v2(
+            owner, authority_request(), attested_desc).ok().unwrap()
+        expect(confirmed_token.receipt_hash == unknown_token.receipt_hash).to_equal(false)
+
+        val confirmed_use = backend_session_authority_use_acquire_v2(
+            owner, confirmed_token).ok().unwrap()
+        val confirmed_res = backend_session_authority_compile_module_result_v2(
+            owner, confirmed_token, confirmed_use, authority_probe_module()).ok().unwrap()
+        val confirmed_proj = backend_session_authority_result_project_v2(
+            owner, confirmed_token, confirmed_use, confirmed_res).ok().unwrap()
+        expect(confirmed_proj.feature_acceptance).to_equal(
+            BackendSessionFeatureAcceptanceV2.ConfirmedBaseline)
+        expect(confirmed_proj.accepted_features.len()).to_equal(0)
+        expect(confirmed_proj.envelope_sha256 == unknown_proj.envelope_sha256).to_equal(false)
+
+        expect(backend_session_authority_result_release_v2(
+            owner, unknown_token, unknown_use, unknown_res)).to_equal(Ok(()))
+        expect(backend_session_authority_use_release_v2(
+            owner, unknown_token, unknown_use)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, unknown_token)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, unknown_token)).to_equal(Ok(()))
+
+        expect(backend_session_authority_result_release_v2(
+            owner, confirmed_token, confirmed_use, confirmed_res)).to_equal(Ok(()))
+        expect(backend_session_authority_use_release_v2(
+            owner, confirmed_token, confirmed_use)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, confirmed_token)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, confirmed_token)).to_equal(Ok(()))

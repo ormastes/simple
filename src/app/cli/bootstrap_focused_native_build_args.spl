@@ -92,10 +92,50 @@ pub struct FocusedNativeTargetProfileV1:
     profile: text
     managed_build_phase: text
 
+fn _focused_profile_namespace_segment_v1(target_profile: FocusedNativeTargetProfileV1) -> text:
+    if target_profile.managed_build_phase != "":
+        return target_profile.managed_build_phase + "-" + target_profile.profile
+    target_profile.profile
+
+# reason: computes profile-qualified native cache directory text from CLI args, saved env, and target profile
+@allow(primitive_api)
+pub fn focused_native_build_profile_cache_dir_v1(
+    args: [text],
+    previous: text,
+    target_profile: FocusedNativeTargetProfileV1
+) -> text:
+    val requested = focused_native_build_cache_dir(args)
+    if requested != "":
+        return requested
+    val segment = _focused_profile_namespace_segment_v1(target_profile)
+    if previous != "":
+        if target_profile.managed_build_phase == "":
+            return previous
+        if previous.ends_with("/" + segment) or previous.ends_with("-" + segment):
+            return previous
+        return previous + "/" + segment
+    "build/native_cache/" + segment
+
+# reason: computes profile-qualified receipt namespace directory text from target profile and optional base root
+@allow(primitive_api)
+pub fn focused_native_build_profile_receipt_namespace_v1(
+    target_profile: FocusedNativeTargetProfileV1,
+    base_dir: text = ""
+) -> text:
+    val segment = _focused_profile_namespace_segment_v1(target_profile)
+    if base_dir == "":
+        return "build/native_receipts/" + segment
+    if base_dir.ends_with("/" + segment):
+        return base_dir + "/receipts"
+    base_dir + "/receipts/" + segment
+
+# reason: default_release boolean controls unmanaged fallback profile when no CLI flag selects dev or prod
+@allow(primitive_api)
 pub fn focused_native_build_target_profile_v1(args: [text], default_release: bool = true) -> Result<FocusedNativeTargetProfileV1, text>:
     var explicit_profile = ""
     var phase = ""
     var release_requested = false
+    var debug_requested = false
     var index = 0
     while index < args.len():
         val arg = args[index]
@@ -103,6 +143,8 @@ pub fn focused_native_build_target_profile_v1(args: [text], default_release: boo
         var phase_value = ""
         if arg == "--release" or arg == "--release-optimized":
             release_requested = true
+        elif arg == "--debug":
+            debug_requested = true
         elif arg == "--profile" or arg == "--managed-build-phase":
             if index + 1 >= args.len() or args[index + 1].starts_with("--"):
                 return Err("TARGET-PROFILE-E-ARG: missing value for " + arg)
@@ -128,10 +170,22 @@ pub fn focused_native_build_target_profile_v1(args: [text], default_release: boo
                 return Err("TARGET-PROFILE-E-CONFLICT: conflicting managed phases")
             phase = phase_value
         index = index + 1
-    val phase_profile = if phase == "phase3": "dev" else: if phase == "phase4": "prod" else: ""
-    if phase_profile != "" and explicit_profile != "" and phase_profile != explicit_profile:
+    if phase == "phase3" and explicit_profile != "" and explicit_profile != "dev":
         return Err("TARGET-PROFILE-E-CONFLICT: managed phase and explicit profile differ")
-    val selected = if explicit_profile != "": explicit_profile else: if phase_profile != "": phase_profile else: if default_release or release_requested: "prod" else: "dev"
+    val selected = if explicit_profile != "":
+        explicit_profile
+    elif phase == "phase3":
+        "dev"
+    elif debug_requested:
+        "dev"
+    elif phase == "phase4":
+        "prod"
+    elif default_release or release_requested:
+        "prod"
+    else:
+        "dev"
     if release_requested and selected == "dev":
+        return Err("TARGET-PROFILE-E-CONFLICT: release and development both requested")
+    if debug_requested and selected == "prod":
         return Err("TARGET-PROFILE-E-CONFLICT: release and development both requested")
     Ok(FocusedNativeTargetProfileV1(selected == "prod", selected, phase))

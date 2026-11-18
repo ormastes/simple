@@ -4,10 +4,7 @@ Status: managed source implementation and bounded native policy projection
 verified; no full bootstrap qualification or new XRay capability claimed. This applies to newly created managed jobs, never mutation
 of a running/frozen bootstrap.
 
-Phase 3 selects Development (`debug`/`dev`); phase 4 selects Release
-(`release`/`prod`). This is the target artifact's profile. Producer path/digest
-remain independent admission facts. Default optimization is respectively 0/2;
-optimization never determines the target profile.
+Phase 3 selects Development (`debug`/`dev`); in the initial 2026-11-14 baseline, phase 4 selected Release (`release`/`prod`) only, and **as updated on 2026-11-18 (`C7` / `W8`, see below)** phase 4 accepts orthogonal `--profile=dev|prod` while defaulting to Release (`prod`) when `--profile` is omitted (keeping `phase3` strictly `dev`-only). This is the target artifact's profile. Producer path/digest remain independent admission facts. Default optimization is respectively 0 (`dev`) and 2 (`prod`); optimization never determines the target profile.
 
 The approved shared owner is `compiler.common.driver_compile_options`:
 `TargetBuildProfileV1`, `TargetDebugRequestV1`, `TargetTraceCapabilityV1`,
@@ -91,3 +88,19 @@ complete before the owned scope was stopped. Before executing the artifact, all
 26 shared declarations were verified against c065340a279 and all 35 added spans
 against their exact sources. No product defect or full-manager pass is inferred.
 Artifacts: `/tmp/managed-profile-followup-20261114/`; full bootstrap remains UNRUN.
+
+## Orthogonal Phase-4 `dev` / `prod` profile separation (2026-11-18, `C7`)
+
+Per `doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md` (`R03`, `W8`, `C7`, `T14`), Phase 4 separates stage identity from target build profile so both Diagnosis (`dev`) and Release (`prod`) Phase-4 compilers and provider catalogs can be built without cache or receipt cross-contamination:
+
+1. **Phase-3 vs Phase-4 selector rules (`bootstrap_focused_native_build_args.spl`, `driver_compile_options.spl`):**
+   - `phase3` remains strictly `dev`-only (`TargetBuildProfileV1.Development`, `release=false`, `profile="dev"`, `automatic_development_debug=true`). Passing `--profile=prod` or `--release` with `--managed-build-phase=phase3` continues to fail with `TARGET-PROFILE-E-CONFLICT`.
+   - `phase4` with no explicit `--profile` (and no `--debug`) defaults to `profile="prod"`, `release=true` (`TargetBuildProfileV1.Production`), preserving backward compatibility.
+   - `phase4` with explicit `--profile=dev` (without `--release`) resolves to `profile="dev"`, `release=false` (`TargetBuildProfileV1.Development`), while `automatic_development_debug = (phase == "phase3")` stays `false` on `phase4` so `trace_resolution` resolves `Disabled` unless explicitly requested.
+   - Contradictory flags (`--profile=dev --release`, or `--profile=prod` with `release=false`) still fail closed with `TARGET-PROFILE-E-CONFLICT`.
+2. **Profile-isolated cache, index, and receipt namespaces (`bootstrap_focused_native_build.spl`, `native_full_index_variant_v1.spl`, Phase-4 scripts):**
+   - `focused_native_build_profile_cache_dir_v1` and `focused_native_build_profile_receipt_namespace_v1` segregate `phase4` `dev` and `prod` cache directories and receipt paths so unstripped Diagnosis artifacts and stripped Release artifacts never overwrite or reuse each other's state.
+   - `native_full_index_variant_v1.spl` admits `(phase="phase4", build_mode="debug")` alongside `(phase="phase4", build_mode="release")` (keeping `phase3` `"debug"`-only) and binds `build_mode` into `ConfigVariantKeyV1`.
+   - `scripts/bootstrap/build-phase4-direct-product.shs` and `scripts/bootstrap/bootstrap-phase4-grouped.shs` honor `PHASE4_PROFILE=${PHASE4_PROFILE:-prod}` (`prod` passes `--release --strip`; `dev` passes `--profile dev` unstripped with `-dev` cache/receipt directory suffixes).
+
+Verification status (2026-11-18): `C7` unit specs (`test/01_unit/app/cli/bootstrap_focused_native_build_spec.spl`, `test/01_unit/compiler/driver/target_profile_native.spl`, `test/01_unit/compiler/driver/target_profile_spec.spl`, `test/01_unit/app/bootstrap_builder/native_group_index_variant_spec.spl`) are `in-progress / unit-verified`; full native `G-P4-DEBUG` and `G-P4-RELEASE` bootstrap gates remain UNRUN.

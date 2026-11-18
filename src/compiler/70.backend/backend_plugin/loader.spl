@@ -5,10 +5,13 @@
 use compiler.common.backend_plugin.model.{
     BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
     BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_capability_attestation_bridge_projected_v2,
+    backend_plugin_is_bridge_projected_v2,
     backend_plugin_vtable_v1_all_operations
 }
 use compiler.common.backend_plugin.receipt.{
-    BackendPluginError, backend_plugin_receipt, validate_backend_plugin_request
+    BackendPluginError, admit_backend_plugin_descriptor,
+    backend_plugin_receipt, validate_backend_plugin_request
 }
 use compiler.backend.backend_plugin.admission.{admit_backend_plugin}
 use compiler.backend.backend_plugin.registry.{
@@ -16,12 +19,16 @@ use compiler.backend.backend_plugin.registry.{
     resolve_builtin_backend
 }
 use compiler.backend.backend_plugin.session.{BackendSession}
+use compiler.backend.backend_plugin.target_context_v2.{
+    backend_plugin_attested_target_context_v2,
+    upgrade_builtin_target_context_with_attestation_v2
+}
 use compiler.backend.backend_plugin.dynamic_loader.{
     DynamicBackendPluginLoadError, load_dynamic_backend_plugin_lease
 }
 use compiler.backend.backend_plugin.dynamic_adapter.{DynamicBackendAdapter}
 use compiler.backend.backend_plugin.builtin_adapter.{
-    create_builtin_backend_compile_adapter
+    BuiltinBackendCompileAdapter, create_builtin_backend_compile_adapter
 }
 
 val BACKEND_PLUGIN_ENTRY_SYMBOL_V1 = "simple_backend_plugin_v1"
@@ -37,20 +44,24 @@ fn dynamic_backend_plugin_error_v1(
         case DynamicBackendPluginLoadError.Unsupported(detail):
             BackendPluginError.ProviderRejected(detail)
 
-fn load_dynamic_backend_v1(
+pub fn load_dynamic_backend_v1(
     request: BackendPluginRequestV1
 ) -> Result<BackendSession, BackendPluginError>:
     val validated = validate_backend_plugin_request(request)
-    if validated.is_err():
-        return Err(validated.err().unwrap())
+    match validated:
+        case Err(error): return Err(error)
+        case Ok(_): pass
+    if request.features.len() > 0:
+        return Err(BackendPluginError.ProviderRejected(
+            "dynamic V1 backend provider has no capability attestation for requested CPU features"))
     val loaded = unsafe(capabilities: [ffi, raw_ptr]):
         load_dynamic_backend_plugin_lease(request.plugin_path)
     val lease = match loaded:
         case Ok(value): value
         case Err(error): return Err(dynamic_backend_plugin_error_v1(error))
     # The runtime bridge validates the actual foreign descriptor before any
-    # provider operation. This local projection binds session/cache provenance
-    # to the selected path until descriptor metadata is returned in v2.
+    # provider operation. Mark this local projection explicitly as Unknown /
+    # bridge-projected rather than provider-attested.
     val descriptor = BackendPluginDescriptorV1(
         BACKEND_PLUGIN_ABI_VERSION_V1,
         BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
@@ -59,7 +70,8 @@ fn load_dynamic_backend_v1(
         lease.build_id,
         request.mir_abi_digest,
         [request.role], [request.target], request.required_capabilities,
-        backend_plugin_vtable_v1_all_operations())
+        backend_plugin_vtable_v1_all_operations(),
+        backend_capability_attestation_bridge_projected_v2())
     val receipt = backend_plugin_receipt(descriptor, request)
     val adapter = DynamicBackendAdapter(
         provider_path: lease.provider_path, request: request,
@@ -67,7 +79,65 @@ fn load_dynamic_backend_v1(
     Ok(BackendSession.dynamic_admitted(
         descriptor, request, receipt, adapter, 1))
 
-fn load_backend(
+pub fn load_backend_with_descriptor_v2(
+    request: BackendPluginRequestV1,
+    descriptor: BackendPluginDescriptorV1
+) -> Result<BackendSession, BackendPluginError>:
+    val effective_request = backend_request_with_default_name(request)
+    if backend_plugin_is_bridge_projected_v2(descriptor):
+        return Err(BackendPluginError.ProviderRejected(
+            "synthetic bridge descriptor cannot be admitted as a provider descriptor"))
+    val attested_ctx = match backend_plugin_attested_target_context_v2(
+        effective_request, descriptor):
+        case Err(error): return Err(error)
+        case Ok(value): value
+    val receipt = match admit_backend_plugin_descriptor(effective_request, descriptor):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    if effective_request.has_plugin_path:
+        val loaded = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease(effective_request.plugin_path)
+        var lease = match loaded:
+            case Ok(value): value
+            case Err(error): return Err(dynamic_backend_plugin_error_v1(error))
+        if lease.build_id != descriptor.build_id:
+            _ = lease.close()
+            return Err(BackendPluginError.ProviderRejected(
+                "admitted descriptor build_id does not match staged dynamic provider digest"))
+        val adapter = DynamicBackendAdapter(
+            provider_path: lease.provider_path, request: effective_request,
+            lease: lease, closed: false)
+        return Ok(BackendSession.dynamic_admitted(
+            descriptor, effective_request, receipt, adapter, 1))
+    val base_request = BackendPluginRequestV1(
+        effective_request.role,
+        effective_request.backend_name,
+        effective_request.target,
+        effective_request.cpu,
+        [],
+        effective_request.optimization,
+        effective_request.mir_abi_digest,
+        effective_request.required_capabilities,
+        effective_request.plugin_path,
+        effective_request.has_plugin_path)
+    val base_adapter = match create_builtin_backend_compile_adapter(base_request):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val upgraded_context = match upgrade_builtin_target_context_with_attestation_v2(
+        base_adapter.target_context, base_adapter.kind, attested_ctx):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val adapter = BuiltinBackendCompileAdapter(
+        kind: base_adapter.kind, target_context: upgraded_context)
+    Ok(BackendSession.admitted(
+        descriptor,
+        effective_request,
+        receipt,
+        adapter,
+        BUILTIN_SESSION_HANDLE
+    ))
+
+pub fn load_backend(
     request: BackendPluginRequestV1
 ) -> Result<BackendSession, BackendPluginError>:
     val effective_request = backend_request_with_default_name(request)
@@ -89,3 +159,6 @@ fn load_backend(
         adapter,
         BUILTIN_SESSION_HANDLE
     ))
+
+export BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+export load_dynamic_backend_v1, load_backend, load_backend_with_descriptor_v2

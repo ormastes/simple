@@ -1,7 +1,19 @@
 use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
 use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
-use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_equals}
-use compiler.hir.target_hir.hir_freeze.{HirSnapshot, hir_snapshot_freeze, hir_snapshot_verify, hir_snapshot_read}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new, hir_snapshot_id_equals}
+use compiler.hir.target_hir.hir_freeze.{
+    HirSnapshot,
+    HirSnapshotSessionCacheV1,
+    hir_snapshot_freeze,
+    hir_snapshot_verify,
+    hir_snapshot_read,
+    hir_snapshot_read_in_session,
+    hir_snapshot_session_epoch_v1,
+    hir_snapshot_session_invalidate_v1,
+    hir_snapshot_verify_count_v1,
+    hir_snapshot_session_cache_hits_v1
+}
 
 fn fixture(name: text, path: text) -> HirModule:
     HirModule(name: name, path: path, imports: [], exports: [],
@@ -44,3 +56,67 @@ describe "HirSnapshot deep freeze (TargetHIR PR-B)":
         val tampered = HirSnapshot(id: snap.id, frozen_bytes: snap.frozen_bytes + " ", codec: snap.codec)
         expect(hir_snapshot_verify(tampered)).to_be(false)
         expect(hir_snapshot_read(tampered).unwrap_err()).to_start_with("hir_snapshot_digest_mismatch:")
+
+    it "verifies SHA-256 once per (epoch, id, codec), reuses verified bytes safely, and re-verifies on epoch reset":
+        val epoch0 = hir_snapshot_session_invalidate_v1()
+        val snap_gen0 = hir_snapshot_freeze(fixture("app.session_mod", "s0.spl"), 0).unwrap()
+        val snap_gen1 = hir_snapshot_freeze(fixture("app.session_mod", "s0.spl"), 1).unwrap()
+
+        val verifies_before = hir_snapshot_verify_count_v1()
+        val hits_before = hir_snapshot_session_cache_hits_v1()
+
+        var view1 = hir_snapshot_read_in_session(snap_gen0).unwrap()
+        expect(hir_snapshot_verify_count_v1()).to_equal(verifies_before + 1)
+        expect(hir_snapshot_session_cache_hits_v1()).to_equal(hits_before)
+        view1.path = "mutated_caller_view.spl"
+        view1.exports.push("mutated_export")
+
+        val view2 = hir_snapshot_read(snap_gen0).unwrap()
+        expect(hir_snapshot_verify_count_v1()).to_equal(verifies_before + 1)
+        expect(hir_snapshot_session_cache_hits_v1()).to_equal(hits_before + 1)
+        expect(view2.path).to_equal("s0.spl")
+        expect(view2.exports.len()).to_equal(0)
+
+        # Different generation is a distinct cache key and verifies independently.
+        val view_gen1 = hir_snapshot_read(snap_gen1).unwrap()
+        expect(view_gen1.path).to_equal("s0.spl")
+        expect(hir_snapshot_verify_count_v1()).to_equal(verifies_before + 2)
+
+        # Advancing session epoch invalidates prior verified entries and forces fresh SHA-256.
+        val epoch1 = hir_snapshot_session_invalidate_v1()
+        expect(epoch1).to_equal(epoch0 + 1)
+        expect(hir_snapshot_session_epoch_v1()).to_equal(epoch1)
+        val view_after_reset = hir_snapshot_read(snap_gen0).unwrap()
+        expect(view_after_reset.path).to_equal("s0.spl")
+        expect(hir_snapshot_verify_count_v1()).to_equal(verifies_before + 3)
+
+    it "supports explicit HirSnapshotSessionCacheV1 and rejects corrupted or unknown-codec payloads":
+        var cache = HirSnapshotSessionCacheV1.new()
+        val snap = hir_snapshot_freeze(fixture("app.cache_mod", "c.spl"), 2).unwrap()
+
+        var m1 = cache.read(snap).unwrap()
+        expect(cache.sha256_verifications).to_equal(1)
+        expect(cache.cache_hits).to_equal(0)
+        m1.path = "dirty.spl"
+
+        val m2 = cache.read(snap).unwrap()
+        expect(cache.sha256_verifications).to_equal(1)
+        expect(cache.cache_hits).to_equal(1)
+        expect(m2.path).to_equal("c.spl")
+
+        # Global epoch bump invalidates explicit cache instances on next read.
+        val _bumped = hir_snapshot_session_invalidate_v1()
+        val m3 = cache.read(snap).unwrap()
+        expect(cache.sha256_verifications).to_equal(2)
+        expect(m3.path).to_equal("c.spl")
+
+        # Corrupted payload with matching SHA-256 digest is rejected and never cached.
+        val garbage = "corrupted-hir-header\nnot-a-valid-frame\n"
+        val forged_id = hir_snapshot_id_new("app.corrupt", sha256_text(garbage), 0).unwrap()
+        val corrupt_snap = HirSnapshot(id: forged_id, frozen_bytes: garbage, codec: "legacy")
+        expect(cache.read(corrupt_snap).unwrap_err()).to_equal("hir_snapshot_decode_failed: app.corrupt")
+        expect(hir_snapshot_read(corrupt_snap).unwrap_err()).to_equal("hir_snapshot_decode_failed: app.corrupt")
+
+        val bad_codec = HirSnapshot(id: snap.id, frozen_bytes: snap.frozen_bytes, codec: "bogus")
+        expect(cache.read(bad_codec).unwrap_err()).to_equal("hir_snapshot_codec_unknown: bogus")
+        expect(hir_snapshot_read(bad_codec).unwrap_err()).to_equal("hir_snapshot_codec_unknown: bogus")

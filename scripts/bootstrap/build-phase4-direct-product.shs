@@ -113,6 +113,20 @@ if [ "$authority_mode" = provisional ]; then
   regular "$original_source_snapshot" && regular "$hello_receipt" || die 'provisional source/Hello receipt unavailable'
 fi
 case "$backend" in llvm|cranelift) ;; *) die "unsupported backend: $backend" ;; esac
+phase4_profile=${PHASE4_PROFILE:-prod}
+case "$phase4_profile" in
+  prod)
+    phase4_suffix=
+    target_profile_mode=release
+    ;;
+  dev)
+    phase4_suffix=-dev
+    target_profile_mode=development
+    ;;
+  *)
+    die "unsupported PHASE4_PROFILE: $phase4_profile (expected prod or dev)"
+    ;;
+esac
 case "$cuda_source_root" in src/plugins|src/compositions/cuda_dynamic|src/compositions/cuda_disabled) ;; *) die 'unsupported selected CUDA source root' ;; esac
 case "$threads" in ''|*[!0-9]*) die 'threads must be a positive integer' ;; esac
 [ "$threads" -gt 0 ] || die 'threads must be a positive integer'
@@ -186,7 +200,8 @@ mkdir -p "$output_root/cache" "$output_root/bin" "$output_root/tmp" "$output_roo
 output_physical=$(CDPATH= cd -P -- "$output_root" && pwd -P) || die 'output root cannot be resolved physically'
 [ "$output_physical" = "$output_root" ] || die 'output root path is not canonical'
 artifact="$output_root/$output"
-cache="$output_root/cache/$product-$backend-$cuda_selection_identity"
+cache_project="phase4-direct-$product-$backend$phase4_suffix"
+cache="$output_root/cache/$product-$backend-$cuda_selection_identity$phase4_suffix"
 mkdir -p "$cache" || die 'private compiler cache creation failed'
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
@@ -247,7 +262,7 @@ verify_source_snapshot
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
     SIMPLE_RUNTIME_PATH="$runtime_authority" SIMPLE_PROJECT_ROOT="$source_root" \
     SIMPLE_USER_STORAGE_ROOT="$output_root/storage" \
-    SIMPLE_CACHE_PROJECT="phase4-direct-$product-$backend" \
+    SIMPLE_CACHE_PROJECT="$cache_project" \
     SIMPLE_BINARY="$program" SIMPLE_CACHE="$cache" \
     XDG_CACHE_HOME="$output_root/xdg-cache" \
     SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache" \
@@ -295,7 +310,7 @@ verify_source_snapshot
     "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256=$source_authority_sha" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
     "SIMPLE_RUNTIME_PATH=$runtime_authority" "SIMPLE_PROJECT_ROOT=$source_root" \
-    "SIMPLE_USER_STORAGE_ROOT=$output_root/storage" "SIMPLE_CACHE_PROJECT=phase4-direct-$product-$backend" \
+    "SIMPLE_USER_STORAGE_ROOT=$output_root/storage" "SIMPLE_CACHE_PROJECT=$cache_project" \
     "SIMPLE_BINARY=$program" "SIMPLE_CACHE=$cache" \
     "XDG_CACHE_HOME=$output_root/xdg-cache" "SIMPLE_NATIVE_BUILD_CACHE_DIR=$cache" \
     "SIMPLE_FRONTEND_CACHE_DIR=$cache/frontend" "SIMPLE_HIR_CACHE_DIR=$cache/hir" \
@@ -305,7 +320,13 @@ verify_source_snapshot
     "SIMPLE_PROCESS_TREE_RSS_RECEIPT=$output_root/process-tree-rss.env" \
     sh "$timeout_helper" "$timeout_seconds" 5 \
     sh "$build_selector" --executor=direct --program="$program" -- \
-    --target "$target" --backend "$backend" --profile=prod --managed-build-phase=phase4 --opt-level=standard --low-memory \
+    --target "$target" --backend "$backend"
+  if [ "$phase4_profile" = prod ]; then
+    set -- "$@" --profile=prod --release --strip
+  else
+    set -- "$@" --profile dev
+  fi
+  set -- "$@" --managed-build-phase=phase4 --opt-level=standard --low-memory \
     --source "$cuda_source_root" \
     --source src/compositions/kernel_llvm_cranelift \
     --source src/compiler --source src/app --source src/lib \
@@ -370,20 +391,29 @@ perl -I "$repo_root/scripts/bootstrap/lib" -MBootstrapNativeImage=verify_native_
   || die 'direct output is not a validated native executable image'
 
 artifact_sha=$(hash_file "$artifact") || die 'artifact digest unavailable'
-build_args_sha=$(printf '%s\n' 'env SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' \
-  native-build --target "$target" --backend "$backend" --profile=prod --managed-build-phase=phase4 --opt-level=standard --low-memory \
-  --source "$cuda_source_root" --source src/compositions/kernel_llvm_cranelift \
-  --source src/compiler --source src/app --source src/lib --source src/os \
-  --source src/plugins --source src/package_ownership --source src/compositions \
-  --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
-  --cache-dir "$cache" --output "$artifact" | sha256sum | awk '{print $1}') \
-  || die 'direct build argument digest unavailable'
-receipt="$output_root/direct-build.env"
+build_args_sha=$(
+  {
+    printf '%s\n' 'env SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' \
+      native-build --target "$target" --backend "$backend"
+    if [ "$phase4_profile" = prod ]; then
+      printf '%s\n' --profile=prod --release --strip
+    else
+      printf '%s\n' --profile dev
+    fi
+    printf '%s\n' --managed-build-phase=phase4 --opt-level=standard --low-memory \
+      --source "$cuda_source_root" --source src/compositions/kernel_llvm_cranelift \
+      --source src/compiler --source src/app --source src/lib --source src/os \
+      --source src/plugins --source src/package_ownership --source src/compositions \
+      --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
+      --cache-dir "$cache" --output "$artifact"
+  } | sha256sum | awk '{print $1}'
+) || die 'direct build argument digest unavailable'
+receipt="$output_root/direct-build$phase4_suffix.env"
 umask 077
 {
   printf '%s\n' 'format=SIMPLE-PHASE4-DIRECT-BUILD-2' 'evidence_state=BUILD_ONLY'
   printf '%s\n' 'target_profile_schema=1' 'managed_build_phase=phase4' \
-    'target_profile=release' 'target_debug_request=default' \
+    "target_profile=$target_profile_mode" 'target_debug_request=default' \
     'target_trace_resolution=disabled' 'target_trace_reason=' \
     'target_trace_admission_identity=absent' 'opt_level=2' 'debug_info=1' 'low_memory=1' 'output_format=both'
   printf '%s\n' "authority_mode=$authority_mode"

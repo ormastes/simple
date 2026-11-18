@@ -15,7 +15,13 @@
 use common.plugin.iface_id.{IfaceId, ParamHeader, ParamExt}
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.backend.codegen_types.{CodegenOutput}
-use compiler.backend.backend.backend_types.{CompileError, BackendCompileOptions}
+use compiler.backend.backend.backend_types.{
+    CompileError, BackendCompileOptions, OptimizationLevel}
+use compiler.common.driver_compile_options.{
+    CompileOptions, compileoptions_effective_mir_opt_level}
+use compiler.backend.feature_caps.{
+    TargetCapsKind, X86Caps, Aarch64Caps, Rv64Caps, Rv32Caps}
+use std.io_runtime.{env_get_opt}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.hir.hir_types.{HirModule}
 use compiler.backend.backend_types.{BackendResult, BackendError}
@@ -95,6 +101,177 @@ pub fn codegen_params_v1(target: text, optimization: text, target_cpu: text,
     CodegenParamsV1(
         ParamHeader("simple.codegen.CodegenParamsV1", 1, 0, 0),
         target, optimization, target_cpu, options, [])
+
+pub fn codegen_optimization_from_level_v1(opt_level: OptimizationLevel) -> text:
+    match opt_level:
+        case OptimizationLevel.None_ | OptimizationLevel.Debug: "o0"
+        case OptimizationLevel.Basic | OptimizationLevel.Size: "o1"
+        case OptimizationLevel.Standard | OptimizationLevel.Speed: "o2"
+        case OptimizationLevel.Aggressive: "o3"
+
+# reason: scalar CLI/driver optimization levels 0..3 cross CompileOptions and AOT boundaries as i64
+@allow(primitive_api)
+pub fn codegen_optimization_from_scalar_v1(opt_level: i64) -> text:
+    if opt_level <= 0:
+        "o0"
+    elif opt_level == 1:
+        "o1"
+    elif opt_level == 2:
+        "o2"
+    else:
+        "o3"
+
+pub fn codegen_optimization_from_compile_options_v1(options: CompileOptions) -> text:
+    codegen_optimization_from_scalar_v1(compileoptions_effective_mir_opt_level(options))
+
+fn _x86_caps_cpu_v1(caps: X86Caps) -> text:
+    if caps.has_avx512:
+        return "x86_64-v4"
+    if caps.has_avx2:
+        return "x86_64-v3"
+    if caps.has_sse42:
+        return "x86_64-v2"
+    ""
+
+fn _aarch64_caps_cpu_v1(caps: Aarch64Caps) -> text:
+    if caps.has_sha3:
+        return "armv8.4-A+crypto+sha3"
+    if caps.has_crc32:
+        return "armv8.2-A+crypto"
+    if caps.has_aes:
+        return "aarch64+crypto"
+    ""
+
+fn _rv64_caps_cpu_v1(caps: Rv64Caps) -> text:
+    if caps.has_zvknh and caps.has_zvkg:
+        return "rv64gcv_zvkn_zvknh_zvkg"
+    if caps.has_zvkned:
+        return "rv64gcv_zvkn"
+    if caps.has_v:
+        return "rv64gcv"
+    ""
+
+fn _rv32_caps_cpu_v1(caps: Rv32Caps) -> text:
+    if caps.has_zknd and caps.has_zkne and caps.has_zknh:
+        return "riscv32imac_zknd_zkne_zknh"
+    if caps.has_zbb and caps.has_zbkb:
+        return "riscv32imac_zbb_zbkb"
+    ""
+
+fn _target_cpu_from_caps_v1(caps_kind: TargetCapsKind) -> text:
+    match caps_kind:
+        case TargetCapsKind.X86(caps): _x86_caps_cpu_v1(caps)
+        case TargetCapsKind.Aarch64(caps): _aarch64_caps_cpu_v1(caps)
+        case TargetCapsKind.Rv64(caps): _rv64_caps_cpu_v1(caps)
+        case TargetCapsKind.Rv32(caps): _rv32_caps_cpu_v1(caps)
+        case _: ""
+
+pub fn codegen_target_cpu_from_backend_options_v1(
+    options: BackendCompileOptions, explicit_cpu: text = ""
+) -> text:
+    val trimmed_explicit = explicit_cpu.trim()
+    if trimmed_explicit != "":
+        return trimmed_explicit
+    val from_caps = _target_cpu_from_caps_v1(options.target_opt_ctx.caps_kind)
+    if from_caps != "":
+        return from_caps
+    val env_cpu = (env_get_opt("SIMPLE_NATIVE_CPU") ?? "").trim()
+    if env_cpu != "":
+        return env_cpu
+    "generic"
+
+pub fn codegen_params_from_backend_options_v1(
+    options: BackendCompileOptions, explicit_cpu: text = ""
+) -> CodegenParamsV1:
+    codegen_params_v1(
+        options.target.to_text(),
+        codegen_optimization_from_level_v1(options.opt_level),
+        codegen_target_cpu_from_backend_options_v1(options, explicit_cpu),
+        options)
+
+pub fn codegen_params_from_compile_options_v1(
+    driver_options: CompileOptions,
+    backend_options: BackendCompileOptions,
+    explicit_cpu: text = ""
+) -> CodegenParamsV1:
+    val target_name = if driver_options.native_target.trim() != "":
+        driver_options.native_target.trim()
+    else:
+        backend_options.target.to_text()
+    codegen_params_v1(
+        target_name,
+        codegen_optimization_from_compile_options_v1(driver_options),
+        codegen_target_cpu_from_backend_options_v1(backend_options, explicit_cpu),
+        backend_options)
+
+fn _canonicalize_triple_arch_v1(triple: text) -> text:
+    if triple.starts_with("amd64-"):
+        return "x86_64-" + triple.substring(6, triple.byte_len())
+    if triple.starts_with("x64-"):
+        return "x86_64-" + triple.substring(4, triple.byte_len())
+    if triple.starts_with("arm64-"):
+        return "aarch64-" + triple.substring(6, triple.byte_len())
+    triple
+
+fn _macos_short_alias_v1(canonical: text) -> text:
+    if canonical == "aarch64-apple-darwin" or canonical == "aarch64-apple-macos":
+        return "aarch64-macos"
+    if canonical == "x86_64-apple-darwin" or canonical == "x86_64-apple-macos":
+        return "x86_64-macos"
+    canonical
+
+pub fn backend_normalize_target_selector_v1(target: text) -> text:
+    val trimmed = target.trim().lower()
+    if trimmed == "" or trimmed == "host":
+        return "host"
+    if trimmed == "native":
+        return "native"
+    if trimmed == "simpleos" or trimmed == "simpleos-x86_64":
+        return "x86_64"
+    if (trimmed == "cuda-ptx" or trimmed == "hip-hsaco" or
+            trimmed == "opencl-c" or trimmed == "opencl-spirv" or
+            trimmed == "vulkan-spirv" or trimmed == "wasm32" or
+            trimmed == "wasm64" or trimmed == "avr" or trimmed == "i8086"):
+        return trimmed
+    val parts = trimmed.split("-")
+    val arch = parts[0]
+    if arch.starts_with("riscv64") or arch.starts_with("rv64"):
+        return "riscv64"
+    if arch.starts_with("riscv32") or arch.starts_with("rv32"):
+        return "riscv32"
+    if arch.starts_with("armv") or arch.starts_with("thumbv"):
+        return "arm"
+    match arch:
+        case "amd64" | "x64" | "x86_64": "x86_64"
+        case "arm64" | "aarch64": "aarch64"
+        case "i386" | "i486" | "i586" | "i686" | "x86": "x86"
+        case "arm": "arm"
+        case "wasm32": "wasm32"
+        case "wasm64": "wasm64"
+        case _: trimmed
+
+# reason: boolean target-admission predicate aligns Codegen.supports_target and BackendSession.supports_target contracts
+@allow(primitive_api)
+pub fn backend_target_list_supports_v1(
+    supported_targets: [text], requested_target: text
+) -> bool:
+    val raw = requested_target.trim().lower()
+    val effective = if raw == "": "host" else: raw
+    val canonical_requested = _canonicalize_triple_arch_v1(effective)
+    val macos_requested = _macos_short_alias_v1(canonical_requested)
+    val normalized_requested = backend_normalize_target_selector_v1(effective)
+    for candidate in supported_targets:
+        val entry = candidate.trim().lower()
+        if entry == "*":
+            return true
+        val canonical_entry = _canonicalize_triple_arch_v1(entry)
+        val macos_entry = _macos_short_alias_v1(canonical_entry)
+        if canonical_entry == canonical_requested or macos_entry == macos_requested:
+            return true
+        if not entry.contains("-"):
+            if backend_normalize_target_selector_v1(entry) == normalized_requested:
+                return true
+    false
 
 # ============================================================================
 # Legacy HIR composition port

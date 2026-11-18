@@ -131,7 +131,7 @@ use compiler.driver.driver_source_receipt_index_v1.{
     driver_source_receipt_pair_key_v1, driver_source_receipt_index_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_unit_active_v1}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory, hir_shard_claim_failure_reason_v1,
-    hir_shard_row_terminal_due_v1}
+    hir_shard_row_terminal_due_v1, hir_shard_current_owner_claimed_v1, hir_shard_owner_terminal_due_v1}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_register_source_alias_v1, reverse_reference_module_begin_v1
@@ -1349,6 +1349,7 @@ impl CompilerDriver:
                 hir_cache_key(source.path, hir_closure_digest, is_requested_bootstrap_entry, self.ctx.options.library_mode, self.ctx.native_target, None)
             else:
                 ""
+            var hir_stream_row_claimed: bool = false
             if hir_shard_mode:
                 val claim = hir_shard_begin(source.path, hir_stream_key)
                 if claim < 0 or hir_stream_key == "":
@@ -1357,6 +1358,7 @@ impl CompilerDriver:
                     self.ctx.add_error("HIR shard ledger claim failed: {claim_reason}")
                     return false
                 if claim == 1:
+                    hir_stream_row_claimed = true
                     # File-worker P4: record F's direct import source paths (frozen
                     # surface import targets) before F's terminal; the coordinator's
                     # generic-instance step reads them.
@@ -1428,6 +1430,12 @@ impl CompilerDriver:
             if not hir_unit_mode and not worker_hir_load_allowed_v1(source.path):
                 hir_loop_pos = hir_loop_pos + 1
                 continue
+            val hir_stream_terminal_due: bool = if hir_shard_mode:
+                hir_row_terminal_due and hir_shard_owner_terminal_due_v1(
+                    hir_shard_mode, hir_unit_mode, hir_stream_row_claimed,
+                    hir_shard_current_owner_claimed_v1(source.path))
+            else:
+                hir_row_terminal_due
             val hir_stream_binding: text = if hir_stream_key != "":
                 hir_cache_parser_binding_v1(hir_stream_key, source.module_name, source.path, self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode)
             else:
@@ -1529,10 +1537,10 @@ impl CompilerDriver:
                         streaming_error.ends_with("; transient parser scope end failed") or
                         streaming_error.ends_with("; frontend registry promotion failed")):
                         hir_shard_guard_block(streaming_error)
-                        val _terminal = if hir_row_terminal_due: hir_shard_finish(source.path, "BLOCKED", false) else: true
+                        val _terminal = if hir_stream_terminal_due: hir_shard_finish(source.path, "BLOCKED", false) else: true
                         self.ctx.add_error(streaming_error)
                         return false
-                    if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
+                    if hir_stream_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                         hir_shard_guard_block("HIR failure receipt publication failed")
                         self.ctx.add_error("HIR failure receipt publication failed")
                         return false
@@ -1589,7 +1597,7 @@ impl CompilerDriver:
                         self.ctx.add_error(module_error_message)
                     module_error_index = module_error_index + 1
                 if module_fatal_error_count > 0:
-                    if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
+                    if hir_stream_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                         hir_shard_guard_block("HIR diagnostic receipt publication failed")
                         self.ctx.add_error("HIR diagnostic receipt publication failed")
                         return false
@@ -1625,7 +1633,7 @@ impl CompilerDriver:
                 source.module_name, hir_module, self.ctx.assurance_policy.strictness)
             publish_module_typecheck_receipt_v1(self.ctx, representation_receipt)
             if representation_receipt.errors.len() > 0:
-                if hir_row_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
+                if hir_stream_terminal_due and not hir_shard_finish(source.path, "FAILED", false):
                     hir_shard_guard_block("representation diagnostic receipt publication failed")
                     self.ctx.add_error("representation diagnostic receipt publication failed")
                 return false
@@ -1638,7 +1646,7 @@ impl CompilerDriver:
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
-            if hir_row_terminal_due and not hir_shard_finish(source.path, "PASS", hir_cache_stored):
+            if hir_stream_terminal_due and not hir_shard_finish(source.path, "PASS", hir_cache_stored):
                 hir_shard_guard_block("HIR completion receipt publication failed")
                 self.ctx.add_error("HIR completion receipt publication failed")
                 return false
@@ -2014,7 +2022,9 @@ impl CompilerDriver:
             hir_shard_guard_block("HIR cache identity unavailable for shard")
             self.ctx.add_error("HIR cache identity unavailable for shard")
             return false
-        if hir_shard_mode and native_file_worker_unit_active_v1():
+        val hir_unit_mode: bool = hir_shard_mode and native_file_worker_unit_active_v1()
+        val hir_row_terminal_due: bool = hir_shard_row_terminal_due_v1(hir_shard_mode, hir_unit_mode)
+        if hir_unit_mode:
             hir_shard_guard_block("file-worker unit requires streaming surfaces")
             self.ctx.add_error("file-worker unit requires the streaming surface HIR path")
             return false
@@ -2064,6 +2074,7 @@ impl CompilerDriver:
             source_idx = hir_visit_order[hir_loop_pos]
             val src = self.ctx.sources[source_idx]
             val name = src.module_name
+            var hir_row_claimed: bool = false
             if hir_shard_mode:
                 val hir_shard_key = hir_cache_key(src.path, hir_closure_digest, source_idx == entry_source_index, self.ctx.options.library_mode, self.ctx.native_target, None)
                 val claim = hir_shard_begin(src.path, hir_shard_key)
@@ -2075,6 +2086,7 @@ impl CompilerDriver:
                 if claim == 0:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
+                hir_row_claimed = true
                 # Same deps/hirkey records as the streaming path (shared helper):
                 # the file-worker pool admits MIR(F) only from them. Edges are the
                 # frozen surface's import_target_indices, as in streaming.
@@ -2350,8 +2362,11 @@ impl CompilerDriver:
 
             # Drop a fatally poisoned partial aggregate but keep checking later
             # modules. The count delta prevents poisoning them transitively.
+            val hir_nonstream_terminal_due: bool = hir_row_terminal_due and hir_shard_owner_terminal_due_v1(
+                hir_shard_mode, hir_unit_mode, hir_row_claimed,
+                hir_shard_current_owner_claimed_v1(src.path))
             if self.ctx.error_count_value > module_errors_before:
-                if not hir_shard_finish(src.path, "FAILED", false):
+                if hir_nonstream_terminal_due and not hir_shard_finish(src.path, "FAILED", false):
                     hir_shard_guard_block("HIR diagnostic receipt publication failed")
                     self.ctx.add_error("HIR diagnostic receipt publication failed")
                     return false
@@ -2392,7 +2407,7 @@ impl CompilerDriver:
                 if parser_record != "" and hir_cache_store(hir_cache_key_value, hir_module, hir_module_warnings, parser_record, self.ctx.options.library_mode):
                     hir_shard_lowered = hir_shard_lowered + 1
                     hir_cache_stored = true
-            if not hir_shard_finish(src.path, "PASS", hir_cache_stored):
+            if hir_nonstream_terminal_due and not hir_shard_finish(src.path, "PASS", hir_cache_stored):
                 hir_shard_guard_block("HIR completion receipt publication failed")
                 self.ctx.add_error("HIR completion receipt publication failed")
                 return false

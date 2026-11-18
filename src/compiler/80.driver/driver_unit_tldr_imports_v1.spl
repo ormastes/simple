@@ -23,9 +23,13 @@ use compiler.driver.driver_stage_hir_v1.*
 use compiler.common.driver_compile_result.{CompileResult}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1, unit_tldr_imports_enabled_v1}
 use compiler.driver.driver_tldr_surface_register_v1.{driver_register_tldr_surfaces_v1}
+use compiler.common.module_path_naming.{module_logical_name_from_path, module_canonical_fold_name}
 use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_content_hash}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path,
+    module_surface_content_hash, module_surface_admitted_roots_v1,
+    module_surface_admitted_logical_id_v1, module_surface_logical_alias_candidates_v1,
+    module_surface_same_admitted_logical_module_v1}
 
 struct UnitTldrPlanV1:
     unit_id: text
@@ -57,6 +61,7 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
     var surfaces: [ModuleSurface] = []
     var fallback_modules: [text] = []
     var seen: [text] = []
+    var seen_paths: [text] = []
     var frontier: [text] = []
     for p in picked:
         for spec in tldr_route_import_specs_v1(file_read(p)):
@@ -76,8 +81,13 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
         if not file_exists(src_path):
             continue
         seen.push(module_id)
+        val src_canonical = module_surface_canonical_path(src_path)
+        val path_key = if src_canonical != "": src_canonical else: src_path
+        if seen_paths.contains(path_key):
+            continue
+        seen_paths.push(path_key)
         val source = file_read(src_path)
-        var built: ModuleSurface? = nil
+        var built: ModuleSurface? = None
         match tldr_summary_ensure_v1(root, module_id, source):
             case Some(rows):
                 summaries = summaries + 1
@@ -91,7 +101,11 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
                 # on surface.canonical_path (bug per_file_lane_unit_mir_physical_
                 # ownership_missing_hir_2026-11-12, layer 2).
                 var bound: ModuleSurface = surface
-                bound.canonical_path = module_surface_canonical_path(src_path)
+                bound.canonical_path = path_key
+                val derived_logical = module_logical_name_from_path(src_path)
+                if derived_logical != "" and not derived_logical.contains("/"):
+                    bound.logical_name = derived_logical
+                    bound.canonical_name = module_canonical_fold_name(derived_logical)
                 # Bind the physical content identity too: a second admitted row
                 # for the same file (lib.X / std.X twin) takes the registry's
                 # alias lane, which rejects a surface whose length/hash differ
@@ -164,12 +178,39 @@ pub fn unit_tldr_empty_plan_v1() -> UnitTldrPlanV1:
     UnitTldrPlanV1(unit_id: "", picked: [], parse_paths: [], parsed: 0, summaries: 0, fallbacks: 0,
         fallback_modules: [], surfaces: [], import_hir_lowered: 0)
 
+fn _unit_tldr_inventory_logical_from_path_v1(path: text, admitted_roots: [text]) -> text:
+    val admitted_id = module_surface_admitted_logical_id_v1(path, admitted_roots)
+    if admitted_id != "":
+        return admitted_id
+    val norm = path.replace("\\", "/")
+    if norm.starts_with("src/") or norm.starts_with("examples/") or norm.starts_with("test/") or
+            norm.contains("/src/") or norm.contains("/examples/") or norm.contains("/test/"):
+        return module_canonical_fold_name(module_logical_name_from_path(norm))
+    for anchor in ["/app/", "/lib/", "/std/", "/compiler/"]:
+        val rel_anchor = anchor.substring(1)
+        if norm.starts_with(rel_anchor):
+            return module_canonical_fold_name(module_logical_name_from_path(norm))
+        val at = norm.index_of(anchor)
+        if at >= 0:
+            return module_canonical_fold_name(module_logical_name_from_path(norm.substring(at + 1)))
+    ""
+
 pub fn unit_tldr_module_paths_v1(module_names: [text], paths: [text]) -> Dict<text, text>:
     var out: Dict<text, text> = {}
+    val admitted_roots = module_surface_admitted_roots_v1(paths, [], module_surface_canonical_path("."))
     var i = 0
     while i < module_names.len() and i < paths.len():
-        if not out.contains_key(module_names[i]):
-            out[module_names[i]] = paths[i]
+        val raw_name = module_names[i]
+        val src_path = paths[i]
+        if raw_name != "" and not out.contains_key(raw_name):
+            out[raw_name] = src_path
+        for alias in module_surface_logical_alias_candidates_v1(raw_name):
+            if not out.contains_key(alias):
+                out[alias] = src_path
+        val path_logical = _unit_tldr_inventory_logical_from_path_v1(src_path, admitted_roots)
+        for alias in module_surface_logical_alias_candidates_v1(path_logical):
+            if not out.contains_key(alias):
+                out[alias] = src_path
         i = i + 1
     out
 
@@ -184,29 +225,35 @@ pub fn unit_tldr_surface_for_v1(plan: UnitTldrPlanV1, module_name: text) -> Modu
     for s in plan.surfaces:
         if s.module_name == module_name:
             return Some(s)
-    nil
+    None
 
 # Inventory path of an import spelling. The closure loader admits a src/lib
 # file under its canonical `lib.*` name and adds the `std.*` twin only on
-# demand, so a `use std.X` import must also find the `lib.X` row.
+# demand, so a `use std.X` import must also find the `lib.X` row. SCV snapshot
+# paths and checkout paths share the same path-derived canonical logical keys.
 pub fn unit_tldr_module_path_for_v1(module_paths: Dict<text, text>, module_id: text) -> text:
+    if module_id == "":
+        return ""
     if module_paths.contains_key(module_id):
         return module_paths[module_id]
-    if module_id.starts_with("std."):
-        val lib_id = "lib." + module_id.substring(4)
-        if module_paths.contains_key(lib_id):
-            return module_paths[lib_id]
-    if module_id.starts_with("common."):
-        val lib_common_id = "lib." + module_id
-        if module_paths.contains_key(lib_common_id):
-            return module_paths[lib_common_id]
+    val lookup_id = if module_id.contains("/") or module_id.contains("\\") or module_id.ends_with(".spl"):
+        module_logical_name_from_path(module_id)
+    else:
+        module_id
+    for cand in module_surface_logical_alias_candidates_v1(lookup_id):
+        if module_paths.contains_key(cand):
+            return module_paths[cand]
+        val init_cand = cand + ".__init__"
+        if module_paths.contains_key(init_cand):
+            return module_paths[init_cand]
     ""
 
 # Summary surface for an inventory row. The plan names a surface by the import
 # spelling (e.g. `std.common.string_core`) while the row the streaming loop
 # meets first may carry another alias (`lib.common.string_core`); the plan
 # binds every surface's canonical_path to its admitted source, so fall back to
-# that key. Missing this left the row a placeholder -> CLOSURE-INCOMPLETE.
+# that key and to admitted SCV/checkout logical identity. Missing this left the
+# row a placeholder -> CLOSURE-INCOMPLETE.
 pub fn unit_tldr_surface_for_row_v1(plan: UnitTldrPlanV1, module_name: text, canonical_path: text) -> ModuleSurface?:
     for s in plan.surfaces:
         if s.module_name == module_name:
@@ -214,7 +261,15 @@ pub fn unit_tldr_surface_for_row_v1(plan: UnitTldrPlanV1, module_name: text, can
     for s in plan.surfaces:
         if s.canonical_path == canonical_path:
             return Some(s)
-    nil
+    for s in plan.surfaces:
+        if module_surface_same_admitted_logical_module_v1(s.canonical_path, canonical_path, []):
+            return Some(s)
+    val row_cands = module_surface_logical_alias_candidates_v1(module_name)
+    if row_cands.len() > 0:
+        for s in plan.surfaces:
+            if (s.canonical_name != "" and row_cands.contains(s.canonical_name)) or row_cands.contains(s.module_name):
+                return Some(s)
+    None
 
 export UnitTldrPlanV1, UnitLowerResultV1
 export unit_tldr_log_line_v1, unit_tldr_plan_v1, unit_lower_v1

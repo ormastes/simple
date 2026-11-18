@@ -169,3 +169,21 @@ Review follow-ups (LAND-WITH-NITS, both fail closed today):
 - Placeholders are safe only because the only-paths skip runs, and that skip
   requires an active MIR shard queue. Tie the disposition to the queue being
   active.
+
+## 2026-11-18: Layer 2/3 logical identity, owner terminal receipt, and `worker=1` low-memory slice (`C5`)
+
+Status remains **OPEN / verification-pending** (`config/bootstrap.sdn` keeps `stage3_file_workers: 0` until native Stage-3 self-rebuild and overlap gate `G-FILE` pass; no native bootstrap PASS is claimed here).
+
+Source and unit-spec progress on `release/1.0.0` (`312a78d4d15` + Wave D4 / `C5`, tracked in `doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md` §9.2):
+
+1. **Prior landed prerequisites (`828de0817c4`, `3d784bec66f`, `d1acc111b99`, `8084b46ebdd`):** bound `unit_tldr` summary row identity in `driver_unit_tldr_imports_v1.spl`, added `hir_shard_row_terminal_due_v1` in the streaming HIR loop (`driver_hir_pipeline_lowering.spl`), and introduced `native_file_worker_serial_low_memory_admitted_v1`.
+2. **Layer 2 repair — canonical logical source identity (`module_surface_source_identity.spl`, `driver_unit_tldr_imports_v1.spl`, `driver_source_parse_streaming.spl`):**
+   - `unit_tldr_module_paths_v1` / `unit_tldr_module_path_for_v1` now index path-derived canonical logical module names (`module_logical_name_from_path`) alongside `source_module_names[i]` and `std.`/`common.` aliases so SCV snapshot paths (`<scv>/src/app/p3rp/aa.spl`), checkout paths (`<checkout>/app/p3rp/aa.spl`), and entry-closure alias spellings map to the same canonical logical module.
+   - `driver_source_parse_streaming.spl` adds logical-module surface readiness fallback alongside `ready_canonical` when SCV snapshot and checkout paths denote the same admitted logical module.
+3. **Layer 3 repair — owner-verified terminal receipt in non-streaming HIR (`driver_hir_pipeline_lowering.spl`, `driver_hir_cache.spl`):**
+   - Extended `hir_shard_row_terminal_due_v1` / claim-owner verification (`native_file_worker_owner_claims_v1`) to the non-streaming HIR loop (`driver_hir_pipeline_lowering.spl:2350-2405`) so an unclaimed imported module never publishes or collides with another worker's `hir_shard_finish` terminal receipt.
+4. **Low-memory `worker=1` per-file admission (`native_file_worker_v1.spl`):**
+   - Added `native_file_worker_single_unit_low_memory_admitted_v1` (`SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY` / explicit single-worker per-file unit mode) so memory-bounded `worker=1` builds can run per-file units without requiring `>= 2` workers or falling back to a whole-program HIR/MIR barrier.
+
+Specs: `test/01_unit/compiler/driver/mir_physical_owners_spec.spl`, `test/01_unit/compiler/driver/native_file_worker_v1_spec.spl`, `test/01_unit/compiler/80.driver/per_file_logical_identity_terminal_spec.spl` (`in-progress / unit-verified`).  
+Remaining gate to close `#8504`: rebuild Stage 2/Stage 3 natively with these fixes, pass the 3-file import repro natively under checkout + SCV snapshot (`G-FILE-SERIAL` / `G-FILE-PARALLEL`), verify `scripts/check/check-per-file-overlap-receipt.shs`, and only then remove `stage3_file_workers: 0` (`G-FILE`).

@@ -1,0 +1,238 @@
+"""Host-only Phase-3 backend composition & static BackendSession parity.
+
+Purpose: Phase 3 builds a host-only diagnostic compiler (`G-P3-HOST`) that links
+only the selected K1 host backend table and disables CUDA static placement
+without registering optional GPU, VHDL, Wasm, C, Lean, or Lua P-static ports.
+At the same time, static `StaticBackendCodegenV1` and admitted `BackendSession`
+must project identical normalized optimization (`o0..o3`), CPU (`target_cpu`),
+and normalized architecture/triple target support (`T01`, `T03`).
+
+Operator workflow: run in interpreter mode via
+`simple.exe test test/01_unit/compiler/backend/host_only_composition_static_parity_spec.spl --mode=interpreter`.
+"""
+# @manual_section: compiler/backend_composition
+# @req REQ-BACKEND-DYN-001 REQ-BACKEND-DYN-003 REQ-BACKEND-DYN-005
+use std.spec.{describe, it, expect, step}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, file_write}
+use std.nogc_sync_mut.io_runtime.{remove_file_if_exists}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_source_loading.{
+    driver_resolve_closure_import_v1, driver_closure_native_owner_v1,
+    driver_closure_import_specs_v1}
+use compiler.common.cuda_backend_policy.{installed_cuda_backend_mode_v1}
+use compiler.common.driver_compile_options.{
+    driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
+use compiler.common.backend_plugin.model.{
+    BackendRole, BackendCapability, BackendPluginRequestV1}
+use compiler.backend.backend.backend_types.{
+    BackendKind, CodegenTarget, OptimizationLevel,
+    compileoptions_default_options, compileoptions_debug_options,
+    compileoptions_with_optimization, compileoptions_with_target}
+use compiler.backend.backend_helpers.{backend_helper_target_opt_context}
+use compiler.backend.backend_port.{
+    codegen_optimization_from_level_v1, codegen_optimization_from_scalar_v1,
+    codegen_target_cpu_from_backend_options_v1,
+    backend_normalize_target_selector_v1, backend_target_list_supports_v1}
+use compiler.backend.static_backend_registry.{
+    BackendLinkClass, resolve_backend_composition_mode_v1,
+    backend_composition_receipt_v1, format_backend_composition_receipt_v1,
+    active_backend_composition_receipt_v1, active_static_backend_table_v1,
+    full_static_backend_table_installed_v1, select_static_backend_v1,
+    install_full_static_backend_table_v1, static_backend_codegen_instance_v1,
+    static_backend_codegen_for_compile_options_v1}
+use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.backend.backend_plugin.loader.{load_backend}
+use compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected.{
+    install_selected_k1_backend_table_v1, selected_k1_backend_policy_v1}
+use plugins.backend_registry.full_static_backend_registry.{
+    install_static_backends_for_composition_mode_v1,
+    plugin_static_backend_table_v1}
+use app.cli.bootstrap_essential_backend_request.{
+    bootstrap_essential_backend_request_error_v1,
+    bootstrap_essential_dynamic_backend_request_v1}
+
+fn host_only_overlay_roots() -> [text]:
+    ["src/compositions/kernel_llvm_cranelift",
+     "src/compositions/backends_host_only",
+     "src/compiler", "src/app", "src/lib", "src/plugins"]
+
+fn resolve_registry_under_host_only_overlay() -> text:
+    val spec = "plugins.backend_registry.full_static_backend_registry"
+    match driver_resolve_closure_import_v1(spec, host_only_overlay_roots(), "src/app/cli"):
+        case SourceRootResolutionV1.Found(path):
+            driver_closure_native_owner_v1(path, spec, "src/app/cli")
+        case _: ""
+
+fn plugin_edges_in_file(path: text) -> [text]:
+    var edges: [text] = []
+    for spec in driver_closure_import_specs_v1(path):
+        if spec.starts_with("plugins."):
+            edges.push(spec)
+    edges
+
+describe "Host-only Phase-3 backend composition and static BackendSession parity":
+    it "resolves SIMPLE_BACKEND_COMPOSITION policy and formats deterministic receipts":
+        # @req REQ-BACKEND-DYN-001
+        step("Default to host-only in Stage 3 and full outside Stage 3")
+        expect(resolve_backend_composition_mode_v1("", "")).to_equal("full")
+        expect(resolve_backend_composition_mode_v1("", "0")).to_equal("full")
+        expect(resolve_backend_composition_mode_v1("", "1")).to_equal("host-only")
+        step("Honor explicit host-only and full overrides and reject invalid modes")
+        expect(resolve_backend_composition_mode_v1("host-only", "0")).to_equal("host-only")
+        expect(resolve_backend_composition_mode_v1("HOST-ONLY", "")).to_equal("host-only")
+        expect(resolve_backend_composition_mode_v1("full", "1")).to_equal("full")
+        expect(resolve_backend_composition_mode_v1("bogus", "1")).to_equal("")
+        step("Format SDN receipt recording mode, K1 policy, and optional static installation")
+        val receipt = backend_composition_receipt_v1("host-only", "llvm-cranelift", false)
+        val formatted = format_backend_composition_receipt_v1(receipt)
+        expect(formatted).to_contain("composition_mode: host-only")
+        expect(formatted).to_contain("k1_policy: llvm-cranelift")
+        expect(formatted).to_contain("optional_static_backends_installed: false")
+        expect(receipt.to_sdn()).to_equal(formatted)
+
+    it "installs only K1 host ports with disabled CUDA in host-only mode":
+        # @req REQ-BACKEND-DYN-001
+        step("Install K1 table and apply host-only static backend composition")
+        val policy = selected_k1_backend_policy_v1()
+        expect(policy).to_equal("llvm-cranelift")
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        expect(install_static_backends_for_composition_mode_v1("bogus", policy)).to_equal(false)
+        expect(install_static_backends_for_composition_mode_v1("host-only", policy)).to_equal(true)
+        step("Verify active table contains only K1 entries and CUDA is disabled")
+        expect(installed_cuda_backend_mode_v1()).to_equal("disabled")
+        expect(full_static_backend_table_installed_v1()).to_equal(false)
+        val active = active_static_backend_table_v1()
+        expect(active.len()).to_equal(3)
+        for entry in active:
+            expect(entry.link_class).to_equal(BackendLinkClass.KernelLinked)
+        for missing in ["vhdl", "cuda", "wasm", "c", "vulkan", "opencl", "hip"]:
+            val lookup = select_static_backend_v1(missing, active)
+            expect(lookup.is_err()).to_equal(true)
+            expect(lookup.unwrap_err().code()).to_equal("PLUG-E-NOTFOUND")
+        step("Verify receipt and block widening a sealed host-only composition")
+        val live_receipt = active_backend_composition_receipt_v1()
+        expect(live_receipt.composition_mode).to_equal("host-only")
+        expect(live_receipt.k1_policy).to_equal("llvm-cranelift")
+        expect(live_receipt.optional_static_backends_installed).to_equal(false)
+        expect(install_full_static_backend_table_v1(
+            policy, plugin_static_backend_table_v1())).to_equal(false)
+
+    it "physically excludes plugins.backend_* imports when backends_host_only precedes src/plugins":
+        # @req REQ-BACKEND-DYN-005
+        step("Resolve full_static_backend_registry with backends_host_only ahead of src/plugins")
+        val resolved = resolve_registry_under_host_only_overlay()
+        expect(resolved).to_contain(
+            "src/compositions/backends_host_only/plugins/backend_registry/full_static_backend_registry.spl")
+        step("Confirm zero plugins.* import edges exist in the resolved overlay module")
+        expect(plugin_edges_in_file(resolved)).to_equal([])
+
+    it "admits explicit --backend-plugin requests in essential and host-only compositions":
+        # @req REQ-BACKEND-DYN-003
+        step("Keep unlinked static backends refused when no plugin_path is supplied")
+        expect(bootstrap_essential_backend_request_error_v1(
+            "llvm-cranelift", "vhdl", "")).to_contain("PLUG-E-NOTFOUND")
+        expect(bootstrap_essential_backend_request_error_v1(
+            "llvm", "cranelift", "")).to_contain("PLUG-E-NOTFOUND")
+        step("Reject whitespace-only, missing, or GPU CUDA plugin paths fail-closed")
+        expect(bootstrap_essential_backend_request_error_v1(
+            "llvm", "llvm", "   ")).to_contain("PLUG-E-UNSUPPORTED")
+        expect(bootstrap_essential_backend_request_error_v1(
+            "llvm", "llvm", "missing_nonexistent_plugin.dll")).to_contain("PLUG-E-UNSUPPORTED")
+        val fixture_dir = path_absolute(
+            "build/tests/host-only-parity-{time_now_unix_micros()}")
+        expect(dir_create_all(fixture_dir)).to_equal(true)
+        val fixture_plugin = fixture_dir + "/backend_c.dll"
+        expect(file_write(fixture_plugin, "stub-provider-bytes")).to_equal(true)
+        expect(bootstrap_essential_backend_request_error_v1(
+            "llvm-cranelift", "cuda", fixture_plugin)).to_contain("PLUG-E-UNSUPPORTED")
+        step("Allow explicit existing plugin_path and build a validated dynamic request")
+        expect(bootstrap_essential_backend_request_error_v1(
+            "llvm-cranelift", "c", fixture_plugin)).to_equal("")
+        expect(bootstrap_essential_backend_request_error_v1(
+            "llvm", "llvm", fixture_plugin)).to_equal("")
+        val built = bootstrap_essential_dynamic_backend_request_v1(
+            "llvm-cranelift", "c", fixture_plugin,
+            "x86_64", "x86_64-v3", "o2")
+        expect(remove_file_if_exists(fixture_plugin)).to_equal(true)
+        expect(built.is_ok()).to_equal(true)
+        val req = built.unwrap()
+        expect(req.has_plugin_path).to_equal(true)
+        expect(req.plugin_path).to_equal(fixture_plugin)
+        expect(req.backend_name).to_equal("c")
+        expect(req.target).to_equal("x86_64")
+        expect(req.cpu).to_equal("x86_64-v3")
+        expect(req.optimization).to_equal("o2")
+
+    it "projects normalized optimization and target_cpu into StaticBackendCodegenV1 params":
+        # @req REQ-BACKEND-DYN-003
+        step("Map every OptimizationLevel and scalar opt_level to o0..o3")
+        expect(codegen_optimization_from_level_v1(OptimizationLevel.None_)).to_equal("o0")
+        expect(codegen_optimization_from_level_v1(OptimizationLevel.Debug)).to_equal("o0")
+        expect(codegen_optimization_from_level_v1(OptimizationLevel.Basic)).to_equal("o1")
+        expect(codegen_optimization_from_level_v1(OptimizationLevel.Size)).to_equal("o1")
+        expect(codegen_optimization_from_level_v1(OptimizationLevel.Standard)).to_equal("o2")
+        expect(codegen_optimization_from_level_v1(OptimizationLevel.Speed)).to_equal("o2")
+        expect(codegen_optimization_from_level_v1(OptimizationLevel.Aggressive)).to_equal("o3")
+        expect(codegen_optimization_from_scalar_v1(0)).to_equal("o0")
+        expect(codegen_optimization_from_scalar_v1(1)).to_equal("o1")
+        expect(codegen_optimization_from_scalar_v1(2)).to_equal("o2")
+        expect(codegen_optimization_from_scalar_v1(3)).to_equal("o3")
+        step("Verify StaticBackendCodegenV1 replaces hardcoded 'configured' with real o0..o3 and CPU")
+        val llvm_entry = select_static_backend_v1("llvm").unwrap()
+        val debug_cg = static_backend_codegen_instance_v1(
+            llvm_entry, compileoptions_debug_options())
+        expect(debug_cg.params.optimization).to_equal("o0")
+        expect(debug_cg.params.target_cpu).to_equal("generic")
+        var v3_opts = compileoptions_with_optimization(
+            compileoptions_with_target(compileoptions_default_options(), CodegenTarget.X86_64),
+            OptimizationLevel.Aggressive)
+        v3_opts.target_opt_ctx = backend_helper_target_opt_context("", "x86_64-v3", true)
+        val v3_cg = static_backend_codegen_instance_v1(llvm_entry, v3_opts)
+        expect(v3_cg.params.optimization).to_equal("o3")
+        expect(v3_cg.params.target_cpu).to_equal("x86_64-v3")
+        expect(codegen_target_cpu_from_backend_options_v1(v3_opts)).to_equal("x86_64-v3")
+        step("Project normalized driver CompileOptions directly into StaticBackendCodegenV1")
+        var drv = driver_core_compile_options_default()
+        drv.release = true
+        drv.native_target = "x86_64-pc-windows-gnu"
+        drv = compileoptions_normalize_mir_optimization(drv)
+        val from_drv = static_backend_codegen_for_compile_options_v1(
+            llvm_entry, drv, compileoptions_default_options(), "x86-64-v2")
+        expect(from_drv.params.target).to_equal("x86_64-pc-windows-gnu")
+        expect(from_drv.params.optimization).to_equal("o2")
+        expect(from_drv.params.target_cpu).to_equal("x86-64-v2")
+
+    it "aligns normalized arch and triple target matching between StaticBackendCodegenV1 and BackendSession":
+        # @req REQ-BACKEND-DYN-003
+        step("Open Cranelift static codegen and admitted Cranelift BackendSession")
+        val cl_entry = select_static_backend_v1("cranelift").unwrap()
+        val cl_static = static_backend_codegen_instance_v1(
+            cl_entry, compileoptions_default_options())
+        val cl_req = BackendPluginRequestV1(
+            BackendRole.CompilerAot, "cranelift", "x86_64", "generic", [], "o2",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit], "", false)
+        var cl_session = load_backend(cl_req).ok().unwrap()
+        step("Assert identical target-support verdicts across triples, OS aliases, and unsupported arches")
+        for supported in ["host", "native", "x86_64", "x86_64-unknown-linux-gnu",
+                "amd64-pc-windows-gnu", "x86_64-macos", "simpleos-x86_64",
+                "aarch64-apple-darwin", "arm64-apple-darwin", "riscv64gc-unknown-none-elf"]:
+            expect(cl_static.supports_target_name(supported)).to_equal(true)
+            expect(cl_session.supports_target(supported)).to_equal(true)
+        for unsupported in ["x86", "i686-unknown-linux-gnu", "arm",
+                "armv7-unknown-linux-gnueabihf", "riscv32", "wasm32", "cuda-ptx"]:
+            expect(cl_static.supports_target_name(unsupported)).to_equal(false)
+            expect(cl_session.supports_target(unsupported)).to_equal(false)
+        for cg_target in [CodegenTarget.X86_64, CodegenTarget.X86_64_MacOS,
+                CodegenTarget.AArch64_MacOS, CodegenTarget.SimpleOS_X86_64,
+                CodegenTarget.X86, CodegenTarget.Arm, CodegenTarget.Wasm32]:
+            expect(cl_static.supports_target(cg_target)).to_equal(
+                cl_session.supports_codegen_target(cg_target))
+        step("Verify triple-pinned dynamic target lists do not widen across OS boundaries")
+        expect(backend_normalize_target_selector_v1("riscv64gc-unknown-none-elf")).to_equal("riscv64")
+        expect(backend_target_list_supports_v1(
+            ["x86_64-unknown-linux-gnu"], "amd64-unknown-linux-gnu")).to_equal(true)
+        expect(backend_target_list_supports_v1(
+            ["x86_64-unknown-linux-gnu"], "x86_64-pc-windows-gnu")).to_equal(false)
+        expect(cl_session.close()).to_equal(true)

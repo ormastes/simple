@@ -1,5 +1,25 @@
 use std.spec.*
-use compiler.hir.target_hir.target_hir_flags.{target_hir_mode_parse_strict, target_hir_mode_parse, target_hir_verify_parse, target_hir_storage_parse, stage3_compiler_path_parse, target_hir_mode, target_hir_storage}
+use std.io_runtime.{env_get_opt, env_set}
+use compiler.hir.target_hir.target_hir_flags.{
+    TARGET_HIR_MODE_ENV,
+    TARGET_HIR_VERIFY_ENV,
+    TARGET_HIR_STORAGE_ENV,
+    STAGE3_COMPILER_ENV,
+    TARGET_HIR_RECEIPT_FORMAT_V1,
+    target_hir_mode_parse_strict,
+    target_hir_mode_parse,
+    target_hir_verify_parse,
+    target_hir_storage_parse_strict,
+    target_hir_storage_parse,
+    stage3_compiler_path_parse,
+    target_hir_mode,
+    target_hir_mode_or_legacy,
+    target_hir_storage,
+    target_hir_storage_strict,
+    target_hir_effective_mode_receipt_from_raw_v1,
+    target_hir_effective_mode_receipt_v1,
+    target_hir_effective_mode_receipt_to_sdn_v1
+}
 
 describe "TargetHIR flags (U0)":
     it "defaults mode to legacy when unset or empty":
@@ -39,3 +59,75 @@ describe "TargetHIR flags (U0)":
         expect(m == "legacy" or m == "shadow" or m == "typed").to_be(true)
         val s = target_hir_storage()
         expect(s == "auto" or s == "dense" or s == "sparse").to_be(true)
+
+    it "strictly validates storage and rejects unknown storage values":
+        expect(target_hir_storage_parse_strict("").unwrap()).to_equal("auto")
+        expect(target_hir_storage_parse_strict(" Auto ").unwrap()).to_equal("auto")
+        expect(target_hir_storage_parse_strict("dense").unwrap()).to_equal("dense")
+        expect(target_hir_storage_parse_strict(" SPARSE ").unwrap()).to_equal("sparse")
+        val bad = target_hir_storage_parse_strict("bogus")
+        expect(bad.is_err()).to_be(true)
+        expect(bad.unwrap_err()).to_equal("target_hir_storage_unknown: bogus")
+
+    it "builds effective-mode receipt and canonical SDN, failing closed on typos":
+        val dflt = target_hir_effective_mode_receipt_from_raw_v1("", "", "", "").unwrap()
+        expect(dflt.format).to_equal(TARGET_HIR_RECEIPT_FORMAT_V1)
+        expect(dflt.mode).to_equal("legacy")
+        expect(dflt.verify).to_be(false)
+        expect(dflt.storage).to_equal("auto")
+        expect(dflt.stage3_compiler).to_equal("")
+
+        val configured = target_hir_effective_mode_receipt_from_raw_v1(" Shadow ", "yes", " DENSE ", " /opt/s3/simple ").unwrap()
+        expect(configured.mode).to_equal("shadow")
+        expect(configured.verify).to_be(true)
+        expect(configured.storage).to_equal("dense")
+        expect(configured.stage3_compiler).to_equal("/opt/s3/simple")
+        val sdn = target_hir_effective_mode_receipt_to_sdn_v1(configured)
+        expect(sdn).to_contain("format: \"simple/target-hir-effective-mode-receipt/v1\"")
+        expect(sdn).to_contain("mode: \"shadow\"")
+        expect(sdn).to_contain("verify: true")
+        expect(sdn).to_contain("storage: \"dense\"")
+        expect(sdn).to_contain("stage3_compiler: \"/opt/s3/simple\"")
+
+        val bad_mode = target_hir_effective_mode_receipt_from_raw_v1("typo", "0", "auto", "")
+        expect(bad_mode.is_err()).to_be(true)
+        expect(bad_mode.unwrap_err()).to_equal("target_hir_mode_unknown: typo")
+
+        val bad_storage = target_hir_effective_mode_receipt_from_raw_v1("typed", "1", "diagonal", "")
+        expect(bad_storage.is_err()).to_be(true)
+        expect(bad_storage.unwrap_err()).to_equal("target_hir_storage_unknown: diagonal")
+
+    it "reads effective-mode receipt and result-free mode from process environment":
+        val saved_mode = env_get_opt(TARGET_HIR_MODE_ENV) ?? ""
+        val saved_verify = env_get_opt(TARGET_HIR_VERIFY_ENV) ?? ""
+        val saved_storage = env_get_opt(TARGET_HIR_STORAGE_ENV) ?? ""
+        val saved_stage3 = env_get_opt(STAGE3_COMPILER_ENV) ?? ""
+
+        env_set(TARGET_HIR_MODE_ENV, "TYPED")
+        env_set(TARGET_HIR_VERIFY_ENV, "1")
+        env_set(TARGET_HIR_STORAGE_ENV, "sparse")
+        env_set(STAGE3_COMPILER_ENV, "/bin/stage3")
+        expect(target_hir_mode_or_legacy()).to_equal("typed")
+        expect(target_hir_storage_strict().unwrap()).to_equal("sparse")
+        val live_ok = target_hir_effective_mode_receipt_v1().unwrap()
+        expect(live_ok.mode).to_equal("typed")
+        expect(live_ok.verify).to_be(true)
+        expect(live_ok.storage).to_equal("sparse")
+        expect(live_ok.stage3_compiler).to_equal("/bin/stage3")
+
+        env_set(TARGET_HIR_MODE_ENV, "misspelled")
+        expect(target_hir_mode_or_legacy()).to_equal("legacy")
+        val live_bad_mode = target_hir_effective_mode_receipt_v1()
+        expect(live_bad_mode.is_err()).to_be(true)
+        expect(live_bad_mode.unwrap_err()).to_equal("target_hir_mode_unknown: misspelled")
+
+        env_set(TARGET_HIR_MODE_ENV, "shadow")
+        env_set(TARGET_HIR_STORAGE_ENV, "invalid_kind")
+        val live_bad_storage = target_hir_effective_mode_receipt_v1()
+        expect(live_bad_storage.is_err()).to_be(true)
+        expect(live_bad_storage.unwrap_err()).to_equal("target_hir_storage_unknown: invalid_kind")
+
+        env_set(TARGET_HIR_MODE_ENV, saved_mode)
+        env_set(TARGET_HIR_VERIFY_ENV, saved_verify)
+        env_set(TARGET_HIR_STORAGE_ENV, saved_storage)
+        env_set(STAGE3_COMPILER_ENV, saved_stage3)

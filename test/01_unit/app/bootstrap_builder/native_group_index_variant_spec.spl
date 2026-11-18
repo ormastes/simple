@@ -87,15 +87,53 @@ describe "native full-index variant to compiler options":
             Ok(_): fail("unsupported language ABI admitted")
             Err(reason): expect(reason).to_contain("language ABI")
 
-    it "rejects stale phase3 release and phase4 development profiles":
+    it "rejects stale phase3 release while admitting phase4 debug with distinct variant keys":
         match native_group_index_variant_profile_v1("phase3", "llvm",
                 "aarch64-unknown-linux-gnu", "release", "simple-v1"):
             Ok(_): fail("old both-release phase3 profile admitted")
             Err(reason): expect(reason).to_contain("phase does not match")
-        match native_group_index_variant_profile_v1("phase4", "llvm",
+        val p4_release = match native_group_index_variant_profile_v1("phase4", "llvm",
+                "aarch64-unknown-linux-gnu", "release", "simple-v1"):
+            Ok(profile): profile
+            Err(reason):
+                fail(reason)
+                return
+        val p4_debug = match native_group_index_variant_profile_v1("phase4", "llvm",
                 "aarch64-unknown-linux-gnu", "debug", "simple-v1"):
-            Ok(_): fail("development phase4 profile admitted")
-            Err(reason): expect(reason).to_contain("phase does not match")
+            Ok(profile): profile
+            Err(reason):
+                fail(reason)
+                return
+        val p3_debug = match native_group_index_variant_profile_v1("phase3", "llvm",
+                "aarch64-unknown-linux-gnu", "debug", "simple-v1"):
+            Ok(profile): profile
+            Err(reason):
+                fail(reason)
+                return
+        expect(p4_debug.options.release).to_equal(false)
+        expect(p4_debug.options.profile).to_equal("dev")
+        expect(p4_debug.options.build_mode).to_equal("debug")
+        expect(p4_debug.options.managed_build_phase).to_equal("phase4")
+        expect(p4_debug.options.opt_level ?? -1).to_equal(0)
+        expect(p4_debug.variant.build_mode).to_equal("debug")
+        expect(p4_debug.variant.normalized_options).to_equal([
+            "managed_build_phase=phase4", "target_trace_admission_identity=absent",
+            "debug_info=1", "low_memory=1", "mode=aot",
+            "opt_level=0", "output_format=native", "target_profile_schema=1",
+            "target_profile=development", "target_debug_request=default",
+            "target_trace_resolution=disabled", "target_trace_reason="])
+        expect(p4_debug.digest == p4_release.digest).to_equal(false)
+        expect(p4_debug.digest == p3_debug.digest).to_equal(false)
+        expect(p4_debug.variant.build_mode == p4_release.variant.build_mode).to_equal(false)
+        match native_group_index_variant_admit_v1(index_variant_config_v1(p4_debug.variant, "phase4")):
+            Ok(admitted): expect(admitted.digest).to_equal(p4_debug.digest)
+            Err(reason): fail(reason)
+        match native_group_index_variant_admit_v1(index_variant_config_v1(p4_debug.variant, "phase3")):
+            Ok(_): fail("phase4 debug variant admitted as phase3")
+            Err(reason): expect(reason).to_contain("does not match")
+        match native_group_index_variant_admit_v1(index_variant_config_v1(p3_debug.variant, "phase4")):
+            Ok(_): fail("phase3 debug variant admitted as phase4")
+            Err(reason): expect(reason).to_contain("does not match")
 
     it "rejects old phase4 receipts despite a valid old variant digest":
         val old = ConfigVariantKeyV1("aarch64-unknown-linux-gnu", "llvm", [],

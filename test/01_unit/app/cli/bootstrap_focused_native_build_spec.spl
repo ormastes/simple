@@ -8,6 +8,9 @@ use app.cli.bootstrap_focused_native_build.{
     focused_native_build_cache_dir,
     focused_native_build_effective_sources,
     focused_native_build_effective_cache_dir,
+    focused_native_build_profile_cache_dir_v1,
+    focused_native_build_profile_receipt_namespace_v1,
+    focused_native_build_target_profile_v1,
     focused_native_build_backend,
     focused_native_build_strip,
     focused_native_build_exact_capsule_entry_allowed,
@@ -84,3 +87,67 @@ describe "focused bootstrap native-build plan":
         expect(focused_native_build_strip([], true)).to_equal(true)
         expect(focused_native_build_strip([], false)).to_equal(false)
         expect(focused_native_build_strip(["--strip"], false)).to_equal(true)
+
+    it "decouples phase4 dev and prod profiles while keeping phase3 dev-only":
+        val p4_default = focused_native_build_target_profile_v1(["--managed-build-phase=phase4"], false).unwrap()
+        expect(p4_default.release).to_equal(true)
+        expect(p4_default.profile).to_equal("prod")
+        expect(p4_default.managed_build_phase).to_equal("phase4")
+
+        val p4_prod = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=prod", "--release"]).unwrap()
+        expect(p4_prod.release).to_equal(true)
+        expect(p4_prod.profile).to_equal("prod")
+        expect(p4_prod.managed_build_phase).to_equal("phase4")
+
+        val p4_dev = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=dev"]).unwrap()
+        expect(p4_dev.release).to_equal(false)
+        expect(p4_dev.profile).to_equal("dev")
+        expect(p4_dev.managed_build_phase).to_equal("phase4")
+
+        val p3_dev = focused_native_build_target_profile_v1(["--managed-build-phase=phase3"]).unwrap()
+        expect(p3_dev.release).to_equal(false)
+        expect(p3_dev.profile).to_equal("dev")
+        expect(p3_dev.managed_build_phase).to_equal("phase3")
+
+        val p3_prod = focused_native_build_target_profile_v1(["--managed-build-phase=phase3", "--profile=prod"])
+        expect(p3_prod.is_err()).to_equal(true)
+        expect(p3_prod.unwrap_err()).to_start_with("TARGET-PROFILE-E-CONFLICT")
+
+        val p3_release = focused_native_build_target_profile_v1(["--managed-build-phase=phase3", "--release"])
+        expect(p3_release.is_err()).to_equal(true)
+        expect(p3_release.unwrap_err()).to_start_with("TARGET-PROFILE-E-CONFLICT")
+
+        val p4_dev_release = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=dev", "--release"])
+        expect(p4_dev_release.is_err()).to_equal(true)
+        expect(p4_dev_release.unwrap_err()).to_start_with("TARGET-PROFILE-E-CONFLICT")
+
+    it "isolates phase4 dev and phase4 prod cache and receipt namespaces":
+        val p4_prod = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=prod"]).unwrap()
+        val p4_dev = focused_native_build_target_profile_v1(["--managed-build-phase=phase4", "--profile=dev"]).unwrap()
+        val p3_dev = focused_native_build_target_profile_v1(["--managed-build-phase=phase3"]).unwrap()
+
+        val prod_cache = focused_native_build_profile_cache_dir_v1([], "", p4_prod)
+        val dev_cache = focused_native_build_profile_cache_dir_v1([], "", p4_dev)
+        val p3_cache = focused_native_build_profile_cache_dir_v1([], "", p3_dev)
+        expect(prod_cache).to_equal("build/native_cache/phase4-prod")
+        expect(dev_cache).to_equal("build/native_cache/phase4-dev")
+        expect(p3_cache).to_equal("build/native_cache/phase3-dev")
+        expect(prod_cache == dev_cache).to_equal(false)
+
+        val inherited_prod = focused_native_build_profile_cache_dir_v1([], "build/shared-cache", p4_prod)
+        val inherited_dev = focused_native_build_profile_cache_dir_v1([], "build/shared-cache", p4_dev)
+        expect(inherited_prod).to_equal("build/shared-cache/phase4-prod")
+        expect(inherited_dev).to_equal("build/shared-cache/phase4-dev")
+        expect(inherited_prod == inherited_dev).to_equal(false)
+
+        val prod_receipt = focused_native_build_profile_receipt_namespace_v1(p4_prod)
+        val dev_receipt = focused_native_build_profile_receipt_namespace_v1(p4_dev)
+        expect(prod_receipt).to_equal("build/native_receipts/phase4-prod")
+        expect(dev_receipt).to_equal("build/native_receipts/phase4-dev")
+        expect(prod_receipt == dev_receipt).to_equal(false)
+
+        val shared_prod_receipt = focused_native_build_profile_receipt_namespace_v1(p4_prod, "build/shared-cache")
+        val shared_dev_receipt = focused_native_build_profile_receipt_namespace_v1(p4_dev, "build/shared-cache")
+        expect(shared_prod_receipt).to_equal("build/shared-cache/receipts/phase4-prod")
+        expect(shared_dev_receipt).to_equal("build/shared-cache/receipts/phase4-dev")
+        expect(shared_prod_receipt == shared_dev_receipt).to_equal(false)

@@ -256,3 +256,21 @@ Closure composition of `bootstrap_main` (approx. import-graph count, 1,234 modul
 Why no code step in this change: the only lazy seam (PR2-3, first provider exporting the v1 entry) needs a native-built dylib to validate, and wiring `plugin_search` (PR4/7) would add a caller to the bootstrap closure with nothing loadable behind it. Both are refused here rather than forced.
 
 Next, in order: (1) PR2 provider shim + `backend_c` entry, validated by one native `--emit-shared` build; (2) PR3 descriptor v2 + e2e `backend_c_dynamic_provider_spec`; (3) PR7 `backends_dynamic` composition and `plugin_search` fallback, after which the full CLI stops installing the 12 static ports eagerly. Then split `compiler.driver.cache` / SMF publication behind the same lazy seam.
+
+## 8. Host-only composition gate, `backends_host_only` overlay, and `--backend-plugin` admission (2026-11-18)
+
+Reconciliation with the Phase-3-first master plan (`doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md`, slice `C1` / `W1`):
+
+1. **`SIMPLE_BACKEND_COMPOSITION=host-only|full` selector (`static_backend_registry.spl`):**
+   - `selected_backend_composition_mode_v1()` reads `SIMPLE_BACKEND_COMPOSITION` (`host-only` or `full`), defaulting to `"host-only"` when `SIMPLE_BOOTSTRAP_STAGE3=1` and `"full"` otherwise, and records `(composition_mode, k1_policy, optional_static_backends_installed)` in a structured composition receipt.
+   - Under `"host-only"`, `src/plugins/backend_registry/full_static_backend_registry.spl` and `src/app/cli/bootstrap_backend_installer.spl` install only the selected K1 host table (`llvm` / `cranelift`) plus `install_cuda_backend_mode_v1("disabled")`, skipping registration of the 12 optional GPU/VHDL/Wasm static ports.
+2. **`src/compositions/backends_host_only` source overlay:**
+   - `src/compositions/backends_host_only/plugins/backend_registry/full_static_backend_registry.spl` exports the same public installer symbols without importing `plugins.backend_*` or VHDL/HWIR driver lanes.
+   - Passing `--source src/compositions/backends_host_only` before `src/plugins` physically excludes optional backend implementations from `--entry-closure` even for worker entrypoints (`native_build_worker.spl`) that import `full_static_backend_registry`.
+3. **Explicit `--backend-plugin` admission in essential/host-only builds (`bootstrap_essential_backend_request.spl`):**
+   - Updates §5 and §7's earlier `PLUG-E-UNSUPPORTED` stub: when an operator passes an explicit non-empty `plugin_path` (`--backend-plugin=PATH`), `bootstrap_essential_backend_request.spl` constructs and admits a `BackendPluginRequestV1` through `load_backend` so the admitted host-only Phase-3 compiler can qualify an external `simple_backend_plugin_v1` debug provider (`W3` / `G-DYN-ONE`) without statically linking `plugins.backend_*`.
+   - Requests for non-linked backend names without `--backend-plugin` continue to fail closed with `PLUG-E-NOTFOUND`, and missing/incompatible plugin files fail closed in `dynamic_loader.spl` with no silent static fallback.
+4. **Static `BackendSession` parameter parity (`StaticBackendCodegenV1`):**
+   - `StaticBackendCodegenV1` projects normalized optimization (`o0..o3`) and `target_cpu` from `CompileOptions` into `CodegenParamsV1` (replacing hardcoded `"configured"`) and aligns `supports_target` normalized architecture/triple checks with `BackendSession` (`session.spl`).
+
+Status (2026-11-18): `C1` source and unit specs (`test/01_unit/compiler/backend/host_only_composition_static_parity_spec.spl`, `test/01_unit/compiler/backend/backend_port_negotiate_spec.spl`) are `in-progress / unit-verified`; native `G-STATIC-HOST`, `G-P3-HOST`, and `G-DYN-ONE` execution gates remain pending.

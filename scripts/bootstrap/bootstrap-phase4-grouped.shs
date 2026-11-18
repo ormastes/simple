@@ -85,6 +85,19 @@ for arg in "$@"; do
   esac
 done
 case "$phase_only" in ''|phase3|phase4) ;; *) die "invalid isolated phase" ;; esac
+phase4_profile=${PHASE4_PROFILE:-prod}
+case "$phase4_profile" in
+  prod) phase4_suffix= ;;
+  dev) phase4_suffix=-dev ;;
+  *) die "invalid PHASE4_PROFILE: $phase4_profile (expected prod or dev)" ;;
+esac
+phase_namespace() {
+  if [ "$1" = phase4 ]; then
+    printf '%s\n' "phase4$phase4_suffix"
+  else
+    printf '%s\n' "$1"
+  fi
+}
 case "$memory_policy" in enforce|monitor) ;; *) die "invalid memory policy" ;; esac
 case "$executor" in direct|buildrunner) ;; *) die "invalid build executor: $executor" ;; esac
 if [ -n "$direct_product" ]; then
@@ -100,7 +113,12 @@ if [ -n "$direct_product" ]; then
   [ "$phase_only" = phase4 ] && [ "$finalize_only" -eq 0 ] && [ -z "$phase_output" ] \
     || die "direct product cannot publish a managed phase completion"
 elif [ -n "$phase_only" ]; then
-  [ "$finalize_only" -eq 0 ] && [ "$phase_output" = "phase-output/$phase_only/completion.env" ] || die "isolated phase output differs"
+  phase_only_ns=$(phase_namespace "$phase_only")
+  [ "$finalize_only" -eq 0 ] && {
+    [ "$phase_output" = "phase-output/$phase_only/completion.env" ] ||
+    [ "$phase_output" = "phase-output/$phase_only_ns/completion$phase4_suffix.env" ] ||
+    [ "$phase_output" = "phase-output/$phase_only/completion$phase4_suffix.env" ]
+  } || die "isolated phase output differs"
 else
   [ -z "$phase_output" ] || die "phase output requires isolated phase"
 fi
@@ -194,12 +212,15 @@ if [ -z "$direct_product" ]; then
   regular "$shared_parse_source_check" || die "shared parse source checker unavailable"
 fi
 mkdir -p "$root" || die "managed phase root unavailable"
-receipt="$root/completion.env"
-scratch="$root/driver-${phase_only:-parent}"
+receipt="$root/completion$phase4_suffix.env"
+scratch="$root/driver-${phase_only:-parent}$phase4_suffix"
 mkdir -p "$scratch" || die "private phase scratch unavailable"
 if [ -n "$phase_only" ]; then
-  mkdir -p "$root/$phase_only" || die "private phase output unavailable"
-  receipt="$root/$phase_only/completion.env"
+  phase_only_ns=$(phase_namespace "$phase_only")
+  phase_only_suffix=
+  [ "$phase_only" = phase4 ] && phase_only_suffix=$phase4_suffix
+  mkdir -p "$root/$phase_only_ns" || die "private phase output unavailable"
+  receipt="$root/$phase_only_ns/completion$phase_only_suffix.env"
 fi
 
 # Preparation replays the canonical Stage 2 admission before any manager task
@@ -210,9 +231,10 @@ prepare_backend() {
   task_phase=$1 backend=$2
   case "$task_phase" in phase3|phase4) ;; *) die "unsupported module phase" ;; esac
   case "$backend" in llvm|cranelift) ;; *) die "unsupported backend" ;; esac
-  index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
+  task_phase_ns=$(phase_namespace "$task_phase")
+  index_handoff="$root/$task_phase_ns/index/$backend/handoff.sdn"
   regular "$index_handoff" || die "$backend typed index handoff unavailable"
-  backend_root="$root/$task_phase/modules/$backend"
+  backend_root="$root/$task_phase_ns/modules/$backend"
   sh "$prepare" --phase="$task_phase" --producer-receipt="$producer_receipt" \
     --scv-receipt="$scv_receipt" --index-handoff="$index_handoff" \
     --index-program="$index_program" --source-root="$source_root" \
@@ -291,7 +313,7 @@ verify_image_set() {
 # Read the same typed index option that admission bound into its variant.
 # Do not inherit native-build's unrelated aggressive optimization default.
 managed_optimization_flag() {
-  awk -F= -v wanted_phase="$2" -v wanted_backend="$3" -v wanted_target="$target" '
+  awk -F= -v wanted_phase="$2" -v wanted_backend="$3" -v wanted_target="$target" -v wanted_p4_profile="${PHASE4_PROFILE:-prod}" '
     $1 == "phase" { phase_value=$2; phase_count++ }
     $1 == "backend" { backend_value=$2; backend_count++ }
     $1 == "target" { target_value=$2; target_count++ }
@@ -303,7 +325,8 @@ managed_optimization_flag() {
           level_count != 1 || malformed || phase_value != wanted_phase ||
           backend_value != wanted_backend || target_value != wanted_target) exit 1
       if (wanted_phase == "phase3" && level == "0") print "none"
-      else if (wanted_phase == "phase4" && level == "2") print "standard"
+      else if (wanted_phase == "phase4" && wanted_p4_profile == "prod" && level == "2") print "standard"
+      else if (wanted_phase == "phase4" && wanted_p4_profile == "dev" && (level == "0" || level == "2")) print (level == "0" ? "none" : "standard")
       else exit 1
     }' "$1"
 }
@@ -323,17 +346,26 @@ build_binary() {
   target_opt=$(managed_optimization_flag "$target_index_config" "$task_phase" "$backend") \
     || die "typed index target optimization differs or is missing"
   case "$task_phase" in
-    phase3) target_profile=dev ;;
-    phase4) target_profile=prod ;;
+    phase3)
+      target_profile=dev
+      task_suffix=
+      ;;
+    phase4)
+      target_profile=$phase4_profile
+      task_suffix=$phase4_suffix
+      ;;
     *) die "unsupported target build phase" ;;
   esac
-  case "$output_kind" in
-    binary) set -- ;;
-    object) set -- --emit-object ;;
+  case "$output_kind:$target_profile" in
+    binary:prod) set -- --profile=prod --release --strip ;;
+    object:prod) set -- --profile=prod --release --emit-object ;;
+    binary:dev) set -- --profile dev ;;
+    object:dev) set -- --profile dev --emit-object ;;
     *) die "unsupported build output kind" ;;
   esac
+  task_phase_ns=$(phase_namespace "$task_phase")
   task_id="$id-$backend"
-  job_root="$root/$task_phase/binaries/$backend/$id"
+  job_root="$root/$task_phase_ns/binaries/$backend/$id"
   mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
   verify_shared_source
   bootstrap_managed_cuda_record "$job_root" || die "$id CUDA selection differs from retained job"
@@ -348,11 +380,11 @@ build_binary() {
       --memory-policy "$memory_policy" \
       --manifest "$pending_manifest" -- \
       native-build --target "$target" --backend "$backend" \
-      --profile="$target_profile" --managed-build-phase="$task_phase" --opt-level="$target_opt" --low-memory \
+      --managed-build-phase="$task_phase" --opt-level="$target_opt" --low-memory \
       --source "$cuda_selected_root" --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib \
       --source src/os --source src/plugins --source src/package_ownership --source src/compositions \
       --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
-      --cache-dir "cache/$task_id/$cuda_selection_identity" "$@" --output "$output" \
+      --cache-dir "cache/$task_id/$cuda_selection_identity$task_suffix" "$@" --output "$output" \
       || die "$id manifest blocked"
   if [ -e "$job_root/manifest.sdn" ] || [ -L "$job_root/manifest.sdn" ]; then
     regular "$job_root/manifest.sdn" && cmp -s "$pending_manifest" "$job_root/manifest.sdn" \
@@ -403,8 +435,9 @@ build_binary() {
 run_test_suite() {
   backend=$1 suite=$2
   case "$backend:$suite" in llvm:compiler|llvm:loader|llvm:interpreter|cranelift:compiler|cranelift:loader|cranelift:interpreter) ;; *) die "invalid suite" ;; esac
-  cli_job="$root/phase4/binaries/$backend/full-cli"
-  interpreter_job="$root/phase4/binaries/$backend/interpreter"
+  phase4_ns=$(phase_namespace phase4)
+  cli_job="$root/$phase4_ns/binaries/$backend/full-cli"
+  interpreter_job="$root/$phase4_ns/binaries/$backend/interpreter"
   cli="$cli_job/bin/simple$exe_suffix"
   interpreter="$interpreter_job/bin/simple_interpreter$exe_suffix"
   for dependency in "$cli_job" "$interpreter_job"; do
@@ -413,7 +446,7 @@ run_test_suite() {
       || die "$backend suite tool dependency lacks exact manager admission"
   done
   task_id="test-$suite-$backend"
-  job_root="$root/phase4/tests/$backend/$suite"
+  job_root="$root/$phase4_ns/tests/$backend/$suite"
   mkdir -p "$job_root/suite" "$job_root/state" || die "suite directories unavailable"
   verify_shared_source
   disk_preflight "$job_root"
@@ -455,7 +488,8 @@ build_index() {
   task_phase=$1 backend=$2 config=$3
   case "$task_phase" in phase3|phase4) ;; *) die "unsupported index phase" ;; esac
   case "$backend" in llvm|cranelift) ;; *) die "unsupported index backend" ;; esac
-  job_root="$root/$task_phase/index/$backend"
+  task_phase_ns=$(phase_namespace "$task_phase")
+  job_root="$root/$task_phase_ns/index/$backend"
   input_root="$job_root/inputs"
   output_root="$job_root/output"
   state_root="$job_root/state"
@@ -550,11 +584,12 @@ build_index() {
 
 run_module_backend() {
   task_phase=$1 backend=$2
-  manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
+  task_phase_ns=$(phase_namespace "$task_phase")
+  manifest="$root/$task_phase_ns/modules/$backend/state/manifest.sdn"
   regular "$manifest" || die "$task_phase/$backend group manifest unavailable"
   verify_image_set
   "$group_program" native-groups-run-single --manifest "$manifest" \
-    --state "$root/$task_phase/modules/$backend/state" \
+    --state "$root/$task_phase_ns/modules/$backend/state" \
     || {
       manager_status=$?
       verify_shared_source
@@ -564,7 +599,7 @@ run_module_backend() {
     }
   verify_image_set
   "$group_program" native-groups-verify --manifest "$manifest" \
-    --state "$root/$task_phase/modules/$backend/state" \
+    --state "$root/$task_phase_ns/modules/$backend/state" \
     || die "$task_phase/$backend ledger is incomplete or lacks qualified SMF outputs"
 }
 
@@ -634,7 +669,7 @@ bootstrap_managed_cuda_select "$source_root" "$source_inventory" \
 if [ -n "$direct_product" ]; then
   verify_image_pin "$authority_program" authority_program authority_sha256
   authority_program_sha=$expected_digest
-  sh "$repo_root/scripts/bootstrap/build-phase4-direct-product.shs" \
+  PHASE4_PROFILE="$phase4_profile" sh "$repo_root/scripts/bootstrap/build-phase4-direct-product.shs" \
     --executor=direct --program="$producer" --producer-sha256="$producer_sha" \
     --source-root="$source_root" --source-authority="$source_authority" \
     --source-authority-sha256="$source_authority_digest" --target="$target" \
@@ -651,7 +686,7 @@ if [ -n "$direct_product" ]; then
     --runtime-snapshot-sha256="$runtime_snapshot_digest" \
     --tool-authority="$tool_authority" --tool-authority-sha256="$tool_authority_digest" \
     --timeout-seconds="$(( (lifetime_ms + 999) / 1000 ))" \
-    --output-root="$root/phase4/direct/$direct_backend/$direct_product" \
+    --output-root="$root/$(phase_namespace phase4)/direct/$direct_backend/$direct_product" \
     || die "direct Phase 4 product build failed"
   bootstrap_stage3_verify_stage2_admission_receipt \
     "$producer_receipt" "$producer_receipt" "$producer" "$producer" \
@@ -676,15 +711,19 @@ diagnostic_inventory_digest=$(hash_file "$module_inventory") || die "diagnostic 
 dispatch_selected() {
   if [ "$finalize_only" -eq 1 ]; then
     for phase in phase3 phase4; do
-      phase_receipt="$root/$phase/completion.env"
-      regular "$phase_receipt" && regular "$root/$phase/verified-hashes.env" || die "$phase completion absent"
+      phase_ns=$(phase_namespace "$phase")
+      phase_suffix=
+      [ "$phase" = phase4 ] && phase_suffix=$phase4_suffix
+      phase_receipt="$root/$phase_ns/completion$phase_suffix.env"
+      phase_verified_hashes="$root/$phase_ns/verified-hashes$phase_suffix.env"
+      regular "$phase_receipt" && regular "$phase_verified_hashes" || die "$phase completion absent"
       [ "$(bootstrap_stage3_manifest_value format "$phase_receipt")" = SIMPLE-MANAGED-PHASE-COMPLETION-1 ] &&
         [ "$(bootstrap_stage3_manifest_value phase "$phase_receipt")" = "$phase" ] &&
         [ "$(bootstrap_stage3_manifest_value status "$phase_receipt")" = PASS ] &&
         [ "$(bootstrap_stage3_manifest_value producer_sha256 "$phase_receipt")" = "$producer_sha" ] &&
         [ "$(bootstrap_stage3_manifest_value source_authority_sha256 "$phase_receipt")" = "$source_authority_digest" ] &&
-        [ "$(bootstrap_stage3_manifest_value verified_hashes_sha256 "$phase_receipt")" = "$(hash_file "$root/$phase/verified-hashes.env")" ] || die "$phase completion authority differs"
-      cat "$root/$phase/verified-hashes.env" >>"$hashes" || return 2
+        [ "$(bootstrap_stage3_manifest_value verified_hashes_sha256 "$phase_receipt")" = "$(hash_file "$phase_verified_hashes")" ] || die "$phase completion authority differs"
+      cat "$phase_verified_hashes" >>"$hashes" || return 2
     done
   elif [ -n "$phase_only" ]; then
     managed_dispatch_phase "$phase_only"
@@ -714,14 +753,17 @@ verify_shared_source
 tmp="$receipt.tmp.$$"
 {
   if [ -n "$phase_only" ]; then
-    phase_hashes="$root/$phase_only/verified-hashes.env"
+    phase_only_ns=$(phase_namespace "$phase_only")
+    phase_only_suffix=
+    [ "$phase_only" = phase4 ] && phase_only_suffix=$phase4_suffix
+    phase_hashes="$root/$phase_only_ns/verified-hashes$phase_only_suffix.env"
     if [ -e "$phase_hashes" ]; then
       regular "$phase_hashes" && cmp -s "$hashes" "$phase_hashes" || die "retained phase digest journal differs"
     else
       cp "$hashes" "$phase_hashes" || die "phase digest journal publication failed"
     fi
     printf '%s\n' 'format=SIMPLE-MANAGED-PHASE-COMPLETION-1' 'status=PASS' "phase=$phase_only" \
-      "verified_hashes_sha256=$(hash_file "$root/$phase_only/verified-hashes.env")"
+      "verified_hashes_sha256=$(hash_file "$phase_hashes")"
   else
     aggregate_evidence=$(sh "$repo_root/scripts/bootstrap/lib/managed-phase-evidence.shs" \
       "$root" "$builder_program" "$poll_ms" "$lifetime_ms") || die "aggregate phase ownership verification failed"
@@ -746,13 +788,14 @@ tmp="$receipt.tmp.$$"
     "phase4_module_inventory_count=$module_inventory_count"
   cat "$hashes"
   for task_phase in ${phase_only:-phase3 phase4}; do
+    task_phase_ns=$(phase_namespace "$task_phase")
     for backend in llvm cranelift; do
-      index_receipt="$root/$task_phase/index/$backend/output/index-output/receipt.sdn"
-      index_handoff="$root/$task_phase/index/$backend/handoff.sdn"
-      index_manager_receipt="$root/$task_phase/index/$backend/state/receipts/index-$task_phase-$backend.sdn"
-      group_manifest="$root/$task_phase/modules/$backend/state/manifest.sdn"
-      group_ledger="$root/$task_phase/modules/$backend/state/ledger.sdn"
-      group_completion="$root/$task_phase/modules/$backend/state/completion.json"
+      index_receipt="$root/$task_phase_ns/index/$backend/output/index-output/receipt.sdn"
+      index_handoff="$root/$task_phase_ns/index/$backend/handoff.sdn"
+      index_manager_receipt="$root/$task_phase_ns/index/$backend/state/receipts/index-$task_phase-$backend.sdn"
+      group_manifest="$root/$task_phase_ns/modules/$backend/state/manifest.sdn"
+      group_ledger="$root/$task_phase_ns/modules/$backend/state/ledger.sdn"
+      group_completion="$root/$task_phase_ns/modules/$backend/state/completion.json"
       regular "$index_receipt" && regular "$index_handoff" && regular "$index_manager_receipt" && regular "$group_manifest" &&
         regular "$group_ledger" && regular "$group_completion" \
         || die "$task_phase/$backend lacks terminal index or group proof"

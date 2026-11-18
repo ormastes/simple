@@ -1,0 +1,168 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+# Per-file pipeline canonical logical identity, owner-verified terminal receipt, and single-worker low-memory admission
+
+Regression coverage for Bug #8504 remaining layers (Wave D4 / C5, T08-T10):
+1. SCV snapshot paths (`<scv>/src/app/p3rp/aa.spl`) and checkout paths
+   (`<checkout>/app/p3rp/aa.spl` or alias spellings) resolve to the same
+   admitted canonical logical module in `unit_tldr_module_paths_v1`,
+   `unit_tldr_module_path_for_v1`, `unit_tldr_surface_for_row_v1`, and the
+   streaming worker readiness/target resolution maps without stripping
+   unrelated roots.
+2. Non-streaming and post-shard HIR loops gate `hir_shard_finish` behind
+   `hir_shard_row_terminal_due_v1`, `hir_shard_owner_terminal_due_v1`, and
+   ledger `.claim` ownership verification (`hir_shard_owner_claimed_path_v1`)
+   so an unclaimed imported module never publishes another worker's terminal.
+3. Bounded single-worker low-memory per-file admission
+   (`native_file_worker_single_unit_low_memory_admitted_v1`) admits `worker=1`
+   under `SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY=1` while preserving the 3-arg
+   `native_file_worker_serial_low_memory_admitted_v1` contract.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:driver
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read, file_delete, getpid}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+use compiler.hir.hir_lowering.module_surface_source_identity.{
+    module_surface_scv_snapshot_split_v1,
+    module_surface_admitted_roots_v1,
+    module_surface_admitted_logical_id_v1,
+    module_surface_match_admitted_logical_v1,
+    module_surface_same_admitted_logical_module_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{
+    UnitTldrPlanV1,
+    unit_tldr_module_paths_v1,
+    unit_tldr_module_path_for_v1,
+    unit_tldr_surface_for_row_v1}
+use compiler.driver.driver_hir_cache.{
+    hir_shard_row_terminal_due_v1,
+    hir_shard_owner_claimed_path_v1,
+    hir_shard_owner_terminal_due_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    NATIVE_FILE_WORKER_SINGLE_LOW_MEMORY_ENV_V1,
+    native_file_worker_serial_low_memory_admitted_v1,
+    native_file_worker_single_unit_low_memory_admitted_v1}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+
+describe "SCV snapshot vs checkout canonical logical source identity":
+    it "splits SCV snapshot roots into checkout root, snapshot root, and repo-relative path":
+        val scv = "/work/repo/build/scv/snapshots/scv-revision-v1-abc123/src/app/p3rp/aa.spl"
+        val (checkout_root, snapshot_root, rel_path) = module_surface_scv_snapshot_split_v1(scv)
+        expect(checkout_root).to_equal("/work/repo")
+        expect(snapshot_root).to_equal("/work/repo/build/scv/snapshots/scv-revision-v1-abc123")
+        expect(rel_path).to_equal("src/app/p3rp/aa.spl")
+
+    it "indexes path-derived canonical logical names across SCV snapshot, checkout, tier, and std/common aliases":
+        val scv_aa = "/work/repo/build/scv/snapshots/scv-revision-v1-abc123/src/app/p3rp/aa.spl"
+        val scv_tier = "/work/repo/build/scv/snapshots/scv-revision-v1-abc123/src/compiler/00.common/driver_core_types.spl"
+        val scv_common = "/work/repo/build/scv/snapshots/scv-revision-v1-abc123/src/lib/common/plugin/iface_id.spl"
+        val scv_map = unit_tldr_module_paths_v1(
+            [scv_aa, "compiler.00.common.driver_core_types", "lib.common.plugin.iface_id"],
+            [scv_aa, scv_tier, scv_common])
+        expect(unit_tldr_module_path_for_v1(scv_map, "app.p3rp.aa")).to_equal(scv_aa)
+        expect(unit_tldr_module_path_for_v1(scv_map, "compiler.common.driver_core_types")).to_equal(scv_tier)
+        expect(unit_tldr_module_path_for_v1(scv_map, "common.plugin.iface_id")).to_equal(scv_common)
+        expect(unit_tldr_module_path_for_v1(scv_map, "std.common.plugin.iface_id")).to_equal(scv_common)
+
+        val checkout_aa = "/work/repo/app/p3rp/aa.spl"
+        val checkout_map = unit_tldr_module_paths_v1(["src.app.p3rp.aa"], [checkout_aa])
+        expect(unit_tldr_module_path_for_v1(checkout_map, "app.p3rp.aa")).to_equal(checkout_aa)
+
+    it "equates admitted SCV snapshot and checkout paths while rejecting unrelated roots":
+        val scv_main = "/work/repo/build/scv/snapshots/scv-revision-v1-abc123/src/app/p3rp/main.spl"
+        val scv_aa = "/work/repo/build/scv/snapshots/scv-revision-v1-abc123/src/app/p3rp/aa.spl"
+        val checkout_aa = "/work/repo/app/p3rp/aa.spl"
+        val checkout_src_aa = "/work/repo/src/app/p3rp/aa.spl"
+        val foreign_aa = "/unrelated/other_repo/app/p3rp/aa.spl"
+        val foreign_src_aa = "/unrelated/other_repo/src/app/p3rp/aa.spl"
+
+        val roots = module_surface_admitted_roots_v1([scv_main, scv_aa], [], "")
+        expect(module_surface_admitted_logical_id_v1(scv_aa, roots)).to_equal("app.p3rp.aa")
+        expect(module_surface_admitted_logical_id_v1(checkout_aa, roots)).to_equal("app.p3rp.aa")
+        expect(module_surface_admitted_logical_id_v1(checkout_src_aa, roots)).to_equal("app.p3rp.aa")
+        expect(module_surface_admitted_logical_id_v1(foreign_aa, roots)).to_equal("")
+        expect(module_surface_admitted_logical_id_v1(foreign_src_aa, roots)).to_equal("")
+
+        var admitted_logical: Dict<text, bool> = {}
+        admitted_logical["app.p3rp.aa"] = true
+        expect(module_surface_match_admitted_logical_v1(checkout_aa, roots, admitted_logical)).to_equal("app.p3rp.aa")
+        expect(module_surface_match_admitted_logical_v1(foreign_aa, roots, admitted_logical)).to_equal("")
+
+        expect(module_surface_same_admitted_logical_module_v1(scv_aa, checkout_aa, [])).to_be(true)
+        expect(module_surface_same_admitted_logical_module_v1(scv_aa, foreign_aa, [])).to_be(false)
+        expect(module_surface_same_admitted_logical_module_v1(scv_aa, foreign_src_aa, [])).to_be(false)
+
+    it "matches unit TLDR summary surfaces across SCV snapshot and checkout row spellings":
+        var surf: ModuleSurface = ModuleSurface.empty("")
+        surf.module_name = "app.p3rp.aa"
+        surf.logical_name = "app.p3rp.aa"
+        surf.canonical_name = "app.p3rp.aa"
+        surf.canonical_path = "/work/repo/app/p3rp/aa.spl"
+        val plan = UnitTldrPlanV1(
+            unit_id: "0/2@0",
+            picked: [],
+            parse_paths: [],
+            parsed: 0,
+            summaries: 1,
+            fallbacks: 0,
+            fallback_modules: [],
+            surfaces: [surf],
+            import_hir_lowered: 0)
+        val scv_aa = "/work/repo/build/scv/snapshots/scv-revision-v1-abc123/src/app/p3rp/aa.spl"
+        val hit = unit_tldr_surface_for_row_v1(plan, scv_aa, scv_aa)
+        expect(hit.is_some()).to_be(true)
+        val miss = unit_tldr_surface_for_row_v1(plan, "/unrelated/repo/app/p3rp/aa.spl", "/unrelated/repo/app/p3rp/aa.spl")
+        expect(miss.is_none()).to_be(true)
+
+    it "wires ready_logical and source_of_logical alongside ready_canonical in streaming parse":
+        val stream = file_read("src/compiler/80.driver/driver_source_parse_streaming.spl")
+        expect(stream.contains("var ready_logical: Dict<text, bool> =")).to_be(true)
+        expect(stream.contains("module_surface_match_admitted_logical_v1(ready_path, admitted_roots, admitted_logical)")).to_be(true)
+        expect(stream.contains("var source_of_logical: Dict<text, text> =")).to_be(true)
+
+describe "non-streaming HIR loop owner-verified terminal receipt":
+    it "verifies claim ownership in the ledger before allowing terminal publication":
+        val queue = "build/tmp-d4-claim-owner-{getpid()}"
+        expect(rt_dir_create_all(queue)).to_be(true)
+        val path_claimed = "src/app/p3rp/aa.spl"
+        val path_unclaimed = "src/app/p3rp/bb.spl"
+        val claimed = hir_shard_recovery_claim(queue, "0/2@0", path_claimed, "k" * 64)
+        expect(claimed).to_equal(1)
+
+        expect(hir_shard_owner_claimed_path_v1(queue, "0/2@0", path_claimed)).to_be(true)
+        expect(hir_shard_owner_claimed_path_v1(queue, "1/2@0", path_claimed)).to_be(false)
+        expect(hir_shard_owner_claimed_path_v1(queue, "0/2@0", path_unclaimed)).to_be(false)
+        expect(hir_shard_owner_claimed_path_v1("", "0/2@0", path_claimed)).to_be(false)
+        val _cleaned = rt_dir_remove_all(queue)
+
+    it "gates row terminal publication on shard mode, non-unit mode, in-loop claim, and ledger owner":
+        expect(hir_shard_row_terminal_due_v1(true, false)).to_be(true)
+        expect(hir_shard_row_terminal_due_v1(true, true)).to_be(false)
+        expect(hir_shard_owner_terminal_due_v1(true, false, true, true)).to_be(true)
+        expect(hir_shard_owner_terminal_due_v1(true, false, false, true)).to_be(false)
+        expect(hir_shard_owner_terminal_due_v1(true, false, true, false)).to_be(false)
+        expect(hir_shard_owner_terminal_due_v1(true, true, true, true)).to_be(false)
+        expect(hir_shard_owner_terminal_due_v1(false, false, true, true)).to_be(false)
+
+        val lowering = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        expect(lowering.contains("if hir_nonstream_terminal_due and not hir_shard_finish(src.path, \"FAILED\", false):")).to_be(true)
+        expect(lowering.contains("if hir_nonstream_terminal_due and not hir_shard_finish(src.path, \"PASS\", hir_cache_stored):")).to_be(true)
+
+describe "bounded single-worker low-memory per-file admission":
+    it "preserves 3-arg interface-HIR admission and adds 4-arg single-unit low-memory admission":
+        expect(NATIVE_FILE_WORKER_SINGLE_LOW_MEMORY_ENV_V1).to_equal("SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY")
+        expect(native_file_worker_serial_low_memory_admitted_v1(1, "", "")).to_be(false)
+        expect(native_file_worker_serial_low_memory_admitted_v1(1, "", "1")).to_be(true)
+        expect(native_file_worker_single_unit_low_memory_admitted_v1(1, "", "", "1")).to_be(true)
+        expect(native_file_worker_single_unit_low_memory_admitted_v1(0, "", "", "1")).to_be(true)
+        expect(native_file_worker_single_unit_low_memory_admitted_v1(1, "", "1", "")).to_be(true)
+        expect(native_file_worker_single_unit_low_memory_admitted_v1(1, "", "", "")).to_be(false)
+        expect(native_file_worker_single_unit_low_memory_admitted_v1(1, "SIMPLE_HIR_CACHE=0", "", "1")).to_be(false)
+        expect(native_file_worker_single_unit_low_memory_admitted_v1(2, "", "", "1")).to_be(false)

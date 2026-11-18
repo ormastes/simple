@@ -4,9 +4,7 @@
 implementers listed in §6. Supersedes nothing: it is the execution contract for
 rule 1 of `src_based_tldr_build_v1.md` ("per-file jobs, no stage barrier") and
 §8/§9 of `build_runner_fiber_scheduler_v1.md`, written against what the code
-did at the time of the 2026-10-25 measurement, see §1. The source default is
-now off, with explicit `SIMPLE_FILE_WORKERS=1` opt-in; native qualification
-evidence remains pending. This supersedes the earlier enablement in PR #4865.
+did at the time of the 2026-10-25 measurement, see §1. *(Historical note from 2026-10-26: temporarily turned off via `SIMPLE_FILE_WORKERS=1` opt-in superseding PR #4865. **Reconciled 2026-11-18:** since 2026-11-04, `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` at `src/compiler/80.driver/driver_build/native_file_worker_v1.spl:55` makes per-file `src → obj` the general default when `SIMPLE_FILE_WORKERS` is unset, while `config/bootstrap.sdn:27` scopes `stage3_file_workers: 0` specifically to Stage 3 pending Bug `#8504` / gate `G-FILE`; see §8 below.)*
 
 ## 1. What is NOT per-file today (measured on the frozen Windows stage2, 2026-10-25)
 
@@ -86,11 +84,7 @@ cache). P4 DONE (opt-in) #4575, #4580, #4597 (P-B), #4598 (P-G3, no global
 mono pass on this lane), #4603 (P-D). P5 PARTIAL — #4585/#4588 limit HIR to the
 claimed module's import closure; TLDR specialization list + `.rr` producers (P-G2) DONE
 #4600 `73c4aef632a`. P6 OPEN — ParseContext item 32 at stage 2 (#4502, #4568).
-The default now resolves unset `SIMPLE_FILE_WORKERS` to
-`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` in
-`src/compiler/80.driver/driver_build/native_file_worker_v1.spl:45`.
-`SIMPLE_FILE_WORKERS=1` explicitly selects the pool;
-`SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` still takes precedence.
+*(2026-10-26 snapshot: unset `SIMPLE_FILE_WORKERS` temporarily resolved to `"0"`; **reconciled 2026-11-18:** `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` at `src/compiler/80.driver/driver_build/native_file_worker_v1.spl:55` is the active general default when `SIMPLE_FILE_WORKERS` is unset, `SIMPLE_FILE_WORKERS=0` and `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` are per-invocation opt-outs, and `config/bootstrap.sdn:27` scopes `stage3_file_workers: 0` only to Stage 3 for Bug `#8504` until `G-FILE` passes.)*
 The §2 overlap proof (`obj_done(A) < hir_start(B)`) has a checker
 (`scripts/check/check-per-file-overlap-receipt.shs`) but **no native receipt
 yet**; the shared default flip is not qualification evidence.
@@ -172,3 +166,21 @@ seed JIT fallback on `native_build_main`.
 - Investigating: closure walk not following `use os.*` imports (selected 1 vs
   5); `--parse-fibers` children exit 1; HIR cache selfcheck still failing
   despite #4504 (239/1495 hits); seed JIT fallback; linker memory (21 GB).
+
+## 8. Reconciliation 2026-11-18: General `"1"` Default, Scoped Stage-3 Override, Logical Identity, Owner Terminal Receipts, and `worker=1` Low-Memory Admission (`C5`)
+
+Aligned with `doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md` (`W5` / `C5`) and Bug `#8504` (`doc/08_tracking/bug/per_file_lane_unit_mir_physical_ownership_missing_hir_2026-11-12.md`):
+
+1. **General default vs Stage-3 scoped exception:**
+   - Unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`src/compiler/80.driver/driver_build/native_file_worker_v1.spl:55`, pinned by `test/01_unit/compiler/driver/native_file_worker_v1_spec.spl`).
+   - `config/bootstrap.sdn` (`stage3_file_workers: 0`) scopes the two-pass fallback strictly to Stage 3 while Bug `#8504` is verified; global defaults are never flipped to hide a stage-specific blocker.
+2. **Canonical logical source identity across SCV snapshots and checkouts (`module_surface_source_identity.spl`, `driver_unit_tldr_imports_v1.spl`, `driver_source_parse_streaming.spl`):**
+   - `unit_tldr_module_paths_v1` and `unit_tldr_module_path_for_v1` index path-derived canonical logical module names (`module_logical_name_from_path`) alongside `source_module_names[i]` and `std.`/`common.` aliases so entry-closure alias spellings, checkout paths (`<checkout>/app/...`), and SCV snapshot paths (`<scv>/src/app/...`) resolve to one canonical logical module identity.
+   - `driver_source_parse_streaming.spl` checks logical module identity alongside `ready_canonical` when an SCV snapshot source and a checkout path denote the same admitted logical module, preventing false `FILE-WORKER-E-CLOSURE-INCOMPLETE` rejections without stripping arbitrary directory prefixes.
+3. **Owner-verified terminal receipts (`driver_hir_pipeline_lowering.spl`, `driver_hir_cache.spl`):**
+   - Both the streaming HIR lowering loop and the non-streaming HIR lowering loop gate `hir_shard_finish(src.path, ...)` with `hir_shard_row_terminal_due_v1` / claim-owner verification (`native_file_worker_owner_claims_v1`).
+   - Only the worker that owns the active claim on a row publishes its terminal `PASS`/`FAILED` receipt; imported modules loaded from cache or lowered read-only in-process for surface/type context never overwrite or collide with another worker's terminal state.
+4. **Bounded `worker=1` low-memory per-file admission (`native_file_worker_v1.spl`):**
+   - Preserves existing 3-argument `native_file_worker_serial_low_memory_admitted_v1(parallel, hir_disabled_by, interface_hir)` semantics and adds `native_file_worker_single_unit_low_memory_admitted_v1(parallel, hir_disabled_by, interface_hir, single_low_mem_flag)` (`SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY` / explicit single-worker per-file unit mode) so memory-constrained hosts with `worker=1` execute per-file `src → obj` units without a mandatory whole-program HIR/MIR barrier.
+
+Verification status (2026-11-18): `C5` unit specs (`test/01_unit/compiler/driver/native_file_worker_v1_spec.spl`, `test/01_unit/compiler/80.driver/per_file_logical_identity_terminal_spec.spl`) are `in-progress / unit-verified`. Native Stage-3 self-rebuild and overlap proof (`scripts/check/check-per-file-overlap-receipt.shs`, gates `G-FILE-SERIAL`, `G-FILE-PARALLEL`, `G-FILE`) remain **not_run**; `config/bootstrap.sdn` retains `stage3_file_workers: 0` until `G-FILE` passes.

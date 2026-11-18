@@ -253,23 +253,39 @@ The Simple compiler is self-hosted. To build from scratch, a bootstrap process p
 Stage 1: Rust Seed Binary
   cargo build --profile bootstrap -p simple-driver
   -> src/compiler_rust/target/bootstrap/simple
-  -> Rust bootstrap authority (not a future stage-default selection)
+  -> Rust bootstrap authority (bootstrap-only; never a production tool default)
 
-Stage 2: Canonical pure-Simple compiler (compiled by Rust seed)
-  seed native-build --entry bootstrap_main.spl
+Stage 2: Canonical pure-Simple bootstrap compiler (compiled by Rust seed)
+  seed native-build --entry src/app/cli/bootstrap_main.spl
   -> build/bootstrap/stage2/<triple>/simple
-  -> Backend: llvm-lib (default)
+  -> Backend: selected K1 host backend (`llvm` or `cranelift` per platform policy, not `llvm-lib` P-static plugin)
 
-Stage 3: Self-Hosted (compiled by Stage 2)
-  stage2 native-build --entry bootstrap_main.spl
+Stage 3 (Phase 3): Host-only self-hosted debug compiler (compiled by admitted Stage 2)
+  stage2 native-build --entry src/app/cli/bootstrap_main.spl \
+    --managed-build-phase=phase3 --profile=dev
   -> build/bootstrap/stage3/<triple>/simple
-  -> Backend: llvm-lib (default)
+  -> Backend & closure: proven host K1 baseline (`SIMPLE_BACKEND_COMPOSITION=host-only` / K1 kernel or `backends_host_only` overlay; optional GPU/VHDL/Wasm backends excluded)
 
-Stage 4: Full CLI (compiled by verified stage)
-  stage3 native-build --entry main.spl
-  -> build/bootstrap/full/<triple>/simple
-  -> Backend: llvm-lib (default)
+Stage 4 (Phase 4): Full CLI & provider distribution (compiled by verified pure-Simple stage)
+  stage3 native-build --entry src/app/cli/main.spl \
+    --managed-build-phase=phase4 --profile=prod|dev
+  -> build/bootstrap/full/<triple>/simple (Release `prod` default; Diagnosis `dev` in isolated `-dev` namespace)
+  -> Backend: selected K1 host core + explicitly built/admitted static or `simple_backend_plugin_v1` dynlib providers
 ```
+
+### Managed Bootstrap Phases, Host-Only Closure, and Phase-4 Profiles
+
+Managed bootstrap builds separate **phase**, **profile**, **backend composition/linkage**, and **host ABI vs emitted target** (see `doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md`):
+
+- **Phase 3 (`--managed-build-phase=phase3`):**
+  - Strictly `dev`-only (`--profile=dev`, unstripped debug/diagnosis symbols; `--profile=prod` or `--release` is rejected with `TARGET-PROFILE-E-CONFLICT`).
+  - Uses `--stop-after-stage3` on `scripts/bootstrap/bootstrap-from-scratch.sh` (delegated through `scripts/bootstrap/run-managed-from-admitted.shs`) to qualify the host self-hosted compiler (`G-P3-HOST`) without implying Phase-4 completion or release deployment.
+  - Defaults to **host-only composition** (`SIMPLE_BACKEND_COMPOSITION=host-only` when `SIMPLE_BOOTSTRAP_STAGE3=1`, or `--source src/compositions/backends_host_only` / `src/compositions/kernel_llvm{,_cranelift}`), excluding optional GPU/VHDL/Wasm static backend closures while preserving explicit `--backend-plugin=PATH` dynamic provider qualification (`G-DYN-ONE`).
+  - While Bug `#8504` native overlap qualification (`G-FILE`) remains open, `config/bootstrap.sdn` scopes `stage3_file_workers: 0` specifically to Stage 3 even though the general compiler default is per-file `src → obj` (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"`).
+- **Phase 4 (`--managed-build-phase=phase4`):**
+  - Supports orthogonal `--profile=prod` (Release, default when `--profile` is omitted) and `--profile=dev` (Diagnosis unstripped full CLI, selectable via `PHASE4_PROFILE=dev` in `scripts/bootstrap/build-phase4-direct-product.shs` and `scripts/bootstrap/bootstrap-phase4-grouped.shs`).
+  - `phase4` `dev` and `prod` use isolated cache, `ConfigVariantKeyV1`, and receipt namespaces (`focused_native_build_profile_cache_dir_v1`, `focused_native_build_profile_receipt_namespace_v1`) so Debug and Release builds never cross-contaminate.
+  - Optional and mandatory `simple_backend_plugin_v1` dynlib providers record separate auditable statuses (`built`, `loaded`, `emitted`, `linked`, `executed`, `unavailable`, `not_run`); `--mode=dynload` SMF packaging alone is never treated as proof that a dynamic codegen provider was built or executed.
 
 After the fresh Stage 4 full CLI passes candidate admission, bootstrap runs
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact
