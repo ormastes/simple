@@ -1,0 +1,57 @@
+# SimpleOS 32-bit userland: no sysroot, crt0 or syscall stub (i686, arm32, riscv32)
+
+- **Status:** open
+- **Date:** 2026-11-19
+- **Lane:** ssos (Simple linker vs ld.lld for SimpleOS userland)
+
+## Summary
+
+No C hello can be linked for SimpleOS on i686, arm32 or riscv32, with either
+ld.lld or the Simple linker, because the userland inputs do not exist. This is
+not a linker bug. The kernel side is ahead of the userland side: all three
+arches already have filesystem-launch spawn code.
+
+## What exists
+
+| piece | i686 (x86_32) | arm32 | riscv32 |
+|---|---|---|---|
+| kernel fs-exec spawn | `src/os/kernel/loader/x86_32_fs_exec_spawn.spl` | `arm32_fs_exec_spawn.spl` | `riscv32_fs_exec_spawn.spl` |
+| kernel user entry | `arch/x86_32/user_entry.spl` | `arch/arm32/user_entry.spl` | `arch/riscv32/user_entry_v1.spl` |
+| syscall ABI in kernel | `int 0x80` (`arch/x86_32/early_syscall.spl`) | `svc`, id 60 = write (`loader/arm32_real_exec_payload.spl`) | `ecall`, 60 = write, 0 = exit (`loader/rv32_real_exec_payload.spl`) |
+| compiler lld path | none | none | `link_simpleos_riscv32` (`simpleos_native_linkers.spl:647`); it links against the KERNEL script `arch/riscv32/linker.ld` with a UART stub, so it is a bare-metal link, not a userland one |
+
+## Exactly what is missing (per cell)
+
+1. **crt0**: `src/os/libc/` has only `simpleos_crt0.S` (x86_64) and
+   `simpleos_crt0_aarch64.S`. No `simpleos_crt0_i686.S`, `simpleos_crt0_arm32.S`
+   or `simpleos_crt0_riscv32.S`.
+2. **Syscall stub**: only `simpleos_syscall.S` (x86_64), `_aarch64.S` and
+   `_riscv64.S` exist. There is no 32-bit stub for `int 0x80`, `svc` or rv32 `ecall`.
+3. **Sysroot script**: only `scripts/os/simpleos-sysroot-aarch64.shs` and
+   `-riscv64.shs` exist (x86_64 is built into `build/os/sysroot`). Nothing builds
+   `build/os/sysroot-{i686,arm32,riscv32}/` (`lib/crt0.o`, `libsimpleos_c.a`,
+   `share/simpleos/simpleos.ld`).
+4. **User linker script**: no userland `simpleos.ld` for any 32-bit arch. Its load
+   address has to match what the kernel spawn maps.
+5. **lld argv**: `simpleos_user_link_args_for_arch` (`simpleos_native_symbols.spl`)
+   has no 32-bit branch (`-m elf_i386` / `armelf` / `elf32lriscv --no-relax`).
+6. **Simple linker**: `internal_link_simpleos`
+   (`src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl:1387`)
+   accepts x86_64, aarch64 and riscv64 only, so 32-bit SimpleOS targets are rejected
+   before `elf_boot_link`. Whether `elf_boot_link` itself handles ELF32 relocations
+   for i386 and rv32 is unproven. arm32 has a separate `elf/arm32_raw_link.spl`
+   path (EFI lane, PR #10239), not wired for SimpleOS userland.
+7. **libc portability**: the `src/os/libc/*.c` sources have not been built for an
+   ILP32 target, so `long`/pointer-size assumptions are unverified.
+
+## Order to unblock
+
+Items 1-4 per arch, then 5 (the lld reference), then 6 (Simple linker vs readelf of
+lld), the same as the 64-bit cells (`simpleos_user_elf_boot_blocked_aarch64_riscv64_2026-11-19.md`).
+
+## Repro
+
+```sh
+ls src/os/libc | grep -E 'crt0|syscall'      # no i686/arm32/riscv32 files
+ls scripts/os | grep sysroot                 # aarch64 and riscv64 only
+```
