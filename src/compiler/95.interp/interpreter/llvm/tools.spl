@@ -13,8 +13,15 @@ use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.io_runtime.{host_os}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{
     native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 
 extern fn rt_env_get(key: text) -> text?  # nil when unset; callers here use `?? ""` because unset == empty is the intended semantics
+@unsafe(reason: "process-lifetime tool cache spinlock handle ABI", capabilities: [ffi])
+extern fn rt_atomic_int_new(initial: i64) -> i64
+@unsafe(reason: "process-lifetime tool cache spinlock state query ABI", capabilities: [ffi])
+extern fn rt_atomic_int_load(handle: i64) -> i64
+@unsafe(reason: "process-lifetime tool cache spinlock CAS ABI", capabilities: [ffi])
+extern fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new_value: i64) -> bool
 
 # ============================================================================
 # Portable Tool Finder (shared helper)
@@ -63,95 +70,433 @@ fn _tool_path_is_absolute(path: text) -> bool:
         return true
     path.len() >= 3 and path.char_at(1) == ":" and (path.char_at(2) == "\\" or path.char_at(2) == "/")
 
-fn _env_tool_dirs() -> [text]:
-    """Explicit LLVM bin dirs from the environment, highest priority.
-
-    SIMPLE_LLVM_BIN points at a bin directory; LLVM_SYS_180_PREFIX (the
-    var the Windows MSVC bootstrap lane already sets for the known-good
-    LLVM 18 toolchain) points at an install prefix whose bin/ is used.
-    Both unset => empty list => no behavior change (Unix no-op).
-    """
+pub fn env_tool_dirs_from(explicit_bin: text, llvm_sys_231: text, win_root_23: text, llvm_sys_180: text, llvm_mingw_root: text) -> [text]:
+    """Pure builder for explicit LLVM bin dirs from env var values."""
     var dirs: [text] = []
-    val explicit = rt_env_get("SIMPLE_LLVM_BIN") ?? ""
-    if explicit != "":
-        dirs.push(explicit)
-    # LLVM 23 is the Windows toolchain authority: the MSVC bootstrap env
-    # exports LLVM_SYS_231_PREFIX / SIMPLE_LLVM_WIN_ROOT_23 and unsets the
-    # LLVM 18 prefix.
-    for prefix_var in ["LLVM_SYS_231_PREFIX", "SIMPLE_LLVM_WIN_ROOT_23", "LLVM_SYS_180_PREFIX"]:
-        val prefix = rt_env_get(prefix_var) ?? ""
+    if explicit_bin != "":
+        dirs.push(explicit_bin)
+    for prefix in [llvm_sys_231, win_root_23, llvm_sys_180, llvm_mingw_root]:
         if prefix != "":
             dirs.push(prefix + "/bin")
     dirs
 
+fn _env_tool_dirs() -> [text]:
+    """Explicit LLVM bin dirs from the environment, highest priority.
+
+    SIMPLE_LLVM_BIN points at a bin directory; LLVM_SYS_231_PREFIX,
+    SIMPLE_LLVM_WIN_ROOT_23, LLVM_SYS_180_PREFIX (the var the Windows MSVC
+    bootstrap lane sets for LLVM 18), and SIMPLE_LLVM_MINGW_ROOT point at
+    install prefixes whose bin/ is used.
+    All unset => empty list => no behavior change (Unix no-op).
+    """
+    env_tool_dirs_from(
+        rt_env_get("SIMPLE_LLVM_BIN") ?? "",
+        rt_env_get("LLVM_SYS_231_PREFIX") ?? "",
+        rt_env_get("SIMPLE_LLVM_WIN_ROOT_23") ?? "",
+        rt_env_get("LLVM_SYS_180_PREFIX") ?? "",
+        rt_env_get("SIMPLE_LLVM_MINGW_ROOT") ?? ""
+    )
+
+pub fn env_tool_dirs() -> [text]:
+    """Return explicit LLVM bin directories configured in the environment."""
+    _env_tool_dirs()
+
 # Per-process resolution cache for _find_tool, keyed by the joined candidate
 # list. find_llc/find_clang run once per AOT unit; re-spawning `where` and
 # `--version` for every unit failed transiently in a long stage3 build
-# ("llc not found" for 51 units across 7 batches with llc on PATH).
-# Hits are cached for the process lifetime. A miss is retried on later calls
-# up to _FIND_TOOL_MAX_MISSES times, then cached as "" (bounded retry).
+# ("llc not found" for 51 units across 7 batches with llc on PATH, and 1427
+# occurrences when transient --version spawn failures poisoned the cache).
+# Hits are cached for the process lifetime. A miss where NO candidate exists on
+# disk is retried up to _FIND_TOOL_MAX_MISSES (3) times, then cached as "".
+# A transient `--version` probe failure on an existing candidate on disk does
+# NOT advance absent misses and retries up to _FIND_TOOL_MAX_TRANSIENT_MISSES (16)
+# times so a transient spike recovers while a permanently broken binary stops
+# re-spawning `where` + `--version` across thousands of modules.
+# Cache/diagnostic globals are NEVER mutated while inside an active
+# transient_scope (transient_array_scope_state_v1() != 0), preventing
+# scope-owned strings/arrays from dangling after transient_scope_end().
+# find_tool_cache_check() is strictly read-only so parallel worker hits never
+# race on _last_tool_probe_diagnostic.
+fn _find_tool_cache_lock_init() -> i64:
+    var handle: i64 = 0
+    unsafe(capabilities: [ffi]):
+        handle = rt_atomic_int_new(0)
+    handle
+
 val _FIND_TOOL_MAX_MISSES = 3
+val _FIND_TOOL_MAX_TRANSIENT_MISSES = 16
+var _find_tool_cache_lock_handle: i64 = _find_tool_cache_lock_init()
 var _find_tool_cache_keys: [text] = []
 var _find_tool_cache_paths: [text] = []
 var _find_tool_cache_misses: [i64] = []
+var _find_tool_cache_transient_misses: [i64] = []
+var _find_tool_cache_diagnostics: [text] = []
+var _last_tool_probe_diagnostic: text = ""
 
-fn _find_tool(candidates: [text]) -> text:
-    """Find a WORKING tool using platform-appropriate detection.
+fn _find_tool_cache_lock_acquire() -> bool:
+    if _find_tool_cache_lock_handle <= 0:
+        return false
+    while true:
+        val acquired = unsafe(capabilities: [ffi]):
+            rt_atomic_int_compare_exchange(_find_tool_cache_lock_handle, 0, 1)
+        if acquired:
+            return true
+    false
 
-    Priority: env-provided LLVM bin dirs (SIMPLE_LLVM_BIN,
-    LLVM_SYS_180_PREFIX/bin) -> /usr/bin -> `command -v` (Unix) ->
-    `where` (Windows, every listed path tried in order) -> Homebrew
-    keg-only prefixes (macOS). Every hit is verified by EXECUTING the
-    candidate (`--version`, exit 0) before it is returned — a bare
-    existence probe selected a DLL-broken mingw64 llc on Windows and
-    produced "Bootstrap LLVM llc failed" far downstream.
-    Bootstrap-safe.
-    """
-    if native_tool_strict_requested_v1():
-        if candidates.len() == 0: return ""
-        val name = candidates[candidates.len() - 1]
-        val role = if name == "clang": "cc" else: name
-        # Missing, changed or unadmitted tools never fall through to discovery.
-        return match native_tool_strict_resolve_v1(role):
-            Ok(path): path
-            Err(_): ""
-    val key = candidates.join(",")
+fn _find_tool_cache_lock_release(held: bool):
+    if held and _find_tool_cache_lock_handle > 0:
+        val _ = unsafe(capabilities: [ffi]):
+            rt_atomic_int_compare_exchange(_find_tool_cache_lock_handle, 1, 0)
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn find_tool_cache_lock_is_free() -> bool:
+    """Return true when the cache spinlock handle is initialized (> 0) and unlocked (0)."""
+    if _find_tool_cache_lock_handle <= 0:
+        return false
+    val state = unsafe(capabilities: [ffi]):
+        rt_atomic_int_load(_find_tool_cache_lock_handle)
+    state == 0
+
+pub struct ToolProbeObservation:
+    path: text
+    exists_on_disk: bool
+    probe_ok: bool
+
+pub struct ToolProbeOutcome:
+    found_path: text
+    failed_candidates: [text]
+    had_existing_candidate: bool
+
+pub struct ToolCacheDecision:
+    cached_path: text
+    absent_misses: i64
+    transient_misses: i64
+    should_retry: bool
+    diagnostic: text
+
+pub struct ToolCacheLookup:
+    hit: bool
+    path: text
+    diagnostic: text
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn find_tool_max_misses() -> i64:
+    """Maximum consecutive absent-binary misses before caching empty string."""
+    _FIND_TOOL_MAX_MISSES
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn find_tool_max_transient_misses() -> i64:
+    """Maximum consecutive transient --version failures on an existing binary before caching broken."""
+    _FIND_TOOL_MAX_TRANSIENT_MISSES
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn tool_cache_can_persist() -> bool:
+    """Return true only when outside an active transient scope (safe to write process globals)."""
+    transient_array_scope_state_v1() == 0
+
+pub fn last_tool_probe_diagnostic() -> text:
+    """Diagnostic from the most recent persisted tool discovery probe (empty on success)."""
+    val held = _find_tool_cache_lock_acquire()
+    val diag = _last_tool_probe_diagnostic
+    _find_tool_cache_lock_release(held)
+    diag
+
+pub fn reset_find_tool_cache():
+    """Clear the per-process tool discovery cache and last diagnostic (for tests)."""
+    val held = _find_tool_cache_lock_acquire()
+    _find_tool_cache_keys = []
+    _find_tool_cache_paths = []
+    _find_tool_cache_misses = []
+    _find_tool_cache_transient_misses = []
+    _find_tool_cache_diagnostics = []
+    _last_tool_probe_diagnostic = ""
+    _find_tool_cache_lock_release(held)
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn tool_cache_should_reuse_counts(cached_path: text, absent_misses: i64, transient_misses: i64) -> bool:
+    """Return true when cache holds a working hit or reached either miss limit."""
+    cached_path != "" or absent_misses >= _FIND_TOOL_MAX_MISSES or transient_misses >= _FIND_TOOL_MAX_TRANSIENT_MISSES
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn tool_cache_should_reuse(cached_path: text, absent_misses: i64) -> bool:
+    """Return true when cache holds a working hit or reached the absent-tool miss limit."""
+    tool_cache_should_reuse_counts(cached_path, absent_misses, 0)
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn format_tool_probe_diagnostic_with_cap(candidates_key: text, found_path: text, failed_candidates: [text], cached_absent: bool, cached_broken: bool) -> text:
+    """Format diagnostic distinguishing transient --version failure, repeated broken binary, and absent binary."""
+    if found_path != "":
+        return ""
+    if failed_candidates.len() > 0:
+        val joined = failed_candidates.join(", ")
+        if cached_broken:
+            return "tool probe failed repeatedly (cached broken after {_FIND_TOOL_MAX_TRANSIENT_MISSES} --version failures) for existing candidate(s): {joined} (candidates: {candidates_key})"
+        return "tool probe failed transiently (--version failed) for existing candidate(s): {joined} (candidates: {candidates_key})"
+    if cached_absent:
+        return "tool missing (cached absent after {_FIND_TOOL_MAX_MISSES} misses; no candidate file exists on disk) for candidates: {candidates_key}"
+    "tool missing (no candidate file exists on disk) for candidates: {candidates_key}"
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn format_tool_probe_diagnostic(candidates_key: text, found_path: text, failed_candidates: [text], cached_absent: bool) -> text:
+    """Format diagnostic distinguishing transient --version failure from absent binary."""
+    format_tool_probe_diagnostic_with_cap(candidates_key, found_path, failed_candidates, cached_absent, false)
+
+fn _contains_text(items: [text], target: text) -> bool:
+    for item in items:
+        if item == target:
+            return true
+    false
+
+fn _append_unique_text(items: [text], value: text) -> [text]:
+    if value == "" or _contains_text(items, value):
+        return items
+    var out: [text] = []
+    for item in items:
+        out.push(item)
+    out.push(value)
+    out
+
+pub fn tool_probe_evaluate_observations(observations: [ToolProbeObservation]) -> ToolProbeOutcome:
+    """Pure classification separating absent tools from existing candidates whose --version failed."""
+    var failed: [text] = []
+    for obs in observations:
+        if obs.path != "" and obs.exists_on_disk:
+            if obs.probe_ok:
+                return ToolProbeOutcome(
+                    found_path: obs.path,
+                    failed_candidates: [],
+                    had_existing_candidate: true
+                )
+            failed = _append_unique_text(failed, obs.path)
+    ToolProbeOutcome(
+        found_path: "",
+        failed_candidates: failed,
+        had_existing_candidate: failed.len() > 0
+    )
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn tool_probe_decide_counts(candidates_key: text, prev_absent_misses: i64, prev_transient_misses: i64, outcome: ToolProbeOutcome) -> ToolCacheDecision:
+    """Pure state transition deciding cache path, absent/transient miss counts, retry, and diagnostic."""
+    if outcome.found_path != "":
+        return ToolCacheDecision(
+            cached_path: outcome.found_path,
+            absent_misses: 0,
+            transient_misses: 0,
+            should_retry: false,
+            diagnostic: ""
+        )
+    if outcome.had_existing_candidate or outcome.failed_candidates.len() > 0:
+        val next_transient = prev_transient_misses + 1
+        val can_retry = next_transient < _FIND_TOOL_MAX_TRANSIENT_MISSES
+        val diag = format_tool_probe_diagnostic_with_cap(candidates_key, "", outcome.failed_candidates, false, not can_retry)
+        return ToolCacheDecision(
+            cached_path: "",
+            absent_misses: 0,
+            transient_misses: next_transient,
+            should_retry: can_retry,
+            diagnostic: diag
+        )
+    val next_misses = prev_absent_misses + 1
+    val can_retry = next_misses < _FIND_TOOL_MAX_MISSES
+    val diag = format_tool_probe_diagnostic_with_cap(candidates_key, "", [], not can_retry, false)
+    ToolCacheDecision(
+        cached_path: "",
+        absent_misses: next_misses,
+        transient_misses: prev_transient_misses,
+        should_retry: can_retry,
+        diagnostic: diag
+    )
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn tool_probe_decide(candidates_key: text, prev_absent_misses: i64, outcome: ToolProbeOutcome) -> ToolCacheDecision:
+    """Pure state transition from a discovery outcome (starting at zero transient misses)."""
+    tool_probe_decide_counts(candidates_key, prev_absent_misses, 0, outcome)
+
+fn _find_tool_cache_index(key: text) -> i64:
     var idx = -1
     var i = 0
     while i < _find_tool_cache_keys.len():
         if _find_tool_cache_keys[i] == key:
             idx = i
         i = i + 1
-    if idx >= 0:
-        if _find_tool_cache_paths[idx] != "" or _find_tool_cache_misses[idx] >= _FIND_TOOL_MAX_MISSES:
-            return _find_tool_cache_paths[idx]
-    val found = _find_tool_discover(candidates)
+    idx
+
+fn _find_tool_cache_check_unlocked(key: text) -> ToolCacheLookup:
+    val idx = _find_tool_cache_index(key)
+    if idx < 0:
+        return ToolCacheLookup(hit: false, path: "", diagnostic: "")
+    val cached_path = _find_tool_cache_paths[idx]
+    val absent_misses = _find_tool_cache_misses[idx]
+    val transient_misses = _find_tool_cache_transient_misses[idx]
+    if tool_cache_should_reuse_counts(cached_path, absent_misses, transient_misses):
+        return ToolCacheLookup(
+            hit: true,
+            path: cached_path,
+            diagnostic: _find_tool_cache_diagnostics[idx]
+        )
+    ToolCacheLookup(hit: false, path: "", diagnostic: "")
+
+fn _find_tool_cache_record_unlocked(key: text, outcome: ToolProbeOutcome) -> text:
+    val idx = _find_tool_cache_index(key)
+    val prev_misses = if idx < 0: 0 else: _find_tool_cache_misses[idx]
+    val prev_transient = if idx < 0: 0 else: _find_tool_cache_transient_misses[idx]
+    val decision = tool_probe_decide_counts(key, prev_misses, prev_transient, outcome)
     if idx < 0:
         _find_tool_cache_keys.push(key)
-        _find_tool_cache_paths.push(found)
-        _find_tool_cache_misses.push(if found == "": 1 else: 0)
+        _find_tool_cache_paths.push(decision.cached_path)
+        _find_tool_cache_misses.push(decision.absent_misses)
+        _find_tool_cache_transient_misses.push(decision.transient_misses)
+        _find_tool_cache_diagnostics.push(decision.diagnostic)
     else:
-        _find_tool_cache_paths[idx] = found
-        if found == "":
-            _find_tool_cache_misses[idx] = _find_tool_cache_misses[idx] + 1
-    found
+        _find_tool_cache_paths[idx] = decision.cached_path
+        _find_tool_cache_misses[idx] = decision.absent_misses
+        _find_tool_cache_transient_misses[idx] = decision.transient_misses
+        _find_tool_cache_diagnostics[idx] = decision.diagnostic
+    _last_tool_probe_diagnostic = decision.diagnostic
+    decision.cached_path
 
-fn _find_tool_discover(candidates: [text]) -> text:
-    """Uncached discovery body of _find_tool (non-strict path only)."""
+fn _clear_last_tool_probe_diagnostic_if_needed():
+    if not tool_cache_can_persist():
+        return
+    val held = _find_tool_cache_lock_acquire()
+    if _last_tool_probe_diagnostic != "":
+        _last_tool_probe_diagnostic = ""
+    _find_tool_cache_lock_release(held)
+
+fn _set_last_tool_probe_diagnostic(msg: text):
+    if not tool_cache_can_persist():
+        return
+    val held = _find_tool_cache_lock_acquire()
+    _last_tool_probe_diagnostic = msg
+    _find_tool_cache_lock_release(held)
+
+pub fn find_tool_cache_check(key: text) -> ToolCacheLookup:
+    """Locked read-only lookup of the per-process cache (safe on concurrent workers and in transient scopes)."""
+    val held = _find_tool_cache_lock_acquire()
+    val lookup = _find_tool_cache_check_unlocked(key)
+    _find_tool_cache_lock_release(held)
+    lookup
+
+# reason: internal LLVM tool-probe cache helper exported for unit specs
+@allow(primitive_api)
+pub fn find_tool_cache_record_with_persist(key: text, outcome: ToolProbeOutcome, allow_persist: bool) -> text:
+    """Update per-process cache and diagnostic state when `allow_persist` is true.
+
+    When inside an active transient scope (`allow_persist == false`), return
+    `outcome.found_path` directly without storing scope-owned strings or array
+    buffers in process-lifetime globals.
+    """
+    if not allow_persist:
+        return outcome.found_path
+    val held = _find_tool_cache_lock_acquire()
+    val res = _find_tool_cache_record_unlocked(key, outcome)
+    _find_tool_cache_lock_release(held)
+    res
+
+pub fn find_tool_cache_record(key: text, outcome: ToolProbeOutcome) -> text:
+    """Update the per-process cache and diagnostic state when outside a transient scope."""
+    find_tool_cache_record_with_persist(key, outcome, tool_cache_can_persist())
+
+pub fn find_tool_cache_commit_probe(key: text, outcome: ToolProbeOutcome) -> text:
+    """Commit a probe outcome under the cache spinlock with double-check against concurrent winners."""
+    if not tool_cache_can_persist():
+        return outcome.found_path
+    val held = _find_tool_cache_lock_acquire()
+    val recheck = _find_tool_cache_check_unlocked(key)
+    if recheck.hit and (recheck.path != "" or outcome.found_path == ""):
+        _find_tool_cache_lock_release(held)
+        return recheck.path
+    val res = _find_tool_cache_record_unlocked(key, outcome)
+    _find_tool_cache_lock_release(held)
+    res
+
+fn _find_tool(candidates: [text]) -> text:
+    """Find a WORKING tool using platform-appropriate detection.
+
+    Priority: env-provided LLVM bin dirs (SIMPLE_LLVM_BIN,
+    LLVM_SYS_231_PREFIX/bin, SIMPLE_LLVM_WIN_ROOT_23/bin,
+    LLVM_SYS_180_PREFIX/bin, SIMPLE_LLVM_MINGW_ROOT/bin) -> /usr/bin ->
+    in-process PATH scan -> `where` (Windows, every listed path tried in
+    order) -> Homebrew keg-only prefixes (macOS). Every hit is verified by
+    EXECUTING the candidate (`--version`, exit 0) before it is returned — a
+    bare existence probe selected a DLL-broken mingw64 llc on Windows and
+    produced "Bootstrap LLVM llc failed" far downstream.
+    Bootstrap-safe.
+    """
+    if native_tool_strict_requested_v1():
+        if candidates.len() == 0:
+            _set_last_tool_probe_diagnostic("strict tool resolution failed: empty candidates")
+            return ""
+        val name = candidates[candidates.len() - 1]
+        val role = if name == "clang": "cc" else: name
+        # Missing, changed or unadmitted tools never fall through to discovery.
+        match native_tool_strict_resolve_v1(role):
+            Ok(path):
+                _clear_last_tool_probe_diagnostic_if_needed()
+                return path
+            Err(_):
+                _set_last_tool_probe_diagnostic("strict tool resolution failed for role: {role}")
+                return ""
+    val key = candidates.join(",")
+    val lookup = find_tool_cache_check(key)
+    if lookup.hit:
+        return lookup.path
+    val outcome = _find_tool_discover_outcome(candidates)
+    find_tool_cache_commit_probe(key, outcome)
+
+pub fn find_tool_for_candidates(candidates: [text]) -> text:
+    """Public entrypoint to resolve a tool candidate list through _find_tool."""
+    _find_tool(candidates)
+
+fn _probe_candidate_paths(paths: [text], require_file_exists: bool, prev_failed: [text]) -> ToolProbeOutcome:
+    var failed = prev_failed
+    for path in paths:
+        if path != "":
+            val exists = if require_file_exists: file_exists(path) else: (file_exists(path) or _tool_path_is_absolute(path))
+            if exists:
+                if _tool_runs(path):
+                    return ToolProbeOutcome(
+                        found_path: path,
+                        failed_candidates: [],
+                        had_existing_candidate: true
+                    )
+                failed = _append_unique_text(failed, path)
+    ToolProbeOutcome(
+        found_path: "",
+        failed_candidates: failed,
+        had_existing_candidate: failed.len() > 0
+    )
+
+fn _find_tool_discover_outcome(candidates: [text]) -> ToolProbeOutcome:
+    """Uncached discovery body returning hit path or failed existing candidate(s)."""
+    var failed: [text] = []
     # Env-provided dirs first (see _env_tool_dirs docstring). With
-    # SIMPLE_LLVM_BIN set and the tool present there, no `where`/`command -v`
-    # process is ever spawned.
+    # SIMPLE_LLVM_BIN or SIMPLE_LLVM_MINGW_ROOT set and the tool present there,
+    # no `where`/`command -v` process is ever spawned.
+    var env_paths: [text] = []
     for dir in _env_tool_dirs():
         for candidate in candidates:
-            for path in [dir + "/" + candidate, dir + "/" + candidate + ".exe"]:
-                if file_exists(path) and _tool_runs(path):
-                    return path
+            env_paths.push(dir + "/" + candidate)
+            env_paths.push(dir + "/" + candidate + ".exe")
+    val env_res = _probe_candidate_paths(env_paths, true, failed)
+    if env_res.found_path != "":
+        return env_res
+    failed = env_res.failed_candidates
+
     val on_windows = host_os() == "windows"
     for candidate in candidates:
         # /usr/bin and the POSIX `command -v` probe are meaningless under
         # cmd.exe; on Windows only `where` below applies.
-        if not on_windows and file_exists("/usr/bin/{candidate}") and _tool_runs("/usr/bin/{candidate}"):
-            return "/usr/bin/{candidate}"
         # PATH hit resolved in process to the file it names. This used to ask
         # `command -v` and return the BARE name, but callers spawn the result
         # with process_run, which does not search PATH: every AOT unit then
@@ -160,9 +505,19 @@ fn _find_tool_discover(candidates: [text]) -> text:
         # backend_tool_on_path follows the host rules (`:` on POSIX; `;`,
         # the working directory and PATHEXT on Windows). Only an absolute hit
         # is returned; a relative PATH entry falls through to `where`.
+        var step_paths: [text] = []
+        if not on_windows:
+            val usr_path = "/usr/bin/{candidate}"
+            if file_exists(usr_path):
+                step_paths.push(usr_path)
         val on_path = backend_tool_on_path([candidate])
-        if _tool_path_is_absolute(on_path) and _tool_runs(on_path):
-            return on_path
+        if _tool_path_is_absolute(on_path):
+            step_paths.push(on_path)
+        val step_res = _probe_candidate_paths(step_paths, false, failed)
+        if step_res.found_path != "":
+            return step_res
+        failed = step_res.failed_candidates
+
         # Windows fallback: `where` can list several installs and the FIRST
         # can be broken (mingw64 llc missing its own DLLs) while a later one
         # works (e.g. an LLVM MSVC release install). Try each resolved path
@@ -171,19 +526,35 @@ fn _find_tool_discover(candidates: [text]) -> text:
         # invocation sites that build shell strings from this result.
         val (wout, werr, wcode) = backend_shell_tuple("where {candidate}")
         if wcode == 0:
+            var where_paths: [text] = []
             for line in wout.split("\n"):
                 # `where` output is CRLF-terminated; strip \r explicitly.
                 val p = line.replace("\r", "").trim()
-                if p != "" and _tool_runs(p):
-                    return p
+                if p != "":
+                    where_paths.push(p)
+            val where_res = _probe_candidate_paths(where_paths, false, failed)
+            if where_res.found_path != "":
+                return where_res
+            failed = where_res.failed_candidates
+
     # Homebrew keg-only fallback (macOS): probe absolute prefixes for the
     # unversioned tool name (last candidate in the fallback chain).
     if candidates.len() > 0:
         val base_name = candidates[candidates.len() - 1]
-        for path in tool_probe_locations(base_name):
-            if file_exists(path) and _tool_runs(path):
-                return path
-    ""
+        val brew_res = _probe_candidate_paths(tool_probe_locations(base_name), true, failed)
+        if brew_res.found_path != "":
+            return brew_res
+        failed = brew_res.failed_candidates
+
+    ToolProbeOutcome(
+        found_path: "",
+        failed_candidates: failed,
+        had_existing_candidate: failed.len() > 0
+    )
+
+fn _find_tool_discover(candidates: [text]) -> text:
+    """Uncached discovery body of _find_tool (non-strict path only)."""
+    _find_tool_discover_outcome(candidates).found_path
 
 # ============================================================================
 # LLVM Tool Discovery
