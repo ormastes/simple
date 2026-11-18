@@ -1371,8 +1371,10 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text:
         var info = rows.info[i]
         var shndx = rows.shndx[i]
         var value = rows.value[i]
-        if (info & 15) == 10 and ifunc_at.has(rows.names[i]):
-            # address-taken static IFUNC: the symbol is its IPLT entry (ld.lld)
+        if (info & 15) == 10 and (info >> 4) != STB_LOCAL and ifunc_at.has(rows.names[i]):
+            # address-taken static IFUNC: the symbol is its IPLT entry (ld.lld).
+            # ponytail: globals only (names unique after resolution); a local
+            # IFUNC row keeps the resolver value. Upgrade: key rows by (oi, si).
             info = (info & 0xf0) | 2
             shndx = iplt_sh
             value = ifunc_at[rows.names[i]]
@@ -2285,7 +2287,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             # ld.lld interworks THM_CALL only for STT_FUNC targets: any other
             # defined target keeps the object's BL/BLX (patched like THM_JUMP24)
             val dt = elf_ref_def_type(ctx, r)
-            if dt >= 0 and dt != 2:
+            if dt >= 0 and dt != 2 and dt != 10:
                 rtype = 30
         if elf_target_is_riscv(target) and r.rtype == 60:
             if j + 1 >= refs.len(): return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations")
@@ -2664,7 +2666,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         var ifunc_at: {text: i64} = {}
         for ar in refs:
             val ak = ar.key
-            if ifunc_idx.has(ak) and (ar.rclass == RC_ABS64 or ar.rclass == RC_ABS_NARROW or ar.rclass == RC_PCREL):
+            if ifunc_idx.has(ak) and ak.starts_with("global:") and (ar.rclass == RC_ABS64 or ar.rclass == RC_ABS_NARROW or ar.rclass == RC_PCREL):
                 ifunc_at[ar.name] = elf_iplt_entry_addr(target, iplt_v, ifunc_idx[ak], false)
         val symtab = elf_build_symtab(ctx, lay, w32, ifunc_at)?
         image = if w32: elf_append_symtab32(image, symtab)? else: elf_append_symtab(image, symtab)?
