@@ -11,6 +11,15 @@ use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
+extern fn rt_array_free<T>(array: [T])
+
+fn module_surface_freeze_republish_v1<T>(previous: [T]) -> [T]:
+    val published = previous.copy()
+    # Only the superseded outer array is released. Its text/declaration
+    # payloads are intentionally shared with the registry-scope copy.
+    rt_array_free(previous)
+    published
+
 val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v3"
 
 # Stable bottom-up merge sort: each pass appends every row once instead of
@@ -629,18 +638,18 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         # Per-file promotion keeps these projections readable until freeze,
         # but their backing arrays still belong to the file scope. Publish
         # fresh registry-scope carriers before any HIR module scope can end.
-        surface.composite_names = surface.composite_names.copy()
-        surface.enum_names = surface.enum_names.copy()
-        surface.trait_names = surface.trait_names.copy()
-        surface.callable_names = surface.callable_names.copy()
-        surface.type_alias_names = surface.type_alias_names.copy()
-        surface.constant_names = surface.constant_names.copy()
-        surface.composite_values = surface.composite_values.copy()
-        surface.enum_values = surface.enum_values.copy()
-        surface.trait_values = surface.trait_values.copy()
-        surface.callable_values = surface.callable_values.copy()
-        surface.type_alias_values = surface.type_alias_values.copy()
-        surface.constant_values = surface.constant_values.copy()
+        surface.composite_names = module_surface_freeze_republish_v1(surface.composite_names)
+        surface.enum_names = module_surface_freeze_republish_v1(surface.enum_names)
+        surface.trait_names = module_surface_freeze_republish_v1(surface.trait_names)
+        surface.callable_names = module_surface_freeze_republish_v1(surface.callable_names)
+        surface.type_alias_names = module_surface_freeze_republish_v1(surface.type_alias_names)
+        surface.constant_names = module_surface_freeze_republish_v1(surface.constant_names)
+        surface.composite_values = module_surface_freeze_republish_v1(surface.composite_values)
+        surface.enum_values = module_surface_freeze_republish_v1(surface.enum_values)
+        surface.trait_values = module_surface_freeze_republish_v1(surface.trait_values)
+        surface.callable_values = module_surface_freeze_republish_v1(surface.callable_values)
+        surface.type_alias_values = module_surface_freeze_republish_v1(surface.type_alias_values)
+        surface.constant_values = module_surface_freeze_republish_v1(surface.constant_values)
 
         var import_target_indices: [i64] = []
         var import_target_names: [text] = []
@@ -837,6 +846,12 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         surface.import_target_indices = import_target_indices
         surface.import_target_names = import_target_names
         surface.import_resolution_traces = import_resolution_traces
+        # The rebuilt import rows replace these outer arrays, not their shared
+        # text payloads. Retire only the superseded array carriers.
+        rt_array_free(surface.import_item_offsets)
+        rt_array_free(surface.import_item_names)
+        rt_array_free(surface.import_item_aliases)
+        rt_array_free(surface.import_item_has_alias)
         surface.import_item_offsets = import_item_offsets
         surface.import_item_names = import_item_names
         surface.import_item_aliases = import_item_aliases
