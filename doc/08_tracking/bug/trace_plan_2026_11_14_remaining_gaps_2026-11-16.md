@@ -22,6 +22,18 @@ is now the closed enum `TraceLocatorKind` (text only at the SDN boundary via
 `TraceGraphLocatorV1.locator_kind` stays `text` and is validated by
 `graph_schema_v1.spl`.
 
+## 3. MCP / ctx
+
+- `simple_ctx_purge` lost-write window is narrowed, not closed. Appends now
+  re-check the store size after writing (`_ctx_append_chunks_settled`,
+  `src/app/mcp/main_lazy_ctx_tools.spl`), which catches a purge rename landing
+  between an append's write and its re-check. Still lost: an append whose size
+  read, write and re-check all land between `ctx_purge_commit`'s final key check
+  and its rename; and a same-size false pass (a purge that shrinks the file by
+  exactly the appended bytes). Unblock: an OS compare-and-rename, or the purge
+  re-reading the store after its rename and replaying rows appended since its
+  snapshot.
+
 ## 4. Test query and harness
 
 - The plan (sections 3.5, 9.1) lists `TESTDB-001`..`TESTDB-010` as one range with
