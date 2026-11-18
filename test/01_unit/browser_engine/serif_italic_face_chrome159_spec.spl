@@ -1,0 +1,188 @@
+"""
+## Purpose and audience
+Purpose: Pin the FACE of italic and bold-italic serif text against Chrome 159.
+The style router sent italic only to the sans and mono italic faces, so `<i>` /
+`<em>` in a serif family (and in the default serif face of a page without a
+served `font-family`) painted Liberation Serif REGULAR upright: the `<i>` band
+below was byte-identical to the regular `<span>` band (dark sum 279172 for
+both), and `<b><i>` painted the upright Bold face (120 px wide). Chrome 159 on
+Linux paints LiberationSerif-Italic.ttf and LiberationSerif-BoldItalic.ttf:
+`<i>Hamburgefonstiv</i>` at 16px is 110.52 px wide, `<b><i>` 115.56, against
+the upright faces' 111.69 / 120.00 (`getBoundingClientRect`).
+Audience: web renderer text / font face resolution maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=1 --window-size=320,100
+--screenshot`), default family (serif), `color:#000` on white, page `_page()`.
+dark = 765 - (r+g+b); extent = columns with dark > 150.
+
+| band (rows)             | Chrome x / dark   | base x / dark     | head x / dark     |
+|-------------------------|-------------------|-------------------|-------------------|
+| `<i>` 16px (0..34)      | 0..110 / 279321   | 0..111 / 279172   | 0..110 / 275672   |
+| `<b><i>` 16px (34..68)  | 0..115 / 406769   | 0..119 / 428710   | 0..115 / 405218   |
+| `<span>` 16px (68..100) | 0..111 / 286470   | 0..111 / 279172   | 0..111 / 279172   |
+
+`H` left stem slant, dark of x=0..1 (top row of the stem, then its foot):
+`<i>` row 6 Chrome 0 / base 207 / head 0, row 14 Chrome 488 / base 207 /
+head 456; `<b><i>` row 40 Chrome 0 / base 312 / head 0, row 48 Chrome 432 /
+base 312 / head 408.
+
+Slant probe, page `_page_60()` (60px `l` at left 20 / 120 / 220), first column
+with dark > 380 four rows below the ink top and four rows above the ink bottom:
+
+| glyph      | Chrome top / bottom | base top / bottom | head top / bottom |
+|------------|---------------------|-------------------|-------------------|
+| `<i>`      | 30 / 24             | 26 / 26           | 29 / 24           |
+| `<b><i>`   | 128 / 122           | 124 / 124         | 128 / 122         |
+| `<span>`   | 226 / 226           | 226 / 226         | 226 / 226         |
+
+(The `<i>` top probe is 1 px left of Chrome because the 60px ink box sits two
+rows higher here, rows 11..52 against Chrome's 13..53, for the upright face
+too: a vertical placement difference this spec does not pin.)
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-FONT-ITALIC-001 — italic and bold-italic serif text (`<i>`, `<em>`, `<b><i>`) paints the Liberation Serif Italic / BoldItalic faces, as Chrome 159 on Linux.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/nogc_sync_mut/text_layout/font_provider.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SERIF_ITALIC: text = "/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf"
+val SERIF_BOLD_ITALIC: text = "/usr/share/fonts/truetype/liberation/LiberationSerif-BoldItalic.ttf"
+val W: i32 = 320
+val H: i32 = 100
+
+fn _page() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff\"><i style=\"position:absolute;left:0;top:2px;font-size:16px;color:#000\">Hamburgefonstiv</i><b style=\"position:absolute;left:0;top:36px;font-size:16px;color:#000\"><i>Hamburgefonstiv</i></b><span style=\"position:absolute;left:0;top:70px;font-size:16px;color:#000\">Hamburgefonstiv</span></body></html>"
+
+fn _page_60() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff\"><i style=\"position:absolute;left:20px;top:0;font-size:60px;color:#000\">l</i><b style=\"position:absolute;left:120px;top:0;font-size:60px;color:#000\"><i>l</i></b><span style=\"position:absolute;left:220px;top:0;font-size:60px;color:#000\">l</span></body></html>"
+
+fn _faces_present() -> bool:
+    file_exists(SERIF_ITALIC) and file_exists(SERIF_BOLD_ITALIC)
+
+fn _dark(px: u32) -> i32:
+    765 - (((px >> 16) & 0xFFu32) + ((px >> 8) & 0xFFu32) + (px & 0xFFu32)).to_i32()
+
+# Summed dark over rows y0..y1-1.
+fn _band_dark(px: [u32], y0: i32, y1: i32) -> i32:
+    var sum = 0
+    var y = y0
+    while y < y1:
+        var x = 0
+        while x < W:
+            sum = sum + _dark(px[y * W + x])
+            x = x + 1
+        y = y + 1
+    sum
+
+# Rightmost column with dark > 150 over rows y0..y1-1, or -1.
+fn _band_right(px: [u32], y0: i32, y1: i32) -> i32:
+    var right = -1
+    var y = y0
+    while y < y1:
+        var x = 0
+        while x < W:
+            if _dark(px[y * W + x]) > 150 and x > right:
+                right = x
+            x = x + 1
+        y = y + 1
+    right
+
+# Summed dark of x=0..1 on row y (the left edge of the `H` stem).
+fn _edge_dark(px: [u32], y: i32) -> i32:
+    _dark(px[y * W]) + _dark(px[y * W + 1])
+
+# First column in x0..x1-1 with dark > 380 on row y, or -1.
+fn _row_first(px: [u32], y: i32, x0: i32, x1: i32) -> i32:
+    var x = x0
+    while x < x1:
+        if _dark(px[y * W + x]) > 380:
+            return x
+        x = x + 1
+    -1
+
+# First (want_last false) or last row with dark > 380 in columns x0..x1-1, or -1.
+fn _ink_row(px: [u32], x0: i32, x1: i32, want_last: bool) -> i32:
+    var found = -1
+    var y = 0
+    while y < H:
+        if _row_first(px, y, x0, x1) >= 0:
+            if not want_last:
+                return y
+            found = y
+        y = y + 1
+    found
+
+# Stem left edge four rows below the ink top of the glyph in x0..x1-1.
+fn _stem_top(px: [u32], x0: i32, x1: i32) -> i32:
+    _row_first(px, _ink_row(px, x0, x1, false) + 4, x0, x1)
+
+# Stem left edge four rows above the ink bottom of the glyph in x0..x1-1.
+fn _stem_bottom(px: [u32], x0: i32, x1: i32) -> i32:
+    _row_first(px, _ink_row(px, x0, x1, true) - 4, x0, x1)
+
+fn _within_pct(ours: i32, chrome: i32, pct: i32) -> bool:
+    val d = if ours > chrome: ours - chrome else: chrome - ours
+    d * 100 <= chrome * pct
+
+describe "italic serif face against Chrome 159":
+    it "AC-1: `<i>` at 16px in the default serif paints Liberation Serif Italic":
+        if not _faces_present():
+            skip("no Liberation Serif Italic on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome ink extent x=0..110 (upright face ends at 111)")
+        expect(_band_right(px, 0, 34)).to_equal(110)
+        step("Chrome band dark 279321, within 3%")
+        expect(_within_pct(_band_dark(px, 0, 34), 279321, 3)).to_be(true)
+        step("Chrome H stem leans: x=0..1 dark 0 on row 6 (upright 207), 488 on row 14 (upright 207), within 10%")
+        expect(_edge_dark(px, 6)).to_equal(0)
+        expect(_within_pct(_edge_dark(px, 14), 488, 10)).to_be(true)
+
+    it "AC-2: `<b><i>` at 16px in the default serif paints Liberation Serif BoldItalic":
+        if not _faces_present():
+            skip("no Liberation Serif BoldItalic on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome ink extent x=0..115 (upright Bold ends at 119)")
+        expect(_band_right(px, 34, 68)).to_equal(115)
+        step("Chrome band dark 406769 (upright Bold 428710), within 3%")
+        expect(_within_pct(_band_dark(px, 34, 68), 406769, 3)).to_be(true)
+        step("Chrome H stem leans: x=0..1 dark 0 on row 40 (upright 312), 432 on row 48 (upright 312), within 10%")
+        expect(_edge_dark(px, 40)).to_equal(0)
+        expect(_within_pct(_edge_dark(px, 48), 432, 10)).to_be(true)
+
+    it "AC-3: regular serif at 16px keeps the upright regular face":
+        if not _faces_present():
+            skip("no Liberation Serif Italic on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome ink extent x=0..111, band dark 286470, within 3%")
+        expect(_band_right(px, 68, 100)).to_equal(111)
+        expect(_within_pct(_band_dark(px, 68, 100), 286470, 3)).to_be(true)
+
+    it "AC-4: 60px serif `l` stems slant in italic and bold-italic only":
+        if not _faces_present():
+            skip("no Liberation Serif Italic on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page_60(), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("`<i>`: Chrome stem edge 30 near the top, 24 near the bottom (upright 26 / 26)")
+        val i_top = _stem_top(px, 0, 100)
+        expect(i_top >= 29 and i_top <= 30).to_be(true)
+        expect(_stem_bottom(px, 0, 100)).to_equal(24)
+        step("`<b><i>`: Chrome stem edge 128 near the top, 122 near the bottom (upright Bold 124 / 124)")
+        expect(_stem_top(px, 100, 200)).to_equal(128)
+        expect(_stem_bottom(px, 100, 200)).to_equal(122)
+        step("`<span>`: Chrome stem edge 226 top and bottom")
+        expect(_stem_top(px, 200, 320)).to_equal(226)
+        expect(_stem_bottom(px, 200, 320)).to_equal(226)
