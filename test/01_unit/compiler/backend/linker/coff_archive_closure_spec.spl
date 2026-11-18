@@ -1,7 +1,7 @@
 use std.spec.*
 use compiler.backend.linker.coff.coff_object.{coff_parse_object}
 use compiler.backend.linker.coff.archive_closure.{
-    coff_archive_members, coff_archive_closure}
+    coff_archive_members, coff_archive_closure, coff_archive_closure_retained}
 
 fn _ca_ascii(bytes: [u8], value: text, width: i64) -> [u8]:
     var result = bytes
@@ -213,12 +213,17 @@ describe "COFF archive closure":
         expect(search_library.members.len()).to_equal(1)
         expect(search_library.members[0].name).to_equal("weak.obj")
 
-    it "extracts CRT loader metadata symbols when archives provide them":
+    it "extracts _load_config_used but not an unreferenced _tls_used, as lld-link does":
+        # lld-link force-resolves _load_config_used when an archive provides it;
+        # mingw tlssup (_tls_used) loads only on a real reference, else the image
+        # gains a TLS directory lld does not emit.
         val root = coff_parse_object(_ca_object("_start", 1)).unwrap()
-        val closure = coff_archive_closure([root], [
+        val archives = [
             _ca_archive("tls.obj", _ca_long_symbol_object("_tls_used")),
             _ca_archive("loadcfg.obj",
-                _ca_long_symbol_object("_load_config_used"))]).unwrap()
-        expect(closure.members.len()).to_equal(2)
-        expect(closure.members[0].name).to_equal("tls.obj")
-        expect(closure.members[1].name).to_equal("loadcfg.obj")
+                _ca_long_symbol_object("_load_config_used"))]
+        val closure = coff_archive_closure([root], archives).unwrap()
+        expect(closure.members.len()).to_equal(1)
+        expect(closure.members[0].name).to_equal("loadcfg.obj")
+        val referenced = coff_archive_closure_retained([root], archives, ["_tls_used"]).unwrap()
+        expect(referenced.members.len()).to_equal(2)
