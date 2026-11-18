@@ -2887,6 +2887,45 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
   | animation | 2.77 | 2.46 |
   | evidence | 0.77 | 0.68 |
 
+## 2026-11-18 — Fractional font-size glyph raster (float x scale + float pens)
+- **Was:** after #10100, layout used the float size (18.72 px), but every glyph was still rasterised at the rounded size (19 px) on the run's whole-pixel pens. `_lcd_apply_pen_phases` compared the layout's 18.72 advances with whole-19 px pens, found a mismatch, and silently returned, so the run got no quarter phases at all.
+- **Measured** (Liberation Sans, `line-height:normal`, 320x40, mismatched px > 8 / summed |delta|):
+
+  | page | base | pens only | x scale only | both | whole-px reference |
+  |---|---|---|---|---|---|
+  | sans 18.72 | 1264 / 158k | 1066 / 99k | 933 / 130k | 725 / 70k | 19 px: 379 |
+  | sans 13.28 | 666 / 74k | 535 / 33k | 532 / 71k | 309 / 28k | 13 px: 209 |
+  | serif 18.72 | 1235 / 140k | 1048 / 100k | 1197 / 130k | 814 / 78k | |
+  | serif 13.28 | 687 / 84k | 514 / 37k | 653 / 82k | 369 / 34k | |
+  | sans 10.72 | 567 / 65k | 438 / 31k | 506 / 54k | 252 / 20k | |
+
+  - Pens contribute most of the summed delta; the x scale contributes the most mismatched px at 18.72, because each 19 px glyph is 1.5 % too wide. Neither alone is enough.
+  - **Vertical hinting contributes nothing.** Chrome's 18.72 px rows equal its 19 px rows, and its 13.28 rows equal its 13 rows. FreeType's light autohinter fits the y scale to the whole-pixel x-height. The 18.72 residual after the fix has the same row shape as the whole-19 px residual.
+- **Change:**
+  - The producer emits `font-size-milli` on the text command only when the size is fractional. `draw_ir_device_scale` scales it by k.
+  - `draw_ir_adv` → `Engine2D.draw_text_with_advances(..., size_milli)` (and the `_vulkan_only` twin) → `stage_text_with_advances_configured` → `_lcd_apply_pen_phases`.
+  - **Exact pens:** the paint side rebuilds the layout's model (`resolve_font_metrics_with_language_milli`). It takes exact milli pens at ref = 8 x round(size), capped at 512, and rescales them to `size_milli`. Whole-pixel boundaries use `round(round(ref_pen) * milli / ref)`. On the 18.72 probe the advances match the layout's exactly. A mismatch keeps the float outline at phase 0.
+  - **Raster:** every glyph of a fractional run is swapped for a cell from `sfnt_render_glyph_lcd_milli`. The outline x is scaled by `milli / (size_px * 1000)`. y, the hint knots and the hint cache stay at the whole `size_px`, so the "13.5 rounds down for rows" pin holds.
+  - Cells are keyed `glyph_index = -1 - phase - 4 * size_milli`, and `_lcd_phase_glyphs` includes `x_milli`.
+  - Whole-px runs carry no prop and take the old code path byte for byte.
+- **Pin:** `fractional_glyph_raster_chrome159_spec` (18.72 and 13.28, four Chrome windows). Red 0/2 on base, green 2/2.
+- **Catalog 1x** (base and head measured on the same seed; rows lowered to head):
+
+  | page | base | head |
+  |---|---|---|
+  | html | 2.44 | 2.35 |
+  | css-layout | 2.29 | 2.22 |
+  | css-paint | 2.50 | 2.43 |
+  | forms-media | 2.40 | 2.33 |
+  | animation | 2.39-2.46 | 2.33-2.40 (paired re-runs 2.46 -> 2.33 twice) |
+- **Catalog dpr4:** identical on all 8 pages, base and head (css-paint 4.87 against its 4.49 row is red on base, from the strut lane). No catalog page has a fractional LCD run at dpr4.
+- **Perf** (css-paint 1x, same seed): base 54.5 / 53.2 s, head 55.8 / 52.6 s; RSS 774-791 MB on both.
+- **Not done / found:**
+  - Grayscale glyphs (device size > 48 px, i.e. 18.72 and 13.28 at dpr4) still rasterise at the whole device size.
+  - At dpr4 the layout advances are k x CSS advances, which never equal the device-size model. A fractional LCD run (10.72 x 4) therefore takes the float outline at phase 0.
+  - **Serif bold is not bold** (separate bug, face resolution): `font-family:serif;font-weight:bold`, including the UA serif `<h3>`, paints Liberation Serif Regular on both the LCD and gray paths, even at 19 px. That is 1839 mismatched px per line against Chrome, which dwarfs the fractional effect on serif h3 lines. Sans bold is fine.
+  - **`line-height:1` at a fractional size** puts the baseline one row low. Blink floors the half-leading (-1.14 → -2), and Simple does not. That belongs to the line-box lane.
+
 ## Images
 
 - Raster (software) lane paints `<img>` only via `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)`; the plain entries paint none. The painter (`_fb_paint_img_clip`, paint_raster) runs in document order right after the node's box paint, with Draw IR geometry via the shared `html_image_fit_size`. Nearest-neighbour is exact only for uniform images (`# ponytail:`); overlapping-paint opacity cells (`tg_page` (50,12)) stay un-admitted on the raster. Spec: `test/01_unit/browser_engine/img_raster_chrome159_spec.spl`.
