@@ -69,16 +69,24 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostLinuxServic
     host_agent_cancel_request_decode_v4, host_agent_cancel_archive_check_v4, host_linux_service_agent_cancel_authorize_v4,
     HostAgentActionAuthorityV4, host_agent_detach_apply_v4, host_linux_service_agent_attachment_inspect_v4,
     HostAgentAttachServiceV4, host_agent_attach_apply_v4, HostAgentTerminalAuthorityV4, host_agent_terminal_authority_v4,
-    host_linux_service_agent_attachment_authority_inspect_v4}
+    host_linux_service_agent_attachment_authority_inspect_v4,
+    host_linux_service_agent_attachment_lease_v4, host_linux_service_agent_pane_io_v4}
+use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
+use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4,
+    host_agent_pane_io_refused_v4}
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attachment_live_v4, HostAgentReleaseContextV4,
     HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, host_agent_attachment_release_step_v4,
     host_agent_attach_archive_relative_v4, HOST_AGENT_ATTACH_MAX_BYTES_V4, HOST_AGENT_ATTACH_READY_V4,
-    HOST_AGENT_ATTACH_ADOPTED_V4}
+    HOST_AGENT_ATTACH_ADOPTED_V4, host_agent_pane_control_target_v4}
+use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlTargetV1
 use std.nogc_sync_mut.orchestration.host_helper_owner_v1.host_helper_prepare_check_v1
 use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
+use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.host_primary_attach_open_entry_check_v1
 use std.container.LinuxWorkspaceRootBorrowV3
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
+use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1,
+    host_service_handoff_consume_v1, host_service_handoff_abandon_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1}
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
@@ -136,6 +144,9 @@ pub class HostLinuxServiceCurrentV4:
     # after the journal and before any attach; "" when not opened (an attach then refuses). Pathname store: no
     # handle to close; it outlives every attachment release and is left in place across restarts.
     helper_store: text = ""
+    # AT-OPS-01: set only after a verified controller-signed handoff was published; this owner then admits nothing
+    # (inspect only) and is to be closed. The successor adopts the record at its own start.
+    draining: bool = false
 
     # Rechecks readers, installed records, the sealed proof under freshly read
     # installed policy, the actual native identity, Linux-protected journal
@@ -205,8 +216,9 @@ pub class HostLinuxServiceCurrentV4:
     # keep the service quarantined; no empty-ledger assertion releases them.
     pub fn status_v4() -> Result<text, text>:
         val metadata = self.current_v4()?
+        if self.draining: return Err("linux-host-service-draining")
+        if self.reconcile_error != "": return Err("linux-host-service-reconciliation-required:" + self.reconcile_error)
         if not self.capacity.unwrap().ledger.continuity_proven:
-            if self.reconcile_error != "": return Err("linux-host-service-reconciliation-required:" + self.reconcile_error)
             return Err("linux-host-service-reconciliation-required")
         linux_service_status_bytes_v4(self.records.unwrap().binding, self.scope.unwrap(), self.current_bytes, self.published)
 
@@ -370,7 +382,13 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
     # continuity flipped in memory only. The inventory must be lent for the
     # same epoch as this service; on any refusal startup stays published but
     # quarantined (status_v4 refuses).
-    if inventory.epoch_digest != initial_epoch_digest: owner.reconcile_error = "linux-host-service-inventory-epoch-mismatch"
+    # AT-OPS-01 (D1/D2): a pending controller-signed handoff is VERIFIED here, with the journal writer held and before
+    # any continuity flip; a refused one quarantines like a refused reconcile. It is consumed only after the reconcile
+    # below re-proved exclusion.
+    val adopted = host_service_handoff_verify_v1(journal, scope.unwrap(), loaded.unwrap().metadata.policy,
+        loaded.unwrap().metadata.configuration.controller_ref, host_local_context_v1(loaded.unwrap().metadata.policy), relative)
+    if adopted.is_err(): owner.reconcile_error = adopted.unwrap_err()
+    elif inventory.epoch_digest != initial_epoch_digest: owner.reconcile_error = "linux-host-service-inventory-epoch-mismatch"
     else:
         # milestone_0022 N3 (16, 17(C)): helper-cancel-resume runs FIRST; its owner is
         # adopted even on error (single writer); an error quarantines and skips the
@@ -381,7 +399,10 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
         else:
             val flipped = host_linux_service_reconcile_flip_v4(owner.capacity.unwrap(), native, inventory)
             if flipped.is_err(): owner.reconcile_error = flipped.unwrap_err()
-            else: owner.capacity = Some(flipped.unwrap())
+            else:
+                owner.capacity = Some(flipped.unwrap())
+                val consumed = host_service_handoff_consume_v1(owner.capacity.unwrap().journal, relative, adopted.unwrap())
+                if consumed.is_err(): owner.reconcile_error = consumed.unwrap_err()
     linux_service_start_error_v4(owner, "")
 
 # milestone_0022 N3 (14.3 P2-E, 15.5, 16 P1-1/P2-5): resume every executing or
@@ -638,7 +659,7 @@ pub fn host_linux_service_prepare_v4(original: HostLinuxServiceCurrentV4, source
     var owner = original
     val metadata = owner.current_v4()
     if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
-    if not owner.capacity.unwrap().ledger.continuity_proven:
+    if not owner.capacity.unwrap().ledger.continuity_proven or owner.reconcile_error != "":
         return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
     val request = host_prepare_associated_decode_v3(source)
     if request.is_err(): return linux_service_reply_v4(owner, "", request.unwrap_err(), false)
@@ -746,6 +767,8 @@ pub fn host_linux_service_execute_v4(original: HostLinuxServiceCurrentV4, source
     var owner = original
     val metadata = owner.current_v4()
     if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    # A handoff consume that failed after the reconcile flip leaves continuity proven AND reconcile_error set.
+    if owner.reconcile_error != "": return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
     val request = host_execute_associated_decode_v3(source)
     if request.is_err(): return linux_service_reply_v4(owner, "", request.unwrap_err(), false)
     val prepare = request.unwrap().prepare.prepare
@@ -1006,13 +1029,16 @@ fn linux_service_agent_authority_v4(owner: HostLinuxServiceCurrentV4, metadata: 
         context: host_local_context_v1(policy)))
 
 # The read-only helper admission of an attach, run before its archive: the helper operation must be NEW on this
-# journal (a reused id could only fail at prepare, after the slot was consumed), then the read-only twin of helper
-# prepare's own checks.
-fn linux_service_attach_admit_v4(capacity: HostCapacityOwnerV1, helper: HostHelperRequestV1, policy: LocalAuthorityPolicyV1,
-        scope: ContainerHostScopeV2, context: HostReservationAuthorizationContextV1) -> Result<(), text>:
+# journal (a reused id could only fail at prepare, after the slot was consumed), the open core's entry guard holds
+# on `store` (milestone_0031: this journal's own valid helper store with no marker of the operation; it could only
+# refuse after helper begin otherwise), then the read-only twin of helper prepare's own checks.
+fn linux_service_attach_admit_v4(capacity: HostCapacityOwnerV1, store: HostHelperStoreV1, helper: HostHelperRequestV1,
+        policy: LocalAuthorityPolicyV1, scope: ContainerHostScopeV2,
+        context: HostReservationAuthorizationContextV1) -> Result<(), text>:
     val row = daemon_operation_exact_v2(capacity.journal, helper.operation)
     if row.is_ok(): return Err("attach-helper-operation-reused")
     if row.unwrap_err() != "OPERATION_NOT_FOUND": return Err(row.unwrap_err())
+    host_primary_attach_open_entry_check_v1(store, helper.operation.id)?
     host_helper_prepare_check_v1(capacity, helper, policy, scope, context)
 
 # milestone_0021 13.2 E1 attach (bound by milestone_0023 part B): the same held-run gates as cancel, then the ONE
@@ -1042,12 +1068,16 @@ pub fn host_linux_service_agent_attach_v4(original: HostLinuxServiceCurrentV4, s
     if live_epoch.is_err(): return linux_service_reply_v4(owner, "", live_epoch.unwrap_err(), false)
     val policy = metadata.unwrap().policy
     val context = authority.unwrap().context
+    # F15 (B) / milestone_0031: the enrollment-pinned template the packet's stream policy must repeat.
+    val template = owner.records.unwrap().agent_helper_template
+    if template.is_none(): return linux_service_reply_v4(owner, "", "linux-host-agent-helper-template-invalid", false)
+    val store = linux_service_helper_store_v4(owner)
     # Geometry needs an installed-policy-v3 source this service does not have: `policy_bytes` stays empty and a
     # pane Resize is refused by the adapter.
     val service = HostAgentAttachServiceV4(journal: capacity.journal, fence: fence.unwrap(),
         live_incarnation: scope.continuity_id, live_epoch: live_epoch.unwrap(), not_after: agent.not_after,
-        policy_bytes: "", store_root: linux_service_helper_store_v4(owner).root, monotonic_ms: context.monotonic_ms)
-    val admit = fn(helper: HostHelperRequestV1) -> Result<(), text>: linux_service_attach_admit_v4(capacity, helper, policy, scope, context)
+        policy_bytes: "", store_root: store.root, monotonic_ms: context.monotonic_ms, template: template.unwrap())
+    val admit = fn(helper: HostHelperRequestV1) -> Result<(), text>: linux_service_attach_admit_v4(capacity, store, helper, policy, scope, context)
     val applied = host_agent_attach_apply_v4(agent, source, authority.unwrap(), service, admit)
     if applied.error != "": return linux_service_reply_v4(owner, "", applied.error, false)
     owner.agent = Some(applied.agent)
@@ -1071,6 +1101,67 @@ pub fn host_linux_service_agent_terminal_authority_v4(owner: HostLinuxServiceCur
         host_agent_attach_archive_relative_v4(container_scope_fence_id_v2(scope)?, agent.operation_id),
         HOST_AGENT_ATTACH_MAX_BYTES_V4)?
     host_agent_terminal_authority_v4(agent, archived, authority, scope.continuity_id, linux_service_live_epoch_v4(owner)?)
+
+# milestone_0025 PR4: the control target of the agent's own pane for the smux control lease. Err unless the
+# terminal-authority accessor above is Ok NOW (so an expired or revoked approval, a changed policy generation or a
+# binding of another incarnation yields no target); derived only from that verified authority and the attached
+# session (host_agent_pane_control_target_v4). Read-only, never cached: every control issue and every Write asks again.
+pub fn host_linux_service_agent_pane_control_target_v4(owner: HostLinuxServiceCurrentV4) -> Result<SessionRuntimeControlTargetV1, text>:
+    val authority = host_linux_service_agent_terminal_authority_v4(owner)?
+    if owner.agent.is_none() or owner.agent.unwrap().attachment.is_none(): return Err("attach-no-attachment")
+    host_agent_pane_control_target_v4(owner.agent.unwrap().attachment.unwrap(), authority.binding, authority.lease_epoch)
+
+# ---- milestone_0024 PR3c S0: the pane lease and brokered pane io the smux consumer calls ----
+
+pub struct HostLinuxServiceLeaseTurnV4:
+    owner: HostLinuxServiceCurrentV4
+    lease: Option<HostAgentPaneLeaseV4>
+    error: text
+
+pub struct HostLinuxServicePaneIoTurnV4:
+    owner: HostLinuxServiceCurrentV4
+    result: HostAgentPaneIoResultV4
+
+# "" when a pane entry may reach the agent: a held agent whose controller-signed attach still verifies under the
+# installed policy, a fresh clock and the service's own live incarnation/epoch (so an expired or revoked approval
+# is refused, also after a restart). Pane and smux state are never consulted.
+# It also pins the caller's pane: `expected_binding_uid` must equal the controller-signed binding's uid, so a
+# Host-route caller that does not name the bound pane never claims or reads it.
+fn linux_service_pane_gate_v4(owner: HostLinuxServiceCurrentV4, expected_binding_uid: text,
+        registry_check: fn(HostAgentPaneBindingV4) -> text) -> text:
+    if owner.agent.is_none(): return "attach-no-attachment"
+    match host_linux_service_agent_terminal_authority_v4(owner):
+        case Ok(authority):
+            if authority.binding.binding_uid != expected_binding_uid: return "attach-binding-mismatch"
+            # smux's own registry consistency check on the VERIFIED binding (never authority).
+            registry_check(authority.binding)
+        case Err(reason): reason
+
+# The pane lease of the agent's attachment, handed out ONCE (13.1). The updated owner is always returned.
+pub fn host_linux_service_attachment_lease_v4(original: HostLinuxServiceCurrentV4, expected_binding_uid: text,
+        registry_check: fn(HostAgentPaneBindingV4) -> text) -> HostLinuxServiceLeaseTurnV4:
+    var owner = original
+    val gate = linux_service_pane_gate_v4(owner, expected_binding_uid, registry_check)
+    if gate != "": return HostLinuxServiceLeaseTurnV4(owner: owner, lease: None, error: gate)
+    val turn = host_linux_service_agent_attachment_lease_v4(owner.agent.unwrap())
+    owner.agent = Some(turn.agent)
+    HostLinuxServiceLeaseTurnV4(owner: owner, lease: turn.lease, error: turn.error)
+
+# Brokered pane io. There is NO caller `now`: the clock is the service's own grant clock under the installed policy,
+# so a pane caller can neither advance the agent clock nor end the signed window.
+pub fn host_linux_service_pane_io_v4(original: HostLinuxServiceCurrentV4, expected_binding_uid: text,
+        registry_check: fn(HostAgentPaneBindingV4) -> text, lease: HostAgentPaneLeaseV4, op: HostAgentPaneOpV4) -> HostLinuxServicePaneIoTurnV4:
+    var owner = original
+    val gate = linux_service_pane_gate_v4(owner, expected_binding_uid, registry_check)
+    if gate != "":
+        return HostLinuxServicePaneIoTurnV4(owner: owner, result: host_agent_pane_io_refused_v4(gate))
+    val metadata = owner.current_v4()
+    if metadata.is_err():
+        return HostLinuxServicePaneIoTurnV4(owner: owner, result: host_agent_pane_io_refused_v4(metadata.unwrap_err()))
+    val turn = host_linux_service_agent_pane_io_v4(owner.agent.unwrap(), lease, op,
+        host_local_context_v1(metadata.unwrap().policy).grant_clock)
+    owner.agent = Some(turn.agent)
+    HostLinuxServicePaneIoTurnV4(owner: owner, result: turn.result)
 
 # The inspect field of the accessor above: "" unless the attachment is ready/adopted, else "verified" or the
 # accessor's refusal (so an operator sees WHY a ready attachment has no usable authority).
@@ -1140,6 +1231,11 @@ fn linux_service_cancel_relative_v4(scope: ContainerHostScopeV2, operation_id: t
 # cancel (PR3) and the attachment attach/detach/inspect (PR3b).
 pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: text, source: text,
         project: fn(ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>) -> HostLinuxServiceReplyV4:
+    # Draining admits nothing new; inspect, detach and cancel stay so a live attachment can still release the writer.
+    if owner.draining and action != "host_agent_inspect_v4" and action != "host_agent_detach_v4" and action != "host_agent_cancel_v4":
+        return linux_service_reply_v4(owner, "", "linux-host-service-draining", false)
+    if action == "host_service_handoff_v1": return linux_service_handoff_v4(owner, source)
+    if action == "host_service_handoff_abandon_v1": return linux_service_handoff_abandon_v4(owner, source)
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
     if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
     if action == "host_agent_invoke_v4": return host_linux_service_agent_invoke_v4(owner, source)
@@ -1148,6 +1244,41 @@ pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: 
     if action == "host_agent_detach_v4": return host_linux_service_agent_detach_v4(owner, source)
     if action == "host_agent_inspect_v4": return host_linux_service_agent_inspect_v4(owner, source)
     linux_service_reply_v4(owner, "", "linux-host-service-action-unknown", false)
+
+# AT-OPS-01 drain: verify the controller-signed handoff against THIS owner's live state, publish it as the pending
+# handoff on the single journal, and only then stop admitting. The caller closes the owner next (exit-then-adopt).
+fn linux_service_handoff_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    if not owner.capacity.unwrap().ledger.continuity_proven:
+        return linux_service_reply_v4(owner, "", "linux-host-service-startup-quarantine", false)
+    if owner.reconcile_error != "" or not owner.inventory_returned:
+        return linux_service_reply_v4(owner, "", "linux-host-service-handoff-before-reconcile", false)
+    val reply = host_service_handoff_commit_v1(owner.capacity.unwrap().journal, owner.scope.unwrap(), metadata.unwrap().policy,
+        metadata.unwrap().configuration.controller_ref, host_local_context_v1(metadata.unwrap().policy), owner.current_relative,
+        owner.current_bytes, owner.agent_operation, source)
+    if reply.is_err():
+        # Published but unverified: the record is on the journal, so admission stops and recovery is flagged.
+        if reply.unwrap_err().starts_with(HOST_SERVICE_HANDOFF_UNVERIFIED_V1):
+            owner.draining = true
+            return linux_service_reply_v4(owner, "", reply.unwrap_err(), true)
+        return linux_service_reply_v4(owner, "", reply.unwrap_err(), false)
+    owner.draining = true
+    linux_service_reply_v4(owner, reply.unwrap(), "", true)
+
+# AT-OPS-01 recovery: a controller-signed abandon voids the one pending handoff this (quarantined) successor could not
+# verify. Deliberately NOT gated on the quarantine it exists to clear: only a verified abandon is accepted, written
+# through the single journal writer. The unit is then restarted; the next start finds the sequence consumed. After a
+# failed post-flip consume the voided record had been verified: harmless, the next start re-proves exclusion anyway.
+fn linux_service_handoff_abandon_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val reply = host_service_handoff_abandon_v1(owner.capacity.unwrap().journal, owner.scope.unwrap(), metadata.unwrap().policy,
+        metadata.unwrap().configuration.controller_ref, host_local_context_v1(metadata.unwrap().policy), source)
+    if reply.is_err(): return linux_service_reply_v4(owner, "", reply.unwrap_err(), false)
+    linux_service_reply_v4(owner, reply.unwrap(), "", true)
 
 # The workload scope of this service's lending epoch: the bound host (the same
 # physical_host_id association_match_v3 compares), "epoch-" + the lent digest
@@ -1342,4 +1473,5 @@ export host_linux_service_start_v4, host_linux_service_prepare_v4, host_linux_se
 export host_linux_service_open_installed_v4, host_linux_service_anchor_parent_v4
 export host_linux_service_dispatch_v4, host_linux_service_execute_v4, host_linux_service_dispatch_installed_v4
 export host_linux_service_agent_invoke_v4, host_linux_service_agent_cancel_v4
-export host_linux_service_agent_attach_v4, host_linux_service_agent_terminal_authority_v4
+export host_linux_service_agent_attach_v4, host_linux_service_agent_terminal_authority_v4, host_linux_service_agent_pane_control_target_v4
+export HostLinuxServiceLeaseTurnV4, HostLinuxServicePaneIoTurnV4, host_linux_service_attachment_lease_v4, host_linux_service_pane_io_v4

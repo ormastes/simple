@@ -784,6 +784,12 @@ fn elf_in_vaddr_fast(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64, input_of
     if k < 0 or elf_merge_flags(ctx.inputs.objects[oi].sections[si].sh_flags): return ELF_ADDR_SLOW
     lay.plan.vaddrs[lay.in_to_plan[k]] + ctx.inputs.sec_off[oi][si] + input_offset
 
+fn elf_entry_addr_fast(ctx: ElfLinkCtx, lay: ElfLayout, e: SymEntry) -> i64:
+    """elf_entry_addr for ABS or a placed non-merge section, else ELF_ADDR_SLOW."""
+    if e.section_idx == SHN_ABS: return e.offset
+    if e.section_idx == SHN_COMMON: return ELF_ADDR_SLOW
+    elf_in_vaddr_fast(ctx, lay, e.obj_idx, e.section_idx, e.offset)
+
 fn elf_ref_value_fast(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> i64:
     """S of a DEFINED reference into a placed non-merge section (A is r.addend), else ELF_ADDR_SLOW."""
     if r.kind != SYMREF_DEFINED or r.sym_idx == 0: return ELF_ADDR_SLOW
@@ -1255,8 +1261,8 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool) -> Result<ElfSym
                         if sh > 0:
                             var va = elf_in_vaddr_fast(ctx, lay, oi, sym.st_shndx, sym.st_value)
                             if va == ELF_ADDR_SLOW: va = elf_in_vaddr(ctx, lay, oi, sym.st_shndx, sym.st_value)?
-                            rows.add(sym.name, typ, sym.st_other, sh,
-                                elf_symtab_address(lay.plan, typ, va)?, sym.st_size)
+                            if (typ & 15) == 6: va = elf_symtab_address(lay.plan, typ, va)?
+                            rows.add(sym.name, typ, sym.st_other, sh, va, sym.st_size)
             else if sym.name != "":
                 if not seen.has(sym.name):
                     seen[sym.name] = true
@@ -1317,8 +1323,11 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool) -> Result<ElfSym
                 var sz = def_sym.st_size
                 if e.section_idx == SHN_COMMON:
                     sz = e.size
-                rows.add(n, info, def_sym.st_other, sh,
-                    elf_symtab_address(lay.plan, info, elf_entry_addr(ctx, lay, e)?)?, sz)
+                # workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md
+                var v = elf_entry_addr_fast(ctx, lay, e)
+                if v == ELF_ADDR_SLOW: v = elf_entry_addr(ctx, lay, e)?
+                if (info & 15) == 6: v = elf_symtab_address(lay.plan, info, v)?
+                rows.add(n, info, def_sym.st_other, sh, v, sz)
         else:
             var sym_bind = STB_GLOBAL
             if all_weak[n]:
@@ -1637,12 +1646,17 @@ pub fn elf_apply_worker(lo: i64, hi: i64) -> [i64]:
         while wb < span[1]:
             window.push(contents[k][wb] as i64)
             wb = wb + 1
-        val applied = ops.relocate(target, window, jobs[ji * ELF_JOB_W + 1] - span[0],
+        # workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md
+        var patched = ops.relocate_fast(target, window, jobs[ji * ELF_JOB_W + 1] - span[0],
             jobs[ji * ELF_JOB_W + 2], jobs[ji * ELF_JOB_W + 3], jobs[ji * ELF_JOB_W + 4],
             jobs[ji * ELF_JOB_W + 5])
-        if applied.is_err():
-            return [-1, ji, 0]
-        val patched = applied.unwrap()
+        if patched.len() == 0:
+            val applied = ops.relocate(target, window, jobs[ji * ELF_JOB_W + 1] - span[0],
+                jobs[ji * ELF_JOB_W + 2], jobs[ji * ELF_JOB_W + 3], jobs[ji * ELF_JOB_W + 4],
+                jobs[ji * ELF_JOB_W + 5])
+            if applied.is_err():
+                return [-1, ji, 0]
+            patched = applied.unwrap()
         val f_lo = jobs[ji * ELF_JOB_W + 1]
         var f_w = reloc_patch_width(target, jobs[ji * ELF_JOB_W + 2])
         if f_w < 1: f_w = 1
@@ -1727,12 +1741,17 @@ fn elf_apply_jobs(input: [[u8]], jobs: [i64], target: RelocArch,
         while wb < span[1]:
             window.push(contents[k][wb] as i64)
             wb = wb + 1
-        val applied = operations.relocate(target, window, jobs[ji * ELF_JOB_W + 1] - span[0],
+        # workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md
+        var patched = operations.relocate_fast(target, window, jobs[ji * ELF_JOB_W + 1] - span[0],
             jobs[ji * ELF_JOB_W + 2], jobs[ji * ELF_JOB_W + 3], jobs[ji * ELF_JOB_W + 4],
             jobs[ji * ELF_JOB_W + 5])
-        if applied.is_err():
-            return ElfApplyOut(contents: contents, failed: ji)
-        val patched = applied.unwrap()
+        if patched.len() == 0:
+            val applied = operations.relocate(target, window, jobs[ji * ELF_JOB_W + 1] - span[0],
+                jobs[ji * ELF_JOB_W + 2], jobs[ji * ELF_JOB_W + 3], jobs[ji * ELF_JOB_W + 4],
+                jobs[ji * ELF_JOB_W + 5])
+            if applied.is_err():
+                return ElfApplyOut(contents: contents, failed: ji)
+            patched = applied.unwrap()
         var wi: i64 = 0
         while wi < patched.len():
             if patched[wi] != window[wi]: contents[k][span[0] + wi] = patched[wi] as u8
@@ -2291,10 +2310,13 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         while wb < field_end:
             window.push(contents[k][wb] as i64)
             wb = wb + 1
-        val applied = operations.relocate(target, window, r.out_off - field_start, rtype, s, a, p)
-        if applied.is_err():
-            return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.unwrap_err()}")
-        val patched = applied.unwrap()
+        # workaround: doc/08_tracking/bug/native_result_call_cost_2026-11-16.md
+        var patched = operations.relocate_fast(target, window, r.out_off - field_start, rtype, s, a, p)
+        if patched.len() == 0:
+            val applied = operations.relocate(target, window, r.out_off - field_start, rtype, s, a, p)
+            if applied.is_err():
+                return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.unwrap_err()}")
+            patched = applied.unwrap()
         var wi: i64 = 0
         while wi < patched.len():
             if patched[wi] != window[wi]: contents[k][field_start + wi] = patched[wi]

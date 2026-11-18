@@ -13,8 +13,15 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
 # invalidates the list), unlike a known-but-unsatisfied one (`a, b:hover`).
 # Legacy single-colon pseudo-elements are listed too. The @page-only names
 # `:first`, `:left`, `:right` and `:blank` are rejected by Chrome here.
-# Vendor-prefixed `-webkit-` / `-internal-` names are accepted.
+# Only the seven `-webkit-` names below are accepted (`:-webkit-frob`,
+# `:-webkit-hover` are dropped); every `-internal-` name is still accepted.
 val CSS_KNOWN_PSEUDO_CLASSES: [text] = [
+    "-webkit-any", "-webkit-any-link", "-webkit-autofill", "-webkit-drag",
+    "-webkit-full-page-media", "-webkit-full-screen",
+    "-webkit-full-screen-ancestor",
+    "horizontal", "vertical", "decrement", "increment", "start", "end",
+    "double-button", "single-button", "no-button", "corner-present",
+    "window-inactive",
     "active", "active-view-transition", "any-link", "autofill", "buffering",
     "checked", "current", "default", "defined", "dir", "disabled", "empty",
     "enabled", "first-child", "first-of-type", "focus", "focus-visible",
@@ -52,9 +59,60 @@ fn _css_name_in(names: [text], n: text) -> bool:
 
 fn _css_pseudo_class_known(name: text) -> bool:
     val n = name.lower()
-    if n.starts_with("-webkit-") or n.starts_with("-internal-"):
+    if n.starts_with("-internal-"):
         return true
     _css_name_in(CSS_KNOWN_PSEUDO_CLASSES, n)
+
+val CSS_USER_ACTION_PSEUDO_CLASSES: [text] = [
+    "hover", "active", "focus", "focus-visible", "focus-within"
+]
+
+val CSS_SCROLLBAR_PSEUDO_CLASSES: [text] = [
+    "hover", "active", "enabled", "disabled", "window-inactive",
+    "horizontal", "vertical", "decrement", "increment", "start", "end",
+    "double-button", "single-button", "no-button", "corner-present"
+]
+
+# Known pseudo-classes Chrome 159 still rejects after ::part(),
+# ::details-content and ::picker(): tree-structural ones, :has/:host/:scope
+# and the scrollbar-only states.
+val CSS_NOT_AFTER_ELEMENT_BACKED: [text] = [
+    "first-child", "last-child", "only-child", "nth-child", "nth-last-child",
+    "first-of-type", "last-of-type", "only-of-type", "nth-of-type",
+    "nth-last-of-type", "empty", "root", "has", "host", "host-context", "scope",
+    "horizontal", "vertical", "decrement", "increment", "start", "end",
+    "double-button", "single-button", "no-button", "corner-present"
+]
+
+# May pseudo-class `n` follow pseudo-element `element` (both lower case;
+# a functional `::cue(...)` is "cue()")? Chrome 159 `<style>` probes,
+# 2026-11-17: `::part(x):hover`, `::selection:window-inactive`,
+# `::-webkit-scrollbar:hover` and `::file-selector-button:focus` are
+# accepted; `::before:hover`, `::placeholder:hover`, `::selection:hover`,
+# `::-webkit-scrollbar:focus` and `::part(x):first-child` are dropped.
+# `:is()`/`:where()` follow any pseudo-element; `:not()` is accepted here
+# and its argument is checked against the same element by the caller.
+fn _css_pseudo_class_allowed_after(element: text, n: text) -> bool:
+    if n == "is" or n == "where" or n == "not":
+        return true
+    if element == "part" or element == "details-content" or element == "picker":
+        return _css_pseudo_class_known(n) and not _css_name_in(CSS_NOT_AFTER_ELEMENT_BACKED, n)
+    if element.starts_with("-webkit-scrollbar") or element == "-webkit-resizer":
+        return _css_name_in(CSS_SCROLLBAR_PSEUDO_CLASSES, n)
+    val user_action = _css_name_in(CSS_USER_ACTION_PSEUDO_CLASSES, n)
+    if element.starts_with("-webkit-") or element == "file-selector-button" or element == "cue":
+        return user_action
+    if element == "scroll-button":
+        return user_action or n == "enabled" or n == "disabled"
+    if element == "scroll-marker":
+        return user_action or n == "target-current" or n == "target-before" or n == "target-after"
+    if element == "selection":
+        return n == "window-inactive"
+    if element == "search-text":
+        return n == "current"
+    if element.starts_with("view-transition-"):
+        return n == "only-child"
+    false
 
 fn _css_pseudo_element_known(name: text) -> bool:
     val n = name.lower()
@@ -87,16 +145,20 @@ fn _selector_paren_close(sel: text, open: i32, end: i32) -> i32:
         i = i + 1
     0 - 1
 
-# Does sel[start, end) name an unknown pseudo-class or pseudo-element? The
-# arguments of `:not()`, `:has()` and the `of S` of `:nth-child()` /
-# `:nth-last-child()` are checked too (they are not forgiving); `:is()` and
-# `:where()` are forgiving in Chrome, so their arguments are not. After a
-# pseudo-element, the rest of its compound is not checked
-# (`::-webkit-scrollbar:horizontal` is valid).
-fn _selector_range_has_unknown_pseudo(sel: text, start: i32, end: i32) -> bool:
+# Does sel[start, end) name an unknown pseudo-class or pseudo-element, or
+# use one where Chrome 159 rejects it? The arguments of `:not()`, `:has()`
+# and the `of S` of `:nth-child()` / `:nth-last-child()` are checked too
+# (they are not forgiving); `:is()` and `:where()` are forgiving in Chrome,
+# so their arguments are not. `no_elements`: a pseudo-element here is
+# invalid (`:not(::before)`, `:has(::before)`; `:nth-child(1 of ::before)`
+# is accepted). `element` names the pseudo-element the range follows ("" for
+# none): only the pseudo-classes `_css_pseudo_class_allowed_after` lists may
+# follow one, and no class, id or attribute (`::before.a`). `of S` on
+# `:nth-of-type()` / `:nth-last-of-type()` is invalid.
+fn _selector_range_has_unknown_pseudo(sel: text, start: i32, end: i32, element_in: text, no_elements: bool) -> bool:
     var quote = ""
     var bracket = 0
-    var after_element = false
+    var element = element_in
     var i = start
     while i < end:  # cpu-lane-loop-ok: one pass over ONE rule's selector text at parse time
         val ch = sel.substring(i, i + 1)
@@ -109,13 +171,15 @@ fn _selector_range_has_unknown_pseudo(sel: text, start: i32, end: i32) -> bool:
             i = i + 1
         elif ch == "\"" or ch == "'":
             quote = ch
+        elif bracket == 0 and element != "" and ".#[".contains(ch):
+            return true
         elif ch == "[":
             bracket = bracket + 1
         elif ch == "]":
             if bracket > 0:
                 bracket = bracket - 1
         elif bracket == 0 and " ,>+~\t\n".contains(ch):
-            after_element = false
+            element = ""
         elif bracket == 0 and ch == "(":
             val skip = _selector_paren_close(sel, i, end)
             if skip < 0:
@@ -130,26 +194,36 @@ fn _selector_range_has_unknown_pseudo(sel: text, start: i32, end: i32) -> bool:
                     e = e + 1
                 e = e + 1
             val name = sel.substring(name_start, e)
-            if is_element:
-                if not _css_pseudo_element_known(name):
+            val lname = name.lower()
+            val has_args = e < end and sel.substring(e, e + 1) == "("
+            val legacy = not is_element and element == "" and (lname == "before" or lname == "after" or lname == "first-line" or lname == "first-letter")
+            if is_element or legacy:
+                if no_elements or not _css_pseudo_element_known(name):
                     return true
-                after_element = true
-            elif not after_element and not _css_pseudo_class_known(name):
+                element = if lname == "cue" and has_args: "cue()" else: lname
+            elif element != "":
+                if not _css_pseudo_class_allowed_after(element, lname):
+                    return true
+            elif not _css_pseudo_class_known(name):
                 return true
             i = e - 1
-            if e < end and sel.substring(e, e + 1) == "(":
+            if has_args:
                 val close = _selector_paren_close(sel, e, end)
                 if close < 0:
                     return false
-                val lname = name.lower()
-                if not is_element and (lname == "not" or lname == "has"):
-                    if _selector_range_has_unknown_pseudo(sel, e + 1, close):
+                val arg = sel.substring(e + 1, close)
+                if is_element:
+                    i = close
+                elif lname == "not" or lname == "has":
+                    val inner = if lname == "not": element else: ""
+                    if _selector_range_has_unknown_pseudo(sel, e + 1, close, inner, true):
                         return true
-                elif not is_element and (lname == "nth-child" or lname == "nth-last-child"):
-                    val arg = sel.substring(e + 1, close)
+                elif lname == "nth-child" or lname == "nth-last-child":
                     val of_at = _nth_of_offset(PSEUDO_NTH_CHILD, arg)
-                    if of_at >= 0 and _selector_range_has_unknown_pseudo(sel, e + 1 + of_at + 4, close):
+                    if of_at >= 0 and _selector_range_has_unknown_pseudo(sel, e + 1 + of_at + 4, close, "", false):
                         return true
+                elif (lname == "nth-of-type" or lname == "nth-last-of-type") and _nth_of_offset(PSEUDO_NTH_CHILD, arg) >= 0:
+                    return true
                 i = close
         i = i + 1
     false
@@ -159,7 +233,7 @@ fn _selector_range_has_unknown_pseudo(sel: text, start: i32, end: i32) -> bool:
 # reason: CSS rule admission is a yes/no fact about one selector text.
 # @allow(primitive_api)
 fn selector_list_has_unknown_pseudo(sel: text) -> bool:
-    _selector_range_has_unknown_pseudo(sel, 0, sel.byte_len())
+    _selector_range_has_unknown_pseudo(sel, 0, sel.byte_len(), "", false)
 
 fn selector_rightmost_part(parts: [text]) -> text:
     var right = parts.len() - 1

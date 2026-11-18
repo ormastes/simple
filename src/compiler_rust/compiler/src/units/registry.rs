@@ -347,7 +347,7 @@ pub fn populate_thread_local_state(reg: &UnitRegistry) {
 /// kept as a LAST resort because it is genuinely useful in `cargo test`, where
 /// cwd is a crate directory rather than the repo root; it is only ever
 /// consulted when the invoking tree has no unit tree of its own.
-fn find_unit_tree_root() -> Option<PathBuf> {
+pub(crate) fn find_unit_tree_root() -> Option<PathBuf> {
     if let Ok(custom) = std::env::var("SIMPLE_UNIT_TREE_ROOT") {
         let p = PathBuf::from(custom);
         if p.is_dir() {

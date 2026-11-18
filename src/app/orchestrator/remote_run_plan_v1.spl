@@ -1,0 +1,129 @@
+# milestone_0030 PR-1a: `simple orchestrator remote-run-plan`. Loads the controller's installed dispatch context,
+# derives ONE grant for a remote build/test request envelope, issues the grant + policy-driven approval with the
+# controller's store-held issuer/approver keys and verifies the pair from the installed snapshot
+# (controller_authority_issue_v1). It prints only digests: the signed pair is never printed or written (no
+# file-drop authority surface). It starts no run; the V4 Host route is a later milestone (DESIGN.md section 12).
+use app.io.mod.file_read_regular_no_follow_bounded
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.controller_authority_issue_v1.{controller_authority_issue_v1, controller_authority_store_reader_v1}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{controller_dispatch_context_load_v1,
+    controller_dispatch_grant_clock_v1}
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_decode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2,
+    distributed_encode_signed_approval_v2}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+val REMOTE_RUN_PLAN_OPTIONS_V1 = ["--dispatch-root", "--controller", "--key-store", "--approver", "--operation",
+    "--environment", "--grant-id", "--expires-in-ms"]
+val REMOTE_RUN_ENVIRONMENT_FIELDS_V1 = ["version", "kind", "hostId", "executionPlatform", "targetPlatform",
+    "testRuntime", "isolationClass", "toolchainDigest", "sdkDigest", "abi", "isa", "optimization"]
+
+fn remote_run_plan_reply_v1(exit_code: i64, fields: Dict<text, SdnValue>) -> OrchestratorValidationReplyV1:
+    OrchestratorValidationReplyV1(exit_code: exit_code, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn remote_run_plan_error_v1(exit_code: i64, error: text) -> OrchestratorValidationReplyV1:
+    remote_run_plan_reply_v1(exit_code, {"version": SdnValue.Int(1), "kind": SdnValue.String("remote-run-plan"),
+        "state": SdnValue.String("refused"), "error": SdnValue.String(error)})
+
+# Exactly the eight `--name value` options, each once.
+pub fn remote_run_plan_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
+    if args.len() != 1 + 2 * REMOTE_RUN_PLAN_OPTIONS_V1.len(): return Err("remote-run-plan-usage")
+    var options: Dict<text, text> = {}
+    var index = 1
+    while index + 1 < args.len():
+        val name = args[index]
+        if not REMOTE_RUN_PLAN_OPTIONS_V1.contains(name) or options.contains_key(name) or
+                args[index + 1].starts_with("--"):
+            return Err("remote-run-plan-usage")
+        options[name] = args[index + 1]
+        index = index + 2
+    Ok(options)
+
+fn remote_run_plan_millis_v1(value: text) -> Result<i64, text>:
+    if value.byte_len() < 1 or value.byte_len() > 9: return Err("remote-run-plan-expiry-invalid")
+    val digits = "0123456789"
+    var total: i64 = 0
+    for index in 0..value.byte_len():
+        val digit = digits.index_of(value.substring(index, index + 1))
+        if digit < 0: return Err("remote-run-plan-expiry-invalid")
+        total = total * 10 + digit
+    Ok(total)
+
+fn remote_run_environment_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("remote-run-environment-field:" + name)
+
+pub fn remote_run_environment_decode_v1(source: text) -> Result<ExecutionEnvironmentV2, text>:
+    if source.byte_len() < 1 or source.byte_len() > 16384: return Err("remote-run-environment-size")
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384, max_depth: 2, max_nodes: 32,
+        max_rows: 0, max_cells: 0, max_columns: 16))
+    if parsed.is_err(): return Err("remote-run-environment-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("remote-run-environment-object")
+    for name in fields.keys():
+        if not REMOTE_RUN_ENVIRONMENT_FIELDS_V1.contains(name): return Err("remote-run-environment-unknown-field")
+    for name in REMOTE_RUN_ENVIRONMENT_FIELDS_V1:
+        if not fields.contains_key(name): return Err("remote-run-environment-missing-field")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 1: return Err("remote-run-environment-version")
+        case _: return Err("remote-run-environment-version")
+    if remote_run_environment_text_v1(fields, "kind")? != "remote-run-environment":
+        return Err("remote-run-environment-kind")
+    Ok(ExecutionEnvironmentV2(host_id: remote_run_environment_text_v1(fields, "hostId")?,
+        execution_platform: remote_run_environment_text_v1(fields, "executionPlatform")?,
+        target_platform: remote_run_environment_text_v1(fields, "targetPlatform")?,
+        test_runtime: remote_run_environment_text_v1(fields, "testRuntime")?,
+        isolation_class: remote_run_environment_text_v1(fields, "isolationClass")?,
+        toolchain_digest: remote_run_environment_text_v1(fields, "toolchainDigest")?,
+        sdk_digest: remote_run_environment_text_v1(fields, "sdkDigest")?, abi: remote_run_environment_text_v1(fields, "abi")?,
+        isa: remote_run_environment_text_v1(fields, "isa")?, optimization: remote_run_environment_text_v1(fields, "optimization")?))
+
+# One-action grant over exactly the request's scope, environment digest and budget; lifetime in (0, 1 day].
+pub fn remote_run_plan_grant_v1(request: OperationEnvelopeV2, grant_id: text, now: i64, expires_in_ms: i64,
+        policy_revision: i64, revocation_epoch: i64) -> Result<ExecutionGrantV2, text>:
+    if expires_in_ms <= 0 or expires_in_ms > 86400000: return Err("remote-run-plan-expiry-invalid")
+    Ok(ExecutionGrantV2(id: grant_id, principal: request.principal, project: request.project, host_id: request.host_id,
+        operations: [request.operation], environment_digest: request.environment_digest,
+        policy_revision: policy_revision, revocation_epoch: revocation_epoch, expires_at: now + expires_in_ms,
+        maximum_memory_bytes: request.memory_bytes, maximum_duration_ms: request.duration_ms))
+
+# Fixed refusal code: the reader's error text names the path.
+fn remote_run_plan_read_v1(path: text, maximum: i64, code: text) -> Result<text, text>:
+    val read = file_read_regular_no_follow_bounded(path, maximum)
+    if read.is_err(): return Err(code)
+    Ok(read.unwrap())
+
+fn remote_run_plan_issue_v1(options: Dict<text, text>) -> Result<Dict<text, SdnValue>, text>:
+    val controller = options["--controller"]
+    val context = controller_dispatch_context_load_v1(options["--dispatch-root"], controller)?
+    val request = distributed_decode_operation_v2(remote_run_plan_read_v1(options["--operation"], 65536,
+        "remote-run-plan-operation-unreadable")?)?
+    val environment = remote_run_environment_decode_v1(remote_run_plan_read_v1(options["--environment"], 16384,
+        "remote-run-plan-environment-unreadable")?)?
+    val now = controller_dispatch_grant_clock_v1()?
+    val snapshot = context.policy.snapshot
+    val grant = remote_run_plan_grant_v1(request, options["--grant-id"], now,
+        remote_run_plan_millis_v1(options["--expires-in-ms"])?, snapshot.policy_revision, snapshot.revocation_epoch)?
+    val issued = controller_authority_issue_v1(context, controller_authority_store_reader_v1(options["--key-store"]),
+        controller, options["--approver"], grant, request, environment, grant.expires_at, now)?
+    val plan = distributed_encode_signed_grant_v2(issued.signed)? + "\n" + distributed_encode_signed_approval_v2(issued.approval)?
+    Ok({"version": SdnValue.Int(1), "kind": SdnValue.String("remote-run-plan"), "state": SdnValue.String("verified"),
+        "operationId": SdnValue.String(request.id), "grantDigest": SdnValue.String(distributed_grant_digest_v2(grant)?),
+        "planDigest": SdnValue.String(sha256_text(plan))})
+
+pub fn remote_run_plan_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    val options = remote_run_plan_options_v1(args)
+    if options.is_err(): return remote_run_plan_error_v1(2, options.unwrap_err())
+    val issued = remote_run_plan_issue_v1(options.unwrap())
+    if issued.is_err(): return remote_run_plan_error_v1(1, issued.unwrap_err())
+    remote_run_plan_reply_v1(0, issued.unwrap())
+
+export remote_run_plan_command_v1, remote_run_plan_options_v1, remote_run_environment_decode_v1, remote_run_plan_grant_v1
