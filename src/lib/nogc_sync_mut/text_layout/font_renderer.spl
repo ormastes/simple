@@ -352,7 +352,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_render_glyph_lcd_milli, SfntLcdGlyph}
+use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, SfntLcdGlyph, SfntLcdOutline}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
@@ -462,6 +462,18 @@ var _lcd_phase_glyphs: Dict<text, CachedGlyph> = {}
 # Last atlas slot of each phase cell, same keys. A hint only: every read is
 # checked against the slot's identity before use (see _lcd_phase_atlas_index).
 var _lcd_phase_atlas_slots: Dict<text, i32> = {}
+# Phase-independent half of an LCD glyph (parsed, hinted outline and frame),
+# keyed "{rasterizer identity}|{selector kind}|{selector value}|{size}|{x milli}".
+# A run draws a glyph at up to four quarter phases; each phase cell after the
+# first skips the parse and the hint (3.3 of 12.7 ms on the interpreter lane).
+# Dropped whole at LCD_OUTLINE_CACHE_LIMIT entries.
+val LCD_OUTLINE_CACHE_LIMIT: i64 = 2048
+var _lcd_outlines: Dict<text, SfntLcdOutline> = {}
+var _lcd_outline_count: i64 = 0
+# Phase-0 LCD cells whose pixels nobody has read yet, by `get_glyph`'s raster
+# key: the metrics of the cell with empty `pixels` (`lcd_frame_only`). Handed
+# out only while a renderer has `lcd_defer_cells` set.
+var _lcd_frame_glyphs: Dict<text, CachedGlyph> = {}
 var _glyph_raster_keys: [text] = []
 var _glyph_raster_values: [CachedGlyph] = []
 var _glyph_raster_cursor: i64 = 0
@@ -1120,6 +1132,27 @@ class GlyphCache:
         self.payload_bytes = payload + glyph_bytes
         true
 
+    # Give a deferred LCD cell its pixels: `glyph` replaces the `lcd_frame_only`
+    # entry of the same codepoint and size IN PLACE, so the entry keeps its
+    # eviction order. Newest first: the frame is filled right after the run
+    # that deferred it. False when the cache holds no such entry.
+    me fill_frame(glyph: CachedGlyph) -> bool:
+        var entries = self.entries
+        var i: i64 = entries.len() - 1
+        while i >= 0:
+            val entry = entries[i]
+            if (entry.lcd_frame_only and entry.glyph_index < 0 and entry.codepoint == glyph.codepoint and
+                entry.font_size == glyph.font_size and
+                entry.render_config_identity == self.observed_render_config_identity):
+                var configured = glyph
+                configured.render_config_identity = self.observed_render_config_identity
+                entries[i] = configured
+                self.entries = entries
+                self.payload_bytes = self.payload_bytes + glyph.pixels.len().to_i64()
+                return true
+            i = i - 1
+        false
+
     me invalidate():
         self.entries = []
         self.payload_bytes = 0
@@ -1252,6 +1285,10 @@ class FontRenderer:
     # LCD atlas cell is (avg << 24) | (r << 16) | (g << 8) | b; a grayscale
     # cell keeps rgb = 0xFFFFFF, so single-alpha consumers still see coverage.
     lcd_text: bool = false
+    # Set by `stage_text_with_advances_configured` around its own staging pass:
+    # `get_glyph` may then answer an unrastered phase-0 LCD cell with its
+    # metrics alone (`CachedGlyph.lcd_frame_only`). Never set between calls.
+    lcd_defer_cells: bool = false
     # The same identity with `size=` masked: what decides an atlas wipe.
     active_render_config_atlas_identity: text = ""
     # ---- Staged FontRenderBatch payload -----------------------------------
@@ -1564,19 +1601,53 @@ class FontRenderer:
     # LCD variant of a selected-outline glyph; `fallback` is returned when the
     # outline cannot be rasterised.
     fn _lcd_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, glyph_index: i32, face_generation: i64, font_size: i32, fallback: CachedGlyph, phase_q: i64 = 0, x_milli: i64 = 0) -> CachedGlyph:
-        val lcd = sfnt_render_glyph_lcd_milli(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), x_milli, phase_q)
-        if val Some(g) = lcd:
-            val w = g.slg_width
-            val h = g.slg_height
-            val gray = g.slg_gray
-            val rgb = g.slg_rgb
-            if w > 0 and h > 0 and gray.len() == w * h and rgb.len() == w * h * 3:
-                return CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: face_generation,
-                    glyph_index: glyph_index, font_size: font_size,
-                    width: w.to_i32(), height: h.to_i32(),
-                    advance: fallback.advance, bearing_x: g.slg_bearing_x.to_i32(),
-                    bearing_y: g.slg_bearing_y.to_i32(), pixels: gray, lcd_pixels: rgb)
+        if val Some(outline) = self._lcd_outline(selector_kind, selector_value, font_size, x_milli):
+            if val Some(g) = sfnt_lcd_outline_raster(outline, phase_q):
+                val w = g.slg_width
+                val h = g.slg_height
+                val gray = g.slg_gray
+                val rgb = g.slg_rgb
+                if w > 0 and h > 0 and gray.len() == w * h and rgb.len() == w * h * 3:
+                    return CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: face_generation,
+                        glyph_index: glyph_index, font_size: font_size,
+                        width: w.to_i32(), height: h.to_i32(),
+                        advance: fallback.advance, bearing_x: g.slg_bearing_x.to_i32(),
+                        bearing_y: g.slg_bearing_y.to_i32(), pixels: gray, lcd_pixels: rgb)
         fallback
+
+    # The selected face's LCD outline, from `_lcd_outlines` when the rasterizer
+    # identity names the selected blob (the `_selected_outline_gid` guard).
+    fn _lcd_outline(selector_kind: i64, selector_value: i64, font_size: i32, x_milli: i64) -> SfntLcdOutline?:
+        var key = ""
+        if val Some(rasterizer) = self.ttf_rasterizer:
+            if rasterizer.has_glyph_reads_selected_blob():
+                key = "{rasterizer.cache_identity()}|{selector_kind}|{selector_value}|{font_size}|{x_milli}"
+        if key != "":
+            if val Some(hit) = _lcd_outlines.get(key):
+                return Some(hit)
+        val built = sfnt_lcd_glyph_outline(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), x_milli)
+        if key != "":
+            if val Some(outline) = built:
+                if _lcd_outline_count >= LCD_OUTLINE_CACHE_LIMIT:
+                    _lcd_outlines = {}
+                    _lcd_outline_count = 0
+                _lcd_outlines[key] = outline
+                _lcd_outline_count = _lcd_outline_count + 1
+        built
+
+    # Phase-0 LCD cell of `_lcd_glyph` as metrics only (`lcd_frame_only`, no
+    # pixels): the same width, height and bearings, read from the outline
+    # without the raster. Zero-size when the outline cannot be rasterised.
+    fn _lcd_frame_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, font_size: i32, advance: i32) -> CachedGlyph:
+        if val Some(outline) = self._lcd_outline(selector_kind, selector_value, font_size, 0):
+            val frame = sfnt_lcd_outline_frame(outline, 0)
+            if frame.len() == 4:
+                return CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0,
+                    glyph_index: -1, font_size: font_size,
+                    width: frame[0].to_i32(), height: frame[1].to_i32(),
+                    advance: advance, bearing_x: frame[2].to_i32(),
+                    bearing_y: frame[3].to_i32(), pixels: [], lcd_frame_only: true)
+        CachedGlyph.empty(codepoint, font_size)
 
     # Chrome's quarter-pixel glyph phases for an LCD run (Skia subpixel
     # positioning; measured: left 1.00/1.25/1.50/1.75 px give four different
@@ -1711,7 +1782,7 @@ class FontRenderer:
             if phase != 0 or frac:
                 val cp = cps[ci].to_i32()
                 val base = self.get_glyph(cp, font_size)
-                if base.lcd_pixels.len() > 0:
+                if base.lcd_pixels.len() > 0 or base.lcd_frame_only:
                     val cell_index = (-1 - phase - cell_base).to_i32()
                     val key = "{self.atlas_font_identity}|{self.atlas_face_generation}|{cp}|{font_size}|{phase}|{x_milli}"
                     var pg = base
@@ -1751,6 +1822,12 @@ class FontRenderer:
                     width: q.width, height: q.height,
                     atlas_x: q.atlas_x, atlas_y: q.atlas_y, color: q.color)
             qi = qi + 1
+        self._lcd_publish_cells(inserted)
+        self.staged_quads = quads
+
+    # Atlas cells inserted after `_stage_text_active` published its batch: name
+    # them in the staged dirty rects under a new atlas generation.
+    me _lcd_publish_cells(inserted: [FontRenderQuad]):
         if inserted.len() > 0:
             self.atlas_generation = _next_font_atlas_dependency_generation()
             self.atlas_owner_sequence = self.atlas_owner_sequence + 1
@@ -1761,7 +1838,54 @@ class FontRenderer:
             for d in inserted:
                 dirty.push(d)
             self.staged_dirty_rects = dirty
+
+    # Raster the deferred phase-0 LCD cells that are still drawn: every staged
+    # quad left with atlas_x = -1 (see `lcd_defer_cells`). The quad keeps its
+    # place and takes the cell `get_glyph` builds now, the one the staging
+    # pass used to insert up front. The atlas held no such cell when the quad
+    # was staged and only phase cells were added since, so a cell is inserted
+    # once per codepoint without another atlas scan. False = a cell did not
+    # fit the atlas (or is not the frame that was staged): the caller stages
+    # the run again without deferral.
+    me _lcd_resolve_deferred_cells(font_size: i32) -> bool:
+        var quads = self.staged_quads
+        var inserted: [FontRenderQuad] = []
+        var cell_cps: [i32] = []
+        var cell_slots: [i32] = []
+        var resolved = true
+        var qi: i64 = 0
+        while qi < quads.len():
+            val q = quads[qi]
+            if q.atlas_x < 0:
+                var idx: i32 = -1
+                var known = false
+                var ci: i64 = 0
+                while ci < cell_cps.len():
+                    if cell_cps[ci] == q.codepoint:
+                        idx = cell_slots[ci]
+                        known = true
+                    ci = ci + 1
+                if not known:
+                    val glyph = self.get_glyph(q.codepoint, font_size)
+                    if glyph.width == q.width and glyph.height == q.height:
+                        idx = self._insert_font_atlas_glyph(glyph)
+                        if idx >= 0:
+                            inserted.push(FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
+                                dst_x: 0, dst_y: 0, width: self.atlas_widths[idx], height: self.atlas_heights[idx],
+                                atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color))
+                    cell_cps.push(q.codepoint)
+                    cell_slots.push(idx)
+                if idx < 0:
+                    resolved = false
+                else:
+                    quads[qi] = FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
+                        dst_x: q.dst_x, dst_y: q.dst_y,
+                        width: self.atlas_widths[idx], height: self.atlas_heights[idx],
+                        atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color)
+            qi = qi + 1
+        self._lcd_publish_cells(inserted)
         self.staged_quads = quads
+        resolved
 
     me _activate_render_config(config: FontRenderConfig):
         val identity = font_render_config_identity(config)
@@ -2110,13 +2234,22 @@ class FontRenderer:
         # CachedGlyph), so each of the other two idioms crashes on one side.
         # See doc/08_tracking/bug/
         # font_renderer_cached_glyph_unwrap_semantic_crash_2026-08-15.md.
+        var filling_frame = false
+        var frame_advance: i32 = 0
         if val Some(cached_glyph) = cached:
             self.glyph_phase_cache_hit = true
             if cached_glyph.width > 0 and cached_glyph.height > 0:
                 self.glyph_phase_cache_hit_positive = true
                 self.glyph_phase_return_positive = true
-            self.cache = cache
-            return cached_glyph
+            # A deferred LCD cell (`lcd_frame_only`) read outside its staging
+            # pass gets its pixels now: the raster below runs and
+            # `fill_frame` puts the result in this entry's place.
+            if cached_glyph.lcd_frame_only and not self.lcd_defer_cells:
+                filling_frame = true
+                frame_advance = cached_glyph.advance
+            else:
+                self.cache = cache
+                return cached_glyph
 
         # Cross-instance glyph-raster cache (T12, render-perf replan
         # 2026-08-07) -- keyed by rasterizer identity + codepoint + size.
@@ -2145,7 +2278,8 @@ class FontRenderer:
         val raster_key = "{raster_identity};cp={codepoint};fs={font_size}{raster_lcd}"
         var raster_idx = 0
         var raster_hit: CachedGlyph? = nil
-        while raster_idx < _glyph_raster_keys.len():
+        # A frame being filled was a cache hit: no cross-instance lookup.
+        while not filling_frame and raster_idx < _glyph_raster_keys.len():
             if _glyph_raster_keys[raster_idx] == raster_key:
                 raster_hit = _glyph_raster_values[raster_idx]
             raster_idx = raster_idx + 1
@@ -2153,11 +2287,18 @@ class FontRenderer:
         # values in _glyph_raster_values are stored RAW.
         if val Some(raster_glyph) = raster_hit:
             _glyph_raster_hits = _glyph_raster_hits + 1
-            cache.insert(raster_glyph)
+            if not (filling_frame and cache.fill_frame(raster_glyph)):
+                cache.insert(raster_glyph)
             self.cache = cache
             if raster_glyph.width > 0 and raster_glyph.height > 0:
                 self.glyph_phase_return_positive = true
             return raster_glyph
+        if self.lcd_defer_cells:
+            if val Some(frame_glyph) = _lcd_frame_glyphs.get(raster_key):
+                cache.insert(frame_glyph)
+                self.cache = cache
+                self.glyph_phase_return_positive = true
+                return frame_glyph
         _glyph_raster_misses = _glyph_raster_misses + 1
 
         # Rasterize
@@ -2181,7 +2322,21 @@ class FontRenderer:
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] gwc-pre-rasterize cp={codepoint} rast_nil={rast == nil} has_glyph={rast_has_glyph}")
-        if rast_has_glyph:
+        # A frame being filled passed the checks of the block below when it was
+        # deferred (glyph id, measure, ink), with this advance: raster it.
+        if filling_frame and known_gid > 0 and self._lcd_applies(font_size):
+            val frame_seed = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: 0, height: 0, advance: frame_advance, bearing_x: 0, bearing_y: 0, pixels: [])
+            val filled = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, known_gid, codepoint, -1, 0, font_size, frame_seed)
+            if filled.lcd_pixels.len() > 0:
+                self.glyph_phase_bitmap_non_nil = true
+                self.glyph_phase_bitmap_positive = true
+                self.glyph_phase_adapter_positive = true
+                self.glyph_phase_reconstructed_positive = true
+                self.glyph_phase_bitmap_pixels_match = true
+                self.glyph_phase_adapter_pixels_match = true
+                glyph = filled
+                handled = true
+        if rast_has_glyph and not handled:
             if self.selected_outline_blob.len() > 0:
                 var direct_meta: [i64] = [0; 20]
                 # The selector only decides how the glyph id is found; slots
@@ -2206,6 +2361,25 @@ class FontRenderer:
                     if direct_count == lcd_width.to_i64() * lcd_height.to_i64() and sfnt_glyph_gray_row_has_ink(self.selected_outline_blob, direct_meta[6], font_size.to_i64()):
                         val lcd_advance_raw = direct_meta[2] as i32
                         val lcd_advance = if lcd_advance_raw > 0: lcd_advance_raw else: lcd_width + 1
+                        # Deferred cell (`lcd_defer_cells`): the staging pass
+                        # reads only this cell's metrics, and a glyph whose pen
+                        # lands on a quarter phase is drawn from its phase cell
+                        # instead. `_lcd_resolve_deferred_cells` rasters the
+                        # ones still drawn at phase 0.
+                        if self.lcd_defer_cells:
+                            val frame_glyph = self._lcd_frame_glyph(SFNT_GLYPH_SELECTOR_INDEX, direct_meta[6], codepoint, font_size, lcd_advance)
+                            if frame_glyph.lcd_frame_only:
+                                self.glyph_phase_bitmap_non_nil = true
+                                self.glyph_phase_bitmap_positive = true
+                                self.glyph_phase_adapter_positive = true
+                                self.glyph_phase_reconstructed_positive = true
+                                self.glyph_phase_bitmap_pixels_match = true
+                                self.glyph_phase_adapter_pixels_match = true
+                                self.glyph_phase_return_positive = true
+                                _lcd_frame_glyphs[raster_key] = frame_glyph
+                                cache.insert(frame_glyph)
+                                self.cache = cache
+                                return frame_glyph
                         val lcd_seed = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: lcd_width, height: lcd_height, advance: lcd_advance, bearing_x: direct_meta[3] as i32, bearing_y: direct_meta[4] as i32, pixels: [])
                         val lcd_first = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, direct_meta[6], codepoint, -1, 0, font_size, lcd_seed)
                         if lcd_first.lcd_pixels.len() > 0:
@@ -2344,7 +2518,8 @@ class FontRenderer:
             print("[vec-glyph-probe] gwc-pre-insert cp={codepoint} w={glyph.width} h={glyph.height} adv={glyph.advance} plen={glyph.pixels.len()}")
         val expected_pixels = glyph.width.to_i64() * glyph.height.to_i64()
         if glyph.advance > 0 and expected_pixels == glyph.pixels.len().to_i64():
-            cache.insert(glyph)
+            if not (filling_frame and cache.fill_frame(glyph)):
+                cache.insert(glyph)
         if glyph.width > 0 and glyph.height > 0:
             self.glyph_phase_return_positive = true
             # Store into the cross-instance glyph-raster cache -- inline
@@ -3199,13 +3374,26 @@ class FontRenderer:
                         _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                         print("[vec-glyph-probe] quadloop-after-entry_index i={i} atlas_index={atlas_index}")
                     var inserted = false
-                    if atlas_index < 0:
+                    # A deferred phase-0 LCD cell (see `lcd_defer_cells`) has no
+                    # pixels to insert: its quad carries atlas_x = -1 until
+                    # `_lcd_apply_pen_phases` swaps in a phase cell or
+                    # `_lcd_resolve_deferred_cells` rasters it.
+                    val deferred = atlas_index < 0 and glyph.lcd_frame_only
+                    if atlas_index < 0 and not deferred:
                         atlas_index = self._insert_font_atlas_glyph(glyph)
                         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                             print("[vec-glyph-probe] quadloop-after-insert i={i} atlas_index={atlas_index}")
                         inserted = atlas_index >= 0
-                    if atlas_index < 0:
+                    if deferred:
+                        self.text_phase_atlas_index_valid = true
+                        quads = quads.push(FontRenderQuad(
+                            codepoint: glyph.codepoint, byte_offset: quad_byte_offset,
+                            dst_x: quad_dst_x.to_i32(), dst_y: quad_dst_y.to_i32(),
+                            width: glyph.width, height: glyph.height,
+                            atlas_x: -1, atlas_y: -1, color: color))
+                        self.text_phase_quad_appended = true
+                    elif atlas_index < 0:
                         overflow = true
                     else:
                         self.text_phase_atlas_index_valid = true
@@ -3307,6 +3495,23 @@ class FontRenderer:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
+        # Phase-0 LCD cells are deferred for this pass: most glyphs of an LCD
+        # run are drawn from a quarter-phase cell, and the phase-0 cell the
+        # staging pass rastered for each of them first (about 13 ms per cold
+        # glyph on the interpreter lane) was never drawn.
+        self.lcd_defer_cells = self._lcd_applies(config.size)
+        self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli)
+        if self.lcd_defer_cells:
+            self.lcd_defer_cells = false
+            if not self._lcd_resolve_deferred_cells(config.size):
+                # Atlas full: start it over and stage with every cell up
+                # front, as `_stage_text_active` does on its own overflow.
+                self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
+                self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli)
+        self._apply_staged_config(config)
+        self.staged_quads.len()
+
+    me _stage_text_with_advances_active(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64, size_milli: i64):
         # `natural_advances` must describe the pen the quads were ACTUALLY
         # staged at, or the re-layout shift carries the difference into the
         # quads. When the rasterizer has no layout of its own,
@@ -3331,8 +3536,6 @@ class FontRenderer:
         self.staged_quads = quads
         if self.staged_valid:
             self._lcd_apply_pen_phases(content, advance_widths, config.size, pen_origin_milli, size_milli)
-        self._apply_staged_config(config)
-        self.staged_quads.len()
 
     # Single-aggregate return (was `(CachedGlyph, GlyphCache)`); the cache half
     # now updates `self.cache` in place — see get_glyph above for the channel

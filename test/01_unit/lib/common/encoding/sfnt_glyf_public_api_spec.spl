@@ -10,7 +10,8 @@ use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYF_MOVE
     sfnt_glyf_read_i16_be, sfnt_glyf_cmap_ids_into, sfnt_glyf_parse_outline,
     sfnt_glyf_measure_codepoint_advances, sfnt_rasterize_glyph_baseline_aligned,
     sfnt_render_glyph_lcd, sfnt_glyph_gray_row_has_ink, sfnt_measure_glyph_into,
-    sfnt_render_glyph_into, SFNT_GLYPH_SELECTOR_INDEX}
+    sfnt_render_glyph_into, SFNT_GLYPH_SELECTOR_INDEX, sfnt_lcd_glyph_outline,
+    sfnt_lcd_outline_frame, sfnt_lcd_outline_raster}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 val PINNED_FONT: text = "assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf"
@@ -148,6 +149,33 @@ describe "sfnt_glyf public API":
         expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 0, 0)).to_equal(None)
         expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 513, 0)).to_equal(None)
         expect(sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 1114109, 32, 0)).to_equal(None)
+
+    # `sfnt_lcd_outline_frame` is what a text run reads in place of a phase-0
+    # cell it never draws, so it must be the raster's own metrics.
+    it "LCD outline frame is the metrics of the cell rastered at each phase":
+        val blob = file_read_bytes(PINNED_FONT)
+        var checked: i64 = 0
+        var wrong: i64 = 0
+        for size in [12, 16, 32]:
+            var cp: i64 = 33
+            while cp < 127:
+                if val Some(outline) = sfnt_lcd_glyph_outline(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, cp, size, 0):
+                    var phase: i64 = 0
+                    while phase < 4:
+                        val frame = sfnt_lcd_outline_frame(outline, phase)
+                        val whole = sfnt_render_glyph_lcd(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, cp, size, phase).unwrap()
+                        val cell = sfnt_lcd_outline_raster(outline, phase).unwrap()
+                        checked = checked + 1
+                        if frame != [whole.slg_width, whole.slg_height, whole.slg_bearing_x, whole.slg_bearing_y]: wrong = wrong + 1
+                        if cell.slg_rgb != whole.slg_rgb or cell.slg_gray != whole.slg_gray or cell.slg_advance != whole.slg_advance: wrong = wrong + 1
+                        phase = phase + 1
+                    expect(sfnt_lcd_outline_frame(outline, 4)).to_equal([])
+                    expect(sfnt_lcd_outline_raster(outline, -1)).to_equal(None)
+                cp = cp + 1
+        expect(checked).to_be_greater_than(600)
+        expect(wrong).to_equal(0)
+        expect(sfnt_lcd_glyph_outline(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 1114109, 16, 0)).to_equal(None)
+        expect(sfnt_lcd_glyph_outline(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 0, 0)).to_equal(None)
 
     # `sfnt_glyph_gray_row_has_ink` stands in for the grayscale render's "any
     # ink" receipt (meta[9] > 0) on the LCD glyph path, so a `true` must never
