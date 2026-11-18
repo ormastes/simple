@@ -1,10 +1,111 @@
 use std.spec.*
-use compiler.backend.runtime_object_cache_windows.{runtime_windows_cache_driver_kind_v1, runtime_windows_cache_split_args_v1}
+use std.io_runtime.{file_write, file_read, file_exists, file_delete, file_hash_sha256_or_empty, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.runtime_object_cache.{runtime_object_cache_publish_v1}
+use compiler.backend.runtime_object_cache_windows.{
+    runtime_windows_cache_driver_kind_v1,
+    runtime_windows_cache_split_args_v1,
+    runtime_windows_cache_toolchain_v1,
+    runtime_windows_cache_publish_batch_v1,
+    runtime_windows_cached_compile_with_runner_v1,
+    runtime_windows_normalize_dep_path_v1,
+    runtime_windows_extract_linemarker_headers_v1,
+    runtime_windows_direct_manifest_key_v1,
+    runtime_windows_direct_manifest_path_v1,
+    runtime_windows_direct_manifest_roundtrip,
+    runtime_windows_direct_manifest_publish_v1,
+    runtime_windows_direct_manifest_lookup_v1,
+    runtime_windows_direct_manifest_decode_v1
+}
 
 # Regression: on Windows the llvm-mingw `clang.exe` (GNU driver) runtime lane
 # had no runtime object cache at all, so every native-build recompiled ~60
 # runtime C files serially (~92 s of a 200 s warm p2_add smoke build).
+# Follow-up: direct header-manifest warm-hit lookup skips serial `-E` and `-###`
+# spawns when every linemarker dependency keeps its SHA-256 and cached `.o` exists.
 # doc/08_tracking/bug/windows_gnu_clang_runtime_objects_uncached_2026-11-16.md
+
+var _win_gnu_spec_calls: [text] = []
+
+fn _win_gnu_spec_reset_calls():
+    _win_gnu_spec_calls = []
+
+fn _win_gnu_spec_count_calls(kind: text) -> i64:
+    var total: i64 = 0
+    for item in _win_gnu_spec_calls:
+        if item == kind:
+            total = total + 1
+    total
+
+fn _win_gnu_spec_arg_after(args: [text], flag: text) -> text:
+    var index = 0
+    while index + 1 < args.len():
+        if args[index] == flag:
+            return args[index + 1]
+        index = index + 1
+    ""
+
+fn _win_gnu_spec_arg_ending(args: [text], suffix: text) -> text:
+    for item in args:
+        if item.ends_with(suffix):
+            return item
+    ""
+
+fn _win_gnu_spec_strip_comments(content: text) -> text:
+    var kept: [text] = []
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "" and not trimmed.starts_with("//"):
+            kept.push(trimmed)
+    kept.join("\n")
+
+fn _win_gnu_spec_runner(compiler: text, args: [text]) -> (text, text, i64):
+    if args.len() > 0 and args[0] == "-###":
+        _win_gnu_spec_calls.push("plan")
+        val obj_path = _win_gnu_spec_arg_after(args, "-o")
+        val i_path = _win_gnu_spec_arg_ending(args, ".i")
+        val plan = "\"{compiler}\" \"-x\" \"cpp-output\" \"-o\" \"" + obj_path.replace("\\", "\\\\") + "\" \"" + i_path.replace("\\", "\\\\") + "\""
+        return (plan, "", 0)
+    var is_preprocess = false
+    for item in args:
+        if item == "-E":
+            is_preprocess = true
+    if is_preprocess:
+        _win_gnu_spec_calls.push("preprocess")
+        val pre_out = _win_gnu_spec_arg_after(args, "-o")
+        val src_path = _win_gnu_spec_arg_ending(args, ".c")
+        val slash = src_path.rfind("/")
+        val rt_dir = if slash >= 0: src_path[0:slash] else: "."
+        val a_h = rt_dir + "/a.h"
+        val b_h = rt_dir + "/sub/b.h"
+        var lines: [text] = [
+            "# 1 \"<built-in>\"",
+            "# 1 \"<command line>\"",
+            "# 1 \"" + src_path.replace("/", "\\\\") + "\""
+        ]
+        if file_exists(a_h):
+            lines.push("# 1 \"" + a_h.replace("/", "\\\\") + "\" 1")
+            lines.push(_win_gnu_spec_strip_comments(file_read(a_h)))
+        if file_exists(b_h):
+            lines.push("# 1 \"" + b_h.replace("/", "\\\\") + "\" 1 3 4")
+            lines.push(_win_gnu_spec_strip_comments(file_read(b_h)))
+        lines.push("# 2 \"" + src_path.replace("/", "\\\\") + "\" 2")
+        lines.push(_win_gnu_spec_strip_comments(file_read(src_path)))
+        if not file_write(pre_out, lines.join("\n") + "\n"):
+            return ("", "failed to write preprocessed output", 1)
+        return ("", "", 0)
+    _win_gnu_spec_calls.push("compile")
+    val obj_path = _win_gnu_spec_arg_after(args, "-o")
+    val i_path = _win_gnu_spec_arg_ending(args, ".i")
+    var body: [text] = []
+    for line in file_read(i_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            body.push(trimmed)
+    if not file_write(obj_path, "OBJ:" + body.join("|")):
+        return ("", "failed to write object output", 1)
+    ("", "", 0)
 
 describe "Windows runtime cache driver kind":
     it "admits clang-cl and the llvm-mingw GNU clang driver":
@@ -33,3 +134,225 @@ describe "Windows runtime cache argument split":
         expect(split.preprocess.join(" ")).to_equal("/O2 rt/a.c /P /FiS/input.i")
         expect(split.compile.join(" ")).to_equal("/c /O2 /Forun.obj S/input.i")
         expect(split.options.join(" ")).to_equal("/c /O2 /Fo<runtime-object> rt/a.c")
+
+describe "Windows runtime direct header linemarker extraction":
+    it "extracts normalized deduplicated file paths and ignores synthetic markers":
+        val preprocessed = [
+            "# 1 \"<built-in>\"",
+            "# 1 \"<command line>\"",
+            "# 1 \"<command-line>\"",
+            "# 1 \"<scratch space>\"",
+            "# 1 \"C:\\\\dev\\\\wt\\\\rt\\\\runtime_native.c\"",
+            "# 12 \"C:\\\\Program Files\\\\LLVM\\\\include\\\\stdint.h\" 1 3 4",
+            "# 1 \"C:\\dev\\wt\\rt\\runtime_native.h\" 1",
+            "# 9 \"C:/dev/wt/rt/./runtime_native.h\" 2",
+            "#line 20 \"C:\\\\dev\\\\wt\\\\rt\\\\platform\\\\win.h\"",
+            "int runtime_ok = 1;",
+            "#define IGNORED \"not/a/header.h\"",
+            "# 30 \"C:/dev/wt/rt/runtime_native.c\" 2"
+        ].join("\n")
+        val headers = runtime_windows_extract_linemarker_headers_v1(preprocessed)
+        expect(headers.len()).to_equal(4)
+        expect(headers[0]).to_equal("C:/dev/wt/rt/runtime_native.c")
+        expect(headers[1]).to_equal("C:/Program Files/LLVM/include/stdint.h")
+        expect(headers[2]).to_equal("C:/dev/wt/rt/runtime_native.h")
+        expect(headers[3]).to_equal("C:/dev/wt/rt/platform/win.h")
+
+describe "Windows runtime direct header manifest key and SDN roundtrip":
+    it "computes deterministic direct keys and roundtrips .deps.sdn with sha256 entries":
+        val root = secure_temp_dir(".", "win-direct-sdn-").unwrap()
+        val cache = root + "/cache"
+        val tc_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val content_key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val src = root + "/src/a.c"
+        val hdr = root + "/src/a.h"
+        expect(dir_create_all(root + "/src")).to_be(true)
+        expect(file_write(src, "int f(void);\n")).to_be(true)
+        expect(file_write(hdr, "#define X 1\n")).to_be(true)
+        val k1 = runtime_windows_direct_manifest_key_v1(cache, tc_id, ["-O2", "-DWIN=1"], src)
+        val k2 = runtime_windows_direct_manifest_key_v1(cache, tc_id, ["-O2", "-DWIN=1"], src.replace("/", "\\"))
+        val k_diff_flag = runtime_windows_direct_manifest_key_v1(cache, tc_id, ["-O3", "-DWIN=1"], src)
+        val k_diff_tc = runtime_windows_direct_manifest_key_v1(cache, content_key, ["-O2", "-DWIN=1"], src)
+        val k_diff_src = runtime_windows_direct_manifest_key_v1(cache, tc_id, ["-O2", "-DWIN=1"], root + "/src/other.c")
+        expect(k1.len()).to_equal(64)
+        expect(k1).to_equal(k2)
+        expect(k1 == k_diff_flag).to_be(false)
+        expect(k1 == k_diff_tc).to_be(false)
+        expect(k1 == k_diff_src).to_be(false)
+        val roundtrip = runtime_windows_direct_manifest_roundtrip(cache, k1, content_key, [src, hdr])
+        expect(roundtrip.is_ok()).to_be(true)
+        val manifest = roundtrip.unwrap()
+        expect(manifest.direct_key).to_equal(k1)
+        expect(manifest.content_key).to_equal(content_key)
+        expect(manifest.deps.len()).to_equal(2)
+        expect(manifest.deps[0].path).to_equal(runtime_windows_normalize_dep_path_v1(src))
+        expect(manifest.deps[0].sha256).to_equal(file_hash_sha256_or_empty(src))
+        expect(manifest.deps[1].path).to_equal(runtime_windows_normalize_dep_path_v1(hdr))
+        expect(manifest.deps[1].sha256).to_equal(file_hash_sha256_or_empty(hdr))
+        val manifest_path = runtime_windows_direct_manifest_path_v1(cache, k1)
+        expect(file_exists(manifest_path)).to_be(true)
+        expect(dir_remove(root, true)).to_be(true)
+
+    it "refuses to publish .deps.sdn when any dependency is missing or not a regular file":
+        val root = secure_temp_dir(".", "win-direct-fail-").unwrap()
+        val cache = root + "/cache"
+        val tc_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val content_key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val src = root + "/a.c"
+        val dir_dep = root + "/incdir"
+        expect(dir_create_all(dir_dep)).to_be(true)
+        expect(file_write(src, "int a = 1;\n")).to_be(true)
+        val dkey = runtime_windows_direct_manifest_key_v1(cache, tc_id, ["-O2"], src)
+        expect(runtime_windows_direct_manifest_publish_v1(cache, dkey, content_key, [src, root + "/missing.h"])).to_be(false)
+        expect(file_exists(runtime_windows_direct_manifest_path_v1(cache, dkey))).to_be(false)
+        expect(runtime_windows_direct_manifest_publish_v1(cache, dkey, content_key, [src, dir_dep])).to_be(false)
+        expect(file_exists(runtime_windows_direct_manifest_path_v1(cache, dkey))).to_be(false)
+        expect(runtime_windows_direct_manifest_publish_v1(cache, dkey, content_key, [])).to_be(false)
+        expect(file_exists(runtime_windows_direct_manifest_path_v1(cache, dkey))).to_be(false)
+        expect(dir_remove(root, true)).to_be(true)
+
+describe "Windows runtime direct header-manifest warm hit and invalidation":
+    it "publishes .deps.sdn on miss, serves warm direct hits with zero preprocess callbacks, and invalidates on header mutation":
+        val root = secure_temp_dir(".", "win-direct-flow-").unwrap()
+        val cache = root + "/cache"
+        val tc_dir = root + "/tc/bin"
+        val rt_dir = root + "/rt"
+        val out_dir = root + "/out"
+        expect(dir_create_all(tc_dir)).to_be(true)
+        expect(dir_create_all(rt_dir + "/sub")).to_be(true)
+        expect(dir_create_all(out_dir)).to_be(true)
+        val compiler = tc_dir + "/clang.exe"
+        expect(file_write(compiler, "fake-llvm-mingw-clang-driver-v1")).to_be(true)
+        val compiler_digest = file_hash_sha256_or_empty(compiler)
+        val toolchain = runtime_windows_cache_toolchain_v1(cache, compiler)
+        expect(toolchain.len()).to_equal(64)
+        val src = rt_dir + "/a.c"
+        val hdr_a = rt_dir + "/a.h"
+        val hdr_b = rt_dir + "/sub/b.h"
+        expect(file_write(src, "BODY=fn_a\n")).to_be(true)
+        expect(file_write(hdr_a, "VAL=1\n")).to_be(true)
+        expect(file_write(hdr_b, "// comment v1\nSUB=10\n")).to_be(true)
+
+        val ctx = ["target=host", "profile=ordinary"]
+        val obj1 = out_dir + "/run1_a.o"
+        val args1 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj1, src]
+        _win_gnu_spec_reset_calls()
+        val r1 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args1, src, obj1, ctx, false, _win_gnu_spec_runner)
+        expect(r1.exit_code).to_equal(0)
+        expect(r1.pending_key.len()).to_equal(64)
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(1)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(1)
+        expect(file_read(obj1)).to_equal("OBJ:VAL=1|SUB=10|BODY=fn_a")
+        expect(runtime_windows_cache_publish_batch_v1(cache, compiler, toolchain, [r1.pending_key], [obj1])).to_be(true)
+
+        # Warm direct hit: zero preprocess, zero plan, zero compile callbacks.
+        val obj2 = out_dir + "/run2_a.o"
+        val args2 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj2, src]
+        _win_gnu_spec_reset_calls()
+        val r2 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args2, src, obj2, ctx, false, _win_gnu_spec_runner)
+        expect(r2.exit_code).to_equal(0)
+        expect(r2.pending_key).to_equal("")
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(0)
+        expect(_win_gnu_spec_count_calls("plan")).to_equal(0)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(0)
+        expect(file_read(obj2)).to_equal("OBJ:VAL=1|SUB=10|BODY=fn_a")
+
+        # Mutate header content (preprocessed bytes change): must invalidate and recompile.
+        expect(file_write(hdr_a, "VAL=2\n")).to_be(true)
+        val obj3 = out_dir + "/run3_a.o"
+        val args3 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj3, src]
+        _win_gnu_spec_reset_calls()
+        val r3 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args3, src, obj3, ctx, false, _win_gnu_spec_runner)
+        expect(r3.exit_code).to_equal(0)
+        expect(r3.pending_key.len()).to_equal(64)
+        expect(r3.pending_key == r1.pending_key).to_be(false)
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(1)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(1)
+        expect(file_read(obj3)).to_equal("OBJ:VAL=2|SUB=10|BODY=fn_a")
+        expect(runtime_windows_cache_publish_batch_v1(cache, compiler, toolchain, [r3.pending_key], [obj3])).to_be(true)
+
+        # Warm direct hit after refresh: zero preprocess callbacks, serves updated object.
+        val obj4 = out_dir + "/run4_a.o"
+        val args4 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj4, src]
+        _win_gnu_spec_reset_calls()
+        val r4 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args4, src, obj4, ctx, false, _win_gnu_spec_runner)
+        expect(r4.exit_code).to_equal(0)
+        expect(r4.pending_key).to_equal("")
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(0)
+        expect(_win_gnu_spec_count_calls("plan")).to_equal(0)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(0)
+        expect(file_read(obj4)).to_equal("OBJ:VAL=2|SUB=10|BODY=fn_a")
+
+        # Comment-only header mutation: direct manifest misses -> `-E` runs -> content cache hits (0 compile) -> refreshes .deps.sdn!
+        expect(file_write(hdr_b, "// comment v2\nSUB=10\n")).to_be(true)
+        val obj5 = out_dir + "/run5_a.o"
+        val args5 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj5, src]
+        _win_gnu_spec_reset_calls()
+        val r5 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args5, src, obj5, ctx, false, _win_gnu_spec_runner)
+        expect(r5.exit_code).to_equal(0)
+        expect(r5.pending_key).to_equal("")
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(1)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(0)
+        expect(file_read(obj5)).to_equal("OBJ:VAL=2|SUB=10|BODY=fn_a")
+
+        # Next warm run after comment-only refresh hits direct manifest again with zero preprocess!
+        val obj6 = out_dir + "/run6_a.o"
+        val args6 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj6, src]
+        _win_gnu_spec_reset_calls()
+        val r6 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args6, src, obj6, ctx, false, _win_gnu_spec_runner)
+        expect(r6.exit_code).to_equal(0)
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(0)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(0)
+        expect(file_read(obj6)).to_equal("OBJ:VAL=2|SUB=10|BODY=fn_a")
+
+        # Direct lookup unit invalidation via runtime_windows_direct_manifest_lookup_v1:
+        val direct_key = runtime_windows_direct_manifest_key_v1(cache, toolchain, ["-O2"], src)
+        expect(runtime_windows_direct_manifest_publish_v1(cache, direct_key, r3.pending_key, [src, hdr_a, hdr_b])).to_be(true)
+        val obj_direct = out_dir + "/direct_only.o"
+        expect(runtime_windows_direct_manifest_lookup_v1(cache, direct_key, obj_direct)).to_equal(r3.pending_key)
+        expect(file_read(obj_direct)).to_equal("OBJ:VAL=2|SUB=10|BODY=fn_a")
+        # Corrupt manifest fails closed without touching output:
+        val manifest_path = runtime_windows_direct_manifest_path_v1(cache, direct_key)
+        expect(file_write(manifest_path, "not-valid-sdn-manifest")).to_be(true)
+        val obj_corrupt = out_dir + "/direct_corrupt.o"
+        expect(runtime_windows_direct_manifest_lookup_v1(cache, direct_key, obj_corrupt)).to_equal("")
+        expect(file_exists(obj_corrupt)).to_be(false)
+        # Re-publish valid manifest, then delete hdr_b -> direct lookup misses without writing output:
+        expect(runtime_windows_direct_manifest_publish_v1(cache, direct_key, r3.pending_key, [src, hdr_a, hdr_b])).to_be(true)
+        expect(file_delete(hdr_b)).to_be(true)
+        val obj_missing_hdr = out_dir + "/direct_missing_hdr.o"
+        expect(runtime_windows_direct_manifest_lookup_v1(cache, direct_key, obj_missing_hdr)).to_equal("")
+        expect(file_exists(obj_missing_hdr)).to_be(false)
+
+        # Missing header in compile pipeline falls back cleanly to `-E` and refreshes `.deps.sdn`:
+        val obj7 = out_dir + "/run7_a.o"
+        val args7 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj7, src]
+        _win_gnu_spec_reset_calls()
+        val r7 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args7, src, obj7, ctx, false, _win_gnu_spec_runner)
+        expect(r7.exit_code).to_equal(0)
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(1)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(1)
+        expect(file_read(obj7)).to_equal("OBJ:VAL=2|BODY=fn_a")
+        expect(runtime_windows_cache_publish_batch_v1(cache, compiler, toolchain, [r7.pending_key], [obj7])).to_be(true)
+
+        # After hdr_b was deleted and TU rebuilt without it, warm direct hit succeeds again with zero preprocess:
+        val obj8 = out_dir + "/run8_a.o"
+        val args8 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj8, src]
+        _win_gnu_spec_reset_calls()
+        val r8 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args8, src, obj8, ctx, false, _win_gnu_spec_runner)
+        expect(r8.exit_code).to_equal(0)
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(0)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(0)
+        expect(file_read(obj8)).to_equal("OBJ:VAL=2|BODY=fn_a")
+
+        # Swept/missing cached object must fall back cleanly to `-E` + `-c` without false hit:
+        expect(file_delete(cache + "/keys/" + r7.pending_key)).to_be(true)
+        val obj9 = out_dir + "/run9_a.o"
+        val args9 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj9, src]
+        _win_gnu_spec_reset_calls()
+        val r9 = runtime_windows_cached_compile_with_runner_v1(cache, compiler, compiler_digest, toolchain, args9, src, obj9, ctx, false, _win_gnu_spec_runner)
+        expect(r9.exit_code).to_equal(0)
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(1)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(1)
+        expect(file_read(obj9)).to_equal("OBJ:VAL=2|BODY=fn_a")
+        expect(dir_remove(root, true)).to_be(true)

@@ -1,10 +1,19 @@
 # Windows runtime C object cache adapter (clang-cl and the llvm-mingw GNU clang
 # driver). Preprocessed bytes, not a guessed include list, are the compilation
-# input. Unsupported tool/configuration shapes remain uncached.
+# input; on warm builds a verified direct header manifest skips `-E` and `-###`
+# when every recorded dependency keeps its regular-file SHA-256 and the cached
+# object is intact. Unsupported tool/configuration shapes remain uncached.
 use compiler.backend.runtime_object_cache.{runtime_object_cache_digest_valid_v1, runtime_object_cache_material_v1, runtime_object_cache_key_v1, runtime_object_cache_lookup_v1, runtime_object_cache_publish_v1}
 use std.io_runtime.{process_run, env_get_nullable, file_delete, file_hash_sha256_or_empty, dir_list_optional}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
-use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_read_regular_no_follow_bounded, file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_is_real_no_follow}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse}
+
+val RUNTIME_WINDOWS_DIRECT_MANIFEST_SCHEMA_V1 = "simple-windows-rt-direct-v1"
+val RUNTIME_WINDOWS_PREPROCESSED_READ_CAP_BYTES = 33554432
+val RUNTIME_WINDOWS_MANIFEST_READ_CAP_BYTES = 4194304
 
 pub struct RuntimeWindowsCacheCompileResultV1:
     stdout: text
@@ -17,8 +26,25 @@ pub struct RuntimeWindowsCacheArgsV1:
     compile: [text]
     options: [text]
 
-fn runtime_windows_uncached_compile_v1(compiler: text, arguments: [text]) -> RuntimeWindowsCacheCompileResultV1:
-    val (stdout, stderr, code) = process_run(compiler, arguments)
+pub struct RuntimeWindowsDepEntryV1:
+    path: text
+    sha256: text
+
+pub struct RuntimeWindowsDirectManifestV1:
+    direct_key: text
+    content_key: text
+    deps: [RuntimeWindowsDepEntryV1]
+
+struct RuntimeWindowsPendingManifestV1:
+    root: text
+    content_key: text
+    direct_key: text
+    deps: [RuntimeWindowsDepEntryV1]
+
+var _windows_pending_direct_manifests_v1: [RuntimeWindowsPendingManifestV1] = []
+
+fn runtime_windows_uncached_compile_v1(compiler: text, arguments: [text], run_process: fn(text, [text]) -> (text, text, i64)) -> RuntimeWindowsCacheCompileResultV1:
+    val (stdout, stderr, code) = run_process(compiler, arguments)
     RuntimeWindowsCacheCompileResultV1(stdout: stdout, stderr: stderr, exit_code: code, pending_key: "")
 
 pub fn runtime_windows_cache_driver_kind_v1(compiler: text) -> text:
@@ -36,6 +62,27 @@ pub fn runtime_windows_cache_driver_kind_v1(compiler: text) -> text:
     if name == "clang.exe" or name.ends_with("-clang.exe"): return "gnu"
     ""
 
+fn _runtime_windows_normalize_option_v1(kind: text, argument: text, output: text) -> text:
+    if kind == "gnu":
+        if argument == output: "<runtime-object>" else: argument
+    else:
+        if argument == "/Fo" + output: "/Fo<runtime-object>" else: argument
+
+fn _runtime_windows_option_flags_v1(kind: text, arguments: [text], output: text) -> [text]:
+    var options: [text] = []
+    for argument in arguments:
+        options.push(_runtime_windows_normalize_option_v1(kind, argument, output))
+    options
+
+fn _runtime_windows_append_env_pairs_v1(base: [text]) -> [text]:
+    var out: [text] = []
+    for item in base:
+        out.push(item)
+    for variable in ["INCLUDE", "LIB", "LIBPATH", "PATH", "SDKROOT", "WindowsSdkDir", "WindowsSDKVersion", "VCToolsInstallDir", "VCINSTALLDIR", "SOURCE_DATE_EPOCH", "CPATH", "C_INCLUDE_PATH", "CLANG_CONFIG_FILE_SYSTEM_DIR", "CLANG_CONFIG_FILE_USER_DIR"]:
+        out.push(variable)
+        out.push(env_get_nullable(variable) ?? "")
+    out
+
 pub fn runtime_windows_cache_split_args_v1(kind: text, arguments: [text], source: text, output: text, preprocessed: text) -> RuntimeWindowsCacheArgsV1:
     """Split one runtime compile into: preprocess the TU into `preprocessed`,
     compile that same `.i` to `output`, and the output-independent options
@@ -46,8 +93,8 @@ pub fn runtime_windows_cache_split_args_v1(kind: text, arguments: [text], source
     var skip_next = false
     for argument in arguments:
         compile.push(if argument == source: preprocessed else: argument)
+        options.push(_runtime_windows_normalize_option_v1(kind, argument, output))
         if kind == "gnu":
-            options.push(if argument == output: "<runtime-object>" else: argument)
             if skip_next:
                 skip_next = false
             elif argument == "-o":
@@ -55,7 +102,6 @@ pub fn runtime_windows_cache_split_args_v1(kind: text, arguments: [text], source
             elif argument != "-c":
                 preprocess.push(argument)
         else:
-            options.push(if argument == "/Fo" + output: "/Fo<runtime-object>" else: argument)
             if argument != "/c" and not argument.starts_with("/Fo"):
                 preprocess.push(argument)
     if kind == "gnu":
@@ -83,7 +129,7 @@ pub fn runtime_windows_cache_toolchain_v1(root: text, compiler: text) -> text:
     if not runtime_object_cache_digest_valid_v1(compiler_digest): return ""
     val directory = spelling[0:separator]
     val observed = dir_list_optional(directory)
-    if observed == nil: return ""
+    if not observed.?: return ""
     var names = observed ?? []
     names.sort()
     var options: [text] = [spelling, compiler_digest]
@@ -100,10 +146,329 @@ pub fn runtime_windows_cache_toolchain_v1(root: text, compiler: text) -> text:
     if key.is_err(): return ""
     key.unwrap()
 
-fn runtime_windows_cache_plan_v1(compiler: text, arguments: [text], stage: text, output: text) -> Result<text, text>:
+pub fn runtime_windows_normalize_dep_path_v1(path: text) -> text:
+    """Normalize Windows/POSIX separators in a dependency or source path."""
+    if path == "":
+        return ""
+    var replaced = path.replace("\\\\", "/").replace("\\", "/")
+    val unc = replaced.starts_with("//") and not replaced.starts_with("///")
+    while replaced.contains("//"):
+        replaced = replaced.replace("//", "/")
+    while replaced.contains("/./"):
+        replaced = replaced.replace("/./", "/")
+    if unc:
+        return "/" + replaced
+    replaced
+
+fn _runtime_windows_is_pseudo_marker_path_v1(norm_path: text) -> bool:
+    norm_path == "" or (norm_path.starts_with("<") and norm_path.ends_with(">"))
+
+fn _runtime_windows_parse_linemarker_line_v1(raw_line: text) -> text:
+    """Extract normalized path from a `# <line> "<path>"` or `#line <line> "<path>"` directive."""
+    val line = raw_line.trim()
+    if not line.starts_with("#"):
+        return ""
+    var pos = 1
+    while true:
+        val ch = line.substring(pos, pos + 1)
+        if ch != " " and ch != "\t":
+            break
+        pos = pos + 1
+    val rest = line.substring(pos)
+    if rest.starts_with("line ") or rest.starts_with("line\t"):
+        pos = pos + 4
+        while true:
+            val ch = line.substring(pos, pos + 1)
+            if ch != " " and ch != "\t":
+                break
+            pos = pos + 1
+    var digits = 0
+    while true:
+        val ch = line.substring(pos, pos + 1)
+        if ch == "" or not "0123456789".contains(ch):
+            break
+        digits = digits + 1
+        pos = pos + 1
+    if digits == 0:
+        return ""
+    var spaces = 0
+    while true:
+        val ch = line.substring(pos, pos + 1)
+        if ch != " " and ch != "\t":
+            break
+        spaces = spaces + 1
+        pos = pos + 1
+    if spaces == 0:
+        return ""
+    if line.substring(pos, pos + 1) != "\"":
+        return ""
+    pos = pos + 1
+    var parts: [text] = []
+    var run_start = pos
+    var closed = false
+    while true:
+        val ch = line.substring(pos, pos + 1)
+        if ch == "":
+            break
+        if ch == "\"":
+            if pos > run_start:
+                parts.push(line.substring(run_start, pos))
+            pos = pos + 1
+            closed = true
+            break
+        if ch == "\\":
+            if pos > run_start:
+                parts.push(line.substring(run_start, pos))
+            val nx = line.substring(pos + 1, pos + 2)
+            if nx == "\\":
+                parts.push("/")
+                pos = pos + 2
+            elif nx == "\"":
+                parts.push("\"")
+                pos = pos + 2
+            else:
+                parts.push("/")
+                pos = pos + 1
+            run_start = pos
+        else:
+            pos = pos + 1
+    if not closed:
+        return ""
+    while true:
+        val ch = line.substring(pos, pos + 1)
+        if ch == "":
+            break
+        if ch != " " and ch != "\t" and not "0123456789".contains(ch):
+            return ""
+        pos = pos + 1
+    val norm = runtime_windows_normalize_dep_path_v1(parts.join(""))
+    if _runtime_windows_is_pseudo_marker_path_v1(norm):
+        return ""
+    norm
+
+pub fn runtime_windows_extract_linemarker_headers_v1(preprocessed_text: text) -> [text]:
+    """Extract normalized, deduplicated file paths from preprocessed `.i` linemarkers.
+
+    Ignores synthetic compiler markers such as `<built-in>` and `<command line>`.
+    """
+    var seen: Dict<text, bool> = {}
+    var headers: [text] = []
+    for raw_line in preprocessed_text.split("\n"):
+        if not raw_line.contains("#"):
+            continue
+        val path = _runtime_windows_parse_linemarker_line_v1(raw_line)
+        if path != "" and not seen.contains_key(path):
+            seen[path] = true
+            headers.push(path)
+    headers
+
+pub fn runtime_windows_direct_manifest_key_v1(root: text, toolchain_id: text, compiler_flags: [text], source_path: text) -> text:
+    """Compute the direct manifest key from `(toolchain_id, compiler_flags, source_path)`."""
+    if root == "" or not runtime_object_cache_digest_valid_v1(toolchain_id) or source_path == "":
+        return ""
+    val norm_source = runtime_windows_normalize_dep_path_v1(source_path)
+    if _runtime_windows_is_pseudo_marker_path_v1(norm_source):
+        return ""
+    var options: [text] = [RUNTIME_WINDOWS_DIRECT_MANIFEST_SCHEMA_V1, norm_source]
+    for flag in compiler_flags:
+        options.push(flag)
+    val material = runtime_object_cache_material_v1(toolchain_id, toolchain_id, toolchain_id, options)
+    if material.is_err():
+        return ""
+    val key = runtime_object_cache_key_v1(root, material.unwrap())
+    if key.is_err():
+        return ""
+    key.unwrap()
+
+pub fn runtime_windows_direct_manifest_path_v1(root: text, direct_key: text) -> text:
+    if root == "" or not runtime_object_cache_digest_valid_v1(direct_key):
+        return ""
+    root + "/keys/" + direct_key + ".deps.sdn"
+
+pub fn runtime_windows_direct_manifest_encode_v1(manifest: RuntimeWindowsDirectManifestV1) -> text:
+    var dep_values: [SdnValue] = []
+    for dep in manifest.deps:
+        var entry: Dict<text, SdnValue> = {}
+        entry["path"] = SdnValue.String(dep.path)
+        entry["sha256"] = SdnValue.String(dep.sha256)
+        dep_values.push(SdnValue.Dict(entry))
+    var root_map: Dict<text, SdnValue> = {}
+    root_map["schema"] = SdnValue.String(RUNTIME_WINDOWS_DIRECT_MANIFEST_SCHEMA_V1)
+    root_map["direct_key"] = SdnValue.String(manifest.direct_key)
+    root_map["content_key"] = SdnValue.String(manifest.content_key)
+    root_map["deps"] = SdnValue.Array(dep_values)
+    sdn_encode_canonical(SdnValue.Dict(root_map)) + "\n"
+
+pub fn runtime_windows_direct_manifest_decode_v1(raw: text, expected_direct_key: text) -> Result<RuntimeWindowsDirectManifestV1, text>:
+    val parsed: SdnValue = match parse(raw):
+        case Ok(v): v
+        case Err(reason): return Err(reason)
+    val schema = match parsed.get("schema"):
+        case Some(v): v.as_str() ?? ""
+        case None: ""
+    if schema != RUNTIME_WINDOWS_DIRECT_MANIFEST_SCHEMA_V1:
+        return Err("unexpected direct manifest schema")
+    val direct_key = match parsed.get("direct_key"):
+        case Some(v): v.as_str() ?? ""
+        case None: ""
+    if not runtime_object_cache_digest_valid_v1(direct_key):
+        return Err("invalid direct_key in manifest")
+    if expected_direct_key != "" and direct_key != expected_direct_key:
+        return Err("direct_key mismatch in manifest")
+    val content_key = match parsed.get("content_key"):
+        case Some(v): v.as_str() ?? ""
+        case None: ""
+    if not runtime_object_cache_digest_valid_v1(content_key):
+        return Err("invalid content_key in manifest")
+    val raw_deps: [SdnValue] = match parsed.get("deps"):
+        case Some(v):
+            match v.as_array():
+                case Some(items): items
+                case None: return Err("deps must be an array")
+        case None:
+            return Err("missing deps in manifest")
+    if raw_deps.len() == 0:
+        return Err("manifest deps must be non-empty")
+    var deps: [RuntimeWindowsDepEntryV1] = []
+    for item in raw_deps:
+        val dep_path = match item.get("path"):
+            case Some(v): v.as_str() ?? ""
+            case None: ""
+        val dep_sha = match item.get("sha256"):
+            case Some(v): v.as_str() ?? ""
+            case None: ""
+        val norm_path = runtime_windows_normalize_dep_path_v1(dep_path)
+        if _runtime_windows_is_pseudo_marker_path_v1(norm_path) or not runtime_object_cache_digest_valid_v1(dep_sha):
+            return Err("invalid dependency entry in manifest")
+        deps.push(RuntimeWindowsDepEntryV1(path: norm_path, sha256: dep_sha))
+    Ok(RuntimeWindowsDirectManifestV1(direct_key: direct_key, content_key: content_key, deps: deps))
+
+fn _runtime_windows_collect_dep_hashes_v1(dep_paths: [text]) -> Result<[RuntimeWindowsDepEntryV1], text>:
+    if dep_paths.len() == 0:
+        return Err("no dependencies provided")
+    var seen: Dict<text, bool> = {}
+    var deps: [RuntimeWindowsDepEntryV1] = []
+    for raw_path in dep_paths:
+        val dep_path = runtime_windows_normalize_dep_path_v1(raw_path)
+        if _runtime_windows_is_pseudo_marker_path_v1(dep_path):
+            continue
+        if seen.contains_key(dep_path):
+            continue
+        seen[dep_path] = true
+        if not file_is_regular_no_follow(dep_path):
+            return Err("dependency is not a regular file: {dep_path}")
+        val digest = file_hash_sha256_or_empty(dep_path)
+        if not runtime_object_cache_digest_valid_v1(digest):
+            return Err("dependency hash unavailable: {dep_path}")
+        deps.push(RuntimeWindowsDepEntryV1(path: dep_path, sha256: digest))
+    if deps.len() == 0:
+        return Err("no regular dependency files hashed")
+    Ok(deps)
+
+fn _runtime_windows_verify_dep_hashes_v1(deps: [RuntimeWindowsDepEntryV1]) -> bool:
+    if deps.len() == 0:
+        return false
+    for dep in deps:
+        if _runtime_windows_is_pseudo_marker_path_v1(dep.path) or not runtime_object_cache_digest_valid_v1(dep.sha256):
+            return false
+        if not file_is_regular_no_follow(dep.path):
+            return false
+        if file_hash_sha256_or_empty(dep.path) != dep.sha256:
+            return false
+    true
+
+fn _runtime_windows_direct_manifest_write_entries_v1(root: text, direct_key: text, content_key: text, deps: [RuntimeWindowsDepEntryV1]) -> bool:
+    if not runtime_object_cache_digest_valid_v1(direct_key) or not runtime_object_cache_digest_valid_v1(content_key):
+        return false
+    if deps.len() == 0:
+        return false
+    if not dir_is_real_no_follow(root) or not dir_is_real_no_follow(root + "/keys"):
+        return false
+    val manifest_path = runtime_windows_direct_manifest_path_v1(root, direct_key)
+    if manifest_path == "":
+        return false
+    val encoded = runtime_windows_direct_manifest_encode_v1(RuntimeWindowsDirectManifestV1(direct_key: direct_key, content_key: content_key, deps: deps))
+    file_atomic_write(manifest_path, encoded)
+
+# reason: internal backend Windows runtime object cache helper exported for unit specs
+@allow(primitive_api)
+pub fn runtime_windows_direct_manifest_publish_v1(root: text, direct_key: text, content_key: text, dep_paths: [text]) -> bool:
+    """Hash all dependency files (failing closed if any is missing/non-regular)
+    and atomically write `<direct_key>.deps.sdn`."""
+    if not runtime_object_cache_digest_valid_v1(direct_key) or not runtime_object_cache_digest_valid_v1(content_key):
+        return false
+    val collected: [RuntimeWindowsDepEntryV1] = match _runtime_windows_collect_dep_hashes_v1(dep_paths):
+        case Ok(v): v
+        case Err(_): return false
+    _runtime_windows_direct_manifest_write_entries_v1(root, direct_key, content_key, collected)
+
+pub fn runtime_windows_direct_manifest_roundtrip(root: text, direct_key: text, content_key: text, dep_paths: [text]) -> Result<RuntimeWindowsDirectManifestV1, text>:
+    """Write `<direct_key>.deps.sdn` from `dep_paths` and read/validate it back."""
+    val collected: [RuntimeWindowsDepEntryV1] = match _runtime_windows_collect_dep_hashes_v1(dep_paths):
+        case Ok(v): v
+        case Err(reason): return Err(reason)
+    if not _runtime_windows_direct_manifest_write_entries_v1(root, direct_key, content_key, collected):
+        return Err("failed to write direct manifest")
+    val manifest_path = runtime_windows_direct_manifest_path_v1(root, direct_key)
+    val raw: text = match file_read_regular_no_follow_bounded(manifest_path, RUNTIME_WINDOWS_MANIFEST_READ_CAP_BYTES):
+        case Ok(v): v
+        case Err(reason): return Err(reason)
+    runtime_windows_direct_manifest_decode_v1(raw, direct_key)
+
+pub fn runtime_windows_direct_manifest_lookup_v1(root: text, direct_key: text, output: text) -> text:
+    """Verify `<direct_key>.deps.sdn`, all recorded dependency SHA-256 digests,
+    and cached `.o` existence/integrity; returns `content_key` on hit or ""."""
+    if root == "" or output == "" or not runtime_object_cache_digest_valid_v1(direct_key):
+        return ""
+    if not dir_is_real_no_follow(root) or not dir_is_real_no_follow(root + "/objects") or not dir_is_real_no_follow(root + "/keys"):
+        return ""
+    val manifest_path = runtime_windows_direct_manifest_path_v1(root, direct_key)
+    if manifest_path == "":
+        return ""
+    val raw: text = match file_read_regular_no_follow_bounded(manifest_path, RUNTIME_WINDOWS_MANIFEST_READ_CAP_BYTES):
+        case Ok(v): v
+        case Err(_): return ""
+    val manifest: RuntimeWindowsDirectManifestV1 = match runtime_windows_direct_manifest_decode_v1(raw, direct_key):
+        case Ok(v): v
+        case Err(_): return ""
+    if not file_is_regular_no_follow(root + "/keys/" + manifest.content_key):
+        return ""
+    if not _runtime_windows_verify_dep_hashes_v1(manifest.deps):
+        return ""
+    if runtime_object_cache_lookup_v1(root, manifest.content_key, output):
+        return manifest.content_key
+    ""
+
+fn _runtime_windows_stage_pending_manifest_v1(root: text, content_key: text, direct_key: text, deps: [RuntimeWindowsDepEntryV1]):
+    var updated: [RuntimeWindowsPendingManifestV1] = []
+    for entry in _windows_pending_direct_manifests_v1:
+        if entry.root != root or entry.content_key != content_key:
+            updated.push(entry)
+    updated.push(RuntimeWindowsPendingManifestV1(root: root, content_key: content_key, direct_key: direct_key, deps: deps))
+    _windows_pending_direct_manifests_v1 = updated
+
+fn _runtime_windows_take_pending_manifest_v1(root: text, content_key: text) -> RuntimeWindowsPendingManifestV1?:
+    var remaining: [RuntimeWindowsPendingManifestV1] = []
+    var found: RuntimeWindowsPendingManifestV1? = None
+    for entry in _windows_pending_direct_manifests_v1:
+        if entry.root == root and entry.content_key == content_key and not found.?:
+            found = Some(entry)
+        else:
+            remaining.push(entry)
+    _windows_pending_direct_manifests_v1 = remaining
+    found
+
+fn _runtime_windows_clear_pending_for_root_v1(root: text):
+    var remaining: [RuntimeWindowsPendingManifestV1] = []
+    for entry in _windows_pending_direct_manifests_v1:
+        if entry.root != root:
+            remaining.push(entry)
+    _windows_pending_direct_manifests_v1 = remaining
+
+fn runtime_windows_cache_plan_v1(compiler: text, arguments: [text], stage: text, output: text, run_process: fn(text, [text]) -> (text, text, i64)) -> Result<text, text>:
     var plan_args: [text] = ["-###"]
     for argument in arguments: plan_args.push(argument)
-    val (stdout, stderr, code) = process_run(compiler, plan_args)
+    val (stdout, stderr, code) = run_process(compiler, plan_args)
     if code != 0: return Err("compiler driver plan unavailable")
     val plan = stdout + stderr
     # These consume additional code-generation input files not represented by
@@ -126,43 +491,74 @@ pub fn runtime_windows_cache_plan_normalize_v1(plan: text, output: text, stage: 
         normalized = normalized.replace(stage.replace("\\", "\\\\"), "<runtime-stage>").replace(stage, "<runtime-stage>")
     normalized
 
-pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, compiler_digest: text, toolchain: text, arguments: [text], source: text, output: text, context: [text], trace: bool) -> RuntimeWindowsCacheCompileResultV1:
-    """A cache miss compiles the same immutable preprocessed input it hashed.
+fn _runtime_windows_collect_tu_deps_v1(preprocessed: text, source: text) -> [text]:
+    val raw: text = match file_read_regular_no_follow_bounded(preprocessed, RUNTIME_WINDOWS_PREPROCESSED_READ_CAP_BYTES):
+        case Ok(v): v
+        case Err(_): return []
+    var deps = runtime_windows_extract_linemarker_headers_v1(raw)
+    if deps.len() == 0:
+        return []
+    val norm_source = runtime_windows_normalize_dep_path_v1(source)
+    if not _runtime_windows_is_pseudo_marker_path_v1(norm_source):
+        var has_source = false
+        for dep in deps:
+            if dep == norm_source:
+                has_source = true
+                break
+        if not has_source:
+            deps.push(norm_source)
+    deps
 
-    Cache IO is optional. Real compilation failure remains a real failure.
-    The existing caller retains process ownership, cancellation and cleanup.
+# reason: internal backend Windows runtime object cache helper exported for unit specs
+@allow(primitive_api)
+pub fn runtime_windows_cached_compile_with_runner_v1(root: text, compiler: text, compiler_digest: text, toolchain: text, arguments: [text], source: text, output: text, context: [text], trace: bool, run_process: fn(text, [text]) -> (text, text, i64)) -> RuntimeWindowsCacheCompileResultV1:
+    """Direct header-manifest lookup followed by `-E` / `-###` / compile fallback.
+
+    Checks `<direct_key>.deps.sdn` first so warm builds skip `-E` and `-###`
+    when every recorded dependency keeps its regular-file SHA-256 and the
+    cached `.o` exists. Any missing/changed header falls back cleanly to `-E`.
     """
     if root == "" or not runtime_object_cache_digest_valid_v1(toolchain) or not runtime_object_cache_digest_valid_v1(compiler_digest):
-        return runtime_windows_uncached_compile_v1(compiler, arguments)
+        return runtime_windows_uncached_compile_v1(compiler, arguments, run_process)
     # CL/_CL_ can inject response files and additional source/output switches.
     # Preserve their existing semantics by using the original uncached path.
     for variable in ["CL", "_CL_", "CCC_OVERRIDE_OPTIONS"]:
-        if (env_get_nullable(variable) ?? "") != "": return runtime_windows_uncached_compile_v1(compiler, arguments)
+        if (env_get_nullable(variable) ?? "") != "": return runtime_windows_uncached_compile_v1(compiler, arguments, run_process)
+    val kind = runtime_windows_cache_driver_kind_v1(compiler)
+    var direct_base: [text] = ["compiler=" + compiler_digest]
+    for value in context: direct_base.push(value)
+    for value in _runtime_windows_option_flags_v1(kind, arguments, output): direct_base.push(value)
+    val direct_flags = _runtime_windows_append_env_pairs_v1(direct_base)
+    val direct_key = runtime_windows_direct_manifest_key_v1(root, toolchain, direct_flags, source)
+    if direct_key != "":
+        val direct_hit = runtime_windows_direct_manifest_lookup_v1(root, direct_key, output)
+        if direct_hit != "":
+            if trace: print "[RT-COMPILE] Windows direct header cache hit: {source}"
+            return RuntimeWindowsCacheCompileResultV1(stdout: "", stderr: "", exit_code: 0, pending_key: "")
     val staged = secure_temp_dir(root, "runtime-tu-")
-    if staged.is_err(): return runtime_windows_uncached_compile_v1(compiler, arguments)
+    if staged.is_err(): return runtime_windows_uncached_compile_v1(compiler, arguments, run_process)
     val stage = staged.unwrap()
     val preprocessed = stage + "/input.i"
-    val split = runtime_windows_cache_split_args_v1(runtime_windows_cache_driver_kind_v1(compiler), arguments, source, output, preprocessed)
+    val split = runtime_windows_cache_split_args_v1(kind, arguments, source, output, preprocessed)
     val preprocess_args = split.preprocess
     val compile_args = split.compile
-    var options: [text] = []
-    for value in context: options.push(value)
-    for value in split.options: options.push(value)
-    val (pre_out, pre_err, pre_code) = process_run(compiler, preprocess_args)
+    var options_base: [text] = []
+    for value in context: options_base.push(value)
+    for value in split.options: options_base.push(value)
+    val (pre_out, pre_err, pre_code) = run_process(compiler, preprocess_args)
     val tu_digest = file_hash_sha256_or_empty(preprocessed)
     if pre_code != 0 or not runtime_object_cache_digest_valid_v1(tu_digest):
         file_delete(preprocessed)
         dir_remove(stage, false)
-        return runtime_windows_uncached_compile_v1(compiler, arguments)
-    val plan = runtime_windows_cache_plan_v1(compiler, compile_args, stage, output)
+        return runtime_windows_uncached_compile_v1(compiler, arguments, run_process)
+    val dep_paths = _runtime_windows_collect_tu_deps_v1(preprocessed, source)
+    val plan = runtime_windows_cache_plan_v1(compiler, compile_args, stage, output, run_process)
     if plan.is_err():
         file_delete(preprocessed)
         dir_remove(stage, false)
-        return runtime_windows_uncached_compile_v1(compiler, arguments)
-    options.push(plan.unwrap())
-    for variable in ["INCLUDE", "LIB", "LIBPATH", "PATH", "SDKROOT", "WindowsSdkDir", "WindowsSDKVersion", "VCToolsInstallDir", "VCINSTALLDIR", "SOURCE_DATE_EPOCH", "CPATH", "C_INCLUDE_PATH", "CLANG_CONFIG_FILE_SYSTEM_DIR", "CLANG_CONFIG_FILE_USER_DIR"]:
-        options.push(variable)
-        options.push(env_get_nullable(variable) ?? "")
+        return runtime_windows_uncached_compile_v1(compiler, arguments, run_process)
+    options_base.push(plan.unwrap())
+    val options = _runtime_windows_append_env_pairs_v1(options_base)
     val material = runtime_object_cache_material_v1(compiler_digest, toolchain, tu_digest, options)
     var key = ""
     if material.is_ok():
@@ -170,17 +566,25 @@ pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, compiler_di
         if keyed.is_ok(): key = keyed.unwrap()
     if key != "" and runtime_object_cache_lookup_v1(root, key, output):
         if trace: print "[RT-COMPILE] Windows content cache hit: {source}"
+        if direct_key != "" and dep_paths.len() > 0:
+            val _refreshed = runtime_windows_direct_manifest_publish_v1(root, direct_key, key, dep_paths)
         file_delete(preprocessed)
         dir_remove(stage, false)
         return RuntimeWindowsCacheCompileResultV1(stdout: pre_out, stderr: pre_err, exit_code: 0, pending_key: "")
-    val (stdout, stderr, code) = process_run(compiler, compile_args)
+    val (stdout, stderr, code) = run_process(compiler, compile_args)
     # This is an owned private file, but validate consumption before admitting
     # an object. Changed compiler configuration also suppresses publication.
     val unchanged = file_hash_sha256_or_empty(preprocessed) == tu_digest
-    val final_plan = runtime_windows_cache_plan_v1(compiler, compile_args, stage, output)
+    val final_plan = runtime_windows_cache_plan_v1(compiler, compile_args, stage, output, run_process)
     var pending_key = ""
     if code == 0 and unchanged and final_plan.is_ok() and final_plan.unwrap() == plan.unwrap():
         pending_key = key
+        if pending_key != "" and direct_key != "" and dep_paths.len() > 0:
+            match _runtime_windows_collect_dep_hashes_v1(dep_paths):
+                case Ok(deps):
+                    _runtime_windows_stage_pending_manifest_v1(root, pending_key, direct_key, deps)
+                case Err(_):
+                    ()
     file_delete(preprocessed)
     dir_remove(stage, false)
     if not unchanged:
@@ -188,11 +592,34 @@ pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, compiler_di
         return RuntimeWindowsCacheCompileResultV1(stdout: pre_out + stdout, stderr: pre_err + stderr + "runtime preprocessed input changed during compilation", exit_code: 1, pending_key: "")
     RuntimeWindowsCacheCompileResultV1(stdout: pre_out + stdout, stderr: pre_err + stderr, exit_code: code, pending_key: pending_key)
 
+pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, compiler_digest: text, toolchain: text, arguments: [text], source: text, output: text, context: [text], trace: bool) -> RuntimeWindowsCacheCompileResultV1:
+    """A cache miss compiles the same immutable preprocessed input it hashed.
+
+    Cache IO is optional. Real compilation failure remains a real failure.
+    The existing caller retains process ownership, cancellation and cleanup.
+    """
+    runtime_windows_cached_compile_with_runner_v1(root, compiler, compiler_digest, toolchain, arguments, source, output, context, trace, process_run)
+
 pub fn runtime_windows_cache_publish_batch_v1(root: text, compiler: text, toolchain: text, keys: [text], objects: [text]) -> bool:
     # No object is published before this batch-wide check. Hash the compiler's
     # adjacent DLLs twice per batch, not once per translation unit.
-    if keys.len() > objects.len(): return false
-    if runtime_windows_cache_toolchain_v1(root, compiler) != toolchain: return false
+    if keys.len() > objects.len():
+        _runtime_windows_clear_pending_for_root_v1(root)
+        return false
+    if runtime_windows_cache_toolchain_v1(root, compiler) != toolchain:
+        _runtime_windows_clear_pending_for_root_v1(root)
+        return false
     for index in 0..keys.len():
-        if keys[index] != "": runtime_object_cache_publish_v1(root, keys[index], objects[index])
+        val key = keys[index]
+        if key != "":
+            val published = runtime_object_cache_publish_v1(root, key, objects[index])
+            val pending = _runtime_windows_take_pending_manifest_v1(root, key)
+            if published:
+                match pending:
+                    case Some(manifest):
+                        if _runtime_windows_verify_dep_hashes_v1(manifest.deps):
+                            val _wrote = _runtime_windows_direct_manifest_write_entries_v1(root, manifest.direct_key, key, manifest.deps)
+                    case None:
+                        ()
+    _runtime_windows_clear_pending_for_root_v1(root)
     true
