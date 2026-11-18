@@ -56,7 +56,7 @@ use compiler.backend.linker.elf.section_gc.{
     elf_section_gc, elf_section_keep_all, elf_gc_undefined
 }
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
-use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
+use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff, elf_tls_tpoff_variant1}
 use compiler.backend.linker.elf.link_trace.{elf_link_trace}
 use compiler.backend.linker.elf.elf_par.{elf_par_acquire, elf_par_release, elf_par_jobs, elf_par_run}
 use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros, elf_u8_from_i64, elf_i64_from_u8, elf_u8_read_le}
@@ -69,7 +69,7 @@ use compiler.backend.linker.elf.elf_operation_bindings.{
 }
 use compiler.backend.linker.riscv_static_reloc.{riscv_static_delta, riscv_uleb_width, riscv_uleb_patch}
 use compiler.backend.linker.elf.merge_strings.{
-    ElfMergePlan, elf_merge_flags, elf_merge_section, elf_merge_sections, elf_merge_offset
+    ElfMergePlan, elf_merge_flags, elf_merge_section, elf_merge_sections, elf_merge_offset, elf_unmerge_relocated
 }
 use compiler.backend.linker.elf.reloc_scan.{
     ElfScanRef, ElfScan, elf_reloc_scan, elf_reloc_class,
@@ -1135,6 +1135,8 @@ fn elf_tls_tprel(plan: ElfExecPlan, target: RelocArch, address: i64) -> Result<i
         val offset = elf_symtab_address(plan, 6, address)?
         return riscv_static_delta(offset, start % elf_tls_align(plan), 0)
     # Same p_memsz/p_align the writer publishes in PT_TLS.
+    if target == RelocArch.Arm32:
+        return Ok(elf_tls_tpoff_variant1(address, start, 8, elf_tls_align(plan)))
     Ok(elf_tls_tpoff(elf_target_is_a64(target), address, start, end - start,
         elf_tls_align(plan)))
 
@@ -1913,6 +1915,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                     if elf_reloc_type(relocation) == 43:
                         return Err("RISC-V RV32 R_RISCV_ALIGN is not supported yet (assemble with -mno-relax)")
     all = elf_relax_tls(all, target)?
+    var unmerged: [ElfObject] = []
+    for o in all: unmerged.push(elf_unmerge_relocated(o))
+    all = unmerged
 
     elf_link_trace("tls relaxed")
     val res = sym_resolve_objects(all)
@@ -1962,7 +1967,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 (elf_target_is_a64(target) and
                 (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32)) or
                 (target == RelocArch.I386 and
-                (r.rtype == 3 or r.rtype == 9 or r.rtype == 10 or r.rtype == 43)):
+                (r.rtype == 3 or r.rtype == 9 or r.rtype == 10 or r.rtype == 43)) or
+                (target == RelocArch.Arm32 and (r.rtype == 24 or r.rtype == 25 or r.rtype == 26)) or
+                (target == RelocArch.I386 and r.rtype == 16):
             need_got_base = true
     val copies = elf_place_copies(common.inputs, sc)
     val inputs = copies.inputs
@@ -2223,6 +2230,10 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 else if r.rtype == 31: rtype = 28
             else if a64:
                 rtype = r.rtype
+            else if target == RelocArch.I386:
+                rtype = 1   # R_386_32 writes the (negative) variant-II TPOFF word
+            else if target == RelocArch.Arm32:
+                rtype = 2   # R_ARM_ABS32 writes the variant-I TPOFF word
             else if r.rtype != 18:
                 rtype = 11  # R_X86_64_32S encodes the signed TPOFF32 result
         else if r.rclass == RC_SIZE:
@@ -2236,6 +2247,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             if elf_target_is_riscv(target):
                 a = 0
                 rtype = 23 # TLS_GOT_HI20 addresses the slot using AUIPC.
+            else if target == RelocArch.Arm32:
+                rtype = 3  # R_ARM_TLS_IE32 = GOT(S) + A - P (R_ARM_REL32 shape)
             else if a64:
                 a = 0
                 if r.rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
@@ -2276,9 +2289,21 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             # absolutely: lld evaluates G + A there (I386::getRelExpr).
             if r.rtype == 10: s = gotplt_v
             if r.rtype == 9: p = gotplt_v
+            if r.rtype == 16: p = gotplt_v  # TLS_GOTIE: slot (G) + A - GOT, applied as PC32
             if r.rtype == 3 or r.rtype == 43:
                 val no_base = r.out_off >= 1 and ((contents[k][r.out_off - 1] as i64) & 0xc7) == 0x05
                 p = if no_base: 0 else: gotplt_v
+        if target == RelocArch.Arm32:
+            # lld ARM: BASE_PREL = GOT_ORG + A - P (R_GOTONLY_PC, GOT_ORG = .got);
+            # GOT_BREL = G + A - GOT_ORG (S already holds the slot address G).
+            if r.rtype == 25:
+                s = got_v
+                rtype = 3   # R_ARM_REL32
+            if r.rtype == 26 or r.rtype == 24:
+                p = got_v   # GOTOFF32 = S + A - GOT_ORG
+                rtype = 3
+            if r.rtype == 96:
+                rtype = 3   # GOT_PREL = G + A - P
         if elf_target_is_riscv(target) and (r.rtype == 24 or r.rtype == 25):
             val key = "{r.oi}#{s}"
             if not riscv_highs.has(key):

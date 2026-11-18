@@ -81,6 +81,7 @@ val R_ARM_THM_MOVT_PREL: i64 = 50
 val R_ARM_THM_PC12: i64 = 54  # S + A - Pa, signed Thumb-2 literal imm12
 val R_ARM_THM_JUMP11: i64 = 102 # S + A - P, Thumb-1 unconditional B imm11
 val R_ARM_THM_JUMP8: i64 = 103  # S + A - P, Thumb-1 conditional B imm8
+val R_ARM_THM_JUMP19: i64 = 51  # S + A - P, Thumb-2 conditional B.W imm21
 
 # i386 (psABI, SHT_REL implicit addends; the parser extracts A from the field)
 val R_386_NONE: i64 = 0
@@ -507,6 +508,19 @@ fn reloc_apply_arm32(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i
                 error: "R_ARM_TARGET1 out of range under bare-metal ABS32 policy")
         return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
 
+    if rtype == R_ARM_CALL and (s & 1) != 0:
+        # ARM BL to a Thumb function: interwork as BLX (ld.lld ARM::relocate).
+        # value = imm24 | H << 24 | 1 << 25 (BLX marker for the patcher).
+        val v = (s & -2) + a - p
+        if v & 0x1 != 0:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_CALL BLX target is not 2-byte aligned")
+        if v < -33554432 or v >= 33554432:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM branch displacement exceeds signed 26-bit range")
+        return RelocResult(success: true, offset: offset,
+            value: ((v >> 2) & 0xffffff) | (((v >> 1) & 1) << 24) | (1 << 25), error: "")
+
     if rtype == R_ARM_PC24 or rtype == R_ARM_CALL or rtype == R_ARM_JUMP24:
         val v = s + a - p
         if v & 0x3 != 0:
@@ -542,6 +556,13 @@ fn reloc_apply_arm32(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i
         if v < -4095 or v > 4095:
             return RelocResult(success: false, offset: offset, value: 0,
                 error: "R_ARM_THM_PC12 displacement exceeds signed-magnitude 12-bit range")
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_ARM_THM_JUMP19:
+        val v = ((s + a) & -2) - p
+        if v < -1048576 or v >= 1048576:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM_JUMP19 displacement exceeds signed 21-bit range")
         return RelocResult(success: true, offset: offset, value: v, error: "")
 
     if rtype == R_ARM_THM_JUMP11 or rtype == R_ARM_THM_JUMP8:
@@ -1187,7 +1208,14 @@ fn reloc_patch_value(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 patch_u8(bytes, offset, value)
             else if rtype == R_ARM_PC24 or rtype == R_ARM_CALL or rtype == R_ARM_JUMP24:
                 val insn = read_u32_le(bytes, offset)
+<<<<<<< HEAD
                 patch_u32_le(bytes, offset, (insn & 0xff000000) | (value & 0xffffff))
+=======
+                if (result.value >> 25) & 1 != 0:
+                    patch_u32_le(bytes, offset, 0xfa000000 | (result.value & 0x1ffffff))
+                else:
+                    patch_u32_le(bytes, offset, (insn & 0xff000000) | (result.value & 0xffffff))
+>>>>>>> b8086c46108 (fix(linker): armv7/i686 hosted-glibc relocations in the Simple ELF linker)
             else if rtype == R_ARM_PREL31:
                 val word = read_u32_le(bytes, offset)
                 patch_u32_le(bytes, offset, (word & 0x80000000) | (value & 0x7fffffff))
@@ -1209,6 +1237,16 @@ fn reloc_patch_value(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                     (high_half & 0xf800) | (sign << 10) | imm10)
                 patched = patch_u16_le(patched, offset + 2,
                     (low_half & 0xd000) | (j1 << 13) | (j2 << 11) | imm11)
+                patched
+            else if rtype == R_ARM_THM_JUMP19:
+                val high_half = read_u16_le(bytes, offset)
+                val low_half = read_u16_le(bytes, offset + 2)
+                val v = result.value
+                var patched = patch_u16_le(bytes, offset,
+                    (high_half & 0xfbc0) | (((v >> 20) & 1) << 10) | ((v >> 12) & 0x3f))
+                patched = patch_u16_le(patched, offset + 2,
+                    (low_half & 0xd000) | (((v >> 18) & 1) << 13) | (((v >> 19) & 1) << 11) |
+                    ((v >> 1) & 0x7ff))
                 patched
             else if rtype == R_ARM_THM_JUMP11:
                 val half = read_u16_le(bytes, offset)
@@ -1437,7 +1475,7 @@ export R_ARM_TARGET1, R_ARM_V4BX, R_ARM_PREL31
 export R_ARM_MOVW_ABS_NC, R_ARM_MOVT_ABS, R_ARM_MOVW_PREL_NC, R_ARM_MOVT_PREL
 export R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS, R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL
 export R_ARM_THM_PC12
-export R_ARM_THM_JUMP11, R_ARM_THM_JUMP8
+export R_ARM_THM_JUMP11, R_ARM_THM_JUMP8, R_ARM_THM_JUMP19
 export R_386_NONE, R_386_32, R_386_PC32, R_386_GOT32, R_386_PLT32, R_386_GOTOFF, R_386_GOTPC
 export R_386_16, R_386_PC16, R_386_8, R_386_PC8, R_386_GOT32X
 export R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_PLT32
