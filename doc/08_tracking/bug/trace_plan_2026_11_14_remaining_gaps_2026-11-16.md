@@ -95,3 +95,47 @@ and the graph wire DTO `TraceGraphLocatorV1.locator_kind` are now the closed enu
 - `doc/08_tracking/bug/2026-11-15_seed_tail_match_parse_int_wrong_value.md`
   (not reproduced)
 - `doc/08_tracking/bug/2026-11-15_ctx_capture_truncation_windows_bounded_run_timeout.md`
+
+### 2b. Public bare primitives across the wider trace surface (census 2026-11-18)
+
+The §2 claim covers only the model structs. A field/param/return census over
+src/lib/common/traceability, src/app/traceability, main_lazy_trace_tools,
+main_lazy_ctx_tools, test_query_cli (fn params/returns on pub fn|me plus pub
+struct/class fields typed bool/int/i*/u*/f*) found 168 findings. The codec limit
+families (graph, declarations, document, qualification, conventions; 28 fields)
+now use `TraceCountLimitV1` / `TraceByteLimitV1` (envelope_types_v1.spl); 140 remain.
+32 of those are the `value` payload of single-field newtypes themselves (irreducible).
+Remaining non-newtype findings by file (count):
+
+- src/app/mcp/main_lazy_ctx_tools.spl: 14
+- src/lib/common/traceability/evidence_model.spl: 9
+- src/lib/common/traceability/graph_types_v1.spl: 8
+- src/lib/common/traceability/execution_config.spl: 8
+- src/lib/common/traceability/qualification_types_v1.spl: 7
+- src/lib/common/traceability/incremental.spl: 7
+- src/app/traceability/capture_v1.spl: 7
+- src/lib/common/traceability/model.spl: 5
+- src/lib/common/traceability/envelope_types_v1.spl: 5
+- src/lib/common/traceability/sspec_inventory.spl: 4
+- src/lib/common/traceability/declarations_types_v1.spl: 4
+- src/lib/common/traceability/run_plan.spl: 3
+- src/lib/common/traceability/query_refs_v1.spl: 3
+- src/app/traceability/snapshot/git_provider.spl: 3
+- src/app/traceability/query_options_v1.spl: 3
+- src/app/traceability/cli_options_v1.spl: 3
+- src/lib/common/traceability/legacy_bugs_v1.spl: 2
+- src/lib/common/traceability/conventions_types_v1.spl: 2
+- src/app/traceability/extract/snapshot_partitions.spl: 2
+- src/lib/common/traceability/sidecar_v1.spl: 1
+- src/lib/common/traceability/reverse_index_cache_v1.spl: 1
+- src/lib/common/traceability/query_nodes_v1.spl: 1
+- src/lib/common/traceability/conventions_result_v1.spl: 1
+- src/lib/common/traceability/codec_text_budget_v1.spl: 1
+- src/app/traceability/snapshot_preview.spl: 1
+- src/app/traceability/snapshot/git_batch.spl: 1
+- src/app/traceability/extract/snapshot_pipeline.spl: 1
+- src/app/traceability/extract/snapshot_delta.spl: 1
+
+Not yet scanned for param/return primitives in: ctx_*.spl, test_db_compat.spl,
+test_extended/database.spl, trace_events.spl (0 field/fn hits in this census; the
+checker only sees single-line signatures). main_lazy_ctx_tools.spl has 14 findings.
