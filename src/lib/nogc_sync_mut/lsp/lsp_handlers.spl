@@ -14,20 +14,33 @@ use std.nogc_sync_mut.lsp.lsp_query_symbol.{lsp_query_symbol_at_v1, lsp_query_wo
 use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.nogc_sync_mut.source.visibility_session.{SourceVisibilitySessionV1, source_visibility_session_default_v1,
     source_visibility_session_set_v1, source_visibility_session_serve_v1, source_visibility_auto_revert_limit_v1}
+use std.common.crypto.sha256.{sha256_text}
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_as_bool,
     json_value_items, json_value_keys, json_value_object_from, json_value_object_set, json_value_serialize,
-    json_value_as_i64, json_value_get}
+    json_value_as_i64, json_value_get, json_value_has}
 use std.nogc_sync_mut.lsp.lsp_json.*
 use std.nogc_sync_mut.lsp.lsp_protocol.{lsp_write_notification}
 use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path, lsp_query_file_argument_v1}
 use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_code_actions_convert_output,
     lsp_code_action_request, lsp_code_action_query_args}
 use std.nogc_sync_mut.lsp.lsp_code_action_handler.{lsp_code_action_response}
-use std.nogc_sync_mut.lsp.lsp_diag_action_store.{lsp_diag_action_store_record, lsp_diag_action_store_clear}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{
+    LspDiagActionFileRevV1,
+    lsp_diag_action_store_record_for_client_v1,
+    lsp_diag_action_store_clear_for_client_v1
+}
 use std.common.diagnostics.diagnostic_batch.{DiagnosticActionIndex, FixCandidate}
-use std.common.diagnostics.diagnostic_v1.{DiagnosticFixConfidence}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticFixConfidence, FixReplacement, FixPrecondition}
 use std.common.diagnostics.span.{Span}
-use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply, lsp_document_sync_uri, lsp_document_snapshot, lsp_document_snapshot_matches, lsp_read_analyzed_source}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{
+    lsp_extract_client_id_v1,
+    lsp_document_sync_apply_for_client_v1,
+    lsp_document_sync_uri,
+    lsp_document_snapshot,
+    lsp_document_snapshot_for_client_v1,
+    lsp_document_snapshot_by_path_for_client_v1,
+    lsp_read_analyzed_source
+}
 use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_visibility_snapshot_v1, lsp_visibility_snapshot_current_v1,
     lsp_visibility_source_read_v1, lsp_visibility_source_reader_v1, lsp_visibility_dependencies_current_v1,
     lsp_document_overlay_generation_v1}
@@ -45,6 +58,8 @@ var CLIENT_SUPPORTS_VISIBILITY: bool = false
 # Set by `initialize`; unsolicited publishDiagnostics (didChange) only flow in
 # an initialized session, so pre-handshake notifications never spawn a check.
 var LSP_SESSION_INITIALIZED: bool = false
+var LSP_OVERLAY_STAGE_NONCE: i64 = 0
+var LSP_PUBLISHED_DIAGNOSTIC_NOTIFICATIONS: [text] = []
 # MDSOC+ session view (REQ-PUBVIEW-008, 010..012): one immutable value replaced on
 # every request; public = per-file default (public
 # inside an __init__.spl boundary, all for an open module). Private views
@@ -191,21 +206,27 @@ fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
 
 # --- Document sync ---
 
+# reason: handles LSP didOpen JSON-RPC notification payload
+@allow(primitive_api)
 pub fn lsp_handle_did_open(body: text):
-    if not lsp_document_sync_apply("textDocument/didOpen", body): return
+    val client_id = lsp_extract_client_id_v1(body)
+    if not lsp_document_sync_apply_for_client_v1(client_id, "textDocument/didOpen", body): return
     # Existing diagnostics are disk-backed, so do not label them as results
     # for an unsaved editor overlay retained by the canonical owner.
     val uri = lsp_document_sync_uri(body)
-    val snapshot = lsp_document_snapshot(uri)
-    if snapshot == nil: return
+    val snapshot = lsp_document_snapshot_for_client_v1(client_id, uri)
+    if not snapshot.?: return
     val file_path = _uri_to_path(uri)
     val source = lsp_read_analyzed_source(file_path)
     if source.is_err() or source.unwrap() != snapshot.unwrap().content: return
     if uri != "" and file_path != "":
-        _publish_diagnostics(uri=uri, file_path=file_path)
+        _publish_diagnostics_for_client(client_id, uri, file_path)
 
+# reason: handles LSP didChange JSON-RPC notification payload
+@allow(primitive_api)
 pub fn lsp_handle_did_change(body: text):
-    if not lsp_document_sync_apply("textDocument/didChange", body): return
+    val client_id = lsp_extract_client_id_v1(body)
+    if not lsp_document_sync_apply_for_client_v1(client_id, "textDocument/didChange", body): return
     # REQ-DIAG-006: an accepted change re-analyzes the LATEST unsaved text.
     # A rejected (stale/malformed) change publishes nothing: the owner kept
     # the previous authority and its diagnostics stay valid.
@@ -213,79 +234,217 @@ pub fn lsp_handle_did_change(body: text):
     val uri = lsp_document_sync_uri(body)
     val file_path = _uri_to_path(uri)
     if uri == "" or file_path == "": return
-    val (batch, current) = lsp_diagnostics_for_uri_v1(uri, file_path)
-    # A newer change arrived while this analysis ran: its result is obsolete
-    # and the newer change publishes its own batch. Never publish stale items.
-    if not current: return
-    _publish_items(uri=uri, batch=batch)
+    val (batch, current) = lsp_diagnostics_for_uri_for_client_v1(client_id, uri, file_path)
+    # Never publish stale, failed, timed-out, or malformed batches.
+    val _ = lsp_publish_batch_for_client_v1(client_id, uri, batch, current)
 
+# reason: handles LSP didClose JSON-RPC notification payload
+@allow(primitive_api)
 pub fn lsp_handle_did_close(body: text):
-    if not lsp_document_sync_apply("textDocument/didClose", body): return
+    val client_id = lsp_extract_client_id_v1(body)
+    if not lsp_document_sync_apply_for_client_v1(client_id, "textDocument/didClose", body): return
     val uri = lsp_document_sync_uri(body)
-    lsp_diag_action_store_clear(uri)
+    lsp_diag_action_store_clear_for_client_v1(client_id, uri)
     if uri != "":
         val params = jo2(jp("uri", js(uri)), jp("diagnostics", SB_L() + SB_R()))
         lsp_write_notification(method="textDocument/publishDiagnostics", params=params)
 
 fn lsp_handle_did_save(body: text):
+    val client_id = lsp_extract_client_id_v1(body)
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     if uri != "" and file_path != "":
-        _publish_diagnostics(uri=uri, file_path=file_path)
+        _publish_diagnostics_for_client(client_id, uri, file_path)
 
 # --- Diagnostics (heavy — uses full query.spl with compiler) ---
 
+# reason: returns recorded publishDiagnostics notification payloads for observability
+@allow(primitive_api)
+pub fn lsp_published_diagnostic_notifications_v1() -> [text]:
+    LSP_PUBLISHED_DIAGNOSTIC_NOTIFICATIONS
+
+pub fn lsp_clear_published_diagnostic_notifications_v1():
+    LSP_PUBLISHED_DIAGNOSTIC_NOTIFICATIONS = []
+
+fn _record_published_notification(params: text):
+    if LSP_PUBLISHED_DIAGNOSTIC_NOTIFICATIONS.len() >= 64:
+        var trimmed: [text] = []
+        var i = 1
+        while i < LSP_PUBLISHED_DIAGNOSTIC_NOTIFICATIONS.len():
+            trimmed.push(LSP_PUBLISHED_DIAGNOSTIC_NOTIFICATIONS[i])
+            i = i + 1
+        LSP_PUBLISHED_DIAGNOSTIC_NOTIFICATIONS = trimmed
+    LSP_PUBLISHED_DIAGNOSTIC_NOTIFICATIONS.push(params)
+
+fn _publish_diagnostics_for_client(client_id: text, uri: text, file_path: text):
+    val (batch, current) = lsp_diagnostics_for_uri_for_client_v1(client_id, uri, file_path)
+    val _ = lsp_publish_batch_for_client_v1(client_id, uri, batch, current)
+
 fn _publish_diagnostics(uri: text, file_path: text):
-    val snap = lsp_document_snapshot(uri)
-    var version: i64 = -1
-    if snap != nil:
-        version = snap.unwrap().version
-    _publish_items(uri=uri, batch=_collect_diagnostics(file_path, file_path, version))
+    _publish_diagnostics_for_client("default", uri, file_path)
+
+fn _build_batch_file_revisions(
+    client_id: text,
+    primary_file: text,
+    primary_version: i64,
+    primary_hash: text,
+    batch: LspCheckBatchV1
+) -> [LspDiagActionFileRevV1]:
+    var revs: [LspDiagActionFileRevV1] = []
+    if primary_file != "":
+        revs.push(LspDiagActionFileRevV1(
+            file: primary_file,
+            version: primary_version,
+            source_hash: primary_hash,
+            from_overlay: primary_version >= 0
+        ))
+    var seen: [text] = [primary_file]
+    for id in batch.ids:
+        for c in batch.index.candidates_for(id):
+            for sec in c.affected_files():
+                if not seen.contains(sec):
+                    seen.push(sec)
+                    match lsp_document_snapshot_by_path_for_client_v1(client_id, sec):
+                        Some(sec_snap):
+                            revs.push(LspDiagActionFileRevV1(
+                                file: sec,
+                                version: sec_snap.version,
+                                source_hash: sha256_text(sec_snap.content),
+                                from_overlay: true
+                            ))
+                        None:
+                            match lsp_read_analyzed_source(sec):
+                                Ok(sec_disk):
+                                    revs.push(LspDiagActionFileRevV1(
+                                        file: sec,
+                                        version: -1,
+                                        source_hash: sha256_text(sec_disk),
+                                        from_overlay: false
+                                    ))
+                                Err(_):
+                                    pass
+            for p in c.preconditions:
+                if not seen.contains(p.file):
+                    seen.push(p.file)
+                    match lsp_document_snapshot_by_path_for_client_v1(client_id, p.file):
+                        Some(sec_snap):
+                            revs.push(LspDiagActionFileRevV1(
+                                file: p.file,
+                                version: sec_snap.version,
+                                source_hash: sha256_text(sec_snap.content),
+                                from_overlay: true
+                            ))
+                        None:
+                            match lsp_read_analyzed_source(p.file):
+                                Ok(sec_disk):
+                                    revs.push(LspDiagActionFileRevV1(
+                                        file: p.file,
+                                        version: -1,
+                                        source_hash: sha256_text(sec_disk),
+                                        from_overlay: false
+                                    ))
+                                Err(_):
+                                    pass
+    revs
+
+# reason: records complete diagnostic batch and SHA-256 file revisions for client_id and URI
+@allow(primitive_api)
+pub fn lsp_diag_record_batch_for_client_v1(client_id: text, uri: text, batch: LspCheckBatchV1):
+    if not batch.valid or batch.status != "complete":
+        return
+    val primary_path = _uri_to_path(uri)
+    val snap = lsp_document_snapshot_for_client_v1(client_id, uri)
+    if not snap.?:
+        if primary_path != "":
+            match lsp_read_analyzed_source(primary_path):
+                Ok(disk_src):
+                    val disk_hash = if batch.source_hash != "": batch.source_hash else: sha256_text(disk_src)
+                    val revs = _build_batch_file_revisions(client_id, primary_path, -1, disk_hash, batch)
+                    lsp_diag_action_store_record_for_client_v1(client_id, uri, -1, disk_hash, batch.status, batch.valid, batch.items, batch.index, batch.ids, revs)
+                Err(_):
+                    lsp_diag_action_store_clear_for_client_v1(client_id, uri)
+        else:
+            lsp_diag_action_store_clear_for_client_v1(client_id, uri)
+        return
+    val s = snap.unwrap()
+    val snap_hash = sha256_text(s.content)
+    val revs = _build_batch_file_revisions(client_id, primary_path, s.version, snap_hash, batch)
+    lsp_diag_action_store_record_for_client_v1(client_id, uri, s.version, snap_hash, batch.status, batch.valid, batch.items, batch.index, batch.ids, revs)
 
 # Each published batch replaces the URI's fix-candidate store entry, so the
 # live codeAction path never serves candidates from an older batch.
+# reason: records complete diagnostic batch and SHA-256 file revisions for default client and URI
+@allow(primitive_api)
 pub fn lsp_diag_record_batch_v1(uri: text, batch: LspCheckBatchV1):
-    val snap = lsp_document_snapshot(uri)
-    if snap == nil:
-        lsp_diag_action_store_clear(uri)
-    else:
-        lsp_diag_action_store_record(uri, snap.unwrap().version, "", batch.index, batch.ids)
+    lsp_diag_record_batch_for_client_v1("default", uri, batch)
 
-fn _publish_items(uri: text, batch: LspCheckBatchV1):
-    lsp_diag_record_batch_v1(uri, batch)
+# reason: publishes a complete current diagnostic batch for client_id and suppresses invalid or stale batches
+@allow(primitive_api)
+pub fn lsp_publish_batch_for_client_v1(client_id: text, uri: text, batch: LspCheckBatchV1, current: bool) -> bool:
+    if not current or not batch.valid or batch.status != "complete":
+        return false
+    lsp_diag_record_batch_for_client_v1(client_id, uri, batch)
     val diags_str = SB_L() + batch.items.join(",") + SB_R()
     val params = jo2(jp("uri", js(uri)), jp("diagnostics", diags_str))
+    _record_published_notification(params)
     lsp_write_notification(method="textDocument/publishDiagnostics", params=params)
+    true
+
+fn _publish_items(uri: text, batch: LspCheckBatchV1):
+    val _ = lsp_publish_batch_for_client_v1("default", uri, batch, true)
 
 # --- Unsaved-overlay analysis source (REQ-DIAG-006) ---
-# Which bytes a diagnostics query analyzes for a URI. When the editor owns a
-# synchronized snapshot whose text differs from disk, the snapshot is staged
-# into a private temp file so the compiler sees the unsaved text; otherwise the
-# on-disk file is analyzed directly. `version`/`generation` identify the
-# snapshot so a caller can discard a result the editor has already superseded.
 pub struct LspDiagnosticsSourceV1:
+    client_id: text = "default"
     uri: text
     path: text          # path handed to `check`
     staged: bool        # path is a temp overlay copy that must be released
     overlay: bool       # analysis reflects unsaved editor text
     version: i64        # snapshot version (-1 when no snapshot)
     generation: i64     # snapshot lifetime generation (-1 when no snapshot)
+    source_hash: text = ""
 
-pub fn lsp_diagnostics_stage_source_v1(uri: text, file_path: text) -> LspDiagnosticsSourceV1:
-    val none = LspDiagnosticsSourceV1(uri: uri, path: file_path, staged: false, overlay: false, version: -1, generation: -1)
-    val snapshot = lsp_document_snapshot(uri)
-    if snapshot == nil: return none
+fn _sanitize_client_id_for_filename(client_id: text) -> text:
+    val trimmed = client_id.trim()
+    if trimmed == "":
+        return "default"
+    var parts: [text] = []
+    for ch in trimmed.chars():
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-" or ch == "_"
+        parts.push(if ok: ch else: "_")
+    parts.join("")
+
+fn _next_overlay_stage_nonce() -> i64:
+    LSP_OVERLAY_STAGE_NONCE = LSP_OVERLAY_STAGE_NONCE + 1
+    LSP_OVERLAY_STAGE_NONCE
+
+# reason: stages client_id unsaved overlay into collision-free temp file with client_id and monotonic nonce
+@allow(primitive_api)
+pub fn lsp_diagnostics_stage_source_for_client_v1(client_id: text, uri: text, file_path: text) -> LspDiagnosticsSourceV1:
+    val norm_client = if client_id.trim() == "": "default" else: client_id.trim()
+    val snapshot = lsp_document_snapshot_for_client_v1(norm_client, uri)
+    if not snapshot.?:
+        var disk_hash = ""
+        match lsp_read_analyzed_source(file_path):
+            Ok(disk_src): disk_hash = sha256_text(disk_src)
+            Err(_): pass
+        return LspDiagnosticsSourceV1(client_id: norm_client, uri: uri, path: file_path, staged: false, overlay: false, version: -1, generation: -1, source_hash: disk_hash)
     val snap = snapshot.unwrap()
+    val snap_hash = sha256_text(snap.content)
     val disk = lsp_read_analyzed_source(file_path)
     if disk.is_ok() and disk.unwrap() == snap.content:
-        return LspDiagnosticsSourceV1(uri: uri, path: file_path, staged: false, overlay: false, version: snap.version, generation: snap.lifetime_generation)
-    val staged_path = get_temp_dir() + "/simple_lsp_overlay_{time_now_unix_micros()}.spl"
+        return LspDiagnosticsSourceV1(client_id: norm_client, uri: uri, path: file_path, staged: false, overlay: false, version: snap.version, generation: snap.lifetime_generation, source_hash: snap_hash)
+    val safe_client = _sanitize_client_id_for_filename(norm_client)
+    val nonce = _next_overlay_stage_nonce()
+    val staged_path = get_temp_dir() + "/simple_lsp_overlay_" + safe_client + "_" + str(nonce) + "_" + str(time_now_unix_micros()) + ".spl"
     if not write_file(staged_path, snap.content):
-        # Cannot stage: analyzing disk would label stale results as the
-        # overlay's. Report the snapshot identity with an empty path so the
-        # caller publishes nothing rather than something wrong.
-        return LspDiagnosticsSourceV1(uri: uri, path: "", staged: false, overlay: true, version: snap.version, generation: snap.lifetime_generation)
-    LspDiagnosticsSourceV1(uri: uri, path: staged_path, staged: true, overlay: true, version: snap.version, generation: snap.lifetime_generation)
+        return LspDiagnosticsSourceV1(client_id: norm_client, uri: uri, path: "", staged: false, overlay: true, version: snap.version, generation: snap.lifetime_generation, source_hash: snap_hash)
+    LspDiagnosticsSourceV1(client_id: norm_client, uri: uri, path: staged_path, staged: true, overlay: true, version: snap.version, generation: snap.lifetime_generation, source_hash: snap_hash)
+
+# reason: stages default-client unsaved overlay for diagnostics analysis
+@allow(primitive_api)
+pub fn lsp_diagnostics_stage_source_v1(uri: text, file_path: text) -> LspDiagnosticsSourceV1:
+    lsp_diagnostics_stage_source_for_client_v1("default", uri, file_path)
 
 pub fn lsp_diagnostics_release_source_v1(source: LspDiagnosticsSourceV1):
     if source.staged and source.path != "":
@@ -293,29 +452,109 @@ pub fn lsp_diagnostics_release_source_v1(source: LspDiagnosticsSourceV1):
 
 # True while the editor still owns exactly the snapshot this source was staged
 # from; false once a newer version (or a close/reopen) superseded it.
+# reason: checks whether staged diagnostics source still matches client's current document snapshot
+@allow(primitive_api)
 pub fn lsp_diagnostics_source_is_current_v1(source: LspDiagnosticsSourceV1) -> bool:
-    val snapshot = lsp_document_snapshot(source.uri)
-    if snapshot == nil: return source.version < 0
+    val snapshot = lsp_document_snapshot_for_client_v1(source.client_id, source.uri)
+    if not snapshot.?:
+        if source.version >= 0:
+            return false
+        if source.source_hash == "" or source.path == "":
+            return true
+        val disk = lsp_read_analyzed_source(source.path)
+        return disk.is_ok() and sha256_text(disk.unwrap()) == source.source_hash
+    if source.version < 0:
+        return false
     val snap = snapshot.unwrap()
     snap.version == source.version and snap.lifetime_generation == source.generation
+
+# reason: collects diagnostics batch and currency verdict isolated to client_id
+@allow(primitive_api)
+pub fn lsp_diagnostics_for_uri_for_client_v1(client_id: text, uri: text, file_path: text) -> (LspCheckBatchV1, bool):
+    val source = lsp_diagnostics_stage_source_for_client_v1(client_id, uri, file_path)
+    if source.path == "":
+        val failed_stage = LspCheckBatchV1(
+            items: [],
+            index: DiagnosticActionIndex.new(),
+            ids: [],
+            valid: false,
+            status: "failed",
+            incomplete_reason: "failed to stage unsaved overlay source",
+            source_hash: source.source_hash,
+            scope: "document",
+            target: file_path,
+            policy_digest: "default"
+        )
+        return (failed_stage, false)
+    var batch = _collect_diagnostics_with_hash(source.path, file_path, source.version, source.source_hash)
+    lsp_diagnostics_release_source_v1(source)
+    val current = lsp_diagnostics_source_is_current_v1(source)
+    if not current:
+        batch.valid = false
+        batch.status = "stale"
+        batch.incomplete_reason = "document snapshot changed during analysis"
+    (batch, current)
 
 # Diagnostics for a URI from the latest unsaved text (or disk when the editor
 # holds none / the same bytes). The bool is false when the snapshot changed
 # while the analysis ran, i.e. the items are obsolete and must not be published.
+# reason: collects diagnostics batch and currency verdict for default client
+@allow(primitive_api)
 pub fn lsp_diagnostics_for_uri_v1(uri: text, file_path: text) -> (LspCheckBatchV1, bool):
-    val source = lsp_diagnostics_stage_source_v1(uri, file_path)
-    if source.path == "": return (LspCheckBatchV1(items: [], index: DiagnosticActionIndex.new(), ids: []), false)
-    # Fix rows name the staged path; their edits target the URI's own file.
-    val batch = _collect_diagnostics(source.path, file_path, source.version)
-    lsp_diagnostics_release_source_v1(source)
-    (batch, lsp_diagnostics_source_is_current_v1(source))
+    lsp_diagnostics_for_uri_for_client_v1("default", uri, file_path)
 
-# One parsed diagnostics batch: LSP diagnostic JSON items plus the fix
-# candidates (keyed by diagnostic id, in publish order) for the action store.
+# One parsed diagnostics batch: LSP diagnostic JSON items, fix candidates,
+# and explicit completion/validity metadata (REQ-DIAG-006, ED-T07).
 pub struct LspCheckBatchV1:
     items: [text]
     index: DiagnosticActionIndex
     ids: [text]
+    valid: bool = true
+    status: text = "complete"
+    incomplete_reason: text = ""
+    source_hash: text = ""
+    scope: text = "document"
+    target: text = ""
+    policy_digest: text = "default"
+
+impl LspCheckBatchV1:
+    fn len() -> i64:
+        self.items.len()
+
+    fn join(sep: text) -> text:
+        self.items.join(sep)
+
+    fn is_publishable() -> bool:
+        self.valid and self.status == "complete"
+
+fn _invalid_check_batch(status: text, reason: text, target: text, source_hash: text) -> LspCheckBatchV1:
+    LspCheckBatchV1(
+        items: [],
+        index: DiagnosticActionIndex.new(),
+        ids: [],
+        valid: false,
+        status: status,
+        incomplete_reason: reason,
+        source_hash: source_hash,
+        scope: "document",
+        target: target,
+        policy_digest: "default"
+    )
+
+fn _normalize_batch_status_name(raw_status: text) -> (bool, text):
+    if raw_status == "" or raw_status == "complete":
+        return (true, "complete")
+    if raw_status == "stale":
+        return (false, "stale")
+    if raw_status == "timed_out":
+        return (false, "timed_out")
+    if raw_status == "malformed":
+        return (false, "malformed")
+    if raw_status == "failed" or raw_status == "internal_error":
+        return (false, "failed")
+    if raw_status == "unavailable" or raw_status == "unsupported":
+        return (false, "unavailable")
+    (false, "incomplete")
 
 fn _json_int_field(v: JsonValue, key: text) -> i64:
     match json_value_get(v, key):
@@ -331,80 +570,401 @@ fn _json_span(v: JsonValue) -> Span:
     val s = json_value_field(v, "span")
     Span.new(_json_int_field(s, "start"), _json_int_field(s, "end"), _json_int_field(s, "line"), _json_int_field(s, "col"))
 
-# A `fixes[]` entry (ranked DiagnosticFix shape) as a FixCandidate whose
-# replacements all target `fix_file` at document `version`.
-fn _fix_candidate_from_json(fix: JsonValue, fix_file: text, version: i64) -> FixCandidate:
-    var c = FixCandidate.new(json_value_text_or(json_value_field(fix, "id"), ""),
-        json_value_text_or(json_value_field(fix, "title"), ""),
-        json_value_text_or(json_value_field(fix, "description"), ""),
-        _fix_confidence(json_value_text_or(json_value_field(fix, "confidence"), "")), version)
+fn _resolve_candidate_file(raw_file: text, analyzed_file: text, fix_file: text) -> text:
+    if raw_file == "":
+        return fix_file
+    if analyzed_file != "" and (raw_file == analyzed_file or raw_file.replace("\\", "/") == analyzed_file.replace("\\", "/")):
+        return fix_file
+    raw_file
+
+# A `fixes[]` entry (ranked DiagnosticFix shape) as a FixCandidate preserving
+# per-replacement target `"file"` and explicit `"preconditions"`.
+fn _fix_candidate_from_json_staged(fix: JsonValue, analyzed_file: text, fix_file: text, version: i64) -> FixCandidate:
+    val id = json_value_text_or(json_value_field(fix, "id"), "")
+    val desc = json_value_text_or(json_value_field(fix, "description"), "")
+    val raw_title = json_value_text_or(json_value_field(fix, "title"), "")
+    val title = if raw_title != "": raw_title else: desc
+    var c = FixCandidate.new(
+        id,
+        title,
+        desc,
+        _fix_confidence(json_value_text_or(json_value_field(fix, "confidence"), "")),
+        version
+    )
+    val dis_reason = json_value_text_or(json_value_field(fix, "disabled_reason"), "")
+    val applicability = json_value_text_or(json_value_field(fix, "applicability"), "")
+    if dis_reason != "":
+        c = c.disabled(dis_reason)
+    elif applicability == "unavailable":
+        c = c.disabled("fix is currently unavailable")
     val reps = json_value_items(json_value_field(fix, "replacements"))
+    var parsed_reps: [FixReplacement] = []
+    var inline_pres: [FixPrecondition] = []
+    for rep in reps:
+        val rep_file = _resolve_candidate_file(
+            json_value_text_or(json_value_field(rep, "file"), ""),
+            analyzed_file,
+            fix_file
+        )
+        val sp = _json_span(rep)
+        parsed_reps.push(FixReplacement.new(rep_file, sp, json_value_text_or(json_value_field(rep, "new_text"), "")))
+        match json_value_get(rep, "expected_text"):
+            Some(et):
+                inline_pres.push(FixPrecondition(file: rep_file, span: sp, expected_text: json_value_text_or(et, "")))
+            None:
+                pass
+    c.replacements = parsed_reps
     val pres = json_value_items(json_value_field(fix, "preconditions"))
-    var i = 0
-    while i < reps.len():
-        var expected = ""
-        if i < pres.len():
-            expected = json_value_text_or(json_value_field(pres[i], "expected_text"), "")
-        c = c.with_replacement(fix_file, _json_span(reps[i]), json_value_text_or(json_value_field(reps[i], "new_text"), ""), expected)
-        i = i + 1
+    if pres.len() > 0:
+        var parsed_pres: [FixPrecondition] = []
+        var pi = 0
+        while pi < pres.len():
+            val pre = pres[pi]
+            val raw_pf = json_value_text_or(json_value_field(pre, "file"), "")
+            var pf = ""
+            if raw_pf == "":
+                pf = if pi < parsed_reps.len(): parsed_reps[pi].file else: fix_file
+            else:
+                pf = _resolve_candidate_file(raw_pf, analyzed_file, fix_file)
+            val pspan = if json_value_has(pre, "span"):
+                _json_span(pre)
+            elif pi < parsed_reps.len():
+                parsed_reps[pi].span
+            else:
+                Span.new(0, 0, 1, 1)
+            val expected = json_value_text_or(json_value_field(pre, "expected_text"), "")
+            parsed_pres.push(FixPrecondition(file: pf, span: pspan, expected_text: expected))
+            pi = pi + 1
+        c.preconditions = parsed_pres
+    elif inline_pres.len() > 0:
+        c.preconditions = inline_pres
     c
 
-# Parse `check --format=json` output: a JSON array of
-# {"file", "diagnostics":[...]} entries (or a bare diagnostic array).
-pub fn lsp_check_json_parse_v1(output: text, fix_file: text, version: i64) -> LspCheckBatchV1:
+fn _fix_candidate_from_json(fix: JsonValue, fix_file: text, version: i64) -> FixCandidate:
+    _fix_candidate_from_json_staged(fix, fix_file, fix_file, version)
+
+fn _row_has_string_message(row: JsonValue) -> bool:
+    match json_value_field(row, "message"):
+        case Str(_): true
+        case _: false
+
+fn _check_json_parse_internal_v1(
+    output: text,
+    analyzed_file: text,
+    fix_file: text,
+    version: i64,
+    default_source_hash: text
+) -> LspCheckBatchV1:
+    val trimmed = output.trim()
+    if trimmed == "":
+        return _invalid_check_batch("malformed", "empty check JSON payload", fix_file, default_source_hash)
+    val parsed = json_parse_value_strict(trimmed)
+    if parsed.is_err():
+        return _invalid_check_batch("malformed", "malformed check JSON payload", fix_file, default_source_hash)
     var items: [text] = []
     var index = DiagnosticActionIndex.new()
     var ids: [text] = []
-    val parsed = json_parse_value_strict(output.trim())
-    if parsed.is_err(): return LspCheckBatchV1(items: items, index: index, ids: ids)
     var rows: [JsonValue] = []
-    for entry in json_value_items(parsed.unwrap()):
-        match json_value_get(entry, "diagnostics"):
-            Some(ds):
-                for d in json_value_items(ds):
-                    rows.push(d)
-            None: rows.push(entry)
-    for row in rows:
+    var row_ids: [text] = []
+    var batch_valid = true
+    var batch_status = "complete"
+    var incomplete_reason = ""
+    var batch_hash = default_source_hash
+    var scope = "document"
+    var policy_digest = "default"
+
+    val root = parsed.unwrap()
+    match root:
+        case Array(entries):
+            for entry in entries:
+                match entry:
+                    case Object(_, _):
+                        if json_value_has(entry, "status"):
+                            val (ok_st, norm_st) = _normalize_batch_status_name(json_value_text_or(json_value_field(entry, "status"), "complete"))
+                            if not ok_st:
+                                batch_valid = false
+                                batch_status = norm_st
+                                val er = json_value_text_or(json_value_field(entry, "incomplete_reason"), "")
+                                if er != "": incomplete_reason = er
+                        val eh = json_value_text_or(json_value_field(entry, "source_hash"), "")
+                        if eh != "": batch_hash = eh
+                        val ep = json_value_text_or(json_value_field(entry, "policy_digest"), "")
+                        if ep != "": policy_digest = ep
+                        if json_value_has(entry, "diagnostics"):
+                            match json_value_field(entry, "diagnostics"):
+                                case Array(ds):
+                                    for d in ds:
+                                        if json_value_has(d, "diagnostic"):
+                                            rows.push(json_value_field(d, "diagnostic"))
+                                            row_ids.push(json_value_text_or(json_value_field(d, "id"), ""))
+                                        else:
+                                            rows.push(d)
+                                            row_ids.push(json_value_text_or(json_value_field(d, "id"), ""))
+                                case _:
+                                    return _invalid_check_batch("malformed", "entry diagnostics field is not an array", fix_file, batch_hash)
+                        else:
+                            if not _row_has_string_message(entry):
+                                return _invalid_check_batch("malformed", "diagnostic array entry missing string message", fix_file, batch_hash)
+                            rows.push(entry)
+                            row_ids.push(json_value_text_or(json_value_field(entry, "id"), ""))
+                    case _:
+                        return _invalid_check_batch("malformed", "check JSON array contains non-object entry", fix_file, batch_hash)
+        case Object(_, _):
+            if json_value_has(root, "structuredContent"):
+                match json_value_as_bool(json_value_field(root, "isError")):
+                    case Some(true):
+                        return _invalid_check_batch("failed", "check MCP wrapper reported isError=true", fix_file, batch_hash)
+                    case _:
+                        pass
+                val sc = json_value_field(root, "structuredContent")
+                val (ok_sc_st, norm_sc_st) = _normalize_batch_status_name(json_value_text_or(json_value_field(sc, "status"), "complete"))
+                batch_valid = ok_sc_st
+                batch_status = norm_sc_st
+                val sc_comp = json_value_text_or(json_value_field(sc, "completeness"), "")
+                if sc_comp == "timed_out" or sc_comp == "incomplete" or sc_comp == "unavailable":
+                    batch_valid = false
+                    if batch_status == "complete":
+                        batch_status = sc_comp
+                val sc_inc_reason = json_value_text_or(json_value_field(sc, "incomplete_reason"), "")
+                val sc_alt_reason = json_value_text_or(json_value_field(sc, "reason"), "")
+                incomplete_reason = if sc_inc_reason != "": sc_inc_reason else: sc_alt_reason
+                val sc_src_hash = json_value_text_or(json_value_field(sc, "source_hash"), "")
+                val sc_snap_hash = json_value_text_or(json_value_field(sc, "snapshot_hash"), "")
+                if sc_src_hash != "":
+                    batch_hash = sc_src_hash
+                elif sc_snap_hash != "":
+                    batch_hash = sc_snap_hash
+                val sc_scope = json_value_text_or(json_value_field(sc, "scope"), "")
+                if sc_scope != "": scope = sc_scope
+                val sc_pol = json_value_text_or(json_value_field(sc, "policy_digest"), "")
+                if sc_pol != "": policy_digest = sc_pol
+                match json_value_field(sc, "diagnostics"):
+                    case Array(ds):
+                        for d in ds:
+                            if json_value_has(d, "diagnostic"):
+                                rows.push(json_value_field(d, "diagnostic"))
+                                row_ids.push(json_value_text_or(json_value_field(d, "id"), ""))
+                            else:
+                                rows.push(d)
+                                row_ids.push(json_value_text_or(json_value_field(d, "id"), ""))
+                    case _:
+                        return _invalid_check_batch("malformed", "structuredContent.diagnostics is not an array", fix_file, batch_hash)
+            elif json_value_has(root, "diagnostics"):
+                val (ok_st, norm_st) = _normalize_batch_status_name(json_value_text_or(json_value_field(root, "status"), "complete"))
+                batch_valid = ok_st
+                batch_status = norm_st
+                val root_comp = json_value_text_or(json_value_field(root, "completeness"), "")
+                if root_comp == "timed_out" or root_comp == "incomplete" or root_comp == "unavailable":
+                    batch_valid = false
+                    if batch_status == "complete":
+                        batch_status = root_comp
+                incomplete_reason = json_value_text_or(json_value_field(root, "incomplete_reason"), "")
+                val rh = json_value_text_or(json_value_field(root, "source_hash"), "")
+                val rsnap = json_value_text_or(json_value_field(root, "snapshot_hash"), "")
+                if rh != "":
+                    batch_hash = rh
+                elif rsnap != "":
+                    batch_hash = rsnap
+                val rs = json_value_text_or(json_value_field(root, "scope"), "")
+                if rs != "": scope = rs
+                val rp = json_value_text_or(json_value_field(root, "policy_digest"), "")
+                if rp != "": policy_digest = rp
+                match json_value_field(root, "diagnostics"):
+                    case Array(ds):
+                        for d in ds:
+                            if json_value_has(d, "diagnostic"):
+                                rows.push(json_value_field(d, "diagnostic"))
+                                row_ids.push(json_value_text_or(json_value_field(d, "id"), ""))
+                            else:
+                                rows.push(d)
+                                row_ids.push(json_value_text_or(json_value_field(d, "id"), ""))
+                    case _:
+                        return _invalid_check_batch("malformed", "batch diagnostics field is not an array", fix_file, batch_hash)
+            else:
+                return _invalid_check_batch("malformed", "unexpected JSON object without diagnostics array", fix_file, batch_hash)
+        case _:
+            return _invalid_check_batch("malformed", "check JSON payload must be an array or batch object", fix_file, batch_hash)
+
+    var ri = 0
+    while ri < rows.len():
+        val row = rows[ri]
+        if not _row_has_string_message(row):
+            return _invalid_check_batch("malformed", "diagnostic row missing string message", fix_file, batch_hash)
+        if json_value_has(row, "lifecycle"):
+            val lc_pol = json_value_text_or(json_value_field(json_value_field(row, "lifecycle"), "policy_digest"), "")
+            if lc_pol != "": policy_digest = lc_pol
         var plain: [(text, JsonValue)] = []
         for k in json_value_keys(row):
-            if k != "fixes":
+            if k != "fixes" and k != "fix":
                 plain.push((k, json_value_field(row, k)))
         val diag = _parse_json_diagnostic(json_value_serialize(json_value_object_from(plain)))
-        if diag == "": continue
+        if diag == "":
+            ri = ri + 1
+            continue
         items.push(diag)
-        val id = "d" + (items.len() - 1).to_text()
+        val explicit_id = row_ids[ri]
+        val id = if explicit_id != "": explicit_id else: "d" + (items.len() - 1).to_text()
         val fixes = json_value_items(json_value_field(row, "fixes"))
         if fixes.len() > 0:
-            ids.push(id)
+            if not ids.contains(id):
+                ids.push(id)
             for fx in fixes:
-                index = index.add(id, _fix_candidate_from_json(fx, fix_file, version))
-    LspCheckBatchV1(items: items, index: index, ids: ids)
+                index = index.add(id, _fix_candidate_from_json_staged(fx, analyzed_file, fix_file, version))
+        ri = ri + 1
 
-fn _collect_diagnostics(file_path: text, fix_file: text, version: i64) -> LspCheckBatchV1:
-    var diags: [text] = []
-    # Try structured JSON format first
-    var cmd_json = lsp_heavy_query_command_v1(["check", lsp_query_file_argument_v1(file_path), "--format=json"])
-    var out_json = ""
-    var exit_json: i64 = 0
-    (out_json, exit_json) = lsp_run_query_command_v1(_find_simple_binary(), cmd_json)
+    if not batch_valid and incomplete_reason == "":
+        incomplete_reason = "diagnostic batch status is " + batch_status
+    LspCheckBatchV1(
+        items: items,
+        index: index,
+        ids: ids,
+        valid: batch_valid,
+        status: batch_status,
+        incomplete_reason: incomplete_reason,
+        source_hash: batch_hash,
+        scope: scope,
+        target: fix_file,
+        policy_digest: policy_digest
+    )
+
+# Parse `check --format=json` output: a JSON array of
+# {"file", "diagnostics":[...]} entries, MCP structuredContent wrapper, or DiagnosticBatchV1.
+# reason: parses raw check JSON text for target fix_file and integer document version
+@allow(primitive_api)
+pub fn lsp_check_json_parse_v1(output: text, fix_file: text, version: i64) -> LspCheckBatchV1:
+    _check_json_parse_internal_v1(output, fix_file, fix_file, version, "")
+
+# reason: classifies check child stdout and exit code into a canonical LspCheckBatchV1
+@allow(primitive_api)
+pub fn lsp_evaluate_check_output_v1(
+    out_json: text,
+    exit_json: i64,
+    analyzed_file: text,
+    fix_file: text,
+    version: i64,
+    source_hash: text
+) -> LspCheckBatchV1:
+    if exit_json == 124:
+        return _invalid_check_batch("timed_out", "LSP check query timed out (exit 124)", fix_file, source_hash)
+    if exit_json < 0 or exit_json > 1:
+        return _invalid_check_batch("failed", "LSP check query failed (exit " + str(exit_json) + ")", fix_file, source_hash)
     val payload = lsp_extract_query_json_payload(out_json)
-    if payload != "":
-        return lsp_check_json_parse_v1(payload, fix_file, version)
-    # Fallback to plain text format
-    var cmd = lsp_heavy_query_command_v1(["check", lsp_query_file_argument_v1(file_path)])
-    var out = ""
-    var exit_code: i64 = 0
-    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
-    if exit_code != 0 and out != "":
-        val lines = out.split("\n")
-        for line in lines:
-            val trimmed = line.trim()
-            if trimmed == "":
-                continue
-            val diag = _parse_diagnostic_line(line=trimmed, file_path=file_path)
+    if payload == "":
+        val trimmed = out_json.trim()
+        if trimmed.starts_with(LB()) or trimmed.starts_with(SB_L()):
+            return _invalid_check_batch("malformed", "truncated or malformed check JSON output", fix_file, source_hash)
+        val fallback_diags = _collect_plain_text_check_diags_v1(out_json, analyzed_file, fix_file)
+        if fallback_diags.len() > 0:
+            return LspCheckBatchV1(
+                items: fallback_diags,
+                index: DiagnosticActionIndex.new(),
+                ids: [],
+                valid: true,
+                status: "complete",
+                incomplete_reason: "",
+                source_hash: source_hash,
+                scope: "document",
+                target: fix_file,
+                policy_digest: "default"
+            )
+        return _invalid_check_batch("failed", "check --format=json produced no JSON payload (exit " + str(exit_json) + ")", fix_file, source_hash)
+    val batch = _check_json_parse_internal_v1(payload, analyzed_file, fix_file, version, source_hash)
+    if not batch.valid:
+        return batch
+    if exit_json != 0 and batch.items.len() == 0:
+        return _invalid_check_batch("incomplete", "check exited with code " + str(exit_json) + " without emitting diagnostics", fix_file, source_hash)
+    batch
+
+fn _strip_path_prefix_colon(line: text, candidate_path: text) -> text:
+    if candidate_path == "":
+        return ""
+    val p1 = candidate_path + ":"
+    if line.starts_with(p1):
+        return line.substring(p1.byte_len())
+    val norm_cand = candidate_path.replace("\\", "/")
+    val p2 = norm_cand + ":"
+    val norm_line = line.replace("\\", "/")
+    if norm_line.starts_with(p2):
+        return line.substring(p2.byte_len())
+    ""
+
+fn _parse_check_worker_tail(tail: text) -> text:
+    val c1 = tail.index_of(":")
+    if c1 < 0:
+        return ""
+    val line_str = tail.substring(0, c1).trim()
+    val after_line = tail.substring(c1 + 1)
+    var diag_line = 0
+    val ln = line_str.to_int() ?? -1
+    if ln < 0:
+        return ""
+    if ln > 0:
+        diag_line = ln - 1
+    var diag_col = 0
+    var msg_part = after_line.trim()
+    val c2 = after_line.index_of(":")
+    if c2 >= 0:
+        val col_candidate = after_line.substring(0, c2).trim()
+        val cn = col_candidate.to_int() ?? -1
+        if cn >= 0:
+            if cn > 0:
+                diag_col = cn - 1
+            msg_part = after_line.substring(c2 + 1).trim()
+    var severity = 1
+    var code = ""
+    if msg_part.starts_with("warning"):
+        severity = 2
+    val b_open = msg_part.index_of("[")
+    val b_close = msg_part.index_of("]:")
+    if b_open >= 0 and b_close > b_open and (msg_part.starts_with("error[") or msg_part.starts_with("warning[")):
+        code = msg_part.substring(b_open + 1, b_close)
+        msg_part = msg_part.substring(b_close + 2).trim()
+    elif msg_part.starts_with("warning:"):
+        msg_part = msg_part.substring(8).trim()
+    elif msg_part.starts_with("error:"):
+        msg_part = msg_part.substring(6).trim()
+    if msg_part == "":
+        return ""
+    val range = jo2(
+        jp("start", jo2(jp("line", str(diag_line)), jp("character", str(diag_col)))),
+        jp("end", jo2(jp("line", str(diag_line)), jp("character", str(diag_col + 1))))
+    )
+    var parts: [text] = [
+        jp("range", range),
+        jp("severity", str(severity)),
+        jp("message", js(msg_part)),
+        jp("source", js("simple"))
+    ]
+    if code != "":
+        parts.push(jp("code", js(code)))
+    LB() + parts.join(",") + RB()
+
+fn _collect_plain_text_check_diags_v1(raw_output: text, target_arg: text, file_path: text) -> [text]:
+    var diags: [text] = []
+    for raw_line in raw_output.split("\n"):
+        val trimmed = raw_line.trim()
+        if trimmed == "" or trimmed.starts_with(SB_L()):
+            continue
+        var tail = _strip_path_prefix_colon(trimmed, target_arg)
+        if tail == "" and file_path != target_arg:
+            tail = _strip_path_prefix_colon(trimmed, file_path)
+        if tail != "":
+            val diag = _parse_check_worker_tail(tail)
             if diag != "":
                 diags.push(diag)
-    LspCheckBatchV1(items: diags, index: DiagnosticActionIndex.new(), ids: [])
+    diags
+
+fn _collect_check_worker_v1(target_arg: text, file_path: text, fix_file: text, version: i64, source_hash: text) -> LspCheckBatchV1:
+    val worker_cmd = LspQueryCommandV1(["run", "src/app/cli/query.spl", "check", target_arg, "--format", "json"], 60000)
+    val (out_worker, exit_worker) = lsp_run_query_command_v1(_find_simple_binary(), worker_cmd)
+    lsp_evaluate_check_output_v1(out_worker, exit_worker, target_arg, fix_file, version, source_hash)
+
+fn _collect_diagnostics_with_hash(file_path: text, fix_file: text, version: i64, source_hash: text) -> LspCheckBatchV1:
+    val target_arg = lsp_query_file_argument_v1(file_path)
+    _collect_check_worker_v1(target_arg, file_path, fix_file, version, source_hash)
+
+fn _collect_diagnostics(file_path: text, fix_file: text, version: i64) -> LspCheckBatchV1:
+    _collect_diagnostics_with_hash(file_path, fix_file, version, "")
 
 fn _parse_diagnostic_line(line: text, file_path: text) -> text:
     # JSON structured format: line starts with "{"
@@ -419,7 +979,8 @@ fn _parse_json_diagnostic(line: text) -> text:
     val code = extract_field(json=line, key="code")
     val source = extract_field(json=line, key="source")
     val line_str = extract_field(json=line, key="line")
-    val col_str = extract_field(json=line, key="col")
+    val raw_col_str = extract_field(json=line, key="col")
+    val col_str = if raw_col_str != "": raw_col_str else: extract_field(json=line, key="column")
     val tags_raw = extract_field(json=line, key="tags")
     var diag_line = 0
     var diag_col = 0
@@ -1116,18 +1677,81 @@ fn lsp_code_actions_from_query_output(out: text, uri: text) -> text:
 
 # --- Pull Diagnostics (LSP 3.17 — textDocument/diagnostic) ---
 
-fn lsp_handle_pull_diagnostic(id: text, body: text) -> text:
+# reason: computes deterministic LSP 3.17 pull diagnostic resultId digest over snapshot and batch metadata
+@allow(primitive_api)
+pub fn lsp_pull_diagnostic_result_id_v1(
+    snapshot_identity: text,
+    scope: text,
+    status: text,
+    target: text,
+    policy_digest: text
+) -> text:
+    val canonical = "v1|snapshot=" + snapshot_identity + "|scope=" + scope + "|status=" + status + "|target=" + target + "|policy=" + policy_digest
+    "diag-" + sha256_text(canonical)
+
+fn _extract_previous_result_id(body: text) -> text:
+    match json_parse_value_strict(body):
+        case Ok(msg):
+            if json_value_has(msg, "params"):
+                val p = json_value_field(msg, "params")
+                val nested = json_value_text_or(json_value_field(p, "previousResultId"), "")
+                if nested != "": return nested
+            return json_value_text_or(json_value_field(msg, "previousResultId"), "")
+        case Err(_):
+            return extract_field(json=body, key="previousResultId")
+
+# reason: formats LSP 3.17 DocumentDiagnosticReport JSON-RPC response or failure/staleness error from LspCheckBatchV1
+@allow(primitive_api)
+pub fn lsp_pull_diagnostic_response_from_batch_v1(
+    id: text,
+    previous_result_id: text,
+    batch: LspCheckBatchV1,
+    current: bool,
+    version: i64
+) -> text:
+    if not current or batch.status == "stale":
+        return make_error(id, -32801, "pull diagnostic source changed during analysis; retry on latest revision")
+    if not batch.valid or batch.status != "complete":
+        val msg = if batch.incomplete_reason != "":
+            batch.incomplete_reason
+        elif batch.status == "timed_out":
+            "LSP check query timed out"
+        else:
+            "pull diagnostic analysis failed (" + batch.status + ")"
+        return make_error(id, -32803, msg)
+    val snap_id = if batch.source_hash != "" and version >= 0:
+        batch.source_hash + "@" + str(version)
+    elif batch.source_hash != "":
+        batch.source_hash
+    else:
+        "v:" + str(version)
+    val result_id = lsp_pull_diagnostic_result_id_v1(snap_id, batch.scope, batch.status, batch.target, batch.policy_digest)
+    if previous_result_id != "" and previous_result_id == result_id:
+        val unchanged = jo2(jp("kind", js("unchanged")), jp("resultId", js(result_id)))
+        return make_json_result(id=id, result=unchanged)
+    val diags_str = SB_L() + batch.items.join(",") + SB_R()
+    val full_report = jo3(jp("kind", js("full")), jp("resultId", js(result_id)), jp("items", diags_str))
+    make_json_result(id=id, result=full_report)
+
+# reason: handles LSP 3.17 textDocument/diagnostic pull request isolated to client_id
+@allow(primitive_api)
+pub fn lsp_handle_pull_diagnostic_for_client_v1(client_id: text, id: text, body: text) -> text:
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
-    if file_path == "":
-        val empty_result = jo2(jp("kind", js("full")), jp("items", SB_L() + SB_R()))
-        return make_json_result(id=id, result=empty_result)
-    # Pull and push analyze the same source (unsaved overlay when the editor
-    # owns one), so both return the same batch for the same snapshot.
-    val (diags, _current) = lsp_diagnostics_for_uri_v1(uri, file_path)
-    val diags_str = SB_L() + diags.join(",") + SB_R()
-    val result = jo2(jp("kind", js("full")), jp("items", diags_str))
-    make_json_result(id=id, result=result)
+    if uri == "" or file_path == "":
+        return make_error(id, -32602, "textDocument/diagnostic requires a valid file URI")
+    val previous_result_id = _extract_previous_result_id(body)
+    val snap_before = lsp_document_snapshot_for_client_v1(client_id, uri)
+    val snap_version = if snap_before.?: snap_before.unwrap().version else: -1
+    val (batch, current) = lsp_diagnostics_for_uri_for_client_v1(client_id, uri, file_path)
+    if current and batch.valid and batch.status == "complete":
+        lsp_diag_record_batch_for_client_v1(client_id, uri, batch)
+    lsp_pull_diagnostic_response_from_batch_v1(id, previous_result_id, batch, current, snap_version)
+
+# reason: handles LSP 3.17 textDocument/diagnostic pull request routing by embedded clientId or default client
+@allow(primitive_api)
+pub fn lsp_handle_pull_diagnostic(id: text, body: text) -> text:
+    lsp_handle_pull_diagnostic_for_client_v1(lsp_extract_client_id_v1(body), id, body)
 
 # --- Shared source-edit core (doc/05_design/app/lsp/closure_refactor.md §3) ---
 # simple/refactor/closure {closure, scope: [glob], dryRun} -> {workspaceEdit, summary}

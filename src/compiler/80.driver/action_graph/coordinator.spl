@@ -18,11 +18,16 @@ struct BuildDiagnosticFrameV1:
     ordinal: i64
     payload: text
 
+struct BuildActionWaitersV1:
+    action_id: text
+    waiter_ids: [text]
+
 struct BuildActionCoordinatorV1:
     graph: PersistedBuildGraphV1
     runtime: [BuildActionRuntimeV1]
     budgets: [BuildPoolBudgetV1]
     cancelled: bool
+    waiters: [BuildActionWaitersV1] = []
 
 struct BuildActionClaimV1:
     valid: bool
@@ -210,12 +215,88 @@ fn coordinator_complete_v1(
     BuildActionCompletionTransferV1(
         commit_transfer.coordinator, commit_transfer.commit)
 
+fn coordinator_waiter_count_v1(coordinator: BuildActionCoordinatorV1, action_id: text) -> i64:
+    for row in coordinator.waiters:
+        if row.action_id == action_id:
+            return row.waiter_ids.len()
+    0
+
+fn coordinator_attach_waiter_v1(
+    coordinator: &mut BuildActionCoordinatorV1, action_id: text, waiter_id: text
+) -> bool:
+    if coordinator.cancelled or action_id == "" or waiter_id == "":
+        return false
+    val index = coordinator_runtime_index_v1(coordinator, action_id)
+    if index < 0:
+        return false
+    val state = coordinator.runtime[index].state
+    if state == BuildActionStateV1.cancelled or state == BuildActionStateV1.failed:
+        return false
+    var updated: [BuildActionWaitersV1] = []
+    var found = false
+    for row in coordinator.waiters:
+        if row.action_id == action_id:
+            found = true
+            var ids = row.waiter_ids
+            if not ids.contains(waiter_id):
+                ids = ids.push(waiter_id)
+            updated = updated.push(BuildActionWaitersV1(action_id, ids))
+        else:
+            updated = updated.push(row)
+    if not found:
+        updated = updated.push(BuildActionWaitersV1(action_id, [waiter_id]))
+    coordinator.waiters = updated
+    true
+
+fn coordinator_cancel_action_v1(
+    coordinator: &mut BuildActionCoordinatorV1, action_id: text
+) -> bool:
+    val index = coordinator_runtime_index_v1(coordinator, action_id)
+    if index < 0 or coordinator_waiter_count_v1(coordinator, action_id) > 0:
+        return false
+    val state = coordinator.runtime[index].state
+    if state != BuildActionStateV1.pending and
+            state != BuildActionStateV1.ready and
+            state != BuildActionStateV1.running:
+        return false
+    coordinator.runtime[index] = BuildActionRuntimeV1(
+        action_id, BuildActionStateV1.cancelled, "", 0, None)
+    true
+
+fn coordinator_detach_waiter_v1(
+    coordinator: &mut BuildActionCoordinatorV1, action_id: text, waiter_id: text
+) -> bool:
+    if action_id == "" or waiter_id == "":
+        return false
+    var had_waiter = false
+    var remaining_count: i64 = 0
+    var updated: [BuildActionWaitersV1] = []
+    for row in coordinator.waiters:
+        if row.action_id == action_id:
+            var remaining: [text] = []
+            for existing in row.waiter_ids:
+                if existing == waiter_id:
+                    had_waiter = true
+                else:
+                    remaining = remaining.push(existing)
+            remaining_count = remaining.len()
+            if remaining.len() > 0:
+                updated = updated.push(BuildActionWaitersV1(action_id, remaining))
+        else:
+            updated = updated.push(row)
+    if not had_waiter:
+        return false
+    coordinator.waiters = updated
+    if remaining_count > 0:
+        return false
+    coordinator_cancel_action_v1(coordinator, action_id)
+
 fn coordinator_cancel_v1(coordinator: &mut BuildActionCoordinatorV1):
     coordinator.cancelled = true
     var index = 0
     while index < coordinator.runtime.len():
         if coordinator.runtime[index].state == BuildActionStateV1.pending:
-            coordinator.runtime[index] = BuildActionRuntimeV1(coordinator.runtime[index].action_id, BuildActionStateV1.cancelled, "", 0, nil)
+            coordinator.runtime[index] = BuildActionRuntimeV1(coordinator.runtime[index].action_id, BuildActionStateV1.cancelled, "", 0, None)
         index = index + 1
 
 fn coordinator_diagnostics_v1(coordinator: BuildActionCoordinatorV1) -> [BuildDiagnosticFrameV1]:
@@ -231,10 +312,14 @@ fn coordinator_diagnostics_v1(coordinator: BuildActionCoordinatorV1) -> [BuildDi
     frames
 
 export BuildPoolBudgetV1, BuildActionRuntimeV1, BuildDiagnosticFrameV1
+export BuildActionWaitersV1
 export BuildActionCoordinatorV1, BuildActionClaimV1, BuildActionCommitV1
 export BuildActionClaimTransferV1, BuildActionCommitTransferV1
 export BuildActionCompletionTransferV1
 export coordinator_new_v1, coordinator_ready_actions_v1
 export coordinator_claim_v1, coordinator_commit_v1, coordinator_cancel_v1
+export coordinator_waiter_count_v1
+export coordinator_attach_waiter_v1, coordinator_detach_waiter_v1
+export coordinator_cancel_action_v1
 export coordinator_complete_v1
 export coordinator_diagnostics_v1

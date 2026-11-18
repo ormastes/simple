@@ -1,0 +1,188 @@
+"""
+## Purpose and audience
+
+Executable unit contract for canonical `DiagnosticBatchV1` envelope metadata and
+fail-closed `finalize()` admission (`[C07]`, `ED-T06`, `ED-T33`). Audience:
+compiler, lint, and LSP diagnostic producers and consumers relying on
+`std.common.diagnostics`.
+"""
+# @cover src/lib/common/diagnostics/diagnostic_batch.spl
+# @req REQ-DIAG-001
+
+use std.spec.*
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_batch.{
+    BatchStatus, DiagnosticBatchV1, CoverageReceiptV1, BatchTargetProfileV1,
+    diagnostic_stable_id, batch_status_parse, render_diagnostic_batch_json
+}
+
+fn make_profile(scope: text) -> BatchTargetProfileV1:
+    BatchTargetProfileV1.new("x86_64-pc-windows-msvc", "strict", scope, "sha256:policy01")
+
+fn make_base_batch() -> DiagnosticBatchV1:
+    DiagnosticBatchV1.new("simple_lint", "file:01", "file:///w/mod.spl", 3, "xxh3:abcd1234", 5)
+
+fn bool_label(flag: bool) -> text:
+    if flag: "yes" else: "no"
+
+describe "DiagnosticBatchV1 canonical envelope and fail-closed finalization":
+    """Verifies BatchStatus extensions, CoverageReceiptV1 conservation, BatchTargetProfileV1 metadata, and fail-closed finalize() rules."""
+
+    context "BatchStatus timeout and budget exhaustion variants (ED-T06)":
+        """Ensures TimedOut and BudgetExhausted round-trip cleanly alongside the six pre-existing batch statuses."""
+
+        it "round-trips timed_out and budget_exhausted through name and batch_status_parse":
+            """Checks canonical wire names and parser recovery for all eight BatchStatus variants."""
+            val statuses = [
+                BatchStatus.Complete,
+                BatchStatus.PartialRecovery,
+                BatchStatus.Stale,
+                BatchStatus.Cancelled,
+                BatchStatus.Unsupported,
+                BatchStatus.InternalError,
+                BatchStatus.TimedOut,
+                BatchStatus.BudgetExhausted
+            ]
+            var names: [text] = []
+            var matched = 0
+            for st in statuses:
+                names.push(st.name())
+                match batch_status_parse(st.name()):
+                    case Some(parsed):
+                        if parsed.name() == st.name():
+                            matched = matched + 1
+                    case None:
+                        matched = matched
+            expect(matched).to_equal(8)
+            expect(names.join(",")).to_equal(
+                "complete,partial_recovery,stale,cancelled,unsupported,internal_error,timed_out,budget_exhausted"
+            )
+
+    context "Fail-closed finalize() invariants (ED-T06, ED-T33)":
+        """Proves incomplete, timed-out, budget-exhausted, or un-admitted skipped batches can never finalize as Complete or claim clean."""
+
+        it "finalizes a complete finding-free batch with full rule coverage as clean":
+            """Admits a complete batch only when executed plus exempted rules equal requested rules and no budget or timeout occurred."""
+            val receipt = CoverageReceiptV1.new(61, 59, 0, 2, 0, 0, false)
+            val batch = make_base_batch()
+                .with_target_profile(make_profile("full"))
+                .with_coverage(receipt)
+            match batch.finalize():
+                case Ok(finalized):
+                    expect(finalized.status.name()).to_equal("complete")
+                    expect(bool_label(finalized.is_clean())).to_equal("yes")
+                    expect(bool_label(finalized.is_full_clean())).to_equal("yes")
+                    expect(finalized.verdict_name()).to_equal("clean")
+                case Err(err):
+                    expect(err).to_equal("")
+
+        it "rejects finalizing as complete when budget_exhausted is true":
+            """Fails closed when a producer claims Complete while the coverage receipt marks budget_exhausted."""
+            val receipt = CoverageReceiptV1.new(61, 61, 0, 0, 0, 0, true)
+            val batch = make_base_batch()
+                .with_target_profile(make_profile("full"))
+                .with_coverage(receipt)
+            expect(bool_label(batch.is_clean())).to_equal("no")
+            match batch.finalize():
+                case Ok(unexpected):
+                    expect(unexpected.status.name()).to_equal("expected_err_for_budget_exhausted")
+                case Err(err):
+                    expect(err).to_contain("budget_exhausted")
+
+        it "rejects finalizing as complete when timed_out_rules is positive":
+            """Fails closed when any rule timed out even if zero diagnostics were emitted."""
+            val receipt = CoverageReceiptV1.new(61, 58, 0, 0, 0, 3, false)
+            val batch = make_base_batch()
+                .with_target_profile(make_profile("full"))
+                .with_coverage(receipt)
+            expect(bool_label(batch.is_clean())).to_equal("no")
+            match batch.finalize():
+                case Ok(unexpected):
+                    expect(unexpected.status.name()).to_equal("expected_err_for_timed_out_rules")
+                case Err(err):
+                    expect(err).to_contain("timed_out")
+
+        it "rejects skipped_rules under full scope but admits explicit fast_lint scope without claiming full clean":
+            """Requires explicit fast_lint target scope to finalize cost-skipped batches and still withholds full-clean claims."""
+            val fast_receipt = CoverageReceiptV1.new(61, 36, 25, 0, 0, 0, false)
+            val un_admitted = make_base_batch()
+                .with_target_profile(make_profile("full"))
+                .with_coverage(fast_receipt)
+            expect(bool_label(un_admitted.is_clean())).to_equal("no")
+            match un_admitted.finalize():
+                case Ok(unexpected):
+                    expect(unexpected.status.name()).to_equal("expected_err_for_unadmitted_skips")
+                case Err(err):
+                    expect(err).to_contain("skipped_rules")
+
+            val admitted_fast = make_base_batch()
+                .with_target_profile(make_profile("fast_lint"))
+                .with_coverage(fast_receipt)
+            match admitted_fast.finalize():
+                case Ok(finalized):
+                    expect(finalized.status.name()).to_equal("complete")
+                    expect(bool_label(finalized.is_full_clean())).to_equal("no")
+                    expect(finalized.verdict_name()).to_equal("fast_clean")
+                case Err(err):
+                    expect(err).to_equal("")
+
+        it "requires a non-empty incomplete_reason on every non-complete batch":
+            """Rejects non-Complete batches with missing or whitespace-only incomplete_reason and accepts explicit reasons."""
+            val missing_reason = DiagnosticBatchV1.incomplete(
+                "simple_lint", "file:02", "file:///w/t.spl", 1, "xxh3:99", 1,
+                BatchStatus.TimedOut, ""
+            )
+            match missing_reason.finalize():
+                case Ok(unexpected):
+                    expect(unexpected.status.name()).to_equal("expected_err_for_empty_reason")
+                case Err(err):
+                    expect(err).to_contain("incomplete_reason")
+
+            val valid_timeout = make_base_batch()
+                .with_target_profile(make_profile("full"))
+                .with_coverage(CoverageReceiptV1.new(61, 20, 0, 0, 0, 41, true))
+                .with_status(BatchStatus.TimedOut, "child worker exceeded 900s deadline")
+            match valid_timeout.finalize():
+                case Ok(finalized):
+                    expect(finalized.status.name()).to_equal("timed_out")
+                    expect(bool_label(finalized.is_clean())).to_equal("no")
+                    expect(finalized.verdict_name()).to_equal("timed_out")
+                case Err(err):
+                    expect(err).to_equal("")
+
+        it "rejects inconsistent rule count sums in CoverageReceiptV1":
+            """Enforces requested_rules == executed + skipped + exempted + unsupported + timed_out."""
+            val bad_receipt = CoverageReceiptV1.new(61, 40, 5, 0, 0, 0, false)
+            val batch = make_base_batch()
+                .with_target_profile(make_profile("full"))
+                .with_coverage(bad_receipt)
+            match batch.finalize():
+                case Ok(unexpected):
+                    expect(unexpected.status.name()).to_equal("expected_err_for_bad_sum")
+                case Err(err):
+                    expect(err).to_contain("requested_rules")
+
+    context "Backward-compatible JSON serialization with target_profile and coverage (ED-T06)":
+        """Ensures legacy top-level keys remain intact while target_profile and coverage render deterministically."""
+
+        it "renders legacy envelope keys alongside target_profile and coverage objects":
+            """Verifies schema_version, uri, document_version, source_hash, status, incomplete_reason, diagnostics, target_profile, and coverage."""
+            val span = Span.new(0, 4, 1, 1)
+            val diag = DiagnosticV1.warning("W001", "unused binding").with_file("mod.spl").with_span(span)
+            val id = diagnostic_stable_id("W001", "file:01", "decl:0", 0)
+            val receipt = CoverageReceiptV1.new(61, 36, 25, 0, 0, 0, false)
+            val batch = make_base_batch()
+                .push(id, diag)
+                .with_target_profile(make_profile("fast_lint"))
+                .with_coverage(receipt)
+            val rendered = render_diagnostic_batch_json(batch)
+            expect(rendered).to_contain("\"schema_version\":1")
+            expect(rendered).to_contain("\"uri\":\"file:///w/mod.spl\"")
+            expect(rendered).to_contain("\"document_version\":3")
+            expect(rendered).to_contain("\"source_hash\":\"xxh3:abcd1234\"")
+            expect(rendered).to_contain("\"status\":\"complete\"")
+            expect(rendered).to_contain("\"incomplete_reason\":null")
+            expect(rendered).to_contain("\"diagnostics\":[")
+            expect(rendered).to_contain("\"target_profile\":{{\"target\":\"x86_64-pc-windows-msvc\",\"profile\":\"strict\",\"scope\":\"fast_lint\",\"policy_digest\":\"sha256:policy01\"}}")
+            expect(rendered).to_contain("\"coverage\":{{\"requested_rules\":61,\"executed_rules\":36,\"skipped_rules\":25,\"exempted_rules\":0,\"unsupported_rules\":0,\"timed_out_rules\":0,\"budget_exhausted\":false}}")

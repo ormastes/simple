@@ -1,9 +1,31 @@
 use compiler.semantics.lint.unwrapped_foreign_resource.{check_unwrapped_foreign_resource}
+use compiler.semantics.lint.sffi_preflight_facts_v1.{SffiResourceOwnershipFactV1, extract_sffi_preflight_report_v1}
 use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+
+pub fn unwrapped_foreign_resource_ownership_facts_v1(unit: LintUnit) -> [SffiResourceOwnershipFactV1]:
+    extract_sffi_preflight_report_v1(unit.content, unit.path, "x86_64-unknown-linux-gnu").resource_facts
+
+fn _ufr_enrich_release_hint(ownership: [SffiResourceOwnershipFactV1], base_note: text) -> text:
+    var i = 0
+    while i < ownership.len():
+        if ownership[i].paired and ownership[i].release_symbols.len() > 0:
+            return base_note + " (paired release: `" + ownership[i].release_symbols[0] + "`)"
+        if ownership[i].acquire_symbols.len() > 0 and not ownership[i].paired:
+            return base_note + " (unpaired acquire family `" + ownership[i].family_prefix + "`: declare matching close/destroy/free)"
+        i = i + 1
+    base_note
 
 fn unwrapped_foreign_resource_check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
     val _ = params
-    [StaticLintFinding(f.code, StaticLintLevel.Allow, StaticLintCategory.Correctness, f.message, f.note, f.line_num, 0) for f in check_unwrapped_foreign_resource(unit.content, unit.path)]
+    val raw_findings = check_unwrapped_foreign_resource(unit.content, unit.path)
+    if raw_findings.len() == 0:
+        return []
+    val ownership = unwrapped_foreign_resource_ownership_facts_v1(unit)
+    var out: [StaticLintFinding] = []
+    for f in raw_findings:
+        val hint = _ufr_enrich_release_hint(ownership, f.note)
+        out.push(StaticLintFinding(f.code, StaticLintLevel.Allow, StaticLintCategory.Correctness, f.message, hint, f.line_num, 0))
+    out
 
 pub fn unwrapped_foreign_resource_lint_rule() -> StaticLintRule:
     static_lint_rule("unwrapped_foreign_resource", lint_rule_provider_iface("unwrapped_foreign_resource"), unwrapped_foreign_resource_check_rule)

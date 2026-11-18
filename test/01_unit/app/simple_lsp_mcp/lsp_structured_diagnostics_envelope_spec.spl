@@ -1,0 +1,405 @@
+"""
+## Purpose and audience
+Purpose: Prove that `simple_lsp_mcp` serves agent-ready structured diagnostics
+envelopes (`ED-T29`, `WP-08`, `[C12]`) with truthful `clean` invariants, shared
+admitted batch cache hits, deadlock-free source-mode command planning, bounded
+`task_handle` registration/lookup, preconditioned `ranked_fixes`, and guided
+`next_actions`.
+Audience: LSP/MCP and compiler tooling engineers maintaining `simple_lsp_mcp`.
+## Operator workflow
+Run with `simple test test/01_unit/app/simple_lsp_mcp/lsp_structured_diagnostics_envelope_spec.spl --mode=interpreter`
+and verify every scenario passes with zero skipped or placeholder checks.
+## Compatibility and limitations
+Exercises pure structured-envelope builders, admitted batch cache parsing, task
+registry bounds, `protocol.spl` schema advertisement, and `tools.spl` dispatch
+without spawning unbounded compiler delegates.
+"""
+# @req: REQ-LSP-STRUCTURED-DIAG-001
+
+use std.spec.*
+use std.spec.step
+use app.simple_lsp_mcp.lsp_diagnostics_structured_v1.{
+    LspStructuredDiagItemV1,
+    LspRankedFixV1,
+    LspNextActionV1,
+    LspDiagCoverageV1,
+    lsp_snapshot_hash_for_text_v1,
+    lsp_policy_digest_from_text_v1,
+    lsp_compute_clean_verdict_v1,
+    lsp_build_diagnostics_command_v1,
+    lsp_diag_task_register_v1,
+    lsp_diag_task_lookup_v1,
+    lsp_diag_task_reset_v1,
+    lsp_diag_task_count_v1,
+    lsp_parse_admitted_batch_json_v1,
+    lsp_build_structured_diagnostics_envelope_v1,
+    lsp_render_structured_envelope_json_v1,
+    lsp_render_diagnostics_text_v1,
+    lsp_envelope_from_command_output_v1
+}
+use app.simple_lsp_mcp.protocol.{make_tools_list}
+use app.simple_lsp_mcp.tools.{handle_lsp_diagnostics, handle_tool_call}
+use app.simple_lsp_mcp.json_helpers.{LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field}
+
+fn count_substrings_in_text(haystack: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    val hlen = haystack.byte_len()
+    val nlen = needle.byte_len()
+    if nlen > hlen:
+        return 0
+    var count = 0
+    var pos = 0
+    while pos + nlen <= hlen:
+        if haystack.substring(pos, pos + nlen) == needle:
+            count = count + 1
+            pos = pos + nlen
+        else:
+            pos = pos + 1
+    count
+
+describe "ED-T29: simple_lsp_mcp structured diagnostics envelope v1":
+    """Verifies the v1 structured diagnostics contract for agent consumers,
+    enforcing the strict truth invariant that non-complete or diagnostic-bearing
+    runs never report clean=true or silent no-issue prose."""
+
+    context "truth invariant across status, completeness, and diagnostic counts":
+        """Enforces clean == true strictly when status == complete, completeness == pass,
+        and diagnostics.len() == 0; all other states force clean == false."""
+
+        it "marks clean true only for a complete pass with zero diagnostics":
+            """A completed semantic + syntax run with zero diagnostics is the
+            sole combination allowed to report clean=true."""
+            step("Evaluate clean verdict and JSON rendering on a complete zero-diagnostic run")
+            expect(lsp_compute_clean_verdict_v1("complete", "pass", 0)).to_equal(true)
+            expect(lsp_compute_clean_verdict_v1("complete", "fail", 0)).to_equal(false)
+            expect(lsp_compute_clean_verdict_v1("complete", "pass", 1)).to_equal(false)
+            expect(lsp_compute_clean_verdict_v1("incomplete", "pass", 0)).to_equal(false)
+            expect(lsp_compute_clean_verdict_v1("timed_out", "timed_out", 0)).to_equal(false)
+            expect(lsp_compute_clean_verdict_v1("unavailable", "unavailable", 0)).to_equal(false)
+            expect(lsp_compute_clean_verdict_v1("failed", "fail", 0)).to_equal(false)
+
+            val cov = LspDiagCoverageV1(
+                syntax_checked: true,
+                semantic_checked: true,
+                lint_checked: true,
+                source: "admitted_batch_cache",
+                reason: "complete"
+            )
+            val env = lsp_build_structured_diagnostics_envelope_v1(
+                "src/demo.spl", "complete", "pass", cov,
+                "snap-001", "pol-001", "", "", [], [], []
+            )
+            expect(env.clean).to_equal(true)
+            val json = lsp_render_structured_envelope_json_v1(env)
+            expect(json).to_contain("\"schema_version\":1")
+            expect(json).to_contain("\"status\":\"complete\"")
+            expect(json).to_contain("\"completeness\":\"pass\"")
+            expect(json).to_contain("\"clean\":true")
+            expect(json).to_contain("\"snapshot_hash\":\"snap-001\"")
+            expect(json).to_contain("\"policy_digest\":\"pol-001\"")
+
+        it "forces clean false and emits explicit status markers on timed_out, incomplete, unavailable, and failed":
+            """Non-complete envelopes must never claim clean=true or render prose
+            saying 'no issues', and must guide the agent with concrete next_actions."""
+            step("Build timed_out, incomplete, unavailable, and failed envelopes and check text + JSON")
+            lsp_diag_task_reset_v1()
+            val cov_none = LspDiagCoverageV1(
+                syntax_checked: false,
+                semantic_checked: false,
+                lint_checked: false,
+                reason: "deadline exceeded",
+                source: "query_check_script"
+            )
+            val timed_out_env = lsp_envelope_from_command_output_v1(
+                "src/slow.spl",
+                "fn slow() -> i64:\n    1\n",
+                "snap-slow",
+                "pol-slow",
+                "src/slow.spl:1:1: warning: partial",
+                "[TIMEOUT: Process killed after 10000ms]",
+                -1,
+                "source_script",
+                true
+            )
+            expect(timed_out_env.status).to_equal("timed_out")
+            expect(timed_out_env.completeness).to_equal("timed_out")
+            expect(timed_out_env.clean).to_equal(false)
+            expect(timed_out_env.task_handle).to_start_with("lsp-diag-task-")
+            expect(timed_out_env.next_actions.len()).to_be_greater_than(0)
+            expect(timed_out_env.next_actions[0].kind).to_equal("poll_task")
+
+            val timed_out_text = lsp_render_diagnostics_text_v1(timed_out_env)
+            expect(timed_out_text).to_contain("[TIMED_OUT]")
+            expect(timed_out_text).to_contain("clean=false")
+            expect(count_substrings_in_text(timed_out_text, "no issues")).to_equal(0)
+            expect(count_substrings_in_text(cov_none.reason, "no issues")).to_equal(0)
+
+            val incomplete_env = lsp_build_structured_diagnostics_envelope_v1(
+                "src/partial.spl", "incomplete", "incomplete", cov_none,
+                "snap-part", "pol-part", "lsp-diag-task-99", "partial_recovery", [], [], []
+            )
+            expect(incomplete_env.clean).to_equal(false)
+            val incomplete_text = lsp_render_diagnostics_text_v1(incomplete_env)
+            expect(incomplete_text).to_contain("[INCOMPLETE]")
+            expect(count_substrings_in_text(incomplete_text, "no issues")).to_equal(0)
+            expect(incomplete_env.next_actions.len()).to_be_greater_than(0)
+
+            val unavail_env = lsp_build_structured_diagnostics_envelope_v1(
+                "src/off.spl", "unavailable", "unavailable", cov_none,
+                "snap-off", "pol-off", "", "diagnostics gate disabled", [], [], []
+            )
+            expect(unavail_env.clean).to_equal(false)
+            val unavail_text = lsp_render_diagnostics_text_v1(unavail_env)
+            expect(unavail_text).to_contain("[UNAVAILABLE]")
+            expect(count_substrings_in_text(unavail_text, "no issues")).to_equal(0)
+            expect(unavail_env.next_actions.len()).to_be_greater_than(0)
+
+    context "deadlock-free command builder and bounded task-handle registry":
+        """Verifies source-wrapper mode routes through direct query.spl script
+        execution instead of nested CLI `simple check` delegation, and caps task handles."""
+
+        it "prefers direct script run src/app/cli/query.spl in source mode and native check in native mode":
+            """Source-mode execution avoids nested CLI subcommand delegation by
+            running `src/app/cli/query.spl check <file> --format json` directly."""
+            step("Compare source-mode and native-mode command plans")
+            val src_plan = lsp_build_diagnostics_command_v1("bin/simple", "src/demo.spl", true)
+            expect(src_plan.mode).to_equal("source_script")
+            expect(src_plan.args[0]).to_equal("run")
+            expect(src_plan.args[1]).to_equal("src/app/cli/query.spl")
+            expect(src_plan.args[2]).to_equal("check")
+            expect(src_plan.args[3]).to_equal("src/demo.spl")
+            expect(src_plan.args[4]).to_equal("--format")
+            expect(src_plan.args[5]).to_equal("json")
+
+            val nat_plan = lsp_build_diagnostics_command_v1("bin/release/x86_64-unknown-linux-gnu/simple", "src/demo.spl", false)
+            expect(nat_plan.mode).to_equal("native_check")
+            expect(nat_plan.args[0]).to_equal("check")
+            expect(nat_plan.args[1]).to_equal("--format=json")
+            expect(nat_plan.args[2]).to_equal("src/demo.spl")
+
+        it "registers and evicts task handles within a fixed 64-entry ring bound":
+            """Long-running MCP sessions must never leak unbounded task state when
+            repeated timeouts or incomplete checks register task handles."""
+            step("Register 70 task handles and verify oldest eviction and newest retention")
+            lsp_diag_task_reset_v1()
+            var first_handle = ""
+            var last_handle = ""
+            var i = 0
+            while i < 70:
+                val h = lsp_diag_task_register_v1(
+                    "src/f_" + str(i) + ".spl",
+                    "snap-" + str(i),
+                    "timed_out",
+                    "timed_out",
+                    "deadline",
+                    LB() + RB()
+                )
+                if i == 0:
+                    first_handle = h
+                if i == 69:
+                    last_handle = h
+                i = i + 1
+            expect(lsp_diag_task_count_v1()).to_equal(64)
+            val evicted = lsp_diag_task_lookup_v1(first_handle)
+            match evicted:
+                case None:
+                    expect(lsp_diag_task_count_v1()).to_equal(64)
+                case Some(unexpected):
+                    expect(unexpected.task_handle).to_equal("")
+            val kept = lsp_diag_task_lookup_v1(last_handle)
+            match kept:
+                case Some(entry):
+                    expect(entry.file).to_equal("src/f_69.spl")
+                    expect(entry.snapshot_hash).to_equal("snap-69")
+                case None:
+                    expect("missing latest task handle").to_equal("")
+
+    context "shared admitted batch cache reader and ranked preconditioned fixes":
+        """Verifies exact content-hash admission on cached DiagnosticBatchV1 JSON,
+        rejection of stale hashes, and synthesis of snapshot-bound ranked fixes."""
+
+        it "admits a matching DiagnosticBatchV1 JSON snapshot and rejects stale content hashes":
+            """A cached batch is trusted only when source_hash matches the active
+            file snapshot hash; any edit invalidates the cached batch immediately."""
+            step("Parse admitted batch JSON with matching vs mismatched snapshot hash")
+            val src = "pub fn add(x: i64, y: i64) -> i64:\n    x + y\n"
+            val snap = lsp_snapshot_hash_for_text_v1(src)
+            val pol = lsp_policy_digest_from_text_v1("SPL-TYPE-001: deny\n")
+            val diag_inner = LB() + jp("severity", js("error")) + "," + jp("code", js("SPL-TYPE-001")) + "," + jp("message", js("bare primitive in public API")) + "," + jp("line", "1") + "," + jp("col", "1") + RB()
+            val batch_diag = jo2(jp("id", js("SPL-TYPE-001@src/math.spl#1:1/0")), jp("diagnostic", diag_inner))
+            val batch_json = LB() + jp("schema_version", "1") + "," + jp("producer", js("simple-check")) + "," + jp("file_id", js("src/math.spl")) + "," + jp("uri", js("file://src/math.spl")) + "," + jp("document_version", "1") + "," + jp("source_hash", js(snap)) + "," + jp("analysis_generation", "1") + "," + jp("status", js("complete")) + "," + jp("incomplete_reason", "null") + "," + jp("diagnostics", SB_L() + batch_diag + SB_R()) + "," + jp("related_files", SB_L() + SB_R()) + RB()
+
+            val hit = lsp_parse_admitted_batch_json_v1("src/math.spl", snap, pol, batch_json, true)
+            match hit:
+                case Some(env):
+                    expect(env.status).to_equal("complete")
+                    expect(env.completeness).to_equal("fail")
+                    expect(env.clean).to_equal(false)
+                    expect(env.diagnostics.len()).to_equal(1)
+                    expect(env.diagnostics[0].code).to_equal("SPL-TYPE-001")
+                    expect(env.ranked_fixes.len()).to_be_greater_than(0)
+                    expect(env.ranked_fixes[0].required_snapshot_hash).to_equal(snap)
+                    expect(env.next_actions[0].kind).to_equal("apply_ranked_fix")
+                case None:
+                    expect("expected admitted batch cache hit").to_equal("")
+
+            val stale = lsp_parse_admitted_batch_json_v1("src/math.spl", "different-hash", pol, batch_json, true)
+            match stale:
+                case None:
+                    expect(snap).to_start_with("s1-")
+                case Some(unexpected_env):
+                    expect(unexpected_env.snapshot_hash).to_equal("")
+
+        it "rejects cached DiagnosticBatchV1 hits when target_profile.policy_digest disagrees with active policy":
+            """When a cached batch carries a non-empty target_profile.policy_digest,
+            changing the active policy file invalidates the stale cache hit."""
+            step("Compare matching vs mismatched target_profile.policy_digest on admitted batch JSON")
+            val src = "pub fn calc(n: i64) -> i64:\n    n\n"
+            val snap = lsp_snapshot_hash_for_text_v1(src)
+            val pol_old = lsp_policy_digest_from_text_v1("SPL-TYPE-001: warn\n")
+            val pol_new = lsp_policy_digest_from_text_v1("SPL-TYPE-001: deny\n")
+            val tp_json = LB() + jp("target", js("src/math.spl")) + "," + jp("profile", js("dev")) + "," + jp("scope", js("document")) + "," + jp("policy_digest", js(pol_old)) + RB()
+            val batch_json = LB() + jp("schema_version", "1") + "," + jp("producer", js("simple-check")) + "," + jp("file_id", js("src/math.spl")) + "," + jp("source_hash", js(snap)) + "," + jp("status", js("complete")) + "," + jp("incomplete_reason", "null") + "," + jp("diagnostics", SB_L() + SB_R()) + "," + jp("target_profile", tp_json) + RB()
+
+            val same_pol_hit = lsp_parse_admitted_batch_json_v1("src/math.spl", snap, pol_old, batch_json, false)
+            match same_pol_hit:
+                case Some(env):
+                    expect(env.clean).to_equal(true)
+                    expect(env.policy_digest).to_equal(pol_old)
+                case None:
+                    expect("expected cache hit for matching policy_digest").to_equal("")
+
+            val changed_pol_miss = lsp_parse_admitted_batch_json_v1("src/math.spl", snap, pol_new, batch_json, false)
+            match changed_pol_miss:
+                case None:
+                    expect(pol_old == pol_new).to_equal(false)
+                case Some(unexpected_hit):
+                    expect(unexpected_hit.policy_digest).to_equal("")
+
+        it "parses check --json NDJSON warning lines, blocks error summaries from clean=true, and tracks lint_checked accurately":
+            """Warning-only NDJSON output from `simple check --json` populates diagnostics
+            with column->col mapping, error summaries never report clean=true, and
+            parse/block aborts set coverage.lint_checked to false."""
+            step("Parse check-diagnostic NDJSON warning + check summary with exit_code 0")
+            val ndjson_warn = LB() + jp("type", js("check-diagnostic")) + "," + jp("severity", js("warning")) + "," + jp("file", js("src/warn.spl")) + "," + jp("line", "4") + "," + jp("column", "7") + "," + jp("code", js("W0410")) + "," + jp("message", js("unresolved import 'ghost.mod'")) + RB()
+            val warn_summary = LB() + jp("command", js("check")) + "," + jp("status", js("warning")) + "," + jp("coverage", js("semantic")) + "," + jp("semantic_complete", "true") + "," + jp("checked", "1") + "," + jp("files", "1") + "," + jp("errors", "0") + "," + jp("files_with_errors", "0") + RB()
+            val warn_env = lsp_envelope_from_command_output_v1(
+                "src/warn.spl", "use ghost.mod\n", "snap-w", "pol-w",
+                warn_summary, ndjson_warn, 0, "native_check", false
+            )
+            expect(warn_env.status).to_equal("complete")
+            expect(warn_env.completeness).to_equal("pass")
+            expect(warn_env.diagnostics.len()).to_equal(1)
+            expect(warn_env.diagnostics[0].code).to_equal("W0410")
+            expect(warn_env.diagnostics[0].severity).to_equal("warning")
+            expect(warn_env.diagnostics[0].line).to_equal(4)
+            expect(warn_env.diagnostics[0].col).to_equal(7)
+            expect(warn_env.clean).to_equal(false)
+            expect(warn_env.coverage.lint_checked).to_equal(true)
+
+            step("Reject check summary with errors > 0 from reporting clean=true even if diagnostic lines were absent")
+            val err_summary = LB() + jp("command", js("check")) + "," + jp("status", js("error")) + "," + jp("checked", "0") + "," + jp("files", "0") + "," + jp("errors", "1") + "," + jp("files_with_errors", "0") + RB()
+            val err_env = lsp_envelope_from_command_output_v1(
+                "src/err.spl", "", "snap-e", "pol-e",
+                err_summary, "", 0, "native_check", false
+            )
+            expect(err_env.clean).to_equal(false)
+            expect(err_env.status).to_equal("failed")
+            expect(err_env.completeness).to_equal("fail")
+
+            step("Mark lint_checked false when source_script output aborts on a parse error or lacks structured output")
+            val parse_abort_env = lsp_envelope_from_command_output_v1(
+                "src/broken.spl", "fn (\n", "snap-b", "pol-b",
+                "src/broken.spl:1:4: error: [E0002] unexpected token", "", 1, "source_script", false
+            )
+            expect(parse_abort_env.diagnostics.len()).to_equal(1)
+            expect(parse_abort_env.coverage.lint_checked).to_equal(false)
+
+        it "parses Windows drive-prefixed text diagnostic paths without splitting on the drive letter colon":
+            """Windows paths like `C:\\foo\\bar.spl:12:4: error: ...` skip index-1 drive
+            colons when locating `:line:col:`."""
+            step("Parse backslash and forward-slash Windows drive-letter diagnostic lines")
+            val win_lines = "C:\\foo\\bar.spl:12:4: error: [E0101] bad token\nD:/proj/src/mod.spl:8:3: warning: [W0410] unused import\n"
+            val win_env = lsp_envelope_from_command_output_v1(
+                "C:\\foo\\bar.spl", "", "snap-win", "pol-win",
+                win_lines, "", 1, "native_check", false
+            )
+            expect(win_env.diagnostics.len()).to_equal(2)
+            expect(win_env.diagnostics[0].file).to_equal("C:\\foo\\bar.spl")
+            expect(win_env.diagnostics[0].line).to_equal(12)
+            expect(win_env.diagnostics[0].col).to_equal(4)
+            expect(win_env.diagnostics[0].severity).to_equal("error")
+            expect(win_env.diagnostics[0].code).to_equal("E0101")
+            expect(win_env.diagnostics[1].file).to_equal("D:/proj/src/mod.spl")
+            expect(win_env.diagnostics[1].line).to_equal(8)
+            expect(win_env.diagnostics[1].col).to_equal(3)
+            expect(win_env.diagnostics[1].severity).to_equal("warning")
+            expect(win_env.diagnostics[1].code).to_equal("W0410")
+
+    context "MCP protocol schema and tools.spl structured dispatch":
+        """Verifies protocol.spl advertises format/include_fixes/task_handle and
+        handle_tool_call serves structured envelopes without false-clean output."""
+
+        it "advertises format, include_fixes, and task_handle on lsp_diagnostics in tools/list":
+            """MCP clients must see the structured diagnostics parameters in the
+            tools/list JSON-RPC response."""
+            step("Inspect make_tools_list JSON for lsp_diagnostics inputSchema properties")
+            val tools_json = make_tools_list("1")
+            expect(tools_json).to_contain("\"lsp_diagnostics\"")
+            expect(tools_json).to_contain("\"format\"")
+            expect(tools_json).to_contain("\"structured\"")
+            expect(tools_json).to_contain("\"include_fixes\"")
+            expect(tools_json).to_contain("\"task_handle\"")
+
+        it "serves a structured envelope with clean=false when polling an unknown task_handle":
+            """Polling an expired or unknown task_handle through tools/call must
+            return a structured unavailable envelope with clean=false and guidance."""
+            step("Dispatch tools/call for lsp_diagnostics with an unknown task_handle")
+            lsp_diag_task_reset_v1()
+            val args_obj = jo3(jp("file", js("src/demo.spl")), jp("format", js("structured")), jp("task_handle", js("lsp-diag-task-missing")))
+            val params_obj = jo2(jp("name", js("lsp_diagnostics")), jp("arguments", args_obj))
+            val req = LB() + jp("jsonrpc", js("2.0")) + "," + jp("id", "42") + "," + jp("method", js("tools/call")) + "," + jp("params", params_obj) + RB()
+            val resp = handle_tool_call("42", req)
+            expect(resp).to_contain("\"id\":42")
+            val result_obj = extract_field(resp, "result")
+            val structured_obj = extract_field(result_obj, "structuredContent")
+            expect(structured_obj).to_contain("\"schema_version\":1")
+            expect(structured_obj).to_contain("\"status\":\"unavailable\"")
+            expect(structured_obj).to_contain("\"clean\":false")
+            expect(structured_obj).to_contain("\"next_actions\":")
+            val text_args = jo3(jp("file", js("src/demo.spl")), jp("format", js("text")), jp("task_handle", js("lsp-diag-task-missing")))
+            val direct = handle_lsp_diagnostics("43", text_args)
+            expect(direct).to_contain("[UNAVAILABLE]")
+            expect(count_substrings_in_text(direct, "no issues")).to_equal(0)
+
+        it "allows task_handle-only polling in protocol.spl schema and tools/call while failing closed when both file and task_handle are absent":
+            """lsp_diagnostics sets inputSchema.required to [] so MCP clients can poll
+            with task_handle alone, while omitting both file and task_handle returns a tool error."""
+            step("Verify lsp_diagnostics schema required is [] and dispatch task_handle-only poll vs empty-args error")
+            val tools_json = make_tools_list("1")
+            val diag_marker = "\"name\":\"lsp_diagnostics\""
+            val diag_idx = tools_json.index_of(diag_marker)
+            val comp_idx = tools_json.index_of("\"name\":\"lsp_completion\"")
+            val diag_schema_slice = tools_json.substring(diag_idx, comp_idx)
+            expect(diag_schema_slice).to_contain("\"required\":[]")
+
+            lsp_diag_task_reset_v1()
+            val handle = lsp_diag_task_register_v1(
+                "src/polled_only.spl", "snap-poll", "timed_out", "timed_out",
+                "still running", LB() + RB()
+            )
+            val poll_args = jo1(jp("task_handle", js(handle)))
+            val poll_params = jo2(jp("name", js("lsp_diagnostics")), jp("arguments", poll_args))
+            val poll_req = LB() + jp("jsonrpc", js("2.0")) + "," + jp("id", "44") + "," + jp("method", js("tools/call")) + "," + jp("params", poll_params) + RB()
+            val poll_resp = handle_tool_call("44", poll_req)
+            val poll_sc = extract_field(extract_field(poll_resp, "result"), "structuredContent")
+            expect(poll_sc).to_contain("\"file\":\"src/polled_only.spl\"")
+            expect(poll_sc).to_contain("\"status\":\"timed_out\"")
+            expect(poll_sc).to_contain("\"clean\":false")
+
+            val empty_params = jo2(jp("name", js("lsp_diagnostics")), jp("arguments", LB() + RB()))
+            val empty_req = LB() + jp("jsonrpc", js("2.0")) + "," + jp("id", "45") + "," + jp("method", js("tools/call")) + "," + jp("params", empty_params) + RB()
+            val empty_resp = handle_tool_call("45", empty_req)
+            expect(empty_resp).to_contain("\"isError\":true")
+            expect(empty_resp).to_contain("Missing required argument: file")

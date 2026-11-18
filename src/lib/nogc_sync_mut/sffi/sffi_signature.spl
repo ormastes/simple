@@ -39,10 +39,12 @@ impl FfiManifest:
         self.entries.len()
 
     fn names() -> [text]:
-        var result: [text] = []
-        for key in self.entries:
-            result.push(key)
-        result
+        self.entries.keys()
+
+    fn preflight_get(name: text) -> Option<FfiSignature>:
+        if self.entries.contains_key(name):
+            return Some(self.entries[name])
+        None
 
 # ============================================================================
 # Validation Result
@@ -170,6 +172,14 @@ impl EvidenceBoundI64ManifestV1:
     fn count() -> i64:
         self.entries.len()
 
+    fn names() -> [text]:
+        self.entries.keys()
+
+    fn get_entry(name: text) -> Option<EvidenceBoundI64SignatureV1>:
+        if self.entries.contains_key(name):
+            return Some(self.entries[name])
+        None
+
 # Pure admission-identity validation. This does not grant authority or touch a
 # foreign handle; it only proves that the parsed receipt, expected manifest,
 # and already-observed artifact digest agree exactly.
@@ -250,3 +260,279 @@ fn resolve_i64_manifest(lib: VersionedDynLib, manifest: FfiManifest) -> Result<R
                 return Err("E-SFFI-003: manifest lost signature for {name}")
         i = i + 1
     Ok(ResolvedI64Manifest(slots: slots))
+
+# ============================================================================
+# SFFI Preflight Fact Contract Validation (WP-07)
+# ============================================================================
+
+pub struct SffiPreflightExternFactV1:
+    name: text
+    arg_count: i64
+    arg_types: [text]
+    return_type: text
+    target: text
+    c_abi_ok: bool
+    range_validated: bool
+    has_ffi_capability: bool
+
+pub struct SffiPreflightManifestReportV1:
+    target: text
+    data_model: text
+    checked_symbols: i64
+    missing_in_source: [text]
+    arity_mismatches: [text]
+    return_mismatches: [text]
+    target_mismatches: [text]
+    abi_or_range_violations: [text]
+
+# reason: Target triple string comes from external build/manifest configuration boundary
+@allow(primitive_api)
+pub fn sffi_preflight_target_data_model_v1(triple: text) -> text:
+    val parts = triple.split("-")
+    if parts.len() < 2:
+        return ""
+    val arch = parts[0]
+    if arch == "x86_64" or arch == "aarch64" or arch == "riscv64" or arch == "riscv64gc":
+        if arch == "x86_64" and (triple.contains("gnux32") or triple.contains("muslx32")):
+            return "ilp32"
+        if triple.contains("windows"):
+            return "llp64"
+        return "lp64"
+    if arch == "i686" or arch == "i386" or arch == "arm" or arch == "armv7" or arch == "riscv32" or arch == "wasm32":
+        return "ilp32"
+    ""
+
+fn _sig_split_top_level_params(params_src: text) -> [text]:
+    val trimmed = params_src.trim()
+    if trimmed == "":
+        return []
+    var out: [text] = []
+    var depth = 0
+    var seg_start = 0
+    val n = trimmed.byte_len()
+    var i = 0
+    while i < n:
+        val ch = trimmed.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "<":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == ">":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == "," and depth == 0:
+            val item = trimmed.substring(seg_start, i).trim()
+            if item != "":
+                out.push(item)
+            seg_start = i + 1
+        i = i + 1
+    val tail = trimmed.substring(seg_start, n).trim()
+    if tail != "":
+        out.push(tail)
+    out
+
+fn _sig_param_type(param_decl: text) -> text:
+    val colon = param_decl.find(":")
+    if colon < 0:
+        return param_decl.trim()
+    param_decl.substring(colon + 1, param_decl.byte_len()).trim()
+
+fn _sig_parse_extern_line(line: text, target: text, has_ffi_cap: bool) -> Option<SffiPreflightExternFactV1>:
+    var rest = line.trim()
+    if rest.starts_with("pub "):
+        rest = rest.substring(4, rest.byte_len()).trim()
+    if rest.starts_with("unsafe "):
+        rest = rest.substring(7, rest.byte_len()).trim()
+    if not rest.starts_with("extern fn "):
+        return None
+    rest = rest.substring(10, rest.byte_len()).trim()
+    val open_p = rest.find("(")
+    if open_p <= 0:
+        return None
+    val fn_name = rest.substring(0, open_p).trim()
+    var depth = 0
+    var close_p = -1
+    val n = rest.byte_len()
+    var i = open_p
+    while i < n:
+        val ch = rest.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                close_p = i
+                break
+        i = i + 1
+    if close_p < open_p:
+        return None
+    val raw_params = _sig_split_top_level_params(rest.substring(open_p + 1, close_p))
+    var arg_types: [text] = []
+    var pi = 0
+    while pi < raw_params.len():
+        arg_types.push(_sig_param_type(raw_params[pi]))
+        pi = pi + 1
+    val after = rest.substring(close_p + 1, n).trim()
+    var ret_type = "unit"
+    if after.starts_with("->"):
+        ret_type = after.substring(2, after.byte_len()).trim()
+    Some(SffiPreflightExternFactV1(
+        name: fn_name,
+        arg_count: arg_types.len(),
+        arg_types: arg_types,
+        return_type: ret_type,
+        target: target,
+        c_abi_ok: sffi_preflight_target_data_model_v1(target) != "",
+        range_validated: not ret_type.starts_with("NonZero"),
+        has_ffi_capability: has_ffi_cap
+    ))
+
+# reason: Source scanner extracts extern signature facts from raw module source and target triple
+@allow(primitive_api)
+pub fn extract_sffi_extern_signature_facts_v1(source: text, target: text) -> [SffiPreflightExternFactV1]:
+    val lines = source.split("\n")
+    var facts: [SffiPreflightExternFactV1] = []
+    var pending_ffi_cap = false
+    var i = 0
+    while i < lines.len():
+        val t = lines[i].trim()
+        if t == "" or t.starts_with("#"):
+            i = i + 1
+            continue
+        if t.starts_with("@unsafe(") and t.contains("ffi"):
+            pending_ffi_cap = true
+            i = i + 1
+            continue
+        if t.starts_with("@"):
+            i = i + 1
+            continue
+        val parsed = _sig_parse_extern_line(t, target, pending_ffi_cap or t.starts_with("unsafe ") or t.starts_with("pub unsafe "))
+        pending_ffi_cap = false
+        match parsed:
+            case Some(fact):
+                facts.push(fact)
+            case None:
+                i = i
+        i = i + 1
+    facts
+
+fn _find_extern_fact_by_name(facts: [SffiPreflightExternFactV1], symbol: text) -> Option<SffiPreflightExternFactV1>:
+    var i = 0
+    while i < facts.len():
+        if facts[i].name == symbol:
+            return Some(facts[i])
+        i = i + 1
+    None
+
+# reason: Validates FfiManifest against target triple string and extracted preflight extern facts
+@allow(primitive_api)
+pub fn validate_sffi_preflight_manifest_facts_v1(
+    manifest: FfiManifest,
+    expected_target: text,
+    extern_facts: [SffiPreflightExternFactV1]
+) -> Result<SffiPreflightManifestReportV1, text>:
+    val model = sffi_preflight_target_data_model_v1(expected_target)
+    if model == "":
+        return Err("E-SFFI-005: unknown preflight target triple: " + expected_target)
+
+    var missing: [text] = []
+    var arity_bad: [text] = []
+    var ret_bad: [text] = []
+    var target_bad: [text] = []
+    var abi_bad: [text] = []
+    val names = manifest.names()
+    var i = 0
+    while i < names.len():
+        val sym = names[i]
+        match manifest.preflight_get(sym):
+            case None:
+                missing.push(sym)
+            case Some(sig):
+                if sig.arg_count < 0 or sig.arg_count > 8:
+                    return Err("E-SFFI-003: " + sym + " arity " + str(sig.arg_count) + " is outside 0..8")
+                match _find_extern_fact_by_name(extern_facts, sym):
+                    case None:
+                        missing.push(sym)
+                    case Some(fact):
+                        if fact.target != expected_target:
+                            target_bad.push(sym)
+                        if fact.arg_count != sig.arg_count:
+                            arity_bad.push(sym)
+                        if sig.return_type != "" and fact.return_type != sig.return_type:
+                            ret_bad.push(sym)
+                        if not fact.c_abi_ok or not fact.range_validated:
+                            abi_bad.push(sym)
+        i = i + 1
+
+    if missing.len() > 0:
+        return Err("E-SFFI-006: manifest symbol missing from preflight extern facts: " + missing[0])
+    if target_bad.len() > 0:
+        return Err("E-SFFI-005: preflight target mismatch for symbol: " + target_bad[0])
+    if arity_bad.len() > 0:
+        return Err("E-SFFI-003: preflight arity mismatch for symbol: " + arity_bad[0])
+    if ret_bad.len() > 0:
+        return Err("E-SFFI-003: preflight return type mismatch for symbol: " + ret_bad[0])
+    if abi_bad.len() > 0:
+        return Err("SPL-SFFI-ABI-001: preflight ABI or range contract violation for symbol: " + abi_bad[0])
+
+    Ok(SffiPreflightManifestReportV1(
+        target: expected_target,
+        data_model: model,
+        checked_symbols: names.len(),
+        missing_in_source: [],
+        arity_mismatches: [],
+        return_mismatches: [],
+        target_mismatches: [],
+        abi_or_range_violations: []
+    ))
+
+pub fn validate_evidence_bound_preflight_facts_v1(
+    manifest: EvidenceBoundI64ManifestV1,
+    extern_facts: [SffiPreflightExternFactV1]
+) -> Result<SffiPreflightManifestReportV1, text>:
+    val model = sffi_preflight_target_data_model_v1(manifest.target)
+    if model == "":
+        return Err("E-SFFI-005: unknown evidence manifest target triple: " + manifest.target)
+
+    var checked = 0
+    val names = manifest.names()
+    var ni = 0
+    while ni < names.len():
+        val sym = names[ni]
+        match manifest.get_entry(sym):
+            case None:
+                return Err("E-SFFI-003: evidence manifest lost signature for " + sym)
+            case Some(sig):
+                if sig.arg_count < 0 or sig.arg_count > 8:
+                    return Err("E-SFFI-003: " + sym + " arity " + str(sig.arg_count) + " is outside 0..8")
+                match _find_extern_fact_by_name(extern_facts, sym):
+                    case None:
+                        return Err("E-SFFI-006: evidence manifest symbol missing from preflight extern facts: " + sym)
+                    case Some(fact):
+                        if fact.target != manifest.target:
+                            return Err("E-SFFI-005: preflight target mismatch for " + sym + ": expected " + manifest.target + ", got " + fact.target)
+                        if fact.arg_count != sig.arg_count:
+                            return Err("E-SFFI-003: preflight arity mismatch for " + sym)
+                        if fact.return_type != "i64":
+                            return Err("E-SFFI-003: evidence-bound i64 manifest requires i64 return for " + sym + ", got " + fact.return_type)
+                        if not fact.c_abi_ok or not fact.range_validated:
+                            return Err("SPL-SFFI-ABI-001: preflight ABI or range contract violation for " + sym)
+        checked = checked + 1
+        ni = ni + 1
+
+    Ok(SffiPreflightManifestReportV1(
+        target: manifest.target,
+        data_model: model,
+        checked_symbols: checked,
+        missing_in_source: [],
+        arity_mismatches: [],
+        return_mismatches: [],
+        target_mismatches: [],
+        abi_or_range_violations: []
+    ))
+
+export FfiSignature, FfiManifest, FfiValidationResult
+export validation_summary, validate_library, validate_subset, has_required_symbols, classify_api_groups
+export ResolvedI64Manifest, EvidenceBoundI64SignatureV1, EvidenceBoundI64ManifestV1
+export validate_evidence_bound_i64_identity, resolve_evidence_bound_i64_manifest, resolve_i64_manifest
+export SffiPreflightExternFactV1, SffiPreflightManifestReportV1
+export sffi_preflight_target_data_model_v1, extract_sffi_extern_signature_facts_v1
+export validate_sffi_preflight_manifest_facts_v1, validate_evidence_bound_preflight_facts_v1

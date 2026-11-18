@@ -17,7 +17,7 @@ diagnostic_batch_v1_schema:
 
   enums:
     batch_status:
-      values: [complete, partial_recovery, stale, cancelled, unsupported, internal_error]
+      values: [complete, partial_recovery, stale, cancelled, unsupported, internal_error, timed_out, budget_exhausted]
       meaning:
         complete: "analysis finished; diagnostics may contain errors/warnings"
         partial_recovery: "parsing/indexing recovered enough to return useful facts; unreliable regions marked"
@@ -25,6 +25,8 @@ diagnostic_batch_v1_schema:
         cancelled: "superseded/cancelled computation; do not publish a cleared list"
         unsupported: "the requested analysis is not implemented for this surface"
         internal_error: "execution/transport/index failure; keep last valid evidence, never claim clean"
+        timed_out: "per-unit or per-rule wall-clock deadline expired before completion"
+        budget_exhausted: "run-level wall-clock or unit budget expired before full coverage"
 
   stable_id:
     format: "<code>@<file_id>#<node_identity>/<occurrence>"
@@ -36,6 +38,23 @@ diagnostic_batch_v1_schema:
       fields:
         id: text              # diagnostic_stable_id(...)
         diagnostic: diagnostic_v1
+
+    batch_target_profile_v1:
+      fields:
+        target: text          # target triple or logical surface
+        profile: text         # active strictness/assurance profile
+        scope: text           # e.g. "full" or "fast_lint"
+        policy_digest: text   # policy snapshot digest
+
+    coverage_receipt_v1:
+      fields:
+        requested_rules: i64
+        executed_rules: i64
+        skipped_rules: i64
+        exempted_rules: i64
+        unsupported_rules: i64
+        timed_out_rules: i64
+        budget_exhausted: bool
 
     diagnostic_batch_v1:
       fields:
@@ -50,6 +69,16 @@ diagnostic_batch_v1_schema:
         incomplete_reason: text?   # null only when status == complete
         diagnostics: [batch_diagnostic]
         related_files: [text]
+        target_profile: batch_target_profile_v1?
+        coverage: coverage_receipt_v1?
+
+  finalization_invariants:
+    complete_requires_full_or_admitted_scope: >
+      DiagnosticBatchV1.finalize() rejects status == complete when
+      budget_exhausted == true, timed_out_rules > 0, unsupported_rules > 0,
+      or skipped_rules > 0 without explicit fast_lint scope admission.
+    incomplete_requires_reason: >
+      Every non-complete batch must carry a non-empty incomplete_reason.
 
     fix_precondition:
       fields:

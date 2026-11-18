@@ -96,3 +96,16 @@ Explicit public APIs added without signature changes: LspServer, DocumentInfo an
 Runtime, docgen, external child/protocol and performance qualification: NOT_RUN. In-process completion tests use genuine ordinary producers and real files; a separate actual child-route scenario requires SIMPLE_BINARY. Source review does not execute it or complete FIX-01–07.
 
 The actual code-action query passes a 4MiB capture ceiling to the canonical process runner before output allocation. Because its tuple return lacks a truncation bit, reaching the exact stdout or stderr ceiling fails closed, even if captured text is valid JSON. Other query callers retain the existing unlimited-output default. The real child-output fixture and public query path are isolated in test/02_integration/app/lsp/revision_code_action_child_spec.spl, with a60s child watchdog and explicit admitted SIMPLE_BINARY requirement; this integration remains NOT_RUN.
+
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Multi-file all-or-nothing `EditTransaction` preconditions (`WP-03`, 2026-11-18)
+
+Extended by [early_defect_detection_2026-11-18.md](../../03_plan/compiler/early_defect_detection_2026-11-18.md) (`ED-06`, `ED-07`, `ED-10`, `ED-T16`, `ED-T28`) across `src/lib/common/diagnostics/fix_transaction.spl`, `src/lib/nogc_sync_mut/lsp/lsp_diag_code_action.spl`, `src/lib/nogc_sync_mut/lsp/lsp_diag_action_store.spl`, and `src/lib/nogc_sync_mut/lsp/lsp_code_action_handler.spl`:
+
+- **Per-document triple precondition:** Every single-file or multi-file fix wraps its edits in an `EditTransaction` (`src/lib/common/diagnostics/fix_transaction.spl`) requiring, for **every** affected URI:
+  1. `version`: exact synchronized document integer revision (matching the live `lsp_document_sync` owner for open files).
+  2. `source_hash`: canonical SHA-256 digest of the full source text analyzed when the fix was generated.
+  3. `expected_text`: exact pre-edit text slice at each non-overlapping replacement span, verified alongside valid UTF-16/byte boundaries and target/dependency assumptions.
+- **All-or-nothing multi-file admission (`ED-T28`):** `EditTransaction` validates all preconditions across **all** participating documents before enabling a `WorkspaceEdit` or applying staged changes. If any single target document has a stale `version`, a mismatched `source_hash`, modified `expected_text`, revoked sync authority, or overlapping edits, the entire transaction fails closed with **zero partial edits** applied to any file.
+- **Post-edit invalidation:** Applying an authorized `EditTransaction` invalidates cached snapshot diagnostics for every touched file and dependent module so follow-up checks run against the post-edit revision (`ED-T16`).

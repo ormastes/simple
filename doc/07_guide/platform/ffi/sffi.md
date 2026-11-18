@@ -810,3 +810,36 @@ When adding a binding: put the raw call in the smallest function carrying an
 explicit `@unsafe(reason: "...", capabilities: [ffi])`, and confirm it is backed
 with `sh scripts/check/extern-backing-census.shs` — the single source of truth,
 which reads `nm` off real link artifacts rather than grepping text.
+
+---
+
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Early SFFI Preflight Facts and ABI/Resource Lints (`WP-07`, 2026-11-18)
+
+Reconciled with [early_defect_detection_2026-11-18.md](../../../03_plan/compiler/early_defect_detection_2026-11-18.md) (`ED-01`, `ED-04`, `ED-T21..ED-T23`, `ED-T34`):
+
+### SFFI Preflight Fact Contracts (`sffi_preflight_facts_v1.spl`)
+
+Foreign provider verification reuses the canonical diagnostic and cache pipeline rather than a separate FFI error engine (`src/compiler/35.semantics/lint/sffi_preflight_facts_v1.spl`, `src/lib/nogc_sync_mut/sffi/sffi_signature.spl`):
+
+- Each `extern fn` / `@c_abi` boundary emits an immutable target-explicit preflight fact binding declaration identity and span, target triple, pointer width, endianness, C ABI/calling convention, admitted header/library artifact digest (when available), required export symbol/ordinal/weak policy, and explicit verification state (`validated`, `incompatible`, `pending`, or `unavailable`).
+- **Normal build vs. full lint (`ED-02`, `ED-T23`, `ED-T34`):** Normal compilation enforces mandatory call typing, local representation/ABI compatibility, and already-admitted `Low`-cost export metadata without cold-scanning archives or hashing external SDK trees on cache miss; when optional preflight bytes are absent, it records `unavailable` and leaves final link authoritative rather than claiming exports were verified. Full lint performs `Medium`/`High` header/archive/signature audits and caches reusable target-bound indexes.
+
+### Target-Explicit `@c_abi` Obligations (`SPL-SFFI-ABI-001`)
+
+`src/compiler/35.semantics/lint/sffi_abi_mismatch.spl` and `src/compiler/90.tools/lint/rules/sffi_abi_mismatch_rule.spl` enforce `SPL-SFFI-ABI-001` (`ED-04`, `ED-T21`):
+
+- Every `@c_abi` / foreign signature is checked against the explicit target data layout for integer/float width, signedness, register-class family, platform-dependent C widths (`c_long`, `size_t`, pointer width), and imported custom-primitive or unit backing types.
+- Bare Simple `text` or non-transparent aggregates without an explicit C ABI representation/wrapper are rejected, and a matching exported symbol name in a link artifact never overrides an ABI width/signedness/unit mismatch.
+
+### Constrained-Unit Return Validation (`SPL-SFFI-RANGE-001`)
+
+When an SFFI wrapper lifts a raw foreign scalar or pointer return into a constrained unit, bounded custom primitive, non-null handle, or sentinel-checked status type, `SPL-SFFI-RANGE-001` requires explicit range/sentinel validation inside the wrapper's minimal `unsafe(capabilities: [ffi])` scope before constructing the safe Simple return value (returning `Result<T, SffiError>` or `Option<T>` as specified by the boundary contract rather than passing unchecked raw values through).
+
+### Raw-Extern and Foreign-Resource Boundary Metadata
+
+`src/compiler/90.tools/lint/rules/raw_sffi_rule.spl` (`RAW-RT-001`) and `src/compiler/90.tools/lint/rules/unwrapped_foreign_resource_rule.spl` publish structured boundary metadata onto canonical `DiagnosticV1` findings:
+
+- **Raw-extern containment:** Flags direct `extern fn` invocations outside an explicit `@unsafe(reason: "...", capabilities: [ffi])` boundary and attaches reviewed facade metadata only where exact contract-preserving rewrites exist (never auto-inserting `unsafe` or converting sentinel failures into `nil`/`0`).
+- **Foreign-resource wrapping:** Tracks foreign handle acquisition sites so raw integer/pointer handles escaping without an owning resource/wrapper type carry explicit allocator/destructor obligation metadata under `DiagnosticRulePolicy` profile schedules.

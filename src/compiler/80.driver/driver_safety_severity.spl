@@ -37,6 +37,10 @@ use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
     warning_phase_env_var_name, downgrade_severity_rank,
     severity_rank_advisory, severity_rank_warn, severity_rank_deny}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness, ResolvedAssurancePolicyV1}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticPolicyInputV1, DiagnosticPolicySnapshot, DiagnosticRuleLevel,
+    ResolvedSeverity, resolve_policy_with_input
+}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 
 # Enforcement severity for the safety pass, independent of LintLevel (Allow/
@@ -168,3 +172,50 @@ pub fn safety_pass_severity_phased() -> SafetyPassSeverity:
     val raw_profile = env_get("SIMPLE_SAFETY_PROFILE")
     val warning_phase = safety_pass_warning_phase()
     safety_pass_severity_for_name_phased(raw_profile, warning_phase)
+
+# ---------------------------------------------------------------------------
+# DiagnosticRulePolicy parity projections (80.driver <-> 00.common; zero 90.tools imports)
+# ---------------------------------------------------------------------------
+
+# reason: canonical severity name string for CLI and parity reporting
+@allow(primitive_api)
+pub fn safety_pass_severity_name(sev: SafetyPassSeverity) -> text:
+    match sev:
+        SafetyPassSeverity.Advisory: "advisory"
+        SafetyPassSeverity.Warn: "warn"
+        SafetyPassSeverity.Deny: "deny"
+
+pub fn safety_pass_severity_from_rule_level(level: DiagnosticRuleLevel) -> SafetyPassSeverity:
+    match level:
+        DiagnosticRuleLevel.Deny: SafetyPassSeverity.Deny
+        DiagnosticRuleLevel.Warn: SafetyPassSeverity.Warn
+        DiagnosticRuleLevel.Advisory: SafetyPassSeverity.Advisory
+        DiagnosticRuleLevel.Allow: SafetyPassSeverity.Advisory
+
+# reason: diagnostic rule code is a canonical policy identifier string
+@allow(primitive_api)
+pub fn driver_resolve_rule_severity(
+    snapshot: DiagnosticPolicySnapshot,
+    code: text,
+    input: DiagnosticPolicyInputV1,
+    emitted: DiagnosticRuleLevel
+) -> ResolvedSeverity:
+    resolve_policy_with_input(snapshot, code, input, emitted)
+
+# reason: diagnostic rule code is a canonical policy identifier string
+@allow(primitive_api)
+pub fn driver_safety_severity_for_rule(
+    snapshot: DiagnosticPolicySnapshot,
+    code: text,
+    input: DiagnosticPolicyInputV1,
+    emitted: DiagnosticRuleLevel
+) -> SafetyPassSeverity:
+    val resolved = driver_resolve_rule_severity(snapshot, code, input, emitted)
+    safety_pass_severity_from_rule_level(resolved.level)
+
+# reason: policy digest is a canonical sha256 string identifier
+@allow(primitive_api)
+pub fn driver_policy_digest(snapshot: DiagnosticPolicySnapshot?) -> text:
+    match snapshot:
+        case Some(s): s.policy_digest()
+        case None: ""

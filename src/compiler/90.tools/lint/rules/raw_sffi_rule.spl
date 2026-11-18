@@ -1,13 +1,32 @@
 use compiler.semantics.lint.raw_sffi_call.{check_raw_sffi_calls, check_raw_sffi_declarations}
+use compiler.semantics.lint.sffi_preflight_facts_v1.{SffiExternFactV1, extract_sffi_preflight_report_v1}
 use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+
+pub fn raw_sffi_preflight_extern_facts_v1(unit: LintUnit) -> [SffiExternFactV1]:
+    extract_sffi_preflight_report_v1(unit.content, unit.path, "x86_64-unknown-linux-gnu").extern_facts
+
+fn _raw_sffi_pairing_hint_for_line(facts: [SffiExternFactV1], line_num: i64, base_note: text) -> text:
+    var i = 0
+    while i < facts.len():
+        if facts[i].line_num == line_num and facts[i].paired_release_symbol != "":
+            return base_note + " (paired release extern: `" + facts[i].paired_release_symbol + "`)"
+        i = i + 1
+    base_note
 
 fn raw_sffi_check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
     val _ = params
     var out: [StaticLintFinding] = []
-    for f in check_raw_sffi_calls(unit.content, unit.path):
+    val calls = check_raw_sffi_calls(unit.content, unit.path)
+    val decls = check_raw_sffi_declarations(unit.content, unit.path)
+    val extern_facts = if calls.len() > 0 or decls.len() > 0:
+        raw_sffi_preflight_extern_facts_v1(unit)
+    else:
+        []
+    for f in calls:
         out.push(StaticLintFinding(f.code, StaticLintLevel.Allow, StaticLintCategory.Safety, f.message, f.note, f.line_num, 0))
-    for f in check_raw_sffi_declarations(unit.content, unit.path):
-        out.push(StaticLintFinding(f.code, StaticLintLevel.Allow, StaticLintCategory.Safety, f.message, f.note, f.line_num, 0))
+    for f in decls:
+        val hint = _raw_sffi_pairing_hint_for_line(extern_facts, f.line_num, f.note)
+        out.push(StaticLintFinding(f.code, StaticLintLevel.Allow, StaticLintCategory.Safety, f.message, hint, f.line_num, 0))
     out
 
 pub fn raw_sffi_lint_rule() -> StaticLintRule:

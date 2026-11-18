@@ -1,21 +1,23 @@
 """
 ## Purpose and audience
 Purpose: Prove `simple lint --fast` (P0-5, ROB-COST-01/02) runs only Low-tier
-rules: a non-Low rule's finding (COLL019, rule `collection_performance`, High
-tier) is absent under the fast profile and present under the default profile.
+rules by gating Medium and High producers before execution: a High-tier finding
+(`COLL019`, rule `collection_performance`) has zero producer invocations and
+zero findings under the fast profile while firing under the default profile.
 Also pins the completeness status names printed by the CLI.
 Audience: compiler and tooling engineers maintaining lint profiles.
 ## Operator workflow
 Run this spec with the test runner and read the SPEC FILE VERDICT line.
-## Compatibility and limitations
-The fast profile suppresses non-Low rule output through the lint config; it
-does not yet skip executing those rules (no wall-time saving is claimed).
 """
 # @req: REQ-DIAG-POLICY-001
 
 use std.spec.*
 use compiler.tools.lint.main.{Linter, lint_cli_source, LintCliPolicy}
-use compiler.tools.lint._LintMain.rule_cost_tier.{LintCompleteness, lint_apply_fast_profile, lint_completeness_name, lint_completeness_reduce}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    LintCompleteness, lint_apply_fast_profile, lint_completeness_name,
+    lint_completeness_reduce, lint_reset_invocation_counts_v1,
+    lint_rule_invocation_count_v1
+}
 
 val COLL_SRC = "fn addp(d: Dict<text, [i64]>):\n    d[\"k\"].push(1)\n"
 
@@ -28,19 +30,29 @@ fn coll019_count(linter: Linter) -> i64:
 
 # @manual_section: lint_fast_profile
 describe "simple lint --fast profile":
-    it "reports the High-tier COLL019 finding under the default profile":
-        expect(coll019_count(Linter.new())).to_equal(1)
+    """Verifies pre-execution cost admission and completeness status naming for --fast."""
 
-    it "drops the High-tier COLL019 finding under the fast profile":
+    it "reports the High-tier COLL019 finding under the default profile":
+        """Runs DefaultLint and confirms collection_performance executes and reports COLL019."""
+        lint_reset_invocation_counts_v1()
+        expect(coll019_count(Linter.new())).to_equal(1)
+        expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(1)
+
+    it "skips executing High-tier collection_performance and drops COLL019 under the fast profile":
+        """Runs NormalBuild (--fast) and confirms zero invocations and zero findings for COLL019."""
+        lint_reset_invocation_counts_v1()
         val linter = Linter.new()
         lint_apply_fast_profile(linter.config)
         expect(coll019_count(linter)).to_equal(0)
+        expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(0)
 
     it "parses --fast into the CLI policy":
+        """Checks LintCliPolicy.from_args sets fast=true only when --fast is passed."""
         expect(LintCliPolicy.from_args(["--fast"]).fast).to_equal(true)
         expect(LintCliPolicy.from_args([]).fast).to_equal(false)
 
     it "names completeness statuses for the status line":
+        """Checks status strings and budget-exhausted incomplete reduction."""
         expect(lint_completeness_name(LintCompleteness.Pass)).to_equal("pass")
         expect(lint_completeness_name(LintCompleteness.Fail)).to_equal("fail")
         expect(lint_completeness_name(LintCompleteness.Incomplete)).to_equal("incomplete")

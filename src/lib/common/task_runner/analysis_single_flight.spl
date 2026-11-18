@@ -1,0 +1,383 @@
+# Shared parent-owned single-flight table for analysis jobs and negative-dependency
+# absence witnesses. Flight deduplication is keyed strictly by `(snapshot_id, analysis_key)`
+# while mutable worker ownership is fenced by `lease_generation`.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+@unsafe(reason: "read-only filesystem existence probe for negative dependency absence witness", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+
+struct NegativeDependencyWitnessV1:
+    absent_paths: [text]
+
+struct AnalysisFlightEntryV1:
+    snapshot_id: text
+    analysis_key: text
+    waiter_ids: [text]
+    pinned_by_build: bool
+    lease_generation: i64
+    owner_id: text
+    status: text
+    result_digest: text
+    negative_witness: NegativeDependencyWitnessV1
+
+struct AnalysisSingleFlightV1:
+    flights: [AnalysisFlightEntryV1]
+
+struct AnalysisFlightAttachResultV1:
+    table: AnalysisSingleFlightV1
+    accepted: bool
+    deduplicated: bool
+    reason: text
+
+struct AnalysisFlightDetachResultV1:
+    table: AnalysisSingleFlightV1
+    cancelled_producer: bool
+    reason: text
+
+struct AnalysisFlightCommitResultV1:
+    table: AnalysisSingleFlightV1
+    accepted: bool
+    reason: text
+
+struct AnalysisFlightLeaseResultV1:
+    table: AnalysisSingleFlightV1
+    accepted: bool
+    reason: text
+
+fn _analysis_fs_path_exists_v1(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
+
+fn negative_dependency_witness_error_v1(witness: NegativeDependencyWitnessV1) -> text:
+    for path in witness.absent_paths:
+        if path == "" or path.len() > 4096 or path.contains("\n") or path.contains("\r"):
+            return "invalid negative dependency witness path"
+    ""
+
+fn _negative_dependency_sort_unique_v1(paths: [text]) -> [text]:
+    var ordered = paths.sorted()
+    var unique: [text] = []
+    for path in ordered:
+        if unique.len() == 0 or unique[unique.len() - 1] != path:
+            unique = unique.push(path)
+    unique
+
+fn negative_dependency_witness_canonical_v1(absent_paths: [text]) -> Result<NegativeDependencyWitnessV1, text>:
+    val raw = NegativeDependencyWitnessV1(absent_paths: absent_paths)
+    val invalid = negative_dependency_witness_error_v1(raw)
+    if invalid != "": return Err(invalid)
+    Ok(NegativeDependencyWitnessV1(absent_paths: _negative_dependency_sort_unique_v1(absent_paths)))
+
+fn negative_dependency_witness_digest_v1(witness: NegativeDependencyWitnessV1) -> Result<text, text>:
+    val canonical = negative_dependency_witness_canonical_v1(witness.absent_paths)?
+    var payload = "SIMPLE-NEGATIVE-DEP-WITNESS-1\n"
+    for path in canonical.absent_paths:
+        payload = payload + str(path.len()) + ":" + path
+    Ok(sha256_text(payload))
+
+fn negative_dependency_witness_valid_v1(
+    witness: NegativeDependencyWitnessV1, exists_fn: fn(text) -> bool
+) -> bool:
+    if negative_dependency_witness_error_v1(witness) != "":
+        return false
+    for path in witness.absent_paths:
+        if exists_fn(path):
+            return false
+    true
+
+fn negative_dependency_witness_fs_valid_v1(witness: NegativeDependencyWitnessV1) -> bool:
+    negative_dependency_witness_valid_v1(witness, _analysis_fs_path_exists_v1)
+
+fn analysis_single_flight_new_v1() -> AnalysisSingleFlightV1:
+    AnalysisSingleFlightV1(flights: [])
+
+fn _analysis_flight_index_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text
+) -> i64:
+    for index in 0..table.flights.len():
+        val entry = table.flights[index]
+        if entry.snapshot_id == snapshot_id and entry.analysis_key == analysis_key:
+            return index
+    -1
+
+fn analysis_flight_find_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text
+) -> AnalysisFlightEntryV1?:
+    val index = _analysis_flight_index_v1(table, snapshot_id, analysis_key)
+    if index < 0: return None
+    Some(table.flights[index])
+
+fn _analysis_flight_key_valid_v1(snapshot_id: text, analysis_key: text) -> bool:
+    snapshot_id != "" and snapshot_id.len() <= 4096 and
+        not snapshot_id.contains("\n") and not snapshot_id.contains("\r") and
+        builder_digest_valid_v1(analysis_key)
+
+fn _analysis_flight_token_valid_v1(token: text) -> bool:
+    token != "" and token.len() <= 4096 and
+        not token.contains("\n") and not token.contains("\r")
+
+fn attach_waiter(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text,
+    waiter_id: text, owner_id: text, pinned_by_build: bool = false
+) -> AnalysisFlightAttachResultV1:
+    if not _analysis_flight_key_valid_v1(snapshot_id, analysis_key):
+        return AnalysisFlightAttachResultV1(table, false, false, "invalid-flight-key")
+    if not _analysis_flight_token_valid_v1(waiter_id) or not _analysis_flight_token_valid_v1(owner_id):
+        return AnalysisFlightAttachResultV1(table, false, false, "invalid-flight-participant")
+    val index = _analysis_flight_index_v1(table, snapshot_id, analysis_key)
+    if index < 0:
+        val created = AnalysisFlightEntryV1(
+            snapshot_id: snapshot_id,
+            analysis_key: analysis_key,
+            waiter_ids: [waiter_id],
+            pinned_by_build: pinned_by_build,
+            lease_generation: 1,
+            owner_id: owner_id,
+            status: "running",
+            result_digest: "",
+            negative_witness: NegativeDependencyWitnessV1(absent_paths: []))
+        var flights = table.flights
+        flights = flights.push(created)
+        return AnalysisFlightAttachResultV1(
+            AnalysisSingleFlightV1(flights: flights), true, false, "ok")
+
+    var current = table.flights[index]
+    if current.status == "running":
+        var waiters = current.waiter_ids
+        if not waiters.contains(waiter_id):
+            waiters = waiters.push(waiter_id)
+        current.waiter_ids = waiters
+        if pinned_by_build:
+            current.pinned_by_build = true
+        var flights = table.flights
+        flights[index] = current
+        return AnalysisFlightAttachResultV1(
+            AnalysisSingleFlightV1(flights: flights), true, true, "ok")
+
+    if current.status == "completed" and negative_dependency_witness_fs_valid_v1(current.negative_witness):
+        var waiters = current.waiter_ids
+        if not waiters.contains(waiter_id):
+            waiters = waiters.push(waiter_id)
+        current.waiter_ids = waiters
+        if pinned_by_build:
+            current.pinned_by_build = true
+        var flights = table.flights
+        flights[index] = current
+        return AnalysisFlightAttachResultV1(
+            AnalysisSingleFlightV1(flights: flights), true, true, "ok")
+
+    val restarted = AnalysisFlightEntryV1(
+        snapshot_id: snapshot_id,
+        analysis_key: analysis_key,
+        waiter_ids: [waiter_id],
+        pinned_by_build: pinned_by_build,
+        lease_generation: current.lease_generation + 1,
+        owner_id: owner_id,
+        status: "running",
+        result_digest: "",
+        negative_witness: NegativeDependencyWitnessV1(absent_paths: []))
+    var flights = table.flights
+    flights[index] = restarted
+    AnalysisFlightAttachResultV1(
+        AnalysisSingleFlightV1(flights: flights), true, false, "ok")
+
+fn analysis_flight_attach_waiter_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text,
+    waiter_id: text, owner_id: text, pinned_by_build: bool = false
+) -> AnalysisFlightAttachResultV1:
+    attach_waiter(table, snapshot_id, analysis_key, waiter_id, owner_id, pinned_by_build)
+
+fn pin_flight_by_build(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text, owner_id: text
+) -> AnalysisSingleFlightV1:
+    if not _analysis_flight_key_valid_v1(snapshot_id, analysis_key) or
+            not _analysis_flight_token_valid_v1(owner_id):
+        return table
+    val index = _analysis_flight_index_v1(table, snapshot_id, analysis_key)
+    if index < 0:
+        val created = AnalysisFlightEntryV1(
+            snapshot_id: snapshot_id,
+            analysis_key: analysis_key,
+            waiter_ids: [],
+            pinned_by_build: true,
+            lease_generation: 1,
+            owner_id: owner_id,
+            status: "running",
+            result_digest: "",
+            negative_witness: NegativeDependencyWitnessV1(absent_paths: []))
+        var flights = table.flights
+        flights = flights.push(created)
+        return AnalysisSingleFlightV1(flights: flights)
+    var current = table.flights[index]
+    if current.status == "running" or current.status == "completed":
+        current.pinned_by_build = true
+    else:
+        current = AnalysisFlightEntryV1(
+            snapshot_id: snapshot_id,
+            analysis_key: analysis_key,
+            waiter_ids: [],
+            pinned_by_build: true,
+            lease_generation: current.lease_generation + 1,
+            owner_id: owner_id,
+            status: "running",
+            result_digest: "",
+            negative_witness: NegativeDependencyWitnessV1(absent_paths: []))
+    var flights = table.flights
+    flights[index] = current
+    AnalysisSingleFlightV1(flights: flights)
+
+fn analysis_flight_pin_build_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text, owner_id: text
+) -> AnalysisSingleFlightV1:
+    pin_flight_by_build(table, snapshot_id, analysis_key, owner_id)
+
+fn detach_waiter(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text, waiter_id: text
+) -> AnalysisFlightDetachResultV1:
+    val index = _analysis_flight_index_v1(table, snapshot_id, analysis_key)
+    if index < 0 or waiter_id == "":
+        return AnalysisFlightDetachResultV1(table, false, "flight-missing")
+    var current = table.flights[index]
+    var had_waiter = false
+    var remaining: [text] = []
+    for existing in current.waiter_ids:
+        if existing == waiter_id:
+            had_waiter = true
+        else:
+            remaining = remaining.push(existing)
+    if not had_waiter:
+        return AnalysisFlightDetachResultV1(table, false, "waiter-not-attached")
+    current.waiter_ids = remaining
+    var cancelled = false
+    if current.status == "running" and current.waiter_ids.len() == 0 and not current.pinned_by_build:
+        current.status = "cancelled"
+        cancelled = true
+    var flights = table.flights
+    flights[index] = current
+    AnalysisFlightDetachResultV1(AnalysisSingleFlightV1(flights: flights), cancelled, "ok")
+
+fn analysis_flight_detach_waiter_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text, waiter_id: text
+) -> AnalysisFlightDetachResultV1:
+    detach_waiter(table, snapshot_id, analysis_key, waiter_id)
+
+fn unpin_flight_by_build(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text
+) -> AnalysisFlightDetachResultV1:
+    val index = _analysis_flight_index_v1(table, snapshot_id, analysis_key)
+    if index < 0:
+        return AnalysisFlightDetachResultV1(table, false, "flight-missing")
+    var current = table.flights[index]
+    if not current.pinned_by_build:
+        return AnalysisFlightDetachResultV1(table, false, "not-pinned")
+    current.pinned_by_build = false
+    var cancelled = false
+    if current.status == "running" and current.waiter_ids.len() == 0:
+        current.status = "cancelled"
+        cancelled = true
+    var flights = table.flights
+    flights[index] = current
+    AnalysisFlightDetachResultV1(AnalysisSingleFlightV1(flights: flights), cancelled, "ok")
+
+fn analysis_flight_unpin_build_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text
+) -> AnalysisFlightDetachResultV1:
+    unpin_flight_by_build(table, snapshot_id, analysis_key)
+
+fn supersede_flight_lease(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text, new_owner_id: text
+) -> AnalysisFlightLeaseResultV1:
+    if not _analysis_flight_token_valid_v1(new_owner_id):
+        return AnalysisFlightLeaseResultV1(table, false, "invalid-flight-participant")
+    val index = _analysis_flight_index_v1(table, snapshot_id, analysis_key)
+    if index < 0:
+        return AnalysisFlightLeaseResultV1(table, false, "flight-missing")
+    var current = table.flights[index]
+    if current.status != "running":
+        return AnalysisFlightLeaseResultV1(table, false, "flight-not-running")
+    current.lease_generation = current.lease_generation + 1
+    current.owner_id = new_owner_id
+    var flights = table.flights
+    flights[index] = current
+    AnalysisFlightLeaseResultV1(AnalysisSingleFlightV1(flights: flights), true, "ok")
+
+fn analysis_flight_supersede_lease_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text, new_owner_id: text
+) -> AnalysisFlightLeaseResultV1:
+    supersede_flight_lease(table, snapshot_id, analysis_key, new_owner_id)
+
+fn commit_flight_with_witness(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text,
+    lease_generation: i64, result_digest: text,
+    negative_witness: NegativeDependencyWitnessV1
+) -> AnalysisFlightCommitResultV1:
+    val index = _analysis_flight_index_v1(table, snapshot_id, analysis_key)
+    if index < 0:
+        return AnalysisFlightCommitResultV1(table, false, "flight-missing")
+    var current = table.flights[index]
+    if lease_generation < current.lease_generation:
+        return AnalysisFlightCommitResultV1(table, false, "stale-lease-generation")
+    if lease_generation > current.lease_generation:
+        return AnalysisFlightCommitResultV1(table, false, "invalid-lease-generation")
+    if current.status != "running":
+        return AnalysisFlightCommitResultV1(table, false, "flight-not-running")
+    if not builder_digest_valid_v1(result_digest):
+        return AnalysisFlightCommitResultV1(table, false, "invalid-result-digest")
+    val canonical_witness = match negative_dependency_witness_canonical_v1(negative_witness.absent_paths):
+        case Ok(value): value
+        case Err(reason): return AnalysisFlightCommitResultV1(table, false, reason)
+    current.status = "completed"
+    current.result_digest = result_digest
+    current.negative_witness = canonical_witness
+    var flights = table.flights
+    flights[index] = current
+    AnalysisFlightCommitResultV1(AnalysisSingleFlightV1(flights: flights), true, "ok")
+
+fn commit_flight(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text,
+    lease_generation: i64, result_digest: text
+) -> AnalysisFlightCommitResultV1:
+    commit_flight_with_witness(
+        table, snapshot_id, analysis_key, lease_generation, result_digest,
+        NegativeDependencyWitnessV1(absent_paths: []))
+
+fn analysis_flight_commit_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text,
+    lease_generation: i64, result_digest: text
+) -> AnalysisFlightCommitResultV1:
+    commit_flight(table, snapshot_id, analysis_key, lease_generation, result_digest)
+
+fn analysis_flight_cache_lookup_with_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text,
+    exists_fn: fn(text) -> bool
+) -> text?:
+    val index = _analysis_flight_index_v1(table, snapshot_id, analysis_key)
+    if index < 0: return None
+    val entry = table.flights[index]
+    if entry.status != "completed" or not builder_digest_valid_v1(entry.result_digest):
+        return None
+    if not negative_dependency_witness_valid_v1(entry.negative_witness, exists_fn):
+        return None
+    Some(entry.result_digest)
+
+fn analysis_flight_cache_lookup_v1(
+    table: AnalysisSingleFlightV1, snapshot_id: text, analysis_key: text
+) -> text?:
+    analysis_flight_cache_lookup_with_v1(table, snapshot_id, analysis_key, _analysis_fs_path_exists_v1)
+
+export NegativeDependencyWitnessV1
+export negative_dependency_witness_error_v1, negative_dependency_witness_canonical_v1
+export negative_dependency_witness_digest_v1
+export negative_dependency_witness_valid_v1, negative_dependency_witness_fs_valid_v1
+export AnalysisFlightEntryV1, AnalysisSingleFlightV1
+export AnalysisFlightAttachResultV1, AnalysisFlightDetachResultV1
+export AnalysisFlightCommitResultV1, AnalysisFlightLeaseResultV1
+export analysis_single_flight_new_v1, analysis_flight_find_v1
+export attach_waiter, analysis_flight_attach_waiter_v1
+export detach_waiter, analysis_flight_detach_waiter_v1
+export pin_flight_by_build, analysis_flight_pin_build_v1
+export unpin_flight_by_build, analysis_flight_unpin_build_v1
+export supersede_flight_lease, analysis_flight_supersede_lease_v1
+export commit_flight, commit_flight_with_witness, analysis_flight_commit_v1
+export analysis_flight_cache_lookup_with_v1, analysis_flight_cache_lookup_v1

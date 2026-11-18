@@ -1,0 +1,189 @@
+"""
+## Purpose and audience
+Executable parity specification for `DiagnosticRulePolicy` across `00.common`,
+`80.driver`, and `90.tools/lint` (`ED-T26`, `ED-T27`). Proves every seeded rule in
+`config/policy/diagnostic_policy.sdn` is bound in lint, resolved deterministically
+through `snapshot.resolve(code, PolicyResolveContext, ...)` with explicit inputs and
+zero ambient wall-clock reads, exposes identical `policy_digest` values, and keeps
+`80.driver` free of upward `90.tools` imports.
+Audience: diagnostics, driver, and lint policy maintainers.
+"""
+# @cover src/compiler/00.common/diagnostics/diagnostic_rule_policy.spl
+# @cover src/compiler/80.driver/driver_safety_severity.spl
+# @cover src/compiler/90.tools/lint/_LintMain/config_and_model.spl
+# @req REQ-DIAG-POLICY-001
+# @req REQ-DIAG-POLICY-002
+# @req REQ-DIAG-POLICY-003
+# @req REQ-DPOL-001
+# @req REQ-DPOL-006
+
+use std.spec.*
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.diagnostic_rule_policy.{
+    DiagnosticPolicyInputV1, DiagnosticPolicySnapshot, DiagnosticRuleLevel,
+    diagnostic_policy_default_edition, diagnostic_policy_default_path,
+    lint_level_name_for_rule_level, load_diagnostic_policy_text,
+    project_policy_parity_v1, resolve_policy_with_input
+}
+use compiler.driver.driver_safety_severity.{
+    driver_policy_digest, driver_resolve_rule_severity,
+    driver_safety_severity_for_rule, safety_pass_severity_name
+}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintConfig, LintLevel, LintProfile, build_default_levels,
+    lint_diagnostic_policy_digest, lint_policy_code_for_rule,
+    lint_policy_digest_for_snapshot, lint_policy_rule_ids,
+    lint_resolve_policy_rule, policy_overlay_levels_with_context,
+    profile_table_levels
+}
+
+fn shipped_policy() -> DiagnosticPolicySnapshot:
+    match load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path())):
+        Ok(snapshot): snapshot
+        Err(err):
+            panic("shipped diagnostic policy failed to load: " + err)
+
+# @manual_section: diagnostic_rule_policy_parity
+describe "DiagnosticRulePolicy completeness and cross-layer parity (ED-T26, ED-T27)":
+    """Verifies seeded rule coverage, deterministic resolution, digest exposure, and lint/driver parity."""
+
+    context "ED-T26: complete seeded policy bindings, deterministic resolve inputs, and digest accessors":
+        """Proves lint_policy_rule_ids covers all 14 seeded rules and resolves via snapshot.resolve."""
+
+        it "binds every seeded rule in config/policy/diagnostic_policy.sdn into lint_policy_rule_ids and build_default_levels":
+            """Verifies 100% coverage of shipped DiagnosticRulePolicy rules in lint configuration."""
+            val snapshot = shipped_policy()
+            val bindings = lint_policy_rule_ids()
+            val defaults = build_default_levels()
+            var bound_codes: [text] = []
+            for lint_name in bindings.keys():
+                expect(defaults.contains_key(lint_name)).to_be(true)
+                bound_codes.push(bindings[lint_name])
+
+            expect(bound_codes.len()).to_equal(snapshot.rule_count())
+            for rule in snapshot.rules:
+                expect(bound_codes).to_contain(rule.rule_id)
+                expect(lint_policy_code_for_rule(rule.rule_id)).to_equal(rule.rule_id)
+
+        it "resolves edition promotions, profile baselines, and security non-downgrade deterministically without wall-clock dates":
+            """Proves policy_overlay_levels_with_context and LintConfig honour edition 2026.11 vs 2027.2 and security rules."""
+            val snapshot = shipped_policy()
+            val mod_2026 = policy_overlay_levels_with_context(
+                profile_table_levels(LintProfile.Moderate),
+                Some(snapshot), "moderate", "2026.11", false,
+                "x86_64-unknown-linux-gnu", "src/app/demo.spl")
+            val rob_2026 = policy_overlay_levels_with_context(
+                profile_table_levels(LintProfile.Robust),
+                Some(snapshot), "robust", "2026.11", false,
+                "x86_64-unknown-linux-gnu", "src/app/demo.spl")
+            val mod_2027 = policy_overlay_levels_with_context(
+                profile_table_levels(LintProfile.Moderate),
+                Some(snapshot), "moderate", "2027.2", false,
+                "x86_64-unknown-linux-gnu", "src/app/demo.spl")
+            val rob_phased = policy_overlay_levels_with_context(
+                profile_table_levels(LintProfile.Robust),
+                Some(snapshot), "robust", "2026.11", true,
+                "x86_64-unknown-linux-gnu", "src/app/demo.spl")
+
+            expect(mod_2026["bound_late_cast"]).to_equal("warn")
+            expect(mod_2026["bound_raw_escape"]).to_equal("warn")
+            expect(mod_2026["bound_unit_reassert"]).to_equal("warn")
+            expect(mod_2026["numeric_newtype_deprecation"]).to_equal("warn")
+            expect(mod_2026["undeclared_derived_unit"]).to_equal("warn")
+            expect(mod_2026["sffi_abi_mismatch"]).to_equal("deny")
+            expect(mod_2026["non_option_pattern_match"]).to_equal("deny")
+
+            expect(rob_2026["bound_late_cast"]).to_equal("deny")
+            expect(rob_2026["bound_raw_escape"]).to_equal("deny")
+            expect(rob_2026["bound_unit_reassert"]).to_equal("deny")
+            expect(rob_2026["numeric_newtype_deprecation"]).to_equal("deny")
+            expect(rob_2026["undeclared_derived_unit"]).to_equal("deny")
+            expect(rob_2026["source_inventory_drift"]).to_equal("deny")
+            expect(rob_2026["boundary_role_grant"]).to_equal("deny")
+
+            expect(mod_2027["primitive_api"]).to_equal("deny")
+            expect(mod_2027["newunit_deprecation"]).to_equal("deny")
+            expect(mod_2027["bound_late_cast"]).to_equal("deny")
+            expect(mod_2027["numeric_newtype_deprecation"]).to_equal("deny")
+            expect(mod_2027["undeclared_derived_unit"]).to_equal("deny")
+
+            expect(rob_phased["primitive_api"]).to_equal("warn")
+            expect(rob_phased["bound_late_cast"]).to_equal("warn")
+            expect(rob_phased["sffi_abi_mismatch"]).to_equal("deny")
+            expect(rob_phased["illegal_unit_arithmetic"]).to_equal("deny")
+
+            var cfg = LintConfig.new()
+            cfg.set_profile(LintProfile.Moderate)
+            expect(cfg.get_level("bound_late_cast") == LintLevel.Warn).to_be(true)
+            expect(cfg.get_level("sffi_abi_mismatch") == LintLevel.Deny).to_be(true)
+            cfg.set_language_edition("2027.2")
+            expect(cfg.get_level("bound_late_cast") == LintLevel.Deny).to_be(true)
+            cfg.set_warning_phase(true)
+            expect(cfg.get_level("bound_late_cast") == LintLevel.Warn).to_be(true)
+            expect(cfg.get_level("sffi_abi_mismatch") == LintLevel.Deny).to_be(true)
+
+        it "exposes identical sha256 policy_digest values across common, driver, and lint":
+            """Verifies policy_digest accessors match byte-for-byte across all three layers."""
+            val snapshot = shipped_policy()
+            val cfg = LintConfig.new()
+            expect(snapshot.policy_digest()).to_start_with("sha256:")
+            expect(snapshot.policy_digest()).to_equal(snapshot.digest)
+            expect(driver_policy_digest(Some(snapshot))).to_equal(snapshot.policy_digest())
+            expect(driver_policy_digest(None)).to_equal("")
+            expect(lint_policy_digest_for_snapshot(Some(snapshot))).to_equal(snapshot.policy_digest())
+            expect(lint_policy_digest_for_snapshot(None)).to_equal("")
+            expect(lint_diagnostic_policy_digest()).to_equal(snapshot.policy_digest())
+            expect(cfg.policy_digest()).to_equal(snapshot.policy_digest())
+
+    context "ED-T27: deterministic parity across 00.common, 80.driver, and 90.tools/lint":
+        """Proves driver and lint projections agree for every seeded rule, mode, edition, and warning_phase."""
+
+        it "agrees on ResolvedSeverity and ladder projections across all seeded rules, modes, editions, and rehearsal states":
+            """Cross-checks common parity projection, driver rule severity, and lint policy resolution."""
+            val snapshot = shipped_policy()
+            val bindings = lint_policy_rule_ids()
+            val modes = ["moderate", "strict", "robust", "critical", "verified"]
+            val editions = [diagnostic_policy_default_edition(), "2027.2"]
+            val phases = [false, true]
+
+            for lint_name in bindings.keys():
+                val code = bindings[lint_name]
+                for mode in modes:
+                    for edition in editions:
+                        for phase in phases:
+                            val input = DiagnosticPolicyInputV1.for_mode(
+                                mode, edition, phase, "x86_64-unknown-linux-gnu", "src/compiler/demo.spl")
+                            val common_resolved = resolve_policy_with_input(
+                                snapshot, code, input, DiagnosticRuleLevel.Warn)
+                            val parity = project_policy_parity_v1(
+                                snapshot, code, input, DiagnosticRuleLevel.Warn)
+                            val driver_resolved = driver_resolve_rule_severity(
+                                snapshot, code, input, DiagnosticRuleLevel.Warn)
+                            val driver_sev = driver_safety_severity_for_rule(
+                                snapshot, code, input, DiagnosticRuleLevel.Warn)
+                            val lint_resolved = lint_resolve_policy_rule(
+                                snapshot, lint_name, input, DiagnosticRuleLevel.Warn)
+
+                            expect(driver_resolved.level.name()).to_equal(common_resolved.level.name())
+                            expect(driver_resolved.stage).to_equal(common_resolved.stage)
+                            expect(driver_resolved.rehearsal).to_equal(common_resolved.rehearsal)
+                            expect(driver_resolved.policy_digest).to_equal(snapshot.policy_digest())
+
+                            expect(lint_resolved.level.name()).to_equal(common_resolved.level.name())
+                            expect(lint_resolved.stage).to_equal(common_resolved.stage)
+                            expect(lint_resolved.rehearsal).to_equal(common_resolved.rehearsal)
+                            expect(lint_resolved.policy_digest).to_equal(snapshot.policy_digest())
+
+                            expect(safety_pass_severity_name(driver_sev)).to_equal(parity.driver_severity_name)
+                            expect(lint_level_name_for_rule_level(lint_resolved.level)).to_equal(parity.lint_level_name)
+
+        it "keeps 80.driver/driver_safety_severity.spl free of upward 90.tools imports":
+            """Proves architectural layering: driver policy parity imports only 00.common and std."""
+            val driver_source = file_read_text("src/compiler/80.driver/driver_safety_severity.spl")
+            var upward_imports = 0
+            for raw_line in driver_source.split("\n"):
+                val trimmed = raw_line.trim()
+                if trimmed.starts_with("use ") or trimmed.starts_with("export use "):
+                    if trimmed.contains("compiler.tools") or trimmed.contains("90.tools"):
+                        upward_imports = upward_imports + 1
+            expect(upward_imports).to_equal(0)

@@ -1,10 +1,153 @@
-use common.kernel_plugin.ids.{kpf_digest256_zero}
-use common.lint_kernel.model.{AnalysisCoverageV1, LintRunResultV1, lint_run_result}
+use common.lint_kernel.model.{
+    AnalysisCoverageV1, LintRunResultV1, lint_run_result_with_receipt_v1, lint_sha256_kpf_digest
+}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintCliPolicy, LintConfig, LintProfile, all_lint_names
+}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    LintCostTier, LintCompleteness,
+    lint_registered_rule_names, lint_rule_cost_tier,
+    lint_completeness_reduce, lint_completeness_name
+}
+use compiler.tools.fix.rules.impl_.lint_allow.{line_has_allow}
+use std.tooling.easy_fix.types.{LintLevel}
 
 pub struct SimpleLintAdapterResult:
     exit_code: i64
     kernel_result: LintRunResultV1
 
+pub struct SimpleLintReceiptInputV1:
+    requested_units: u32
+    completed_units: u32
+    not_analyzed_units: u32
+    requested_rules: u32
+    completed_rules: u32
+    skipped_rules: u32
+    exempted_rules: u32
+    unsupported_rules: u32
+    timed_out_rules: u32
+    diagnostic_count: u32
+    error_count: u32
+    warning_count: u32
+    budget_exhausted: bool
+    timed_out: bool
+    cancelled: bool
+    infrastructure_failed: bool
+    provider_identity: text
+    input_revision_seed: text
+
+fn _bool_tag(flag: bool) -> text:
+    if flag: "1" else: "0"
+
+pub fn simple_lint_adapter_result_with_receipt_v1(receipt: SimpleLintReceiptInputV1) -> SimpleLintAdapterResult:
+    var impossible_coverage = (
+        receipt.not_analyzed_units > receipt.requested_units or
+        receipt.completed_units > receipt.requested_units or
+        receipt.completed_rules > receipt.requested_rules)
+    if not impossible_coverage:
+        impossible_coverage = receipt.not_analyzed_units > receipt.requested_units - receipt.completed_units
+    if not impossible_coverage:
+        impossible_coverage = receipt.skipped_rules > receipt.requested_rules - receipt.completed_rules
+    if not impossible_coverage:
+        val rem1 = receipt.requested_rules - receipt.completed_rules - receipt.skipped_rules
+        impossible_coverage = receipt.exempted_rules > rem1
+    if not impossible_coverage:
+        val rem2 = receipt.requested_rules - receipt.completed_rules - receipt.skipped_rules - receipt.exempted_rules
+        impossible_coverage = receipt.unsupported_rules > rem2
+    if not impossible_coverage:
+        val rem3 = receipt.requested_rules - receipt.completed_rules - receipt.skipped_rules - receipt.exempted_rules - receipt.unsupported_rules
+        impossible_coverage = receipt.timed_out_rules > rem3
+    if not impossible_coverage and receipt.requested_rules > 0 and not receipt.cancelled and not receipt.infrastructure_failed:
+        val total_accounted = (
+            receipt.completed_rules + receipt.skipped_rules +
+            receipt.exempted_rules + receipt.unsupported_rules + receipt.timed_out_rules)
+        if total_accounted != receipt.requested_rules:
+            impossible_coverage = true
+
+    var admitted_units: u32 = 0u32
+    var partial_units: u32 = 0u32
+    var skipped_rules: u32 = 0u32
+    var exempted_rules: u32 = 0u32
+    var unsupported_rules: u32 = 0u32
+    var timed_out_rules: u32 = 0u32
+    if not impossible_coverage:
+        admitted_units = receipt.requested_units - receipt.not_analyzed_units
+        partial_units = receipt.requested_units - receipt.completed_units - receipt.not_analyzed_units
+        skipped_rules = receipt.skipped_rules
+        exempted_rules = receipt.exempted_rules
+        unsupported_rules = receipt.unsupported_rules
+        timed_out_rules = receipt.timed_out_rules
+
+    val rules_fully_satisfied = (
+        not impossible_coverage and
+        skipped_rules == 0u32 and
+        unsupported_rules == 0u32 and
+        timed_out_rules == 0u32 and
+        not receipt.budget_exhausted and
+        not receipt.timed_out and
+        receipt.completed_rules + exempted_rules == receipt.requested_rules)
+    val completed_phases: u64 = if rules_fully_satisfied and receipt.completed_units == receipt.requested_units and receipt.requested_units > 0u32: 1u64 else: 0u64
+
+    val provider_id = if receipt.provider_identity != "": receipt.provider_identity else: "simple-lint-v1"
+    val rev_seed = if receipt.input_revision_seed != "": receipt.input_revision_seed else: "default"
+    val receipt_payload = (
+        "simple-lint-provider-receipt-v1|" + provider_id +
+        "|u=" + receipt.requested_units.to_text() + "/" + receipt.completed_units.to_text() + "/" + receipt.not_analyzed_units.to_text() +
+        "|r=" + receipt.requested_rules.to_text() + "/" + receipt.completed_rules.to_text() + "/" +
+        skipped_rules.to_text() + "/" + exempted_rules.to_text() + "/" +
+        unsupported_rules.to_text() + "/" + timed_out_rules.to_text() +
+        "|d=" + receipt.diagnostic_count.to_text() + "/" + receipt.error_count.to_text() + "/" + receipt.warning_count.to_text() +
+        "|f=" + _bool_tag(receipt.budget_exhausted) + _bool_tag(receipt.timed_out) + _bool_tag(receipt.cancelled) + _bool_tag(receipt.infrastructure_failed)
+    )
+    val revision_payload = (
+        "simple-lint-input-revision-v1|" + rev_seed +
+        "|units=" + receipt.requested_units.to_text() +
+        "|rules=" + receipt.requested_rules.to_text()
+    )
+
+    val coverage = AnalysisCoverageV1(
+        requested_unit_count: receipt.requested_units,
+        admitted_unit_count: admitted_units,
+        completed_unit_count: receipt.completed_units,
+        partial_unit_count: partial_units,
+        not_analyzed_unit_count: receipt.not_analyzed_units,
+        requested_rule_count: receipt.requested_rules,
+        completed_rule_count: receipt.completed_rules,
+        skipped_rule_count: skipped_rules,
+        requested_phase_bits: 1u64,
+        completed_phase_bits: completed_phases,
+        provider_receipt_digest: lint_sha256_kpf_digest(receipt_payload),
+        input_revision_digest: lint_sha256_kpf_digest(revision_payload),
+        exempted_rule_count: exempted_rules,
+        unsupported_rule_count: unsupported_rules,
+        timed_out_rule_count: timed_out_rules
+    )
+    val result = lint_run_result_with_receipt_v1(
+        coverage,
+        receipt.diagnostic_count,
+        receipt.error_count,
+        receipt.warning_count,
+        receipt.cancelled,
+        receipt.infrastructure_failed or impossible_coverage,
+        receipt.budget_exhausted,
+        receipt.timed_out
+    )
+    var exit_code: i64 = 0
+    if (receipt.error_count > 0u32 or
+        receipt.not_analyzed_units > 0u32 or
+        receipt.infrastructure_failed or
+        impossible_coverage or
+        receipt.requested_units == 0u32 or
+        receipt.budget_exhausted or
+        receipt.timed_out or
+        receipt.cancelled or
+        timed_out_rules > 0u32 or
+        unsupported_rules > 0u32):
+        exit_code = 1
+    SimpleLintAdapterResult(exit_code: exit_code, kernel_result: result)
+
+# reason: backward-compatible lint adapter entry accepting scalar unit and rule counts
+@allow(primitive_api)
 pub fn simple_lint_adapter_result(
     requested_units: u32,
     completed_units: u32,
@@ -16,42 +159,30 @@ pub fn simple_lint_adapter_result(
     warning_count: u32,
     infrastructure_failed: bool = false
 ) -> SimpleLintAdapterResult:
-    var impossible_coverage = (
-        not_analyzed_units > requested_units or
-        completed_units > requested_units or
-        completed_rules > requested_rules)
-    if not impossible_coverage:
-        impossible_coverage = not_analyzed_units > requested_units - completed_units
-    var admitted_units: u32 = 0
-    var partial_units: u32 = 0
-    var skipped_rules: u32 = 0
-    if not impossible_coverage:
-        admitted_units = requested_units - not_analyzed_units
-        partial_units = requested_units - completed_units - not_analyzed_units
-        skipped_rules = requested_rules - completed_rules
-    val completed_phases: u64 = if not impossible_coverage and completed_units == requested_units and requested_units > 0: 1 else: 0
-    val coverage = AnalysisCoverageV1(
-        requested_unit_count: requested_units,
-        admitted_unit_count: admitted_units,
-        completed_unit_count: completed_units,
-        partial_unit_count: partial_units,
-        not_analyzed_unit_count: not_analyzed_units,
-        requested_rule_count: requested_rules,
-        completed_rule_count: completed_rules,
-        skipped_rule_count: skipped_rules,
-        requested_phase_bits: 1,
-        completed_phase_bits: completed_phases,
-        provider_receipt_digest: kpf_digest256_zero(),
-        input_revision_digest: kpf_digest256_zero()
-    )
-    val result = lint_run_result(
-        coverage, diagnostic_count, error_count, warning_count,
-        false, infrastructure_failed or impossible_coverage)
-    var exit_code: i64 = 0
-    if error_count > 0 or not_analyzed_units > 0 or infrastructure_failed or impossible_coverage or requested_units == 0:
-        exit_code = 1
-    SimpleLintAdapterResult(exit_code: exit_code, kernel_result: result)
+    val derived_skipped: u32 = if completed_rules <= requested_rules: requested_rules - completed_rules else: 0u32
+    simple_lint_adapter_result_with_receipt_v1(SimpleLintReceiptInputV1(
+        requested_units: requested_units,
+        completed_units: completed_units,
+        not_analyzed_units: not_analyzed_units,
+        requested_rules: requested_rules,
+        completed_rules: completed_rules,
+        skipped_rules: derived_skipped,
+        exempted_rules: 0u32,
+        unsupported_rules: 0u32,
+        timed_out_rules: 0u32,
+        diagnostic_count: diagnostic_count,
+        error_count: error_count,
+        warning_count: warning_count,
+        budget_exhausted: false,
+        timed_out: false,
+        cancelled: false,
+        infrastructure_failed: infrastructure_failed,
+        provider_identity: "simple-lint-legacy-adapter-v1",
+        input_revision_seed: "units:" + requested_units.to_text() + ":rules:" + requested_rules.to_text()
+    ))
 
+# reason: CLI verdict string formatter at the lint summary boundary
+@allow(primitive_api)
 pub fn simple_lint_verdict_name(result: LintRunResultV1) -> text:
     match result.verdict:
         case CompleteClean: "clean"
@@ -61,11 +192,383 @@ pub fn simple_lint_verdict_name(result: LintRunResultV1) -> text:
         case Cancelled: "cancelled"
         case Failed: "failed"
 
+# reason: CLI human summary formatter at the lint output boundary
+@allow(primitive_api)
 pub fn simple_lint_human_summary(result: LintRunResultV1) -> text:
     match result.verdict:
         case CompleteClean: "Lint passed: all files clean"
         case CompleteWithFindings: "Lint completed with {result.error_count} error(s) and {result.warning_count} warning(s)"
-        case Partial: "Lint incomplete: only {result.coverage.completed_unit_count} of {result.coverage.requested_unit_count} file(s) were fully analysed"
+        case Partial:
+            if result.timed_out:
+                "Lint timed out: only {result.coverage.completed_unit_count} of {result.coverage.requested_unit_count} file(s) completed before deadline"
+            elif result.budget_exhausted:
+                "Lint budget exhausted: only {result.coverage.completed_unit_count} of {result.coverage.requested_unit_count} file(s) analysed within budget"
+            elif result.coverage.completed_unit_count < result.coverage.requested_unit_count:
+                "Lint incomplete: only {result.coverage.completed_unit_count} of {result.coverage.requested_unit_count} file(s) were fully analysed"
+            else:
+                "Lint incomplete: {result.coverage.completed_rule_count} of {result.coverage.requested_rule_count} rule(s) executed ({result.coverage.skipped_rule_count} skipped, {result.coverage.exempted_rule_count} exempted, {result.coverage.unsupported_rule_count} unsupported)"
         case NotAnalyzed: "NOT LINTED: {result.coverage.not_analyzed_unit_count} file(s) were not analysed"
         case Cancelled: "Lint cancelled"
         case Failed: "Lint failed before trustworthy completion"
+
+# --- Per-run budget owner and honest rule receipt evaluation ---
+
+val _LINT_CHILD_STATS_PREFIX = "@@LINT-CHILD-STATS"
+
+pub struct LintParsedChildStatsV1:
+    cleaned_stdout: text
+    has_stats: bool
+    timed_out: bool
+    crashed: bool
+    diagnostic_files: u32
+    error_files: u32
+    warning_files: u32
+    completed_files: u32
+    not_linted_files: i64
+    failed_files: i64
+    child_exit: i64
+    exempt_mask_lo: i64
+    exempt_mask_hi: i64
+    timed_out_files: u32
+    budget_exhausted: bool
+
+# reason: child process stdout and exit-code parser at the CLI fan-out boundary
+@allow(primitive_api)
+pub fn lint_parse_child_stats_v1(stdout: text, exit_code: i64) -> LintParsedChildStatsV1:
+    val lines = stdout.split("\n")
+    var kept = ""
+    var stats: [i64] = []
+    var first = true
+    var idx = 0
+    while idx < lines.len():
+        val line = lines[idx]
+        idx = idx + 1
+        if line.starts_with(_LINT_CHILD_STATS_PREFIX):
+            for field in line.split(" "):
+                if field != _LINT_CHILD_STATS_PREFIX and field != "":
+                    stats.push(field.to_i64() ?? 0)
+            continue
+        if idx == lines.len() and line == "":
+            continue
+        kept = kept + (if first: "" else: "\n") + line
+        first = false
+    if stats.len() < 7:
+        val is_timeout = exit_code == 124
+        return LintParsedChildStatsV1(
+            cleaned_stdout: kept,
+            has_stats: false,
+            timed_out: is_timeout,
+            crashed: not is_timeout,
+            diagnostic_files: 0u32,
+            error_files: 0u32,
+            warning_files: 0u32,
+            completed_files: 0u32,
+            not_linted_files: 1,
+            failed_files: if is_timeout: 0 else: 1,
+            child_exit: exit_code,
+            exempt_mask_lo: 0,
+            exempt_mask_hi: 0,
+            timed_out_files: if is_timeout: 1u32 else: 0u32,
+            budget_exhausted: is_timeout
+        )
+    val ex_lo = if stats.len() >= 11: stats[7] else: 0
+    val ex_hi = if stats.len() >= 11: stats[8] else: 0
+    val to_files: u32 = if stats.len() >= 11: stats[9] as u32 else: 0u32
+    val bud_ex = if stats.len() >= 11: stats[10] != 0 else: false
+    LintParsedChildStatsV1(
+        cleaned_stdout: kept,
+        has_stats: true,
+        timed_out: to_files > 0u32,
+        crashed: false,
+        diagnostic_files: stats[0] as u32,
+        error_files: stats[1] as u32,
+        warning_files: stats[2] as u32,
+        completed_files: stats[3] as u32,
+        not_linted_files: stats[4],
+        failed_files: stats[5],
+        child_exit: stats[6],
+        exempt_mask_lo: ex_lo,
+        exempt_mask_hi: ex_hi,
+        timed_out_files: to_files,
+        budget_exhausted: bud_ex
+    )
+
+fn _parse_positive_budget_int(raw: text) -> i64:
+    val trimmed = raw.trim()
+    if trimmed == "":
+        return 0
+    val parsed = trimmed.to_i64() ?? 0
+    if parsed > 0: parsed else: 0
+
+# reason: CLI budget boundary struct exposes millisecond, file-count, and second limits
+@allow(primitive_api)
+pub struct LintRunBudgetV1:
+    max_wall_ms: i64
+    max_files: i64
+    child_timeout_s: i64
+    started_ms: i64
+
+impl LintRunBudgetV1:
+    static fn new(max_wall_ms: i64, max_files: i64, child_timeout_s: i64, started_ms: i64) -> LintRunBudgetV1:
+        val eff_timeout = if child_timeout_s > 0: child_timeout_s else: 900
+        LintRunBudgetV1(
+            max_wall_ms: if max_wall_ms > 0: max_wall_ms else: 0,
+            max_files: if max_files > 0: max_files else: 0,
+            child_timeout_s: eff_timeout,
+            started_ms: started_ms
+        )
+
+    static fn from_cli_and_env(
+        args: [text],
+        env_wall_ms: text,
+        env_max_files: text,
+        env_child_timeout_s: text,
+        started_ms: i64
+    ) -> LintRunBudgetV1:
+        var wall_ms = _parse_positive_budget_int(env_wall_ms)
+        var max_files = _parse_positive_budget_int(env_max_files)
+        var timeout_s = _parse_positive_budget_int(env_child_timeout_s)
+        if timeout_s <= 0:
+            timeout_s = 900
+        var i = 0
+        while i < args.len():
+            val arg = args[i]
+            if arg.starts_with("--budget-ms="):
+                wall_ms = _parse_positive_budget_int(arg.slice(12))
+            elif arg == "--budget-ms" and i + 1 < args.len():
+                wall_ms = _parse_positive_budget_int(args[i + 1])
+                i = i + 1
+            elif arg.starts_with("--max-files="):
+                max_files = _parse_positive_budget_int(arg.slice(12))
+            elif arg == "--max-files" and i + 1 < args.len():
+                max_files = _parse_positive_budget_int(args[i + 1])
+                i = i + 1
+            elif arg.starts_with("--child-timeout-s="):
+                val parsed_t = _parse_positive_budget_int(arg.slice(18))
+                if parsed_t > 0:
+                    timeout_s = parsed_t
+            elif arg == "--child-timeout-s" and i + 1 < args.len():
+                val parsed_t = _parse_positive_budget_int(args[i + 1])
+                if parsed_t > 0:
+                    timeout_s = parsed_t
+                i = i + 1
+            i = i + 1
+        LintRunBudgetV1.new(wall_ms, max_files, timeout_s, started_ms)
+
+    fn wall_exhausted_at(now_ms: i64) -> bool:
+        self.max_wall_ms > 0 and (now_ms - self.started_ms) >= self.max_wall_ms
+
+    fn files_exhausted_at(analyzed_files: i64, total_requested_files: i64) -> bool:
+        self.max_files > 0 and analyzed_files >= self.max_files and analyzed_files < total_requested_files
+
+pub fn lint_baseline_config_for_policy_v1(policy: LintCliPolicy) -> LintConfig:
+    var cfg = LintConfig.new()
+    match policy.profile:
+        case Some(profile): cfg.set_profile(profile)
+        case None: val _ = 0
+    if policy.wm_lane:
+        cfg.set_level("wm_lane_boundary", LintLevel.Deny)
+    if policy.gpu_2d_perf:
+        cfg.set_level("gpu_2d_perf", LintLevel.Deny)
+    if policy.warn_all:
+        for lint_name in all_lint_names():
+            if cfg.get_level(lint_name) == LintLevel.Allow:
+                cfg.set_level(lint_name, LintLevel.Warn)
+    cfg
+
+fn _set_rule_mask_bit(idx: i64, mask_lo: i64, mask_hi: i64) -> (i64, i64):
+    if idx >= 0 and idx < 60:
+        return (mask_lo | (1 << idx), mask_hi)
+    if idx >= 60 and idx < 120:
+        return (mask_lo, mask_hi | (1 << (idx - 60)))
+    (mask_lo, mask_hi)
+
+fn _has_rule_mask_bit(idx: i64, mask_lo: i64, mask_hi: i64) -> bool:
+    if idx >= 0 and idx < 60:
+        return (mask_lo & (1 << idx)) != 0
+    if idx >= 60 and idx < 120:
+        return (mask_hi & (1 << (idx - 60))) != 0
+    false
+
+fn _line_carries_allow_rationale(lines: [text], idx: i64) -> bool:
+    val trimmed = lines[idx].trim()
+    if trimmed.starts_with("#![allow(") or trimmed.starts_with("#!allow("):
+        return true
+    if trimmed.contains("# reason:"):
+        val pos = trimmed.find("# reason:")
+        if pos >= 0 and trimmed.slice(pos + 9).trim() != "":
+            return true
+    var prev = idx - 1
+    while prev >= 0:
+        val pt = lines[prev].trim()
+        if pt == "":
+            prev = prev - 1
+            continue
+        if not pt.starts_with("#") and not pt.starts_with("@"):
+            return false
+        if pt.starts_with("# reason:") and pt.slice(9).trim() != "":
+            return true
+        prev = prev - 1
+    false
+
+# reason: source text and bitmask pair at the rule exemption scan boundary
+@allow(primitive_api)
+pub fn lint_collect_exempted_rule_masks_v1(
+    baseline_cfg: LintConfig,
+    file_sdn_cfg: LintConfig,
+    source: text,
+    mc_exempted: bool
+) -> (i64, i64):
+    val rules = lint_registered_rule_names()
+    var mask_lo: i64 = 0
+    var mask_hi: i64 = 0
+    val has_allow_text = source.contains("allow(")
+    val lines: [text] = if has_allow_text: source.split("\n") else: []
+    var r_idx = 0
+    while r_idx < rules.len():
+        val name = rules[r_idx]
+        if baseline_cfg.get_level(name) != LintLevel.Allow:
+            var is_exempt = false
+            if file_sdn_cfg.levels.has(name) and file_sdn_cfg.levels[name] == "allow":
+                is_exempt = true
+            elif mc_exempted and (name == "bare_primitive_internal" or name == "unwrapped_foreign_resource"):
+                is_exempt = true
+            elif has_allow_text:
+                var l_idx = 0
+                while l_idx < lines.len():
+                    val lt = lines[l_idx].trim()
+                    if (lt.starts_with("@allow(") or lt.starts_with("#![allow(") or lt.starts_with("#[allow(") or lt.starts_with("#!allow(")):
+                        if line_has_allow(lt, name) and _line_carries_allow_rationale(lines, l_idx):
+                            is_exempt = true
+                            break
+                    l_idx = l_idx + 1
+            if is_exempt:
+                val updated = _set_rule_mask_bit(r_idx, mask_lo, mask_hi)
+                mask_lo = updated.0
+                mask_hi = updated.1
+        r_idx = r_idx + 1
+    (mask_lo, mask_hi)
+
+pub struct LintEvaluatedRunReceiptV1:
+    adapter: SimpleLintAdapterResult
+    status: text
+    completeness: text
+    exit_code: i64
+    budget_exhausted: bool
+    timed_out_files: u32
+    requested_rules: u32
+    completed_rules: u32
+    skipped_rules: u32
+    exempted_rules: u32
+    unsupported_rules: u32
+    timed_out_rules: u32
+
+# reason: CLI-to-kernel receipt evaluator accepting aggregate counters and bitmasks
+@allow(primitive_api)
+pub fn lint_evaluate_run_receipt_v1(
+    policy: LintCliPolicy,
+    run_mcp_perf: bool,
+    requested_files: u32,
+    completed_files: u32,
+    not_linted_files: u32,
+    timed_out_files: u32,
+    hard_failed_files: u32,
+    diagnostic_files: u32,
+    error_files: u32,
+    warning_files: u32,
+    exempt_mask_lo: i64,
+    exempt_mask_hi: i64,
+    budget_exhausted: bool,
+    revision_seed: text
+) -> LintEvaluatedRunReceiptV1:
+    val baseline_cfg = lint_baseline_config_for_policy_v1(policy)
+    val rules = lint_registered_rule_names()
+    var requested_rules: u32 = 0u32
+    var completed_rules: u32 = 0u32
+    var skipped_rules: u32 = 0u32
+    var exempted_rules: u32 = 0u32
+    var unsupported_rules: u32 = 0u32
+    var timed_out_rules: u32 = 0u32
+
+    val timed_out = timed_out_files > 0u32
+    val effective_budget_exhausted = budget_exhausted or timed_out
+
+    var r_idx = 0
+    while r_idx < rules.len():
+        val name = rules[r_idx]
+        if baseline_cfg.get_level(name) != LintLevel.Allow:
+            requested_rules = requested_rules + 1u32
+            if completed_files == 0u32:
+                if timed_out:
+                    timed_out_rules = timed_out_rules + 1u32
+                else:
+                    skipped_rules = skipped_rules + 1u32
+            elif policy.fast and lint_rule_cost_tier(name) != LintCostTier.Low:
+                skipped_rules = skipped_rules + 1u32
+            elif _has_rule_mask_bit(r_idx, exempt_mask_lo, exempt_mask_hi):
+                exempted_rules = exempted_rules + 1u32
+            else:
+                completed_rules = completed_rules + 1u32
+        r_idx = r_idx + 1
+
+    if run_mcp_perf:
+        requested_rules = requested_rules + 1u32
+        unsupported_rules = unsupported_rules + 1u32
+
+    val infra_failed = hard_failed_files > 0u32 and completed_files == 0u32 and not_linted_files == 0u32 and not timed_out
+    val adapter = simple_lint_adapter_result_with_receipt_v1(SimpleLintReceiptInputV1(
+        requested_units: requested_files,
+        completed_units: completed_files,
+        not_analyzed_units: not_linted_files,
+        requested_rules: requested_rules,
+        completed_rules: completed_rules,
+        skipped_rules: skipped_rules,
+        exempted_rules: exempted_rules,
+        unsupported_rules: unsupported_rules,
+        timed_out_rules: timed_out_rules,
+        diagnostic_count: diagnostic_files,
+        error_count: error_files,
+        warning_count: warning_files,
+        budget_exhausted: effective_budget_exhausted,
+        timed_out: timed_out,
+        cancelled: false,
+        infrastructure_failed: infra_failed,
+        provider_identity: "simple-lint-cli-v1",
+        input_revision_seed: revision_seed
+    ))
+
+    var completeness_inputs: [LintCompleteness] = []
+    if hard_failed_files > 0u32 or error_files > 0u32:
+        completeness_inputs.push(LintCompleteness.Fail)
+    if timed_out or timed_out_rules > 0u32:
+        completeness_inputs.push(LintCompleteness.TimedOut)
+    val non_timeout_skipped_files = if not_linted_files > timed_out_files: not_linted_files - timed_out_files else: 0u32
+    if non_timeout_skipped_files > 0u32 or skipped_rules > 0u32 or effective_budget_exhausted:
+        completeness_inputs.push(LintCompleteness.Incomplete)
+    if unsupported_rules > 0u32:
+        completeness_inputs.push(LintCompleteness.Unsupported)
+    if completed_files > 0u32 and skipped_rules == 0u32 and unsupported_rules == 0u32 and timed_out_rules == 0u32 and not timed_out and not effective_budget_exhausted:
+        completeness_inputs.push(LintCompleteness.Pass)
+
+    val completeness = lint_completeness_name(
+        lint_completeness_reduce(completeness_inputs, effective_budget_exhausted)
+    )
+    val status = simple_lint_verdict_name(adapter.kernel_result)
+    var exit_code = adapter.exit_code
+    if (hard_failed_files > 0u32 or timed_out or effective_budget_exhausted or unsupported_rules > 0u32) and exit_code == 0:
+        exit_code = 1
+
+    LintEvaluatedRunReceiptV1(
+        adapter: adapter,
+        status: status,
+        completeness: completeness,
+        exit_code: exit_code,
+        budget_exhausted: effective_budget_exhausted,
+        timed_out_files: timed_out_files,
+        requested_rules: requested_rules,
+        completed_rules: completed_rules,
+        skipped_rules: skipped_rules,
+        exempted_rules: exempted_rules,
+        unsupported_rules: unsupported_rules,
+        timed_out_rules: timed_out_rules
+    )

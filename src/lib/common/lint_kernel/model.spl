@@ -1,4 +1,5 @@
 use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_equal}
+use std.common.crypto.sha256.{sha256_text}
 
 pub enum LintVerdict:
     CompleteClean
@@ -53,6 +54,9 @@ pub struct AnalysisCoverageV1:
     completed_phase_bits: u64
     provider_receipt_digest: KpfDigest256
     input_revision_digest: KpfDigest256
+    exempted_rule_count: u32 = 0u32
+    unsupported_rule_count: u32 = 0u32
+    timed_out_rule_count: u32 = 0u32
 
 pub struct LintRunResultV1:
     verdict: LintVerdict
@@ -62,7 +66,42 @@ pub struct LintRunResultV1:
     warning_count: u32
     cancelled: bool
     infrastructure_failed: bool
+    budget_exhausted: bool = false
+    timed_out: bool = false
 
+fn _hex_nibble_u64(byte_val: i64) -> u64:
+    if byte_val >= 48 and byte_val <= 57:
+        return (byte_val - 48) as u64
+    if byte_val >= 97 and byte_val <= 102:
+        return (byte_val - 87) as u64
+    if byte_val >= 65 and byte_val <= 70:
+        return (byte_val - 55) as u64
+    0u64
+
+fn _hex_word64_at(hex: text, start_byte: i64) -> u64:
+    var acc: u64 = 0u64
+    var i: i64 = 0
+    while i < 16:
+        val b = hex.byte_at(start_byte + i) as i64
+        acc = (acc << 4u64) | _hex_nibble_u64(b)
+        i = i + 1
+    acc
+
+# reason: SHA-256 text-to-KpfDigest256 conversion at the lint-kernel receipt boundary
+@allow(primitive_api)
+pub fn lint_sha256_kpf_digest(payload: text) -> KpfDigest256:
+    val hex = sha256_text(payload)
+    if hex.byte_len() < 64:
+        return KpfDigest256(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+    KpfDigest256(
+        w0: _hex_word64_at(hex, 0),
+        w1: _hex_word64_at(hex, 16),
+        w2: _hex_word64_at(hex, 32),
+        w3: _hex_word64_at(hex, 48)
+    )
+
+# reason: boolean completeness predicate at the lint-kernel coverage boundary
+@allow(primitive_api)
 pub fn lint_coverage_complete(coverage: AnalysisCoverageV1) -> bool:
     if coverage.requested_unit_count == 0 or coverage.requested_rule_count == 0 or coverage.requested_phase_bits == 0:
         return false
@@ -72,18 +111,35 @@ pub fn lint_coverage_complete(coverage: AnalysisCoverageV1) -> bool:
         return false
     if coverage.partial_unit_count != 0 or coverage.not_analyzed_unit_count != 0:
         return false
-    if coverage.completed_rule_count != coverage.requested_rule_count or coverage.skipped_rule_count != 0:
+    if coverage.skipped_rule_count != 0 or coverage.unsupported_rule_count != 0 or coverage.timed_out_rule_count != 0:
+        return false
+    if coverage.completed_rule_count + coverage.exempted_rule_count != coverage.requested_rule_count:
+        return false
+    if coverage.completed_rule_count == 0:
         return false
     (coverage.completed_phase_bits & coverage.requested_phase_bits) == coverage.requested_phase_bits
 
-pub fn lint_run_result(coverage: AnalysisCoverageV1, diagnostic_count: u32, error_count: u32, warning_count: u32, cancelled: bool, infrastructure_failed: bool) -> LintRunResultV1:
+# reason: explicit kernel run-result constructor accepting primitive counts and budget flags
+@allow(primitive_api)
+pub fn lint_run_result_with_receipt_v1(
+    coverage: AnalysisCoverageV1,
+    diagnostic_count: u32,
+    error_count: u32,
+    warning_count: u32,
+    cancelled: bool,
+    infrastructure_failed: bool,
+    budget_exhausted: bool,
+    timed_out: bool
+) -> LintRunResultV1:
     var verdict = LintVerdict.Partial
     if infrastructure_failed:
         verdict = LintVerdict.Failed
     elif cancelled:
         verdict = LintVerdict.Cancelled
-    elif coverage.completed_unit_count == 0 and (coverage.not_analyzed_unit_count > 0 or coverage.requested_unit_count > 0):
+    elif coverage.completed_unit_count == 0 and (coverage.not_analyzed_unit_count > 0 or coverage.requested_unit_count > 0) and not timed_out and not budget_exhausted:
         verdict = LintVerdict.NotAnalyzed
+    elif budget_exhausted or timed_out or coverage.timed_out_rule_count > 0:
+        verdict = LintVerdict.Partial
     elif lint_coverage_complete(coverage):
         if diagnostic_count == 0:
             verdict = LintVerdict.CompleteClean
@@ -96,7 +152,23 @@ pub fn lint_run_result(coverage: AnalysisCoverageV1, diagnostic_count: u32, erro
         error_count: error_count,
         warning_count: warning_count,
         cancelled: cancelled,
-        infrastructure_failed: infrastructure_failed
+        infrastructure_failed: infrastructure_failed,
+        budget_exhausted: budget_exhausted,
+        timed_out: timed_out
+    )
+
+# reason: backward-compatible kernel run-result constructor at the model boundary
+@allow(primitive_api)
+pub fn lint_run_result(coverage: AnalysisCoverageV1, diagnostic_count: u32, error_count: u32, warning_count: u32, cancelled: bool, infrastructure_failed: bool) -> LintRunResultV1:
+    lint_run_result_with_receipt_v1(
+        coverage,
+        diagnostic_count,
+        error_count,
+        warning_count,
+        cancelled,
+        infrastructure_failed,
+        false,
+        false
     )
 
 fn _id_less(left: KpfId128, right: KpfId128) -> bool:

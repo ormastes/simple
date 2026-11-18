@@ -1,0 +1,246 @@
+"""
+## Purpose and audience
+
+Purpose: verify negative-dependency absence witnesses (`ED-T12`, `[C20]`) across
+`NegativeDependencyWitnessV1`, single-flight analysis cache lookup, and
+`TaskRunnerV1` cached readiness (`task_runner_cache_ready` and `task_runner_resume`).
+
+Audience: compiler, build-runner, and IDE analysis cache maintainers ensuring
+previously absent `simple.sdn`, `__init__.spl`, or shadowed module paths immediately
+invalidate cached outputs when created.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/lib/common/task_runner/negative_dependency_witness_spec.spl --mode=interpreter`.
+2. Confirm both callback-backed and filesystem-backed invalidation scenarios pass.
+
+## Compatibility and limitations
+
+Uses isolated temporary directories under `build/test/negative-dependency-witness`
+and removes them after each filesystem scenario.
+"""
+
+# @req REQ-WP06-NEGATIVE-DEPENDENCY-WITNESS
+# @cover src/lib/common/task_runner/analysis_single_flight.spl
+# @cover src/lib/common/task_runner/scheduler.spl
+
+use std.spec.{describe, context, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{cwd_process, dir_create_all, dir_remove_all, file_write_exact}
+use std.common.build_manager.contracts.{
+    BuildTaskV1, BuildHostV1, BuildRunV1, BuildResultV1, BuildInputV1,
+    builder_task_identity_v1
+}
+use std.common.task_runner.{
+    NegativeDependencyWitnessV1,
+    negative_dependency_witness_canonical_v1,
+    negative_dependency_witness_error_v1,
+    negative_dependency_witness_valid_v1,
+    negative_dependency_witness_fs_valid_v1,
+    negative_dependency_witness_digest_v1,
+    analysis_single_flight_new_v1,
+    attach_waiter,
+    commit_flight_with_witness,
+    analysis_flight_cache_lookup_v1,
+    analysis_flight_cache_lookup_with_v1,
+    task_runner_start,
+    task_runner_ready,
+    task_runner_cache_ready,
+    task_runner_cache_ready_with_v1,
+    task_runner_bind_negative_witness_v1,
+    task_runner_resume
+}
+
+fn witness_task_fixture_v1() -> BuildTaskV1:
+    BuildTaskV1(
+        id: "analyze-pkg",
+        attempt: 1,
+        phase: "analysis",
+        producer_digest: sha256_text("producer"),
+        source_digest: sha256_text("source"),
+        toolchain_digest: sha256_text("toolchain"),
+        dependencies: [],
+        program: "simple",
+        args: ["check"],
+        inputs: [],
+        outputs: ["pkg.analysis"],
+        cache_key: sha256_text("analysis-cache"),
+        timeout_ms: 2000,
+        memory_limit_bytes: 1024,
+        links: [])
+
+fn witness_run_fixture_v1() -> BuildRunV1:
+    BuildRunV1(
+        tasks: [witness_task_fixture_v1()],
+        hosts: [BuildHostV1(
+            id: "local",
+            transport: "local",
+            endpoint: "",
+            workspace: ".",
+            worker_program: "worker",
+            worker_digest: sha256_text("worker"),
+            slots: 1)],
+        keep_going: true,
+        max_attempts: 1)
+
+fn witness_cached_receipt_v1() -> BuildResultV1:
+    val task = witness_task_fixture_v1()
+    BuildResultV1(
+        task_id: task.id,
+        attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task),
+        host_id: "local",
+        status: "OK",
+        exit_code: 0,
+        outputs: [BuildInputV1(path: "pkg.analysis", digest: sha256_text("cached-analysis"))],
+        cache_hits: -1,
+        cache_misses: -1,
+        cache_stores: -1)
+
+describe "Negative-dependency absence witnesses (ED-T12)":
+    """
+    Verifies that recorded absent candidate paths (`simple.sdn`, `__init__.spl`,
+    shadowed module files) validate cleanly while absent and immediately invalidate
+    both single-flight analysis cache entries and `TaskRunnerV1` cache readiness
+    as soon as any witness path materializes.
+    """
+
+    context "Pure witness canonicalization, digesting, and predicate validation":
+        """
+        Tests `NegativeDependencyWitnessV1` canonical sorting, deduplication,
+        malformed-path rejection, and `negative_dependency_witness_valid_v1`.
+        """
+
+        it "canonicalizes absent witness paths deterministically and invalidates when any path appears":
+            """
+            Confirms duplicate/unsorted absent paths produce one canonical digest,
+            stay valid when `exists_fn` returns false for all paths, and fail closed
+            when any candidate path exists or is malformed.
+            """
+            # @req ED-T12
+            step("Canonicalize unsorted duplicate candidate paths to deterministic sorted order")
+            val raw_paths = [
+                "src/pkg/__init__.spl",
+                "simple.sdn",
+                "src/shadow/mod.spl",
+                "simple.sdn"
+            ]
+            val canonical = negative_dependency_witness_canonical_v1(raw_paths).unwrap()
+            expect(canonical.absent_paths).to_equal([
+                "simple.sdn",
+                "src/pkg/__init__.spl",
+                "src/shadow/mod.spl"
+            ])
+            val reordered = negative_dependency_witness_canonical_v1([
+                "src/shadow/mod.spl",
+                "src/pkg/__init__.spl",
+                "simple.sdn"
+            ]).unwrap()
+            expect(negative_dependency_witness_digest_v1(canonical).unwrap()).to_equal(
+                negative_dependency_witness_digest_v1(reordered).unwrap())
+
+            step("Validate witness against a predicate where all paths are still absent")
+            expect(negative_dependency_witness_valid_v1(canonical, \p: false)).to_equal(true)
+
+            step("Invalidate immediately as soon as simple.sdn, __init__.spl, or shadowed module appears")
+            expect(negative_dependency_witness_valid_v1(canonical, \p: p == "simple.sdn")).to_equal(false)
+            expect(negative_dependency_witness_valid_v1(canonical, \p: p == "src/pkg/__init__.spl")).to_equal(false)
+            expect(negative_dependency_witness_valid_v1(canonical, \p: p == "src/shadow/mod.spl")).to_equal(false)
+
+            step("Reject empty or newline-contaminated witness paths fail-closed")
+            val malformed = NegativeDependencyWitnessV1(absent_paths: ["simple.sdn", ""])
+            expect(negative_dependency_witness_error_v1(malformed)).to_equal("invalid negative dependency witness path")
+            expect(negative_dependency_witness_valid_v1(malformed, \p: false)).to_equal(false)
+
+    context "Filesystem invalidation of single-flight cache and TaskRunner cache readiness":
+        """
+        Exercises real filesystem creation of previously absent `simple.sdn` and
+        `__init__.spl` files against `analysis_flight_cache_lookup_v1`,
+        `task_runner_cache_ready`, and `task_runner_resume`.
+        """
+
+        it "invalidates single-flight analysis cache lookup and restarts flight generation when an absent path appears":
+            """
+            Commits an analysis flight with absent candidate paths under a scratch
+            root, confirms cache hit before file creation, creates `__init__.spl`,
+            and verifies immediate cache miss and next-generation re-execution.
+            """
+            # @req ED-T12
+            val root = cwd_process() + "/build/test/negative-dependency-witness/flight"
+            dir_remove_all(root)
+            expect(dir_create_all(root + "/pkg")).to_equal(true)
+            val missing_manifest = root + "/simple.sdn"
+            val missing_init = root + "/pkg/__init__.spl"
+            val witness = negative_dependency_witness_canonical_v1([missing_manifest, missing_init]).unwrap()
+            expect(negative_dependency_witness_fs_valid_v1(witness)).to_equal(true)
+
+            val analysis_key = sha256_text("analysis-key-witness")
+            val artifact_digest = sha256_text("analysis-result-v1")
+            var table = analysis_single_flight_new_v1()
+            table = attach_waiter(table, "snap-w1", analysis_key, "ide-1", "worker-1", false).table
+            val committed = commit_flight_with_witness(
+                table, "snap-w1", analysis_key, 1, artifact_digest, witness)
+            expect(committed.accepted).to_equal(true)
+            table = committed.table
+
+            step("Cache lookup succeeds while both witness paths remain absent")
+            expect(analysis_flight_cache_lookup_with_v1(table, "snap-w1", analysis_key, \p: false).unwrap()).to_equal(artifact_digest)
+            expect(analysis_flight_cache_lookup_v1(table, "snap-w1", analysis_key).unwrap()).to_equal(artifact_digest)
+
+            step("Materializing pkg/__init__.spl immediately invalidates the cached flight result")
+            expect(file_write_exact(missing_init, "# newly added package init\n")).to_equal(true)
+            expect(negative_dependency_witness_fs_valid_v1(witness)).to_equal(false)
+            expect(analysis_flight_cache_lookup_v1(table, "snap-w1", analysis_key).is_none()).to_equal(true)
+
+            step("Attaching after witness invalidation starts a fresh running lease at generation 2")
+            val restarted = attach_waiter(table, "snap-w1", analysis_key, "ide-2", "worker-2", false)
+            expect(restarted.accepted).to_equal(true)
+            expect(restarted.deduplicated).to_equal(false)
+            expect(restarted.table.flights[0].status).to_equal("running")
+            expect(restarted.table.flights[0].lease_generation).to_equal(2)
+            dir_remove_all(root)
+
+        it "invalidates task_runner_cache_ready and task_runner_resume while keeping fresh task_runner_ready dispatchable":
+            """
+            Verifies `TaskRunnerV1` admits cached task outputs when all negative
+            witness paths are absent, but blocks `task_runner_cache_ready` and
+            `task_runner_resume` as soon as a shadowed `simple.sdn` appears while
+            still scheduling fresh execution via `task_runner_ready`.
+            """
+            # @req ED-T12
+            val root = cwd_process() + "/build/test/negative-dependency-witness/scheduler"
+            dir_remove_all(root)
+            expect(dir_create_all(root + "/shadow")).to_equal(true)
+            val candidate_sdn = root + "/simple.sdn"
+            val shadowed_mod = root + "/shadow/target.spl"
+            val witness = negative_dependency_witness_canonical_v1([candidate_sdn, shadowed_mod]).unwrap()
+
+            var base_state = task_runner_start(witness_run_fixture_v1())
+            base_state = task_runner_bind_negative_witness_v1(base_state, "analyze-pkg", witness)
+            expect(base_state.error).to_equal("")
+
+            step("Before candidate files exist, cache readiness and cache resume both succeed")
+            expect(task_runner_cache_ready_with_v1(base_state, \p: false)).to_equal([0])
+            expect(task_runner_cache_ready(base_state)).to_equal([0])
+            val resumed_ok = task_runner_resume(
+                base_state,
+                witness_cached_receipt_v1(),
+                [BuildInputV1(path: "pkg.analysis", digest: sha256_text("cached-analysis"))])
+            expect(resumed_ok.error).to_equal("")
+            expect(resumed_ok.statuses).to_equal(["SUCCEEDED"])
+
+            step("Once candidate simple.sdn appears on disk, cache readiness drops the task and resume fails closed")
+            expect(file_write_exact(candidate_sdn, "package:\n  name: newly_discovered\n")).to_equal(true)
+            expect(task_runner_cache_ready_with_v1(base_state, \p: p == candidate_sdn)).to_equal([])
+            expect(task_runner_cache_ready(base_state)).to_equal([])
+
+            val resumed_stale = task_runner_resume(
+                base_state,
+                witness_cached_receipt_v1(),
+                [BuildInputV1(path: "pkg.analysis", digest: sha256_text("cached-analysis"))])
+            expect(resumed_stale.error).to_equal("cache admission invalidated by negative dependency witness")
+            expect(resumed_stale.statuses).to_equal(["PENDING"])
+
+            step("Fresh worker scheduling via task_runner_ready remains ready to recompute the invalidated task")
+            expect(task_runner_ready(base_state)).to_equal([0])
+            dir_remove_all(root)
