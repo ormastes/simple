@@ -1,0 +1,319 @@
+"""
+## Purpose and audience
+Purpose: Pin (1) an empty auto-height box being 0 px high (block, flex
+container and item, grid item, float, inline-block, absolutely positioned),
+with a block of 1 px content still keeping its margins apart; (2)
+`grid-auto-columns` and implicit grid columns: column flow with and without a
+template, a definite column or a span past the template, the track list
+cycle, px / em / percent / `fr` / `auto` / `minmax(<length>, auto)` tracks,
+`auto` columns sized by content and sharing the free width, and items laid
+out against their implicit column.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + getBoundingClientRect(),
+900x2000, `body{margin:0}`, `.w{width:400px;margin-bottom:10px}`,
+`.f{display:flex}`, `.g{display:grid}`, 2026-11-19). Every expected rect is
+"x y w h" relative to its `.w` container and is quoted in the `step` of its
+example. Each example lays out only its own container.
+
+Base (release/1.0.0 0251987783a): an empty auto-height box was floored to
+1 px, and a block of height <= 1 px was treated as self-collapsing;
+`grid-auto-columns` was not parsed, a grid without `grid-template-columns`
+was laid out as a block, column flow without template rows stacked every
+item in the first column, and a definite column or a span past the template
+was clamped into it.
+Not covered (open, see doc/08_tracking/bug/
+web_percent_padding_unparsed_and_grid_bare_span_2026-11-18.md):
+`display:flow-root`, an empty inline box opening a line, fractional track
+sizes, auto inline margins of a grid item, `justify-content` distribution.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-GRID-AUTO-COLUMNS-001 — implicit grid columns are created by placement and sized from `grid-auto-columns`; REQ-BROWSER-ENGINE-EMPTY-BLOCK-HEIGHT-001 — an empty auto-height box is 0 px high.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PRE: text = "<html><head><style>body{{margin:0}} .w{{width:400px;margin-bottom:10px}} .f{{display:flex}} .g{{display:grid}}</style></head><body>"
+val POST: text = "</body></html>"
+val PAGE_E1: text = PRE + "<div class=w id=e1><div id=e1a></div><div id=e1b style=\"height:10px\"></div></div>" + POST
+val PAGE_E2: text = PRE + "<div class=\"w g\" id=e2 style=\"grid-template-columns:200px 200px\"><div id=e2a style=\"height:40px\"></div><div id=e2b style=\"align-self:start\"></div></div>" + POST
+val PAGE_E3: text = PRE + "<div class=w id=e3><div id=e3a style=\"padding:5px\"></div><div id=e3b style=\"border:2px solid\"></div><div id=e3c style=\"height:10px\"></div></div>" + POST
+val PAGE_E4: text = PRE + "<div class=\"w f\" id=e4><div id=e4a style=\"width:50px\"></div><div id=e4b style=\"width:50px;align-self:flex-start\"></div></div>" + POST
+val PAGE_E6: text = PRE + "<div class=w id=e6><div id=e6a style=\"float:left;width:30px\"></div><div id=e6b style=\"display:inline-block;width:30px\"></div></div>" + POST
+val PAGE_E7: text = PRE + "<div class=w id=e7 style=\"position:relative;height:20px\"><div id=e7a style=\"position:absolute;left:0;top:0;width:30px\"></div></div>" + POST
+val PAGE_E9: text = PRE + "<div class=\"w g\" id=e9 style=\"grid-template-columns:200px 200px\"><div id=e9a></div><div id=e9b></div><div id=e9c style=\"height:10px\"></div></div>" + POST
+val PAGE_E10: text = PRE + "<div class=\"w f\" id=e10 style=\"flex-direction:column\"><div id=e10a></div><div id=e10b style=\"height:10px\"></div></div>" + POST
+val PAGE_N10: text = PRE + "<div class=w id=n10><div id=n10a style=\"float:left;width:30px;height:30px\"></div></div>" + POST
+val PAGE_N11: text = PRE + "<div class=w id=n11><div id=n11a style=\"height:1px\"></div><div id=n11b style=\"margin:8px 0\"><div style=\"height:1px\"></div></div><div id=n11c style=\"height:5px\"></div></div>" + POST
+val PAGE_C1: text = PRE + "<div class=\"w g\" id=c1 style=\"grid-auto-flow:column;grid-auto-columns:100px\"><div id=c1a style=\"height:10px\"></div><div id=c1b style=\"height:10px\"></div><div id=c1c style=\"height:10px\"></div></div>" + POST
+val PAGE_C2: text = PRE + "<div class=\"w g\" id=c2 style=\"grid-template-columns:100px;grid-auto-flow:column;grid-auto-columns:50px\"><div id=c2a style=\"height:10px\"></div><div id=c2b style=\"height:10px\"></div><div id=c2c style=\"height:10px\"></div></div>" + POST
+val PAGE_C3: text = PRE + "<div class=\"w g\" id=c3 style=\"grid-auto-flow:column;grid-auto-columns:40px 80px\"><div id=c3a style=\"height:10px\"></div><div id=c3b style=\"height:10px\"></div><div id=c3c style=\"height:10px\"></div></div>" + POST
+val PAGE_C4: text = PRE + "<div class=\"w g\" id=c4 style=\"grid-template-columns:100px;grid-auto-columns:60px\"><div id=c4a style=\"height:10px\"></div><div id=c4b style=\"grid-column:3;height:10px\"></div><div id=c4c style=\"height:10px\"></div></div>" + POST
+val PAGE_C5: text = PRE + "<div class=\"w g\" id=c5 style=\"grid-auto-flow:column\"><div id=c5a style=\"height:10px\"></div><div id=c5b style=\"height:10px\"></div></div>" + POST
+val PAGE_C7: text = PRE + "<div class=\"w g\" id=c7 style=\"grid-template-rows:20px 20px;grid-auto-flow:column;grid-auto-columns:100px\"><div id=c7a></div><div id=c7b></div><div id=c7c></div><div id=c7d></div><div id=c7e></div></div>" + POST
+val PAGE_C8: text = PRE + "<div class=\"w g\" id=c8 style=\"grid-auto-flow:column;grid-auto-columns:2em;font-size:10px;column-gap:5px\"><div id=c8a style=\"height:10px\"></div><div id=c8b style=\"height:10px\"></div></div>" + POST
+val PAGE_C10: text = PRE + "<div class=\"w g\" id=c10 style=\"grid-auto-columns:100px\"><div id=c10a style=\"height:10px\"></div><div id=c10b style=\"height:10px\"></div></div>" + POST
+val PAGE_C11: text = PRE + "<div class=\"w g\" id=c11 style=\"grid-auto-flow:column;grid-auto-columns:100px bogus\"><div id=c11a style=\"height:10px\"></div><div id=c11b style=\"height:10px\"></div></div>" + POST
+val PAGE_C12: text = PRE + "<div class=\"w g\" id=c12 style=\"grid-auto-flow:column;grid-auto-columns:25%\"><div id=c12a style=\"height:10px\"></div><div id=c12b style=\"height:10px\"></div></div>" + POST
+val PAGE_C13: text = PRE + "<div class=\"w g\" id=c13 style=\"grid-auto-flow:column;grid-auto-columns:minmax(50px,auto)\"><div id=c13a style=\"height:10px\"></div><div id=c13b style=\"height:10px\"></div></div>" + POST
+val PAGE_D1: text = PRE + "<div class=\"w g\" id=d1 style=\"grid-auto-flow:column\"><div id=d1a><div style=\"width:30px;height:10px\"></div></div><div id=d1b><div style=\"width:70px;height:10px\"></div></div></div>" + POST
+val PAGE_D3: text = PRE + "<div class=\"w g\" id=d3 style=\"grid-template-columns:100px;grid-auto-flow:column\"><div id=d3a style=\"height:10px\"></div><div id=d3b><div style=\"width:40px;height:10px\"></div></div></div>" + POST
+val PAGE_D5: text = PRE + "<div class=\"w g\" id=d5 style=\"grid-template-columns:100px\"><div id=d5a style=\"height:10px\"></div><div id=d5b style=\"grid-column:3;height:10px\"></div></div>" + POST
+val PAGE_D7: text = PRE + "<div class=\"w g\" id=d7 style=\"grid-template-rows:20px 20px;grid-auto-flow:column;grid-auto-columns:50px\"><div id=d7a></div><div id=d7b style=\"grid-column:span 2\"></div><div id=d7c></div><div id=d7d></div></div>" + POST
+val PAGE_D8: text = PRE + "<div class=\"w g\" id=d8 style=\"grid-auto-flow:column;justify-content:start\"><div id=d8a><div style=\"width:30px;height:10px\"></div></div><div id=d8b><div style=\"width:70px;height:10px\"></div></div></div>" + POST
+val PAGE_D9: text = PRE + "<div class=\"w g\" id=d9 style=\"grid-auto-flow:column;grid-auto-columns:100px\"><div id=d9a style=\"height:10px\"></div><div id=d9b style=\"height:30px\"></div><div id=d9c></div></div>" + POST
+val PAGE_D11: text = PRE + "<div class=\"w g\" id=d11 style=\"grid-auto-columns:100px;row-gap:5px\"><div id=d11a style=\"height:10px\"></div><div id=d11b style=\"height:10px\"></div></div>" + POST
+val PAGE_D12: text = PRE + "<div class=\"w g\" id=d12 style=\"grid-template-columns:100px 100px;grid-auto-flow:column\"><div id=d12a style=\"height:10px\"></div><div id=d12b style=\"height:10px\"></div><div id=d12c style=\"height:10px\"></div></div>" + POST
+val PAGE_D13: text = PRE + "<div class=\"w g\" id=d13 style=\"grid-auto-flow:column;grid-auto-columns:50px\"><div id=d13a style=\"grid-column:2;height:10px\"></div><div id=d13b style=\"height:10px\"></div><div id=d13c style=\"height:10px\"></div></div>" + POST
+val PAGE_D14: text = PRE + "<div class=\"w g\" id=d14 style=\"grid-auto-flow:column;grid-auto-columns:minmax(50px,auto);justify-content:start\"><div id=d14a style=\"height:10px\"></div><div id=d14b><div style=\"width:70px;height:10px\"></div></div></div>" + POST
+val PAGE_D15: text = PRE + "<div class=\"w g\" id=d15 style=\"grid-auto-flow:column;grid-auto-columns:100px;column-gap:10px;padding:5px\"><div id=d15a style=\"height:10px;margin:2px\"></div><div id=d15b style=\"height:10px;padding:10%\"></div></div>" + POST
+val PAGE_D16: text = PRE + "<div class=\"w g\" id=d16 style=\"grid-template-columns:100px;grid-auto-columns:60px\"><div id=d16a style=\"grid-column:span 2;height:10px\"></div><div id=d16b style=\"height:10px\"></div></div>" + POST
+val PAGE_D17: text = PRE + "<div class=\"w g\" id=d17 style=\"grid-template-columns:100px 100px;grid-auto-flow:column;grid-template-rows:10px 10px\"><div id=d17a></div><div id=d17b></div><div id=d17c></div><div id=d17d></div></div>" + POST
+val PAGE_D18: text = PRE + "<div class=\"w g\" id=d18 style=\"grid-auto-flow:column\"><div id=d18a style=\"height:10px\"></div><div id=d18b style=\"height:10px;grid-row:2\"></div><div id=d18c style=\"height:10px\"></div></div>" + POST
+
+fn _g(page: text, id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(page, 900, 2000, id, field).to_i32()
+
+fn _size(page: text, id: text) -> text:
+    val w = _g(page, id, "w")
+    val h = _g(page, id, "h")
+    "{w} {h}"
+
+# "x y w h" of `id` relative to its container `box`.
+fn _rect(page: text, id: text, box: text) -> text:
+    val x = _g(page, id, "x") - _g(page, box, "x")
+    val y = _g(page, id, "y") - _g(page, box, "y")
+    val w = _g(page, id, "w")
+    val h = _g(page, id, "h")
+    "{x} {y} {w} {h}"
+
+describe "empty box height and implicit grid columns (Chrome 159)":
+    it "an empty auto-height block is 0 px high":
+        step("Chrome 159: e1 400 x 10, e1a 0 0 400 0, e1b 0 0 400 10")
+        expect(_size(PAGE_E1, "e1")).to_equal("400 10")
+        expect(_rect(PAGE_E1, "e1a", "e1")).to_equal("0 0 400 0")
+        expect(_rect(PAGE_E1, "e1b", "e1")).to_equal("0 0 400 10")
+
+    it "an empty `align-self:start` grid item is 0 px high":
+        step("Chrome 159: e2 400 x 40, e2a 0 0 200 40, e2b 200 0 200 0")
+        expect(_size(PAGE_E2, "e2")).to_equal("400 40")
+        expect(_rect(PAGE_E2, "e2a", "e2")).to_equal("0 0 200 40")
+        expect(_rect(PAGE_E2, "e2b", "e2")).to_equal("200 0 200 0")
+
+    it "an empty block is as high as its padding or border":
+        step("Chrome 159: e3 400 x 24, e3a 0 0 400 10, e3b 0 10 400 4, e3c 0 14 400 10")
+        expect(_size(PAGE_E3, "e3")).to_equal("400 24")
+        expect(_rect(PAGE_E3, "e3a", "e3")).to_equal("0 0 400 10")
+        expect(_rect(PAGE_E3, "e3b", "e3")).to_equal("0 10 400 4")
+        expect(_rect(PAGE_E3, "e3c", "e3")).to_equal("0 14 400 10")
+
+    it "a flex container of empty items is 0 px high":
+        step("Chrome 159: e4 400 x 0, e4a 0 0 50 0, e4b 50 0 50 0")
+        expect(_size(PAGE_E4, "e4")).to_equal("400 0")
+        expect(_rect(PAGE_E4, "e4a", "e4")).to_equal("0 0 50 0")
+        expect(_rect(PAGE_E4, "e4b", "e4")).to_equal("50 0 50 0")
+
+    it "an empty float and an empty inline-block are 0 px high":
+        step("Chrome 159: e6 400 x 18, e6a 0 0 30 0, e6b 0 14 30 0")
+        expect(_size(PAGE_E6, "e6")).to_equal("400 18")
+        expect(_rect(PAGE_E6, "e6a", "e6")).to_equal("0 0 30 0")
+        expect(_rect(PAGE_E6, "e6b", "e6")).to_equal("0 14 30 0")
+
+    it "an empty absolutely positioned box is 0 px high":
+        step("Chrome 159: e7 400 x 20, e7a 0 0 30 0")
+        expect(_size(PAGE_E7, "e7")).to_equal("400 20")
+        expect(_rect(PAGE_E7, "e7a", "e7")).to_equal("0 0 30 0")
+
+    it "a grid row of empty items is 0 px high":
+        step("Chrome 159: e9 400 x 10, e9a 0 0 200 0, e9b 200 0 200 0, e9c 0 0 200 10")
+        expect(_size(PAGE_E9, "e9")).to_equal("400 10")
+        expect(_rect(PAGE_E9, "e9a", "e9")).to_equal("0 0 200 0")
+        expect(_rect(PAGE_E9, "e9b", "e9")).to_equal("200 0 200 0")
+        expect(_rect(PAGE_E9, "e9c", "e9")).to_equal("0 0 200 10")
+
+    it "an empty item of a column flex container is 0 px high":
+        step("Chrome 159: e10 400 x 10, e10a 0 0 400 0, e10b 0 0 400 10")
+        expect(_size(PAGE_E10, "e10")).to_equal("400 10")
+        expect(_rect(PAGE_E10, "e10a", "e10")).to_equal("0 0 400 0")
+        expect(_rect(PAGE_E10, "e10b", "e10")).to_equal("0 0 400 10")
+
+    it "a block holding only a float is 0 px high":
+        step("Chrome 159: n10 400 x 0, n10a 0 0 30 30")
+        expect(_size(PAGE_N10, "n10")).to_equal("400 0")
+        expect(_rect(PAGE_N10, "n10a", "n10")).to_equal("0 0 30 30")
+
+    it "a block with 1 px of content keeps its margins apart":
+        step("Chrome 159: n11 400 x 23, n11a 0 0 400 1, n11b 0 9 400 1, n11c 0 18 400 5")
+        expect(_size(PAGE_N11, "n11")).to_equal("400 23")
+        expect(_rect(PAGE_N11, "n11a", "n11")).to_equal("0 0 400 1")
+        expect(_rect(PAGE_N11, "n11b", "n11")).to_equal("0 9 400 1")
+        expect(_rect(PAGE_N11, "n11c", "n11")).to_equal("0 18 400 5")
+
+    it "column flow without a template: one `grid-auto-columns` column per item":
+        step("Chrome 159: c1 400 x 10, c1a 0 0 100 10, c1b 100 0 100 10, c1c 200 0 100 10")
+        expect(_size(PAGE_C1, "c1")).to_equal("400 10")
+        expect(_rect(PAGE_C1, "c1a", "c1")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_C1, "c1b", "c1")).to_equal("100 0 100 10")
+        expect(_rect(PAGE_C1, "c1c", "c1")).to_equal("200 0 100 10")
+
+    it "column flow past the template opens `grid-auto-columns` columns":
+        step("Chrome 159: c2 400 x 10, c2a 0 0 100 10, c2b 100 0 50 10, c2c 150 0 50 10")
+        expect(_size(PAGE_C2, "c2")).to_equal("400 10")
+        expect(_rect(PAGE_C2, "c2a", "c2")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_C2, "c2b", "c2")).to_equal("100 0 50 10")
+        expect(_rect(PAGE_C2, "c2c", "c2")).to_equal("150 0 50 10")
+
+    it "a `grid-auto-columns` track list cycles over the implicit columns":
+        step("Chrome 159: c3 400 x 10, c3a 0 0 40 10, c3b 40 0 80 10, c3c 120 0 40 10")
+        expect(_size(PAGE_C3, "c3")).to_equal("400 10")
+        expect(_rect(PAGE_C3, "c3a", "c3")).to_equal("0 0 40 10")
+        expect(_rect(PAGE_C3, "c3b", "c3")).to_equal("40 0 80 10")
+        expect(_rect(PAGE_C3, "c3c", "c3")).to_equal("120 0 40 10")
+
+    it "a definite column past the template opens implicit columns":
+        step("Chrome 159: c4 400 x 20, c4a 0 0 100 10, c4b 160 0 60 10, c4c 0 10 100 10")
+        expect(_size(PAGE_C4, "c4")).to_equal("400 20")
+        expect(_rect(PAGE_C4, "c4a", "c4")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_C4, "c4b", "c4")).to_equal("160 0 60 10")
+        expect(_rect(PAGE_C4, "c4c", "c4")).to_equal("0 10 100 10")
+
+    it "column flow, no `grid-auto-columns`: `auto` columns share the width":
+        step("Chrome 159: c5 400 x 10, c5a 0 0 200 10, c5b 200 0 200 10")
+        expect(_size(PAGE_C5, "c5")).to_equal("400 10")
+        expect(_rect(PAGE_C5, "c5a", "c5")).to_equal("0 0 200 10")
+        expect(_rect(PAGE_C5, "c5b", "c5")).to_equal("200 0 200 10")
+
+    it "column flow fills the template rows, then opens a column":
+        step("Chrome 159: c7 400 x 40, c7a 0 0 100 20, c7b 0 20 100 20, c7c 100 0 100 20, c7d 100 20 100 20, c7e 200 0 100 20")
+        expect(_size(PAGE_C7, "c7")).to_equal("400 40")
+        expect(_rect(PAGE_C7, "c7a", "c7")).to_equal("0 0 100 20")
+        expect(_rect(PAGE_C7, "c7b", "c7")).to_equal("0 20 100 20")
+        expect(_rect(PAGE_C7, "c7c", "c7")).to_equal("100 0 100 20")
+        expect(_rect(PAGE_C7, "c7d", "c7")).to_equal("100 20 100 20")
+        expect(_rect(PAGE_C7, "c7e", "c7")).to_equal("200 0 100 20")
+
+    it "`grid-auto-columns` in em, with a column gap":
+        step("Chrome 159: c8 400 x 10, c8a 0 0 20 10, c8b 25 0 20 10")
+        expect(_size(PAGE_C8, "c8")).to_equal("400 10")
+        expect(_rect(PAGE_C8, "c8a", "c8")).to_equal("0 0 20 10")
+        expect(_rect(PAGE_C8, "c8b", "c8")).to_equal("25 0 20 10")
+
+    it "row flow without a template: one `grid-auto-columns` column":
+        step("Chrome 159: c10 400 x 20, c10a 0 0 100 10, c10b 0 10 100 10")
+        expect(_size(PAGE_C10, "c10")).to_equal("400 20")
+        expect(_rect(PAGE_C10, "c10a", "c10")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_C10, "c10b", "c10")).to_equal("0 10 100 10")
+
+    it "an invalid `grid-auto-columns` track drops the declaration":
+        step("Chrome 159: c11 400 x 10, c11a 0 0 200 10, c11b 200 0 200 10")
+        expect(_size(PAGE_C11, "c11")).to_equal("400 10")
+        expect(_rect(PAGE_C11, "c11a", "c11")).to_equal("0 0 200 10")
+        expect(_rect(PAGE_C11, "c11b", "c11")).to_equal("200 0 200 10")
+
+    it "a percentage `grid-auto-columns` is of the grid width":
+        step("Chrome 159: c12 400 x 10, c12a 0 0 100 10, c12b 100 0 100 10")
+        expect(_size(PAGE_C12, "c12")).to_equal("400 10")
+        expect(_rect(PAGE_C12, "c12a", "c12")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_C12, "c12b", "c12")).to_equal("100 0 100 10")
+
+    it "`minmax(<length>, auto)` columns stretch like `auto`":
+        step("Chrome 159: c13 400 x 10, c13a 0 0 200 10, c13b 200 0 200 10")
+        expect(_size(PAGE_C13, "c13")).to_equal("400 10")
+        expect(_rect(PAGE_C13, "c13a", "c13")).to_equal("0 0 200 10")
+        expect(_rect(PAGE_C13, "c13b", "c13")).to_equal("200 0 200 10")
+
+    it "an `auto` implicit column is its content plus an equal share":
+        step("Chrome 159: d1 400 x 10, d1a 0 0 180 10, d1b 180 0 220 10")
+        expect(_size(PAGE_D1, "d1")).to_equal("400 10")
+        expect(_rect(PAGE_D1, "d1a", "d1")).to_equal("0 0 180 10")
+        expect(_rect(PAGE_D1, "d1b", "d1")).to_equal("180 0 220 10")
+
+    it "an `auto` implicit column takes what the template leaves":
+        step("Chrome 159: d3 400 x 10, d3a 0 0 100 10, d3b 100 0 300 10")
+        expect(_size(PAGE_D3, "d3")).to_equal("400 10")
+        expect(_rect(PAGE_D3, "d3a", "d3")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_D3, "d3b", "d3")).to_equal("100 0 300 10")
+
+    it "an empty `auto` implicit column still shares the width":
+        step("Chrome 159: d5 400 x 10, d5a 0 0 100 10, d5b 250 0 150 10")
+        expect(_size(PAGE_D5, "d5")).to_equal("400 10")
+        expect(_rect(PAGE_D5, "d5a", "d5")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_D5, "d5b", "d5")).to_equal("250 0 150 10")
+
+    it "a column-spanning item in column flow":
+        step("Chrome 159: d7 400 x 40, d7a 0 0 50 20, d7b 0 20 100 20, d7c 50 0 50 20, d7d 100 0 50 20")
+        expect(_size(PAGE_D7, "d7")).to_equal("400 40")
+        expect(_rect(PAGE_D7, "d7a", "d7")).to_equal("0 0 50 20")
+        expect(_rect(PAGE_D7, "d7b", "d7")).to_equal("0 20 100 20")
+        expect(_rect(PAGE_D7, "d7c", "d7")).to_equal("50 0 50 20")
+        expect(_rect(PAGE_D7, "d7d", "d7")).to_equal("100 0 50 20")
+
+    it "`justify-content:start` leaves `auto` columns at their content":
+        step("Chrome 159: d8 400 x 10, d8a 0 0 30 10, d8b 30 0 70 10")
+        expect(_size(PAGE_D8, "d8")).to_equal("400 10")
+        expect(_rect(PAGE_D8, "d8a", "d8")).to_equal("0 0 30 10")
+        expect(_rect(PAGE_D8, "d8b", "d8")).to_equal("30 0 70 10")
+
+    it "items in implicit columns stretch to the row":
+        step("Chrome 159: d9 400 x 30, d9a 0 0 100 10, d9b 100 0 100 30, d9c 200 0 100 30")
+        expect(_size(PAGE_D9, "d9")).to_equal("400 30")
+        expect(_rect(PAGE_D9, "d9a", "d9")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_D9, "d9b", "d9")).to_equal("100 0 100 30")
+        expect(_rect(PAGE_D9, "d9c", "d9")).to_equal("200 0 100 30")
+
+    it "implicit column with a row gap":
+        step("Chrome 159: d11 400 x 25, d11a 0 0 100 10, d11b 0 15 100 10")
+        expect(_size(PAGE_D11, "d11")).to_equal("400 25")
+        expect(_rect(PAGE_D11, "d11a", "d11")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_D11, "d11b", "d11")).to_equal("0 15 100 10")
+
+    it "column flow past a two-column template":
+        step("Chrome 159: d12 400 x 10, d12a 0 0 100 10, d12b 100 0 100 10, d12c 200 0 200 10")
+        expect(_size(PAGE_D12, "d12")).to_equal("400 10")
+        expect(_rect(PAGE_D12, "d12a", "d12")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_D12, "d12b", "d12")).to_equal("100 0 100 10")
+        expect(_rect(PAGE_D12, "d12c", "d12")).to_equal("200 0 200 10")
+
+    it "a definite column among auto-placed column-flow items":
+        step("Chrome 159: d13 400 x 10, d13a 50 0 50 10, d13b 0 0 50 10, d13c 100 0 50 10")
+        expect(_size(PAGE_D13, "d13")).to_equal("400 10")
+        expect(_rect(PAGE_D13, "d13a", "d13")).to_equal("50 0 50 10")
+        expect(_rect(PAGE_D13, "d13b", "d13")).to_equal("0 0 50 10")
+        expect(_rect(PAGE_D13, "d13c", "d13")).to_equal("100 0 50 10")
+
+    it "`minmax(50px, auto)` columns under `justify-content:start`":
+        step("Chrome 159: d14 400 x 10, d14a 0 0 50 10, d14b 50 0 70 10")
+        expect(_size(PAGE_D14, "d14")).to_equal("400 10")
+        expect(_rect(PAGE_D14, "d14a", "d14")).to_equal("0 0 50 10")
+        expect(_rect(PAGE_D14, "d14b", "d14")).to_equal("50 0 70 10")
+
+    it "margin and percent padding resolve against the implicit column":
+        step("Chrome 159: d15 410 x 40, d15a 7 7 96 10, d15b 115 5 100 30")
+        expect(_size(PAGE_D15, "d15")).to_equal("410 40")
+        expect(_rect(PAGE_D15, "d15a", "d15")).to_equal("7 7 96 10")
+        expect(_rect(PAGE_D15, "d15b", "d15")).to_equal("115 5 100 30")
+
+    it "a span past the template opens an implicit column":
+        step("Chrome 159: d16 400 x 20, d16a 0 0 160 10, d16b 0 10 100 10")
+        expect(_size(PAGE_D16, "d16")).to_equal("400 20")
+        expect(_rect(PAGE_D16, "d16a", "d16")).to_equal("0 0 160 10")
+        expect(_rect(PAGE_D16, "d16b", "d16")).to_equal("0 10 100 10")
+
+    it "column flow inside a full template is unchanged":
+        step("Chrome 159: d17 400 x 20, d17a 0 0 100 10, d17b 0 10 100 10, d17c 100 0 100 10, d17d 100 10 100 10")
+        expect(_size(PAGE_D17, "d17")).to_equal("400 20")
+        expect(_rect(PAGE_D17, "d17a", "d17")).to_equal("0 0 100 10")
+        expect(_rect(PAGE_D17, "d17b", "d17")).to_equal("0 10 100 10")
+        expect(_rect(PAGE_D17, "d17c", "d17")).to_equal("100 0 100 10")
+        expect(_rect(PAGE_D17, "d17d", "d17")).to_equal("100 10 100 10")
+
+    it "a definite row gives column flow its row count":
+        step("Chrome 159: d18 400 x 20, d18a 0 0 200 10, d18b 0 10 200 10, d18c 200 0 200 10")
+        expect(_size(PAGE_D18, "d18")).to_equal("400 20")
+        expect(_rect(PAGE_D18, "d18a", "d18")).to_equal("0 0 200 10")
+        expect(_rect(PAGE_D18, "d18b", "d18")).to_equal("0 10 200 10")
+        expect(_rect(PAGE_D18, "d18c", "d18")).to_equal("200 0 200 10")

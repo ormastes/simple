@@ -1139,10 +1139,16 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
         normalized = normalized + size.to_string() + "px"
     normalized
 
-# One `grid-auto-rows` track -> `<N>px` (fixed), `auto` (content sized),
+# One `grid-auto-rows` / `grid-auto-columns` track -> `<N>px` (fixed), `auto`
+# (content sized),
 # `<N>auto` (content sized, N px floor: `minmax(<length>, auto)`) or `<N>fr`.
-# "" rejects the track. A percentage row in an auto-height grid is `auto`.
-fn normalized_grid_auto_track(token: text, font_px: i32) -> text:
+# "" rejects the track. A percentage is `auto` for a row (auto-height grid)
+# and `<N>%` of the grid width for a column (`percent_definite`, whole N).
+fn normalized_grid_auto_track(token: text, font_px: i32, percent_definite: bool) -> text:
+    if percent_definite and token.ends_with("%"):
+        val percent = normalized_grid_positive_int(token.substring(0, token.byte_len() - 1))
+        if percent > 0:
+            return "{percent}%"
     if token == "auto" or token == "min-content" or token == "max-content" or token.ends_with("%"):
         return "auto"
     if token.starts_with("minmax(") and token.ends_with(")"):
@@ -1150,8 +1156,8 @@ fn normalized_grid_auto_track(token: text, font_px: i32) -> text:
         if comma < 0:
             return ""
         val floor_px = _padding_length_px(token.substring(7, comma), font_px)
-        val limit = normalized_grid_auto_track(token.substring(comma + 1, token.byte_len() as i32 - 1).trim(), font_px)
-        if floor_px < 0 or limit == "" or limit.ends_with("px"):
+        val limit = normalized_grid_auto_track(token.substring(comma + 1, token.byte_len() as i32 - 1).trim(), font_px, false)
+        if floor_px < 0 or limit == "" or limit.ends_with("px") or limit.ends_with("%"):
             return ""
         if limit.ends_with("fr"):
             return limit
@@ -1162,9 +1168,10 @@ fn normalized_grid_auto_track(token: text, font_px: i32) -> text:
     val size = _padding_length_px(token, font_px)
     if size >= 0: "{size}px" else: ""
 
-# `grid-auto-rows` -> space-joined tracks, cycled over the implicit rows (CSS
+# `grid-auto-rows` / `grid-auto-columns` -> space-joined tracks, cycled over
+# the implicit rows / columns (CSS
 # Grid 7.6). "" drops the declaration (every implicit row stays content sized).
-fn normalized_grid_auto_tracks(raw: text, font_px: i32) -> text:
+fn normalized_grid_auto_tracks(raw: text, font_px: i32, percent_definite: bool) -> text:
     val value = raw.trim().lower()
     val n = value.byte_len() as i32
     var normalized = ""
@@ -1179,7 +1186,7 @@ fn normalized_grid_auto_tracks(raw: text, font_px: i32) -> text:
             depth = depth - 1
         elif ch == " " and depth == 0:
             if i > start:
-                val track = normalized_grid_auto_track(value.substring(start, i), font_px)
+                val track = normalized_grid_auto_track(value.substring(start, i), font_px, percent_definite)
                 if track == "":
                     return ""
                 if normalized != "":
@@ -1334,10 +1341,15 @@ fn apply_grid_decls(mut st: Style, table: [text]):
     if areas != "":
         st.grid_template_areas = areas
     val auto_rows = normalized_grid_auto_tracks(
-        decl_tbl_get(table, "grid-auto-rows"), st.font_size
+        decl_tbl_get(table, "grid-auto-rows"), st.font_size, false
     )
     if auto_rows != "":
         st.grid_auto_rows = auto_rows
+    val auto_columns = normalized_grid_auto_tracks(
+        decl_tbl_get(table, "grid-auto-columns"), st.font_size, true
+    )
+    if auto_columns != "":
+        st.grid_auto_columns = auto_columns
     if normalized_grid_auto_flow(decl_tbl_get(table, "grid-auto-flow")):
         st.grid_auto_flow_column = true
     val area = normalized_grid_area(decl_tbl_get(table, "grid-area"))
@@ -1464,6 +1476,7 @@ fn _apply_decls_on_writing_mode(
         decl_tbl_last_index(table, "grid-template-areas") >= 0 or
         decl_tbl_last_index(table, "grid-auto-flow") >= 0 or
         decl_tbl_last_index(table, "grid-auto-rows") >= 0 or
+        decl_tbl_last_index(table, "grid-auto-columns") >= 0 or
         decl_tbl_last_index(table, "grid-area") >= 0
     )
     if not has_grid_declaration:
@@ -1485,6 +1498,7 @@ fn _apply_decls_on_writing_mode(
     val area = st.grid_area
     val auto_flow_column = st.grid_auto_flow_column
     val auto_rows = st.grid_auto_rows
+    val auto_columns = st.grid_auto_columns
     var result = _apply_decls_without_grid(
         st, decls, table, em_base, logical_writing_mode, apply_display
     )
@@ -1496,6 +1510,7 @@ fn _apply_decls_on_writing_mode(
     result.grid_area = area
     result.grid_auto_flow_column = auto_flow_column
     result.grid_auto_rows = auto_rows
+    result.grid_auto_columns = auto_columns
     apply_grid_decls(result, table)
     result = apply_authored_style_metadata(
         result, st, table, logical_writing_mode)
@@ -1571,6 +1586,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         st.grid_area = ""
         st.grid_auto_flow_column = false
         st.grid_auto_rows = ""
+        st.grid_auto_columns = ""
         st.text_decoration_overline = false
         st.text_decoration_line_through = false
         st.resolved_font_identity = ""
@@ -1840,6 +1856,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     st.grid_area = ""
     st.grid_auto_flow_column = false
     st.grid_auto_rows = ""
+    st.grid_auto_columns = ""
     st.text_decoration_overline = false
     st.text_decoration_line_through = false
     st.resolved_font_identity = ""
