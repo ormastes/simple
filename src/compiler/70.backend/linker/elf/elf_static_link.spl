@@ -509,9 +509,11 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
         return 36
     if n == ".got.plt":
         return 37
-    if n == ".tdata":
+    # .tdata (any SHF_TLS PROGBITS) must sit directly before .tbss so PT_TLS
+    # is one contiguous block; every other RW section sorts before it.
+    if n == ".tdata" or (s.sh_flags & 0x400) != 0:
         return 38
-    38
+    37
 
 fn elf_sort_outs(secs: [ElfOutSec]) -> [ElfOutSec]:
     """Stable insertion sort by elf_out_rank."""
@@ -546,7 +548,11 @@ fn elf_is_synth(name: text) -> bool:
         name == "__rela_iplt_start" or name == "__rela_iplt_end" or
         name == "__rel_iplt_start" or name == "__rel_iplt_end"
 
-fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>:
+fn elf_got_base_sec(target: RelocArch) -> text:
+    """Section _GLOBAL_OFFSET_TABLE_ marks: .got on ARM (lld gotBaseSymInGotPlt=false), else .got.plt."""
+    if target == RelocArch.Arm32: ".got" else: ".got.plt"
+
+fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text, target: RelocArch) -> Result<i64, text>:
     if name == "__ehdr_start" or name == "__executable_start":
         return Ok(base)
     if name == "_DYNAMIC":
@@ -555,9 +561,10 @@ fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>
             return Err("undefined symbol: _DYNAMIC (output has no .dynamic)")
         return Ok(plan.vaddrs[d])
     if name == "_GLOBAL_OFFSET_TABLE_":
-        val g = elf_exec_find(plan, ".got.plt")
+        val gsec = elf_got_base_sec(target)
+        val g = elf_exec_find(plan, gsec)
         if g < 0:
-            return Err("undefined symbol: _GLOBAL_OFFSET_TABLE_ (output has no .got.plt)")
+            return Err("undefined symbol: _GLOBAL_OFFSET_TABLE_ (output has no {gsec})")
         return Ok(plan.vaddrs[g])
     var sec = ".init_array"
     if name.contains("_iplt_"):
@@ -747,7 +754,7 @@ fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, t
     if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
         if ctx.res.defined.has(sym.name):
             return elf_entry_addr(ctx, lay, ctx.res.defined[sym.name])
-        return elf_synth_addr(lay.plan, lay.base, sym.name)
+        return elf_synth_addr(lay.plan, lay.base, sym.name, ctx.target)
     if sym.st_shndx == SHN_ABS:
         return Ok(sym.st_value)
     if sym.st_shndx == SHN_UNDEF:
@@ -1218,7 +1225,7 @@ fn elf_sym_hidden(sym: ElfSymbol) -> bool:
 fn elf_is_definer(ctx: ElfLinkCtx, oi: i64, sym: ElfSymbol) -> bool:
     sym.st_shndx != SHN_UNDEF and ctx.res.defined.has(sym.name) and ctx.res.defined[sym.name].obj_idx == oi
 
-fn elf_synth_shndx(plan: ElfExecPlan, name: text) -> i64:
+fn elf_synth_shndx(plan: ElfExecPlan, name: text, target: RelocArch) -> i64:
     """Header index of the section a linker-defined symbol points into, or -1."""
     if name == "__ehdr_start" or name == "__executable_start":
         return 1
@@ -1228,7 +1235,7 @@ fn elf_synth_shndx(plan: ElfExecPlan, name: text) -> i64:
     if name == "_DYNAMIC":
         sec = ".dynamic"
     else if name == "_GLOBAL_OFFSET_TABLE_":
-        sec = ".got.plt"
+        sec = elf_got_base_sec(target)
     else if name.starts_with("__fini_array"):
         sec = ".fini_array"
     else if name.starts_with("__preinit_array"):
@@ -1307,9 +1314,9 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool) -> Result<ElfSym
         oi = oi + 1
     for n in order:
         if elf_is_synth(n) and not ctx.res.defined.has(n):
-            val sh = elf_synth_shndx(lay.plan, n)
+            val sh = elf_synth_shndx(lay.plan, n, ctx.target)
             if sh > 0:
-                rows.add(n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n)?, 0)
+                rows.add(n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n, ctx.target)?, 0)
                 demoted[n] = true
     # ld.lld defines _DYNAMIC (hidden) whenever there is a .dynamic, referenced or not
     val dyn = elf_exec_find(lay.plan, ".dynamic")
@@ -2153,7 +2160,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     if veneers.count() > 0:
         secs = secs.push(elf_out_sec(".veneer", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 4,
             veneers.count() * ARM_VENEER_SLOT, ELF_SEG_RX))
-    if sc.got_keys.len() > 0:
+    if sc.got_keys.len() > 0 or (need_got_base and target == RelocArch.Arm32):
         secs = secs.push(elf_out_sec(".got", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, got_ws, sc.got_keys.len() * got_ws, ELF_SEG_RW))
     if pie or dynamic:
         var dlink = ""
@@ -2483,8 +2490,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             got.extend(elf_got_word(w32, 0))
             rela_sym.extend(elf_rela_entry(slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0))
         else if r.rclass == RC_TLS_IE:
-            got.extend(elf_got_word(w32, elf_tls_tprel(plan, target,
-                elf_ref_addr(ctx, lay, r)? + r.addend)?))
+            # slot = tprel(S); A belongs to the GOT(S) + A - P access (ld.lld)
+            got.extend(elf_got_word(w32, elf_tls_tprel(plan, target, elf_ref_addr(ctx, lay, r)?)?))
         else if r.kind == SYMREF_IMPORT and sc.copy_idx.has(r.name):
             got.extend(elf_got_word(w32, elf_ref_addr(ctx, lay, r)?))
         else if r.kind == SYMREF_IMPORT:
@@ -2659,5 +2666,5 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
 export ElfStaticInputs, ElfLinkRequest
 export elf_static_link, elf_link, elf_link_stripped, elf_link_configured, elf_link_structural
 export elf_link_with_operations, ElfComposedImageV1
-export ELF_STATIC_BASE, elf_arm_float_flags
+export ELF_STATIC_BASE, elf_arm_float_flags, elf_sort_outs, elf_got_base_sec
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE

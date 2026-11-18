@@ -205,3 +205,9 @@ Reference symbol values (llvm-readelf -s): a64 first_message 0x40000000,
 _start 0x4000000c, other_message 0x4000004c, tail_message 0x40000058,
 string_sink 0x40000098; x64 long_message 0x400000, _start 0x400010,
 short_message 0x400030, string_sink 0x400048.
+## tls_ie_arm.o / tls_ie_def_arm.o
+
+armv7 initial-exec TLS through an R_ARM_TLS_IE32 GOT slot (ld.lld slot = 0xc):
+
+    clang --target=armv7-linux-gnueabihf -mtp=cp15 -ffreestanding -fPIC -O1 -c tls_ie_arm.c -o tls_ie_arm.o
+    clang --target=armv7-linux-gnueabihf -ffreestanding -fPIC -O1 -c tls_ie_def_arm.c -o tls_ie_def_arm.o

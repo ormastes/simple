@@ -10,7 +10,7 @@
 # @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
 # @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
 
-use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link, elf_got_base_sec}
 use compiler.backend.linker.reloc_engine.{
     RelocArch, reloc_apply, reloc_patch_bytes,
     R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC, R_AARCH64_PREL32,
@@ -140,3 +140,33 @@ describe "elf_static_link - static GOT for clang -fPIC objects":
         if rel >= 0x80000000:
             rel = rel - 0x100000000
         expect(text_v + 8 + rel).to_equal(sec_addr(b, ".rodata"))
+
+# ELF32 section lookup (shdr 40 bytes; addr/offset at +12/+16).
+fn shdr32_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd32(b, 0x20)
+    val shnum = rd16(b, 0x30)
+    val stroff = rd32(b, shoff + rd16(b, 0x32) * 40 + 16)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 40
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+describe "ELF32 static TLS initial-exec GOT":
+    it "armv7 TLS_IE32 slot holds tprel(S), not tprel(S + A)":
+        # repro: armv7 static glibc __ctype_init read _nl_current_LC_CTYPE's
+        # slot as tprel(S + literal-pool bias) and crashed. ld.lld writes 0xc.
+        val out = link_or_empty([load_fixture("tls_ie_arm.o"), load_fixture("tls_ie_def_arm.o")], RelocArch.Arm32)
+        expect(out.len() > 0).to_equal(true)
+        val got = shdr32_by_name(out, ".got")
+        expect(got >= 0).to_equal(true)
+        expect(rd32(out, rd32(out, got + 16))).to_equal(0xc)
+
+    it "ARM _GLOBAL_OFFSET_TABLE_ marks .got, the origin GOT_BREL/BASE_PREL use":
+        # repro: glibc setjmp.o added a GOT_BREL offset (from .got) to
+        # _GLOBAL_OFFSET_TABLE_ (.got.plt) and loaded _dl_hwcap from .bss
+        expect(elf_got_base_sec(RelocArch.Arm32)).to_equal(".got")
+        expect(elf_got_base_sec(RelocArch.X86_64)).to_equal(".got.plt")
+        expect(elf_got_base_sec(RelocArch.I386)).to_equal(".got.plt")
