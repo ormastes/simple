@@ -24,6 +24,7 @@ use app.test_daemon.{
     test_daemon_mcdc_child_profile_arg
 }
 use app.test_daemon.agent_pool.{AgentPool, agent_pool_new}
+use app.test_cache_shared.{shared_cache_clear_memo}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_load}
 use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
 use app.test_daemon.resource_policy.{
@@ -76,6 +77,7 @@ impl TestDaemon:
 
     me run():
         while self.runner.is_running():
+            shared_cache_clear_memo()
             self.runner.run_poll_cycle(self.handle_request)
 
             # Periodic session broker cleanup every 50 cycles
@@ -175,7 +177,9 @@ impl TestDaemon:
         # so it may serve and record MC/DC-on runs only: an off/dynamic result
         # must never replay to a client that asked for a different mode.
         val mcdc_mode = test_request_mcdc_mode(req.fields)
-        if clean != "true" and mcdc_mode == "on":
+        if clean == "true":
+            shared_cache_clear_memo()
+        elif mcdc_mode == "on":
             val cached = self.incremental_state.check_freshness(test_path)
             if cached.test_path != "":
                 # Remove from active
@@ -203,6 +207,7 @@ impl TestDaemon:
     # --- Run all tests ---
 
     fn handle_run_all(req: DaemonRequest) -> DaemonResponse:
+        shared_cache_clear_memo()
         val filter = req.fields["filter"] ?? ""
         val test_files = discover_test_files(filter)
 
@@ -246,6 +251,7 @@ impl TestDaemon:
     # --- Clean run (bypass cache) ---
 
     fn handle_clean_run(req: DaemonRequest) -> DaemonResponse:
+        shared_cache_clear_memo()
         if req.fields.contains_key("native_profile"):
             return self.handle_run_single(req)
         val test_path = req.fields["test_path"] ?? ""

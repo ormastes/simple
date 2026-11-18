@@ -24,16 +24,39 @@ use app.test_cache_shared.{
     shared_cache_hash_compute_count,
     shared_cache_reset_hash_compute_count
 }
-use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_exists, file_stat}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, sleep_ms}
 use std.nogc_sync_mut.io_runtime.{file_delete}
+use app.test_incremental_state_shared.{incremental_test_state_new}
 
 fn _spec_root() -> text:
     "build/test_tmp/test_cache_shared_spec_{getpid()}"
 
 fn _spec_path(name: text) -> text:
     "{_spec_root()}/{name}"
+
+fn _now_unix_secs() -> i64:
+    val us = time_sample_unix_micros_or_failure()
+    if us <= 0:
+        return 0
+    us / 1000000
+
+fn _align_fresh_wall_second():
+    val us = time_sample_unix_micros_or_failure()
+    if us > 0 and (us % 1000000) > 800000:
+        sleep_ms(250)
+
+fn _wait_until_non_racy(path: text):
+    var attempts = 0
+    while attempts < 35:
+        val mtime = file_stat(path)
+        val now_s = _now_unix_secs()
+        if mtime > 0 and now_s > 0 and (now_s - mtime) >= 2:
+            return
+        sleep_ms(100)
+        attempts = attempts + 1
 
 fn _cleanup_spec_root():
     val root = _spec_root()
@@ -46,8 +69,9 @@ describe "app.test_cache_shared":
     after_each:
         _cleanup_spec_root()
 
-    it "reuses memoized SHA-256 digests when live (mtime, size) matches including empty files":
-        step("Verify shared dependency digests are computed once when (mtime, size) matches")
+    it "reuses memoized SHA-256 digests for older non-racy files including empty files":
+        """Verify untouched files with mtime <= now_s - 2 hit the (mtime, size) memo without re-hashing."""
+        step("Wait past racy window and verify shared dependency digests are computed once when (mtime, size) matches")
         _cleanup_spec_root()
         val root = _spec_root()
         expect(dir_create_all(root)).to_be(true)
@@ -64,6 +88,9 @@ describe "app.test_cache_shared":
         expect(file_write(dep_2, "val dep_two = 2\n")).to_be(true)
         expect(file_write(dep_empty, "")).to_be(true)
 
+        _wait_until_non_racy(dep_empty)
+        expect(_now_unix_secs() - file_stat(dep_empty) >= 2).to_be(true)
+
         shared_cache_clear_memo()
         shared_cache_reset_hash_compute_count()
 
@@ -72,7 +99,7 @@ describe "app.test_cache_shared":
         entries[spec_a] = shared_cache_build_entry(spec_a, deps, 0, 1, 0, 0, 10, "")
         expect(shared_cache_hash_compute_count()).to_equal(4)
 
-        # Building a second entry sharing all 3 deps only hashes spec_b itself.
+        # Building a second entry sharing all 3 non-racy deps only hashes spec_b itself.
         entries[spec_b] = shared_cache_build_entry(spec_b, deps, 0, 1, 0, 0, 11, "")
         expect(shared_cache_hash_compute_count()).to_equal(5)
 
@@ -87,7 +114,37 @@ describe "app.test_cache_shared":
         expect(second_check.result_status).to_equal(0)
         expect(shared_cache_hash_compute_count()).to_equal(6)
 
+    it "detects same-second same-size dependency overwrites as stale without manual invalidation":
+        """Verify raceless (mtime, size) memoization never serves a false cache hit on same-second same-byte-length dependency edits."""
+        step("Build cache entry, warm freshness check, then overwrite dependency in the same second with identical byte length")
+        _cleanup_spec_root()
+        expect(dir_create_all(_spec_root())).to_be(true)
+
+        _align_fresh_wall_second()
+        val spec_path = _spec_path("racy_dep_spec.spl")
+        val dep_path = _spec_path("racy_dep.spl")
+        expect(file_write(spec_path, "describe \"racy_dep\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        expect(file_write(dep_path, "val magic_const = 100\n")).to_be(true)
+        val initial_mtime = file_stat(dep_path)
+
+        var entries: {text: TestCacheEntry} = {}
+        val deps = [dep_path]
+        entries[spec_path] = shared_cache_build_entry(spec_path, deps, 0, 1, 0, 0, 5, "")
+        expect(shared_cache_check_freshness(entries, spec_path, deps).result_status).to_equal(0)
+
+        # Overwrite dep_path with identical byte length (22 bytes) without calling shared_cache_invalidate_path.
+        expect(file_write(dep_path, "val magic_const = 999\n")).to_be(true)
+        expect(file_stat(dep_path)).to_equal(initial_mtime)
+        val after_overwrite = shared_cache_check_freshness(entries, spec_path, deps)
+        expect(after_overwrite.result_status).to_equal(-1)
+
+        # After the racy window expires, the entry must still report stale (proving no racy digest poisoned the memo).
+        _wait_until_non_racy(dep_path)
+        val after_window = shared_cache_check_freshness(entries, spec_path, deps)
+        expect(after_window.result_status).to_equal(-1)
+
     it "bypasses memo when live file size changes and supports path and full memo invalidation":
+        """Verify size-change miss, backslash-normalized shared_cache_invalidate_path, and shared_cache_clear_memo."""
         step("Verify size-change miss, shared_cache_invalidate_path, and shared_cache_clear_memo")
         _cleanup_spec_root()
         expect(dir_create_all(_spec_root())).to_be(true)
@@ -99,37 +156,34 @@ describe "app.test_cache_shared":
         expect(file_write(spec_a, "describe \"inv\"")).to_be(true)
         expect(file_write(dep_1, "alpha")).to_be(true)
         expect(file_write(dep_2, "beta-unchanged")).to_be(true)
+        _wait_until_non_racy(dep_2)
 
         var entries: {text: TestCacheEntry} = {}
         val deps = [dep_1, dep_2]
         entries[spec_a] = shared_cache_build_entry(spec_a, deps, 0, 1, 0, 0, 5, "")
 
-        # Warm spec_a in memo.
+        # Warm non-racy spec_a, dep_1, dep_2 in memo.
         expect(shared_cache_check_freshness(entries, spec_a, deps).result_status).to_equal(0)
 
-        # Size-changing edit invalidates automatically without explicit invalidation call.
+        # Size-changing edit invalidates dep_1 automatically while spec_a and dep_2 hit memo.
         shared_cache_reset_hash_compute_count()
         expect(file_write(dep_1, "alpha-extended")).to_be(true)
         val after_size_change = shared_cache_check_freshness(entries, spec_a, deps)
         expect(after_size_change.result_status).to_equal(-1)
         expect(shared_cache_hash_compute_count()).to_equal(1)
 
-        # Same-size edit on dep_1 with shared_cache_invalidate_path (using Windows backslash spelling).
-        expect(file_write(dep_1, "alpha")).to_be(true)
-        shared_cache_invalidate_path(dep_1)
+        # Wait past racy window on updated dep_1, rebuild, warm memo, and verify backslash path invalidation.
+        _wait_until_non_racy(dep_1)
         entries[spec_a] = shared_cache_build_entry(spec_a, deps, 0, 1, 0, 0, 5, "")
         expect(shared_cache_check_freshness(entries, spec_a, deps).result_status).to_equal(0)
 
-        expect(file_write(dep_1, "omega")).to_be(true)
         shared_cache_invalidate_path(dep_1.replace("/", "\\"))
         shared_cache_reset_hash_compute_count()
-        val after_same_size_dep = shared_cache_check_freshness(entries, spec_a, deps)
-        expect(after_same_size_dep.result_status).to_equal(-1)
+        val after_path_inv = shared_cache_check_freshness(entries, spec_a, deps)
+        expect(after_path_inv.result_status).to_equal(0)
         expect(shared_cache_hash_compute_count()).to_equal(1)
 
         # Full clear_memo forces every path to re-hash on next check.
-        entries[spec_a] = shared_cache_build_entry(spec_a, deps, 0, 1, 0, 0, 5, "")
-        expect(shared_cache_check_freshness(entries, spec_a, deps).result_status).to_equal(0)
         shared_cache_clear_memo()
         shared_cache_reset_hash_compute_count()
         expect(shared_cache_check_freshness(entries, spec_a, deps).result_status).to_equal(0)
@@ -208,7 +262,10 @@ describe "app.test_cache_shared":
         )
 
         expect(file_delete(gone_spec)).to_be(true)
-        shared_cache_save(entries, cache_path)
+        entries = shared_cache_save(entries, cache_path)
+        expect(entries.contains_key(live_spec)).to_be(true)
+        expect(entries.contains_key("")).to_be(true)
+        expect(entries.contains_key(gone_spec)).to_be(false)
 
         val raw = file_read_text(cache_path)
         expect(raw).to_contain(live_spec)
@@ -245,7 +302,13 @@ describe "app.test_cache_shared":
             )
             i = i + 1
 
-        shared_cache_save(entries, cache_path)
+        entries = shared_cache_save(entries, cache_path)
+        expect(entries.keys().len()).to_equal(MAX_SHARED_TEST_CACHE_ENTRIES)
+        expect(entries.contains_key("synthetic_0")).to_be(false)
+        expect(entries.contains_key("synthetic_9")).to_be(false)
+        expect(entries.contains_key("synthetic_10")).to_be(true)
+        expect(entries.contains_key("synthetic_8201")).to_be(true)
+
         val raw = file_read_text(cache_path)
         val lines = raw.split("\n")
         var entry_lines = 0
@@ -258,3 +321,28 @@ describe "app.test_cache_shared":
         expect(raw.contains("marker_9_end")).to_be(false)
         expect(raw).to_contain("marker_10_end")
         expect(raw).to_contain("marker_8201_end")
+
+    it "prunes deleted and overflow entries from live IncrementalTestState.entries on save":
+        """Verify IncrementalTestState.save updates its in-memory entries map so long-lived daemon cache_entries stays bounded."""
+        step("Record live and deleted specs plus overflow entries in IncrementalTestState and verify save prunes live map")
+        _cleanup_spec_root()
+        expect(dir_create_all(_spec_root())).to_be(true)
+
+        val live_spec = _spec_path("daemon_live_spec.spl")
+        val gone_spec = _spec_path("daemon_gone_spec.spl")
+        val cache_path = _spec_path("daemon_state_cache.sdn")
+        val graph_path = _spec_path("daemon_state_graph.sdn")
+
+        expect(file_write(live_spec, "describe \"live\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        expect(file_write(gone_spec, "describe \"gone\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+
+        var state = incremental_test_state_new(cache_path, graph_path, false)
+        state.record_daemon_result(live_spec, 0, 1, 0, 0, 5, "ok")
+        state.record_daemon_result(gone_spec, 0, 1, 0, 0, 6, "ok")
+        expect(state.entries.keys().len()).to_equal(2)
+
+        expect(file_delete(gone_spec)).to_be(true)
+        state.save()
+        expect(state.entries.keys().len()).to_equal(1)
+        expect(state.entries.contains_key(live_spec)).to_be(true)
+        expect(state.entries.contains_key(gone_spec)).to_be(false)

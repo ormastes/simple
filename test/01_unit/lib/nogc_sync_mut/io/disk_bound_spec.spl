@@ -2,8 +2,14 @@
 
 use std.spec.*
 use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes, disk_bound_mark_used, disk_bound_sweep, disk_bound_keep_newest_dirs, disk_bound_keep_newest_prefix_dirs}
-use app.cli.native_build_parse_closure_owner.{native_build_parse_closure_retire_request_v1, NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1}
-use app.io.env_ops.{env_set}
+use app.cli.native_build_parse_closure_owner.{
+    native_build_parse_closure_retire_request_v1,
+    native_build_parse_closure_teardown_env_v1,
+    NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1,
+    NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1,
+    NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1
+}
+use app.io.env_ops.{env_set, env_unset, env_get}
 use compiler.driver.driver_build.incremental.{build_cache_open, build_cache_record_entry, build_cache_record_entry_at, build_cache_persist, build_cache_entry_is_valid_at}
 use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros, file_write, file_exists, file_delete, file_read, dir_create, dir_exists}
 
@@ -169,4 +175,46 @@ describe "disk bound":
         expect(dir_exists(foreign_dir)).to_equal(true)
         expect(native_build_parse_closure_retire_request_v1(req_dir + "/selection.v1")).to_equal(true)
         expect(dir_exists(req_dir)).to_equal(false)
+        dir_remove_all(root)
+
+    it "retires published SIMPLE_PARSE_CLOSURE_REQUEST on coordinator teardown when SIMPLE_KEEP_CLOSURE_REQUEST is unset or 0 and preserves when 1":
+        """Verify worker coordinator teardown retires closure-request-* when SIMPLE_KEEP_CLOSURE_REQUEST is unset or 0 and preserves it when 1."""
+        step("Preserve closure-request-* when SIMPLE_KEEP_CLOSURE_REQUEST == 1 and retire when 0 or unset")
+        val root = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_coord_teardown"
+        val req_keep = root + "/closure-request-801-11111"
+        val req_zero = root + "/closure-request-802-22222"
+        val req_unset = root + "/closure-request-803-33333"
+        for d in [req_keep, req_zero, req_unset]:
+            dir_create(d, true)
+            file_write(d + "/selection.v1", "selection")
+            file_write(d + "/request.v1", "request")
+
+        # 1) SIMPLE_KEEP_CLOSURE_REQUEST == "1" preserves directory across retire_request_v1("") and teardown_env_v1.
+        expect(env_set("SIMPLE_PARSE_CLOSURE_REQUEST", req_keep + "/request.v1")).to_equal(true)
+        expect(env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "digest_keep")).to_equal(true)
+        expect(env_set(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, "1")).to_equal(true)
+        expect(env_set(NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1, "42")).to_equal(true)
+        expect(env_set(NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1, "1")).to_equal(true)
+        expect(native_build_parse_closure_retire_request_v1("")).to_equal(false)
+        expect(native_build_parse_closure_teardown_env_v1(false)).to_equal(false)
+        expect(dir_exists(req_keep)).to_equal(true)
+        expect(env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "").to_equal("")
+
+        # 2) Shard child (shard_child_run == true) never deletes sibling-shared closure-request-* on teardown.
+        expect(env_set("SIMPLE_PARSE_CLOSURE_REQUEST", req_zero + "/request.v1")).to_equal(true)
+        expect(env_set(NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1, "0")).to_equal(true)
+        expect(native_build_parse_closure_teardown_env_v1(true)).to_equal(false)
+        expect(dir_exists(req_zero)).to_equal(true)
+
+        # 3) SIMPLE_KEEP_CLOSURE_REQUEST == "0" retires closure-request-* via coordinator retire_request_v1("").
+        expect(env_set("SIMPLE_PARSE_CLOSURE_REQUEST", req_zero + "/request.v1")).to_equal(true)
+        expect(native_build_parse_closure_retire_request_v1("")).to_equal(true)
+        expect(dir_exists(req_zero)).to_equal(false)
+
+        # 4) Unset SIMPLE_KEEP_CLOSURE_REQUEST retires closure-request-* on coordinator teardown_env_v1(false).
+        env_unset(NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1)
+        expect(env_set("SIMPLE_PARSE_CLOSURE_REQUEST", req_unset + "/request.v1")).to_equal(true)
+        expect(native_build_parse_closure_teardown_env_v1(false)).to_equal(true)
+        expect(dir_exists(req_unset)).to_equal(false)
+        expect(env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "").to_equal("")
         dir_remove_all(root)
