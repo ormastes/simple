@@ -3,7 +3,7 @@
 # controls. Split out of simple_web_html_layout_renderer_paint_layout.spl,
 # which re-exports every name defined here.
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{html_image_fit_size, input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, SELECT_ARROW_WIDTH_PX, text_line_aligned_x, text_line_needs_paint_width, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{html_image_fit_size, input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_value_vector_x, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, text_line_aligned_x, text_line_needs_paint_width, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
@@ -15,6 +15,7 @@ use std.gc_async_mut.io.mod_stub.{env_get}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
+use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans}
 
 fn _html_draw_ir_component_id(node: HNode, i: i32) -> text:
     if node.id_attr != "":
@@ -1164,37 +1165,82 @@ fn _html_draw_ir_styled_border_commands(
             cmds.push(cmd)
     cmds
 
-fn _html_draw_ir_select_arrow_commands(
-    node: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, i: i32, clip: ClipRect
+# Lowers native form-control spans (form_control_chrome.spl) to Draw IR rects.
+# The spans are DEVICE px relative to the device point (ox * k + dev_x,
+# oy * k + dev_y), where (ox, oy) is a CSS px origin. At k == 1 a span is a
+# plain rect; at k > 1 it carries `device-rect`, which
+# `draw_ir_composition_at_device_scale` applies after scaling the CSS origin.
+# The colours are not scaled by the node opacity: Engine2D applies it to the
+# rects through their `parent_id` (a disabled select at `opacity: 0.7` paints
+# its #808080 arrow as #a5a5a5 on #fafafa, as Chrome 159 does).
+fn _html_draw_ir_chrome_span_commands(
+    base_id: text, parent_id: text, spans: ChromeSpans, ox: i32, oy: i32,
+    dev_x: i32, dev_y: i32, k: i32, clip: ClipRect
 ) -> [DrawIrCommand]:
-    if node.tag != "select" or w < 10 or h < 8 or SELECT_ARROW_WIDTH_PX <= 0 or st.display == "none" or st.visibility_hidden:
+    var commands: [DrawIrCommand] = []
+    var n = 0
+    # cpu-lane-loop-ok: one rect per span of one native control part; bound is the span count of that part
+    while n < spans.xs.len():
+        val color = spans.colors[n]
+        if (color >> 24) != 0u32:
+            val px = dev_x + spans.xs[n]
+            val py = dev_y + spans.ys[n]
+            if k <= 1:
+                var plain = _html_draw_ir_overlay_rect(
+                    "{base_id}_{n}",
+                    ClipRect(x0: ox + px, y0: oy + py, x1: ox + px + spans.ws[n], y1: oy + py + spans.hs[n]),
+                    color, clip
+                )
+                plain.parent_id = parent_id
+                commands.push(plain)
+            else:
+                var device = _html_draw_ir_overlay_rect(
+                    "{base_id}_{n}", ClipRect(x0: ox, y0: oy, x1: ox + 1, y1: oy + 1), color, clip
+                )
+                device.parent_id = parent_id
+                device.computed_style = [
+                    draw_ir_style_prop("device-rect", "{px},{py},{spans.ws[n]},{spans.hs[n]}")
+                ]
+                commands.push(device)
+        n = n + 1
+    commands
+
+# Chrome 159 menulist arrow: an 8k x 4k chevron whose box starts at
+# int(inner right edge - 11.5k) and is centred on the control's device middle
+# row (k = device scale; `extra_h` = the control's device height minus k x h).
+fn _html_draw_ir_select_arrow_commands(
+    node: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, i: i32, clip: ClipRect,
+    k: i32, extra_h: i32
+) -> [DrawIrCommand]:
+    if node.tag != "select" or w < 10 or h < 8 or st.display == "none" or st.visibility_hidden:
         return []
-    var ax1 = x + w - st.border_r - st.pad_r
-    if ax1 > x + w - st.border_r:
-        ax1 = x + w - st.border_r
-    var ax0 = ax1 - SELECT_ARROW_WIDTH_PX
-    if ax0 < x + 2:
-        ax0 = x + 2
-    if ax1 - ax0 < 6:
-        ax1 = x + w - st.border_r
-        ax0 = ax1 - SELECT_ARROW_WIDTH_PX
-        if ax0 < x + 2:
-            ax0 = x + 2
-    if ax1 - ax0 < 5:
+    val arrow_x = ((w - st.border_r) * k * 2 - 23 * k) / 2
+    if arrow_x < 0:
         return []
-    val cx = (ax0 + ax1) / 2
-    val cy = (y + st.border_t + y + h - st.border_b) / 2
-    val chevron_col = _html_draw_ir_scale_color_opacity(
-        if st.fg != 0u32: st.fg else: web_argb(55, 65, 81),
-        st.opacity_pct
+    val base_id = _html_draw_ir_component_id(node, i)
+    _html_draw_ir_chrome_span_commands(
+        base_id + "_select_chevron", base_id,
+        chrome_select_arrow_spans(k, if st.fg != 0u32: st.fg else: web_argb(0, 0, 0)),
+        x, y, arrow_x, (h * k + extra_h) / 2, k, clip
     )
-    val base_id = _html_draw_ir_component_id(node, i) + "_select_chevron"
-    [
-        _html_draw_ir_overlay_rect(base_id + "_0", ClipRect(x0: cx - 3, y0: cy - 2, x1: cx + 4, y1: cy - 1), chevron_col, clip),
-        _html_draw_ir_overlay_rect(base_id + "_1", ClipRect(x0: cx - 2, y0: cy - 1, x1: cx + 3, y1: cy), chevron_col, clip),
-        _html_draw_ir_overlay_rect(base_id + "_2", ClipRect(x0: cx - 1, y0: cy, x1: cx + 2, y1: cy + 1), chevron_col, clip),
-        _html_draw_ir_overlay_rect(base_id + "_3", ClipRect(x0: cx, y0: cy + 1, x1: cx + 1, y1: cy + 2), chevron_col, clip)
-    ]
+
+# Chrome 159 textarea resize grip (`resize` other than `none`): its lines are
+# placed from a point 16k px inside the padding box's bottom-right corner.
+fn _html_draw_ir_textarea_grip_commands(
+    node: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, i: i32, clip: ClipRect,
+    k: i32, extra_h: i32
+) -> [DrawIrCommand]:
+    if node.tag != "textarea" or st.resize == "none" or st.display == "none" or st.visibility_hidden:
+        return []
+    val inner_w = w - st.border_l - st.border_r
+    val inner_h = h - st.border_t - st.border_b
+    if inner_w < 16 or inner_h < 16:
+        return []
+    val base_id = _html_draw_ir_component_id(node, i)
+    _html_draw_ir_chrome_span_commands(
+        base_id + "_resizer", base_id, chrome_resizer_spans(k), x, y,
+        (w - st.border_r - 16) * k, (h - st.border_b - 16) * k + extra_h, k, clip
+    )
 
 fn _html_draw_ir_has_input_text(
     node: HNode, st: Style, box_width: i32
@@ -1233,6 +1279,45 @@ fn _html_draw_ir_input_text_command_from_plan(
             plan.clip.x1 - plan.clip.x0, plan.clip.y1 - plan.clip.y0
         )
     )
+
+# The static value of a text field or button-type `<input>` on the vector-font
+# lane. Chrome 159 shapes it like any other text: real per-glyph advances at
+# the control's own font, on a line box centred in the content box (a default
+# 21 px field at y 8: `Simple` at 13.333px Liberation Sans inks rows 14..25,
+# columns 5..43 of the border box). The plan's fixed-pitch cell model (8 px a
+# glyph, a 7-row cell centred in the content box) put the same text at rows
+# 17.. and columns 5..50. The staging raster already paints this model for a
+# font above 8 px (`use_ttf`), and paints the plan's cells at 8 px and below,
+# so the two lanes keep the same rule. A password mask and a live edit
+# overlay keep the plan's model too: their caret and selection are measured
+# in its cells.
+fn _html_draw_ir_input_value_command(
+    nodes: [HNode], st: Style, i: i32, plan: InputTextPaintPlan,
+    x: i32, y: i32, w: i32, h: i32, vector_fonts: bool
+) -> DrawIrCommand:
+    val node = nodes[i]
+    val flat = _html_draw_ir_input_text_command_from_plan(node, st, i, plan)
+    if not vector_fonts or st.font_size <= 8 or attr_value(node.attrs_raw, "type").trim().lower() == "password":
+        return flat
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+    val content_h = h - st.border_t - st.border_b - st.pad_t - st.pad_b
+    val line_h = style_line_h(st)
+    # A half px of slack rounds down the page, as in Chrome.
+    val line_y = if content_h > line_h: content_y + (content_h - line_h + 1) / 2 else: content_y
+    var resolved = _html_draw_ir_resolved_text_command(
+        nodes, i, node, st, flat.component_id, plan.baseline_x, line_y,
+        plan.text_value, flat.computed_style, flat.clip_rect, true
+    )
+    if resolved.advance_widths.len() == 0:
+        return flat
+    var real_w = 0
+    # cpu-lane-loop-ok: sums one input value's glyph advances; bound is its codepoint count
+    for advance in resolved.advance_widths:
+        real_w = real_w + advance
+    resolved.x = input_value_vector_x(plan, content_x, content_w, real_w)
+    resolved
 
 fn _html_draw_ir_overlay_rect(
     component_id: text, rect: ClipRect, color: u32, clip: ClipRect
@@ -1441,65 +1526,42 @@ fn _html_draw_ir_replaced_media_commands(
         commands.push(pill)
     commands
 
+# Chrome 159 checkbox / radio: the glyph is a square of side min(w, h), centred
+# in the border box (a 40x16 checkbox at (4,3) inks columns 16..31, rows
+# 3..18), drawn from the vector parts of form_control_chrome.spl. The
+# `_checkable_frame` command (and `_checked_indicator` when checked) is a
+# transparent carrier of the control's state; the `_part_<n>` rects paint.
 fn _html_draw_ir_checkable_commands(
     node: HNode, st: Style, i: i32,
-    x: i32, y: i32, width: i32, height: i32, clip: ClipRect
+    x: i32, y: i32, width: i32, height: i32, clip: ClipRect, k: i32
 ) -> [DrawIrCommand]:
     var commands: [DrawIrCommand] = []
-    # Chrome 159 draws the glyph as a square of side min(w, h), centred in
-    # the border box: a 40x16 checkbox at (4,3) inks columns 16..31, rows
-    # 3..18. A 13x13 box is unchanged.
     val side = if width < height: width else: height
-    val control_w = side
-    val control_h = side
     val gx = x + (width - side) / 2
     val gy = y + (height - side) / 2
-    if control_w <= 0 or control_h <= 0:
+    if side <= 0:
         return commands
     val component_id = _html_draw_ir_component_id(node, i)
     val input_type = attr_value(node.attrs_raw, "type").trim().lower()
     val checked = input_is_checked(node)
-    val accent = if st.accent_color != 0u32:
-        st.accent_color
-    else:
-        web_argb(37, 99, 235)
-    val surface = web_argb(248, 250, 252)
-    val radio = input_type == "radio"
+    val accent = if st.accent_color != 0u32: st.accent_color else: web_argb(0, 117, 255)
 
     var frame = _html_draw_ir_overlay_rect(
         component_id + "_checkable_frame",
-        ClipRect(x0: gx, y0: gy, x1: gx + control_w, y1: gy + control_h),
-        surface, clip
+        ClipRect(x0: gx, y0: gy, x1: gx + side, y1: gy + side), 0u32, clip
     )
     frame.parent_id = component_id
     frame.computed_style = [
         draw_ir_style_prop("form-control-part", "frame"),
         draw_ir_style_prop("input-type", input_type),
         draw_ir_style_prop("checked", if checked: "true" else: "false"),
-        draw_ir_style_prop("accent-color", "{accent}"),
-        draw_ir_style_prop("border-top-width", "1"),
-        draw_ir_style_prop("border-right-width", "1"),
-        draw_ir_style_prop("border-bottom-width", "1"),
-        draw_ir_style_prop("border-left-width", "1"),
-        draw_ir_style_prop("border-top-color", "{accent}"),
-        draw_ir_style_prop("border-right-color", "{accent}"),
-        draw_ir_style_prop("border-bottom-color", "{accent}"),
-        draw_ir_style_prop("border-left-color", "{accent}")
+        draw_ir_style_prop("accent-color", "{accent}")
     ]
-    if radio:
-        frame.computed_style.push(draw_ir_style_prop(
-            "border-radius", "{control_w / 2}"
-        ))
     commands.push(frame)
-
-    if checked and control_w > 6 and control_h > 6:
+    if checked:
         var indicator = _html_draw_ir_overlay_rect(
             component_id + "_checked_indicator",
-            ClipRect(
-                x0: gx + 3, y0: gy + 3,
-                x1: gx + control_w - 3, y1: gy + control_h - 3
-            ),
-            accent, clip
+            ClipRect(x0: gx, y0: gy, x1: gx + side, y1: gy + side), 0u32, clip
         )
         indicator.parent_id = component_id
         indicator.computed_style = [
@@ -1508,9 +1570,13 @@ fn _html_draw_ir_checkable_commands(
             draw_ir_style_prop("checked", "true"),
             draw_ir_style_prop("accent-color", "{accent}")
         ]
-        if radio:
-            indicator.computed_style.push(draw_ir_style_prop(
-                "border-radius", "{(control_w - 6) / 2}"
-            ))
         commands.push(indicator)
+    # cpu-lane-loop-ok: the vector part rects of one checkbox / radio; bound is its span count
+    for part in _html_draw_ir_chrome_span_commands(
+        component_id + "_part", component_id,
+        chrome_checkable_spans(
+            input_type == "radio", side, k, checked, attr_present(node.attrs_raw, "disabled"), st.accent_color),
+        gx, gy, 0, 0, k, clip
+    ):
+        commands.push(part)
     commands

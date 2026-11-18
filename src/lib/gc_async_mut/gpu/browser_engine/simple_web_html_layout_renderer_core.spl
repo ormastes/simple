@@ -9,10 +9,26 @@ use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use common.ui.glyph_bitmap_5x7.{glyph_row_bits, glyph_index_for_char_code}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{decl_get, parse_int, HNODE_ATTR_HREF_BIT, font_milli_of}
 
+# Chrome 159 system colours of a DISABLED control (light scheme), as the CSS a
+# styled control computes: `Field` / `ButtonFace` and the border at 30 %.
+val _FORM_CONTROL_DISABLED_BOX: text = ";background-color:rgba(239,239,239,0.3);border-color:rgba(118,118,118,0.3)"
+
+# `<input>` types Chrome paints as a push button (`ButtonFace`, `ButtonText`).
+fn _input_type_is_button(input_type: text) -> bool:
+    input_type == "button" or input_type == "submit" or input_type == "reset"
+
+# `<input>` types Chrome paints as a text field (`Field`, `FieldText`).
+fn _input_type_is_text_field(input_type: text) -> bool:
+    not _input_type_is_button(input_type) and input_type != "range" and input_type != "color" and input_type != "file"
+
 fn form_control_ua_box_decls(node: HNode) -> text:
     """UA-sheet box declarations for a form control (Chrome html.css), or ""
     for any other element. The border colour is Chrome's light-scheme control
-    border."""
+    border. A control does not inherit `color`: Chrome 159 computes
+    `FieldText` / `ButtonText` (rgb(0, 0, 0)) under a coloured parent, #545454
+    for a disabled field, rgba(16, 16, 16, 0.3) for a disabled button and
+    GrayText (#808080) at `opacity: 0.7` for a disabled select."""
+    val disabled = attr_present(node.attrs_raw, "disabled")
     if node.tag == "input":
         # Chrome 159 computes `box-sizing: border-box` for every input type
         # except `image` (content-box): `width:40px;height:16px;padding:2px`
@@ -29,9 +45,19 @@ fn form_control_ua_box_decls(node: HNode) -> text:
             return ""
         if input_type == "image":
             return ""
-        return "border:2px solid #767676;box-sizing:border-box"
+        if _input_type_is_button(input_type):
+            if disabled:
+                return "border:2px solid #767676;box-sizing:border-box;color:rgba(16,16,16,0.3)" + _FORM_CONTROL_DISABLED_BOX
+            return "border:2px solid #767676;box-sizing:border-box;color:#000;background-color:#efefef"
+        if not _input_type_is_text_field(input_type):
+            return "border:2px solid #767676;box-sizing:border-box"
+        if disabled:
+            return "border:2px solid #767676;box-sizing:border-box;color:#545454" + _FORM_CONTROL_DISABLED_BOX
+        return "border:2px solid #767676;box-sizing:border-box;color:#000;background-color:#fff"
     if node.tag == "button":
-        return "border:2px solid #767676"
+        if disabled:
+            return "border:2px solid #767676;color:rgba(16,16,16,0.3)" + _FORM_CONTROL_DISABLED_BOX
+        return "border:2px solid #767676;color:#000;background-color:#efefef"
     if node.tag == "select":
         # Chrome 159 (standards mode, `<!DOCTYPE html>`) computes `box-sizing:
         # border-box` for `<select>`: `width:40px;height:16px;padding:2px` is a
@@ -40,13 +66,64 @@ fn form_control_ua_box_decls(node: HNode) -> text:
         # A listbox (`multiple`, or `size` > 1) is a white `Field`. A menulist
         # gets `background-color: ButtonFace` (Chrome 159 getComputedStyle
         # rgb(239, 239, 239)), but an unstyled one paints its native white
-        # field instead; see _select_author_styled.
+        # field instead; see _apply_native_control_look.
+        if disabled:
+            return "border:1px solid #767676;box-sizing:border-box;color:#808080;opacity:0.7" + _FORM_CONTROL_DISABLED_BOX
         if attr_present(node.attrs_raw, "multiple") or parse_int(attr_value(node.attrs_raw, "size").trim()) > 1:
-            return "border:1px solid #767676;background-color:#fff;box-sizing:border-box"
-        return "border:1px solid #767676;background-color:#efefef;box-sizing:border-box"
+            return "border:1px solid #767676;background-color:#fff;box-sizing:border-box;color:#000"
+        return "border:1px solid #767676;background-color:#efefef;box-sizing:border-box;color:#000"
     if node.tag == "textarea":
-        return "border:1px solid #767676;padding:2px"
+        if disabled:
+            return "border:1px solid #767676;padding:2px;resize:both;color:#545454" + _FORM_CONTROL_DISABLED_BOX
+        return "border:1px solid #767676;padding:2px;resize:both;color:#000;background-color:#fff"
     ""
+
+fn _native_look_set_frame(style: Style, color: u32, fill: u32) -> Style:
+    var st = style
+    st.border_w = 1
+    st.border_l = 1
+    st.border_t = 1
+    st.border_r = 1
+    st.border_b = 1
+    st.border_color = color
+    st.border_color_l = color
+    st.border_color_t = color
+    st.border_color_r = color
+    st.border_color_b = color
+    st.bg = fill
+    st
+
+# Chrome 159 native (`appearance: auto`) look of a control the author did not
+# restyle (no border, background, box-shadow or non-auto appearance): a 1 px
+# #767676 frame at the OUTER edge of the UA border area -- a text field's and
+# a button's computed border is 2 px, so the second px is field / face colour
+# -- over white (field, menulist, textarea) or #efefef (button). The content
+# box is unchanged: the hidden border px moves into the padding. Chrome also
+# rounds the frame (outer radius 2.5 px); the corners stay square here.
+#
+# Disabled, Chrome composites (on #fff and on #204060) a 244 at 68 % field
+# inside a 128 at 36.7 % frame, and a 216 at 44 % face inside a 152 at 45.7 %
+# frame for a button. The fill of a box runs under its border here, so the
+# frame colours are solved for a white page instead: 140 / 172 over the fill
+# give Chrome's #d0d0d0 frame on #f8f8f8 and on #eeeeee.
+fn _apply_native_control_look(style: Style, node: HNode) -> Style:
+    val disabled = attr_present(node.attrs_raw, "disabled")
+    var button = node.tag == "button"
+    if node.tag == "input":
+        val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+        if input_type == "checkbox" or input_type == "radio" or input_type == "hidden" or input_type == "image":
+            return style
+        if not _input_type_is_button(input_type) and not _input_type_is_text_field(input_type):
+            return style
+        button = _input_type_is_button(input_type)
+    var st = style
+    st.pad_l = st.pad_l + st.border_l - 1
+    st.pad_t = st.pad_t + st.border_t - 1
+    st.pad_r = st.pad_r + st.border_r - 1
+    st.pad_b = st.pad_b + st.border_b - 1
+    if button:
+        return _native_look_set_frame(st, if disabled: 0x75ACACACu32 else: 0xFF767676u32, if disabled: 0x70D8D8D8u32 else: 0xFFEFEFEFu32)
+    _native_look_set_frame(st, if disabled: 0x5E8C8C8Cu32 else: 0xFF767676u32, if disabled: 0xADF4F4F4u32 else: 0xFFFFFFFFu32)
 
 # Inked pixel width of the built-in 5x7 bitmap cell for one codepoint, at
 # the rasterizer's scale (web_glyph_scale of the font size). The
@@ -373,7 +450,7 @@ fn _decls_style_control_box(decls: text) -> bool:
                     return true
     false
 
-# Chrome 159 keeps a select's native (`appearance: auto`) menulist look --
+# Chrome 159 keeps a control's native (`appearance: auto`) look -- for a select
 # a white field -- until the author declares a border (radius included),
 # background, box-shadow or a non-auto appearance; then it paints CSS, i.e.
 # the UA ButtonFace fill. Padding, color and font-size do not count. Pinned
@@ -1095,10 +1172,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # the cascade memo above is keyed by tag, not by this attribute.
         if nd.tag == "audio" and not attr_present(nd.attrs_raw, "controls"):
             st.display = "none"
-        if nd.tag == "select" and not _select_author_styled(
+        if (nd.tag == "select" or nd.tag == "input" or nd.tag == "button" or nd.tag == "textarea") and not _select_author_styled(
             combined_decls, inline_normal, combined_important_decls, inline_important
         ):
-            st = apply_decls(st, "background-color:#fff", em_base)
+            st = _apply_native_control_look(st, nd)
         if _wsc_tail_sub_armed():
             _wsc_add_sub2(11, _wsc_now_us() - _sb_t8)
             _sb_t8 = _wsc_now_us()

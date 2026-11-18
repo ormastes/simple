@@ -1,0 +1,503 @@
+"""
+## Purpose and audience
+Purpose: Pin the painted chrome of the form controls against Chrome 159 on
+Linux: the checkbox check mark, the radio dot, the `<select>` arrow, the
+`<textarea>` resize grip, the native (`appearance: auto`) frame and fill of an
+unstyled text field / button, the UA colours of a disabled control, and --
+at device scale 4 -- the device-px height of the painted control box.
+Audience: web renderer paint / Draw IR / device-scale maintainers.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K
+--screenshot`, 300 CSS px wide, the two pages below (Liberation Sans, the
+13.333px UA control font). Page A holds one default control per 44 px band (a
+textarea band is 70 px); page B holds the catalog's
+`padding:8px;border:1px solid #94a3b8;border-radius:5px` controls.
+
+Every fact is measured relative to the control's own box (found by its
+non-white bounding box in its band), so a layout offset of the box does not
+count as a paint difference. Chrome / base 0251987783a / this change:
+
+| fact                                   | Chrome            | base              | now      |
+|----------------------------------------|-------------------|-------------------|----------|
+| checkbox, px differing by > 8 (of 169) | 0                 | 52                | 0        |
+| checked checkbox, same                 | 0                 | 169               | 25       |
+| check mark ink box (red >= 160)        | c2-10 r2-9        | c2-10 r2-10       | = Chrome |
+| radio / checked radio, px differing    | 0 / 0             | 76 / 143          | 0 / 26   |
+| disabled checkbox ring, fill           | d1d1d1 f8f8f8     | 2563eb f8fafc     | = Chrome |
+| select arrow, px differing (12 x 9)    | 0                 | 44                | 4        |
+| select arrow ink box from right / top  | c-12--5 r7-11     | c-13--7 r7-10     | = Chrome |
+| textarea grip, #666 px from the corner | c-9--3 r-9--3 n10 | none              | = Chrome |
+| text field top edge, 2nd row, right    | 767676 ffffff ... | 767676 767676 ... | = Chrome |
+| text field value ink rows              | 6-17              | 9-17              | = Chrome |
+| button frame, 2nd row, face            | 767676 efefef x2  | 767676 x2 ffffff  | = Chrome |
+| styled button face                     | efefef            | ffffff            | = Chrome |
+| disabled field frame, fill             | d0d0d0 f8f8f8     | 767676 ffffff     | = Chrome |
+| disabled button frame, face            | d0d0d0 eeeeee     | 767676 ffffff     | = Chrome |
+| disabled select frame, fill, arrow     | dddddd fafafa a5a5a5 | 767676 ffffff ffffff | dedede fafafa a5a5a5 |
+| K=4 heights select textarea input button | 139 198 133 133 | 140 192 132 132   | = Chrome |
+| K=4 check mark ink box                 | c8-43 r8-41       | c8-43 r8-43       | = Chrome |
+| K=4 checked radio, centre column       | B4 W6 a1 B30 a1 W6 B4 | B4 W8 B28 W8 B4 | = Chrome |
+| K=4 select arrow ink                   | c-49--18 r29-45 n94 | c-55--28 r28-43 n256 | = Chrome |
+| K=4 grip ink                           | c-40--12 r-40--12 n170 | none         | = Chrome |
+
+Open (not pinned here): Chrome rounds the native frame (outer radius 2.5 px,
+so the four corner px are page colour) -- the frame is square here; the
+checked marks differ from Chrome by 25 / 26 edge px at scale 1 (Skia's small
+stroke is slightly bolder than its exact area); the control font is carried as
+13 px, so `Simple` ends one column early (42, Chrome 43).
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CHROME-PAINT-001 — native form-control parts paint as Chrome 159 paints them, at device scale 1 and 4.
+"""
+# @tag: unit, browser_engine, paint, form_control, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/form_control_chrome.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 300
+val A_H: i32 = 760
+val A4_H: i32 = 520
+val B_H: i32 = 210
+
+val PAGE_A: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+    "*{{box-sizing:border-box}}" +
+    "body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';width:300px;color:#172033}}" +
+    "div{{height:44px;padding:6px 0 0 10px;overflow:hidden}}" +
+    "div.t{{height:70px}}" +
+    ".s input,.s select,.s textarea,.s button{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}" +
+    "</style></head><body>" +
+    "<div><input type=\"checkbox\"></div>" +
+    "<div><input type=\"checkbox\" checked></div>" +
+    "<div><input type=\"checkbox\" disabled></div>" +
+    "<div><input type=\"checkbox\" checked disabled></div>" +
+    "<div><input type=\"radio\"></div>" +
+    "<div><input type=\"radio\" checked></div>" +
+    "<div><input type=\"radio\" disabled></div>" +
+    "<div><input type=\"radio\" checked disabled></div>" +
+    "<div><select><option>Alpha</option></select></div>" +
+    "<div><select disabled><option>Alpha</option></select></div>" +
+    "<div class=\"t\"><textarea>Editable</textarea></div>" +
+    "<div class=\"t\"><textarea disabled>Editable</textarea></div>" +
+    "<div><input value=\"Simple\"></div>" +
+    "<div><input value=\"Simple\" disabled></div>" +
+    "<div><button>Go</button></div>" +
+    "<div><button disabled>Go</button></div>" +
+    "</body></html>"
+
+val PAGE_B: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+    "*{{box-sizing:border-box}}" +
+    "body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';width:300px;color:#172033}}" +
+    "div{{height:44px;padding:6px 0 0 10px;overflow:hidden}}" +
+    "div.t{{height:70px}}" +
+    ".s input,.s select,.s textarea,.s button{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}" +
+    "</style></head><body>" +
+    "<div class=\"s\"><select><option>Alpha</option></select></div>" +
+    "<div class=\"s t\"><textarea>Editable</textarea></div>" +
+    "<div class=\"s\"><input value=\"Simple\"></div>" +
+    "<div class=\"s\"><button>Go</button></div>" +
+    "</body></html>"
+
+# Chrome 159 screenshots at device scale 1, one RRGGBB per pixel: the 13 x 13
+# checkbox, checked checkbox, radio and checked radio, and the 12 x 9 block
+# that holds the select arrow (14 px left of the select's right edge, 5 px
+# below its top).
+val CB_REF: [text] = [
+    "ffffffa3a3a3999999767676767676767676767676767676767676767676999999a3a3a3ffffff",
+    "a3a3a3b2b2b2ffffffffffffffffffffffffffffffffffffffffffffffffffffffb2b2b2a3a3a3",
+    "999999ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff999999",
+    "767676ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff767676",
+    "767676ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff767676",
+    "767676ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff767676",
+    "767676ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff767676",
+    "767676ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff767676",
+    "767676ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff767676",
+    "767676ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff767676",
+    "999999ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff999999",
+    "a3a3a3b2b2b2ffffffffffffffffffffffffffffffffffffffffffffffffffffffb2b2b2a3a3a3",
+    "ffffffa3a3a3999999767676767676767676767676767676767676767676999999a3a3a3ffffff"
+]
+val CB_ON_REF: [text] = [
+    "a9d0ff278aff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff278affa9d0ff",
+    "278aff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff278aff",
+    "0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0577ffbfdcff499cff0075ff0075ff",
+    "0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff9fcbffffffffeaf4ff0a7aff0075ff",
+    "0075ff0075ff0075ff0075ff0075ff0075ff0075ff6aaefffffffffcfdff3893ff0075ff0075ff",
+    "0075ff0075ff0075ff107dff0075ff0075ff3c95fffdfeffffffff6db0ff0075ff0075ff0075ff",
+    "0075ff0075ff62aaffecf5ff2e8dff1982ffeaf4ffffffffa5ceff0075ff0075ff0075ff0075ff",
+    "0075ff0477ffd0e5ffffffffeff6ffddecffffffffd0e5ff0979ff0075ff0075ff0075ff0075ff",
+    "0075ff0075ff1580ffd5e8ffffffffffffffeef6ff1f85ff0075ff0075ff0075ff0075ff0075ff",
+    "0075ff0075ff0075ff1580ffdbebfffdfeff4499ff0075ff0075ff0075ff0075ff0075ff0075ff",
+    "0075ff0075ff0075ff0075ff1882ff63aaff0075ff0075ff0075ff0075ff0075ff0075ff0075ff",
+    "278aff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff278aff",
+    "a9d0ff278aff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff278affa9d0ff"
+]
+val RD_REF: [text] = [
+    "fffffffffffffffffff2f2f2afafaf8f8f8f9999998f8f8fb1b1b1f3f3f3ffffffffffffffffff",
+    "ffffffffffffd4d4d4828282d1d1d1e5e5e5ffffffe5e5e5d0d0d0818181d6d6d6ffffffffffff",
+    "ffffffd4d4d4a1a1a1ffffffffffffffffffffffffffffffffffffffffffa1a1a1d5d5d5ffffff",
+    "f2f2f2828282ffffffffffffffffffffffffffffffffffffffffffffffffffffff808080f4f4f4",
+    "afafafd1d1d1ffffffffffffffffffffffffffffffffffffffffffffffffffffffcfcfcfb2b2b2",
+    "8f8f8fe5e5e5ffffffffffffffffffffffffffffffffffffffffffffffffffffffe4e4e4909090",
+    "999999ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff999999",
+    "8f8f8fe5e5e5ffffffffffffffffffffffffffffffffffffffffffffffffffffffe4e4e4909090",
+    "b1b1b1d0d0d0ffffffffffffffffffffffffffffffffffffffffffffffffffffffcfcfcfb1b1b1",
+    "f3f3f3818181ffffffffffffffffffffffffffffffffffffffffffffffffffffff7f7f7ff5f5f5",
+    "ffffffd6d6d6a1a1a1ffffffffffffffffffffffffffffffffffffffffffa0a0a0d8d8d8ffffff",
+    "ffffffffffffd5d5d5808080cececee4e4e4ffffffe4e4e4cfcfcf7f7f7fd8d8d8ffffffffffff",
+    "fffffffffffffffffff4f4f4b2b2b2909090999999909090b2b2b2f5f5f5ffffffffffffffffff"
+]
+val RD_ON_REF: [text] = [
+    "ffffffffffffffffffe7f2ff6cafff308fff4097ff308fff6eb0ffe9f3ffffffffffffffffffff",
+    "ffffffffffffafd4ff1882ffaad1ffcfe5ffffffffcfe5ffa9d0ff1680ffb3d6ffffffffffffff",
+    "ffffffafd4ff51a1ffffffffe4f0ffa4ceff87beffa4ceffe5f1ffffffff50a0ffb2d5ffffffff",
+    "e7f2ff1882ffffffffa5ceff0979ff0075ff0075ff0075ff0a7affa8d0ffffffff147fffebf4ff",
+    "6bafffaad1ffecf5ff0d7cff0075ff0075ff0075ff0075ff0075ff1580fff2f8ffa6cfff70b1ff",
+    "308fffcfe5ffbfdcff0075ff0075ff0075ff0075ff0075ff0075ff0075ffbfdcffcde4ff3290ff",
+    "4097ffffffff97c6ff0075ff0075ff0075ff0075ff0075ff0075ff0075ff9fcbffffffff4097ff",
+    "308fffcfe5ffbfdcff0075ff0075ff0075ff0075ff0075ff0075ff0075ffbfdcffcde4ff3290ff",
+    "6eb0ffa9d0ffecf5ff0e7cff0075ff0075ff0075ff0075ff0075ff147ffff2f8ffa7cfff70b1ff",
+    "e9f3ff1680ffffffffa4ceff0a7aff0075ff0075ff0075ff0979ffa9d0ffffffff127effedf5ff",
+    "ffffffb3d6ff50a0ffffffffe3f0ffa4ceff87beffa4ceffe5f1ffffffff4fa0ffb6d7ffffffff",
+    "ffffffffffffb2d5ff147fffa6ceffcde4ffffffffcde4ffa7cfff127effb6d7ffffffffffffff",
+    "ffffffffffffffffffebf4ff6fb0ff3290ff4097ff3290ff70b1ffedf5ffffffffffffffffffff"
+]
+val ARROW_REF: [text] = [
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "ffffffffffff8d8d8de7e7e7ffffffffffffffffffffffffe7e7e78f8f8fffffffffffff",
+    "ffffff969696000000242424e6e6e6ffffffffffffe6e6e62424240000009a9a9affffff",
+    "ffffffe7e7e7202020000000242424e7e7e7e7e7e7242424000000242424e7e7e7ffffff",
+    "ffffffffffffe3e3e3232323000000212121212121000000232323e6e6e6ffffffffffff",
+    "ffffffffffffffffffe2e2e2212121000000000000232323e3e3e3ffffffffffffffffff",
+    "ffffffffffffffffffffffffe3e3e31c1c1c202020e3e3e3ffffffffffffffffffffffff",
+    "ffffffffffffffffffffffffffffffdededee2e2e2ffffffffffffffffffffffffffffff",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+]
+
+fn _r(p: u32) -> i32:
+    ((p >> 16) & 0xFFu32) as i32
+
+fn _g(p: u32) -> i32:
+    ((p >> 8) & 0xFFu32) as i32
+
+fn _b(p: u32) -> i32:
+    (p & 0xFFu32) as i32
+
+fn _hex2(v: i32) -> text:
+    val digits = "0123456789abcdef"
+    digits.substring(v / 16, v / 16 + 1) + digits.substring(v % 16, v % 16 + 1)
+
+fn _hex(p: u32) -> text:
+    _hex2(_r(p)) + _hex2(_g(p)) + _hex2(_b(p))
+
+fn _white(p: u32) -> bool:
+    (p & 0xFFFFFFu32) == 0xFFFFFFu32
+
+# Non-white bounding box [x0, y0, x1, y1] (inclusive) of rows y0..y1-1.
+fn _bbox(px: [u32], w: i32, y0: i32, y1: i32) -> [i32]:
+    var out = [w, y1, -1, -1]
+    var y = y0
+    while y < y1:
+        var x = 0
+        while x < w:
+            if not _white(px[y * w + x]):
+                if x < out[0]: out[0] = x
+                if x > out[2]: out[2] = x
+                if y < out[1]: out[1] = y
+                if y > out[3]: out[3] = y
+            x = x + 1
+        y = y + 1
+    out
+
+# Pixels of the `cols` x rows(ref) block at (x0, y0) that differ from the
+# Chrome reference (one RRGGBB per pixel) by more than 8 in any channel.
+fn _mismatch(px: [u32], w: i32, x0: i32, y0: i32, cols: i32, reference: [text]) -> i32:
+    var bad = 0
+    var row = 0
+    while row < reference.len():
+        var col = 0
+        while col < cols:
+            val want = reference[row].substring(col * 6, col * 6 + 6)
+            val got = _hex(px[(y0 + row) * w + x0 + col])
+            var c = 0
+            while c < 3:
+                val a = _hex_val(want.substring(c * 2, c * 2 + 2))
+                val b = _hex_val(got.substring(c * 2, c * 2 + 2))
+                if a - b > 8 or b - a > 8:
+                    bad = bad + 1
+                    c = 3
+                c = c + 1
+            col = col + 1
+        row = row + 1
+    bad
+
+fn _hex_digit(ch: text) -> i32:
+    val at = "0123456789abcdef".index_of(ch) ?? 0
+    at as i32
+
+fn _hex_val(two: text) -> i32:
+    _hex_digit(two.substring(0, 1)) * 16 + _hex_digit(two.substring(1, 2))
+
+# Bounding box, relative to (ox, oy), of the pixels of the block
+# (x0, y0)..(x1, y1) (inclusive) whose `channel` (0 red, 1 green) is in the
+# range lo..hi: "c<first>-<last> r<first>-<last> n<count>".
+fn _ink(px: [u32], w: i32, x0: i32, y0: i32, x1: i32, y1: i32, ox: i32, oy: i32, channel: i32, lo: i32, hi: i32) -> text:
+    var cx0 = 99999
+    var cx1 = -99999
+    var cy0 = 99999
+    var cy1 = -99999
+    var n = 0
+    var y = y0
+    while y <= y1:
+        var x = x0
+        while x <= x1:
+            val p = px[y * w + x]
+            val v = if channel == 0: _r(p) else: _g(p)
+            if v >= lo and v <= hi:
+                n = n + 1
+                if x - ox < cx0: cx0 = x - ox
+                if x - ox > cx1: cx1 = x - ox
+                if y - oy < cy0: cy0 = y - oy
+                if y - oy > cy1: cy1 = y - oy
+            x = x + 1
+        y = y + 1
+    "c{cx0}-{cx1} r{cy0}-{cy1} n{n}"
+
+# Run lengths down column x over rows y0..y1: B = accent blue (red < 64),
+# W = light (red > 192), a = an anti-aliased edge row.
+fn _column_runs(px: [u32], w: i32, x: i32, y0: i32, y1: i32) -> text:
+    var out = ""
+    var kind = ""
+    var count = 0
+    var y = y0
+    while y <= y1 + 1:
+        var now = ""
+        if y <= y1:
+            val red = _r(px[y * w + x])
+            now = if red < 64: "B" elif red > 192: "W" else: "a"
+        if now != kind:
+            if count > 0:
+                out = out + kind + count.to_text() + " "
+            kind = now
+            count = 0
+        count = count + 1
+        y = y + 1
+    out.trim()
+
+# The row part ("r<first>-<last>") of an `_ink` result.
+fn _rows_of(ink: text) -> text:
+    val parts = ink.split(" ")
+    parts[1]
+
+# The bounding-box part ("c<first>-<last> r<first>-<last>") of an `_ink` result.
+fn _box_of(ink: text) -> text:
+    val parts = ink.split(" ")
+    parts[0] + " " + parts[1]
+
+# True when two space-separated RRGGBB lists agree within 8 per channel.
+fn _near(got: text, want: text) -> bool:
+    val a = got.split(" ")
+    val b = want.split(" ")
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        var c = 0
+        while c < 3:
+            val d = _hex_val(a[i].substring(c * 2, c * 2 + 2)) - _hex_val(b[i].substring(c * 2, c * 2 + 2))
+            if d > 8 or d < -8:
+                return false
+            c = c + 1
+        i = i + 1
+    true
+
+fn _fact(facts: [text], key: text) -> text:
+    for fact in facts:
+        if fact.starts_with(key + "="):
+            return fact.substring(key.byte_len() + 1, fact.byte_len())
+    "missing " + key
+
+fn _at(px: [u32], w: i32, x: i32, y: i32) -> text:
+    _hex(px[y * w + x])
+
+# Page A (default controls) at device scale 1.
+fn facts_a1(px: [u32], w: i32) -> [text]:
+    var out: [text] = []
+    val cb = _bbox(px, w, 0, 44)
+    out.push("cb.mm={_mismatch(px, w, cb[0], cb[1], 13, CB_REF)}")
+    val on = _bbox(px, w, 44, 88)
+    out.push("cb_on.mm={_mismatch(px, w, on[0], on[1], 13, CB_ON_REF)}")
+    out.push("cb_on.mark={_box_of(_ink(px, w, on[0] + 2 * 1, on[1] + 2 * 1, on[2] - 2 * 1, on[3] - 2 * 1, on[0], on[1], 0, 160, 255))}")
+    val cd = _bbox(px, w, 88, 132)
+    out.push("cb_dis={_at(px, w, cd[0] + 6, cd[1])} {_at(px, w, cd[0] + 6, cd[1] + 6)}")
+    val cod = _bbox(px, w, 132, 176)
+    out.push("cb_on_dis={_at(px, w, cod[0] + 10, cod[1] + 10)} {_at(px, w, cod[0] + 9, cod[1] + 3)}")
+    val rd = _bbox(px, w, 176, 220)
+    out.push("rd.mm={_mismatch(px, w, rd[0], rd[1], 13, RD_REF)}")
+    val ro = _bbox(px, w, 220, 264)
+    out.push("rd_on.mm={_mismatch(px, w, ro[0], ro[1], 13, RD_ON_REF)}")
+    val rdd = _bbox(px, w, 264, 308)
+    out.push("rd_dis={_at(px, w, rdd[0] + 6, rdd[1] + 6)}")
+    val rod = _bbox(px, w, 308, 352)
+    out.push("rd_on_dis={_at(px, w, rod[0] + 6, rod[1] + 6)}")
+    val sel = _bbox(px, w, 352, 396)
+    out.push("sel={_at(px, w, sel[0] + 5, sel[1])} {_at(px, w, sel[0] + 3, sel[1] + 3)}")
+    out.push("sel.arrow.mm={_mismatch(px, w, sel[2] - 14, sel[1] + 5, 12, ARROW_REF)}")
+    out.push("sel.arrow={_ink(px, w, sel[2] - 15, sel[1] + 1, sel[2] - 2, sel[3] - 1, sel[2], sel[1], 1, 0, 96)}")
+    val sd = _bbox(px, w, 396, 440)
+    out.push("sel_dis={_at(px, w, sd[0] + 20, sd[1])} {_at(px, w, sd[0] + 3, sd[1] + 3)} {_at(px, w, sd[2] - 9, sd[1] + 10)}")
+    val ta = _bbox(px, w, 440, 510)
+    out.push("ta={_at(px, w, ta[0] + 5, ta[1])} {_at(px, w, ta[0] + 3, ta[1] + 3)}")
+    out.push("ta.grip={_ink(px, w, ta[2] - 16, ta[3] - 16, ta[2] - 3, ta[3] - 3, ta[2], ta[3], 1, 96, 108)}")
+    val td = _bbox(px, w, 510, 580)
+    out.push("ta_dis={_at(px, w, td[0] + 5, td[1])} {_at(px, w, td[0] + 3, td[1] + 3)}")
+    val inp = _bbox(px, w, 580, 624)
+    out.push("in={_at(px, w, inp[0] + 5, inp[1])} {_at(px, w, inp[0] + 5, inp[1] + 1)} {_at(px, w, inp[2], inp[1] + 5)} {_at(px, w, inp[2] - 1, inp[1] + 5)}")
+    out.push("in.text={_rows_of(_ink(px, w, inp[0] + 3, inp[1] + 3, inp[0] + 80, inp[3] - 3, inp[0], inp[1], 1, 0, 96))}")
+    val ind = _bbox(px, w, 624, 668)
+    out.push("in_dis={_at(px, w, ind[0] + 60, ind[1])} {_at(px, w, ind[0] + 60, ind[1] + 3)}")
+    val btn = _bbox(px, w, 668, 712)
+    out.push("btn={_at(px, w, btn[0] + 8, btn[1])} {_at(px, w, btn[0] + 8, btn[1] + 1)} {_at(px, w, btn[0] + 4, btn[1] + 4)}")
+    out.push("btn.text={_rows_of(_ink(px, w, btn[0] + 3, btn[1] + 3, btn[2] - 3, btn[3] - 3, btn[0], btn[1], 1, 0, 96))}")
+    val bd = _bbox(px, w, 712, 756)
+    out.push("btn_dis={_at(px, w, bd[0] + 8, bd[1])} {_at(px, w, bd[0] + 4, bd[1] + 4)}")
+    out
+
+# Page B (the catalog's `padding:8px;border:1px solid #94a3b8;border-radius:5px`
+# controls) at device scale k: border-box heights and the vector parts.
+fn facts_b(px: [u32], w: i32, k: i32) -> [text]:
+    var out: [text] = []
+    val sel = _bbox(px, w, 0, 44 * k)
+    val ta = _bbox(px, w, 44 * k, 114 * k)
+    val inp = _bbox(px, w, 114 * k, 158 * k)
+    val btn = _bbox(px, w, 158 * k, 202 * k)
+    out.push("heights={sel[3] - sel[1] + 1} {ta[3] - ta[1] + 1} {inp[3] - inp[1] + 1} {btn[3] - btn[1] + 1}")
+    out.push("s_sel.arrow={_ink(px, w, sel[2] - 18 * k, sel[1] + 2 * k, sel[2] - 2 * k, sel[3] - 2 * k, sel[2], sel[1], 1, 0, 96)}")
+    out.push("s_ta.grip={_ink(px, w, ta[2] - 16 * k, ta[3] - 16 * k, ta[2] - 3 * k, ta[3] - 3 * k, ta[2], ta[3], 1, 96, 108)}")
+    out.push("s_in.text={_rows_of(_ink(px, w, inp[0] + 3 * k, inp[1] + 3 * k, inp[0] + 80 * k, inp[3] - 3 * k, inp[0], inp[1], 1, 0, 96))}")
+    out.push("s_btn.fill={_at(px, w, btn[0] + 5 * k, btn[1] + 5 * k)}")
+    out
+
+# Page A at device scale 4: the vector parts relative to their own box.
+fn facts_a4(px: [u32], w: i32) -> [text]:
+    var out: [text] = []
+    val on = _bbox(px, w, 176, 352)
+    out.push("cb_on.box={on[2] - on[0] + 1}x{on[3] - on[1] + 1}")
+    out.push("cb_on.mark={_box_of(_ink(px, w, on[0] + 2 * 4, on[1] + 2 * 4, on[2] - 2 * 4, on[3] - 2 * 4, on[0], on[1], 0, 160, 255))}")
+    val cb = _bbox(px, w, 0, 176)
+    out.push("cb.ring={_at(px, w, cb[0] + 26, cb[1])} {_at(px, w, cb[0] + 26, cb[1] + 3)} {_at(px, w, cb[0] + 26, cb[1] + 4)} {_at(px, w, cb[0], cb[1])} {_at(px, w, cb[0] + 3, cb[1] + 3)}")
+    val ro = _bbox(px, w, 880, 1056)
+    out.push("rd_on.col={_column_runs(px, w, ro[0] + 26, ro[1], ro[3])}")
+    val sel = _bbox(px, w, 1408, 1584)
+    out.push("sel.arrow={_ink(px, w, sel[2] - 56, sel[1] + 8, sel[2] - 8, sel[3] - 8, sel[2], sel[1], 1, 0, 96)}")
+    val ta = _bbox(px, w, 1760, 2040)
+    out.push("ta.grip={_ink(px, w, ta[2] - 64, ta[3] - 64, ta[2] - 12, ta[3] - 12, ta[2], ta[3], 1, 96, 108)}")
+    out
+
+fn _render(page: text, height: i32, k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, height, k, "cpu_simd")
+
+var g_facts_a1: [text] = []
+var g_facts_b1: [text] = []
+var g_facts_a4: [text] = []
+var g_facts_b4: [text] = []
+
+fn _a1(key: text) -> text:
+    if g_facts_a1.len() == 0:
+        g_facts_a1 = facts_a1(_render(PAGE_A, A_H, 1), CSS_W)
+    _fact(g_facts_a1, key)
+
+fn _b1(key: text) -> text:
+    if g_facts_b1.len() == 0:
+        g_facts_b1 = facts_b(_render(PAGE_B, B_H, 1), CSS_W, 1)
+    _fact(g_facts_b1, key)
+
+fn _a4(key: text) -> text:
+    if g_facts_a4.len() == 0:
+        g_facts_a4 = facts_a4(_render(PAGE_A, A4_H, 4), CSS_W * 4)
+    _fact(g_facts_a4, key)
+
+fn _b4(key: text) -> text:
+    if g_facts_b4.len() == 0:
+        g_facts_b4 = facts_b(_render(PAGE_B, B_H, 4), CSS_W * 4, 4)
+    _fact(g_facts_b4, key)
+
+describe "Checkbox and radio parts at device scale 1 (Chrome 159)":
+    it "AC-1: an unchecked checkbox and radio equal Chrome's 13 x 13 pixels":
+        expect(_a1("cb.mm")).to_equal("0")
+        expect(_a1("rd.mm")).to_equal("0")
+
+    it "AC-2: the check mark and the radio dot are Chrome's shapes":
+        step("Chrome 159: white ink of the mark spans columns 2..10, rows 2..9")
+        expect(_a1("cb_on.mark")).to_equal("c2-10 r2-9")
+        step("Pixels off Chrome by more than 8: 25 of 169 (base 169), 26 of 169 (base 143)")
+        expect(_a1("cb_on.mm").to_int()).to_be_less_than(26)
+        expect(_a1("rd_on.mm").to_int()).to_be_less_than(27)
+
+    it "AC-3: disabled parts take Chrome's greys":
+        expect(_a1("cb_dis")).to_equal("d1d1d1 f8f8f8")
+        step("Chrome 159: d1d1d1 ededed (checked square, mark)")
+        expect(_near(_a1("cb_on_dis"), "d1d1d1 ededed")).to_be(true)
+        expect(_a1("rd_dis")).to_equal("f8f8f8")
+        expect(_a1("rd_on_dis")).to_equal("d1d1d1")
+
+describe "Select arrow and textarea grip at device scale 1 (Chrome 159)":
+    it "AC-4: the select arrow is Chrome's 8 x 4 chevron":
+        step("Dark ink, relative to the select's right edge and top")
+        expect(_a1("sel.arrow")).to_equal("c-12--5 r7-11 n22")
+        expect(_b1("s_sel.arrow")).to_equal("c-12--5 r15-19 n22")
+        step("Pixels off Chrome by more than 8 in the 12 x 9 arrow block: 4 (base 44)")
+        expect(_a1("sel.arrow.mm").to_int()).to_be_less_than(5)
+
+    it "AC-5: the textarea grip is Chrome's two #666 diagonals":
+        step("7 + 3 px of #666666, 3..9 px inside the right and bottom border")
+        expect(_a1("ta.grip")).to_equal("c-9--3 r-9--3 n10")
+        expect(_b1("s_ta.grip")).to_equal("c-9--3 r-9--3 n10")
+
+describe "Native frame, face and UA colours at device scale 1 (Chrome 159)":
+    it "AC-6: an unstyled text field is a 1 px #767676 frame over white with black text":
+        step("top edge, the row under it, right edge, the column left of it")
+        expect(_a1("in")).to_equal("767676 ffffff 767676 ffffff")
+        step("Chrome 159: `Simple` inks rows 6..17 of the 21 px field")
+        expect(_a1("in.text")).to_equal("r6-17")
+        expect(_b1("s_in.text")).to_equal("r12-23")
+        expect(_a1("sel")).to_equal("767676 ffffff")
+        expect(_a1("ta")).to_equal("767676 ffffff")
+
+    it "AC-7: a button is a 1 px #767676 frame over the #efefef face":
+        expect(_a1("btn")).to_equal("767676 efefef efefef")
+        expect(_a1("btn.text")).to_equal("r6-14")
+        step("A button with an author border keeps the UA ButtonFace fill")
+        expect(_b1("s_btn.fill")).to_equal("efefef")
+
+    it "AC-8: disabled controls take Chrome's frame, fill and text colours":
+        expect(_a1("in_dis")).to_equal("d0d0d0 f8f8f8")
+        expect(_a1("ta_dis")).to_equal("d0d0d0 f8f8f8")
+        expect(_a1("btn_dis")).to_equal("d0d0d0 eeeeee")
+        step("Chrome 159: dddddd fafafa a5a5a5 (frame, fill, arrow at opacity 0.7)")
+        expect(_near(_a1("sel_dis"), "dddddd fafafa a5a5a5")).to_be(true)
+
+describe "Form-control chrome at device scale 4 (Chrome 159)":
+    it "AC-9: the painted box takes its device-px height":
+        step("select 34.75, textarea 49.5, input 33.25, button 33.25 CSS px")
+        expect(_b4("heights")).to_equal("139 198 133 133")
+        expect(_b1("heights")).to_equal("35 48 33 33")
+
+    it "AC-10: the check mark, ring and dot scale as vectors":
+        expect(_a4("cb_on.box")).to_equal("52x52")
+        expect(_a4("cb_on.mark")).to_equal("c8-43 r8-41")
+        step("ring rows 0 and 3 are #767676, row 4 is fill; the corner px is page colour")
+        expect(_a4("cb.ring")).to_equal("767676 767676 ffffff ffffff 767676")
+        step("centre column: 4 ring, 6 fill, 1 edge, 30 dot, 1 edge, 6 fill, 4 ring")
+        expect(_a4("rd_on.col")).to_equal("B4 W6 a1 B30 a1 W6 B4")
+
+    it "AC-11: the arrow keeps a 2 device px stroke and the grip a k px one":
+        expect(_a4("sel.arrow")).to_equal("c-49--18 r29-45 n94")
+        expect(_b4("s_sel.arrow")).to_equal("c-49--18 r61-77 n94")
+        expect(_a4("ta.grip")).to_equal("c-40--12 r-40--12 n170")
+        expect(_b4("s_ta.grip")).to_equal("c-40--12 r-40--12 n170")
+        step("Chrome 159: the value's first ink row is 45 of the 133 row field")
+        expect(_b4("s_in.text").starts_with("r45-")).to_be(true)
