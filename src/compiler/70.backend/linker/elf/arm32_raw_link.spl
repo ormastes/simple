@@ -6,7 +6,7 @@
 
 use compiler.backend.linker.elf_parser.{
     ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding,
-    elf_reloc_sym, elf_reloc_type, elf_section_addralign,
+    elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
     SHN_UNDEF, STB_LOCAL, STB_WEAK, SHT_NOBITS
 }
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_ARM, EM_386, EM_RISCV, SHT_PROGBITS}
@@ -55,29 +55,39 @@ fn arm32_raw_align(value: i64, alignment: i64) -> i64:
 
 fn arm32_raw_layout(objects: [ElfObject]) -> Result<Arm32RawLayout, text>:
     var offsets: [[i64]] = []
+    for obj in objects:
+        var row: [i64] = []
+        for _s in obj.sections:
+            row = row.push(-1)
+        offsets = offsets.push(row)
     var cursor: i64 = 0
-    var oi: i64 = 0
-    while oi < objects.len():
-        val obj = objects[oi]
-        var object_offsets: [i64] = []
-        var si: i64 = 0
-        while si < obj.sections.len():
-            val section = obj.sections[si]
-            if section.sh_flags & ARM32_RAW_SHF_ALLOC == 0:
-                object_offsets = object_offsets.push(-1)
-            else:
-                if section.sh_type != SHT_PROGBITS and section.sh_type != SHT_NOBITS and
-                        section.sh_type != ARM32_RAW_SHT_EXIDX:
-                    return Err("ELF32 raw link: object {oi} section {si} has unsupported allocatable type {section.sh_type}")
-                var alignment = elf_section_addralign(obj, si)
-                if alignment < 1:
-                    alignment = 1
-                cursor = arm32_raw_align(cursor, alignment)
-                object_offsets = object_offsets.push(cursor)
-                cursor = cursor + section.sh_size
-            si = si + 1
-        offsets = offsets.push(object_offsets)
-        oi = oi + 1
+    # Pass 0 places `.text.boot` (the entry stub) first, like the lld scripts'
+    # `*(.text.boot) *(.text*)`; pass 1 places everything else in input order.
+    var pass_no: i64 = 0
+    while pass_no < 2:
+        var oi: i64 = 0
+        while oi < objects.len():
+            val obj = objects[oi]
+            var row = offsets[oi]
+            var si: i64 = 0
+            while si < obj.sections.len():
+                val section = obj.sections[si]
+                if section.sh_flags & ARM32_RAW_SHF_ALLOC != 0:
+                    if section.sh_type != SHT_PROGBITS and section.sh_type != SHT_NOBITS and
+                            section.sh_type != ARM32_RAW_SHT_EXIDX:
+                        return Err("ELF32 raw link: object {oi} section {si} has unsupported allocatable type {section.sh_type}")
+                    val is_boot = elf_section_name(obj, si) == ".text.boot"
+                    if is_boot == (pass_no == 0):
+                        var alignment = elf_section_addralign(obj, si)
+                        if alignment < 1:
+                            alignment = 1
+                        cursor = arm32_raw_align(cursor, alignment)
+                        row[si] = cursor
+                        cursor = cursor + section.sh_size
+                si = si + 1
+            offsets[oi] = row
+            oi = oi + 1
+        pass_no = pass_no + 1
     var strong_regular: {text: bool} = {}
     for object in objects:
         for sym in object.symbols:

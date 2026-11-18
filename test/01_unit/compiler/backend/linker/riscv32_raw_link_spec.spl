@@ -3,7 +3,7 @@
 
 use compiler.backend.linker.elf_inspect.{ElfHeader, ElfSectionHeader, SHT_PROGBITS, ET_REL, EM_ARM}
 use compiler.backend.linker.elf_parser.{
-    ElfObject, ElfSymbol, ElfRelocation, elf_make_empty_strtab,
+    ElfObject, ElfSymbol, ElfRelocation, ElfStringTable, elf_make_empty_strtab,
     STB_LOCAL, STB_GLOBAL, STT_NOTYPE, STT_FUNC
 }
 use compiler.backend.linker.elf.arm32_raw_link.{elf_riscv32_link_parsed}
@@ -75,3 +75,26 @@ describe "RISC-V 32 raw ELF linker":
     it "rejects a non-RISC-V object":
         val obj = rv32_object(EM_ARM, [])
         expect(elf_riscv32_link_parsed([obj], 0x80400000, "_start").is_err()).to_equal(true)
+
+    it "places .text.boot before .text so the entry stub sits at the image base":
+        val base_obj = rv32_object(RV32_EM_RISCV, [])
+        var raw = base_obj.raw
+        raw[172] = 0x6f
+        raw[173] = 0x00
+        raw[174] = 0x00
+        raw[175] = 0x00
+        val names: [u8] = [0, 46, 116, 101, 120, 116, 46, 98, 111, 111, 116, 0]
+        val shstr = ElfStringTable(data: names, offset: 0)
+        val boot = ElfSectionHeader(sh_name: 1, sh_type: SHT_PROGBITS, sh_flags: 6,
+            sh_addr: 172, sh_size: 4, sh_info: 0)
+        val sections = [base_obj.sections[0], base_obj.sections[1], boot]
+        val symbols = [
+            rv32_symbol("", STB_LOCAL, 0, 0, STT_NOTYPE),
+            rv32_symbol("_start", STB_GLOBAL, 2, 0, STT_FUNC)
+        ]
+        val obj = ElfObject(header: base_obj.header, sections: sections, symbols: symbols,
+            relocations: [], strtab: base_obj.strtab, shstrtab: shstr, raw: raw)
+        val image = elf_riscv32_link_parsed([obj], 0x80400000, "_start").unwrap()
+        expect(image.entry_addr).to_equal(0x80400000)
+        expect(image.bytes[0:4]).to_equal([0x6f, 0x00, 0x00, 0x00])
+        expect(image.bytes[4:8]).to_equal([0x17, 0x05, 0x00, 0x00])
