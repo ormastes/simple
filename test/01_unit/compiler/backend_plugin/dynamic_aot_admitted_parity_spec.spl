@@ -259,27 +259,49 @@ describe "dynamic V1 AOT admitted-handle and request parity + capability attesta
         expect(session.close()).to_equal(true)
         expect(dir_remove_all(work_dir)).to_equal(true)
 
-    it "rejects AOT is_release, opt_level, target_cpu, and storage_bindings mismatches with PLUG-E-CONFIG-MISMATCH":
+    it "accepts orthogonal is_release and opt_level on o0..o3 requests while rejecting genuine AOT config mismatches":
+        """Verify dev optimized (is_release=false, opt_level=2|3) and release-unoptimized (is_release=true, opt_level=0) pass on o0..o3 requests while mismatched opt_level, explicit profile, CPU, or storage_bindings fail with PLUG-E-CONFIG-MISMATCH."""
         val work_dir = _parity_work_dir("dyn-aot-arg-parity")
         expect(work_dir == "").to_equal(false)
         val dll_path = _build_parity_provider_dll(work_dir)
         val request = _parity_request(dll_path, "x86_64", "znver4", [], "o2")
+        val o3_request = _parity_request(dll_path, "x86_64", "znver4", [], "o3")
+        val o0_request = _parity_request(dll_path, "x86_64", "znver4", [], "o0")
+        val release_o2_request = _parity_request(dll_path, "x86_64", "znver4", [], "release-o2")
         var session = load_backend(request).ok().unwrap()
         val module = _parity_probe_module()
         val binding = _sample_storage_binding()
 
-        step("Pure parity diagnostic returns None on matching or empty CPU override and Diagnostic on mismatch")
+        step("Pure parity diagnostic keeps is_release orthogonal to o0..o3 optimization levels")
         expect(backend_plugin_aot_request_parity_diagnostic_v2(
             request, true, 2, "znver4", 0).is_none()).to_equal(true)
         expect(backend_plugin_aot_request_parity_diagnostic_v2(
             request, true, 2, "", 0).is_none()).to_equal(true)
+        expect(backend_plugin_aot_request_parity_diagnostic_v2(
+            request, false, 2, "znver4", 0).is_none()).to_equal(true)
+        expect(backend_plugin_aot_request_parity_diagnostic_v2(
+            o3_request, false, 3, "znver4", 0).is_none()).to_equal(true)
+        expect(backend_plugin_aot_request_parity_diagnostic_v2(
+            o0_request, true, 0, "znver4", 0).is_none()).to_equal(true)
+
+        step("Pure parity diagnostic rejects genuine opt_level, explicit profile, CPU, and storage mismatches")
+        val opt_diag = backend_plugin_aot_request_parity_diagnostic_v2(
+            request, false, 0, "znver4", 0).unwrap()
+        expect(opt_diag.code.unwrap()).to_equal(BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
+        val explicit_profile_diag = backend_plugin_aot_request_parity_diagnostic_v2(
+            release_o2_request, false, 2, "znver4", 0).unwrap()
+        expect(explicit_profile_diag.code.unwrap()).to_equal(BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
         val cpu_diag = backend_plugin_aot_request_parity_diagnostic_v2(
             request, true, 2, "generic", 0).unwrap()
         expect(cpu_diag.code.unwrap()).to_equal(BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
 
-        step("compile_aot_module rejects mismatched release, opt_level, CPU, and storage_bindings")
-        val bad_release = session.compile_aot_module(module, false, 2, "znver4", [])
-        expect(bad_release.err().unwrap().to_text()).to_contain("PLUG-E-CONFIG-MISMATCH")
+        step("compile_aot_module accepts dev o2 and rejects mismatched opt_level, CPU, and storage_bindings")
+        val dev_o2_mem = session.compile_aot_module(module, false, 2, "znver4", [])
+        match dev_o2_mem:
+            case Ok(compiled_dev):
+                expect((compiled_dev.object_code ?? []).len()).to_equal(8)
+            case Err(transport_err):
+                expect(transport_err.to_text().contains("PLUG-E-CONFIG-MISMATCH")).to_equal(false)
         val bad_opt = session.compile_aot_module(module, true, 0, "znver4", [])
         expect(bad_opt.err().unwrap().to_text()).to_contain("PLUG-E-CONFIG-MISMATCH")
         val bad_cpu = session.compile_aot_module(module, true, 2, "x86-64", [])
@@ -291,7 +313,7 @@ describe "dynamic V1 AOT admitted-handle and request parity + capability attesta
         val obj_path = work_dir + "/mismatch.o"
         val diag_path = work_dir + "/mismatch.diag"
         expect(session.compile_aot_into_path(
-            module, false, 2, "znver4", [], obj_path, diag_path)).to_equal(1)
+            module, false, 0, "znver4", [], obj_path, diag_path)).to_equal(1)
         expect(file_exists(obj_path)).to_equal(false)
         expect(file_read(diag_path)).to_contain("PLUG-E-CONFIG-MISMATCH")
         file_delete(diag_path)
@@ -314,13 +336,19 @@ describe "dynamic V1 AOT admitted-handle and request parity + capability attesta
         expect(file_read(diag_path)).to_contain("PLUG-E-CONFIG-MISMATCH")
         file_delete(diag_path)
 
-        step("Matching AOT arguments pass the parity gate without PLUG-E-CONFIG-MISMATCH")
+        step("Matching dev and release AOT arguments pass the parity gate without PLUG-E-CONFIG-MISMATCH")
         val matched_mem = session.compile_aot_module(module, true, 2, "znver4", [])
         match matched_mem:
             case Ok(compiled_mod):
                 expect((compiled_mod.object_code ?? []).len()).to_equal(8)
             case Err(transport_err):
                 expect(transport_err.to_text().contains("PLUG-E-CONFIG-MISMATCH")).to_equal(false)
+        val dev_status = session.compile_aot_into_path(
+            module, false, 2, "znver4", [], obj_path, diag_path)
+        if dev_status != 0:
+            expect(file_read(diag_path).contains("PLUG-E-CONFIG-MISMATCH")).to_equal(false)
+        file_delete(obj_path)
+        file_delete(diag_path)
         val matched_status = session.compile_aot_into_path(
             module, true, 2, "znver4", [], obj_path, diag_path)
         if matched_status != 0:

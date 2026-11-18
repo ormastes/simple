@@ -5,7 +5,8 @@ use app.bootstrap_builder.native_group_index_contract.{
 }
 use app.bootstrap_builder.native_group_index_variant.{
     native_group_index_variant_profile_v1,
-    native_group_index_variant_admit_v1, native_group_target_build_mode_v1
+    native_group_index_variant_admit_v1, native_group_target_build_mode_v1,
+    native_group_target_build_mode_for_profile_v1
 }
 use app.bootstrap_builder.native_group_phase2_admission.{
     Phase2Stage2AdmissionV1
@@ -14,6 +15,22 @@ use app.bootstrap_builder.native_group_phase2_source_snapshot.{
     Phase2SourceSnapshotV1
 }
 use app.bootstrap_builder.native_group_phase2_scv.{Phase2NativeScvV1}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+pub fn native_group_phase4_profile_from_env_v1(
+    explicit_profile: text = ""
+) -> Result<text, text>:
+    val trimmed_explicit = explicit_profile.trim()
+    if trimmed_explicit != "":
+        if trimmed_explicit == "dev" or trimmed_explicit == "prod":
+            return Ok(trimmed_explicit)
+        return Err("index target profile unsupported")
+    val env_profile = env_get("PHASE4_PROFILE").trim()
+    if env_profile == "" or env_profile == "prod":
+        return Ok("prod")
+    if env_profile == "dev":
+        return Ok("dev")
+    Err("invalid PHASE4_PROFILE: expected prod or dev")
 
 fn native_group_index_config_encode_for_producer_v1(
     producer_path: text,
@@ -23,13 +40,21 @@ fn native_group_index_config_encode_for_producer_v1(
     authority_copy_path: text,
     phase: text,
     backend: text,
-    target: text
+    target: text,
+    profile: text = ""
 ) -> Result<text, text>:
-    val build_mode = native_group_target_build_mode_v1(phase)?
-    val profile = native_group_index_variant_profile_v1(
+    val effective_profile = if profile != "":
+        profile
+    elif phase == "phase4":
+        native_group_phase4_profile_from_env_v1("")?
+    else:
+        ""
+    val build_mode = native_group_target_build_mode_for_profile_v1(
+        phase, effective_profile)?
+    val variant_profile = native_group_index_variant_profile_v1(
         phase, backend, target, build_mode, "simple-v1")?
     val snapshot = scv.snapshot
-    val variant = profile.variant
+    val variant = variant_profile.variant
     var rows = [
         "format=SIMPLE-NATIVE-INDEX-BUILD-CONFIG-1",
         "phase={phase}", "backend={backend}", "target={target}",
@@ -59,7 +84,7 @@ fn native_group_index_config_encode_for_producer_v1(
         "variant_backend={variant.backend}",
         "variant_build_mode={variant.build_mode}",
         "variant_language_abi={variant.language_abi}",
-        "variant_digest={profile.digest}",
+        "variant_digest={variant_profile.digest}",
         "variant_features_count={variant.features.len()}"
     ]
     for index in 0..variant.features.len():
@@ -85,7 +110,7 @@ fn native_group_index_config_encode_for_producer_v1(
             parsed.full_source_authority_digest != copied.authority_digest or
             parsed.phase != phase or
             parsed.backend != backend or parsed.target != target or
-            admitted.digest != profile.digest:
+            admitted.digest != variant_profile.digest:
         return Err("Phase2 native index config roundtrip differs")
     Ok(payload)
 
@@ -96,11 +121,13 @@ fn phase2_native_index_config_encode_v1(
     authority_copy_path: text,
     phase: text,
     backend: text,
-    target: text
+    target: text,
+    profile: text = ""
 ) -> Result<text, text>:
     native_group_index_config_encode_for_producer_v1(
         admission.producer_path, admission.producer_digest,
-        copied, scv, authority_copy_path, phase, backend, target)
+        copied, scv, authority_copy_path, phase, backend, target, profile)
 
 export phase2_native_index_config_encode_v1
 export native_group_index_config_encode_for_producer_v1
+export native_group_phase4_profile_from_env_v1

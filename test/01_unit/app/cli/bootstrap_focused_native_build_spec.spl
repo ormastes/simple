@@ -10,8 +10,11 @@ use app.cli.bootstrap_focused_native_build.{
     focused_native_build_effective_cache_dir,
     focused_native_build_profile_cache_dir_v1,
     focused_native_build_profile_receipt_namespace_v1,
+    focused_native_build_receipt_dir_from_env_v1,
+    focused_native_build_receipt_path_v1,
     focused_native_build_target_profile_v1,
     focused_native_build_backend,
+    focused_native_build_backend_plugin,
     focused_native_build_strip,
     focused_native_build_exact_capsule_entry_allowed,
 }
@@ -151,3 +154,50 @@ describe "focused bootstrap native-build plan":
         expect(shared_prod_receipt).to_equal("build/shared-cache/receipts/phase4-prod")
         expect(shared_dev_receipt).to_equal("build/shared-cache/receipts/phase4-dev")
         expect(shared_prod_receipt == shared_dev_receipt).to_equal(false)
+
+        expect(focused_native_build_receipt_dir_from_env_v1(
+            "build/custom-receipts/phase4-dev", p4_prod, "build/shared-cache")).to_equal(
+            "build/custom-receipts/phase4-dev")
+        expect(focused_native_build_receipt_dir_from_env_v1(
+            "", p4_dev, "build/shared-cache")).to_equal(
+            "build/shared-cache/receipts/phase4-dev")
+        expect(focused_native_build_receipt_path_v1(
+            "build/out/simple", "build/custom-receipts/phase4-dev", p4_dev)).to_equal(
+            "build/custom-receipts/phase4-dev/simple.focused-receipt.sdn")
+        expect(focused_native_build_receipt_path_v1(
+            "build/out/simple", "", p4_prod)).to_equal(
+            "build/native_receipts/phase4-prod/simple.focused-receipt.sdn")
+
+    it "validates --backend-plugin options fail-closed and extracts provider paths":
+        """Accept split and inline --backend-plugin flags on focused native-build while rejecting missing or whitespace-only values."""
+        val split_args = [
+            "simple", "native-build",
+            "--entry", "src/app/cli/main.spl",
+            "--backend", "c",
+            "--backend-plugin", "build/plugins/backend_c.dll",
+            "--output", "build/focused-simple"
+        ]
+        val inline_args = [
+            "simple", "native-build",
+            "--entry", "src/app/cli/main.spl",
+            "--backend=c",
+            "--backend-plugin=build/plugins/backend_c.so",
+            "--output", "build/focused-simple"
+        ]
+        expect(focused_native_build_error(split_args)).to_equal("")
+        expect(focused_native_build_backend_plugin(split_args)).to_equal("build/plugins/backend_c.dll")
+        expect(focused_native_build_error(inline_args)).to_equal("")
+        expect(focused_native_build_backend_plugin(inline_args)).to_equal("build/plugins/backend_c.so")
+
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b", "--backend-plugin"
+        ])).to_contain("--backend-plugin requires a non-empty path")
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b", "--backend-plugin", "--strip"
+        ])).to_contain("--backend-plugin requires a non-empty path")
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b", "--backend-plugin="
+        ])).to_contain("--backend-plugin requires a non-empty path")
+        expect(focused_native_build_error([
+            "simple", "native-build", "--entry", "a.spl", "--output", "b", "--backend-plugin=   "
+        ])).to_contain("--backend-plugin requires a non-empty path")

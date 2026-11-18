@@ -278,9 +278,10 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     val codegen_error = llvm_codegen_error_from_ir(llvm_ir)
     if codegen_error != "":
         return Err(codegen_error)
-    # Find llc binary
+    # Find llc binary (or clang when LLVM ships clang without llc on Windows)
     val llc = find_llc()
-    if llc == "":
+    val clang = if llc == "": find_clang() else: ""
+    if llc == "" and clang == "":
         var probed = ""
         for path in tool_probe_locations("llc"):
             probed = probed + "  Checked: {path}\n"
@@ -348,20 +349,30 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     # Windows command-line construction and cmd.exe /c parsing.
     val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val direct_argv = retain_target_arguments or target.ends_with("-simpleos")
-    val llc_args = llvm_llc_object_argv_v1(config, opt_level, bootstrap_io,
-        direct_argv, obj_path, compile_input_path)
-    val cmd = "{llc} " + llc_args.join(" ") + " 2>&1"
+    val tool = if llc != "": llc else: clang
+    var cpu = config.to_cpu_string()
+    if cpu == "x86-64-v1":
+        cpu = "x86-64"
+    val llc_args = if llc != "":
+        llvm_llc_object_argv_v1(config, opt_level, bootstrap_io,
+            direct_argv, obj_path, compile_input_path)
+    else:
+        llvm_clang_object_args(config.triple.to_text(), cpu,
+            config.features.len() > 0, config.to_feature_string(),
+            llvm_llc_opt_flag(opt_level), direct_argv or not bootstrap_io,
+            obj_path, compile_input_path)
+    val cmd = "{tool} " + llc_args.join(" ") + " 2>&1"
     var llc_out = ""
     var llc_err = ""
     var llc_code = 0
-    val (direct_out, direct_err, direct_code) = process_run(llc, llc_args)
+    val (direct_out, direct_err, direct_code) = process_run(tool, llc_args)
     llc_out = direct_out
     llc_err = direct_err
     llc_code = direct_code
     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         print "[llvm-tools] llc-done"
 
-    if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, llc, compile_input_path) != "":
+    if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, tool, compile_input_path) != "":
         file_delete(obj_path)
         if bootstrap_io:
             print "[llvm-direct] failed-ir {ir_path}"
@@ -380,11 +391,11 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
         spawn_attempts = spawn_attempts + 1
         if bootstrap_io:
             print "[llvm-tools] llc-retry {spawn_attempts}"
-        val (retry_out, retry_err, retry_code) = process_run(llc, llc_args)
+        val (retry_out, retry_err, retry_code) = process_run(tool, llc_args)
         llc_out = retry_out
         llc_err = retry_err
         llc_code = retry_code
-        if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, llc, compile_input_path) != "":
+        if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, tool, compile_input_path) != "":
             file_delete(obj_path)
             if bootstrap_io:
                 print "[llvm-direct] failed-ir {ir_path}"

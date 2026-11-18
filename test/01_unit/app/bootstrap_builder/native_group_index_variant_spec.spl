@@ -1,7 +1,13 @@
 use std.spec.{describe, it, expect, fail}
 use app.bootstrap_builder.native_group_index_contract.{NativeGroupIndexConfigV1}
 use app.bootstrap_builder.native_group_index_variant.{native_group_index_variant_profile_v1,
-    native_group_index_variant_admit_v1}
+    native_group_index_variant_admit_v1, native_group_target_build_mode_v1,
+    native_group_target_build_mode_for_profile_v1}
+use app.bootstrap_builder.native_group_phase2_index_config.{
+    native_group_phase4_profile_from_env_v1}
+use compiler.driver.cache.native_full_index_variant_v1.{
+    native_full_index_target_build_mode_for_profile_v1}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
 use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1,
     config_variant_digest_v1}
 
@@ -168,3 +174,29 @@ describe "native full-index variant to compiler options":
                 wrong_target.target = "aarch64-unknown-linux-gnu"
                 expect(native_group_index_variant_admit_v1(wrong_target).is_err()).to_equal(true)
             Err(reason): fail(reason)
+
+    it "maps phase4 dev/prod profiles and PHASE4_PROFILE env into debug/release build modes":
+        """Verify profile-aware index target build modes default phase4 to release, select debug for phase4 dev, and reject phase3 prod."""
+        expect(native_full_index_target_build_mode_for_profile_v1("phase3", "").unwrap()).to_equal("debug")
+        expect(native_full_index_target_build_mode_for_profile_v1("phase3", "dev").unwrap()).to_equal("debug")
+        expect(native_full_index_target_build_mode_for_profile_v1("phase3", "prod").is_err()).to_equal(true)
+        expect(native_full_index_target_build_mode_for_profile_v1("phase4", "").unwrap()).to_equal("release")
+        expect(native_full_index_target_build_mode_for_profile_v1("phase4", "prod").unwrap()).to_equal("release")
+        expect(native_full_index_target_build_mode_for_profile_v1("phase4", "dev").unwrap()).to_equal("debug")
+        expect(native_full_index_target_build_mode_for_profile_v1("phase4", "bogus").is_err()).to_equal(true)
+
+        expect(native_group_target_build_mode_v1("phase3").unwrap()).to_equal("debug")
+        expect(native_group_target_build_mode_v1("phase4").unwrap()).to_equal("release")
+        expect(native_group_target_build_mode_for_profile_v1("phase4", "dev").unwrap()).to_equal("debug")
+        expect(native_group_target_build_mode_for_profile_v1("phase4", "prod").unwrap()).to_equal("release")
+        expect(native_group_target_build_mode_for_profile_v1("phase3", "prod").is_err()).to_equal(true)
+
+        val saved_p4 = env_get("PHASE4_PROFILE")
+        env_set("PHASE4_PROFILE", "")
+        expect(native_group_phase4_profile_from_env_v1("").unwrap()).to_equal("prod")
+        env_set("PHASE4_PROFILE", "dev")
+        expect(native_group_phase4_profile_from_env_v1("").unwrap()).to_equal("dev")
+        expect(native_group_phase4_profile_from_env_v1("prod").unwrap()).to_equal("prod")
+        env_set("PHASE4_PROFILE", "invalid")
+        expect(native_group_phase4_profile_from_env_v1("").is_err()).to_equal(true)
+        env_set("PHASE4_PROFILE", saved_p4)

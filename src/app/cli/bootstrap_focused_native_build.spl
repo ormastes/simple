@@ -7,18 +7,27 @@
 use compiler.driver.bootstrap_api_fixed.{aot_native_project_with_backend_fixed_v2}
 use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1,
     selected_k1_backend_policy_v1, selected_k1_backend_table_diagnostic_v1}
+use compiler.backend.backend_port.{codegen_optimization_from_scalar_v1}
 use compiler.common.driver_compile_result.{compile_result_is_success, compile_result_errors}
 use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
+use app.cli.bootstrap_backend_installer.{bootstrap_backend_request_error_v1}
+use app.cli.bootstrap_essential_backend_request.{bootstrap_essential_dynamic_backend_request_v1}
 pub use app.cli.bootstrap_focused_native_build_args.{
     FocusedNativeTargetProfileV1,
     focused_native_build_arg_value, focused_native_build_sources, focused_native_build_target_profile_v1,
     focused_native_build_target, focused_native_build_linker_script,
     focused_native_build_runtime_path, focused_native_build_cache_dir,
-    focused_native_build_backend, focused_native_build_effective_sources,
+    focused_native_build_backend, focused_native_build_backend_plugin,
+    focused_native_build_backend_plugin_error,
+    focused_native_build_effective_sources,
     focused_native_build_effective_cache_dir,
     focused_native_build_profile_cache_dir_v1,
     focused_native_build_profile_receipt_namespace_v1,
+    focused_native_build_receipt_dir_from_env_v1,
+    focused_native_build_receipt_path_v1,
     focused_native_build_strip,
     focused_native_build_exact_capsule_entry_allowed,
     focused_native_build_has_flag, focused_native_build_source_at,
@@ -28,6 +37,8 @@ pub use app.cli.bootstrap_focused_native_build_args.{
 use app.cli.collection_planner_options.{collection_planner_options}
 
 pub fn focused_native_build_error(args: [text]) -> text:
+    val plugin_error = focused_native_build_backend_plugin_error(args)
+    if plugin_error != "": return plugin_error
     val planner = collection_planner_options(args)
     if planner.error != "": return "Error: " + planner.error
     if planner.specified:
@@ -98,7 +109,20 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
     if output == "":
         output = focused_native_build_arg_value(args, "-o")
     val backend = focused_native_build_backend(args)
+    val backend_plugin_path = focused_native_build_backend_plugin(args)
     val target = focused_native_build_target(args)
+    val opt_level = focused_native_build_opt_level(args)
+    val composition_error = bootstrap_backend_request_error_v1(backend, backend_plugin_path)
+    if composition_error != "":
+        print "Error: {composition_error}"
+        return 1
+    if backend_plugin_path != "":
+        val dyn_req = bootstrap_essential_dynamic_backend_request_v1(
+            selected_k1_backend_policy_v1(), backend, backend_plugin_path,
+            target, "", codegen_optimization_from_scalar_v1(opt_level))
+        if dyn_req.is_err():
+            print "Error: {dyn_req.unwrap_err()}"
+            return 1
     val linker_script = focused_native_build_linker_script(args)
     val runtime_path = focused_native_build_runtime_path(args)
     val runtime_bundle = focused_native_build_arg_value(args, "--runtime-bundle")
@@ -146,10 +170,15 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
         backend,
         focused_native_build_strip(args, exact_stage4_capsule),
         target_profile.release,
-        focused_native_build_opt_level(args),
+        opt_level,
         focused_native_build_has_flag(args, "--no-borrow-check"),
-        target_profile.managed_build_phase
+        target_profile.managed_build_phase,
+        backend_plugin_path
     )
+    val active_receipt_dir = focused_native_build_receipt_dir_from_env_v1(
+        env_get("SIMPLE_NATIVE_BUILD_RECEIPT_DIR"), target_profile, effective_cache_dir)
+    val focused_receipt_path = focused_native_build_receipt_path_v1(
+        output, active_receipt_dir, target_profile, effective_cache_dir)
 
     native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
     native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_entry_closure)
@@ -162,6 +191,15 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
     native_build_env_restore_v1("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
 
     if compile_result_is_success(result):
+        if dir_create_all(active_receipt_dir):
+            val receipt_sdn = "format: \"simple/focused-native-build-receipt/v1\"\n" +
+                "entry: \"{entry}\"\n" +
+                "output: \"{output}\"\n" +
+                "backend: \"{backend}\"\n" +
+                "backend_plugin_path: \"{backend_plugin_path}\"\n" +
+                "profile: \"{target_profile.profile}\"\n" +
+                "managed_build_phase: \"{target_profile.managed_build_phase}\"\n"
+            val _published = file_atomic_write(focused_receipt_path, receipt_sdn)
         return 0
     for err in compile_result_errors(result):
         print "error: focused native-build: {err}"

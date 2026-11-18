@@ -399,6 +399,14 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
                 return log_error
             i = i + 2
             continue
+        if arg == "--backend-plugin":
+            val error = cli_native_build_value_error(args, i, arg, false)
+            if error != "":
+                return error
+            if args[i + 1].trim() == "":
+                return "--backend-plugin requires a non-empty path"
+            i = i + 2
+            continue
         if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-owner" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--profile" or arg == "--managed-build-phase" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or arg == "--collection-policy" or arg == "--collection-memory-budget" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
@@ -419,6 +427,11 @@ fn cli_native_build_option_error(args: [text], require_entry: bool = false) -> t
         if arg.starts_with("--backend="):
             val error = cli_native_build_inline_value_error(arg, "--backend=", "--backend", false)
             if error != "": return error
+        elif arg.starts_with("--backend-plugin="):
+            val error = cli_native_build_inline_value_error(arg, "--backend-plugin=", "--backend-plugin", false)
+            if error != "": return error
+            if arg.substring(17).trim() == "":
+                return "--backend-plugin requires a non-empty path"
         elif arg.starts_with("--runtime-owner="):
             val error = cli_native_build_inline_value_error(arg, "--runtime-owner=", "--runtime-owner", false)
             if error != "": return error
@@ -794,6 +807,7 @@ pub struct CliNativeBuildParsedOptionsV1:
     hir_shard: text = ""
     mir_shard: text = ""
     runtime_path: text = ""
+    backend_plugin_path: text = ""
     optimization_requested: bool = false
     no_borrow_check: bool = false
     no_mangle: bool = false
@@ -844,6 +858,7 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
     var hir_shard: text = ""
     var mir_shard: text = ""
     var runtime_path = ""
+    var backend_plugin_path = ""
     var optimization_requested = false
     var no_borrow_check = false
     var no_mangle = false
@@ -1116,6 +1131,18 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
             if a == "--backend" and j + 1 < args.len():
                 j = j + 1
             # Already handled above
+        elif a.starts_with("--backend-plugin="):
+            val plugin_val = a.substring(17).trim()
+            if plugin_val == "":
+                _cli_eprint("Error: --backend-plugin requires a non-empty path")
+                return cli_native_build_parse_failure_v1()
+            backend_plugin_path = plugin_val
+        elif a == "--backend-plugin":
+            if j + 1 >= args.len() or args[j + 1].starts_with("-") or args[j + 1].trim() == "":
+                _cli_eprint("Error: --backend-plugin requires a non-empty path")
+                return cli_native_build_parse_failure_v1()
+            j = j + 1
+            backend_plugin_path = args[j].trim()
         elif a.starts_with("--log="):
             val mode = a.substring(6)
             if mode == "":
@@ -1179,6 +1206,7 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
         hir_shard: hir_shard,
         mir_shard: mir_shard,
         runtime_path: runtime_path,
+        backend_plugin_path: backend_plugin_path,
         optimization_requested: optimization_requested,
         no_borrow_check: no_borrow_check,
         no_mangle: no_mangle,
@@ -1198,6 +1226,7 @@ fn cli_native_build_print_help_v1() -> i64:
     print "  -o <path>            Output binary path"
     print "  --entry <file>       Entry file"
     print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
+    print "  --backend-plugin <p> Explicit dynamic backend plugin artifact path"
     print "  --mode <name>        Build mode: dynload (default; warns until automatic aspect-pack packaging is available) or one-binary"
     print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
     print "  --collection-profile <path>  Admitted .sprof collection feedback"
@@ -1293,6 +1322,7 @@ fn _cli_native_build(
     # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
     var backend = ""
     var backend_explicit = false
+    var backend_plugin_path = ""
     var runtime_bundle = "auto"
     var runtime_bundle_explicit = false
     var log_mode = "on"
@@ -1311,6 +1341,11 @@ fn _cli_native_build(
             i = i + 1
             backend = args[i]
             backend_explicit = true
+        elif arg.starts_with("--backend-plugin="):
+            backend_plugin_path = arg.substring(17).trim()
+        elif arg == "--backend-plugin" and i + 1 < args.len():
+            i = i + 1
+            backend_plugin_path = args[i].trim()
         elif arg == "--runtime-owner" and i + 1 < args.len():
             # One rt_* owner per link: c (default) | rust | simple. The linker
             # (llvm_native_link_runtime_owner.spl) validates and fails closed.
@@ -1373,14 +1408,14 @@ fn _cli_native_build(
         backend_explicit = true
 
     # The internal worker reaches this point only after its policy handoff has
-    # been opened. Use this argument owner's parsed backend; plugin options
-    # are already rejected by cli_native_build_option_error above.
-    val composition_error = bootstrap_backend_request_error_v1(backend, "")
+    # been opened. Validate the parsed backend and any explicit --backend-plugin
+    # artifact before entering CompilerDriver.
+    val composition_error = bootstrap_backend_request_error_v1(backend, backend_plugin_path)
     if composition_error != "":
         _cli_eprint("Error: {composition_error}")
         return 1
 
-    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm" or backend == "cranelift"):
+    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm" or backend == "cranelift" or backend_plugin_path != ""):
         # Pure Simple path: use CompilerDriver with LLVM lib backend
         # Parse native-build args: --source, --entry, -o, --strip, --no-mangle, etc.
         val parsed = cli_native_build_parse_options_v1(args)
@@ -1416,6 +1451,10 @@ fn _cli_native_build(
         var hir_shard: text = parsed.hir_shard
         var mir_shard: text = parsed.mir_shard
         var runtime_path: text = parsed.runtime_path
+        val effective_backend_plugin_path: text = if parsed.backend_plugin_path != "":
+            parsed.backend_plugin_path
+        else:
+            backend_plugin_path
         var optimization_requested: bool = parsed.optimization_requested
         var no_borrow_check: bool = parsed.no_borrow_check
         var no_mangle: bool = parsed.no_mangle
@@ -1695,6 +1734,7 @@ fn _cli_native_build(
             options.output_file = Some(staged_output)
             options.output_format = native_build_output_format_v1(build_mode, true, false, native_group_requested)
             options.backend = backend
+            options.backend_plugin_path = effective_backend_plugin_path
             options.native_target = native_target
             options.release = release
             options.xray_enabled = xray_enabled
@@ -1754,6 +1794,7 @@ fn _cli_native_build(
             options.output_format = native_build_output_format_v1(build_mode, false,
                 emit_object or emit_entry_object or emit_archive or emit_shared, native_group_requested)
             options.backend = backend
+            options.backend_plugin_path = effective_backend_plugin_path
             options.native_target = native_target
             options.release = release
             options.xray_enabled = xray_enabled
