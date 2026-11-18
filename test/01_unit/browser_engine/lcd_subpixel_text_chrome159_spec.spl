@@ -48,6 +48,9 @@ val PAGE_L16: text = "<!doctype html><html><body style=\"margin:0;background:#ff
 val PAGE_L50: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:50px;line-height:1;color:#000\">l</p></body></html>"
 val PAGE_LLL: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:16px;line-height:1;color:#000\">lll</p></body></html>"
 val PAGE_WB: text = "<!doctype html><html><body style=\"margin:0;background:#000;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:16px;line-height:1;color:#fff\">l</p></body></html>"
+# Words, so neighbouring LCD quads overlap (1 px padding) and the Vulkan kernel
+# has to blend each word as one chain in painter order; dark and light text.
+val PAGE_WORDS: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:1px;top:0px;font-size:16px;line-height:1;color:#000\">Waffle</p><p style=\"margin:0;position:absolute;left:1px;top:24px;font-size:13px;line-height:1;background:#123;color:#fec\">fjord Tilt</p></body></html>"
 
 fn _chan(px: u32, shift: u32) -> i32:
     ((px >> shift) & 0xFFu32).to_i32()
@@ -170,3 +173,19 @@ describe "LCD subpixel text on a real Vulkan device":
             expect(res.vector_font_device_executed).to_be(true)
             expect(res.vector_font_execution_target).to_equal("vulkan")
             expect(res.readback.pixels).to_equal(cpu)
+
+    it "AC-8: words of overlapping LCD glyphs, blended as one chain per word, match byte for byte":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        if not file_exists("/usr/share/vulkan/icd.d/lvp_icd.json"):
+            print("[skip] AC-8: no llvmpipe ICD; this Vulkan row was not exercised")
+            return
+        expect(simple_web_resolved_engine2d_backend_name(W, H, "vulkan")).to_equal("vulkan")
+        val cpu = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_WORDS, W, H, "cpu_simd")
+        val res = simple_web_render_html_to_readback_result_with_engine2d_backend(PAGE_WORDS, W, H, "vulkan")
+        expect(res.readback.source).to_equal("device_readback")
+        expect(res.vector_font_device_executed).to_be(true)
+        expect(res.vector_font_execution_target).to_equal("vulkan")
+        expect(_fringe_count(res.readback.pixels) > 0).to_be(true)
+        expect(res.readback.pixels).to_equal(cpu)

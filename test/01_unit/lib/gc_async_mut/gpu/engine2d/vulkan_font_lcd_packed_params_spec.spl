@@ -1,16 +1,22 @@
 # Purpose and audience: pin the LCD trailer of the packed Vulkan font params for
 # the engine2d font maintainers. The kernel (shaders/font_atlas_batch.comp) reads
-# per-glyph LCD table indices and per-colour s32 tables from the params buffer;
+# per-glyph LCD table indices, chain lengths and per-colour s32 tables from the
+# params buffer; an overlapping LCD batch is ONE dispatch of chains, not one
+# dispatch per overlapping glyph;
 # these rows pin that layout without needing a device.
 # @req REQ-SSPEC-UNIT
 # @tag: unit, engine2d, vulkan, font, lcd
 
 use std.spec.*
-use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_FONT_LCD_MAX_COLORS, VULKAN_BITMAP_FONT_CONFIG_IDENTITY, vulkan_font_packed_params, vulkan_font_packed_params_lcd, vulkan_font_packed_has_lcd_trailer, vulkan_font_quad_key, vulkan_font_lcd_veto_keys, vulkan_bitmap_text_clip_quads}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_FONT_LCD_MAX_COLORS, VULKAN_BITMAP_FONT_CONFIG_IDENTITY, vulkan_font_packed_params, vulkan_font_packed_params_lcd, vulkan_font_packed_has_lcd_trailer, vulkan_font_lcd_color_count, vulkan_font_chain_ids, vulkan_font_chain_order, vulkan_font_chain_lens, vulkan_font_partition_quads, vulkan_font_partition_bucket_count, vulkan_font_quad_key, vulkan_font_lcd_veto_keys, vulkan_bitmap_text_clip_quads}
 use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
 val NO_VETO: [text] = []
+val NO_CHAINS: [i64] = []
+# trailer word = chain length * 65536 + table index; 65535 = no LCD table
+val ONE: i64 = 65536
+val GRAY: i64 = 65535
 
 fn _quad(dst_x: i32, dst_y: i32, atlas_x: i32, color: u32) -> FontRenderQuad:
     FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: dst_x, dst_y: dst_y,
@@ -32,19 +38,19 @@ describe "packed Vulkan font params LCD trailer":
     it "keeps the legacy layout byte for byte when the atlas has no LCD cell":
         val batch = _batch([_quad(0, 0, 0, 0xFF000000u32)], "cfg")
         val legacy = vulkan_font_packed_params(batch, 0, 0, 8, 4)
-        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO)).to_equal(legacy)
+        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO, NO_CHAINS)).to_equal(legacy)
         expect(vulkan_font_packed_has_lcd_trailer(legacy)).to_be(false)
 
     it "appends a per-glyph table index and the shared s32 tables for an LCD quad":
         val black = 0xFF000000u32
         val batch = _batch([_quad(0, 0, 2, black), _quad(4, 0, 0, black)], "cfg")
         val legacy = vulkan_font_packed_params(batch, 0, 0, 8, 4)
-        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO)
+        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO, NO_CHAINS)
         expect(vulkan_font_packed_has_lcd_trailer(packed)).to_be(true)
         # 8 header words + 2 glyph records of 7 words, then 2 index words, then one table
         expect(packed.len().to_i64()).to_equal((8 + 14 + 2 + 768) * 4)
-        expect(_word(packed, 22)).to_equal(0)           # glyph 0 (LCD cell) -> table 0
-        expect(_word(packed, 23)).to_equal(4294967295)  # glyph 1 (gray cells) -> no LCD
+        expect(_word(packed, 22)).to_equal(ONE + 0)     # glyph 0 (LCD cell) -> chain of 1, table 0
+        expect(_word(packed, 23)).to_equal(ONE + GRAY)  # glyph 1 (gray cells) -> chain of 1, no LCD
         val table = engine2d_lcd_s32_tables(black)
         expect(_word(packed, 24 + 255)).to_equal(table[255])
         expect(_word(packed, 24 + 256 + 128)).to_equal(table[256 + 128])
@@ -62,25 +68,25 @@ describe "packed Vulkan font params LCD trailer":
         val a = 0xFF000000u32
         val b = 0xFFFFFFFFu32
         val batch = _batch([_quad(0, 0, 2, a), _quad(4, 0, 2, a), _quad(8, 0, 2, b)], "cfg")
-        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 12, 4, true, NO_VETO)
+        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 12, 4, true, NO_VETO, NO_CHAINS)
         expect(packed.len().to_i64()).to_equal((8 + 21 + 3 + 2 * 768) * 4)
-        expect(_word(packed, 29)).to_equal(0)
-        expect(_word(packed, 30)).to_equal(0)
-        expect(_word(packed, 31)).to_equal(1)
+        expect(_word(packed, 29)).to_equal(ONE + 0)
+        expect(_word(packed, 30)).to_equal(ONE + 0)
+        expect(_word(packed, 31)).to_equal(ONE + 1)
 
     it "draws a vetoed quad gray (no table) while its neighbour keeps LCD":
         val black = 0xFF000000u32
         val q0 = _quad(0, 0, 2, black)
         val q1 = _quad(4, 0, 2, black)
         val batch = _batch([q0, q1], "cfg")
-        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, [vulkan_font_quad_key(q0)])
-        expect(_word(packed, 8 + 14 + 0)).to_equal(4294967295)
-        expect(_word(packed, 8 + 14 + 1)).to_equal(0)
+        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, [vulkan_font_quad_key(q0)], NO_CHAINS)
+        expect(_word(packed, 8 + 14 + 0)).to_equal(ONE + GRAY)
+        expect(_word(packed, 8 + 14 + 1)).to_equal(ONE + 0)
 
     it "never takes the LCD branch for the rgb-less bitmap atlas":
         val batch = _batch([_quad(0, 0, 2, 0xFF000000u32)], VULKAN_BITMAP_FONT_CONFIG_IDENTITY)
         val legacy = vulkan_font_packed_params(batch, 0, 0, 8, 4)
-        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO)).to_equal(legacy)
+        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO, NO_CHAINS)).to_equal(legacy)
 
     it "refuses a batch with more distinct LCD colours than the trailer holds":
         var quads: [FontRenderQuad] = []
@@ -89,7 +95,7 @@ describe "packed Vulkan font params LCD trailer":
             quads.push(_quad(0, 0, 2, (0xFF000000u32 | i.to_u32())))
             i = i + 1
         val batch = _batch(quads, "cfg")
-        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO).len()).to_equal(0)
+        expect(vulkan_font_packed_params_lcd(batch, 0, 0, 8, 4, true, NO_VETO, NO_CHAINS).len()).to_equal(0)
 
     it "marks only the trimmed quads whose untrimmed rect left the surface":
         val inside = _quad(4, 0, 2, 0xFF000000u32)
@@ -102,3 +108,58 @@ describe "packed Vulkan font params LCD trailer":
         expect(keys.len().to_i64()).to_equal(1)
         expect(keys[0]).to_equal(vulkan_font_quad_key(kept[0]))
         expect(kept[0].width).to_equal(1)
+
+# A word of LCD glyphs: each quad is 2 px wide and 1 px further right, so every
+# neighbour pair overlaps (LCD padding does this to real text).
+fn _word_quads(count: i64, first_x: i32) -> [FontRenderQuad]:
+    var quads: [FontRenderQuad] = []
+    var i: i64 = 0
+    while i < count:
+        quads.push(_quad(first_x + i.to_i32(), 0, 2, 0xFF000000u32))
+        i = i + 1
+    quads
+
+describe "packed Vulkan font LCD chains":
+    it "groups each run of overlapping quads into one chain, in painter order":
+        # two words of 5 and 3 glyphs with a gap, drawn interleaved
+        val a = _word_quads(5, 0)
+        val b = _word_quads(3, 20)
+        val quads = [a[0], b[0], a[1], b[1], a[2], b[2], a[3], a[4]]
+        val ids = vulkan_font_chain_ids(quads)
+        expect(ids).to_equal([0, 1, 0, 1, 0, 1, 0, 0])
+        expect(vulkan_font_chain_order(ids)).to_equal([0, 2, 4, 6, 7, 1, 3, 5])
+        expect(vulkan_font_chain_lens(ids)).to_equal([5, 0, 0, 0, 0, 3, 0, 0])
+
+    it "joins two chains when a later quad overlaps both":
+        val bridge = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 0,
+            width: 10, height: 1, atlas_x: 2, atlas_y: 0, color: 0xFF000000u32)
+        val ids = vulkan_font_chain_ids([_quad(0, 0, 2, 0xFF000000u32), _quad(9, 0, 2, 0xFF000000u32), bridge])
+        expect(ids).to_equal([0, 0, 0])
+        expect(vulkan_font_chain_lens(ids)).to_equal([3, 0, 0])
+
+    it "needs one dispatch where the overlap split needs one per glyph of the word":
+        val quads = _word_quads(12, 0)
+        # the split this replaces: 12 overlapping glyphs = 12 ordered dispatches
+        expect(vulkan_font_partition_bucket_count(vulkan_font_partition_quads(quads))).to_equal(12)
+        val ids = vulkan_font_chain_ids(quads)
+        val lens = vulkan_font_chain_lens(ids)
+        val batch = _batch(quads, "cfg")
+        expect(vulkan_font_lcd_color_count(batch, NO_VETO)).to_equal(1)
+        val packed = vulkan_font_packed_params_lcd(batch, 0, 0, 16, 4, true, NO_VETO, lens)
+        expect(vulkan_font_packed_has_lcd_trailer(packed)).to_be(true)
+        # one params buffer (= one dispatch) holds all 12 glyphs: the first
+        # trailer word owns the chain of 12, the other 11 own nothing
+        expect(_word(packed, 6)).to_equal(12)
+        expect(_word(packed, 8 + 12 * 7)).to_equal(12 * 65536 + 0)
+        var owned: i64 = 0
+        var i: i64 = 1
+        while i < 12:
+            owned = owned + _word(packed, 8 + 12 * 7 + i) / 65536
+            i = i + 1
+        expect(owned).to_equal(0)
+
+    it "counts no LCD colour for gray or bitmap batches, which keep the overlap split":
+        val gray = _batch([_quad(0, 0, 0, 0xFF000000u32), _quad(1, 0, 0, 0xFF000000u32)], "cfg")
+        expect(vulkan_font_lcd_color_count(gray, NO_VETO)).to_equal(0)
+        val bitmap = _batch(_word_quads(2, 0), VULKAN_BITMAP_FONT_CONFIG_IDENTITY)
+        expect(vulkan_font_lcd_color_count(bitmap, NO_VETO)).to_equal(0)

@@ -163,3 +163,16 @@ Left open:
    `vector_font_device_executed=false` with LCD on AND off, so that fallback to the
    CPU suffix is not caused by this change; at 900x760 the same constructs ran on
    the device on base and head.
+
+## Follow-up (2026-11-19): one dispatch per overlapping LCD batch
+
+Open item 5 (cost) is partly closed. The kernel now blends each chain of
+overlapping quads inside one workgroup, so an LCD batch is one dispatch instead
+of one per glyph of its longest word (text page: 456 -> 60 dispatches, byte
+equal). The trailer word is now `chain length << 16 | table index`
+(`0xFFFF` = no LCD), and the pinned SPIR-V sha256 is
+`be8db6a0280107944e44e77fe37a4cf7140e982f411ba3dcee99138d77800075`.
+Details and numbers: the "Chains" bullet of
+`doc/00_llm_process/feature_expert/web_render_css_parity/skill.md`. What still
+dominates Vulkan wall time is the atlas upload:
+`vulkan_font_atlas_full_repack_interleaved_faces_2026-11-19.md`.
