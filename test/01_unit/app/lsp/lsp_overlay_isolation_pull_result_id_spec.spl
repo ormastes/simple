@@ -1,0 +1,240 @@
+# Per-Client Overlay Isolation & Deterministic Pull Diagnostic ResultId Spec (ED-T08)
+# @req REQ-DIAG-006
+# @req REQ-DIAG-011
+# @cover src/lib/nogc_sync_mut/lsp/lsp_document_sync.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_action_store.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_handlers.spl
+"""
+## Purpose and audience
+
+Executable TDD specification for Wave E4 (`WP-03`, `[C10]`, `ED-T08`):
+verifies per-client document overlay isolation (`client_id`, defaulting to
+`"default"`), per-client diagnostic action store isolation with real SHA-256
+`source_hash` recording, collision-free overlay temp staging paths containing
+`client_id` + monotonic nonce, and deterministic LSP 3.17 pull diagnostic
+`resultId` computation with `{"kind":"unchanged","resultId":"..."}` matching.
+"""
+
+use std.spec
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticFixConfidence}
+use std.common.diagnostics.diagnostic_batch.{DiagnosticActionIndex, FixCandidate}
+use std.common.diagnostics.span.{Span}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_has, json_value_object_from, json_value_serialize, json_value_text_or}
+use std.io_runtime.{file_exists, read_file, write_file, file_delete, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{
+    lsp_document_snapshot,
+    lsp_document_open_for_client_v1,
+    lsp_document_change_for_client_v1,
+    lsp_document_close_for_client_v1,
+    lsp_document_snapshot_for_client_v1
+}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{
+    lsp_diag_action_store_lookup,
+    lsp_diag_action_store_record_for_client_v1,
+    lsp_diag_action_store_lookup_for_client_v1,
+    lsp_diag_action_store_clear_for_client_v1
+}
+use std.nogc_sync_mut.lsp.lsp_handlers.{
+    lsp_check_json_parse_v1,
+    lsp_evaluate_check_output_v1,
+    lsp_diag_record_batch_for_client_v1,
+    lsp_diagnostics_stage_source_for_client_v1,
+    lsp_diagnostics_release_source_v1,
+    lsp_pull_diagnostic_result_id_v1,
+    lsp_pull_diagnostic_response_from_batch_v1
+}
+
+fn temp_disk_spl(tag: text, content: text) -> (text, text):
+    val path = get_temp_dir().replace("\\", "/") + "/lsp_ed_t08_" + tag + "_" + str(time_now_unix_micros()) + ".spl"
+    val _ = write_file(path, content)
+    val uri = if path.starts_with("/"): "file://" + path else: "file:///" + path
+    (path, uri)
+
+describe "Per-client overlay isolation, staging nonces, and pull diagnostic resultId (ED-T08)":
+    """
+    Verifies strict client separation across document sync, action store, temp
+    staging files, and deterministic pull-diagnostic resultId / unchanged replies.
+    """
+
+    context "when multiple LSP clients open and edit the same file URI":
+        """
+        Ensures client A's unsaved overlay and action store never leak into client B or default.
+        """
+
+        it "isolates unsaved overlays between client A, client B, and the default client":
+            """
+            Independent clients hold distinct versions and buffer contents for the same URI.
+            """
+            val uri = "file:///w/shared_ed_t08.spl"
+            val a_v1 = "val x: i64 = 1\n"
+            val a_v2 = "val broken: = 1\n"
+            val b_v1 = "val clean_b: i64 = 99\n"
+
+            step("Open and mutate URI in client-a while opening distinct text in client-b")
+            expect(lsp_document_open_for_client_v1("client-a", uri, 1, a_v1)).to_equal(true)
+            expect(lsp_document_change_for_client_v1("client-a", uri, 2, a_v2)).to_equal(true)
+            expect(lsp_document_open_for_client_v1("client-b", uri, 1, b_v1)).to_equal(true)
+
+            step("Verify client-a, client-b, and default snapshots stay completely isolated")
+            val snap_a = lsp_document_snapshot_for_client_v1("client-a", uri)
+            val snap_b = lsp_document_snapshot_for_client_v1("client-b", uri)
+            val snap_default = lsp_document_snapshot(uri)
+            expect(snap_a.?).to_equal(true)
+            expect(snap_a.unwrap().version).to_equal(2)
+            expect(snap_a.unwrap().content).to_equal(a_v2)
+            expect(snap_b.?).to_equal(true)
+            expect(snap_b.unwrap().version).to_equal(1)
+            expect(snap_b.unwrap().content).to_equal(b_v1)
+            expect(snap_default.?).to_equal(false)
+
+            step("Closing client-a leaves client-b synchronized")
+            expect(lsp_document_close_for_client_v1("client-a", uri)).to_equal(true)
+            expect(lsp_document_snapshot_for_client_v1("client-a", uri).?).to_equal(false)
+            expect(lsp_document_snapshot_for_client_v1("client-b", uri).unwrap().content).to_equal(b_v1)
+            expect(lsp_document_close_for_client_v1("client-b", uri)).to_equal(true)
+
+        it "isolates action store entries per client and records real SHA-256 source_hash":
+            """
+            Action store lookups respect client_id and record exact 64-hex SHA-256 digests.
+            """
+            val uri = "file:///w/store_ed_t08.spl"
+            val src_a = "fn a():\n    val p = Foo__bar()\n"
+            val src_b = "fn b():\n    val q = 42\n"
+
+            step("Open distinct versions/contents in client-a and client-b and record batch for client-a")
+            expect(lsp_document_open_for_client_v1("client-a", uri, 5, src_a)).to_equal(true)
+            expect(lsp_document_open_for_client_v1("client-b", uri, 5, src_b)).to_equal(true)
+
+            val fix_a = FixCandidate.new("fx_a", "Use Foo.bar()", "dot call", DiagnosticFixConfidence.Safe, 5)
+                .with_replacement("/w/store_ed_t08.spl", Span.new(20, 28, 2, 13), "Foo.bar", "Foo__bar")
+            var batch_a = lsp_check_json_parse_v1("[]", "/w/store_ed_t08.spl", 5)
+            batch_a.index = DiagnosticActionIndex.new().add("d0", fix_a)
+            batch_a.ids = ["d0"]
+            lsp_diag_record_batch_for_client_v1("client-a", uri, batch_a)
+
+            step("Verify client-a has SHA-256 source_hash and candidate fx_a, while client-b and default have none")
+            val entry_a = lsp_diag_action_store_lookup_for_client_v1("client-a", uri, 5)
+            expect(entry_a.?).to_equal(true)
+            expect(entry_a.unwrap().source_hash).to_equal(sha256_text(src_a))
+            expect(entry_a.unwrap().source_hash.len()).to_equal(64)
+            expect(entry_a.unwrap().ids.len()).to_equal(1)
+
+            expect(lsp_diag_action_store_lookup_for_client_v1("client-b", uri, 5).?).to_equal(false)
+            expect(lsp_diag_action_store_lookup(uri, 5).?).to_equal(false)
+
+            lsp_diag_action_store_record_for_client_v1("client-b", uri, 5, sha256_text(src_b), "complete", true, [], DiagnosticActionIndex.new(), [], [])
+            lsp_diag_action_store_clear_for_client_v1("client-a", uri)
+            expect(lsp_diag_action_store_lookup_for_client_v1("client-a", uri, 5).?).to_equal(false)
+            expect(lsp_diag_action_store_lookup_for_client_v1("client-b", uri, 5).?).to_equal(true)
+
+            lsp_diag_action_store_clear_for_client_v1("client-b", uri)
+            expect(lsp_document_close_for_client_v1("client-a", uri)).to_equal(true)
+            expect(lsp_document_close_for_client_v1("client-b", uri)).to_equal(true)
+
+        it "stages overlay temp files with sanitized client_id and monotonic nonces":
+            """
+            Simultaneous staging for two clients produces distinct filenames without touching disk.
+            """
+            val disk_src = "val disk_ok: i64 = 10\n"
+            val alpha_src = "val alpha_dirty: i64 = 20\n"
+            val beta_src = "val beta_dirty: i64 = 30\n"
+            val (path, uri) = temp_disk_spl("stage", disk_src)
+
+            step("Open unsaved overlays for client-alpha and client-beta on the same disk file")
+            expect(lsp_document_open_for_client_v1("client-alpha", uri, 1, alpha_src)).to_equal(true)
+            expect(lsp_document_open_for_client_v1("client-beta", uri, 1, beta_src)).to_equal(true)
+
+            val staged_a1 = lsp_diagnostics_stage_source_for_client_v1("client-alpha", uri, path)
+            val staged_a2 = lsp_diagnostics_stage_source_for_client_v1("client-alpha", uri, path)
+            val staged_b1 = lsp_diagnostics_stage_source_for_client_v1("client-beta", uri, path)
+
+            expect(staged_a1.staged).to_equal(true)
+            expect(staged_b1.staged).to_equal(true)
+            expect(staged_a1.path).to_contain("client-alpha")
+            expect(staged_b1.path).to_contain("client-beta")
+            expect(staged_a1.path == staged_a2.path).to_equal(false)
+            expect(read_file(staged_a1.path)).to_equal(alpha_src)
+            expect(read_file(staged_b1.path)).to_equal(beta_src)
+            expect(read_file(path)).to_equal(disk_src)
+
+            step("Release staged sources and clean up")
+            lsp_diagnostics_release_source_v1(staged_a1)
+            lsp_diagnostics_release_source_v1(staged_a2)
+            lsp_diagnostics_release_source_v1(staged_b1)
+            expect(file_exists(staged_a1.path)).to_equal(false)
+            expect(file_exists(staged_a2.path)).to_equal(false)
+            expect(file_exists(staged_b1.path)).to_equal(false)
+            expect(lsp_document_close_for_client_v1("client-alpha", uri)).to_equal(true)
+            expect(lsp_document_close_for_client_v1("client-beta", uri)).to_equal(true)
+            val _ = file_delete(path)
+
+    context "when computing deterministic pull diagnostic resultId and unchanged responses":
+        """
+        Verifies resultId determinism across all 5 identity axes and unchanged short-circuiting.
+        """
+
+        it "computes a deterministic resultId sensitive to snapshot, scope, status, target, and policy_digest":
+            """
+            Changing any component of the 5-tuple changes resultId; identical inputs match exactly.
+            """
+            step("Compare deterministic resultId digests across each axis")
+            val base_id = lsp_pull_diagnostic_result_id_v1("sha_v1@1", "document", "complete", "/w/a.spl", "pol_1")
+            val same_id = lsp_pull_diagnostic_result_id_v1("sha_v1@1", "document", "complete", "/w/a.spl", "pol_1")
+            val diff_snap = lsp_pull_diagnostic_result_id_v1("sha_v2@2", "document", "complete", "/w/a.spl", "pol_1")
+            val diff_scope = lsp_pull_diagnostic_result_id_v1("sha_v1@1", "workspace", "complete", "/w/a.spl", "pol_1")
+            val diff_status = lsp_pull_diagnostic_result_id_v1("sha_v1@1", "document", "incomplete", "/w/a.spl", "pol_1")
+            val diff_target = lsp_pull_diagnostic_result_id_v1("sha_v1@1", "document", "complete", "/w/b.spl", "pol_1")
+            val diff_policy = lsp_pull_diagnostic_result_id_v1("sha_v1@1", "document", "complete", "/w/a.spl", "pol_2")
+
+            expect(base_id).to_equal(same_id)
+            expect(base_id).to_start_with("diag-")
+            expect(base_id == diff_snap).to_equal(false)
+            expect(base_id == diff_scope).to_equal(false)
+            expect(base_id == diff_status).to_equal(false)
+            expect(base_id == diff_target).to_equal(false)
+            expect(base_id == diff_policy).to_equal(false)
+
+        it "returns full report with resultId initially and kind unchanged when previousResultId matches":
+            """
+            Matching previousResultId returns unchanged report; updated snapshot returns full report with new resultId.
+            """
+            step("Build a complete batch for v1 and verify full report contains resultId and items")
+            val diag_obj = json_value_object_from([
+                ("severity", JsonValue.Int(2)),
+                ("code", JsonValue.Str("W0001")),
+                ("message", JsonValue.Str("unused binding")),
+                ("line", JsonValue.Int(1)),
+                ("col", JsonValue.Int(5))
+            ])
+            val payload = json_value_serialize(JsonValue.Array([diag_obj]))
+            val h1 = sha256_text("val unused = 1\n")
+            val batch_v1 = lsp_evaluate_check_output_v1(payload, 0, "/w/pull_id.spl", "/w/pull_id.spl", 1, h1)
+
+            val full_resp = lsp_pull_diagnostic_response_from_batch_v1("41", "", batch_v1, true, 1)
+            val parsed_full = json_parse_value_strict(full_resp).unwrap()
+            val full_result = json_value_field(parsed_full, "result")
+            expect(json_value_text_or(json_value_field(full_result, "kind"), "")).to_equal("full")
+            val rid_v1 = json_value_text_or(json_value_field(full_result, "resultId"), "")
+            expect(rid_v1).to_start_with("diag-")
+            expect(full_resp).to_contain("unused binding")
+
+            step("Re-pull with matching previousResultId: returns kind unchanged without items")
+            val unch_resp = lsp_pull_diagnostic_response_from_batch_v1("42", rid_v1, batch_v1, true, 1)
+            val parsed_unch = json_parse_value_strict(unch_resp).unwrap()
+            val unch_result = json_value_field(parsed_unch, "result")
+            expect(json_value_text_or(json_value_field(unch_result, "kind"), "")).to_equal("unchanged")
+            expect(json_value_text_or(json_value_field(unch_result, "resultId"), "")).to_equal(rid_v1)
+            expect(json_value_has(unch_result, "items")).to_equal(false)
+
+            step("Pull after snapshot edit (v2): previousResultId no longer matches, returns full with new resultId")
+            val h2 = sha256_text("val used = 2\n")
+            val batch_v2 = lsp_evaluate_check_output_v1("[]", 0, "/w/pull_id.spl", "/w/pull_id.spl", 2, h2)
+            val next_resp = lsp_pull_diagnostic_response_from_batch_v1("43", rid_v1, batch_v2, true, 2)
+            val parsed_next = json_parse_value_strict(next_resp).unwrap()
+            val next_result = json_value_field(parsed_next, "result")
+            expect(json_value_text_or(json_value_field(next_result, "kind"), "")).to_equal("full")
+            val rid_v2 = json_value_text_or(json_value_field(next_result, "resultId"), "")
+            expect(rid_v2 == rid_v1).to_equal(false)

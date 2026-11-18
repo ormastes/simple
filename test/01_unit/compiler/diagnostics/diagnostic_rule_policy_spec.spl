@@ -15,8 +15,8 @@ Audience: driver/lint/LSP adapters that resolve a diagnostic's severity.
 use std.spec
 use std.nogc_sync_mut.fs.text_io.{file_read_text}
 use compiler.common.diagnostics.diagnostic_rule_policy.{
-    DiagnosticRuleLevel, DiagnosticPolicySnapshot, PolicyResolveContext,
-    load_diagnostic_policy_text, diagnostic_policy_default_path
+    DiagnosticPolicyInputV1, DiagnosticRuleLevel, DiagnosticPolicySnapshot, PolicyResolveContext,
+    load_diagnostic_policy_text, diagnostic_policy_default_path, project_policy_parity_v1
 }
 use compiler.common.assurance.warning_phase.{
     phased_rule_severity_rank, severity_rank_deny, severity_rank_advisory
@@ -262,3 +262,24 @@ describe "Robust-boundary rules (robust_boundaries plan section 7)":
         expect(rng.stage).to_equal("security")
         expect(s.rule("SPL-SFFI-ABI-001").exception_policy).to_equal("forbidden")
         expect(s.rule("SPL-SFFI-RANGE-001").exception_policy).to_equal("forbidden")
+
+    it "resolves unscheduled rules directly to their profile baseline and projects parity":
+        """Verifies rules with empty warn_since fields use their mode baseline and project deterministically."""
+        val src = "diagnostic_policy:\n    version: 1\n    rules:\n        X-UNSCHED:\n            modes:\n                moderate: warn\n                robust: deny\n"
+        match load_diagnostic_policy_text(src):
+            Ok(s):
+                val mod_proj = project_policy_parity_v1(
+                    s, "X-UNSCHED",
+                    DiagnosticPolicyInputV1.for_mode("moderate", "2026.11", false, "", ""),
+                    DiagnosticRuleLevel.Warn)
+                val rob_proj = project_policy_parity_v1(
+                    s, "X-UNSCHED",
+                    DiagnosticPolicyInputV1.for_mode("robust", "2026.11", false, "", ""),
+                    DiagnosticRuleLevel.Warn)
+                expect(mod_proj.stage).to_equal("profile")
+                expect(mod_proj.lint_level_name).to_equal("warn")
+                expect(mod_proj.driver_severity_name).to_equal("warn")
+                expect(rob_proj.stage).to_equal("profile")
+                expect(rob_proj.lint_level_name).to_equal("deny")
+                expect(rob_proj.driver_severity_name).to_equal("deny")
+            Err(e): expect(e).to_equal("loaded")

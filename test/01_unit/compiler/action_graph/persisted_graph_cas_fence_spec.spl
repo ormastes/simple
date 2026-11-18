@@ -1,0 +1,180 @@
+"""
+## Purpose and audience
+
+Purpose: verify lockless `persisted_graph_publish_v1` CAS claim fencing (`ED-T25`,
+`[C22]`) using per-parent-generation exclusive claim witnesses under
+`{root}/claims/from_{parent_key}.claim` and monotonic intra-process staging sequence
+nonces alongside `rt_getpid()`.
+
+Audience: engineers maintaining `compiler.driver.action_graph.persisted_graph`
+and lockless snapshot/action-graph publication.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/compiler/action_graph/persisted_graph_cas_fence_spec.spl --mode=interpreter`.
+2. Verify all CAS claim fencing, crash-recovery, ancestor-replay, and staging-nonce scenarios pass.
+
+## Compatibility and limitations
+
+Exercises real filesystem exclusive publication (`file_publish_noreplace_raw`)
+under `build/test/persisted-graph-cas-fence` on Windows and POSIX hosts.
+"""
+
+# @req REQ-WP06-PERSISTED-GRAPH-CAS-FENCE
+# @cover src/compiler/80.driver/action_graph/persisted_graph.spl
+
+use std.spec.{describe, context, it, expect, step}
+use std.io_runtime.{
+    cwd_process, dir_create_all, dir_list_or_empty, dir_remove_all,
+    file_exists, file_read_result, file_write_exact
+}
+use compiler.driver.action_graph.persisted_graph.{
+    PersistedBuildGraphV1, persisted_graph_digest_v1,
+    persisted_graph_encode_v1, persisted_graph_load_current_v1,
+    persisted_graph_publish_v1, persisted_graph_next_stage_seq_v1
+}
+
+fn make_graph_v1(parent_generation: text, snapshot_revision: text) -> PersistedBuildGraphV1:
+    val draft = PersistedBuildGraphV1("draft", parent_generation, snapshot_revision, [])
+    val generation = persisted_graph_digest_v1(draft)
+    PersistedBuildGraphV1(generation, parent_generation, snapshot_revision, [])
+
+fn count_tmp_entries_v1(dir_path: text) -> i64:
+    var count: i64 = 0
+    for name in dir_list_or_empty(dir_path):
+        if name.contains(".tmp."):
+            count = count + 1
+    count
+
+describe "Persisted build graph lockless CAS claim fencing (ED-T25)":
+    """
+    Verifies that concurrent or interleaved publishers derived from the same
+    `parent_generation` are fenced by `{root}/claims/from_{parent_key}.claim`
+    before renaming `{root}/CURRENT`, and that intra-process staging paths
+    include a monotonic sequence nonce.
+    """
+
+    context "Monotonic intra-process staging nonces and claim witness layout":
+        """
+        Ensures `persisted_graph_next_stage_seq_v1` strictly increases on each call
+        and `persisted_graph_publish_v1` writes `from_root_init.claim` and
+        `from_<parent>.claim` while cleaning up all `.tmp.` staging files.
+        """
+
+        it "advances the staging sequence monotonically and records per-parent claim witnesses without temp leftovers":
+            """
+            Checks monotonic sequence allocation and verifies root and child
+            publications record exact claim files with zero `.tmp.` files left behind.
+            """
+            # @req ED-T25
+            val root = cwd_process() + "/build/test/persisted-graph-cas-fence/layout"
+            dir_remove_all(root)
+
+            step("Verify persisted_graph_next_stage_seq_v1 strictly increments across intra-process calls")
+            val seq_1 = persisted_graph_next_stage_seq_v1()
+            val seq_2 = persisted_graph_next_stage_seq_v1()
+            expect(seq_2).to_be_greater_than(seq_1)
+
+            step("Publish initial graph from empty parent and check claims/from_root_init.claim")
+            val root_graph = make_graph_v1("", "snap-root")
+            expect(persisted_graph_publish_v1(root, root_graph)).to_equal("ok")
+            expect(file_read_result(root + "/claims/from_root_init.claim").unwrap()).to_equal(root_graph.generation)
+            expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(root_graph.generation)
+
+            step("Publish child graph from root_graph and check claims/from_<parent>.claim")
+            val child_graph = make_graph_v1(root_graph.generation, "snap-child")
+            expect(persisted_graph_publish_v1(root, child_graph)).to_equal("ok")
+            expect(file_read_result(root + "/claims/from_" + root_graph.generation + ".claim").unwrap()).to_equal(child_graph.generation)
+            expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(child_graph.generation)
+
+            step("Confirm zero temporary staging files remain in root, generations, or claims")
+            expect(count_tmp_entries_v1(root)).to_equal(0)
+            expect(count_tmp_entries_v1(root + "/generations")).to_equal(0)
+            expect(count_tmp_entries_v1(root + "/claims")).to_equal(0)
+            expect(file_exists(root + "/publication.lock")).to_equal(false)
+            dir_remove_all(root)
+
+    context "Pre-rename CAS race window fencing and winner crash recovery":
+        """
+        Deterministically exercises the exact race window where Publisher A has
+        claimed `from_{parent_key}.claim` for `parent_generation` but has NOT yet
+        renamed `{root}/CURRENT` when Publisher B attempts to publish a competing
+        generation from the same `parent_generation`.
+        """
+
+        it "fences out a competing same-parent publisher even while CURRENT still equals parent_generation":
+            """
+            Plants the winning claim witness for `graph_winner` while `CURRENT` still
+            points at `graph_seed`, verifies `graph_loser` returns `parent-generation-changed`
+            without touching `CURRENT`, and confirms `graph_winner` recovers to `ok`.
+            """
+            # @req ED-T25
+            val root = cwd_process() + "/build/test/persisted-graph-cas-fence/midflight-race"
+            dir_remove_all(root)
+
+            step("Publish shared parent generation graph_seed")
+            val graph_seed = make_graph_v1("", "snap-seed")
+            expect(persisted_graph_publish_v1(root, graph_seed)).to_equal("ok")
+
+            val graph_winner = make_graph_v1(graph_seed.generation, "snap-winner")
+            val graph_loser = make_graph_v1(graph_seed.generation, "snap-loser")
+
+            step("Simulate graph_winner acquiring from_<seed>.claim right before renaming CURRENT")
+            expect(file_write_exact(
+                root + "/generations/" + graph_winner.generation + ".graph",
+                persisted_graph_encode_v1(graph_winner))).to_equal(true)
+            expect(file_write_exact(
+                root + "/claims/from_" + graph_seed.generation + ".claim",
+                graph_winner.generation)).to_equal(true)
+            expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(graph_seed.generation)
+
+            step("Competing graph_loser sees CURRENT == parent_generation but loses the exclusive claim fence")
+            expect(persisted_graph_publish_v1(root, graph_loser)).to_equal("parent-generation-changed")
+            expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(graph_seed.generation)
+            expect(count_tmp_entries_v1(root)).to_equal(0)
+            expect(count_tmp_entries_v1(root + "/claims")).to_equal(0)
+
+            step("Winning publisher completes recovery of its claimed transition and advances CURRENT")
+            expect(persisted_graph_publish_v1(root, graph_winner)).to_equal("ok")
+            expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(graph_winner.generation)
+            expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(graph_winner.generation)
+            dir_remove_all(root)
+
+        it "fences out a competing initial root_init publisher before CURRENT exists and blocks ancestor replay":
+            """
+            Verifies `from_root_init.claim` prevents two initial `parent_generation == ""`
+            publishers from racing the very first `CURRENT` creation, and prevents
+            an older ancestor from rewinding `CURRENT` once descendants advance.
+            """
+            # @req ED-T25
+            val root = cwd_process() + "/build/test/persisted-graph-cas-fence/root-init-race"
+            dir_remove_all(root)
+            expect(dir_create_all(root + "/generations")).to_equal(true)
+            expect(dir_create_all(root + "/claims")).to_equal(true)
+
+            val graph_a = make_graph_v1("", "snap-init-a")
+            val graph_b = make_graph_v1("", "snap-init-b")
+
+            step("Pre-claim from_root_init.claim for graph_a before CURRENT is created")
+            expect(file_write_exact(
+                root + "/claims/from_root_init.claim",
+                graph_a.generation)).to_equal(true)
+            expect(file_exists(root + "/CURRENT")).to_equal(false)
+
+            step("Competing initial publisher graph_b loses on from_root_init.claim and leaves CURRENT absent")
+            expect(persisted_graph_publish_v1(root, graph_b)).to_equal("parent-generation-changed")
+            expect(file_exists(root + "/CURRENT")).to_equal(false)
+            expect(count_tmp_entries_v1(root)).to_equal(0)
+
+            step("Claim holder graph_a recovers and publishes CURRENT, then child graph_c advances CURRENT")
+            expect(persisted_graph_publish_v1(root, graph_a)).to_equal("ok")
+            expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(graph_a.generation)
+
+            val graph_c = make_graph_v1(graph_a.generation, "snap-child-c")
+            expect(persisted_graph_publish_v1(root, graph_c)).to_equal("ok")
+            expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(graph_c.generation)
+
+            step("Replaying older ancestor graph_a returns parent-generation-changed even though it owns from_root_init.claim")
+            expect(persisted_graph_publish_v1(root, graph_a)).to_equal("parent-generation-changed")
+            expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(graph_c.generation)
+            dir_remove_all(root)

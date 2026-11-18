@@ -15,7 +15,11 @@ use compiler.tools.lint._LintMain.config_and_model.{
 # `impl Linter` (Linter.new, lint_source_for_parsed_append,
 # release_combined_lint_view) lives in lint_checks; import it directly so
 # this module does not depend on another module's facade wildcard to load it.
-use compiler.tools.lint._LintMain.rule_cost_tier.{lint_apply_fast_profile}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    lint_admit_and_record_v1, lint_apply_fast_profile,
+    lint_record_ast_parse_skipped_v1, lint_record_ast_parse_v1,
+    lint_rule_admitted_for_config
+}
 use compiler.tools.lint._LintMain.lint_checks.{lint_rule_code_from_easyfix_id}
 use compiler.tools.lint._LintMain.semantic_markdown_lints.{
     apply_semantic_markdown_lint_fix_v1, semantic_markdown_lint_sources_v1
@@ -95,10 +99,66 @@ fn lint_cli_unit_results(config: LintConfig, path: String) -> [LintRunResult]:
         results.push(LintRunResult.new(path, 1, 0, lint))
     results
 
+fn _any_ast_rule_admitted(config: LintConfig, content: String) -> bool:
+    if lint_rule_admitted_for_config(config, "undeclared_derived_unit"):
+        return true
+    if lint_rule_admitted_for_config(config, "too_many_arguments"):
+        return true
+    if lint_rule_admitted_for_config(config, "collection_performance"):
+        return true
+    if lint_rule_admitted_for_config(config, "stub_impl"):
+        return true
+    if lint_rule_admitted_for_config(config, "required_comment") and required_comment_source_may_match(content):
+        return true
+    if lint_rule_admitted_for_config(config, "visibility_boundary"):
+        return true
+    if lint_rule_admitted_for_config(config, "semantic_api_exported_graph") and not lines_allow_rule(content.split("\n"), "primitive_api"):
+        return true
+    false
+
+fn _record_unadmitted_ast_rules(config: LintConfig):
+    val _ = lint_admit_and_record_v1(config, "undeclared_derived_unit")
+    val _ = lint_admit_and_record_v1(config, "too_many_arguments")
+    val _ = lint_admit_and_record_v1(config, "collection_performance")
+    val _ = lint_admit_and_record_v1(config, "stub_impl")
+    val _ = lint_admit_and_record_v1(config, "required_comment")
+    val _ = lint_admit_and_record_v1(config, "visibility_boundary")
+    val _ = lint_admit_and_record_v1(config, "semantic_api_exported_graph")
+
+fn _append_option_me_results(
+    config: LintConfig, path: String, content: String, initial_results: [LintRunResult]
+) -> [LintRunResult]:
+    var results = initial_results
+    for warning in check_option_me_call_source(path, content):
+        val policy = lint_policy_decision(
+            config, warning.code, LintLevel.Warn, LintEvidenceTier.SourcePattern)
+        if not policy.keep: continue
+        val level = policy.level
+        val message = "{warning.message} — {warning.hint}"
+        val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
+        results.push(LintRunResult.new(path, warning.line_num, 0, lint))
+    results
+
 fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunResult]:
     val previous_parse_error = parser_has_errors()
     var results = linter.lint_source_for_parsed_append(path, content)
     if not path.ends_with(".spl"):
+        linter.release_combined_lint_view()
+        return results
+
+    val file_config = if linter.last_resolved_path == path and linter.last_resolved_config.?:
+        linter.last_resolved_config.unwrap()
+    else:
+        resolve_lint_config(linter.config, path, content)
+
+    if not _any_ast_rule_admitted(file_config, content):
+        lint_record_ast_parse_skipped_v1()
+        _record_unadmitted_ast_rules(file_config)
+        val _ = lint_admit_and_record_v1(file_config, "written_any_decl")
+        val _ = lint_admit_and_record_v1(file_config, "any_fallback_use")
+        val _ = lint_admit_and_record_v1(file_config, "any_receiver_use")
+        if lint_admit_and_record_v1(file_config, "option_me_call"):
+            results = _append_option_me_results(file_config, path, content, results)
         linter.release_combined_lint_view()
         return results
 
@@ -107,6 +167,7 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
     # module boundary, which made this gate fail open — lint reported
     # `all files clean` on files the compiler rejects outright. See
     # doc/08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md.
+    lint_record_ast_parse_v1()
     unit_decl_pool_reset()
     val parse_failed =if val receipt = representation_checked_parse_receipt_v1(content, path):
         receipt
@@ -157,11 +218,10 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
         linter.release_combined_lint_view()
         return results
 
-    # Any-rule gate is read BEFORE the AST pass releases the resolved config.
-    val any_config = if linter.last_resolved_path == path and linter.last_resolved_config.?:
-        linter.last_resolved_config.unwrap()
-    else:
-        resolve_lint_config(linter.config, path, content)
+    val any_config = file_config
+    val any_decl_admitted = lint_admit_and_record_v1(any_config, "written_any_decl")
+    val any_fallback_admitted = lint_admit_and_record_v1(any_config, "any_fallback_use")
+    val any_receiver_admitted = lint_admit_and_record_v1(any_config, "any_receiver_use")
     val any_decl = lint_policy_decision(
         any_config, "W-ANY-DECL-001", LintLevel.Allow, LintEvidenceTier.SourcePattern)
     val any_fallback = lint_policy_decision(
@@ -169,11 +229,12 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunRes
     val any_receiver = lint_policy_decision(
         any_config, "W-ANY-USE-001", LintLevel.Allow, LintEvidenceTier.ParsedStructural)
     val any_env_level = any_rules_env_level()
-    val any_decl_level = any_rule_relay_level(any_config, "written_any_decl", any_decl.keep, any_decl.level, any_env_level)
-    val any_fallback_level = any_rule_relay_level(any_config, "any_fallback_use", any_fallback.keep, any_fallback.level, any_env_level)
-    val any_receiver_level = any_rule_relay_level(any_config, "any_receiver_use", any_receiver.keep, any_receiver.level, any_env_level)
-    for unit_result in lint_cli_unit_results(any_config, path):
-        results.push(unit_result)
+    val any_decl_level = if any_decl_admitted: any_rule_relay_level(any_config, "written_any_decl", any_decl.keep, any_decl.level, any_env_level) else: LintLevel.Allow
+    val any_fallback_level = if any_fallback_admitted: any_rule_relay_level(any_config, "any_fallback_use", any_fallback.keep, any_fallback.level, any_env_level) else: LintLevel.Allow
+    val any_receiver_level = if any_receiver_admitted: any_rule_relay_level(any_config, "any_receiver_use", any_receiver.keep, any_receiver.level, any_env_level) else: LintLevel.Allow
+    if lint_admit_and_record_v1(any_config, "undeclared_derived_unit"):
+        for unit_result in lint_cli_unit_results(any_config, path):
+            results.push(unit_result)
     var parsed_results = lint_cli_append_parsed_results(linter, path, content, module_get_decls(), results)
     # Robust/critical default to warnings. Moderate/strict and explicit allow
     # keep an empty mask: no checker process, HIR lowering, or walk.
@@ -339,16 +400,27 @@ fn lint_cli_append_parsed_results(
         linter.last_resolved_config.unwrap()
     else:
         resolve_lint_config(linter.config, path, content)
-    val source_locations = if (linter.last_resolved_path == path
-        and linter.last_source_locations_valid):
+    val run_arg_count = lint_admit_and_record_v1(config, "too_many_arguments")
+    val run_coll = lint_admit_and_record_v1(config, "collection_performance")
+    val run_stub = lint_admit_and_record_v1(config, "stub_impl")
+    val run_reqc = lint_admit_and_record_v1(config, "required_comment")
+    val run_vis = lint_admit_and_record_v1(config, "visibility_boundary")
+    val run_sem_api = lint_admit_and_record_v1(config, "semantic_api_exported_graph")
+    val run_opt_me = lint_admit_and_record_v1(config, "option_me_call")
+
+    val need_locations = run_coll or run_reqc or run_vis
+    val source_locations = if not need_locations:
+        LintSourceLocationIndex({}, {}, {})
+    elif (linter.last_resolved_path == path and linter.last_source_locations_valid):
         LintSourceLocationIndex(
             linter.last_source_function_lines,
             linter.last_source_collection_fix_lines,
             linter.last_source_export_star_lines)
     else:
         lint_source_location_index(content.split("\n"))
-    val option_me_warnings = if (linter.last_resolved_path == path
-        and linter.last_source_locations_valid):
+    val option_me_warnings = if not run_opt_me:
+        []
+    elif (linter.last_resolved_path == path and linter.last_source_locations_valid):
         linter.last_option_me_warnings
     else:
         check_option_me_call_source(path, content)
@@ -357,82 +429,57 @@ fn lint_cli_append_parsed_results(
     # diagnostic production; the tail release remains deliberately idempotent.
     linter.release_combined_lint_view()
     val stub_profile_name = _lint_profile_to_assurance_name(config.profile)
-    for warning in check_argument_count(decls):
-        val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
-        val policy = lint_policy_decision(
-            config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
-        if not policy.keep: continue
-        # This producer is the AST compatibility fallback. A deny policy is
-        # reserved for typed, high-confidence evidence; never turn unresolved
-        # receiver/effect/alias facts into a build error.
-        val level = if policy.level == LintLevel.Deny: LintLevel.Warn else: policy.level
-        val lint = LintDiag.new(warning.code, level, LintCategory.Style, warning.message)
-            .with_fix(warning.hint)
-        results.push(LintRunResult.new(path, warning.line, 0, lint))
-    for warning in check_collection_patterns(decls):
-        # This is the AST compatibility fallback.  Robust/critical deny policy
-        # is reserved for typed, high-confidence evidence; unresolved receiver,
-        # effect, alias, and mutation facts must never become a build error.
-        val base_level = LintLevel.Warn
-        val policy = lint_policy_decision(
-            config, warning.code, base_level, LintEvidenceTier.SourcePattern)
-        if not policy.keep: continue
-        val level = policy.level
-        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
-            .with_fix(warning.hint)
-            .with_evidence(["item=" + warning.item_name, "source_severity=" + warning.severity])
-            .with_uncertainty("source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved")
-            .with_evidence_tier(LintEvidenceTier.SourcePattern)
-        # Locate the offending line textually; the AST span pool is empty on
-        # this path (verified: expr/stmt spans all read 0 and span_is_valid is
-        # false), so line recovery here works the same way lint_cli_find_fn_line
-        # already does.
-        val hit = lint_source_collection_fix_line(source_locations, warning.code)
-        var coll_line = lint_source_function_line(source_locations, warning.item_name)
-        if hit >= 0:
-            coll_line = hit + 1
-        results.push(LintRunResult.new(path, coll_line, 0, lint))
-    for warning in check_stub_impl(decls, stub_profile_name):
-        # The line-scan text reimplementation in lint_checks.spl (`pass_todo`
-        # substring scan) remains the ONE live STUB003 source for this CLI
-        # path — see flight_rules.spl's note that the live STUB003 emitter is
-        # the text reimplementation, not this AST checker. This filter is
-        # what keeps it that way: it drops every STUB003 this AST pass would
-        # otherwise also emit (explicit placeholder bodies AND, since WP-8,
-        # the empty-body-under-critical case), so a placeholder still emits
-        # exactly once, not twice. See
-        # test/01_unit/compiler/lint/lint_cli_stub_impl_contract_check.spl
-        # (`cli_stub003_count != 1`) for the regression probe.
-        if warning.code != "STUB001" and warning.code != "STUB002":
-            continue
-        val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
-        val policy = lint_policy_decision(
-            config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
-        if not policy.keep: continue
-        val level = policy.level
-        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
-            .with_fix(warning.hint)
-        results.push(LintRunResult.new(path, warning.line, 0, lint))
-    # REQC00x — WP-7: the AST-based `check_required_comment` (35.semantics)
-    # is now the ONLY live REQC001-004 emitter. Its predicate walks the real
-    # `pass_*`/`todo`/dangerous-keyword/wildcard-arm AST nodes rather than
-    # scanning source text line-by-line, so it does not false-positive on a
-    # call whose rationale string is on a different physical line than the
-    # opening paren (the old `lint_checks.spl` text scanner did — see
-    # doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
-    # WP-7). The old text reimplementation (lint_checks.spl
-    # `check_required_comment_source` + helpers) has been deleted, so this
-    # loop is the single source of REQC001-004 diagnostics.
-    if required_comment_source_may_match(content):
+    if run_arg_count:
+        for warning in check_argument_count(decls):
+            val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
+            val policy = lint_policy_decision(
+                config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            # This producer is the AST compatibility fallback. A deny policy is
+            # reserved for typed, high-confidence evidence; never turn unresolved
+            # receiver/effect/alias facts into a build error.
+            val level = if policy.level == LintLevel.Deny: LintLevel.Warn else: policy.level
+            val lint = LintDiag.new(warning.code, level, LintCategory.Style, warning.message)
+                .with_fix(warning.hint)
+            results.push(LintRunResult.new(path, warning.line, 0, lint))
+    if run_coll:
+        for warning in check_collection_patterns(decls):
+            # This is the AST compatibility fallback.  Robust/critical deny policy
+            # is reserved for typed, high-confidence evidence; unresolved receiver,
+            # effect, alias, and mutation facts must never become a build error.
+            val base_level = LintLevel.Warn
+            val policy = lint_policy_decision(
+                config, warning.code, base_level, LintEvidenceTier.SourcePattern)
+            if not policy.keep: continue
+            val level = policy.level
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
+                .with_fix(warning.hint)
+                .with_evidence(["item=" + warning.item_name, "source_severity=" + warning.severity])
+                .with_uncertainty("source-pattern fallback; receiver type, effects, aliasing, and mutation version are unresolved")
+                .with_evidence_tier(LintEvidenceTier.SourcePattern)
+            val hit = lint_source_collection_fix_line(source_locations, warning.code)
+            var coll_line = lint_source_function_line(source_locations, warning.item_name)
+            if hit >= 0:
+                coll_line = hit + 1
+            results.push(LintRunResult.new(path, coll_line, 0, lint))
+    if run_stub:
+        for warning in check_stub_impl(decls, stub_profile_name):
+            if warning.code != "STUB001" and warning.code != "STUB002":
+                continue
+            val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
+            val policy = lint_policy_decision(
+                config, warning.code, base_level, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            val level = policy.level
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
+                .with_fix(warning.hint)
+            results.push(LintRunResult.new(path, warning.line, 0, lint))
+    if run_reqc and required_comment_source_may_match(content):
         for warning in check_required_comment(decls):
             val policy = lint_policy_decision(
                 config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
             if not policy.keep: continue
             val level = policy.level
-            # REQC warnings carry the AST span line when the span pool is
-            # populated. When it is not (empty-pool paths), recover the site
-            # textually from the enclosing function and say so in the message:
-            # a 0:0 locator names no statement, which was the reported defect.
             var req_line = warning.line
             var req_message = warning.message
             if req_line <= 0:
@@ -442,40 +489,34 @@ fn lint_cli_append_parsed_results(
             val lint = LintDiag.new(warning.code, level, LintCategory.Warning, req_message)
                 .with_fix(warning.hint)
             results.push(LintRunResult.new(path, req_line, 0, lint))
-    # W0406 already comes from the text EasyFix owner. Add only the parsed
-    # export sibling here so wildcard imports are not reported twice.
-    for warning in check_star_export_file(decls, path):
-        val policy = lint_policy_decision(
-            config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
-        if not policy.keep: continue
-        val level = policy.level
-        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
-        results.push(LintRunResult.new(
-            path, lint_source_export_star_line(source_locations, warning.module_path), 0, lint))
-    for warning in check_wide_public_file(decls, path):
-        val policy = lint_policy_decision(
-            config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
-        if not policy.keep: continue
-        val level = policy.level
-        val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
-        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, message)
-        results.push(LintRunResult.new(path, warning.line, 0, lint))
-    results = _append_semantic_api_results(config, path, content, decls, results)
-    # OPTME001 — a `me` (mutating) method called through a `T?` receiver
-    # silently discards the write. Single-file index: this path only resolves
-    # classes declared in the SAME file. The cross-file census (most real sites
-    # call a backend class declared elsewhere) is
-    # `src/app/optme_lint/optme_scan.spl`, which calls the same rule function
-    # with a repo-wide index. See doc/08_tracking/bug/
-    # me_method_mutation_through_optional_binding_discarded_2026-08-04.md.
-    for warning in option_me_warnings:
-        val policy = lint_policy_decision(
-            config, warning.code, LintLevel.Warn, LintEvidenceTier.SourcePattern)
-        if not policy.keep: continue
-        val level = policy.level
-        val message = "{warning.message} — {warning.hint}"
-        val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
-        results.push(LintRunResult.new(path, warning.line_num, 0, lint))
+    if run_vis:
+        for warning in check_star_export_file(decls, path):
+            val policy = lint_policy_decision(
+                config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            val level = policy.level
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
+            results.push(LintRunResult.new(
+                path, lint_source_export_star_line(source_locations, warning.module_path), 0, lint))
+        for warning in check_wide_public_file(decls, path):
+            val policy = lint_policy_decision(
+                config, warning.code, LintLevel.Warn, LintEvidenceTier.ParsedStructural)
+            if not policy.keep: continue
+            val level = policy.level
+            val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, message)
+            results.push(LintRunResult.new(path, warning.line, 0, lint))
+    if run_sem_api:
+        results = _append_semantic_api_results(config, path, content, decls, results)
+    if run_opt_me:
+        for warning in option_me_warnings:
+            val policy = lint_policy_decision(
+                config, warning.code, LintLevel.Warn, LintEvidenceTier.SourcePattern)
+            if not policy.keep: continue
+            val level = policy.level
+            val message = "{warning.message} — {warning.hint}"
+            val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
+            results.push(LintRunResult.new(path, warning.line_num, 0, lint))
     linter.release_combined_lint_view()
     results
 
@@ -839,9 +880,6 @@ fn _run_lint_with_linter_source(
     # rule and nothing else, so the portability contract can be checked without
     # the ~900 lines of noise --warn-all produces. See
     # _LintMain/wm_lane_boundary_lints.spl.
-    if policy.fast:
-        lint_apply_fast_profile(linter.config)
-
     if policy.wm_lane:
         linter.config.set_level("wm_lane_boundary", LintLevel.Deny)
 
@@ -857,6 +895,12 @@ fn _run_lint_with_linter_source(
                     linter.config.set_level(lint_name, LintLevel.Warn)
                 case _:
                     val _ = 0
+
+    # NormalBuild (`--fast`) ceiling MUST run AFTER CLI escalation flags so
+    # `--warn-all`, `--wm-lane`, and `--gpu-2d-perf` never promote Medium/High
+    # rules back above the Low cost ceiling.
+    if policy.fast:
+        lint_apply_fast_profile(linter.config)
 
     linter.semantic_markdown_sources = []
     if file_path.ends_with(".md"):

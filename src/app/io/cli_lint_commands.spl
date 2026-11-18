@@ -5,11 +5,13 @@
 use std.tooling.easy_fix.types.{FixConfidence}
 use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, fmt_read_file, print_diff}
 use compiler.tools.lint.main.{
-    Linter, LintCliPolicy, LintReadFileResult, lint_read_file,
+    Linter, LintCliPolicy, LintProfile, LintReadFileResult, lint_read_file,
     semantic_markdown_authority_option_v1,
-    run_lint_source_with_linter_policy, simple_lint_adapter_result,
+    run_lint_source_with_linter_policy,
     simple_lint_verdict_name, simple_lint_human_summary,
-    LintCompleteness, lint_completeness_reduce, lint_completeness_name}
+    LintRunBudgetV1, LintEvaluatedRunReceiptV1, LintParsedChildStatsV1,
+    lint_parse_child_stats_v1, lint_evaluate_run_receipt_v1,
+    lint_baseline_config_for_policy_v1, lint_collect_exempted_rule_masks_v1}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixToolApplicator, apply_fixes_to_disk, fix_read_source}
 use lazy compiler.tools.fix.engine.{fix_filter_by_code, fix_validate, fix_outcome_diff, snapshots_from_sources}
 use lazy compiler.tools.fix.rules.impl_.lint_simd.{check_simd_opportunities, easyfix_id_text, easyfix_description_text}
@@ -20,7 +22,8 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use std.nogc_sync_mut.io.mod_stub.{is_dir}
 use app.io.source_discovery.{discover_spl_files, source_path_identity}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
-use app.io.cli_ops.{cli_kernel_executable_path}
+use app.io.cli_ops.{cli_kernel_executable_path, cli_env_get}
+use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
 use app.io.cli_parallel_children.{cli_jobs_from_args, cli_default_workers, cli_run_children_ordered, cli_all_unique}
 use app.io.sysinfo_ops.{cpu_count}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap}
@@ -31,22 +34,53 @@ use app.io.cli_fix_options.{fix_option_error}
 use app.io.cli_fmt_options.{fmt_option_error}
 use common.text.{escape_json}
 
+fn _lint_positive_int_ok(raw: text) -> bool:
+    (raw.trim().to_i64() ?? 0) > 0
+
+# reason: CLI option validator operates directly on raw argv text slices
+@allow(primitive_api)
 pub fn lint_option_error(args: [text]) -> text:
     var help_count = 0
     var other_count = 0
     var expect_profile_tier = false
     var expect_semantic_value = false
     var expect_jobs_value = false
+    var expect_budget_opt = ""
     val (_jobs_n, jobs_bad) = cli_jobs_from_args(args)
     if jobs_bad:
         return "--jobs requires a positive integer"
     for arg in args:
+        if expect_budget_opt != "":
+            if not _lint_positive_int_ok(arg):
+                return "{expect_budget_opt} requires a positive integer"
+            expect_budget_opt = ""
+            other_count = other_count + 1
+            continue
         if expect_jobs_value:
             expect_jobs_value = false
             other_count = other_count + 1
             continue
         if arg == "--jobs":
             expect_jobs_value = true
+            other_count = other_count + 1
+            continue
+        if arg == "--budget-ms" or arg == "--max-files" or arg == "--child-timeout-s":
+            expect_budget_opt = arg
+            other_count = other_count + 1
+            continue
+        if arg.starts_with("--budget-ms="):
+            if not _lint_positive_int_ok(arg.slice(12)):
+                return "--budget-ms requires a positive integer"
+            other_count = other_count + 1
+            continue
+        if arg.starts_with("--max-files="):
+            if not _lint_positive_int_ok(arg.slice(12)):
+                return "--max-files requires a positive integer"
+            other_count = other_count + 1
+            continue
+        if arg.starts_with("--child-timeout-s="):
+            if not _lint_positive_int_ok(arg.slice(18)):
+                return "--child-timeout-s requires a positive integer"
             other_count = other_count + 1
             continue
         if arg.starts_with("--jobs=") or arg == "--lint-child-stats":
@@ -92,6 +126,8 @@ pub fn lint_option_error(args: [text]) -> text:
             continue
         if arg.starts_with("-"):
             return "unknown option: {arg}"
+    if expect_budget_opt != "":
+        return "{expect_budget_opt} requires a positive integer"
     if expect_semantic_value:
         return "semantic source authority requires a value"
     if expect_profile_tier:
@@ -107,54 +143,42 @@ fn _fan_trim_nl(s: text) -> text:
     s
 
 val LINT_CHILD_STATS_PREFIX = "@@LINT-CHILD-STATS"
-
-# Split a fan-out child's stdout into (user-visible output, stats numbers).
-# stats is empty when the child never reached its stats line (crash).
-fn _lint_child_split_stats(stdout: text) -> (text, [i64]):
-    val lines = stdout.split("\n")
-    var kept = ""
-    var stats: [i64] = []
-    var first = true
-    var idx = 0
-    while idx < lines.len():
-        val line = lines[idx]
-        idx = idx + 1
-        if line.starts_with(LINT_CHILD_STATS_PREFIX):
-            for field in line.split(" "):
-                if field != LINT_CHILD_STATS_PREFIX and field != "":
-                    stats.push(field.to_i64() ?? 0)
-            continue
-        if idx == lines.len() and line == "":
-            continue
-        kept = kept + (if first: "" else: "\n") + line
-        first = false
-    (kept, stats)
-
-# Lint children are FULL seed runtimes: each loads the lint closure and holds
-# the interpreted parse of its target. Measured tree peaks run ~2.4-3.4 GB per
-# worker on this repo, while the shared cli_parallel_children estimate prices a
-# child at 512 MiB. At 28-32 cores that schedules 28 x ~2.7 GB ~= 75 GB of
-# children onto a host with ~24 GB free, and `simple lint <dir>` swap-thrashes
-# for hours instead of finishing (children also have no timeout, so every
-# pathological file serializes the whole pool behind it). Price lint children
-# honestly and keep automatic fan-out inside a conservative ceiling; an
-# explicit `--jobs N` still wins (it is an operator promise).
 val LINT_CHILD_RSS_ESTIMATE_KIB: i64 = 2097152
 val LINT_FANOUT_MAX_WORKERS: i64 = 12
-
-# Per-child wall-clock bound for the lint fan-out, in seconds. Generous on
-# purpose: the bound exists to convert "hangs forever" into "reports failed",
-# not to time out legitimate large-file lints.
 val LINT_CHILD_TIMEOUT_S: i64 = 900
+
+# reason: child process stdout and exit-code parser at the CLI fan-out boundary
+@allow(primitive_api)
+pub fn cli_lint_parse_child_stats_v1(stdout: text, exit_code: i64) -> LintParsedChildStatsV1:
+    lint_parse_child_stats_v1(stdout, exit_code)
+
+# reason: CLI run-receipt evaluator forwarding aggregate counters and masks
+@allow(primitive_api)
+pub fn cli_lint_evaluate_run_receipt_v1(
+    policy: LintCliPolicy, run_mcp_perf: bool,
+    requested_files: u32, completed_files: u32, not_linted_files: u32,
+    timed_out_files: u32, hard_failed_files: u32,
+    diagnostic_files: u32, error_files: u32, warning_files: u32,
+    exempt_mask_lo: i64, exempt_mask_hi: i64,
+    budget_exhausted: bool, revision_seed: text
+) -> LintEvaluatedRunReceiptV1:
+    lint_evaluate_run_receipt_v1(
+        policy, run_mcp_perf, requested_files, completed_files, not_linted_files,
+        timed_out_files, hard_failed_files, diagnostic_files, error_files, warning_files,
+        exempt_mask_lo, exempt_mask_hi, budget_exhausted, revision_seed)
+
+fn lint_child_supervisor_with_timeout(exe_path: text, timeout_s: i64) -> (text, [text]):
+    val bound_s = if timeout_s > 0: timeout_s else: LINT_CHILD_TIMEOUT_S
+    if file_exists("/usr/bin/timeout"):
+        ("timeout", ["{bound_s}", exe_path])
+    else:
+        (exe_path, [])
 
 # (executable, leading argv) for a lint fan-out child. Wrap in GNU timeout
 # when it is present so one pathological file cannot stall the pool; bare
 # hosts (no /usr/bin/timeout) run the child unwrapped exactly as before.
 fn lint_child_supervisor(exe_path: text) -> (text, [text]):
-    if file_exists("/usr/bin/timeout"):
-        ("timeout", ["{LINT_CHILD_TIMEOUT_S}", exe_path])
-    else:
-        (exe_path, [])
+    lint_child_supervisor_with_timeout(exe_path, LINT_CHILD_TIMEOUT_S)
 
 fn lint_fanout_workers(requested: i64, files: [text]) -> i64:
     if files.len() <= 1 or requested == 1:
@@ -180,6 +204,8 @@ fn lint_fanout_workers(requested: i64, files: [text]) -> i64:
         workers = 1
     workers
 
+# reason: CLI command handler returns process exit code for raw argv
+@allow(primitive_api)
 pub fn run_lint_command(args: [text]) -> i64:
     val option_error = lint_option_error(args)
     if option_error != "":
@@ -211,16 +237,23 @@ pub fn run_lint_command(args: [text]) -> i64:
     var child_stats_mode = false
     val (jobs_requested, _jobs_bad) = cli_jobs_from_args(args)
     var expect_jobs_value = false
+    var expect_budget_value = false
     var expect_profile_tier = false
     var expect_semantic_value = false
     for arg in args:
+        if expect_budget_value:
+            expect_budget_value = false
+            continue
         if expect_jobs_value:
             expect_jobs_value = false
             continue
         if arg == "--jobs":
             expect_jobs_value = true
             continue
-        if arg.starts_with("--jobs="):
+        if arg == "--budget-ms" or arg == "--max-files" or arg == "--child-timeout-s":
+            expect_budget_value = true
+            continue
+        if arg.starts_with("--jobs=") or arg.starts_with("--budget-ms=") or arg.starts_with("--max-files=") or arg.starts_with("--child-timeout-s="):
             continue
         if arg == "--lint-child-stats":
             child_stats_mode = true
@@ -305,25 +338,22 @@ pub fn run_lint_command(args: [text]) -> i64:
         return 1
 
     var failed_files = 0
+    var hard_failed_files: u32 = 0u32
+    var timed_out_files: u32 = 0u32
+    var budget_exhausted = false
+    var exempt_mask_lo: i64 = 0
+    var exempt_mask_hi: i64 = 0
+    val budget = LintRunBudgetV1.from_cli_and_env(
+        args, cli_env_get("SIMPLE_LINT_BUDGET_MS"), cli_env_get("SIMPLE_LINT_MAX_FILES"),
+        cli_env_get("SIMPLE_LINT_CHILD_TIMEOUT_S"), time_now_monotonic_ms())
     var completed_files: u32 = 0
     var diagnostic_files: u32 = 0
     var error_files: u32 = 0
     var warning_files: u32 = 0
-    # Files the parse gate rejected. These were NOT analysed at all — no
-    # AST-based lint ran on them — so they must be counted and reported
-    # separately from files that were analysed and found faulty. Without this
-    # the verification layer reports a skipped file as "1 error" and it reads
-    # as checked. See
-    # doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
+    # Files rejected by the parse gate were not AST-analysed; track separately.
     var not_linted_files = 0
     var lint_files: [text] = []
-    # Dedupe via dict-keyed sets, NOT an array `.contains()` scan. `simple lint
-    # src` discovers ~32k files; the array form is O(n^2) membership plus an
-    # O(n^2) copy from push-clones and does not finish, which is why a full-repo
-    # lint census had never been completed. Dict shape is `{text: bool}`
-    # deliberately: never call `Dict.len()` (returns -1 under native codegen)
-    # and never `.get()` a struct-valued dict — `contains_key` + `d[k] = v` is
-    # safe on every engine. See .claude/rules/code-style.md.
+    # Dedupe via `{text: bool}` dict sets (`contains_key` + `d[k] = v`).
     var seen_targets: {text: bool} = {}
     var seen_files: {text: bool} = {}
     for target in files:
@@ -349,14 +379,10 @@ pub fn run_lint_command(args: [text]) -> i64:
                 _cli_eprint("Error: No Simple source files found: {target}")
             exit_code = 1
             failed_files = failed_files + 1
+            hard_failed_files = hard_failed_files + 1u32
 
-    # One command-scoped linter owns the immutable rule registry and bounded
-    # project-policy cache. Do not reconstruct dozens of descriptors per file.
-    # Target manifests are resolved through the command-owned bounded cache.
-    # Skip Linter.new's direct-library cwd discovery/parsing path.
+    # Command-scoped linter and invariant CLI policy parsed once per run.
     var lint_session = Linter.new(false)
-    # Policy is command-invariant. Parse it once rather than rescanning the
-    # complete target/option array for every discovered file.
     val lint_policy = LintCliPolicy.from_args(normalized_args)
     if lint_policy.error != "":
         if json_output:
@@ -364,23 +390,23 @@ pub fn run_lint_command(args: [text]) -> i64:
         else:
             _cli_eprint("Error: {lint_policy.error}")
         return 2
-    # Fan out one child per file (same binary, single-file => in-process path,
-    # so children never recurse). Output is replayed in INPUT order.
-    # Each child is wrapped in a wall-clock bound: a single pathological file
-    # (interpreted parse cost grows with file size; >100 KB files run for
-    # many minutes on the seed) previously stalled the whole pool forever
-    # because nothing could reap or bypass it. GNU timeout exists on every
-    # supported host path except bare macOS, where we keep the unwrapped
-    # spawn. A timed-out child exits 124 with no stats line, so the existing
-    # "produced no result" path reports it as failed instead of hanging.
+    # Fan out one child per file under per-child timeout; exit 124 marks timeout.
+    val baseline_cfg = lint_baseline_config_for_policy_v1(lint_policy)
     val fan_exe = if child_stats_mode or lint_files.len() < 2: "" else: cli_kernel_executable_path()
     val fan_workers = if fan_exe == "": 1 else: lint_fanout_workers(jobs_requested, lint_files)
     var serial_files: [text] = lint_files
     if fan_workers > 1:
         serial_files = []
-        val supervisor = lint_child_supervisor(fan_exe)
+        var scheduled_fan_files = lint_files
+        if budget.max_files > 0 and lint_files.len() > budget.max_files:
+            scheduled_fan_files = lint_files[0:budget.max_files]
+            budget_exhausted = true
+            not_linted_files = not_linted_files + (lint_files.len() - budget.max_files)
+            if exit_code == 0:
+                exit_code = 1
+        val supervisor = lint_child_supervisor_with_timeout(fan_exe, budget.child_timeout_s)
         var fan_argvs: [[text]] = []
-        for fan_file in lint_files:
+        for fan_file in scheduled_fan_files:
             var fan_args: [text] = []
             for sup_arg in supervisor.1:
                 fan_args.push(sup_arg)
@@ -394,27 +420,51 @@ pub fn run_lint_command(args: [text]) -> i64:
             fan_argvs.push(fan_args)
         val fan_runs = cli_run_children_ordered(supervisor.0, fan_argvs, fan_workers)
         for fan_run in fan_runs:
-            val (child_out, stats) = _lint_child_split_stats(fan_run.stdout)
-            if child_out.len() > 0:
-                print(child_out)
+            val parsed = cli_lint_parse_child_stats_v1(fan_run.stdout, fan_run.exit)
+            if parsed.cleaned_stdout.len() > 0:
+                print(parsed.cleaned_stdout)
             if fan_run.stderr.len() > 0:
                 _cli_eprint(_fan_trim_nl(fan_run.stderr))
-            if stats.len() != 7:
-                _cli_eprint("Error: lint child produced no result (exit {fan_run.exit})")
+            if not parsed.has_stats:
+                if parsed.timed_out:
+                    _cli_eprint("Error: lint child timed out (exit {fan_run.exit})")
+                    timed_out_files = timed_out_files + 1u32
+                    budget_exhausted = true
+                else:
+                    _cli_eprint("Error: lint child produced no result (exit {fan_run.exit})")
+                    failed_files = failed_files + 1
+                    hard_failed_files = hard_failed_files + 1u32
                 if exit_code == 0:
                     exit_code = 1
-                failed_files = failed_files + 1
                 not_linted_files = not_linted_files + 1
                 continue
-            diagnostic_files = diagnostic_files + (stats[0] as u32)
-            error_files = error_files + (stats[1] as u32)
-            warning_files = warning_files + (stats[2] as u32)
-            completed_files = completed_files + (stats[3] as u32)
-            not_linted_files = not_linted_files + (stats[4] as i64)
-            failed_files = failed_files + (stats[5] as i64)
-            if stats[6] != 0 and exit_code == 0:
-                exit_code = stats[6]
-    for file_path in serial_files:
+            diagnostic_files = diagnostic_files + parsed.diagnostic_files
+            error_files = error_files + parsed.error_files
+            warning_files = warning_files + parsed.warning_files
+            completed_files = completed_files + parsed.completed_files
+            not_linted_files = not_linted_files + parsed.not_linted_files
+            failed_files = failed_files + parsed.failed_files
+            if parsed.failed_files > 0 and parsed.not_linted_files == 0:
+                hard_failed_files = hard_failed_files + (parsed.failed_files as u32)
+            exempt_mask_lo = exempt_mask_lo | parsed.exempt_mask_lo
+            exempt_mask_hi = exempt_mask_hi | parsed.exempt_mask_hi
+            timed_out_files = timed_out_files + parsed.timed_out_files
+            if parsed.budget_exhausted:
+                budget_exhausted = true
+            if parsed.child_exit != 0 and exit_code == 0:
+                exit_code = parsed.child_exit
+        if budget.wall_exhausted_at(time_now_monotonic_ms()):
+            budget_exhausted = true
+    var serial_idx = 0
+    while serial_idx < serial_files.len():
+        if budget.files_exhausted_at(serial_idx, lint_files.len()) or budget.wall_exhausted_at(time_now_monotonic_ms()):
+            budget_exhausted = true
+            not_linted_files = not_linted_files + (serial_files.len() - serial_idx)
+            if exit_code == 0:
+                exit_code = 1
+            break
+        val file_path = serial_files[serial_idx]
+        serial_idx = serial_idx + 1
         if not file_exists(file_path):
             if json_output:
                 print "{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}"
@@ -422,10 +472,9 @@ pub fn run_lint_command(args: [text]) -> i64:
                 _cli_eprint("Error: File not found: {file_path}")
             exit_code = 1
             failed_files = failed_files + 1
+            hard_failed_files = hard_failed_files + 1u32
             continue
 
-        # The command owns one source payload for all read-only analyses. Keep
-        # read failures distinct from a valid empty file.
         var source = ""
         match lint_read_file(file_path):
             case LintReadFileResult.ReadFileErr(read_error):
@@ -435,6 +484,7 @@ pub fn run_lint_command(args: [text]) -> i64:
                     _cli_eprint("Error: {read_error}")
                 exit_code = 1
                 failed_files = failed_files + 1
+                hard_failed_files = hard_failed_files + 1u32
                 continue
             case LintReadFileResult.ReadFileOk(loaded_source):
                 source = loaded_source
@@ -447,13 +497,23 @@ pub fn run_lint_command(args: [text]) -> i64:
             not_linted_files = not_linted_files + 1
         else:
             completed_files = completed_files + 1
+            val sdn_cfg = if lint_session.config.source_path != "" and lint_session.parsed_sdn_index.contains_key(lint_session.config.source_path):
+                lint_session.parsed_sdn_configs[lint_session.parsed_sdn_index[lint_session.config.source_path]]
+            else:
+                lint_session.manifest_free_config
+            val mc_exempt = match lint_policy.profile:
+                case Some(prof): prof == LintProfile.Critical and sdn_cfg.mc_exception_reason(file_path) != ""
+                case None: false
+            val (ex_lo, ex_hi) = lint_collect_exempted_rule_masks_v1(baseline_cfg, sdn_cfg, source, mc_exempt)
+            exempt_mask_lo = exempt_mask_lo | ex_lo
+            exempt_mask_hi = exempt_mask_hi | ex_hi
         if file_exit != 0:
             if exit_code == 0:
-                # 3 is the internal NOT-LINTED marker, not a process exit code.
                 exit_code = if file_exit == 3: 1 else: file_exit
             failed_files = failed_files + 1
+            if file_exit != 3:
+                hard_failed_files = hard_failed_files + 1u32
 
-        # SIMD opportunity pass — info severity, never increments exit code
         if run_simd:
             val simd_fixes = check_simd_opportunities(source, file_path)
             var si = 0
@@ -468,34 +528,31 @@ pub fn run_lint_command(args: [text]) -> i64:
                 else:
                     print "{file_path}:{line_str2}: info[simd_opportunity]: {easyfix_description_text(sf)}"
                 si = si + 1
+        if budget.wall_exhausted_at(time_now_monotonic_ms()):
+            budget_exhausted = true
 
     if child_stats_mode:
-        # Fan-out child: the parent owns the aggregate summary.
-        print "{LINT_CHILD_STATS_PREFIX} {diagnostic_files} {error_files} {warning_files} {completed_files} {not_linted_files} {failed_files} {exit_code}"
+        val bud_flag = if budget_exhausted: 1 else: 0
+        print "{LINT_CHILD_STATS_PREFIX} {diagnostic_files} {error_files} {warning_files} {completed_files} {not_linted_files} {failed_files} {exit_code} {exempt_mask_lo} {exempt_mask_hi} {timed_out_files} {bud_flag}"
         return exit_code
 
-    val rule_count = lint_session.lints.len() as u32
-    val adapter = simple_lint_adapter_result(
+    val receipt = cli_lint_evaluate_run_receipt_v1(
+        lint_policy, run_mcp_perf,
         lint_files.len() as u32, completed_files, not_linted_files as u32,
-        rule_count, if completed_files > 0: rule_count else: 0,
-        diagnostic_files, error_files, warning_files)
-    if adapter.exit_code != 0 and exit_code == 0:
-        exit_code = adapter.exit_code
-    var completeness_inputs: [LintCompleteness] = []
-    if failed_files > 0 or error_files > 0:
-        completeness_inputs.push(LintCompleteness.Fail)
-    if not_linted_files > 0:
-        completeness_inputs.push(LintCompleteness.Incomplete)
-    if completed_files > 0:
-        completeness_inputs.push(LintCompleteness.Pass)
-    # TODO: budget_exhausted is hardcoded false; no per-run lint budget source (wall-clock/step budget owner) exists yet, so exhausted runs cannot report incomplete or timed_out.
-    val completeness = lint_completeness_name(lint_completeness_reduce(completeness_inputs, false))
+        timed_out_files, hard_failed_files,
+        diagnostic_files, error_files, warning_files,
+        exempt_mask_lo, exempt_mask_hi, budget_exhausted, lint_files.join("|")
+    )
+    if receipt.exit_code != 0 and exit_code == 0:
+        exit_code = receipt.exit_code
+    val completeness = receipt.completeness
+    val budget_json = if receipt.budget_exhausted: "true" else: "false"
     if json_output:
-        print "{{\"type\":\"lint-summary\",\"status\":\"{simple_lint_verdict_name(adapter.kernel_result)}\",\"failed_files\":{failed_files},\"not_linted_files\":{not_linted_files},\"completed_files\":{completed_files},\"completeness\":\"{completeness}\"}"
+        print "{{\"type\":\"lint-summary\",\"status\":\"{receipt.status}\",\"failed_files\":{failed_files},\"not_linted_files\":{not_linted_files},\"completed_files\":{completed_files},\"completeness\":\"{completeness}\",\"timed_out_files\":{receipt.timed_out_files},\"budget_exhausted\":{budget_json},\"requested_rules\":{receipt.requested_rules},\"completed_rules\":{receipt.completed_rules},\"skipped_rules\":{receipt.skipped_rules},\"exempted_rules\":{receipt.exempted_rules},\"unsupported_rules\":{receipt.unsupported_rules},\"timed_out_rules\":{receipt.timed_out_rules}}"
     else:
         print ""
         print "lint completeness: {completeness}"
-        print simple_lint_human_summary(adapter.kernel_result)
+        print simple_lint_human_summary(receipt.adapter.kernel_result)
     exit_code
 
 pub fn run_fmt_command(all_args: [text]) -> i64:

@@ -28,6 +28,7 @@
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.parser.{parse}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.policy_names.normalize_profile_name
 use compiler.common.assurance.warning_phase.{phased_rule_severity_rank, severity_rank_advisory}
 
 pub enum DiagnosticRuleLevel:
@@ -176,6 +177,11 @@ impl DiagnosticPolicySnapshot:
     fn rule_count() -> i64:
         self.rules.len()
 
+    # reason: policy digest is a canonical sha256 string identifier at the diagnostics boundary
+    @allow(primitive_api)
+    pub fn policy_digest() -> text:
+        self.digest
+
     fn slot_of(code: text) -> i64:
         match self.slot_by_code.get(code):
             Some(s): s
@@ -221,9 +227,10 @@ impl DiagnosticPolicySnapshot:
             out.level = DiagnosticRuleLevel.Deny
             out.stage = "edition"
         else:
+            val has_warn_schedule = r.warn_since_date != "" or r.warn_since_lang_version != ""
             val warn_by_date = date_reached(date, r.warn_since_date)
             val warn_by_edition = edition_reached(ctx.language_edition, r.warn_since_lang_version)
-            if not warn_by_date and not warn_by_edition:
+            if has_warn_schedule and not warn_by_date and not warn_by_edition:
                 out.level = DiagnosticRuleLevel.Allow
                 out.stage = "schedule"
                 return out
@@ -288,7 +295,149 @@ fn edition_reached(edition: text, threshold: text) -> bool:
         i = i + 1
     true
 
-# --- Loading ---
+# --- Loading & Parity Projections ---
+
+# reason: language edition identifier at the policy configuration boundary
+@allow(primitive_api)
+pub fn diagnostic_policy_default_edition() -> text:
+    "2026.11"
+
+fn normalize_policy_mode(raw: text) -> text:
+    val lower = raw.lower()
+    if lower == "default" or lower == "advisory" or lower == "ci":
+        return lower
+    val canonical = normalize_profile_name(lower)
+    if canonical != "":
+        return canonical
+    "default"
+
+pub struct DiagnosticPolicyInputV1:
+    profile: text
+    language_edition: text
+    policy_as_of: text
+    warning_phase: bool
+    scoped_exception: bool
+    fatal: bool
+    target_triple: text
+    source_path: text
+
+impl DiagnosticPolicyInputV1:
+    # reason: explicit deterministic policy resolution parameters at the diagnostics boundary
+    @allow(primitive_api)
+    pub static fn for_mode(
+        profile: text,
+        language_edition: text,
+        warning_phase: bool,
+        target_triple: text,
+        source_path: text
+    ) -> DiagnosticPolicyInputV1:
+        val edition = if language_edition != "": language_edition else: diagnostic_policy_default_edition()
+        DiagnosticPolicyInputV1(
+            profile: normalize_policy_mode(profile),
+            language_edition: edition,
+            policy_as_of: "",
+            warning_phase: warning_phase,
+            scoped_exception: false,
+            fatal: false,
+            target_triple: target_triple,
+            source_path: source_path
+        )
+
+    # reason: ISO date text override for deterministic policy rehearsal
+    @allow(primitive_api)
+    pub fn with_policy_as_of(date: text) -> DiagnosticPolicyInputV1:
+        var next = self
+        next.policy_as_of = date
+        next
+
+    # reason: explicit boolean toggle for scoped exception evaluation
+    @allow(primitive_api)
+    pub fn with_scoped_exception(enabled: bool) -> DiagnosticPolicyInputV1:
+        var next = self
+        next.scoped_exception = enabled
+        next
+
+    # reason: explicit boolean toggle for fatal corruption evaluation
+    @allow(primitive_api)
+    pub fn with_fatal(enabled: bool) -> DiagnosticPolicyInputV1:
+        var next = self
+        next.fatal = enabled
+        next
+
+    pub fn to_resolve_context() -> PolicyResolveContext:
+        val edition = if self.language_edition != "": self.language_edition else: diagnostic_policy_default_edition()
+        var ctx = PolicyResolveContext.new(normalize_policy_mode(self.profile), edition, "")
+        if self.policy_as_of != "":
+            ctx = ctx.with_policy_as_of(self.policy_as_of)
+        if self.fatal:
+            ctx = ctx.with_fatal()
+        if self.scoped_exception:
+            ctx = ctx.with_scoped_exception()
+        if self.warning_phase:
+            ctx = ctx.with_warning_phase()
+        ctx
+
+pub struct PolicyParityProjectionV1:
+    rule_id: text
+    canonical_mode: text
+    language_edition: text
+    resolved_level: DiagnosticRuleLevel
+    lint_level_name: text
+    driver_severity_name: text
+    stage: text
+    rehearsal: bool
+    policy_digest: text
+
+# Lint has Allow (silence), Warn, Deny; Advisory clamps at Warn so reporting is preserved.
+# reason: lint config tables store canonical severity names as text
+@allow(primitive_api)
+pub fn lint_level_name_for_rule_level(level: DiagnosticRuleLevel) -> text:
+    match level:
+        DiagnosticRuleLevel.Allow: "allow"
+        DiagnosticRuleLevel.Advisory: "warn"
+        DiagnosticRuleLevel.Warn: "warn"
+        DiagnosticRuleLevel.Deny: "deny"
+
+# Driver safety pass has Advisory (log-only floor), Warn, Deny; Allow clamps at Advisory.
+# reason: parity comparison exposes canonical driver severity names as text
+@allow(primitive_api)
+pub fn driver_severity_name_for_rule_level(level: DiagnosticRuleLevel) -> text:
+    match level:
+        DiagnosticRuleLevel.Deny: "deny"
+        DiagnosticRuleLevel.Warn: "warn"
+        DiagnosticRuleLevel.Advisory: "advisory"
+        DiagnosticRuleLevel.Allow: "advisory"
+
+# reason: diagnostic rule codes are canonical string identifiers
+@allow(primitive_api)
+pub fn resolve_policy_with_input(
+    snapshot: DiagnosticPolicySnapshot,
+    code: text,
+    input: DiagnosticPolicyInputV1,
+    emitted: DiagnosticRuleLevel
+) -> ResolvedSeverity:
+    snapshot.resolve(code, input.to_resolve_context(), emitted)
+
+# reason: diagnostic rule codes are canonical string identifiers
+@allow(primitive_api)
+pub fn project_policy_parity_v1(
+    snapshot: DiagnosticPolicySnapshot,
+    code: text,
+    input: DiagnosticPolicyInputV1,
+    emitted: DiagnosticRuleLevel
+) -> PolicyParityProjectionV1:
+    val resolved = resolve_policy_with_input(snapshot, code, input, emitted)
+    PolicyParityProjectionV1(
+        rule_id: code,
+        canonical_mode: resolved.profile,
+        language_edition: resolved.language_edition,
+        resolved_level: resolved.level,
+        lint_level_name: lint_level_name_for_rule_level(resolved.level),
+        driver_severity_name: driver_severity_name_for_rule_level(resolved.level),
+        stage: resolved.stage,
+        rehearsal: resolved.rehearsal,
+        policy_digest: resolved.policy_digest
+    )
 
 pub fn diagnostic_policy_default_path() -> text:
     "config/policy/diagnostic_policy.sdn"

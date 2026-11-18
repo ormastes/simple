@@ -1,8 +1,10 @@
 use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
 use compiler.driver.action_graph.coordinator.{
     BuildActionClaimTransferV1, BuildActionClaimV1,
-    BuildActionCommitTransferV1, coordinator_cancel_v1,
-    coordinator_claim_v1, coordinator_commit_v1
+    BuildActionCommitTransferV1, coordinator_attach_waiter_v1,
+    coordinator_cancel_action_v1, coordinator_cancel_v1,
+    coordinator_claim_v1, coordinator_commit_v1,
+    coordinator_detach_waiter_v1
 }
 use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
 use lib.compiler_artifact_service.profile.{
@@ -14,9 +16,10 @@ use lib.compiler_artifact_service.protocol.{
 }
 use lib.compiler_artifact_service.service.{
     ArtifactLeaseV1, ArtifactQueueEntryV1, ArtifactRequestStateV1, ArtifactRequestV1,
-    ArtifactServiceV1, artifact_service_cancel_v1,
-    artifact_service_claim_v1, artifact_service_complete_v1,
-    artifact_service_enqueue_v1
+    ArtifactServiceV1, artifact_service_attach_waiter_v1,
+    artifact_service_cancel_v1, artifact_service_claim_v1,
+    artifact_service_complete_v1, artifact_service_detach_waiter_v1,
+    artifact_service_enqueue_v1, artifact_service_waiter_ids_v1
 }
 
 struct DemandArtifactRouteV1:
@@ -162,13 +165,73 @@ fn demand_artifact_commit_owned_v1(
     DemandArtifactCommitTransferV1(owned, accepted)
 
 fn demand_artifact_cancel_v1(route: &mut DemandArtifactRouteV1, action_id: text):
+    if action_id == "":
+        demand_artifact_abort_all_v1(route)
+        return
     var execution = route.execution
-    if execution.coordinator != nil:
-        var coordinator = execution.coordinator!
-        coordinator_cancel_v1(&mut coordinator)
-        execution.coordinator = Some(coordinator)
+    match execution.coordinator:
+        case Some(coord):
+            var mutable_coord = coord
+            val did_cancel = coordinator_cancel_action_v1(&mut mutable_coord, action_id)
+            execution.coordinator = Some(mutable_coord)
+            route.execution = execution
+            if did_cancel:
+                route.service = artifact_service_cancel_v1(route.service, action_id)
+        case None:
+            route.execution = execution
+            if artifact_service_waiter_ids_v1(route.service, action_id).len() == 0:
+                route.service = artifact_service_cancel_v1(route.service, action_id)
+
+fn demand_artifact_abort_all_v1(route: &mut DemandArtifactRouteV1):
+    var execution = route.execution
+    match execution.coordinator:
+        case Some(coord):
+            var mutable_coord = coord
+            coordinator_cancel_v1(&mut mutable_coord)
+            for action in mutable_coord.graph.actions:
+                route.service = artifact_service_cancel_v1(route.service, action.action_id)
+            execution.coordinator = Some(mutable_coord)
+        case None:
+            var action_ids: [text] = []
+            for entry in route.service.entries:
+                if not action_ids.contains(entry.request.action_id):
+                    action_ids.push(entry.request.action_id)
+            for aid in action_ids:
+                route.service = artifact_service_cancel_v1(route.service, aid)
     route.execution = execution
-    route.service = artifact_service_cancel_v1(route.service, action_id)
+
+fn demand_artifact_attach_waiter_v1(
+    route: &mut DemandArtifactRouteV1, action_id: text, waiter_id: text
+) -> bool:
+    if not route.valid or route.execution.coordinator.is_none():
+        return false
+    var execution = route.execution
+    var coordinator = execution.coordinator!
+    if not coordinator_attach_waiter_v1(&mut coordinator, action_id, waiter_id):
+        return false
+    val staged_service = artifact_service_attach_waiter_v1(route.service, action_id, waiter_id)
+    if not artifact_service_waiter_ids_v1(staged_service, action_id).contains(waiter_id):
+        return false
+    execution.coordinator = Some(coordinator)
+    route.execution = execution
+    route.service = staged_service
+    true
+
+fn demand_artifact_detach_waiter_v1(
+    route: &mut DemandArtifactRouteV1, action_id: text, waiter_id: text
+) -> bool:
+    if not route.valid or route.execution.coordinator.is_none():
+        return false
+    if not artifact_service_waiter_ids_v1(route.service, action_id).contains(waiter_id):
+        return false
+    var execution = route.execution
+    var coordinator = execution.coordinator!
+    val cancelled_action = coordinator_detach_waiter_v1(&mut coordinator, action_id, waiter_id)
+    val staged_service = artifact_service_detach_waiter_v1(route.service, action_id, waiter_id)
+    execution.coordinator = Some(coordinator)
+    route.execution = execution
+    route.service = staged_service
+    cancelled_action
 
 fn artifact_service_claim_action_v1(
     service: ArtifactServiceV1, action_id: text, owner_id: text,
@@ -231,4 +294,6 @@ export DemandArtifactRouteV1
 export DemandArtifactClaimTransferV1, DemandArtifactCommitTransferV1
 export demand_artifact_route_v1, demand_artifact_claim_v1
 export demand_artifact_commit_v1, demand_artifact_cancel_v1
+export demand_artifact_abort_all_v1
+export demand_artifact_attach_waiter_v1, demand_artifact_detach_waiter_v1
 export demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1

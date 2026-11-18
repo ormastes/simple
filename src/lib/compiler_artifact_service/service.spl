@@ -30,9 +30,14 @@ struct ArtifactQueueEntryV1:
     cas_artifact_digest: text
     error_code: text
 
+struct ArtifactActionWaitersV1:
+    action_id: text
+    waiter_ids: [text]
+
 struct ArtifactServiceV1:
     profile: ArtifactServiceProfileV1
     entries: [ArtifactQueueEntryV1]
+    waiters: [ArtifactActionWaitersV1] = []
 
 fn artifact_request_validate_v1(
     profile: ArtifactServiceProfileV1, request: ArtifactRequestV1
@@ -58,8 +63,8 @@ fn artifact_service_enqueue_v1(
     val reason = artifact_request_validate_v1(service.profile, request)
     val state = if reason == "ok": ArtifactRequestStateV1.queued else: ArtifactRequestStateV1.rejected
     var entries = service.entries
-    entries = entries.push(ArtifactQueueEntryV1(request, state, nil, "", if reason == "ok": "" else: reason))
-    ArtifactServiceV1(service.profile, entries)
+    entries = entries.push(ArtifactQueueEntryV1(request, state, None, "", if reason == "ok": "" else: reason))
+    ArtifactServiceV1(service.profile, entries, service.waiters)
 
 fn artifact_service_claim_v1(
     service: ArtifactServiceV1, owner_id: text, lease_id: text,
@@ -99,7 +104,81 @@ fn artifact_service_claim_v1(
                 recovery_marker))
         else:
             entries = entries.push(entry)
-    ArtifactServiceV1(service.profile, entries)
+    ArtifactServiceV1(service.profile, entries, service.waiters)
+
+fn _artifact_service_without_action_waiters_v1(
+    waiters: [ArtifactActionWaitersV1], action_id: text
+) -> [ArtifactActionWaitersV1]:
+    var filtered: [ArtifactActionWaitersV1] = []
+    for row in waiters:
+        if row.action_id != action_id:
+            filtered = filtered.push(row)
+    filtered
+
+fn artifact_service_waiter_ids_v1(
+    service: ArtifactServiceV1, action_id: text
+) -> [text]:
+    for row in service.waiters:
+        if row.action_id == action_id:
+            return row.waiter_ids
+    []
+
+fn artifact_service_attach_waiter_v1(
+    service: ArtifactServiceV1, action_id: text, waiter_id: text
+) -> ArtifactServiceV1:
+    if action_id == "" or waiter_id == "":
+        return service
+    var attachable = false
+    for entry in service.entries:
+        if entry.request.action_id == action_id and
+                (entry.state == ArtifactRequestStateV1.queued or
+                    entry.state == ArtifactRequestStateV1.leased or
+                    entry.state == ArtifactRequestStateV1.completed):
+            attachable = true
+    if not attachable:
+        return service
+    var updated_waiters: [ArtifactActionWaitersV1] = []
+    var found = false
+    for row in service.waiters:
+        if row.action_id == action_id:
+            found = true
+            var ids = row.waiter_ids
+            if not ids.contains(waiter_id):
+                ids = ids.push(waiter_id)
+            updated_waiters = updated_waiters.push(ArtifactActionWaitersV1(action_id, ids))
+        else:
+            updated_waiters = updated_waiters.push(row)
+    if not found:
+        updated_waiters = updated_waiters.push(ArtifactActionWaitersV1(action_id, [waiter_id]))
+    ArtifactServiceV1(service.profile, service.entries, updated_waiters)
+
+fn artifact_service_detach_waiter_v1(
+    service: ArtifactServiceV1, action_id: text, waiter_id: text
+) -> ArtifactServiceV1:
+    if action_id == "" or waiter_id == "":
+        return service
+    var had_waiter = false
+    var remaining_count: i64 = 0
+    var updated_waiters: [ArtifactActionWaitersV1] = []
+    for row in service.waiters:
+        if row.action_id == action_id:
+            var remaining: [text] = []
+            for existing in row.waiter_ids:
+                if existing == waiter_id:
+                    had_waiter = true
+                else:
+                    remaining = remaining.push(existing)
+            remaining_count = remaining.len()
+            if remaining.len() > 0:
+                updated_waiters = updated_waiters.push(ArtifactActionWaitersV1(action_id, remaining))
+        else:
+            updated_waiters = updated_waiters.push(row)
+    if not had_waiter:
+        return service
+    val detached_service = ArtifactServiceV1(service.profile, service.entries, updated_waiters)
+    if remaining_count > 0:
+        return detached_service
+    artifact_service_cancel_v1(detached_service, action_id)
 
 fn artifact_service_cancel_v1(
     service: ArtifactServiceV1, action_id: text
@@ -113,12 +192,14 @@ fn artifact_service_cancel_v1(
                 Some(value):
                     lease = Some(ArtifactLeaseV1(
                         value.lease_id, value.action_id, value.owner_id, value.generation, true))
-                _: nil
+                _: ()
             entries = entries.push(ArtifactQueueEntryV1(
                 entry.request, ArtifactRequestStateV1.cancelled, lease, "", "cancelled"))
         else:
             entries = entries.push(entry)
-    ArtifactServiceV1(service.profile, entries)
+    ArtifactServiceV1(
+        service.profile, entries,
+        _artifact_service_without_action_waiters_v1(service.waiters, action_id))
 
 fn artifact_service_complete_v1(
     service: ArtifactServiceV1, lease: ArtifactLeaseV1, result: ArtifactResultV1
@@ -147,9 +228,12 @@ fn artifact_service_complete_v1(
                 else:
                     updated = ArtifactQueueEntryV1(entry.request, ArtifactRequestStateV1.failed, entry.lease, "", result.error_code)
         entries = entries.push(updated)
-    ArtifactServiceV1(service.profile, entries)
+    ArtifactServiceV1(service.profile, entries, service.waiters)
 
 export ArtifactRequestStateV1, ArtifactRequestV1, ArtifactLeaseV1
+export ArtifactActionWaitersV1
 export ArtifactQueueEntryV1, ArtifactServiceV1, artifact_request_validate_v1
 export artifact_service_enqueue_v1, artifact_service_claim_v1
+export artifact_service_waiter_ids_v1
+export artifact_service_attach_waiter_v1, artifact_service_detach_waiter_v1
 export artifact_service_cancel_v1, artifact_service_complete_v1

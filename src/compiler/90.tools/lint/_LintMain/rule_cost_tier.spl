@@ -1,11 +1,13 @@
-# Fast/deep lint rule cost-tier registry (P0-5, ROB-COST-01/02).
+# Fast/deep lint rule cost-tier registry and pre-execution admission ledger (P0-5, ROB-COST-01/02).
 #
 # Every canonical lint rule name (see `all_lint_names` in config_and_model.spl)
 # is assigned a cost tier. The normal build profile runs Low rules only; the
 # default lint profile runs everything. A rule missing from the registry is
 # High (fail closed: unknown cost is never run on the fast path).
 
-use compiler.tools.lint._LintMain.config_and_model.{LintConfig, LintLevel, all_lint_names}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintConfig, LintLevel, all_lint_names, map_lint_code_to_config_name
+}
 
 pub enum LintCostTier:
     Low
@@ -24,6 +26,15 @@ pub enum LintTierProfile:
     NormalBuild
     DefaultLint
 
+# Execution ledger (Stage-1 safe `var` globals, zero `nil`).
+var _RULE_INVOCATION_COUNTS_V1: Dict<text, i64> = {}
+var _RULE_COST_SKIP_COUNTS_V1: Dict<text, i64> = {}
+var _EXECUTED_RULE_IDS_V1: [text] = []
+var _COST_SKIPPED_RULE_IDS_V1: [text] = []
+var _AST_PARSE_COUNT_V1: i64 = 0
+var _AST_PARSE_SKIPPED_COUNT_V1: i64 = 0
+var _ACTIVE_ADMISSION_CONFIG_V1: [LintConfig] = []
+
 # Syntactic / source-pattern rules: single pass, no cross-statement analysis.
 fn _low_cost_rules() -> [text]:
     ["primitive_api", "bare_bool", "bare_text_domain", "simple_script_required",
@@ -38,7 +49,8 @@ fn _low_cost_rules() -> [text]:
      "ui_no_raw_theme_name", "hash_bracket_attribute", "style_convention",
      "multiline_bool", "dummy_accessor", "too_many_arguments",
      "wildcard_match", "stub_impl", "raw_rt_access", "const_ref_default",
-     "module_init_literal", "nil_outside_unsafe"]
+     "module_init_literal", "nil_outside_unsafe",
+     "newunit_deprecation", "numeric_newtype_deprecation"]
 
 # Per-declaration structural rules.
 fn _medium_cost_rules() -> [text]:
@@ -51,7 +63,9 @@ fn _medium_cost_rules() -> [text]:
      "freestanding_global_call_init", "bare_primitive_internal",
      "representation_boundary", "unwrapped_foreign_resource", "raw_sffi_call",
      "variant_shadow_binding", "written_any_decl", "wm_lane_boundary",
-     "robust_option_surface", "nil_return_non_optional"]
+     "robust_option_surface", "nil_return_non_optional",
+     "option_me_call", "undeclared_derived_unit",
+     "source_inventory_drift", "boundary_role_grant"]
 
 # Flow / cross-function / typed analyses that can dominate a build.
 fn _high_cost_rules() -> [text]:
@@ -60,9 +74,55 @@ fn _high_cost_rules() -> [text]:
      "collection_performance", "database_integrity", "linear_scan_in_loop",
      "bound_late_cast", "bound_unit_reassert", "sffi_abi_mismatch",
      "silent_default", "nil_compare_non_optional", "inferred_type_fallback_use",
-     "any_fallback_use", "any_receiver_use", "gpu_2d_perf", "panic_free"]
+     "any_fallback_use", "any_receiver_use", "gpu_2d_perf", "panic_free",
+     "cow_alias_hotpath", "nogc_ownership",
+     "illegal_unit_arithmetic", "bound_raw_escape",
+     "provider_abi_mismatch", "sffi_constrained_return",
+     "non_option_pattern_match"]
 
-@allow(primitive_api)  # rule names are plain identifiers at the lint registry boundary
+fn _low_cost_producer_aliases() -> [text]:
+    ["L:print_in_test_spec", "L:spipe_missing_docstrings",
+     "L:spipe_manual_assertions", "E:parser_contextual_keyword",
+     "L:deprecated_if_let", "L:struct_construction_parens", "L:stub_impl",
+     "L:unknown_annotation", "L:export_outside_init", "L:bare_bool",
+     "L:spipe_no_print_based_tests", "L:spipe_minimal_docstrings",
+     "L:short_grammar", "L:simple_script_required",
+     "L:short_grammar_field_access", "W-STR-BRACE-001",
+     "SPL-UNIT-001", "SPL-UNIT-003", "SPL-TYPE-001",
+     "constant_interpolation", "leading_operator"]
+
+fn _medium_cost_producer_aliases() -> [text]:
+    ["L:unnamed_duplicate_typed_args", "L:star_import", "L:wide_public",
+     "L:init_boundary_violation", "L:bypass_with_code_files",
+     "accessor_parent_name", "os_freestanding", "param_object",
+     "param_tag", "raw_sffi", "riscv_debuggability",
+     "windows_c_compiler_selection", "semantic_api_exported_graph",
+     "theme_package", "SPL-UNIT-004",
+     "SPL-BUILD-SRC-001", "SPL-BUILD-ROLE-001"]
+
+fn _strip_easyfix_prefix(rule_id: text) -> text:
+    if rule_id.starts_with("L:") or rule_id.starts_with("E:"):
+        return rule_id.slice(2, rule_id.byte_len())
+    rule_id
+
+# reason: rule identifiers are plain strings at the lint registry boundary
+@allow(primitive_api)
+pub fn lint_canonical_config_name_for_producer(rule_id: text) -> text:
+    if rule_id == "raw_sffi":
+        return "raw_sffi_call"
+    if rule_id == "param_tag":
+        return "unnamed_duplicate_typed_args"
+    if rule_id == "semantic_api_exported_graph":
+        return "primitive_api"
+    val stripped = _strip_easyfix_prefix(rule_id)
+    if stripped == "short_grammar" or stripped == "short_grammar_field_access":
+        return "short_grammar_refactor"
+    if stripped == "star_import" or stripped == "wide_public":
+        return "visibility_boundary"
+    map_lint_code_to_config_name(stripped)
+
+# reason: rule names are plain identifiers at the lint registry boundary
+@allow(primitive_api)
 pub fn lint_registered_rule_names() -> [text]:
     var names: [text] = []
     for n in _low_cost_rules():
@@ -73,16 +133,58 @@ pub fn lint_registered_rule_names() -> [text]:
         names.push(n)
     names
 
-@allow(primitive_api)  # rule names are plain identifiers at the lint registry boundary
+# reason: rule names are plain identifiers at the lint registry boundary
+@allow(primitive_api)
 pub fn lint_rule_cost_tier(name: text) -> LintCostTier:
-    if _low_cost_rules().contains(name):
+    if _low_cost_rules().contains(name) or _low_cost_producer_aliases().contains(name):
         return LintCostTier.Low
-    if _medium_cost_rules().contains(name):
+    if _medium_cost_rules().contains(name) or _medium_cost_producer_aliases().contains(name):
         return LintCostTier.Medium
+    if _high_cost_rules().contains(name):
+        return LintCostTier.High
+    val canon = lint_canonical_config_name_for_producer(name)
+    if canon != "" and canon != name:
+        if _low_cost_rules().contains(canon):
+            return LintCostTier.Low
+        if _medium_cost_rules().contains(canon):
+            return LintCostTier.Medium
     LintCostTier.High
 
+# reason: admission check returns a plain boolean verdict for the tier gate
+@allow(primitive_api)
+pub fn lint_tier_admits(profile: LintTierProfile, tier: LintCostTier) -> bool:
+    match profile:
+        case DefaultLint:
+            true
+        case NormalBuild:
+            tier == LintCostTier.Low
+
+# Hard cost ceiling FIRST (`lint_tier_admits`), then effective `LintLevel`.
+# reason: rule_id is a canonical text key and admission returns a boolean gate verdict
+@allow(primitive_api)
+pub fn lint_rule_admitted_for_config(config: LintConfig, rule_id: text) -> bool:
+    val tier = lint_rule_cost_tier(rule_id)
+    if not lint_tier_admits(config.tier_profile, tier):
+        return false
+    if rule_id == "os_freestanding":
+        return (config.get_level("freestanding_enum_eq") != LintLevel.Allow or
+            config.get_level("freestanding_anon_tuple_return") != LintLevel.Allow or
+            config.get_level("freestanding_bare_conversion") != LintLevel.Allow or
+            config.get_level("freestanding_global_call_init") != LintLevel.Allow)
+    if rule_id == "accessor_parent_name":
+        return (config.get_level("dummy_accessor") != LintLevel.Allow or
+            config.get_level("similar_parent_method_name") != LintLevel.Allow)
+    if rule_id == "bound_late_cast":
+        return (config.get_level("bound_late_cast") != LintLevel.Allow or
+            config.get_level("bound_raw_escape") != LintLevel.Allow)
+    val canon = lint_canonical_config_name_for_producer(rule_id)
+    if canon == "":
+        return true
+    config.get_level(canon) != LintLevel.Allow
+
 # Pure rule selection. NormalBuild keeps Low only; DefaultLint keeps all.
-@allow(primitive_api)  # rule names are plain identifiers at the lint registry boundary
+# reason: rule names are plain identifiers at the lint registry boundary
+@allow(primitive_api)
 pub fn lint_rules_for_profile(profile: LintTierProfile, names: [text]) -> [text]:
     match profile:
         case DefaultLint:
@@ -98,7 +200,8 @@ pub fn lint_rules_for_profile(profile: LintTierProfile, names: [text]) -> [text]
 # Pass: a clean-looking run that was cut short is Incomplete.
 # Precedence: Fail > TimedOut > Incomplete > Unsupported > Pass; NotApplicable
 # only when nothing applied.
-@allow(primitive_api)  # CLI boundary: budget flag from the lint driver
+# reason: CLI boundary: budget flag from the lint driver
+@allow(primitive_api)
 pub fn lint_completeness_reduce(results: [LintCompleteness], budget_exhausted: bool) -> LintCompleteness:
     var any_fail = false
     var any_timed_out = false
@@ -125,7 +228,8 @@ pub fn lint_completeness_reduce(results: [LintCompleteness], budget_exhausted: b
         return LintCompleteness.Pass
     LintCompleteness.NotApplicable
 
-@allow(primitive_api)  # CLI status-line boundary: printed status text
+# reason: CLI status-line boundary: printed status text
+@allow(primitive_api)
 pub fn lint_completeness_name(c: LintCompleteness) -> text:
     match c:
         case Pass: "pass"
@@ -135,10 +239,115 @@ pub fn lint_completeness_name(c: LintCompleteness) -> text:
         case Unsupported: "unsupported"
         case NotApplicable: "not_applicable"
 
-# `lint --fast`: silence every rule the NormalBuild profile does not select.
+# `lint --fast`: bind config to NormalBuild ceiling AND silence non-Low levels.
 pub fn lint_apply_fast_profile(config: LintConfig):
+    config.tier_profile = LintTierProfile.NormalBuild
     val all = all_lint_names()
     val keep = lint_rules_for_profile(LintTierProfile.NormalBuild, all)
     for name in all:
         if not keep.contains(name):
             config.set_level(name, LintLevel.Allow)
+
+# ---------------------------------------------------------------------------
+# Pre-execution invocation & cost-skip ledger
+# ---------------------------------------------------------------------------
+
+pub fn lint_reset_invocation_counts_v1():
+    _RULE_INVOCATION_COUNTS_V1 = {}
+    _RULE_COST_SKIP_COUNTS_V1 = {}
+    _EXECUTED_RULE_IDS_V1 = []
+    _COST_SKIPPED_RULE_IDS_V1 = []
+    _AST_PARSE_COUNT_V1 = 0
+    _AST_PARSE_SKIPPED_COUNT_V1 = 0
+
+# reason: rule identifiers in the lint execution ledger are canonical text keys
+@allow(primitive_api)
+pub fn lint_record_rule_invoked_v1(rule_id: text):
+    val prev = if _RULE_INVOCATION_COUNTS_V1.contains_key(rule_id): _RULE_INVOCATION_COUNTS_V1[rule_id] else: 0
+    _RULE_INVOCATION_COUNTS_V1[rule_id] = prev + 1
+    if not _EXECUTED_RULE_IDS_V1.contains(rule_id):
+        _EXECUTED_RULE_IDS_V1.push(rule_id)
+
+# reason: rule identifiers in the lint execution ledger are canonical text keys
+@allow(primitive_api)
+pub fn lint_record_rule_skipped_cost_v1(rule_id: text):
+    val prev = if _RULE_COST_SKIP_COUNTS_V1.contains_key(rule_id): _RULE_COST_SKIP_COUNTS_V1[rule_id] else: 0
+    _RULE_COST_SKIP_COUNTS_V1[rule_id] = prev + 1
+    if not _COST_SKIPPED_RULE_IDS_V1.contains(rule_id):
+        _COST_SKIPPED_RULE_IDS_V1.push(rule_id)
+
+# reason: rule identifiers and invocation counts are plain scalars at the lint telemetry boundary
+@allow(primitive_api)
+pub fn lint_rule_invocation_count_v1(rule_id: text) -> i64:
+    if _RULE_INVOCATION_COUNTS_V1.contains_key(rule_id):
+        return _RULE_INVOCATION_COUNTS_V1[rule_id]
+    0
+
+# reason: rule identifiers and skip counts are plain scalars at the lint telemetry boundary
+@allow(primitive_api)
+pub fn lint_rule_cost_skip_count_v1(rule_id: text) -> i64:
+    if _RULE_COST_SKIP_COUNTS_V1.contains_key(rule_id):
+        return _RULE_COST_SKIP_COUNTS_V1[rule_id]
+    0
+
+# reason: rule identifiers are plain strings at the lint telemetry boundary
+@allow(primitive_api)
+pub fn lint_executed_rule_ids_v1() -> [text]:
+    _EXECUTED_RULE_IDS_V1
+
+# reason: rule identifiers are plain strings at the lint telemetry boundary
+@allow(primitive_api)
+pub fn lint_cost_skipped_rule_ids_v1() -> [text]:
+    _COST_SKIPPED_RULE_IDS_V1
+
+pub fn lint_record_ast_parse_v1():
+    _AST_PARSE_COUNT_V1 = _AST_PARSE_COUNT_V1 + 1
+
+pub fn lint_record_ast_parse_skipped_v1():
+    _AST_PARSE_SKIPPED_COUNT_V1 = _AST_PARSE_SKIPPED_COUNT_V1 + 1
+
+# reason: AST parse count is an integer counter at the lint telemetry boundary
+@allow(primitive_api)
+pub fn lint_ast_parse_count_v1() -> i64:
+    _AST_PARSE_COUNT_V1
+
+# reason: AST parse skip count is an integer counter at the lint telemetry boundary
+@allow(primitive_api)
+pub fn lint_ast_parse_skipped_count_v1() -> i64:
+    _AST_PARSE_SKIPPED_COUNT_V1
+
+# Evaluate pre-execution admission and record cost-skip or invocation in one step.
+# When a producer ID maps to a canonical config name (e.g. `L:resource_leak` ->
+# `resource_leak`), both IDs are recorded consistently in the ledger.
+# reason: rule_id is a canonical text key and admission returns a boolean verdict
+@allow(primitive_api)
+pub fn lint_admit_and_record_v1(config: LintConfig, rule_id: text) -> bool:
+    val tier = lint_rule_cost_tier(rule_id)
+    val canon = lint_canonical_config_name_for_producer(rule_id)
+    if not lint_tier_admits(config.tier_profile, tier):
+        lint_record_rule_skipped_cost_v1(rule_id)
+        if canon != "" and canon != rule_id:
+            lint_record_rule_skipped_cost_v1(canon)
+        return false
+    if not lint_rule_admitted_for_config(config, rule_id):
+        return false
+    lint_record_rule_invoked_v1(rule_id)
+    if canon != "" and canon != rule_id:
+        lint_record_rule_invoked_v1(canon)
+    true
+
+pub fn lint_set_active_config_v1(config: LintConfig):
+    _ACTIVE_ADMISSION_CONFIG_V1 = [config]
+
+pub fn lint_clear_active_config_v1():
+    _ACTIVE_ADMISSION_CONFIG_V1 = []
+
+# Top-level non-capturing callback for `run_admitted_static_lint_rule_table`
+# and `run_admitted_registry_producers`.
+# reason: callback signature matches fn(text) -> bool producer admission contract
+@allow(primitive_api)
+pub fn lint_active_config_admits_rule_v1(rule_id: text) -> bool:
+    if _ACTIVE_ADMISSION_CONFIG_V1.len() == 0:
+        lint_record_rule_invoked_v1(rule_id)
+        return true
+    lint_admit_and_record_v1(_ACTIVE_ADMISSION_CONFIG_V1[0], rule_id)

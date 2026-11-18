@@ -1,0 +1,520 @@
+"""
+## Purpose and audience
+
+Purpose: verify shared `"analysis"` task contracts (`ED-T09`), single-flight waiter
+deduplication and reference-counted waiter detach (`ED-T10`), build-pinned producer
+preservation (`ED-T11`), and `lease_generation` separation with stale-worker commit
+rejection (`ED-T24`).
+
+Audience: engineers maintaining `std.common.task_runner`, `app.buildrunner`,
+`lib.compiler_artifact_service`, and `compiler.driver.action_graph`.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/lib/common/task_runner/analysis_key_single_flight_spec.spl --mode=interpreter`.
+2. Verify every `ED-T09`, `ED-T10`, `ED-T11`, and `ED-T24` scenario passes with zero warnings.
+
+## Compatibility and limitations
+
+Pure deterministic state-machine and codec contracts; executes identically on
+Windows, Linux, macOS, and FreeBSD without spawning external processes.
+"""
+
+# @req REQ-WP06-ANALYSIS-SINGLE-FLIGHT
+# @cover src/lib/common/task_runner/contracts.spl
+# @cover src/lib/common/task_runner/analysis_single_flight.spl
+# @cover src/app/buildrunner/task_context.spl
+# @cover src/lib/compiler_artifact_service/service.spl
+# @cover src/compiler/80.driver/action_graph/coordinator.spl
+# @cover src/compiler/80.driver/action_graph/artifact_service_bridge.spl
+
+use std.spec.{describe, context, it, expect, fail, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
+use std.common.task_runner.contracts.{
+    TaskRunnerIdentityV1, TaskRunnerAttemptV1,
+    AnalysisKeyV1, AnalysisJobLeaseV1,
+    analysis_key_error_v1, analysis_key_v1, analysis_key_digest_v1,
+    analysis_job_lease_error_v1, analysis_job_lease_v1,
+    task_runner_identity_v1, task_runner_attempt_error_v1
+}
+use std.common.task_runner.analysis_single_flight.{
+    AnalysisSingleFlightV1, AnalysisFlightEntryV1,
+    analysis_single_flight_new_v1, attach_waiter, detach_waiter,
+    commit_flight, supersede_flight_lease, pin_flight_by_build,
+    unpin_flight_by_build, analysis_flight_find_v1
+}
+use app.buildrunner.task_context.{
+    BuildRunnerTaskContextV1, build_runner_context_encode_v1,
+    build_runner_context_decode_v1, build_runner_environment_digest_v1
+}
+use app.buildrunner.runner.{
+    build_analysis_single_flight_new_v1
+}
+use std.compiler_artifact_service.profile.{artifact_service_profile_v1}
+use std.compiler_artifact_service.protocol.{ArtifactResultV1}
+use std.compiler_artifact_service.service.{
+    ArtifactRequestStateV1, ArtifactRequestV1, ArtifactServiceV1,
+    artifact_service_enqueue_v1, artifact_service_claim_v1,
+    artifact_service_attach_waiter_v1, artifact_service_detach_waiter_v1,
+    artifact_service_waiter_ids_v1, artifact_service_cancel_v1,
+    artifact_service_complete_v1
+}
+use compiler.driver.action_graph.build_action_v1.{
+    BuildActionPoolV1, BuildActionResultV1, BuildActionStateV1, BuildActionV1
+}
+use compiler.driver.action_graph.persisted_graph.{
+    PersistedBuildGraphV1, persisted_graph_digest_v1
+}
+use compiler.driver.action_graph.coordinator.{
+    BuildPoolBudgetV1, coordinator_new_v1, coordinator_claim_v1,
+    coordinator_commit_v1, coordinator_attach_waiter_v1,
+    coordinator_detach_waiter_v1, coordinator_cancel_action_v1,
+    coordinator_cancel_v1, coordinator_waiter_count_v1
+}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use compiler.driver.backend.native_promotion_queue.{NativePromotionQueueV1}
+use compiler.driver.perf.demand_compile_counters.{demand_compile_counters_empty_v1}
+use compiler.driver.action_graph.artifact_service_bridge.{
+    demand_artifact_route_v1, demand_artifact_claim_v1,
+    demand_artifact_commit_v1, demand_artifact_cancel_v1,
+    demand_artifact_attach_waiter_v1, demand_artifact_detach_waiter_v1
+}
+
+fn sample_analysis_identity_v1(kind: text) -> TaskRunnerIdentityV1:
+    TaskRunnerIdentityV1(
+        kind: kind,
+        task_id: "analysis:pkg/core",
+        case_id: "hover:line:12",
+        backend: "analysis",
+        phase: "semantic",
+        producer_digest: sha256_text("producer"),
+        source_digest: sha256_text("source"),
+        runtime_digest: sha256_text("runtime"),
+        toolchain_digest: sha256_text("toolchain"),
+        policy_digest: sha256_text("policy"),
+        execution_digest: sha256_text("execution"))
+
+fn sample_analysis_attempt_v1(status: text, reason: text, task_exit_code: i64) -> TaskRunnerAttemptV1:
+    val identity = task_runner_identity_v1(sample_analysis_identity_v1("analysis")).unwrap()
+    TaskRunnerAttemptV1(
+        identity_digest: identity,
+        group_id: "analysis-group-1",
+        attempt: 1,
+        mode: "grouped",
+        pid: 4242,
+        process_generation: 3,
+        status: status,
+        reason: reason,
+        exit_code: task_exit_code,
+        task_exit_code: task_exit_code,
+        signal_number: 0,
+        tree_reaped: true,
+        result_validated: true,
+        stdout_digest: sha256_text("stdout"),
+        stderr_digest: sha256_text("stderr"),
+        result_digest: sha256_text("result"),
+        transport_execution_digest: sha256_text("transport"))
+
+fn sample_analysis_key_v1(snapshot_id: text, target_id: text) -> AnalysisKeyV1:
+    AnalysisKeyV1(
+        snapshot_id: snapshot_id,
+        scope_id: "workspace/main",
+        target_id: target_id,
+        policy_digest: sha256_text("analysis-policy-v1"),
+        analyzer_profile: "ide-semantic-v1")
+
+fn two_action_graph_v1() -> PersistedBuildGraphV1:
+    val act_a = BuildActionV1(
+        action_id: "analysis-a",
+        command_identity: "cmd-analysis-a",
+        inputs: ["src/a.spl"],
+        dynamic_edges: [],
+        outputs: ["out/a.sif"],
+        pool: BuildActionPoolV1.semantic,
+        priority: 10,
+        snapshot_revision: "snap-1",
+        memory_budget_bytes: 1024,
+        restat_identity: "")
+    val act_b = BuildActionV1(
+        action_id: "compile-b",
+        command_identity: "cmd-compile-b",
+        inputs: ["src/b.spl"],
+        dynamic_edges: [],
+        outputs: ["out/b.o"],
+        pool: BuildActionPoolV1.mir,
+        priority: 8,
+        snapshot_revision: "snap-1",
+        memory_budget_bytes: 1024,
+        restat_identity: "")
+    val draft = PersistedBuildGraphV1("draft", "", "snap-1", [act_a, act_b])
+    PersistedBuildGraphV1(persisted_graph_digest_v1(draft), "", "snap-1", [act_a, act_b])
+
+fn two_action_budgets_v1() -> [BuildPoolBudgetV1]:
+    [
+        BuildPoolBudgetV1(BuildActionPoolV1.semantic, 2, 8192),
+        BuildPoolBudgetV1(BuildActionPoolV1.mir, 2, 8192)
+    ]
+
+describe "Shared analysis identity, lease separation, and single-flight coordination":
+    """
+    Verifies the WP-06 contracts separating stable `(snapshot_id, analysis_key)`
+    cache/dedup identity from mutable `lease_generation` worker ownership, and
+    ensuring waiter cancellation never kills producers still needed by other
+    waiters or by an active build.
+    """
+
+    context "ED-T09 shared analysis task kind and BuildRunner context contracts":
+        """
+        Ensures `TaskRunnerIdentityV1`, `TaskRunnerAttemptV1`, `AnalysisKeyV1`,
+        `AnalysisJobLeaseV1`, and `BuildRunnerTaskContextV1` admit `"analysis"`
+        cleanly without mixing `lease_generation` into `analysis_key`.
+        """
+
+        it "admits analysis task identity and terminal analysis failure reason while keeping key digest lease-independent":
+            """
+            Confirms `kind == "analysis"` and `reason == "analysis"` are accepted,
+            and proves two `AnalysisJobLeaseV1` leases with different generations
+            and owners derive the exact same `analysis_key` digest.
+            """
+            # @req ED-T09
+            step("Admit kind == analysis in task_runner_identity_v1 and keep unknown kinds rejected")
+            val analysis_id = task_runner_identity_v1(sample_analysis_identity_v1("analysis"))
+            expect(analysis_id.is_ok()).to_equal(true)
+            val build_id = task_runner_identity_v1(sample_analysis_identity_v1("build"))
+            expect(build_id.is_ok()).to_equal(true)
+            expect(analysis_id.unwrap() == build_id.unwrap()).to_equal(false)
+            val invalid_kind = task_runner_identity_v1(sample_analysis_identity_v1("lint"))
+            expect(invalid_kind.unwrap_err()).to_equal("invalid task kind")
+
+            step("Admit terminal failed reason == analysis in task_runner_attempt_error_v1")
+            val failed_analysis = sample_analysis_attempt_v1("failed", "analysis", 1)
+            expect(task_runner_attempt_error_v1(failed_analysis)).to_equal("")
+            val failed_unknown = sample_analysis_attempt_v1("failed", "unattributed", 1)
+            expect(task_runner_attempt_error_v1(failed_unknown)).to_equal("ordinary failure lacks attributable reason")
+
+            step("Verify AnalysisKeyV1 digest is invariant across lease_generation and owner_id")
+            val key = sample_analysis_key_v1("snap-001", "src/lib/mod.spl")
+            expect(analysis_key_error_v1(key)).to_equal("")
+            val key_digest = analysis_key_digest_v1(key).unwrap()
+            val lease_one = AnalysisJobLeaseV1(key: key, lease_generation: 1, owner_id: "worker-a")
+            val lease_two = AnalysisJobLeaseV1(key: key, lease_generation: 9, owner_id: "worker-b")
+            expect(analysis_job_lease_error_v1(lease_one)).to_equal("")
+            expect(analysis_job_lease_v1(lease_one).unwrap()).to_equal(key_digest)
+            expect(analysis_job_lease_v1(lease_two).unwrap()).to_equal(key_digest)
+
+            step("Verify semantic field changes alter analysis_key and invalid lease generations fail")
+            val other_key = sample_analysis_key_v1("snap-002", "src/lib/mod.spl")
+            expect(analysis_key_v1(other_key).unwrap() == key_digest).to_equal(false)
+            val zero_lease = AnalysisJobLeaseV1(key: key, lease_generation: 0, owner_id: "worker-a")
+            expect(analysis_job_lease_error_v1(zero_lease)).to_equal("invalid analysis lease generation")
+
+        it "encodes analysis BuildRunnerTaskContextV1 and binds SIMPLE_ANALYSIS_CACHE_DIR to the attempt root":
+            """
+            Verifies `backend == "analysis"` round-trips through V1 and V2 task
+            contexts and `SIMPLE_ANALYSIS_CACHE_DIR` normalizes via `@OWNED-CACHE@/analysis`.
+            """
+            # @req ED-T09
+            step("Round-trip an analysis task context through build_runner_context_encode_v1 and decode_v1")
+            val ctx = BuildRunnerTaskContextV1(
+                backend: "analysis",
+                runtime_digest: "a".repeat(64),
+                policy_digest: "b".repeat(64),
+                environment_digest: "c".repeat(64))
+            val payload = build_runner_context_encode_v1(ctx).unwrap()
+            expect(payload).to_start_with("SIMPLE-BUILD-TASK-CONTEXT-1\nanalysis\n")
+            val decoded = build_runner_context_decode_v1(payload).unwrap()
+            expect(decoded.backend).to_equal("analysis")
+            expect(decoded.policy_digest).to_equal("b".repeat(64))
+
+            step("Normalize SIMPLE_ANALYSIS_CACHE_DIR across distinct attempt roots and reject foreign paths")
+            val env_a = [
+                ProcessObservationEnvironmentV4(key: "LANG", value: "C"),
+                ProcessObservationEnvironmentV4(key: "SIMPLE_ANALYSIS_CACHE_DIR", value: "/run/a/work/.builder-cache/analysis")
+            ]
+            val env_b = [
+                ProcessObservationEnvironmentV4(key: "LANG", value: "C"),
+                ProcessObservationEnvironmentV4(key: "SIMPLE_ANALYSIS_CACHE_DIR", value: "/run/b/work/.builder-cache/analysis")
+            ]
+            val digest_a = build_runner_environment_digest_v1(env_a, "/run/a").unwrap()
+            val digest_b = build_runner_environment_digest_v1(env_b, "/run/b").unwrap()
+            expect(digest_a).to_equal(digest_b)
+
+            val foreign_env = [
+                ProcessObservationEnvironmentV4(key: "SIMPLE_ANALYSIS_CACHE_DIR", value: "/foreign/cache/analysis")
+            ]
+            expect(build_runner_environment_digest_v1(foreign_env, "/run/a").unwrap_err()).to_equal("owned environment path differs")
+
+    context "ED-T10 and ED-T11 single-flight waiter attach, detach, and build pinning":
+        """
+        Verifies identical `(snapshot_id, analysis_key)` requests share one active
+        flight, waiter detach cancels only when `waiter_ids.len() == 0 and not pinned_by_build`,
+        and per-action cancellation in coordinator/service/bridge never poisons sibling actions.
+        """
+
+        it "deduplicates waiters onto one flight and preserves the producer until the last waiter detaches":
+            """
+            Attaches two waiters to the same `(snapshot_id, analysis_key)`, detaches
+            one without cancelling the producer, and confirms detaching the final
+            unpinned waiter cancels the producer lease.
+            """
+            # @req ED-T10
+            val key = sample_analysis_key_v1("snap-10", "src/compiler/driver.spl")
+            val digest = analysis_key_digest_v1(key).unwrap()
+            var table = build_analysis_single_flight_new_v1()
+
+            step("First waiter starts lease_generation 1; second waiter deduplicates onto the active flight")
+            val first = attach_waiter(table, "snap-10", digest, "ide-hover-1", "worker-1", false)
+            expect(first.accepted).to_equal(true)
+            expect(first.deduplicated).to_equal(false)
+            table = first.table
+
+            val second = attach_waiter(table, "snap-10", digest, "cli-check-2", "worker-2", false)
+            expect(second.accepted).to_equal(true)
+            expect(second.deduplicated).to_equal(true)
+            table = second.table
+            expect(table.flights.len()).to_equal(1)
+            val active = analysis_flight_find_v1(table, "snap-10", digest).unwrap()
+            expect(active.lease_generation).to_equal(1)
+            expect(active.owner_id).to_equal("worker-1")
+            expect(active.waiter_ids).to_equal(["ide-hover-1", "cli-check-2"])
+            expect(active.status).to_equal("running")
+
+            step("Detaching ide-hover-1 keeps the producer running for cli-check-2")
+            val after_first_detach = detach_waiter(table, "snap-10", digest, "ide-hover-1")
+            expect(after_first_detach.cancelled_producer).to_equal(false)
+            table = after_first_detach.table
+            val still_running = analysis_flight_find_v1(table, "snap-10", digest).unwrap()
+            expect(still_running.status).to_equal("running")
+            expect(still_running.waiter_ids).to_equal(["cli-check-2"])
+
+            step("Detaching the final waiter on an unpinned flight cancels the producer lease")
+            val after_last_detach = detach_waiter(table, "snap-10", digest, "cli-check-2")
+            expect(after_last_detach.cancelled_producer).to_equal(true)
+            table = after_last_detach.table
+            val cancelled_entry = analysis_flight_find_v1(table, "snap-10", digest).unwrap()
+            expect(cancelled_entry.status).to_equal("cancelled")
+            expect(cancelled_entry.waiter_ids.len()).to_equal(0)
+
+        it "keeps a build-pinned flight alive when all interactive waiters detach":
+            """
+            Pins an active flight for a build, attaches and detaches an IDE waiter,
+            and verifies the producer lease stays running and commits cleanly for the build.
+            """
+            # @req ED-T11
+            val key = sample_analysis_key_v1("snap-11", "src/app/main.spl")
+            val digest = analysis_key_digest_v1(key).unwrap()
+            var table = analysis_single_flight_new_v1()
+
+            step("Attach an IDE waiter and pin the same flight for the active build")
+            val attached = attach_waiter(table, "snap-11", digest, "ide-diag-1", "worker-1", false)
+            table = attached.table
+            table = pin_flight_by_build(table, "snap-11", digest, "build-worker-1")
+            val pinned = analysis_flight_find_v1(table, "snap-11", digest).unwrap()
+            expect(pinned.pinned_by_build).to_equal(true)
+
+            step("Detaching the sole interactive waiter must NOT cancel the build-pinned producer")
+            val detached = detach_waiter(table, "snap-11", digest, "ide-diag-1")
+            expect(detached.cancelled_producer).to_equal(false)
+            table = detached.table
+            val preserved = analysis_flight_find_v1(table, "snap-11", digest).unwrap()
+            expect(preserved.status).to_equal("running")
+            expect(preserved.waiter_ids.len()).to_equal(0)
+            expect(preserved.pinned_by_build).to_equal(true)
+
+            step("Commit the build-pinned flight result cleanly")
+            val out_digest = sha256_text("analysis-artifact-11")
+            val committed = commit_flight(table, "snap-11", digest, 1, out_digest)
+            expect(committed.accepted).to_equal(true)
+            expect(committed.reason).to_equal("ok")
+            val done_entry = analysis_flight_find_v1(committed.table, "snap-11", digest).unwrap()
+            expect(done_entry.status).to_equal("completed")
+            expect(done_entry.result_digest).to_equal(out_digest)
+
+            step("Unpinning an unreferenced still-running flight cancels its producer")
+            var table2 = pin_flight_by_build(analysis_single_flight_new_v1(), "snap-11b", digest, "build-only")
+            val unpinned = unpin_flight_by_build(table2, "snap-11b", digest)
+            expect(unpinned.cancelled_producer).to_equal(true)
+            expect(analysis_flight_find_v1(unpinned.table, "snap-11b", digest).unwrap().status).to_equal("cancelled")
+
+        it "cancels only an unreferenced action in coordinator and artifact service without poisoning siblings":
+            """
+            Verifies refcounted waiter detach across `ArtifactServiceV1` and
+            `BuildActionCoordinatorV1` cancels only the target action when its last
+            waiter detaches while keeping sibling actions dispatchable and committable.
+            """
+            # @req ED-T10
+            val graph = two_action_graph_v1()
+            var coordinator = coordinator_new_v1(graph, two_action_budgets_v1())
+            val profile = artifact_service_profile_v1(
+                "ide-shared", "compat-1", ["semantic", "mir"], 1, true)
+            var service = ArtifactServiceV1(profile, [])
+            service = artifact_service_enqueue_v1(
+                service, ArtifactRequestV1("analysis-a", "compat-1", "snap-1", 11, 1024))
+            service = artifact_service_enqueue_v1(
+                service, ArtifactRequestV1("compile-b", "compat-1", "snap-1", 9, 1024))
+
+            step("Claim analysis-a in both service and coordinator and attach two waiters")
+            service = artifact_service_claim_v1(service, "owner-1", "lease-a-1", 1, 4096, 0)
+            val claim_a = coordinator_claim_v1(coordinator, "analysis-a", "lease-a-1")
+            expect(claim_a.claim.valid).to_equal(true)
+            coordinator = claim_a.coordinator
+
+            service = artifact_service_attach_waiter_v1(service, "analysis-a", "waiter-1")
+            service = artifact_service_attach_waiter_v1(service, "analysis-a", "waiter-2")
+            expect(coordinator_attach_waiter_v1(&mut coordinator, "analysis-a", "waiter-1")).to_equal(true)
+            expect(coordinator_attach_waiter_v1(&mut coordinator, "analysis-a", "waiter-2")).to_equal(true)
+            expect(artifact_service_waiter_ids_v1(service, "analysis-a")).to_equal(["waiter-1", "waiter-2"])
+            expect(coordinator_waiter_count_v1(coordinator, "analysis-a")).to_equal(2)
+            expect(coordinator_cancel_action_v1(&mut coordinator, "analysis-a")).to_equal(false)
+
+            step("Detaching waiter-1 preserves analysis-a lease and running state")
+            service = artifact_service_detach_waiter_v1(service, "analysis-a", "waiter-1")
+            expect(coordinator_detach_waiter_v1(&mut coordinator, "analysis-a", "waiter-1")).to_equal(false)
+            expect(service.entries[0].state == ArtifactRequestStateV1.leased).to_equal(true)
+            expect(coordinator.runtime[0].state == BuildActionStateV1.running).to_equal(true)
+
+            step("Detaching final waiter-2 cancels ONLY analysis-a without setting global coordinator.cancelled")
+            service = artifact_service_detach_waiter_v1(service, "analysis-a", "waiter-2")
+            expect(coordinator_detach_waiter_v1(&mut coordinator, "analysis-a", "waiter-2")).to_equal(true)
+            expect(service.entries[0].state == ArtifactRequestStateV1.cancelled).to_equal(true)
+            expect(coordinator.runtime[0].state == BuildActionStateV1.cancelled).to_equal(true)
+            expect(coordinator.cancelled).to_equal(false)
+
+            step("Sibling action compile-b still claims and commits cleanly on the same coordinator and service")
+            service = artifact_service_claim_v1(service, "owner-1", "lease-b-1", 1, 4096, 0)
+            val claim_b = coordinator_claim_v1(coordinator, "compile-b", "lease-b-1")
+            expect(claim_b.claim.valid).to_equal(true)
+            coordinator = claim_b.coordinator
+            val out_b = sha256_text("out-b")
+            val result_b = BuildActionResultV1(
+                "compile-b", "snap-1", true, false, out_b, "", [], 512)
+            val committed_b = coordinator_commit_v1(coordinator, "lease-b-1", result_b)
+            expect(committed_b.commit.accepted).to_equal(true)
+            coordinator = committed_b.coordinator
+            expect(coordinator.runtime[1].state == BuildActionStateV1.succeeded).to_equal(true)
+            val lease_b = service.entries[1].lease.unwrap()
+            service = artifact_service_complete_v1(
+                service, lease_b,
+                ArtifactResultV1("compile-b", "compat-1", "snap-1", out_b, [], true, false, ""))
+            expect(service.entries[1].state == ArtifactRequestStateV1.completed).to_equal(true)
+
+            step("Explicit whole-graph coordinator_cancel_v1 and artifact_service_cancel_v1 still abort when requested")
+            var explicit_coord = coordinator_new_v1(graph, two_action_budgets_v1())
+            coordinator_cancel_v1(&mut explicit_coord)
+            expect(explicit_coord.cancelled).to_equal(true)
+            expect(explicit_coord.runtime[0].state == BuildActionStateV1.cancelled).to_equal(true)
+            expect(explicit_coord.runtime[1].state == BuildActionStateV1.cancelled).to_equal(true)
+            val explicit_cancelled_svc = artifact_service_cancel_v1(
+                artifact_service_enqueue_v1(
+                    ArtifactServiceV1(profile, []),
+                    ArtifactRequestV1("analysis-a", "compat-1", "snap-1", 11, 1024)),
+                "analysis-a")
+            expect(explicit_cancelled_svc.entries[0].state == ArtifactRequestStateV1.cancelled).to_equal(true)
+
+        it "keeps route.service authoritative on demand_artifact_cancel_v1 while a second waiter remains attached":
+            """
+            Exercises `demand_artifact_attach_waiter_v1` + `demand_artifact_cancel_v1`
+            when a second waiter remains attached, proving `route.service` preserves its
+            active lease and waiters so `demand_artifact_commit_v1` succeeds, while
+            whole-route cancellation (`action_id == ""`) aborts all actions cleanly.
+            """
+            # @req ED-T10
+            val graph = two_action_graph_v1()
+            val coordinator = coordinator_new_v1(graph, two_action_budgets_v1())
+            val profile = artifact_service_profile_v1(
+                "ide-shared", "compat-1", ["semantic", "mir"], 1, true)
+            val exec = DemandCompileExecutionV1(
+                valid: true,
+                reason: "ok",
+                coordinator: Some(coordinator),
+                backend_plan: None,
+                promotion_queue: NativePromotionQueueV1([]),
+                baseline_action_id: "analysis-a",
+                counters: demand_compile_counters_empty_v1(),
+                backend_identity: None,
+                foreground_budget: None,
+                build_ordinal: 1,
+                mir_admission_digest: "",
+                total_started_ns: 0,
+                baseline_started_ns: 0)
+            var route = demand_artifact_route_v1(exec, profile, true, "owner-1", 1)
+            expect(route.valid).to_equal(true)
+
+            step("Claim analysis-a on the bridge route and attach waiter-1 and waiter-2")
+            val claim = demand_artifact_claim_v1(&mut route, "analysis-a", "lease-a-1", 4096)
+            expect(claim.valid).to_equal(true)
+            expect(demand_artifact_attach_waiter_v1(&mut route, "analysis-a", "waiter-1")).to_equal(true)
+            expect(demand_artifact_attach_waiter_v1(&mut route, "analysis-a", "waiter-2")).to_equal(true)
+
+            step("Detach waiter-1 and invoke demand_artifact_cancel_v1 while waiter-2 remains attached")
+            expect(demand_artifact_detach_waiter_v1(&mut route, "analysis-a", "waiter-1")).to_equal(false)
+            demand_artifact_cancel_v1(&mut route, "analysis-a")
+            expect(artifact_service_waiter_ids_v1(route.service, "analysis-a")).to_equal(["waiter-2"])
+            expect(route.service.entries[0].state == ArtifactRequestStateV1.leased).to_equal(true)
+
+            step("Commit analysis-a authoritatively for remaining waiter-2")
+            val out_a = sha256_text("out-analysis-a")
+            val result_a = BuildActionResultV1(
+                "analysis-a", "snap-1", true, false, out_a, "", [], 512)
+            expect(demand_artifact_commit_v1(&mut route, result_a)).to_equal(true)
+            expect(route.service.entries[0].state == ArtifactRequestStateV1.completed).to_equal(true)
+            expect(route.service.entries[0].cas_artifact_digest).to_equal(out_a)
+
+            step("Whole-route demand_artifact_cancel_v1 with empty action_id cancels remaining queued actions")
+            demand_artifact_cancel_v1(&mut route, "")
+            expect(route.service.entries[1].state == ArtifactRequestStateV1.cancelled).to_equal(true)
+
+    context "ED-T24 lease_generation fencing against stale or timed-out workers":
+        """
+        Ensures a timed-out or superseded worker with an older `lease_generation`
+        is deterministically rejected with `"stale-lease-generation"` both before
+        and after the successor lease commits.
+        """
+
+        it "rejects stale-generation commits after lease supersession and preserves the winning result":
+            """
+            Supersedes `lease_generation` 1 with `lease_generation` 2 on timeout,
+            rejects worker 1's late commit before and after worker 2 commits, and
+            confirms waiters and `analysis_key` remain intact throughout.
+            """
+            # @req ED-T24
+            val key = sample_analysis_key_v1("snap-24", "src/compiler/mir.spl")
+            val digest = analysis_key_digest_v1(key).unwrap()
+            var table = analysis_single_flight_new_v1()
+
+            step("Start flight at lease_generation 1 with waiter ide-1 attached")
+            val initial = attach_waiter(table, "snap-24", digest, "ide-1", "worker-gen-1", true)
+            table = initial.table
+            expect(analysis_flight_find_v1(table, "snap-24", digest).unwrap().lease_generation).to_equal(1)
+
+            step("Supersede timed-out worker-gen-1 with worker-gen-2 while keeping analysis_key and waiters intact")
+            val superseded = supersede_flight_lease(table, "snap-24", digest, "worker-gen-2")
+            expect(superseded.accepted).to_equal(true)
+            table = superseded.table
+            val current = analysis_flight_find_v1(table, "snap-24", digest).unwrap()
+            expect(current.lease_generation).to_equal(2)
+            expect(current.owner_id).to_equal("worker-gen-2")
+            expect(current.waiter_ids).to_equal(["ide-1"])
+            expect(current.pinned_by_build).to_equal(true)
+            expect(current.analysis_key).to_equal(digest)
+
+            step("Reject late commit from worker-gen-1 with stale-lease-generation while gen-2 is running")
+            val stale_before = commit_flight(table, "snap-24", digest, 1, sha256_text("stale-out"))
+            expect(stale_before.accepted).to_equal(false)
+            expect(stale_before.reason).to_equal("stale-lease-generation")
+            expect(analysis_flight_find_v1(stale_before.table, "snap-24", digest).unwrap().status).to_equal("running")
+
+            step("Accept authoritative commit from worker-gen-2")
+            val fresh_digest = sha256_text("fresh-gen-2-out")
+            val fresh_commit = commit_flight(table, "snap-24", digest, 2, fresh_digest)
+            expect(fresh_commit.accepted).to_equal(true)
+            table = fresh_commit.table
+
+            step("Reject delayed replay from worker-gen-1 after gen-2 completion without overwriting result_digest")
+            val stale_after = commit_flight(table, "snap-24", digest, 1, sha256_text("late-overwrite"))
+            expect(stale_after.accepted).to_equal(false)
+            expect(stale_after.reason).to_equal("stale-lease-generation")
+            val final_entry = analysis_flight_find_v1(stale_after.table, "snap-24", digest).unwrap()
+            expect(final_entry.result_digest).to_equal(fresh_digest)
+            expect(final_entry.lease_generation).to_equal(2)

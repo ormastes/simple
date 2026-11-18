@@ -7,6 +7,11 @@ use compiler.tools.lint._LintMain.config_and_model.{
     lint_suppression_issue_level, resolve_lint_config, should_keep_lint_result
 }
 use compiler.tools.lint._LintMain.gpu_2d_perf_lints.{lint_gpu_2d_perf}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    lint_active_config_admits_rule_v1, lint_admit_and_record_v1,
+    lint_clear_active_config_v1, lint_rule_admitted_for_config,
+    lint_set_active_config_v1
+}
 use compiler.tools.lint._LintMain.traceability_and_assertions.{is_test_like_file}
 use compiler.tools.lint._LintMain.wm_lane_boundary_lints.{lint_wm_lane_boundary}
 # Simple Language Linter
@@ -83,7 +88,7 @@ use std.log.{error, info}
 
 # Import EasyFix data types from stdlib
 use std.tooling.easy_fix.*
-use compiler.tools.fix.rules.registry.{run_registry_producers}
+use compiler.tools.fix.rules.registry.{registry_fix_producers, run_admitted_registry_producers}
 use compiler.tools.fix.producer.{fix_unit_from_source}
 use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, primitive_api_fix_hint}
 use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
@@ -96,7 +101,7 @@ use compiler.semantics.lint.dynamic_capability_acquire.{check_dynamic_capability
 use std.critical.capability_manifest.{load_critical_mode_config}
 use compiler.tools.lint.static_rules.{
     LintParamsV1, LintUnit, StaticLintCategory, StaticLintLevel,
-    static_lint_rule_table, run_static_lint_rule_table
+    static_lint_rule_table, run_admitted_static_lint_rule_table
 }
 
 # File I/O wrapper
@@ -364,70 +369,122 @@ impl Linter:
         self.results = []
 
         val file_config = resolve_lint_config(self.config, path, content)
+        if self.retain_combined_view:
+            self.last_resolved_path = path
+            self.last_resolved_config = Some(file_config)
         for issue in file_config.suppression_issues:
             val level = lint_suppression_issue_level(file_config)
             val diagnostic = LintDiag.new("LINTALLOW001", level, LintCategory.Correctness, issue.message)
             self.results.push(LintRunResult.new(path, issue.line, issue.column, diagnostic))
 
-        # Run simple pattern-based lints
+        # Pre-execution cost admission for pattern-based line checks
         val lines = content.split("\n")
-        var line_num = 1
+        val run_unused_code = lint_admit_and_record_v1(file_config, "unused_code")
+        val run_style_convention = lint_admit_and_record_v1(file_config, "style_convention")
+        val run_unfold_init = lint_admit_and_record_v1(file_config, "init_boundary_violation")
+        val run_hash_bracket = lint_admit_and_record_v1(file_config, "hash_bracket_attribute")
+        val run_stub_impl_line = lint_admit_and_record_v1(file_config, "stub_impl")
+        val run_todo_format = lint_admit_and_record_v1(file_config, "todo_format")
+        val run_database_integrity = lint_admit_and_record_v1(file_config, "database_integrity")
+        if (run_unused_code or run_style_convention or run_unfold_init or
+            run_hash_bracket or run_stub_impl_line or run_todo_format or run_database_integrity):
+            var line_num = 1
+            for line in lines:
+                self.check_line_gated(
+                    path, line_num, line,
+                    run_unused_code, run_style_convention, run_unfold_init,
+                    run_hash_bracket, run_stub_impl_line, run_todo_format,
+                    run_database_integrity)
+                line_num = line_num + 1
 
-        for line in lines:
-            self.check_line(path, line_num, line)
-            line_num = line_num + 1
-
-        self.check_feature_tracking_done_gate(path, lines)
-        self.check_spipe_quality(path, lines)
-        self.check_ui_raw_widget_kind(path, lines)
-        self.check_ui_raw_variant(path, lines)
-        self.check_ui_raw_theme_name(path, lines)
-        self.check_theme_package(path)
-        self.check_stale_md_diagrams(path, content)
-        self.check_semantic_markdown_links_v1(path, content, file_config)
-        self.check_llvm_backend_type_safety(path, content)
-        self.check_raw_rt_access_spl(path, content)
-        self.check_dynamic_capability_acquire_spl(path, content)
+        if lint_admit_and_record_v1(file_config, "tracking_traceability"):
+            self.check_feature_tracking_done_gate(path, lines)
+        val run_spipe_p = lint_admit_and_record_v1(file_config, "spipe_placeholder_tests")
+        val run_spipe_np = lint_admit_and_record_v1(file_config, "spipe_no_print_based_tests")
+        val run_spipe_ee = lint_admit_and_record_v1(file_config, "spipe_empty_examples")
+        val run_spipe_bw = lint_admit_and_record_v1(file_config, "spipe_boolean_wrapper_assertions")
+        val run_spipe_fbw = lint_admit_and_record_v1(file_config, "spipe_false_boolean_wrapper_assertions")
+        if run_spipe_p or run_spipe_np or run_spipe_ee or run_spipe_bw or run_spipe_fbw:
+            self.check_spipe_quality(path, lines)
+        if lint_admit_and_record_v1(file_config, "ui_no_raw_widget_kind"):
+            self.check_ui_raw_widget_kind(path, lines)
+        if lint_admit_and_record_v1(file_config, "ui_no_raw_variant"):
+            self.check_ui_raw_variant(path, lines)
+        if lint_admit_and_record_v1(file_config, "ui_no_raw_theme_name"):
+            self.check_ui_raw_theme_name(path, lines)
+        if lint_admit_and_record_v1(file_config, "theme_package"):
+            self.check_theme_package(path)
+        if lint_admit_and_record_v1(file_config, "stale_md_diagrams"):
+            self.check_stale_md_diagrams(path, content)
+        if lint_admit_and_record_v1(file_config, "semantic_markdown_links"):
+            self.check_semantic_markdown_links_v1(path, content, file_config)
+        if lint_admit_and_record_v1(file_config, "llvm_backend_type_safety"):
+            self.check_llvm_backend_type_safety(path, content)
+        if lint_admit_and_record_v1(file_config, "raw_rt_access"):
+            self.check_raw_rt_access_spl(path, content)
+        if lint_admit_and_record_v1(file_config, "dynamic_capability_acquire"):
+            self.check_dynamic_capability_acquire_spl(path, content)
         self.check_static_lint_rules(file_config, path, content)
         self.check_wm_lane_boundary(file_config, path, content)
         self.check_gpu_2d_perf(file_config, path, content)
 
-        # Run shared EasyFix rules and attach as lint results
-        val shared_fixes = run_registry_producers(fix_unit_from_source(path, content))
-        for fix in shared_fixes:
-            val rule_id = lint_rule_code_from_easyfix_id(easyfix_id(fix))
-            val lint = LintDiag.new(rule_id, LintLevel.Warn, LintCategory.Warning, easyfix_description(fix))
-                .with_easy_fix(fix)
-            # Line from the first replacement; diagnostic-only fixes carry it in the id.
-            var fix_line = lint_line_from_easyfix_id(easyfix_id(fix))
-            val fix_reps = easyfix_replacements(fix)
-            if fix_reps.len() > 0:
-                val first_rep = fix_reps[0]
-                fix_line = first_rep.line
-            self.results.push(LintRunResult.new(path, fix_line, 0, lint))
+        # Gate EasyFix registry producers BEFORE building FixUnit or invoking rules
+        var any_registry_admitted = false
+        for p in registry_fix_producers():
+            if lint_rule_admitted_for_config(file_config, p.code):
+                any_registry_admitted = true
+                break
+        if any_registry_admitted:
+            lint_set_active_config_v1(file_config)
+            val shared_fixes = run_admitted_registry_producers(
+                fix_unit_from_source(path, content),
+                lint_active_config_admits_rule_v1)
+            lint_clear_active_config_v1()
+            for fix in shared_fixes:
+                val rule_id = lint_rule_code_from_easyfix_id(easyfix_id(fix))
+                val lint = LintDiag.new(rule_id, LintLevel.Warn, LintCategory.Warning, easyfix_description(fix))
+                    .with_easy_fix(fix)
+                # Line from the first replacement; diagnostic-only fixes carry it in the id.
+                var fix_line = lint_line_from_easyfix_id(easyfix_id(fix))
+                val fix_reps = easyfix_replacements(fix)
+                if fix_reps.len() > 0:
+                    val first_rep = fix_reps[0]
+                    fix_line = first_rep.line
+                self.results.push(LintRunResult.new(path, fix_line, 0, lint))
+        else:
+            for p in registry_fix_producers():
+                val _ = lint_admit_and_record_v1(file_config, p.code)
 
         # primitive_api: single owner. Ranked type fixes are review-required
         # (they change callers), so they are listed in the hint, never attached
         # as an EasyFix that `lint --fix-all` would apply.
-        for finding in primitive_api_findings(path, content.split("\n")):
-            # SPL-BOOL-001 (public bool) reports under its own lint name so it is
-            # warn by default and deny only in the robust/critical/verified tiers.
-            val lint_name = if finding.code == "SPL-BOOL-001": "bare_bool" else: if finding.code == "SPL-TEXT-001": "bare_text_domain" else: "primitive_api"
-            val lint_msg = if finding.code == "primitive_api": finding.message else: "{finding.code}: {finding.message}"
-            val lint = LintDiag.new(lint_name, LintLevel.Warn, LintCategory.Warning, lint_msg)
-                .with_fix(primitive_api_fix_hint(finding))
-            self.results.push(LintRunResult.new(path, finding.line, finding.column, lint))
+        val run_prim_api = lint_admit_and_record_v1(file_config, "primitive_api")
+        val run_bare_bool = lint_admit_and_record_v1(file_config, "bare_bool")
+        val run_bare_text = lint_admit_and_record_v1(file_config, "bare_text_domain")
+        if run_prim_api or run_bare_bool or run_bare_text:
+            for finding in primitive_api_findings(path, lines):
+                # SPL-BOOL-001 (public bool) reports under its own lint name so it is
+                # warn by default and deny only in the robust/critical/verified tiers.
+                val lint_name = if finding.code == "SPL-BOOL-001": "bare_bool" else: if finding.code == "SPL-TEXT-001": "bare_text_domain" else: "primitive_api"
+                val sub_admitted = if lint_name == "bare_bool": run_bare_bool else: if lint_name == "bare_text_domain": run_bare_text else: run_prim_api
+                if not sub_admitted:
+                    continue
+                val lint_msg = if finding.code == "primitive_api": finding.message else: "{finding.code}: {finding.message}"
+                val lint = LintDiag.new(lint_name, LintLevel.Warn, LintCategory.Warning, lint_msg)
+                    .with_fix(primitive_api_fix_hint(finding))
+                self.results.push(LintRunResult.new(path, finding.line, finding.column, lint))
 
-        val script_language_fixes = check_simple_script_required(content, path)
-        for fix in script_language_fixes:
-            val lint = LintDiag.new("simple_script_required", LintLevel.Warn, LintCategory.Warning, easyfix_description(fix))
-                .with_easy_fix(fix)
-            var fix_line = lint_line_from_easyfix_id(easyfix_id(fix))
-            val fix_reps = easyfix_replacements(fix)
-            if fix_reps.len() > 0:
-                val first_rep = fix_reps[0]
-                fix_line = first_rep.line
-            self.results.push(LintRunResult.new(path, fix_line, 0, lint))
+        if lint_admit_and_record_v1(file_config, "simple_script_required"):
+            val script_language_fixes = check_simple_script_required(content, path)
+            for fix in script_language_fixes:
+                val lint = LintDiag.new("simple_script_required", LintLevel.Warn, LintCategory.Warning, easyfix_description(fix))
+                    .with_easy_fix(fix)
+                var fix_line = lint_line_from_easyfix_id(easyfix_id(fix))
+                val fix_reps = easyfix_replacements(fix)
+                if fix_reps.len() > 0:
+                    val first_rep = fix_reps[0]
+                    fix_line = first_rep.line
+                self.results.push(LintRunResult.new(path, fix_line, 0, lint))
 
         # Filter and adjust results based on config
         var filtered_results: [LintRunResult] = []
@@ -529,6 +586,16 @@ impl Linter:
             self.results.push(LintRunResult.new(path, finding.line_num, finding.column, lint))
 
     me check_static_lint_rules(file_config: LintConfig, path: String, content: String):
+        val table = static_lint_rule_table()
+        var any_static_admitted = false
+        for rule in table:
+            if lint_rule_admitted_for_config(file_config, rule.id()):
+                any_static_admitted = true
+                break
+        if not any_static_admitted:
+            for rule in table:
+                val _ = lint_admit_and_record_v1(file_config, rule.id())
+            return
         var strictness = AssuranceStrictness.Moderate
         if val profile = file_config.profile:
             match profile:
@@ -538,8 +605,11 @@ impl Linter:
                 case _: pass
         val params = representation_lint_params_v1(file_config.representation_project,
             module_logical_name_from_path(path), strictness, path, content)
-        val run = run_static_lint_rule_table(
-            params, LintUnit(path, content), static_lint_rule_table())
+        lint_set_active_config_v1(file_config)
+        val run = run_admitted_static_lint_rule_table(
+            params, LintUnit(path, content), table,
+            lint_active_config_admits_rule_v1)
+        lint_clear_active_config_v1()
         for failure in run.errors:
             val lint = LintDiag.new(failure, LintLevel.Deny, LintCategory.Correctness,
                 "Static lint-rule registration was rejected")
@@ -559,40 +629,20 @@ impl Linter:
             self.results.push(LintRunResult.new(path, finding.line_num, finding.column, lint))
 
     # WM/GUI/web/2D portable-lane dependency boundary (WML001/WML002).
-    #
-    # OPT-IN ONLY, and the gate below is what makes "off" actually free: the
-    # rule walks every module-level import of every in-scope file, so before
-    # touching `content` at all it does a single O(1) override lookup. The
-    # default level is "allow" and no profile promotes it, so the ONLY ways the
-    # name appears in config.levels are an explicit simple.sdn [lints] entry,
-    # --wm-lane, or --warn-all — each of which calls set_level. When it is off
-    # this costs one dict probe per file and reads zero lines. Deliberately not
-    # routed through get_level(), which rebuilds the whole defaults dict on
-    # every call.
+    # Gated pre-execution by cost tier AND explicit opt-in level.
     me check_wm_lane_boundary(file_config: LintConfig, path: String, content: String):
-        if not file_config.levels.has("wm_lane_boundary"):
+        if not lint_admit_and_record_v1(file_config, "wm_lane_boundary"):
             return
-        match file_config.get_level("wm_lane_boundary"):
-            case Allow:
-                return
-            case _:
-                val _ = 0
         val warnings = lint_wm_lane_boundary(path, content)
         for warning in warnings:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
                 .with_fix(warning.hint)
             self.results.push(LintRunResult.new(path, warning.line, 0, lint))
 
-    # Same O(1) short-circuit shape as check_wm_lane_boundary: default-off
-    # rules must cost nothing when they are off.
+    # Same pre-execution cost + opt-in gate for gpu_2d_perf.
     me check_gpu_2d_perf(file_config: LintConfig, path: String, content: String):
-        if not file_config.levels.has("gpu_2d_perf"):
+        if not lint_admit_and_record_v1(file_config, "gpu_2d_perf"):
             return
-        match file_config.get_level("gpu_2d_perf"):
-            case Allow:
-                return
-            case _:
-                val _ = 0
         val warnings = lint_gpu_2d_perf(path, content)
         for warning in warnings:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Warning, warning.message)
@@ -600,6 +650,20 @@ impl Linter:
             self.results.push(LintRunResult.new(path, warning.line, 0, lint))
 
     me check_line(path: String, line_num: i64, line: String):
+        self.check_line_gated(path, line_num, line, true, true, true, true, true, true, true)
+
+    me check_line_gated(
+        path: String,
+        line_num: i64,
+        line: String,
+        run_unused_code: bool,
+        run_style_convention: bool,
+        run_unfold_init: bool,
+        run_hash_bracket: bool,
+        run_stub_impl_line: bool,
+        run_todo_format: bool,
+        run_database_integrity: bool
+    ):
         val trimmed = line.trim()
         if trimmed == "":
             return
@@ -608,7 +672,7 @@ impl Linter:
         # Most lines start with identifiers/keywords — only a few prefixes matter.
         val first = trimmed[0]
 
-        if first == "v":
+        if run_unused_code and first == "v":
             # Check for unused variables (simple heuristic)
             if trimmed.starts_with("val ") and not trimmed.contains("="):
                 val lint = LintDiag.new("W001", LintLevel.Warn, LintCategory.Warning,
@@ -616,7 +680,7 @@ impl Linter:
                     .with_fix("Remove declaration or assign a value")
                 self.results.push(LintRunResult.new(path, line_num, 0, lint))
 
-        if first == "f":
+        if run_style_convention and first == "f":
             # Check naming conventions for functions
             if trimmed.starts_with("fn "):
                 val fn_name = self.extract_function_name(trimmed)
@@ -626,7 +690,7 @@ impl Linter:
                         .with_fix("Rename to '{self.to_snake_case(fn_name)}'")
                     self.results.push(LintRunResult.new(path, line_num, 0, lint))
 
-        if first == "c":
+        if run_style_convention and first == "c":
             if trimmed.starts_with("class "):
                 val class_name = self.extract_class_name(trimmed)
                 if not self.is_pascal_case(class_name):
@@ -634,12 +698,12 @@ impl Linter:
                         "Class name '{class_name}' should be PascalCase")
                     self.results.push(LintRunResult.new(path, line_num, 0, lint))
 
-        if first == "u":
+        if run_unfold_init and first == "u":
             # Check unfold declaration (only in __init__.spl files)
             if trimmed.starts_with("unfold ") and trimmed.contains("{{"):
                 self.check_unfold_declaration(path, line_num, trimmed)
 
-        if first == "#":
+        if run_hash_bracket and first == "#":
             if trimmed.starts_with("#["):
                 val after = trimmed.substring(2, trimmed.byte_len())
                 var ne = 0
@@ -659,26 +723,29 @@ impl Linter:
                                 .with_fix("Replace '#[{aname}]' with '@{aname}'")
                             self.results.push(LintRunResult.new(path, line_num, 0, lint))
 
-        # These checks examine content (comments, strings) — always run
-        var has_production_pass_todo = false
-        if lint_line_may_contain_pass_todo(trimmed):
-            var normalized = trimmed.replace(" ", "")
-            normalized = normalized.replace("\t", "")
-            if normalized == "pass_todo":
-                has_production_pass_todo = true
-            if normalized.starts_with("pass_todo("):
-                has_production_pass_todo = true
-            if normalized.contains(":pass_todo"):
-                has_production_pass_todo = true
-            if normalized.contains("=pass_todo"):
-                has_production_pass_todo = true
-        if not is_test_like_file(path) and has_production_pass_todo:
-            val lint = LintDiag.new("STUB003", LintLevel.Deny, LintCategory.Warning,
-                "Explicit pass_todo placeholder in production code")
-                .with_fix("Replace pass_todo with a real implementation or return an explicit unsupported error")
-            self.results.push(LintRunResult.new(path, line_num, 0, lint))
-        self.check_todo_format(path, line_num, trimmed)
-        self.check_sdn_write(path, line_num, trimmed)
+        # Content checks gated by rule admission
+        if run_stub_impl_line:
+            var has_production_pass_todo = false
+            if lint_line_may_contain_pass_todo(trimmed):
+                var normalized = trimmed.replace(" ", "")
+                normalized = normalized.replace("\t", "")
+                if normalized == "pass_todo":
+                    has_production_pass_todo = true
+                if normalized.starts_with("pass_todo("):
+                    has_production_pass_todo = true
+                if normalized.contains(":pass_todo"):
+                    has_production_pass_todo = true
+                if normalized.contains("=pass_todo"):
+                    has_production_pass_todo = true
+            if not is_test_like_file(path) and has_production_pass_todo:
+                val lint = LintDiag.new("STUB003", LintLevel.Deny, LintCategory.Warning,
+                    "Explicit pass_todo placeholder in production code")
+                    .with_fix("Replace pass_todo with a real implementation or return an explicit unsupported error")
+                self.results.push(LintRunResult.new(path, line_num, 0, lint))
+        if run_todo_format:
+            self.check_todo_format(path, line_num, trimmed)
+        if run_database_integrity:
+            self.check_sdn_write(path, line_num, trimmed)
 
     fn extract_function_name(line: String) -> String:
         # Extract function name from "fn name(...)" pattern

@@ -1,0 +1,1045 @@
+# SFFI Preflight Fact Contracts (WP-07):
+# - Explicit target data model (`SffiTargetDataModelV1`)
+# - Local & imported `@c_abi` unit obligations (`SPL-SFFI-ABI-001`)
+# - Constrained unit SFFI returns (`SPL-SFFI-RANGE-001`)
+# - Raw `extern fn` capability boundaries (`@unsafe(capabilities: [ffi])`)
+# - Foreign-resource acquire/release pairing & escape provenance
+# - Manifest vs preflight extern signature validation bridge
+
+use compiler.semantics.lint.lint_text.{code_line_snapshot, CodeLine, lint_is_vendor_path}
+use compiler.types.custom_primitive_info.{c_scalar_underlying, c_target_data_model}
+use compiler.semantics.lint.raw_sffi_call.{raw_sffi_code_snapshot_from_snapshot, check_raw_sffi_calls_snapshot, check_raw_sffi_declarations_snapshot}
+use compiler.semantics.lint.unwrapped_foreign_resource.{check_unwrapped_foreign_resource_snapshot}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_sync_mut.sffi.sffi_signature.{FfiManifest, SffiPreflightExternFactV1, SffiPreflightManifestReportV1, validate_sffi_preflight_manifest_facts_v1}
+
+pub struct SffiTargetDataModelV1:
+    triple: text
+    data_model: text
+    pointer_bits: i64
+    c_int_bits: i64
+    c_long_bits: i64
+    size_t_bits: i64
+    char_signedness: text
+    endianness: text
+    calling_convention: text
+
+pub struct SffiUnitAbiFactV1:
+    unit_name: text
+    underlying_primitive: text
+    declared_c_type: text
+    provenance: text
+    source_module: text
+    has_range_constraint: bool
+    constraint_expr: text
+    line_num: i64
+
+pub struct SffiExternFactV1:
+    name: text
+    arg_types: [text]
+    arg_count: i64
+    return_type: text
+    has_ffi_unsafe_decl: bool
+    c_abi_units: [text]
+    returns_constrained_unit: bool
+    has_boundary_validation_wrapper: bool
+    resource_role: text
+    resource_family: text
+    paired_release_symbol: text
+    line_num: i64
+
+pub struct SffiResourceOwnershipFactV1:
+    family_prefix: text
+    acquire_symbols: [text]
+    release_symbols: [text]
+    paired: bool
+    unwrapped_escape_lines: [i64]
+
+pub struct SffiPreflightFindingV1:
+    code: text
+    severity: text
+    message: text
+    note: text
+    line_num: i64
+
+pub struct SffiPreflightReportV1:
+    file_path: text
+    target_model: SffiTargetDataModelV1
+    unit_abi_facts: [SffiUnitAbiFactV1]
+    extern_facts: [SffiExternFactV1]
+    resource_facts: [SffiResourceOwnershipFactV1]
+    unresolved_imported_units: [text]
+    findings: [SffiPreflightFindingV1]
+
+struct _ImportSymbolFact:
+    local_name: text
+    remote_name: text
+    module_path: text
+    line_num: i64
+
+fn _resolve_char_signedness(triple: text) -> text:
+    val parts = triple.split("-")
+    val arch = parts[0]
+    if triple.contains("linux") and (arch.starts_with("aarch64") or arch.starts_with("arm") or arch.starts_with("riscv")):
+        return "unsigned"
+    "signed"
+
+fn _resolve_endianness(triple: text) -> text:
+    val parts = triple.split("-")
+    val arch = parts[0]
+    if arch.ends_with("eb") or arch == "s390x" or arch == "powerpc64" or arch == "powerpc":
+        return "big"
+    "little"
+
+fn _resolve_calling_convention(triple: text, model: text) -> text:
+    val parts = triple.split("-")
+    val arch = parts[0]
+    if arch == "x86_64":
+        if triple.contains("windows"):
+            return "win64"
+        return "sysv64"
+    if arch == "aarch64":
+        return "aapcs64"
+    if arch.starts_with("arm"):
+        return "aapcs"
+    if arch.starts_with("riscv64"):
+        return "lp64d"
+    if arch.starts_with("riscv32"):
+        return "ilp32d"
+    if arch == "i686" or arch == "i386":
+        return "cdecl"
+    if arch == "wasm32":
+        return "wasm_c_abi"
+    if model == "lp64":
+        return "sysv64"
+    "c"
+
+# reason: Compiler lint boundary resolves target triple string into typed SffiTargetDataModelV1
+@allow(primitive_api)
+pub fn resolve_sffi_target_data_model_v1(triple: text) -> SffiTargetDataModelV1:
+    val model = c_target_data_model(triple)
+    if model == "":
+        return SffiTargetDataModelV1(
+            triple: triple,
+            data_model: "",
+            pointer_bits: 0,
+            c_int_bits: 0,
+            c_long_bits: 0,
+            size_t_bits: 0,
+            char_signedness: "",
+            endianness: "",
+            calling_convention: ""
+        )
+    val ptr_bits = if model == "ilp32": 32 else: 64
+    val long_bits = if model == "lp64": 64 else: 32
+    val size_bits = if model == "ilp32": 32 else: 64
+    SffiTargetDataModelV1(
+        triple: triple,
+        data_model: model,
+        pointer_bits: ptr_bits,
+        c_int_bits: 32,
+        c_long_bits: long_bits,
+        size_t_bits: size_bits,
+        char_signedness: _resolve_char_signedness(triple),
+        endianness: _resolve_endianness(triple),
+        calling_convention: _resolve_calling_convention(triple, model)
+    )
+
+fn _is_builtin_nonzero_type(type_name: text) -> bool:
+    val t = type_name.trim()
+    t == "NonZeroU8" or t == "NonZeroU16" or t == "NonZeroU32" or t == "NonZeroU64" or
+        t == "NonZeroI8" or t == "NonZeroI16" or t == "NonZeroI32" or t == "NonZeroI64" or
+        t == "NonZeroUsize" or t == "NonZeroIsize"
+
+fn _strip_decl_c_abi(line: text) -> [text]:
+    if not line.starts_with("@c_abi(\""):
+        return []
+    val close = line.find("\")")
+    if close < 8:
+        return []
+    val inner = line.substring(8, close)
+    if inner.contains(":") or inner.contains("\""):
+        return []
+    [inner, line.substring(close + 2, line.byte_len()).trim()]
+
+fn _is_c_abi_alias_line(t: text) -> bool:
+    t.starts_with("@c_abi(") and t.ends_with(")") and _strip_decl_c_abi(t).len() == 0
+
+fn _is_range_decorator_line(t: text) -> bool:
+    t.starts_with("@range(") or t.starts_with("@invariant(") or t.starts_with("@non_zero")
+
+fn _parse_unit_decl_full(line: text, c_type: text, extra_constrained: bool, source_mod: text, provenance: text, line_num: i64) -> Option<SffiUnitAbiFactV1>:
+    var rest = line.trim()
+    if rest.starts_with("pub "):
+        rest = rest.substring(4, rest.byte_len()).trim()
+    if not rest.starts_with("unit "):
+        return None
+    rest = rest.substring(5, rest.byte_len()).trim()
+    val colon = rest.find(":")
+    if colon <= 0:
+        return None
+    val name = rest.substring(0, colon).trim()
+    val tail = rest.substring(colon + 1, rest.byte_len()).trim()
+    val tokens = tail.split(" ")
+    if tokens.len() == 0 or tokens[0] == "":
+        return None
+    val prim = tokens[0].trim()
+    val where_idx = tail.find(" where ")
+    var has_constraint = extra_constrained or _is_builtin_nonzero_type(prim)
+    var constraint_text = ""
+    if where_idx >= 0:
+        has_constraint = true
+        constraint_text = tail.substring(where_idx + 7, tail.byte_len()).trim()
+    Some(SffiUnitAbiFactV1(
+        unit_name: name,
+        underlying_primitive: prim,
+        declared_c_type: c_type,
+        provenance: provenance,
+        source_module: source_mod,
+        has_range_constraint: has_constraint,
+        constraint_expr: constraint_text,
+        line_num: line_num
+    ))
+
+fn _extract_units_from_lines(lines: [CodeLine], source_mod: text, provenance: text) -> [SffiUnitAbiFactV1]:
+    var out: [SffiUnitAbiFactV1] = []
+    var pending_ctype = ""
+    var pending_constrained = false
+    var i = 0
+    while i < lines.len():
+        var decl_line = lines[i].trimmed
+        if decl_line == "" or decl_line.starts_with("#"):
+            i = i + 1
+            continue
+        if _is_range_decorator_line(decl_line):
+            pending_constrained = true
+            i = i + 1
+            continue
+        var ctype = ""
+        val deco = _strip_decl_c_abi(decl_line)
+        if deco.len() == 2:
+            ctype = deco[0]
+            decl_line = deco[1]
+            if decl_line == "":
+                pending_ctype = ctype
+                i = i + 1
+                continue
+        elif pending_ctype != "":
+            ctype = pending_ctype
+        val parsed = _parse_unit_decl_full(decl_line, ctype, pending_constrained, source_mod, provenance, lines[i].line_num)
+        pending_ctype = ""
+        pending_constrained = false
+        match parsed:
+            case Some(u):
+                out.push(u)
+            case None:
+                i = i
+        i = i + 1
+    out
+
+fn _find_brace_open_byte(s: text) -> i64:
+    val n = s.byte_len()
+    var i = 0
+    while i < n:
+        if s.byte_at(i) == 123:
+            return i
+        i = i + 1
+    -1
+
+fn _find_brace_close_byte(s: text, start: i64) -> i64:
+    val n = s.byte_len()
+    var i = start
+    while i < n:
+        if s.byte_at(i) == 125:
+            return i
+        i = i + 1
+    -1
+
+fn _parse_import_line(trimmed: text, line_num: i64) -> [_ImportSymbolFact]:
+    var rest = trimmed
+    if rest.starts_with("pub use "):
+        rest = rest.substring(8, rest.byte_len()).trim()
+    elif rest.starts_with("export use "):
+        rest = rest.substring(11, rest.byte_len()).trim()
+    elif rest.starts_with("use "):
+        rest = rest.substring(4, rest.byte_len()).trim()
+    else:
+        return []
+
+    var facts: [_ImportSymbolFact] = []
+    val open_b = _find_brace_open_byte(rest)
+    if open_b >= 0:
+        var mod_prefix = rest.substring(0, open_b).trim()
+        if mod_prefix.ends_with("."):
+            mod_prefix = mod_prefix.substring(0, mod_prefix.byte_len() - 1)
+        var inner_start = open_b + 1
+        if inner_start < rest.byte_len() and rest.byte_at(inner_start) == 123:
+            inner_start = inner_start + 1
+        val close_b = _find_brace_close_byte(rest, inner_start)
+        if close_b > inner_start:
+            val raw_items = rest.substring(inner_start, close_b).split(",")
+            var idx = 0
+            while idx < raw_items.len():
+                val item = raw_items[idx].trim()
+                if item != "" and item != "*":
+                    val parts = item.split(" as ")
+                    val remote = parts[0].trim()
+                    val local = parts[parts.len() - 1].trim()
+                    if local != "":
+                        facts.push(_ImportSymbolFact(
+                            local_name: local,
+                            remote_name: remote,
+                            module_path: mod_prefix,
+                            line_num: line_num
+                        ))
+                idx = idx + 1
+        return facts
+
+    val as_parts = rest.split(" as ")
+    val full_path = as_parts[0].trim()
+    val dot = full_path.rfind(".")
+    if dot <= 0:
+        return []
+    val mod_path = full_path.substring(0, dot).trim()
+    val remote_sym = full_path.substring(dot + 1, full_path.byte_len()).trim()
+    val local_sym = if as_parts.len() > 1: as_parts[as_parts.len() - 1].trim() else: remote_sym
+    if local_sym == "" or remote_sym == "*":
+        return []
+    [_ImportSymbolFact(
+        local_name: local_sym,
+        remote_name: remote_sym,
+        module_path: mod_path,
+        line_num: line_num
+    )]
+
+fn _resolve_module_source_text(module_path: text, imported_sources: {text: text}) -> text:
+    if module_path == "":
+        return ""
+    if imported_sources.contains(module_path):
+        return imported_sources[module_path]
+    val rel = module_path.replace(".", "/") + ".spl"
+    if imported_sources.contains(rel):
+        return imported_sources[rel]
+    var candidates: [text] = [
+        "src/" + rel,
+        rel
+    ]
+    if module_path.starts_with("std."):
+        val sub = module_path.substring(4, module_path.byte_len()).replace(".", "/") + ".spl"
+        candidates.push("src/lib/" + sub)
+        candidates.push("src/lib/common/" + sub)
+        candidates.push("src/lib/nogc_sync_mut/" + sub)
+    var i = 0
+    while i < candidates.len():
+        val p = candidates[i]
+        if file_exists(p):
+            val content = file_read(p)
+            if content != "":
+                return content
+        i = i + 1
+    ""
+
+fn _find_unit_in_list(units: [SffiUnitAbiFactV1], target_name: text) -> Option<SffiUnitAbiFactV1>:
+    var i = 0
+    while i < units.len():
+        if units[i].unit_name == target_name:
+            return Some(units[i])
+        i = i + 1
+    None
+
+fn _ident_char(c: text) -> bool:
+    c != "" and "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(c)
+
+fn _has_word(line: text, word: text) -> bool:
+    if word == "":
+        return false
+    val n = line.byte_len()
+    val wlen = word.byte_len()
+    var start = 0
+    while start + wlen <= n:
+        val rel = line.substring(start, n).find(word)
+        if rel < 0:
+            return false
+        val at = start + rel
+        val end = at + wlen
+        val before_ok = at == 0 or not _ident_char(line.substring(at - 1, at))
+        val after_ok = end >= n or not _ident_char(line.substring(end, end + 1))
+        if before_ok and after_ok:
+            return true
+        start = at + 1
+    false
+
+fn _is_extern_decl_start(t: text) -> bool:
+    t.starts_with("extern fn ") or t.starts_with("pub extern fn ") or
+        t.starts_with("unsafe extern fn ") or t.starts_with("pub unsafe extern fn ")
+
+fn _paren_angle_depth(line: text) -> i64:
+    val s = line.replace("->", "  ")
+    val n = s.byte_len()
+    var d = 0
+    var k = 0
+    while k < n:
+        val c = s.substring(k, k + 1)
+        if c == "(" or c == "<":
+            d = d + 1
+        elif c == ")" or c == ">":
+            d = d - 1
+        k = k + 1
+    d
+
+fn _split_params_top_level(inner: text) -> [text]:
+    val t = inner.trim()
+    if t == "":
+        return []
+    var parts: [text] = []
+    var depth = 0
+    var start = 0
+    val n = t.byte_len()
+    var i = 0
+    while i < n:
+        val ch = t.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "<":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == ">":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == "," and depth == 0:
+            val seg = t.substring(start, i).trim()
+            if seg != "":
+                parts.push(seg)
+            start = i + 1
+        i = i + 1
+    val tail = t.substring(start, n).trim()
+    if tail != "":
+        parts.push(tail)
+    parts
+
+fn _param_type_of(param: text) -> text:
+    val colon = param.find(":")
+    if colon < 0:
+        return param.trim()
+    param.substring(colon + 1, param.byte_len()).trim()
+
+fn _parse_extern_signature(joined: text) -> (bool, bool, text, [text], text):
+    var rest = joined.trim()
+    var is_pub = false
+    var is_kw_unsafe = false
+    if rest.starts_with("pub "):
+        is_pub = true
+        rest = rest.substring(4, rest.byte_len()).trim()
+    if rest.starts_with("unsafe "):
+        is_kw_unsafe = true
+        rest = rest.substring(7, rest.byte_len()).trim()
+    if not rest.starts_with("extern fn "):
+        return (false, false, "", [], "")
+    rest = rest.substring(10, rest.byte_len()).trim()
+    val open_p = rest.find("(")
+    if open_p <= 0:
+        return (false, false, "", [], "")
+    val fn_name = rest.substring(0, open_p).trim()
+    var depth = 0
+    var close_p = -1
+    val n = rest.byte_len()
+    var i = open_p
+    while i < n:
+        val c = rest.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+            if depth == 0:
+                close_p = i
+                break
+        i = i + 1
+    if close_p < open_p:
+        return (false, false, "", [], "")
+    val raw_params = _split_params_top_level(rest.substring(open_p + 1, close_p))
+    var arg_types: [text] = []
+    var pi = 0
+    while pi < raw_params.len():
+        arg_types.push(_param_type_of(raw_params[pi]))
+        pi = pi + 1
+    val after = rest.substring(close_p + 1, n).trim()
+    var ret_type = "unit"
+    if after.starts_with("->"):
+        ret_type = after.substring(2, after.byte_len()).trim()
+    (is_pub, is_kw_unsafe, fn_name, arg_types, ret_type)
+
+fn _line_has_ffi_cap(line: text) -> bool:
+    val cap_idx = line.find("capabilities")
+    if cap_idx < 0:
+        return false
+    val sub = line.substring(cap_idx, line.byte_len())
+    val open_b = sub.find("[")
+    val close_b = sub.find("]")
+    if open_b < 0 or close_b <= open_b:
+        return false
+    val items = sub.substring(open_b + 1, close_b).split(",")
+    var i = 0
+    while i < items.len():
+        if items[i].trim() == "ffi":
+            return true
+        i = i + 1
+    false
+
+fn _has_preceding_ffi_unsafe(lines: [CodeLine], index: i64) -> bool:
+    var i = index - 1
+    var budget = 24
+    var saw_ffi = false
+    while i >= 0 and budget > 0:
+        val t = lines[i].trimmed
+        budget = budget - 1
+        if t == "":
+            i = i - 1
+            continue
+        if _line_has_ffi_cap(t):
+            saw_ffi = true
+        if t.starts_with("@unsafe("):
+            return saw_ffi or _line_has_ffi_cap(t)
+        if t.starts_with("@") or t == ")" or t == ")," or t.ends_with(","):
+            i = i - 1
+            continue
+        return false
+    false
+
+fn _indent_spaces(raw: text) -> i64:
+    val n = raw.byte_len()
+    var i = 0
+    while i < n and raw.substring(i, i + 1) == " ":
+        i = i + 1
+    i
+
+fn _is_normal_fn_header(t: text) -> bool:
+    if _is_extern_decl_start(t):
+        return false
+    t.starts_with("fn ") or t.starts_with("pub fn ") or
+        t.starts_with("static fn ") or t.starts_with("pub static fn ") or
+        t.starts_with("me ") or t.starts_with("pub me ")
+
+fn _body_has_validation_guard(body_lines: [text]) -> bool:
+    var i = 0
+    while i < body_lines.len():
+        val t = body_lines[i]
+        if t.starts_with("if ") or t.starts_with("elif ") or t.starts_with("match ") or
+           t.contains(".try_from(") or t.contains(".validate(") or
+           t.contains("return Err(") or t.contains("return None"):
+            return true
+        i = i + 1
+    false
+
+fn _has_validating_wrapper_for_extern(lines: [CodeLine], extern_name: text) -> bool:
+    if extern_name == "":
+        return false
+    var caller_count = 0
+    var all_callers_validate = true
+    var i = 0
+    while i < lines.len():
+        val header = lines[i]
+        if _is_normal_fn_header(header.trimmed):
+            val header_indent = _indent_spaces(header.raw)
+            val fn_ffi_unsafe = _has_preceding_ffi_unsafe(lines, i)
+            var calls_extern = false
+            var inline_ffi = false
+            var body_trimmed: [text] = []
+            var j = i + 1
+            while j < lines.len():
+                val b = lines[j]
+                if b.trimmed == "":
+                    j = j + 1
+                    continue
+                val b_indent = _indent_spaces(b.raw)
+                if b_indent <= header_indent:
+                    break
+                if b.trimmed.contains("unsafe(") and _line_has_ffi_cap(b.trimmed):
+                    inline_ffi = true
+                if _has_word(b.trimmed, extern_name) and b.trimmed.contains(extern_name + "("):
+                    calls_extern = true
+                body_trimmed.push(b.trimmed)
+                j = j + 1
+            if calls_extern:
+                caller_count = caller_count + 1
+                if (not fn_ffi_unsafe and not inline_ffi) or not _body_has_validation_guard(body_trimmed):
+                    all_callers_validate = false
+            i = j
+            continue
+        i = i + 1
+    caller_count > 0 and all_callers_validate
+
+fn _prim_width_suffix(prim: text) -> text:
+    prim.substring(1, prim.byte_len())
+
+fn _compare_unit_vs_c_scalar(unit_name: text, unit_prim: text, c_type: text, c_prim: text, triple: text) -> text:
+    if unit_prim == c_prim:
+        return ""
+    val head = "C `" + c_type + "` maps to " + c_prim + " on " + triple + " but unit `" + unit_name + "` is backed by " + unit_prim
+    if _prim_width_suffix(unit_prim) != _prim_width_suffix(c_prim):
+        return head + " (width mismatch)"
+    if unit_prim.substring(0, 1) != c_prim.substring(0, 1):
+        return head + " (signedness mismatch)"
+    head + " (type class mismatch)"
+
+fn _unquote_c_type(s: text) -> text:
+    var v = s.trim()
+    if v.starts_with("\"") and v.ends_with("\""):
+        v = v.substring(1, v.byte_len() - 1)
+    v
+
+fn _sffi_acquire_verbs() -> [text]:
+    ["open", "create", "new", "alloc", "acquire", "copy", "clone", "load"]
+
+fn _sffi_release_verbs() -> [text]:
+    ["close", "destroy", "free", "release", "unref", "dispose"]
+
+fn _sffi_retain_verbs() -> [text]:
+    ["retain", "ref", "add_ref"]
+
+fn _classify_extern_resource(fn_name: text) -> (text, text):
+    if not fn_name.starts_with("rt_"):
+        return ("none", "")
+    for v in _sffi_acquire_verbs():
+        val suffix = "_" + v
+        if fn_name.ends_with(suffix) and fn_name.byte_len() > suffix.byte_len() + 3:
+            return ("acquire", fn_name.substring(0, fn_name.byte_len() - suffix.byte_len()))
+    for v in _sffi_release_verbs():
+        val suffix = "_" + v
+        if fn_name.ends_with(suffix) and fn_name.byte_len() > suffix.byte_len() + 3:
+            return ("release", fn_name.substring(0, fn_name.byte_len() - suffix.byte_len()))
+    for v in _sffi_retain_verbs():
+        val suffix = "_" + v
+        if fn_name.ends_with(suffix) and fn_name.byte_len() > suffix.byte_len() + 3:
+            return ("retain", fn_name.substring(0, fn_name.byte_len() - suffix.byte_len()))
+    ("none", "")
+
+fn _is_standard_non_unit_type(name: text) -> bool:
+    name == "bool" or name == "i8" or name == "i16" or name == "i32" or name == "i64" or
+        name == "u8" or name == "u16" or name == "u32" or name == "u64" or
+        name == "f32" or name == "f64" or name == "text" or name == "String" or
+        name == "unit" or name == "void" or name == "Any" or
+        name.starts_with("Result<") or name.starts_with("Option<") or
+        name.starts_with("[") or name.starts_with("(")
+
+# reason: Preflight analyzer accepts source text, logical path, target triple, and module map
+@allow(primitive_api)
+pub fn extract_sffi_preflight_report_with_imports_v1(
+    source: text,
+    file_path: text,
+    triple: text,
+    imported_sources: {text: text},
+    strict_imports: bool
+) -> SffiPreflightReportV1:
+    val model = resolve_sffi_target_data_model_v1(triple)
+    if lint_is_vendor_path(file_path):
+        return SffiPreflightReportV1(
+            file_path: file_path,
+            target_model: model,
+            unit_abi_facts: [],
+            extern_facts: [],
+            resource_facts: [],
+            unresolved_imported_units: [],
+            findings: []
+        )
+
+    val snapshot = code_line_snapshot(source)
+    val lines = snapshot.lines
+    var unit_facts = _extract_units_from_lines(lines, file_path, "local")
+    var import_bindings: [_ImportSymbolFact] = []
+    var li = 0
+    while li < lines.len():
+        val parsed_imps = _parse_import_line(lines[li].trimmed, lines[li].line_num)
+        var pi = 0
+        while pi < parsed_imps.len():
+            import_bindings.push(parsed_imps[pi])
+            pi = pi + 1
+        li = li + 1
+
+    var unresolved_imported: [text] = []
+    var ib = 0
+    while ib < import_bindings.len():
+        val imp = import_bindings[ib]
+        val mod_src = _resolve_module_source_text(imp.module_path, imported_sources)
+        if mod_src != "":
+            val mod_units = _extract_units_from_lines(code_line_snapshot(mod_src).lines, imp.module_path, "imported_resolved")
+            val matched = _find_unit_in_list(mod_units, imp.remote_name)
+            match matched:
+                case Some(u):
+                    unit_facts.push(SffiUnitAbiFactV1(
+                        unit_name: imp.local_name,
+                        underlying_primitive: u.underlying_primitive,
+                        declared_c_type: u.declared_c_type,
+                        provenance: "imported_resolved",
+                        source_module: imp.module_path,
+                        has_range_constraint: u.has_range_constraint,
+                        constraint_expr: u.constraint_expr,
+                        line_num: imp.line_num
+                    ))
+                case None:
+                    ib = ib
+        ib = ib + 1
+
+    var findings: [SffiPreflightFindingV1] = []
+    var extern_facts: [SffiExternFactV1] = []
+
+    var alias_lines_handled: [i64] = []
+    var i = 0
+    while i < lines.len():
+        val cur = lines[i].trimmed
+        if _is_c_abi_alias_line(cur):
+            alias_lines_handled.push(lines[i].line_num)
+            if model.data_model == "":
+                findings.push(SffiPreflightFindingV1(
+                    code: "SPL-SFFI-ABI-001",
+                    severity: "deny",
+                    message: "unknown target `" + triple + "`: cannot resolve the C ABI, refusing to default",
+                    note: "supply a known target triple",
+                    line_num: lines[i].line_num
+                ))
+                i = i + 1
+                continue
+            val inner = cur.substring(7, cur.byte_len() - 1)
+            val entries = inner.split(",")
+            var ei = 0
+            while ei < entries.len():
+                val entry = entries[ei]
+                val colon = entry.find(":")
+                if colon > 0:
+                    val u_name = entry.substring(0, colon).trim()
+                    val c_type = _unquote_c_type(entry.substring(colon + 1, entry.byte_len()))
+                    val c_prim = c_scalar_underlying(c_type, triple)
+                    if c_prim == "":
+                        findings.push(SffiPreflightFindingV1(
+                            code: "SPL-SFFI-ABI-001",
+                            severity: "deny",
+                            message: "C type `" + c_type + "` for unit `" + u_name + "` is not a known scalar on " + triple,
+                            note: "",
+                            line_num: lines[i].line_num
+                        ))
+                    else:
+                        match _find_unit_in_list(unit_facts, u_name):
+                            case Some(uf):
+                                if uf.declared_c_type != "":
+                                    if uf.declared_c_type != c_type:
+                                        findings.push(SffiPreflightFindingV1(
+                                            code: "SPL-SFFI-ABI-001",
+                                            severity: "deny",
+                                            message: "@c_abi alias `" + c_type + "` for unit `" + u_name + "` disagrees with the unit declaration `" + uf.declared_c_type + "`",
+                                            note: "",
+                                            line_num: lines[i].line_num
+                                        ))
+                                else:
+                                    val cmp_msg = _compare_unit_vs_c_scalar(u_name, uf.underlying_primitive, c_type, c_prim, triple)
+                                    if cmp_msg != "":
+                                        findings.push(SffiPreflightFindingV1(
+                                            code: "SPL-SFFI-ABI-001",
+                                            severity: "deny",
+                                            message: cmp_msg,
+                                            note: "",
+                                            line_num: lines[i].line_num
+                                        ))
+                            case None:
+                                var was_imported = false
+                                var imp_mod = ""
+                                var ii = 0
+                                while ii < import_bindings.len():
+                                    if import_bindings[ii].local_name == u_name:
+                                        was_imported = true
+                                        imp_mod = import_bindings[ii].module_path
+                                    ii = ii + 1
+                                if was_imported:
+                                    if not unresolved_imported.contains(u_name):
+                                        unresolved_imported.push(u_name)
+                                    unit_facts.push(SffiUnitAbiFactV1(
+                                        unit_name: u_name,
+                                        underlying_primitive: "",
+                                        declared_c_type: c_type,
+                                        provenance: "imported_unresolved",
+                                        source_module: imp_mod,
+                                        has_range_constraint: false,
+                                        constraint_expr: "",
+                                        line_num: lines[i].line_num
+                                    ))
+                                    if strict_imports:
+                                        findings.push(SffiPreflightFindingV1(
+                                            code: "SPL-SFFI-ABI-001",
+                                            severity: "deny",
+                                            message: "imported unit `" + u_name + "` from `" + imp_mod + "` could not be resolved to verify `" + c_type + "` on " + triple,
+                                            note: "provide the imported unit module or inline unit declaration",
+                                            line_num: lines[i].line_num
+                                        ))
+                                else:
+                                    findings.push(SffiPreflightFindingV1(
+                                        code: "SPL-SFFI-ABI-001",
+                                        severity: "deny",
+                                        message: "@c_abi names undeclared unit `" + u_name + "` (no `unit " + u_name + ": ...` declaration in this file)",
+                                        note: "",
+                                        line_num: lines[i].line_num
+                                    ))
+                ei = ei + 1
+            i = i + 1
+            continue
+
+        if _is_extern_decl_start(cur):
+            val start_idx = i
+            val decl_line_num = lines[i].line_num
+            val ffi_decl_ok = _has_preceding_ffi_unsafe(lines, start_idx) or cur.starts_with("unsafe ") or cur.starts_with("pub unsafe ")
+            var joined = cur
+            var depth = _paren_angle_depth(joined)
+            while i + 1 < lines.len() and (depth > 0 or joined.ends_with("->") or lines[i + 1].trimmed.starts_with("->")):
+                i = i + 1
+                joined = joined + " " + lines[i].trimmed
+                depth = depth + _paren_angle_depth(lines[i].trimmed)
+            val (is_pub_ext, _kw_unsafe, ext_name, ext_args, ext_ret) = _parse_extern_signature(joined)
+
+            var used_c_abi_units: [text] = []
+            var unknown_target_emitted = false
+            var ui = 0
+            while ui < unit_facts.len():
+                val uf = unit_facts[ui]
+                if uf.declared_c_type != "" and uf.provenance != "imported_unresolved" and _has_word(joined, uf.unit_name):
+                    used_c_abi_units.push(uf.unit_name)
+                    if model.data_model == "":
+                        if not unknown_target_emitted:
+                            findings.push(SffiPreflightFindingV1(
+                                code: "SPL-SFFI-ABI-001",
+                                severity: "deny",
+                                message: "unknown target `" + triple + "`: cannot resolve the C ABI, refusing to default",
+                                note: "",
+                                line_num: decl_line_num
+                            ))
+                            unknown_target_emitted = true
+                    else:
+                        val c_prim = c_scalar_underlying(uf.declared_c_type, triple)
+                        if c_prim == "":
+                            findings.push(SffiPreflightFindingV1(
+                                code: "SPL-SFFI-ABI-001",
+                                severity: "deny",
+                                message: "C type `" + uf.declared_c_type + "` for unit `" + uf.unit_name + "` is not a known scalar on " + triple,
+                                note: "",
+                                line_num: decl_line_num
+                            ))
+                        else:
+                            val cmp_msg = _compare_unit_vs_c_scalar(uf.unit_name, uf.underlying_primitive, uf.declared_c_type, c_prim, triple)
+                            if cmp_msg != "":
+                                findings.push(SffiPreflightFindingV1(
+                                    code: "SPL-SFFI-ABI-001",
+                                    severity: "deny",
+                                    message: cmp_msg,
+                                    note: "",
+                                    line_num: decl_line_num
+                                ))
+                ui = ui + 1
+
+            # Check imported symbols referenced on this extern signature that had no resolved unit
+            var ii = 0
+            while ii < import_bindings.len():
+                val imp = import_bindings[ii]
+                if _has_word(joined, imp.local_name) and not _is_standard_non_unit_type(imp.local_name):
+                    val resolved_opt = _find_unit_in_list(unit_facts, imp.local_name)
+                    match resolved_opt:
+                        case Some(_):
+                            ii = ii
+                        case None:
+                            val looks_unit_import = imp.module_path.starts_with("unit.") or imp.module_path.contains(".units") or strict_imports
+                            if looks_unit_import:
+                                if not unresolved_imported.contains(imp.local_name):
+                                    unresolved_imported.push(imp.local_name)
+                                unit_facts.push(SffiUnitAbiFactV1(
+                                    unit_name: imp.local_name,
+                                    underlying_primitive: "",
+                                    declared_c_type: "",
+                                    provenance: "imported_unresolved",
+                                    source_module: imp.module_path,
+                                    has_range_constraint: false,
+                                    constraint_expr: "",
+                                    line_num: decl_line_num
+                                ))
+                                findings.push(SffiPreflightFindingV1(
+                                    code: "SPL-SFFI-ABI-001",
+                                    severity: "deny",
+                                    message: "unresolved imported unit ABI obligation for `" + imp.local_name + "` from `" + imp.module_path + "` on " + triple,
+                                    note: "declare `@c_abi` on the imported unit and ensure its module is resolvable",
+                                    line_num: decl_line_num
+                                ))
+                ii = ii + 1
+
+            # Check SPL-SFFI-RANGE-001: constrained unit returned from extern fn
+            var ret_constrained = _is_builtin_nonzero_type(ext_ret)
+            match _find_unit_in_list(unit_facts, ext_ret):
+                case Some(ret_uf):
+                    if ret_uf.has_range_constraint:
+                        ret_constrained = true
+                case None:
+                    ret_constrained = ret_constrained
+
+            var has_wrapper = false
+            if ret_constrained and not is_pub_ext:
+                has_wrapper = _has_validating_wrapper_for_extern(lines, ext_name)
+            if ret_constrained and (is_pub_ext or not has_wrapper):
+                findings.push(SffiPreflightFindingV1(
+                    code: "SPL-SFFI-RANGE-001",
+                    severity: "deny",
+                    message: "constrained unit `" + ext_ret + "` returned from SFFI `" + ext_name + "` without a boundary validation wrapper",
+                    note: "keep the raw extern private or return the underlying scalar, and validate the range/invariant inside an @unsafe(capabilities: [ffi]) wrapper returning Result/Option",
+                    line_num: decl_line_num
+                ))
+
+            val (res_role, res_family) = _classify_extern_resource(ext_name)
+            extern_facts.push(SffiExternFactV1(
+                name: ext_name,
+                arg_types: ext_args,
+                arg_count: ext_args.len(),
+                return_type: ext_ret,
+                has_ffi_unsafe_decl: ffi_decl_ok,
+                c_abi_units: used_c_abi_units,
+                returns_constrained_unit: ret_constrained,
+                has_boundary_validation_wrapper: has_wrapper,
+                resource_role: res_role,
+                resource_family: res_family,
+                paired_release_symbol: "",
+                line_num: decl_line_num
+            ))
+        i = i + 1
+
+    # Pair acquire/release externs per resource family and fold escape provenance
+    val escape_findings = check_unwrapped_foreign_resource_snapshot(snapshot, file_path)
+    var escape_lines: [i64] = []
+    var efi = 0
+    while efi < escape_findings.len():
+        escape_lines.push(escape_findings[efi].line_num)
+        efi = efi + 1
+
+    var families: [text] = []
+    var xfi = 0
+    while xfi < extern_facts.len():
+        val fam = extern_facts[xfi].resource_family
+        if fam != "" and not families.contains(fam):
+            families.push(fam)
+        xfi = xfi + 1
+
+    var resource_facts: [SffiResourceOwnershipFactV1] = []
+    var fi = 0
+    while fi < families.len():
+        val fam = families[fi]
+        var acqs: [text] = []
+        var rels: [text] = []
+        var k = 0
+        while k < extern_facts.len():
+            if extern_facts[k].resource_family == fam:
+                if extern_facts[k].resource_role == "acquire":
+                    acqs.push(extern_facts[k].name)
+                elif extern_facts[k].resource_role == "release":
+                    rels.push(extern_facts[k].name)
+            k = k + 1
+        if acqs.len() > 0 or rels.len() > 0:
+            resource_facts.push(SffiResourceOwnershipFactV1(
+                family_prefix: fam,
+                acquire_symbols: acqs,
+                release_symbols: rels,
+                paired: acqs.len() > 0 and rels.len() > 0,
+                unwrapped_escape_lines: escape_lines
+            ))
+        fi = fi + 1
+
+    # Populate paired_release_symbol on acquire externs
+    var paired_externs: [SffiExternFactV1] = []
+    var pxi = 0
+    while pxi < extern_facts.len():
+        val ef = extern_facts[pxi]
+        var release_sym = ""
+        if ef.resource_role == "acquire" and ef.resource_family != "":
+            var rj = 0
+            while rj < resource_facts.len():
+                if resource_facts[rj].family_prefix == ef.resource_family and resource_facts[rj].release_symbols.len() > 0:
+                    release_sym = resource_facts[rj].release_symbols[0]
+                rj = rj + 1
+        paired_externs.push(SffiExternFactV1(
+            name: ef.name,
+            arg_types: ef.arg_types,
+            arg_count: ef.arg_count,
+            return_type: ef.return_type,
+            has_ffi_unsafe_decl: ef.has_ffi_unsafe_decl,
+            c_abi_units: ef.c_abi_units,
+            returns_constrained_unit: ef.returns_constrained_unit,
+            has_boundary_validation_wrapper: ef.has_boundary_validation_wrapper,
+            resource_role: ef.resource_role,
+            resource_family: ef.resource_family,
+            paired_release_symbol: release_sym,
+            line_num: ef.line_num
+        ))
+        pxi = pxi + 1
+
+    # Also record raw SFFI declaration/call findings in the unified preflight report
+    val raw_snap = raw_sffi_code_snapshot_from_snapshot(snapshot, file_path)
+    val raw_decls = check_raw_sffi_declarations_snapshot(raw_snap)
+    var rdi = 0
+    while rdi < raw_decls.len():
+        findings.push(SffiPreflightFindingV1(
+            code: raw_decls[rdi].code,
+            severity: "allow",
+            message: raw_decls[rdi].message,
+            note: raw_decls[rdi].note,
+            line_num: raw_decls[rdi].line_num
+        ))
+        rdi = rdi + 1
+
+    val raw_calls = check_raw_sffi_calls_snapshot(raw_snap)
+    var rci = 0
+    while rci < raw_calls.len():
+        findings.push(SffiPreflightFindingV1(
+            code: raw_calls[rci].code,
+            severity: "allow",
+            message: raw_calls[rci].message,
+            note: raw_calls[rci].note,
+            line_num: raw_calls[rci].line_num
+        ))
+        rci = rci + 1
+
+    SffiPreflightReportV1(
+        file_path: file_path,
+        target_model: model,
+        unit_abi_facts: unit_facts,
+        extern_facts: paired_externs,
+        resource_facts: resource_facts,
+        unresolved_imported_units: unresolved_imported,
+        findings: findings
+    )
+
+# reason: Convenience compiler lint entrypoint takes raw source text, file path, and target triple
+@allow(primitive_api)
+pub fn extract_sffi_preflight_report_v1(source: text, file_path: text, triple: text) -> SffiPreflightReportV1:
+    val empty_imports: {text: text} = {}
+    extract_sffi_preflight_report_with_imports_v1(source, file_path, triple, empty_imports, false)
+
+fn _has_finding_at_line_with_code(findings: [SffiPreflightFindingV1], line_num: i64, code: text) -> bool:
+    var i = 0
+    while i < findings.len():
+        if findings[i].line_num == line_num and findings[i].code == code:
+            return true
+        i = i + 1
+    false
+
+pub fn sffi_preflight_to_manifest_facts_v1(report: SffiPreflightReportV1) -> [SffiPreflightExternFactV1]:
+    var out: [SffiPreflightExternFactV1] = []
+    var i = 0
+    while i < report.extern_facts.len():
+        val ef = report.extern_facts[i]
+        val abi_bad = report.target_model.data_model == "" or _has_finding_at_line_with_code(report.findings, ef.line_num, "SPL-SFFI-ABI-001")
+        val range_bad = _has_finding_at_line_with_code(report.findings, ef.line_num, "SPL-SFFI-RANGE-001")
+        out.push(SffiPreflightExternFactV1(
+            name: ef.name,
+            arg_count: ef.arg_count,
+            arg_types: ef.arg_types,
+            return_type: ef.return_type,
+            target: report.target_model.triple,
+            c_abi_ok: not abi_bad,
+            range_validated: not range_bad,
+            has_ffi_capability: ef.has_ffi_unsafe_decl
+        ))
+        i = i + 1
+    out
+
+pub fn validate_sffi_preflight_report_manifest_v1(
+    report: SffiPreflightReportV1,
+    manifest: FfiManifest
+) -> Result<SffiPreflightManifestReportV1, text>:
+    val facts = sffi_preflight_to_manifest_facts_v1(report)
+    validate_sffi_preflight_manifest_facts_v1(manifest, report.target_model.triple, facts)

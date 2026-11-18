@@ -9,6 +9,9 @@ use std.common.task_runner.execution_schedule.{TaskExecutionScheduleV1,
     task_execution_host_active_v1, task_execution_dispatch_v1,
     task_execution_reap_v1, task_execution_finish_v1, task_execution_retry_v1,
     task_execution_block_v1, task_execution_cache_accept_v1}
+use std.common.task_runner.analysis_single_flight.{NegativeDependencyWitnessV1,
+    negative_dependency_witness_error_v1, negative_dependency_witness_valid_v1,
+    negative_dependency_witness_fs_valid_v1}
 
 struct TaskRunnerV1:
     run: BuildRunV1
@@ -21,6 +24,7 @@ struct TaskRunnerV1:
     execution_indexed: bool = false
     execution_next_pending: i64 = 0
     execution_host_active: Dict<text, i64> = {}
+    negative_witnesses: Dict<text, NegativeDependencyWitnessV1> = {}
 
 fn _task_runner_execution_v1(state: TaskRunnerV1) -> TaskExecutionScheduleV1:
     if state.execution_indexed:
@@ -95,12 +99,55 @@ fn task_runner_ready(state: TaskRunnerV1) -> [i64]:
             index = task_execution_next_pending_v1(execution, index + 1)
     ready
 
+fn task_runner_bind_negative_witness_v1(
+    state: TaskRunnerV1, task_id: text, witness: NegativeDependencyWitnessV1
+) -> TaskRunnerV1:
+    var next = state
+    if next.error != "": return next
+    if task_runner_task_index(next, task_id) < 0:
+        next.error = "negative witness task is unknown"
+        return next
+    val invalid = negative_dependency_witness_error_v1(witness)
+    if invalid != "":
+        next.error = invalid
+        return next
+    var witnesses = next.negative_witnesses
+    witnesses[task_id] = witness
+    next.negative_witnesses = witnesses
+    next
+
+fn task_runner_negative_witness_ready_with_v1(
+    state: TaskRunnerV1, index: i64, exists_fn: fn(text) -> bool
+) -> bool:
+    if index < 0 or index >= state.tasks.len(): return false
+    val task_id = state.tasks[index].id
+    if not state.negative_witnesses.contains_key(task_id): return true
+    negative_dependency_witness_valid_v1(state.negative_witnesses[task_id], exists_fn)
+
+fn task_runner_negative_witness_ready(state: TaskRunnerV1, index: i64) -> bool:
+    if index < 0 or index >= state.tasks.len(): return false
+    val task_id = state.tasks[index].id
+    if not state.negative_witnesses.contains_key(task_id): return true
+    negative_dependency_witness_fs_valid_v1(state.negative_witnesses[task_id])
+
+fn task_runner_cache_ready_with_v1(
+    state: TaskRunnerV1, exists_fn: fn(text) -> bool
+) -> [i64]:
+    var ready: [i64] = []
+    if state.error != "": return ready
+    for i in 0..state.tasks.len():
+        if state.statuses[i] == "PENDING" and task_runner_dependencies_ready(state, i) and
+                task_runner_negative_witness_ready_with_v1(state, i, exists_fn):
+            ready = ready.push(i)
+    ready
+
 fn task_runner_cache_ready(state: TaskRunnerV1) -> [i64]:
     """Cache admission uses no worker slots, including during lease recovery."""
     var ready: [i64] = []
     if state.error != "": return ready
     for i in 0..state.tasks.len():
-        if state.statuses[i] == "PENDING" and task_runner_dependencies_ready(state, i):
+        if state.statuses[i] == "PENDING" and task_runner_dependencies_ready(state, i) and
+                task_runner_negative_witness_ready(state, i):
             ready = ready.push(i)
     ready
 
@@ -259,6 +306,9 @@ fn task_runner_resume(state: TaskRunnerV1, result: BuildResultV1, observed_outpu
     if next.statuses[index] != "PENDING" or not task_runner_dependencies_ready(next, index):
         next.error = "cache admission requires pending task with admitted dependencies"
         return next
+    if not task_runner_negative_witness_ready(next, index):
+        next.error = "cache admission invalidated by negative dependency witness"
+        return next
     if result.status != "OK":
         next.error = "cached receipt is not successful"
         return next
@@ -364,7 +414,9 @@ fn task_runner_decode_v1(run: BuildRunV1, content: text) -> Result<TaskRunnerV1,
 export TaskRunnerV1
 export task_runner_start, task_runner_task_index, task_runner_host_slots
 export task_runner_dependencies_ready, task_runner_ready, task_runner_dispatch
-export task_runner_cache_ready
+export task_runner_cache_ready, task_runner_cache_ready_with_v1
+export task_runner_bind_negative_witness_v1
+export task_runner_negative_witness_ready, task_runner_negative_witness_ready_with_v1
 export task_runner_reap, task_runner_accept, task_runner_resume
 export task_runner_unresolved
 export task_runner_done, task_runner_succeeded

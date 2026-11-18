@@ -1,0 +1,1371 @@
+# Agent-ready structured diagnostics envelope for simple_lsp_mcp (WP-08 / ED-T29).
+#
+# Startup-closure invariant: imports ONLY lightweight local json_helpers,
+# lsp_command_metrics, and app.io.minimal_runtime_ops — never app.io.mod or
+# compiler.* modules.
+
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, jsonrpc_result, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
+use app.io.minimal_runtime_ops.{env_get, file_exists, process_run_bounded, time_now_unix_micros}
+use .lsp_command_metrics.{lsp_note_command_start}
+
+@unsafe(reason: "read source and admitted batch cache without importing heavy std.io_runtime graph", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+
+@unsafe(reason: "detect interpreted source-wrapper execution so diagnostics avoids nested CLI check deadlock", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+
+pub struct LspStructuredDiagItemV1:
+    id: text
+    code: text
+    severity: text
+    message: text
+    file: text
+    line: i64
+    col: i64
+    end_line: i64
+    end_col: i64
+    source: text
+
+pub struct LspRankedFixV1:
+    id: text
+    diagnostic_id: text
+    rank: i64
+    title: text
+    confidence: text
+    applicability: text
+    file: text
+    line: i64
+    col: i64
+    expected_text: text
+    new_text: text
+    required_snapshot_hash: text
+
+pub struct LspNextActionV1:
+    kind: text
+    summary: text
+    command_or_tool: text
+    task_handle: text
+
+pub struct LspDiagCoverageV1:
+    syntax_checked: bool
+    semantic_checked: bool
+    lint_checked: bool
+    source: text
+    reason: text
+
+pub struct LspDiagCommandPlanV1:
+    binary: text
+    args: [text]
+    mode: text
+    timeout_ms: i64
+
+pub struct LspDiagTaskEntryV1:
+    task_handle: text
+    file: text
+    snapshot_hash: text
+    status: text
+    completeness: text
+    reason: text
+    envelope_json: text
+    created_micros: i64
+
+pub struct LspStructuredDiagnosticsEnvelopeV1:
+    schema_version: i64
+    file: text
+    status: text
+    completeness: text
+    clean: bool
+    coverage: LspDiagCoverageV1
+    snapshot_hash: text
+    policy_digest: text
+    task_handle: text
+    reason: text
+    diagnostics: [LspStructuredDiagItemV1]
+    ranked_fixes: [LspRankedFixV1]
+    next_actions: [LspNextActionV1]
+
+var _LSP_DIAG_TASK_SEQ: i64 = 0
+var _LSP_DIAG_TASK_ENTRIES: [LspDiagTaskEntryV1] = []
+
+fn _lsp_diag_task_cap() -> i64:
+    64
+
+fn _lsp_diag_timeout_ms() -> i64:
+    10000
+
+fn _lsp_diag_capture_bytes() -> i64:
+    1024 * 1024
+
+@unsafe(reason: "bounded text read via runtime file primitive after file_exists check", capabilities: [ffi])
+fn _lsp_read_file_safe(path: text) -> text:
+    if path == "" or not file_exists(path):
+        return ""
+    rt_file_read_text(path) ?? ""
+
+@unsafe(reason: "query runtime mode flag to avoid nested CLI check delegate deadlock in source mode", capabilities: [ffi])
+fn _lsp_is_interpreter_mode() -> bool:
+    rt_is_interpreter_runtime()
+
+fn _hex_nibble(n: i64) -> text:
+    val v = n & 15
+    if v == 0: return "0"
+    if v == 1: return "1"
+    if v == 2: return "2"
+    if v == 3: return "3"
+    if v == 4: return "4"
+    if v == 5: return "5"
+    if v == 6: return "6"
+    if v == 7: return "7"
+    if v == 8: return "8"
+    if v == 9: return "9"
+    if v == 10: return "a"
+    if v == 11: return "b"
+    if v == 12: return "c"
+    if v == 13: return "d"
+    if v == 14: return "e"
+    "f"
+
+fn _hex_u32(value: i64) -> text:
+    val u = value & 4294967295
+    _hex_nibble(u >> 28) + _hex_nibble(u >> 24) + _hex_nibble(u >> 20) + _hex_nibble(u >> 16) +
+        _hex_nibble(u >> 12) + _hex_nibble(u >> 8) + _hex_nibble(u >> 4) + _hex_nibble(u)
+
+fn _fnv1a_dual32_hex(content: text) -> text:
+    val mask32 = 4294967295
+    var h1 = 2166136261
+    var h2 = 2166136261 ^ 16777619
+    val n = content.byte_len()
+    var i = 0
+    while i < n:
+        val b = content.byte_at(i) & 255
+        h1 = ((h1 ^ b) * 16777619) & mask32
+        h2 = ((h2 ^ ((b + i + 1) & 255)) * 16777619) & mask32
+        i = i + 1
+    _hex_u32(h1) + _hex_u32(h2) + "-" + str(n)
+
+# reason: MCP protocol boundary hashes raw source text before constructing envelope identity
+@allow(primitive_api)
+pub fn lsp_snapshot_hash_for_text_v1(content: text) -> text:
+    "s1-" + _fnv1a_dual32_hex(content)
+
+# reason: MCP protocol boundary hashes workspace file path before constructing envelope identity
+@allow(primitive_api)
+pub fn lsp_snapshot_hash_for_file_v1(file: text) -> text:
+    if file == "" or not file_exists(file):
+        return "missing"
+    val content = _lsp_read_file_safe(file)
+    lsp_snapshot_hash_for_text_v1(content)
+
+# reason: MCP protocol boundary hashes diagnostic policy SDN text into compact digest
+@allow(primitive_api)
+pub fn lsp_policy_digest_from_text_v1(policy_text: text) -> text:
+    if policy_text == "":
+        return "policy-unavailable"
+    "p1-" + _fnv1a_dual32_hex(policy_text)
+
+# reason: MCP protocol boundary returns compact policy digest string for JSON serialization
+@allow(primitive_api)
+pub fn lsp_policy_digest_v1() -> text:
+    val override_path = env_get("SIMPLE_DIAGNOSTIC_POLICY_FILE")
+    val path = if override_path != "": override_path else: "config/policy/diagnostic_policy.sdn"
+    val content = _lsp_read_file_safe(path)
+    lsp_policy_digest_from_text_v1(content)
+
+# reason: Truth invariant predicate evaluates wire status, completeness, and count primitives
+@allow(primitive_api)
+pub fn lsp_compute_clean_verdict_v1(status: text, completeness: text, diag_count: i64) -> bool:
+    status == "complete" and completeness == "pass" and diag_count == 0
+
+# reason: Command builder accepts resolved binary path, target file path, and source-mode flag
+@allow(primitive_api)
+pub fn lsp_build_diagnostics_command_v1(binary: text, file: text, source_mode: bool) -> LspDiagCommandPlanV1:
+    if source_mode:
+        return LspDiagCommandPlanV1(
+            binary: binary,
+            args: ["run", "src/app/cli/query.spl", "check", file, "--format", "json"],
+            mode: "source_script",
+            timeout_ms: _lsp_diag_timeout_ms()
+        )
+    LspDiagCommandPlanV1(
+        binary: binary,
+        args: ["check", "--format=json", file],
+        mode: "native_check",
+        timeout_ms: _lsp_diag_timeout_ms()
+    )
+
+fn _lsp_detect_source_mode(binary: text) -> bool:
+    val mode_override = env_get("SIMPLE_LSP_DIAGNOSTICS_MODE")
+    if mode_override == "source":
+        return true
+    if mode_override == "native":
+        return false
+    if _lsp_is_interpreter_mode():
+        return true
+    val norm = binary.replace("\\", "/")
+    if norm.contains("/release/"):
+        return false
+    file_exists("src/app/cli/query.spl")
+
+# reason: Bounded task registry mints opaque string task handle for MCP JSON polling
+@allow(primitive_api)
+pub fn lsp_diag_task_register_v1(
+    file: text,
+    snapshot_hash: text,
+    status: text,
+    completeness: text,
+    reason: text,
+    envelope_json: text
+) -> text:
+    _LSP_DIAG_TASK_SEQ = _LSP_DIAG_TASK_SEQ + 1
+    val handle = "lsp-diag-task-" + str(_LSP_DIAG_TASK_SEQ)
+    val entry = LspDiagTaskEntryV1(
+        task_handle: handle,
+        file: file,
+        snapshot_hash: snapshot_hash,
+        status: status,
+        completeness: completeness,
+        reason: reason,
+        envelope_json: envelope_json,
+        created_micros: time_now_unix_micros()
+    )
+    val cap = _lsp_diag_task_cap()
+    if _LSP_DIAG_TASK_ENTRIES.len() >= cap:
+        var trimmed: [LspDiagTaskEntryV1] = []
+        var idx = _LSP_DIAG_TASK_ENTRIES.len() - cap + 1
+        while idx < _LSP_DIAG_TASK_ENTRIES.len():
+            trimmed.push(_LSP_DIAG_TASK_ENTRIES[idx])
+            idx = idx + 1
+        _LSP_DIAG_TASK_ENTRIES = trimmed
+    _LSP_DIAG_TASK_ENTRIES.push(entry)
+    handle
+
+fn _lsp_diag_task_update_envelope(handle: text, envelope_json: text):
+    var updated: [LspDiagTaskEntryV1] = []
+    var i = 0
+    while i < _LSP_DIAG_TASK_ENTRIES.len():
+        val cur = _LSP_DIAG_TASK_ENTRIES[i]
+        if cur.task_handle == handle:
+            updated.push(LspDiagTaskEntryV1(
+                task_handle: cur.task_handle,
+                file: cur.file,
+                snapshot_hash: cur.snapshot_hash,
+                status: cur.status,
+                completeness: cur.completeness,
+                reason: cur.reason,
+                envelope_json: envelope_json,
+                created_micros: cur.created_micros
+            ))
+        else:
+            updated.push(cur)
+        i = i + 1
+    _LSP_DIAG_TASK_ENTRIES = updated
+
+# reason: MCP task poll looks up registered task entry by opaque string handle
+@allow(primitive_api)
+pub fn lsp_diag_task_lookup_v1(task_handle: text) -> Option<LspDiagTaskEntryV1>:
+    if task_handle == "":
+        return None
+    var i = _LSP_DIAG_TASK_ENTRIES.len() - 1
+    while i >= 0:
+        if _LSP_DIAG_TASK_ENTRIES[i].task_handle == task_handle:
+            return Some(_LSP_DIAG_TASK_ENTRIES[i])
+        i = i - 1
+    None
+
+pub fn lsp_diag_task_reset_v1():
+    _LSP_DIAG_TASK_SEQ = 0
+    _LSP_DIAG_TASK_ENTRIES = []
+
+# reason: Test and diagnostic telemetry inspects bounded task count
+@allow(primitive_api)
+pub fn lsp_diag_task_count_v1() -> i64:
+    _LSP_DIAG_TASK_ENTRIES.len()
+
+fn _digit_val_local(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+fn _parse_int_or_default(raw: text, fallback: i64) -> i64:
+    val t = raw.trim()
+    if t == "":
+        return fallback
+    var result = 0
+    var seen = false
+    for ch in t:
+        val d = _digit_val_local(ch)
+        if d < 0:
+            return fallback
+        result = result * 10 + d
+        seen = true
+    if not seen:
+        return fallback
+    result
+
+fn _split_top_level_json_objects_char(arr_json: text) -> [text]:
+    var objs: [text] = []
+    val n = _char_len(arr_json)
+    var depth = 0
+    var obj_start = -1
+    var in_str = false
+    var escaped = false
+    var i = 0
+    while i < n:
+        val ch = _char_at(arr_json, i)
+        if in_str:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                in_str = false
+            i = i + 1
+            continue
+        if ch == Q():
+            in_str = true
+        elif ch == LB():
+            if depth == 0:
+                obj_start = i
+            depth = depth + 1
+        elif ch == RB():
+            depth = depth - 1
+            if depth == 0 and obj_start >= 0:
+                objs.push(_slice_text(arr_json, obj_start, i + 1))
+                obj_start = -1
+        i = i + 1
+    objs
+
+fn _normalize_severity_name(raw_sev: text) -> text:
+    val s = raw_sev.trim()
+    if s == "1" or s == "error" or s == "Error" or s == "deny" or s == "Deny":
+        return "error"
+    if s == "2" or s == "warning" or s == "Warning" or s == "warn" or s == "Warn":
+        return "warning"
+    if s == "3" or s == "info" or s == "Info" or s == "Information" or s == "note":
+        return "info"
+    if s == "4" or s == "hint" or s == "Hint" or s == "help":
+        return "hint"
+    "error"
+
+fn _has_error_diag(items: [LspStructuredDiagItemV1]) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i].severity == "error":
+            return true
+        i = i + 1
+    false
+
+fn _source_line_at(source_content: text, line1: i64) -> text:
+    if source_content == "" or line1 < 1:
+        return ""
+    val lines = source_content.split("\n")
+    if line1 > lines.len():
+        return ""
+    lines[line1 - 1]
+
+fn _synthesize_ranked_fixes(
+    file: text,
+    source_content: text,
+    snapshot_hash: text,
+    diagnostics: [LspStructuredDiagItemV1]
+) -> [LspRankedFixV1]:
+    var fixes: [LspRankedFixV1] = []
+    var i = 0
+    while i < diagnostics.len():
+        val d = diagnostics[i]
+        val line_text = _source_line_at(source_content, d.line)
+        if d.code == "SPL-TYPE-001" or d.code == "primitive_api":
+            fixes.push(LspRankedFixV1(
+                id: "fix-" + str(i + 1) + "-" + d.code,
+                diagnostic_id: d.id,
+                rank: fixes.len() + 1,
+                title: "Wrap bare primitive in a domain unit or add justified @allow(primitive_api)",
+                confidence: "needs_review",
+                applicability: "review_required",
+                file: file,
+                line: d.line,
+                col: d.col,
+                expected_text: line_text,
+                new_text: "# reason: <justify boundary primitive>\n@allow(primitive_api)\n" + line_text,
+                required_snapshot_hash: snapshot_hash
+            ))
+        elif d.code == "SFFI009" or d.code == "SFFI010":
+            fixes.push(LspRankedFixV1(
+                id: "fix-" + str(i + 1) + "-" + d.code,
+                diagnostic_id: d.id,
+                rank: fixes.len() + 1,
+                title: "Isolate raw foreign declaration/call behind @unsafe(reason: ..., capabilities: [ffi])",
+                confidence: "likely",
+                applicability: "review_required",
+                file: file,
+                line: d.line,
+                col: d.col,
+                expected_text: line_text,
+                new_text: "@unsafe(reason: \"explicit foreign ABI boundary\", capabilities: [ffi])\n" + line_text,
+                required_snapshot_hash: snapshot_hash
+            ))
+        elif d.code == "SPL-SFFI-ABI-001" or d.code == "SPL-SFFI-RANGE-001":
+            fixes.push(LspRankedFixV1(
+                id: "fix-" + str(i + 1) + "-" + d.code,
+                diagnostic_id: d.id,
+                rank: fixes.len() + 1,
+                title: "Align @c_abi unit primitive with target data model and validate constrained returns",
+                confidence: "needs_review",
+                applicability: "review_required",
+                file: file,
+                line: d.line,
+                col: d.col,
+                expected_text: line_text,
+                new_text: line_text,
+                required_snapshot_hash: snapshot_hash
+            ))
+        elif d.code != "":
+            fixes.push(LspRankedFixV1(
+                id: "fix-" + str(i + 1) + "-" + d.code,
+                diagnostic_id: d.id,
+                rank: fixes.len() + 1,
+                title: "Inspect and repair " + d.code + " at " + file + ":" + str(d.line),
+                confidence: "needs_review",
+                applicability: "review_required",
+                file: file,
+                line: d.line,
+                col: d.col,
+                expected_text: line_text,
+                new_text: line_text,
+                required_snapshot_hash: snapshot_hash
+            ))
+        i = i + 1
+    fixes
+
+fn _default_next_actions(
+    file: text,
+    status: text,
+    clean: bool,
+    task_handle: text,
+    diag_count: i64,
+    fix_count: i64
+) -> [LspNextActionV1]:
+    if clean:
+        return []
+    var actions: [LspNextActionV1] = []
+    val targeted_cmd = "simple run src/app/cli/query.spl check " + file + " --format json"
+    if status == "timed_out":
+        if task_handle != "":
+            actions.push(LspNextActionV1(
+                kind: "poll_task",
+                summary: "Diagnostics timed out; poll task_handle or inspect admitted batch cache before treating file as clean",
+                command_or_tool: "lsp_diagnostics(task_handle=" + task_handle + ")",
+                task_handle: task_handle
+            ))
+        actions.push(LspNextActionV1(
+            kind: "run_targeted_check",
+            summary: "Run bounded single-file check outside MCP timeout window",
+            command_or_tool: targeted_cmd,
+            task_handle: task_handle
+        ))
+        return actions
+    if status == "incomplete":
+        if task_handle != "":
+            actions.push(LspNextActionV1(
+                kind: "poll_task",
+                summary: "Analysis was incomplete; poll task_handle for admitted completion",
+                command_or_tool: "lsp_diagnostics(task_handle=" + task_handle + ")",
+                task_handle: task_handle
+            ))
+        actions.push(LspNextActionV1(
+            kind: "run_targeted_check",
+            summary: "Re-run targeted check to obtain complete syntax and semantic coverage",
+            command_or_tool: targeted_cmd,
+            task_handle: task_handle
+        ))
+        if diag_count > 0:
+            actions.push(LspNextActionV1(
+                kind: "inspect_diagnostics",
+                summary: "Repair partial diagnostics first, then re-verify full file",
+                command_or_tool: targeted_cmd,
+                task_handle: ""
+            ))
+        return actions
+    if status == "unavailable":
+        actions.push(LspNextActionV1(
+            kind: "run_targeted_check",
+            summary: "Diagnostics unavailable in current MCP gate; run direct query check script",
+            command_or_tool: targeted_cmd,
+            task_handle: task_handle
+        ))
+        actions.push(LspNextActionV1(
+            kind: "enable_or_retry_diagnostics",
+            summary: "Supply SIMPLE_DIAGNOSTIC_BATCH_CACHE_FILE or set SIMPLE_LSP_ENABLE_DIAGNOSTICS=1",
+            command_or_tool: "SIMPLE_LSP_ENABLE_DIAGNOSTICS=1",
+            task_handle: task_handle
+        ))
+        return actions
+    if status == "failed":
+        actions.push(LspNextActionV1(
+            kind: "run_targeted_check",
+            summary: "Diagnostic runner exited with failure without complete batch; run targeted check",
+            command_or_tool: targeted_cmd,
+            task_handle: task_handle
+        ))
+        return actions
+    if fix_count > 0:
+        actions.push(LspNextActionV1(
+            kind: "apply_ranked_fix",
+            summary: "Verify snapshot_hash and expected_text preconditions before applying ranked fix",
+            command_or_tool: "lsp_diagnostics(include_fixes=true)",
+            task_handle: ""
+        ))
+    if diag_count > 0:
+        actions.push(LspNextActionV1(
+            kind: "inspect_diagnostics",
+            summary: "Resolve reported diagnostics and re-run check to reach clean=true",
+            command_or_tool: targeted_cmd,
+            task_handle: ""
+        ))
+    actions
+
+fn _normalize_status_and_completeness(
+    raw_status: text,
+    raw_completeness: text,
+    diagnostics: [LspStructuredDiagItemV1]
+) -> (text, text):
+    if raw_status == "timed_out":
+        return ("timed_out", "timed_out")
+    if raw_status == "unavailable":
+        return ("unavailable", "unavailable")
+    if raw_status == "incomplete":
+        return ("incomplete", "incomplete")
+    if raw_status == "failed":
+        return ("failed", "fail")
+    if raw_status == "complete":
+        if _has_error_diag(diagnostics):
+            return ("complete", "fail")
+        if raw_completeness == "fail":
+            return ("complete", "fail")
+        if raw_completeness == "incomplete" or raw_completeness == "timed_out" or raw_completeness == "unavailable":
+            return (raw_completeness, raw_completeness)
+        return ("complete", "pass")
+    ("failed", "fail")
+
+# reason: Envelope constructor accepts canonical status/hash/reason strings from protocol and cache layers
+@allow(primitive_api)
+pub fn lsp_build_structured_diagnostics_envelope_v1(
+    file: text,
+    status: text,
+    completeness: text,
+    coverage: LspDiagCoverageV1,
+    snapshot_hash: text,
+    policy_digest: text,
+    task_handle: text,
+    reason: text,
+    diagnostics: [LspStructuredDiagItemV1],
+    ranked_fixes: [LspRankedFixV1],
+    next_actions: [LspNextActionV1]
+) -> LspStructuredDiagnosticsEnvelopeV1:
+    val (norm_status, norm_comp) = _normalize_status_and_completeness(status, completeness, diagnostics)
+    val clean = lsp_compute_clean_verdict_v1(norm_status, norm_comp, diagnostics.len())
+    val resolved_actions = if next_actions.len() > 0:
+        next_actions
+    else:
+        _default_next_actions(file, norm_status, clean, task_handle, diagnostics.len(), ranked_fixes.len())
+    LspStructuredDiagnosticsEnvelopeV1(
+        schema_version: 1,
+        file: file,
+        status: norm_status,
+        completeness: norm_comp,
+        clean: clean,
+        coverage: coverage,
+        snapshot_hash: if snapshot_hash != "": snapshot_hash else: "unknown",
+        policy_digest: if policy_digest != "": policy_digest else: "policy-unavailable",
+        task_handle: task_handle,
+        reason: reason,
+        diagnostics: diagnostics,
+        ranked_fixes: ranked_fixes,
+        next_actions: resolved_actions
+    )
+
+fn _bool_json(v: bool) -> text:
+    if v: "true" else: "false"
+
+fn _render_diag_item_json(d: LspStructuredDiagItemV1) -> text:
+    var out = LB()
+    out = out + jp("id", js(d.id))
+    out = out + "," + jp("code", js(d.code))
+    out = out + "," + jp("severity", js(d.severity))
+    out = out + "," + jp("message", js(d.message))
+    out = out + "," + jp("file", js(d.file))
+    out = out + "," + jp("line", str(d.line))
+    out = out + "," + jp("col", str(d.col))
+    out = out + "," + jp("end_line", str(d.end_line))
+    out = out + "," + jp("end_col", str(d.end_col))
+    out = out + "," + jp("source", js(d.source))
+    out = out + RB()
+    out
+
+fn _render_ranked_fix_json(f: LspRankedFixV1) -> text:
+    var pre = LB()
+    pre = pre + jp("file", js(f.file))
+    pre = pre + "," + jp("line", str(f.line))
+    pre = pre + "," + jp("col", str(f.col))
+    pre = pre + "," + jp("expected_text", js(f.expected_text))
+    pre = pre + "," + jp("snapshot_hash", js(f.required_snapshot_hash))
+    pre = pre + RB()
+
+    var rep = LB()
+    rep = rep + jp("file", js(f.file))
+    rep = rep + "," + jp("line", str(f.line))
+    rep = rep + "," + jp("col", str(f.col))
+    rep = rep + "," + jp("new_text", js(f.new_text))
+    rep = rep + RB()
+
+    var out = LB()
+    out = out + jp("id", js(f.id))
+    out = out + "," + jp("diagnostic_id", js(f.diagnostic_id))
+    out = out + "," + jp("rank", str(f.rank))
+    out = out + "," + jp("title", js(f.title))
+    out = out + "," + jp("confidence", js(f.confidence))
+    out = out + "," + jp("applicability", js(f.applicability))
+    out = out + "," + jp("required_snapshot_hash", js(f.required_snapshot_hash))
+    out = out + "," + jp("preconditions", SB_L() + pre + SB_R())
+    out = out + "," + jp("replacement", rep)
+    out = out + RB()
+    out
+
+fn _render_next_action_json(a: LspNextActionV1) -> text:
+    var out = LB()
+    out = out + jp("kind", js(a.kind))
+    out = out + "," + jp("summary", js(a.summary))
+    out = out + "," + jp("command_or_tool", js(a.command_or_tool))
+    out = out + "," + jp("task_handle", js(a.task_handle))
+    out = out + RB()
+    out
+
+fn _render_coverage_json(c: LspDiagCoverageV1) -> text:
+    var out = LB()
+    out = out + jp("syntax_checked", _bool_json(c.syntax_checked))
+    out = out + "," + jp("semantic_checked", _bool_json(c.semantic_checked))
+    out = out + "," + jp("lint_checked", _bool_json(c.lint_checked))
+    out = out + "," + jp("source", js(c.source))
+    out = out + "," + jp("reason", js(c.reason))
+    out = out + RB()
+    out
+
+# reason: Renders typed envelope into wire JSON string for MCP transport
+@allow(primitive_api)
+pub fn lsp_render_structured_envelope_json_v1(envelope: LspStructuredDiagnosticsEnvelopeV1) -> text:
+    var diag_parts: [text] = []
+    var i = 0
+    while i < envelope.diagnostics.len():
+        diag_parts.push(_render_diag_item_json(envelope.diagnostics[i]))
+        i = i + 1
+
+    var fix_parts: [text] = []
+    var fi = 0
+    while fi < envelope.ranked_fixes.len():
+        fix_parts.push(_render_ranked_fix_json(envelope.ranked_fixes[fi]))
+        fi = fi + 1
+
+    var act_parts: [text] = []
+    var ai = 0
+    while ai < envelope.next_actions.len():
+        act_parts.push(_render_next_action_json(envelope.next_actions[ai]))
+        ai = ai + 1
+
+    var out = LB()
+    out = out + jp("schema_version", str(envelope.schema_version))
+    out = out + "," + jp("file", js(envelope.file))
+    out = out + "," + jp("status", js(envelope.status))
+    out = out + "," + jp("completeness", js(envelope.completeness))
+    out = out + "," + jp("clean", _bool_json(envelope.clean))
+    out = out + "," + jp("coverage", _render_coverage_json(envelope.coverage))
+    out = out + "," + jp("snapshot_hash", js(envelope.snapshot_hash))
+    out = out + "," + jp("policy_digest", js(envelope.policy_digest))
+    out = out + "," + jp("task_handle", js(envelope.task_handle))
+    out = out + "," + jp("reason", js(envelope.reason))
+    out = out + "," + jp("diagnostics", SB_L() + diag_parts.join(",") + SB_R())
+    out = out + "," + jp("ranked_fixes", SB_L() + fix_parts.join(",") + SB_R())
+    out = out + "," + jp("next_actions", SB_L() + act_parts.join(",") + SB_R())
+    out = out + RB()
+    out
+
+fn _severity_display(sev: text) -> text:
+    if sev == "warning": return "Warning"
+    if sev == "info": return "Information"
+    if sev == "hint": return "Hint"
+    "Error"
+
+fn _format_diag_block_for_items(file: text, status_banner: text, items: [LspStructuredDiagItemV1]) -> text:
+    if items.len() == 0:
+        return ""
+    var lines: [text] = []
+    var i = 0
+    while i < items.len():
+        val d = items[i]
+        val code_tag = if d.code != "": "[" + d.code + "] " else: ""
+        lines.push("  " + _severity_display(d.severity) + " (line " + str(d.line) + ", col " + str(d.col) + "): " + code_tag + d.message + " (" + d.source + ")")
+        i = i + 1
+    "<new-diagnostics status=\"" + status_banner + "\">\n" + file + ":\n" + lines.join("\n") + "\n</new-diagnostics>"
+
+# reason: Renders typed envelope into human-readable MCP text content with explicit completeness banners
+@allow(primitive_api)
+pub fn lsp_render_diagnostics_text_v1(envelope: LspStructuredDiagnosticsEnvelopeV1) -> text:
+    if envelope.clean:
+        return "[COMPLETE/PASS] " + envelope.file + ": clean=true (0 diagnostics, snapshot=" + envelope.snapshot_hash + ", policy=" + envelope.policy_digest + ")"
+
+    var next_hint = ""
+    if envelope.next_actions.len() > 0:
+        next_hint = " Next: " + envelope.next_actions[0].summary
+
+    if envelope.status == "timed_out":
+        val handle_part = if envelope.task_handle != "": ", task_handle=" + envelope.task_handle else: ""
+        return "[TIMED_OUT] " + envelope.file + ": diagnostics timed out (clean=false" + handle_part + ")." + next_hint
+
+    if envelope.status == "unavailable":
+        val why = if envelope.reason != "": envelope.reason else: "diagnostics unavailable"
+        return "[UNAVAILABLE] " + envelope.file + ": " + why + " (clean=false)." + next_hint
+
+    if envelope.status == "incomplete":
+        val why = if envelope.reason != "": envelope.reason else: "incomplete analysis"
+        val header = "[INCOMPLETE] " + envelope.file + ": " + why + " (clean=false)." + next_hint
+        val partial_block = _format_diag_block_for_items(envelope.file, "INCOMPLETE", envelope.diagnostics)
+        if partial_block != "":
+            return header + "\n" + partial_block
+        return header
+
+    if envelope.status == "failed":
+        val why = if envelope.reason != "": envelope.reason else: "diagnostic check failed"
+        val header = "[FAILED] " + envelope.file + ": " + why + " (clean=false)." + next_hint
+        val fail_block = _format_diag_block_for_items(envelope.file, "FAILED", envelope.diagnostics)
+        if fail_block != "":
+            return header + "\n" + fail_block
+        return header
+
+    val comp_label = if envelope.completeness == "fail": "COMPLETE/FAIL" else: "COMPLETE/FINDINGS"
+    val header = "[" + comp_label + "] " + envelope.file + ": " + str(envelope.diagnostics.len()) + " diagnostic(s) (clean=false)." + next_hint
+    val block = _format_diag_block_for_items(envelope.file, comp_label, envelope.diagnostics)
+    if block != "":
+        return header + "\n" + block
+    header
+
+fn _parse_diag_json_object(default_file: text, obj_json: text, index: i64) -> LspStructuredDiagItemV1:
+    val outer_id = extract_field(obj_json, "id")
+    val nested = extract_field(obj_json, "diagnostic")
+    val body = if nested != "" and _char_at(nested, 0) == LB(): nested else: obj_json
+
+    val raw_code = extract_field(body, "code")
+    val sev = _normalize_severity_name(extract_field(body, "severity"))
+    val code = if raw_code != "" and raw_code != "null": raw_code else: (if sev == "warning": "W-CHECK" else: "E-CHECK")
+    val msg = extract_field(body, "message")
+    val raw_file = extract_field(body, "file")
+    val span_obj = extract_field(body, "span")
+    var line_num = _parse_int_or_default(extract_field(body, "line"), 0)
+    var col_num = _parse_int_or_default(extract_field(body, "col"), 0)
+    if col_num <= 0:
+        col_num = _parse_int_or_default(extract_field(body, "column"), 0)
+    if line_num <= 0 and span_obj != "":
+        line_num = _parse_int_or_default(extract_field(span_obj, "line"), 1)
+    if col_num <= 0 and span_obj != "":
+        col_num = _parse_int_or_default(extract_field(span_obj, "col"), 1)
+    if line_num <= 0:
+        line_num = 1
+    if col_num <= 0:
+        col_num = 1
+    val end_line = _parse_int_or_default(extract_field(body, "end_line"), line_num)
+    val end_col = _parse_int_or_default(extract_field(body, "end_col"), col_num)
+    val src_tag = extract_field(body, "source")
+    val item_file = if raw_file != "" and raw_file != "null": raw_file else: default_file
+    val stable_id = if outer_id != "" and outer_id != "null":
+        outer_id
+    else:
+        code + "@" + item_file + "#" + str(line_num) + ":" + str(col_num) + "/" + str(index)
+    LspStructuredDiagItemV1(
+        id: stable_id,
+        code: code,
+        severity: sev,
+        message: msg,
+        file: item_file,
+        line: line_num,
+        col: col_num,
+        end_line: end_line,
+        end_col: end_col,
+        source: if src_tag != "" and src_tag != "null": src_tag else: "simple-check"
+    )
+
+# reason: Admitted batch parser validates wire JSON text against expected file path and snapshot hash
+@allow(primitive_api)
+pub fn lsp_parse_admitted_batch_json_v1(
+    file: text,
+    expected_hash: text,
+    policy_digest: text,
+    batch_json: text,
+    include_fixes: bool
+) -> Option<LspStructuredDiagnosticsEnvelopeV1>:
+    val trimmed = batch_json.trim()
+    if trimmed == "" or _char_at(trimmed, 0) != LB():
+        return None
+
+    val cached_hash = extract_field(trimmed, "source_hash")
+    val alt_hash = extract_field(trimmed, "snapshot_hash")
+    val batch_hash = if cached_hash != "" and cached_hash != "null": cached_hash else: alt_hash
+    if expected_hash == "" or batch_hash == "" or batch_hash != expected_hash:
+        return None
+
+    val file_id = extract_field(trimmed, "file_id")
+    val batch_file = if file_id != "" and file_id != "null": file_id else: extract_field(trimmed, "file")
+    if batch_file != "" and file != "":
+        val norm_batch = batch_file.replace("\\", "/")
+        val norm_req = file.replace("\\", "/")
+        if norm_batch != norm_req and not norm_req.ends_with("/" + norm_batch) and not norm_batch.ends_with("/" + norm_req):
+            return None
+
+    val raw_batch_status = extract_field(trimmed, "status")
+    val raw_reason = extract_field(trimmed, "incomplete_reason")
+    val clean_reason = if raw_reason == "null": "" else: raw_reason
+
+    val tp_raw = extract_field(trimmed, "target_profile")
+    val tp_pol = if tp_raw != "" and _char_at(tp_raw, 0) == LB():
+        extract_field(tp_raw, "policy_digest")
+    else:
+        ""
+    val top_pol = extract_field(trimmed, "policy_digest")
+    val raw_cached_pol = if tp_pol != "" and tp_pol != "null": tp_pol else: top_pol
+    val cached_pol = if raw_cached_pol != "" and raw_cached_pol != "null": raw_cached_pol else: ""
+    if policy_digest != "" and policy_digest != "default" and cached_pol != "" and cached_pol != "default" and cached_pol != policy_digest:
+        return None
+    val resolved_pol = if cached_pol != "": cached_pol else: policy_digest
+
+    val diag_arr = extract_field(trimmed, "diagnostics")
+    var items: [LspStructuredDiagItemV1] = []
+    if diag_arr != "" and _char_at(diag_arr, 0) == SB_L():
+        val raw_objs = _split_top_level_json_objects_char(diag_arr)
+        var i = 0
+        while i < raw_objs.len():
+            items.push(_parse_diag_json_object(file, raw_objs[i], i))
+            i = i + 1
+
+    var status = "complete"
+    var completeness = "pass"
+    if raw_batch_status == "complete":
+        status = "complete"
+        completeness = if _has_error_diag(items): "fail" else: "pass"
+    elif raw_batch_status == "partial_recovery" or raw_batch_status == "cancelled" or raw_batch_status == "stale":
+        status = "incomplete"
+        completeness = "incomplete"
+    elif raw_batch_status == "unsupported":
+        status = "unavailable"
+        completeness = "unavailable"
+    elif raw_batch_status == "timed_out":
+        status = "timed_out"
+        completeness = "timed_out"
+    else:
+        status = "failed"
+        completeness = "fail"
+
+    val source_content = _lsp_read_file_safe(file)
+    val fixes = if include_fixes and items.len() > 0:
+        _synthesize_ranked_fixes(file, source_content, expected_hash, items)
+    else:
+        []
+    val cov = LspDiagCoverageV1(
+        syntax_checked: status == "complete" or status == "incomplete",
+        semantic_checked: status == "complete",
+        lint_checked: status == "complete",
+        source: "admitted_batch_cache",
+        reason: if clean_reason != "": clean_reason else: raw_batch_status
+    )
+    Some(lsp_build_structured_diagnostics_envelope_v1(
+        file, status, completeness, cov, expected_hash, resolved_pol,
+        "", clean_reason, items, fixes, []
+    ))
+
+# reason: Cache reader checks explicit or env-configured admitted batch path against snapshot hash
+@allow(primitive_api)
+pub fn lsp_read_admitted_batch_cache_v1(
+    file: text,
+    expected_hash: text,
+    policy_digest: text,
+    explicit_cache_path: text,
+    include_fixes: bool
+) -> Option<LspStructuredDiagnosticsEnvelopeV1>:
+    var candidates: [text] = []
+    if explicit_cache_path != "":
+        candidates.push(explicit_cache_path)
+    val env_cache = env_get("SIMPLE_DIAGNOSTIC_BATCH_CACHE_FILE")
+    if env_cache != "":
+        candidates.push(env_cache)
+    if file != "":
+        candidates.push(file + ".diag.batch.json")
+
+    var i = 0
+    while i < candidates.len():
+        val path = candidates[i]
+        if file_exists(path):
+            val raw = _lsp_read_file_safe(path)
+            val parsed = lsp_parse_admitted_batch_json_v1(file, expected_hash, policy_digest, raw, include_fixes)
+            match parsed:
+                case Some(env):
+                    return Some(env)
+                case None:
+                    i = i
+        i = i + 1
+    None
+
+fn _child_timed_out_local(exit_code: i64, stderr: text) -> bool:
+    if exit_code != -1:
+        return false
+    if stderr.ends_with("\nTIMEOUT\n"):
+        return true
+    if stderr.ends_with("Process timed out"):
+        return true
+    stderr.ends_with("ms]") and stderr.contains("[TIMEOUT: Process killed after ")
+
+fn _extract_bracketed_code(message: text) -> text:
+    val trimmed = message.trim()
+    if not trimmed.starts_with("["):
+        return ""
+    val close = trimmed.find("]")
+    if close <= 1:
+        return ""
+    trimmed.substring(1, close).trim()
+
+fn _is_windows_drive_colon(s: text, colon_pos: i64) -> bool:
+    if colon_pos != 1 or _char_len(s) < 3:
+        return false
+    val c0 = _char_at(s, 0)
+    val is_alpha = (c0 >= "A" and c0 <= "Z") or (c0 >= "a" and c0 <= "z")
+    val c2 = _char_at(s, 2)
+    is_alpha and _digit_val_local(c2) < 0
+
+fn _parse_text_diag_line_item(default_file: text, raw_line: text, index: i64) -> Option<LspStructuredDiagItemV1>:
+    val clean = strip_ansi(raw_line).trim()
+    if clean == "":
+        return None
+
+    var colon1 = -1
+    var colon2 = -1
+    var colon3 = -1
+    var pos = 0
+    for ch in clean:
+        if ch == ":" and not _is_windows_drive_colon(clean, pos):
+            if colon1 < 0:
+                colon1 = pos
+            elif colon2 < 0:
+                colon2 = pos
+            elif colon3 < 0:
+                colon3 = pos
+                break
+        pos = pos + 1
+    if colon3 < 0:
+        return None
+
+    val parsed_file = _slice_text(clean, 0, colon1).trim()
+    val line_str = _slice_text(clean, colon1 + 1, colon2).trim()
+    val col_str = _slice_text(clean, colon2 + 1, colon3).trim()
+    val line_num = _parse_int_or_default(line_str, -1)
+    if line_num < 0:
+        return None
+    val col_num = _parse_int_or_default(col_str, 1)
+    val after = _slice_text(clean, colon3 + 1, _char_len(clean)).trim()
+
+    var sev = ""
+    var msg = after
+    if after.starts_with("error"):
+        sev = "error"
+        msg = _slice_text(after, 5, _char_len(after)).trim()
+    elif after.starts_with("warning"):
+        sev = "warning"
+        msg = _slice_text(after, 7, _char_len(after)).trim()
+    elif after.starts_with("info"):
+        sev = "info"
+        msg = _slice_text(after, 4, _char_len(after)).trim()
+    elif after.starts_with("hint"):
+        sev = "hint"
+        msg = _slice_text(after, 4, _char_len(after)).trim()
+    else:
+        return None
+
+    if msg.starts_with(":"):
+        msg = _slice_text(msg, 1, _char_len(msg)).trim()
+    val code_in_brackets = _extract_bracketed_code(msg)
+    val code = if code_in_brackets != "": code_in_brackets else: (if sev == "error": "E-CHECK" else: "W-CHECK")
+    val use_file = if parsed_file != "": parsed_file else: default_file
+    val stable_id = code + "@" + use_file + "#" + str(line_num) + ":" + str(col_num) + "/" + str(index)
+    Some(LspStructuredDiagItemV1(
+        id: stable_id,
+        code: code,
+        severity: sev,
+        message: msg,
+        file: use_file,
+        line: line_num,
+        col: col_num,
+        end_line: line_num,
+        end_col: col_num,
+        source: "simple-check"
+    ))
+
+struct _JsonCheckScanResultV1:
+    saw_structured: bool
+    items: [LspStructuredDiagItemV1]
+    saw_check_summary: bool
+    summary_status: text
+    summary_errors: i64
+    summary_warnings: i64
+
+fn _extract_json_diagnostics_from_output(file: text, combined_out: text) -> _JsonCheckScanResultV1:
+    val lines = combined_out.split("\n")
+    var items: [LspStructuredDiagItemV1] = []
+    var saw_structured_wrapper = false
+    var saw_check_summary = false
+    var summary_status = ""
+    var summary_errors = 0
+    var summary_warnings = 0
+    var li = 0
+    while li < lines.len():
+        val t = lines[li].trim()
+        if t != "" and _char_at(t, 0) == LB():
+            if extract_field(t, "type") == "check-diagnostic":
+                saw_structured_wrapper = true
+                items.push(_parse_diag_json_object(file, t, items.len()))
+            else:
+                val structured = extract_field(t, "structuredContent")
+                val target_obj = if structured != "" and _char_at(structured, 0) == LB(): structured else: t
+                val diag_arr = extract_field(target_obj, "diagnostics")
+                if diag_arr != "" and _char_at(diag_arr, 0) == SB_L():
+                    saw_structured_wrapper = true
+                    val raw_objs = _split_top_level_json_objects_char(diag_arr)
+                    var oi = 0
+                    while oi < raw_objs.len():
+                        items.push(_parse_diag_json_object(file, raw_objs[oi], items.len()))
+                        oi = oi + 1
+                elif extract_field(target_obj, "command") == "check":
+                    saw_structured_wrapper = true
+                    saw_check_summary = true
+                    summary_status = extract_field(target_obj, "status")
+                    summary_errors = _parse_int_or_default(extract_field(target_obj, "errors"), 0)
+                    summary_warnings = _parse_int_or_default(extract_field(target_obj, "warnings"), 0)
+        li = li + 1
+    _JsonCheckScanResultV1(
+        saw_structured: saw_structured_wrapper,
+        items: items,
+        saw_check_summary: saw_check_summary,
+        summary_status: summary_status,
+        summary_errors: summary_errors,
+        summary_warnings: summary_warnings
+    )
+
+fn _has_lint_blocking_abort(combined: text, items: [LspStructuredDiagItemV1]) -> bool:
+    if combined.contains("unexpected token") or combined.contains("ParseError") or combined.contains("cannot read file"):
+        return true
+    var i = 0
+    while i < items.len():
+        val c = items[i].code
+        if c == "E0001" or c == "E0002" or c == "check" or c.starts_with("E-PAR-"):
+            return true
+        i = i + 1
+    false
+
+# reason: Converts raw bounded child output and exit code into typed structured diagnostics envelope
+@allow(primitive_api)
+pub fn lsp_envelope_from_command_output_v1(
+    file: text,
+    source_content: text,
+    snapshot_hash: text,
+    policy_digest: text,
+    stdout: text,
+    stderr: text,
+    exit_code: i64,
+    mode: text,
+    include_fixes: bool
+) -> LspStructuredDiagnosticsEnvelopeV1:
+    val cov_source = if mode == "source_script": "query_check_script" else: "native_check"
+    if _child_timed_out_local(exit_code, stderr):
+        val timeout_cov = LspDiagCoverageV1(
+            syntax_checked: false,
+            semantic_checked: false,
+            lint_checked: false,
+            source: cov_source,
+            reason: "diagnostics child timed out after " + str(_lsp_diag_timeout_ms()) + " ms"
+        )
+        val provisional = lsp_build_structured_diagnostics_envelope_v1(
+            file, "timed_out", "timed_out", timeout_cov,
+            snapshot_hash, policy_digest, "pending",
+            "diagnostics timed out after " + str(_lsp_diag_timeout_ms()) + " ms",
+            [], [], []
+        )
+        val handle = lsp_diag_task_register_v1(
+            file, snapshot_hash, "timed_out", "timed_out",
+            provisional.reason, ""
+        )
+        val final_env = lsp_build_structured_diagnostics_envelope_v1(
+            file, "timed_out", "timed_out", timeout_cov,
+            snapshot_hash, policy_digest, handle,
+            provisional.reason, [], [], []
+        )
+        _lsp_diag_task_update_envelope(handle, lsp_render_structured_envelope_json_v1(final_env))
+        return final_env
+
+    val clean_out = clean_command_output(stdout)
+    val clean_err = clean_command_output(stderr)
+    val combined = if clean_out != "" and clean_err != "":
+        clean_out + "\n" + clean_err
+    elif clean_out != "":
+        clean_out
+    else:
+        clean_err
+
+    val json_scan = _extract_json_diagnostics_from_output(file, combined)
+    val saw_json = json_scan.saw_structured
+    var items: [LspStructuredDiagItemV1] = json_scan.items
+    if items.len() == 0:
+        val text_lines = combined.split("\n")
+        var ti = 0
+        while ti < text_lines.len():
+            val parsed_item = _parse_text_diag_line_item(file, text_lines[ti], items.len())
+            match parsed_item:
+                case Some(item):
+                    items.push(item)
+                case None:
+                    ti = ti
+            ti = ti + 1
+
+    val summary_has_errors = json_scan.saw_check_summary and (json_scan.summary_errors > 0 or json_scan.summary_status == "error")
+    val summary_has_warnings = json_scan.saw_check_summary and (json_scan.summary_warnings > 0 or json_scan.summary_status == "warning")
+    if items.len() == 0 and summary_has_warnings and not summary_has_errors:
+        items.push(LspStructuredDiagItemV1(
+            id: "W-CHECK@" + file + "#1:1/0",
+            code: "W-CHECK",
+            severity: "warning",
+            message: "check summary reported warning status without individual diagnostic records",
+            file: file,
+            line: 1,
+            col: 1,
+            end_line: 1,
+            end_col: 1,
+            source: "simple-check"
+        ))
+
+    val syntax_only = combined.contains("\"coverage\":\"syntax-only\"") or combined.contains("Syntax-only check")
+    if syntax_only:
+        val inc_cov = LspDiagCoverageV1(
+            syntax_checked: true,
+            semantic_checked: false,
+            lint_checked: false,
+            source: cov_source,
+            reason: "syntax-only coverage; semantic coverage incomplete"
+        )
+        val fixes = if include_fixes and items.len() > 0:
+            _synthesize_ranked_fixes(file, source_content, snapshot_hash, items)
+        else:
+            []
+        return lsp_build_structured_diagnostics_envelope_v1(
+            file, "incomplete", "incomplete", inc_cov,
+            snapshot_hash, policy_digest, "",
+            "syntax-only check did not verify full semantics",
+            items, fixes, []
+        )
+
+    if (exit_code != 0 or summary_has_errors) and items.len() == 0:
+        val fail_reason = if summary_has_errors:
+            "check summary reported errors=" + str(json_scan.summary_errors) + " without diagnostic records"
+        elif combined.trim() != "":
+            combined.trim()
+        else:
+            "command failed with exit code " + str(exit_code)
+        val fail_cov = LspDiagCoverageV1(
+            syntax_checked: false,
+            semantic_checked: false,
+            lint_checked: false,
+            source: cov_source,
+            reason: fail_reason
+        )
+        return lsp_build_structured_diagnostics_envelope_v1(
+            file, "failed", "fail", fail_cov,
+            snapshot_hash, policy_digest, "",
+            fail_reason, [], [], []
+        )
+
+    val lint_ran = (saw_json or combined.contains("Semantic check passed")) and not _has_lint_blocking_abort(combined, items)
+    val full_cov = LspDiagCoverageV1(
+        syntax_checked: true,
+        semantic_checked: not _has_lint_blocking_abort(combined, items),
+        lint_checked: lint_ran,
+        source: cov_source,
+        reason: "complete"
+    )
+    val completeness = if exit_code != 0 or summary_has_errors or _has_error_diag(items): "fail" else: "pass"
+    val fixes = if include_fixes and items.len() > 0:
+        _synthesize_ranked_fixes(file, source_content, snapshot_hash, items)
+    else:
+        []
+    lsp_build_structured_diagnostics_envelope_v1(
+        file, "complete", completeness, full_cov,
+        snapshot_hash, policy_digest, "",
+        "", items, fixes, []
+    )
+
+# reason: Main structured diagnostics collector takes MCP request file, fix toggle, and optional task handle
+@allow(primitive_api)
+pub fn lsp_collect_structured_diagnostics_v1(
+    file: text,
+    include_fixes: bool,
+    task_handle: text
+) -> LspStructuredDiagnosticsEnvelopeV1:
+    val policy_digest = lsp_policy_digest_v1()
+
+    if task_handle != "":
+        val lookup = lsp_diag_task_lookup_v1(task_handle)
+        match lookup:
+            case Some(entry):
+                val target_file = if file != "": file else: entry.file
+                val active_hash = lsp_snapshot_hash_for_file_v1(target_file)
+                val cached_now = lsp_read_admitted_batch_cache_v1(target_file, active_hash, policy_digest, "", include_fixes)
+                match cached_now:
+                    case Some(admitted):
+                        return admitted
+                    case None:
+                        val task_cov = LspDiagCoverageV1(
+                            syntax_checked: false,
+                            semantic_checked: false,
+                            lint_checked: false,
+                            source: "task_registry",
+                            reason: entry.reason
+                        )
+                        return lsp_build_structured_diagnostics_envelope_v1(
+                            target_file, entry.status, entry.completeness, task_cov,
+                            active_hash, policy_digest, entry.task_handle,
+                            entry.reason, [], [], []
+                        )
+            case None:
+                val missing_cov = LspDiagCoverageV1(
+                    syntax_checked: false,
+                    semantic_checked: false,
+                    lint_checked: false,
+                    source: "task_registry",
+                    reason: "unknown or expired task_handle"
+                )
+                return lsp_build_structured_diagnostics_envelope_v1(
+                    file, "unavailable", "unavailable", missing_cov,
+                    lsp_snapshot_hash_for_file_v1(file), policy_digest, task_handle,
+                    "unknown or expired task_handle: " + task_handle,
+                    [], [], []
+                )
+
+    val snapshot_hash = lsp_snapshot_hash_for_file_v1(file)
+    val cached = lsp_read_admitted_batch_cache_v1(file, snapshot_hash, policy_digest, "", include_fixes)
+    match cached:
+        case Some(hit):
+            return hit
+        case None:
+            val _ = 0
+
+    val enabled = env_get("SIMPLE_LSP_ENABLE_DIAGNOSTICS")
+    if enabled != "1":
+        val gate_cov = LspDiagCoverageV1(
+            syntax_checked: false,
+            semantic_checked: false,
+            lint_checked: false,
+            source: "disabled_gate",
+            reason: "SIMPLE_LSP_ENABLE_DIAGNOSTICS is not enabled and no admitted batch cache matched"
+        )
+        val reason = "diagnostics live spawn disabled unless SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 or admitted batch cache matches snapshot"
+        val handle = lsp_diag_task_register_v1(
+            file, snapshot_hash, "unavailable", "unavailable", reason, ""
+        )
+        val unavail = lsp_build_structured_diagnostics_envelope_v1(
+            file, "unavailable", "unavailable", gate_cov,
+            snapshot_hash, policy_digest, handle,
+            reason, [], [], []
+        )
+        _lsp_diag_task_update_envelope(handle, lsp_render_structured_envelope_json_v1(unavail))
+        return unavail
+
+    if not file_exists(file):
+        val missing_file_cov = LspDiagCoverageV1(
+            syntax_checked: false,
+            semantic_checked: false,
+            lint_checked: false,
+            source: "none",
+            reason: "target file not found"
+        )
+        return lsp_build_structured_diagnostics_envelope_v1(
+            file, "failed", "fail", missing_file_cov,
+            "missing", policy_digest, "",
+            "target file not found: " + file, [], [], []
+        )
+
+    val binary = find_simple_binary()
+    val source_mode = _lsp_detect_source_mode(binary)
+    val plan = lsp_build_diagnostics_command_v1(binary, file, source_mode)
+    lsp_note_command_start()
+    var (stdout, stderr, code) = process_run_bounded(
+        plan.binary, plan.args, plan.timeout_ms, _lsp_diag_capture_bytes()
+    )
+    if not source_mode and code == 2 and (stdout.contains("unknown option") or stderr.contains("unknown option")):
+        lsp_note_command_start()
+        val retry = process_run_bounded(
+            plan.binary, ["check", "--json", file], plan.timeout_ms, _lsp_diag_capture_bytes()
+        )
+        stdout = retry.0
+        stderr = retry.1
+        code = retry.2
+    val source_content = _lsp_read_file_safe(file)
+    lsp_envelope_from_command_output_v1(
+        file, source_content, snapshot_hash, policy_digest,
+        stdout, stderr, code, plan.mode, include_fixes
+    )
+
+# reason: Builds complete JSON-RPC MCP tool result carrying both content and structuredContent
+@allow(primitive_api)
+pub fn lsp_make_structured_tool_response_v1(
+    id: text,
+    format: text,
+    envelope: LspStructuredDiagnosticsEnvelopeV1
+) -> text:
+    val envelope_json = lsp_render_structured_envelope_json_v1(envelope)
+    val display_text = if format == "text":
+        lsp_render_diagnostics_text_v1(envelope)
+    else:
+        envelope_json
+    val text_obj = jo2(
+        jp("type", js("text")),
+        jp("text", js(display_text))
+    )
+    var result = LB()
+    result = result + jp("content", SB_L() + text_obj + SB_R())
+    result = result + "," + jp("structuredContent", envelope_json)
+    result = result + RB()
+    jsonrpc_result(id, result)
+
+export LspStructuredDiagItemV1
+export LspRankedFixV1
+export LspNextActionV1
+export LspDiagCoverageV1
+export LspDiagCommandPlanV1
+export LspDiagTaskEntryV1
+export LspStructuredDiagnosticsEnvelopeV1
+export lsp_snapshot_hash_for_text_v1
+export lsp_snapshot_hash_for_file_v1
+export lsp_policy_digest_from_text_v1
+export lsp_policy_digest_v1
+export lsp_compute_clean_verdict_v1
+export lsp_build_diagnostics_command_v1
+export lsp_diag_task_register_v1
+export lsp_diag_task_lookup_v1
+export lsp_diag_task_reset_v1
+export lsp_diag_task_count_v1
+export lsp_parse_admitted_batch_json_v1
+export lsp_read_admitted_batch_cache_v1
+export lsp_build_structured_diagnostics_envelope_v1
+export lsp_render_structured_envelope_json_v1
+export lsp_render_diagnostics_text_v1
+export lsp_envelope_from_command_output_v1
+export lsp_collect_structured_diagnostics_v1
+export lsp_make_structured_tool_response_v1

@@ -1,35 +1,109 @@
-# Per-URI fix-candidate store fed by the last publishDiagnostics batch
+# Per-client, per-URI fix-candidate and last-valid diagnostic batch store
 # (REQ-DIAG-011). The live codeAction handler answers from this store when it
-# holds candidates for the editor's CURRENT document version; any other
-# version is stale and is never served.
+# holds complete candidates for that client's CURRENT document version; failed,
+# timed-out, malformed, or stale batches never overwrite a valid entry.
 use std.common.diagnostics.diagnostic_batch.{DiagnosticActionIndex}
 
-struct LspDiagActionEntry:
+pub struct LspDiagActionFileRevV1:
+    file: text
+    version: i64
+    source_hash: text
+    from_overlay: bool = true
+
+pub struct LspDiagActionEntry:
+    client_id: text = "default"
     uri: text
     version: i64
     source_hash: text
+    status: text = "complete"
+    valid: bool = true
+    items: [text] = []
     index: DiagnosticActionIndex
     ids: [text]
+    file_revisions: [LspDiagActionFileRevV1] = []
 
 var LSP_DIAG_ACTION_ENTRIES: [LspDiagActionEntry] = []
 
-# Replace the entry for `uri` with the batch published at `version`.
-pub fn lsp_diag_action_store_record(uri: text, version: i64, source_hash: text, index: DiagnosticActionIndex, ids: [text]):
-    lsp_diag_action_store_clear(uri)
-    LSP_DIAG_ACTION_ENTRIES.push(LspDiagActionEntry(uri: uri, version: version, source_hash: source_hash, index: index, ids: ids))
+fn _store_client_id(client_id: text) -> text:
+    val t = client_id.trim()
+    if t == "": "default" else: t
 
-pub fn lsp_diag_action_store_clear(uri: text):
+# reason: records per-client diagnostic action store entry with protocol URI, version, hash, and status
+@allow(primitive_api)
+pub fn lsp_diag_action_store_record_for_client_v1(
+    client_id: text,
+    uri: text,
+    version: i64,
+    source_hash: text,
+    status: text,
+    valid: bool,
+    items: [text],
+    index: DiagnosticActionIndex,
+    ids: [text],
+    file_revisions: [LspDiagActionFileRevV1]
+):
+    val norm_client = _store_client_id(client_id)
+    if not valid or status != "complete":
+        return
+    lsp_diag_action_store_clear_for_client_v1(norm_client, uri)
+    LSP_DIAG_ACTION_ENTRIES.push(LspDiagActionEntry(
+        client_id: norm_client,
+        uri: uri,
+        version: version,
+        source_hash: source_hash,
+        status: status,
+        valid: valid,
+        items: items,
+        index: index,
+        ids: ids,
+        file_revisions: file_revisions
+    ))
+
+# reason: records default-client diagnostic action store entry at document version and hash
+@allow(primitive_api)
+pub fn lsp_diag_action_store_record(uri: text, version: i64, source_hash: text, index: DiagnosticActionIndex, ids: [text]):
+    lsp_diag_action_store_record_for_client_v1("default", uri, version, source_hash, "complete", true, [], index, ids, [])
+
+# reason: clears stored diagnostic action entry for a specific client_id and URI
+@allow(primitive_api)
+pub fn lsp_diag_action_store_clear_for_client_v1(client_id: text, uri: text):
+    val norm_client = _store_client_id(client_id)
     var kept: [LspDiagActionEntry] = []
     for e in LSP_DIAG_ACTION_ENTRIES:
-        if e.uri != uri:
+        if not (e.client_id == norm_client and e.uri == uri):
             kept.push(e)
     LSP_DIAG_ACTION_ENTRIES = kept
 
-# The entry for `uri` only when it was recorded at exactly `version`.
-pub fn lsp_diag_action_store_lookup(uri: text, version: i64) -> LspDiagActionEntry?:
+# reason: clears stored diagnostic action entry for default client and URI
+@allow(primitive_api)
+pub fn lsp_diag_action_store_clear(uri: text):
+    lsp_diag_action_store_clear_for_client_v1("default", uri)
+
+# reason: looks up complete valid diagnostic action entry for client_id, URI, and exact document version
+@allow(primitive_api)
+pub fn lsp_diag_action_store_lookup_for_client_v1(client_id: text, uri: text, version: i64) -> LspDiagActionEntry?:
+    val norm_client = _store_client_id(client_id)
     for e in LSP_DIAG_ACTION_ENTRIES:
-        if e.uri == uri and e.version == version:
+        if e.client_id == norm_client and e.uri == uri and e.version == version and e.valid and e.status == "complete":
             return Some(e)
     None
 
-export LspDiagActionEntry
+# reason: looks up complete valid diagnostic action entry for default client, URI, and exact version
+@allow(primitive_api)
+pub fn lsp_diag_action_store_lookup(uri: text, version: i64) -> LspDiagActionEntry?:
+    lsp_diag_action_store_lookup_for_client_v1("default", uri, version)
+
+# reason: retrieves retained last-valid diagnostic snapshot entry for client_id and URI
+@allow(primitive_api)
+pub fn lsp_diag_action_store_last_valid_for_client_v1(client_id: text, uri: text) -> LspDiagActionEntry?:
+    val norm_client = _store_client_id(client_id)
+    for e in LSP_DIAG_ACTION_ENTRIES:
+        if e.client_id == norm_client and e.uri == uri and e.valid and e.status == "complete":
+            return Some(e)
+    None
+
+export LspDiagActionFileRevV1, LspDiagActionEntry
+export lsp_diag_action_store_record_for_client_v1, lsp_diag_action_store_record
+export lsp_diag_action_store_clear_for_client_v1, lsp_diag_action_store_clear
+export lsp_diag_action_store_lookup_for_client_v1, lsp_diag_action_store_lookup
+export lsp_diag_action_store_last_valid_for_client_v1

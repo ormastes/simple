@@ -1,35 +1,67 @@
 # LSP codeAction wiring over the typed fix model (REQ-DIAG-011).
 # Lists come from ranked_candidates_for(); applies go through EditTransaction
+# with per-file (version, source_hash) preconditions across all affected files,
 # and a versioned documentChanges WorkspaceEdit is emitted only on Applied.
-# Positions are zero-based lines and UTF-16 code-unit characters (LSP).
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{char_from_code}
 use std.common.json.serializer.{json_escape_string}
 use std.common.diagnostics.diagnostic_batch.{FixCandidate, DiagnosticActionIndex}
 use std.common.diagnostics.fix_ranking.{ranked_candidates_for}
 use std.common.diagnostics.fix_transaction.{EditTransaction, ApplyResult, DocumentSnapshot}
 use std.common.diagnostics.source_position.{LineStartTable, byte_to_position, span_to_range}
 use std.nogc_sync_mut.lsp.lsp_diag_action_store.{LspDiagActionEntry}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{
+    lsp_document_snapshot_by_path_for_client_v1,
+    lsp_document_has_unsynchronized_path_for_client_v1,
+    lsp_read_analyzed_source
+}
+
+pub struct LspLiveActionOutcomeV1:
+    status: text
+    actions_json: text
+    refusal_reason: text
 
 fn jstr(s: text) -> text:
     "\"" + json_escape_string(s) + "\""
 
+fn _lbrace() -> text:
+    char_from_code(123)
+
+fn _rbrace() -> text:
+    char_from_code(125)
+
+fn _file_uri_for_path(f: text) -> text:
+    if f.starts_with("file://"):
+        return f
+    val norm = f.replace("\\", "/")
+    if norm.starts_with("/"):
+        return "file://" + norm
+    "file:///" + norm
+
 # Byte offset -> (line, UTF-16 character); (-1, -1) for an offset that is out
 # of range or splits a UTF-8 scalar.
+# reason: converts UTF-8 byte offset in source text to LSP zero-based (line, character) pair
+@allow(primitive_api)
 pub fn lsp_byte_offset_position(body: text, offset: i64) -> (i64, i64):
     match byte_to_position(body, LineStartTable.build(body), offset):
         Some(p): (p.line, p.character)
         None: (-1, -1)
 
 fn action_json(diagnostic_id: text, c: FixCandidate, preferred: bool) -> text:
-    var out = "{\"title\":" + jstr(c.title) + ",\"kind\":\"quickfix\""
+    val lb = _lbrace()
+    val rb = _rbrace()
+    var out = lb + "\"title\":" + jstr(c.title) + ",\"kind\":\"quickfix\""
     if preferred:
         out = out + ",\"isPreferred\":true"
     match c.disabled_reason:
         Some(reason):
-            out = out + ",\"disabled\":{\"reason\":" + jstr(reason) + "}"
+            out = out + ",\"disabled\":" + lb + "\"reason\":" + jstr(reason) + rb
         None:
             pass
-    out + ",\"data\":{\"diagnostic_id\":" + jstr(diagnostic_id) + ",\"candidate_id\":" + jstr(c.id) + "}}"
+    out + ",\"data\":" + lb + "\"diagnostic_id\":" + jstr(diagnostic_id) + ",\"candidate_id\":" + jstr(c.id) + rb + rb
 
+# reason: serializes ranked LSP codeAction JSON array for a diagnostic_id
+@allow(primitive_api)
 pub fn lsp_diag_code_actions_json(index: DiagnosticActionIndex, diagnostic_id: text) -> text:
     var rows: [text] = []
     var preferred_taken = false
@@ -41,40 +73,54 @@ pub fn lsp_diag_code_actions_json(index: DiagnosticActionIndex, diagnostic_id: t
     "[" + rows.join(",") + "]"
 
 fn position_json(line: i64, character: i64) -> text:
-    "{\"line\":" + line.to_text() + ",\"character\":" + character.to_text() + "}"
+    val lb = _lbrace()
+    val rb = _rbrace()
+    lb + "\"line\":" + line.to_text() + ",\"character\":" + character.to_text() + rb
 
 # documentChanges for an Applied result; "" when any range is unmappable.
-fn workspace_edit_json(tx: EditTransaction, result: ApplyResult, c: FixCandidate) -> text:
+fn workspace_edit_json_with_disk(tx: EditTransaction, result: ApplyResult, c: FixCandidate, disk_files: [text]) -> text:
+    val lb = _lbrace()
+    val rb = _rbrace()
     var changes: [text] = []
     for f in result.changed_files:
         val before = tx.text_of(f)
         val table = LineStartTable.build(before)
-        var version = 0
-        match tx.document(f):
-            Some(d): version = d.version
-            None: pass
+        var version_str = "0"
+        if disk_files.contains(f):
+            version_str = "null"
+        else:
+            match tx.document(f):
+                Some(d): version_str = d.version.to_text()
+                None: pass
         var edits: [text] = []
         for r in c.replacements:
             if r.file == f:
                 match span_to_range(before, table, r.span.start, r.span.end):
                     Some(rg):
-                        val range = "{\"start\":" + position_json(rg.start.line, rg.start.character)
-                            + ",\"end\":" + position_json(rg.end.line, rg.end.character) + "}"
-                        edits.push("{\"range\":" + range + ",\"newText\":" + jstr(r.new_text) + "}")
+                        val range = lb + "\"start\":" + position_json(rg.start.line, rg.start.character)
+                            + ",\"end\":" + position_json(rg.end.line, rg.end.character) + rb
+                        edits.push(lb + "\"range\":" + range + ",\"newText\":" + jstr(r.new_text) + rb)
                     None:
                         return ""
-        changes.push("{\"textDocument\":{\"uri\":" + jstr("file://" + f) + ",\"version\":" + version.to_text()
-            + "},\"edits\":[" + edits.join(",") + "]}")
-    "{\"documentChanges\":[" + changes.join(",") + "]}"
+        changes.push(lb + "\"textDocument\":" + lb + "\"uri\":" + jstr(_file_uri_for_path(f)) + ",\"version\":" + version_str
+            + rb + ",\"edits\":[" + edits.join(",") + "]" + rb)
+    lb + "\"documentChanges\":[" + changes.join(",") + "]" + rb
 
+fn workspace_edit_json(tx: EditTransaction, result: ApplyResult, c: FixCandidate) -> text:
+    workspace_edit_json_with_disk(tx, result, c, [])
+
+# reason: applies FixCandidate through EditTransaction and serializes LSP WorkspaceEdit or refusal JSON
+@allow(primitive_api)
 pub fn lsp_diag_apply_json(tx: EditTransaction, c: FixCandidate) -> text:
+    val lb = _lbrace()
+    val rb = _rbrace()
     val result = tx.apply(c)
     if not result.applied():
-        return "{\"status\":" + jstr(result.status.name()) + ",\"reason\":" + jstr(result.reason) + "}"
+        return lb + "\"status\":" + jstr(result.status.name()) + ",\"reason\":" + jstr(result.reason) + rb
     val edit = workspace_edit_json(tx, result, c)
     if edit == "":
-        return "{\"status\":\"unmappable_range\",\"reason\":\"edit span is not on a UTF-8 scalar boundary\"}"
-    "{\"status\":\"applied\",\"edit\":" + edit + "}"
+        return lb + "\"status\":\"unmappable_range\",\"reason\":\"edit span is not on a UTF-8 scalar boundary\"" + rb
+    lb + "\"status\":\"applied\",\"edit\":" + edit + rb
 
 fn starts_on_line(c: FixCandidate, file: text, body: text, table: LineStartTable, line: i64) -> bool:
     for r in c.replacements:
@@ -85,32 +131,128 @@ fn starts_on_line(c: FixCandidate, file: text, body: text, table: LineStartTable
                 None: pass
     false
 
-# Live codeAction list for one document line, built from the published
-# batch's candidates and the editor snapshot. Only candidates the transaction
-# actually applies are offered, each with its versioned edit. None when the
-# store has nothing applicable for this line.
-pub fn lsp_diag_live_actions_json(entry: LspDiagActionEntry, file: text, body: text, line: i64) -> text?:
+fn file_parent(file: text) -> text:
+    val norm = file.replace("\\", "/")
+    val slash = norm.last_index_of("/")
+    if slash <= 0:
+        if norm.starts_with("/"): return "/"
+        return norm
+    norm.substring(0, slash)
+
+fn common_workspace_root(files: [text]) -> text:
+    if files.len() == 0:
+        return "/"
+    var common = file_parent(files[0])
+    var i = 1
+    while i < files.len():
+        val next_dir = file_parent(files[i])
+        while common != "/" and common != "" and not (next_dir == common or next_dir.starts_with(common + "/")):
+            val slash = common.last_index_of("/")
+            if slash <= 0:
+                common = if common.starts_with("/"): "/" else: common
+                break
+            common = common.substring(0, slash)
+        i = i + 1
+    common
+
+fn _collect_entry_candidate_files(entry: LspDiagActionEntry, primary_file: text) -> [text]:
+    var files: [text] = [primary_file]
+    for rev in entry.file_revisions:
+        if not files.contains(rev.file):
+            files.push(rev.file)
+    for id in entry.ids:
+        for c in entry.index.candidates_for(id):
+            for f in c.affected_files():
+                if not files.contains(f):
+                    files.push(f)
+            for p in c.preconditions:
+                if not files.contains(p.file):
+                    files.push(p.file)
+    files
+
+# reason: evaluates live codeAction candidates for client_id with multi-file revision preconditions
+@allow(primitive_api)
+pub fn lsp_diag_live_actions_outcome_for_client_v1(
+    client_id: text,
+    entry: LspDiagActionEntry,
+    file: text,
+    current_version: i64,
+    body: text,
+    line: i64
+) -> LspLiveActionOutcomeV1:
+    if not entry.valid or entry.status != "complete":
+        return LspLiveActionOutcomeV1(
+            status: "refused",
+            actions_json: "",
+            refusal_reason: "codeAction refuses incomplete or failed diagnostic batch (" + entry.status + ")"
+        )
+    val lb = _lbrace()
+    val rb = _rbrace()
     val table = LineStartTable.build(body)
-    val tx = EditTransaction.new(file_parent(file), entry.source_hash)
-        .with_document(DocumentSnapshot.new(file, entry.version, entry.source_hash, body))
+    val all_files = _collect_entry_candidate_files(entry, file)
+    val root = common_workspace_root(all_files)
+    var disk_files: [text] = []
+    var tx = EditTransaction.new(root, entry.source_hash)
+    if entry.file_revisions.len() > 0:
+        for rev in entry.file_revisions:
+            tx = tx.expect_document_revision(rev.file, rev.version, rev.source_hash)
+        tx = tx.with_document(DocumentSnapshot.new(file, current_version, sha256_text(body), body))
+        for sec in all_files:
+            if sec != file:
+                match lsp_document_snapshot_by_path_for_client_v1(client_id, sec):
+                    Some(sec_snap):
+                        tx = tx.with_document(DocumentSnapshot.new(sec, sec_snap.version, sha256_text(sec_snap.content), sec_snap.content))
+                    None:
+                        if not lsp_document_has_unsynchronized_path_for_client_v1(client_id, sec):
+                            match lsp_read_analyzed_source(sec):
+                                Ok(sec_disk):
+                                    tx = tx.with_document(DocumentSnapshot.new(sec, -1, sha256_text(sec_disk), sec_disk))
+                                    disk_files.push(sec)
+                                Err(_):
+                                    pass
+    else:
+        tx = tx.with_document(DocumentSnapshot.new(file, current_version, entry.source_hash, body))
+        for sec in all_files:
+            if sec != file:
+                match lsp_document_snapshot_by_path_for_client_v1(client_id, sec):
+                    Some(sec_snap):
+                        tx = tx.with_document(DocumentSnapshot.new(sec, sec_snap.version, sha256_text(sec_snap.content), sec_snap.content))
+                    None:
+                        pass
     var rows: [text] = []
     var preferred_taken = false
+    var saw_line_candidate = false
+    var last_refusal = ""
     for id in entry.ids:
         for c in ranked_candidates_for(entry.index, id):
-            if not c.is_enabled() or not starts_on_line(c, file, body, table, line): continue
+            if not c.is_enabled() or not starts_on_line(c, file, body, table, line):
+                continue
+            saw_line_candidate = true
             val result = tx.apply(c)
-            if not result.applied(): continue
-            val edit = workspace_edit_json(tx, result, c)
-            if edit == "": continue
-            var row = "{\"title\":" + jstr(c.title) + ",\"kind\":\"quickfix\""
+            if not result.applied():
+                last_refusal = result.reason
+                continue
+            val edit = workspace_edit_json_with_disk(tx, result, c, disk_files)
+            if edit == "":
+                last_refusal = "edit span is not on a UTF-8 scalar boundary"
+                continue
+            var row = lb + "\"title\":" + jstr(c.title) + ",\"kind\":\"quickfix\""
             if not preferred_taken:
                 preferred_taken = true
                 row = row + ",\"isPreferred\":true"
-            rows.push(row + ",\"edit\":" + edit + ",\"data\":{\"diagnostic_id\":" + jstr(id) + ",\"candidate_id\":" + jstr(c.id) + "}}")
-    if rows.len() == 0: return None
-    Some("[" + rows.join(",") + "]")
+            rows.push(row + ",\"edit\":" + edit + ",\"data\":" + lb + "\"diagnostic_id\":" + jstr(id) + ",\"candidate_id\":" + jstr(c.id) + rb + rb)
+    if rows.len() > 0:
+        return LspLiveActionOutcomeV1(status: "actions", actions_json: "[" + rows.join(",") + "]", refusal_reason: "")
+    if saw_line_candidate and last_refusal != "":
+        return LspLiveActionOutcomeV1(status: "refused", actions_json: "", refusal_reason: last_refusal)
+    LspLiveActionOutcomeV1(status: "no_match", actions_json: "", refusal_reason: "")
 
-fn file_parent(file: text) -> text:
-    val slash = file.last_index_of("/")
-    if slash <= 0: return "/"
-    file.substring(0, slash)
+# Live codeAction list for one document line, built from the published
+# batch's candidates and the editor snapshot.
+# reason: builds live codeAction JSON list for a document line when applicable
+@allow(primitive_api)
+pub fn lsp_diag_live_actions_json(entry: LspDiagActionEntry, file: text, body: text, line: i64) -> text?:
+    val outcome = lsp_diag_live_actions_outcome_for_client_v1(entry.client_id, entry, file, entry.version, body, line)
+    if outcome.status == "actions":
+        return Some(outcome.actions_json)
+    None
