@@ -41,7 +41,11 @@ use compiler.backend.linker.elf_parser.{
     elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, SHT_NOBITS
 }
-use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, EM_RISCV}
+use compiler.backend.linker.riscv_reloc.{riscv_is_pcrel_hi, riscv_is_pcrel_lo, riscv_hi_key,
+    riscv_pcrel_lo_value, riscv_pcrel_lo_as_absolute}
+use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags}
+use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes,
     reloc_patch_width, reloc_patch_range_valid,
@@ -123,8 +127,10 @@ fn _bl_machine(target: RelocArch) -> Result<i64, text>:
             Ok(EM_X86_64)
         case AArch64:
             Ok(EM_AARCH64)
+        case Riscv64:
+            Ok(EM_RISCV)
         case _:
-            Err("elf_boot_link: supports only x86_64 and aarch64 targets")
+            Err("elf_boot_link: supports only x86_64, aarch64 and riscv64 targets")
 
 fn _bl_page(target: RelocArch) -> i64:
     # ld.lld's default max-page-size: 64 KiB on aarch64, 4 KiB on x86_64.
@@ -137,6 +143,13 @@ fn _bl_page(target: RelocArch) -> i64:
 fn _bl_is_a64(target: RelocArch) -> bool:
     match target:
         case AArch64:
+            true
+        case _:
+            false
+
+fn _bl_is_rv64(target: RelocArch) -> bool:
+    match target:
+        case Riscv64:
             true
         case _:
             false
@@ -997,6 +1010,14 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         i = i + 1
 
     parsed = elf_relax_tls(parsed, target)?
+    val rv = _bl_is_rv64(target)
+    val x86 = not a64 and not rv
+    var riscv_flags: i64 = 0
+    if rv:
+        # Relaxation off (ld.lld --no-relax): R_RISCV_RELAX is ignored and
+        # R_RISCV_ALIGN padding is resolved without shrinking code.
+        riscv_flags = elf_riscv_flags(parsed)?
+        parsed = elf_riscv_align_objects(parsed)?
     val res = sym_resolve_objects(parsed)
     if res.errors.len() > 0:
         return Err(res.errors.join("; "))
@@ -1039,8 +1060,8 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                 val rsym = obj.symbols[elf_reloc_sym(r)]
                 if rsym.name == "_GLOBAL_OFFSET_TABLE_":
                     need_got_base = true
-                if elf_reloc_type(r) == R_X86_64_GOTOFF64 or
-                        elf_reloc_type(r) == R_X86_64_PLTOFF64:
+                if x86 and (elf_reloc_type(r) == R_X86_64_GOTOFF64 or
+                        elf_reloc_type(r) == R_X86_64_PLTOFF64):
                     need_got_base = true
                 if rc == RC_GOT or rc == RC_GOT_RELAX or rc == RC_TLS_IE:
                     val sym = rsym
@@ -1181,6 +1202,14 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     # --- relocate ---
     var undef: [text] = []
+    # RISC-V PCREL_LO12 pairing: HI20 sites record S + A - P by riscv_hi_key;
+    # the LO12 relocations are applied after every HI20 has been evaluated.
+    var rv_hi: {text: i64} = {}
+    var lo_out: [i64] = []
+    var lo_place: [i64] = []
+    var lo_type: [i64] = []
+    var lo_key: [text] = []
+    var lo_what: [text] = []
     oi = 0
     while oi < ins.objects.len():
         val obj = ins.objects[oi]
@@ -1240,13 +1269,26 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                     s = outs[lay.plan_to_out[sk]].vma + ins.off_of[ins.base[oi] + sym.st_shndx] + sym.st_value
             if undef.len() > 0:
                 continue
+            if rv and riscv_is_pcrel_lo(rtype):
+                if r.r_addend != 0:
+                    return Err("object {names[oi]}: RISC-V PCREL_LO12 addend must be zero")
+                if sym.st_shndx == SHN_UNDEF or sym.st_shndx >= BOOT_SHN_LORESERVE:
+                    return Err("object {names[oi]}: RISC-V PCREL_LO12 label '{sym.name}' is not a section label")
+                lo_out = lo_out.push(ok)
+                lo_place = lo_place.push(place)
+                lo_type = lo_type.push(rtype)
+                lo_key = lo_key.push(riscv_hi_key(oi, sym.st_shndx, sym.st_value))
+                lo_what = lo_what.push("object {names[oi]}: RISC-V PCREL_LO12 at {p} label '{sym.name}'")
+                continue
+            if rv and (rc == RC_TLS_LE or rc == RC_TLS_IE or rc == RC_TLS_LD or rc == RC_TLS_MOD):
+                return Err("object {names[oi]}: RISC-V TLS relocation type {rtype} is unsupported in boot images")
             var a = r.r_addend
             if rc == RC_GOT or rc == RC_GOT_RELAX:
                 var key = "{oi}#{sidx}"
                 if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                     key = sym.name
                 s = got_vma + got_idx[key] * 8
-                if not a64 and (rtype == R_X86_64_GOT32 or
+                if x86 and (rtype == R_X86_64_GOT32 or
                         rtype == R_X86_64_GOT64 or
                         rtype == R_X86_64_GOTPLT64): s = s - got_vma
                 if a64:
@@ -1291,8 +1333,13 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                     rtype = 1   # R_X86_64_64 applies Z + A.
                 else:
                     rtype = 10  # R_X86_64_32 applies Z + A with width checking.
-            if not a64 and (rtype == R_X86_64_GOTOFF64 or
+            if x86 and (rtype == R_X86_64_GOTOFF64 or
                     rtype == R_X86_64_PLTOFF64): p = got_vma
+            if rv and riscv_is_pcrel_hi(rtype):
+                val hk = riscv_hi_key(oi, t, r.r_offset)
+                if rv_hi.has(hk):
+                    return Err("object {names[oi]}: RISC-V duplicate HI20 relocation at {p}")
+                rv_hi[hk] = riscv_pcrel_lo_value(s, a, p)?
             val applied = reloc_apply(target, contents[ok], place, rtype, s, a, p)
             if not applied.success:
                 return Err("object {names[oi]}: relocation type {rtype} against '{sym.name}' at {p}: {applied.error}")
@@ -1301,6 +1348,17 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     if undef.len() > 0:
         return Err("undefined symbol: " + undef.join("; "))
+    var li: i64 = 0
+    while li < lo_out.len():
+        if not rv_hi.has(lo_key[li]):
+            return Err("{lo_what[li]} has no matching HI20")
+        val lt = riscv_pcrel_lo_as_absolute(lo_type[li])
+        val lv = rv_hi[lo_key[li]]
+        val lo_applied = reloc_apply(target, contents[lo_out[li]], lo_place[li], lt, lv, 0, 0)
+        if not lo_applied.success:
+            return Err("{lo_what[li]}: {lo_applied.error}")
+        contents[lo_out[li]] = reloc_patch_bytes(target, contents[lo_out[li]], lo_place[li], lt, lv, 0, 0)
+        li = li + 1
 
     # --- .got contents (static: the symbol's link-time address) ---
     if got_out >= 0:
@@ -1442,7 +1500,13 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     val xplan = ElfExecPlan(secs: secs, offsets: offs, vaddrs: vaddrs, segments: sg.segs,
         file_end: final_end)
-    val bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
+    var bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
+    if rv:
+        # e_flags: the merged RVC / float-ABI flags of the inputs, as ld.lld writes.
+        var fi: i64 = 0
+        while fi < 4:
+            bytes[48 + fi] = (riscv_flags >> (fi * 8)) & 0xff
+            fi = fi + 1
 
     var sec_names: [text] = []
     var sec_vmas: [i64] = []

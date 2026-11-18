@@ -1,0 +1,106 @@
+# elf_boot_link — riscv64 bare-metal link (relaxation off)
+#
+# Fixtures: test/fixtures/linker/elf/riscv_boot/{start_rv64,lib_rv64}.{S,o},
+# assembled with clang --target=riscv64-unknown-elf -march=rv64imac -mabi=lp64
+# -mrelax (so R_RISCV_RELAX hints are present). They carry CALL_PLT,
+# PCREL_HI20 + PCREL_LO12_I/S pairs, HI20/LO12_I, JAL, RVC_BRANCH and
+# R_RISCV_64. Every expected byte below is `ld.lld --no-relax -T RV_SCRIPT`
+# (LLD 18) on the same two objects. Before this lane elf_boot_link rejected
+# riscv64 outright ("supports only x86_64 and aarch64 targets").
+#
+# @cover src/compiler/70.backend/linker/elf/elf_boot_link.spl
+# @cover src/compiler/70.backend/linker/riscv_reloc.spl
+
+use compiler.backend.linker.elf.elf_boot_link.{ElfBootImage, elf_boot_link, elf_boot_link_image}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{BootLayoutPlan, boot_layout_from_text}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val RV_FIX: text = "test/fixtures/linker/elf/riscv_boot"
+
+val RV_SCRIPT: text = """ENTRY(_start)
+SECTIONS { . = 0x200000; .text : { *(.text.boot) *(.text*) } . = ALIGN(16); .rodata : { *(.rodata*) } . = ALIGN(16); .data : { *(.data*) } }
+"""
+
+val LLD_RV_TEXT: [i64] = [151, 0, 0, 0, 231, 128, 128, 3, 23, 5, 0, 0, 131, 53, 133, 4, 23, 6, 0, 0, 35, 48, 182, 4, 183, 6, 32, 0, 147, 134, 6, 4, 153, 193, 111, 240, 255, 253, 115, 0, 80, 16, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 19, 0, 0, 0, 5, 5, 130, 128]
+val LLD_RV_DATA: [i64] = [7, 0, 0, 0, 0, 0, 0, 0, 56, 0, 32, 0, 0, 0, 0, 0]
+
+fn rv_load(name: text) -> [i64]:
+    val raw = file_read_bytes("{RV_FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rv_objs() -> [[i64]]:
+    [rv_load("start_rv64.o"), rv_load("lib_rv64.o")]
+
+fn rv_plan(script: text) -> BootLayoutPlan:
+    boot_layout_from_text(script).unwrap()
+
+fn rv_u16(b: [i64], off: i64) -> i64:
+    b[off] | (b[off + 1] << 8)
+
+fn rv_u32(b: [i64], off: i64) -> i64:
+    rv_u16(b, off) | (rv_u16(b, off + 2) << 16)
+
+fn rv_u64(b: [i64], off: i64) -> i64:
+    rv_u32(b, off) | (rv_u32(b, off + 4) << 32)
+
+fn rv_img() -> ElfBootImage:
+    elf_boot_link_image(rv_objs(), rv_plan(RV_SCRIPT), RelocArch.Riscv64).unwrap()
+
+fn rv_sec(im: ElfBootImage, name: text, n: i64) -> [i64]:
+    var i: i64 = 0
+    while i < im.sec_names.len():
+        if im.sec_names[i] == name:
+            val shoff = rv_u64(im.bytes, 40)
+            val off = rv_u64(im.bytes, shoff + (i + 1) * 64 + 24)
+            var out: [i64] = []
+            var k: i64 = 0
+            while k < n:
+                out = out.push(im.bytes[off + k])
+                k = k + 1
+            return out
+        i = i + 1
+    []
+
+fn rv_vma(im: ElfBootImage, name: text) -> i64:
+    var i: i64 = 0
+    while i < im.sec_names.len():
+        if im.sec_names[i] == name:
+            return im.sec_vmas[i]
+        i = i + 1
+    -1
+
+describe "elf_boot_link - riscv64 (relaxation off)":
+    it "links riscv64 objects with EM_RISCV, the merged RVC e_flags and the entry":
+        val im = rv_img()
+        expect(rv_u16(im.bytes, 18)).to_equal(243)
+        expect(rv_u32(im.bytes, 48)).to_equal(1)
+        expect(im.entry).to_equal(0x200000)
+
+    it "places sections at lld --no-relax addresses":
+        val im = rv_img()
+        expect(rv_vma(im, ".text")).to_equal(0x200000)
+        expect(rv_vma(im, ".rodata")).to_equal(0x200040)
+        expect(rv_vma(im, ".data")).to_equal(0x200050)
+
+    it "CALL, PCREL_HI20/LO12_I/LO12_S, HI20/LO12, JAL and RVC_BRANCH bytes equal ld.lld --no-relax":
+        expect(rv_sec(rv_img(), ".text", LLD_RV_TEXT.len())).to_equal(LLD_RV_TEXT)
+
+    it "R_RISCV_64 data equals ld.lld":
+        expect(rv_sec(rv_img(), ".data", LLD_RV_DATA.len())).to_equal(LLD_RV_DATA)
+
+describe "elf_boot_link - riscv64 fail-closed":
+    it "an absolute HI20 out of the signed 32-bit range is an Err, as in ld.lld":
+        val r = elf_boot_link(rv_objs(), rv_plan(RV_SCRIPT.replace("0x200000", "0x80200000")), RelocArch.Riscv64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("20-bit")).to_equal(true)
+
+    it "a riscv64 object is rejected for an aarch64 link":
+        val r = elf_boot_link(rv_objs(), rv_plan(RV_SCRIPT), RelocArch.AArch64)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("e_machine")).to_equal(true)
