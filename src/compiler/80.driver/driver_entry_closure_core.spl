@@ -1131,6 +1131,28 @@ fn _driver_entry_sibling_path(line: text) -> text:
             return "." + parts[0]
     ""
 
+fn _driver_entry_sibling_line_needs_materialization(content: text, start: i64, end: i64,
+        in_doc: bool, has_triple_quote: bool, generated_owner: text) -> bool:
+    # Ordinary declarations cannot affect the sibling walk. Keep them on the
+    # allocation-free path used by the import scanner above; only stateful
+    # generated-owner lines, docstrings, and candidate declarations need text.
+    if in_doc or has_triple_quote or generated_owner != "":
+        return true
+    var first = start
+    while first < end:
+        val code = content.byte_at(first)
+        if code == 32 or code == 9 or code == 13:
+            first = first + 1
+            continue
+        break
+    if first >= end:
+        return false
+    if content.byte_at(first) > 127:
+        return true
+    (_driver_text_range_starts_with(content, first, end, "mod ") or
+        _driver_text_range_starts_with(content, first, end, "export ") or
+        _driver_text_range_starts_with(content, first, end, "# Re-exported from "))
+
 pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
     """Relative sibling paths from top-level `mod` and `export member.*`
     declarations, and from generated facade export-origin comments. A frozen
@@ -1143,20 +1165,29 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
     var line_start: i64 = 0
     # Char-policy runtimes only: incremental byte->char conversion cursor for
     # line slicing (see _driver_substring_is_byte_based_v1).
+    var next_triple_quote = _driver_triple_quote_byte_index_v1(content, 0)
     var conv_byte: i64 = 0
     var conv_char: i64 = 0
     while line_start < content.byte_len():
-        val line_end = _driver_line_end(content, line_start)
+        val current_start = line_start
+        val line_end = _driver_line_end(content, current_start)
+        val has_triple_quote = next_triple_quote >= current_start and next_triple_quote < line_end
+        val materialize_line = _driver_entry_sibling_line_needs_materialization(
+            content, current_start, line_end, in_doc, has_triple_quote, generated_owner)
+        line_start = line_end + 1
+        if has_triple_quote:
+            next_triple_quote = _driver_triple_quote_byte_index_v1(content, line_start)
+        if not materialize_line:
+            continue
         var raw_line: text = ""
         if _driver_substring_is_byte_based_v1():
-            raw_line = content.substring(line_start, line_end)
+            raw_line = content.substring(current_start, line_end)
         else:
-            conv_char = _driver_byte_to_char_advance_v1(content, conv_byte, conv_char, line_start)
+            conv_char = _driver_byte_to_char_advance_v1(content, conv_byte, conv_char, current_start)
             val char_start = conv_char
-            conv_char = _driver_byte_to_char_advance_v1(content, line_start, conv_char, line_end)
+            conv_char = _driver_byte_to_char_advance_v1(content, current_start, conv_char, line_end)
             conv_byte = line_end
             raw_line = content.substring(char_start, conv_char)
-        line_start = line_end + 1
         var scan_line = raw_line
         if not in_doc:
             val comment_at = _driver_text_index_of(scan_line, "#")
