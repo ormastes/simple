@@ -646,6 +646,23 @@ impl MirLowering:
                 case _: ()
         declared
 
+    me unwrap_concrete_fallback_hir_type_v1(receiver: HirExpr, local: LocalId) -> HirType?:
+        """Concrete non-Option HIR type for `x!` / `x.unwrap()` on a flat-nullable
+        local (such as `val m = d[k]; m!`), where the local MIR type is the erased
+        `i64` handle word. Prevents `decode_runtime_value` from shifting a record
+        pointer through `rt_value_as_int_wide`."""
+        var candidate = self.find_local_hir_type(local.id)
+        if candidate == None:
+            candidate = self.enum_match_expr_type(receiver)
+        if val found = candidate:
+            if found != None and not self.hir_type_mentions_type_param(found, self.symbols):
+                match found.kind:
+                    case HirTypeKind.Optional(_) | HirTypeKind.Result(_, _) | HirTypeKind.Any | HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Unit | HirTypeKind.Never:
+                        return None
+                    case _:
+                        return Some(found)
+        None
+
     me unresolved_receiver_is_text_v1(receiver: HirExpr, local: LocalId, declared_text_receiver: bool) -> bool:
         """Positive text proof for an Unresolved builtin text method: the
         declared receiver type, the lowered local's text flag, or its
@@ -998,7 +1015,11 @@ impl MirLowering:
                         return local
                     if val record_owner = self.symbols.get_symbol_raw(record_symbol.id):
                         if record_owner.kind == SymbolKind.Struct or record_owner.kind == SymbolKind.Class:
-                            val owner_key = self.declared_struct_layout_key(self.composite_layout_key(record_owner))
+                            var owner_key = self.declared_struct_layout_key(self.composite_layout_key(record_owner))
+                            if record_owner.kind == SymbolKind.Class:
+                                val class_key = mir_class_identity_raw(self.symbols, record_symbol.id)
+                                if class_key != "" and self.struct_field_order.has(class_key):
+                                    owner_key = class_key
                             if self.struct_field_order.has(owner_key):
                                 layout_key = owner_key
                 case _: ()
@@ -1059,6 +1080,35 @@ impl MirLowering:
             match declared.kind:
                 case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
                     return self.option_record_argument_payload_v1(value, local, element)
+                case _: ()
+        local
+
+    me option_dict_key_payload_v1(dict_expr: HirExpr, key_expr: HirExpr, local: LocalId) -> LocalId:
+        """Key of type `K?` supplied to a dictionary whose declared key type is
+        non-optional `K` (`Dict<text, V>`, `Dict<SymbolId, V>`): unwrap the
+        canonical Option box so `rt_dict_set`/`rt_dict_get` key on `K`, not the
+        `Option::Some` enum handle."""
+        var dict_key_hir: HirType? = None
+        if dict_expr.has_type_ == true and dict_expr.type_ != None:
+            dict_key_hir = self.runtime_dict_key_hir_type(dict_expr.type_)
+        if dict_key_hir == None:
+            if val declared_dict = self.receiver_declared_type(dict_expr):
+                dict_key_hir = self.runtime_dict_key_hir_type(declared_dict)
+        if val expected_key = dict_key_hir:
+            match expected_key.kind:
+                case HirTypeKind.Named(_, _):
+                    return self.option_record_argument_payload_v1(key_expr, local, expected_key)
+                case HirTypeKind.Str:
+                    if val inner = self.option_inner_hir_type_for_local(key_expr, local):
+                        match inner.kind:
+                            case HirTypeKind.Str:
+                                val payload_word = self.option_payload_or_self(local)
+                                var str_key_b = self.builder
+                                val str_key_local = str_key_b.emit_bitcast(mir_operand_copy(payload_word), self.bootstrap_text_type())
+                                self.builder = str_key_b
+                                self.remember_local_hir_type(str_key_local.id, inner, 0, 0)
+                                return str_key_local
+                            case _: ()
                 case _: ()
         local
 
@@ -1443,7 +1493,9 @@ impl MirLowering:
             var unwrap_result_type = MirType.i64()
             var unwrap_is_text = false
             var unwrap_is_bool = false
-            val inner_type_uw = self.option_inner_hir_type_for_local(receiver, receiver_local)
+            var inner_type_uw = self.option_inner_hir_type_for_local(receiver, receiver_local)
+            if inner_type_uw == None:
+                inner_type_uw = self.unwrap_concrete_fallback_hir_type_v1(receiver, receiver_local)
             if inner_type_uw != None:
                 val found_inner_uw = inner_type_uw ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
                 match found_inner_uw.kind:
@@ -6906,8 +6958,9 @@ impl MirLowering:
         rt_string_new(ptr, rt_strlen(ptr)); pass everything else (already-tagged
         string variables, int keys) through unchanged.
         """
-        val key_local = self.lower_expr(key_expr)
+        var key_local = self.lower_expr(key_expr)
         if val dict_expr = receiver:
+            key_local = self.option_dict_key_payload_v1(dict_expr, key_expr, key_local)
             self.refuse_struct_key_on_erased_dict_v1(dict_expr, key_local)
         self.box_dict_key_v1(key_local)
 
