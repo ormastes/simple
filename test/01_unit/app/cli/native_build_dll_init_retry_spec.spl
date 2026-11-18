@@ -1,0 +1,103 @@
+# Unit spec for 0xC0000142 (STATUS_DLL_INIT_FAILED) detection, bounded retry, and recovery guidance.
+# @cover src/app/cli/native_build_exit_status.spl 90%
+# @cover src/app/cli/native_build_main.spl 50%
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use app.cli.native_build_exit_status.{native_build_is_dll_init_failed_v1,
+    native_build_windows_status_label, native_build_posix_signal,
+    native_build_exit_cause_field_v1}
+use app.cli.native_build_main.{native_build_should_retry_dll_init_v1,
+    native_build_dll_init_retry_delay_ms_v1, native_build_dll_init_recovery_lines_v1,
+    native_build_worker_failure_lines_v1, native_build_worker_failure_lines_for_output_v1,
+    native_build_normalize_exit_code}
+
+fn join_lines(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line
+    out
+
+describe "0xC0000142 STATUS_DLL_INIT_FAILED exit status classification":
+    it "recognizes both signed and unsigned 0xC0000142 exit codes":
+        expect(native_build_is_dll_init_failed_v1(-1073741502)).to_equal(true)
+        expect(native_build_is_dll_init_failed_v1(3221225794)).to_equal(true)
+        expect(native_build_is_dll_init_failed_v1(native_build_normalize_exit_code(3221225794))).to_equal(true)
+
+    it "does not classify unrelated exit codes as DLL init failures":
+        for code in [0, 1, -1, -139, -1073741819, -1073741510, -1073740940]:
+            expect(native_build_is_dll_init_failed_v1(code)).to_equal(false)
+
+    it "formats Windows status label and exit cause field for both 0xC0000142 forms":
+        expect(native_build_windows_status_label(-1073741502)).to_equal("0xC0000142 (STATUS_DLL_INIT_FAILED)")
+        expect(native_build_windows_status_label(3221225794)).to_equal("0xC0000142 (STATUS_DLL_INIT_FAILED)")
+        expect(native_build_posix_signal(-1073741502)).to_equal(0)
+        expect(native_build_posix_signal(3221225794)).to_equal(0)
+        expect(native_build_exit_cause_field_v1(-1073741502)).to_equal(" ntstatus=0xC0000142 (STATUS_DLL_INIT_FAILED)")
+        expect(native_build_exit_cause_field_v1(3221225794)).to_equal(" ntstatus=0xC0000142 (STATUS_DLL_INIT_FAILED)")
+
+describe "native_build_should_retry_dll_init_v1":
+    it "allows up to 2 retries for non-shard workers with missing output on 0xC0000142":
+        expect(native_build_should_retry_dll_init_v1(-1073741502, false, false, 0, 2)).to_equal(true)
+        expect(native_build_should_retry_dll_init_v1(3221225794, false, false, 0, 2)).to_equal(true)
+        expect(native_build_should_retry_dll_init_v1(-1073741502, false, false, 1, 2)).to_equal(true)
+        expect(native_build_should_retry_dll_init_v1(3221225794, false, false, 1, 2)).to_equal(true)
+
+    it "stops once the retry budget is exhausted or invalid":
+        expect(native_build_should_retry_dll_init_v1(-1073741502, false, false, 2, 2)).to_equal(false)
+        expect(native_build_should_retry_dll_init_v1(-1073741502, false, false, 3, 2)).to_equal(false)
+        expect(native_build_should_retry_dll_init_v1(-1073741502, false, false, 0, 0)).to_equal(false)
+        expect(native_build_should_retry_dll_init_v1(-1073741502, false, false, -1, 2)).to_equal(false)
+
+    it "never retries shard children or runs whose output artifact succeeded":
+        expect(native_build_should_retry_dll_init_v1(-1073741502, true, false, 0, 2)).to_equal(false)
+        expect(native_build_should_retry_dll_init_v1(-1073741502, false, true, 0, 2)).to_equal(false)
+
+    it "never retries non-DLL-init failure codes":
+        for code in [0, 1, -1, -139, -1073741819]:
+            expect(native_build_should_retry_dll_init_v1(code, false, false, 0, 2)).to_equal(false)
+
+    it "computes 1000ms and 2000ms retry backoff delays":
+        expect(native_build_dll_init_retry_delay_ms_v1(0)).to_equal(1000)
+        expect(native_build_dll_init_retry_delay_ms_v1(1)).to_equal(2000)
+        expect(native_build_dll_init_retry_delay_ms_v1(-1)).to_equal(1000)
+        expect(native_build_dll_init_retry_delay_ms_v1(2)).to_equal(3000)
+
+    it "guards ice_boundary_begin_run with ice_owned on DLL init retry":
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src).to_contain("if ice_owned:\n            ice_boundary_begin_run()")
+
+describe "0xC0000142 manual link recovery guidance":
+    it "mentions link-command.txt, aot-*.o, and p3-manual-link-stage3.shs for explicit output path":
+        val msg = join_lines(native_build_dll_init_recovery_lines_v1("build/stage3/simple.exe"))
+        expect(msg).to_contain("0xC0000142 (STATUS_DLL_INIT_FAILED)")
+        expect(msg).to_contain("build/stage3/simple.exe.link-command.txt")
+        expect(msg).to_contain("scripts/bootstrap/p3-manual-link-stage3.shs")
+        expect(msg).to_contain("aot-*.o")
+
+    it "preserves native_build_worker_failure_lines_v1 signature and emits recovery lines on 0xC0000142":
+        val signed_msg = join_lines(native_build_worker_failure_lines_v1(-1073741502, "", "bin/simple.exe", 60))
+        expect(signed_msg).to_contain("0xC0000142 (STATUS_DLL_INIT_FAILED)")
+        expect(signed_msg).to_contain(".link-command.txt")
+        expect(signed_msg).to_contain("scripts/bootstrap/p3-manual-link-stage3.shs")
+        expect(signed_msg).to_contain("aot-*.o")
+
+        val unsigned_msg = join_lines(native_build_worker_failure_lines_v1(3221225794, "", "bin/simple.exe", 60))
+        expect(unsigned_msg).to_contain("0xC0000142 (STATUS_DLL_INIT_FAILED)")
+        expect(unsigned_msg).to_contain("scripts/bootstrap/p3-manual-link-stage3.shs")
+
+    it "formats the concrete output link-command path via native_build_worker_failure_lines_for_output_v1":
+        val msg = join_lines(native_build_worker_failure_lines_for_output_v1(-1073741502, "", "bin/simple.exe", 60, "build/out/app.exe"))
+        expect(msg).to_contain("0xC0000142 (STATUS_DLL_INIT_FAILED)")
+        expect(msg).to_contain("build/out/app.exe.link-command.txt")
+        expect(msg).to_contain("scripts/bootstrap/p3-manual-link-stage3.shs")
+
+    it "does not emit DLL init recovery lines for other Windows exceptions":
+        val msg = join_lines(native_build_worker_failure_lines_v1(-1073741819, "", "bin/simple.exe", 60))
+        expect(msg).to_contain("0xC0000005 (access violation)")
+        expect(msg.contains("p3-manual-link-stage3.shs")).to_equal(false)
+        expect(msg.contains(".link-command.txt")).to_equal(false)
+
+    it "falls back to <output>.link-command.txt when output_path is empty":
+        val msg = join_lines(native_build_dll_init_recovery_lines_v1(""))
+        expect(msg).to_contain("<output>.link-command.txt")

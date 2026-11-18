@@ -1,6 +1,6 @@
 # native-build: final (link) worker dies with 0xC0000142 after fully successful codegen; ~4.5 h of work lost
 
-Status: OPEN. Cause unconfirmed.
+Status: FIXED (transient retry + status label + manual link recovery guidance implemented; automatic per-module object reuse remains a separate enhancement).
 
 ## Symptom
 After a fully successful Cranelift codegen
@@ -13,7 +13,7 @@ and produced no binary. -1073741502 = 0xC0000142 = STATUS_DLL_INIT_FAILED: the f
 (link) worker process could not initialise.
 
 ## Source location
-The message is printed in `src/app/cli/native_build_main.spl:2587`
+The message is printed in `src/app/cli/native_build_main.spl:2615`
 (`stderr_write("error: native-build worker exited with code {code}.\n")`, inside the
 `if code != 0:` branch). The branch prints the last diagnostic line and relays stderr; it
 does not retry and does not print the link command or response-file path.
@@ -39,5 +39,7 @@ entry stub calling every `__module_init*`. The binary links and answers `--versi
 3. On failure print the link command / rsp path so a hand link need not be reverse-engineered.
 
 ## Does current source fix it?
-No. `native_build_main.spl:2587` on origin/release/1.0.0 is a plain report with no retry
-for this exit code (read, not executed).
+Yes (for transient retry and manual link recovery, items 1 and 3 above; automatic cross-invocation `aot-*.o` reuse in item 2 remains separate):
+- `src/app/cli/native_build_exit_status.spl`: added `native_build_is_dll_init_failed_v1(code)` for `-1073741502` / `3221225794` (`0xC0000142`), and updated `native_build_windows_status_label` to return `"0xC0000142 (STATUS_DLL_INIT_FAILED)"` for both forms.
+- `src/app/cli/native_build_main.spl`: added `native_build_should_retry_dll_init_v1` and `native_build_dll_init_retry_delay_ms_v1`, retrying the final (non-shard) worker up to 2 times (`1000ms`, `2000ms`) via `sleep_ms` with `stderr_write` warnings when it exits with `0xC0000142` and no valid output artifact; added `native_build_dll_init_recovery_lines_v1` and `native_build_worker_failure_lines_for_output_v1` (preserving `native_build_worker_failure_lines_v1`) to print explicit recovery hints naming `{output_path}.link-command.txt`, surviving `aot-*.o` objects, and `scripts/bootstrap/p3-manual-link-stage3.shs`.
+- `test/01_unit/app/cli/native_build_dll_init_retry_spec.spl`: unit coverage for status classification, retry gate, backoff delays, and recovery guidance.
