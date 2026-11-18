@@ -110,3 +110,54 @@ describe "SimpleOS riscv64 user link - internal ELF engine":
         expect(image[16] as i64).to_equal(2)
         expect(image[18] as i64).to_equal(243)
         expect(_u64_le(image, 24)).to_equal(0x100000000)
+
+fn _sos_cfg(script: text) -> NativeLinkConfig:
+    var cfg = NativeLinkConfig.default()
+    cfg.runtime_path = "none"
+    cfg.pie = false
+    cfg.allow_duplicate_definitions = false
+    cfg.allow_cc_fallback = false
+    cfg.extra_flags = [
+        "-T", script, "-nostdlib", "-static",
+        "--gc-sections", "--start-group", "--end-group"]
+    cfg
+
+describe "SimpleOS internal link - script INPUT() search path":
+    it "finds a bare INPUT() file through the -L library paths like ld.lld":
+        var cfg = _sos_cfg("{FIX}/simpleos_user_rv64_bare.ld")
+        cfg.library_paths = [FIX]
+        val out = "/tmp/simpleos_internal_entry_spec_rv64_bare.elf"
+        val result = link_simpleos_internal(["{FIX}/main_rv64.o"], out, "simpleos-riscv64", cfg)
+        if result.is_err():
+            print "link error: {result.unwrap_err()}"
+        expect(result.is_ok()).to_equal(true)
+        val image = file_read_bytes(out)
+        expect(image[18] as i64).to_equal(243)
+        expect(_u64_le(image, 24)).to_equal(0x100000000)
+
+    it "fails closed when a bare INPUT() file is on no search path":
+        val result = link_simpleos_internal(["{FIX}/main_rv64.o"],
+            "/tmp/simpleos_internal_entry_spec_rv64_bare_miss.elf", "simpleos-riscv64",
+            _sos_cfg("{FIX}/simpleos_user_rv64_bare.ld"))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().contains("crt0_rv64.o")).to_equal(true)
+
+describe "SimpleOS internal link - runtime static archive":
+    it "pulls main from a -l archive found on the library paths like ld.lld":
+        var cfg = _sos_cfg("{FIX}/simpleos_user.ld")
+        cfg.libraries = ["sosmain"]
+        cfg.library_paths = [FIX]
+        val out = "/tmp/simpleos_internal_entry_spec_archive.elf"
+        val result = link_simpleos_internal(["{FIX}/crt0_x64.o"], out, "simpleos-x86_64", cfg)
+        if result.is_err():
+            print "link error: {result.unwrap_err()}"
+        expect(result.is_ok()).to_equal(true)
+        val image = file_read_bytes(out)
+        expect(image[18] as i64).to_equal(62)
+        expect(_u64_le(image, 24)).to_equal(0x10000000)
+
+    it "fails when the archive that defines main is not linked":
+        val result = link_simpleos_internal(["{FIX}/crt0_x64.o"],
+            "/tmp/simpleos_internal_entry_spec_archive_miss.elf", "simpleos-x86_64",
+            _sos_cfg("{FIX}/simpleos_user.ld"))
+        expect(result.is_err()).to_equal(true)
