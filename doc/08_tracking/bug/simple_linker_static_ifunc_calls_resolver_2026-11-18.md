@@ -30,7 +30,12 @@ Static ET_EXEC only (ponytail: PIE needs PIC stubs + IRELATIVE in .rela.dyn).
 - Freestanding IFUNC test (`slk/ifunc.c`, `ifunc_start.c` walks the iplt
   table like apply_irel): Simple and ld.lld both print "hi" with rc=42 under qemu-user on
   x86_64, aarch64, i686 and armv7.
-- armv7 static glibc hello now links (431228 B).
+- armv7 static glibc hello now links (431228 B). The IFUNC tables in it are
+  well-formed: `.rel.iplt` has 2 entries and `__rel_iplt_*` brackets it. It still SIGSEGVs at run time
+  inside `_dl_debug_vdprintf`, glibc's early fatal-error printer, while the ld.lld
+  build of the same inputs prints "hello libc 1 tls=8". So startup aborts for a
+  reason outside IFUNC (next to triage: static TLS/TCB setup, `.ARM.exidx`).
+  Tracked as a remaining armv7-static item.
 - Time and RSS: an aarch64 dynamic hello link takes 9.0 s / 542 MB peak WS on the branch vs
   8.6 s / 517 MB on origin (Windows seed). The output is identical (5160 B).
   elf_link_rss_budget.shs not run: its native bench driver needs a heavy
