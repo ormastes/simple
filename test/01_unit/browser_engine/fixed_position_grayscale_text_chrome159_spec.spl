@@ -1,0 +1,111 @@
+"""
+## Purpose and audience
+Purpose: Pin which `position:fixed` text Chrome 159 paints with LCD subpixel
+antialiasing and which it paints in grayscale. Chrome promotes a fixed box to
+its own composited layer; LCD text needs an opaque background behind the glyphs
+inside that layer, so a fixed box with no opaque background (none, `#fff0`,
+`rgba(255,255,255,.5)`) paints grayscale, while an opaque background on the box
+or on an element between the text and the box keeps LCD. `position:absolute`
+and `position:sticky` keep LCD.
+Audience: web renderer text / lane-routing maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, `body{margin:0;background:#fff;font:16px
+Liberation Sans;color:#000}`, text `Hamburgefonstiv Qy`, 400x120). "fringe" is a
+pixel whose red and blue differ by more than 16.
+
+| fixed box at 20,30                       | Chrome fringe | text AA   |
+|------------------------------------------|---------------|-----------|
+| no background                            | 0             | grayscale |
+| `background:#fff`                        | 970           | LCD       |
+| `background:rgba(255,255,255,.5)`        | 0             | grayscale |
+| `background:#fff0`                       | 0             | grayscale |
+| opaque background on a child `<span>`    | 970           | LCD       |
+| opaque background on a child `<div>`     | 970           | LCD       |
+| `position:absolute` (no background)      | 970           | LCD       |
+| `position:sticky;top:30px;margin-left:20px` | 970        | LCD       |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-LCD-002 — text in a position:fixed layer with no opaque background behind it is grayscale.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 120
+val HEAD: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\">"
+val TAIL: text = "</body></html>"
+val WORDS: text = "Hamburgefonstiv Qy"
+val FIX: text = "<div style=\"position:fixed;left:20px;top:30px"
+
+val PAGE_NONE: text = HEAD + FIX + "\">" + WORDS + "</div>" + TAIL
+val PAGE_OPAQUE: text = HEAD + FIX + ";background:#fff\">" + WORDS + "</div>" + TAIL
+val PAGE_TRANSLUCENT: text = HEAD + FIX + ";background:rgba(255,255,255,.5)\">" + WORDS + "</div>" + TAIL
+val PAGE_TRANSPARENT: text = HEAD + FIX + ";background:#fff0\">" + WORDS + "</div>" + TAIL
+val PAGE_CHILD_SPAN: text = HEAD + FIX + "\"><span style=\"background:#fff\">" + WORDS + "</span></div>" + TAIL
+val PAGE_CHILD_DIV: text = HEAD + FIX + "\"><div style=\"background:#fff\">" + WORDS + "</div></div>" + TAIL
+val PAGE_ABS: text = HEAD + "<div style=\"position:absolute;left:20px;top:30px\">" + WORDS + "</div>" + TAIL
+val PAGE_STICKY: text = HEAD + "<div style=\"position:sticky;top:30px;margin-left:20px\">" + WORDS + "</div>" + TAIL
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+fn _fringe_count(px: [u32]) -> i32:
+    var n = 0
+    for p in px:
+        if _abs(_chan(p, 16u32) - _chan(p, 0u32)) > 16:
+            n = n + 1
+    n
+
+fn _fringe(page: text) -> i32:
+    val px = simple_web_render_html_to_pixels_with_engine2d_backend(page, W, H, "cpu_simd")
+    _fringe_count(px)
+
+describe "position:fixed text antialiasing against Chrome 159":
+    it "AC-1: fixed text with no background is grayscale":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome fringe 0")
+        expect(_fringe(PAGE_NONE)).to_equal(0)
+
+    it "AC-2: fixed text on a translucent or transparent background is grayscale":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome fringe 0 for rgba(255,255,255,.5) and #fff0")
+        expect(_fringe(PAGE_TRANSLUCENT)).to_equal(0)
+        expect(_fringe(PAGE_TRANSPARENT)).to_equal(0)
+
+    it "AC-3: fixed text on an opaque background keeps LCD":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome fringe 970")
+        expect(_fringe(PAGE_OPAQUE) > 800).to_be(true)
+
+    it "AC-4: an opaque background on an element between the text and the fixed box keeps LCD":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome fringe 970 for a child span and a child div")
+        expect(_fringe(PAGE_CHILD_SPAN) > 800).to_be(true)
+        expect(_fringe(PAGE_CHILD_DIV) > 800).to_be(true)
+
+    it "AC-5: absolute and sticky text keep LCD":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome fringe 970 for both")
+        expect(_fringe(PAGE_ABS) > 800).to_be(true)
+        expect(_fringe(PAGE_STICKY) > 800).to_be(true)

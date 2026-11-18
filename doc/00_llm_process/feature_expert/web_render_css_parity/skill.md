@@ -3360,3 +3360,9 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Trap:** a spec that compares a plain bare-text page with a `letter-spacing` / `word-spacing` / `text-shadow` one now compares two lanes. Give the plain page the initial value (`letter-spacing: 0px`) so both stay on the raster lane.
 - **Still open, measured here** (`doc/08_tracking/bug/inline_span_never_wraps_and_fixed_text_is_lcd_2026-11-19.md`): a `<span>` wider than its line never wraps (Chrome two lines, here one, 618 mismatching pixels against 357 for a `<p>`); Chrome draws `position:fixed` text without an opaque background in grayscale, here LCD (1084 against 356 with `background:#fff`).
 - **Spec:** `test/01_unit/browser_engine/abspos_bare_text_chrome159_spec.spl` (8 examples, 0 / 7 on base before AC-8 was added, 8 / 8 on head).
+
+## Fixed-position text is grayscale without an opaque background (2026-11-19)
+
+- Chrome 159 (fringe pixels, red/blue differing by more than 16, 400x120): `position:fixed` with no background, `rgba(255,255,255,.5)` or `#fff0` is grayscale (0); `background:#fff` on the box, an opaque `<span>`/`<div>` background between text and box, `position:absolute` and `position:sticky` are LCD (970).
+- Rule: the Draw IR text command carries `text-lcd:0` when walking from the text node up reaches a `position:fixed` ancestor before any element with alpha-255 `bg` (`_html_draw_ir_fixed_gray_text`, `simple_web_html_layout_renderer_paint_draw_ir.spl`); `draw_ir_adv.spl` sets Engine2D LCD per text command from it.
+- Spec: `test/01_unit/browser_engine/fixed_position_grayscale_text_chrome159_spec.spl` (5 examples, 3 / 5 on base, 5 / 5 on head). Gradient backgrounds are not treated as opaque; not measured.

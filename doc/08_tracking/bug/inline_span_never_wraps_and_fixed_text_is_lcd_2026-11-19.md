@@ -1,7 +1,7 @@
 # A `<span>` wider than its line never wraps; `position:fixed` text paints LCD where Chrome paints grayscale
 
 - **Found:** 2026-11-19, measuring bare text in positioned boxes against Chrome 159.
-- **Status:** open, both.
+- **Status:** section 1 open; section 2 (fixed-text grayscale) resolved 2026-11-19 (`fixed_position_grayscale_text_chrome159_spec`).
 - Pages: `body{margin:0;background:#fff;font:16px Liberation Sans;color:#000}`, text `Hamburgefonstiv Qy`, 400x120, `cpu_simd`. Ink = a channel under 200; fringe = red and blue more than 16 apart; mismatch = pixels with a channel more than 8 from Chrome.
 
 ## 1. Inline element text is one unbreakable box
@@ -25,3 +25,7 @@ A line breaks between inline items but never inside an inline element's text.
 | `position:absolute` | 970 (LCD) | 934 | 357 |
 
 Chrome gives a fixed box its own layer and draws LCD text only where the layer is opaque behind it. LCD is a per-frame switch here (`Engine2D.set_lcd_text`), so a per-run decision needs a flag on the Draw IR text command.
+
+### Resolution of section 2 (2026-11-19)
+
+Chrome 159 measured: fixed with no background, `rgba(255,255,255,.5)` or `#fff0` is grayscale (fringe 0); fixed with `background:#fff`, an opaque `<span>`/`<div>` background on a child, `position:absolute` and `position:sticky` are LCD (970). The Draw IR text command now carries `text-lcd:0` when no element from the text up to its `position:fixed` ancestor has an opaque background (`_html_draw_ir_fixed_gray_text`), and the executor sets LCD per text command. Pinned by `test/01_unit/browser_engine/fixed_position_grayscale_text_chrome159_spec.spl`.
