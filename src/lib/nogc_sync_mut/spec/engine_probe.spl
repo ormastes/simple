@@ -103,6 +103,25 @@ pub fn is_known_engine(engine: text) -> bool:
 # cannot change, so ask once per process.
 var _self_exe_windows_cache = ""
 
+pub fn self_exe_path() -> text?:
+    """Absolute path of the running executable, or None when it cannot be resolved.
+
+    /proc/self/exe where it exists; on Windows (no /proc) this pid's image path
+    from PowerShell. Never returns a `.spl` path, so it is never a script.
+    """
+    val self_path = path_absolute("/proc/self/exe") ?? ""
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and not self_path.ends_with(".spl") and file_exists(self_path):
+        return Some(self_path)
+    if host_os() == "windows":
+        if _self_exe_windows_cache != "":
+            return Some(_self_exe_windows_cache)
+        val (win_out, _win_err, win_code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
+        val win_path = win_out.trim()
+        if win_code == 0 and win_path != "" and not win_path.ends_with(".spl") and file_exists(win_path):
+            _self_exe_windows_cache = win_path
+            return Some(win_path)
+    None
+
 pub fn simple_binary() -> text:
     """Resolve the compiler binary to spawn probes with.
 
@@ -122,20 +141,9 @@ pub fn simple_binary() -> text:
         configured = env_get("PLAN_ACCEPTANCE_RUNNER") ?? ""
     if configured != "" and file_exists(configured):
         return configured
-    val self_path = path_absolute("/proc/self/exe") ?? ""
-    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
-        return self_path
-    # Windows has no /proc: ask PowerShell for this pid's image path so the probe
-    # still runs on the invoking build instead of the tracked bin/simple.exe,
-    # which can be older than the source tree (BUG-IT-1, 2026-10-10).
-    if host_os() == "windows":
-        if _self_exe_windows_cache != "":
-            return _self_exe_windows_cache
-        val (win_out, _win_err, win_code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
-        val win_path = win_out.trim()
-        if win_code == 0 and win_path != "" and not win_path.ends_with(".spl") and file_exists(win_path):
-            _self_exe_windows_cache = win_path
-            return win_path
+    match self_exe_path():
+        case Some(self_path): return self_path
+        case None: pass
     if file_exists("bin/simple"):
         return "bin/simple"
     "./bin/simple"

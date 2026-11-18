@@ -5,7 +5,7 @@
 # (bootstrap runtime cannot resolve impl block methods from separate modules)
 
 use std.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
-use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName, TestFailureCode, TestDefinitionDigest, TestBinaryDigest, test_failure_code_name, parse_test_failure_code}
 use std.common.traceability.run_plan.{TraceRunPlan}
 use std.common.traceability.run_plan_codec.{encode_trace_run_plan, decode_trace_run_plan}
 use std.common.traceability.run_request.{materialize_trace_run_plan}
@@ -94,7 +94,7 @@ fn decode_trace_stored_event(row: SdnRow) -> Result<TraceStoredEvent, text>:
 # Facts live in a sidecar table so the strict 9-column event table (and every
 # legacy database) keeps its exact schema. Absent table or row = absent facts.
 fn trace_fact_columns() -> [text]:
-    ["event_id", "at_micros", "failure", "host", "backend"]
+    ["event_id", "at_micros", "failure", "host", "backend", "failure_code", "definition_digest", "binary_digest"]
 
 fn trace_fact_row(event_id: text, facts: TraceCaseFacts) -> Result<SdnRow, text>:
     val row = SdnRow.empty()
@@ -119,6 +119,21 @@ fn trace_fact_row(event_id: text, facts: TraceCaseFacts) -> Result<SdnRow, text>
         case Some(found): backend = encode_trace_storage_scalar(found.value)?
         case None: pass
     row.set("backend", backend)
+    var code_text = ""
+    match facts.failure_code:
+        case Some(code): code_text = test_failure_code_name(code)
+        case None: pass
+    row.set("failure_code", code_text)
+    var definition = ""
+    match facts.definition_digest:
+        case Some(found): definition = found.value
+        case None: pass
+    row.set("definition_digest", definition)
+    var binary = ""
+    match facts.binary_digest:
+        case Some(found): binary = found.value
+        case None: pass
+    row.set("binary_digest", binary)
     Ok(row)
 
 fn trace_fact_row_decode(row: SdnRow) -> Result<TraceCaseFacts, text>:
@@ -141,7 +156,21 @@ fn trace_fact_row_decode(row: SdnRow) -> Result<TraceCaseFacts, text>:
     val backend_text = row.get("backend") ?? ""
     if backend_text != "":
         backend = Some(TestBackendName(value: decode_trace_storage_scalar(backend_text)?))
-    Ok(TraceCaseFacts(at: at, failure: failure, host: host, backend: backend))
+    var failure_code: TestFailureCode? = None
+    val code_text = row.get("failure_code") ?? ""
+    if code_text != "":
+        match parse_test_failure_code(code_text):
+            case Some(code): failure_code = Some(code)
+            case None: return Err("stored trace event fact failure_code is invalid")
+    var definition_digest: TestDefinitionDigest? = None
+    val definition_text = row.get("definition_digest") ?? ""
+    if definition_text != "":
+        definition_digest = Some(TestDefinitionDigest(value: definition_text))
+    var binary_digest: TestBinaryDigest? = None
+    val binary_text = row.get("binary_digest") ?? ""
+    if binary_text != "":
+        binary_digest = Some(TestBinaryDigest(value: binary_text))
+    Ok(TraceCaseFacts(at: at, failure: failure, host: host, backend: backend, failure_code: failure_code, definition_digest: definition_digest, binary_digest: binary_digest))
 
 fn trace_fact_index(db: SdnDatabase) -> Result<Dict<text, TraceCaseFacts>, text>:
     var index: Dict<text, TraceCaseFacts> = {}
@@ -431,6 +460,9 @@ class TestDatabaseExtended:
         var fact_table = match self.db.get_table("trace_case_event_facts"):
             case Some(existing): existing
             case None: SdnTable.new("trace_case_event_facts", trace_fact_columns())
+        # Databases written before the digest columns existed keep their rows; the
+        # header widens so new rows persist every column.
+        fact_table.columns = trace_fact_columns()
         var fact_rows: [SdnRow] = []
         for i in 0..events.len():
             match events[i].facts:
