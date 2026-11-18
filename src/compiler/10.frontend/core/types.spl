@@ -13,7 +13,7 @@
 
 use compiler.frontend.core.flat_pool_codec.*
 use std.io_runtime.{env_get_opt}
-use compiler.core.unit_constraint.{unit_constraint_pool_reset}
+use compiler.core.unit_constraint.{UnitConstraintPoolSnapshot, unit_constraint_pool_reset, unit_constraint_pool_save, unit_constraint_pool_restore, unit_constraint_promote_transient_owner}
 
 extern fn rt_string_contains(s: text, substr: text) -> bool
 extern fn rt_string_len(s: text) -> i64
@@ -1034,6 +1034,7 @@ var unit_decl_alias_ofs: [text] = []
 # Origin syntax: "" for the canonical `unit` spelling, "newunit" / "newtype"
 # for the deprecated spellings that lower into the same record (SPL-UNIT-001 /
 # SPL-UNIT-003 are raised at the parse site, never here).
+var unit_decl_initialized: bool = false
 var unit_decl_legacy_origins: [text] = []
 
 pub fn unit_decl_pool_reset():
@@ -1043,6 +1044,7 @@ pub fn unit_decl_pool_reset():
     unit_decl_underlying_type_tags = []
     unit_decl_alias_ofs = []
     unit_decl_legacy_origins = []
+    unit_decl_initialized = true
     unit_constraint_pool_reset()
 
 # The unit decl pool is process-global and shared with the core interpreter.
@@ -1051,28 +1053,42 @@ pub fn unit_decl_pool_reset():
 # arrays before the reset and hands them back afterwards. The reset rebinds
 # the globals to fresh arrays, so the captured arrays keep their contents.
 pub struct UnitDeclPoolSnapshot:
+    initialized: bool
     names: [text]
     roles: [text]
     short_symbols: [text]
     underlying_type_tags: [i64]
     alias_ofs: [text]
     legacy_origins: [text]
+    constraints: UnitConstraintPoolSnapshot
 
 pub fn unit_decl_pool_save() -> UnitDeclPoolSnapshot:
-    UnitDeclPoolSnapshot(names: unit_decl_names, roles: unit_decl_roles,
+    if not unit_decl_initialized:
+        return UnitDeclPoolSnapshot(initialized: false, names: [], roles: [],
+            short_symbols: [], underlying_type_tags: [], alias_ofs: [],
+            legacy_origins: [], constraints: unit_constraint_pool_save())
+    UnitDeclPoolSnapshot(initialized: true, names: unit_decl_names, roles: unit_decl_roles,
         short_symbols: unit_decl_short_symbols,
         underlying_type_tags: unit_decl_underlying_type_tags,
-        alias_ofs: unit_decl_alias_ofs, legacy_origins: unit_decl_legacy_origins)
+        alias_ofs: unit_decl_alias_ofs, legacy_origins: unit_decl_legacy_origins,
+        constraints: unit_constraint_pool_save())
 
 pub fn unit_decl_pool_restore(snap: UnitDeclPoolSnapshot):
+    unit_constraint_pool_restore(snap.constraints)
+    if not snap.initialized:
+        unit_decl_initialized = false
+        return
     unit_decl_names = snap.names
     unit_decl_roles = snap.roles
     unit_decl_short_symbols = snap.short_symbols
     unit_decl_underlying_type_tags = snap.underlying_type_tags
     unit_decl_alias_ofs = snap.alias_ofs
     unit_decl_legacy_origins = snap.legacy_origins
+    unit_decl_initialized = true
 
 pub fn unit_decl_find(name: text) -> i64:
+    if not unit_decl_initialized:
+        return -1
     var i = 0
     while i < unit_decl_names.len():
         if unit_decl_names[i] == name:
@@ -1084,7 +1100,7 @@ pub fn unit_decl_find(name: text) -> i64:
 # unknown suffixes). Used by the literal checks for `70000_pt`.
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_decl_find_by_suffix(suffix: text) -> i64:
-    if suffix == "": return -1
+    if not unit_decl_initialized or suffix == "": return -1
     var i = 0
     while i < unit_decl_short_symbols.len():
         if unit_decl_short_symbols[i] == suffix:
@@ -1096,6 +1112,8 @@ fn unit_decl_register(name: text, role: text, short_symbol: text, underlying_typ
     unit_decl_register_origin(name, role, short_symbol, underlying_type_tag, alias_of, "")
 
 pub fn unit_decl_register_origin(name: text, role: text, short_symbol: text, underlying_type_tag: i64, alias_of: text, legacy_origin: text) -> i64:
+    if not unit_decl_initialized:
+        unit_decl_pool_reset()
     val existing = unit_decl_find(name)
     if existing >= 0:
         unit_decl_roles[existing] = role
@@ -1114,6 +1132,8 @@ pub fn unit_decl_register_origin(name: text, role: text, short_symbol: text, und
     idx
 
 pub fn unit_decl_count() -> i64:
+    if not unit_decl_initialized:
+        return 0
     unit_decl_names.len()
 
 pub fn unit_decl_name_at(idx: i64) -> text:
@@ -1830,6 +1850,14 @@ pub fn type_pools_promote_hir_owners() -> bool:
     # type tags index these registries.
     promoted = _type_pool_promote_root_i64([option_generic_inner_tags]) and promoted
     promoted = _type_pool_promote_root_i64([array_generic_elem_tags]) and promoted
+    if unit_decl_initialized:
+        promoted = _type_pool_promote_root_text([unit_decl_names]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_roles]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_short_symbols]) and promoted
+        promoted = _type_pool_promote_root_i64([unit_decl_underlying_type_tags]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_alias_ofs]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_legacy_origins]) and promoted
+    promoted = unit_constraint_promote_transient_owner() and promoted
     promoted
 
 # ===== Pool Reset =====

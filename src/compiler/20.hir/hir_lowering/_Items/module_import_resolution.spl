@@ -549,9 +549,10 @@ impl HirLowering:
                     if frozen_target != "" and self.surface_index_for_name(frozen_target) >= 0:
                         imported_key = frozen_target
                         resolved_module_name = frozen_target
-            if imported_key == "" and importer_surface_index < 0 and imp.items.len() == 1:
-                # Single-module embedders omit their own frozen surface. Keep
-                # their import behavior aligned with the registry freeze.
+            if imported_key == "" and imp.items.len() == 1:
+                # Single-module embedders omit their own frozen surface, and
+                # library-mode `use std.<pkg>.<item> as <alias>` imports cannot
+                # resolve `std.<pkg>` during unconfigured surface freeze.
                 val item = imp.items[0]
                 if item.has_alias and item.name == imp.module:
                     val path_parts = imp.module.split(".")
@@ -579,10 +580,17 @@ impl HirLowering:
                                 else: ""
                                 dot_index = dot_index + 1
                         if parent_lookup != "" and member_name != "":
-                            val parent_key = self.resolve_module_key_relative(parent_lookup, importer_name, importer_source_path)
+                            val selected_parent_key = library_mode_import_key_v1(parent_lookup, self.library_mode, importer_owner)
+                            val parent_key = if selected_parent_key != "" and self.surface_index_for_name(selected_parent_key) >= 0:
+                                selected_parent_key
+                            else:
+                                self.resolve_module_key_relative(parent_lookup, importer_name, importer_source_path)
                             if parent_key != "" and self.surface_index_for_name(parent_key) >= 0:
                                 imported_key = parent_key
-                                resolved_module_name = parent_key
+                                resolved_module_name = if self.library_mode != "" and library_mode_generic_import_v1(parent_lookup):
+                                    self.module_surfaces.surfaces[self.surface_index_for_name(parent_key)].module_name
+                                else:
+                                    parent_key
                                 fallback_item_name = member_name
             if imported_key != "":
                 val imported_index = self.surface_index_for_name(imported_key)
@@ -602,7 +610,7 @@ impl HirLowering:
                 var item_names: [text] = []
                 var item_aliases: [text] = []
                 var item_has_alias: [bool] = []
-                if importer_surface_index >= 0:
+                if importer_surface_index >= 0 and fallback_item_name == "":
                     val importer_surface: ModuleSurface = self.module_surfaces.surfaces[importer_surface_index]
                     item_start = importer_surface.import_item_offsets[import_idx]
                     item_end = importer_surface.import_item_offsets[import_idx + 1]

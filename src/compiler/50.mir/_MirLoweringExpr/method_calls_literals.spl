@@ -1559,6 +1559,14 @@ impl MirLowering:
                     case HirTypeKind.Named(_, retained_args_uw):
                         if retained_args_uw.len() == 0:
                             self.remember_local_hir_type(result_local_uw.id, retained_inner_uw, 0, 0)
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        self.runtime_array_locals[result_local_uw.id] = true
+                        self.mark_runtime_value_local(result_local_uw.id)
+                        self.remember_local_hir_type(result_local_uw.id, retained_inner_uw, 0, 0)
+                    case HirTypeKind.Dict(_, _):
+                        self.runtime_dict_locals[result_local_uw.id] = true
+                        self.mark_runtime_value_local(result_local_uw.id)
+                        self.remember_local_hir_type(result_local_uw.id, retained_inner_uw, 0, 0)
                     case _: ()
 
             var b_merge_uw = self.builder
@@ -1682,6 +1690,14 @@ impl MirLowering:
                     match tuple_payload_uo.kind:
                         case HirTypeKind.Tuple(_):
                             self.copy_local_hir_type_metadata(some_val_uo.id, result_local_uo.id)
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            self.runtime_array_locals[result_local_uo.id] = true
+                            self.mark_runtime_value_local(result_local_uo.id)
+                            self.remember_local_hir_type(result_local_uo.id, tuple_payload_uo, 0, 0)
+                        case HirTypeKind.Dict(_, _):
+                            self.runtime_dict_locals[result_local_uo.id] = true
+                            self.mark_runtime_value_local(result_local_uo.id)
+                            self.remember_local_hir_type(result_local_uo.id, tuple_payload_uo, 0, 0)
                         case _: ()
 
             var b_merge_uo = self.builder
@@ -6870,6 +6886,12 @@ impl MirLowering:
         val cap_hint = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
         var key_type = if val expected = key_context: self.lower_type(expected) else: MirType.i64()
         var value_type = if val expected = value_context: self.lower_type(expected) else: MirType.i64()
+        var inferred_key_hir = HirType(kind: HirTypeKind.Error, span: Span.empty())
+        var observed_key_hir = false
+        var complete_key_hir = true
+        var inferred_value_hir = HirType(kind: HirTypeKind.Error, span: Span.empty())
+        var observed_value_hir = false
+        var complete_value_hir = true
         var first_entry = true
         # Bug #189 sibling (dict LITERAL). A struct-valued dict learns its
         # element struct NAME from exactly one of two places, and a literal hit
@@ -6921,6 +6943,24 @@ impl MirLowering:
                     key_local_raw = self.adapt_declared_enum_payload(expected, key_local_raw)
                 if first_entry and not key_context.?:
                     key_type = self.local_mir_type_of(key_local_raw) ?? key_type
+                if not key_context.?:
+                    var current_key_hir = self.aggregate_literal_source_type(key_expr, key_local_raw)
+                    match current_key_hir.kind:
+                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                            if self.local_is_str(key_local_raw):
+                                current_key_hir = HirType(kind: HirTypeKind.Str, span: Span.empty())
+                            elif val enum_key_hir = self.enum_match_expr_type(key_expr):
+                                current_key_hir = enum_key_hir
+                        case _: ()
+                    match current_key_hir.kind:
+                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                            complete_key_hir = false
+                        case _:
+                            if not observed_key_hir:
+                                inferred_key_hir = current_key_hir
+                                observed_key_hir = true
+                            elif not hir_types_equal(inferred_key_hir, current_key_hir):
+                                complete_key_hir = false
                 val key_local = self.box_struct_or_runtime_value_key_v1(key_local_raw)
                 var value_local = if val expected = value_context:
                     self.lower_declared_enum_payload_expression(expected, value_expr)
@@ -6937,6 +6977,24 @@ impl MirLowering:
                     if not value_context.?:
                         value_type = self.local_mir_type_of(value_local) ?? value_type
                     first_entry = false
+                if not value_context.?:
+                    var current_val_hir = self.aggregate_literal_source_type(value_expr, value_local)
+                    match current_val_hir.kind:
+                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                            if self.local_is_str(value_local):
+                                current_val_hir = HirType(kind: HirTypeKind.Str, span: Span.empty())
+                            elif val enum_val_hir = self.enum_match_expr_type(value_expr):
+                                current_val_hir = enum_val_hir
+                        case _: ()
+                    match current_val_hir.kind:
+                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
+                            complete_value_hir = false
+                        case _:
+                            if not observed_value_hir:
+                                inferred_value_hir = current_val_hir
+                                observed_value_hir = true
+                            elif not hir_types_equal(inferred_value_hir, current_val_hir):
+                                complete_value_hir = false
                 # Capture BEFORE box_runtime_value, mirroring how value_type is
                 # read off the raw local just above: struct construction
                 # registers struct_value_syms on the value local, and boxing
@@ -6967,6 +7025,12 @@ impl MirLowering:
             if retain_collection_operands:
                 self.collection_literal_operands[typed.id] = collection_operands
             self.mark_runtime_value_local(typed.id)
+            val resolved_key_hir: HirType? = if key_context.?: key_context elif complete_key_hir and observed_key_hir: Some(inferred_key_hir) else: None
+            val resolved_val_hir: HirType? = if value_context.?: value_context elif complete_value_hir and observed_value_hir: Some(inferred_value_hir) else: None
+            if val dk = resolved_key_hir:
+                if val dv = resolved_val_hir:
+                    self.remember_local_hir_type(typed.id,
+                        HirType(kind: HirTypeKind.Dict(dk, dv), span: Span.empty()), 0, 0)
             if value_struct_name != "" and value_struct_name != "__runtime_array__":
                 self.array_element_struct_syms[typed.id] = value_struct_name
             return typed

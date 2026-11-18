@@ -13147,10 +13147,26 @@ void rt_bdd_clear_state(void) {
 
 int64_t rt_hash_text(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return 0;
+    if (!s) {
+        if (value < 0x10000) return 0;
+        uintptr_t raw = (uintptr_t)value;
+        if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP &&
+                rt_core_is_registered_immortal_ptr((void*)(raw & ~RT_VALUE_TAG_MASK))) {
+            return 0;
+        }
+        s = rt_core_string_from_data_pointer(value);
+    }
     uint64_t hash = 14695981039346656037ULL;
-    for (uint64_t i = 0; i < s->len; i++) {
-        hash ^= (uint8_t)s->data[i];
+    if (s) {
+        for (uint64_t i = 0; i < s->len; i++) {
+            hash ^= (uint8_t)s->data[i];
+            hash *= 1099511628211ULL;
+        }
+        return (int64_t)hash;
+    }
+    const uint8_t* raw_bytes = (const uint8_t*)(uintptr_t)value;
+    for (uint64_t i = 0; raw_bytes[i] != 0; i++) {
+        hash ^= raw_bytes[i];
         hash *= 1099511628211ULL;
     }
     return (int64_t)hash;

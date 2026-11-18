@@ -32,17 +32,27 @@ fn selected_binding_key_v1(surface: i64, role: i64, category: text, name: text) 
 
 # Construction keys use scalar collision chains, like the retained registry
 # path owner; no class-field aggregate dictionary is a native read authority.
-extern fn rt_hash_text(content: text) -> i64
 
-class SelectedExportBuildKeysV1:
+pub class SelectedExportBuildKeysV1:
     names: [text] = []
     rows: [i64] = []
     buckets: [i64] = []
     next: [i64] = []
 
-fn selected_key_position_v1(keys: SelectedExportBuildKeysV1, key: text) -> i64:
+# @allow(primitive_api) internal selected-export bucket table uses raw string keys and i64 slot indices
+pub fn selected_key_hash_v1(key: text) -> i64:
+    var hash: i64 = 5381
+    val byte_count = key.byte_len()
+    var index = 0
+    while index < byte_count:
+        hash = (((hash << 5) + hash) ^ (key.byte_at(index) as i64)) & 1073741823
+        index = index + 1
+    hash ^ (hash >> 12)
+
+# @allow(primitive_api) internal selected-export bucket table uses raw string keys and i64 slot indices
+pub fn selected_key_position_v1(keys: SelectedExportBuildKeysV1, key: text) -> i64:
     if keys.buckets.len() != 4096: return -1
-    var slot = keys.buckets[rt_hash_text(key) & 4095]
+    var slot = keys.buckets[selected_key_hash_v1(key) & 4095]
     var visited = 0
     while slot >= 0 and slot < keys.names.len() and slot < keys.next.len() and slot < keys.rows.len() and visited < keys.names.len():
         if keys.names[slot] == key: return keys.rows[slot]
@@ -50,8 +60,9 @@ fn selected_key_position_v1(keys: SelectedExportBuildKeysV1, key: text) -> i64:
         visited = visited + 1
     -1
 
-fn selected_key_put_v1(keys: SelectedExportBuildKeysV1, key: text, row: i64):
-    val bucket = rt_hash_text(key) & 4095
+# @allow(primitive_api) internal selected-export bucket table uses raw string keys and i64 slot indices
+pub fn selected_key_put_v1(keys: SelectedExportBuildKeysV1, key: text, row: i64):
+    val bucket = selected_key_hash_v1(key) & 4095
     keys.next = keys.next.push(keys.buckets[bucket])
     keys.buckets[bucket] = keys.names.len()
     keys.names = keys.names.push(key)
@@ -539,6 +550,7 @@ pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfa
         # Sorted keys make declaration ordering irrelevant. Edge order preserves
         # exact source item positions, which are part of route semantics.
         for row in index.lookup_rows:
+            if row < 0 or row >= index.source_surfaces.len(): return Err("selected export lookup row is invalid")
             if index.source_surfaces[row] != source: continue
             if not selected_window_valid_v1(index, row): return Err("selected export edge window is invalid")
             digest = module_surface_semantic_mix(digest, "role", "{index.roles[row]}")
