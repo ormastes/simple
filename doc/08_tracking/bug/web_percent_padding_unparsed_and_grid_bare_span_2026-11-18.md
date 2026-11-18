@@ -256,10 +256,7 @@ Free width is shared in whole px: three `1fr` implicit columns of 380 px are
 
 ## Residue still open
 
-- `display:flow-root` is not parsed: the box does not stop margin collapsing
-  (first-child `margin-top:20px`: Chrome child y 20 / box 30 high, Simple
-  0 / 10), does not enclose floats (Chrome 30, Simple 0) and does not avoid a
-  float beside it. `contain:layout` does not stop margin collapsing either.
+- `display:flow-root` is FIXED (2026-11-19, `display_flow_root_chrome159_spec`: parsed as a display keyword; margin-collapse, float containment and float avoidance now follow the existing BFC predicates). `contain:layout` still does not stop margin collapsing.
 - `<div><span></span></div>`: the empty inline box opens an 18 px line
   (Chrome 0).
 - An empty block with `margin:7px 0` after an empty block: its margin should
