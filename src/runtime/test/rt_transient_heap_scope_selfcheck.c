@@ -188,6 +188,49 @@ static void check_raw_text_data_pointer_promotes(void) {
     rt_free(holder);
 }
 
+/* The compiler's `Any`/`T` call-argument boxer (box_runtime_generic_argument_v1,
+ * 50.mir/_MirLoweringExpr/expr_dispatch.spl) turns a raw text data pointer
+ * back into its owner's handle with `(word - 16) | 1`, accepted only when
+ * rt_string_data(candidate) answers the same word. This pins that contract:
+ * the candidate IS the original handle, an ownerless or interior word is
+ * refused without a dereference, and promoting the candidate keeps the string
+ * the caller still points at. Promoting a copy (the old boundary) did not.
+ * doc/08_tracking/bug/stage3_selfbuild_raw_text_strict_extern_2026-11-18.md */
+static int64_t generic_argument_owner_candidate(int64_t word) {
+    if (word <= 0x10010) return 0;
+    int64_t candidate = (int64_t)(((uint64_t)word - 16u) | 1u);
+    return (int64_t)(uintptr_t)rt_string_data(candidate) == word ? candidate : 0;
+}
+
+static void check_generic_argument_owner_identity(void) {
+    static const char literal[] = "an ownerless literal that is long enough";
+    check(rt_transient_array_scope_begin() == 1, "owner-identity scope begins");
+    const char* name = "/some/long/path/file_name_that_is_rather_long.spl";
+    int64_t text = rt_string_new((const uint8_t*)name, strlen(name));
+    int64_t copied = rt_string_new((const uint8_t*)name, strlen(name));
+    int64_t word = (int64_t)(uintptr_t)rt_interp_cstr(text);
+    check(generic_argument_owner_candidate(word) == text,
+          "data pointer resolves to its owning handle");
+    check(generic_argument_owner_candidate(word + 8) == 0,
+          "interior text word has no owner candidate");
+    check(generic_argument_owner_candidate((int64_t)(uintptr_t)literal) == 0,
+          "ownerless literal has no owner candidate");
+    check(generic_argument_owner_candidate(0) == 0 && generic_argument_owner_candidate(3) == 0,
+          "nil-like words have no owner candidate");
+    check(rt_transient_array_scope_pause() == 1, "owner-identity scope pauses");
+    check(rt_transient_heap_promote(generic_argument_owner_candidate(word)) == 1,
+          "owner candidate promotes");
+    int64_t boundary_copy = rt_string_new((const uint8_t*)(uintptr_t)
+        rt_interp_cstr(copied), strlen(name));
+    check(rt_transient_heap_promote(boundary_copy) == 1, "boundary copy promotes (old lowering)");
+    check(rt_transient_array_scope_end() == 1, "owner-identity scope ends");
+    check(rt_heap_ref_registered_c(text) == 1, "text promoted through its data pointer survives");
+    check(memcmp((const char*)(uintptr_t)word, name, strlen(name) + 1) == 0,
+          "caller's data pointer still reads the text");
+    check(rt_heap_ref_registered_c(copied) == 0,
+          "text whose boundary copy was promoted is freed (the defect)");
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--retained-text-array-only") == 0) {
         check_retained_text_array();
@@ -452,6 +495,7 @@ int main(int argc, char **argv) {
 
     check_raw_table_release_after_oversized_scope();
     check_raw_text_data_pointer_promotes();
+    check_generic_argument_owner_identity();
 
     printf("%s (%d failure%s)\n", failures ? "SELFCHECK FAILED" : "SELFCHECK PASSED",
            failures, failures == 1 ? "" : "s");

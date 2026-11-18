@@ -2882,6 +2882,21 @@ impl MirLowering:
         self.box_runtime_dictionary_key_v1(local)
 
     me box_runtime_dictionary_key_v1(local: LocalId) -> LocalId:
+        self.box_text_identity_v1(local, false)
+
+    me box_runtime_generic_argument_v1(local: LocalId) -> LocalId:
+        """`Any` / erased `T` call-argument boxer. A text argument keeps its
+        IDENTITY in both representations: a tagged handle passes, and a raw
+        char* that is the data buffer of a live heap string (a `for` binder
+        or `a[i]` over `[text]`, decoded by rt_interp_cstr) is handed over as
+        that string's own handle. Copying it instead made
+        `rt_transient_heap_promote<T>(answer)` retain the COPY while the
+        caller returned the original, freed at scope end (bug
+        stage3_selfbuild_raw_text_strict_extern_2026-11-18, defect 2). Only
+        a char* with no heap owner (a literal) is still copied."""
+        self.box_text_identity_v1(local, true)
+
+    me box_text_identity_v1(local: LocalId, resolve_owner: bool) -> LocalId:
         # Struct-agnostic: dict key sites canonicalize first (box_dict_key_v1).
         # Preserve registered text identity even when a field/load lost its
         # static tagged-text note. rt_string_data is registry-aware: tagged
@@ -2909,6 +2924,36 @@ impl MirLowering:
         val result = probe.new_temp(MirType.i64())
         probe.terminate_if(mir_operand_copy(is_borrowed), borrowed_block, tagged_block)
         probe.switch_to_block(borrowed_block)
+        if resolve_owner:
+            # RtCoreString (runtime_native.c) is {u32 kind, u32 flags, u64 len,
+            # char data[]} behind RT_VALUE_TAG_HEAP (1): the owner candidate of
+            # a data pointer is `(word - 16) | 1`. rt_string_data checks
+            # registry membership before it reads a header and answers the data
+            # pointer only for a live registered string, so the candidate is
+            # accepted on an exact word match and never dereferenced here.
+            # A probe call with no result falls back to the candidate word,
+            # which never equals `word`: the copy path stays.
+            # Words at or below 0x10010 (nil, small ints) cannot be data
+            # pointers (same floor as rt_core_transient_text_data_pointer).
+            val owner_probe_block = probe.new_block(Some("generic_arg_text_owner_probe"))
+            val owner_keep_block = probe.new_block(Some("generic_arg_text_owner_keep"))
+            val owner_copy_block = probe.new_block(Some("generic_arg_text_owner_copy"))
+            val floor_word = probe.emit_const_int(65552)
+            val plausible = probe.emit_binop(MirBinOp.Gt, mir_operand_copy(word), mir_operand_copy(floor_word), MirType.bool())
+            probe.terminate_if(mir_operand_copy(plausible), owner_probe_block, owner_copy_block)
+            probe.switch_to_block(owner_probe_block)
+            val header_bytes = probe.emit_const_int(16)
+            val header_word = probe.emit_binop(MirBinOp.Sub, mir_operand_copy(word), mir_operand_copy(header_bytes), MirType.i64())
+            val heap_tag = probe.emit_const_int(1)
+            val candidate = probe.emit_binop(MirBinOp.BitOr, mir_operand_copy(header_word), mir_operand_copy(heap_tag), MirType.i64())
+            val candidate_data = probe.emit_call(data_function, [mir_operand_copy(candidate)], MirType(kind: MirTypeKind.Opaque("str")))
+            val candidate_word = probe.emit_bitcast(mir_operand_copy(candidate_data ?? candidate), MirType.i64())
+            val is_owner = probe.emit_binop(MirBinOp.Eq, mir_operand_copy(word), mir_operand_copy(candidate_word), MirType.bool())
+            probe.terminate_if(mir_operand_copy(is_owner), owner_keep_block, owner_copy_block)
+            probe.switch_to_block(owner_keep_block)
+            probe.emit_copy(result, candidate)
+            probe.terminate_goto(merge_block)
+            probe.switch_to_block(owner_copy_block)
         self.builder = probe
         val boxed = self.box_runtime_value(local)
         var borrowed = self.builder

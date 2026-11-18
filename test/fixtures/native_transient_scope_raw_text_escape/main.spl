@@ -1,10 +1,16 @@
-# Bug stage3_selfbuild_raw_text_strict_extern_2026-11-18 (defect 2, OPEN).
-# A `for` binder over `[text]` is a raw char* borrowed from the array element.
-# Returned out of a transient scratch scope it cannot be promoted (the generic
-# `T` boundary boxes a copy), so the caller reads freed memory. Stage 2 native
-# output on 2026-11-18 printed `plain=junk-...-1 spl=false`. Expected:
-#   plain=/some/long/path/number/3/file_name_that_is_rather_long.spl spl=true
-#   owned=/some/long/path/number/4/file_name_that_is_rather_long.spl spl=true
+# Bug stage3_selfbuild_raw_text_strict_extern_2026-11-18 (defect 2).
+# A `for` binder or `a[i]` over `[text]` is a raw char*: the data buffer of the
+# array element. The erased `T` argument boundary copied a raw text, so
+# `rt_transient_heap_promote<T>(answer)` retained the copy and the caller read
+# the original after scope end. Stage 2 394e392ed55 printed
+#   plain=junk-...-0 spl=false     (wrapped= the same; index= a sibling's path)
+# Fixed in the generic-argument boxer (box_runtime_generic_argument_v1), which
+# hands over the owning string. Expected, every line `spl=true`:
+#   plain=/some/long/path/number/3/file_name_that_is_rather_long.spl
+#   owned=.../4/...  index=.../5/...  direct=.../6/...  wrapped=.../7/...
+# Isolation measured on that Stage 2: `direct` (a call result, tagged) and
+# `owned` (`+ ""`) were already correct, and all variants were correct when the
+# extern was declared `(value: text)` (raw word passed, runtime resolves it).
 # Native only: the externs are runtime scratch-scope owners.
 
 extern fn rt_transient_array_scope_begin() -> bool
@@ -46,6 +52,47 @@ fn pick_owned(n: i64) -> text:
     scratch_end_text(resolved)
     resolved
 
+fn promote_any<T>(value: T) -> bool:
+    var ok = false
+    unsafe(capabilities: [ffi]):
+        ok = rt_transient_heap_promote(value)
+    ok
+
+fn scratch_end_wrapped(answer: text):
+    var ok = false
+    unsafe(capabilities: [ffi]):
+        ok = rt_transient_array_scope_pause()
+    ok = ok and promote_any(answer)
+    unsafe(capabilities: [ffi]):
+        ok = ok and rt_transient_array_scope_end()
+    if not ok: panic("scratch end failed")
+
+fn make_path(n: i64) -> text:
+    "/some/long/path/number/{n}/file_name_that_is_rather_long.spl"
+
+fn index_scratch(n: i64) -> text:
+    var candidates: [text] = []
+    candidates = candidates.push(make_path(n))
+    candidates[0]
+
+fn pick_index(n: i64) -> text:
+    scratch_begin()
+    val resolved = index_scratch(n)
+    scratch_end_text(resolved)
+    resolved
+
+fn pick_direct(n: i64) -> text:
+    scratch_begin()
+    val resolved = make_path(n)
+    scratch_end_text(resolved)
+    resolved
+
+fn pick_wrapped(n: i64) -> text:
+    scratch_begin()
+    val resolved = pick_scratch(n)
+    scratch_end_wrapped(resolved)
+    resolved
+
 fn churn() -> i64:
     var junk: [text] = []
     var i = 0
@@ -57,6 +104,12 @@ fn churn() -> i64:
 fn main():
     val plain = pick_plain(3)
     val owned = pick_owned(4)
+    val indexed = pick_index(5)
+    val direct = pick_direct(6)
+    val wrapped = pick_wrapped(7)
     val count = churn()
     print "plain={plain} spl={plain.ends_with(".spl")}"
     print "owned={owned} spl={owned.ends_with(".spl")}"
+    print "index={indexed} spl={indexed.ends_with(".spl")}"
+    print "direct={direct} spl={direct.ends_with(".spl")}"
+    print "wrapped={wrapped} spl={wrapped.ends_with(".spl")}"
