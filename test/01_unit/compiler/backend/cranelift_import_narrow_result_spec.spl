@@ -7,7 +7,7 @@
 use std.spec
 use std.spec.step
 use compiler.mir.mir.*
-use compiler.backend.cranelift_codegen_adapter.{cl_import_result_narrow_plan}
+use compiler.backend.cranelift_codegen_adapter.{cl_import_result_narrow_plan, cl_import_call_result_narrow_plan}
 
 describe "Cranelift imported-call narrow result plan":
     it "zero-extends a declared bool from its low byte":
@@ -45,3 +45,30 @@ describe "Cranelift imported-call narrow result plan":
         expect(tf).to_equal(0)
         val (tu, _) = cl_import_result_narrow_plan(MirType.unit())
         expect(tu).to_equal(0)
+
+    # Bug phase2_cranelift_extern_bool_return_upper_bits_2026-11-18: MIR splits
+    # a `text` argument of a (ptr, len) runtime extern into two operands, so the
+    # call's arity differs from the declared parameter count. The result must
+    # still be re-extended from the recorded return type.
+    it "plans from the recorded return when text expansion changed the arity":
+        step("rt_file_exists(text) -> bool: 1 declared param, 2 call operands")
+        val sig = MirSignature(params: [], return_type: MirType.bool(), is_variadic: false,
+            declared_params: [MirType.i64()], declared_params_known: true)
+        val (ty, signed) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
+        expect(ty).to_equal(1)
+        expect(signed).to_equal(false)
+
+    it "plans a zero-argument bool extern":
+        step("rt_transient_array_scope_begin() -> bool")
+        val sig = MirSignature(params: [], return_type: MirType.bool(), is_variadic: false)
+        val (ty, signed) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
+        expect(ty).to_equal(1)
+        expect(signed).to_equal(false)
+
+    it "leaves a callee with no recorded return untouched":
+        step("non-FuncPtr operand type and I64 return -> no reduce")
+        val (tn, _) = cl_import_call_result_narrow_plan(MirType.i64())
+        expect(tn).to_equal(0)
+        val sig = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        val (tw, _) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
+        expect(tw).to_equal(0)
