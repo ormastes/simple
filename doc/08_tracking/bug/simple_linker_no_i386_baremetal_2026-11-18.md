@@ -61,3 +61,10 @@ Limit: `check-baremetal-efi-boot.shs --linker simple` needs SIMPLE_LINK_BIN
 with a `run` command; neither WSL binary (simple-p2, sosrt2) has one today, so
 the link + wrap ran on Windows with the WSL-built objects. Board run not
 evidenced.
+
+## Follow-up 2026-11-18: measurements and the lld lane
+
+- Simple link (`baremetal-elf32-link.spl` via `simple.exe run`, Windows, interpreter fallback): 4.9-5.4 s wall and 501-518 MB peak working set. The output is a 134041-byte image, byte-identical to the image that booted.
+- lld lane (`--linker lld`) on release/1.0.0 failed at the EFI wrap: `lld-link: undefined symbol: _image_start/_image_end`, because i386 COFF prefixes C symbols with `_`. Fixed with asm labels on the extern declarations. `efi_main` now returns `uintn`.
+- After the fix, `--arch i686 --linker lld` boots on OVMF IA32 with the exact transcript (PASS). Whole check: 8:40 wall, 126 MB max RSS (WSL, small_slot).
+- `elf_link_rss_budget.shs`: selftest PASS (4 fixtures). The measured run needs a natively built `elf_link_bench_driver`, which is not built in this lane (the x86_64 ELF path, not the ELF32 raw path).
