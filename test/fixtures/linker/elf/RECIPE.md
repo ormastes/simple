@@ -280,3 +280,14 @@ clang $T $PIC ldstub_arm.c -o ls.o && ld.lld -shared --soname ld-linux-armhf.so.
 - **ldstub_arm.so.1** is a link-time stand-in for `ld-linux-armhf.so.3` and exports only `__tls_get_addr`. The runtime uses the real loader, plus `libc.so.6`.
 
 Under `qemu-arm-static -L /usr/arm-linux-gnueabihf`, the Simple linker and ld.lld give the same results in both dynamic and PIE modes: `hi`/rc=42 for the tail-call fixture and rc=42 for the TLS fixture.
+
+## riscv64 dynamic fixtures (elf_riscv64_dynamic_spec)
+
+Built in WSL by `C:/dev/wt/xc-wsl-scripts/slk_rv64_fix.sh` with clang only:
+
+    T="--target=riscv64-linux-gnu -march=rv64gc -mabi=lp64d -mno-relax -O2"
+    clang $T -fPIC -c dyn_lib_rv64.c -o dyn_lib_rv64.o
+    ld.lld --no-relax -shared -soname libadd_rv64.so dyn_lib_rv64.o -o libadd_rv64.so.1
+    clang $T -fno-pic -ffreestanding -c dyn_start_rv64.c -o dyn_start_rv64.o
+    # oracle: ld.lld --no-relax --dynamic-linker /lib/ld-linux-riscv64-lp64d.so.1 [-pie] \
+    #         dyn_start_rv64.o libadd_rv64.so.1   -> prints "hi", exit 42 under qemu-riscv64

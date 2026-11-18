@@ -1,0 +1,180 @@
+# Internal ELF linker: riscv64 hosted output (static __global_pointer$, then
+# dynamic ET_EXEC / PIE against a DSO). Oracle: ld.lld --no-relax
+# --dynamic-linker /lib/ld-linux-riscv64-lp64d.so.1 [-pie] dyn_start_rv64.o
+# libadd_rv64.so.1 (RECIPE.md): ld.lld's 32-byte PLT0 / 16-byte PLTn, a
+# two-word .got.plt header with lazy slots = PLT0, R_RISCV_JUMP_SLOT and
+# R_RISCV_64 for an imported GOT slot.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/synthetic_sections.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.eh_frame_hdr.{elf_build_eh_frame_hdr}
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+
+val FIX: text = "test/fixtures/linker/elf"
+val INTERP: text = "/lib/ld-linux-riscv64-lp64d.so.1"
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < rd16(b, 0x3c):
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    rd64(b, shdr(b, name) + 16)
+
+fn sec_off(b: [i64], name: text) -> i64:
+    rd64(b, shdr(b, name) + 24)
+
+fn sec_size(b: [i64], name: text) -> i64:
+    rd64(b, shdr(b, name) + 32)
+
+fn hi20(x: i64) -> i64:
+    ((x + 0x800) >> 12) & 0xfffff
+
+fn lo12(x: i64) -> i64:
+    (x - (((x + 0x800) >> 12) << 12)) & 0xfff
+
+fn dynsym_index(b: [i64], name: text) -> i64:
+    val ds = sec_off(b, ".dynsym")
+    val st = sec_off(b, ".dynstr")
+    var i: i64 = 1
+    while i < sec_size(b, ".dynsym") / 24:
+        if cstr(b, st + rd32(b, ds + i * 24)) == name:
+            return i
+        i = i + 1
+    -1
+
+fn link_rv(objs: [text], shared: [text], mode: i64) -> [i64]:
+    var o: [[i64]] = []
+    for p in objs: o.push(load_path("{FIX}/{p}"))
+    var s: [[i64]] = []
+    for p in shared: s.push(load_path("{FIX}/{p}"))
+    val r = elf_link(ElfLinkRequest(objects: o, archives: [], shared: s, entry: "_start",
+        target: RelocArch.Riscv64, mode: mode, interp: if mode == ELF_LINK_STATIC_EXEC: "" else: INTERP))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+fn first_load(b: [i64]) -> i64:
+    val ph = rd64(b, 0x20)
+    var i: i64 = 0
+    while i < rd16(b, 0x38):
+        if rd32(b, ph + i * 56) == 1:
+            return rd64(b, ph + i * 56 + 16)
+        i = i + 1
+    -1
+
+describe "elf_link - riscv64 static":
+    it "defines __global_pointer$ like ld.lld (.sdata + 0x800, else image base + 0x800)":
+        val b = link_rv(["dyn_start_rv64.o", "dyn_lib_rv64.o"], [], ELF_LINK_STATIC_EXEC)
+        expect(b.len() > 0).to_equal(true)
+        val g = sec_off(b, ".got")
+        var found = false
+        var i: i64 = 0
+        while i < sec_size(b, ".got") / 8:
+            if rd64(b, g + i * 8) == first_load(b) + 0x800: found = true
+            i = i + 1
+        expect(found).to_equal(true)
+
+describe "elf_link - riscv64 dynamic":
+    it "writes ld.lld's PLT0 and PLT1 against .got.plt":
+        val b = link_rv(["dyn_start_rv64.o"], ["libadd_rv64.so.1"], ELF_LINK_DYNAMIC_EXEC)
+        expect(b.len() > 0).to_equal(true)
+        val p = sec_addr(b, ".plt")
+        val o = sec_off(b, ".plt")
+        val g = sec_addr(b, ".got.plt")
+        val d = g - p
+        expect(rd32(b, o)).to_equal(0x397 | (hi20(d) << 12))
+        expect(rd32(b, o + 4)).to_equal(0x41c30333)
+        expect(rd32(b, o + 8)).to_equal(0x3be03 | (lo12(d) << 20))
+        expect(rd32(b, o + 12)).to_equal(0xfd430313)
+        expect(rd32(b, o + 16)).to_equal(0x38293 | (lo12(d) << 20))
+        expect(rd32(b, o + 20)).to_equal(0x00135313)
+        expect(rd32(b, o + 24)).to_equal(0x0082b283)
+        expect(rd32(b, o + 28)).to_equal(0x000e0067)
+        val e = g + 16 - (p + 32)
+        expect(rd32(b, o + 32)).to_equal(0xe17 | (hi20(e) << 12))
+        expect(rd32(b, o + 36)).to_equal(0xe3e03 | (lo12(e) << 20))
+        expect(rd32(b, o + 40)).to_equal(0x000e0367)
+        expect(rd32(b, o + 44)).to_equal(0x13)
+
+    it "seeds the lazy slot with PLT0 and binds add_val/msg by JUMP_SLOT/R_RISCV_64":
+        val b = link_rv(["dyn_start_rv64.o"], ["libadd_rv64.so.1"], ELF_LINK_DYNAMIC_EXEC)
+        val g = sec_addr(b, ".got.plt")
+        val go2 = sec_off(b, ".got.plt")
+        expect(sec_size(b, ".got.plt")).to_equal(24)
+        expect(rd64(b, go2 + 16)).to_equal(sec_addr(b, ".plt"))
+        val rp = sec_off(b, ".rela.plt")
+        expect(rd64(b, rp)).to_equal(g + 16)
+        expect(rd64(b, rp + 8)).to_equal((dynsym_index(b, "add_val") << 32) | 5)
+        val rd = sec_off(b, ".rela.dyn")
+        var saw64 = false
+        var i: i64 = 0
+        while i < sec_size(b, ".rela.dyn") / 24:
+            if rd64(b, rd + i * 24 + 8) == ((dynsym_index(b, "msg") << 32) | 2): saw64 = true
+            i = i + 1
+        expect(saw64).to_equal(true)
+
+    it "links a PIE whose __global_pointer$ GOT slot gets R_RISCV_RELATIVE":
+        val b = link_rv(["dyn_start_rv64.o"], ["libadd_rv64.so.1"], ELF_LINK_DYNAMIC_PIE)
+        expect(rd16(b, 16)).to_equal(3)
+        val rd = sec_off(b, ".rela.dyn")
+        var rel = 0
+        var i: i64 = 0
+        while i < sec_size(b, ".rela.dyn") / 24:
+            if rd64(b, rd + i * 24 + 8) == 3 and rd64(b, rd + i * 24 + 16) == 0x800: rel = rel + 1
+            i = i + 1
+        expect(rel).to_equal(1)
+
+describe "eh_frame_hdr - glibc RISC-V crt CIEs":
+    it "indexes an FDE under a version-3 zPLR CIE":
+        # CIE: v3 "zPLR", code 1, data -4, ra 1, aug len 7, P=0x9b+4B, L=0x1b, R=0x1b
+        val cie: [i64] = [24, 0, 0, 0, 0, 0, 0, 0, 3, 0x7a, 0x50, 0x4c, 0x52, 0, 1, 0x7c, 1, 7,
+            0x9b, 0, 0, 0, 0, 0x1b, 0x1b, 0, 0, 0]
+        # FDE: CIE ptr 32, pc_begin -60 (pcrel sdata4), range 16, aug len 4, lsda 0
+        val fde: [i64] = [20, 0, 0, 0, 32, 0, 0, 0, 0xc4, 0xff, 0xff, 0xff, 16, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]
+        var b: [u8] = []
+        for x in cie: b.push(x as u8)
+        for x in fde: b.push(x as u8)
+        for x in [0, 0, 0, 0]: b.push(x as u8)
+        val r = elf_build_eh_frame_hdr(b, 0x1000, 0x2000)
+        if r.is_err(): print "eh err: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
