@@ -16,16 +16,17 @@
 # redefine a key of the immutable base. The merged entry list is therefore
 # byte-identical for any task completion order or worker count.
 #
-# Mode gate (SIMPLE_TARGET_HIR_MODE via target_hir_mode()):
-#   legacy -> the legacy result is returned unchanged; overlays are ignored
-#   shadow -> overlay-merged result is compared to legacy; mismatch is fatal
-#   typed  -> overlay-merged result is used
+# Mode gate (SIMPLE_TARGET_HIR_MODE via target_hir_mode_strict()):
+#   legacy  -> the legacy result is returned unchanged; overlays are ignored
+#   shadow  -> overlay-merged result is compared to legacy; mismatch is fatal
+#   typed   -> overlay-merged result is used
+#   unknown -> fatal Err("target_hir_mode_unknown: ...")
 #
 # Scope: the overlay protocol and its invariants. Wiring the MirLowering
 # SymbolTable writers onto it needs a frozen HirSnapshot carried into
 # MirLowering plus a Stage-3 run (matrix rows pending-stage3).
 
-use compiler.hir.target_hir.target_hir_flags.{target_hir_mode}
+use compiler.hir.target_hir.target_hir_flags.{target_hir_mode_strict, target_hir_mode_or_legacy}
 
 class TaskOverlay:
     owner: text
@@ -111,9 +112,11 @@ fn _entries_text(xs: [text]) -> text:
     s
 
 # Mode-explicit form (pure; unit-testable).
-fn task_overlay_resolve_for_mode(mode: text, legacy: [text], base: Dict<text, text>, overlays: [TaskOverlay]) -> Result<[text], text>:
+pub fn task_overlay_resolve_for_mode(mode: text, legacy: [text], base: Dict<text, text>, overlays: [TaskOverlay]) -> Result<[text], text>:
     if mode == "legacy":
         return Ok(legacy)
+    if mode != "shadow" and mode != "typed":
+        return Err("target_hir_mode_unknown: " + mode)
     val merged = task_overlay_merge(base, overlays)
     if merged.is_err():
         return merged
@@ -122,7 +125,16 @@ fn task_overlay_resolve_for_mode(mode: text, legacy: [text], base: Dict<text, te
         if _entries_text(m) != _entries_text(legacy):
             return Err("target_hir_overlay_shadow_mismatch: legacy " + legacy.len().to_string() + " entries, overlay " + m.len().to_string() + " entries")
         return Ok(legacy)
-    Ok(m)
+    if mode == "typed":
+        return Ok(m)
+    Err("target_hir_mode_unknown: " + mode)
 
-fn task_overlay_resolve(legacy: [text], base: Dict<text, text>, overlays: [TaskOverlay]) -> Result<[text], text>:
-    task_overlay_resolve_for_mode(target_hir_mode(), legacy, base, overlays)
+pub fn task_overlay_resolve(legacy: [text], base: Dict<text, text>, overlays: [TaskOverlay]) -> Result<[text], text>:
+    val mode_check = target_hir_mode_strict()
+    if mode_check.is_err():
+        return Err(mode_check.unwrap_err())
+    # Preserve riscv64 Result<text, text> lowering workaround after strict admission.
+    val mode = target_hir_mode_or_legacy()
+    task_overlay_resolve_for_mode(mode, legacy, base, overlays)
+
+export TaskOverlay, overlay_read, task_overlay_merge, task_overlay_resolve_for_mode, task_overlay_resolve

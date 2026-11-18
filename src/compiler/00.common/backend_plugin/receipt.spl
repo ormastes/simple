@@ -4,7 +4,11 @@ use std.common.crypto.sha256.{sha256_text}
 use compiler.common.backend_plugin.model.{
     BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
     BackendRole, BackendCapability, BackendPluginVTableV1,
+    BackendCapabilityAttestationKindV2, BackendCapabilityAttestationV2,
     BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_plugin_is_bridge_projected_v2,
+    backend_plugin_attests_target_v2, backend_plugin_attests_cpu_v2,
+    backend_plugin_attests_feature_v2,
     backend_plugin_supports_role, backend_plugin_supports_target,
     backend_plugin_has_capability
 }
@@ -75,6 +79,126 @@ fn _backend_plugin_canonical_features(features: [text]) -> text:
         framed.push(_backend_plugin_frame(feature))
     framed.join("")
 
+fn _backend_plugin_effective_cpu(cpu: text) -> text:
+    if cpu == "": "generic" else: cpu
+
+fn _backend_plugin_validate_unique_list(
+    values: [text],
+    empty_detail: text,
+    duplicate_detail: text
+) -> Result<bool, BackendPluginError>:
+    for index in 0..values.len():
+        if values[index] == "":
+            return Err(BackendPluginError.ProviderRejected(empty_detail))
+        for prior in 0..index:
+            if values[prior] == values[index]:
+                return Err(BackendPluginError.ProviderRejected(duplicate_detail))
+    Ok(true)
+
+pub fn resolve_backend_plugin_attestation_v2(
+    request: BackendPluginRequestV1,
+    descriptor: BackendPluginDescriptorV1
+) -> Result<(BackendCapabilityAttestationKindV2, [text]), BackendPluginError>:
+    val attestation: BackendCapabilityAttestationV2 = descriptor.attestation
+    match attestation.kind:
+        case BackendCapabilityAttestationKindV2.Unknown:
+            if (attestation.targets.len() > 0 or attestation.cpus.len() > 0 or
+                    attestation.supported_features.len() > 0):
+                return Err(BackendPluginError.ProviderRejected(
+                    "unattested backend descriptor cannot populate confirmed capability lists"))
+            Ok((BackendCapabilityAttestationKindV2.Unknown, []))
+        case BackendCapabilityAttestationKindV2.ConfirmedBaseline:
+            if backend_plugin_is_bridge_projected_v2(descriptor):
+                return Err(BackendPluginError.ProviderRejected(
+                    "synthetic bridge descriptor cannot claim provider capability attestation"))
+            if attestation.targets.len() == 0:
+                return Err(BackendPluginError.ProviderRejected(
+                    "attested backend descriptor must declare confirmed targets"))
+            match _backend_plugin_validate_unique_list(
+                attestation.targets,
+                "attested target names must not be empty",
+                "attested targets must not contain duplicates"):
+                case Err(error): return Err(error)
+                case Ok(_): pass
+            for attested_target in attestation.targets:
+                if not backend_plugin_supports_target(descriptor, attested_target):
+                    return Err(BackendPluginError.ProviderRejected(
+                        "attested target is outside descriptor targets: " + attested_target))
+            if attestation.cpus.len() == 0:
+                return Err(BackendPluginError.ProviderRejected(
+                    "attested backend descriptor must declare confirmed CPUs"))
+            match _backend_plugin_validate_unique_list(
+                attestation.cpus,
+                "attested CPU names must not be empty",
+                "attested CPUs must not contain duplicates"):
+                case Err(error): return Err(error)
+                case Ok(_): pass
+            if attestation.supported_features.len() > 0:
+                return Err(BackendPluginError.ProviderRejected(
+                    "baseline capability attestation cannot declare supported features"))
+            if not backend_plugin_attests_target_v2(descriptor, request.target):
+                return Err(BackendPluginError.TargetUnsupported(
+                    "provider attestation does not confirm target: " + request.target))
+            val effective_cpu = _backend_plugin_effective_cpu(request.cpu)
+            if not backend_plugin_attests_cpu_v2(descriptor, effective_cpu):
+                return Err(BackendPluginError.CapabilityMismatch(
+                    "provider attestation does not confirm cpu: " + effective_cpu))
+            if request.features.len() > 0:
+                return Err(BackendPluginError.CapabilityMismatch(
+                    "baseline provider attestation rejects feature: " + request.features[0]))
+            Ok((BackendCapabilityAttestationKindV2.ConfirmedBaseline, []))
+        case BackendCapabilityAttestationKindV2.ConfirmedFeatures:
+            if backend_plugin_is_bridge_projected_v2(descriptor):
+                return Err(BackendPluginError.ProviderRejected(
+                    "synthetic bridge descriptor cannot claim provider capability attestation"))
+            if attestation.targets.len() == 0:
+                return Err(BackendPluginError.ProviderRejected(
+                    "attested backend descriptor must declare confirmed targets"))
+            match _backend_plugin_validate_unique_list(
+                attestation.targets,
+                "attested target names must not be empty",
+                "attested targets must not contain duplicates"):
+                case Err(error): return Err(error)
+                case Ok(_): pass
+            for attested_target in attestation.targets:
+                if not backend_plugin_supports_target(descriptor, attested_target):
+                    return Err(BackendPluginError.ProviderRejected(
+                        "attested target is outside descriptor targets: " + attested_target))
+            if attestation.cpus.len() == 0:
+                return Err(BackendPluginError.ProviderRejected(
+                    "attested backend descriptor must declare confirmed CPUs"))
+            match _backend_plugin_validate_unique_list(
+                attestation.cpus,
+                "attested CPU names must not be empty",
+                "attested CPUs must not contain duplicates"):
+                case Err(error): return Err(error)
+                case Ok(_): pass
+            if attestation.supported_features.len() == 0:
+                return Err(BackendPluginError.ProviderRejected(
+                    "feature capability attestation must declare supported features"))
+            match _backend_plugin_validate_unique_list(
+                attestation.supported_features,
+                "attested CPU feature names must not be empty",
+                "attested CPU features must not contain duplicates"):
+                case Err(error): return Err(error)
+                case Ok(_): pass
+            if not backend_plugin_attests_target_v2(descriptor, request.target):
+                return Err(BackendPluginError.TargetUnsupported(
+                    "provider attestation does not confirm target: " + request.target))
+            val effective_cpu = _backend_plugin_effective_cpu(request.cpu)
+            if not backend_plugin_attests_cpu_v2(descriptor, effective_cpu):
+                return Err(BackendPluginError.CapabilityMismatch(
+                    "provider attestation does not confirm cpu: " + effective_cpu))
+            for requested in request.features:
+                if not backend_plugin_attests_feature_v2(descriptor, requested):
+                    return Err(BackendPluginError.CapabilityMismatch(
+                        "provider attestation does not confirm feature: " + requested))
+            if request.features.len() == 0:
+                Ok((BackendCapabilityAttestationKindV2.ConfirmedBaseline, []))
+            else:
+                Ok((BackendCapabilityAttestationKindV2.ConfirmedFeatures,
+                    _backend_plugin_sorted_text(request.features)))
+
 struct BackendProviderReceipt:
     provider_identity: text
     provider_version: text
@@ -86,6 +210,9 @@ struct BackendProviderReceipt:
     role: BackendRole
     optimization: text
     plugin_path_policy: text = "builtin"
+    cpu: text = "generic"
+    feature_acceptance: BackendCapabilityAttestationKindV2 = BackendCapabilityAttestationKindV2.Unknown
+    accepted_features: [text] = []
 
 impl BackendProviderReceipt:
     fn canonical_text() -> text:
@@ -96,7 +223,10 @@ impl BackendProviderReceipt:
             + _backend_plugin_frame(self.abi_version.to_string())
             + _backend_plugin_frame(self.mir_abi_digest)
             + _backend_plugin_frame(self.target)
+            + _backend_plugin_frame(self.cpu)
             + _backend_plugin_frame(_backend_plugin_canonical_features(self.features))
+            + _backend_plugin_frame(self.feature_acceptance.name())
+            + _backend_plugin_frame(_backend_plugin_canonical_features(self.accepted_features))
             + _backend_plugin_frame(self.role.name())
             + _backend_plugin_frame(self.optimization)
             + _backend_plugin_frame(self.plugin_path_policy))
@@ -104,12 +234,29 @@ impl BackendProviderReceipt:
     fn hash() -> text:
         sha256_text(self.canonical_text())
 
-fn backend_plugin_receipt(descriptor: BackendPluginDescriptorV1, request: BackendPluginRequestV1) -> BackendProviderReceipt:
+fn _backend_plugin_receipt_with_attestation_v2(
+    descriptor: BackendPluginDescriptorV1,
+    request: BackendPluginRequestV1,
+    feature_acceptance: BackendCapabilityAttestationKindV2,
+    accepted_features: [text]
+) -> BackendProviderReceipt:
     BackendProviderReceipt(
         descriptor.provider_identity, descriptor.provider_version,
         descriptor.build_id, descriptor.abi_version, descriptor.mir_abi_digest,
         request.target, request.features, request.role, request.optimization,
-        if request.has_plugin_path: "explicit:" + request.plugin_path else: "builtin")
+        if request.has_plugin_path: "explicit:" + request.plugin_path else: "builtin",
+        _backend_plugin_effective_cpu(request.cpu),
+        feature_acceptance,
+        accepted_features)
+
+fn backend_plugin_receipt(descriptor: BackendPluginDescriptorV1, request: BackendPluginRequestV1) -> BackendProviderReceipt:
+    match resolve_backend_plugin_attestation_v2(request, descriptor):
+        case Ok((acceptance, accepted)):
+            _backend_plugin_receipt_with_attestation_v2(
+                descriptor, request, acceptance, accepted)
+        case Err(_):
+            _backend_plugin_receipt_with_attestation_v2(
+                descriptor, request, BackendCapabilityAttestationKindV2.Unknown, [])
 
 fn validate_backend_plugin_request(request: BackendPluginRequestV1) -> Result<BackendPluginRequestV1, BackendPluginError>:
     if request.backend_name == "": return Err(BackendPluginError.ProviderRejected("backend_name is required"))
@@ -160,7 +307,13 @@ fn admit_backend_plugin_descriptor(request: BackendPluginRequestV1, descriptor: 
     match operations:
         case Err(error): return Err(error)
         case Ok(_): pass
-    Ok(backend_plugin_receipt(descriptor, request))
+    val attestation = resolve_backend_plugin_attestation_v2(request, descriptor)
+    match attestation:
+        case Err(error): return Err(error)
+        case Ok((acceptance, accepted)):
+            Ok(_backend_plugin_receipt_with_attestation_v2(
+                descriptor, request, acceptance, accepted))
 
 export BackendPluginError, BackendProviderReceipt, backend_plugin_receipt,
-    validate_backend_plugin_request, admit_backend_plugin_descriptor
+    validate_backend_plugin_request, admit_backend_plugin_descriptor,
+    resolve_backend_plugin_attestation_v2

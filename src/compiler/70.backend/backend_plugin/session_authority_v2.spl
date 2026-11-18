@@ -1,9 +1,19 @@
 # Backend session, compile-use, and retained object-result authority (Stage 6A.1a/b).
-# V1 providers report unknown CPU-feature acceptance. No result issued here is
-# inspection or execution evidence.
+# Unattested V1 providers report Unknown CPU-feature acceptance; provider-attested
+# descriptors bind ConfirmedBaseline or ConfirmedFeatures into receipts and envelopes.
 
-use compiler.common.backend_plugin.model.{BackendPluginRequestV1}
-use compiler.backend.backend_plugin.loader.{load_backend}
+use compiler.common.backend_plugin.model.{
+    BackendCapabilityAttestationKindV2,
+    BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_plugin_is_provider_attested_v2,
+    backend_plugin_is_bridge_projected_v2
+}
+use compiler.common.backend_plugin.receipt.{
+    resolve_backend_plugin_attestation_v2
+}
+use compiler.backend.backend_plugin.loader.{
+    load_backend, load_backend_with_descriptor_v2
+}
 use compiler.backend.backend_plugin.session.{BackendSession}
 use compiler.backend.codegen_types.{CodegenOutput, CodegenOutputKind}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
@@ -79,7 +89,18 @@ pub struct BackendSessionResultTokenV2:
 
 pub enum BackendSessionFeatureAcceptanceV2:
     Unknown
+    ConfirmedBaseline
+    ConfirmedFeatures
     AcceptedExact
+
+pub fn backend_session_feature_acceptance_name_v2(
+    acceptance: BackendSessionFeatureAcceptanceV2
+) -> text:
+    match acceptance:
+        case BackendSessionFeatureAcceptanceV2.Unknown: "Unknown"
+        case BackendSessionFeatureAcceptanceV2.ConfirmedBaseline: "ConfirmedBaseline"
+        case BackendSessionFeatureAcceptanceV2.ConfirmedFeatures: "ConfirmedFeatures"
+        case BackendSessionFeatureAcceptanceV2.AcceptedExact: "AcceptedExact"
 
 pub enum BackendSessionResultTerminalStatusV2:
     Emitted
@@ -129,6 +150,8 @@ struct _BackendSessionResultRecordV2:
     compile_cpu_request: text
     compile_opt_level_request: i64
     compile_is_release: bool
+    feature_acceptance: BackendSessionFeatureAcceptanceV2
+    accepted_features: [text]
 
 struct _BackendSessionCompileUseRecordV2:
     token: BackendSessionCompileUseTokenV2
@@ -176,6 +199,51 @@ fn _backend_session_copy_texts_v2(source: [text]) -> [text]:
         copied.push(value)
     copied
 
+fn _backend_session_texts_equal_v2(left: [text], right: [text]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+fn _backend_session_resolve_feature_attestation_v2(
+    record: _BackendSessionAuthorityRecordV2
+) -> Result<(BackendSessionFeatureAcceptanceV2, [text]), BackendSessionAuthorityErrorV2>:
+    val request = record.session.request
+    val descriptor = record.session.descriptor
+    val receipt = record.session.receipt
+    if receipt.hash() != record.token.receipt_hash:
+        return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+    val resolved = resolve_backend_plugin_attestation_v2(request, descriptor)
+    val (resolved_kind, resolved_accepted) = match resolved:
+        case Err(_):
+            return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+        case Ok(pair):
+            pair
+    if receipt.feature_acceptance.name() != resolved_kind.name():
+        return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+    if not _backend_session_texts_equal_v2(receipt.accepted_features, resolved_accepted):
+        return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+    match resolved_kind:
+        case BackendCapabilityAttestationKindV2.Unknown:
+            if request.features.len() > 0 or resolved_accepted.len() > 0:
+                return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+            Ok((BackendSessionFeatureAcceptanceV2.Unknown, []))
+        case BackendCapabilityAttestationKindV2.ConfirmedBaseline:
+            if (backend_plugin_is_bridge_projected_v2(descriptor) or
+                    request.features.len() > 0 or resolved_accepted.len() > 0):
+                return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+            Ok((BackendSessionFeatureAcceptanceV2.ConfirmedBaseline, []))
+        case BackendCapabilityAttestationKindV2.ConfirmedFeatures:
+            if (backend_plugin_is_bridge_projected_v2(descriptor) or
+                    resolved_accepted.len() == 0):
+                return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+            Ok((BackendSessionFeatureAcceptanceV2.ConfirmedFeatures,
+                _backend_session_copy_texts_v2(resolved_accepted)))
+
 fn _backend_session_frame_v2(value: text) -> text:
     value.len().to_string() + ":" + value
 
@@ -187,7 +255,9 @@ fn _backend_session_result_envelope_sha256_v2(
     compile_kind: BackendSessionCompileKindV2,
     compile_cpu_request: text,
     compile_opt_level_request: i64,
-    compile_is_release: bool
+    compile_is_release: bool,
+    feature_acceptance: BackendSessionFeatureAcceptanceV2,
+    accepted_features: [text]
 ) -> text:
     val request = record.session.request
     val descriptor = record.session.descriptor
@@ -213,9 +283,12 @@ fn _backend_session_result_envelope_sha256_v2(
     framed = framed + _backend_session_frame_v2(request.features.len().to_string())
     for feature in request.features:
         framed = framed + _backend_session_frame_v2(feature)
-    # V1 has no provider-confirmed feature set. Bind that absence explicitly.
-    framed = framed + _backend_session_frame_v2("Unknown")
-    framed = framed + _backend_session_frame_v2("0")
+    # Bind both feature_acceptance and canonical accepted_features into the envelope.
+    framed = framed + _backend_session_frame_v2(
+        backend_session_feature_acceptance_name_v2(feature_acceptance))
+    framed = framed + _backend_session_frame_v2(accepted_features.len().to_string())
+    for accepted in accepted_features:
+        framed = framed + _backend_session_frame_v2(accepted)
     framed = framed + _backend_session_frame_v2("ObjectCode")
     framed = framed + _backend_session_frame_v2(object_sha256)
     framed = framed + _backend_session_frame_v2(object_byte_count.to_string())
@@ -279,12 +352,40 @@ pub fn backend_session_authority_open_v2(
         return Err(BackendSessionAuthorityErrorV2.CapacityExceeded)
     if owner.next_generation == 0u64 or owner.next_generation == 0xffffffffffffffffu64:
         return Err(BackendSessionAuthorityErrorV2.CounterOverflow)
-    # The V1 loader cannot attest that requested CPU features were accepted.
-    # Keep this owner feature-free until a provider-owned acceptance receipt exists.
+    # Unattested V1 loading cannot confirm requested CPU features.
     if request.features.len() > 0:
         return Err(BackendSessionAuthorityErrorV2.LoadRejected(
             "backend feature acceptance is unavailable for V2 sessions"))
     val loaded = match load_backend(request):
+        case Ok(session): session
+        case Err(error):
+            return Err(BackendSessionAuthorityErrorV2.LoadRejected(
+                "{error.code()}: {error.diagnostic()}"))
+    val token = BackendSessionAuthorityTokenV2(
+        owner_identity: owner.owner_identity,
+        generation: owner.next_generation,
+        receipt_hash: loaded.receipt.hash())
+    owner.records.push(_BackendSessionAuthorityRecordV2(
+        token: token, session: loaded,
+        state: BackendSessionAuthorityStateV2.Accepting, uses: []))
+    owner.next_generation = owner.next_generation + 1u64
+    Ok(token)
+
+pub fn backend_session_authority_open_with_descriptor_v2(
+    owner: BackendSessionAuthorityV2,
+    request: BackendPluginRequestV1,
+    descriptor: BackendPluginDescriptorV1
+) -> Result<BackendSessionAuthorityTokenV2, BackendSessionAuthorityErrorV2>:
+    if owner.owner_identity == 0u64:
+        return Err(BackendSessionAuthorityErrorV2.InvalidOwner)
+    if owner.records.len() >= BACKEND_SESSION_AUTHORITY_MAX_SESSIONS_V2:
+        return Err(BackendSessionAuthorityErrorV2.CapacityExceeded)
+    if owner.next_generation == 0u64 or owner.next_generation == 0xffffffffffffffffu64:
+        return Err(BackendSessionAuthorityErrorV2.CounterOverflow)
+    if not backend_plugin_is_provider_attested_v2(descriptor) and request.features.len() > 0:
+        return Err(BackendSessionAuthorityErrorV2.LoadRejected(
+            "backend feature acceptance is unavailable for V2 sessions"))
+    val loaded = match load_backend_with_descriptor_v2(request, descriptor):
         case Ok(session): session
         case Err(error):
             return Err(BackendSessionAuthorityErrorV2.LoadRejected(
@@ -415,6 +516,9 @@ fn _backend_session_retain_object_v2(
     val result_token = BackendSessionResultTokenV2(
         owner_identity: owner.owner_identity, generation: token.generation,
         use_id: use_token.use_id, result_id: owner.next_result_id)
+    val (feature_acceptance, accepted_features) = match _backend_session_resolve_feature_attestation_v2(record):
+        case Ok(pair): pair
+        case Err(error): return Err(error)
     val copied = _backend_session_copy_bytes_v2(object_bytes)
     var use_record = record.uses[use_index]
     val object_sha256 = sha256_u8_hex(copied)
@@ -428,11 +532,13 @@ fn _backend_session_retain_object_v2(
         envelope_sha256: _backend_session_result_envelope_sha256_v2(
             record, result_token, object_sha256, byte_count,
             compile_kind, recorded_cpu_request, compile_opt_level_request,
-            compile_is_release),
+            compile_is_release, feature_acceptance, accepted_features),
         compile_kind: compile_kind,
         compile_cpu_request: recorded_cpu_request,
         compile_opt_level_request: compile_opt_level_request,
-        compile_is_release: compile_is_release))
+        compile_is_release: compile_is_release,
+        feature_acceptance: feature_acceptance,
+        accepted_features: _backend_session_copy_texts_v2(accepted_features)))
     record.uses[use_index] = use_record
     owner.records[index] = record
     owner.next_result_id = owner.next_result_id + 1u64
@@ -523,12 +629,21 @@ pub fn backend_session_authority_result_project_v2(
        result_token.use_id != use_token.use_id:
         return Err(BackendSessionAuthorityErrorV2.ResultUnknownOrReleased)
     val result = use_record.results[result_index]
+    val (live_acceptance, live_accepted) = match _backend_session_resolve_feature_attestation_v2(record):
+        case Ok(pair): pair
+        case Err(error): return Err(error)
+    if backend_session_feature_acceptance_name_v2(result.feature_acceptance) !=
+       backend_session_feature_acceptance_name_v2(live_acceptance):
+        return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
+    if not _backend_session_texts_equal_v2(result.accepted_features, live_accepted):
+        return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
     if result.object_sha256 != sha256_u8_hex(result.object_bytes):
         return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
     if result.envelope_sha256 != _backend_session_result_envelope_sha256_v2(
         record, result_token, result.object_sha256, result.object_bytes.len(),
         result.compile_kind, result.compile_cpu_request,
-        result.compile_opt_level_request, result.compile_is_release):
+        result.compile_opt_level_request, result.compile_is_release,
+        result.feature_acceptance, result.accepted_features):
         return Err(BackendSessionAuthorityErrorV2.ByteIntegrityFailed)
     val request = record.session.request
     val descriptor = record.session.descriptor
@@ -546,8 +661,8 @@ pub fn backend_session_authority_result_project_v2(
         compile_opt_level_request: result.compile_opt_level_request,
         compile_is_release: result.compile_is_release,
         requested_features: _backend_session_copy_texts_v2(request.features),
-        accepted_features: [],
-        feature_acceptance: BackendSessionFeatureAcceptanceV2.Unknown,
+        accepted_features: _backend_session_copy_texts_v2(result.accepted_features),
+        feature_acceptance: result.feature_acceptance,
         kind: CodegenOutputKind.ObjectCode,
         object_bytes: _backend_session_copy_bytes_v2(result.object_bytes),
         object_sha256: result.object_sha256,
@@ -708,6 +823,26 @@ pub class BackendSessionOwnedLeaseV2:
             backend_name: projection.provider_identity,
             receipt_hash: projection.receipt_hash, retired: false))
 
+    pub static fn open_with_descriptor(
+        request: BackendPluginRequestV1,
+        descriptor: BackendPluginDescriptorV1
+    ) -> Result<BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2>:
+        var authority = BackendSessionAuthorityV2.create()
+        val token = match backend_session_authority_open_with_descriptor_v2(
+            authority, request, descriptor):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        val projection = match backend_session_authority_project_v2(authority, token):
+            case Ok(value): value
+            case Err(error):
+                _ = backend_session_authority_close_v2(authority, token)
+                _ = backend_session_authority_release_v2(authority, token)
+                return Err(error)
+        Ok(BackendSessionOwnedLeaseV2(
+            authority: authority, token: token,
+            backend_name: projection.provider_identity,
+            receipt_hash: projection.receipt_hash, retired: false))
+
     fn compile_owned_aot_into_path_v2(
         module: MirModule, is_release: bool, opt_level: i64, target_cpu: text,
         storage_bindings: [MirStorageViewSiteBindingV1], object_path: text,
@@ -792,12 +927,15 @@ export BackendSessionOwnedLeaseV2
 export BackendSessionAuthorityTokenV2, BackendSessionCompileUseTokenV2
 export BackendSessionResultTokenV2, BackendSessionResultProjectionV2
 export BackendSessionFeatureAcceptanceV2, BackendSessionResultTerminalStatusV2
+export backend_session_feature_acceptance_name_v2
 export BackendSessionCompileKindV2
 export BackendSessionAuthorityStateV2, BackendSessionAuthorityProjectionV2
 export BACKEND_SESSION_AUTHORITY_SCHEMA_V2
 export BACKEND_SESSION_RESULT_MAX_BYTES_V2
 export BACKEND_SESSION_RESULT_MAX_RETAINED_BYTES_V2
-export backend_session_authority_open_v2, backend_session_authority_project_v2
+export backend_session_authority_open_v2
+export backend_session_authority_open_with_descriptor_v2
+export backend_session_authority_project_v2
 export backend_session_authority_use_acquire_v2
 export backend_session_authority_compile_module_v2
 export backend_session_authority_compile_module_result_v2

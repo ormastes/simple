@@ -29,24 +29,59 @@ fn target_profile_native_check() -> text:
         case Err(reason): return reason
     var phase4 = prod
     phase4.managed_build_phase = "phase4"
+    var phase4_prod_identity = ""
     match compileoptions_target_profile_v1(phase4, driver_target_trace_capability_v1(phase4)):
         case Ok(policy):
+            if policy.profile != TargetBuildProfileV1.Release: return "wrong phase4 prod profile"
             if policy.trace_resolution != TargetTraceResolutionV1.Disabled: return "phase4 debug enabled"
+            phase4_prod_identity = target_profile_identity_text_v1(policy)
         case Err(reason): return reason
+    var phase4_dev = driver_core_compile_options_default()
+    phase4_dev.managed_build_phase = "phase4"
+    phase4_dev.backend = "llvm"
+    phase4_dev.native_target = "aarch64-unknown-linux-gnu"
+    match compileoptions_target_profile_v1(phase4_dev, driver_target_trace_capability_v1(phase4_dev)):
+        case Ok(policy):
+            if policy.profile != TargetBuildProfileV1.Development: return "wrong phase4 dev profile"
+            if policy.trace_resolution != TargetTraceResolutionV1.Disabled: return "phase4 dev enabled automatic debug"
+            if target_profile_identity_text_v1(policy) == phase4_prod_identity: return "phase4 dev and prod share identity"
+        case Err(reason): return reason
+    var mixed_release_dev = driver_core_compile_options_default()
+    mixed_release_dev.managed_build_phase = "phase4"
+    mixed_release_dev.release = true
+    mixed_release_dev.profile = "dev"
+    if compileoptions_target_profile_v1(mixed_release_dev, driver_target_trace_capability_v1(mixed_release_dev)).is_ok():
+        return "mixed release+dev accepted"
+    var mixed_debug_prod = driver_core_compile_options_default()
+    mixed_debug_prod.managed_build_phase = "phase4"
+    mixed_debug_prod.release = false
+    mixed_debug_prod.profile = "prod"
+    if compileoptions_target_profile_v1(mixed_debug_prod, driver_target_trace_capability_v1(mixed_debug_prod)).is_ok():
+        return "mixed debug+prod accepted"
+    var phase3_prod = prod
+    phase3_prod.managed_build_phase = "phase3"
+    if compileoptions_target_profile_v1(phase3_prod, driver_target_trace_capability_v1(phase3_prod)).is_ok():
+        return "phase3 prod accepted"
     dev.target_debug_request = TargetDebugRequestV1.Enabled
     if compileoptions_target_profile_v1(dev, driver_target_trace_capability_v1(dev)).is_ok(): return "explicit unavailable request accepted"
     phase4.xray_enabled = true
     if compileoptions_target_profile_v1(phase4, driver_target_trace_capability_v1(phase4)).is_ok(): return "release static XRay accepted"
-    for args in [["--profile=dev", "--opt-level=aggressive"], ["--managed-build-phase", "phase3"]]:
+    for args in [["--profile=dev", "--opt-level=aggressive"], ["--managed-build-phase", "phase3"], ["--managed-build-phase=phase4", "--profile=dev"]]:
         match focused_native_build_target_profile_v1(args):
             case Ok(selected):
                 if selected.release or selected.profile != "dev": return "CLI development selection lost"
+            case Err(reason): return reason
+    for args in [["--managed-build-phase=phase4"], ["--managed-build-phase=phase4", "--profile=prod"]]:
+        match focused_native_build_target_profile_v1(args, false):
+            case Ok(selected):
+                if not selected.release or selected.profile != "prod" or selected.managed_build_phase != "phase4":
+                    return "CLI phase4 prod selection lost"
             case Err(reason): return reason
     match focused_native_build_target_profile_v1(["--opt-level=none"]):
         case Ok(selected):
             if not selected.release: return "native default release changed by optimization"
         case Err(reason): return reason
-    for args in [["--profile=dev", "--release"], ["--release", "--profile=dev"], ["--managed-build-phase=phase3", "--profile=prod"], ["--managed-build-phase=phase4", "--profile=dev"], ["--managed-build-phase=unknown"]]:
+    for args in [["--profile=dev", "--release"], ["--release", "--profile=dev"], ["--managed-build-phase=phase3", "--profile=prod"], ["--managed-build-phase=phase3", "--release"], ["--managed-build-phase=phase4", "--profile=dev", "--release"], ["--managed-build-phase=unknown"]]:
         if focused_native_build_target_profile_v1(args).is_ok(): return "contradictory CLI policy accepted"
     ""
 

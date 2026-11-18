@@ -58,6 +58,51 @@ struct BackendPluginRequestV1:
     plugin_path: text
     has_plugin_path: bool
 
+enum BackendCapabilityAttestationKindV2:
+    Unknown
+    ConfirmedBaseline
+    ConfirmedFeatures
+
+impl BackendCapabilityAttestationKindV2:
+    fn name() -> text:
+        match self:
+            case BackendCapabilityAttestationKindV2.Unknown: "unknown"
+            case BackendCapabilityAttestationKindV2.ConfirmedBaseline: "confirmed_baseline"
+            case BackendCapabilityAttestationKindV2.ConfirmedFeatures: "confirmed_features"
+
+struct BackendCapabilityAttestationV2:
+    kind: BackendCapabilityAttestationKindV2
+    targets: [text]
+    cpus: [text]
+    supported_features: [text]
+    descriptor_origin: text = "unattested-v1"
+
+fn backend_capability_attestation_unknown_v2() -> BackendCapabilityAttestationV2:
+    BackendCapabilityAttestationV2(
+        BackendCapabilityAttestationKindV2.Unknown, [], [], [], "unattested-v1")
+
+fn backend_capability_attestation_bridge_projected_v2() -> BackendCapabilityAttestationV2:
+    BackendCapabilityAttestationV2(
+        BackendCapabilityAttestationKindV2.Unknown, [], [], [],
+        "dynamic-bridge-projected-v1")
+
+fn backend_capability_attestation_confirmed_baseline_v2(
+    targets: [text],
+    cpus: [text]
+) -> BackendCapabilityAttestationV2:
+    BackendCapabilityAttestationV2(
+        BackendCapabilityAttestationKindV2.ConfirmedBaseline, targets, cpus, [],
+        "provider-attested-v2")
+
+fn backend_capability_attestation_confirmed_features_v2(
+    targets: [text],
+    cpus: [text],
+    supported_features: [text]
+) -> BackendCapabilityAttestationV2:
+    BackendCapabilityAttestationV2(
+        BackendCapabilityAttestationKindV2.ConfirmedFeatures, targets, cpus,
+        supported_features, "provider-attested-v2")
+
 struct BackendPluginDescriptorV1:
     abi_version: i64
     descriptor_size: i64
@@ -69,6 +114,70 @@ struct BackendPluginDescriptorV1:
     targets: [text]
     capabilities: [BackendCapability]
     vtable: BackendPluginVTableV1
+    attestation: BackendCapabilityAttestationV2 = BackendCapabilityAttestationV2(
+        BackendCapabilityAttestationKindV2.Unknown, [], [], [], "unattested-v1")
+
+fn backend_plugin_descriptor_with_attestation_v2(
+    descriptor: BackendPluginDescriptorV1,
+    attestation: BackendCapabilityAttestationV2
+) -> BackendPluginDescriptorV1:
+    BackendPluginDescriptorV1(
+        descriptor.abi_version,
+        descriptor.descriptor_size,
+        descriptor.provider_identity,
+        descriptor.provider_version,
+        descriptor.build_id,
+        descriptor.mir_abi_digest,
+        descriptor.roles,
+        descriptor.targets,
+        descriptor.capabilities,
+        descriptor.vtable,
+        attestation)
+
+# reason: boolean predicate over typed BackendPluginDescriptorV1 capability attestation state
+@allow(primitive_api)
+pub fn backend_plugin_is_provider_attested_v2(descriptor: BackendPluginDescriptorV1) -> bool:
+    match descriptor.attestation.kind:
+        case BackendCapabilityAttestationKindV2.Unknown: false
+        case BackendCapabilityAttestationKindV2.ConfirmedBaseline: true
+        case BackendCapabilityAttestationKindV2.ConfirmedFeatures: true
+
+# reason: boolean predicate distinguishing synthetic V1 dynamic bridge descriptors from provider-supplied descriptors
+@allow(primitive_api)
+pub fn backend_plugin_is_bridge_projected_v2(descriptor: BackendPluginDescriptorV1) -> bool:
+    descriptor.attestation.descriptor_origin == "dynamic-bridge-projected-v1" or
+        descriptor.provider_version == "dynamic-bridge-v1"
+
+# reason: boolean membership predicate over attested target triples on BackendPluginDescriptorV1
+@allow(primitive_api)
+pub fn backend_plugin_attests_target_v2(descriptor: BackendPluginDescriptorV1, target: text) -> bool:
+    if not backend_plugin_is_provider_attested_v2(descriptor):
+        return false
+    for supported in descriptor.attestation.targets:
+        if supported == target: return true
+    false
+
+# reason: boolean membership predicate over attested CPU names on BackendPluginDescriptorV1
+@allow(primitive_api)
+pub fn backend_plugin_attests_cpu_v2(descriptor: BackendPluginDescriptorV1, cpu: text) -> bool:
+    if not backend_plugin_is_provider_attested_v2(descriptor):
+        return false
+    for supported in descriptor.attestation.cpus:
+        if supported == cpu: return true
+    false
+
+# reason: boolean membership predicate over attested CPU feature names on BackendPluginDescriptorV1
+@allow(primitive_api)
+pub fn backend_plugin_attests_feature_v2(descriptor: BackendPluginDescriptorV1, feature: text) -> bool:
+    match descriptor.attestation.kind:
+        case BackendCapabilityAttestationKindV2.ConfirmedFeatures:
+            for supported in descriptor.attestation.supported_features:
+                if supported == feature: return true
+            false
+        case BackendCapabilityAttestationKindV2.Unknown:
+            false
+        case BackendCapabilityAttestationKindV2.ConfirmedBaseline:
+            false
 
 fn backend_plugin_supports_role(descriptor: BackendPluginDescriptorV1, role: BackendRole) -> bool:
     for supported in descriptor.roles:
@@ -89,6 +198,18 @@ fn backend_plugin_has_capability(descriptor: BackendPluginDescriptorV1, required
 
 export BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
     BackendRole, BackendCapability, BackendPluginVTableV1,
+    BackendCapabilityAttestationKindV2, BackendCapabilityAttestationV2,
     BackendPluginRequestV1, BackendPluginDescriptorV1,
-    backend_plugin_vtable_v1_all_operations, backend_plugin_supports_role,
+    backend_plugin_vtable_v1_all_operations,
+    backend_capability_attestation_unknown_v2,
+    backend_capability_attestation_bridge_projected_v2,
+    backend_capability_attestation_confirmed_baseline_v2,
+    backend_capability_attestation_confirmed_features_v2,
+    backend_plugin_descriptor_with_attestation_v2,
+    backend_plugin_is_provider_attested_v2,
+    backend_plugin_is_bridge_projected_v2,
+    backend_plugin_attests_target_v2,
+    backend_plugin_attests_cpu_v2,
+    backend_plugin_attests_feature_v2,
+    backend_plugin_supports_role,
     backend_plugin_supports_target, backend_plugin_has_capability

@@ -18,6 +18,41 @@ describe "normalized target profiles":
         val invalid = target_profile_normalize_v1(TargetBuildProfileV1.Release, TargetDebugRequestV1.Enabled, false, TargetTraceCapabilityV1.Unavailable("test-no-admission"))
         expect(invalid.is_err()).to_equal(true)
 
+    it "admits orthogonal phase4 dev and prod profiles while keeping phase3 dev-only":
+        val absent = TargetTraceCapabilityV1.Unavailable("test-no-admission")
+        var p4_prod = driver_core_compile_options_default()
+        p4_prod.managed_build_phase = "phase4"
+        p4_prod.release = true
+        p4_prod.profile = "prod"
+        val resolved_prod = compileoptions_target_profile_v1(p4_prod, absent).unwrap()
+        expect(resolved_prod.profile).to_equal(TargetBuildProfileV1.Release)
+        expect(resolved_prod.trace_resolution).to_equal(TargetTraceResolutionV1.Disabled)
+
+        var p4_dev = driver_core_compile_options_default()
+        p4_dev.managed_build_phase = "phase4"
+        p4_dev.release = false
+        p4_dev.profile = "dev"
+        val resolved_dev = compileoptions_target_profile_v1(p4_dev, absent).unwrap()
+        expect(resolved_dev.profile).to_equal(TargetBuildProfileV1.Development)
+        expect(resolved_dev.trace_resolution).to_equal(TargetTraceResolutionV1.Disabled)
+        expect(target_profile_identity_text_v1(resolved_prod) == target_profile_identity_text_v1(resolved_dev)).to_equal(false)
+
+        var p3_prod = p4_prod
+        p3_prod.managed_build_phase = "phase3"
+        expect(compileoptions_target_profile_v1(p3_prod, absent).is_err()).to_equal(true)
+
+        var mixed_rel_dev = driver_core_compile_options_default()
+        mixed_rel_dev.managed_build_phase = "phase4"
+        mixed_rel_dev.release = true
+        mixed_rel_dev.profile = "dev"
+        expect(compileoptions_target_profile_v1(mixed_rel_dev, absent).is_err()).to_equal(true)
+
+        var mixed_dbg_prod = driver_core_compile_options_default()
+        mixed_dbg_prod.managed_build_phase = "phase4"
+        mixed_dbg_prod.release = false
+        mixed_dbg_prod.profile = "prod"
+        expect(compileoptions_target_profile_v1(mixed_dbg_prod, absent).is_err()).to_equal(true)
+
 
 describe "observer request presence in target policy":
     it "preserves absent Off and Dynamic and rejects malformed conflicting and unsupported requests":

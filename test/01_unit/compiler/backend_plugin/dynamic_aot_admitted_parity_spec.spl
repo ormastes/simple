@@ -1,0 +1,489 @@
+# @req REQ-010
+# Wave D3 (C3 + C4): Dynlib V1 AOT admitted-handle parity, AOT request argument
+# parity, and provider-confirmed capability/feature attestation.
+
+use std.spec.*
+use std.spec.step
+use std.io.{process_run}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io_runtime.{
+    dir_remove_all, file_exists, file_hash_sha256_or_empty,
+    file_read, file_read_bytes, file_write, host_os
+}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageLayoutKind, StorageConversionPolicy, storage_layout_plan_v1
+}
+use compiler.mir_opt.storage_projection_lowering.{
+    MirStorageViewSiteBindingV1, mir_storage_field_binding_v1,
+    mir_storage_view_binding_v1, mir_storage_view_site_binding_v1
+}
+use compiler.common.backend_plugin.model.{
+    BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+    BackendRole, BackendCapability,
+    BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_plugin_vtable_v1_all_operations,
+    backend_capability_attestation_confirmed_baseline_v2,
+    backend_capability_attestation_confirmed_features_v2,
+    backend_plugin_descriptor_with_attestation_v2,
+    backend_plugin_is_bridge_projected_v2,
+    backend_plugin_is_provider_attested_v2
+}
+use compiler.backend.backend_plugin.registry.{
+    BUILTIN_MIR_ABI_DIGEST_V1, llvm_builtin_descriptor
+}
+use compiler.backend.backend_plugin.loader.{
+    load_backend, load_dynamic_backend_v1, load_backend_with_descriptor_v2
+}
+use compiler.backend.backend_plugin.target_context_v2.{
+    BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2,
+    backend_plugin_aot_request_parity_diagnostic_v2
+}
+use compiler.backend.backend_plugin.session_authority_v2.{
+    BackendSessionAuthorityV2, BackendSessionFeatureAcceptanceV2,
+    backend_session_authority_open_v2,
+    backend_session_authority_open_with_descriptor_v2,
+    backend_session_authority_use_acquire_v2,
+    backend_session_authority_compile_aot_result_v2,
+    backend_session_authority_result_project_v2,
+    backend_session_authority_result_release_v2,
+    backend_session_authority_use_release_v2,
+    backend_session_authority_close_v2,
+    backend_session_authority_release_v2
+}
+use compiler.backend.backend.backend_types.{BackendKind}
+use compiler.backend.codegen_types.{CodegenOutputKind}
+use compiler.backend.static_backend_registry.{
+    BackendLinkClass, install_k1_static_backend_table_v1, static_backend_entry_v1
+}
+use compiler.backend.static_backend_cranelift_port.{cranelift_backend_port_v1}
+use compiler.backend.static_backend_interpreter_port.{interpreter_backend_port_v1}
+use compiler.backend.static_backend_llvm_port.{llvm_backend_port_v1}
+use compiler.mir.mir_data.{MirModule}
+
+fn _install_parity_k1_table() -> bool:
+    install_k1_static_backend_table_v1("llvm-cranelift", [
+        static_backend_entry_v1(BackendKind.Cranelift,
+            BackendLinkClass.KernelLinked, cranelift_backend_port_v1(),
+            CodegenOutputKind.ObjectCode),
+        static_backend_entry_v1(BackendKind.Interpreter,
+            BackendLinkClass.KernelLinked, interpreter_backend_port_v1(),
+            CodegenOutputKind.InterpretedResult),
+        static_backend_entry_v1(BackendKind.Llvm,
+            BackendLinkClass.KernelLinked, llvm_backend_port_v1(),
+            CodegenOutputKind.ObjectCode)
+    ])
+
+fn _parity_provider_c_source() -> text:
+    var lines: [text] = []
+    lines.push("#include \"simple_backend_plugin_v1.h\"")
+    lines.push("#include <stdlib.h>")
+    lines.push("#include <string.h>")
+    lines.push("typedef struct {{ uint8_t opt_byte; uint8_t feature_count; }} parity_session_t;")
+    lines.push("static int32_t parity_open(const simple_backend_request_v1 *r, uint64_t *s) {{")
+    lines.push("    if (!r || !s || r->abi_version != 1 || r->struct_size < sizeof(*r)) return 20;")
+    lines.push("    parity_session_t *st = (parity_session_t *)calloc(1, sizeof(*st));")
+    lines.push("    if (!st) return 23;")
+    lines.push("    st->opt_byte = (r->optimization.data && r->optimization.size > 0) ? r->optimization.data[0] : 0u;")
+    lines.push("    uint32_t fc = 0;")
+    lines.push("    if (r->features_wire.data && r->features_wire.size >= 4) memcpy(&fc, r->features_wire.data, 4);")
+    lines.push("    st->feature_count = (uint8_t)(fc & 255u);")
+    lines.push("    *s = (uint64_t)(uintptr_t)st;")
+    lines.push("    return 0;")
+    lines.push("}}")
+    lines.push("static int32_t parity_compile(uint64_t s, simple_backend_slice_v1 m, simple_backend_compile_result_v1 *o) {{")
+    lines.push("    if (!s || !m.data || m.size == 0 || !o) return 30;")
+    lines.push("    uint8_t *buf = (uint8_t *)malloc(4);")
+    lines.push("    if (!buf) return 31;")
+    lines.push("    memcpy(buf, \"MIR1\", 4);")
+    lines.push("    o->abi_version = 1; o->struct_size = sizeof(*o); o->result_kind = 1; o->status = 0;")
+    lines.push("    o->payload = (simple_backend_owned_buffer_v1){{buf, 4, (uint64_t)(uintptr_t)buf}};")
+    lines.push("    return 0;")
+    lines.push("}}")
+    lines.push("static int32_t parity_finalize(uint64_t s, simple_backend_compile_result_v1 *o) {{")
+    lines.push("    if (!s || !o) return 40;")
+    lines.push("    parity_session_t *st = (parity_session_t *)(uintptr_t)s;")
+    lines.push("    uint8_t *obj = (uint8_t *)malloc(8);")
+    lines.push("    if (!obj) return 41;")
+    lines.push("    obj[0] = 0x7Fu; obj[1] = 0x45u; obj[2] = 0x4Cu; obj[3] = 0x46u;")
+    lines.push("    obj[4] = st->opt_byte; obj[5] = st->feature_count; obj[6] = 1u; obj[7] = 0u;")
+    lines.push("    o->abi_version = 1; o->struct_size = sizeof(*o); o->result_kind = 2; o->status = 0;")
+    lines.push("    o->payload = (simple_backend_owned_buffer_v1){{obj, 8, (uint64_t)(uintptr_t)obj}};")
+    lines.push("    return 0;")
+    lines.push("}}")
+    lines.push("static int32_t parity_diag(uint64_t s, simple_backend_owned_buffer_v1 *o) {{")
+    lines.push("    if (!s || !o) return 50;")
+    lines.push("    *o = (simple_backend_owned_buffer_v1){{NULL, 0, 0}};")
+    lines.push("    return 0;")
+    lines.push("}}")
+    lines.push("static int32_t parity_release(uint64_t s, simple_backend_owned_buffer_v1 b) {{")
+    lines.push("    if (!s || !b.data || b.owner_token != (uint64_t)(uintptr_t)b.data) return 60;")
+    lines.push("    free((void *)(uintptr_t)b.owner_token);")
+    lines.push("    return 0;")
+    lines.push("}}")
+    lines.push("static int32_t parity_close(uint64_t s) {{")
+    lines.push("    if (!s) return 70;")
+    lines.push("    free((void *)(uintptr_t)s);")
+    lines.push("    return 0;")
+    lines.push("}}")
+    lines.push("static const simple_backend_vtable_v1 vt = {{1, sizeof(vt), parity_open, parity_compile, parity_finalize, parity_diag, parity_close, parity_release}};")
+    lines.push("static const uint8_t id[] = \"dyn-parity\", ver[] = \"2.0.0\", build[] = \"dyn-parity-build\", digest[] = \"simple-mir-v1\", targets[] = \"6:x86_64\";")
+    lines.push("static const simple_backend_descriptor_v1 desc = {{1, sizeof(desc), {{id, sizeof(id)-1}}, {{ver, sizeof(ver)-1}}, {{build, sizeof(build)-1}}, {{digest, sizeof(digest)-1}}, 3, 63, {{targets, sizeof(targets)-1}}, &vt}};")
+    lines.push("SIMPLE_BACKEND_PLUGIN_EXPORT const simple_backend_descriptor_v1 *simple_backend_plugin_v1(void) {{ return &desc; }}")
+    lines.join("\n") + "\n"
+
+fn _parity_work_dir(prefix: text) -> text:
+    _ = dir_create_all("build/test-artifacts")
+    secure_temp_dir_raw("build/test-artifacts", prefix)
+
+fn _build_parity_provider_dll(work_dir: text) -> text:
+    val src_path = work_dir + "/parity_provider.c"
+    expect(file_write(src_path, _parity_provider_c_source())).to_equal(true)
+    if host_os() == "windows":
+        val dll_path = work_dir + "/parity_provider.dll"
+        val (out, err, code) = process_run("gcc", [
+            "-std=c11", "-shared",
+            "-Isrc/compiler/70.backend/backend_plugin/abi",
+            src_path, "-o", dll_path
+        ])
+        expect(code).to_equal(0)
+        expect(file_exists(dll_path)).to_equal(true)
+        return dll_path
+    if host_os() == "macos":
+        val dylib_path = work_dir + "/parity_provider.dylib"
+        val (out, err, code) = process_run("clang", [
+            "-std=c11", "-dynamiclib",
+            "-Isrc/compiler/70.backend/backend_plugin/abi",
+            src_path, "-o", dylib_path
+        ])
+        expect(code).to_equal(0)
+        expect(file_exists(dylib_path)).to_equal(true)
+        return dylib_path
+    val so_path = work_dir + "/parity_provider.so"
+    val (out, err, code) = process_run("cc", [
+        "-std=c11", "-fPIC", "-shared",
+        "-Isrc/compiler/70.backend/backend_plugin/abi",
+        src_path, "-o", so_path
+    ])
+    expect(code).to_equal(0)
+    expect(file_exists(so_path)).to_equal(true)
+    so_path
+
+fn _parity_probe_module() -> MirModule:
+    MirModule(
+        name: "dynamic_aot_parity_probe",
+        functions: {}, statics: {}, constants: {}, types: {})
+
+fn _parity_request(
+    plugin_path: text,
+    target: text = "x86_64",
+    cpu: text = "znver4",
+    features: [text] = [],
+    optimization: text = "o2"
+) -> BackendPluginRequestV1:
+    BackendPluginRequestV1(
+        BackendRole.CompilerAot, "dyn-parity", target, cpu, features,
+        optimization, BUILTIN_MIR_ABI_DIGEST_V1,
+        [BackendCapability.ObjectEmit, BackendCapability.Optimization],
+        plugin_path, true)
+
+fn _sample_storage_binding() -> MirStorageViewSiteBindingV1:
+    val plan = storage_layout_plan_v1(
+        1, StorageLayoutKind.SoA, 1, 8, false,
+        StorageConversionPolicy.OnDemand, "policy-sha", "soa-test")
+    val field = mir_storage_field_binding_v1(0, 0, 8, 0)
+    val view = mir_storage_view_binding_v1(1, 1, 4, 32, 8, false, plan, [field])
+    mir_storage_view_site_binding_v1(1, 0, true, view)
+
+describe "dynamic V1 AOT admitted-handle and request parity + capability attestation":
+    it "routes compile_aot_into_path through the live admitted handle instead of reopening provider_path":
+        val adapter_source = file_read(
+            "src/compiler/70.backend/backend_plugin/dynamic_adapter.spl")
+        expect(adapter_source.contains("backend_plugin_run_module_v1(")).to_equal(false)
+        expect(adapter_source.split("begin_admitted_call()").len()).to_equal(4)
+        expect(adapter_source.split("end_admitted_call()").len()).to_be_greater_than(3)
+        expect(adapter_source.split("backend_plugin_run_admitted_module_v1(").len()).to_equal(3)
+
+        val work_dir = _parity_work_dir("dyn-aot-handle-parity")
+        expect(work_dir == "").to_equal(false)
+        val dll_path = _build_parity_provider_dll(work_dir)
+        val request = _parity_request(dll_path)
+        var session = load_backend(request).ok().unwrap()
+
+        step("Synthetic V1 bridge descriptor is marked Unknown and bridge-projected")
+        expect(backend_plugin_is_bridge_projected_v2(session.descriptor)).to_equal(true)
+        expect(backend_plugin_is_provider_attested_v2(session.descriptor)).to_equal(false)
+        expect(session.receipt.feature_acceptance.name()).to_equal("unknown")
+        expect(session.receipt.accepted_features.len()).to_equal(0)
+
+        step("Poison adapter.provider_path and verify compile_aot_into_path matches compile_module handle transport")
+        var adapter = session.dynamic_adapter.unwrap()
+        adapter.provider_path = work_dir + "/missing-reopen-trap.dll"
+        session.dynamic_adapter = Some(adapter)
+
+        val obj_path = work_dir + "/emitted.o"
+        val diag_path = work_dir + "/emitted.diag"
+        val module = _parity_probe_module()
+        val module_res = session.compile_module(module)
+        val status = session.compile_aot_into_path(
+            module, true, 2, "znver4", [], obj_path, diag_path)
+        match module_res:
+            case Ok(module_out):
+                expect(status).to_equal(0)
+                expect(file_exists(obj_path)).to_equal(true)
+                expect(file_read_bytes(obj_path) ?? []).to_equal(module_out.object_code)
+            case Err(module_err):
+                # Under the Rust seed interpreter, SBH1 admitted-handle packets
+                # return status 100 whereas legacy path calls returned 102/103.
+                expect(status).to_equal(1)
+                val path_diag = file_read(diag_path)
+                expect(module_err.to_text()).to_contain(path_diag)
+                expect(path_diag == "provider status 102").to_equal(false)
+                expect(path_diag == "provider status 103").to_equal(false)
+
+        step("Revoking the lease while restoring a valid provider_path still fails closed without reopening disk")
+        var closing_adapter = session.dynamic_adapter.unwrap()
+        var closing_lease = closing_adapter.lease
+        expect(closing_lease.close()).to_equal(true)
+        closing_adapter.lease = closing_lease
+        closing_adapter.provider_path = dll_path
+        session.dynamic_adapter = Some(closing_adapter)
+
+        val closed_obj_path = work_dir + "/closed.o"
+        val closed_diag_path = work_dir + "/closed.diag"
+        val closed_status = session.compile_aot_into_path(
+            module, true, 2, "znver4", [], closed_obj_path, closed_diag_path)
+        expect(closed_status).to_equal(1)
+        expect(file_exists(closed_obj_path)).to_equal(false)
+        expect(file_read(closed_diag_path)).to_contain("dynamic backend session is closed")
+        expect(session.close()).to_equal(true)
+        expect(dir_remove_all(work_dir)).to_equal(true)
+
+    it "rejects AOT is_release, opt_level, target_cpu, and storage_bindings mismatches with PLUG-E-CONFIG-MISMATCH":
+        val work_dir = _parity_work_dir("dyn-aot-arg-parity")
+        expect(work_dir == "").to_equal(false)
+        val dll_path = _build_parity_provider_dll(work_dir)
+        val request = _parity_request(dll_path, "x86_64", "znver4", [], "o2")
+        var session = load_backend(request).ok().unwrap()
+        val module = _parity_probe_module()
+        val binding = _sample_storage_binding()
+
+        step("Pure parity diagnostic returns None on matching or empty CPU override and Diagnostic on mismatch")
+        expect(backend_plugin_aot_request_parity_diagnostic_v2(
+            request, true, 2, "znver4", 0).is_none()).to_equal(true)
+        expect(backend_plugin_aot_request_parity_diagnostic_v2(
+            request, true, 2, "", 0).is_none()).to_equal(true)
+        val cpu_diag = backend_plugin_aot_request_parity_diagnostic_v2(
+            request, true, 2, "generic", 0).unwrap()
+        expect(cpu_diag.code.unwrap()).to_equal(BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
+
+        step("compile_aot_module rejects mismatched release, opt_level, CPU, and storage_bindings")
+        val bad_release = session.compile_aot_module(module, false, 2, "znver4", [])
+        expect(bad_release.err().unwrap().to_text()).to_contain("PLUG-E-CONFIG-MISMATCH")
+        val bad_opt = session.compile_aot_module(module, true, 0, "znver4", [])
+        expect(bad_opt.err().unwrap().to_text()).to_contain("PLUG-E-CONFIG-MISMATCH")
+        val bad_cpu = session.compile_aot_module(module, true, 2, "x86-64", [])
+        expect(bad_cpu.err().unwrap().to_text()).to_contain("PLUG-E-CONFIG-MISMATCH")
+        val bad_storage = session.compile_aot_module(module, true, 2, "znver4", [binding])
+        expect(bad_storage.err().unwrap().to_text()).to_contain("PLUG-E-CONFIG-MISMATCH")
+
+        step("compile_aot_into_path writes PLUG-E-CONFIG-MISMATCH diagnostics without publishing objects")
+        val obj_path = work_dir + "/mismatch.o"
+        val diag_path = work_dir + "/mismatch.diag"
+        expect(session.compile_aot_into_path(
+            module, false, 2, "znver4", [], obj_path, diag_path)).to_equal(1)
+        expect(file_exists(obj_path)).to_equal(false)
+        expect(file_read(diag_path)).to_contain("PLUG-E-CONFIG-MISMATCH")
+        file_delete(diag_path)
+
+        expect(session.compile_aot_into_path(
+            module, true, 3, "znver4", [], obj_path, diag_path)).to_equal(1)
+        expect(file_exists(obj_path)).to_equal(false)
+        expect(file_read(diag_path)).to_contain("PLUG-E-CONFIG-MISMATCH")
+        file_delete(diag_path)
+
+        expect(session.compile_aot_into_path(
+            module, true, 2, "generic", [], obj_path, diag_path)).to_equal(1)
+        expect(file_exists(obj_path)).to_equal(false)
+        expect(file_read(diag_path)).to_contain("PLUG-E-CONFIG-MISMATCH")
+        file_delete(diag_path)
+
+        expect(session.compile_aot_into_path(
+            module, true, 2, "znver4", [binding], obj_path, diag_path)).to_equal(1)
+        expect(file_exists(obj_path)).to_equal(false)
+        expect(file_read(diag_path)).to_contain("PLUG-E-CONFIG-MISMATCH")
+        file_delete(diag_path)
+
+        step("Matching AOT arguments pass the parity gate without PLUG-E-CONFIG-MISMATCH")
+        val matched_mem = session.compile_aot_module(module, true, 2, "znver4", [])
+        match matched_mem:
+            case Ok(compiled_mod):
+                expect((compiled_mod.object_code ?? []).len()).to_equal(8)
+            case Err(transport_err):
+                expect(transport_err.to_text().contains("PLUG-E-CONFIG-MISMATCH")).to_equal(false)
+        val matched_status = session.compile_aot_into_path(
+            module, true, 2, "znver4", [], obj_path, diag_path)
+        if matched_status != 0:
+            expect(file_read(diag_path).contains("PLUG-E-CONFIG-MISMATCH")).to_equal(false)
+
+        expect(session.close()).to_equal(true)
+        expect(dir_remove_all(work_dir)).to_equal(true)
+
+    it "refuses unattested dynamic feature requests and binds provider-confirmed features into receipts and V2 envelopes":
+        expect(_install_parity_k1_table()).to_equal(true)
+        val work_dir = _parity_work_dir("dyn-aot-attestation")
+        expect(work_dir == "").to_equal(false)
+        val dll_path = _build_parity_provider_dll(work_dir)
+        val dll_digest = file_hash_sha256_or_empty(dll_path)
+        expect(dll_digest.len()).to_equal(64)
+
+        step("Unattested V1 dynamic loader refuses non-empty features")
+        val unattested_feat = load_dynamic_backend_v1(
+            _parity_request(dll_path, "x86_64", "znver4", ["avx2"], "o2"))
+        expect(unattested_feat.is_err()).to_equal(true)
+        expect(unattested_feat.err().unwrap().code()).to_equal(
+            "BACKEND_PLUGIN_PROVIDER_REJECTED")
+
+        step("Attested dynamic descriptor validates build_id, target, CPU, and supported features")
+        val attested_dyn_descriptor = BackendPluginDescriptorV1(
+            BACKEND_PLUGIN_ABI_VERSION_V1,
+            BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+            "dyn-parity",
+            "2.0.0",
+            dll_digest,
+            BUILTIN_MIR_ABI_DIGEST_V1,
+            [BackendRole.CompilerAot, BackendRole.InterpreterJit],
+            ["x86_64"],
+            [BackendCapability.ObjectEmit, BackendCapability.Optimization],
+            backend_plugin_vtable_v1_all_operations(),
+            backend_capability_attestation_confirmed_features_v2(
+                ["x86_64"], ["znver4"], ["avx2", "fma"]))
+
+        val wrong_digest_descriptor = BackendPluginDescriptorV1(
+            BACKEND_PLUGIN_ABI_VERSION_V1,
+            BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+            "dyn-parity",
+            "2.0.0",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            BUILTIN_MIR_ABI_DIGEST_V1,
+            [BackendRole.CompilerAot, BackendRole.InterpreterJit],
+            ["x86_64"],
+            [BackendCapability.ObjectEmit, BackendCapability.Optimization],
+            backend_plugin_vtable_v1_all_operations(),
+            backend_capability_attestation_confirmed_features_v2(
+                ["x86_64"], ["znver4"], ["avx2", "fma"]))
+        val confirmed_dyn_req = _parity_request(
+            dll_path, "x86_64", "znver4", ["fma", "avx2"], "o2")
+        expect(load_backend_with_descriptor_v2(
+            confirmed_dyn_req, wrong_digest_descriptor).err().unwrap().code()).to_equal(
+            "BACKEND_PLUGIN_PROVIDER_REJECTED")
+
+        val bad_feature_req = _parity_request(
+            dll_path, "x86_64", "znver4", ["avx512f"], "o2")
+        expect(load_backend_with_descriptor_v2(
+            bad_feature_req, attested_dyn_descriptor).err().unwrap().code()).to_equal(
+            "BACKEND_PLUGIN_CAPABILITY")
+
+        val bad_cpu_req = _parity_request(
+            dll_path, "x86_64", "skylake", ["avx2"], "o2")
+        expect(load_backend_with_descriptor_v2(
+            bad_cpu_req, attested_dyn_descriptor).err().unwrap().code()).to_equal(
+            "BACKEND_PLUGIN_CAPABILITY")
+
+        val bad_target_req = _parity_request(
+            dll_path, "aarch64", "znver4", ["avx2"], "o2")
+        expect(load_backend_with_descriptor_v2(
+            bad_target_req, attested_dyn_descriptor).err().unwrap().code()).to_equal(
+            "BACKEND_PLUGIN_TARGET")
+
+        var admitted_dyn_session = load_backend_with_descriptor_v2(
+            confirmed_dyn_req, attested_dyn_descriptor).ok().unwrap()
+        expect(admitted_dyn_session.receipt.feature_acceptance.name()).to_equal(
+            "confirmed_features")
+        expect(admitted_dyn_session.receipt.accepted_features).to_equal(["avx2", "fma"])
+        expect(admitted_dyn_session.close()).to_equal(true)
+
+        step("Verify Unknown vs ConfirmedBaseline vs ConfirmedFeatures envelope_sha256 with real emitted objects")
+        var owner = BackendSessionAuthorityV2.create()
+        val llvm_base_req = BackendPluginRequestV1(
+            BackendRole.CompilerAot, "llvm", "x86_64", "x86-64", [], "o2",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit], "", false)
+        val llvm_feat_req = BackendPluginRequestV1(
+            BackendRole.CompilerAot, "llvm", "x86_64", "x86-64", ["fma", "avx2"], "o2",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit], "", false)
+
+        val unknown_tok = backend_session_authority_open_v2(
+            owner, llvm_base_req).ok().unwrap()
+        val unknown_use = backend_session_authority_use_acquire_v2(
+            owner, unknown_tok).ok().unwrap()
+        val unknown_res = backend_session_authority_compile_aot_result_v2(
+            owner, unknown_tok, unknown_use, _parity_probe_module(),
+            true, 2, "x86-64", []).ok().unwrap()
+        val unknown_proj = backend_session_authority_result_project_v2(
+            owner, unknown_tok, unknown_use, unknown_res).ok().unwrap()
+        expect(unknown_proj.feature_acceptance).to_equal(
+            BackendSessionFeatureAcceptanceV2.Unknown)
+        expect(unknown_proj.accepted_features.len()).to_equal(0)
+
+        val llvm_baseline_desc = backend_plugin_descriptor_with_attestation_v2(
+            llvm_builtin_descriptor(),
+            backend_capability_attestation_confirmed_baseline_v2(
+                ["x86_64"], ["x86-64"]))
+        val baseline_tok = backend_session_authority_open_with_descriptor_v2(
+            owner, llvm_base_req, llvm_baseline_desc).ok().unwrap()
+        val baseline_use = backend_session_authority_use_acquire_v2(
+            owner, baseline_tok).ok().unwrap()
+        val baseline_res = backend_session_authority_compile_aot_result_v2(
+            owner, baseline_tok, baseline_use, _parity_probe_module(),
+            true, 2, "x86-64", []).ok().unwrap()
+        val baseline_proj = backend_session_authority_result_project_v2(
+            owner, baseline_tok, baseline_use, baseline_res).ok().unwrap()
+        expect(baseline_proj.feature_acceptance).to_equal(
+            BackendSessionFeatureAcceptanceV2.ConfirmedBaseline)
+        expect(baseline_proj.accepted_features.len()).to_equal(0)
+
+        val llvm_features_desc = backend_plugin_descriptor_with_attestation_v2(
+            llvm_builtin_descriptor(),
+            backend_capability_attestation_confirmed_features_v2(
+                ["x86_64"], ["x86-64"], ["avx2", "fma", "bmi2"]))
+        val feat_tok = backend_session_authority_open_with_descriptor_v2(
+            owner, llvm_feat_req, llvm_features_desc).ok().unwrap()
+        val feat_use = backend_session_authority_use_acquire_v2(
+            owner, feat_tok).ok().unwrap()
+        val feat_res = backend_session_authority_compile_aot_result_v2(
+            owner, feat_tok, feat_use, _parity_probe_module(),
+            true, 2, "x86-64", []).ok().unwrap()
+        val feat_proj = backend_session_authority_result_project_v2(
+            owner, feat_tok, feat_use, feat_res).ok().unwrap()
+        expect(feat_proj.feature_acceptance).to_equal(
+            BackendSessionFeatureAcceptanceV2.ConfirmedFeatures)
+        expect(feat_proj.accepted_features).to_equal(["avx2", "fma"])
+        expect(feat_proj.object_byte_count).to_be_greater_than(64)
+
+        expect(unknown_tok.receipt_hash == baseline_tok.receipt_hash).to_equal(false)
+        expect(baseline_tok.receipt_hash == feat_tok.receipt_hash).to_equal(false)
+        expect(unknown_proj.envelope_sha256 == baseline_proj.envelope_sha256).to_equal(false)
+        expect(baseline_proj.envelope_sha256 == feat_proj.envelope_sha256).to_equal(false)
+
+        expect(backend_session_authority_result_release_v2(
+            owner, unknown_tok, unknown_use, unknown_res)).to_equal(Ok(()))
+        expect(backend_session_authority_use_release_v2(
+            owner, unknown_tok, unknown_use)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, unknown_tok)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, unknown_tok)).to_equal(Ok(()))
+
+        expect(backend_session_authority_result_release_v2(
+            owner, baseline_tok, baseline_use, baseline_res)).to_equal(Ok(()))
+        expect(backend_session_authority_use_release_v2(
+            owner, baseline_tok, baseline_use)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, baseline_tok)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, baseline_tok)).to_equal(Ok(()))
+
+        expect(backend_session_authority_result_release_v2(
+            owner, feat_tok, feat_use, feat_res)).to_equal(Ok(()))
+        expect(backend_session_authority_use_release_v2(
+            owner, feat_tok, feat_use)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, feat_tok)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, feat_tok)).to_equal(Ok(()))
+
+        expect(dir_remove_all(work_dir)).to_equal(true)

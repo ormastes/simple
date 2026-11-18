@@ -3,7 +3,8 @@ use compiler.backend.codegen_types.{CodegenOutputKind}
 use compiler.backend.static_backend_registry.{
     BackendLinkClass, StaticBackendEntryV1, installed_k1_static_backend_policy_v1,
     installed_k1_static_backend_table_v1, install_full_static_backend_table_v1,
-    static_backend_name_precedes_v1}
+    install_host_only_static_backend_composition_v1,
+    selected_backend_composition_mode_v1, static_backend_name_precedes_v1}
 use compiler.backend.backend_port.{BackendPortV1, backend_plugin_from_port_v1}
 use plugins.backend_registry.full_static_backend_ports.*
 use plugins.backend_registry.selected_cuda_backend.{
@@ -65,12 +66,35 @@ fn _merge_backend_tables_v1(k1: [StaticBackendEntryV1],
 pub fn full_static_backend_table_for_k1_policy_v1(policy: text) -> [StaticBackendEntryV1]:
     if policy == "" or policy != installed_k1_static_backend_policy_v1():
         return []
+    val mode = selected_backend_composition_mode_v1()
+    if mode == "host-only":
+        return installed_k1_static_backend_table_v1()
+    if mode != "full":
+        return []
     _merge_backend_tables_v1(installed_k1_static_backend_table_v1(),
         plugin_static_backend_table_v1())
 
-pub fn install_full_static_backends_for_k1_policy_v1(policy: text) -> bool:
-    val table = full_static_backend_table_for_k1_policy_v1(policy)
+# reason: boolean installation verdict matches the v1 static backend registry installer ABI across CLI and worker entrypoints
+@allow(primitive_api)
+pub fn install_static_backends_for_composition_mode_v1(
+    mode: text, policy: text
+) -> bool:
+    if policy == "" or policy != installed_k1_static_backend_policy_v1():
+        return false
+    if mode == "host-only":
+        if not install_cuda_backend_mode_v1("disabled"): return false
+        return install_host_only_static_backend_composition_v1(policy)
+    if mode != "full":
+        return false
+    val table = _merge_backend_tables_v1(installed_k1_static_backend_table_v1(),
+        plugin_static_backend_table_v1())
     if table.len() == 0: return false
     if not install_cuda_backend_mode_v1(selected_cuda_backend_mode_v1()): return false
     if not install_vhdl_driver_lane_v1(): return false
     install_full_static_backend_table_v1(policy, table)
+
+# reason: boolean installation verdict matches the existing v1 static backend registry installer ABI
+@allow(primitive_api)
+pub fn install_full_static_backends_for_k1_policy_v1(policy: text) -> bool:
+    install_static_backends_for_composition_mode_v1(
+        selected_backend_composition_mode_v1(), policy)

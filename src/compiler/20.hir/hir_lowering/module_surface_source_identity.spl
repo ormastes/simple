@@ -4,7 +4,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_projection, module_surface_semantic_hex_limb}
-use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.common.module_path_naming.{module_logical_name_from_path, module_canonical_fold_name}
 
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_path_absolute(path: text) -> text?
@@ -199,3 +199,193 @@ pub fn module_surface_bind_row_identity(surface: ModuleSurface, source_path: tex
             bound.declaration_authority_index.source_paths[idx] = canonical_path
         idx = idx + 1
     bound
+
+fn _module_surface_norm_path_v1(path: text) -> text:
+    var norm = module_surface_strip_verbatim_prefix(path.replace("\\", "/"))
+    while norm.byte_len() > 1 and norm.ends_with("/"):
+        if norm.byte_len() == 3 and norm.char_code_at(1) == 58:
+            break
+        norm = norm.substring(0, norm.byte_len() - 1)
+    norm
+
+fn _module_surface_scv_marker_split_v1(norm: text, marker: text) -> (text, text, text):
+    val rel_marker = marker.substring(1)
+    var checkout_root = ""
+    var rev_start = -1
+    if norm.starts_with(rel_marker):
+        rev_start = rel_marker.byte_len()
+    else:
+        val found = norm.index_of(marker)
+        if found >= 0:
+            checkout_root = norm.substring(0, found)
+            rev_start = found + marker.byte_len()
+    if rev_start < 0 or rev_start >= norm.byte_len():
+        return ("", "", "")
+    val tail = norm.substring(rev_start)
+    val slash = tail.index_of("/")
+    if slash <= 0:
+        return ("", "", "")
+    val snapshot_root = norm.substring(0, rev_start + slash)
+    val rel_path = tail.substring(slash + 1)
+    if rel_path == "":
+        return ("", "", "")
+    (checkout_root, snapshot_root, rel_path)
+
+pub fn module_surface_scv_snapshot_split_v1(path: text) -> (text, text, text):
+    val norm = _module_surface_norm_path_v1(path)
+    if norm == "":
+        return ("", "", "")
+    val (v1_checkout, v1_snap, v1_rel) = _module_surface_scv_marker_split_v1(norm, "/build/scv/snapshots/")
+    if v1_snap != "":
+        return (v1_checkout, v1_snap, v1_rel)
+    val (v2_checkout, v2_snap, v2_rel) = _module_surface_scv_marker_split_v1(norm, "/build/scv_snapshots/")
+    if v2_snap != "":
+        return (v2_checkout, v2_snap, v2_rel)
+    val rev_at = norm.index_of("/scv-revision-")
+    if rev_at >= 0:
+        val after = norm.substring(rev_at + 1)
+        val slash = after.index_of("/")
+        if slash > 0 and rev_at + 1 + slash < norm.byte_len():
+            val snapshot_root = norm.substring(0, rev_at + 1 + slash)
+            val rel_path = after.substring(slash + 1)
+            if rel_path != "":
+                return ("", snapshot_root, rel_path)
+    ("", "", "")
+
+fn _module_surface_push_admitted_root_v1(roots: [text], candidate: text) -> [text]:
+    val norm = _module_surface_norm_path_v1(candidate)
+    if norm == "" or norm == "/":
+        return roots
+    if norm.byte_len() == 2 and norm.char_code_at(1) == 58:
+        return roots
+    if roots.contains(norm):
+        return roots
+    var out: [text] = []
+    var inserted = false
+    val want_len = norm.byte_len()
+    for existing in roots:
+        if not inserted and want_len > existing.byte_len():
+            out.push(norm)
+            inserted = true
+        out.push(existing)
+    if not inserted:
+        out.push(norm)
+    out
+
+pub fn module_surface_admitted_roots_v1(canonical_paths: [text], resolution_roots: [text], cwd_canonical: text) -> [text]:
+    var roots: [text] = []
+    for cp in canonical_paths:
+        val (checkout_root, snapshot_root, _rel) = module_surface_scv_snapshot_split_v1(cp)
+        if snapshot_root != "":
+            roots = _module_surface_push_admitted_root_v1(roots, snapshot_root)
+            if checkout_root != "":
+                roots = _module_surface_push_admitted_root_v1(roots, checkout_root)
+        else:
+            val norm_cp = _module_surface_norm_path_v1(cp)
+            val src_at = norm_cp.index_of("/src/")
+            if src_at > 0:
+                roots = _module_surface_push_admitted_root_v1(roots, norm_cp.substring(0, src_at))
+    for rr in resolution_roots:
+        val norm_rr = _module_surface_norm_path_v1(rr)
+        val (rr_checkout, rr_snapshot, _rr_rel) = module_surface_scv_snapshot_split_v1(norm_rr)
+        if rr_snapshot != "":
+            roots = _module_surface_push_admitted_root_v1(roots, rr_snapshot)
+            if rr_checkout != "":
+                roots = _module_surface_push_admitted_root_v1(roots, rr_checkout)
+        elif norm_rr.ends_with("/src"):
+            roots = _module_surface_push_admitted_root_v1(roots, norm_rr.substring(0, norm_rr.byte_len() - 4))
+            roots = _module_surface_push_admitted_root_v1(roots, norm_rr)
+        else:
+            val src_at = norm_rr.index_of("/src/")
+            if src_at > 0:
+                roots = _module_surface_push_admitted_root_v1(roots, norm_rr.substring(0, src_at))
+            roots = _module_surface_push_admitted_root_v1(roots, norm_rr)
+    if cwd_canonical != "":
+        roots = _module_surface_push_admitted_root_v1(roots, cwd_canonical)
+    roots
+
+pub fn module_surface_admitted_logical_id_v1(path: text, admitted_roots: [text]) -> text:
+    val norm = _module_surface_norm_path_v1(path)
+    if norm == "" or (not norm.ends_with(".spl") and not norm.ends_with(".sdn")):
+        return ""
+    if norm.starts_with("src/") or norm.starts_with("examples/") or norm.starts_with("test/"):
+        return module_canonical_fold_name(module_logical_name_from_path(norm))
+    for root in admitted_roots:
+        val prefix = root + "/"
+        if root != "" and norm.starts_with(prefix):
+            val rel = norm.substring(prefix.byte_len())
+            if rel == "" or rel.starts_with("build/") or rel.starts_with("."):
+                return ""
+            return module_canonical_fold_name(module_logical_name_from_path(rel))
+    ""
+
+fn _module_surface_push_unique_text_v1(items: [text], value: text) -> [text]:
+    if value == "" or items.contains(value):
+        return items
+    var out = items
+    out.push(value)
+    out
+
+fn _module_surface_push_lib_std_aliases_v1(items: [text], name: text) -> [text]:
+    var out = _module_surface_push_unique_text_v1(items, name)
+    val folded = module_canonical_fold_name(name)
+    out = _module_surface_push_unique_text_v1(out, folded)
+    if folded.starts_with("lib."):
+        val tail = folded.substring(4)
+        out = _module_surface_push_unique_text_v1(out, "std." + tail)
+        if folded.starts_with("lib.common."):
+            val common_tail = folded.substring(11)
+            out = _module_surface_push_unique_text_v1(out, "common." + common_tail)
+            out = _module_surface_push_unique_text_v1(out, "std.common." + common_tail)
+    elif folded.starts_with("common."):
+        out = _module_surface_push_unique_text_v1(out, "lib." + folded)
+        out = _module_surface_push_unique_text_v1(out, "std." + folded)
+    out
+
+pub fn module_surface_logical_alias_candidates_v1(module_id: text) -> [text]:
+    var out: [text] = []
+    if module_id == "" or module_id.contains("/") or module_id.contains("\\"):
+        return out
+    out = _module_surface_push_lib_std_aliases_v1(out, module_id)
+    if module_id.starts_with("src.") and module_id.byte_len() > 4:
+        out = _module_surface_push_lib_std_aliases_v1(out, module_id.substring(4))
+    val snapshot = out
+    for entry in snapshot:
+        if entry.ends_with(".__init__") and entry.byte_len() > 9:
+            out = _module_surface_push_lib_std_aliases_v1(out, entry.substring(0, entry.byte_len() - 9))
+    out
+
+pub fn module_surface_match_admitted_logical_v1(path: text, admitted_roots: [text], admitted_logical: Dict<text, bool>) -> text:
+    val lid = module_surface_admitted_logical_id_v1(path, admitted_roots)
+    if lid == "":
+        return ""
+    if admitted_logical.contains_key(lid):
+        return lid
+    if lid.starts_with("common."):
+        val lib_lid = "lib." + lid
+        if admitted_logical.contains_key(lib_lid):
+            return lib_lid
+    ""
+
+# reason: bool equivalence predicate over two source paths under admitted SCV/checkout roots
+@allow(primitive_api)
+pub fn module_surface_same_admitted_logical_module_v1(path_a: text, path_b: text, admitted_roots: [text]) -> bool:
+    var roots = admitted_roots
+    if roots.len() == 0:
+        for candidate in [path_a, path_b]:
+            val (checkout_root, snapshot_root, _rel) = module_surface_scv_snapshot_split_v1(candidate)
+            if snapshot_root != "":
+                roots = _module_surface_push_admitted_root_v1(roots, snapshot_root)
+                if checkout_root != "":
+                    roots = _module_surface_push_admitted_root_v1(roots, checkout_root)
+    val lid_a = module_surface_admitted_logical_id_v1(path_a, roots)
+    val lid_b = module_surface_admitted_logical_id_v1(path_b, roots)
+    if lid_a == "" or lid_b == "":
+        return false
+    if lid_a == lid_b:
+        return true
+    if lid_a.starts_with("common.") and "lib." + lid_a == lid_b:
+        return true
+    if lid_b.starts_with("common.") and "lib." + lid_b == lid_a:
+        return true
+    false

@@ -1,8 +1,16 @@
 use common.plugin.iface_id.{IfaceId}
 use compiler.backend.backend.backend_types.{BackendKind, BackendCompileOptions, CodegenTarget, CompileError}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.common.driver_compile_options.{CompileOptions}
 use compiler.mir.mir_instructions.{MirModule}
-use compiler.backend.backend_port.{BACKEND_PORT_ERROR_MAJOR, BACKEND_PORT_IFACE_DIGEST, BackendDescV1, BackendPortV1, BackendPlugin, StaticBackendPluginV1, CodegenParamsV1, backend_port_host_iface, backend_plugin_from_port_v1, codegen_params_v1}
+use compiler.backend.backend_port.{
+    BACKEND_PORT_ERROR_MAJOR, BACKEND_PORT_IFACE_DIGEST, BackendDescV1,
+    BackendPortV1, BackendPlugin, StaticBackendPluginV1, CodegenParamsV1,
+    backend_port_host_iface, backend_plugin_from_port_v1, codegen_params_v1,
+    codegen_params_from_backend_options_v1,
+    codegen_params_from_compile_options_v1,
+    backend_target_list_supports_v1}
+use std.io_runtime.{env_get_opt}
 export use compiler.backend.static_backend_types.{BackendLinkClass, StaticBackendEntryV1}
 
 pub enum StaticBackendSelectionError:
@@ -11,11 +19,19 @@ pub enum StaticBackendSelectionError:
     DigestMismatch(text)
     InvalidTable(text)
 
+# reason: optional_static_backends_installed records the boolean installation state required by the v1 composition receipt contract
+@allow(primitive_api)
+pub struct BackendCompositionReceiptV1:
+    composition_mode: text
+    k1_policy: text
+    optional_static_backends_installed: bool
+
 var _k1_static_backend_table_v1: [StaticBackendEntryV1] = []
 var _k1_static_backend_policy_v1: text = ""
 var _k1_static_backend_table_installed_v1: bool = false
 var _full_static_backend_table_v1: [StaticBackendEntryV1] = []
 var _full_static_backend_table_installed_v1: bool = false
+var _installed_backend_composition_mode_v1: text = ""
 
 impl StaticBackendSelectionError:
     fn code() -> text:
@@ -113,6 +129,8 @@ pub fn installed_k1_static_backend_table_v1() -> [StaticBackendEntryV1]:
 
 pub fn install_full_static_backend_table_v1(policy: text,
         table: [StaticBackendEntryV1]) -> bool:
+    if _installed_backend_composition_mode_v1 == "host-only":
+        return false
     if _full_static_backend_table_installed_v1:
         return _k1_static_backend_policy_v1 == policy
     if not _k1_static_backend_table_installed_v1 or
@@ -137,7 +155,86 @@ pub fn install_full_static_backend_table_v1(policy: text,
                 return false
     _full_static_backend_table_v1 = table
     _full_static_backend_table_installed_v1 = true
+    _installed_backend_composition_mode_v1 = "full"
     true
+
+pub fn resolve_backend_composition_mode_v1(
+    configured_mode: text, stage3_marker: text
+) -> text:
+    val normalized = configured_mode.trim().lower()
+    if normalized == "host-only":
+        return "host-only"
+    if normalized == "full":
+        return "full"
+    if normalized != "":
+        return ""
+    if stage3_marker.trim() == "1":
+        return "host-only"
+    "full"
+
+pub fn selected_backend_composition_mode_v1() -> text:
+    resolve_backend_composition_mode_v1(
+        env_get_opt("SIMPLE_BACKEND_COMPOSITION") ?? "",
+        env_get_opt("SIMPLE_BOOTSTRAP_STAGE3") ?? "")
+
+pub fn installed_backend_composition_mode_v1() -> text:
+    _installed_backend_composition_mode_v1
+
+# reason: boolean installation verdict matches install_k1_static_backend_table_v1 and install_full_static_backend_table_v1
+@allow(primitive_api)
+pub fn install_host_only_static_backend_composition_v1(policy: text) -> bool:
+    if _full_static_backend_table_installed_v1:
+        return false
+    if not _k1_static_backend_table_installed_v1 or _k1_static_backend_policy_v1 != policy:
+        return false
+    if not validate_k1_static_backend_table_v1(policy, _k1_static_backend_table_v1):
+        return false
+    _installed_backend_composition_mode_v1 = "host-only"
+    true
+
+# reason: optional_static_backends_installed mirrors the boolean installation flag in BackendCompositionReceiptV1
+@allow(primitive_api)
+pub fn backend_composition_receipt_v1(
+    composition_mode: text,
+    k1_policy: text,
+    optional_static_backends_installed: bool
+) -> BackendCompositionReceiptV1:
+    BackendCompositionReceiptV1(
+        composition_mode: composition_mode,
+        k1_policy: k1_policy,
+        optional_static_backends_installed: optional_static_backends_installed)
+
+pub fn format_backend_composition_receipt_v1(
+    receipt: BackendCompositionReceiptV1
+) -> text:
+    val optional_flag = if receipt.optional_static_backends_installed: "true" else: "false"
+    "schema: simple.backend_composition_receipt/1\n" +
+        "composition_mode: {receipt.composition_mode}\n" +
+        "k1_policy: {receipt.k1_policy}\n" +
+        "optional_static_backends_installed: {optional_flag}\n"
+
+impl BackendCompositionReceiptV1:
+    fn to_sdn() -> text:
+        format_backend_composition_receipt_v1(self)
+
+    fn to_text() -> text:
+        format_backend_composition_receipt_v1(self)
+
+pub fn active_backend_composition_receipt_v1() -> BackendCompositionReceiptV1:
+    val mode = if _installed_backend_composition_mode_v1 != "":
+        _installed_backend_composition_mode_v1
+    elif _full_static_backend_table_installed_v1:
+        "full"
+    else:
+        selected_backend_composition_mode_v1()
+    val k1_policy = if _k1_static_backend_table_installed_v1:
+        _k1_static_backend_policy_v1
+    else:
+        "unselected"
+    BackendCompositionReceiptV1(
+        composition_mode: mode,
+        k1_policy: k1_policy,
+        optional_static_backends_installed: _full_static_backend_table_installed_v1)
 
 pub fn full_static_backend_table_installed_v1() -> bool:
     _full_static_backend_table_installed_v1
@@ -180,14 +277,39 @@ impl Codegen for StaticBackendCodegenV1:
     fn backend_kind() -> BackendKind: self.entry.kind
     fn backend_name() -> text: _entry_name(self.entry)
     fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>: self.entry.plugin.run(self.params, module)
+    # reason: Codegen.supports_target trait contract returns bool
+    @allow(primitive_api)
     fn supports_target(target: CodegenTarget) -> bool:
-        val targets = self.entry.plugin.describe().targets
-        if targets.contains("*"): return true
-        targets.contains(target.to_text())
+        backend_target_list_supports_v1(self.entry.plugin.describe().targets, target.to_text())
     fn output_kind() -> CodegenOutputKind: self.entry.output_kind
 
+impl StaticBackendCodegenV1:
+    # reason: target-name admission predicate mirrors BackendSession.supports_target
+    @allow(primitive_api)
+    fn supports_target_name(target_name: text) -> bool:
+        backend_target_list_supports_v1(self.entry.plugin.describe().targets, target_name)
+
+pub fn static_backend_codegen_instance_v1(
+    entry: StaticBackendEntryV1,
+    options: BackendCompileOptions,
+    explicit_cpu: text = ""
+) -> StaticBackendCodegenV1:
+    StaticBackendCodegenV1(
+        entry,
+        codegen_params_from_backend_options_v1(options, explicit_cpu))
+
+pub fn static_backend_codegen_for_compile_options_v1(
+    entry: StaticBackendEntryV1,
+    driver_options: CompileOptions,
+    backend_options: BackendCompileOptions,
+    explicit_cpu: text = ""
+) -> StaticBackendCodegenV1:
+    StaticBackendCodegenV1(
+        entry,
+        codegen_params_from_compile_options_v1(driver_options, backend_options, explicit_cpu))
+
 pub fn static_backend_codegen_v1(entry: StaticBackendEntryV1, options: BackendCompileOptions) -> Codegen:
-    StaticBackendCodegenV1(entry, codegen_params_v1(options.target.to_text(), "configured", "configured", options))
+    static_backend_codegen_instance_v1(entry, options)
 
 # Error-path diagnostic for site 16/18
 # (stage2_sanity_positional_route_k1_composition_admission_failed_2026-09-13.md):

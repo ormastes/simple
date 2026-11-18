@@ -1,17 +1,57 @@
-# codex-impl: retained builtin request configuration, not acceptance evidence.
+# codex-impl: retained builtin request configuration, AOT request parity, and
+# provider-confirmed capability attestation context.
 
-use compiler.common.backend_plugin.model.{BackendPluginRequestV1}
+use compiler.common.backend_plugin.model.{
+    BackendCapabilityAttestationKindV2,
+    BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_plugin_is_bridge_projected_v2
+}
+use compiler.common.backend_plugin.receipt.{
+    BackendPluginError, admit_backend_plugin_descriptor
+}
+use compiler.common.diagnostics.diagnostic.{Diagnostic}
 use compiler.backend.backend.backend_types.{BackendKind, BackendCompileOptions, OptimizationLevel}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.llvm_codegen_adapter.{llvm_codegen_bare_metal_requested}
 
-# Internal plugin context. No mutating methods or acceptance constructors.
-# Arrays are copied at admission; callers receive no authoritative receipt here.
+pub val BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2: text = "PLUG-E-CONFIG-MISMATCH"
+
+# Internal plugin context. No mutating methods or unattested acceptance constructors.
+# Arrays are copied at admission; callers receive no fabricated confirmation here.
 struct BuiltinBackendTargetContextV2:
     options: BackendCompileOptions
     cpu: text
     requested_features: [text]
     llvm_config: LlvmTargetConfig
+    feature_acceptance: BackendCapabilityAttestationKindV2 = BackendCapabilityAttestationKindV2.Unknown
+    accepted_features: [text] = []
+
+pub struct BackendPluginAttestedTargetContextV2:
+    target: text
+    cpu: text
+    requested_features: [text]
+    accepted_features: [text]
+    feature_acceptance: BackendCapabilityAttestationKindV2
+    bridge_projected: bool
+
+fn _target_context_copy_texts_v2(values: [text]) -> [text]:
+    var copied: [text] = []
+    for item in values:
+        copied.push(item)
+    copied
+
+fn _target_context_features_confirmed_v2(
+    requested: [text],
+    accepted: [text]
+) -> bool:
+    for needed in requested:
+        var found = false
+        for confirmed in accepted:
+            if confirmed == needed:
+                found = true
+        if not found:
+            return false
+    true
 
 fn builtin_backend_cpu_v2(cpu: text) -> text:
     if cpu == "": "generic" else: cpu
@@ -19,13 +59,95 @@ fn builtin_backend_cpu_v2(cpu: text) -> text:
 fn builtin_backend_target_context_v2(
     request: BackendPluginRequestV1, options: BackendCompileOptions
 ) -> BuiltinBackendTargetContextV2:
-    var copied: [text] = []
-    for feature in request.features:
-        copied.push(feature)
+    val copied = _target_context_copy_texts_v2(request.features)
     val cpu = builtin_backend_cpu_v2(request.cpu)
     val config = LlvmTargetConfig.for_target_portable_numeric_with_mode(
         options.target, Some(cpu), llvm_codegen_bare_metal_requested())
     BuiltinBackendTargetContextV2(options, cpu, copied, config)
+
+pub fn backend_plugin_attested_target_context_v2(
+    request: BackendPluginRequestV1,
+    descriptor: BackendPluginDescriptorV1
+) -> Result<BackendPluginAttestedTargetContextV2, BackendPluginError>:
+    val admitted = admit_backend_plugin_descriptor(request, descriptor)
+    val receipt = match admitted:
+        case Err(error): return Err(error)
+        case Ok(value): value
+    match receipt.feature_acceptance:
+        case BackendCapabilityAttestationKindV2.Unknown:
+            if request.features.len() > 0:
+                return Err(BackendPluginError.ProviderRejected(
+                    "backend feature acceptance requires provider capability attestation"))
+        case BackendCapabilityAttestationKindV2.ConfirmedBaseline:
+            if request.features.len() > 0:
+                return Err(BackendPluginError.CapabilityMismatch(
+                    "baseline provider attestation rejects requested features"))
+        case BackendCapabilityAttestationKindV2.ConfirmedFeatures:
+            if not _target_context_features_confirmed_v2(
+                request.features, receipt.accepted_features):
+                return Err(BackendPluginError.CapabilityMismatch(
+                    "requested CPU features are not confirmed by provider attestation"))
+    Ok(BackendPluginAttestedTargetContextV2(
+        target: request.target,
+        cpu: builtin_backend_cpu_v2(request.cpu),
+        requested_features: _target_context_copy_texts_v2(request.features),
+        accepted_features: _target_context_copy_texts_v2(receipt.accepted_features),
+        feature_acceptance: receipt.feature_acceptance,
+        bridge_projected: backend_plugin_is_bridge_projected_v2(descriptor)))
+
+fn _llvm_mattr_features_v2(features: [text]) -> [text]:
+    var formatted: [text] = []
+    for item in features:
+        if item.starts_with("+") or item.starts_with("-"):
+            formatted.push(item)
+        else:
+            formatted.push("+" + item)
+    formatted
+
+pub fn upgrade_builtin_target_context_with_attestation_v2(
+    base_context: BuiltinBackendTargetContextV2,
+    kind: BackendKind,
+    attested: BackendPluginAttestedTargetContextV2
+) -> Result<BuiltinBackendTargetContextV2, BackendPluginError>:
+    match attested.feature_acceptance:
+        case BackendCapabilityAttestationKindV2.Unknown:
+            if attested.requested_features.len() > 0:
+                return Err(BackendPluginError.ProviderRejected(
+                    "backend feature acceptance requires provider capability attestation"))
+            Ok(BuiltinBackendTargetContextV2(
+                base_context.options,
+                attested.cpu,
+                _target_context_copy_texts_v2(attested.requested_features),
+                base_context.llvm_config,
+                BackendCapabilityAttestationKindV2.Unknown,
+                []))
+        case BackendCapabilityAttestationKindV2.ConfirmedBaseline:
+            if attested.requested_features.len() > 0:
+                return Err(BackendPluginError.CapabilityMismatch(
+                    "baseline provider attestation rejects requested features"))
+            Ok(BuiltinBackendTargetContextV2(
+                base_context.options,
+                attested.cpu,
+                [],
+                base_context.llvm_config,
+                BackendCapabilityAttestationKindV2.ConfirmedBaseline,
+                []))
+        case BackendCapabilityAttestationKindV2.ConfirmedFeatures:
+            if kind != BackendKind.Llvm:
+                return Err(BackendPluginError.CapabilityMismatch(
+                    "builtin provider cannot configure attested CPU features: " + kind.to_text()))
+            val updated_llvm = LlvmTargetConfig(
+                triple: base_context.llvm_config.triple,
+                cpu: attested.cpu,
+                features: _llvm_mattr_features_v2(attested.accepted_features),
+                abi: base_context.llvm_config.abi)
+            Ok(BuiltinBackendTargetContextV2(
+                base_context.options,
+                attested.cpu,
+                _target_context_copy_texts_v2(attested.requested_features),
+                updated_llvm,
+                BackendCapabilityAttestationKindV2.ConfirmedFeatures,
+                _target_context_copy_texts_v2(attested.accepted_features)))
 
 fn builtin_backend_context_diagnostic_v2(
     context: BuiltinBackendTargetContextV2, kind: BackendKind, operation_cpu: text
@@ -35,7 +157,15 @@ fn builtin_backend_context_diagnostic_v2(
     # This is a producer-use check. V1 admission's separate fail-closed gate
     # remains owned by builtin_feature_acceptance_gate; V2 also gates at open.
     if context.requested_features.len() > 0:
-        return "backend feature acceptance is unavailable for builtin emission"
+        match context.feature_acceptance:
+            case BackendCapabilityAttestationKindV2.ConfirmedFeatures:
+                if not _target_context_features_confirmed_v2(
+                    context.requested_features, context.accepted_features):
+                    return "requested CPU features are not confirmed by provider attestation"
+            case BackendCapabilityAttestationKindV2.Unknown:
+                return "backend feature acceptance is unavailable for builtin emission"
+            case BackendCapabilityAttestationKindV2.ConfirmedBaseline:
+                return "baseline provider attestation rejects builtin feature emission"
     if kind == BackendKind.Cranelift and context.cpu != "generic":
         return "Cranelift ISA builder cannot configure the requested CPU"
     ""
@@ -47,9 +177,12 @@ fn builtin_backend_aot_context_diagnostic_v2(
     val diagnostic = builtin_backend_context_diagnostic_v2(context, kind, operation_cpu)
     if diagnostic != "": return diagnostic
     val expected = match context.options.opt_level:
-        case OptimizationLevel.None_ | OptimizationLevel.Debug: 0
-        case OptimizationLevel.Basic | OptimizationLevel.Size: 1
-        case OptimizationLevel.Standard | OptimizationLevel.Speed: 2
+        case OptimizationLevel.None_: 0
+        case OptimizationLevel.Debug: 0
+        case OptimizationLevel.Basic: 1
+        case OptimizationLevel.Size: 1
+        case OptimizationLevel.Standard: 2
+        case OptimizationLevel.Speed: 2
         case OptimizationLevel.Aggressive: 3
     val normalized = if operation_opt_level <= 0:
         0
@@ -61,6 +194,95 @@ fn builtin_backend_aot_context_diagnostic_v2(
         return "AOT optimization differs from the admitted backend request"
     ""
 
-export BuiltinBackendTargetContextV2
+fn _backend_plugin_expected_aot_mode_v2(
+    optimization: text
+) -> Result<(bool, i64), text>:
+    match optimization:
+        case "debug": Ok((false, 0))
+        case "none": Ok((false, 0))
+        case "o0": Ok((false, 0))
+        case "release-o0": Ok((true, 0))
+        case "basic": Ok((true, 1))
+        case "o1": Ok((true, 1))
+        case "size": Ok((true, 1))
+        case "os": Ok((true, 1))
+        case "release-o1": Ok((true, 1))
+        case "standard": Ok((true, 2))
+        case "speed": Ok((true, 2))
+        case "o2": Ok((true, 2))
+        case "release-o2": Ok((true, 2))
+        case "aggressive": Ok((true, 3))
+        case "o3": Ok((true, 3))
+        case "release": Ok((true, 3))
+        case "release-o3": Ok((true, 3))
+        case _:
+            Err("admitted backend optimization '" + optimization
+                + "' has no AOT parity mapping")
+
+fn _backend_plugin_config_mismatch_diagnostic_v2(detail: text) -> Diagnostic:
+    Diagnostic.error(detail).with_code(BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
+
+# reason: AOT parity gate checks the existing BackendSession.compile_aot_* scalar is_release/opt_level/storage_bindings_count parameters directly
+@allow(primitive_api)
+pub fn backend_plugin_aot_request_parity_diagnostic_v2(
+    request: BackendPluginRequestV1,
+    is_release: bool,
+    opt_level: i64,
+    target_cpu: text,
+    storage_bindings_count: i64
+) -> Diagnostic?:
+    if storage_bindings_count != 0:
+        return Some(_backend_plugin_config_mismatch_diagnostic_v2(
+            "AOT storage_bindings (count=" + storage_bindings_count.to_string()
+                + ") cannot be transported across admitted backend plugin request"))
+    val admitted_cpu = builtin_backend_cpu_v2(request.cpu)
+    if target_cpu != "" and builtin_backend_cpu_v2(target_cpu) != admitted_cpu:
+        return Some(_backend_plugin_config_mismatch_diagnostic_v2(
+            "AOT target_cpu '" + target_cpu
+                + "' differs from admitted backend request CPU '"
+                + admitted_cpu + "'"))
+    val expected = _backend_plugin_expected_aot_mode_v2(request.optimization)
+    val (expected_release, expected_opt) = match expected:
+        case Ok(pair): pair
+        case Err(reason):
+            return Some(_backend_plugin_config_mismatch_diagnostic_v2(reason))
+    if is_release != expected_release:
+        return Some(_backend_plugin_config_mismatch_diagnostic_v2(
+            "AOT is_release=" + (if is_release: "true" else: "false")
+                + " differs from admitted backend request optimization '"
+                + request.optimization + "'"))
+    if opt_level < 0:
+        return Some(_backend_plugin_config_mismatch_diagnostic_v2(
+            "AOT opt_level=" + opt_level.to_string()
+                + " differs from admitted backend request optimization '"
+                + request.optimization + "'"))
+    val normalized_opt = if opt_level >= 3: 3 else: opt_level
+    if normalized_opt != expected_opt:
+        return Some(_backend_plugin_config_mismatch_diagnostic_v2(
+            "AOT opt_level=" + opt_level.to_string()
+                + " differs from admitted backend request optimization '"
+                + request.optimization + "'"))
+    None
+
+# reason: scalar object-path AOT emitter consumes formatted diagnostic text without materializing aggregate Result/Option in the path frame
+@allow(primitive_api)
+pub fn backend_plugin_aot_request_parity_diagnostic_text_v2(
+    request: BackendPluginRequestV1,
+    is_release: bool,
+    opt_level: i64,
+    target_cpu: text,
+    storage_bindings_count: i64
+) -> text:
+    match backend_plugin_aot_request_parity_diagnostic_v2(
+        request, is_release, opt_level, target_cpu, storage_bindings_count):
+        case Some(diag): diag.to_string()
+        case None: ""
+
+export BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2
+export BuiltinBackendTargetContextV2, BackendPluginAttestedTargetContextV2
 export builtin_backend_cpu_v2, builtin_backend_target_context_v2
+export backend_plugin_attested_target_context_v2
+export upgrade_builtin_target_context_with_attestation_v2
 export builtin_backend_context_diagnostic_v2, builtin_backend_aot_context_diagnostic_v2
+export backend_plugin_aot_request_parity_diagnostic_v2
+export backend_plugin_aot_request_parity_diagnostic_text_v2

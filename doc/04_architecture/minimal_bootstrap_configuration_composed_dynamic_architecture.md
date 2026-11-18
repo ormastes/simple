@@ -148,3 +148,13 @@ System scenarios use `compile_composition`, `load_unchanged_core`, `dispatch_pro
 - `doc/04_architecture/compiler/bootstrap_build_modes.md`
 - `src/os/kernel/loader/artifact_manifest.spl`
 - `src/compiler/35.semantics/interface/compile_interface.spl`
+
+## Phase-3-first host composition and V1 backend provider alignment (2026-11-18)
+
+To protect host Phase-3 self-hosting before the later `CompilerDriverV1` / P6–P8 waves, the compiler backend seam applies three incremental rules (`doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md`, slices `C1`, `C3`, `C4`):
+
+1. **Host-only K1 composition root (`C1` / `W1`):** Phase-3 recovery builds bind the host-only backend composition (`src/compositions/kernel_llvm{,_cranelift}`, `src/compositions/backends_host_only`, and `SIMPLE_BACKEND_COMPOSITION=host-only` when `SIMPLE_BOOTSTRAP_STAGE3=1`). Optional GPU, VHDL/HWIR, Wasm, and alternate-target static ports are excluded at the import/composition root rather than filtered after linking, while emitting a small composition receipt `(composition_mode, k1_policy, optional_static_backends_installed)`.
+2. **Shared static/dynamic `BackendSession` contract (`C1`, `C3`):** Static K1 host adapters (`StaticBackendCodegenV1` / `BackendPortV1`) and dynamically loaded backend providers use the same `BackendSession` admission and execution interface (`src/compiler/70.backend/backend_plugin/session.spl`). Static versus dynamic linkage is a composition decision, not a second compiler backend API. Explicit `--backend-plugin=PATH` selection remains reachable from essential/host-only builds without pulling static plugin closures into the host binary.
+3. **V1 optional provider packaging (`C3`, `C4`):** Optional debug/release codegen providers package against the existing foreign C ABI `simple_backend_plugin_v1` (`SBQ1` request wire, `SBH1` admitted-handle execution across both session and AOT paths, and staged SHA-256 library leases in `dynamic_loader.spl`). Compiler host ABI and emitted target triple/CPU/features are validated as distinct identities. Unattested V1 bridge descriptors report `UnconfirmedV1` (`Unknown`) feature acceptance and reject nonempty CPU feature requests until provider-confirmed metadata (`ConfirmedEmpty` / `AcceptedExact`) is supplied; explicit dynamic load or parity failures fail closed without silent static fallback.
+
+Current status (2026-11-18): `C1`, `C3`, and `C4` source and unit-spec slices (`test/01_unit/compiler/backend/host_only_composition_static_parity_spec.spl`, `test/01_unit/compiler/backend_plugin/dynamic_aot_admitted_parity_spec.spl`) are `in-progress / unit-verified`; native `G-P3-HOST` and `G-DYN-ONE` bootstrap/provider qualification gates remain pending execution.

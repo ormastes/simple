@@ -8,16 +8,133 @@
 # two can never produce the same digest).
 
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.hir_codec.{hir_canonical_codec_generated_available_v1, hir_module_encode_canonical, hir_module_encode, hir_module_encode_reason, hir_module_decode}
+use compiler.hir.hir_codec.{hir_canonical_codec_generated_available_v1, hir_module_encode_canonical, hir_module_encode, hir_module_encode_reason, hir_module_decode, HirDecodeLimits, hir_module_decode_bounded}
 use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_new}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 
-struct HirSnapshot:
+pub struct HirSnapshot:
     id: HirSnapshotId
     frozen_bytes: text
     codec: text
 
-fn hir_snapshot_freeze(module: HirModule, generation: i64) -> Result<HirSnapshot, text>:
+# Monotonic session epoch coordinated with bootstrap_fn_registries_reset_after_session_v1.
+# Cached entries store only verified canonical frozen_bytes (immutable text), never
+# a live HirModule, so caller mutations on a returned HirModule cannot alias or
+# corrupt cached bytes, and each epoch reset drops prior-session handles cleanly.
+var _hir_snapshot_session_epoch_v1: i64 = 0
+var _hir_snapshot_verified_epoch_v1: i64 = 0
+var _hir_snapshot_verified_bytes_v1: Dict<text, text> = {}
+var _hir_snapshot_verify_count_v1: i64 = 0
+var _hir_snapshot_cache_hits_v1: i64 = 0
+
+fn _hir_snapshot_cache_key_v1(epoch: i64, snapshot: HirSnapshot) -> text:
+    val mod_name = snapshot.id.module_name
+    val digest = snapshot.id.content_digest
+    val gen = snapshot.id.generation.to_string()
+    val codec = snapshot.codec
+    epoch.to_string() + "|" +
+        mod_name.len().to_string() + ":" + mod_name + "|" +
+        digest.len().to_string() + ":" + digest + "|" +
+        gen + "|" +
+        codec.len().to_string() + ":" + codec
+
+fn _hir_snapshot_decode_private(frozen_bytes: text, codec: text, module_name: text) -> Result<HirModule, text>:
+    if codec == "legacy":
+        if val decoded = hir_module_decode(frozen_bytes):
+            return Ok(decoded)
+        return Err("hir_snapshot_decode_failed: " + module_name)
+    if codec == "canonical":
+        if not hir_canonical_codec_generated_available_v1():
+            return Err("hir_snapshot_decode_failed: " + module_name)
+        val limits = HirDecodeLimits.standard()
+        val res = hir_module_decode_bounded(frozen_bytes, limits)
+        if res.is_err():
+            return Err("hir_snapshot_decode_failed: " + module_name)
+        return Ok(res.unwrap())
+    Err("hir_snapshot_codec_unknown: " + codec)
+
+fn _hir_snapshot_sync_global_epoch_v1():
+    if _hir_snapshot_verified_epoch_v1 != _hir_snapshot_session_epoch_v1:
+        _hir_snapshot_verified_bytes_v1 = {}
+        _hir_snapshot_verified_epoch_v1 = _hir_snapshot_session_epoch_v1
+
+# reason: monotonic session epoch counter coordinated with BuildSession reset
+@allow(primitive_api)
+pub fn hir_snapshot_session_epoch_v1() -> i64:
+    _hir_snapshot_session_epoch_v1
+
+# reason: advances and returns the monotonic session epoch counter on session reset
+@allow(primitive_api)
+pub fn hir_snapshot_session_advance_epoch_v1() -> i64:
+    _hir_snapshot_session_epoch_v1 = _hir_snapshot_session_epoch_v1 + 1
+    _hir_snapshot_verified_bytes_v1 = {}
+    _hir_snapshot_verified_epoch_v1 = _hir_snapshot_session_epoch_v1
+    _hir_snapshot_session_epoch_v1
+
+# reason: invalidates cached verified snapshot digests and returns the new session epoch
+@allow(primitive_api)
+pub fn hir_snapshot_session_invalidate_v1() -> i64:
+    hir_snapshot_session_advance_epoch_v1()
+
+# reason: diagnostic count of full SHA-256 snapshot verifications performed
+@allow(primitive_api)
+pub fn hir_snapshot_verify_count_v1() -> i64:
+    _hir_snapshot_verify_count_v1
+
+# reason: diagnostic count of session-epoch verified-byte cache hits
+@allow(primitive_api)
+pub fn hir_snapshot_session_cache_hits_v1() -> i64:
+    _hir_snapshot_cache_hits_v1
+
+# reason: explicit session-epoch-keyed verified snapshot reader cache and counters
+@allow(primitive_api)
+pub class HirSnapshotSessionCacheV1:
+    epoch: i64
+    verified_bytes: Dict<text, text>
+    sha256_verifications: i64
+    cache_hits: i64
+
+    static fn new() -> HirSnapshotSessionCacheV1:
+        HirSnapshotSessionCacheV1(
+            epoch: hir_snapshot_session_epoch_v1(),
+            verified_bytes: {},
+            sha256_verifications: 0,
+            cache_hits: 0
+        )
+
+    me sync_epoch():
+        val live_epoch = hir_snapshot_session_epoch_v1()
+        if self.epoch != live_epoch:
+            self.verified_bytes = {}
+            self.epoch = live_epoch
+
+    me clear():
+        self.verified_bytes = {}
+        self.epoch = hir_snapshot_session_epoch_v1()
+
+    me read(snapshot: HirSnapshot) -> Result<HirModule, text>:
+        if snapshot.codec != "legacy" and snapshot.codec != "canonical":
+            return Err("hir_snapshot_codec_unknown: " + snapshot.codec)
+        self.sync_epoch()
+        val key = _hir_snapshot_cache_key_v1(self.epoch, snapshot)
+        if self.verified_bytes.contains_key(key):
+            val cached_bytes = self.verified_bytes[key]
+            if snapshot.frozen_bytes == cached_bytes:
+                self.cache_hits = self.cache_hits + 1
+                return _hir_snapshot_decode_private(cached_bytes, snapshot.codec, snapshot.id.module_name)
+        self.sha256_verifications = self.sha256_verifications + 1
+        if not hir_snapshot_verify(snapshot):
+            return Err("hir_snapshot_digest_mismatch: " + snapshot.id.module_name)
+        val decoded = _hir_snapshot_decode_private(snapshot.frozen_bytes, snapshot.codec, snapshot.id.module_name)
+        if decoded.is_err():
+            return decoded
+        self.verified_bytes[key] = snapshot.frozen_bytes
+        decoded
+
+# reason: generation is the monotonic snapshot generation index in HirSnapshotId
+@allow(primitive_api)
+pub fn hir_snapshot_freeze(module: HirModule, generation: i64) -> Result<HirSnapshot, text>:
     var bytes = ""
     var codec = "legacy"
     if hir_canonical_codec_generated_available_v1():
@@ -35,13 +152,36 @@ fn hir_snapshot_freeze(module: HirModule, generation: i64) -> Result<HirSnapshot
         return Err(id.unwrap_err())
     Ok(HirSnapshot(id: id.unwrap(), frozen_bytes: bytes, codec: codec))
 
-fn hir_snapshot_verify(snapshot: HirSnapshot) -> bool:
+# reason: boolean SHA-256 integrity verdict for a frozen HirSnapshot
+@allow(primitive_api)
+pub fn hir_snapshot_verify(snapshot: HirSnapshot) -> bool:
     sha256_text(snapshot.frozen_bytes) == snapshot.id.content_digest
 
-fn hir_snapshot_read(snapshot: HirSnapshot) -> Result<HirModule, text>:
+pub fn hir_snapshot_read_in_session(snapshot: HirSnapshot) -> Result<HirModule, text>:
+    if snapshot.codec != "legacy" and snapshot.codec != "canonical":
+        return Err("hir_snapshot_codec_unknown: " + snapshot.codec)
+    _hir_snapshot_sync_global_epoch_v1()
+    val key = _hir_snapshot_cache_key_v1(_hir_snapshot_session_epoch_v1, snapshot)
+    if _hir_snapshot_verified_bytes_v1.contains_key(key):
+        val cached_bytes = _hir_snapshot_verified_bytes_v1[key]
+        if snapshot.frozen_bytes == cached_bytes:
+            _hir_snapshot_cache_hits_v1 = _hir_snapshot_cache_hits_v1 + 1
+            return _hir_snapshot_decode_private(cached_bytes, snapshot.codec, snapshot.id.module_name)
+    _hir_snapshot_verify_count_v1 = _hir_snapshot_verify_count_v1 + 1
     if not hir_snapshot_verify(snapshot):
         return Err("hir_snapshot_digest_mismatch: " + snapshot.id.module_name)
-    val decoded = hir_module_decode(snapshot.frozen_bytes)
-    if decoded == nil:
-        return Err("hir_snapshot_decode_failed: " + snapshot.id.module_name)
-    Ok(decoded.unwrap())
+    val decoded = _hir_snapshot_decode_private(snapshot.frozen_bytes, snapshot.codec, snapshot.id.module_name)
+    if decoded.is_err():
+        return decoded
+    # Do not store transient-scope strings into the persistent session table.
+    if transient_array_scope_state_v1() != 1:
+        _hir_snapshot_verified_bytes_v1[key] = snapshot.frozen_bytes
+    decoded
+
+pub fn hir_snapshot_read(snapshot: HirSnapshot) -> Result<HirModule, text>:
+    hir_snapshot_read_in_session(snapshot)
+
+export HirSnapshot, HirSnapshotSessionCacheV1
+export hir_snapshot_freeze, hir_snapshot_verify, hir_snapshot_read, hir_snapshot_read_in_session
+export hir_snapshot_session_epoch_v1, hir_snapshot_session_advance_epoch_v1, hir_snapshot_session_invalidate_v1
+export hir_snapshot_verify_count_v1, hir_snapshot_session_cache_hits_v1

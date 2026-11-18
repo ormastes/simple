@@ -18,9 +18,19 @@ val TARGET_HIR_MODE_ENV = "SIMPLE_TARGET_HIR_MODE"
 val TARGET_HIR_VERIFY_ENV = "SIMPLE_TARGET_HIR_VERIFY"
 val TARGET_HIR_STORAGE_ENV = "SIMPLE_TARGET_HIR_STORAGE"
 val STAGE3_COMPILER_ENV = "SIMPLE_STAGE3_COMPILER"
+val TARGET_HIR_RECEIPT_FORMAT_V1 = "simple/target-hir-effective-mode-receipt/v1"
+
+# reason: verify is the effective boolean SIMPLE_TARGET_HIR_VERIFY flag on the receipt record
+@allow(primitive_api)
+pub struct TargetHirEffectiveModeReceiptV1:
+    format: text
+    mode: text
+    verify: bool
+    storage: text
+    stage3_compiler: text
 
 # Strict: unset/empty/"legacy" -> legacy; shadow|typed; anything else -> Err.
-fn target_hir_mode_parse_strict(raw: text?) -> Result<text, text>:
+pub fn target_hir_mode_parse_strict(raw: text?) -> Result<text, text>:
     val v = (raw ?? "").trim().lower()
     if v == "" or v == "legacy":
         return Ok("legacy")
@@ -28,39 +38,57 @@ fn target_hir_mode_parse_strict(raw: text?) -> Result<text, text>:
         return Ok(v)
     Err("target_hir_mode_unknown: " + (raw ?? ""))
 
-fn target_hir_mode_parse(raw: text?) -> text:
-    val r = target_hir_mode_parse_strict(raw)
-    if r.is_err():
-        return "legacy"
-    r.unwrap()
+# Result-free plain text parse (safe on riscv64 AOT where Result<text, text>
+# Ok-payload unwrap mis-lowered to "").
+pub fn target_hir_mode_parse(raw: text?) -> text:
+    val v = (raw ?? "").trim().lower()
+    if v == "shadow" or v == "typed":
+        return v
+    "legacy"
 
-fn target_hir_verify_parse(raw: text?) -> bool:
+# reason: boolean parser for SIMPLE_TARGET_HIR_VERIFY environment knob
+@allow(primitive_api)
+pub fn target_hir_verify_parse(raw: text?) -> bool:
     val v = (raw ?? "").trim().lower()
     v == "1" or v == "true" or v == "yes" or v == "on"
 
-fn target_hir_storage_parse(raw: text?) -> text:
+# Strict: empty/"auto" -> auto; dense|sparse; anything else -> Err.
+pub fn target_hir_storage_parse_strict(raw: text) -> Result<text, text>:
+    val v = raw.trim().lower()
+    if v == "" or v == "auto":
+        return Ok("auto")
+    if v == "dense" or v == "sparse":
+        return Ok(v)
+    Err("target_hir_storage_unknown: " + raw)
+
+pub fn target_hir_storage_parse(raw: text?) -> text:
     val v = (raw ?? "").trim().lower()
     if v == "dense" or v == "sparse":
         return v
     "auto"
 
-fn stage3_compiler_path_parse(raw: text?) -> text?:
+pub fn stage3_compiler_path_parse(raw: text?) -> text?:
     val v = (raw ?? "").trim()
     if v == "":
         return nil
     v
 
-fn target_hir_mode() -> text:
+pub fn target_hir_mode() -> text:
     target_hir_mode_parse(env_get_opt(TARGET_HIR_MODE_ENV))
 
-fn target_hir_mode_strict() -> Result<text, text>:
+pub fn target_hir_mode_strict() -> Result<text, text>:
     target_hir_mode_parse_strict(env_get_opt(TARGET_HIR_MODE_ENV))
 
-fn target_hir_verify() -> bool:
+# reason: boolean reader for SIMPLE_TARGET_HIR_VERIFY environment knob
+@allow(primitive_api)
+pub fn target_hir_verify() -> bool:
     target_hir_verify_parse(env_get_opt(TARGET_HIR_VERIFY_ENV))
 
-fn target_hir_storage() -> text:
+pub fn target_hir_storage() -> text:
     target_hir_storage_parse(env_get_opt(TARGET_HIR_STORAGE_ENV))
+
+pub fn target_hir_storage_strict() -> Result<text, text>:
+    target_hir_storage_parse_strict(env_get_opt(TARGET_HIR_STORAGE_ENV) ?? "")
 
 # Result-free variant for the MirLowering ledger-open path. The strict
 # parse returns Result<text, text>, but the riscv64 in-guest AOT build
@@ -69,11 +97,74 @@ fn target_hir_storage() -> text:
 # EMPTY mode, which parse_strict can never produce honestly). A plain text
 # return has no enum payload to lose; same acceptance set (unset/empty/
 # invalid -> "legacy", the release default).
-fn target_hir_mode_or_legacy() -> text:
+pub fn target_hir_mode_or_legacy() -> text:
     val v = (env_get_opt(TARGET_HIR_MODE_ENV) ?? "").trim().lower()
     if v == "shadow" or v == "typed":
         return v
     "legacy"
 
-fn stage3_compiler_path() -> text?:
+pub fn stage3_compiler_path() -> text?:
     stage3_compiler_path_parse(env_get_opt(STAGE3_COMPILER_ENV))
+
+pub fn target_hir_effective_mode_receipt_from_raw_v1(
+    raw_mode: text,
+    raw_verify: text,
+    raw_storage: text,
+    raw_stage3: text
+) -> Result<TargetHirEffectiveModeReceiptV1, text>:
+    val mode_check = target_hir_mode_parse_strict(raw_mode)
+    if mode_check.is_err():
+        return Err(mode_check.unwrap_err())
+    val storage_check = target_hir_storage_parse_strict(raw_storage)
+    if storage_check.is_err():
+        return Err(storage_check.unwrap_err())
+    # Use the Result-free normalizers after strict admission so riscv64 AOT
+    # never depends on Result<text, text>.unwrap() for the Ok text payload.
+    val effective_mode = target_hir_mode_parse(raw_mode)
+    val effective_storage = target_hir_storage_parse(raw_storage)
+    val effective_verify = target_hir_verify_parse(raw_verify)
+    val effective_stage3 = raw_stage3.trim()
+    Ok(TargetHirEffectiveModeReceiptV1(
+        format: TARGET_HIR_RECEIPT_FORMAT_V1,
+        mode: effective_mode,
+        verify: effective_verify,
+        storage: effective_storage,
+        stage3_compiler: effective_stage3
+    ))
+
+pub fn target_hir_effective_mode_receipt_v1() -> Result<TargetHirEffectiveModeReceiptV1, text>:
+    target_hir_effective_mode_receipt_from_raw_v1(
+        env_get_opt(TARGET_HIR_MODE_ENV) ?? "",
+        env_get_opt(TARGET_HIR_VERIFY_ENV) ?? "",
+        env_get_opt(TARGET_HIR_STORAGE_ENV) ?? "",
+        env_get_opt(STAGE3_COMPILER_ENV) ?? ""
+    )
+
+fn _target_hir_sdn_quote(value: text) -> text:
+    val escaped = value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    "\"" + escaped + "\""
+
+pub fn target_hir_effective_mode_receipt_to_sdn_v1(receipt: TargetHirEffectiveModeReceiptV1) -> text:
+    val verify_text = if receipt.verify: "true" else: "false"
+    "format: " + _target_hir_sdn_quote(receipt.format) + "\n" +
+        "mode: " + _target_hir_sdn_quote(receipt.mode) + "\n" +
+        "verify: " + verify_text + "\n" +
+        "storage: " + _target_hir_sdn_quote(receipt.storage) + "\n" +
+        "stage3_compiler: " + _target_hir_sdn_quote(receipt.stage3_compiler)
+
+pub fn target_hir_effective_mode_receipt_sdn_v1(receipt: TargetHirEffectiveModeReceiptV1) -> text:
+    target_hir_effective_mode_receipt_to_sdn_v1(receipt)
+
+export TARGET_HIR_MODE_ENV, TARGET_HIR_VERIFY_ENV, TARGET_HIR_STORAGE_ENV, STAGE3_COMPILER_ENV
+export TARGET_HIR_RECEIPT_FORMAT_V1, TargetHirEffectiveModeReceiptV1
+export target_hir_mode_parse_strict, target_hir_mode_parse, target_hir_verify_parse
+export target_hir_storage_parse_strict, target_hir_storage_parse, stage3_compiler_path_parse
+export target_hir_mode, target_hir_mode_strict, target_hir_verify
+export target_hir_storage, target_hir_storage_strict, target_hir_mode_or_legacy, stage3_compiler_path
+export target_hir_effective_mode_receipt_from_raw_v1, target_hir_effective_mode_receipt_v1
+export target_hir_effective_mode_receipt_to_sdn_v1, target_hir_effective_mode_receipt_sdn_v1

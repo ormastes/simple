@@ -3,7 +3,15 @@ use std.spec.*
 use std.spec.step
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes, file_exists, dir_remove_all}
-use compiler.common.backend_plugin.model.{BackendRole, BackendCapability, BackendPluginRequestV1}
+use compiler.common.backend_plugin.model.{
+    BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+    BackendRole, BackendCapability, BackendCapabilityAttestationKindV2,
+    BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_plugin_vtable_v1_all_operations,
+    backend_capability_attestation_confirmed_baseline_v2,
+    backend_capability_attestation_confirmed_features_v2,
+    backend_capability_attestation_bridge_projected_v2
+}
 use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
 use compiler.backend.backend_plugin.builtin_adapter.{BuiltinBackendCompileAdapter, create_builtin_backend_compile_adapter}
 use compiler.backend.backend_plugin.target_context_v2.*
@@ -137,3 +145,99 @@ describe "retained builtin target context V2":
         expect(object_bytes[4]).to_equal(2u8)
         expect(object_bytes[18]).to_equal(62u8)
         expect(dir_remove_all(stage_dir)).to_equal(true)
+
+    it "enforces pure AOT request parity with PLUG-E-CONFIG-MISMATCH diagnostics":
+        val debug_req = BackendPluginRequestV1(
+            BackendRole.CompilerAot, "dyn", "x86_64", "generic", [], "debug",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit],
+            "/tmp/p.dll", true)
+        expect(backend_plugin_aot_request_parity_diagnostic_v2(
+            debug_req, false, 0, "generic", 0).is_none()).to_equal(true)
+        expect(backend_plugin_aot_request_parity_diagnostic_v2(
+            debug_req, false, 0, "", 0).is_none()).to_equal(true)
+
+        val release_mismatch = backend_plugin_aot_request_parity_diagnostic_v2(
+            debug_req, true, 0, "generic", 0).unwrap()
+        expect(release_mismatch.code.unwrap()).to_equal(
+            BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
+
+        val opt_mismatch = backend_plugin_aot_request_parity_diagnostic_v2(
+            debug_req, false, 2, "generic", 0).unwrap()
+        expect(opt_mismatch.code.unwrap()).to_equal(
+            BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
+
+        val cpu_mismatch = backend_plugin_aot_request_parity_diagnostic_v2(
+            debug_req, false, 0, "znver4", 0).unwrap()
+        expect(cpu_mismatch.code.unwrap()).to_equal(
+            BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
+
+        val storage_mismatch = backend_plugin_aot_request_parity_diagnostic_v2(
+            debug_req, false, 0, "generic", 1).unwrap()
+        expect(storage_mismatch.code.unwrap()).to_equal(
+            BACKEND_PLUGIN_AOT_CONFIG_MISMATCH_CODE_V2)
+
+    it "validates provider-confirmed target, CPU, and feature attestation without faking Unknown V1 confirmation":
+        val unattested_desc = BackendPluginDescriptorV1(
+            BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+            "dyn", "1.0.0", "build-sha", BUILTIN_MIR_ABI_DIGEST_V1,
+            [BackendRole.CompilerAot], ["x86_64"], [BackendCapability.ObjectEmit],
+            backend_plugin_vtable_v1_all_operations())
+        val base_req = BackendPluginRequestV1(
+            BackendRole.CompilerAot, "dyn", "x86_64", "znver4", [], "o2",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit],
+            "/tmp/p.dll", true)
+        val feat_req = BackendPluginRequestV1(
+            BackendRole.CompilerAot, "dyn", "x86_64", "znver4", ["fma", "avx2"], "o2",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit],
+            "/tmp/p.dll", true)
+
+        val unattested_ctx = backend_plugin_attested_target_context_v2(
+            base_req, unattested_desc).ok().unwrap()
+        expect(unattested_ctx.feature_acceptance.name()).to_equal("unknown")
+        expect(unattested_ctx.accepted_features.len()).to_equal(0)
+        expect(backend_plugin_attested_target_context_v2(
+            feat_req, unattested_desc).is_err()).to_equal(true)
+
+        val baseline_desc = BackendPluginDescriptorV1(
+            BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+            "dyn", "1.0.0", "build-sha", BUILTIN_MIR_ABI_DIGEST_V1,
+            [BackendRole.CompilerAot], ["x86_64"], [BackendCapability.ObjectEmit],
+            backend_plugin_vtable_v1_all_operations(),
+            backend_capability_attestation_confirmed_baseline_v2(
+                ["x86_64"], ["znver4"]))
+        val baseline_ctx = backend_plugin_attested_target_context_v2(
+            base_req, baseline_desc).ok().unwrap()
+        expect(baseline_ctx.feature_acceptance.name()).to_equal("confirmed_baseline")
+        expect(backend_plugin_attested_target_context_v2(
+            feat_req, baseline_desc).is_err()).to_equal(true)
+
+        val features_desc = BackendPluginDescriptorV1(
+            BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+            "dyn", "1.0.0", "build-sha", BUILTIN_MIR_ABI_DIGEST_V1,
+            [BackendRole.CompilerAot], ["x86_64"], [BackendCapability.ObjectEmit],
+            backend_plugin_vtable_v1_all_operations(),
+            backend_capability_attestation_confirmed_features_v2(
+                ["x86_64"], ["znver4"], ["avx2", "fma", "bmi2"]))
+        val confirmed_ctx = backend_plugin_attested_target_context_v2(
+            feat_req, features_desc).ok().unwrap()
+        expect(confirmed_ctx.feature_acceptance.name()).to_equal("confirmed_features")
+        expect(confirmed_ctx.accepted_features).to_equal(["avx2", "fma"])
+
+        val unsupported_feat_req = BackendPluginRequestV1(
+            BackendRole.CompilerAot, "dyn", "x86_64", "znver4", ["avx512f"], "o2",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit],
+            "/tmp/p.dll", true)
+        expect(backend_plugin_attested_target_context_v2(
+            unsupported_feat_req, features_desc).err().unwrap().code()).to_equal(
+            "BACKEND_PLUGIN_CAPABILITY")
+
+        val bridge_desc = BackendPluginDescriptorV1(
+            BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+            "dyn", "dynamic-bridge-v1", "build-sha", BUILTIN_MIR_ABI_DIGEST_V1,
+            [BackendRole.CompilerAot], ["x86_64"], [BackendCapability.ObjectEmit],
+            backend_plugin_vtable_v1_all_operations(),
+            backend_capability_attestation_bridge_projected_v2())
+        val bridge_ctx = backend_plugin_attested_target_context_v2(
+            base_req, bridge_desc).ok().unwrap()
+        expect(bridge_ctx.bridge_projected).to_equal(true)
+        expect(bridge_ctx.feature_acceptance.name()).to_equal("unknown")

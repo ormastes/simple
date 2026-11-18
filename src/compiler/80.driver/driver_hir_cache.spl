@@ -1345,6 +1345,39 @@ fn hir_shard_finish(path: text, state: text, cache_stored: bool) -> bool:
 pub fn hir_shard_row_terminal_due_v1(shard_mode: bool, unit_mode: bool) -> bool:
     not (shard_mode and unit_mode)
 
+# True iff `queue` holds a valid `.claim` record for `path` owned by `owner`.
+# reason: ledger path/owner/queue strings and bool ownership verdict match sibling hir_shard_* helpers
+@allow(primitive_api)
+pub fn hir_shard_owner_claimed_path_v1(queue: text, owner: text, path: text) -> bool:
+    if queue == "" or owner == "" or path == "" or owner.contains("\n") or path.contains("\n"):
+        return false
+    val claim_path = "{queue}/{sha256_text(path)}.claim"
+    if not file_exists(claim_path):
+        return false
+    val claim = file_read_nullable(claim_path) ?? ""
+    val fields = claim.split("\n")
+    fields.len() == 4 and fields[0] == owner and fields[1] == path and fields[2] != "" and fields[3] == ""
+
+# Current worker owns `path` in the active HIR shard ledger (true when no queue is active).
+# reason: bool ownership verdict over raw module source path, matching hir_shard_finish
+@allow(primitive_api)
+pub fn hir_shard_current_owner_claimed_v1(path: text) -> bool:
+    if not hir_shard_active() or _hir_shard_queue_dir() == "":
+        return true
+    hir_shard_owner_claimed_path_v1(_hir_shard_queue_dir(), hir_shard_owner(), path)
+
+# Owner-verified row terminal gate: a shard worker publishes a terminal receipt
+# only when row terminals are due (never in unit fall-through) AND this worker
+# both claimed the row in-loop and owns its ledger `.claim` record.
+# reason: raw driver loop control booleans matching hir_shard_row_terminal_due_v1
+@allow(primitive_api)
+pub fn hir_shard_owner_terminal_due_v1(shard_mode: bool, unit_mode: bool, row_claimed: bool, owner_verified: bool) -> bool:
+    if not hir_shard_row_terminal_due_v1(shard_mode, unit_mode):
+        return false
+    if not shard_mode:
+        return false
+    row_claimed and owner_verified
+
 # File-worker P4: deps records are written only when a file worker drives
 # this HIR child (its hir ledger env is set), unless SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1.
 fn hir_shard_deps_wanted_v1() -> bool:

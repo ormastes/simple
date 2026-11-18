@@ -1,17 +1,23 @@
-# Request policy for the essential-backend composition (the bootstrap CLI;
-# app.cli.bootstrap_essential_backend_installer, re-exported by each kernel
-# composition root). It links only the K1 table selected by the paired kernel
-# root (kernel_llvm / kernel_llvm_cranelift); every P-static backend (native
-# isel/encode, C, Wasm, CUDA, HIP, OpenCL, Vulkan, Lean, Byl, IrTc, Lua,
-# LlvmLib, VHDL) is left out of the closure.
-# A request for one of them is refused here, by name, before any compile starts.
+# Request policy for the essential / host-only backend composition
+# (`app.cli.bootstrap_essential_backend_installer`, re-exported by each kernel
+# composition root and active when `SIMPLE_BACKEND_COMPOSITION=host-only`).
+# It links only the K1 table selected by the paired kernel root (`kernel_llvm` /
+# `kernel_llvm_cranelift`); optional P-static backends are left out of the
+# static closure unless loaded explicitly through `--backend-plugin <path>`.
 # Plan: doc/05_design/compiler/backend_dynamic_plugin_build_groups.md §2.3.
+
+use compiler.common.backend_plugin.model.{
+    BackendRole, BackendCapability, BackendPluginRequestV1}
+use compiler.common.backend_plugin.receipt.{validate_backend_plugin_request}
+use std.nogc_sync_mut.io_runtime.{file_exists}
 
 pub fn bootstrap_essential_backend_choices_v1(policy: text) -> text:
     if policy == "llvm-cranelift":
         return "llvm|cranelift"
     "llvm"
 
+# reason: full_table_installed boolean flag defers restriction when Phase 4 links the full static table
+@allow(primitive_api)
 pub fn bootstrap_essential_backend_request_error_v1(policy: text, backend: text,
         plugin_path: text, full_table_installed: bool = false) -> text:
     # The kernel roots also precede src/app in the managed Phase 4 builds of the
@@ -20,14 +26,59 @@ pub fn bootstrap_essential_backend_request_error_v1(policy: text, backend: text,
     # restriction, exactly like the full src/app installer.
     if full_table_installed:
         return ""
-    # No provider exports simple_backend_plugin_v1 yet (plan PR2-3), so a
-    # plugin path would be dropped, not loaded. Refuse it instead.
     if plugin_path != "":
-        return "PLUG-E-UNSUPPORTED: backend plugin '{plugin_path}' not loadable in the essential composition: " +
-            "no provider exports simple_backend_plugin_v1 yet"
+        val trimmed_plugin = plugin_path.trim()
+        if trimmed_plugin == "":
+            return "PLUG-E-UNSUPPORTED: backend plugin path must not be whitespace-only"
+        if backend == "cuda" or backend == "ptx":
+            return "PLUG-E-UNSUPPORTED: backend plugin '{plugin_path}' cannot provide CUDA/PTX GPU artifacts over simple_backend_plugin_v1"
+        if not file_exists(trimmed_plugin):
+            return "PLUG-E-UNSUPPORTED: backend plugin '{plugin_path}' is not an existing dynamic provider artifact"
+        # Explicit `--backend-plugin <path>` pointing at an artifact forwards to
+        # the checked V1 dynamic backend session loader (`load_dynamic_backend_v1`),
+        # which stages, hashes, and validates `simple_backend_plugin_v1` fail-closed.
+        return ""
     if backend == "" or backend == "auto" or backend == "llvm":
         return ""
     if backend == "cranelift" and policy == "llvm-cranelift":
         return ""
     "PLUG-E-NOTFOUND: backend '{backend}' not linked in the essential composition (K1 policy '{policy}'): " +
-        "use the full CLI (src/app/cli/main.spl), which links the P-static backends"
+        "pass --backend-plugin <path> or use the full CLI (src/app/cli/main.spl), which links the P-static backends"
+
+pub fn bootstrap_essential_dynamic_backend_request_v1(
+    policy: text,
+    configured_backend: text,
+    plugin_path: text,
+    target: text = "host",
+    cpu: text = "generic",
+    optimization: text = "o0",
+    mir_abi_digest: text = "simple-mir-v1"
+) -> Result<BackendPluginRequestV1, text>:
+    val gate_error = bootstrap_essential_backend_request_error_v1(
+        policy, configured_backend, plugin_path, false)
+    if gate_error != "":
+        return Err(gate_error)
+    val trimmed_plugin = plugin_path.trim()
+    if trimmed_plugin == "":
+        return Err("PLUG-E-UNSUPPORTED: dynamic backend request requires a non-empty --backend-plugin path")
+    val backend_name = if configured_backend == "" or configured_backend == "auto":
+        "llvm"
+    else:
+        configured_backend
+    val effective_target = if target.trim() == "": "host" else: target.trim()
+    val effective_cpu = if cpu.trim() == "": "generic" else: cpu.trim()
+    val effective_opt = if optimization.trim() == "": "o0" else: optimization.trim()
+    val request = BackendPluginRequestV1(
+        BackendRole.CompilerAot,
+        backend_name,
+        effective_target,
+        effective_cpu,
+        [],
+        effective_opt,
+        mir_abi_digest,
+        [BackendCapability.ObjectEmit],
+        trimmed_plugin,
+        true)
+    match validate_backend_plugin_request(request):
+        case Ok(valid): Ok(valid)
+        case Err(err): Err("{err.code()}: {err.diagnostic()}")
