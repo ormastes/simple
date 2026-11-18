@@ -231,3 +231,23 @@ Thumb `bl` to a NOTYPE Thumb label; ld.lld keeps BL (no interworking for non-STT
 GOTTPOFF with addend -4 on a raw field (no relaxation); slot = tprel(S) = -8:
 
     clang --target=x86_64-linux-gnu -c gottpoff_addend_x64.s -o gottpoff_addend_x64.o
+
+## ELF32 dynamic fixtures (i386, lane c)
+
+`Ubuntu clang version 18.1.3`, run from this directory:
+
+```
+PIC="-c -O1 -ffreestanding -fPIC -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+clang --target=i686-linux-gnu $PIC dyn_start_i386.c -o dyn_start_i386.o
+clang --target=i686-linux-gnu $PIC dyn_lib_i386.c -o dyn_lib_i386.o
+ld.lld -shared --soname libadd_i386.so --hash-style=both -o libadd_i386.so.1 dyn_lib_i386.o
+```
+
+| file | role |
+|---|---|
+| dyn_start_i386.o | GOTPC (_GLOBAL_OFFSET_TABLE_), GOT32X (msg, import -> .got + R_386_GLOB_DAT), PLT32 (add_val -> PLT1 + R_386_JUMP_SLOT); writes msg and exits 42 via int $0x80 |
+| libadd_i386.so.1 | ELF32 DSO exporting add_val / msg / base / scratch (soname `libadd_i386.so`) |
+
+`elf32_dynamic_spec` checks the output against
+`ld.lld --dynamic-linker /lib/ld-linux.so.2 [-pie] dyn_start_i386.o libadd_i386.so.1`;
+both run under `qemu-i386-static -L /usr/i686-linux-gnu` and print `hi`, exit 42.

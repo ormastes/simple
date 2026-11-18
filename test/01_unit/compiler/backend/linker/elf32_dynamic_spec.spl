@@ -1,0 +1,169 @@
+# Internal ELF linker: ELF32 dynamic linking (i386), lane (c).
+#
+# REL-format dynamic output against a 32-bit DSO: .rel.dyn/.rel.plt (8-byte
+# Elf32_Rel, r_info = sym << 8 | type), Elf32_Dyn (8 bytes), Elf32_Sym (16
+# bytes), DT_REL/DT_PLTREL=DT_REL, and ld.lld's i386 lazy PLT — absolute
+# `jmp *slot` for ET_EXEC, %ebx-relative for PIE, `pushl` of the .rel.plt
+# byte offset. Oracle: ld.lld --dynamic-linker /lib/ld-linux.so.2 [-pie]
+# dyn_start_i386.o libadd_i386.so.1 (RECIPE.md); both run under qemu-i386.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/synthetic_sections.spl
+# @cover src/compiler/70.backend/linker/elf/shared_object.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+
+val FIX: text = "test/fixtures/linker/elf"
+val INTERP32: text = "/lib/ld-linux.so.2"
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr32(b: [i64], name: text) -> i64:
+    val shoff = rd32(b, 0x20)
+    val stroff = rd32(b, shoff + rd16(b, 0x32) * 40 + 16)
+    var i: i64 = 0
+    while i < rd16(b, 0x30):
+        val h = shoff + i * 40
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    rd32(b, shdr32(b, name) + 12)
+
+fn sec_off(b: [i64], name: text) -> i64:
+    rd32(b, shdr32(b, name) + 16)
+
+fn dyn_tag(b: [i64], tag: i64) -> i64:
+    """Value of the first .dynamic entry with this tag, -1 when absent."""
+    val off = sec_off(b, ".dynamic")
+    var d: i64 = 0
+    while d < rd32(b, shdr32(b, ".dynamic") + 20):
+        if rd32(b, off + d) == tag:
+            return rd32(b, off + d + 4)
+        d = d + 8
+    -1
+
+fn link386(mode: i64) -> [i64]:
+    val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/dyn_start_i386.o")], archives: [],
+        shared: [load_path("{FIX}/libadd_i386.so.1")], entry: "_start",
+        target: RelocArch.I386, mode: mode, interp: INTERP32))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+fn dynsym_index(b: [i64], name: text) -> i64:
+    val off = sec_off(b, ".dynsym")
+    val str = sec_off(b, ".dynstr")
+    var k: i64 = 1
+    while k * 16 < rd32(b, shdr32(b, ".dynsym") + 20):
+        if cstr(b, str + rd32(b, off + k * 16)) == name:
+            return k
+        k = k + 1
+    -1
+
+describe "elf_parse_shared - ELF32 DSO":
+    it "reads SONAME and 16-byte Elf32_Sym exports":
+        val lib = elf_parse_shared(file_read_bytes("{FIX}/libadd_i386.so.1")).unwrap()
+        expect(lib.soname).to_equal("libadd_i386.so")
+        expect(lib.exports["add_val"]).to_equal(2)
+        expect(lib.exports["msg"]).to_equal(1)
+        expect(lib.export_sizes["msg"]).to_equal(4)
+
+describe "elf_link - i386 dynamic ET_EXEC":
+    it "is an ELF32 ET_EXEC with PT_INTERP and DT_NEEDED":
+        val b = link386(ELF_LINK_DYNAMIC_EXEC)
+        expect(b.len() > 0).to_equal(true)
+        expect(b[4]).to_equal(1)
+        expect(rd16(b, 16)).to_equal(2)
+        expect(cstr(b, sec_off(b, ".interp"))).to_equal(INTERP32)
+        expect(cstr(b, sec_off(b, ".dynstr") + dyn_tag(b, 1))).to_equal("libadd_i386.so")
+
+    it "uses REL tags with 8-byte entries and 16-byte symbols":
+        val b = link386(ELF_LINK_DYNAMIC_EXEC)
+        expect(dyn_tag(b, 7)).to_equal(-1)            # no DT_RELA
+        expect(dyn_tag(b, 17)).to_equal(sec_addr(b, ".rel.dyn"))
+        expect(dyn_tag(b, 18)).to_equal(8)            # DT_RELSZ: one GLOB_DAT
+        expect(dyn_tag(b, 19)).to_equal(8)            # DT_RELENT
+        expect(dyn_tag(b, 20)).to_equal(17)           # DT_PLTREL = DT_REL
+        expect(dyn_tag(b, 2)).to_equal(8)             # DT_PLTRELSZ: one JUMP_SLOT
+        expect(dyn_tag(b, 11)).to_equal(16)           # DT_SYMENT
+        expect(dyn_tag(b, 3)).to_equal(sec_addr(b, ".got.plt"))
+        expect(rd32(b, shdr32(b, ".dynsym") + 36)).to_equal(16)
+        expect(rd32(b, shdr32(b, ".dynamic") + 36)).to_equal(8)
+        expect(rd32(b, shdr32(b, ".rel.plt") + 4)).to_equal(9)   # SHT_REL
+
+    it "binds add_val through a JUMP_SLOT whose lazy slot points at its pushl":
+        val b = link386(ELF_LINK_DYNAMIC_EXEC)
+        val gp = sec_addr(b, ".got.plt")
+        val plt = sec_addr(b, ".plt")
+        val rp = sec_off(b, ".rel.plt")
+        expect(rd32(b, rp)).to_equal(gp + 12)
+        expect(rd32(b, rp + 4)).to_equal((dynsym_index(b, "add_val") << 8) | 7)
+        val gpo = sec_off(b, ".got.plt")
+        expect(rd32(b, gpo)).to_equal(sec_addr(b, ".dynamic"))
+        expect(rd32(b, gpo + 12)).to_equal(plt + 16 + 6)
+
+    it "writes ld.lld's non-PIC PLT0 and PLT1":
+        val b = link386(ELF_LINK_DYNAMIC_EXEC)
+        val gp = sec_addr(b, ".got.plt")
+        val plt = sec_addr(b, ".plt")
+        val o = sec_off(b, ".plt")
+        expect([b[o], b[o + 1]]).to_equal([0xff, 0x35])
+        expect(rd32(b, o + 2)).to_equal(gp + 4)
+        expect([b[o + 6], b[o + 7]]).to_equal([0xff, 0x25])
+        expect(rd32(b, o + 8)).to_equal(gp + 8)
+        expect([b[o + 16], b[o + 17]]).to_equal([0xff, 0x25])
+        expect(rd32(b, o + 18)).to_equal(gp + 12)
+        expect(b[o + 22]).to_equal(0x68)
+        expect(rd32(b, o + 23)).to_equal(0)           # .rel.plt byte offset
+        expect(b[o + 27]).to_equal(0xe9)
+        expect(rd32(b, o + 28)).to_equal((plt - (plt + 32)) & 0xffffffff)
+
+    it "binds msg through a GLOB_DAT GOT slot that holds 0 (REL implicit addend)":
+        val b = link386(ELF_LINK_DYNAMIC_EXEC)
+        val got = sec_addr(b, ".got")
+        val rd = sec_off(b, ".rel.dyn")
+        expect(rd32(b, rd)).to_equal(got)
+        expect(rd32(b, rd + 4)).to_equal((dynsym_index(b, "msg") << 8) | 6)
+        expect(rd32(b, sec_off(b, ".got"))).to_equal(0)
+
+describe "elf_link - i386 dynamic PIE":
+    it "is ET_DYN with DF_1_PIE and an %ebx-relative PLT":
+        val b = link386(ELF_LINK_DYNAMIC_PIE)
+        expect(b.len() > 0).to_equal(true)
+        expect(rd16(b, 16)).to_equal(3)
+        expect(dyn_tag(b, 0x6ffffffb)).to_equal(0x08000000)
+        val o = sec_off(b, ".plt")
+        expect([b[o], b[o + 1], rd32(b, o + 2)]).to_equal([0xff, 0xb3, 4])
+        expect([b[o + 6], b[o + 7], rd32(b, o + 8)]).to_equal([0xff, 0xa3, 8])
+        expect([b[o + 16], b[o + 17], rd32(b, o + 18)]).to_equal([0xff, 0xa3, 12])
