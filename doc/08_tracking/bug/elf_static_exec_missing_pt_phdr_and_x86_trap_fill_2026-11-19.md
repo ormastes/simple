@@ -109,3 +109,12 @@ New item, filed and not fixed: the merged `.riscv.attributes` payload differs fr
 (`..._zmmul1p0_zaamo1p0_zalrsc1p0_zca1p0`) and tag 14 (`Tag_RISCV_atomic_abi`). lld 18
 writes `rv32i2p1_m2p0_a2p1_c2p0` with no tag 14, and llvm-readelf 18 reports "invalid tag
 0xe". This predates fix 4; it looks like the engine follows newer LLVM merge rules.
+
+## Fix 2 follow-up: bulk int3 fill
+
+`elf_u8_filled(count, byte)` (byte_buffers.spl) builds the buffer by doubling, with log2(n)
+native copies; `elf_u8_zeros` now delegates to it. `elf_static_contents` uses it for x86
+executable sections in place of the per-byte store loop. Timing for 16 MiB on the
+`bin/simple.exe` seed, two runs each: per-byte loop 118/119 ms, `elf_u8_filled` 22/25 ms
+(about 5x faster). Spec: `elf_byte_buffers_fill_spec` covers lengths 0..4097, including
+non-powers of two.
