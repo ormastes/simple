@@ -104,3 +104,20 @@ describe "elf_boot_link - riscv64 fail-closed":
         val r = elf_boot_link(rv_objs(), rv_plan(RV_SCRIPT), RelocArch.AArch64)
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err().contains("e_machine")).to_equal(true)
+
+# weak_undef_rv64.o: CALL_PLT and JAL (the assembler relaxes the beq/c.beqz/c.j
+# forms into JAL) against an undefined weak symbol, linked at 0x100000000.
+# ld.lld (LLD 18, --no-relax) resolves each to the place itself; S = 0 would
+# need a +-4 GiB displacement and overflow HI20. Bug:
+# doc/08_tracking/bug/riscv64_undefined_weak_pcrel_overflow_2026-11-19.md
+val RV_HIGH_SCRIPT: text = """ENTRY(_start)
+SECTIONS { . = 0x100000000; .text : { *(.text.boot) *(.text*) } }
+"""
+
+val LLD_RV_WEAK_TEXT: [i64] = [151, 0, 0, 0, 231, 128, 0, 0, 239, 0, 0, 0, 99, 20, 181, 0, 111, 0, 0, 0, 25, 225, 111, 0, 0, 0, 111, 0, 0, 0, 130, 128]
+
+describe "elf_boot_link - riscv64 undefined weak PC-relative targets":
+    it "resolves CALL_PLT and JAL to an undefined weak symbol to the place, matching ld.lld":
+        val im = elf_boot_link_image([rv_load("weak_undef_rv64.o")], rv_plan(RV_HIGH_SCRIPT), RelocArch.Riscv64).unwrap()
+        expect(rv_vma(im, ".text")).to_equal(0x100000000)
+        expect(rv_sec(im, ".text", 32)).to_equal(LLD_RV_WEAK_TEXT)
