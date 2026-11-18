@@ -1,0 +1,27 @@
+"""
+## Purpose and audience
+Regressions from the riscv64 kernel native-build (LLVM, --entry-closure):
+- importing the `baremetal.riscv` PACKAGE root pulled every forwarded sibling
+  (semihost, startup, plic, ...) into the kernel closure; semihost.spl then
+  failed with `Array.as_ptr` unresolved. riscv64 kernel arch files import the
+  owning submodule (cmo / sbi) directly.
+- userlib/fs.spl called `text.parse_u8()`, which has no native lowering; the
+  directory kind is decoded from its already-validated ASCII digit instead.
+"""
+# @req: REQ-TEST-RV64_KERNEL_CLOSURE_HYGIENE-001
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+use os.kernel.arch.riscv64.hal_cache
+use os.kernel.arch.riscv64.hal_smp
+
+val PKG_ROOT_IMPORT: text = "use std.nogc_async_mut_noalloc.baremetal.riscv." + "{"
+
+describe "riscv64 kernel closure hygiene":
+    it "kernel arch files do not import the baremetal.riscv package root":
+        for f in ["hal_cache", "hal_smp", "user_entry"]:
+            val src = file_read_text("src/os/kernel/arch/riscv64/" + f + ".spl")
+            expect(src.contains(PKG_ROOT_IMPORT)).to_equal(false)
+
+    it "userlib fs does not call text.parse_u8":
+        val src = file_read_text("src/os/userlib/fs.spl")
+        expect(src.contains(".parse_u8()")).to_equal(false)
