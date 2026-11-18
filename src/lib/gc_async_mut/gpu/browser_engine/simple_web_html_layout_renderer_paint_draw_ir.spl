@@ -657,6 +657,19 @@ fn _html_draw_ir_gradient_layers_tiled(layers: [BackgroundGradientLayer], px: i3
             return true
     false
 
+# Chrome promotes a `position:fixed` box to its own layer and paints LCD text
+# there only over an opaque background: grayscale when no element from the
+# text up to the fixed box (inclusive) has an opaque background.
+fn _html_draw_ir_fixed_gray_text(nodes: [HNode], styles: [Style], i: i32) -> bool:
+    var j = nodes[i].parent
+    while j >= 0:  # cpu-lane-loop-ok: ancestor walk, bounded by tree depth
+        if ((styles[j].bg >> 24) & 255u32) == 255u32:
+            return false
+        if styles[j].position_fixed:
+            return true
+        j = nodes[j].parent
+    false
+
 fn _html_draw_ir_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
     clip: ClipRect, vector_fonts: bool
@@ -724,6 +737,8 @@ fn _html_draw_ir_command(
         val run_pen_origin = text_pen_origin_at(boxes.pen_origin_milli, i)
         if run_pen_origin != 0:
             computed_style.push(draw_ir_style_prop("pen-origin-milli", "{run_pen_origin}"))
+        if _html_draw_ir_fixed_gray_text(nodes, styles, i):
+            computed_style.push(draw_ir_style_prop("text-lcd", "0"))
         # A fractional computed size (UA h3 18.72 px): the glyph raster takes
         # the float size. Whole-px runs carry no prop.
         val run_size_milli = font_milli_of(st.font_size, st.font_size_milli)
