@@ -70,6 +70,27 @@ fn probe_interp_missing_symbol_cache() -> [bool]:
     m.cleanup()
     [single_failure, failed_recorded, stayed_interpreted]
 
+fn probe_interp_empty_source_negative_cache() -> [bool]:
+    var m = TieredJitManager.create(quiet_tiered_config())
+    m.register_function("empty_registered_fn", "")
+    var i = 0
+    while i < 60:
+        m.record_call("empty_registered_fn")
+        m.record_call("unregistered_sourceless_fn")
+        i = i + 1
+    val failed_registered = m.has_compile_failed("empty_registered_fn")
+    val failed_unregistered = m.has_compile_failed("unregistered_sourceless_fn")
+    val err_registered = m.compile_failure_error("empty_registered_fn").contains("E-JIT-EMPTY-SOURCE")
+    val err_unregistered = m.compile_failure_error("unregistered_sourceless_fn").contains("E-JIT-EMPTY-SOURCE")
+    # Exactly 2 failures total (1 per sourceless symbol across 60 calls), proving
+    # subsequent hot calls short-circuit before re-entering hotspot planning.
+    val two_failures_only = m.compile_failure_count() == 2
+    val engine_still_lazy = m.jit_created() == false
+    val stayed_interpreted = m.get_tier("empty_registered_fn") == JitTier.Interpreted and m.get_tier("unregistered_sourceless_fn") == JitTier.Interpreted
+    val checked_rejected = m.call_i64_checked("empty_registered_fn", 0).is_err()
+    m.cleanup()
+    [failed_registered, failed_unregistered, err_registered, err_unregistered, two_failures_only, engine_still_lazy, stayed_interpreted, checked_rejected]
+
 fn probe_interp_honest_tier2_and_checked_call() -> [bool]:
     var m = TieredJitManager.create(quiet_tiered_config())
     m.register_function("jit_dec_one", valid_minus_one_src())
@@ -190,6 +211,20 @@ describe "Wave B5 tiered JIT negative cache, honest Tier-2, and entry order":
         expect probe[0] == true
         expect probe[1] == true
         expect probe[2] == true
+
+    it "negative-caches empty JIT source on first hot call so subsequent calls skip hotspot planning":
+        """Verify sourceless functions record E-JIT-EMPTY-SOURCE once without creating the JIT engine or re-running hotspot planning."""
+        # @req: REQ-COMPILER-INTERP-001
+        step("Verify empty JIT source records compile_failed once across 60 calls")
+        val probe = probe_interp_empty_source_negative_cache()
+        expect(probe[0]).to_equal(true)
+        expect(probe[1]).to_equal(true)
+        expect(probe[2]).to_equal(true)
+        expect(probe[3]).to_equal(true)
+        expect(probe[4]).to_equal(true)
+        expect(probe[5]).to_equal(true)
+        expect(probe[6]).to_equal(true)
+        expect(probe[7]).to_equal(true)
 
     it "keeps Tier-1 functions at JitTier.Fast with tier2_compilations == 0 and disambiguates -1 via call_i64_checked":
         # @req: REQ-COMPILER-INTERP-001

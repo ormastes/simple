@@ -1,4 +1,9 @@
-# Purpose and audience: executable specification evidence for Wave B4 JIT fallback & negative cache contract.
+"""
+## Purpose and audience
+Purpose: Executable specification evidence for Wave B4 JIT fallback, negative
+compile cache, checked execution returns, and atomic handle recompilation state.
+Audience: compiler, backend, and execution-manager maintainers.
+"""
 # @req REQ-SSPEC-UNIT
 # @cover src/compiler/70.backend/backend/jit_interpreter.spl
 # @cover src/compiler/95.interp/execution/mod.spl
@@ -142,6 +147,33 @@ describe "jit_sffi handle state, MIR guard, and checked execution":
         val (ok_closed, _, err_closed) = rt_exec_manager_execute_checked(handle, "always_minus_one", [])
         expect(ok_closed).to_be(false)
         expect(err_closed).to_contain("Invalid")
+
+    it "preserves consistent handle state when compiling or recompiling functionless source":
+        """Verify functionless source never leaves _exec_has_hir and _exec_fn_lists inconsistent across fresh or active handles."""
+        val fresh = rt_exec_manager_create("auto")
+        val fresh_err = rt_exec_manager_compile_source(fresh, "val only_const: i64 = 7\n")
+        expect(fresh_err).to_contain("No functions found")
+        expect(rt_exec_manager_list_functions(fresh).len()).to_equal(0)
+        expect(rt_exec_manager_has_function(fresh, "only_const")).to_be(false)
+        expect(rt_exec_manager_cleanup(fresh)).to_equal(0)
+
+        val active = rt_exec_manager_create("auto")
+        val valid_src = _lines([
+            "fn keep_alive() -> i64:",
+            "    99"
+        ])
+        expect(rt_exec_manager_compile_source(active, valid_src)).to_equal("")
+        expect(rt_exec_manager_has_function(active, "keep_alive")).to_be(true)
+
+        val recompile_err = rt_exec_manager_compile_source(active, "val no_functions_here: i64 = 1\n")
+        expect(recompile_err).to_contain("No functions found")
+        expect(rt_exec_manager_has_function(active, "keep_alive")).to_be(true)
+        expect(rt_exec_manager_list_functions(active)).to_contain("keep_alive")
+        val (ok_after, val_after, err_after) = rt_exec_manager_execute_checked(active, "keep_alive", [])
+        expect(ok_after).to_be(true)
+        expect(val_after).to_equal(99)
+        expect(err_after).to_equal("")
+        expect(rt_exec_manager_cleanup(active)).to_equal(0)
 
 describe "LocalExecutionManager typed Result contract":
     it "tracks is_valid, return_types, and preserves Ok(-1) vs Err on execute":

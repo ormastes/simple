@@ -1,9 +1,14 @@
-# Wave B3 hot-path regression spec for the pure-Simple HIR backend interpreter:
-# 1. Memoized SIMPLE_INTERP_TRACE + guarded interpolated itrace(...) calls.
-# 2. Pre-indexed O(1) module tables on EvalContext with default {} fields and
-#    cached lazy fallback, plus early break in try_construct_struct.
-# 3. Bounded integer range streaming in eval_for without [Value] allocation.
-#
+"""
+## Purpose and audience
+Purpose: Verify Wave B3 hot-path optimizations and boundary safety in the
+pure-Simple HIR backend interpreter:
+1. Memoized SIMPLE_INTERP_TRACE + guarded interpolated itrace(...) calls.
+2. Pre-indexed O(1) module tables on EvalContext with default {} fields and
+   cached lazy fallback, plus early break in try_construct_struct.
+3. Bounded integer range streaming in eval_for without [Value] allocation,
+   including inclusive i64::MAX and i64::MIN step wraparound guards.
+Audience: compiler and backend interpreter maintainers.
+"""
 # @cover src/compiler/70.backend/backend/interpreter.spl
 # @cover src/compiler/70.backend/backend/interpreter_calls.spl
 # @cover src/compiler/70.backend/backend/interpreter_expr.spl
@@ -11,7 +16,7 @@
 # @cover src/compiler/70.backend/backend/env.spl
 
 use std.spec.{describe, it, expect}
-use std.io_runtime.{file_read}
+use std.io_runtime.{file_read, env_set_process}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{Module}
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
@@ -36,8 +41,6 @@ use compiler.backend.interpreter_control.{
 }
 use compiler.common.config.{Logger}
 use compiler.common.driver_core_types.{SourceFile}
-
-extern fn rt_env_set(name: text, value: text) -> bool
 
 fn hp_lower(src: text, path: text, module_name: text) -> HirModule:
     val module = parse_full_frontend(src, path, module_name, Logger(level: 0))
@@ -64,17 +67,61 @@ fn hp_run_int(hir: HirModule) -> i64:
         case Ok(BackendResult.Value(Value.Int(n))): n
         case _: -999999
 
+fn hp_run_stepped_range_hits(a: i64, b: i64, inclusive: bool, step_by: i64) -> i64:
+    val tmpl_hir = hp_lower(
+        "fn main() -> i64:\n    var hits = 0\n    hits = hits + 1\n    hits\n",
+        "hp_step_tmpl.spl",
+        "hp_step_tmpl"
+    )
+    var main_fn_opt: HirFunction? = None
+    for fn_item in tmpl_hir.functions.values():
+        val f: HirFunction = fn_item
+        if f.name == "main":
+            main_fn_opt = Some(f)
+    val main_fn = main_fn_opt.unwrap()
+    val tmpl_expr: HirExpr = main_fn.body.value
+    val inc_stmt: HirStmt = main_fn.body.stmts[1]
+    val loop_body = HirBlock(
+        stmts: [inc_stmt],
+        has: false,
+        value: tmpl_expr,
+        span: main_fn.body.span
+    )
+    val start_expr = HirExpr(kind: HirExprKind.IntLit(a, nil), has_type_: tmpl_expr.has_type_, type_: tmpl_expr.type_, span: tmpl_expr.span)
+    val end_expr = HirExpr(kind: HirExprKind.IntLit(b, nil), has_type_: tmpl_expr.has_type_, type_: tmpl_expr.type_, span: tmpl_expr.span)
+    val step_expr = HirExpr(kind: HirExprKind.IntLit(step_by, nil), has_type_: tmpl_expr.has_type_, type_: tmpl_expr.type_, span: tmpl_expr.span)
+    val backend = InterpreterBackendImpl.new()
+    val env = Environment.new()
+    env.define("hits", backend_value_int_v1(0))
+    var names_map: Dict<i64, text> = {}
+    for sym_item in tmpl_hir.symbols.symbols.values():
+        val s: HirSymbol = sym_item
+        val sid: i64 = s.id.id
+        names_map[sid] = s.name
+    val ctx = EvalContext(
+        env: env,
+        module: tmpl_hir,
+        backend: backend,
+        names: names_map
+    )
+    match backend.eval_for_bounded_range(main_fn.symbol, start_expr, end_expr, inclusive, Some(step_expr), loop_body, ctx, tmpl_expr.span):
+        case Ok(_):
+            match ctx.env.lookup("hits"):
+                case Some(Value.Int(total)): total
+                case _: -999998
+        case Err(_): -999997
+
 describe "HIR backend interpreter hot-path optimizations (Wave B3)":
     it "memoizes SIMPLE_INTERP_TRACE across calls and refreshes on module entry":
         val hir = hp_lower("fn main() -> i64:\n    7\n", "hp_trace.spl", "hp_trace")
         var backend = InterpreterBackendImpl.new()
 
-        rt_env_set("SIMPLE_INTERP_TRACE", "0")
+        env_set_process("SIMPLE_INTERP_TRACE", "0")
         interp_refresh_trace_cache()
         expect(interp_trace_enabled()).to_equal(false)
 
         # Mutating the OS env mid-run must NOT flip the cached flag until module entry.
-        rt_env_set("SIMPLE_INTERP_TRACE", "1")
+        env_set_process("SIMPLE_INTERP_TRACE", "1")
         expect(interp_trace_enabled()).to_equal(false)
 
         # Module entry refreshes the cached trace flag.
@@ -84,7 +131,7 @@ describe "HIR backend interpreter hot-path optimizations (Wave B3)":
         expect(interp_trace_enabled()).to_equal(true)
 
         # Restore disabled trace state and confirm module entry refreshes back to false.
-        rt_env_set("SIMPLE_INTERP_TRACE", "0")
+        env_set_process("SIMPLE_INTERP_TRACE", "0")
         match backend.interpret_hir_module(hir):
             case Ok(BackendResult.Value(Value.Int(v2))): expect(v2).to_equal(7)
             case _: expect(false).to_equal(true)
@@ -213,3 +260,26 @@ describe "HIR backend interpreter hot-path optimizations (Wave B3)":
         )
         expect(hp_run_int(comp_hir)).to_equal(12)
         expect(interp_range_array_alloc_count()).to_equal(1)
+
+    it "stops inclusive bounded for-ranges safely at i64::MAX and i64::MIN without wraparound":
+        """Verify eval_for_bounded_range breaks cleanly before signed i64 wraparound on positive and negative steps."""
+        val max_hir = hp_lower(
+            "fn main() -> i64:\n" +
+            "    val hi = 9223372036854775807\n" +
+            "    val lo = hi - 2\n" +
+            "    var count = 0\n" +
+            "    for i in lo..=hi:\n" +
+            "        count = count + 1\n" +
+            "    count\n",
+            "hp_range_max.spl",
+            "hp_range_max"
+        )
+        interp_reset_range_array_alloc_count()
+        expect(hp_run_int(max_hir)).to_equal(3)
+        expect(interp_range_array_alloc_count()).to_equal(0)
+
+        val max_i64: i64 = 9223372036854775807
+        val min_i64: i64 = -9223372036854775807 - 1
+        expect(hp_run_stepped_range_hits(max_i64 - 3, max_i64, true, 2)).to_equal(2)
+        expect(hp_run_stepped_range_hits(min_i64 + 2, min_i64, true, -1)).to_equal(3)
+        expect(hp_run_stepped_range_hits(min_i64 + 3, min_i64, true, -2)).to_equal(2)
