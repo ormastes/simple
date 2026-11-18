@@ -35,8 +35,8 @@ is now the closed enum `TraceLocatorKind` (text only at the SDN boundary via
   tagged scenario.
 - `TESTDB-010` is only defended fail-closed: `simple test query` has no
   `--bug`, `--requirement` or `--levels` (unknown-flag usage error,
-  `src/app/test_runner_new/test_query_cli.spl:143`), and `simple_test_query` takes
-  only `path`/`name` (`src/app/mcp/main_lazy_trace_tools.spl:301`). Plan 3.2 and
+  `src/app/test_runner_new/test_query_cli.spl:143`), and `simple_test_query` has no
+  bug/requirement/levels field (`src/app/mcp/main_lazy_trace_tools.spl:301`). Plan 3.2 and
   acceptance item 2 (`--bug=<id>` returns case definitions, run attempts,
   executable/source identity, missing evidence) are not implemented. Unblock: a
   bug/requirement -> case resolver over the traceability graph feeding
