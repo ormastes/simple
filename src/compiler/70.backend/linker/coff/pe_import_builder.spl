@@ -1,7 +1,7 @@
 # PE32+ import directory and AMD64/ARM64 import-thunk synthesis.
 
 use compiler.backend.linker.coff.coff_import.{CoffImportObject}
-use compiler.backend.linker.coff.coff_object.{COFF_MACHINE_AMD64, COFF_MACHINE_ARM64}
+use compiler.backend.linker.coff.coff_object.{COFF_MACHINE_AMD64, COFF_MACHINE_ARM64, COFF_MACHINE_I386}
 
 struct PeImportImage:
     thunk_data: [u8]
@@ -10,6 +10,8 @@ struct PeImportImage:
     descriptor_size: i64
     iat_offset: i64
     iat_size: i64
+    # RVAs of absolute 32-bit fields (i386 thunks) that need a HIGHLOW base reloc.
+    thunk_fixups: [i64]
 
 fn _pi_align(value: i64, alignment: i64) -> i64:
     ((value + alignment - 1) / alignment) * alignment
@@ -86,14 +88,17 @@ fn _pi_arm64_thunk(thunk_rva: i64, iat_rva: i64,
     _pi_push_u32(result, 0xd61f0200)
 
 fn _pi_build_imports(imports: [CoffImportObject], thunk_rva: i64,
-        idata_rva: i64, machine: i64) -> Result<PeImportImage, text>:
+        idata_rva: i64, machine: i64,
+        image_base: i64) -> Result<PeImportImage, text>:
     if imports.len() == 0:
         return Ok(PeImportImage(thunk_data: [], idata_data: [],
-            symbol_rvas: {}, descriptor_size: 0, iat_offset: 0, iat_size: 0))
+            symbol_rvas: {}, descriptor_size: 0, iat_offset: 0, iat_size: 0,
+            thunk_fixups: []))
     if idata_rva <= 0: return Err("PE import directory requires a positive RVA")
     for import_object in imports:
         if import_object.machine != machine:
             return Err("short-import machine does not match PE link target")
+    val entry_size: i64 = if machine == COFF_MACHINE_I386: 4 else: 8
     val dlls = _pi_dll_names(imports)
     val descriptor_size = (dlls.len() + 1) * 20
     var ilt_offsets: {text: i64} = {}
@@ -103,12 +108,12 @@ fn _pi_build_imports(imports: [CoffImportObject], thunk_rva: i64,
     for dll in dlls:
         val count = _pi_dll_import_count(imports, dll)
         ilt_offsets[dll.lower()] = cursor
-        cursor = cursor + (count + 1) * 8
+        cursor = cursor + (count + 1) * entry_size
     val iat_start = cursor
     for dll in dlls:
         val count = _pi_dll_import_count(imports, dll)
         iat_offsets[dll.lower()] = cursor
-        cursor = cursor + (count + 1) * 8
+        cursor = cursor + (count + 1) * entry_size
     val iat_end = cursor
     var hint_offsets: {text: i64} = {}
     for import_object in imports:
@@ -124,6 +129,7 @@ fn _pi_build_imports(imports: [CoffImportObject], thunk_rva: i64,
     while idata.len() < cursor: idata = idata.push(0)
     var symbols: {text: i64} = {}
     var thunks: [u8] = []
+    var thunk_fixups: [i64] = []
     var descriptor_index: i64 = 0
     for dll in dlls:
         val key = dll.lower()
@@ -137,22 +143,34 @@ fn _pi_build_imports(imports: [CoffImportObject], thunk_rva: i64,
             if import_object.dll_name.lower() == key:
                 var lookup_value: i64 = 0
                 if import_object.is_ordinal():
-                    lookup_value = -9223372036854775808 + import_object.hint_or_ordinal
+                    lookup_value = if machine == COFF_MACHINE_I386:
+                        0x80000000 + import_object.hint_or_ordinal
+                    else:
+                        -9223372036854775808 + import_object.hint_or_ordinal
                 else:
                     val hint_offset = hint_offsets[import_object.iat_symbol()]
                     idata = _pi_put_u16(idata, hint_offset, import_object.hint_or_ordinal)
                     idata = _pi_put_text(idata, hint_offset + 2, import_object.import_name)
                     lookup_value = idata_rva + hint_offset
-                val ilt_entry = ilt_offsets[key] + import_index * 8
-                val iat_entry = iat_offsets[key] + import_index * 8
-                idata = _pi_put_u64(idata, ilt_entry, lookup_value)
-                idata = _pi_put_u64(idata, iat_entry, lookup_value)
+                val ilt_entry = ilt_offsets[key] + import_index * entry_size
+                val iat_entry = iat_offsets[key] + import_index * entry_size
+                if machine == COFF_MACHINE_I386:
+                    idata = _pi_put_u32(idata, ilt_entry, lookup_value)
+                    idata = _pi_put_u32(idata, iat_entry, lookup_value)
+                else:
+                    idata = _pi_put_u64(idata, ilt_entry, lookup_value)
+                    idata = _pi_put_u64(idata, iat_entry, lookup_value)
                 val iat_rva = idata_rva + iat_entry
                 symbols[import_object.iat_symbol()] = iat_rva
                 if import_object.is_code():
                     val thunk_address = thunk_rva + thunks.len()
                     symbols[import_object.public_name] = thunk_address
-                    if machine == COFF_MACHINE_AMD64:
+                    if machine == COFF_MACHINE_I386:
+                        # jmp dword ptr [abs32 IAT slot]; the field needs a base reloc.
+                        thunk_fixups = thunk_fixups.push(thunk_address + 2)
+                        thunks = thunks.push(0xff as u8).push(0x25 as u8)
+                        thunks = _pi_push_u32(thunks, image_base + iat_rva)
+                    elif machine == COFF_MACHINE_AMD64:
                         val displacement = iat_rva - (thunk_address + 6)
                         if displacement < -2147483648 or displacement > 2147483647:
                             return Err("AMD64 import thunk for '{import_object.public_name}' is out of REL32 range")
@@ -172,16 +190,22 @@ fn _pi_build_imports(imports: [CoffImportObject], thunk_rva: i64,
         descriptor_index = descriptor_index + 1
     Ok(PeImportImage(thunk_data: thunks, idata_data: idata,
         symbol_rvas: symbols, descriptor_size: descriptor_size,
-        iat_offset: iat_start, iat_size: iat_end - iat_start))
+        iat_offset: iat_start, iat_size: iat_end - iat_start,
+        thunk_fixups: thunk_fixups))
 
 fn pe_build_amd64_imports(imports: [CoffImportObject], thunk_rva: i64,
         idata_rva: i64) -> Result<PeImportImage, text>:
     """Build deterministic .idata plus AMD64 RIP-relative jump thunks."""
-    _pi_build_imports(imports, thunk_rva, idata_rva, COFF_MACHINE_AMD64)
+    _pi_build_imports(imports, thunk_rva, idata_rva, COFF_MACHINE_AMD64, 0)
 
 fn pe_build_arm64_imports(imports: [CoffImportObject], thunk_rva: i64,
         idata_rva: i64) -> Result<PeImportImage, text>:
     """Build deterministic .idata plus ARM64 ADRP/LDR/BR jump thunks."""
-    _pi_build_imports(imports, thunk_rva, idata_rva, COFF_MACHINE_ARM64)
+    _pi_build_imports(imports, thunk_rva, idata_rva, COFF_MACHINE_ARM64, 0)
 
-export PeImportImage, pe_build_amd64_imports, pe_build_arm64_imports
+fn pe_build_i386_imports(imports: [CoffImportObject], thunk_rva: i64,
+        idata_rva: i64, image_base: i64) -> Result<PeImportImage, text>:
+    """Build PE32 .idata (4-byte ILT/IAT) plus `jmp [abs32]` thunks."""
+    _pi_build_imports(imports, thunk_rva, idata_rva, COFF_MACHINE_I386, image_base)
+
+export PeImportImage, pe_build_amd64_imports, pe_build_arm64_imports, pe_build_i386_imports
