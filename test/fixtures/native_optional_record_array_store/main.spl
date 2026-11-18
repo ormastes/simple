@@ -1,0 +1,82 @@
+# A `T?` record local stored into a `[T]` array (`xs.push(v)`, `xs[i] = v`)
+# must store the record, not its Option box; a `[T?]` array keeps the option.
+# Regression: doc/08_tracking/bug/optional_record_array_store_keeps_option_box_2026-11-19.md
+# Expected stdout (seed interpreter == native):
+#   3
+#   10
+#   3
+#   36
+#   40
+#   5
+#   2
+#   40
+struct Sp:
+    start: i64
+    end: i64
+    file: text
+
+struct St:
+    kind: i64
+    span: Sp
+
+struct Blk:
+    stmts: [St]
+    has: bool
+
+fn mk_st(i: i64) -> St:
+    St(kind: i * 10, span: Sp(start: i, end: i + 1, file: "f"))
+
+# The generated HIR decoder shape (hc_dec_hir_block before 0483fdd22ed).
+fn dec_blk(n: i64) -> Blk:
+    var f_stmts: [St] = []
+    var i0 = 0
+    while i0 < n:
+        var ev0: St? = None
+        if i0 >= 0:
+            ev0 = mk_st(i0)
+        f_stmts.push(ev0)
+        i0 = i0 + 1
+    Blk(stmts: f_stmts, has: true)
+
+fn enc_blk(node: Blk) -> i64:
+    var sum = 0
+    for e0 in node.stmts:
+        val v1: St? = e0
+        if not v1.?:
+            sum = sum + 1000
+        else:
+            sum = sum + (v1!).kind + (v1!).span.end
+    sum
+
+fn index_store(c: bool) -> St:
+    var ev: St? = None
+    if c:
+        ev = mk_st(4)
+    var arr: [St] = [mk_st(1)]
+    arr[0] = ev
+    arr[0]
+
+fn optional_elems(c: bool) -> i64:
+    var ev: St? = None
+    if c:
+        ev = mk_st(4)
+    var arr: [St?] = []
+    arr.push(ev)
+    arr.push(None)
+    var present = 0
+    for e in arr:
+        if val s = e:
+            present = present + s.kind
+    print(arr.len())
+    present
+
+fn main():
+    val b = dec_blk(3)
+    print(b.stmts.len())
+    print(b.stmts[1].kind)
+    print(b.stmts[2].span.end)
+    print(enc_blk(b))
+    val s = index_store(true)
+    print(s.kind)
+    print(s.span.end)
+    print(optional_elems(true))

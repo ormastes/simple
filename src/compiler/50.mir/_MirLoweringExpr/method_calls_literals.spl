@@ -1040,6 +1040,28 @@ impl MirLowering:
             case _: ()
         local
 
+    me option_record_element_payload_v1(array_local: LocalId, value: HirExpr, local: LocalId) -> LocalId:
+        """Value of type `T?` (T a struct or class) stored into an array whose
+        declared element is exactly `T` (`xs.push(v)`, `xs[i] = v`): store the
+        record, not its Option box.
+
+        The array-store twin of option_record_argument_payload_v1. A
+        `var v: T? = None` assigned from a `-> T` producer holds the canonical
+        Option box, and the element store kept the box; every later element
+        read took the box header for the record
+        (doc/08_tracking/bug/optional_record_array_store_keeps_option_box_2026-11-19.md).
+        Only fires for a receiver whose declared element names the SAME record
+        symbol as the value's optional payload, so a `[T?]` array keeps the
+        box. Accepts no new programs: a None value unwraps to nil, as the
+        interpreter stores it.
+        """
+        if val declared = self.find_local_hir_type(array_local.id):
+            match declared.kind:
+                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                    return self.option_record_argument_payload_v1(value, local, element)
+                case _: ()
+        local
+
     me option_bool_value(value_local: LocalId) -> LocalId:
         """Decode an `Option<bool>` receiver back to a genuine i1.
 
@@ -1844,7 +1866,7 @@ impl MirLowering:
 
     me lower_unresolved_array_push(push_recv: LocalId, push_value: HirExpr, wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
         val push_u64_receiver = self.array_push_receiver_is_u64_v1(push_recv)
-        val push_val_raw = self.lower_expr(push_value)
+        val push_val_raw = self.option_record_element_payload_v1(push_recv, push_value, self.lower_expr(push_value))
         self.note_container_elem_type(push_recv, push_val_raw)
         if push_u64_receiver:
             # The canonical typed helper owns the storage layout: raw U64

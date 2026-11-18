@@ -1,0 +1,85 @@
+"""
+Regression: a `T?` record stored into a `[T]` array keeps the Option box
+(2026-11-19).
+
+`var ev: T? = None` assigned from a `-> T` producer holds the canonical Option
+box on the native lane. `xs.push(ev)` and `xs[i] = ev` into a `[T]` receiver
+stored the box, so every later element read took the box header for the
+record. That is the Stage 3 SIGSEGV in `_hc_enc_hir_block_body`: the generated
+HIR decoder pushed `HirStmt?` locals into `[HirStmt]`, and the HIR-cache
+selfcheck re-encoded the decoded module. The stored value now goes through
+rt_unwrap_or_self (what `if val` uses) when the receiver's declared element is
+the value's optional payload record; a `[T?]` receiver keeps the box.
+Bug: doc/08_tracking/bug/optional_record_array_store_keeps_option_box_2026-11-19.md
+Native end-to-end fixture: test/fixtures/native_optional_record_array_store/main.spl
+Call-argument twin: test/01_unit/compiler/mir/optional_record_argument_unwrap_spec.spl
+"""
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "opt_store.spl", "opt_store.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("opt_store.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.byte_len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn count_of(hay: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.byte_len() <= hay.byte_len():
+        if hay.substring(i, i + needle.byte_len()) == needle:
+            n = n + 1
+            i = i + needle.byte_len()
+        else:
+            i = i + 1
+    n
+
+val SRC = (
+    "struct St:\n    kind: i64\n\n" +
+    "struct Ot:\n    k: i64\n\n" +
+    "fn mk(i: i64) -> St:\n    St(kind: i)\n\n" +
+    "fn mk_other(i: i64) -> Ot:\n    Ot(k: i)\n\n" +
+    "fn push_store(c: bool) -> i64:\n    var ev: St? = None\n    if c:\n        ev = mk(4)\n    var arr: [St] = []\n    arr.push(ev)\n    arr.len()\n\n" +
+    "fn index_store(c: bool) -> i64:\n    var ev: St? = None\n    if c:\n        ev = mk(4)\n    var arr: [St] = [mk(1)]\n    arr[0] = ev\n    arr.len()\n\n" +
+    "fn optional_elems(c: bool) -> i64:\n    var ev: St? = None\n    if c:\n        ev = mk(4)\n    var arr: [St?] = [None]\n    arr.push(ev)\n    arr[0] = ev\n    arr.len()\n\n" +
+    "fn plain_elems() -> i64:\n    var arr: [St] = []\n    arr.push(mk(1))\n    arr[0] = mk(2)\n    arr.len()\n\n" +
+    "fn other_record(c: bool) -> i64:\n    var ev: Ot? = None\n    if c:\n        ev = mk_other(4)\n    var arr: [St] = []\n    arr.push(ev)\n    arr.len()\n"
+)
+
+describe "a T? record stored into a [T] array":
+    it "unwraps the Option box at push and at index assignment":
+        val fns = lower_module_json(SRC)
+        for name in ["push_store", "index_store"]:
+            val j = fns[name] ?? ""
+            expect(j.byte_len() > 0).to_equal(true)
+            expect(count_of(j, "rt_unwrap_or_self")).to_equal(1)
+
+    it "keeps the box for a [T?] receiver and leaves plain records alone":
+        val fns = lower_module_json(SRC)
+        val keep_box = fns["optional_elems"] ?? ""
+        expect(keep_box.byte_len() > 0).to_equal(true)
+        expect(count_of(keep_box, "rt_unwrap_or_self")).to_equal(0)
+        val plain = fns["plain_elems"] ?? ""
+        expect(plain.byte_len() > 0).to_equal(true)
+        expect(count_of(plain, "rt_unwrap_or_self")).to_equal(0)
+
+    it "keeps the box when the optional payload is a different record than the element":
+        # Defensive guard: lowering only, the type checker owns rejecting this
+        # program. A record of another symbol must never be reinterpreted.
+        val fns = lower_module_json(SRC)
+        val mismatched = fns["other_record"] ?? ""
+        expect(mismatched.byte_len() > 0).to_equal(true)
+        expect(count_of(mismatched, "rt_unwrap_or_self")).to_equal(0)
