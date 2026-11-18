@@ -14,9 +14,10 @@ entrypoints must not load any native library (lazy first use).
 use std.spec.step
 use std.spec.{describe, it, expect}
 
-use std.gc_async_mut.slang.host.slang_host.{ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name, host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes, host_os_name}
-use std.gc_async_mut.slang.engine.llm_engine.{engine_loaded_model, engine_backend_available}
-use std.gc_async_mut.slang.entrypoints.openai.serving_models.{read_model_entry}
+use std.gc_async_mut.slang.host.slang_host.{ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name, host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes, host_os_name, host_file_exists}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_loaded_model, engine_backend_available, engine_lib_path, engine_set_lib_path}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{dir_byte_size}
+use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit_with_available}
 
 val MEMINFO = "MemTotal:       16384000 kB\nMemFree:          100000 kB\nMemAvailable:    8192000 kB\nBuffers:           1000 kB\n"
 val VM_STAT = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               5000.\nPages active:                            100000.\nPages inactive:                           90000.\nPages speculative:                         3000.\nPages wired down:                         50000.\nPages purgeable:                           7000.\nPages occupied by compressor:             25000.\n"
@@ -29,7 +30,7 @@ describe "slang host library names per OS":
 
     it "names ROCm HIP and hipRTC per OS":
         expect(rocm_bin_default_for("windows")).to_equal("C:\\Program Files\\AMD\\ROCm\\7.2\\bin")
-        # escape-independent: an unescaped "\7" literal silently drops the 7
+        # escape-independent: an unescaped "\7" literal becomes BEL (0x07), so "7.2" vanishes
         expect(rocm_bin_default_for("windows").contains("ROCm")).to_equal(true)
         expect(rocm_bin_default_for("windows").contains("7.2")).to_equal(true)
         expect(rocm_bin_default_for("linux")).to_equal("/opt/rocm/lib")
@@ -90,9 +91,24 @@ describe "slang host wrappers and lazy native loading":
         val os = host_os_name()
         expect(os == "windows" or os == "linux" or os == "macos" or os == "freebsd").to_equal(true)
 
-    it "loads no native library when the entrypoints are imported":
-        step("Verify: import alone leaves the engine empty; availability is a file probe, not a dlopen")
+    it "answers backend availability from the file on disk without loading a model":
+        step("Verify: availability tracks host_file_exists of the resolved path; the engine stays empty")
         expect(engine_loaded_model()).to_equal("")
-        val available = engine_backend_available()
-        expect(available == true or available == false).to_equal(true)
+        expect(engine_backend_available()).to_equal(host_file_exists(engine_lib_path()))
+        # A path that exists but is no loadable library: a dlopen would fail,
+        # a file probe answers true. Neither loads a model.
+        engine_set_lib_path("test/01_unit/lib/gc_async_mut/slang/host/slang_host_spec.spl")
+        expect(engine_backend_available()).to_equal(true)
+        engine_set_lib_path("build/sffi/does-not-exist-slang-host-spec.bin")
+        expect(engine_backend_available()).to_equal(false)
+        engine_set_lib_path("")
         expect(engine_loaded_model()).to_equal("")
+
+describe "slang model size is unknown, not zero, when the directory cannot be listed":
+    it "reports -1 for a directory that cannot be listed":
+        expect(dir_byte_size("build/probe/no-such-model-dir-slang-host-spec")).to_equal(-1)
+
+    it "refuses the fit check for an unknown model size":
+        val verdict = check_fit_with_available(-1, 0, 0, 1099511627776)
+        expect(verdict.fits).to_equal(false)
+        expect(verdict.reason.contains("model size")).to_equal(true)
