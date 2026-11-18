@@ -1834,7 +1834,7 @@ fn cl_translate_call(
                         if cl_jit_import_refused(cl_module, handle):
                             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                         val reference = cranelift_import_function(ctx, handle)
-                        return cl_normalize_import_result(ctx, type_, args.len(), cranelift_call(ctx, reference, arg_vals))
+                        return cl_normalize_import_result(ctx, type_, cranelift_call(ctx, reference, arg_vals))
                     if name == "rt_array_new" or name == "rt_array_push" or name == "rt_bytes_u8_at":
                         return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     val method = method_leaf_name(name)
@@ -1918,7 +1918,7 @@ fn cl_translate_call(
                         if cl_jit_import_refused(cl_module, handle):
                             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                         val func_ref = cranelift_import_function(ctx, handle)
-                        return cl_normalize_import_result(ctx, type_, args.len(), cranelift_call(ctx, func_ref, arg_vals))
+                        return cl_normalize_import_result(ctx, type_, cranelift_call(ctx, func_ref, arg_vals))
                 case _:
                     return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Copy(local):
@@ -2213,10 +2213,21 @@ pub fn cl_import_result_narrow_plan(declared_ret: MirType) -> (i64, bool):
         case I32: return (CL_TYPE_I32, true)
         case _: return (0, false)
 
-fn cl_normalize_import_result(ctx: i64, callee_type: MirType, arg_count: i64, value: i64) -> i64:
-    # Only a DECLARED return is trusted; the unknown all-i64 import keeps its word.
-    if not cl_declared_callee_signature_known(callee_type, arg_count): return value
-    val (narrow, signed) = cl_import_result_narrow_plan(cl_declared_callee_return(callee_type))
+pub fn cl_import_call_result_narrow_plan(callee_type: MirType) -> (i64, bool):
+    """Narrow plan for the result of an imported call, from the return type
+    the call operand records -- whatever the argument arity.
+
+    The return type must not be gated on cl_declared_callee_signature_known:
+    MIR splits a `text` argument of a (ptr, len) runtime extern into two
+    operands (text_extern_abi.text_arg_indices), so `rt_file_exists(text) ->
+    bool` reaches the backend with 2 arguments against 1 declared parameter.
+    That arity gate left every such bool result as the raw register (bug
+    phase2_cranelift_extern_bool_return_upper_bits_2026-11-18). A callee with
+    no recorded return is I64 here and stays untouched."""
+    cl_import_result_narrow_plan(cl_declared_callee_return(callee_type))
+
+fn cl_normalize_import_result(ctx: i64, callee_type: MirType, value: i64) -> i64:
+    val (narrow, signed) = cl_import_call_result_narrow_plan(callee_type)
     if narrow == 0: return value
     val low = cranelift_ireduce(ctx, narrow, value)
     if signed: return cranelift_sextend(ctx, CL_TYPE_I64, low)
