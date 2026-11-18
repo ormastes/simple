@@ -2856,6 +2856,47 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
   - Re-measured after rebasing onto 84ebb6ebf1b, base and head are the same numbers. The dpr4 rows lowered are html, forms-media and animation (to the worse of the two head runs). evidence (-0.01) is not a clear margin, so it is left alone.
   - The two bands that got worse are the bold h1 (overview) and the bold h3 (css-paint): their block tops are still CSS px x 4 (h1 top 66.44 CSS px lands at device row 264; Chrome puts it at 266), so the correct borrow moves the glyph 1 px further from Chrome there. Stage 2 (fractional block y and line-box height in device px) is the follow-up.
 
+## 2026-11-18 — dpr4 snapped block top, stage 2
+
+- **Chrome rule (dpr4):** Chrome lays out in device LayoutUnits (1/64 px) and pixel-snaps each painted edge, rounding halves up.
+  - A block whose true top is 10.61 CSS px paints from round(42.44) = 42.
+  - Simple's block cursor keeps y rounded to whole CSS px (`cursor_advance_px`), with the milli residual in `cy_frac`. Scaling ×4 put that block at 44.
+- **Record:** `box_device_top_record`, k > 1 only, where the block cursor (or a flex row) hands a child its residual (`g_origin_frac_milli = ...`). Inline-blocks, floats, abspos and text are not recorded there, so they take their nearest recorded ancestor's top. Recording at `layout_with_style` entry instead caught inline-blocks with a reset residual 0 and moved them off their line (css-paint 4.43 vs 4.23).
+  - It stores k × `g_origin_frac_milli` (milli device px) in `LayoutResult.device_top`.
+  - Unset nodes hold `DEVICE_TOP_UNSET` and inherit their nearest recorded ancestor's value at paint.
+  - **Trap:** a collapsed top margin re-tops a child after its layout (`corrected_top_milli`). `box_device_top_shift` moves the subtree's recorded residuals by `cy_frac - child_start_frac`, or the h2 under an h1 lands 1 px off.
+- **Snap:** `box_device_top_px` first puts the residual on the 1/64 grid, then rounds halves up.
+  - Simple's em margins truncate: 0.67em of 32px = 21.437, where Chrome has 21.4375.
+  - Without the grid, the overview h2 at 543.496 device px rounded to 543; Chrome paints it at 544.
+- **Paint:** `_html_draw_ir_device_top` (in paint_layout) post-passes `_html_draw_ir_commands` through `owner_nodes`.
+  - Every command moves by its owner's snapped top. For text this adds to the stage-1 `device-y-offset`.
+- **Top only, measured:**
+  - Snapping bottoms from the box's END residual (`end_frac_milli`) moved the overview section's border 1 device px above Chrome (rows 1487-1490 vs 1488-1491), because Simple's container residual drifts from Chrome's.
+  - With top only, a box keeps k × its CSS height. overview went 0.79 → 0.73, against 0.78 on base.
+- **Pin:** `device_px_block_y_chrome159_spec`. Base 1/3, head 3/3.
+  - AC-1: block rows R42-137 G224-415 R438-629 G631-726 R727-742.
+  - AC-2: text baselines 111/507/603/700.
+  - AC-3: guard; 1x rows stay as they are.
+- **Catalog, base 4eaf71809da → head (dpr4):**
+
+  | Page | Base | Head |
+  |---|---|---|
+  | overview | 0.78 | 0.73 |
+  | html | 2.84 | 2.74 |
+  | css-layout | 4.02 | 3.59 |
+  | css-paint | 4.87 | 4.23 |
+  | forms-media | 5.23 | 5.21 |
+  | animation | 3.97 | 3.85 |
+  | evidence | 0.57 | 0.57 |
+  | tab-bar | 0.30 | 0.30 |
+
+  - css-paint is under its 4.49 row, so the release dpr4 gate is green.
+  - 1x is identical to base on every page.
+- **Open:**
+  - Normal line-height line boxes are still k × CSS: DejaVu 16px is 76 device px against Chrome's 74. The catalog uses `16px/1.5` everywhere, so this was not needed for the gate.
+  - Fractional `height` is truncated before layout, at 1x too: `doc/08_tracking/bug/web_render_fractional_height_truncated_1x_2026-11-18.md`.
+  - The Liberation Sans glyph anchoring residual is still open: h1 baseline 404 vs Chrome's 405.
+
 
 - Group layers (2026-11-18): Chrome keeps an opacity-group layer premultiplied in 8 bits. Engine2D stores it straight, so its translucent-destination blend must compute the premultiplied value first (`_blend_premul_over`), then store it straight. The round trip is exact. The rule has 8 twins (C, Rust runtime, seed interpreter, oracle, scalar fallback, Metal, Vulkan GLSL+SPIR-V); change all of them together and rebuild the seed.
 
