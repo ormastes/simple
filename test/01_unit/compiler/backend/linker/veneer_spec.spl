@@ -8,7 +8,7 @@
 
 use compiler.backend.linker.veneer.{
     VeneerTable, veneer_table_new, ARM_VENEER_SLOT, ARM_VENEER_TO_THUMB, ARM_VENEER_TO_ARM,
-    arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry
+    arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry, arm_veneer_offset, arm_veneer_key
 }
 
 describe "VeneerTable":
@@ -41,3 +41,15 @@ describe "ARM interworking veneers":
         expect(arm_veneer_bytes(ARM_VENEER_TO_ARM, 0x10230)).to_equal(
             [0x78, 0x47, 0xc0, 0x46, 0x04, 0xf0, 0x1f, 0xe5, 0x30, 0x02, 0x01, 0x00])
         expect(arm_veneer_entry(0x2000, ARM_VENEER_TO_ARM)).to_equal(0x2001)
+
+    it "keys a slot by target symbol plus offset so func+N gets its own veneer":
+        # PR #10238 review: a branch to func+N must not share func's slot (would land on func)
+        expect(arm_veneer_offset(29, -8)).to_equal(0)     # ARM B: PC bias 8
+        expect(arm_veneer_offset(30, -4)).to_equal(0)     # Thumb B.W: PC bias 4
+        expect(arm_veneer_offset(29, 8)).to_equal(16)
+        expect(arm_veneer_key("global:f", 29, -8)).to_equal("global:f")
+        expect(arm_veneer_key("global:f", 29, 8)).to_equal("global:f+16")
+        var t = veneer_table_new()
+        val a = t.add(arm_veneer_key("global:f", 29, -8), ARM_VENEER_TO_THUMB)
+        val b = t.add(arm_veneer_key("global:f", 29, 8), ARM_VENEER_TO_THUMB)
+        expect(a == b).to_equal(false)
